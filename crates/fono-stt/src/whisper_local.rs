@@ -1,0 +1,107 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//! Local `whisper-rs` backend. Compiled only with the `whisper-local` feature
+//! since it vendors whisper.cpp (C++ build) and materially increases build
+//! time. See Phase 4 Task 4.2.
+
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+use crate::traits::{SpeechToText, Transcription};
+
+pub struct WhisperLocal {
+    model_path: PathBuf,
+    ctx: Mutex<Option<WhisperContext>>,
+    threads: i32,
+}
+
+impl WhisperLocal {
+    pub fn new(model_path: impl Into<PathBuf>) -> Self {
+        Self::with_threads(model_path, num_cpus())
+    }
+
+    pub fn with_threads(model_path: impl Into<PathBuf>, threads: i32) -> Self {
+        Self {
+            model_path: model_path.into(),
+            ctx: Mutex::new(None),
+            threads,
+        }
+    }
+
+    fn ensure_ctx(&self) -> Result<()> {
+        let mut guard = self
+            .ctx
+            .lock()
+            .map_err(|_| anyhow!("whisper mutex poisoned"))?;
+        if guard.is_none() {
+            let path = self
+                .model_path
+                .to_str()
+                .ok_or_else(|| anyhow!("non-UTF-8 model path"))?;
+            let ctx = WhisperContext::new_with_params(path, WhisperContextParameters::default())
+                .context("load whisper model")?;
+            *guard = Some(ctx);
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl SpeechToText for WhisperLocal {
+    async fn transcribe(
+        &self,
+        pcm: &[f32],
+        _sample_rate: u32,
+        lang: Option<&str>,
+    ) -> Result<Transcription> {
+        self.ensure_ctx()?;
+        let pcm = pcm.to_vec();
+        let lang = lang.map(str::to_string);
+        let threads = self.threads;
+        let guard = self
+            .ctx
+            .lock()
+            .map_err(|_| anyhow!("whisper mutex poisoned"))?;
+        let ctx = guard.as_ref().expect("ensure_ctx succeeded");
+        let mut state = ctx.create_state().context("create whisper state")?;
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_n_threads(threads);
+        params.set_translate(false);
+        if let Some(l) = lang.as_deref() {
+            if l != "auto" {
+                params.set_language(Some(l));
+            }
+        }
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+
+        state.full(params, &pcm).context("whisper full()")?;
+        let segments = state.full_n_segments().context("segments count")?;
+        let mut text = String::new();
+        for i in 0..segments {
+            if let Ok(s) = state.full_get_segment_text(i) {
+                text.push_str(&s);
+            }
+        }
+        Ok(Transcription {
+            text: text.trim().to_string(),
+            language: lang,
+            duration_ms: None,
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "whisper-local"
+    }
+}
+
+fn num_cpus() -> i32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as i32)
+        .unwrap_or(4)
+}

@@ -12,5 +12,13 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# tray-icon pulls a large dependency tree; opt-in.
+default = []
+tray-backend = ["dep:tray-icon"]
+
 [dependencies]
 fono-core = { path = "../fono-core" }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tray-icon = { workspace = true, optional = true }

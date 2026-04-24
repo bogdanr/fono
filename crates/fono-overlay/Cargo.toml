@@ -12,5 +12,13 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# winit + softbuffer pull a large dep tree; keep the overlay opt-in.
+default = []
+overlay-backend = ["dep:winit", "dep:softbuffer"]
+
 [dependencies]
 fono-core = { path = "../fono-core" }
+tracing = { workspace = true }
+winit = { workspace = true, optional = true }
+softbuffer = { workspace = true, optional = true }

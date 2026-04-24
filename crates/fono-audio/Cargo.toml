@@ -14,3 +14,9 @@ workspace = true
 
 [dependencies]
 fono-core = { path = "../fono-core" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+cpal = { workspace = true }
+rubato = { workspace = true }
+tokio = { workspace = true }

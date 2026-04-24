@@ -12,5 +12,24 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["groq"]
+# Cloud backends — each behind a feature flag per Phase 4 Task 4.3.
+groq = ["dep:reqwest"]
+openai = ["dep:reqwest"]
+deepgram = ["dep:reqwest", "dep:tokio-tungstenite"]
+# Local whisper — opt-in because it vendors whisper.cpp (C++ build).
+whisper-local = ["dep:whisper-rs"]
+
 [dependencies]
 fono-core = { path = "../fono-core" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
+whisper-rs = { workspace = true, optional = true }

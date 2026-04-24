@@ -1,5 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! `SpeechToText` trait and local (`whisper-rs`) + cloud (Groq, Deepgram, OpenAI, ...) backends.
-//!
-//! This crate is a stub; the Phase N work in
-//! `docs/plans/2026-04-24-fono-design-v1.md` will flesh it out.
+//! Speech-to-text trait + local (`whisper-rs`, opt-in) and cloud
+//! (Groq by default; Deepgram, OpenAI behind feature flags) backends.
+//! Phase 4 of `docs/plans/2026-04-24-fono-design-v1.md`.
+
+pub mod registry;
+pub mod traits;
+
+#[cfg(feature = "groq")]
+pub mod groq;
+#[cfg(feature = "openai")]
+pub mod openai;
+#[cfg(feature = "whisper-local")]
+pub mod whisper_local;
+
+pub use registry::{ModelInfo, ModelRegistry};
+pub use traits::{SpeechToText, Transcription};

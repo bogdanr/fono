@@ -12,5 +12,21 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["cerebras", "openai-compat"]
+cerebras = ["dep:reqwest"]
+openai-compat = ["dep:reqwest"]
+anthropic = ["dep:reqwest"]
+llama-local = ["dep:llama-cpp-2"]
+
 [dependencies]
 fono-core = { path = "../fono-core" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true, optional = true }
+llama-cpp-2 = { workspace = true, optional = true }

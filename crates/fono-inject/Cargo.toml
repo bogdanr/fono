@@ -12,5 +12,18 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# `enigo` compiles fine on Linux with X11 headers; keep it opt-in so the
+# workspace `cargo build` on a minimal NimbleX without xdotool dev packages
+# still succeeds.
+enigo-backend = ["dep:enigo"]
+x11-focus = ["dep:x11rb"]
+
 [dependencies]
 fono-core = { path = "../fono-core" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+enigo = { workspace = true, optional = true }
+x11rb = { workspace = true, optional = true }

@@ -14,3 +14,8 @@ workspace = true
 
 [dependencies]
 fono-core = { path = "../fono-core" }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
