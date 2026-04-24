@@ -216,16 +216,16 @@ redact_secrets = true                # scrub obvious key patterns
 
 ### Phase 0 — Repository bootstrap
 
-- [ ] Task 0.1. Create a new GitHub repo `fono` (or under the user's org). Initialise with
+- [x] Task 0.1. Create a new GitHub repo `fono` (or under the user's org). Initialise with
   `LICENSE` = full GPL-3.0 text, `README.md` with a short pitch and a pointer to CONTRIBUTING,
   `CONTRIBUTING.md` requiring `git commit -s` (DCO sign-off) and `cargo fmt`/`cargo clippy`
   clean PRs, `CODE_OF_CONDUCT.md` (Contributor Covenant), `.gitignore` for Rust + editor dirs.
 
-- [ ] Task 0.2. Initialise cargo workspace at the repo root with the crate layout above. Pin
+- [x] Task 0.2. Initialise cargo workspace at the repo root with the crate layout above. Pin
   toolchain via `rust-toolchain.toml` to stable 1.82+. Configure `[workspace.lints]` for
   `clippy::pedantic` minus noise lints.
 
-- [ ] Task 0.3. Set up GitHub Actions CI (`.github/workflows/ci.yml`): matrix over
+- [x] Task 0.3. Set up GitHub Actions CI (`.github/workflows/ci.yml`): matrix over
   ubuntu-latest, macos-latest, windows-latest; steps = `cargo fmt --check`, `cargo clippy -- -D
   warnings`, `cargo test --workspace`. Add `release.yml` that fires on tag `v*` and produces
   cross-compiled artifacts (see Phase 9).
