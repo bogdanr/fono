@@ -74,7 +74,7 @@ llama-cpp-2 = "0.1"
 ort = { version = "2.0.0-rc.4", default-features = false }
 
 # Desktop integration
-tray-icon = "0.19"
+tray-icon = { version = "0.19", default-features = false }
 global-hotkey = "0.6"
 enigo = "0.2"
 winit = "0.30"

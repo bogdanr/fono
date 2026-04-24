@@ -15,10 +15,15 @@ workspace = true
 [features]
 # tray-icon pulls a large dependency tree; opt-in.
 default = []
-tray-backend = ["dep:tray-icon"]
+tray-backend = ["dep:tray-icon", "dep:gtk", "dep:glib"]
 
 [dependencies]
 fono-core = { path = "../fono-core" }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }
 tray-icon = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = { version = "0.18", optional = true }
+glib = { version = "0.18", optional = true }

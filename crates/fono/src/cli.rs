@@ -15,8 +15,68 @@ use crate::{daemon, doctor, wizard};
     about = "Lightweight native voice dictation for Linux, Windows, and macOS."
 )]
 pub struct Cli {
+    /// Enable debug logging (shorthand for `FONO_LOG=debug`).
+    /// Pass twice (`-vv`) for trace-level + file/line annotations.
+    #[arg(long = "debug", short = 'v', action = clap::ArgAction::Count, global = true)]
+    pub verbose: u8,
+
+    /// Silence everything below `warn`.
+    #[arg(long = "quiet", short = 'q', global = true)]
+    pub quiet: bool,
+
+    /// Skip the tray icon (use on TTY-only machines or when the compositor
+    /// has no system tray). Only affects the daemon.
+    #[arg(long = "no-tray", global = true)]
+    pub no_tray: bool,
+
     #[command(subcommand)]
     pub cmd: Option<Cmd>,
+}
+
+/// Effective log verbosity derived from `--debug` / `--quiet` flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verbosity {
+    Quiet,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl Verbosity {
+    pub fn as_filter(self) -> &'static str {
+        match self {
+            Self::Quiet => "warn",
+            Self::Info => "info",
+            Self::Debug => {
+                "fono=debug,fono_core=debug,fono_hotkey=debug,fono_tray=debug,\
+                fono_audio=debug,fono_stt=debug,fono_llm=debug,fono_inject=debug,\
+                fono_ipc=debug,fono_download=debug,info"
+            }
+            Self::Trace => {
+                "fono=trace,fono_core=trace,fono_hotkey=trace,fono_tray=trace,\
+                fono_audio=trace,fono_stt=trace,fono_llm=trace,fono_inject=trace,\
+                fono_ipc=trace,fono_download=trace,debug"
+            }
+        }
+    }
+
+    pub fn is_trace(self) -> bool {
+        matches!(self, Self::Trace)
+    }
+}
+
+impl Cli {
+    pub fn verbosity(&self) -> Verbosity {
+        if self.quiet {
+            Verbosity::Quiet
+        } else {
+            match self.verbose {
+                0 => Verbosity::Info,
+                1 => Verbosity::Debug,
+                _ => Verbosity::Trace,
+            }
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -86,8 +146,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             if needs_wizard {
                 wizard::run(&paths).await?;
             }
-            let no_tray = matches!(cli.cmd, Some(Cmd::Daemon { no_tray: true }));
-            daemon::run(&paths, no_tray).await
+            let no_tray = cli.no_tray || matches!(cli.cmd, Some(Cmd::Daemon { no_tray: true }));
+            daemon::run(&paths, no_tray, cli.verbosity()).await
         }
         Some(Cmd::Setup) => wizard::run(&paths).await,
         Some(Cmd::Toggle) => ipc_simple(&paths, Request::Toggle).await,

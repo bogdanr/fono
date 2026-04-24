@@ -19,6 +19,13 @@ workspace = true
 name = "fono"
 path = "src/main.rs"
 
+[features]
+# Tray icon is on by default on desktop builds. Disable with
+# `cargo build --no-default-features` for headless CI or cross-compile runs
+# without a GTK/appindicator toolchain.
+default = ["tray"]
+tray = ["fono-tray/tray-backend"]
+
 [dependencies]
 fono-core = { path = "../fono-core" }
 fono-audio = { path = "../fono-audio" }

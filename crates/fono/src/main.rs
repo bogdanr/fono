@@ -13,13 +13,25 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_env("FONO_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_target(false)
-        .init();
-
     let args = cli::Cli::parse();
+    init_tracing(args.verbosity());
     cli::run(args).await
+}
+
+/// Initialise the global `tracing` subscriber.
+///
+/// Precedence (highest first):
+///  1. `FONO_LOG` env var (tracing-subscriber EnvFilter syntax).
+///  2. `--debug` / `-v` / `-vv` CLI flags.
+///  3. Default = `info`.
+fn init_tracing(verbosity: cli::Verbosity) {
+    let default_filter = verbosity.as_filter();
+    let filter =
+        EnvFilter::try_from_env("FONO_LOG").unwrap_or_else(|_| EnvFilter::new(default_filter));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(verbosity.is_trace())
+        .with_file(verbosity.is_trace())
+        .with_line_number(verbosity.is_trace())
+        .init();
 }

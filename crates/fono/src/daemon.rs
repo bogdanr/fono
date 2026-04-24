@@ -1,40 +1,132 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Minimal daemon event loop: serves IPC, tracks FSM state.
+//! Daemon event loop: startup banner, global-hotkey listener, tray icon,
+//! IPC server, FSM dispatcher.
 //!
-//! Phase 8 deliverable: the daemon compiles, binds its socket, and responds
-//! to CLI round-trips. End-to-end audio → STT → LLM → inject wiring is
-//! sequenced into follow-up phases per the design plan.
+//! End-to-end audio → STT → LLM → inject wiring is sequenced into
+//! follow-up phases; this module owns the long-lived background workers
+//! (hotkeys, tray, IPC) and forwards their events into the FSM.
 
 use anyhow::{Context, Result};
-use fono_core::Paths;
-use fono_hotkey::{HotkeyAction, RecordingFsm};
+use fono_core::{Config, Paths};
+use fono_hotkey::{HotkeyAction, HotkeyBindings, HotkeyEvent, RecordingFsm};
 use fono_ipc::{read_frame, write_frame, Request, Response};
+use fono_tray::{TrayAction, TrayState};
+use std::sync::Arc;
 use tokio::net::UnixStream;
+use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 
-pub async fn run(paths: &Paths, no_tray: bool) -> Result<()> {
-    info!(
-        "starting fono daemon (no_tray={no_tray}, socket={})",
-        paths.ipc_socket().display()
-    );
+use crate::cli::Verbosity;
+
+pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<()> {
+    let config = Config::load(&paths.config_file()).context("load config")?;
+    print_banner(paths, &config, no_tray, verbosity);
     write_pid(paths)?;
 
-    // Spin up the FSM. The hotkey thread + audio thread will push actions
-    // into this receiver in follow-up wiring; today the daemon just serves
-    // IPC so `fono toggle` from a compositor keybind works.
-    let (fsm, mut events) = RecordingFsm::new();
-    let fsm = std::sync::Arc::new(std::sync::Mutex::new(fsm));
+    // ---------------------------------------------------------------
+    // FSM + channels
+    // ---------------------------------------------------------------
+    let (fsm, mut fsm_events) = RecordingFsm::new();
+    let fsm = Arc::new(Mutex::new(fsm));
 
-    // Drain events (no orchestrator consumer yet).
-    tokio::spawn(async move {
-        while let Some(e) = events.recv().await {
-            info!("fsm event: {e:?}");
-        }
-    });
+    // Actions from hotkeys / tray / IPC converge on a single channel.
+    let (action_tx, mut action_rx) = mpsc::unbounded_channel::<HotkeyAction>();
 
+    // ---------------------------------------------------------------
+    // Global hotkey listener
+    // ---------------------------------------------------------------
+    let bindings = HotkeyBindings {
+        hold: config.hotkeys.hold.clone(),
+        toggle: config.hotkeys.toggle.clone(),
+        paste_last: config.hotkeys.paste_last.clone(),
+        cancel: config.hotkeys.cancel.clone(),
+    };
+    match fono_hotkey::spawn_listener(bindings, action_tx.clone()) {
+        Ok(_handle) => info!("global hotkeys registered"),
+        Err(e) => warn!(
+            "global hotkeys unavailable: {e:#}\n  \
+             (the daemon will still accept `fono toggle` via IPC)"
+        ),
+    }
+
+    // ---------------------------------------------------------------
+    // Tray icon (feature-gated; no-op if the backend is compiled out)
+    // ---------------------------------------------------------------
+    let (tray, mut tray_rx) = if no_tray {
+        info!("tray disabled (--no-tray)");
+        let (_tx, rx) = mpsc::unbounded_channel::<TrayAction>();
+        (None, rx)
+    } else {
+        let (t, rx) = fono_tray::spawn("Fono — voice dictation");
+        (Some(t), rx)
+    };
+
+    // ---------------------------------------------------------------
+    // FSM event consumer — logs events, updates tray tint.
+    // Real orchestration (audio capture, STT, inject) will be wired in
+    // follow-up phases. For now we surface state clearly so the user can
+    // verify hotkeys in the log.
+    // ---------------------------------------------------------------
+    let tray_for_events = Arc::new(tray);
+    {
+        let tray = Arc::clone(&tray_for_events);
+        tokio::spawn(async move {
+            while let Some(e) = fsm_events.recv().await {
+                info!("fsm event: {e:?}");
+                if let Some(t) = tray.as_ref() {
+                    match e {
+                        HotkeyEvent::StartRecording(_) => t.set_state(TrayState::Recording),
+                        HotkeyEvent::StopRecording => t.set_state(TrayState::Processing),
+                        HotkeyEvent::Cancel => t.set_state(TrayState::Idle),
+                        HotkeyEvent::PasteLast => { /* no state change */ }
+                    }
+                }
+            }
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // Action dispatcher — drains HotkeyAction into the FSM.
+    // ---------------------------------------------------------------
+    {
+        let fsm = Arc::clone(&fsm);
+        tokio::spawn(async move {
+            while let Some(action) = action_rx.recv().await {
+                let new_state = fsm.lock().await.dispatch(action);
+                tracing::debug!("dispatch {action:?} -> {new_state:?}");
+            }
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // Tray menu actions -> hotkey actions / process exit.
+    // ---------------------------------------------------------------
+    {
+        let action_tx = action_tx.clone();
+        let paths = paths.clone();
+        tokio::spawn(async move {
+            while let Some(ta) = tray_rx.recv().await {
+                info!("tray action: {ta:?}");
+                match ta {
+                    TrayAction::ToggleRecording => {
+                        let _ = action_tx.send(HotkeyAction::TogglePressed);
+                    }
+                    TrayAction::Quit => {
+                        let _ = std::fs::remove_file(paths.ipc_socket());
+                        let _ = std::fs::remove_file(paths.pid_file());
+                        std::process::exit(0);
+                    }
+                    _ => { /* history/config/status wiring deferred */ }
+                }
+            }
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // IPC server
+    // ---------------------------------------------------------------
     let listener = fono_ipc::bind_listener(&paths.ipc_socket()).context("bind IPC socket")?;
-
-    info!("daemon ready; press Ctrl+C to stop");
+    info!("daemon ready — press Ctrl+C to stop");
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -43,9 +135,10 @@ pub async fn run(paths: &Paths, no_tray: bool) -> Result<()> {
             }
             accept = listener.accept() => {
                 let (stream, _) = accept?;
-                let fsm = std::sync::Arc::clone(&fsm);
+                let fsm = Arc::clone(&fsm);
+                let action_tx = action_tx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, fsm).await {
+                    if let Err(e) = handle_client(stream, fsm, action_tx).await {
                         warn!("client error: {e}");
                     }
                 });
@@ -58,38 +151,83 @@ pub async fn run(paths: &Paths, no_tray: bool) -> Result<()> {
     Ok(())
 }
 
+fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbosity) {
+    // Emit the banner through tracing so it respects FONO_LOG filters but
+    // also lands in the log file. `info!` is used so users see it by
+    // default; `--debug` surfaces even more detail below.
+    let config_path = paths.config_file();
+    let config_present = config_path.exists();
+    info!("Fono v{} starting", env!("CARGO_PKG_VERSION"));
+    info!(
+        "config       : {} ({})",
+        config_path.display(),
+        if config_present {
+            "loaded"
+        } else {
+            "absent — using defaults"
+        }
+    );
+    info!("secrets      : {}", paths.secrets_file().display());
+    info!("history db   : {}", paths.history_db().display());
+    info!("models/whisper: {}", paths.whisper_models_dir().display());
+    info!("models/llm   : {}", paths.llm_models_dir().display());
+    info!("cache        : {}", paths.cache_dir.display());
+    info!("state        : {}", paths.state_dir.display());
+    info!("ipc socket   : {}", paths.ipc_socket().display());
+    info!("log level    : {verbosity:?}  (override with FONO_LOG=...)");
+    info!(
+        "tray icon    : {}",
+        if no_tray {
+            "disabled (--no-tray)"
+        } else if cfg!(feature = "tray") {
+            "enabled"
+        } else {
+            "not compiled in (rebuild with `--features tray`)"
+        }
+    );
+    info!(
+        "hotkeys      : hold={}  toggle={}  paste_last={}  cancel={}",
+        config.hotkeys.hold,
+        config.hotkeys.toggle,
+        config.hotkeys.paste_last,
+        config.hotkeys.cancel
+    );
+    info!(
+        "stt backend  : {:?}  (local model: {})",
+        config.stt.backend, config.stt.local.model
+    );
+    info!(
+        "llm backend  : {:?}  (enabled={})",
+        config.llm.backend, config.llm.enabled
+    );
+    tracing::debug!("to see per-crate debug output: re-run with `-v` (debug) or `-vv` (trace)");
+}
+
 async fn handle_client(
     mut stream: UnixStream,
-    fsm: std::sync::Arc<std::sync::Mutex<RecordingFsm>>,
+    fsm: Arc<Mutex<RecordingFsm>>,
+    action_tx: mpsc::UnboundedSender<HotkeyAction>,
 ) -> Result<()> {
     let req: Request = read_frame(&mut stream).await?;
     let resp = match req {
         Request::Toggle => {
-            if let Ok(mut f) = fsm.lock() {
-                f.dispatch(HotkeyAction::TogglePressed);
-            }
+            let _ = action_tx.send(HotkeyAction::TogglePressed);
             Response::Ok
         }
         Request::HoldPress => {
-            if let Ok(mut f) = fsm.lock() {
-                f.dispatch(HotkeyAction::HoldPressed);
-            }
+            let _ = action_tx.send(HotkeyAction::HoldPressed);
             Response::Ok
         }
         Request::HoldRelease => {
-            if let Ok(mut f) = fsm.lock() {
-                f.dispatch(HotkeyAction::HoldReleased);
-            }
+            let _ = action_tx.send(HotkeyAction::HoldReleased);
             Response::Ok
         }
         Request::PasteLast => {
-            if let Ok(mut f) = fsm.lock() {
-                f.dispatch(HotkeyAction::PasteLastPressed);
-            }
+            let _ = action_tx.send(HotkeyAction::PasteLastPressed);
             Response::Ok
         }
         Request::Status => {
-            let state = fsm.lock().map(|f| f.state()).ok();
+            let state = fsm.lock().await.state();
             Response::Text(format!("fono daemon running; fsm={state:?}"))
         }
         Request::Doctor => {
