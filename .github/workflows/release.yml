@@ -12,8 +12,9 @@ env:
   CARGO_TERM_COLOR: always
   BIN_NAME: fono
 
-# TODO(phase-9): add minisign signing step per Task 9.1 in
-# docs/plans/2026-04-24-fono-design-v1.md. Skipped in the scaffold session.
+# Signing with minisign is optional: if the repo secret MINISIGN_KEY is set
+# (along with MINISIGN_PASSWORD), the release job will sign SHA256SUMS and
+# attach SHA256SUMS.minisig to the draft release.
 
 jobs:
   build:
@@ -67,67 +68,87 @@ jobs:
         if: ${{ !matrix.cross }}
         run: cargo build --profile release-slim --target ${{ matrix.target }} -p fono
 
-      - name: Stage artifact
+      - name: Stage + archive
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist
-          bin="target/${{ matrix.target }}/release-slim/${BIN_NAME}"
-          if [[ "${{ matrix.target }}" == *windows* ]]; then bin="${bin}.exe"; fi
-          cp "$bin" "dist/${BIN_NAME}-${{ matrix.target }}${bin##*fono}"
-          ls -la dist/
+          version="${{ github.ref_name }}"
+          target="${{ matrix.target }}"
+          stem="${BIN_NAME}-${version}-${target}"
+          stage="dist/${stem}"
+          mkdir -p "${stage}"
 
-      - name: Package archive
-        shell: bash
-        run: |
-          set -euo pipefail
+          bin="target/${target}/release-slim/${BIN_NAME}"
+          if [[ "${target}" == *windows* ]]; then bin="${bin}.exe"; fi
+          cp "${bin}" "${stage}/"
+          cp README.md LICENSE CHANGELOG.md "${stage}/"
+          cp -r packaging "${stage}/" || true
+
           cd dist
-          name="${BIN_NAME}-${{ github.ref_name }}-${{ matrix.target }}"
           if [[ "${{ matrix.archive }}" == "zip" ]]; then
-            7z a "${name}.zip" *
+            7z a "${stem}.zip" "${stem}"
           else
-            tar -czf "${name}.tar.gz" *
+            tar -czf "${stem}.tar.gz" "${stem}"
           fi
           ls -la
 
-      - name: Upload artifact
+      - name: Stage raw per-arch binary (macOS only, for lipo)
+        if: ${{ contains(matrix.target, 'apple-darwin') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p raw
+          cp "target/${{ matrix.target }}/release-slim/${BIN_NAME}" \
+             "raw/${BIN_NAME}-${{ matrix.target }}"
+
+      - name: Upload archive
         uses: actions/upload-artifact@v4
         with:
-          name: fono-${{ matrix.target }}
-          path: dist/*
+          name: fono-archive-${{ matrix.target }}
+          path: dist/*.tar.gz dist/*.zip
+          if-no-files-found: ignore
+
+      - name: Upload raw macOS binary
+        if: ${{ contains(matrix.target, 'apple-darwin') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fono-raw-${{ matrix.target }}
+          path: raw/*
 
   universal-macos:
     name: universal macOS
     needs: build
     runs-on: macos-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
-          pattern: fono-*-apple-darwin
-          path: inputs
-          merge-multiple: false
+          pattern: fono-raw-*-apple-darwin
+          path: raw
+          merge-multiple: true
 
       - name: lipo into universal binary
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p universal
-          # Extract both per-arch archives and lipo the binaries.
-          find inputs -name "*.tar.gz" -print0 | while IFS= read -r -d '' a; do
-            tar -xzf "$a" -C universal/
-          done
-          ls -la universal
-          # Expect x86_64 + arm64 fono binaries to coexist; lipo them.
-          # NOTE: archive layout is per-target; if both archives contain a file
-          # named `fono`, the second extraction overwrote the first. In that
-          # case we fall back to re-downloading; for now, leave a TODO.
-          # TODO(phase-9): robust universal packaging; see Task 9.1.
-          echo "lipo step placeholder — wire up once per-arch archive names are final"
+          ls -la raw
+          version="${{ github.ref_name }}"
+          stem="${BIN_NAME:-fono}-${version}-universal-apple-darwin"
+          stage="dist/${stem}"
+          mkdir -p "${stage}"
+          lipo -create -output "${stage}/fono" \
+            "raw/fono-x86_64-apple-darwin" \
+            "raw/fono-aarch64-apple-darwin"
+          cp README.md LICENSE CHANGELOG.md "${stage}/"
+          cp -r packaging "${stage}/" || true
+          file "${stage}/fono"
+          cd dist && tar -czf "${stem}.tar.gz" "${stem}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: fono-universal-apple-darwin
-          path: universal
+          name: fono-archive-universal-apple-darwin
+          path: dist/*.tar.gz
 
   release:
     name: Draft GitHub Release
@@ -136,9 +157,11 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
+          pattern: fono-archive-*
           path: artifacts
+          merge-multiple: true
 
-      - name: Flatten + checksum
+      - name: Checksum
         shell: bash
         run: |
           set -euo pipefail
@@ -146,6 +169,23 @@ jobs:
           find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release/ \;
           cd release
           sha256sum * > SHA256SUMS
+          ls -la
+
+      - name: Sign SHA256SUMS with minisign (optional)
+        if: ${{ env.MINISIGN_KEY != '' }}
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign
+          printf '%s\n' "$MINISIGN_KEY" > minisign.key
+          chmod 600 minisign.key
+          cd release
+          echo "$MINISIGN_PASSWORD" | minisign -S -s ../minisign.key -m SHA256SUMS
+          rm ../minisign.key
           ls -la
 
       - name: Create draft release

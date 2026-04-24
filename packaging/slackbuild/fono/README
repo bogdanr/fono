@@ -1,0 +1,35 @@
+Fono NimbleX SlackBuild
+=======================
+
+Two build modes — pick one:
+
+* Binary mode (default, fastest, no build dependencies):
+
+    ./fono.SlackBuild                 # fetches the published musl binary
+
+  The build script downloads
+  `fono-v<VERSION>-<arch>-unknown-linux-musl.tar.gz` from the GitHub
+  release pinned in `fono.info`. Override the release base URL with
+  `FONO_RELEASE_BASE=https://mirror.example/fono ./fono.SlackBuild`.
+
+* Source mode (requires rust + rustup with a musl target installed):
+
+    FROM_SOURCE=1 ./fono.SlackBuild
+
+Standard SlackBuild environment variables also apply:
+`ARCH`, `VERSION`, `BUILD`, `TAG`, `PKGTYPE`, `TMP`, `OUTPUT`.
+
+The resulting package installs:
+
+* `/usr/bin/fono`                         — the single static binary
+* `/usr/share/applications/fono.desktop`  — desktop entry
+* `/usr/share/icons/hicolor/scalable/apps/fono.svg`
+* `/lib/systemd/user/fono.service`        — per-user unit (never enabled
+                                             system-wide; users opt in
+                                             with `systemctl --user
+                                             enable --now fono.service`)
+* Shell completions for bash / zsh / fish under the usual locations
+  (generated post-install via `fono completions`).
+
+Config, models, and history live under the invoking user's XDG dirs;
+`removepkg fono` does **not** touch them — that data is user state.

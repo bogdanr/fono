@@ -1,5 +1,4 @@
-NimbleX SlackBuild — stub.
+NimbleX / Slackware SlackBuild lives under `fono/`.
 
-The real SlackBuild (mirroring the earlyoom layout at
-`/mnt/nvme0n1p5/Work/slackbuilds/earlyoom/`) lands in Phase 9; see
-`docs/plans/2026-04-24-fono-design-v1.md` Task 9.2.
+See `fono/README` for usage. Mirrors the layout of
+`/mnt/nvme0n1p5/Work/slackbuilds/earlyoom/` on the NimbleX build host.

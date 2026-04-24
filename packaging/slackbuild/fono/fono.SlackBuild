@@ -1,0 +1,136 @@
+#!/bin/bash
+#
+# Slackware build script for fono (NimbleX flavour)
+#
+# Fono is a GPL-3.0 Rust single-binary voice dictation tool.
+#   https://github.com/NimbleX/fono
+#
+# Two build modes:
+#   * Binary mode (default): downloads the pre-built musl static binary
+#     from the GitHub release pinned in fono.info and installs it.
+#   * Source mode: set FROM_SOURCE=1 to clone upstream at VERSION and
+#     build with `cargo --profile release-slim`. Requires rust + musl-gcc
+#     in $PATH.
+#
+# Fono is per-user software: the systemd unit ships as a *user* unit
+# under /lib/systemd/user/ and is never enabled globally.
+#
+# Copyright 2026 Bogdan Rădulescu <bogdan@nimblex.net>
+# Licensed under the same terms as earlyoom.SlackBuild (see header there).
+
+cd $(dirname $0) ; CWD=$(pwd)
+
+PRGNAM=fono
+VERSION=${VERSION:-0.1.0}
+BUILD=${BUILD:-1}
+TAG=${TAG:-_NimbleX}
+PKGTYPE=${PKGTYPE:-txz}
+
+if [ -z "$ARCH" ]; then
+  case "$( uname -m )" in
+    arm*)  ARCH=arm ;;
+    aarch64) ARCH=aarch64 ;;
+    *)     ARCH=$( uname -m ) ;;
+  esac
+fi
+
+if [ ! -z "${PRINT_PACKAGE_NAME}" ]; then
+  echo "$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.$PKGTYPE"
+  exit 0
+fi
+
+# Upstream release host — override with FONO_RELEASE_BASE if mirroring.
+RELEASE_BASE=${FONO_RELEASE_BASE:-https://github.com/NimbleX/fono/releases/download}
+
+case "$ARCH" in
+  x86_64)  RUST_TARGET=x86_64-unknown-linux-musl ;;
+  aarch64) RUST_TARGET=aarch64-unknown-linux-musl ;;
+  *)       echo "unsupported ARCH=$ARCH" >&2 ; exit 1 ;;
+esac
+
+TMP=${TMP:-/tmp/SBo}
+PKG=$TMP/package-$PRGNAM
+OUTPUT=${OUTPUT:-/tmp}
+
+set -e
+
+rm -rf $PKG
+mkdir -p $TMP $PKG $OUTPUT
+
+if [ "${FROM_SOURCE:-0}" = "1" ]; then
+  # --- Source mode -------------------------------------------------------
+  command -v cargo >/dev/null 2>&1 || { echo "cargo not found — install rust" >&2; exit 1; }
+  cd $TMP
+  rm -rf $PRGNAM-$VERSION
+  if [ -f "$CWD/$PRGNAM-$VERSION.tar.gz" ]; then
+    tar xvf $CWD/$PRGNAM-$VERSION.tar.gz
+    cd $PRGNAM-$VERSION
+  else
+    git clone --depth 1 --branch v$VERSION https://github.com/NimbleX/fono.git $PRGNAM-$VERSION
+    cd $PRGNAM-$VERSION
+  fi
+  rustup target add "$RUST_TARGET" 2>/dev/null || true
+  cargo build --profile release-slim --target "$RUST_TARGET" -p fono
+  BIN_SRC="target/$RUST_TARGET/release-slim/fono"
+else
+  # --- Binary mode -------------------------------------------------------
+  # Expected asset: fono-v<VERSION>-<RUST_TARGET>.tar.gz
+  STEM="fono-v${VERSION}-${RUST_TARGET}"
+  TARBALL="$CWD/${STEM}.tar.gz"
+  if [ ! -f "$TARBALL" ]; then
+    echo "Fetching ${STEM}.tar.gz from ${RELEASE_BASE}/v${VERSION}/"
+    curl -fL -o "$TARBALL" "${RELEASE_BASE}/v${VERSION}/${STEM}.tar.gz"
+  fi
+  cd $TMP
+  rm -rf "$STEM"
+  tar xvf "$TARBALL"
+  cd "$STEM"
+  BIN_SRC="fono"
+fi
+
+chown -R root:root .
+
+# ---- install ----------------------------------------------------------
+install -s -m0755 -D "$BIN_SRC"                 $PKG/usr/bin/fono
+
+# Desktop entry + icon
+install -Dm644 $CWD/fono.desktop                $PKG/usr/share/applications/fono.desktop
+install -Dm644 $CWD/fono.svg                    $PKG/usr/share/icons/hicolor/scalable/apps/fono.svg
+
+# Systemd **user** unit (never enabled system-wide; user runs
+# `systemctl --user enable --now fono.service` themselves, or the
+# first-run wizard offers to).
+install -Dm644 $CWD/fono.service                $PKG/lib/systemd/user/fono.service
+
+# Shell completions (generated at build time by `fono completions`).
+if command -v "$PKG/usr/bin/fono" >/dev/null 2>&1; then
+  $PKG/usr/bin/fono completions bash 2>/dev/null > $TMP/fono.bash || true
+  if [ -s $TMP/fono.bash ]; then
+    install -Dm644 $TMP/fono.bash               $PKG/usr/share/bash-completion/completions/fono
+  fi
+  $PKG/usr/bin/fono completions zsh  2>/dev/null > $TMP/_fono     || true
+  if [ -s $TMP/_fono ]; then
+    install -Dm644 $TMP/_fono                   $PKG/usr/share/zsh/site-functions/_fono
+  fi
+  $PKG/usr/bin/fono completions fish 2>/dev/null > $TMP/fono.fish || true
+  if [ -s $TMP/fono.fish ]; then
+    install -Dm644 $TMP/fono.fish               $PKG/usr/share/fish/vendor_completions.d/fono.fish
+  fi
+fi
+
+# Documentation
+PKGDOC=$PKG/usr/doc/$PRGNAM-$VERSION
+mkdir -p $PKGDOC
+# Source-mode checkout has these at the root; binary-mode tarball ships
+# them inside the extracted stem directory.
+for f in README.md LICENSE CHANGELOG.md; do
+  [ -f "$f" ] && cp -a "$f" $PKGDOC/ || true
+done
+cat $CWD/$PRGNAM.SlackBuild > $PKGDOC/$PRGNAM.SlackBuild
+
+mkdir -p $PKG/install
+cat $CWD/slack-desc > $PKG/install/slack-desc
+[ -f $CWD/doinst.sh ] && cat $CWD/doinst.sh > $PKG/install/doinst.sh
+
+cd $PKG
+/sbin/makepkg -l y -c n $OUTPUT/$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.$PKGTYPE

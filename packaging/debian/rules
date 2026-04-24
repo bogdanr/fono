@@ -1,0 +1,19 @@
+#!/usr/bin/make -f
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --profile release-slim -p fono --locked
+
+override_dh_auto_test:
+	cargo test --workspace --lib --locked
+
+override_dh_auto_install:
+	install -Dm755 target/release-slim/fono \
+	    debian/fono/usr/bin/fono
+	install -Dm644 packaging/slackbuild/fono/fono.desktop \
+	    debian/fono/usr/share/applications/fono.desktop
+	install -Dm644 packaging/slackbuild/fono/fono.svg \
+	    debian/fono/usr/share/icons/hicolor/scalable/apps/fono.svg
+	install -Dm644 packaging/systemd/fono.service \
+	    debian/fono/usr/lib/systemd/user/fono.service

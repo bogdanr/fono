@@ -1,0 +1,18 @@
+Source: fono
+Section: sound
+Priority: optional
+Maintainer: Bogdan Rădulescu <bogdan@nimblex.net>
+Build-Depends: debhelper-compat (= 13), cargo (>= 1.82~), rustc (>= 1.82~), pkg-config, libasound2-dev, libgtk-3-dev, libayatana-appindicator3-dev, libxdo-dev
+Standards-Version: 4.7.0
+Homepage: https://github.com/NimbleX/fono
+Rules-Requires-Root: no
+
+Package: fono
+Architecture: linux-any
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Recommends: pipewire | pulseaudio, wtype | ydotool | xdotool
+Description: Lightweight native voice dictation
+ Fono is a single-binary Rust voice dictation tool: press a hotkey,
+ speak, and cleaned text is typed at the cursor. Local Whisper + Qwen
+ models by default, or bring-your-own cloud keys (Groq, OpenAI,
+ Cerebras, Anthropic, ...). No Electron, no WebKit, no Python runtime.

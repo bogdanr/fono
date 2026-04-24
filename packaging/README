@@ -1,2 +1,19 @@
-Distribution-specific packaging. Each subdirectory targets one ecosystem; see
-`docs/plans/2026-04-24-fono-design-v1.md` (Phase 9).
+Fono packaging
+==============
+
+Distribution-specific packaging recipes. Each subdirectory targets one
+ecosystem; pick whichever matches your distro.
+
+| Directory            | Target                                      |
+|----------------------|---------------------------------------------|
+| `slackbuild/fono/`   | NimbleX / Slackware `.SlackBuild`           |
+| `aur/`               | Arch Linux AUR `PKGBUILD`                   |
+| `nix/`               | Nix flake (NixOS + nix-on-any-Linux/macOS)  |
+| `debian/`            | `debhelper`/`dh` recipe for Debian/Ubuntu   |
+| `systemd/`           | Per-user `fono.service` shared by all above |
+
+Release artifacts (musl static binaries for `x86_64` and `aarch64`, MSVC
+`.exe` for Windows, universal binary for macOS) are built by
+`.github/workflows/release.yml` on every `v*` tag and attached to a
+draft GitHub Release together with `SHA256SUMS` (and a minisign
+signature when the `MINISIGN_KEY` secret is set).

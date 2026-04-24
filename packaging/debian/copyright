@@ -1,0 +1,12 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: fono
+Source: https://github.com/NimbleX/fono
+
+Files: *
+Copyright: 2026 Bogdan Rădulescu <bogdan@nimblex.net>
+License: GPL-3.0-only
+
+License: GPL-3.0-only
+ The full text of the GNU General Public License version 3 is shipped in
+ /usr/share/common-licenses/GPL-3 on Debian systems and in the upstream
+ LICENSE file.

@@ -1,0 +1,19 @@
+# HOW TO EDIT THIS FILE:
+# The "handy ruler" below makes it easier to edit a package description.
+# Line up the first '|' above the ':' following the base package name, and
+# the '|' on the right side marks the last column you can put a character in.
+# You must make exactly 11 lines for the formatting to be correct.  It's also
+# customary to leave one space after the ':' except on otherwise blank lines.
+
+    |-----handy-ruler------------------------------------------------------|
+fono: fono (lightweight native voice dictation)
+fono:
+fono: Fono is a single-binary Rust voice dictation tool: press a hotkey,
+fono: speak, and cleaned text is typed at the cursor. Local Whisper +
+fono: Qwen models by default, or bring-your-own cloud keys (Groq,
+fono: OpenAI, Cerebras, Anthropic, ...). No Electron, no WebKit, no
+fono: Python runtime.
+fono:
+fono: Ships a per-user systemd unit (fono.service) under
+fono: /lib/systemd/user/ — enable with: systemctl --user enable --now fono
+fono: Homepage: https://github.com/NimbleX/fono

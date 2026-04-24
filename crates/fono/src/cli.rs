@@ -2,7 +2,8 @@
 //! Clap-powered CLI surface + dispatch to daemon / subcommands.
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use fono_core::{Config, Paths, Secrets};
 use fono_ipc::{Request, Response};
 
@@ -116,6 +117,11 @@ pub enum Cmd {
     Setup,
     /// Diagnostic report.
     Doctor,
+    /// Print shell completions (bash, zsh, fish, powershell, elvish).
+    Completions {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -174,6 +180,11 @@ pub async fn run(cli: Cli) -> Result<()> {
         }) => history_cmd(&paths, search.as_deref(), limit, json),
         Some(Cmd::Config { action }) => config_cmd(&paths, action),
         Some(Cmd::Models { action }) => models_cmd(&paths, action).await,
+        Some(Cmd::Completions { shell }) => {
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "fono", &mut std::io::stdout());
+            Ok(())
+        }
     }
 }
 
