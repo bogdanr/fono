@@ -24,6 +24,13 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
     print_banner(paths, &config, no_tray, verbosity);
     write_pid(paths)?;
 
+    // Ensure referenced models are on disk before we register hotkeys —
+    // this is a no-op if they already exist, and only warns (doesn't
+    // abort) if the network is unavailable so the daemon still comes up.
+    if let Err(e) = crate::models::ensure_models(paths, &config).await {
+        warn!("model preflight failed: {e:#}");
+    }
+
     // ---------------------------------------------------------------
     // FSM + channels
     // ---------------------------------------------------------------

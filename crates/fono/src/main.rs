@@ -5,6 +5,7 @@
 mod cli;
 mod daemon;
 mod doctor;
+mod models;
 mod wizard;
 
 use anyhow::Result;

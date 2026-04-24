@@ -46,6 +46,31 @@ pub async fn run(paths: &Paths) -> Result<()> {
         secrets.save(&paths.secrets_file())?;
     }
 
+    // If the user chose local STT, kick off the model download now so
+    // the first `fono` invocation doesn't pause for hundreds of MB.
+    if config.stt.backend == SttBackend::Local {
+        let want = dialoguer::Confirm::with_theme(&theme)
+            .with_prompt(format!(
+                "Download whisper model '{}' now?",
+                config.stt.local.model
+            ))
+            .default(true)
+            .interact()
+            .unwrap_or(false);
+        if want {
+            if let Err(e) = crate::models::ensure_models(paths, &config).await {
+                eprintln!(
+                    "  (model download failed: {e:#} — you can retry with `fono models install`)"
+                );
+            }
+        } else {
+            println!(
+                "  Skipped. Run `fono models install {}` when you're ready.",
+                config.stt.local.model
+            );
+        }
+    }
+
     println!(
         "\n  Configuration saved to: {}",
         paths.config_file().display()

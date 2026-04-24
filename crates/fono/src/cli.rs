@@ -133,6 +133,7 @@ pub enum ModelsCmd {
     Verify,
 }
 
+#[allow(clippy::large_stack_frames)]
 pub async fn run(cli: Cli) -> Result<()> {
     let paths = Paths::resolve().context("resolve XDG paths")?;
     paths.ensure()?;
@@ -149,7 +150,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             let no_tray = cli.no_tray || matches!(cli.cmd, Some(Cmd::Daemon { no_tray: true }));
             daemon::run(&paths, no_tray, cli.verbosity()).await
         }
-        Some(Cmd::Setup) => wizard::run(&paths).await,
+        Some(Cmd::Setup) => Box::pin(wizard::run(&paths)).await,
         Some(Cmd::Toggle) => ipc_simple(&paths, Request::Toggle).await,
         Some(Cmd::PasteLast) => ipc_simple(&paths, Request::PasteLast).await,
         Some(Cmd::Doctor) => {
