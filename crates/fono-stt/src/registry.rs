@@ -17,64 +17,70 @@ pub const DEFAULT_MIRROR: &str = "https://huggingface.co";
 
 /// All supported whisper variants (Phase 4 Task 4.4).
 ///
-/// SHA256s are the upstream ggml-format weights from
-/// `ggerganov/whisper.cpp`; verified at download time.
+/// The SHA-256 pins are currently the "unpinned" sentinel
+/// (64 zeros) because upstream `ggerganov/whisper.cpp` does not publish a
+/// canonical SHA-256 manifest and the previous placeholders were in fact
+/// SHA-1 strings of unknown provenance. Downloads succeed and the
+/// computed SHA-256 is logged at `info`; a follow-up change will pin the
+/// real values once an authoritative manifest exists.
+pub const UNPINNED: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
 pub const WHISPER_MODELS: &[ModelInfo] = &[
     ModelInfo {
         name: "tiny",
         multilingual: true,
         approx_mb: 75,
         url_path: "ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
-        sha256: "bd577a113a864445d4c299885e0cb97d4ba92b5f",
+        sha256: UNPINNED,
     },
     ModelInfo {
         name: "tiny.en",
         multilingual: false,
         approx_mb: 75,
         url_path: "ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
-        sha256: "c78c86eb1a8faa21b369bcd33207cc90d64ae9df",
+        sha256: UNPINNED,
     },
     ModelInfo {
         name: "base",
         multilingual: true,
         approx_mb: 142,
         url_path: "ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
-        sha256: "60ed5bc3dd14eea856493d334349b405782ddcaf",
+        sha256: UNPINNED,
     },
     ModelInfo {
         name: "base.en",
         multilingual: false,
         approx_mb: 142,
         url_path: "ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
-        sha256: "0b47b3e6ba5dd5e9c0a9f9bb6c4f9cc5b2c67f45",
+        sha256: UNPINNED,
     },
     ModelInfo {
         name: "small",
         multilingual: true,
         approx_mb: 466,
         url_path: "ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
-        sha256: "1be3a9b2063867b937e64e2ec7483364a79917e9",
+        sha256: UNPINNED,
     },
     ModelInfo {
         name: "small.en",
         multilingual: false,
         approx_mb: 466,
         url_path: "ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
-        sha256: "6173ff4c80ea9c9562c30c3dc99ea25c30b2e63c",
+        sha256: UNPINNED,
     },
     ModelInfo {
         name: "medium",
         multilingual: true,
         approx_mb: 1500,
         url_path: "ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
-        sha256: "6c14d5ada1f8ed0fab7bc00d8cebe2c3fbbf3daf",
+        sha256: UNPINNED,
     },
     ModelInfo {
         name: "medium.en",
         multilingual: false,
         approx_mb: 1500,
         url_path: "ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin",
-        sha256: "cc37e93478338ec7700281a7ac30a10128929eb8",
+        sha256: UNPINNED,
     },
 ];
 

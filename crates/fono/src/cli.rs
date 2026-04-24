@@ -172,7 +172,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             json,
         }) => history_cmd(&paths, search.as_deref(), limit, json),
         Some(Cmd::Config { action }) => config_cmd(&paths, action),
-        Some(Cmd::Models { action }) => models_cmd(&paths, action),
+        Some(Cmd::Models { action }) => models_cmd(&paths, action).await,
     }
 }
 
@@ -245,14 +245,14 @@ fn config_cmd(paths: &Paths, action: ConfigCmd) -> Result<()> {
     Ok(())
 }
 
-fn models_cmd(paths: &Paths, action: ModelsCmd) -> Result<()> {
+async fn models_cmd(paths: &Paths, action: ModelsCmd) -> Result<()> {
     use fono_stt::ModelRegistry;
     match action {
         ModelsCmd::List => {
             for m in ModelRegistry::all() {
                 let marker = if paths
                     .whisper_models_dir()
-                    .join(format!("{}.bin", m.name))
+                    .join(format!("ggml-{}.bin", m.name))
                     .exists()
                 {
                     "[installed]"
@@ -266,20 +266,27 @@ fn models_cmd(paths: &Paths, action: ModelsCmd) -> Result<()> {
             }
         }
         ModelsCmd::Install { name } => {
-            // Synchronous wrapper: download module is async, so we enter a
-            // lightweight runtime. This subcommand is rare (CLI), so a fresh
-            // runtime is fine.
             let m = ModelRegistry::get(&name)
                 .ok_or_else(|| anyhow::anyhow!("unknown model {name:?}"))?;
-            let dest = paths.whisper_models_dir().join(format!("{}.bin", m.name));
+            let dest = paths
+                .whisper_models_dir()
+                .join(format!("ggml-{}.bin", m.name));
+            if dest.exists() {
+                println!("already installed: {}", dest.display());
+                return Ok(());
+            }
             let url = ModelRegistry::url_for(m);
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
-            rt.block_on(fono_download::download(&url, &dest, m.sha256))?;
+            println!(
+                "Downloading {} ({} MB)\n  from {url}\n  to   {}",
+                m.name,
+                m.approx_mb,
+                dest.display()
+            );
+            fono_download::download(&url, &dest, m.sha256).await?;
+            println!("Installed: {}", dest.display());
         }
         ModelsCmd::Remove { name } => {
-            let path = paths.whisper_models_dir().join(format!("{name}.bin"));
+            let path = paths.whisper_models_dir().join(format!("ggml-{name}.bin"));
             if path.exists() {
                 std::fs::remove_file(&path)?;
                 println!("removed {}", path.display());
