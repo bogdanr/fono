@@ -18,6 +18,7 @@ use tracing::{info, warn};
 
 use crate::cli::Verbosity;
 
+#[allow(clippy::too_many_lines)]
 pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<()> {
     let config = Config::load(&paths.config_file()).context("load config")?;
     print_banner(paths, &config, no_tray, verbosity);
@@ -62,14 +63,16 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
     };
 
     // ---------------------------------------------------------------
-    // FSM event consumer — logs events, updates tray tint.
-    // Real orchestration (audio capture, STT, inject) will be wired in
-    // follow-up phases. For now we surface state clearly so the user can
-    // verify hotkeys in the log.
+    // FSM event consumer — logs events, updates tray tint, and (for now)
+    // synthesises a `ProcessingDone` shortly after every `StopRecording`
+    // so the FSM returns to `Idle`. Once the real STT→LLM→inject
+    // pipeline is wired in, that pipeline will emit `ProcessingDone`
+    // instead and this shim can go away.
     // ---------------------------------------------------------------
     let tray_for_events = Arc::new(tray);
     {
         let tray = Arc::clone(&tray_for_events);
+        let action_tx_for_fsm = action_tx.clone();
         tokio::spawn(async move {
             while let Some(e) = fsm_events.recv().await {
                 info!("fsm event: {e:?}");
@@ -80,6 +83,20 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                         HotkeyEvent::Cancel => t.set_state(TrayState::Idle),
                         HotkeyEvent::PasteLast => { /* no state change */ }
                     }
+                }
+                if matches!(e, HotkeyEvent::StopRecording | HotkeyEvent::Cancel) {
+                    // Placeholder pipeline: pretend we finished processing
+                    // after a beat so the FSM (and the tray tint) return
+                    // to Idle and the next toggle press works.
+                    let tx = action_tx_for_fsm.clone();
+                    let tray = Arc::clone(&tray);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                        let _ = tx.send(HotkeyAction::ProcessingDone);
+                        if let Some(t) = tray.as_ref() {
+                            t.set_state(TrayState::Idle);
+                        }
+                    });
                 }
             }
         });
