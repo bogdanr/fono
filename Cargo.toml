@@ -1,0 +1,113 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fono",
+    "crates/fono-core",
+    "crates/fono-audio",
+    "crates/fono-stt",
+    "crates/fono-llm",
+    "crates/fono-hotkey",
+    "crates/fono-inject",
+    "crates/fono-tray",
+    "crates/fono-overlay",
+    "crates/fono-ipc",
+    "crates/fono-download",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "GPL-3.0-only"
+authors = ["Bogdan Rădulescu <bogdan@nimblex.net>"]
+homepage = "https://github.com/nimblex/fono"
+repository = "https://github.com/nimblex/fono"
+readme = "README.md"
+keywords = ["voice", "dictation", "stt", "whisper", "llm"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+# Shared dependency pins. Member crates opt in via `dep = { workspace = true }`.
+# Many of these are not yet imported by any stub crate; they are listed here so
+# future phases (see `docs/plans/2026-04-24-fono-design-v1.md`) only need to
+# touch the member crate's `[dependencies]` table, never re-pin versions.
+[workspace.dependencies]
+# Async runtime / utilities
+tokio = { version = "1.40", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Error handling + logging
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serialization / config
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+bincode = "1.3"
+
+# CLI / UX
+clap = { version = "4.5", features = ["derive", "env"] }
+dialoguer = "0.11"
+indicatif = "0.17"
+
+# Paths / dirs
+directories = "5.0"
+
+# HTTP (rustls only — never OpenSSL)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+
+# Persistence
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+
+# Audio
+cpal = "0.15"
+rubato = "0.15"
+rodio = { version = "0.19", default-features = false }
+
+# STT / LLM local engines
+whisper-rs = "0.13"
+llama-cpp-2 = "0.1"
+ort = { version = "2.0.0-rc.4", default-features = false }
+
+# Desktop integration
+tray-icon = "0.19"
+global-hotkey = "0.6"
+enigo = "0.2"
+winit = "0.30"
+softbuffer = "0.4"
+notify-rust = "4.11"
+
+# Focus detection
+x11rb = "0.13"
+swayipc = "3.0"
+hyprland = "0.4"
+
+# Misc
+tempfile = "3.12"
+sha2 = "0.10"
+hex = "0.4"
+once_cell = "1.20"
+regex = "1.11"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+# Slim release profile used by packaging/release CI (see release.yml).
+[profile.release-slim]
+inherits = "release"
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+strip = "symbols"

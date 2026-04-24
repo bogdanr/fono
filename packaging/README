@@ -1,0 +1,2 @@
+Distribution-specific packaging. Each subdirectory targets one ecosystem; see
+`docs/plans/2026-04-24-fono-design-v1.md` (Phase 9).

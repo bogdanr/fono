@@ -1,0 +1,156 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: fono
+
+# TODO(phase-9): add minisign signing step per Task 9.1 in
+# docs/plans/2026-04-24-fono-design-v1.md. Skipped in the scaffold session.
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+            archive: tar.gz
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+            archive: zip
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --profile release-slim --target ${{ matrix.target }} -p fono
+
+      - name: Build (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --profile release-slim --target ${{ matrix.target }} -p fono
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          bin="target/${{ matrix.target }}/release-slim/${BIN_NAME}"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then bin="${bin}.exe"; fi
+          cp "$bin" "dist/${BIN_NAME}-${{ matrix.target }}${bin##*fono}"
+          ls -la dist/
+
+      - name: Package archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          name="${BIN_NAME}-${{ github.ref_name }}-${{ matrix.target }}"
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            7z a "${name}.zip" *
+          else
+            tar -czf "${name}.tar.gz" *
+          fi
+          ls -la
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fono-${{ matrix.target }}
+          path: dist/*
+
+  universal-macos:
+    name: universal macOS
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fono-*-apple-darwin
+          path: inputs
+          merge-multiple: false
+
+      - name: lipo into universal binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p universal
+          # Extract both per-arch archives and lipo the binaries.
+          find inputs -name "*.tar.gz" -print0 | while IFS= read -r -d '' a; do
+            tar -xzf "$a" -C universal/
+          done
+          ls -la universal
+          # Expect x86_64 + arm64 fono binaries to coexist; lipo them.
+          # NOTE: archive layout is per-target; if both archives contain a file
+          # named `fono`, the second extraction overwrote the first. In that
+          # case we fall back to re-downloading; for now, leave a TODO.
+          # TODO(phase-9): robust universal packaging; see Task 9.1.
+          echo "lipo step placeholder — wire up once per-arch archive names are final"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fono-universal-apple-darwin
+          path: universal
+
+  release:
+    name: Draft GitHub Release
+    needs: [build, universal-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten + checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release/ \;
+          cd release
+          sha256sum * > SHA256SUMS
+          ls -la
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: release/*

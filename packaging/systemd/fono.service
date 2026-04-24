@@ -1,0 +1,11 @@
+[Unit]
+Description=Fono voice dictation daemon
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/fono daemon
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
