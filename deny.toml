@@ -7,7 +7,23 @@ all-features = false
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # gtk3-rs bindings (atk, atk-sys, gdk, gdk-sys, gdk-pixbuf, gdk-pixbuf-sys,
+    # gtk, gtk-sys, gtk3-macros) are unmaintained but pulled in transitively
+    # via tray-icon -> libappindicator on Linux. tray-icon upstream is aware
+    # and migration to gtk4 is tracked. Re-evaluate when tray-icon 0.20+ ships.
+    "RUSTSEC-2024-0412", # gtk
+    "RUSTSEC-2024-0413", # atk
+    "RUSTSEC-2024-0415", # gdk
+    "RUSTSEC-2024-0416", # atk-sys
+    "RUSTSEC-2024-0418", # gdk-sys
+    "RUSTSEC-2024-0419", # gdk-pixbuf
+    "RUSTSEC-2024-0420", # gdk-pixbuf-sys
+    "RUSTSEC-2024-0429", # gtk-sys
+    "RUSTSEC-2025-0119", # gtk3-macros
+    "RUSTSEC-2024-0370", # proc-macro-error (transitive, unmaintained)
+    "RUSTSEC-2025-0141", # transitive unmaintained crate
+]
 
 [licenses]
 version = 2
@@ -36,6 +52,8 @@ allow = [
     "CC0-1.0",
     "Zlib",
     "0BSD",
+    "Unlicense",            # often dual-licensed: MIT OR Unlicense
+    "CDLA-Permissive-2.0",  # webpki-roots license; permissive, GPL-compat
 ]
 confidence-threshold = 0.93
 exceptions = []
