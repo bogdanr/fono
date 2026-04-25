@@ -52,40 +52,12 @@ pub async fn run(paths: &Paths) -> Result<()> {
         secrets.save(&paths.secrets_file())?;
     }
 
-    // If the user chose local STT, kick off the model download now so
-    // the first `fono` invocation doesn't pause for hundreds of MB —
-    // unless the model is already on disk, in which case we just say so.
+    // If the user chose local STT, download the model now (silently —
+    // it'll also be re-checked on every daemon start). Failures are
+    // non-fatal: the daemon will retry on next launch.
     if config.stt.backend == SttBackend::Local {
-        let dest = paths
-            .whisper_models_dir()
-            .join(format!("ggml-{}.bin", config.stt.local.model));
-        if dest.exists() {
-            println!(
-                "\n  Whisper model '{}' is already installed at {}.",
-                config.stt.local.model,
-                dest.display()
-            );
-        } else {
-            let want = Confirm::with_theme(&theme)
-                .with_prompt(format!(
-                    "Download whisper model '{}' now?",
-                    config.stt.local.model
-                ))
-                .default(true)
-                .interact()
-                .unwrap_or(false);
-            if want {
-                if let Err(e) = crate::models::ensure_models(paths, &config).await {
-                    eprintln!(
-                        "  (model download failed: {e:#} — you can retry with `fono models install`)"
-                    );
-                }
-            } else {
-                println!(
-                    "  Skipped. Run `fono models install {}` when you're ready.",
-                    config.stt.local.model
-                );
-            }
+        if let Err(e) = crate::models::ensure_models(paths, &config).await {
+            eprintln!("  (model download failed: {e:#} — the daemon will retry on next start)");
         }
     }
 
@@ -270,11 +242,6 @@ fn configure_local(
     } else {
         configure_cloud_llm(theme, config, secrets)?;
     }
-
-    println!(
-        "\n  Models will be downloaded on first recording (or run \
-         `fono models install {stt_model}`)."
-    );
     Ok(())
 }
 
