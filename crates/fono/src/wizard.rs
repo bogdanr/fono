@@ -66,6 +66,11 @@ pub async fn run(paths: &Paths) -> Result<()> {
         if let Err(e) = crate::models::ensure_models(paths, &config).await {
             eprintln!("  (model download failed: {e:#} — the daemon will retry on next start)");
         }
+        // R3.1 — in-wizard latency probe. Run a 3-second synthetic clip
+        // through the just-installed whisper to confirm the host can
+        // sustain its tier budget. Surfaces "first dictation will be
+        // slow" *before* the user presses the hotkey for the first time.
+        probe_local_latency(paths, &config, tier);
     }
 
     println!(
@@ -536,5 +541,117 @@ fn prompt_api_key_force(theme: &ColorfulTheme, key_name: &str) -> Result<Option<
         Ok(None)
     } else {
         Ok(Some(k))
+    }
+}
+
+/// Tier-specific p50 budget for transcribing a 3-second clip with the
+/// recommended whisper model on that tier. Numbers come from the latency
+/// budget table in `docs/plans/2026-04-25-fono-latency-v1.md`. The probe
+/// uses these as soft thresholds: exceeding them prints a warning, not a
+/// hard fail, because real-world variance can be wide on first run.
+fn tier_latency_budget_ms(tier: LocalTier) -> u128 {
+    match tier {
+        LocalTier::HighEnd => 600,
+        LocalTier::Recommended => 1000,
+        LocalTier::Comfortable => 1500,
+        LocalTier::Minimum => 2500,
+        LocalTier::Unsuitable => 4000,
+    }
+}
+
+/// Synthesize 3 seconds of 16 kHz mono PCM with low-amplitude pink-ish
+/// noise plus a 220 Hz tone. Whisper's encoder still does a full
+/// log-mel + transformer forward pass on this, so the wall time is
+/// representative of "real" first-dictation latency without needing to
+/// vendor an audio fixture in the binary.
+fn synthetic_3s_pcm() -> Vec<f32> {
+    let sr = 16_000usize;
+    let n = sr * 3;
+    let mut out = Vec::with_capacity(n);
+    let mut state: u32 = 0x1234_5678;
+    for i in 0..n {
+        // xorshift PRNG → low-amp white noise
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        let noise = ((state as i32 as f32) / (i32::MAX as f32)) * 0.05;
+        // 220 Hz tone, ~0.1 amp
+        #[allow(clippy::cast_precision_loss)]
+        let t = i as f32 / sr as f32;
+        let tone = (t * 220.0 * std::f32::consts::TAU).sin() * 0.1;
+        out.push(noise + tone);
+    }
+    out
+}
+
+/// Run a single 3-second STT pass against the configured local backend
+/// and report wall time relative to `tier`'s budget. Errors are
+/// non-fatal — this is purely advisory.
+fn probe_local_latency(paths: &fono_core::Paths, config: &Config, tier: LocalTier) {
+    use fono_stt::factory::build_stt;
+    use std::time::Instant;
+
+    let secrets = if paths.secrets_file().exists() {
+        Secrets::load(&paths.secrets_file()).unwrap_or_default()
+    } else {
+        Secrets::default()
+    };
+
+    let stt = match build_stt(&config.stt, &secrets, &paths.whisper_models_dir()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("  (latency probe skipped: {e:#})");
+            return;
+        }
+    };
+
+    println!("\n  Running latency probe on a 3-second synthetic clip…");
+    let pcm = synthetic_3s_pcm();
+    let start = Instant::now();
+
+    // Reuse the runtime: build_stt is sync, transcribe is async. Use a
+    // fresh tokio runtime since we're called from within `wizard::run`
+    // which is itself already async — but we don't have access to that
+    // runtime handle here. Build a thin one.
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("  (latency probe skipped: tokio rt: {e:#})");
+            return;
+        }
+    };
+
+    let result = rt.block_on(async { stt.transcribe(&pcm, 16_000, Some("en")).await });
+    let elapsed_ms = start.elapsed().as_millis();
+    let budget_ms = tier_latency_budget_ms(tier);
+
+    match result {
+        Ok(_) if elapsed_ms <= budget_ms => {
+            println!(
+                "  ✓ Probe transcribed 3s of audio in {elapsed_ms} ms (budget {budget_ms} ms for {} tier).",
+                tier.as_str()
+            );
+        }
+        Ok(_) => {
+            eprintln!(
+                "  ⚠ Probe took {elapsed_ms} ms — slower than the {budget_ms} ms budget for the {} tier.",
+                tier.as_str()
+            );
+            eprintln!("    First dictation may feel slow. Options:");
+            eprintln!("      • Switch to a smaller model: `fono use stt local` then edit `[stt.local].model`");
+            eprintln!(
+                "      • Switch to fast cloud STT: `fono use stt groq`  (requires GROQ_API_KEY)"
+            );
+            eprintln!(
+                "      • Check load: a busy CPU during setup inflates this number — re-run later."
+            );
+        }
+        Err(e) => {
+            eprintln!("  ⚠ Probe failed: {e:#}");
+            eprintln!("    The model loaded but inference errored — daemon may need a different model size.");
+        }
     }
 }

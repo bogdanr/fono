@@ -53,6 +53,12 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --all-targets
 
+      - name: fono-bench latency smoke (ignored tests)
+        run: cargo test -p fono-bench --release -- --ignored --nocapture
+
+      - name: fono-bench criterion (compile-only sanity)
+        run: cargo bench -p fono-bench --no-run
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
