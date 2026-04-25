@@ -6,10 +6,13 @@
 pub mod config;
 pub mod error;
 pub mod history;
+pub mod hwcheck;
 pub mod paths;
+pub mod providers;
 pub mod secrets;
 
 pub use config::Config;
 pub use error::{Error, Result};
+pub use hwcheck::{HardwareSnapshot, LocalTier};
 pub use paths::Paths;
 pub use secrets::Secrets;

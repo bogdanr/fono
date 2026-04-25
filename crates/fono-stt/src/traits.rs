@@ -27,4 +27,15 @@ pub trait SpeechToText: Send + Sync {
     fn supports_streaming(&self) -> bool {
         false
     }
+
+    /// Optional best-effort warmup. Cloud backends should fire a cheap
+    /// HEAD/GET to pay TCP+TLS+DNS off the hot path; local backends
+    /// should mmap their model. Default impl is a no-op so most
+    /// implementors don't need to override.
+    ///
+    /// Errors are non-fatal — callers log + continue. See latency
+    /// plan task L2/L3.
+    async fn prewarm(&self) -> Result<()> {
+        Ok(())
+    }
 }

@@ -63,11 +63,18 @@ fn default_version() -> u32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct General {
     pub language: String,
     pub startup_autostart: bool,
     pub sound_feedback: bool,
     pub auto_mute_system: bool,
+    /// Keep the cpal input stream open continuously feeding a discarded
+    /// buffer; on `StartRecording` flip a flag rather than open a new
+    /// stream. Saves 50–300 ms cold-start on ALSA/PipeWire. Latency
+    /// plan L1. Off by default for privacy until the wizard surfaces
+    /// explicit consent — see `docs/privacy.md`.
+    pub always_warm_mic: bool,
 }
 
 impl Default for General {
@@ -77,6 +84,7 @@ impl Default for General {
             startup_autostart: false,
             sound_feedback: true,
             auto_mute_system: true,
+            always_warm_mic: false,
         }
     }
 }
@@ -107,6 +115,14 @@ pub struct Audio {
     pub input_device: String,
     pub sample_rate: u32,
     pub vad_backend: String,
+    /// Trim leading/trailing silence before passing audio to STT.
+    /// Latency plan L11/L12 — whisper compute scales linearly with
+    /// audio length so this saves real wall-clock time.
+    pub trim_silence: bool,
+    /// In toggle mode, fire StopRecording automatically when this many
+    /// milliseconds of contiguous silence are detected. `0` disables.
+    /// Latency plan L13.
+    pub auto_stop_silence_ms: u32,
 }
 
 impl Default for Audio {
@@ -115,6 +131,8 @@ impl Default for Audio {
             input_device: String::new(),
             sample_rate: 16000,
             vad_backend: "silero".into(),
+            trim_silence: true,
+            auto_stop_silence_ms: 0,
         }
     }
 }
@@ -155,6 +173,9 @@ pub struct SttLocal {
     pub model: String,
     pub quantization: String,
     pub language: String,
+    /// Whisper inference thread count. `0` = auto-detect physical
+    /// cores (avoids SMT thrash). Latency plan L18.
+    pub threads: u32,
 }
 
 impl Default for SttLocal {
@@ -163,6 +184,7 @@ impl Default for SttLocal {
             model: "small".into(),
             quantization: "q5_1".into(),
             language: "auto".into(),
+            threads: 0,
         }
     }
 }
@@ -182,16 +204,26 @@ pub struct Llm {
     pub local: LlmLocal,
     pub cloud: Option<LlmCloud>,
     pub prompt: Prompt,
+    /// Skip the LLM cleanup roundtrip when the raw STT output has
+    /// fewer than this many words (whitespace-split). 0 = never skip.
+    /// Latency plan L9 — for short utterances (chat, search bars) the
+    /// LLM costs more than it cleans.
+    pub skip_if_words_lt: u32,
 }
 
 impl Default for Llm {
     fn default() -> Self {
         Self {
-            enabled: true,
-            backend: LlmBackend::Local,
+            // Disabled by default until the user opts into a cloud
+            // provider via `fono setup`, or compiles in `llama-local`
+            // and configures a model. Avoids "first dictation crashes
+            // because LlamaLocal is a stub" trap.
+            enabled: false,
+            backend: LlmBackend::None,
             local: LlmLocal::default(),
             cloud: None,
             prompt: Prompt::default(),
+            skip_if_words_lt: 0,
         }
     }
 }

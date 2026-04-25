@@ -3,6 +3,8 @@
 //! (Groq by default; Deepgram, OpenAI behind feature flags) backends.
 //! Phase 4 of `docs/plans/2026-04-24-fono-design-v1.md`.
 
+pub mod defaults;
+pub mod factory;
 pub mod registry;
 pub mod traits;
 
@@ -13,5 +15,6 @@ pub mod openai;
 #[cfg(feature = "whisper-local")]
 pub mod whisper_local;
 
+pub use factory::build_stt;
 pub use registry::{ModelInfo, ModelRegistry};
 pub use traits::{SpeechToText, Transcription};

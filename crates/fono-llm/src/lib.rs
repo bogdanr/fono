@@ -3,6 +3,8 @@
 //! and opt-in local (`llama-cpp-2`) backends. Phase 5 of
 //! `docs/plans/2026-04-24-fono-design-v1.md`.
 
+pub mod defaults;
+pub mod factory;
 pub mod registry;
 pub mod traits;
 
@@ -13,5 +15,6 @@ pub mod llama_local;
 #[cfg(any(feature = "cerebras", feature = "openai-compat"))]
 pub mod openai_compat;
 
+pub use factory::build_llm;
 pub use registry::{LlmModelInfo, LlmRegistry};
 pub use traits::{FormatContext, TextFormatter};

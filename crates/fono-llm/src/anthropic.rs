@@ -20,7 +20,7 @@ impl AnthropicLlm {
         Self {
             api_key: api_key.into(),
             model: model.into(),
-            client: reqwest::Client::new(),
+            client: crate::openai_compat::warm_client(),
         }
     }
 }
@@ -30,6 +30,8 @@ struct Req<'a> {
     model: &'a str,
     max_tokens: u32,
     temperature: f32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    stop_sequences: Vec<&'a str>,
     system: &'a str,
     messages: Vec<Message<'a>>,
 }
@@ -57,8 +59,10 @@ impl TextFormatter for AnthropicLlm {
         let system = ctx.system_prompt();
         let req = Req {
             model: &self.model,
-            max_tokens: 2048,
-            temperature: 0.3,
+            // Latency plan L19 — short cleanup outputs.
+            max_tokens: 512,
+            temperature: 0.2,
+            stop_sequences: vec!["\n\n"],
             system: &system,
             messages: vec![Message {
                 role: "user",
@@ -93,5 +97,20 @@ impl TextFormatter for AnthropicLlm {
 
     fn name(&self) -> &'static str {
         "anthropic"
+    }
+
+    async fn prewarm(&self) -> Result<()> {
+        // Anthropic's `/v1/models` endpoint exists; cheap GET warms the
+        // TLS+HTTP/2 connection. Failures are non-fatal.
+        let res = self
+            .client
+            .get("https://api.anthropic.com/v1/models")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+            .context("anthropic prewarm")?;
+        let _ = res.bytes().await;
+        Ok(())
     }
 }

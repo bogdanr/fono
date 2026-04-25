@@ -9,7 +9,9 @@
 pub mod capture;
 pub mod mute;
 pub mod resample;
+pub mod trim;
 pub mod vad;
 
 pub use capture::{AudioCapture, CaptureConfig, CaptureHandle, RecordingBuffer};
+pub use trim::{trim_silence, TrimConfig};
 pub use vad::{SileroVad, Vad, VadDecision, WebRtcVadStub};

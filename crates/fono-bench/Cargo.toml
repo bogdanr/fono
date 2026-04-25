@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: GPL-3.0-only
+[package]
+name = "fono-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Latency + accuracy benchmark for Fono's STT/LLM pipeline using public-domain dictation clips."
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+clap = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# We depend on the STT trait so any backend (real cloud, real local, fake)
+# can be benchmarked through a single runner. The LLM trait is optional —
+# we wrap the cleanup stage so latency reports still mean something even
+# when the user benchmarks STT-only.
+fono-stt = { path = "../fono-stt", default-features = false }
+fono-llm = { path = "../fono-llm" }
+fono-download = { path = "../fono-download" }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[features]
+# Mirror the upstream STT crate's feature flags so users can benchmark
+# any provider without rebuilding the world.
+default = ["groq"]
+groq = ["fono-stt/groq"]
+openai = ["fono-stt/openai"]
+whisper-local = ["fono-stt/whisper-local"]
+
+[[bin]]
+name = "fono-bench"
+path = "src/bin/fono-bench.rs"
+
+[[bench]]
+name = "orchestrator"
+harness = false

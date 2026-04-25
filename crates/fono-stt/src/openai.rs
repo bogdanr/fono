@@ -10,6 +10,7 @@ use serde::Deserialize;
 use crate::traits::{SpeechToText, Transcription};
 
 const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/audio/transcriptions";
+const OPENAI_MODELS_ENDPOINT: &str = "https://api.openai.com/v1/models";
 const DEFAULT_MODEL: &str = "whisper-1";
 
 pub struct OpenAiStt {
@@ -26,7 +27,7 @@ impl OpenAiStt {
         Self {
             api_key: api_key.into(),
             model: model.into(),
-            client: reqwest::Client::new(),
+            client: crate::groq::warm_client(),
         }
     }
 }
@@ -78,5 +79,17 @@ impl SpeechToText for OpenAiStt {
 
     fn name(&self) -> &'static str {
         "openai"
+    }
+
+    async fn prewarm(&self) -> Result<()> {
+        let res = self
+            .client
+            .get(OPENAI_MODELS_ENDPOINT)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .context("openai prewarm")?;
+        let _ = res.bytes().await;
+        Ok(())
     }
 }

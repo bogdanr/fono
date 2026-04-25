@@ -2,9 +2,15 @@
 //! Local `whisper-rs` backend. Compiled only with the `whisper-local` feature
 //! since it vendors whisper.cpp (C++ build) and materially increases build
 //! time. See Phase 4 Task 4.2.
+//
+// We hold the context mutex for the whole `transcribe` call (and
+// likewise inside `prewarm`) by design: whisper.cpp inference borrows
+// from the loaded `WhisperContext`, and serialising calls is the
+// simplest way to avoid concurrent state misuse. Silence clippy.
+#![allow(clippy::significant_drop_tightening)]
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -14,7 +20,7 @@ use crate::traits::{SpeechToText, Transcription};
 
 pub struct WhisperLocal {
     model_path: PathBuf,
-    ctx: Mutex<Option<WhisperContext>>,
+    ctx: Arc<Mutex<Option<WhisperContext>>>,
     threads: i32,
 }
 
@@ -26,7 +32,7 @@ impl WhisperLocal {
     pub fn with_threads(model_path: impl Into<PathBuf>, threads: i32) -> Self {
         Self {
             model_path: model_path.into(),
-            ctx: Mutex::new(None),
+            ctx: Arc::new(Mutex::new(None)),
             threads,
         }
     }
@@ -81,11 +87,13 @@ impl SpeechToText for WhisperLocal {
         params.set_print_timestamps(false);
 
         state.full(params, &pcm).context("whisper full()")?;
-        let segments = state.full_n_segments().context("segments count")?;
+        let segments = state.full_n_segments();
         let mut text = String::new();
         for i in 0..segments {
-            if let Ok(s) = state.full_get_segment_text(i) {
-                text.push_str(&s);
+            if let Some(seg) = state.get_segment(i) {
+                if let Ok(s) = seg.to_str_lossy() {
+                    text.push_str(&s);
+                }
             }
         }
         Ok(Transcription {
@@ -97,6 +105,27 @@ impl SpeechToText for WhisperLocal {
 
     fn name(&self) -> &'static str {
         "whisper-local"
+    }
+
+    async fn prewarm(&self) -> Result<()> {
+        // mmap the model on a blocking thread so we don't park an
+        // async executor for 200–600 ms (latency plan L2).
+        let path = self.model_path.clone();
+        let ctx = Arc::clone(&self.ctx);
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut guard = ctx.lock().map_err(|_| anyhow!("whisper mutex poisoned"))?;
+            if guard.is_none() {
+                let p = path
+                    .to_str()
+                    .ok_or_else(|| anyhow!("non-UTF-8 model path"))?;
+                let c = WhisperContext::new_with_params(p, WhisperContextParameters::default())
+                    .context("load whisper model")?;
+                *guard = Some(c);
+            }
+            Ok(())
+        })
+        .await
+        .context("whisper prewarm join")?
     }
 }
 

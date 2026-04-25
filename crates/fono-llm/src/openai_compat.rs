@@ -10,6 +10,7 @@ use crate::traits::{FormatContext, TextFormatter};
 
 pub struct OpenAiCompat {
     endpoint: String,
+    models_endpoint: Option<String>,
     api_key: String,
     model: String,
     backend_name: &'static str,
@@ -23,12 +24,15 @@ impl OpenAiCompat {
         model: impl Into<String>,
         backend_name: &'static str,
     ) -> Self {
+        let endpoint_s = endpoint.into();
+        let models_endpoint = derive_models_endpoint(&endpoint_s);
         Self {
-            endpoint: endpoint.into(),
+            endpoint: endpoint_s,
+            models_endpoint,
             api_key: api_key.into(),
             model: model.into(),
             backend_name,
-            client: reqwest::Client::new(),
+            client: warm_client(),
         }
     }
 
@@ -76,12 +80,38 @@ impl OpenAiCompat {
     }
 }
 
+/// Best-effort: rewrite `…/chat/completions` → `…/models` so we can prewarm
+/// the connection with a cheap GET. Returns `None` if the endpoint shape is
+/// unfamiliar (then prewarm becomes a no-op).
+fn derive_models_endpoint(chat: &str) -> Option<String> {
+    chat.strip_suffix("/chat/completions")
+        .map(|root| format!("{root}/models"))
+}
+
+/// Warm `reqwest::Client` shared by all OpenAI-compatible backends.
+/// HTTP/2 keep-alive + bounded timeouts; latency plan L3.
+pub(crate) fn warm_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .pool_idle_timeout(std::time::Duration::from_secs(60))
+        .pool_max_idle_per_host(4)
+        .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
+        .http2_keep_alive_interval(Some(std::time::Duration::from_secs(20)))
+        .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_default()
+}
+
 #[derive(Serialize)]
 struct ChatReq<'a> {
     model: &'a str,
     messages: Vec<Message<'a>>,
     temperature: f32,
     top_p: f32,
+    max_tokens: u32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    stop: Vec<&'a str>,
     stream: bool,
 }
 
@@ -122,8 +152,13 @@ impl TextFormatter for OpenAiCompat {
                     content: raw,
                 },
             ],
-            temperature: 0.3,
+            // Latency plan L19 — short cleanup outputs, deterministic
+            // tone. Bounded `max_tokens` is critical on cloud providers
+            // that meter wall-clock time.
+            temperature: 0.2,
             top_p: 0.9,
+            max_tokens: 256,
+            stop: vec!["\n\n"],
             stream: false,
         };
         let mut builder = self.client.post(&self.endpoint).json(&req);
@@ -150,5 +185,18 @@ impl TextFormatter for OpenAiCompat {
 
     fn name(&self) -> &'static str {
         self.backend_name
+    }
+
+    async fn prewarm(&self) -> Result<()> {
+        let Some(url) = self.models_endpoint.as_ref() else {
+            return Ok(());
+        };
+        let mut req = self.client.get(url);
+        if !self.api_key.is_empty() {
+            req = req.bearer_auth(&self.api_key);
+        }
+        let res = req.send().await.context("openai-compat prewarm")?;
+        let _ = res.bytes().await;
+        Ok(())
     }
 }

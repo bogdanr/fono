@@ -6,9 +6,10 @@ on Linux (X11 + Wayland), Windows, and macOS. One statically-linked
 `fono` binary replaces the heavy Tambourine (Tauri + Python) and
 OpenWhispr (Electron) stacks.
 
-> **Status:** v0.1 scaffold. All ten crates + CLI + tray + hotkeys +
-> model auto-download are working. Real audio → STT → LLM → inject
-> pipeline wiring is the next milestone — follow `docs/status.md`.
+> **Status:** v0.1.0-rc. Pipeline (audio → STT → LLM → inject) is fully
+> wired; default release ships local whisper.cpp out of the box. First
+> run probes hardware and recommends local vs cloud automatically.
+> Follow `docs/status.md` for the live milestone log.
 
 ## Install
 
@@ -87,13 +88,26 @@ Change them in `~/.config/fono/config.toml` (`[hotkeys]` section).
 Fono supports both local and cloud STT + LLM backends. See
 [`docs/providers.md`](docs/providers.md) for the full matrix. Defaults:
 
-* **Local (recommended):** whisper `small` (~466 MB) + Qwen2.5-1.5B
-  (~1.0 GB). Private, offline, ~2 s latency on a 4-core x86_64.
-* **Cloud:** Groq whisper-large-v3 + Cerebras llama-3.3-70b. Sub-1 s
-  latency, generous free tiers.
+* **Local (recommended on capable hardware):** whisper `small` (~466 MB).
+  Private, offline, ~1 s latency on 8-core x86_64. The default release
+  binary bundles whisper.cpp so this works out of the box — no rebuild,
+  no extra system packages. Local LLM cleanup (Qwen / SmolLM) ships in
+  v0.2; for v0.1 the local path is whisper-only with optional cloud LLM
+  cleanup. Run `fono hwprobe` to see what your machine can sustain.
+* **Cloud:** Groq whisper-large-v3-turbo + Cerebras llama-3.3-70b. Sub-1
+  s end-to-end, generous free tiers.
 
 API keys go in `~/.config/fono/secrets.toml` (mode 0600) or via
 `$ENV_VAR` references in config.
+
+### Build flavours
+
+| `cargo build …`                                                | Includes                        | First-run download |
+|----------------------------------------------------------------|---------------------------------|--------------------|
+| (default)                                                      | local STT + tray + cloud Groq   | ~466 MB (whisper)  |
+| `--no-default-features --features tray`                        | cloud-only (no whisper.cpp C++) | none               |
+| `--no-default-features --features tray,cloud-all`              | cloud-only, all providers       | none               |
+| `--features llama-local`                                       | + local LLM (v0.2 — preview)    | + ~1 GB (Qwen)     |
 
 ## CLI
 
@@ -103,7 +117,8 @@ fono daemon [--no-tray]
 fono toggle                   # IPC: toggle recording on running daemon
 fono paste-last               # IPC: re-type last cleaned transcription
 fono setup                    # re-run the wizard
-fono doctor                   # diagnostic report
+fono doctor                   # diagnostic report (includes hardware tier)
+fono hwprobe [--json]         # probe CPU/RAM/disk, print recommended local tier
 fono config {path,show,edit}
 fono history {list,search,clear} [--json] [--limit N]
 fono models  {list,install,remove,verify} [name]

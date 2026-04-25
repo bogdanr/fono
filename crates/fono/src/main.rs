@@ -2,15 +2,11 @@
 //! `fono` — daemon + CLI entry point. Phase 8 of
 //! `docs/plans/2026-04-24-fono-design-v1.md`.
 
-mod cli;
-mod daemon;
-mod doctor;
-mod models;
-mod wizard;
-
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
+
+use fono::cli;
 
 #[tokio::main]
 async fn main() -> Result<()> {

@@ -16,4 +16,4 @@ pub mod focus;
 pub mod inject;
 
 pub use focus::{detect_focus, FocusInfo};
-pub use inject::{type_text, Injector};
+pub use inject::{type_text, warm_backend, Injector};

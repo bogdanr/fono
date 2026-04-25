@@ -20,11 +20,16 @@ name = "fono"
 path = "src/main.rs"
 
 [features]
-# Tray icon is on by default on desktop builds. Disable with
-# `cargo build --no-default-features` for headless CI or cross-compile runs
-# without a GTK/appindicator toolchain.
-default = ["tray"]
+# Default release ships with local STT (whisper.cpp) and tray. Slim
+# cloud-only build: `cargo build --no-default-features --features tray`.
+# Local LLM (`llama-local`) stays opt-in until the v0.2 wiring lands —
+# see docs/plans/2026-04-25-fono-local-default-v1.md task H8.
+default = ["tray", "local-models"]
 tray = ["fono-tray/tray-backend"]
+local-models = ["fono-stt/whisper-local"]
+llama-local = ["fono-llm/llama-local"]
+# Cloud meta-feature so a single flag enables all hosted providers.
+cloud-all = ["fono-stt/openai", "fono-llm/anthropic"]
 
 [dependencies]
 fono-core = { path = "../fono-core" }
@@ -47,3 +52,8 @@ clap_complete = "4.5"
 dialoguer = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+notify-rust = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tempfile = { workspace = true }

@@ -12,6 +12,7 @@ members = [
     "crates/fono-overlay",
     "crates/fono-ipc",
     "crates/fono-download",
+    "crates/fono-bench",
 ]
 
 [workspace.package]
@@ -57,7 +58,7 @@ indicatif = "0.17"
 directories = "5.0"
 
 # HTTP (rustls only — never OpenSSL)
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "multipart", "http2"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 
 # Persistence
@@ -69,7 +70,7 @@ rubato = "0.15"
 rodio = { version = "0.19", default-features = false }
 
 # STT / LLM local engines
-whisper-rs = "0.13"
+whisper-rs = "0.16"
 llama-cpp-2 = "0.1"
 ort = { version = "2.0.0-rc.4", default-features = false }
 

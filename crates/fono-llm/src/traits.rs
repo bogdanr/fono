@@ -45,4 +45,10 @@ impl FormatContext {
 pub trait TextFormatter: Send + Sync {
     async fn format(&self, raw: &str, ctx: &FormatContext) -> Result<String>;
     fn name(&self) -> &'static str;
+
+    /// Optional best-effort warmup. See `SpeechToText::prewarm`. Latency
+    /// plan task L3 / L10.
+    async fn prewarm(&self) -> Result<()> {
+        Ok(())
+    }
 }

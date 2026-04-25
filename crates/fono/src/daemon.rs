@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Daemon event loop: startup banner, global-hotkey listener, tray icon,
-//! IPC server, FSM dispatcher.
-//!
-//! End-to-end audio → STT → LLM → inject wiring is sequenced into
-//! follow-up phases; this module owns the long-lived background workers
-//! (hotkeys, tray, IPC) and forwards their events into the FSM.
+//! IPC server, FSM dispatcher, and the [`crate::session::SessionOrchestrator`]
+//! that drives audio → STT → LLM → inject end to end.
 
 use anyhow::{Context, Result};
-use fono_core::{Config, Paths};
+use fono_core::{Config, Paths, Secrets};
 use fono_hotkey::{HotkeyAction, HotkeyBindings, HotkeyEvent, RecordingFsm};
 use fono_ipc::{read_frame, write_frame, Request, Response};
 use fono_tray::{TrayAction, TrayState};
@@ -17,16 +14,16 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 
 use crate::cli::Verbosity;
+use crate::session::SessionOrchestrator;
 
 #[allow(clippy::too_many_lines)]
 pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<()> {
-    let config = Config::load(&paths.config_file()).context("load config")?;
+    let config = Arc::new(Config::load(&paths.config_file()).context("load config")?);
+    let secrets = Secrets::load(&paths.secrets_file()).context("load secrets")?;
     print_banner(paths, &config, no_tray, verbosity);
     write_pid(paths)?;
 
-    // Ensure referenced models are on disk before we register hotkeys —
-    // this is a no-op if they already exist, and only warns (doesn't
-    // abort) if the network is unavailable so the daemon still comes up.
+    // Ensure referenced models are on disk before we wire the orchestrator.
     if let Err(e) = crate::models::ensure_models(paths, &config).await {
         warn!("model preflight failed: {e:#}");
     }
@@ -36,9 +33,23 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
     // ---------------------------------------------------------------
     let (fsm, mut fsm_events) = RecordingFsm::new();
     let fsm = Arc::new(Mutex::new(fsm));
-
-    // Actions from hotkeys / tray / IPC converge on a single channel.
     let (action_tx, mut action_rx) = mpsc::unbounded_channel::<HotkeyAction>();
+
+    // ---------------------------------------------------------------
+    // Build the orchestrator. STT failure → degraded mode (hotkeys
+    // still register but recording emits a warning instead of audio).
+    // ---------------------------------------------------------------
+    let orchestrator: Option<Arc<SessionOrchestrator>> =
+        match SessionOrchestrator::new(Arc::clone(&config), &secrets, paths, action_tx.clone()) {
+            Ok(o) => Some(Arc::new(o)),
+            Err(e) => {
+                warn!(
+                    "STT backend unavailable; daemon running in DEGRADED mode \
+                 (hotkeys are live but recording will be skipped): {e:#}"
+                );
+                None
+            }
+        };
 
     // ---------------------------------------------------------------
     // Global hotkey listener
@@ -68,22 +79,19 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
         let (t, rx) = fono_tray::spawn("Fono — voice dictation");
         (Some(t), rx)
     };
+    let tray = Arc::new(tray);
 
     // ---------------------------------------------------------------
-    // FSM event consumer — logs events, updates tray tint, and (for now)
-    // synthesises a `ProcessingDone` shortly after every `StopRecording`
-    // so the FSM returns to `Idle`. Once the real STT→LLM→inject
-    // pipeline is wired in, that pipeline will emit `ProcessingDone`
-    // instead and this shim can go away.
+    // FSM event consumer — drives the orchestrator pipeline.
     // ---------------------------------------------------------------
-    let tray_for_events = Arc::new(tray);
     {
-        let tray = Arc::clone(&tray_for_events);
-        let action_tx_for_fsm = action_tx.clone();
+        let tray = Arc::clone(&tray);
+        let action_tx_ev = action_tx.clone();
+        let orch = orchestrator.clone();
         tokio::spawn(async move {
             while let Some(e) = fsm_events.recv().await {
                 info!("fsm event: {e:?}");
-                if let Some(t) = tray.as_ref() {
+                if let Some(t) = tray.as_ref().as_ref() {
                     match e {
                         HotkeyEvent::StartRecording(_) => t.set_state(TrayState::Recording),
                         HotkeyEvent::StopRecording => t.set_state(TrayState::Processing),
@@ -91,33 +99,75 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                         HotkeyEvent::PasteLast => { /* no state change */ }
                     }
                 }
-                if matches!(e, HotkeyEvent::StopRecording | HotkeyEvent::Cancel) {
-                    // Placeholder pipeline: pretend we finished processing
-                    // after a beat so the FSM (and the tray tint) return
-                    // to Idle and the next toggle press works.
-                    let tx = action_tx_for_fsm.clone();
-                    let tray = Arc::clone(&tray);
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-                        let _ = tx.send(HotkeyAction::ProcessingDone);
-                        if let Some(t) = tray.as_ref() {
+                let Some(o) = orch.as_ref() else {
+                    // Degraded mode: just emit ProcessingDone so the FSM
+                    // returns to Idle without us hanging.
+                    if matches!(e, HotkeyEvent::StopRecording | HotkeyEvent::Cancel) {
+                        let _ = action_tx_ev.send(HotkeyAction::ProcessingDone);
+                        if let Some(t) = tray.as_ref().as_ref() {
                             t.set_state(TrayState::Idle);
                         }
-                    });
+                    }
+                    continue;
+                };
+                match e {
+                    HotkeyEvent::StartRecording(mode) => {
+                        if let Err(err) = o.on_start_recording(mode).await {
+                            warn!("start_recording failed: {err:#}");
+                            if let Some(t) = tray.as_ref().as_ref() {
+                                t.set_state(TrayState::Idle);
+                            }
+                            let _ = action_tx_ev.send(HotkeyAction::ProcessingDone);
+                        }
+                    }
+                    HotkeyEvent::StopRecording => {
+                        let tray_for_done = Arc::clone(&tray);
+                        let o = Arc::clone(o);
+                        tokio::spawn(async move {
+                            o.on_stop_recording().await;
+                            // Pipeline emits ProcessingDone when it
+                            // finishes; we just clear the tray here once
+                            // FSM returns to Idle. (The action dispatcher
+                            // below sees ProcessingDone arrive and
+                            // transitions; tray state is updated by the
+                            // FSM event loop via Cancel/Idle paths or
+                            // we explicitly tint to Idle once Done.)
+                            let _ = tray_for_done; // borrowed; future overlay tie-in
+                        });
+                    }
+                    HotkeyEvent::Cancel => {
+                        let o = Arc::clone(o);
+                        tokio::spawn(async move {
+                            o.on_cancel().await;
+                        });
+                    }
+                    HotkeyEvent::PasteLast => {
+                        let o = Arc::clone(o);
+                        tokio::spawn(async move {
+                            o.on_paste_last().await;
+                        });
+                    }
                 }
             }
         });
     }
 
     // ---------------------------------------------------------------
-    // Action dispatcher — drains HotkeyAction into the FSM.
+    // Action dispatcher — drains HotkeyAction into the FSM. Also flips
+    // the tray to Idle when the pipeline reports ProcessingDone.
     // ---------------------------------------------------------------
     {
         let fsm = Arc::clone(&fsm);
+        let tray = Arc::clone(&tray);
         tokio::spawn(async move {
             while let Some(action) = action_rx.recv().await {
                 let new_state = fsm.lock().await.dispatch(action);
                 tracing::debug!("dispatch {action:?} -> {new_state:?}");
+                if matches!(action, HotkeyAction::ProcessingDone) {
+                    if let Some(t) = tray.as_ref().as_ref() {
+                        t.set_state(TrayState::Idle);
+                    }
+                }
             }
         });
     }
@@ -140,7 +190,12 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                         let _ = std::fs::remove_file(paths.pid_file());
                         std::process::exit(0);
                     }
-                    _ => { /* history/config/status wiring deferred */ }
+                    TrayAction::ShowStatus => notify_last_transcription(&paths),
+                    TrayAction::OpenHistory => open_history(&paths),
+                    TrayAction::OpenConfig => open_path(&paths.config_file()),
+                    TrayAction::Pause => {
+                        info!("tray: Pause hotkeys (not yet implemented)");
+                    }
                 }
             }
         });
@@ -176,9 +231,6 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
 }
 
 fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbosity) {
-    // Emit the banner through tracing so it respects FONO_LOG filters but
-    // also lands in the log file. `info!` is used so users see it by
-    // default; `--debug` surfaces even more detail below.
     let config_path = paths.config_file();
     let config_present = config_path.exists();
     info!("Fono v{} starting", env!("CARGO_PKG_VERSION"));
@@ -263,6 +315,85 @@ async fn handle_client(
     };
     write_frame(&mut stream, &resp).await?;
     Ok(())
+}
+
+/// Pop a desktop notification with the most recent transcription's
+/// raw STT output and cleaned LLM output. Used by the tray
+/// "Show last transcription" entry.
+fn notify_last_transcription(paths: &Paths) {
+    let db = match fono_core::history::HistoryDb::open(&paths.history_db()) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("tray: cannot open history db: {e:#}");
+            return;
+        }
+    };
+    let rows = match db.recent(1) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("tray: history query failed: {e:#}");
+            return;
+        }
+    };
+    let body = rows.first().map_or_else(
+        || "(no transcriptions yet)".to_string(),
+        |t| {
+            let cleaned = t.cleaned.as_deref().unwrap_or("(no LLM cleanup)");
+            format!(
+                "raw    : {}\ncleaned: {}\nstt={}  llm={}",
+                truncate(&t.raw, 240),
+                truncate(cleaned, 240),
+                t.stt_backend.as_deref().unwrap_or("?"),
+                t.llm_backend.as_deref().unwrap_or("none"),
+            )
+        },
+    );
+    if let Err(e) = notify_rust::Notification::new()
+        .summary("Fono — last transcription")
+        .body(&body)
+        .icon("audio-input-microphone")
+        .timeout(notify_rust::Timeout::Milliseconds(8_000))
+        .show()
+    {
+        // Fall back to logging when no notification daemon is running.
+        warn!("notify failed ({e:#}); last transcription:\n{body}");
+    }
+}
+
+fn open_history(paths: &Paths) {
+    // SQLite isn't directly browsable; open the parent dir so the user
+    // can see the DB + any rolling exports we add later. A future
+    // refinement may render an HTML view on demand.
+    let dir = paths
+        .history_db()
+        .parent()
+        .unwrap_or(&paths.state_dir)
+        .to_path_buf();
+    open_path(&dir);
+}
+
+fn open_path(path: &std::path::Path) {
+    let cmd = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    match std::process::Command::new(cmd).arg(path).spawn() {
+        Ok(_) => info!("opened {} via {cmd}", path.display()),
+        Err(e) => warn!("failed to spawn {cmd} for {}: {e:#}", path.display()),
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max).collect();
+        out.push('…');
+        out
+    }
 }
 
 fn write_pid(paths: &Paths) -> Result<()> {

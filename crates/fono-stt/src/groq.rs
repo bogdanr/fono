@@ -9,7 +9,10 @@ use serde::Deserialize;
 use crate::traits::{SpeechToText, Transcription};
 
 const GROQ_ENDPOINT: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
-const DEFAULT_MODEL: &str = "whisper-large-v3";
+const GROQ_MODELS_ENDPOINT: &str = "https://api.groq.com/openai/v1/models";
+/// Default Groq STT model. Latency plan L15 picks `whisper-large-v3-turbo`
+/// (≈5× faster than `whisper-1`) — overridable via `stt.cloud.model`.
+const DEFAULT_MODEL: &str = "whisper-large-v3-turbo";
 
 pub struct GroqStt {
     api_key: String,
@@ -27,9 +30,25 @@ impl GroqStt {
         Self {
             api_key: api_key.into(),
             model: model.into(),
-            client: reqwest::Client::new(),
+            client: warm_client(),
         }
     }
+}
+
+/// Build a `reqwest::Client` tuned for low-latency reuse across many
+/// short requests (latency plan L3): HTTP/2 keep-alive, idle pool kept
+/// hot for a minute, generous-but-bounded request timeout.
+pub(crate) fn warm_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .pool_idle_timeout(std::time::Duration::from_secs(60))
+        .pool_max_idle_per_host(4)
+        .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
+        .http2_keep_alive_interval(Some(std::time::Duration::from_secs(20)))
+        .http2_keep_alive_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(45))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_default()
 }
 
 #[derive(Deserialize)]
@@ -82,6 +101,20 @@ impl SpeechToText for GroqStt {
 
     fn name(&self) -> &'static str {
         "groq"
+    }
+
+    async fn prewarm(&self) -> Result<()> {
+        // GET /v1/models is a cheap authed call; warms TCP+TLS so the
+        // first real request doesn't pay handshake latency.
+        let res = self
+            .client
+            .get(GROQ_MODELS_ENDPOINT)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .context("groq prewarm")?;
+        let _ = res.bytes().await; // drain so the connection returns to the pool
+        Ok(())
     }
 }
 
