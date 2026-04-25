@@ -237,6 +237,7 @@ pub struct ClipboardAttempt {
 /// failures (no DISPLAY, no WAYLAND_DISPLAY, missing protocol support) are
 /// always visible in logs.
 pub fn copy_to_clipboard_all(text: &str) -> Vec<ClipboardAttempt> {
+    #![allow(clippy::too_many_lines)] // flat backend table; splitting hurts readability
     use std::io::Write;
 
     // Each tuple is (tool, args, target_label, requires_env). We write to
