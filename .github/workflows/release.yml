@@ -45,7 +45,7 @@ jobs:
             cross: false
             archive: tar.gz
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -60,9 +60,14 @@ jobs:
         if: matrix.cross
         run: cargo install cross --locked
 
-      - name: Build (cross)
+      # Linux musl release tarball is the slim cloud build: no tray
+      # (requires system gtk3 + libappindicator) and no whisper-rs
+      # local-models (bundled C build is heavy under cross). Users who
+      # want the GUI/local stack can install the .SlackBuild / AUR
+      # packages or build from source.
+      - name: Build (cross, slim cloud-only)
         if: matrix.cross
-        run: cross build --profile release-slim --target ${{ matrix.target }} -p fono
+        run: cross build --profile release-slim --target ${{ matrix.target }} -p fono --no-default-features
 
       - name: Build (native)
         if: ${{ !matrix.cross }}
@@ -102,15 +107,17 @@ jobs:
              "raw/${BIN_NAME}-${{ matrix.target }}"
 
       - name: Upload archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: fono-archive-${{ matrix.target }}
-          path: dist/*.tar.gz dist/*.zip
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
           if-no-files-found: ignore
 
       - name: Upload raw macOS binary
         if: ${{ contains(matrix.target, 'apple-darwin') }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: fono-raw-${{ matrix.target }}
           path: raw/*
@@ -120,9 +127,9 @@ jobs:
     needs: build
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: fono-raw-*-apple-darwin
           path: raw
@@ -145,7 +152,7 @@ jobs:
           file "${stage}/fono"
           cd dist && tar -czf "${stem}.tar.gz" "${stem}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: fono-archive-universal-apple-darwin
           path: dist/*.tar.gz
@@ -155,7 +162,7 @@ jobs:
     needs: [build, universal-macos]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: fono-archive-*
           path: artifacts

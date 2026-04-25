@@ -12,7 +12,7 @@ v0.1.0, high-value features for v0.1.x, and longer-term v0.2 items.
 
 ## Tier 1 — block v0.1.0 release tag
 
-### R1. Real-machine validation (manual; outside Forge scope)
+### R1. Real-machine validation (manual)
 
 * [ ] **R1.1** Smoke-test on a clean NimbleX VM: install, wizard, dictate,
   history viewer. Capture rough edges; file follow-up issues.

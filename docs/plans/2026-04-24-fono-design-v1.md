@@ -609,7 +609,7 @@ redact_secrets = true                # scrub obvious key patterns
 
 ## Handoff Notes for Implementation
 
-The plan is ready for Forge to execute. Recommended sequencing for Forge:
+The plan is ready to execute. Recommended sequencing:
 1. Phase 0 (repo bootstrap) in one session.
 2. Phases 1–3 (core + audio + hotkeys) in parallel where independent.
 3. Phases 4–5 (STT + LLM) can land incrementally: `WhisperLocal` + `LlamaLocal` + one cloud
