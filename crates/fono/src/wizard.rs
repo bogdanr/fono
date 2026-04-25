@@ -11,7 +11,8 @@
 //! (e.g. local STT + cloud LLM cleanup).
 
 use anyhow::{Context, Result};
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
+use dialoguer::console::{Key, Term};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use fono_core::config::{
     Config, LlmBackend, LlmCloud, LlmLocal, Stt, SttBackend, SttCloud, SttLocal,
 };
@@ -70,7 +71,7 @@ pub async fn run(paths: &Paths) -> Result<()> {
         // through the just-installed whisper to confirm the host can
         // sustain its tier budget. Surfaces "first dictation will be
         // slow" *before* the user presses the hotkey for the first time.
-        probe_local_latency(paths, &config, tier);
+        probe_local_latency(paths, &config, tier).await;
     }
 
     println!(
@@ -433,7 +434,10 @@ async fn prompt_api_key_with_validation(
     let Some(new_key) = prompt_api_key(theme, secrets, key_name)? else {
         return Ok(None);
     };
-    print!("  validating {key_name} … ");
+    print!(
+        "  received {key_name} ({} chars); validating … ",
+        new_key.chars().count()
+    );
     let _ = std::io::Write::flush(&mut std::io::stdout());
     match validate_cloud_key(key_name, &new_key).await {
         Ok(()) => {
@@ -530,18 +534,57 @@ fn prompt_api_key(
 }
 
 /// Always prompt for an API key. Empty input -> `None` (key left unset).
-fn prompt_api_key_force(theme: &ColorfulTheme, key_name: &str) -> Result<Option<String>> {
-    let k: String = Password::with_theme(theme)
-        .with_prompt(format!(
-            "Paste your {key_name} (stored mode 0600, leave empty to skip)"
-        ))
-        .allow_empty_password(true)
-        .interact()?;
+fn prompt_api_key_force(_theme: &ColorfulTheme, key_name: &str) -> Result<Option<String>> {
+    let k = prompt_masked_api_key(key_name)?;
     if k.is_empty() {
         Ok(None)
     } else {
         Ok(Some(k))
     }
+}
+
+/// Read an API key with masked live feedback.
+///
+/// `dialoguer::Password` intentionally echoes nothing while typing/pasting,
+/// which makes large pasted provider keys feel like they did not land. This
+/// keeps the secret hidden but prints one `*` per accepted character so the
+/// user gets immediate confirmation that paste/input is being captured.
+fn prompt_masked_api_key(key_name: &str) -> Result<String> {
+    let term = Term::stderr();
+    anyhow::ensure!(
+        term.is_term(),
+        "API key prompt requires an interactive terminal"
+    );
+
+    term.write_str(&format!(
+        "? Paste your {key_name} (stored mode 0600, leave empty to skip) "
+    ))?;
+    term.flush()?;
+
+    let mut key = String::new();
+    loop {
+        match term.read_key()? {
+            Key::Enter => {
+                term.write_line("")?;
+                break;
+            }
+            Key::CtrlC | Key::Escape => anyhow::bail!("setup cancelled while entering {key_name}"),
+            Key::Backspace => {
+                if key.pop().is_some() {
+                    term.clear_chars(1)?;
+                    term.flush()?;
+                }
+            }
+            Key::Char(ch) if !ch.is_control() => {
+                key.push(ch);
+                term.write_str("*")?;
+                term.flush()?;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(key)
 }
 
 /// Tier-specific p50 budget for transcribing a 3-second clip with the
@@ -587,7 +630,7 @@ fn synthetic_3s_pcm() -> Vec<f32> {
 /// Run a single 3-second STT pass against the configured local backend
 /// and report wall time relative to `tier`'s budget. Errors are
 /// non-fatal — this is purely advisory.
-fn probe_local_latency(paths: &fono_core::Paths, config: &Config, tier: LocalTier) {
+async fn probe_local_latency(paths: &fono_core::Paths, config: &Config, tier: LocalTier) {
     use fono_stt::factory::build_stt;
     use std::time::Instant;
 
@@ -608,23 +651,7 @@ fn probe_local_latency(paths: &fono_core::Paths, config: &Config, tier: LocalTie
     println!("\n  Running latency probe on a 3-second synthetic clip…");
     let pcm = synthetic_3s_pcm();
     let start = Instant::now();
-
-    // Reuse the runtime: build_stt is sync, transcribe is async. Use a
-    // fresh tokio runtime since we're called from within `wizard::run`
-    // which is itself already async — but we don't have access to that
-    // runtime handle here. Build a thin one.
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("  (latency probe skipped: tokio rt: {e:#})");
-            return;
-        }
-    };
-
-    let result = rt.block_on(async { stt.transcribe(&pcm, 16_000, Some("en")).await });
+    let result = stt.transcribe(&pcm, 16_000, Some("en")).await;
     let elapsed_ms = start.elapsed().as_millis();
     let budget_ms = tier_latency_budget_ms(tier);
 

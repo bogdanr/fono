@@ -43,8 +43,8 @@ fi
 RELEASE_BASE=${FONO_RELEASE_BASE:-https://github.com/bogdanr/fono/releases/download}
 
 case "$ARCH" in
-  x86_64)  RUST_TARGET=x86_64-unknown-linux-musl ;;
-  aarch64) RUST_TARGET=aarch64-unknown-linux-musl ;;
+  x86_64)  RUST_TARGET=x86_64-unknown-linux-gnu ;;
+  aarch64) RUST_TARGET=aarch64-unknown-linux-gnu ;;
   *)       echo "unsupported ARCH=$ARCH" >&2 ; exit 1 ;;
 esac
 

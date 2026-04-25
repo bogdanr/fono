@@ -55,6 +55,7 @@ tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 clap_complete = "4.5"
+console = { workspace = true }
 dialoguer = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

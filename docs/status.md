@@ -2,6 +2,21 @@
 
 Last updated: 2026-04-25
 
+## Recent fix — setup wizard API key paste feedback
+
+User reported that pasting a cloud LLM API key gave no immediate visual
+indication that the paste landed. The wizard now reads API keys with a masked
+prompt that prints one `*` per accepted character, then reports the received
+character count before validation. The key contents remain hidden.
+
+## Recent fix — setup wizard nested Tokio runtime panic
+
+User reported a setup crash after adding a Groq key:
+`Cannot start a runtime from within a runtime` at `crates/fono/src/wizard.rs:627`.
+Root cause: the local-STT latency probe built a new Tokio runtime and called
+`block_on()` while the setup wizard was already running inside Tokio. The probe
+is now async and awaits `stt.transcribe(...)` on the existing wizard runtime.
+
 ## Recent fixes — tray menu hardening (env-var leak + stale binary)
 
 User reported: "I can still see backends that aren't configured for STT and

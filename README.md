@@ -4,7 +4,7 @@
 
 **Press a hotkey, speak, see your words on screen.**
 
-A lightweight, native voice-dictation tool for Linux, Windows, and macOS.
+A lightweight, native voice-dictation tool for Linux. Windows and macOS are on the roadmap.
 One static Rust binary — no Electron, no Python, no WebKit.
 
 [![CI](https://github.com/bogdanr/fono/actions/workflows/ci.yml/badge.svg)](https://github.com/bogdanr/fono/actions/workflows/ci.yml)
@@ -27,8 +27,8 @@ One static Rust binary — no Electron, no Python, no WebKit.
 | **Debian / Ubuntu**     | `sudo apt install ./fono_0.1.0_amd64.deb` *(from [Releases](https://github.com/bogdanr/fono/releases/latest))* |
 | **Slackware / NimbleX** | `installpkg fono-0.1.0-x86_64-1_NimbleX.txz` *(from [Releases](https://github.com/bogdanr/fono/releases/latest))* |
 | **NixOS / Nix flake**   | `nix profile install github:bogdanr/fono`                                                            |
-| **Any Linux (musl)**    | Download tarball, extract, `install -m755 fono /usr/local/bin/`                                      |
-| **macOS / Windows**     | Download from [Releases](https://github.com/bogdanr/fono/releases/latest)                            |
+| **Any Linux (tarball)** | Download `fono-v0.1.0-x86_64-unknown-linux-gnu.tar.gz`, extract, `install -m755 fono /usr/local/bin/` |
+| **macOS / Windows**     | Planned after the Linux-first v0.1.0 release |
 
 ## First run
 

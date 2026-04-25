@@ -24,24 +24,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-musl
+          - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            cross: true
-            archive: tar.gz
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
-            cross: true
-            archive: tar.gz
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            cross: false
-            archive: zip
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            cross: false
-            archive: tar.gz
-          - target: aarch64-apple-darwin
-            os: macos-latest
             cross: false
             archive: tar.gz
     steps:
@@ -56,21 +40,14 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install cross
-        if: matrix.cross
-        run: cargo install cross --locked
-
-      # Linux musl release tarball is the slim cloud build: no tray
-      # (requires system gtk3 + libappindicator) and no whisper-rs
-      # local-models (bundled C build is heavy under cross). Users who
-      # want the GUI/local stack can install the .SlackBuild / AUR
-      # packages or build from source.
-      - name: Build (cross, slim cloud-only)
-        if: matrix.cross
-        run: cross build --profile release-slim --target ${{ matrix.target }} -p fono --no-default-features
+      - name: Install Linux build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential clang cmake pkg-config libasound2-dev libclang-dev \
+            libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
 
       - name: Build (native)
-        if: ${{ !matrix.cross }}
         run: cargo build --profile release-slim --target ${{ matrix.target }} -p fono
 
       - name: Stage + archive
@@ -97,15 +74,6 @@ jobs:
           fi
           ls -la
 
-      - name: Stage raw per-arch binary (macOS only, for lipo)
-        if: ${{ contains(matrix.target, 'apple-darwin') }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p raw
-          cp "target/${{ matrix.target }}/release-slim/${BIN_NAME}" \
-             "raw/${BIN_NAME}-${{ matrix.target }}"
-
       - name: Upload archive
         uses: actions/upload-artifact@v5
         with:
@@ -114,48 +82,6 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
           if-no-files-found: ignore
-
-      - name: Upload raw macOS binary
-        if: ${{ contains(matrix.target, 'apple-darwin') }}
-        uses: actions/upload-artifact@v5
-        with:
-          name: fono-raw-${{ matrix.target }}
-          path: raw/*
-
-  universal-macos:
-    name: universal macOS
-    needs: build
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/download-artifact@v5
-        with:
-          pattern: fono-raw-*-apple-darwin
-          path: raw
-          merge-multiple: true
-
-      - name: lipo into universal binary
-        shell: bash
-        run: |
-          set -euo pipefail
-          ls -la raw
-          version="${{ github.ref_name }}"
-          stem="${BIN_NAME:-fono}-${version}-universal-apple-darwin"
-          stage="dist/${stem}"
-          mkdir -p "${stage}"
-          lipo -create -output "${stage}/fono" \
-            "raw/fono-x86_64-apple-darwin" \
-            "raw/fono-aarch64-apple-darwin"
-          cp README.md LICENSE CHANGELOG.md "${stage}/"
-          cp -r packaging "${stage}/" || true
-          file "${stage}/fono"
-          cd dist && tar -czf "${stem}.tar.gz" "${stem}"
-
-      - uses: actions/upload-artifact@v5
-        with:
-          name: fono-archive-universal-apple-darwin
-          path: dist/*.tar.gz
 
   linux-deb:
     name: Debian package (.deb)
@@ -174,8 +100,9 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
-            debhelper-compat dh-make build-essential pkg-config \
-            libasound2-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+            debhelper-compat dh-make build-essential clang cmake pkg-config \
+            libasound2-dev libclang-dev libgtk-3-dev \
+            libayatana-appindicator3-dev libxdo-dev
 
       - name: Stage source tree for dpkg-buildpackage
         shell: bash
@@ -204,7 +131,7 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           cd "../fono-${version}"
-          dpkg-buildpackage -us -uc -b
+          dpkg-buildpackage -us -uc -b -d
           cd ..
           ls -la
           mkdir -p "${GITHUB_WORKSPACE}/dist-deb"
@@ -225,7 +152,7 @@ jobs:
       - name: Install build deps
         run: |
           pacman -Syu --noconfirm
-          pacman -S --noconfirm git rust cargo pkgconf alsa-lib gtk3 libayatana-appindicator xdotool
+          pacman -S --noconfirm git rust cargo clang llvm lld cmake pkgconf alsa-lib gtk3 libayatana-appindicator xdotool
 
       - name: Allow makepkg to run as root via fakeuser
         run: |
@@ -253,7 +180,8 @@ jobs:
 
       - name: makepkg
         run: |
-          su builder -c 'cd /home/builder/build && makepkg --noconfirm -f'
+          export LIBCLANG_PATH=/usr/lib
+          su builder -c 'cd /home/builder/build && export LIBCLANG_PATH=/usr/lib && makepkg --noconfirm -f'
           mkdir -p "${GITHUB_WORKSPACE}/dist-arch"
           cp /home/builder/build/*.pkg.tar.zst "${GITHUB_WORKSPACE}/dist-arch/"
           ls -la "${GITHUB_WORKSPACE}/dist-arch"
@@ -275,7 +203,7 @@ jobs:
 
       - uses: actions/download-artifact@v5
         with:
-          name: fono-archive-x86_64-unknown-linux-musl
+          name: fono-archive-x86_64-unknown-linux-gnu
           path: musl
 
       - name: Run SlackBuild in binary mode
@@ -283,7 +211,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          stem="fono-v${version}-x86_64-unknown-linux-musl"
+          stem="fono-v${version}-x86_64-unknown-linux-gnu"
           # SlackBuild expects the upstream tarball alongside its directory.
           cp "musl/${stem}.tar.gz" packaging/slackbuild/fono/
           cd packaging/slackbuild/fono
@@ -300,7 +228,7 @@ jobs:
 
   release:
     name: Draft GitHub Release
-    needs: [build, universal-macos, linux-deb, linux-arch, linux-slack]
+    needs: [build, linux-deb, linux-arch, linux-slack]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v5
