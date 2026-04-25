@@ -151,8 +151,11 @@ mod backend {
             .build()
             .context("TrayIconBuilder::build() failed — is libappindicator3 installed?")?;
 
-        // Forward menu click events into the action channel.
-        glib::idle_add_local(move || {
+        // Forward menu click events into the action channel. We poll the
+        // tray-icon crate's crossbeam channels from a 50 ms timeout
+        // instead of `glib::idle_add_local`, which would re-fire
+        // immediately on every main-loop iteration and pin a CPU at 100%.
+        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
             while let Ok(ev) = MenuEvent::receiver().try_recv() {
                 if let Some(action) = MENU_IDS
                     .get()
