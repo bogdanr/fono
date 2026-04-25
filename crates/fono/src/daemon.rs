@@ -392,9 +392,7 @@ fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbos
         .find(|t| which_in_path(t).is_some())
         .copied()
         .unwrap_or("none");
-    info!(
-        "delivery     : key-injector={injector:?}  clipboard-tool={clipboard_tool}"
-    );
+    info!("delivery     : key-injector={injector:?}  clipboard-tool={clipboard_tool}");
     if matches!(injector, fono_inject::Injector::None) && clipboard_tool == "none" {
         warn!(
             "NO injection backend AND no clipboard tool detected — on X11 the built-in \

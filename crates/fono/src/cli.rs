@@ -1029,7 +1029,10 @@ fn test_inject_cmd(text: &str, no_inject: bool, no_clipboard: bool, shortcut: Op
     }
     println!("Fono — test-inject");
     println!("Build: v{}", env!("CARGO_PKG_VERSION"));
-    println!("Detected key-injector: {:?}", fono_inject::Injector::detect());
+    println!(
+        "Detected key-injector: {:?}",
+        fono_inject::Injector::detect()
+    );
     println!(
         "Paste shortcut       : {} (env FONO_PASTE_SHORTCUT={:?})",
         fono_inject::PasteShortcut::from_env_or_default().label(),
@@ -1046,7 +1049,10 @@ fn test_inject_cmd(text: &str, no_inject: bool, no_clipboard: bool, shortcut: Op
         let started = Instant::now();
         match fono_inject::type_text_with_outcome(text) {
             Ok(fono_inject::InjectOutcome::Typed(b)) => {
-                println!("      ✓ typed via {b} in {}ms", started.elapsed().as_millis());
+                println!(
+                    "      ✓ typed via {b} in {}ms",
+                    started.elapsed().as_millis()
+                );
             }
             Ok(fono_inject::InjectOutcome::Clipboard(t)) => {
                 println!(
@@ -1065,22 +1071,32 @@ fn test_inject_cmd(text: &str, no_inject: bool, no_clipboard: bool, shortcut: Op
         println!("[2/2] Skipping clipboard copy (--no-clipboard)");
     } else {
         println!("[2/2] Forcing clipboard copy via every available tool...");
-        println!("      DISPLAY         = {:?}", std::env::var("DISPLAY").ok());
-        println!("      WAYLAND_DISPLAY = {:?}", std::env::var("WAYLAND_DISPLAY").ok());
-        println!("      XDG_SESSION_TYPE= {:?}", std::env::var("XDG_SESSION_TYPE").ok());
+        println!(
+            "      DISPLAY         = {:?}",
+            std::env::var("DISPLAY").ok()
+        );
+        println!(
+            "      WAYLAND_DISPLAY = {:?}",
+            std::env::var("WAYLAND_DISPLAY").ok()
+        );
+        println!(
+            "      XDG_SESSION_TYPE= {:?}",
+            std::env::var("XDG_SESSION_TYPE").ok()
+        );
         let started = Instant::now();
         let attempts = fono_inject::copy_to_clipboard_all(text);
         for a in &attempts {
             let mark = if a.success { "✓" } else { "✗" };
-            println!(
-                "      {mark} {:<8} [{:<9}] {}",
-                a.tool, a.target, a.detail
-            );
+            println!("      {mark} {:<8} [{:<9}] {}", a.tool, a.target, a.detail);
         }
         let any_ok = attempts.iter().any(|a| a.success);
         println!(
             "      {} total in {}ms",
-            if any_ok { "at least one tool wrote the clipboard" } else { "NO tool wrote the clipboard" },
+            if any_ok {
+                "at least one tool wrote the clipboard"
+            } else {
+                "NO tool wrote the clipboard"
+            },
             started.elapsed().as_millis()
         );
         if let Some(readback) = readback_clipboard() {

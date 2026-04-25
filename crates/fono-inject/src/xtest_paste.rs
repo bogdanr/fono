@@ -80,9 +80,7 @@ impl PasteShortcut {
             return Self::default();
         };
         Self::parse(&v).unwrap_or_else(|| {
-            tracing::warn!(
-                "FONO_PASTE_SHORTCUT={v:?} unrecognised; using default Shift+Insert"
-            );
+            tracing::warn!("FONO_PASTE_SHORTCUT={v:?} unrecognised; using default Shift+Insert");
             Self::default()
         })
     }

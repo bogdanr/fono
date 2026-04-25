@@ -245,7 +245,12 @@ pub fn copy_to_clipboard_all(text: &str) -> Vec<ClipboardAttempt> {
     // the entry regardless of which selection it watches.
     let candidates: &[(&str, &[&str], &str, &str)] = &[
         ("wl-copy", &[], "wayland", "WAYLAND_DISPLAY"),
-        ("xclip", &["-selection", "clipboard"], "clipboard", "DISPLAY"),
+        (
+            "xclip",
+            &["-selection", "clipboard"],
+            "clipboard",
+            "DISPLAY",
+        ),
         ("xsel", &["--clipboard", "--input"], "clipboard", "DISPLAY"),
         ("xclip", &["-selection", "primary"], "primary", "DISPLAY"),
         ("xsel", &["--primary", "--input"], "primary", "DISPLAY"),

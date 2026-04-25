@@ -216,17 +216,21 @@ mod tests {
 
     #[test]
     fn disabled_returns_none() {
-        let mut cfg = LlmCfg::default();
-        cfg.enabled = false;
+        let cfg = LlmCfg {
+            enabled: false,
+            ..LlmCfg::default()
+        };
         let s = Secrets::default();
         assert!(build_llm(&cfg, &s).unwrap().is_none());
     }
 
     #[test]
     fn backend_none_returns_none() {
-        let mut cfg = LlmCfg::default();
-        cfg.backend = LlmBackend::None;
-        cfg.enabled = true;
+        let cfg = LlmCfg {
+            backend: LlmBackend::None,
+            enabled: true,
+            ..LlmCfg::default()
+        };
         let s = Secrets::default();
         assert!(build_llm(&cfg, &s).unwrap().is_none());
     }

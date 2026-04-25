@@ -407,9 +407,7 @@ mod backend {
     /// label widths stay consistent and click targets don't jump).
     fn update_active(items: &[MenuItem], labels: &[String], active_idx: u8) {
         for (i, item) in items.iter().enumerate() {
-            let label = labels
-                .get(i)
-                .map_or_else(|| "?".to_string(), Clone::clone);
+            let label = labels.get(i).map_or_else(|| "?".to_string(), Clone::clone);
             let prefix = if u8::try_from(i).is_ok_and(|i_u8| i_u8 == active_idx) {
                 "● "
             } else {

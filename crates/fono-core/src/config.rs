@@ -514,8 +514,10 @@ mod tests {
 
     #[test]
     fn future_version_rejected() {
-        let mut cfg = Config::default();
-        cfg.version = CURRENT_VERSION + 42;
+        let mut cfg = Config {
+            version: CURRENT_VERSION + 42,
+            ..Config::default()
+        };
         assert!(matches!(
             cfg.migrate(),
             Err(Error::ConfigVersionTooNew { .. })

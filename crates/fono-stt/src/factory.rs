@@ -167,9 +167,11 @@ mod tests {
     #[cfg(feature = "groq")]
     #[test]
     fn cloud_optional_with_env_key() {
-        let mut cfg = SttCfg::default();
-        cfg.backend = SttBackend::Groq;
-        cfg.cloud = None;
+        let cfg = SttCfg {
+            backend: SttBackend::Groq,
+            cloud: None,
+            ..SttCfg::default()
+        };
         let mut secrets = Secrets::default();
         secrets.insert("GROQ_API_KEY", "gsk-test");
         let dir = std::path::PathBuf::from("/tmp");
@@ -180,9 +182,11 @@ mod tests {
     #[cfg(feature = "groq")]
     #[test]
     fn missing_key_yields_clear_error() {
-        let mut cfg = SttCfg::default();
-        cfg.backend = SttBackend::Groq;
-        cfg.cloud = None;
+        let cfg = SttCfg {
+            backend: SttBackend::Groq,
+            cloud: None,
+            ..SttCfg::default()
+        };
         let secrets = Secrets::default();
         let dir = std::path::PathBuf::from("/tmp");
         let err = build_stt(&cfg, &secrets, &dir).err().unwrap().to_string();

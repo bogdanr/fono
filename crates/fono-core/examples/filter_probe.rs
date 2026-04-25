@@ -13,7 +13,10 @@ fn main() {
         .unwrap_or_else(|| "/root/.config/fono/secrets.toml".to_string());
     let secrets = Secrets::load(std::path::Path::new(&path)).expect("load secrets");
     println!("secrets file : {path}");
-    println!("keys present : {:?}", secrets.keys.keys().collect::<Vec<_>>());
+    println!(
+        "keys present : {:?}",
+        secrets.keys.keys().collect::<Vec<_>>()
+    );
     let stt = providers::configured_stt_backends(&secrets, &SttBackend::Groq);
     let llm = providers::configured_llm_backends(&secrets, &LlmBackend::Groq);
     println!("STT visible  : {stt:?}");

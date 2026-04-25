@@ -93,8 +93,8 @@ mod tests {
 
     fn pulse(prefix: usize, body: usize, suffix: usize) -> Vec<f32> {
         let mut v = vec![0.0_f32; prefix];
-        v.extend(std::iter::repeat(0.5_f32).take(body));
-        v.extend(std::iter::repeat(0.0_f32).take(suffix));
+        v.extend(std::iter::repeat_n(0.5_f32, body));
+        v.extend(std::iter::repeat_n(0.0_f32, suffix));
         v
     }
 
