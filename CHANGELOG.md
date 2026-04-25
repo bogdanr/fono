@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0] — 2026-04-25 (release candidate)
+## [0.1.0] — 2026-04-25
 
 First public release. Pipeline (audio → STT → LLM → inject) is fully wired
 end-to-end; default release ships local whisper.cpp out of the box.
@@ -129,17 +129,6 @@ feature and ships fully wired in v0.2.
   compositors).
 - Local LLM cleanup (Qwen / SmolLM) is opt-in / preview.
 - Real `winit + softbuffer` overlay window is a stub (event channel only).
-
-## [Unreleased ≤ 0.1.0-rc] — pre-release scaffold
-
-### Added
-
-- Initial cargo workspace scaffold for the 10 planned crates
-  (`fono`, `fono-core`, `fono-audio`, `fono-stt`, `fono-llm`, `fono-hotkey`,
-  `fono-inject`, `fono-tray`, `fono-overlay`, `fono-ipc`, `fono-download`).
-- GitHub Actions CI (fmt + clippy + test matrix), DCO enforcement, and
-  release workflow skeleton.
-- Design document at `docs/plans/2026-04-24-fono-design-v1.md`.
 
 [Unreleased]: https://github.com/bogdanr/fono/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/bogdanr/fono/releases/tag/v0.1.0

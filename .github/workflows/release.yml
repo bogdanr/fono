@@ -157,9 +157,150 @@ jobs:
           name: fono-archive-universal-apple-darwin
           path: dist/*.tar.gz
 
+  linux-deb:
+    name: Debian package (.deb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-deb
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            debhelper-compat dh-make build-essential pkg-config \
+            libasound2-dev libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+
+      - name: Stage source tree for dpkg-buildpackage
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          stage="../fono-${version}"
+          mkdir -p "${stage}"
+          tar --exclude=./.git --exclude=./target -cf - . | (cd "${stage}" && tar -xf -)
+          cp -r packaging/debian "${stage}/debian"
+          chmod +x "${stage}/debian/rules"
+          # Generate a one-line changelog so dpkg-buildpackage is happy.
+          cat > "${stage}/debian/changelog" <<EOF
+          fono (${version}-1) unstable; urgency=medium
+
+            * Release ${version}. See CHANGELOG.md for details.
+
+           -- Bogdan Rădulescu <bogdan@nimblex.net>  $(date -R)
+          EOF
+          # Some debhelper versions want compat file present.
+          echo 13 > "${stage}/debian/compat"
+
+      - name: Run dpkg-buildpackage
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          cd "../fono-${version}"
+          dpkg-buildpackage -us -uc -b
+          cd ..
+          ls -la
+          mkdir -p "${GITHUB_WORKSPACE}/dist-deb"
+          cp fono_*.deb "${GITHUB_WORKSPACE}/dist-deb/"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: fono-archive-deb
+          path: dist-deb/*.deb
+          if-no-files-found: error
+
+  linux-arch:
+    name: Arch package (.pkg.tar.zst)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install build deps
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm git rust cargo pkgconf alsa-lib gtk3 libayatana-appindicator xdotool
+
+      - name: Allow makepkg to run as root via fakeuser
+        run: |
+          useradd -m builder
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+
+      - uses: actions/checkout@v5
+        with:
+          path: fono-src
+
+      - name: Stage source tarball next to PKGBUILD
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p /home/builder/build
+          cp fono-src/packaging/aur/PKGBUILD /home/builder/build/PKGBUILD
+          # Vendor the source so the PKGBUILD's downloader is bypassed.
+          (cd fono-src && tar --exclude=./.git --exclude=./target \
+              --transform "s,^\.,fono-${version}," \
+              -czf "/home/builder/build/fono-${version}.tar.gz" .)
+          # Rewrite source= and sha256sums to point at the local tarball.
+          sed -i "s|^source=.*$|source=(\"fono-${version}.tar.gz\")|" /home/builder/build/PKGBUILD
+          sed -i "s|^sha256sums=.*$|sha256sums=('SKIP')|" /home/builder/build/PKGBUILD
+          chown -R builder:builder /home/builder/build
+
+      - name: makepkg
+        run: |
+          su builder -c 'cd /home/builder/build && makepkg --noconfirm -f'
+          mkdir -p "${GITHUB_WORKSPACE}/dist-arch"
+          cp /home/builder/build/*.pkg.tar.zst "${GITHUB_WORKSPACE}/dist-arch/"
+          ls -la "${GITHUB_WORKSPACE}/dist-arch"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: fono-archive-arch
+          path: dist-arch/*.pkg.tar.zst
+          if-no-files-found: error
+
+  linux-slack:
+    name: Slackware package (.txz)
+    needs: build
+    runs-on: ubuntu-latest
+    container:
+      image: vbatts/slackware:15.0
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: fono-archive-x86_64-unknown-linux-musl
+          path: musl
+
+      - name: Run SlackBuild in binary mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          stem="fono-v${version}-x86_64-unknown-linux-musl"
+          # SlackBuild expects the upstream tarball alongside its directory.
+          cp "musl/${stem}.tar.gz" packaging/slackbuild/fono/
+          cd packaging/slackbuild/fono
+          chmod +x fono.SlackBuild
+          VERSION="${version}" ARCH=x86_64 ./fono.SlackBuild
+          mkdir -p "${GITHUB_WORKSPACE}/dist-slack"
+          cp /tmp/fono-${version}-x86_64-1_NimbleX.txz "${GITHUB_WORKSPACE}/dist-slack/"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: fono-archive-slack
+          path: dist-slack/*.txz
+          if-no-files-found: error
+
   release:
     name: Draft GitHub Release
-    needs: [build, universal-macos]
+    needs: [build, universal-macos, linux-deb, linux-arch, linux-slack]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v5
@@ -173,7 +314,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release/ \;
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.deb" -o -name "*.pkg.tar.zst" -o -name "*.txz" \) -exec cp {} release/ \;
           cd release
           sha256sum * > SHA256SUMS
           ls -la
