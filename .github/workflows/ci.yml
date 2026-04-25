@@ -20,7 +20,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Fono is Linux-first per the design plan; macOS/Windows are
+        # release-time targets handled by the release workflow on tag,
+        # not on every PR. Keeps CI fast and avoids platform-specific
+        # tray-icon stub mismatches and CRLF fmt drift.
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v5
 
