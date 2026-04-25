@@ -24,6 +24,14 @@ pub async fn run(paths: &Paths) -> Result<()> {
 
     let theme = ColorfulTheme::default();
 
+    // Load existing secrets so we can offer 'keep existing key' prompts
+    // when the user re-runs the wizard with a key already on disk.
+    let mut secrets = if paths.secrets_file().exists() {
+        Secrets::load(&paths.secrets_file()).unwrap_or_default()
+    } else {
+        Secrets::default()
+    };
+
     // ---------- Hardware probe + tier ----------
     let snap = hwcheck::probe(&paths.cache_dir);
     let tier = snap.tier();
@@ -32,10 +40,9 @@ pub async fn run(paths: &Paths) -> Result<()> {
     let path_choice = pick_path(&theme, tier, &snap)?;
 
     let mut config = Config::default();
-    let mut secrets = Secrets::default();
 
     if path_choice == PathChoice::Local {
-        configure_local(&theme, &mut config, tier)?;
+        configure_local(&theme, &mut config, &mut secrets, tier)?;
     } else {
         configure_cloud(&theme, &mut config, &mut secrets)?;
     }
@@ -181,7 +188,12 @@ fn pick_path(
     Ok(mapping[idx])
 }
 
-fn configure_local(theme: &ColorfulTheme, config: &mut Config, tier: LocalTier) -> Result<()> {
+fn configure_local(
+    theme: &ColorfulTheme,
+    config: &mut Config,
+    secrets: &mut Secrets,
+    tier: LocalTier,
+) -> Result<()> {
     // Tier-narrowed model menu: only show models the host can sustain
     // plus one safer fallback. Order: recommended → fallback.
     let (items, models, default_idx) = match tier {
@@ -244,19 +256,7 @@ fn configure_local(theme: &ColorfulTheme, config: &mut Config, tier: LocalTier) 
         config.llm.enabled = false;
         config.llm.local = LlmLocal::default();
     } else {
-        // Reuse the cloud LLM picker.
-        let mut secrets = Secrets::default();
-        configure_cloud_llm(theme, config, &mut secrets)?;
-        if !secrets.keys.is_empty() {
-            // Save the cloud key separately. Caller's `secrets` won't
-            // see this; persist directly so the daemon can resolve it.
-            // Path-resolution is the caller's job; we just stash it.
-            // (We don't have `paths` here; configure_cloud_llm wrote
-            // into `secrets` which the caller saves below.)
-            // This is a no-op until we refactor — local + cloud LLM
-            // is rare; document and move on.
-            tracing::debug!("local STT + cloud LLM not yet wired in saved secrets");
-        }
+        configure_cloud_llm(theme, config, secrets)?;
     }
 
     println!(
@@ -290,12 +290,9 @@ fn configure_cloud(
         3 => (SttBackend::Cartesia, "CARTESIA_API_KEY", "sonic-transcribe"),
         _ => (SttBackend::AssemblyAI, "ASSEMBLYAI_API_KEY", "best"),
     };
-    let key: String = Password::with_theme(theme)
-        .with_prompt(format!("Paste your {stt_key_name} (stored mode 0600)"))
-        .allow_empty_password(true)
-        .interact()?;
-    if !key.is_empty() {
-        secrets.insert(stt_key_name, key);
+    let key = prompt_api_key(theme, secrets, stt_key_name)?;
+    if let Some(k) = key {
+        secrets.insert(stt_key_name, k);
     }
 
     config.stt.backend = stt_backend;
@@ -347,15 +344,8 @@ fn configure_cloud_llm(
             "claude-3-5-haiku-latest",
         ),
     };
-    let reuse = secrets.keys.contains_key(key_name);
-    if !reuse {
-        let k: String = Password::with_theme(theme)
-            .with_prompt(format!("Paste your {key_name}"))
-            .allow_empty_password(true)
-            .interact()?;
-        if !k.is_empty() {
-            secrets.insert(key_name, k);
-        }
+    if let Some(k) = prompt_api_key(theme, secrets, key_name)? {
+        secrets.insert(key_name, k);
     }
     config.llm.backend = backend;
     config.llm.enabled = true;
@@ -365,4 +355,40 @@ fn configure_cloud_llm(
         model: model.into(),
     });
     Ok(())
+}
+
+/// Prompt for an API key. If one already exists in `secrets`, ask whether
+/// to keep it (default = yes). Returns `Some(new_key)` only when the user
+/// types something new; `None` means "keep existing or leave unset".
+fn prompt_api_key(
+    theme: &ColorfulTheme,
+    secrets: &Secrets,
+    key_name: &str,
+) -> Result<Option<String>> {
+    if secrets.keys.contains_key(key_name) {
+        let keep = Confirm::with_theme(theme)
+            .with_prompt(format!("Existing {key_name} found — keep it?"))
+            .default(true)
+            .interact()
+            .unwrap_or(true);
+        if keep {
+            return Ok(None);
+        }
+    }
+    prompt_api_key_force(theme, key_name)
+}
+
+/// Always prompt for an API key. Empty input -> `None` (key left unset).
+fn prompt_api_key_force(theme: &ColorfulTheme, key_name: &str) -> Result<Option<String>> {
+    let k: String = Password::with_theme(theme)
+        .with_prompt(format!(
+            "Paste your {key_name} (stored mode 0600, leave empty to skip)"
+        ))
+        .allow_empty_password(true)
+        .interact()?;
+    if k.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(k))
+    }
 }
