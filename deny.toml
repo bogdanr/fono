@@ -16,6 +16,8 @@ version = 2
 # restrictive (AGPL, proprietary, Llama-Community, etc.) is rejected.
 allow = [
     "GPL-3.0",
+    "GPL-3.0-only",
+    "GPL-3.0-or-later",
     "LGPL-2.1",
     "LGPL-2.1-only",
     "LGPL-2.1-or-later",
