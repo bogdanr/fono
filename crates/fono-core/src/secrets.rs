@@ -65,6 +65,23 @@ impl Secrets {
         std::env::var(name).ok()
     }
 
+    /// Like [`Self::resolve`] but ignores the process environment — only
+    /// returns `Some` if the key is explicitly listed in
+    /// `secrets.toml`. Used by the tray's "configured backends" filter:
+    /// we don't want a stray `OPENAI_API_KEY` exported in the user's
+    /// shell to clutter the provider submenu unless they actually ran
+    /// `fono keys add OPENAI_API_KEY`.
+    #[must_use]
+    pub fn resolve_in_file(&self, name: &str) -> Option<&str> {
+        self.keys.get(name).map(String::as_str)
+    }
+
+    /// `true` iff `name` is present in `secrets.toml`'s `[keys]` table.
+    #[must_use]
+    pub fn has_in_file(&self, name: &str) -> bool {
+        self.keys.contains_key(name)
+    }
+
     pub fn insert(&mut self, name: impl Into<String>, value: impl Into<String>) {
         self.keys.insert(name.into(), value.into());
     }

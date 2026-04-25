@@ -1,10 +1,55 @@
 # Fono provider matrix
 
 Fono ships with one **speech-to-text (STT)** engine and one **LLM cleanup**
-engine enabled at a time. Both are selected in `~/.config/fono/config.toml`
-and can be swapped at any time with `fono setup` or by editing the file
-directly. API keys are stored either in `~/.config/fono/secrets.toml`
-(mode 0600, never logged) or referenced by `$ENV_VAR` name.
+engine active at a time. Both are selected in `~/.config/fono/config.toml`
+and can be swapped at any time with `fono use`, `fono setup`, or by editing
+the file directly. API keys are stored in `~/.config/fono/secrets.toml`
+(mode 0600, never logged) or read from `$ENV_VAR`.
+
+## Switching providers (no daemon restart)
+
+The smallest valid cloud config is two lines plus one key:
+
+```toml
+[stt]
+backend = "groq"     # or openai, deepgram, …
+[llm]
+backend = "cerebras" # or none, openai, anthropic, groq, openrouter, ollama, local
+enabled = true
+```
+
+…and `GROQ_API_KEY` + `CEREBRAS_API_KEY` either in `secrets.toml` or
+exported in the environment. The factories fall through to the canonical
+env-var name when the optional `[stt.cloud]` / `[llm.cloud]` sub-block is
+absent — there is no need to repeat the provider name twice.
+
+Once that is in place, switching providers is one command:
+
+```sh
+fono use stt groq         # flip STT only
+fono use llm cerebras     # flip LLM only
+fono use cloud cerebras   # paired preset (STT=Groq + LLM=Cerebras)
+fono use local            # whisper-local + skip LLM
+fono use show             # print active selection + key refs
+```
+
+Each `fono use` writes the change atomically and then issues a hot-reload
+to any running daemon (no restart, no lost state). Per-call overrides
+without persisting use the same backend names:
+
+```sh
+fono record --stt openai --llm anthropic
+fono transcribe sample.wav --stt groq --llm none
+```
+
+API keys for as many providers as you like coexist in `secrets.toml`:
+
+```sh
+fono keys add GROQ_API_KEY
+fono keys add CEREBRAS_API_KEY
+fono keys list                   # masked listing
+fono keys check                  # reachability probe per key
+```
 
 ## Speech-to-text
 

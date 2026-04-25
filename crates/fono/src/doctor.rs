@@ -7,8 +7,8 @@ use anyhow::Result;
 use fono_core::hwcheck;
 use fono_core::{Config, Paths, Secrets};
 
+#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 pub async fn report(paths: &Paths) -> Result<String> {
-    #![allow(clippy::too_many_lines)]
     let mut out = String::new();
     writeln!(out, "Fono doctor — v{}", env!("CARGO_PKG_VERSION"))?;
     writeln!(out)?;
@@ -111,6 +111,65 @@ pub async fn report(paths: &Paths) -> Result<String> {
             Err(e) => writeln!(out, "  llm: FAIL — {e:#}")?,
         }
         writeln!(out)?;
+
+        // ------------------------------------------------------------
+        // Per-provider key + reachability matrix (provider-switching
+        // plan task S18). One line per known backend with active marker
+        // so users see at a glance which providers are ready to switch
+        // to via `fono use stt …` / `fono use llm …`.
+        // ------------------------------------------------------------
+        writeln!(out, "Providers (STT):")?;
+        for b in fono_core::providers::all_stt_backends() {
+            let active = b == c.stt.backend;
+            let mark = if active { "*" } else { " " };
+            let name = fono_core::providers::stt_backend_str(&b);
+            let needs_key = fono_core::providers::stt_requires_key(&b);
+            let key_env = fono_core::providers::stt_key_env(&b);
+            let key_status = if !needs_key {
+                "no key needed".to_string()
+            } else if secrets.resolve(key_env).is_some() {
+                format!("{key_env} present")
+            } else {
+                format!("{key_env} MISSING")
+            };
+            let model = if needs_key {
+                fono_stt::defaults::default_cloud_model(name).to_string()
+            } else {
+                c.stt.local.model.clone()
+            };
+            writeln!(out, "  {mark} {name:<14} model={model:<32} {key_status}")?;
+        }
+        writeln!(out)?;
+
+        writeln!(out, "Providers (LLM):")?;
+        for b in fono_core::providers::all_llm_backends() {
+            let active = b == c.llm.backend;
+            let mark = if active { "*" } else { " " };
+            let name = fono_core::providers::llm_backend_str(&b);
+            let needs_key = fono_core::providers::llm_requires_key(&b);
+            let key_env = fono_core::providers::llm_key_env(&b);
+            let key_status = if !needs_key {
+                "no key needed".to_string()
+            } else if secrets.resolve(key_env).is_some() {
+                format!("{key_env} present")
+            } else {
+                format!("{key_env} MISSING")
+            };
+            let model = if matches!(b, fono_core::config::LlmBackend::None) {
+                "—".to_string()
+            } else if needs_key || matches!(b, fono_core::config::LlmBackend::Ollama) {
+                fono_llm::defaults::default_cloud_model(name).to_string()
+            } else {
+                c.llm.local.model.clone()
+            };
+            writeln!(out, "  {mark} {name:<14} model={model:<32} {key_status}")?;
+        }
+        writeln!(out)?;
+        writeln!(
+            out,
+            "(* = active. Switch with `fono use stt <backend>` / `fono use llm <backend>`.)"
+        )?;
+        writeln!(out)?;
     }
 
     writeln!(out, "Session:")?;
@@ -132,11 +191,37 @@ pub async fn report(paths: &Paths) -> Result<String> {
     writeln!(out)?;
 
     writeln!(out, "Audio stack : {:?}", fono_audio::mute::detect())?;
+    let injector = fono_inject::inject::Injector::detect();
+    writeln!(out, "Injector    : {injector:?}")?;
+    // Show the configured XTEST paste shortcut so users can confirm
+    // it before reporting "doesn't paste in app X".
+    let shortcut_label = fono_inject::PasteShortcut::from_env_or_default().label();
+    let cfg_value = cfg
+        .as_ref()
+        .map(|c| c.inject.paste_shortcut.clone())
+        .unwrap_or_else(|| "shift-insert".into());
+    let env_value = std::env::var("FONO_PASTE_SHORTCUT").ok();
     writeln!(
         out,
-        "Injector    : {:?}",
-        fono_inject::inject::Injector::detect()
+        "Paste keys  : {shortcut_label} (config={cfg_value:?} env={env_value:?})"
     )?;
+    // Clipboard fallback — fono copies the cleaned text here when no
+    // key-injection backend works, so the dictation is never lost.
+    let mut clip_tools = Vec::new();
+    for t in ["wl-copy", "xclip", "xsel"] {
+        if which_in_path(t) {
+            clip_tools.push(t);
+        }
+    }
+    if clip_tools.is_empty() {
+        writeln!(
+            out,
+            "Clipboard   : NONE (install one of: wl-clipboard, xclip, xsel — \
+             without these, dictation cannot be recovered when key injection fails)"
+        )?;
+    } else {
+        writeln!(out, "Clipboard   : {} (fallback)", clip_tools.join(", "))?;
+    }
     writeln!(
         out,
         "IPC socket  : {} ({})",
@@ -149,4 +234,13 @@ pub async fn report(paths: &Paths) -> Result<String> {
     )?;
 
     Ok(out)
+}
+
+/// Best-effort PATH lookup; mirrors fono-inject's `which` so doctor
+/// reports the same set of clipboard tools the real fallback will try.
+fn which_in_path(tool: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|p| p.join(tool).is_file())
 }

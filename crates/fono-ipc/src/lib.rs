@@ -24,6 +24,11 @@ pub enum Request {
     Doctor,
     /// Query daemon status.
     Status,
+    /// Re-read config + secrets and rebuild STT/LLM in-place. Used by
+    /// `fono use …` and `fono keys …` so the user doesn't need to
+    /// restart the daemon to switch providers. Provider-switching plan
+    /// task S11.
+    Reload,
     /// Graceful shutdown.
     Shutdown,
 }

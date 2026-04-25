@@ -4,7 +4,7 @@ Priority: optional
 Maintainer: Bogdan Rădulescu <bogdan@nimblex.net>
 Build-Depends: debhelper-compat (= 13), cargo (>= 1.82~), rustc (>= 1.82~), pkg-config, libasound2-dev, libgtk-3-dev, libayatana-appindicator3-dev, libxdo-dev
 Standards-Version: 4.7.0
-Homepage: https://github.com/NimbleX/fono
+Homepage: https://github.com/bogdanr/fono
 Rules-Requires-Root: no
 
 Package: fono

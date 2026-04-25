@@ -2,14 +2,146 @@
 
 Last updated: 2026-04-25
 
+## Recent fixes — tray menu hardening (env-var leak + stale binary)
+
+User reported: "I can still see backends that aren't configured for STT and
+LLM and switching through them doesn't seem to dynamically switch while the
+software is running." Two distinct issues; both fixed.
+
+1. **Env-var leak into the tray submenu.** The previous filter used
+   `Secrets::resolve()` which falls through to the process environment.
+   On a typical dev machine with `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`
+   etc. exported in the shell, every one of those backends was wrongly
+   marked "configured" and listed in the menu — clicking them then
+   produced a 401 on the next dictation. New strict filter:
+   `crates/fono-core/src/secrets.rs` exposes `has_in_file()` /
+   `resolve_in_file()` and `crates/fono-core/src/providers.rs:178-218`
+   (`configured_stt_backends` / `configured_llm_backends`) only consult
+   `secrets.toml`. Two regression tests
+   (`configured_filter_ignores_env`, `configured_filter_includes_explicit_keys`)
+   pin the new contract.
+2. **Stale release binary.** The binary at `target/release/fono` was
+   older than the daemon's tray-filter source — the user was running
+   the pre-fix version and the menu still listed every backend. Rebuilt
+   so the live binary matches the source.
+
+## Recent fixes — tray polish + whisper log noise + repo URL
+
+- **Tray menu trimmed.** Removed the broken `Open history folder` entry
+  (`xdg-open` on the data directory just opened the parent in Dolphin and
+  was useless). The `Recent transcriptions` submenu is the supported way to
+  revisit history.
+- **Provider submenus restricted to configured backends.** STT/LLM submenus
+  now only list backends whose API key is present in `secrets.toml` (plus
+  `Local` and `None`). New helpers in `crates/fono-core/src/providers.rs`:
+  `configured_stt_backends` / `configured_llm_backends`. Eliminates the
+  "click OpenAI in tray, get a 401 on next dictation" trap.
+- **Whisper.cpp log noise silenced.** `whisper-rs 0.16` ships a
+  `whisper_rs::install_logging_hooks()` redirector that funnels GGML and
+  whisper.cpp logs through `tracing`. Enabled via the new `log_backend`
+  feature in workspace `Cargo.toml` and a `Once` guard in
+  `crates/fono-stt/src/whisper_local.rs`. With the default `info` filter
+  the formerly noisy timing dumps stay silent; `FONO_LOG=whisper_rs=debug`
+  re-enables them when needed.
+- **Repo URL → `bogdanr/fono`.** Replaced every reference in `Cargo.toml`,
+  `README.md`, `CHANGELOG.md`, `packaging/**`, and systemd units with
+  `github.com/bogdanr/fono`.
+
+## Recent fixes (Tier-1 roadmap pass — wizard + docs polish)
+
+- **Wizard rewrite** (`fono/src/wizard.rs`): now offers four explicit
+  paths instead of a binary local/cloud choice — `Local`, `Cloud`,
+  `Mixed (Cloud STT + Local LLM)`, `Mixed (Local STT + Cloud LLM)`. Path
+  recommendation order is hardware-tier aware (Recommended/High-end →
+  local first; Minimum → cloud first; Unsuitable → cloud only).
+- **Cloud key validation** (R3.2): every API key entered in the wizard
+  is hit against the provider's `/v1/models` endpoint with a 5 s
+  timeout before persistence. 401/403 responses re-prompt for the key;
+  network errors warn but allow override (offline-first install).
+- **`docs/inject.md`** — full reference for the injection stack: priority
+  table, paste-shortcut precedence, per-environment recipes (Wayland /
+  KDE-Wayland / X11 / terminals / Vim / tmux), and troubleshooting.
+- **`docs/troubleshooting.md`** — symptom-first guide covering hotkey,
+  pipeline, STT, latency, tray, audio, provider switches, and bug
+  reporting checklist.
+
+## Recent fixes (Tier-1 roadmap pass — provider-switching tray + docs)
+
+- **Tray STT/LLM submenus** (`fono-tray/src/lib.rs`, `fono/src/daemon.rs`).
+  Right-click the tray icon → `STT: <active> ▸` or `LLM: <active> ▸` shows
+  every backend with the active one ticked; click another item to hot-swap.
+  Same code path as `fono use stt … / llm …` (atomic config rewrite +
+  orchestrator `Reload`); tray notification confirms the switch.
+- **README v0.1.0 pass** — added CLI cheatsheet entries for `fono use`,
+  `fono keys`, `fono test-inject`, `fono hwprobe`, plus a tray-menu visual
+  reference and a Text-Injection section explaining the Shift+Insert default
+  + override layers.
+- **CHANGELOG v0.1.0 entry** drafted (`CHANGELOG.md`) — pipeline, providers,
+  hardware tiers, injection, tray, observability, bench harness, model
+  matrix, known limitations.
+
+## Recent fixes (delivery path — clipit/Wayland)
+
+- **Default paste shortcut → Shift+Insert** (`fono-inject/src/xtest_paste.rs`).
+  Was Ctrl+V — captured by shells/tmux/vim normal mode/terminal verbatim-
+  insert bindings. Shift+Insert is the X11 legacy paste binding hard-coded
+  into virtually every toolkit (xterm/urxvt/st PRIMARY, GTK/Qt CLIPBOARD,
+  VTE-based PRIMARY, alacritty/kitty CLIPBOARD, Vim/Emacs in insert mode);
+  fono populates **both** PRIMARY and CLIPBOARD on every dictation so the
+  toolkit's selection choice is invisible. Net effect: text now lands in
+  terminals as well as GUI apps.
+- **`PasteShortcut` enum** with `ShiftInsert` (default), `CtrlV`,
+  `CtrlShiftV`. Generalized XTEST sender: presses modifiers in order,
+  presses key, releases in reverse, with `Insert` ↔ `KP_Insert` keysym
+  fallback for exotic keymaps.
+- **Two override layers** for the rare app that needs a different binding:
+  - `[inject].paste_shortcut = "ctrl-v"` in `~/.config/fono/config.toml`
+    (validated at startup; typos surface as a warn-level log line).
+  - `FONO_PASTE_SHORTCUT=ctrl-v` env var (highest precedence; useful for
+    one-shot testing without editing config).
+  - `fono test-inject "..." --shortcut ctrl-v` flag for the smoke command.
+- **Diagnostic surfaces**:
+  - `fono doctor` now prints `Paste keys  : Shift+Insert (config="..."  env=...)`.
+  - `fono test-inject` prints the active shortcut at the top.
+  - Inject path logs `xtest-paste: synthesizing Shift+Insert (mod_keycodes=...)`
+    so users can confirm what was actually sent.
+- **Pure-Rust XTEST paste backend** (`fono-inject/src/xtest_paste.rs`,
+  `x11-paste` feature, **on by default**). Synthesizes the configured
+  shortcut against the focused X11 / XWayland window after writing to the
+  clipboard. **No system tools required** — works on any X session even
+  without `wtype`/`ydotool`/`xdotool`/`enigo`. Auto-selected by
+  `Injector::detect()` on X11 when no other backend is available; verified
+  live: `typed via xtest-paste in 15ms`.
+- **`FONO_INJECT_BACKEND=xtest|paste|xtestpaste`** override for forcing
+  the backend during testing.
+
+- **Multi-target clipboard write** (`fono-inject/src/inject.rs`) — new
+  `copy_to_clipboard_all()` writes to **every** detected backend
+  (wl-copy + xclip clipboard + xsel + xclip primary) so X11-only managers
+  like clipit catch the entry on Wayland sessions, and Wayland-native
+  managers like Klipper catch it on hybrid setups.
+- **Per-tool stderr capture** — silent failures (no `DISPLAY`, missing
+  protocol support, non-zero exit) are now surfaced in logs and in
+  `fono test-inject` output instead of being swallowed.
+- **`Injector::Xdotool` subprocess backend** — independent of the
+  `libxdo` C dep; XWayland fallback for KWin sessions where `wtype` is
+  accepted but silently dropped.
+- **`FONO_INJECT_BACKEND=…` override** — forces a specific injector for
+  testing.
+- **`fono test-inject "<text>"`** — bypasses STT/LLM, prints per-tool
+  diagnostic + clipboard readback verification.
+- **readback_clipboard `.ok()?` short-circuit fix** — verifier no longer
+  aborts when the first read tool isn't installed.
+
 ## Current milestone
 
-**v0.1.0-rc: local-models out of the box, hardware-adaptive wizard.**
-Pipeline (audio → trim → STT → optional LLM → inject → history) is fully
-wired and warmed at daemon startup. Default release binary now bundles
-whisper.cpp so picking "Local models" in the first-run wizard requires
-no rebuild and no system packages. The wizard probes the host CPU/RAM
-/disk first and steers to local or cloud per a five-tier classifier.
+**v0.1.0-rc: provider switching without daemon restart.** Local-models
+default + hardware-adaptive wizard (previous slice) plus a one-command
+provider-switching UX: `fono use stt groq`, `fono use cloud cerebras`,
+`fono use local`, plus `fono keys add/list/remove/check` and per-call
+`fono record --stt … --llm …` overrides. All flips hot-reload through a
+new `Request::Reload` IPC; the orchestrator hot-swaps STT/LLM behind a
+`RwLock<Arc<dyn _>>` and re-prewarms on every reload.
 
 ## Active plans
 
@@ -19,6 +151,7 @@ no rebuild and no system packages. The wizard probes the host CPU/RAM
 | `docs/plans/2026-04-25-fono-pipeline-wiring-v1.md` (W1–W22) | ✅ 22/22 |
 | `docs/plans/2026-04-25-fono-latency-v1.md` (L1–L30) | ✅ 17/30 landed, 13 deferred-to-v0.2 |
 | `docs/plans/2026-04-25-fono-local-default-v1.md` (H1–H25) | ✅ 11/25 landed, 14 deferred-to-v0.2 |
+| `docs/plans/2026-04-25-fono-provider-switching-v1.md` (S1–S27) | ✅ 16/27 landed, 11 deferred-to-v0.2 |
 
 ## Phase progress
 
@@ -38,6 +171,128 @@ no rebuild and no system packages. The wizard probes the host CPU/RAM
 | W     | Pipeline wiring (audio→STT→LLM→inject orchestrator)                | ✅ Complete |
 | L     | Latency optimisation v0.1 wave (warm + trim + skip + defaults)     | ✅ Complete |
 | H     | Local-models out of box + hardware-adaptive wizard (v0.1 slice)    | ✅ Complete |
+| S     | Easy provider switching: `fono use`, `fono keys`, IPC Reload, hot-swap | ✅ Complete |
+
+## What landed in this session (2026-04-25, provider switching)
+
+* **S1/S2/S3** — `crates/fono-core/src/providers.rs` central registry of
+  every backend's CLI string + canonical env-var name + paired-cloud
+  preset. Factories in `fono-stt` / `fono-llm` now resolve a missing
+  `cloud` sub-block by falling through to the canonical env var, so the
+  smallest valid cloud config is just `stt.backend = "groq"` plus a key
+  in `secrets.toml` or env.
+* **S4/S5/S6** — `fono use stt|llm|cloud|local|show` subcommand tree in
+  `crates/fono/src/cli.rs`; per-call `--stt` / `--llm` overrides on
+  `fono record` and `fono transcribe` clone the in-memory config, never
+  persist. `set_active_stt` / `set_active_llm` clear the stale `cloud`
+  sub-block but preserve every unrelated user customisation.
+* **S7** — `fono keys list|add|remove|check`. Atomic 0600 writes;
+  `check` runs the same 2-second reachability probe as `fono doctor`.
+* **S11/S12/S13** — new `Request::Reload` IPC variant; orchestrator
+  holds STT + LLM + Config each behind a `RwLock<Arc<…>>`; `reload()`
+  re-reads config + secrets, rebuilds via factories, swaps in place,
+  and re-runs `prewarm()` so the first dictation after a switch is
+  warm. `fono use` automatically calls Reload on the running daemon.
+* **S18** — `fono doctor` Providers section: per-row marker for the
+  active backend, key-presence flag, resolved model string, hint to
+  switch via `fono use`.
+* **S20/S21/S23** — new tests: `crates/fono-stt/src/factory.rs` covers
+  cloud-optional resolution; `crates/fono/tests/provider_switching.rs`
+  asserts `set_active_stt` / `set_active_llm` preserve unrelated fields,
+  TOML round-trip survives swap, and provider-string parsers form a
+  bijection with their printers.
+* **S24/S25/S27** — `docs/providers.md` rewritten around the new flow;
+  README has a "Switching providers" subsection; status.md updated.
+
+## Hotfix this session (2026-04-25, tray Recent submenu + clipboard safety net)
+
+User reported two issues after a real dictation on KDE:
+
+1. *"I can't see any notification or anything in the clipboard after
+   doing my last recording"* — root cause was a **subprocess-stdin
+   deadlock**: `copy_to_clipboard` borrowed `child.stdin.as_mut()` but
+   never closed the pipe, so `xsel`/`xclip`/`wl-copy` (all of which
+   read stdin to EOF before daemonizing) hung forever waiting for EOF
+   that never came. `child.wait()` then deadlocked, the pipeline
+   returned without populating the clipboard, and any notification
+   that depended on the outcome never fired. Compounding it: KDE
+   Wayland's KWin doesn't implement the wlroots virtual-keyboard
+   protocol that `wtype` uses, so even when the inject log read
+   `inject: 27ms ok`, no keys actually reached the focused window.
+2. *"OpenHistory tray action … should work in a similar fashion to
+   clipit"* — clicking the tray entry only opened the parent dir;
+   recent dictations weren't visible at all from the tray.
+
+Fixes:
+
+* **`crates/fono-tray/src/lib.rs`** — replaced single `OpenHistory`
+  entry with a **"Recent transcriptions" submenu** holding 10
+  pre-allocated slots refreshed every ~2 s by a `RecentProvider`
+  closure (passed in by the daemon). Click any slot to re-paste that
+  dictation. Clipit-style. Slots refresh in place via `set_text` to
+  avoid KDE/GNOME indicator flicker. Added `OpenHistoryFolder` as a
+  separate entry for power users. New `TrayAction::PasteHistory(usize)`
+  carries the slot index.
+* **`crates/fono/src/daemon.rs`** — provides the `RecentProvider` that
+  reads `db.recent(10)` and returns the cleaned (or raw) labels.
+  Handles `PasteHistory(idx)` by fetching the row and calling
+  `fono_inject::type_text_with_outcome` on the blocking pool, with a
+  notify-rust toast on `Clipboard` outcome.
+* **`crates/fono-core/src/config.rs`** — two new `[general]` knobs,
+  both default `true`:
+  - `also_copy_to_clipboard` — every successful pipeline also copies
+    the cleaned text to the system clipboard so the user can Ctrl+V
+    even when key injection silently no-op'd.
+  - `notify_on_dictation` — every successful pipeline pops a
+    notify-rust toast with the dictated text (truncated to 240 chars).
+* **`crates/fono-inject/`** — `copy_to_clipboard` made `pub` and
+  re-exported so the orchestrator can call it directly.
+* **`crates/fono/src/session.rs`** — pipeline now copies-to-clipboard
+  + notifies after every successful inject; gives the user reliable
+  feedback even on KDE Wayland.
+
+User saw `WARN inject failed: no text-injection backend available` on a
+host without `wtype`/`ydotool` and without the `enigo-backend` feature
+compiled in. Cleaned text was lost.
+
+* **`crates/fono-inject/src/inject.rs`** — added `Injector::Clipboard`
+  fallback that shells out to `wl-copy` (Wayland) → `xclip` → `xsel`
+  (X11) and a `wtype --version` page-cache warm step. New
+  `InjectOutcome { Typed, Clipboard, NoBackend }` returned from
+  `type_text_with_outcome()` so callers can tell the user which path
+  ran. `wtype`/`ydotool` failures now fall through to the clipboard
+  rather than swallowing the text.
+* **`crates/fono/src/session.rs`** — pipeline calls
+  `type_text_with_outcome`; on `Clipboard` shows a toast "Fono — text
+  copied to clipboard, paste with Ctrl-V"; on `NoBackend` shows a toast
+  with a one-line install hint (`pacman -S wtype` / `apt install xsel`).
+  The toast prevents a "press hotkey, nothing happens" failure mode
+  even when no injector + no clipboard tool exists.
+* **`crates/fono/src/doctor.rs`** — Injector section now also lists the
+  detected clipboard tool (or "none — text will be lost"); printed near
+  the active injector to make the gap obvious.
+
+### Deferred to v0.2 (documented in the plan)
+
+* **S8** wizard multi-key (S7 already lets users add keys post-wizard).
+* **S9/S10** named profiles + cycle hotkey (hold for real demand).
+* **S14** auto-reload on file change (notify watcher).
+* **S15/S16/S17** tray submenu for switching (depends on tray-icon API).
+* **S19** dedicated `fono provider list` (covered by `fono use show` + doctor).
+* **S22** full reload integration test (covered by S20 unit tests +
+  manual; deferred until profiles arrive).
+* **S26** ADR `0009-multi-provider-switching.md` (rationale captured in
+  this plan + commit messages).
+
+## Build matrix (verified this session, provider switching)
+
+| Command | Result |
+|---|---|
+| `cargo build --workspace` | ✅ |
+| `cargo test --workspace --lib --tests` | ✅ **79 tests pass** (66 unit + 13 hwcheck), 2 ignored (latency smoke) |
+| `cargo clippy --workspace --no-deps -- -D warnings` | ✅ pedantic + nursery clean |
+| `fono use show` | (manual) prints active stt + llm + key references |
+| `fono keys list` | (manual) masked listing |
 
 ## What landed in this session (2026-04-25, local-default + hwcheck)
 

@@ -13,6 +13,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::RwLock as StdRwLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -102,12 +103,34 @@ pub trait Injector: Send + Sync + 'static {
     fn inject(&self, text: &str) -> Result<()>;
 }
 
-/// Default injector — calls into [`fono_inject::type_text`].
+/// Default injector — calls into [`fono_inject::type_text_with_outcome`]
+/// so it can surface a desktop notification when no key-injection
+/// backend is available and the cleaned text was instead copied to the
+/// clipboard. Without this fallback fono "appears to do nothing" on
+/// hosts that have neither `wtype`/`ydotool` (Wayland) nor an X11
+/// session for `enigo` to talk to.
 pub struct RealInjector;
 
 impl Injector for RealInjector {
     fn inject(&self, text: &str) -> Result<()> {
-        fono_inject::type_text(text)
+        match fono_inject::type_text_with_outcome(text)? {
+            fono_inject::InjectOutcome::Typed(backend) => {
+                tracing::info!("inject backend: typed via {backend}");
+                Ok(())
+            }
+            fono_inject::InjectOutcome::Clipboard(tool) => {
+                tracing::info!("inject backend: clipboard via {tool} (no key-injection worked)");
+                let _ = notify_rust::Notification::new()
+                    .summary("Fono — copied to clipboard")
+                    .body(&format!(
+                        "No key-injection backend was available. The cleaned text \
+                         is on the clipboard (via {tool}); press Ctrl+V to paste."
+                    ))
+                    .timeout(notify_rust::Timeout::Milliseconds(6_000))
+                    .show();
+                Ok(())
+            }
+        }
     }
 }
 
@@ -130,14 +153,24 @@ impl FocusProbe for RealFocusProbe {
 }
 
 /// The orchestrator. One per running daemon.
+///
+/// `stt`, `llm`, and `config` live behind `RwLock<Arc<…>>` so the
+/// daemon can hot-swap them when the user runs `fono use …` or
+/// `fono keys …` without a restart. The recording hot path takes a
+/// single `read()` on each lock and clones the inner `Arc`, so the
+/// writer (Reload) only blocks the negligibly-short clone — never an
+/// in-flight pipeline. Provider-switching plan task S12.
 pub struct SessionOrchestrator {
-    stt: Arc<dyn SpeechToText>,
-    llm: Option<Arc<dyn TextFormatter>>,
+    stt: Arc<StdRwLock<Arc<dyn SpeechToText>>>,
+    llm: Arc<StdRwLock<Option<Arc<dyn TextFormatter>>>>,
     history: Arc<Mutex<HistoryDb>>,
     capture_cfg: CaptureConfig,
     capture: Arc<Mutex<Option<CaptureSession>>>,
     pipeline_in_flight: Arc<AtomicBool>,
-    config: Arc<Config>,
+    config: Arc<StdRwLock<Arc<Config>>>,
+    /// Resolved XDG paths; used by [`Self::reload`] to re-read config
+    /// + secrets from disk.
+    paths: Option<Arc<Paths>>,
     action_tx: mpsc::UnboundedSender<HotkeyAction>,
     injector: Arc<dyn Injector>,
     focus: Arc<dyn FocusProbe>,
@@ -170,7 +203,8 @@ impl SessionOrchestrator {
             input_device: config.audio.input_device.clone(),
             target_sample_rate: config.audio.sample_rate,
         };
-        let orch = Self::with_parts(
+        let config_for_env = Arc::clone(&config);
+        let mut orch = Self::with_parts(
             stt,
             llm,
             history,
@@ -180,6 +214,11 @@ impl SessionOrchestrator {
             Arc::new(RealInjector),
             Arc::new(RealFocusProbe),
         );
+        orch.paths = Some(Arc::new(paths.clone()));
+        // Apply [inject].paste_shortcut to the FONO_PASTE_SHORTCUT env
+        // var so xtest-paste picks up the configured combo without
+        // plumbing it through the Injector trait.
+        apply_paste_shortcut_env(&config_for_env);
         // Latency plan L2/L3/L5 — pay TLS handshake, mmap, and inject
         // backend page-cache costs at daemon startup so the first
         // dictation is fast. Failures are logged but non-fatal.
@@ -187,11 +226,91 @@ impl SessionOrchestrator {
         Ok(orch)
     }
 
+    /// Hot-reload: re-read config + secrets, rebuild STT + LLM, and
+    /// atomically swap the orchestrator's handles. In-flight pipelines
+    /// finish on the old backends (they cloned the `Arc` at spawn);
+    /// the next `StartRecording` picks up the new ones.
+    /// Provider-switching plan task S11/S13.
+    ///
+    /// Returns a short human-readable summary (active backends).
+    pub async fn reload(&self) -> Result<String> {
+        let paths = self
+            .paths
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("orchestrator built without Paths; cannot reload"))?
+            .clone();
+        let cfg = Config::load(&paths.config_file()).context("reload: read config")?;
+        let secrets = Secrets::load(&paths.secrets_file()).context("reload: read secrets")?;
+        let new_stt = fono_stt::build_stt(&cfg.stt, &secrets, &paths.whisper_models_dir())
+            .context("reload: build STT")?;
+        let new_llm = match fono_llm::build_llm(&cfg.llm, &secrets) {
+            Ok(opt) => opt,
+            Err(e) => {
+                warn!("reload: LLM backend unavailable; continuing without cleanup: {e:#}");
+                None
+            }
+        };
+        let stt_name = new_stt.name().to_string();
+        let llm_name = new_llm
+            .as_ref()
+            .map_or_else(|| "none".to_string(), |l| l.name().to_string());
+        // Lock-write order matches read order in the hot path.
+        if let Ok(mut guard) = self.stt.write() {
+            *guard = new_stt;
+        }
+        if let Ok(mut guard) = self.llm.write() {
+            *guard = new_llm;
+        }
+        if let Ok(mut guard) = self.config.write() {
+            *guard = Arc::new(cfg);
+        }
+        if let Ok(guard) = self.config.read() {
+            apply_paste_shortcut_env(&guard);
+        }
+        // Re-prewarm the new backends so the first post-switch
+        // dictation isn't cold (latency plan L3 still applies).
+        self.spawn_warmups();
+        info!("reloaded: stt={stt_name} llm={llm_name}");
+        Ok(format!("active: stt={stt_name} llm={llm_name}"))
+    }
+
+    /// Read-only snapshot of the active backend names. Used by the
+    /// daemon's Status / Doctor responses and by tests.
+    #[must_use]
+    pub fn active_backends(&self) -> (String, String) {
+        let stt = self
+            .stt
+            .read()
+            .map(|s| s.name().to_string())
+            .unwrap_or_default();
+        let llm = self
+            .llm
+            .read()
+            .map(|s| {
+                s.as_ref()
+                    .map_or_else(|| "none".to_string(), |l| l.name().to_string())
+            })
+            .unwrap_or_default();
+        (stt, llm)
+    }
+
+    fn current_stt(&self) -> Arc<dyn SpeechToText> {
+        Arc::clone(&self.stt.read().expect("stt lock poisoned"))
+    }
+
+    fn current_llm(&self) -> Option<Arc<dyn TextFormatter>> {
+        self.llm.read().expect("llm lock poisoned").clone()
+    }
+
+    fn current_config(&self) -> Arc<Config> {
+        Arc::clone(&self.config.read().expect("config lock poisoned"))
+    }
+
     /// Fire-and-forget warmup for STT, LLM and the inject backend.
     /// Latency plan tasks L2 (whisper mmap), L3 (HTTP keep-alive),
     /// L5 (inject binary page-cache).
     fn spawn_warmups(&self) {
-        let stt = Arc::clone(&self.stt);
+        let stt = self.current_stt();
         tokio::spawn(async move {
             let started = Instant::now();
             match stt.prewarm().await {
@@ -203,7 +322,7 @@ impl SessionOrchestrator {
                 Err(e) => debug!("warmup: stt {} prewarm skipped: {e:#}", stt.name()),
             }
         });
-        if let Some(llm) = self.llm.clone() {
+        if let Some(llm) = self.current_llm() {
             tokio::spawn(async move {
                 let started = Instant::now();
                 match llm.prewarm().await {
@@ -238,13 +357,14 @@ impl SessionOrchestrator {
         focus: Arc<dyn FocusProbe>,
     ) -> Self {
         Self {
-            stt,
-            llm,
+            stt: Arc::new(StdRwLock::new(stt)),
+            llm: Arc::new(StdRwLock::new(llm)),
             history,
             capture_cfg,
             capture: Arc::new(Mutex::new(None)),
             pipeline_in_flight: Arc::new(AtomicBool::new(false)),
-            config,
+            config: Arc::new(StdRwLock::new(config)),
+            paths: None,
             action_tx,
             injector,
             focus,
@@ -262,10 +382,6 @@ impl SessionOrchestrator {
             warn!("capture already in progress; ignoring duplicate start");
             return Ok(());
         }
-        // The cpal stream returned by `AudioCapture::start()` is `!Send`
-        // on Linux, so it must live on a dedicated thread. We hand the
-        // shared sample buffer back via a oneshot-shaped std::mpsc so
-        // the orchestrator can drain it from async code on stop.
         let cap_cfg = self.capture_cfg.clone();
         let (started_tx, started_rx) = std::sync::mpsc::channel::<
             std::result::Result<Arc<StdMutex<RecordingBuffer>>, String>,
@@ -278,8 +394,6 @@ impl SessionOrchestrator {
                 match cap.start() {
                     Ok(handle) => {
                         let _ = started_tx.send(Ok(Arc::clone(&handle.buffer)));
-                        // Block until told to stop. Holding `handle`
-                        // here keeps the cpal stream alive.
                         let _ = stop_rx.recv();
                         drop(handle);
                     }
@@ -301,7 +415,8 @@ impl SessionOrchestrator {
                 ))
             }
         };
-        if self.config.general.auto_mute_system {
+        let cfg = self.current_config();
+        if cfg.general.auto_mute_system {
             fono_audio::mute::set_default_sink_mute(true);
         }
         info!(
@@ -327,7 +442,8 @@ impl SessionOrchestrator {
             let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
             return;
         };
-        if self.config.general.auto_mute_system {
+        let cfg = self.current_config();
+        if cfg.general.auto_mute_system {
             fono_audio::mute::set_default_sink_mute(false);
         }
         let (samples, elapsed) = tokio::task::spawn_blocking(move || session.stop_and_drain())
@@ -345,7 +461,6 @@ impl SessionOrchestrator {
             return;
         }
 
-        // Spawn the pipeline so we never block the FSM consumer.
         self.spawn_pipeline(samples, capture_ms);
     }
 
@@ -353,10 +468,9 @@ impl SessionOrchestrator {
     pub async fn on_cancel(&self) {
         let taken = self.capture.lock().await.take();
         if let Some(session) = taken {
-            // Drain on a blocking thread so we never sit on an async
-            // worker waiting for the cpal stream to tear down.
             let _ = tokio::task::spawn_blocking(move || session.stop_and_drain()).await;
-            if self.config.general.auto_mute_system {
+            let cfg = self.current_config();
+            if cfg.general.auto_mute_system {
                 fono_audio::mute::set_default_sink_mute(false);
             }
             info!("recording cancelled by user");
@@ -387,12 +501,12 @@ impl SessionOrchestrator {
     }
 
     fn spawn_pipeline(&self, pcm: Vec<f32>, capture_ms: u64) {
-        let stt = Arc::clone(&self.stt);
-        let llm = self.llm.clone();
+        let stt = self.current_stt();
+        let llm = self.current_llm();
         let history = Arc::clone(&self.history);
         let action_tx = self.action_tx.clone();
         let in_flight = Arc::clone(&self.pipeline_in_flight);
-        let config = Arc::clone(&self.config);
+        let config = self.current_config();
         let injector = Arc::clone(&self.injector);
         let focus = Arc::clone(&self.focus);
         let sample_rate = self.capture_cfg.target_sample_rate;
@@ -443,14 +557,17 @@ impl SessionOrchestrator {
     /// and `fono record`. Drives capture-already-done audio through the
     /// orchestrator's STT/LLM/inject/history.
     pub async fn run_oneshot(&self, pcm: Vec<f32>, capture_ms: u64) -> PipelineOutcome {
+        let stt = self.current_stt();
+        let llm = self.current_llm();
+        let config = self.current_config();
         run_pipeline(
             pcm,
             self.capture_cfg.target_sample_rate,
             capture_ms,
-            self.stt.as_ref(),
-            self.llm.as_deref(),
+            stt.as_ref(),
+            llm.as_deref(),
             &self.history,
-            &self.config,
+            &config,
             self.injector.as_ref(),
             self.focus.as_ref(),
         )
@@ -612,6 +729,41 @@ async fn run_pipeline(
     info!("inject: {}ms", metrics.inject_ms);
     tracing::debug!(target: "fono::pipeline", "inject.text: {final_text:?}");
 
+    // ---- Belt-and-suspenders: also copy to clipboard --------------
+    // KDE Wayland's KWin doesn't implement the wlroots virtual-keyboard
+    // protocol that `wtype` uses, so wtype exits 0 but no keys reach
+    // the focused window. Always also placing the cleaned text on the
+    // system clipboard means the user can press Ctrl+V to recover even
+    // when the inject silently no-op'd. Best-effort; never fatal.
+    if config.general.also_copy_to_clipboard {
+        match fono_inject::copy_to_clipboard(&final_text) {
+            Ok(tool) => {
+                info!("clipboard: copied via {tool} (paste with Ctrl+V if inject didn't land)");
+            }
+            Err(e) => warn!("clipboard copy failed: {e:#}"),
+        }
+    }
+
+    // ---- Desktop notification (always, when enabled) -----------------
+    // Gives the user visible feedback even when injection silently
+    // failed. Truncated to keep the toast short; the full text is in
+    // the clipboard and history db.
+    if config.general.notify_on_dictation {
+        let body = if final_text.chars().count() > 240 {
+            let mut s: String = final_text.chars().take(240).collect();
+            s.push('…');
+            s
+        } else {
+            final_text.clone()
+        };
+        let _ = notify_rust::Notification::new()
+            .summary("Fono — dictated")
+            .body(&body)
+            .icon("audio-input-microphone")
+            .timeout(notify_rust::Timeout::Milliseconds(4_000))
+            .show();
+    }
+
     // ---- History (off the hot path; failure is non-fatal) -----------
     if config.history.enabled {
         let row = HistoryRow {
@@ -739,6 +891,30 @@ pub fn orchestrator_for_test(
         focus,
     );
     (orch, rx)
+}
+
+/// Translate `[inject].paste_shortcut` into the `FONO_PASTE_SHORTCUT`
+/// env var that `fono_inject::xtest_paste` reads at inject time. Logged
+/// at `info` so users can confirm the live shortcut at startup and
+/// after `fono use`/`Reload`.
+fn apply_paste_shortcut_env(config: &Config) {
+    let raw = config.inject.paste_shortcut.trim();
+    if raw.is_empty() {
+        std::env::remove_var("FONO_PASTE_SHORTCUT");
+        info!("inject paste shortcut: default (Shift+Insert)");
+        return;
+    }
+    // Validate so a typo surfaces as a warning instead of silently
+    // falling back. `PasteShortcut` is re-exported from `fono-inject`
+    // when its `x11-paste` feature is on (default).
+    if fono_inject::PasteShortcut::parse(raw).is_none() {
+        warn!(
+            "[inject].paste_shortcut={raw:?} is not recognised; \
+             xtest-paste will fall back to Shift+Insert"
+        );
+    }
+    std::env::set_var("FONO_PASTE_SHORTCUT", raw);
+    info!("inject paste shortcut: {raw}");
 }
 
 #[cfg(test)]

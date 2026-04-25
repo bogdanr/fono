@@ -16,7 +16,7 @@ OpenWhispr (Electron) stacks.
 ### Linux (musl static binary)
 
 ```sh
-curl -fLO https://github.com/NimbleX/fono/releases/latest/download/fono-v0.1.0-x86_64-unknown-linux-musl.tar.gz
+curl -fLO https://github.com/bogdanr/fono/releases/latest/download/fono-v0.1.0-x86_64-unknown-linux-musl.tar.gz
 tar -xzf fono-v0.1.0-x86_64-unknown-linux-musl.tar.gz
 sudo install -m755 fono-v0.1.0-x86_64-unknown-linux-musl/fono /usr/local/bin/fono
 fono   # first run starts the setup wizard
@@ -100,6 +100,24 @@ Fono supports both local and cloud STT + LLM backends. See
 API keys go in `~/.config/fono/secrets.toml` (mode 0600) or via
 `$ENV_VAR` references in config.
 
+### Switching providers
+
+Hot-swap STT, LLM, or both — no daemon restart. Multiple keys coexist:
+
+```sh
+fono use stt groq             # flip STT only
+fono use llm cerebras         # flip LLM only
+fono use cloud cerebras       # paired preset (STT=Groq + LLM=Cerebras)
+fono use local                # back to whisper-local + skip LLM
+fono use show                 # print active selection
+
+fono keys add GROQ_API_KEY    # prompts via password input
+fono keys list                # masked listing
+fono keys check               # reachability probe per stored key
+
+fono record --stt openai --llm anthropic   # one-shot per-call override
+```
+
 ### Build flavours
 
 | `cargo build …`                                                | Includes                        | First-run download |
@@ -117,14 +135,69 @@ fono daemon [--no-tray]
 fono toggle                   # IPC: toggle recording on running daemon
 fono paste-last               # IPC: re-type last cleaned transcription
 fono setup                    # re-run the wizard
-fono doctor                   # diagnostic report (includes hardware tier)
+fono doctor                   # diagnostic report (HW tier + providers + injector)
 fono hwprobe [--json]         # probe CPU/RAM/disk, print recommended local tier
+fono use {stt,llm,cloud,local,show}        # hot-swap providers (no restart)
+fono keys {list,add,remove,check}          # multi-provider API key vault
+fono record [--stt X] [--llm Y] [--no-inject]
+fono transcribe <wav> [--stt X] [--llm Y]
+fono test-inject "<text>" [--shortcut shift-insert|ctrl-v|ctrl-shift-v]
 fono config {path,show,edit}
 fono history {list,search,clear} [--json] [--limit N]
 fono models  {list,install,remove,verify} [name]
 fono completions {bash,zsh,fish,powershell,elvish}
 fono --debug | -v | -vv       # log verbosity
 fono --quiet | -q             # warn-only
+```
+
+## Tray menu
+
+Right-click the tray icon for live provider switching and one-click history paste:
+
+```
+Fono — idle
+─────────────────
+Toggle recording  (Ctrl+Alt+Space)
+Pause hotkeys
+─────────────────
+Recent transcriptions  ▸    1. The meeting is at three…
+                            2. (older items, click to re-paste)
+─────────────────
+STT: groq           ▸    Local · Groq* · OpenAI · Deepgram · …
+LLM: cerebras       ▸    None · Cerebras* · Groq · OpenAI · Anthropic · …
+─────────────────
+Open history folder…
+Edit config
+─────────────────
+Quit
+```
+
+`*` marks the active backend; clicking another item rewrites the config and hot-reloads
+the orchestrator without restarting the daemon.
+
+## Text injection
+
+Fono pastes via **Shift+Insert** by default — the universal X11 paste binding that
+works in every terminal (xterm/urxvt/alacritty/kitty/foot/konsole/gnome-terminal/…),
+every browser, and every GTK / Qt / Electron text field. Each successful dictation
+also writes the cleaned text to **both** the X CLIPBOARD *and* PRIMARY selections so
+clipboard managers (clipit, parcellite, Klipper) can pick it up regardless of which
+selection they watch.
+
+If a specific app rejects Shift+Insert (rare):
+
+```toml
+# ~/.config/fono/config.toml
+[inject]
+paste_shortcut = "ctrl-v"            # or "ctrl-shift-v"
+```
+
+…or one-shot via env: `FONO_PASTE_SHORTCUT=ctrl-v fono record`.
+
+Smoke-test injection without speaking a word:
+
+```sh
+fono test-inject "ana are mere"      # focus a text field within 5 s
 ```
 
 ## Wayland

@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: fono
-Source: https://github.com/NimbleX/fono
+Source: https://github.com/bogdanr/fono
 
 Files: *
 Copyright: 2026 Bogdan Rădulescu <bogdan@nimblex.net>

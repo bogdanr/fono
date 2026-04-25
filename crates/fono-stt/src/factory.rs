@@ -9,10 +9,61 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use fono_core::config::{Stt, SttBackend};
+use fono_core::config::{Stt, SttBackend, SttCloud};
+use fono_core::providers::stt_key_env;
 use fono_core::Secrets;
 
 use crate::traits::SpeechToText;
+
+/// Resolve the effective `(api_key_ref, model)` pair for a cloud STT
+/// backend. When `cfg.cloud` is missing, fall through to the canonical
+/// env-var name from [`fono_core::providers`] and the default model
+/// from [`crate::defaults`]. Returns the (key, model) tuple ready for
+/// the backend constructor.
+fn resolve_cloud(
+    cfg: &Stt,
+    secrets: &Secrets,
+    backend: &SttBackend,
+    provider_name: &str,
+) -> Result<(String, String)> {
+    let canonical = stt_key_env(backend);
+    let (key_ref, model_override) = cfg.cloud.as_ref().map_or_else(
+        || (canonical.to_string(), None),
+        |c| {
+            let key_ref = if c.api_key_ref.is_empty() {
+                canonical.to_string()
+            } else {
+                c.api_key_ref.clone()
+            };
+            let model_override = if c.model.is_empty() {
+                None
+            } else {
+                Some(c.model.clone())
+            };
+            (key_ref, model_override)
+        },
+    );
+    let key = secrets.resolve(&key_ref).ok_or_else(|| {
+        anyhow!(
+            "{provider_name} STT API key {key_ref:?} not found in secrets.toml or environment; \
+             run `fono keys add {key_ref}` to add it"
+        )
+    })?;
+    let model = model_override
+        .unwrap_or_else(|| crate::defaults::default_cloud_model(provider_name).to_string());
+    Ok((key, model))
+}
+
+/// Helper used by integration tests / docs to surface the SttCloud
+/// equivalent of the resolution above without performing it.
+#[must_use]
+pub fn synthetic_cloud(backend: &SttBackend, provider_name: &str) -> SttCloud {
+    SttCloud {
+        provider: provider_name.to_string(),
+        api_key_ref: stt_key_env(backend).to_string(),
+        model: crate::defaults::default_cloud_model(provider_name).to_string(),
+    }
+}
 
 /// Construct an STT backend matching `cfg`. The returned [`Arc`] is
 /// `Send + Sync` so it can be shared across the orchestrator's tokio tasks.
@@ -84,20 +135,7 @@ fn build_local(_cfg: &Stt, _dir: &Path) -> Result<Arc<dyn SpeechToText>> {
 
 #[cfg(feature = "groq")]
 fn build_groq(cfg: &Stt, secrets: &Secrets) -> Result<Arc<dyn SpeechToText>> {
-    let cloud = cfg.cloud.as_ref().ok_or_else(|| {
-        anyhow!("stt.cloud not configured for Groq backend; run `fono setup` again")
-    })?;
-    let key = secrets.resolve(&cloud.api_key_ref).ok_or_else(|| {
-        anyhow!(
-            "Groq STT API key {:?} not found in secrets.toml or environment",
-            cloud.api_key_ref
-        )
-    })?;
-    let model = if cloud.model.is_empty() {
-        crate::defaults::default_cloud_model("groq").to_string()
-    } else {
-        cloud.model.clone()
-    };
+    let (key, model) = resolve_cloud(cfg, secrets, &SttBackend::Groq, "groq")?;
     Ok(Arc::new(crate::groq::GroqStt::with_model(key, model)))
 }
 
@@ -110,21 +148,7 @@ fn build_groq(_: &Stt, _: &Secrets) -> Result<Arc<dyn SpeechToText>> {
 
 #[cfg(feature = "openai")]
 fn build_openai(cfg: &Stt, secrets: &Secrets) -> Result<Arc<dyn SpeechToText>> {
-    let cloud = cfg
-        .cloud
-        .as_ref()
-        .ok_or_else(|| anyhow!("stt.cloud not configured for OpenAI backend"))?;
-    let key = secrets.resolve(&cloud.api_key_ref).ok_or_else(|| {
-        anyhow!(
-            "OpenAI STT API key {:?} not found in secrets.toml or environment",
-            cloud.api_key_ref
-        )
-    })?;
-    let model = if cloud.model.is_empty() {
-        crate::defaults::default_cloud_model("openai").to_string()
-    } else {
-        cloud.model.clone()
-    };
+    let (key, model) = resolve_cloud(cfg, secrets, &SttBackend::OpenAI, "openai")?;
     Ok(Arc::new(crate::openai::OpenAiStt::with_model(key, model)))
 }
 
@@ -133,4 +157,38 @@ fn build_openai(_: &Stt, _: &Secrets) -> Result<Arc<dyn SpeechToText>> {
     Err(anyhow!(
         "OpenAI STT not compiled in (enable the `openai` feature on `fono-stt`)"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fono_core::config::{Stt as SttCfg, SttBackend};
+
+    #[cfg(feature = "groq")]
+    #[test]
+    fn cloud_optional_with_env_key() {
+        let mut cfg = SttCfg::default();
+        cfg.backend = SttBackend::Groq;
+        cfg.cloud = None;
+        let mut secrets = Secrets::default();
+        secrets.insert("GROQ_API_KEY", "gsk-test");
+        let dir = std::path::PathBuf::from("/tmp");
+        // Should succeed: factory falls through to GROQ_API_KEY.
+        assert!(build_stt(&cfg, &secrets, &dir).is_ok());
+    }
+
+    #[cfg(feature = "groq")]
+    #[test]
+    fn missing_key_yields_clear_error() {
+        let mut cfg = SttCfg::default();
+        cfg.backend = SttBackend::Groq;
+        cfg.cloud = None;
+        let secrets = Secrets::default();
+        let dir = std::path::PathBuf::from("/tmp");
+        let err = build_stt(&cfg, &secrets, &dir).err().unwrap().to_string();
+        assert!(
+            err.contains("GROQ_API_KEY") && err.contains("fono keys add"),
+            "error message should mention env var and remediation: {err}"
+        );
+    }
 }

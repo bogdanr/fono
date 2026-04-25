@@ -1,6 +1,6 @@
 [Unit]
 Description=Fono voice dictation daemon
-Documentation=https://github.com/NimbleX/fono
+Documentation=https://github.com/bogdanr/fono
 After=default.target
 
 [Service]

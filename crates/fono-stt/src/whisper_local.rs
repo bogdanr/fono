@@ -14,9 +14,24 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use std::sync::Once;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 use crate::traits::{SpeechToText, Transcription};
+
+/// Install whisper-rs's tracing bridge once per process so whisper.cpp + GGML
+/// logs flow through `tracing` (where they are filtered by the daemon's normal
+/// log-level config) instead of being printed straight to stderr at every
+/// transcription. With a default `info` filter the noisy whisper internals
+/// stay silent; users can re-enable them via `FONO_LOG=whisper_rs=debug` when
+/// debugging.
+static WHISPER_LOG_INIT: Once = Once::new();
+
+fn init_whisper_logging() {
+    WHISPER_LOG_INIT.call_once(|| {
+        whisper_rs::install_logging_hooks();
+    });
+}
 
 pub struct WhisperLocal {
     model_path: PathBuf,
@@ -30,6 +45,7 @@ impl WhisperLocal {
     }
 
     pub fn with_threads(model_path: impl Into<PathBuf>, threads: i32) -> Self {
+        init_whisper_logging();
         Self {
             model_path: model_path.into(),
             ctx: Arc::new(Mutex::new(None)),

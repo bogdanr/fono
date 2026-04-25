@@ -14,6 +14,13 @@
 
 pub mod focus;
 pub mod inject;
+#[cfg(feature = "x11-paste")]
+pub mod xtest_paste;
 
 pub use focus::{detect_focus, FocusInfo};
-pub use inject::{type_text, warm_backend, Injector};
+pub use inject::{
+    copy_to_clipboard, copy_to_clipboard_all, type_text, type_text_with_outcome, warm_backend,
+    ClipboardAttempt, InjectOutcome, Injector,
+};
+#[cfg(feature = "x11-paste")]
+pub use xtest_paste::PasteShortcut;

@@ -1306,6 +1306,7 @@ dependencies = [
  "fono-stt",
  "fono-tray",
  "notify-rust",
+ "reqwest",
  "serde_json",
  "tempfile",
  "tokio",
@@ -5178,6 +5179,7 @@ version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2088172d00f936c348d6a72f488dc2660ab3f507263a195df308a3c2383229f6"
 dependencies = [
+ "tracing",
  "whisper-rs-sys",
 ]
 

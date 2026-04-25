@@ -44,7 +44,7 @@
 
           meta = with pkgs.lib; {
             description = "Lightweight native voice dictation";
-            homepage = "https://github.com/NimbleX/fono";
+            homepage = "https://github.com/bogdanr/fono";
             license = licenses.gpl3Only;
             mainProgram = "fono";
             platforms = platforms.linux ++ platforms.darwin;

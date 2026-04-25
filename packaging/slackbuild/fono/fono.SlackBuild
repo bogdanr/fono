@@ -3,7 +3,7 @@
 # Slackware build script for fono (NimbleX flavour)
 #
 # Fono is a GPL-3.0 Rust single-binary voice dictation tool.
-#   https://github.com/NimbleX/fono
+#   https://github.com/bogdanr/fono
 #
 # Two build modes:
 #   * Binary mode (default): downloads the pre-built musl static binary
@@ -40,7 +40,7 @@ if [ ! -z "${PRINT_PACKAGE_NAME}" ]; then
 fi
 
 # Upstream release host — override with FONO_RELEASE_BASE if mirroring.
-RELEASE_BASE=${FONO_RELEASE_BASE:-https://github.com/NimbleX/fono/releases/download}
+RELEASE_BASE=${FONO_RELEASE_BASE:-https://github.com/bogdanr/fono/releases/download}
 
 case "$ARCH" in
   x86_64)  RUST_TARGET=x86_64-unknown-linux-musl ;;
@@ -66,7 +66,7 @@ if [ "${FROM_SOURCE:-0}" = "1" ]; then
     tar xvf $CWD/$PRGNAM-$VERSION.tar.gz
     cd $PRGNAM-$VERSION
   else
-    git clone --depth 1 --branch v$VERSION https://github.com/NimbleX/fono.git $PRGNAM-$VERSION
+    git clone --depth 1 --branch v$VERSION https://github.com/bogdanr/fono.git $PRGNAM-$VERSION
     cd $PRGNAM-$VERSION
   fi
   rustup target add "$RUST_TARGET" 2>/dev/null || true

@@ -76,7 +76,84 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
         let (_tx, rx) = mpsc::unbounded_channel::<TrayAction>();
         (None, rx)
     } else {
-        let (t, rx) = fono_tray::spawn("Fono — voice dictation");
+        // Tray menu's "Recent transcriptions" submenu reads from the
+        // history DB on a 2-second poll. Provide a closure that returns
+        // the cleaned text (or raw if no LLM cleanup) of the last 10 rows.
+        let history_db_path = paths.history_db();
+        let recent_provider: fono_tray::RecentProvider = Arc::new(move || {
+            let Ok(db) = fono_core::history::HistoryDb::open(&history_db_path) else {
+                return Vec::new();
+            };
+            db.recent(fono_tray::RECENT_SLOTS)
+                .map(|rows| {
+                    rows.into_iter()
+                        .map(|r| r.cleaned.unwrap_or(r.raw))
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+
+        // STT / LLM submenu labels — restricted to backends the user
+        // has actually configured (Local, plus any cloud backend whose
+        // API key is present in secrets.toml or the environment). The
+        // active backend is always included even if its key is missing
+        // so the tray reflects reality. Snapshot at startup; users who
+        // add a new key via `fono keys add` need to restart the daemon
+        // to see it appear in the menu (v0.1 trade-off).
+        let stt_backends: Vec<_> =
+            fono_core::providers::configured_stt_backends(&secrets, &config.stt.backend);
+        let llm_backends: Vec<_> =
+            fono_core::providers::configured_llm_backends(&secrets, &config.llm.backend);
+        let stt_labels: Vec<String> = stt_backends
+            .iter()
+            .map(|b| fono_core::providers::stt_backend_str(b).to_string())
+            .collect();
+        let llm_labels: Vec<String> = llm_backends
+            .iter()
+            .map(|b| fono_core::providers::llm_backend_str(b).to_string())
+            .collect();
+
+        // Active-provider closure — tray polls this every ~2 s. Reads
+        // the orchestrator's current backend pair (which already reflects
+        // any `Reload`-driven hot-swap) and falls back to the on-disk
+        // config string match when the orchestrator isn't available
+        // (degraded mode).
+        let orch_for_tray = orchestrator.clone();
+        let config_path = paths.config_file();
+        let active_provider: fono_tray::ActiveProvider = Arc::new(move || {
+            let (stt_str, llm_str) = orch_for_tray.as_ref().map_or_else(
+                || {
+                    fono_core::Config::load(&config_path)
+                        .map(|c| {
+                            (
+                                fono_core::providers::stt_backend_str(&c.stt.backend).to_string(),
+                                fono_core::providers::llm_backend_str(&c.llm.backend).to_string(),
+                            )
+                        })
+                        .unwrap_or_else(|_| ("local".into(), "none".into()))
+                },
+                |o| o.active_backends(),
+            );
+            let stt_idx = stt_backends
+                .iter()
+                .position(|b| fono_core::providers::stt_backend_str(b) == stt_str)
+                .and_then(|i| u8::try_from(i).ok())
+                .unwrap_or(u8::MAX);
+            let llm_idx = llm_backends
+                .iter()
+                .position(|b| fono_core::providers::llm_backend_str(b) == llm_str)
+                .and_then(|i| u8::try_from(i).ok())
+                .unwrap_or(u8::MAX);
+            (stt_idx, llm_idx)
+        });
+
+        let (t, rx) = fono_tray::spawn(
+            "Fono — voice dictation",
+            recent_provider,
+            stt_labels,
+            llm_labels,
+            active_provider,
+        );
         (Some(t), rx)
     };
     let tray = Arc::new(tray);
@@ -178,6 +255,14 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
     {
         let action_tx = action_tx.clone();
         let paths = paths.clone();
+        let orch_for_tray = orchestrator.clone();
+        // Snapshot the filtered backend lists for the tray dispatcher
+        // so `UseStt(idx)` / `UseLlm(idx)` resolve to the same item the
+        // user clicked (the indices come from the filtered submenu).
+        let stt_backends_for_dispatch: Vec<_> =
+            fono_core::providers::configured_stt_backends(&secrets, &config.stt.backend);
+        let llm_backends_for_dispatch: Vec<_> =
+            fono_core::providers::configured_llm_backends(&secrets, &config.llm.backend);
         tokio::spawn(async move {
             while let Some(ta) = tray_rx.recv().await {
                 info!("tray action: {ta:?}");
@@ -191,10 +276,28 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                         std::process::exit(0);
                     }
                     TrayAction::ShowStatus => notify_last_transcription(&paths),
-                    TrayAction::OpenHistory => open_history(&paths),
+                    TrayAction::PasteHistory(idx) => paste_history_at(&paths, idx).await,
                     TrayAction::OpenConfig => open_path(&paths.config_file()),
                     TrayAction::Pause => {
                         info!("tray: Pause hotkeys (not yet implemented)");
+                    }
+                    TrayAction::UseStt(idx) => {
+                        switch_stt_via_tray(
+                            &paths,
+                            orch_for_tray.as_ref(),
+                            &stt_backends_for_dispatch,
+                            idx,
+                        )
+                        .await;
+                    }
+                    TrayAction::UseLlm(idx) => {
+                        switch_llm_via_tray(
+                            &paths,
+                            orch_for_tray.as_ref(),
+                            &llm_backends_for_dispatch,
+                            idx,
+                        )
+                        .await;
                     }
                 }
             }
@@ -216,8 +319,9 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                 let (stream, _) = accept?;
                 let fsm = Arc::clone(&fsm);
                 let action_tx = action_tx.clone();
+                let orch = orchestrator.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, fsm, action_tx).await {
+                    if let Err(e) = handle_client(stream, fsm, action_tx, orch).await {
                         warn!("client error: {e}");
                     }
                 });
@@ -276,13 +380,47 @@ fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbos
         "llm backend  : {:?}  (enabled={})",
         config.llm.backend, config.llm.enabled
     );
-    tracing::debug!("to see per-crate debug output: re-run with `-v` (debug) or `-vv` (trace)");
+    info!(
+        "inject       : also_copy_to_clipboard={}  notify_on_dictation={}",
+        config.general.also_copy_to_clipboard, config.general.notify_on_dictation
+    );
+    // Probe and print which inject + clipboard tools are detected, so
+    // users immediately see whether they have a working delivery path.
+    let injector = fono_inject::Injector::detect();
+    let clipboard_tool = ["wl-copy", "xclip", "xsel"]
+        .iter()
+        .find(|t| which_in_path(t).is_some())
+        .copied()
+        .unwrap_or("none");
+    info!(
+        "delivery     : key-injector={injector:?}  clipboard-tool={clipboard_tool}"
+    );
+    if matches!(injector, fono_inject::Injector::None) && clipboard_tool == "none" {
+        warn!(
+            "NO injection backend AND no clipboard tool detected — on X11 the built-in \
+             xtest-paste backend should work when DISPLAY is set; otherwise install one of: \
+             wtype/ydotool (Wayland), xdotool (X11/XWayland), or rebuild with \
+             --features enigo-backend; plus wl-clipboard/xclip/xsel for clipboard fallback"
+        );
+    }
+}
+
+fn which_in_path(tool: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for p in std::env::split_paths(&path) {
+        let c = p.join(tool);
+        if c.is_file() {
+            return Some(c);
+        }
+    }
+    None
 }
 
 async fn handle_client(
     mut stream: UnixStream,
     fsm: Arc<Mutex<RecordingFsm>>,
     action_tx: mpsc::UnboundedSender<HotkeyAction>,
+    orchestrator: Option<Arc<SessionOrchestrator>>,
 ) -> Result<()> {
     let req: Request = read_frame(&mut stream).await?;
     let resp = match req {
@@ -304,7 +442,27 @@ async fn handle_client(
         }
         Request::Status => {
             let state = fsm.lock().await.state();
-            Response::Text(format!("fono daemon running; fsm={state:?}"))
+            let active = orchestrator.as_ref().map_or_else(
+                || "(degraded — no orchestrator)".to_string(),
+                |o| {
+                    let (s, l) = o.active_backends();
+                    format!("stt={s} llm={l}")
+                },
+            );
+            Response::Text(format!("fono daemon running; fsm={state:?}; {active}"))
+        }
+        Request::Reload => {
+            // Provider-switching plan task S11. Re-reads config + secrets
+            // and atomically swaps the orchestrator's STT/LLM.
+            match orchestrator.as_ref() {
+                Some(o) => match o.reload().await {
+                    Ok(summary) => Response::Text(summary),
+                    Err(e) => Response::Error(format!("reload failed: {e:#}")),
+                },
+                None => Response::Error(
+                    "daemon is in degraded mode (no orchestrator); cannot reload".into(),
+                ),
+            }
         }
         Request::Doctor => {
             Response::Text("doctor via IPC not yet available; run `fono doctor` directly".into())
@@ -360,18 +518,6 @@ fn notify_last_transcription(paths: &Paths) {
     }
 }
 
-fn open_history(paths: &Paths) {
-    // SQLite isn't directly browsable; open the parent dir so the user
-    // can see the DB + any rolling exports we add later. A future
-    // refinement may render an HTML view on demand.
-    let dir = paths
-        .history_db()
-        .parent()
-        .unwrap_or(&paths.state_dir)
-        .to_path_buf();
-    open_path(&dir);
-}
-
 fn open_path(path: &std::path::Path) {
     let cmd = if cfg!(target_os = "macos") {
         "open"
@@ -402,4 +548,172 @@ fn write_pid(paths: &Paths) -> Result<()> {
     }
     std::fs::write(paths.pid_file(), std::process::id().to_string())?;
     Ok(())
+}
+
+/// Re-paste the i-th most recent transcription (0 = newest) via the
+/// best available injection backend, falling through to the clipboard
+/// when key injection isn't possible. Triggered from the tray's
+/// "Recent transcriptions" submenu.
+async fn paste_history_at(paths: &Paths, idx: usize) {
+    let db = match fono_core::history::HistoryDb::open(&paths.history_db()) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("paste_history: cannot open db: {e:#}");
+            return;
+        }
+    };
+    // recent() returns newest-first up to limit; ask for idx+1 so the
+    // last element of the result is what we want.
+    let rows = match db.recent(idx + 1) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("paste_history: query failed: {e:#}");
+            return;
+        }
+    };
+    let Some(row) = rows.get(idx) else {
+        warn!("paste_history: slot {idx} is empty");
+        return;
+    };
+    let text = row.cleaned.clone().unwrap_or_else(|| row.raw.clone());
+    if text.is_empty() {
+        warn!("paste_history: slot {idx} is empty string");
+        return;
+    }
+    // Run inject on the blocking pool so we don't trip cpal/tokio rules.
+    let outcome = tokio::task::spawn_blocking(move || fono_inject::type_text_with_outcome(&text))
+        .await
+        .ok()
+        .and_then(std::result::Result::ok);
+    match outcome {
+        Some(fono_inject::InjectOutcome::Typed(b)) => {
+            info!("paste_history[{idx}]: typed via {b}");
+        }
+        Some(fono_inject::InjectOutcome::Clipboard(t)) => {
+            info!("paste_history[{idx}]: copied to clipboard via {t} (paste with Ctrl+V)");
+            let _ = notify_rust::Notification::new()
+                .summary("Fono — copied to clipboard")
+                .body(&format!("Press Ctrl+V to paste (via {t})"))
+                .icon("edit-paste")
+                .timeout(notify_rust::Timeout::Milliseconds(4_000))
+                .show();
+        }
+        None => {
+            warn!("paste_history[{idx}]: no inject backend and no clipboard tool available");
+        }
+    }
+}
+
+/// Switch the active STT backend from the tray submenu and trigger a
+/// hot-reload of the orchestrator. Same code path as `fono use stt …`.
+async fn switch_stt_via_tray(
+    paths: &fono_core::Paths,
+    orch: Option<&Arc<crate::session::SessionOrchestrator>>,
+    backends: &[fono_core::config::SttBackend],
+    idx: u8,
+) {
+    let Some(backend) = backends.get(idx as usize) else {
+        warn!("tray UseStt({idx}): out of range (max={})", backends.len());
+        return;
+    };
+    let label = fono_core::providers::stt_backend_str(backend);
+    let config_path = paths.config_file();
+    let backend_clone = backend.clone();
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let mut cfg = fono_core::Config::load(&config_path)?;
+        crate::cli::set_active_stt(&mut cfg, backend_clone);
+        cfg.save(&config_path)?;
+        Ok(())
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {
+            info!("tray: switched STT to {label}");
+            if let Some(o) = orch {
+                if let Err(e) = o.reload().await {
+                    warn!("tray: STT reload failed: {e:#}");
+                    let _ = notify_rust::Notification::new()
+                        .summary("Fono — STT reload failed")
+                        .body(&format!("{e}"))
+                        .icon("dialog-error")
+                        .timeout(notify_rust::Timeout::Milliseconds(5_000))
+                        .show();
+                    return;
+                }
+            }
+            let _ = notify_rust::Notification::new()
+                .summary("Fono — STT switched")
+                .body(&format!("Active speech-to-text backend: {label}"))
+                .icon("audio-input-microphone")
+                .timeout(notify_rust::Timeout::Milliseconds(3_000))
+                .show();
+        }
+        Ok(Err(e)) => {
+            warn!("tray: STT switch failed: {e:#}");
+            let _ = notify_rust::Notification::new()
+                .summary("Fono — STT switch failed")
+                .body(&format!("{e}"))
+                .icon("dialog-error")
+                .timeout(notify_rust::Timeout::Milliseconds(5_000))
+                .show();
+        }
+        Err(e) => warn!("tray: STT switch task join error: {e}"),
+    }
+}
+
+/// Switch the active LLM backend from the tray submenu and trigger a
+/// hot-reload of the orchestrator. Same code path as `fono use llm …`.
+async fn switch_llm_via_tray(
+    paths: &fono_core::Paths,
+    orch: Option<&Arc<crate::session::SessionOrchestrator>>,
+    backends: &[fono_core::config::LlmBackend],
+    idx: u8,
+) {
+    let Some(backend) = backends.get(idx as usize) else {
+        warn!("tray UseLlm({idx}): out of range (max={})", backends.len());
+        return;
+    };
+    let label = fono_core::providers::llm_backend_str(backend);
+    let config_path = paths.config_file();
+    let backend_clone = backend.clone();
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let mut cfg = fono_core::Config::load(&config_path)?;
+        crate::cli::set_active_llm(&mut cfg, backend_clone);
+        cfg.save(&config_path)?;
+        Ok(())
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {
+            info!("tray: switched LLM to {label}");
+            if let Some(o) = orch {
+                if let Err(e) = o.reload().await {
+                    warn!("tray: LLM reload failed: {e:#}");
+                    let _ = notify_rust::Notification::new()
+                        .summary("Fono — LLM reload failed")
+                        .body(&format!("{e}"))
+                        .icon("dialog-error")
+                        .timeout(notify_rust::Timeout::Milliseconds(5_000))
+                        .show();
+                    return;
+                }
+            }
+            let _ = notify_rust::Notification::new()
+                .summary("Fono — LLM switched")
+                .body(&format!("Active text-cleanup backend: {label}"))
+                .icon("accessories-text-editor")
+                .timeout(notify_rust::Timeout::Milliseconds(3_000))
+                .show();
+        }
+        Ok(Err(e)) => {
+            warn!("tray: LLM switch failed: {e:#}");
+            let _ = notify_rust::Notification::new()
+                .summary("Fono — LLM switch failed")
+                .body(&format!("{e}"))
+                .icon("dialog-error")
+                .timeout(notify_rust::Timeout::Milliseconds(5_000))
+                .show();
+        }
+        Err(e) => warn!("tray: LLM switch task join error: {e}"),
+    }
 }

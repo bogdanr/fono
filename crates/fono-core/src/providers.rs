@@ -173,6 +173,59 @@ pub fn all_llm_backends() -> [LlmBackend; 9] {
     ]
 }
 
+/// Subset of [`all_stt_backends`] the user can actually pick today,
+/// given the loaded `Secrets`. `Local` is always included; cloud
+/// backends are included iff their API key is **explicitly listed in
+/// `secrets.toml`**. The process environment is intentionally
+/// ignored so a stray `OPENAI_API_KEY` exported in the user's shell
+/// doesn't clutter the tray submenu — to surface a backend the user
+/// must run `fono keys add <NAME>`. `active` is always included even
+/// if its key is missing, so the tray reflects the current selection.
+#[must_use]
+pub fn configured_stt_backends(secrets: &crate::Secrets, active: &SttBackend) -> Vec<SttBackend> {
+    all_stt_backends()
+        .into_iter()
+        .filter(|b| {
+            if std::mem::discriminant(b) == std::mem::discriminant(active) {
+                return true;
+            }
+            if !stt_requires_key(b) {
+                return true;
+            }
+            secrets.has_in_file(stt_key_env(b))
+        })
+        .collect()
+}
+
+/// Same idea as [`configured_stt_backends`] but for LLM backends.
+/// Always includes `None` and `Local` (no key required). Ollama is
+/// included only if `OLLAMA_HOST` appears in `secrets.toml` (or it's
+/// the active backend), so users without a local Ollama server don't
+/// see it in the tray menu. Like its STT cousin, the process
+/// environment is ignored — only keys saved in `secrets.toml` count.
+#[must_use]
+pub fn configured_llm_backends(secrets: &crate::Secrets, active: &LlmBackend) -> Vec<LlmBackend> {
+    all_llm_backends()
+        .into_iter()
+        .filter(|b| {
+            if std::mem::discriminant(b) == std::mem::discriminant(active) {
+                return true;
+            }
+            // Ollama doesn't have an API key but still needs an explicit
+            // opt-in so users without an Ollama server don't see it in
+            // the tray menu. Treat OLLAMA_HOST in secrets.toml as the
+            // opt-in marker.
+            if matches!(b, LlmBackend::Ollama) {
+                return secrets.has_in_file("OLLAMA_HOST");
+            }
+            if !llm_requires_key(b) {
+                return true;
+            }
+            secrets.has_in_file(llm_key_env(b))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,5 +279,65 @@ mod tests {
         assert!(matches!(s, SttBackend::Groq));
         assert!(matches!(l, LlmBackend::Cerebras));
         assert!(cloud_pair("nope").is_none());
+    }
+
+    #[test]
+    fn configured_filter_ignores_env() {
+        // Env-fallback would have leaked OPENAI_API_KEY into the menu;
+        // the new filter must read secrets.toml only.
+        std::env::set_var("OPENAI_API_KEY", "leaky-env-value");
+        std::env::set_var("CEREBRAS_API_KEY", "leaky-env-value");
+        let secrets = crate::Secrets::default(); // empty file
+        let stt = configured_stt_backends(&secrets, &SttBackend::Local);
+        let llm = configured_llm_backends(&secrets, &LlmBackend::None);
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::remove_var("CEREBRAS_API_KEY");
+        // Only key-free backends + the active one should be present.
+        assert_eq!(
+            stt,
+            vec![SttBackend::Local],
+            "env vars should not expand the STT menu"
+        );
+        assert!(
+            !llm.iter().any(|b| matches!(b, LlmBackend::OpenAI)),
+            "env-only OPENAI_API_KEY should not show OpenAI in the LLM menu"
+        );
+        assert!(
+            !llm.iter().any(|b| matches!(b, LlmBackend::Cerebras)),
+            "env-only CEREBRAS_API_KEY should not show Cerebras in the LLM menu"
+        );
+    }
+
+    #[test]
+    fn configured_filter_includes_explicit_keys() {
+        let mut secrets = crate::Secrets::default();
+        secrets.insert("GROQ_API_KEY", "gsk-explicit");
+        secrets.insert("CEREBRAS_API_KEY", "cs-explicit");
+        let stt = configured_stt_backends(&secrets, &SttBackend::Local);
+        let llm = configured_llm_backends(&secrets, &LlmBackend::None);
+        assert!(stt.iter().any(|b| matches!(b, SttBackend::Groq)));
+        assert!(llm.iter().any(|b| matches!(b, LlmBackend::Cerebras)));
+        // Backends without explicit keys must remain hidden.
+        assert!(!stt.iter().any(|b| matches!(b, SttBackend::OpenAI)));
+        assert!(!llm.iter().any(|b| matches!(b, LlmBackend::Anthropic)));
+    }
+
+    #[test]
+    fn configured_filter_hides_ollama_without_host() {
+        // Ollama has no API key but must still be opt-in via OLLAMA_HOST.
+        let secrets = crate::Secrets::default();
+        let llm = configured_llm_backends(&secrets, &LlmBackend::None);
+        assert!(
+            !llm.iter().any(|b| matches!(b, LlmBackend::Ollama)),
+            "Ollama must be hidden until OLLAMA_HOST is configured"
+        );
+
+        let mut with_host = crate::Secrets::default();
+        with_host.insert("OLLAMA_HOST", "http://localhost:11434");
+        let llm = configured_llm_backends(&with_host, &LlmBackend::None);
+        assert!(
+            llm.iter().any(|b| matches!(b, LlmBackend::Ollama)),
+            "Ollama must appear once OLLAMA_HOST is configured"
+        );
     }
 }

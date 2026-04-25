@@ -6,9 +6,46 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use fono_core::config::{Llm, LlmBackend};
+use fono_core::providers::llm_key_env;
 use fono_core::Secrets;
 
 use crate::traits::TextFormatter;
+
+/// Resolve `(key, model)` for a cloud LLM backend, falling through to
+/// the canonical env var when `cfg.cloud` is missing or fields blank.
+fn resolve_cloud(
+    cfg: &Llm,
+    secrets: &Secrets,
+    backend: &LlmBackend,
+    provider_name: &str,
+) -> Result<(String, String)> {
+    let canonical = llm_key_env(backend);
+    let (key_ref, model_override) = cfg.cloud.as_ref().map_or_else(
+        || (canonical.to_string(), None),
+        |c| {
+            let key_ref = if c.api_key_ref.is_empty() {
+                canonical.to_string()
+            } else {
+                c.api_key_ref.clone()
+            };
+            let model_override = if c.model.is_empty() {
+                None
+            } else {
+                Some(c.model.clone())
+            };
+            (key_ref, model_override)
+        },
+    );
+    let key = secrets.resolve(&key_ref).ok_or_else(|| {
+        anyhow!(
+            "{provider_name} LLM API key {key_ref:?} not found in secrets.toml or environment; \
+             run `fono keys add {key_ref}` to add it"
+        )
+    })?;
+    let model = model_override
+        .unwrap_or_else(|| crate::defaults::default_cloud_model(provider_name).to_string());
+    Ok((key, model))
+}
 
 /// Returns `Ok(None)` when `cfg.enabled == false` or `cfg.backend == None`.
 /// Otherwise returns the constructed backend or an error explaining why
@@ -18,44 +55,36 @@ pub fn build_llm(cfg: &Llm, secrets: &Secrets) -> Result<Option<Arc<dyn TextForm
         return Ok(None);
     }
 
-    let provider_name = match &cfg.backend {
-        LlmBackend::Cerebras => "cerebras",
-        LlmBackend::Groq => "groq",
-        LlmBackend::OpenAI => "openai",
-        LlmBackend::Anthropic => "anthropic",
-        LlmBackend::OpenRouter => "openrouter",
-        LlmBackend::Ollama => "ollama",
-        LlmBackend::Gemini => "gemini",
-        LlmBackend::Local => "local",
-        LlmBackend::None => unreachable!(),
-    };
-
-    let model = cfg
-        .cloud
-        .as_ref()
-        .map(|c| c.model.clone())
-        .filter(|m| !m.is_empty())
-        .unwrap_or_else(|| crate::defaults::default_cloud_model(provider_name).to_string());
-
-    let resolve_key = || -> Result<String> {
-        let cloud = cfg.cloud.as_ref().ok_or_else(|| {
-            anyhow!("llm.cloud not configured for {provider_name} backend; run `fono setup` again")
-        })?;
-        secrets.resolve(&cloud.api_key_ref).ok_or_else(|| {
-            anyhow!(
-                "LLM API key {:?} not found in secrets.toml or environment",
-                cloud.api_key_ref
-            )
-        })
-    };
-
     match &cfg.backend {
-        LlmBackend::Cerebras => build_cerebras(resolve_key()?, model),
-        LlmBackend::Groq => build_oa_groq(resolve_key()?, model),
-        LlmBackend::OpenAI => build_oa_openai(resolve_key()?, model),
-        LlmBackend::OpenRouter => build_oa_openrouter(resolve_key()?, model),
-        LlmBackend::Ollama => build_oa_ollama(cfg, model),
-        LlmBackend::Anthropic => build_anthropic(resolve_key()?, model),
+        LlmBackend::Cerebras => {
+            let (k, m) = resolve_cloud(cfg, secrets, &LlmBackend::Cerebras, "cerebras")?;
+            build_cerebras(k, m)
+        }
+        LlmBackend::Groq => {
+            let (k, m) = resolve_cloud(cfg, secrets, &LlmBackend::Groq, "groq")?;
+            build_oa_groq(k, m)
+        }
+        LlmBackend::OpenAI => {
+            let (k, m) = resolve_cloud(cfg, secrets, &LlmBackend::OpenAI, "openai")?;
+            build_oa_openai(k, m)
+        }
+        LlmBackend::OpenRouter => {
+            let (k, m) = resolve_cloud(cfg, secrets, &LlmBackend::OpenRouter, "openrouter")?;
+            build_oa_openrouter(k, m)
+        }
+        LlmBackend::Ollama => {
+            let model = cfg
+                .cloud
+                .as_ref()
+                .map(|c| c.model.clone())
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| crate::defaults::default_cloud_model("ollama").to_string());
+            build_oa_ollama(cfg, model)
+        }
+        LlmBackend::Anthropic => {
+            let (k, m) = resolve_cloud(cfg, secrets, &LlmBackend::Anthropic, "anthropic")?;
+            build_anthropic(k, m)
+        }
         LlmBackend::Local => build_local(cfg),
         LlmBackend::Gemini => Err(anyhow!(
             "Gemini LLM backend not yet implemented; pick cerebras/openai/anthropic"
@@ -64,7 +93,6 @@ pub fn build_llm(cfg: &Llm, secrets: &Secrets) -> Result<Option<Arc<dyn TextForm
     }
     .map(Some)
 }
-
 #[cfg(feature = "cerebras")]
 #[allow(clippy::unnecessary_wraps)]
 fn build_cerebras(key: String, model: String) -> Result<Arc<dyn TextFormatter>> {

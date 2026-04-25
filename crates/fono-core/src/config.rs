@@ -39,6 +39,9 @@ pub struct Config {
 
     #[serde(default)]
     pub history: History,
+
+    #[serde(default)]
+    pub inject: Inject,
 }
 
 impl Default for Config {
@@ -53,6 +56,7 @@ impl Default for Config {
             context_rules: Vec::new(),
             overlay: Overlay::default(),
             history: History::default(),
+            inject: Inject::default(),
         }
     }
 }
@@ -75,6 +79,15 @@ pub struct General {
     /// plan L1. Off by default for privacy until the wizard surfaces
     /// explicit consent — see `docs/privacy.md`.
     pub always_warm_mic: bool,
+    /// After every successful pipeline, also place the cleaned/raw text
+    /// on the system clipboard as a belt-and-suspenders safety net.
+    /// Robust against KDE Wayland where `wtype` exits 0 but doesn't
+    /// actually deliver keys to the focused window. Default `true`.
+    pub also_copy_to_clipboard: bool,
+    /// Pop a desktop notification after every successful pipeline
+    /// showing the dictated text. Default `true` so users always have
+    /// feedback even when injection silently fails.
+    pub notify_on_dictation: bool,
 }
 
 impl Default for General {
@@ -85,6 +98,8 @@ impl Default for General {
             sound_feedback: true,
             auto_mute_system: true,
             always_warm_mic: false,
+            also_copy_to_clipboard: true,
+            notify_on_dictation: true,
         }
     }
 }
@@ -355,6 +370,29 @@ impl Default for History {
             enabled: true,
             retention_days: 90,
             redact_secrets: true,
+        }
+    }
+}
+
+/// Text-injection tuning. Currently a single knob for the X11 XTEST
+/// paste shortcut; reserved as the home of future per-app paste rules
+/// and inject backend overrides.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Inject {
+    /// Which keystroke combo `Injector::XtestPaste` synthesizes after
+    /// writing the system clipboard. Accepted values: `"shift-insert"`
+    /// (default — universal X11 paste, works in terminals + GUI),
+    /// `"ctrl-v"` (GUI-only — captured by shells/tmux/vim),
+    /// `"ctrl-shift-v"` (modern terminal "official" paste).
+    /// Override at runtime with `FONO_PASTE_SHORTCUT=...`.
+    pub paste_shortcut: String,
+}
+
+impl Default for Inject {
+    fn default() -> Self {
+        Self {
+            paste_shortcut: "shift-insert".into(),
         }
     }
 }

@@ -28,6 +28,12 @@ default = ["tray", "local-models"]
 tray = ["fono-tray/tray-backend"]
 local-models = ["fono-stt/whisper-local"]
 llama-local = ["fono-llm/llama-local"]
+# X11 key injection via enigo (libxdo). Keep opt-in: requires `libxdo`
+# at build time, which isn't installed on every Linux desktop. Users
+# without `wtype`/`ydotool` on Wayland or `enigo` on X11 still get a
+# working dictation thanks to fono-inject's clipboard fallback (see
+# `fono_inject::type_text_with_outcome`).
+enigo = ["fono-inject/enigo-backend"]
 # Cloud meta-feature so a single flag enables all hosted providers.
 cloud-all = ["fono-stt/openai", "fono-llm/anthropic"]
 
@@ -53,6 +59,7 @@ dialoguer = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 notify-rust = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

@@ -16,4 +16,4 @@ fono: Python runtime.
 fono:
 fono: Ships a per-user systemd unit (fono.service) under
 fono: /lib/systemd/user/ — enable with: systemctl --user enable --now fono
-fono: Homepage: https://github.com/NimbleX/fono
+fono: Homepage: https://github.com/bogdanr/fono

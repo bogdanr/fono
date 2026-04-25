@@ -21,8 +21,8 @@ edition = "2021"
 rust-version = "1.82"
 license = "GPL-3.0-only"
 authors = ["Bogdan Rădulescu <bogdan@nimblex.net>"]
-homepage = "https://github.com/nimblex/fono"
-repository = "https://github.com/nimblex/fono"
+homepage = "https://github.com/bogdanr/fono"
+repository = "https://github.com/bogdanr/fono"
 readme = "README.md"
 keywords = ["voice", "dictation", "stt", "whisper", "llm"]
 categories = ["command-line-utilities", "multimedia::audio"]
@@ -70,7 +70,7 @@ rubato = "0.15"
 rodio = { version = "0.19", default-features = false }
 
 # STT / LLM local engines
-whisper-rs = "0.16"
+whisper-rs = { version = "0.16", features = ["tracing_backend"] }
 llama-cpp-2 = "0.1"
 ort = { version = "2.0.0-rc.4", default-features = false }
 
@@ -83,7 +83,7 @@ softbuffer = "0.4"
 notify-rust = "4.11"
 
 # Focus detection
-x11rb = "0.13"
+x11rb = { version = "0.13", features = ["xtest"] }
 swayipc = "3.0"
 hyprland = "0.4"
 
