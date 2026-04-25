@@ -94,7 +94,10 @@ pub fn spawn(tooltip: &str) -> (Tray, mpsc::UnboundedReceiver<TrayAction>) {
 mod backend {
     use super::{TrayAction, TrayState};
     use anyhow::{Context, Result};
-    use std::sync::{atomic::AtomicU8, Arc, OnceLock};
+    use std::sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc, OnceLock,
+    };
     use tokio::sync::mpsc;
     use tray_icon::{
         menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
@@ -113,9 +116,10 @@ mod backend {
     static MENU_IDS: OnceLock<MenuIds> = OnceLock::new();
 
     pub fn request_redraw(_state: TrayState) {
-        // The TrayIcon handle itself lives on the tray thread; we only
-        // track state atomically. A future refinement could swap the icon
-        // bytes here via a channel back to the tray thread.
+        // The actual redraw happens on the tray (GTK) thread which polls
+        // the shared AtomicU8 every 50ms and calls TrayIcon::set_icon
+        // when the state changes. Nothing to do here — set_state has
+        // already updated the atomic.
     }
 
     pub fn spawn(
@@ -137,24 +141,26 @@ mod backend {
     #[cfg(target_os = "linux")]
     fn run(
         tooltip: &str,
-        _shared: Arc<AtomicU8>,
+        shared: Arc<AtomicU8>,
         actions: mpsc::UnboundedSender<TrayAction>,
     ) -> Result<()> {
         // tray-icon uses gtk on Linux and requires its main loop.
         gtk::init().context("gtk::init() failed — is gtk+-3.0 installed?")?;
 
-        let menu = build_menu(&actions)?;
-        let _tray = TrayIconBuilder::new()
+        let (menu, status_item) = build_menu(&actions)?;
+        let tray = TrayIconBuilder::new()
             .with_tooltip(tooltip)
             .with_menu(Box::new(menu))
             .with_icon(icon_for(TrayState::Idle))
             .build()
             .context("TrayIconBuilder::build() failed — is libappindicator3 installed?")?;
 
-        // Forward menu click events into the action channel. We poll the
-        // tray-icon crate's crossbeam channels from a 50 ms timeout
-        // instead of `glib::idle_add_local`, which would re-fire
+        // Forward menu click events into the action channel and repaint
+        // the icon when the FSM state changes. We poll the tray-icon
+        // crate's crossbeam channels and the shared state from a 50 ms
+        // timeout instead of `glib::idle_add_local`, which would re-fire
         // immediately on every main-loop iteration and pin a CPU at 100%.
+        let mut last_state: u8 = TrayState::Idle as u8;
         glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
             while let Ok(ev) = MenuEvent::receiver().try_recv() {
                 if let Some(action) = MENU_IDS
@@ -166,6 +172,15 @@ mod backend {
             }
             while TrayIconEvent::receiver().try_recv().is_ok() {
                 // left-click etc. — ignored for now, menu handles it.
+            }
+            let cur = shared.load(Ordering::Relaxed);
+            if cur != last_state {
+                last_state = cur;
+                let st = decode_state(cur);
+                if let Err(e) = tray.set_icon(Some(icon_for(st))) {
+                    tracing::warn!("tray set_icon failed: {e:#}");
+                }
+                status_item.set_text(status_label(st));
             }
             glib::ControlFlow::Continue
         });
@@ -192,9 +207,9 @@ mod backend {
         }
     }
 
-    fn build_menu(_actions: &mpsc::UnboundedSender<TrayAction>) -> Result<Menu> {
+    fn build_menu(_actions: &mpsc::UnboundedSender<TrayAction>) -> Result<(Menu, MenuItem)> {
         let menu = Menu::new();
-        let status = MenuItem::new("Fono — idle", false, None);
+        let status = MenuItem::new(status_label(TrayState::Idle), false, None);
         let toggle = MenuItem::new("Toggle recording  (Ctrl+Alt+Space)", true, None);
         let pause = MenuItem::new("Pause hotkeys", true, None);
         let history = MenuItem::new("Open history", true, None);
@@ -219,7 +234,25 @@ mod backend {
             config: id_of(&config),
             quit: id_of(&quit),
         });
-        Ok(menu)
+        Ok((menu, status))
+    }
+
+    fn status_label(state: TrayState) -> &'static str {
+        match state {
+            TrayState::Idle => "Fono — idle",
+            TrayState::Recording => "Fono — recording",
+            TrayState::Processing => "Fono — processing",
+            TrayState::Paused => "Fono — paused",
+        }
+    }
+
+    fn decode_state(raw: u8) -> TrayState {
+        match raw {
+            1 => TrayState::Recording,
+            2 => TrayState::Processing,
+            3 => TrayState::Paused,
+            _ => TrayState::Idle,
+        }
     }
 
     fn id_of(item: &MenuItem) -> u32 {
