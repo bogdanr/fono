@@ -19,3 +19,4 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 global-hotkey = { workspace = true }
+crossbeam-channel = { workspace = true }

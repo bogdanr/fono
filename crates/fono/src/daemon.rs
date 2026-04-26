@@ -5,13 +5,15 @@
 
 use anyhow::{Context, Result};
 use fono_core::{Config, Paths, Secrets};
-use fono_hotkey::{HotkeyAction, HotkeyBindings, HotkeyEvent, RecordingFsm};
+use fono_hotkey::{
+    HotkeyAction, HotkeyBindings, HotkeyControl, HotkeyControlSender, HotkeyEvent, RecordingFsm,
+};
 use fono_ipc::{read_frame, write_frame, Request, Response};
 use fono_tray::{TrayAction, TrayState};
 use std::sync::Arc;
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::cli::Verbosity;
 use crate::session::SessionOrchestrator;
@@ -60,19 +62,26 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
         paste_last: config.hotkeys.paste_last.clone(),
         cancel: config.hotkeys.cancel.clone(),
     };
-    match fono_hotkey::spawn_listener(bindings, action_tx.clone()) {
-        Ok(_handle) => info!("global hotkeys registered"),
-        Err(e) => warn!(
-            "global hotkeys unavailable: {e:#}\n  \
-             (the daemon will still accept `fono toggle` via IPC)"
-        ),
-    }
+    let cancel_ctrl: Option<HotkeyControlSender> =
+        match fono_hotkey::spawn_listener(bindings, action_tx.clone()) {
+            Ok(handle) => {
+                debug!("global hotkeys registered");
+                Some(handle.control)
+            }
+            Err(e) => {
+                warn!(
+                    "global hotkeys unavailable: {e:#}\n  \
+                 (the daemon will still accept `fono toggle` via IPC)"
+                );
+                None
+            }
+        };
 
     // ---------------------------------------------------------------
     // Tray icon (feature-gated; no-op if the backend is compiled out)
     // ---------------------------------------------------------------
     let (tray, mut tray_rx) = if no_tray {
-        info!("tray disabled (--no-tray)");
+        debug!("tray disabled (--no-tray)");
         let (_tx, rx) = mpsc::unbounded_channel::<TrayAction>();
         (None, rx)
     } else {
@@ -165,9 +174,21 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
         let tray = Arc::clone(&tray);
         let action_tx_ev = action_tx.clone();
         let orch = orchestrator.clone();
+        let cancel_ctrl_ev = cancel_ctrl.clone();
         tokio::spawn(async move {
             while let Some(e) = fsm_events.recv().await {
-                info!("fsm event: {e:?}");
+                debug!("fsm event: {e:?}");
+                if let Some(ctrl) = cancel_ctrl_ev.as_ref() {
+                    match e {
+                        HotkeyEvent::StartRecording(_) => {
+                            let _ = ctrl.send(HotkeyControl::EnableCancel);
+                        }
+                        HotkeyEvent::StopRecording | HotkeyEvent::Cancel => {
+                            let _ = ctrl.send(HotkeyControl::DisableCancel);
+                        }
+                        HotkeyEvent::PasteLast => { /* no grab change */ }
+                    }
+                }
                 if let Some(t) = tray.as_ref().as_ref() {
                     match e {
                         HotkeyEvent::StartRecording(_) => t.set_state(TrayState::Recording),
@@ -265,7 +286,7 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
             fono_core::providers::configured_llm_backends(&secrets, &config.llm.backend);
         tokio::spawn(async move {
             while let Some(ta) = tray_rx.recv().await {
-                info!("tray action: {ta:?}");
+                debug!("tray action: {ta:?}");
                 match ta {
                     TrayAction::ToggleRecording => {
                         let _ = action_tx.send(HotkeyAction::TogglePressed);
@@ -279,7 +300,7 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                     TrayAction::PasteHistory(idx) => paste_history_at(&paths, idx).await,
                     TrayAction::OpenConfig => open_path(&paths.config_file()),
                     TrayAction::Pause => {
-                        info!("tray: Pause hotkeys (not yet implemented)");
+                        debug!("tray: Pause hotkeys (not yet implemented)");
                     }
                     TrayAction::UseStt(idx) => {
                         switch_stt_via_tray(
@@ -337,8 +358,20 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
 fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbosity) {
     let config_path = paths.config_file();
     let config_present = config_path.exists();
-    info!("Fono v{} starting", env!("CARGO_PKG_VERSION"));
     info!(
+        "Fono v{} starting — stt={:?} llm={:?} tray={}",
+        env!("CARGO_PKG_VERSION"),
+        config.stt.backend,
+        config.llm.backend,
+        if no_tray {
+            "disabled"
+        } else if cfg!(feature = "tray") {
+            "enabled"
+        } else {
+            "not compiled"
+        }
+    );
+    debug!(
         "config       : {} ({})",
         config_path.display(),
         if config_present {
@@ -347,15 +380,15 @@ fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbos
             "absent — using defaults"
         }
     );
-    info!("secrets      : {}", paths.secrets_file().display());
-    info!("history db   : {}", paths.history_db().display());
-    info!("models/whisper: {}", paths.whisper_models_dir().display());
-    info!("models/llm   : {}", paths.llm_models_dir().display());
-    info!("cache        : {}", paths.cache_dir.display());
-    info!("state        : {}", paths.state_dir.display());
-    info!("ipc socket   : {}", paths.ipc_socket().display());
-    info!("log level    : {verbosity:?}  (override with FONO_LOG=...)");
-    info!(
+    debug!("secrets      : {}", paths.secrets_file().display());
+    debug!("history db   : {}", paths.history_db().display());
+    debug!("models/whisper: {}", paths.whisper_models_dir().display());
+    debug!("models/llm   : {}", paths.llm_models_dir().display());
+    debug!("cache        : {}", paths.cache_dir.display());
+    debug!("state        : {}", paths.state_dir.display());
+    debug!("ipc socket   : {}", paths.ipc_socket().display());
+    debug!("log level    : {verbosity:?}  (override with FONO_LOG=...)");
+    debug!(
         "tray icon    : {}",
         if no_tray {
             "disabled (--no-tray)"
@@ -365,22 +398,22 @@ fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbos
             "not compiled in (rebuild with `--features tray`)"
         }
     );
-    info!(
+    debug!(
         "hotkeys      : hold={}  toggle={}  paste_last={}  cancel={}",
         config.hotkeys.hold,
         config.hotkeys.toggle,
         config.hotkeys.paste_last,
         config.hotkeys.cancel
     );
-    info!(
+    debug!(
         "stt backend  : {:?}  (local model: {})",
         config.stt.backend, config.stt.local.model
     );
-    info!(
+    debug!(
         "llm backend  : {:?}  (enabled={})",
         config.llm.backend, config.llm.enabled
     );
-    info!(
+    debug!(
         "inject       : also_copy_to_clipboard={}  notify_on_dictation={}",
         config.general.also_copy_to_clipboard, config.general.notify_on_dictation
     );
@@ -392,7 +425,7 @@ fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbos
         .find(|t| which_in_path(t).is_some())
         .copied()
         .unwrap_or("none");
-    info!("delivery     : key-injector={injector:?}  clipboard-tool={clipboard_tool}");
+    debug!("delivery     : key-injector={injector:?}  clipboard-tool={clipboard_tool}");
     if matches!(injector, fono_inject::Injector::None) && clipboard_tool == "none" {
         warn!(
             "NO injection backend AND no clipboard tool detected — on X11 the built-in \

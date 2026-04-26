@@ -314,7 +314,7 @@ impl SessionOrchestrator {
         tokio::spawn(async move {
             let started = Instant::now();
             match stt.prewarm().await {
-                Ok(()) => info!(
+                Ok(()) => debug!(
                     "warmup: stt {} ready in {}ms",
                     stt.name(),
                     started.elapsed().as_millis()
@@ -326,7 +326,7 @@ impl SessionOrchestrator {
             tokio::spawn(async move {
                 let started = Instant::now();
                 match llm.prewarm().await {
-                    Ok(()) => info!(
+                    Ok(()) => debug!(
                         "warmup: llm {} ready in {}ms",
                         llm.name(),
                         started.elapsed().as_millis()
@@ -338,7 +338,7 @@ impl SessionOrchestrator {
         // Inject backend warmup runs on a blocking thread because the
         // probe shells out to `wtype --version` / `ydotool --version`.
         tokio::task::spawn_blocking(|| match fono_inject::warm_backend() {
-            Ok(name) => info!("warmup: inject backend = {name}"),
+            Ok(name) => debug!("warmup: inject backend = {name}"),
             Err(e) => debug!("warmup: inject backend probe failed: {e:#}"),
         });
     }
@@ -895,13 +895,12 @@ pub fn orchestrator_for_test(
 
 /// Translate `[inject].paste_shortcut` into the `FONO_PASTE_SHORTCUT`
 /// env var that `fono_inject::xtest_paste` reads at inject time. Logged
-/// at `info` so users can confirm the live shortcut at startup and
-/// after `fono use`/`Reload`.
+/// at `debug`; invalid configured shortcuts still warn loudly.
 fn apply_paste_shortcut_env(config: &Config) {
     let raw = config.inject.paste_shortcut.trim();
     if raw.is_empty() {
         std::env::remove_var("FONO_PASTE_SHORTCUT");
-        info!("inject paste shortcut: default (Shift+Insert)");
+        debug!("inject paste shortcut: default (Shift+Insert)");
         return;
     }
     // Validate so a typo surfaces as a warning instead of silently
@@ -914,7 +913,7 @@ fn apply_paste_shortcut_env(config: &Config) {
         );
     }
     std::env::set_var("FONO_PASTE_SHORTCUT", raw);
-    info!("inject paste shortcut: {raw}");
+    debug!("inject paste shortcut: {raw}");
 }
 
 #[cfg(test)]

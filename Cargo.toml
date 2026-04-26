@@ -78,6 +78,7 @@ ort = { version = "2.0.0-rc.4", default-features = false }
 # Desktop integration
 tray-icon = { version = "0.19", default-features = false }
 global-hotkey = "0.6"
+crossbeam-channel = "0.5"
 enigo = "0.2"
 winit = "0.30"
 softbuffer = "0.4"

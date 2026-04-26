@@ -8,5 +8,10 @@ pub mod listener;
 pub mod parse;
 
 pub use fsm::{HotkeyAction, HotkeyEvent, RecordingFsm, RecordingMode, State};
-pub use listener::{spawn as spawn_listener, HotkeyBindings};
+pub use listener::{spawn as spawn_listener, HotkeyBindings, HotkeyControl, ListenerHandle};
 pub use parse::{parse_hotkey, ParsedHotkey};
+
+/// Re-export of the `crossbeam-channel` `Sender` carrying [`HotkeyControl`]
+/// messages. Lets dependent crates clone and forward control commands
+/// without depending on `crossbeam-channel` directly.
+pub type HotkeyControlSender = crossbeam_channel::Sender<HotkeyControl>;

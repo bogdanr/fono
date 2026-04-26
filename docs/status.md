@@ -2,6 +2,39 @@
 
 Last updated: 2026-04-25
 
+## Recent fix — silenced GTK/GDK startup warnings
+
+User reported a `Gdk-CRITICAL: gdk_window_thaw_toplevel_updates: assertion ...
+freeze_count > 0 failed` line at startup. This is a benign assertion fired by
+libappindicator/GTK3 when the indicator first paints on KDE's StatusNotifier
+host; the tray works correctly. The tray thread now installs `glib`
+log handlers for the `Gdk`, `Gtk`, `GLib-GObject`, and `libappindicator-gtk3`
+domains and demotes their warning/critical messages to `tracing::debug`, so
+default startup is clean.
+
+## Recent fix — cancel hotkey only grabbed while recording
+
+User reported Fono was holding a global grab on `Escape`, blocking it in other
+apps. The cancel hotkey is now registered with the OS only when entering the
+Recording state and unregistered as soon as recording stops or is cancelled.
+Implemented via a new `HotkeyControl` channel between the daemon's FSM event
+loop and the `fono-hotkey` listener thread, plus an `unregister(...)` call in
+the listener using the existing `global-hotkey` API.
+
+## Recent fix — quieter whisper logging
+
+User reported there were still too many startup messages coming from whisper.
+The default CLI log filters now keep `whisper-rs` whisper.cpp/GGML `info`
+chatter hidden behind explicit module-level `FONO_LOG` overrides while keeping
+warnings and errors visible.
+
+## Recent fix — quieter daemon startup logging
+
+User reported too many `info` messages when starting Fono. Startup-only details
+such as XDG paths, tray/hotkey internals, model-present checks, warmup timings,
+inject backend discovery, and paste-shortcut setup now log at `debug`; default
+`info` startup keeps only the concise daemon start/ready lines and warnings.
+
 ## Recent fix — setup wizard API key paste feedback
 
 User reported that pasting a cloud LLM API key gave no immediate visual

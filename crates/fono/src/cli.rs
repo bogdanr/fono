@@ -46,17 +46,23 @@ pub enum Verbosity {
 impl Verbosity {
     pub fn as_filter(self) -> &'static str {
         match self {
-            Self::Quiet => "warn",
-            Self::Info => "info",
+            Self::Quiet => {
+                "warn,whisper_rs::ggml_logging_hook=warn,whisper_rs::whisper_logging_hook=warn"
+            }
+            Self::Info => {
+                "info,whisper_rs::ggml_logging_hook=warn,whisper_rs::whisper_logging_hook=warn"
+            }
             Self::Debug => {
                 "fono=debug,fono_core=debug,fono_hotkey=debug,fono_tray=debug,\
                 fono_audio=debug,fono_stt=debug,fono_llm=debug,fono_inject=debug,\
-                fono_ipc=debug,fono_download=debug,info"
+                fono_ipc=debug,fono_download=debug,whisper_rs::ggml_logging_hook=warn,\
+                whisper_rs::whisper_logging_hook=warn,info"
             }
             Self::Trace => {
                 "fono=trace,fono_core=trace,fono_hotkey=trace,fono_tray=trace,\
                 fono_audio=trace,fono_stt=trace,fono_llm=trace,fono_inject=trace,\
-                fono_ipc=trace,fono_download=trace,debug"
+                fono_ipc=trace,fono_download=trace,whisper_rs::ggml_logging_hook=warn,\
+                whisper_rs::whisper_logging_hook=warn,debug"
             }
         }
     }

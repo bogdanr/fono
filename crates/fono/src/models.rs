@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use fono_core::config::{Config, SttBackend};
 use fono_core::Paths;
 use fono_stt::ModelRegistry;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Check every model the current config references and download any that
 /// are missing. Returns Ok(()) on success; individual failures log a
@@ -42,7 +42,7 @@ async fn ensure_whisper(paths: &Paths, model_name: &str) -> Result<()> {
         .whisper_models_dir()
         .join(format!("ggml-{}.bin", info.name));
     if dest.exists() {
-        info!("whisper model ready: {}", dest.display());
+        debug!("whisper model ready: {}", dest.display());
         return Ok(());
     }
     let url = ModelRegistry::url_for(info);

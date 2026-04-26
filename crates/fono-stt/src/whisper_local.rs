@@ -22,9 +22,9 @@ use crate::traits::{SpeechToText, Transcription};
 /// Install whisper-rs's tracing bridge once per process so whisper.cpp + GGML
 /// logs flow through `tracing` (where they are filtered by the daemon's normal
 /// log-level config) instead of being printed straight to stderr at every
-/// transcription. With a default `info` filter the noisy whisper internals
-/// stay silent; users can re-enable them via `FONO_LOG=whisper_rs=debug` when
-/// debugging.
+/// transcription. The default CLI filter keeps whisper.cpp/GGML `info` chatter
+/// hidden; users can re-enable it with an explicit `FONO_LOG` module filter
+/// when debugging.
 static WHISPER_LOG_INIT: Once = Once::new();
 
 fn init_whisper_logging() {

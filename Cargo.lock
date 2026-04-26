@@ -1386,6 +1386,7 @@ name = "fono-hotkey"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "crossbeam-channel",
  "fono-core",
  "global-hotkey",
  "thiserror 1.0.69",

@@ -222,6 +222,13 @@ mod backend {
     ) -> Result<()> {
         // tray-icon uses gtk on Linux and requires its main loop.
         gtk::init().context("gtk::init() failed — is gtk+-3.0 installed?")?;
+        // libappindicator + GTK3 emit a benign but noisy
+        // `Gdk-CRITICAL: gdk_window_thaw_toplevel_updates: assertion ...
+        // freeze_count > 0 failed` during the indicator's first paint on
+        // KDE/StatusNotifier hosts. The tray still works correctly.
+        // Demote these GTK/GDK warnings to tracing::debug so they don't
+        // pollute the daemon's stderr at startup.
+        install_gtk_log_filters();
 
         let (menu, status_item, recent_items, stt_items, llm_items) =
             build_menu(&stt_labels, &llm_labels)?;
@@ -283,9 +290,35 @@ mod backend {
             glib::ControlFlow::Continue
         });
 
-        tracing::info!("tray icon ready");
+        tracing::debug!("tray icon ready");
         gtk::main();
         Ok(())
+    }
+
+    /// Demote noisy GTK/GDK CRITICAL+WARNING log lines (notably the
+    /// libappindicator `gdk_window_thaw_toplevel_updates` assertion that
+    /// fires once at startup on KDE) to `tracing::debug!`. Only installed
+    /// on Linux where the GTK backend is in use.
+    #[cfg(target_os = "linux")]
+    fn install_gtk_log_filters() {
+        use glib::{log_set_handler, LogLevel, LogLevels};
+        // Install a handler per noisy domain. Passing `false` for both
+        // `fatal` and `recursion` matches g_log_set_handler defaults.
+        let levels = LogLevels::LEVEL_CRITICAL
+            | LogLevels::LEVEL_WARNING
+            | LogLevels::LEVEL_MESSAGE
+            | LogLevels::LEVEL_INFO;
+        for domain in ["Gdk", "Gtk", "GLib-GObject", "libappindicator-gtk3"] {
+            log_set_handler(Some(domain), levels, false, false, |dom, lvl, msg| {
+                let dom = dom.unwrap_or("?");
+                match lvl {
+                    LogLevel::Error | LogLevel::Critical | LogLevel::Warning => {
+                        tracing::debug!("{dom}: {msg}");
+                    }
+                    _ => tracing::trace!("{dom}: {msg}"),
+                }
+            });
+        }
     }
 
     #[cfg(not(target_os = "linux"))]
