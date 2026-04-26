@@ -206,7 +206,7 @@ jobs:
           if-no-files-found: error
 
   linux-slack:
-    name: Slackware/NimbleX (.txz + .lzm)
+    name: Slackware package (.txz)
     needs: build
     runs-on: ubuntu-latest
     container:
@@ -219,7 +219,7 @@ jobs:
           name: fono-archive-x86_64-unknown-linux-gnu
           path: linux-bin
 
-      - name: Run SlackBuild and build NimbleX .lzm
+      - name: Run SlackBuild in binary mode
         shell: bash
         run: |
           set -euo pipefail
@@ -233,36 +233,63 @@ jobs:
           mkdir -p "${GITHUB_WORKSPACE}/dist-slack"
           cp "/tmp/fono-${version}-x86_64-1_NimbleX.txz" "${GITHUB_WORKSPACE}/dist-slack/"
 
-          # ---- NimbleX .lzm ------------------------------------------------
-          # The lzm is a squashfs that NimbleX stacks as an aufs/overlay layer
-          # at boot — there is no install hook, so the user-systemd autostart
-          # symlink has to live inside the image itself.
-          command -v mksquashfs >/dev/null
-          PKG=/tmp/SBo/package-fono   # matches TMP/PKG in fono.SlackBuild
-          test -d "$PKG/usr/bin" -a -x "$PKG/usr/bin/fono"
-          # Slackware-only metadata is meaningless inside a live filesystem layer.
-          rm -rf "$PKG/install"
-          # Autostart fono on user login: drop default.target.wants symlink for
-          # the per-user unit. systemd --user picks this up at session start
-          # without anyone running `systemctl --user enable`.
-          mkdir -p "$PKG/lib/systemd/user/default.target.wants"
-          ln -sfn ../fono.service "$PKG/lib/systemd/user/default.target.wants/fono.service"
-          mksquashfs "$PKG" \
-            "${GITHUB_WORKSPACE}/dist-slack/fono-${version}-x86_64.lzm" \
-            -comp xz -b 256K -noappend -no-recovery
-          ls -la "${GITHUB_WORKSPACE}/dist-slack"
-
       - uses: actions/upload-artifact@v5
         with:
           name: fono-archive-slack
-          path: |
-            dist-slack/*.txz
-            dist-slack/*.lzm
+          path: dist-slack/*.txz
+          if-no-files-found: error
+
+  linux-nimblex:
+    name: NimbleX module (.lzm)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: fono-archive-x86_64-unknown-linux-gnu
+          path: linux-bin
+
+      - name: Build NimbleX .lzm
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          stem="fono-v${version}-x86_64-unknown-linux-gnu"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq squashfs-tools
+
+          # Stage the same install layout the .txz/.deb produce.
+          mkdir -p pkg/usr/bin pkg/usr/share/doc/fono \
+            pkg/usr/share/applications pkg/usr/share/icons/hicolor/scalable/apps \
+            pkg/lib/systemd/user pkg/lib/systemd/user/default.target.wants
+          tar -xzf "linux-bin/${stem}.tar.gz" -C /tmp
+          install -m0755 "/tmp/${stem}/fono" pkg/usr/bin/fono
+          install -m0644 README.md LICENSE CHANGELOG.md pkg/usr/share/doc/fono/
+          install -m0644 packaging/slackbuild/fono/fono.desktop pkg/usr/share/applications/fono.desktop
+          install -m0644 packaging/slackbuild/fono/fono.svg pkg/usr/share/icons/hicolor/scalable/apps/fono.svg
+          install -m0644 packaging/systemd/fono.service pkg/lib/systemd/user/fono.service
+          # Autostart fono on user login: NimbleX mounts the lzm as an
+          # aufs/overlay layer with no install hook, so the symlink that
+          # `systemctl --user enable` would normally create has to live
+          # inside the image itself.
+          ln -sfn ../fono.service pkg/lib/systemd/user/default.target.wants/fono.service
+
+          mkdir -p dist-nimblex
+          mksquashfs pkg "dist-nimblex/fono-${version}-x86_64.lzm" \
+            -comp xz -b 256K -noappend -no-recovery
+          ls -la dist-nimblex
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: fono-archive-nimblex
+          path: dist-nimblex/*.lzm
           if-no-files-found: error
 
   release:
     name: Draft GitHub Release
-    needs: [build, linux-deb, linux-arch, linux-slack]
+    needs: [build, linux-deb, linux-arch, linux-slack, linux-nimblex]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v5
