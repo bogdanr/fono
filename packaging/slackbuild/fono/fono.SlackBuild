@@ -6,11 +6,12 @@
 #   https://github.com/bogdanr/fono
 #
 # Two build modes:
-#   * Binary mode (default): downloads the pre-built musl static binary
-#     from the GitHub release pinned in fono.info and installs it.
+#   * Binary mode (default): downloads the pre-built x86_64-unknown-linux-gnu
+#     binary from the GitHub release pinned in fono.info and installs it.
+#     The release-slim cargo profile already strips symbols, so binutils
+#     is not required at install time.
 #   * Source mode: set FROM_SOURCE=1 to clone upstream at VERSION and
-#     build with `cargo --profile release-slim`. Requires rust + musl-gcc
-#     in $PATH.
+#     build with `cargo --profile release-slim`. Requires rust in $PATH.
 #
 # Fono is per-user software: the systemd unit ships as a *user* unit
 # under /lib/systemd/user/ and is never enabled globally.
@@ -91,7 +92,9 @@ fi
 chown -R root:root .
 
 # ---- install ----------------------------------------------------------
-install -s -m0755 -D "$BIN_SRC"                 $PKG/usr/bin/fono
+# release-slim profile strips symbols, so we don't pass -s here (saves a
+# binutils dependency in minimal Slackware containers).
+install -m0755 -D "$BIN_SRC"                    $PKG/usr/bin/fono
 
 # Desktop entry + icon
 install -Dm644 $CWD/fono.desktop                $PKG/usr/share/applications/fono.desktop

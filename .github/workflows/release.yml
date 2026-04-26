@@ -85,57 +85,56 @@ jobs:
 
   linux-deb:
     name: Debian package (.deb)
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v5
         with:
-          key: linux-deb
+          name: fono-archive-x86_64-unknown-linux-gnu
+          path: linux-bin
 
-      - name: Install build deps
+      - name: Build binary Debian package
+        shell: bash
         run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          stem="fono-v${version}-x86_64-unknown-linux-gnu"
           sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            debhelper-compat dh-make build-essential clang cmake pkg-config \
-            libasound2-dev libclang-dev libgtk-3-dev \
-            libayatana-appindicator3-dev libxdo-dev
+          sudo apt-get install -y -qq dpkg-dev
 
-      - name: Stage source tree for dpkg-buildpackage
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          stage="../fono-${version}"
-          mkdir -p "${stage}"
-          tar --exclude=./.git --exclude=./target -cf - . | (cd "${stage}" && tar -xf -)
-          cp -r packaging/debian "${stage}/debian"
-          chmod +x "${stage}/debian/rules"
-          # Generate a one-line changelog so dpkg-buildpackage is happy.
-          cat > "${stage}/debian/changelog" <<EOF
-          fono (${version}-1) unstable; urgency=medium
+          mkdir -p debroot/DEBIAN debroot/usr/bin debroot/usr/share/doc/fono \
+            debroot/usr/share/applications debroot/usr/share/icons/hicolor/scalable/apps \
+            debroot/lib/systemd/user
+          tar -xzf "linux-bin/${stem}.tar.gz" -C /tmp
+          install -m0755 "/tmp/${stem}/fono" debroot/usr/bin/fono
+          install -m0644 README.md LICENSE CHANGELOG.md debroot/usr/share/doc/fono/
+          install -m0644 packaging/slackbuild/fono/fono.desktop debroot/usr/share/applications/fono.desktop
+          install -m0644 packaging/slackbuild/fono/fono.svg debroot/usr/share/icons/hicolor/scalable/apps/fono.svg
+          install -m0644 packaging/systemd/fono.service debroot/lib/systemd/user/fono.service
 
-            * Release ${version}. See CHANGELOG.md for details.
-
-           -- Bogdan Rădulescu <bogdan@nimblex.net>  $(date -R)
+          installed_size="$(du -sk debroot | cut -f1)"
+          cat > debroot/DEBIAN/control <<EOF
+          Package: fono
+          Version: ${version}-1
+          Section: sound
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Bogdan Rădulescu <bogdan@nimblex.net>
+          Installed-Size: ${installed_size}
+          Depends: libc6, libgcc-s1, libstdc++6, libasound2, libgtk-3-0, libayatana-appindicator3-1
+          Recommends: xsel | xclip | wl-clipboard, pipewire | pulseaudio
+          Homepage: https://github.com/bogdanr/fono
+          Description: Native desktop voice dictation tool
+           Fono is a lightweight Rust voice dictation daemon with local and cloud
+           speech-to-text providers, optional LLM cleanup, tray controls, history,
+           and text injection for desktop applications.
           EOF
-          # Some debhelper versions want compat file present.
-          echo 13 > "${stage}/debian/compat"
+          chmod 0644 debroot/DEBIAN/control
 
-      - name: Run dpkg-buildpackage
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          cd "../fono-${version}"
-          dpkg-buildpackage -us -uc -b -d
-          cd ..
-          ls -la
-          mkdir -p "${GITHUB_WORKSPACE}/dist-deb"
-          cp fono_*.deb "${GITHUB_WORKSPACE}/dist-deb/"
+          mkdir -p dist-deb
+          dpkg-deb --build --root-owner-group debroot "dist-deb/fono_${version}-1_amd64.deb"
 
       - uses: actions/upload-artifact@v5
         with:
@@ -145,46 +144,60 @@ jobs:
 
   linux-arch:
     name: Arch package (.pkg.tar.zst)
+    needs: build
     runs-on: ubuntu-latest
-    container:
-      image: archlinux:base-devel
     steps:
-      - name: Install build deps
-        run: |
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm git rust cargo clang llvm lld cmake pkgconf alsa-lib gtk3 libayatana-appindicator xdotool
-
-      - name: Allow makepkg to run as root via fakeuser
-        run: |
-          useradd -m builder
-          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-
       - uses: actions/checkout@v5
-        with:
-          path: fono-src
 
-      - name: Stage source tarball next to PKGBUILD
+      - uses: actions/download-artifact@v5
+        with:
+          name: fono-archive-x86_64-unknown-linux-gnu
+          path: linux-bin
+
+      - name: Build binary Arch package
+        shell: bash
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          mkdir -p /home/builder/build
-          cp fono-src/packaging/aur/PKGBUILD /home/builder/build/PKGBUILD
-          # Vendor the source so the PKGBUILD's downloader is bypassed.
-          (cd fono-src && tar --exclude=./.git --exclude=./target \
-              --transform "s,^\.,fono-${version}," \
-              -czf "/home/builder/build/fono-${version}.tar.gz" .)
-          # Rewrite source= and sha256sums to point at the local tarball.
-          sed -i "s|^source=.*$|source=(\"fono-${version}.tar.gz\")|" /home/builder/build/PKGBUILD
-          sed -i "s|^sha256sums=.*$|sha256sums=('SKIP')|" /home/builder/build/PKGBUILD
-          chown -R builder:builder /home/builder/build
+          stem="fono-v${version}-x86_64-unknown-linux-gnu"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libarchive-tools zstd
 
-      - name: makepkg
-        run: |
-          export LIBCLANG_PATH=/usr/lib
-          su builder -c 'cd /home/builder/build && export LIBCLANG_PATH=/usr/lib && makepkg --noconfirm -f'
-          mkdir -p "${GITHUB_WORKSPACE}/dist-arch"
-          cp /home/builder/build/*.pkg.tar.zst "${GITHUB_WORKSPACE}/dist-arch/"
-          ls -la "${GITHUB_WORKSPACE}/dist-arch"
+          mkdir -p pkg/usr/bin pkg/usr/share/doc/fono \
+            pkg/usr/share/applications pkg/usr/share/icons/hicolor/scalable/apps \
+            pkg/usr/lib/systemd/user
+          tar -xzf "linux-bin/${stem}.tar.gz" -C /tmp
+          install -m0755 "/tmp/${stem}/fono" pkg/usr/bin/fono
+          install -m0644 README.md LICENSE CHANGELOG.md pkg/usr/share/doc/fono/
+          install -m0644 packaging/slackbuild/fono/fono.desktop pkg/usr/share/applications/fono.desktop
+          install -m0644 packaging/slackbuild/fono/fono.svg pkg/usr/share/icons/hicolor/scalable/apps/fono.svg
+          install -m0644 packaging/systemd/fono.service pkg/usr/lib/systemd/user/fono.service
+
+          size="$(du -sb pkg | cut -f1)"
+          cat > pkg/.PKGINFO <<EOF
+          pkgname = fono
+          pkgbase = fono
+          pkgver = ${version}-1
+          pkgdesc = Native desktop voice dictation tool
+          url = https://github.com/bogdanr/fono
+          builddate = $(date +%s)
+          packager = Bogdan Rădulescu <bogdan@nimblex.net>
+          size = ${size}
+          arch = x86_64
+          license = GPL-3.0-only
+          depend = glibc
+          depend = gcc-libs
+          depend = alsa-lib
+          depend = gtk3
+          depend = libayatana-appindicator
+          optdepend = xsel: X11 clipboard fallback
+          optdepend = xclip: X11 clipboard fallback
+          optdepend = wl-clipboard: Wayland clipboard fallback
+          EOF
+
+          mkdir -p dist-arch
+          (cd pkg && bsdtar --zstd -cf "../dist-arch/fono-${version}-1-x86_64.pkg.tar.zst" .)
+          ls -la dist-arch
 
       - uses: actions/upload-artifact@v5
         with:
@@ -193,7 +206,7 @@ jobs:
           if-no-files-found: error
 
   linux-slack:
-    name: Slackware package (.txz)
+    name: Slackware/NimbleX (.txz + .lzm)
     needs: build
     runs-on: ubuntu-latest
     container:
@@ -204,26 +217,47 @@ jobs:
       - uses: actions/download-artifact@v5
         with:
           name: fono-archive-x86_64-unknown-linux-gnu
-          path: musl
+          path: linux-bin
 
-      - name: Run SlackBuild in binary mode
+      - name: Run SlackBuild and build NimbleX .lzm
         shell: bash
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           stem="fono-v${version}-x86_64-unknown-linux-gnu"
           # SlackBuild expects the upstream tarball alongside its directory.
-          cp "musl/${stem}.tar.gz" packaging/slackbuild/fono/
+          cp "linux-bin/${stem}.tar.gz" packaging/slackbuild/fono/
           cd packaging/slackbuild/fono
           chmod +x fono.SlackBuild
           VERSION="${version}" ARCH=x86_64 ./fono.SlackBuild
           mkdir -p "${GITHUB_WORKSPACE}/dist-slack"
-          cp /tmp/fono-${version}-x86_64-1_NimbleX.txz "${GITHUB_WORKSPACE}/dist-slack/"
+          cp "/tmp/fono-${version}-x86_64-1_NimbleX.txz" "${GITHUB_WORKSPACE}/dist-slack/"
+
+          # ---- NimbleX .lzm ------------------------------------------------
+          # The lzm is a squashfs that NimbleX stacks as an aufs/overlay layer
+          # at boot — there is no install hook, so the user-systemd autostart
+          # symlink has to live inside the image itself.
+          command -v mksquashfs >/dev/null
+          PKG=/tmp/SBo/package-fono   # matches TMP/PKG in fono.SlackBuild
+          test -d "$PKG/usr/bin" -a -x "$PKG/usr/bin/fono"
+          # Slackware-only metadata is meaningless inside a live filesystem layer.
+          rm -rf "$PKG/install"
+          # Autostart fono on user login: drop default.target.wants symlink for
+          # the per-user unit. systemd --user picks this up at session start
+          # without anyone running `systemctl --user enable`.
+          mkdir -p "$PKG/lib/systemd/user/default.target.wants"
+          ln -sfn ../fono.service "$PKG/lib/systemd/user/default.target.wants/fono.service"
+          mksquashfs "$PKG" \
+            "${GITHUB_WORKSPACE}/dist-slack/fono-${version}-x86_64.lzm" \
+            -comp xz -b 256K -noappend -no-recovery
+          ls -la "${GITHUB_WORKSPACE}/dist-slack"
 
       - uses: actions/upload-artifact@v5
         with:
           name: fono-archive-slack
-          path: dist-slack/*.txz
+          path: |
+            dist-slack/*.txz
+            dist-slack/*.lzm
           if-no-files-found: error
 
   release:
@@ -242,7 +276,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.deb" -o -name "*.pkg.tar.zst" -o -name "*.txz" \) -exec cp {} release/ \;
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.deb" -o -name "*.pkg.tar.zst" -o -name "*.txz" -o -name "*.lzm" \) -exec cp {} release/ \;
           cd release
           sha256sum * > SHA256SUMS
           ls -la
