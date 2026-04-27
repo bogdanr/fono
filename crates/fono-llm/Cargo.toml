@@ -17,7 +17,7 @@ default = ["cerebras", "openai-compat"]
 cerebras = ["dep:reqwest"]
 openai-compat = ["dep:reqwest"]
 anthropic = ["dep:reqwest"]
-llama-local = ["dep:llama-cpp-2"]
+llama-local = ["dep:llama-cpp-2", "dep:encoding_rs"]
 
 [dependencies]
 fono-core = { path = "../fono-core" }
@@ -30,3 +30,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true, optional = true }
 llama-cpp-2 = { workspace = true, optional = true }
+# Pulled in transitively by llama-cpp-2; declared explicitly so the
+# token-to-piece UTF-8 decoder lands inside our llama_local module.
+encoding_rs = { version = "0.8", optional = true }

@@ -105,7 +105,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
             Ok(s) => writeln!(out, "  stt: {} ready", s.name())?,
             Err(e) => writeln!(out, "  stt: FAIL — {e:#}")?,
         }
-        match fono_llm::build_llm(&c.llm, &secrets) {
+        match fono_llm::build_llm(&c.llm, &secrets, &paths.llm_models_dir()) {
             Ok(Some(l)) => writeln!(out, "  llm: {} ready", l.name())?,
             Ok(None) => writeln!(out, "  llm: disabled (cleanup off)")?,
             Err(e) => writeln!(out, "  llm: FAIL — {e:#}")?,

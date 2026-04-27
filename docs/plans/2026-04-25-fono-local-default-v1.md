@@ -51,16 +51,24 @@ Ship the released `fono` binary so that:
 
 ### Local LLM (`LlamaLocal`)
 
-* [~] **H8.** Real `llama-cpp-2` integration: **deferred to v0.2**. Rationale:
-  - `llama-cpp-2` 0.1.x exposes a low-level API; a safe wrapper inside Fono
-    is several hundred lines of unsafe-adjacent code.
-  - For v0.1 the wizard's local branch defaults to **"Skip LLM cleanup"** for
-    every tier ≤ `Recommended`; users who want LLM cleanup pick a fast cloud
-    provider (Cerebras / Groq).
-  - Local STT (the bulk of the work) is the dominant value-add and ships
-    fully working in v0.1.
-  - Captured in `docs/decisions/0008-llama-local-deferred.md`.
-* [~] **H9, H10.** depend on H8.
+* [x] **H8.** Real `llama-cpp-2` integration landed in the v0.1.x F2 cycle.
+  `crates/fono-llm/src/llama_local.rs` now does honest GGUF inference:
+  - Process-wide `LlamaBackend` cached in a `OnceLock`.
+  - Lazy model load via `Arc<Mutex<Option<LlamaModel>>>` (mirrors `WhisperLocal`),
+    triggered by either `prewarm()` or the first `format()` call.
+  - Fresh `LlamaContext` per cleanup pass, greedy sampling, ChatML prompt
+    template (Qwen2.5 / SmolLM2), `MAX_NEW_TOKENS = 256`, EOS + `<|im_end|>`
+    stop tokens.
+  - Inference runs on `tokio::task::spawn_blocking`. A cleanup that takes
+    > 5 s emits a `warn!` recommending the user switch to a cloud LLM —
+    laptops with no GPU acceleration are the dominant target and CPU-only
+    Q4_K_M of a 1.5B model is on the order of 5–15 tok/s.
+  - Factory grew `llm_models_dir: &Path`; `cfg.local.model` is resolved as
+    `<dir>/<name>.gguf` (matches the whisper resolver pattern).
+  - Three unit tests cover prompt construction + missing-model error path.
+* [~] **H9, H10.** GGUF auto-download + tier-aware preselection: still open,
+  follow-up. The existing `LLM_MODELS` registry already pins the URLs and a
+  TODO in `crates/fono/src/models.rs` marks the integration site.
 
 ### Wizard integration
 

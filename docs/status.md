@@ -1,6 +1,25 @@
 # Fono — Project Status
 
-Last updated: 2026-04-25
+Last updated: 2026-04-27
+
+## H8 landed — real local LLM cleanup via `llama-cpp-2`
+
+`crates/fono-llm/src/llama_local.rs` is no longer a stub. The `llama-local`
+feature now runs honest GGUF inference: process-wide `LlamaBackend` cached in
+a `OnceLock`, lazy model load via `Arc<Mutex<Option<LlamaModel>>>` (mirrors
+`WhisperLocal`), greedy sampling, ChatML prompt template that fits both
+Qwen2.5 and SmolLM2, `MAX_NEW_TOKENS = 256`, EOS + `<|im_end|>` stop tokens,
+and a `tokio::task::spawn_blocking` boundary so the async runtime keeps
+moving while llama.cpp grinds. The factory grew an `llm_models_dir` parameter
+that resolves `cfg.local.model` (a name) to `<dir>/<name>.gguf` — the
+existing scaffold's "model NAME passed as a path" bug is gone.
+
+A cleanup that takes > 5 s emits a `warn!` recommending the user pick a
+cloud provider (`fono use llm groq` / `cerebras`) or a smaller model. CPU-only
+Q4_K_M inference of a 1.5B-parameter model is on the order of 5–15 tok/s on
+a laptop, so this matters: the wizard continues to default-skip the local
+LLM for tiers ≤ `Recommended`. Local LLM model auto-download (H9 / H10) is
+still open — follow-up.
 
 ## Recent fix — silenced GTK/GDK startup warnings
 

@@ -561,7 +561,7 @@ async fn record_cmd(
     drop(handle);
 
     let stt = fono_stt::build_stt(&config.stt, &secrets, &paths.whisper_models_dir())?;
-    let llm = fono_llm::build_llm(&config.llm, &secrets)?;
+    let llm = fono_llm::build_llm(&config.llm, &secrets, &paths.llm_models_dir())?;
 
     eprintln!(
         "fono record: captured {} samples ({} ms); running STT…",
@@ -629,7 +629,7 @@ async fn transcribe_cmd(
     let llm = if no_llm {
         None
     } else {
-        fono_llm::build_llm(&config.llm, &secrets)?
+        fono_llm::build_llm(&config.llm, &secrets, &paths.llm_models_dir())?
     };
     let trans = stt.transcribe(&pcm, sample_rate, None).await?;
     let raw = trans.text.trim().to_string();

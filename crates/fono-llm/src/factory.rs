@@ -2,6 +2,7 @@
 //! Build a concrete [`TextFormatter`] (or `None` when LLM cleanup is
 //! disabled) from `Config` + `Secrets`.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -49,8 +50,17 @@ fn resolve_cloud(
 
 /// Returns `Ok(None)` when `cfg.enabled == false` or `cfg.backend == None`.
 /// Otherwise returns the constructed backend or an error explaining why
-/// construction failed (missing API key, missing feature, etc.).
-pub fn build_llm(cfg: &Llm, secrets: &Secrets) -> Result<Option<Arc<dyn TextFormatter>>> {
+/// construction failed (missing API key, missing model file, missing feature
+/// flag, etc.).
+///
+/// `llm_models_dir` is the on-disk directory where local LLM GGUF weights
+/// live (typically `~/.local/share/fono/models/llm/`). It is only consulted
+/// when `cfg.backend == LlmBackend::Local`.
+pub fn build_llm(
+    cfg: &Llm,
+    secrets: &Secrets,
+    llm_models_dir: &Path,
+) -> Result<Option<Arc<dyn TextFormatter>>> {
     if !cfg.enabled || matches!(cfg.backend, LlmBackend::None) {
         return Ok(None);
     }
@@ -85,13 +95,20 @@ pub fn build_llm(cfg: &Llm, secrets: &Secrets) -> Result<Option<Arc<dyn TextForm
             let (k, m) = resolve_cloud(cfg, secrets, &LlmBackend::Anthropic, "anthropic")?;
             build_anthropic(k, m)
         }
-        LlmBackend::Local => build_local(cfg),
+        LlmBackend::Local => build_local(cfg, llm_models_dir),
         LlmBackend::Gemini => Err(anyhow!(
             "Gemini LLM backend not yet implemented; pick cerebras/openai/anthropic"
         )),
         LlmBackend::None => unreachable!(),
     }
     .map(Some)
+}
+
+/// Resolve the model name in `cfg.local.model` to a `<llm_models_dir>/<name>.gguf`
+/// path. Mirrors the whisper resolver in `fono::models::ensure_whisper`.
+#[cfg(any(feature = "llama-local", test))]
+fn resolve_local_model_path(cfg: &Llm, llm_models_dir: &Path) -> std::path::PathBuf {
+    llm_models_dir.join(format!("{}.gguf", cfg.local.model))
 }
 #[cfg(feature = "cerebras")]
 #[allow(clippy::unnecessary_wraps)]
@@ -190,18 +207,16 @@ fn build_anthropic(_: String, _: String) -> Result<Arc<dyn TextFormatter>> {
 }
 
 #[cfg(feature = "llama-local")]
-fn build_local(cfg: &Llm) -> Result<Arc<dyn TextFormatter>> {
+#[allow(clippy::unnecessary_wraps)]
+fn build_local(cfg: &Llm, llm_models_dir: &Path) -> Result<Arc<dyn TextFormatter>> {
     Ok(Arc::new(crate::llama_local::LlamaLocal::new(
-        // Caller is expected to resolve the path; for now we use the
-        // model name as a placeholder so the construction succeeds and
-        // the scaffold's clear runtime error surfaces on first use.
-        std::path::PathBuf::from(&cfg.local.model),
+        resolve_local_model_path(cfg, llm_models_dir),
         cfg.local.context,
     )))
 }
 
 #[cfg(not(feature = "llama-local"))]
-fn build_local(_: &Llm) -> Result<Arc<dyn TextFormatter>> {
+fn build_local(_: &Llm, _: &Path) -> Result<Arc<dyn TextFormatter>> {
     Err(anyhow!(
         "local LLM requested but this binary was built without the \
          `llama-local` feature; rebuild with `cargo build --features llama-local` \
@@ -221,7 +236,9 @@ mod tests {
             ..LlmCfg::default()
         };
         let s = Secrets::default();
-        assert!(build_llm(&cfg, &s).unwrap().is_none());
+        assert!(build_llm(&cfg, &s, Path::new("/nonexistent"))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -232,6 +249,25 @@ mod tests {
             ..LlmCfg::default()
         };
         let s = Secrets::default();
-        assert!(build_llm(&cfg, &s).unwrap().is_none());
+        assert!(build_llm(&cfg, &s, Path::new("/nonexistent"))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn local_path_resolution_uses_models_dir() {
+        let cfg = LlmCfg {
+            local: fono_core::config::LlmLocal {
+                model: "qwen2.5-1.5b-instruct".into(),
+                ..fono_core::config::LlmLocal::default()
+            },
+            ..LlmCfg::default()
+        };
+        let dir = Path::new("/var/lib/fono/llm");
+        let p = resolve_local_model_path(&cfg, dir);
+        assert_eq!(
+            p,
+            std::path::PathBuf::from("/var/lib/fono/llm/qwen2.5-1.5b-instruct.gguf")
+        );
     }
 }

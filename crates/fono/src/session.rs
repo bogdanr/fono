@@ -189,7 +189,7 @@ impl SessionOrchestrator {
     ) -> Result<Self> {
         let stt = fono_stt::build_stt(&config.stt, secrets, &paths.whisper_models_dir())
             .context("build STT backend")?;
-        let llm = match fono_llm::build_llm(&config.llm, secrets) {
+        let llm = match fono_llm::build_llm(&config.llm, secrets, &paths.llm_models_dir()) {
             Ok(opt) => opt,
             Err(e) => {
                 warn!("LLM backend unavailable; continuing without cleanup: {e:#}");
@@ -243,7 +243,7 @@ impl SessionOrchestrator {
         let secrets = Secrets::load(&paths.secrets_file()).context("reload: read secrets")?;
         let new_stt = fono_stt::build_stt(&cfg.stt, &secrets, &paths.whisper_models_dir())
             .context("reload: build STT")?;
-        let new_llm = match fono_llm::build_llm(&cfg.llm, &secrets) {
+        let new_llm = match fono_llm::build_llm(&cfg.llm, &secrets, &paths.llm_models_dir()) {
             Ok(opt) => opt,
             Err(e) => {
                 warn!("reload: LLM backend unavailable; continuing without cleanup: {e:#}");
