@@ -27,7 +27,7 @@ One static Rust binary — no Electron, no Python, no WebKit.
 | **Debian / Ubuntu**     | `sudo apt install ./fono_0.2.0_amd64.deb` *(from [Releases](https://github.com/bogdanr/fono/releases/latest))* |
 | **Slackware / NimbleX** | `installpkg fono-0.2.0-x86_64-1.txz` *(from [Releases](https://github.com/bogdanr/fono/releases/latest))* |
 | **NixOS / Nix flake**   | `nix profile install github:bogdanr/fono`                                                            |
-| **Any Linux (tarball)** | Download `fono-v0.2.0-x86_64`, `chmod +x fono-v0.2.0-x86_64 && sudo install -m755 fono-v0.2.0-x86_64 /usr/local/bin/fono` |
+| **Any Linux (one-liner)** | `curl -fsSL https://github.com/bogdanr/fono/releases/latest/download/fono-v0.2.0-x86_64 \| sudo install -m755 /dev/stdin /usr/local/bin/fono` |
 | **macOS / Windows**     | Planned after the Linux-first releases |
 
 ## First run
