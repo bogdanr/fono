@@ -11,6 +11,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   BIN_NAME: fono
+  # Opt into Node.js 24 runtime for JS actions (silences Node 20
+  # deprecation warnings emitted by actions/{checkout,upload-artifact,
+  # download-artifact} and softprops/action-gh-release).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 # Signing with minisign is optional: if the repo secret MINISIGN_KEY is set
 # (along with MINISIGN_PASSWORD), the release job will sign SHA256SUMS and
@@ -231,7 +235,7 @@ jobs:
           chmod +x fono.SlackBuild
           VERSION="${version}" ARCH=x86_64 ./fono.SlackBuild
           mkdir -p "${GITHUB_WORKSPACE}/dist-slack"
-          cp "/tmp/fono-${version}-x86_64-1_NimbleX.txz" "${GITHUB_WORKSPACE}/dist-slack/"
+          cp "/tmp/fono-${version}-x86_64-1.txz" "${GITHUB_WORKSPACE}/dist-slack/"
 
       - uses: actions/upload-artifact@v5
         with:
