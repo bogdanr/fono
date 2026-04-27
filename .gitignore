@@ -1,0 +1,15 @@
+.DS_Store
+.idea/
+.claude/
+.vscode/
+node_modules/
+
+# Editor swap / undo files
+*~
+.*~
+.*.un~
+.*.swp
+.*.swo
+
+# Build artefacts that may sit in the worktree from `main` — never commit on site.
+target/

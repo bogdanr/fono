@@ -1,0 +1,64 @@
+#!/usr/bin/env sh
+# Fono installer — fono.page
+#
+# Usage:
+#   curl -L https://fono.page/install | sh
+#   curl -L https://fono.page/install | BIN_DIR=$HOME/.local/bin sh
+#
+# Inspect before piping to sh:
+#   curl -L https://fono.page/install
+set -eu
+
+REPO="bogdanr/fono"
+BIN_DIR="${BIN_DIR:-/usr/local/bin}"
+
+err() { printf '%s\n' "fono: $*" >&2; }
+
+uname_s=$(uname -s)
+uname_m=$(uname -m)
+
+case "$uname_s" in
+  Linux) : ;;
+  *) err "Linux-only today (you're on $uname_s). macOS and Windows are on the roadmap."; exit 1 ;;
+esac
+
+case "$uname_m" in
+  x86_64|amd64) arch=x86_64 ;;
+  *) err "unsupported architecture: $uname_m. open an issue at https://github.com/$REPO/issues"; exit 1 ;;
+esac
+
+need() { command -v "$1" >/dev/null 2>&1 || { err "missing dependency: $1"; exit 1; }; }
+need curl
+
+tag=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+  | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+  | head -n1)
+if [ -z "${tag:-}" ]; then
+  err "could not resolve the latest release tag from GitHub. is the network up?"
+  exit 1
+fi
+
+asset="fono-${tag}-${arch}"
+url="https://github.com/$REPO/releases/download/${tag}/${asset}"
+
+printf '==> downloading %s\n' "$asset"
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+curl -fL --progress-bar "$url" -o "$tmp"
+
+printf '==> installing to %s/fono\n' "$BIN_DIR"
+if [ -w "$BIN_DIR" ]; then
+  install -m755 "$tmp" "$BIN_DIR/fono"
+else
+  if command -v sudo >/dev/null 2>&1; then
+    sudo install -m755 "$tmp" "$BIN_DIR/fono"
+  else
+    err "no write access to $BIN_DIR and sudo not found. set BIN_DIR to a writable path:"
+    err "  curl -L https://fono.page/install | BIN_DIR=\$HOME/.local/bin sh"
+    exit 1
+  fi
+fi
+
+printf '\n  fono %s installed.\n' "$tag"
+printf '  next:  fono setup     # picks local vs cloud, installs models\n'
+printf '         fono            # starts the daemon (F9 toggle, F8 push-to-talk)\n\n'

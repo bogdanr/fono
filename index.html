@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Fono — Speak. It types.</title>
+<meta name="description" content="Press a hotkey, speak, see your words on screen. A lightweight, native voice-dictation tool for Linux. Local-first, cloud-optional. Single static Rust binary." />
+<meta name="theme-color" content="#0e0d0c" />
+<link rel="canonical" href="https://fono.page/" />
+<meta property="og:title" content="Fono — Speak. It types." />
+<meta property="og:description" content="Press a hotkey, speak, see your words on screen. Local-first dictation for Linux." />
+<meta property="og:url" content="https://fono.page/" />
+<meta property="og:type" content="website" />
+<meta name="twitter:card" content="summary_large_image" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="shared/fono.css" />
+<style>
+  :root {
+    /* Sepia neutrals tinted toward warm yellow-orange (h≈70°). */
+    --bg:            oklch(0.135 0.005 70);
+    --bg-2:          oklch(0.160 0.008 70);
+    --bg-3:          oklch(0.200 0.009 70);
+    --line:          oklch(0.235 0.011 70);
+    --line-2:        oklch(0.310 0.013 70);
+    --ink:           oklch(0.950 0.016 75);
+    --ink-mute:      oklch(0.760 0.020 75);
+    --ink-dim:       oklch(0.585 0.020 75);
+    /* Oxblood accent split into two roles so each one passes WCAG AA in its job:
+       --accent      : foreground colour (eyebrows, italic emphasis, prompts) — text on bg
+       --accent-fill : surface colour    (button backgrounds) — pairs with --ink-on-accent
+       --accent-2    : hover surface     — paired with --bg as text on hover */
+    --accent:        oklch(0.660 0.190 28);
+    --accent-fill:   oklch(0.555 0.205 26);
+    --accent-2:      oklch(0.760 0.155 42);
+    --ink-on-accent: oklch(0.970 0.012 75);
+    --serif: 'Instrument Serif', 'Times New Roman', serif;
+    --sans:  'IBM Plex Sans', -apple-system, sans-serif;
+    --mono:  'IBM Plex Mono', ui-monospace, monospace;
+  }
+  [data-theme="light"] {
+    --bg:            oklch(0.950 0.018 75);
+    --bg-2:          oklch(0.910 0.020 75);
+    --bg-3:          oklch(0.870 0.022 75);
+    --line:          oklch(0.830 0.024 75);
+    --line-2:        oklch(0.770 0.025 75);
+    --ink:           oklch(0.180 0.012 60);
+    --ink-mute:      oklch(0.420 0.018 65);
+    --ink-dim:       oklch(0.490 0.022 70);
+    /* Light theme accent is dark enough to serve both roles from a single value. */
+    --accent:        oklch(0.420 0.180 25);
+    --accent-fill:   oklch(0.420 0.180 25);
+    --accent-2:      oklch(0.320 0.160 22);
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.55;
+  }
+
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 0 clamp(20px, 4vw, 40px); }
+  .narrow { max-width: 980px; margin: 0 auto; padding: 0 clamp(20px, 4vw, 40px); }
+
+  /* nav */
+  nav {
+    border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 50;
+    background: var(--bg);
+  }
+  nav .row { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+  .wordmark { font-family: var(--serif); font-size: 28px; font-style: italic; letter-spacing: -0.02em; line-height: 1; }
+  nav ul { display: flex; gap: 28px; list-style: none; padding: 0; margin: 0; font-family: var(--mono); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+  nav a { color: var(--ink-mute); text-decoration: none; }
+  nav a:hover { color: var(--accent); }
+  .nav-right { display: flex; align-items: center; gap: 16px; }
+  .theme-tog { width: 40px; height: 40px; border: 1px solid var(--line-2); background: transparent; cursor: pointer; color: var(--ink-mute); border-radius: 50%; display: grid; place-items: center; }
+  .theme-tog:hover { color: var(--accent); border-color: var(--accent); }
+  .btn-cta {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 11px 16px 11px 14px; border-radius: 999px;
+    min-height: 40px;
+    background: var(--accent-fill); color: var(--ink-on-accent);
+    text-decoration: none;
+    font-family: var(--mono); font-size: 12px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    transition: background .15s, transform .05s;
+  }
+  .btn-cta:hover { background: var(--accent-2); color: var(--bg); }
+  .btn-cta:active { transform: translateY(1px); }
+  .btn-cta .star { width: 14px; height: 14px; fill: currentColor; }
+
+  /* hero star CTA: same shape as install pill, no glow */
+  .btn-star-hero {
+    display: inline-flex; align-items: center; gap: 10px;
+    padding: 14px 22px;
+    background: var(--accent-fill); color: var(--ink-on-accent);
+    text-decoration: none;
+    font-family: var(--mono); font-size: 13px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    border-radius: 999px;
+    transition: background .15s, transform .05s;
+  }
+  .btn-star-hero:hover { background: var(--accent-2); color: var(--bg); }
+  .btn-star-hero:active { transform: translateY(1px); }
+  .btn-star-hero .star { width: 16px; height: 16px; fill: currentColor; }
+
+  /* HERO — editorial */
+  .hero { padding: clamp(48px, 8vw, 80px) 0 clamp(20px, 3vw, 32px); position: relative; overflow: hidden; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.12em;
+    color: var(--accent);
+    margin-bottom: 28px;
+  }
+
+  .hero h1 {
+    font-family: var(--serif);
+    font-size: clamp(56px, 13vw, 192px);
+    line-height: 0.86;
+    letter-spacing: -0.04em;
+    margin: 0 0 0;
+    font-weight: 400;
+    text-wrap: balance;
+  }
+  .hero h1 .it { font-style: italic; color: var(--accent); }
+  .hero h1 .small { font-size: 0.42em; vertical-align: 0.6em; font-style: italic; color: var(--ink-mute); }
+
+  .hero-meta {
+    display: grid;
+    grid-template-columns: 1fr 380px;
+    gap: 56px;
+    margin-top: 56px;
+    padding-top: 32px;
+    border-top: 1px solid var(--line);
+  }
+  .hero-main { display: flex; flex-direction: column; gap: 36px; }
+  .hero-lede {
+    font-family: var(--serif);
+    font-size: 28px;
+    line-height: 1.25;
+    color: var(--ink);
+    max-width: 620px;
+    margin: 0;
+    font-weight: 400;
+    text-wrap: pretty;
+  }
+  .hero-lede em { font-style: italic; color: var(--accent); }
+  .hero-side {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--ink-mute);
+    line-height: 1.7;
+  }
+  .hero-side dt { color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.1em; font-size: 10.5px; margin-top: 14px; }
+  .hero-side dt:first-child { margin-top: 0; }
+  .hero-side dd { margin: 2px 0 0; color: var(--ink); }
+
+  .hero-cta-row {
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  }
+  .install-pill {
+    display: inline-flex; align-items: center; gap: 14px;
+    padding: 8px 8px 8px 22px;
+    border-radius: 999px;
+    border: 1px solid var(--line-2);
+    background: var(--bg-2);
+    font-family: var(--mono); font-size: clamp(11.5px, 3vw, 13.5px);
+    max-width: 100%;
+  }
+  .install-pill > span:not(.prompt) { min-width: 0; overflow-wrap: anywhere; }
+  .install-pill .prompt { color: var(--accent); flex: 0 0 auto; }
+  .install-pill button {
+    border: 0; background: var(--accent-fill); color: var(--ink-on-accent);
+    padding: 10px 16px; border-radius: 999px;
+    min-height: 36px;
+    font-family: var(--mono); font-size: 11.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .install-pill button.copied { background: var(--accent-2); color: var(--bg); }
+
+  /* WAVEFORM HERO VISUAL */
+  .wave-stage {
+    margin-top: clamp(48px, 8vw, 80px);
+    padding: clamp(32px, 6vw, 56px) 0 clamp(40px, 7vw, 64px);
+    background: var(--bg-2);
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    position: relative;
+    overflow: hidden;
+  }
+  .wave-meta {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-family: var(--mono); font-size: 11px;
+    color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.12em;
+    margin-bottom: 24px;
+  }
+  .wave-meta b { color: var(--accent); font-weight: 500; }
+  .waveform {
+    display: flex; align-items: center; justify-content: center;
+    gap: 4px;
+    height: 180px;
+  }
+  .waveform span {
+    width: 5px;
+    background: var(--ink);
+    border-radius: 1px;
+    animation: wv 1.4s ease-in-out infinite;
+  }
+  @keyframes wv {
+    0%, 100% { height: 8%; }
+    50% { height: var(--h, 60%); }
+  }
+  .typed-out {
+    margin-top: 48px;
+    font-family: var(--serif);
+    font-size: clamp(24px, 3.4vw, 38px);
+    font-style: italic;
+    line-height: 1.3;
+    text-align: center;
+    color: var(--ink);
+    min-height: 100px;
+    padding: 0 40px;
+  }
+  .typed-out .tt-caret { color: var(--accent); font-style: normal; }
+
+  /* FEATURES */
+  .features { padding: clamp(64px, 10vw, 120px) 0; }
+  .section-h {
+    display: grid;
+    grid-template-columns: 1fr 1.4fr;
+    gap: clamp(40px, 7vw, 80px);
+    align-items: end;
+    margin-bottom: clamp(40px, 7vw, 72px);
+  }
+  .section-h .num { font-family: var(--mono); font-size: 12px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.12em; }
+  .section-h h2 {
+    font-family: var(--serif);
+    font-size: clamp(36px, 6vw, 88px);
+    line-height: 0.95;
+    letter-spacing: -0.025em;
+    margin: 12px 0 0;
+    font-weight: 400;
+    text-wrap: balance;
+  }
+  .section-h h2 em { font-style: italic; color: var(--accent); white-space: nowrap; }
+  .section-h .desc {
+    font-size: 18px; color: var(--ink-mute); line-height: 1.55;
+    max-width: 520px;
+    text-wrap: pretty;
+  }
+
+  .feat-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1px;
+    background: var(--line);
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+  }
+  .feat {
+    background: var(--bg);
+    padding: 48px 0 48px;
+    display: grid;
+    grid-template-columns: 80px 1fr;
+    gap: 24px;
+    align-items: start;
+  }
+  .feat .idx { font-family: var(--mono); font-size: 12px; color: var(--ink-dim); }
+  .feat h3 {
+    font-family: var(--serif);
+    font-size: 36px;
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+    font-weight: 400;
+    margin: 0 0 12px;
+    text-wrap: balance;
+  }
+  .feat h3 em { font-style: italic; color: var(--accent); }
+  .feat p {
+    font-size: 15.5px;
+    color: var(--ink-mute);
+    line-height: 1.6;
+    margin: 0;
+    max-width: 460px;
+    text-wrap: pretty;
+  }
+
+  /* INSTALL */
+  .install-section {
+    background: var(--bg-2);
+    padding: clamp(64px, 10vw, 120px) 0;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+  }
+  .install-card {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    padding: 32px;
+    margin-top: 56px;
+  }
+  .install-card .lbl {
+    font-family: var(--mono); font-size: 11px;
+    color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.1em;
+    margin-bottom: 14px;
+  }
+  .install-card pre {
+    font-family: var(--mono); font-size: 18px;
+    color: var(--ink);
+    margin: 0; padding: 0;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  .install-card pre .pr { color: var(--accent); }
+  .install-card .inspect {
+    margin-top: 16px;
+    font-family: var(--mono); font-size: 12px;
+    color: var(--ink-mute);
+  }
+  .install-card .inspect a { color: inherit; text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; }
+  .install-card .inspect a:hover { color: var(--accent); text-decoration-color: var(--accent); }
+
+  .pkg-mat {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+  }
+  .pkg-cell { background: var(--bg); padding: 24px 24px 28px; }
+  .pkg-cell .name {
+    font-family: var(--serif); font-style: italic; font-size: 22px;
+    margin-bottom: 12px;
+    color: var(--ink);
+  }
+  .pkg-cell code {
+    font-family: var(--mono); font-size: 13px;
+    color: var(--ink-mute);
+    background: var(--bg-2); padding: 6px 10px; border-radius: 4px;
+    display: inline-block;
+    word-break: break-all;
+  }
+  .pkg-cell.soon .name { color: var(--ink-mute); }
+  .pkg-cell.soon code { background: transparent; border: 1px dashed var(--line-2); color: var(--ink-dim); }
+
+  /* SWITCH PROVIDERS callout */
+  .switch-callout {
+    margin-top: 32px;
+    padding: 28px 32px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: 32px;
+    align-items: start;
+  }
+  .switch-callout .lbl {
+    font-family: var(--mono); font-size: 11px;
+    color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.1em;
+  }
+  .switch-callout pre {
+    font-family: var(--mono); font-size: 13.5px;
+    color: var(--ink);
+    margin: 0; padding: 0;
+    line-height: 1.85;
+    overflow-x: auto;
+  }
+  .switch-callout pre .pr { color: var(--accent); }
+  .switch-callout pre .cm { color: var(--ink-dim); }
+
+  /* HOW IT WORKS */
+  .how { padding: clamp(64px, 10vw, 120px) 0; }
+  .pipeline {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 32px;
+    margin-top: 56px;
+    position: relative;
+  }
+  .pipeline::before {
+    content: ''; position: absolute;
+    top: 28px; left: 5%; right: 5%; height: 1px;
+    background: var(--line);
+    z-index: 0;
+  }
+  .stage {
+    position: relative; z-index: 1;
+    background: var(--bg);
+    text-align: center;
+    padding: 0 16px;
+  }
+  .stage .dot {
+    width: 56px; height: 56px;
+    margin: 0 auto 24px;
+    border-radius: 50%;
+    background: var(--bg);
+    border: 1px solid var(--line-2);
+    display: grid; place-items: center;
+    font-family: var(--mono); font-size: 13px;
+    color: var(--accent);
+  }
+  .stage h4 {
+    font-family: var(--serif); font-size: 28px;
+    margin: 0 0 8px; font-weight: 400; letter-spacing: -0.02em;
+    text-wrap: balance;
+  }
+  .stage h4 em { font-style: italic; color: var(--accent); }
+  .stage p { font-size: 13.5px; color: var(--ink-mute); margin: 0; line-height: 1.55; text-wrap: pretty; }
+
+  /* COMPATIBILITY */
+  .compat-section {
+    background: var(--bg-2);
+    padding: clamp(64px, 10vw, 120px) 0;
+    border-top: 1px solid var(--line);
+  }
+  .compat-list {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: 0 56px;
+    margin-top: 40px;
+    border-top: 1px solid var(--line);
+  }
+  .compat-list dt, .compat-list dd {
+    padding: 24px 0;
+    border-bottom: 1px solid var(--line);
+    margin: 0;
+  }
+  .compat-list dt {
+    font-family: var(--mono); font-size: 11.5px;
+    text-transform: uppercase; letter-spacing: 0.1em;
+    color: var(--ink-dim);
+    align-self: center;
+  }
+  .compat-list dd {
+    display: flex; flex-wrap: wrap; gap: 8px 18px;
+    font-family: var(--serif); font-style: italic; font-size: 22px;
+    color: var(--ink);
+    line-height: 1.3;
+  }
+  .compat-list dd .y::before { content: '·'; color: var(--accent); margin-right: 6px; font-weight: 900; font-style: normal; }
+  .compat-list dd .pending { color: var(--ink-mute); }
+  .compat-list dd .pending::before { content: '·'; color: var(--ink-dim); margin-right: 6px; font-weight: 900; font-style: normal; }
+
+  /* FINAL CTA */
+  .final { padding: clamp(72px, 12vw, 140px) 0; text-align: center; }
+  .final h2 {
+    font-family: var(--serif);
+    font-size: clamp(44px, 9vw, 144px);
+    line-height: 0.9;
+    letter-spacing: -0.035em;
+    margin: 0 0 32px;
+    font-weight: 400;
+    text-wrap: balance;
+  }
+  .final h2 em { font-style: italic; color: var(--accent); white-space: nowrap; }
+  .final p {
+    font-size: 18px; color: var(--ink-mute);
+    max-width: 540px; margin: 0 auto 48px;
+    text-wrap: pretty;
+  }
+  .final .hero-cta-row { justify-content: center; }
+
+  footer {
+    border-top: 1px solid var(--line);
+    padding: 48px 0;
+    color: var(--ink-dim);
+    font-size: 13px;
+  }
+  footer .row { display: flex; justify-content: space-between; align-items: center; gap: 24px; flex-wrap: wrap; }
+  footer .links { display: flex; gap: 24px; font-family: var(--mono); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+  footer a { color: var(--ink-mute); text-decoration: none; }
+  footer a:hover { color: var(--accent); }
+  footer .sig { font-family: var(--serif); font-style: italic; font-size: 16px; color: var(--ink-mute); }
+
+  @media (max-width: 900px) {
+    .hero-meta { grid-template-columns: 1fr; gap: 32px; }
+    .section-h { grid-template-columns: 1fr; gap: 32px; }
+    .feat-grid, .pkg-mat { grid-template-columns: 1fr; }
+    .pipeline { grid-template-columns: 1fr 1fr; }
+    .pipeline::before { display: none; }
+    .compat-list { grid-template-columns: 1fr; }
+    .compat-list dt { padding-bottom: 0; border-bottom: 0; }
+    .compat-list dd { padding-top: 8px; }
+    .switch-callout { grid-template-columns: 1fr; gap: 12px; }
+    nav ul { display: none; }
+  }
+
+  @media (max-width: 600px) {
+    .pipeline { grid-template-columns: 1fr; }
+    .feat { grid-template-columns: auto 1fr; gap: 14px; padding: 36px 0; }
+    .feat h3 { font-size: 30px; }
+    .typed-out { padding: 0 16px; font-size: clamp(20px, 5.5vw, 28px); }
+    .install-card { padding: 24px 20px; }
+    .install-card pre { font-size: 16px; }
+    .install-card .inspect { font-size: 11.5px; }
+    .switch-callout { padding: 20px; }
+    .switch-callout pre { font-size: 12.5px; }
+    .pkg-cell { padding: 20px 20px 22px; }
+    .hero-side dt { font-size: 9.5px; }
+    .hero-side dd { font-size: 12px; }
+    .hero-cta-row { width: 100%; }
+    .install-pill { display: flex; width: 100%; }
+    .btn-star-hero { width: 100%; justify-content: center; }
+  }
+</style>
+</head>
+<body data-theme="dark">
+
+<nav>
+  <div class="wrap row">
+    <a href="/" class="wordmark">Fono</a>
+    <ul>
+      <li><a href="#features">Manifesto</a></li>
+      <li><a href="#install">Install</a></li>
+      <li><a href="#how">Pipeline</a></li>
+      <li><a href="#compat">Runs on</a></li>
+    </ul>
+    <div class="nav-right">
+      <button class="theme-tog" id="theme-toggle" aria-label="Toggle theme">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+      </button>
+      <a href="https://github.com/bogdanr/fono" class="btn-cta" aria-label="Star on GitHub">
+        <svg class="star" viewBox="0 0 24 24"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.6-1.4-1.4-1.8-1.4-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.9 1.2 1.9 1.2 1.1 1.9 2.9 1.4 3.6 1 .1-.8.4-1.4.8-1.7-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3"/></svg>
+        Star
+      </a>
+    </div>
+  </div>
+</nav>
+
+<main>
+  <!-- HERO -->
+  <section class="hero">
+    <div class="wrap">
+      <div class="eyebrow"><span id="eb-tag">Issue</span> · <span id="eb-date"></span> · Local-first dictation for Linux</div>
+      <h1>Speak.<br/><span class="it">It types.</span></h1>
+
+      <div class="hero-meta">
+        <div class="hero-main">
+          <p class="hero-lede">A <em>lightweight dictation</em> system for Linux, macOS, and Windows. Local for privacy. Cloud for performance. LLM cleanup. <em>State&#8209;of&#8209;the&#8209;art</em> on whatever silicon you have.</p>
+          <div class="hero-cta-row">
+            <div class="install-pill">
+              <span class="prompt">$</span>
+              <span>curl -L https://fono.page/install | sh</span>
+              <button data-copy="curl -L https://fono.page/install | sh">copy</button>
+            </div>
+            <a href="https://github.com/bogdanr/fono" class="btn-star-hero" aria-label="Star on GitHub">
+              <svg class="star" viewBox="0 0 24 24"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.6-1.4-1.4-1.8-1.4-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.9 1.2 1.9 1.2 1.1 1.9 2.9 1.4 3.6 1 .1-.8.4-1.4.8-1.7-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3"/></svg>
+              Star on GitHub
+            </a>
+          </div>
+        </div>
+        <dl class="hero-side">
+          <dt>Author</dt><dd>Bogdan Rădulescu &amp; contributors · open source</dd>
+          <dt>License</dt><dd>GPL-3.0-only · audit every byte</dd>
+          <dt>Runs on</dt><dd>Linux · X11 today, Wayland in progress</dd>
+          <dt>Roadmap</dt><dd>macOS · Windows</dd>
+          <dt>Telemetry</dt><dd>None. Ever.</dd>
+        </dl>
+      </div>
+    </div>
+  </section>
+
+  <!-- WAVEFORM STAGE -->
+  <section class="wave-stage">
+    <div class="narrow">
+      <div class="wave-meta" aria-hidden="true">
+        <span><b>● rec</b></span>
+        <span>F9 to start, F9 to stop</span>
+      </div>
+      <div class="waveform" id="wave"></div>
+      <div class="typed-out" id="typed"></div>
+    </div>
+  </section>
+
+  <!-- FEATURES -->
+  <section class="features" id="features">
+    <div class="wrap">
+      <div class="section-h">
+        <div>
+          <div class="num">№01 · Manifesto</div>
+          <h2>Six things, <em>done well</em>.</h2>
+        </div>
+        <p class="desc">Dictation on Linux has been Electron apps with subscriptions or Python scripts that never quite work. Fono is a third option.</p>
+      </div>
+
+      <div class="feat-grid">
+        <div class="feat"><span class="idx">01</span><div><h3>Local <em>first</em>.</h3><p>Whisper runs on your machine. Audio never leaves the box unless you opt in. Your voice stays yours.</p></div></div>
+        <div class="feat"><span class="idx">02</span><div><h3>Cloud <em>fast</em>.</h3><p>One command swaps in Groq, OpenAI, Cerebras, Anthropic, or Deepgram. Bring your own key. No daemon restart.</p></div></div>
+        <div class="feat"><span class="idx">03</span><div><h3>LLM <em>cleanup</em>.</h3><p>Optional pass strips filler, restores punctuation, fixes proper nouns. Local or cloud, your call.</p></div></div>
+        <div class="feat"><span class="idx">04</span><div><h3>Hardware <em>aware</em>.</h3><p><code>fono setup</code> probes your machine, picks the right model size, and binds the hotkeys. Two minutes flat.</p></div></div>
+        <div class="feat"><span class="idx">05</span><div><h3>Press <em>once</em>.</h3><p>F9 toggles recording, F8 is push-to-talk. Text lands in the focused window: terminal, browser, IDE, chat.</p></div></div>
+        <div class="feat"><span class="idx">06</span><div><h3>Open <em>source</em>.</h3><p>GPL-3.0-only. Single static Rust binary. No telemetry. No accounts. No upsell. Ever.</p></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- INSTALL -->
+  <section class="install-section" id="install">
+    <div class="wrap">
+      <div class="section-h">
+        <div>
+          <div class="num">№02 · Install</div>
+          <h2>Ninety <em>seconds</em>.</h2>
+        </div>
+        <p class="desc">One curl, one binary, <code>/usr/local/bin</code>. Distro-native packages below if you prefer.</p>
+      </div>
+
+      <div class="install-card">
+        <div class="lbl">One-liner · any Linux</div>
+        <pre><span class="pr">$</span> curl -L https://fono.page/install | sh</pre>
+        <div class="inspect">Detects your arch, fetches the latest release binary, installs to <code>/usr/local/bin/fono</code>. <a href="/install">Inspect the script</a> before piping.</div>
+      </div>
+
+      <div class="pkg-mat" style="margin-top: 32px;">
+        <div class="pkg-cell"><div class="name">Arch / Manjaro</div><code>sudo pacman -U fono-0.2.0-1-x86_64.pkg.tar.zst</code></div>
+        <div class="pkg-cell"><div class="name">Debian / Ubuntu</div><code>sudo apt install ./fono_0.2.0_amd64.deb</code></div>
+        <div class="pkg-cell"><div class="name">Slackware / NimbleX</div><code>installpkg fono-0.2.0-x86_64-1.txz</code></div>
+        <div class="pkg-cell"><div class="name">Other Linux</div><code>bare binary from <a href="https://github.com/bogdanr/fono/releases/latest" style="color:inherit">Releases</a></code></div>
+        <div class="pkg-cell soon"><div class="name">macOS</div><code>planned · Linux first</code></div>
+        <div class="pkg-cell soon"><div class="name">Windows</div><code>planned · Linux first</code></div>
+      </div>
+
+      <div class="switch-callout">
+        <div class="lbl">First run · hot-swap</div>
+        <pre><span class="pr">$</span> fono setup            <span class="cm"># picks local vs cloud, installs models</span>
+<span class="pr">$</span> fono                  <span class="cm"># starts the daemon (tray + hotkeys)</span>
+<span class="pr">$</span> fono use cloud groq   <span class="cm"># swap STT + LLM, no restart</span>
+<span class="pr">$</span> fono keys add GROQ_API_KEY</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- HOW -->
+  <section class="how" id="how">
+    <div class="wrap">
+      <div class="section-h">
+        <div>
+          <div class="num">№03 · Pipeline</div>
+          <h2>Four <em>small</em> pieces.</h2>
+        </div>
+        <p class="desc">Each stage is swappable. Stay local end-to-end, or stream any one stage to the cloud.</p>
+      </div>
+
+      <div class="pipeline">
+        <div class="stage"><div class="dot">01</div><h4><em>Capture</em></h4><p>PipeWire, PulseAudio, or ALSA. VAD trims silence before bytes ever leave the mic.</p></div>
+        <div class="stage"><div class="dot">02</div><h4><em>Transcribe</em></h4><p>whisper.cpp on-device, or Groq · OpenAI · Cerebras · Deepgram on the wire.</p></div>
+        <div class="stage"><div class="dot">03</div><h4><em>Cleanup</em></h4><p>Optional small LLM strips filler, restores punctuation, fixes names. Local or cloud.</p></div>
+        <div class="stage"><div class="dot">04</div><h4><em>Type</em></h4><p>Shift+Insert paste lands text in the focused window. Universal on X11. No clipboard hijack.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- COMPAT -->
+  <section class="compat-section" id="compat">
+    <div class="wrap">
+      <div class="section-h">
+        <div>
+          <div class="num">№04 · Compatibility</div>
+          <h2>Runs on <em>your Linux</em>.</h2>
+        </div>
+        <p class="desc">Linux first. macOS and Windows next. If your distro boots, Fono should run.</p>
+      </div>
+
+      <dl class="compat-list">
+        <dt>Display server</dt>
+        <dd><span class="y">X11</span><span class="pending">Wayland (in progress)</span></dd>
+        <dt>Audio backend</dt>
+        <dd><span class="y">PipeWire</span><span class="y">PulseAudio</span><span class="y">ALSA</span></dd>
+        <dt>STT providers</dt>
+        <dd><span class="y">whisper.cpp (local)</span><span class="y">Groq</span><span class="y">OpenAI</span><span class="y">Cerebras</span><span class="y">Deepgram</span></dd>
+        <dt>LLM providers</dt>
+        <dd><span class="y">Local (llama-cpp)</span><span class="y">Groq</span><span class="y">OpenAI</span><span class="y">Anthropic</span><span class="y">Cerebras</span></dd>
+        <dt>Tested distros</dt>
+        <dd><span class="y">Arch</span><span class="y">Debian / Ubuntu</span><span class="y">Slackware / NimbleX</span><span class="y">any glibc Linux (bare binary)</span></dd>
+      </dl>
+    </div>
+  </section>
+
+  <!-- FINAL -->
+  <section class="final">
+    <div class="narrow">
+      <h2>Stop typing.<br/><em>Start saying.</em></h2>
+      <p>Fono is free, open source, and waiting for you to press the hotkey.</p>
+      <div class="hero-cta-row">
+        <div class="install-pill">
+          <span class="prompt">$</span>
+          <span>curl -L https://fono.page/install | sh</span>
+          <button data-copy="curl -L https://fono.page/install | sh">copy</button>
+        </div>
+        <a href="https://github.com/bogdanr/fono" class="btn-star-hero" aria-label="Star on GitHub">
+          <svg class="star" viewBox="0 0 24 24"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.6-1.4-1.4-1.8-1.4-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.9 1.2 1.9 1.2 1.1 1.9 2.9 1.4 3.6 1 .1-.8.4-1.4.8-1.7-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3"/></svg>
+          Star on GitHub
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="wrap row">
+      <div class="sig">Fono · an open-source affair</div>
+      <div class="links">
+        <a href="https://github.com/bogdanr/fono">GitHub</a>
+        <a href="https://github.com/bogdanr/fono/issues">Issues</a>
+        <a href="https://github.com/bogdanr/fono/blob/main/LICENSE">GPL-3.0</a>
+        <a href="#install">Install</a>
+      </div>
+    </div>
+  </footer>
+</main>
+
+<script src="shared/typed-terminal.js"></script>
+<script>
+  // generate waveform bars with random heights
+  const wv = document.getElementById('wave');
+  const heights = [22, 38, 65, 48, 80, 92, 55, 70, 88, 45, 60, 95, 72, 50, 38, 68, 84, 58, 42, 76, 90, 48, 62, 35, 80, 92, 65, 48, 70, 55, 82, 38, 60, 88, 50, 72, 95, 58, 42, 65];
+  heights.forEach((h, i) => {
+    const s = document.createElement('span');
+    s.style.setProperty('--h', h + '%');
+    s.style.animationDelay = (i * 0.04) + 's';
+    s.style.animationDuration = (1 + Math.random() * 0.6) + 's';
+    wv.appendChild(s);
+  });
+
+  // theme toggle (persists across sessions)
+  const themeBtn = document.getElementById('theme-toggle');
+  const stored = localStorage.getItem('fono-theme');
+  if (stored === 'light' || stored === 'dark') {
+    document.body.setAttribute('data-theme', stored);
+  }
+  themeBtn.addEventListener('click', () => {
+    const cur = document.body.getAttribute('data-theme');
+    const next = cur === 'light' ? 'dark' : 'light';
+    document.body.setAttribute('data-theme', next);
+    try { localStorage.setItem('fono-theme', next); } catch (_) {}
+  });
+
+  // copy buttons
+  document.querySelectorAll('[data-copy]').forEach(b => {
+    b.addEventListener('click', () => {
+      navigator.clipboard.writeText(b.dataset.copy).catch(() => {});
+      b.textContent = '✓ copied';
+      b.classList.add('copied');
+      setTimeout(() => { b.textContent = 'copy'; b.classList.remove('copied'); }, 1300);
+    });
+  });
+
+  // dynamic eyebrow date — always current month, e.g. "April 2026"
+  const ebDate = document.getElementById('eb-date');
+  if (ebDate) {
+    ebDate.textContent = new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  }
+
+  // latest release tag → eyebrow ("Issue v0.2.0"). Falls back to plain "Issue".
+  fetch('https://api.github.com/repos/bogdanr/fono/releases/latest')
+    .then(r => r.ok ? r.json() : null)
+    .then(d => {
+      if (!d || !d.tag_name) return;
+      const ebTag = document.getElementById('eb-tag');
+      if (ebTag) ebTag.textContent = `Issue ${d.tag_name}`;
+    })
+    .catch(() => {});
+
+  // typed quote sequence in the wave stage
+  typeSequence(document.getElementById('typed'), [
+    { type: 'pause', delay: 600 },
+    { type: 'line', text: '"Remind me to email James about the deploy on Tuesday."' },
+    { type: 'pause', delay: 1500 },
+    { type: 'clear', delay: 200 },
+    { type: 'line', text: '"The meeting is at 3pm. Don\'t forget the invite."' },
+    { type: 'pause', delay: 1500 },
+    { type: 'clear', delay: 200 },
+    { type: 'line', text: '"git commit minus m fixed the audio backend race."' },
+    { type: 'pause', delay: 1500 },
+    { type: 'clear', delay: 200 },
+  ], { charDelay: 32, wordPause: 80, linePause: 700 });
+</script>
+</body>
+</html>

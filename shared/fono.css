@@ -1,0 +1,10 @@
+/* Shared base — variants override */
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
+a { color: inherit; }
+code { font-family: var(--mono, ui-monospace, monospace); font-size: 0.95em; }
+button { font: inherit; cursor: pointer; border: 0; background: none; color: inherit; }
+:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 4px; }
+img, svg { display: block; max-width: 100%; }
+::selection { background: currentColor; color: var(--bg); }
