@@ -320,6 +320,10 @@ impl LiveSession {
 
         let mut transcript = LiveTranscript::default();
         if let Some(o) = overlay.as_ref() {
+            // Clear any text held over from a previous session BEFORE
+            // we flip to LiveDictating, so the user never sees the
+            // tail of the last dictation flash up at session start.
+            o.update_text(String::new());
             o.set_state(OverlayState::LiveDictating);
         }
         while let Some(upd) = updates.next().await {

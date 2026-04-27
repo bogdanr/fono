@@ -326,11 +326,78 @@ mod streaming_impl {
                 }
             }
         }
-        Ok(text.trim().to_string())
+        Ok(strip_whisper_artifacts(text.trim()))
     }
 
     fn whitespace_tokens(s: &str) -> Vec<String> {
         s.split_whitespace().map(ToString::to_string).collect()
+    }
+
+    /// Filter out whisper meta-tokens emitted on silence / non-speech
+    /// audio. Whisper-large/medium/small were trained on transcripts
+    /// that bracket non-verbal segments with all-caps tags like
+    /// `[BLANK_AUDIO]`, `[MUSIC PLAYING]`, `[SILENCE]`, `(applause)`,
+    /// or `*coughing*`. When the user pauses or there's ambient noise,
+    /// these leak into the transcript and are visually noisy in the
+    /// overlay (and worse — get injected as text into the focused app).
+    ///
+    /// Strategy: drop any all-uppercase or "(verb)" parenthetical /
+    /// bracketed run that consists only of letters, spaces, and
+    /// underscores. Real bracketed content the user dictated (e.g.
+    /// "see RFC 1234" or "[TODO] write tests") survives because it's
+    /// not all-uppercase pseudo-tokens.
+    fn strip_whisper_artifacts(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i] as char;
+            if c == '[' || c == '(' || c == '*' {
+                let close = match c {
+                    '[' => ']',
+                    '(' => ')',
+                    _ => '*',
+                };
+                if let Some(end) = s[i + 1..].find(close) {
+                    let inner = &s[i + 1..i + 1 + end];
+                    if is_meta_token(inner) {
+                        i += 1 + end + 1;
+                        // Eat one trailing space so we don't leave
+                        // a double-space hole.
+                        while i < bytes.len() && bytes[i] == b' ' {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                }
+            }
+            out.push(c);
+            i += 1;
+        }
+        out.trim().to_string()
+    }
+
+    fn is_meta_token(inner: &str) -> bool {
+        if inner.is_empty() {
+            return false;
+        }
+        // Letters, spaces, and underscores only — and at least one
+        // alphabetic letter. Whisper meta-tokens never contain
+        // digits or sentence punctuation.
+        let valid = inner
+            .chars()
+            .all(|ch| ch.is_ascii_alphabetic() || ch == ' ' || ch == '_');
+        if !valid {
+            return false;
+        }
+        let alpha = inner.chars().filter(char::is_ascii_alphabetic);
+        let upper_only = alpha.clone().all(|c| c.is_ascii_uppercase());
+        let lower_only = alpha.clone().all(|c| c.is_ascii_lowercase());
+        // Treat as meta if it's all-uppercase ([BLANK_AUDIO],
+        // [MUSIC PLAYING]) OR all-lowercase short verb-like
+        // ((applause), (coughing), (laughs)). Mixed case is treated
+        // as user content and preserved.
+        upper_only || (lower_only && inner.len() <= 24)
     }
 
     impl WhisperLocal {
@@ -340,6 +407,63 @@ mod streaming_impl {
                 ctx: Arc::clone(&self.ctx),
                 threads: self.threads,
             })
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::strip_whisper_artifacts;
+
+        #[test]
+        fn strips_uppercase_bracketed_meta() {
+            assert_eq!(strip_whisper_artifacts("[BLANK_AUDIO]"), "");
+            assert_eq!(strip_whisper_artifacts("[MUSIC PLAYING]"), "");
+            assert_eq!(strip_whisper_artifacts("[SILENCE]"), "");
+            assert_eq!(
+                strip_whisper_artifacts("hello [BLANK_AUDIO] world"),
+                "hello world"
+            );
+        }
+
+        #[test]
+        fn strips_lowercase_parenthetical_verbs() {
+            assert_eq!(strip_whisper_artifacts("(applause)"), "");
+            assert_eq!(strip_whisper_artifacts("(coughing)"), "");
+            assert_eq!(strip_whisper_artifacts("hello (laughs) world"), "hello world");
+        }
+
+        #[test]
+        fn preserves_mixed_case_user_content() {
+            // Mixed case → user dictated "see Fig 3", whisper rendered it.
+            assert_eq!(strip_whisper_artifacts("see (Fig 3)"), "see (Fig 3)");
+            assert_eq!(strip_whisper_artifacts("note [version 2]"), "note [version 2]");
+        }
+
+        #[test]
+        fn strips_all_caps_bracketed_even_if_user_might_have_meant_them() {
+            // Trade-off: a user dictating "open bracket TODO close
+            // bracket" almost certainly won't get whisper to emit
+            // "[TODO]"; whisper meta-tokens are the dominant cause of
+            // all-caps bracketed runs in transcripts. Strip them.
+            assert_eq!(strip_whisper_artifacts("[TODO]"), "");
+        }
+
+        #[test]
+        fn collapses_double_spaces_after_strip() {
+            assert_eq!(
+                strip_whisper_artifacts("hello [BLANK_AUDIO]  world"),
+                "hello world"
+            );
+        }
+
+        #[test]
+        fn empty_brackets_are_left_alone() {
+            assert_eq!(strip_whisper_artifacts("[]"), "[]");
+        }
+
+        #[test]
+        fn unmatched_bracket_is_preserved() {
+            assert_eq!(strip_whisper_artifacts("hello ["), "hello [");
         }
     }
 }

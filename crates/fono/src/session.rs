@@ -83,8 +83,10 @@ struct LiveCaptureSession {
     drain_join: tokio::task::JoinHandle<()>,
     /// JoinHandle for the [`crate::live::LiveSession::run`] task.
     run_join: tokio::task::JoinHandle<anyhow::Result<crate::live::LiveTranscript>>,
-    /// Overlay handle (if available) — kept so we can hide the window
-    /// when the session ends.
+    /// Overlay handle (clone of [`SessionOrchestrator::overlay`]) — kept
+    /// so we can hide the window when the session ends. The handle is
+    /// owned by the orchestrator and reused across sessions; this
+    /// field is just a clone for convenience.
     overlay: Option<fono_overlay::OverlayHandle>,
     started_at: Instant,
     #[allow(dead_code)]
@@ -219,6 +221,14 @@ pub struct SessionOrchestrator {
     /// recorder. Wiring fix follow-up to Slice A v7.
     #[cfg(feature = "interactive")]
     live_capture: Arc<Mutex<Option<LiveCaptureSession>>>,
+    /// Long-lived overlay handle, spawned **once** at orchestrator
+    /// construction and reused across every live-dictation session.
+    /// winit refuses to construct a second `EventLoop` in the same
+    /// process, so we MUST keep this alive for the daemon's lifetime
+    /// rather than spawning per session. `None` means the overlay is
+    /// disabled in config or failed to spawn at startup.
+    #[cfg(feature = "interactive")]
+    overlay: Arc<StdRwLock<Option<fono_overlay::OverlayHandle>>>,
     pipeline_in_flight: Arc<AtomicBool>,
     config: Arc<StdRwLock<Arc<Config>>>,
     /// Resolved XDG paths; used by [`Self::reload`] to re-read config
@@ -284,6 +294,31 @@ impl SessionOrchestrator {
                         "streaming STT factory failed; live dictation will fall back \
                          to batch: {e:#}"
                     );
+                }
+            }
+        }
+        // Spawn the overlay event loop **once**. winit forbids
+        // creating a second `EventLoop` per process, so we cannot
+        // tear this down between sessions. We keep the handle alive
+        // for the daemon's lifetime and just toggle visibility via
+        // `set_state` on each session start/stop. Best-effort: a
+        // failure here just disables the overlay, dictation still
+        // works.
+        #[cfg(feature = "interactive")]
+        {
+            if config.interactive.enabled && config.interactive.overlay {
+                match fono_overlay::RealOverlay::spawn() {
+                    Ok(h) => {
+                        if let Ok(mut g) = orch.overlay.write() {
+                            *g = Some(h);
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "overlay: spawn failed at orchestrator startup ({e:#}); \
+                             live dictation will run without an overlay window"
+                        );
+                    }
                 }
             }
         }
@@ -454,6 +489,8 @@ impl SessionOrchestrator {
             capture: Arc::new(Mutex::new(None)),
             #[cfg(feature = "interactive")]
             live_capture: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "interactive")]
+            overlay: Arc::new(StdRwLock::new(None)),
             pipeline_in_flight: Arc::new(AtomicBool::new(false)),
             config: Arc::new(StdRwLock::new(config)),
             paths: None,
@@ -758,18 +795,16 @@ impl SessionOrchestrator {
             fono_audio::mute::set_default_sink_mute(true);
         }
 
-        // ---- Spawn the overlay (best-effort) ---------------------
-        let overlay = if cfg.interactive.overlay {
-            match fono_overlay::RealOverlay::spawn() {
-                Ok(h) => Some(h),
-                Err(e) => {
-                    warn!("live-dictation: overlay unavailable ({e:#}); continuing without it");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        // ---- Reuse the long-lived overlay handle -----------------
+        // winit forbids a second EventLoop per process; the handle
+        // was spawned once in `Self::new` and lives for the daemon's
+        // lifetime. Per-session we just clone the handle and toggle
+        // visibility via `set_state`.
+        let overlay = self
+            .overlay
+            .read()
+            .ok()
+            .and_then(|g| g.clone());
 
         // ---- Build the pump + LiveSession ------------------------
         let mut pump = crate::live::Pump::new(fono_audio::StreamConfig::default());
@@ -888,20 +923,26 @@ impl SessionOrchestrator {
         // 4. Await the streaming STT run-task. This is the only place
         //    we hear about the final transcript.
         let transcript_res = session.run_join.await;
-        if let Some(o) = session.overlay.as_ref() {
-            o.set_state(fono_overlay::OverlayState::Hidden);
-            o.shutdown();
-        }
+        // Keep the overlay visible — we'll switch it to Processing
+        // during LLM cleanup and back to LiveDictating with the final
+        // text just before injection so the user can actually read
+        // what's about to be typed.
         let transcript = match transcript_res {
             Ok(Ok(t)) => t,
             Ok(Err(e)) => {
                 error!("live-dictation: streaming STT failed: {e:#}");
+                if let Some(o) = session.overlay.as_ref() {
+                    o.set_state(fono_overlay::OverlayState::Hidden);
+                }
                 self.pipeline_in_flight.store(false, Ordering::SeqCst);
                 let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
                 return;
             }
             Err(e) => {
                 error!("live-dictation: run task join error: {e:#}");
+                if let Some(o) = session.overlay.as_ref() {
+                    o.set_state(fono_overlay::OverlayState::Hidden);
+                }
                 self.pipeline_in_flight.store(false, Ordering::SeqCst);
                 let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
                 return;
@@ -911,6 +952,9 @@ impl SessionOrchestrator {
         let raw = transcript.committed.trim().to_string();
         if raw.is_empty() {
             warn!("live-dictation: empty transcript after {capture_ms} ms");
+            if let Some(o) = session.overlay.as_ref() {
+                o.set_state(fono_overlay::OverlayState::Hidden);
+            }
             self.pipeline_in_flight.store(false, Ordering::SeqCst);
             let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
             return;
@@ -934,6 +978,12 @@ impl SessionOrchestrator {
         // adds dedicated columns.
         let cleaned = if cfg.interactive.cleanup_on_finalize {
             if let Some(llm) = self.current_llm() {
+                // Show "polishing…" so the user knows we haven't
+                // hung after the streaming ended.
+                if let Some(o) = session.overlay.as_ref() {
+                    o.set_state(fono_overlay::OverlayState::Processing);
+                    o.update_text(raw.clone());
+                }
                 let (app_class, app_title) = self.focus.probe();
                 let ctx = build_format_context(
                     &cfg,
@@ -963,6 +1013,16 @@ impl SessionOrchestrator {
         };
 
         let final_text = cleaned.as_deref().unwrap_or(&raw).to_string();
+
+        // Show the user what we're about to inject. Switch back to
+        // LiveDictating so they see the polished text in the same
+        // visual lane as the streaming preview, with the cleaned
+        // content. Held briefly *before* injection so the eye can
+        // catch the final wording.
+        if let Some(o) = session.overlay.as_ref() {
+            o.set_state(fono_overlay::OverlayState::LiveDictating);
+            o.update_text(final_text.clone());
+        }
 
         // Inject — best-effort, same as the batch path.
         let injector = Arc::clone(&self.injector);
@@ -1024,6 +1084,16 @@ impl SessionOrchestrator {
             if let Err(e) = db.insert(&row, redact) {
                 warn!("live-dictation: history insert failed: {e:#}");
             }
+        }
+
+        // Hold the final text on screen briefly so the user can read
+        // it, then fade out. 1.2 s is long enough for a glance, short
+        // enough not to feel sticky. The hold is on the orchestrator
+        // task — sleeping here only delays `ProcessingDone` and the
+        // hotkey FSM transition back to Idle, which is fine.
+        if let Some(o) = session.overlay.as_ref() {
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            o.set_state(fono_overlay::OverlayState::Hidden);
         }
 
         self.pipeline_in_flight.store(false, Ordering::SeqCst);

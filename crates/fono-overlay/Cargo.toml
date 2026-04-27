@@ -15,14 +15,20 @@ workspace = true
 [features]
 # winit + softbuffer pull a large dep tree; keep the overlay opt-in.
 default = []
-overlay-backend = ["dep:winit", "dep:softbuffer"]
+overlay-backend = ["dep:winit", "dep:softbuffer", "dep:ab_glyph"]
 # Real window with text rendering — used by live dictation. Plan R5.
 # Slice A keeps the overlay in-process (winit thread); subprocess
 # refactor is deferred to Slice B per ADR 0009.
-real-window = ["dep:winit", "dep:softbuffer"]
+real-window = ["dep:winit", "dep:softbuffer", "dep:ab_glyph"]
 
 [dependencies]
 fono-core = { path = "../fono-core" }
 tracing = { workspace = true }
 winit = { workspace = true, optional = true }
 softbuffer = { workspace = true, optional = true }
+# ab_glyph is pulled in transitively via sctk-adwaita on Linux already;
+# adding it as a direct dep gives us pixel-glyph rendering for the
+# overlay text (Slice A scope upgrade — was originally deferred to
+# Slice B per ADR 0009 but moved forward in response to user feedback
+# that the colour-only overlay isn't useful).
+ab_glyph = { version = "0.2", optional = true }
