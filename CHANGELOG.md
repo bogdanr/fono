@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-04-28
+
+Streaming/interactive dictation lands as a first-class mode, the
+overlay stops stealing focus, and Whisper finally listens to a
+language allow-list instead of free-styling into the wrong tongue.
+
+### Added — interactive (streaming) dictation
+
+- Slice A foundation: streaming STT, latency budget, overlay live
+  text, and the equivalence harness (`fono-bench`) that gates
+  stream↔batch consistency per fixture.
+- v7 boundary heuristics — prosody, punctuation, filler-word and
+  dangling-word handling — so partial commits feel natural rather
+  than mid-phrase.
+- `[interactive].enabled` is now wired end-to-end through the
+  `StreamingStt` factory; flipping it on actually engages the
+  streaming path.
+- Equivalence harness gains a real accuracy gate (batch transcript vs
+  manifest reference) on top of the stream↔batch gate, plus ten
+  multilingual fixtures (EN/ES/FR/ZH/RO) and a `tests/bench.sh`
+  runner.
+
 ### Added — STT language allow-list
 
 - New `[general].languages: Vec<String>` (and `[stt.local].languages`
@@ -29,6 +51,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cloud_rerun_on_language_mismatch`.
 - Wizard now persists the language prompt into `general.languages`
   (previously discarded).
+
+### Fixed — overlay
+
+- Real text rendering, lifecycle and visual overhaul; live-mode UX
+  fixes (`1f23194`).
+- Eliminated focus theft on X11 by setting override-redirect on the
+  overlay window — tooltips/dmenu/rofi-style. The overlay no longer
+  intercepts the synthesized `Shift+Insert` paste on its second map
+  (`f94250e`).
 
 ## [0.2.0] — 2026-04-27
 
