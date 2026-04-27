@@ -53,11 +53,7 @@ pub struct TranscriptUpdate {
 }
 
 impl TranscriptUpdate {
-    pub fn preview(
-        segment_index: u32,
-        text: impl Into<String>,
-        elapsed: Duration,
-    ) -> Self {
+    pub fn preview(segment_index: u32, text: impl Into<String>, elapsed: Duration) -> Self {
         Self {
             segment_index,
             lane: UpdateLane::Preview,
@@ -68,11 +64,7 @@ impl TranscriptUpdate {
         }
     }
 
-    pub fn finalize(
-        segment_index: u32,
-        text: impl Into<String>,
-        elapsed: Duration,
-    ) -> Self {
+    pub fn finalize(segment_index: u32, text: impl Into<String>, elapsed: Duration) -> Self {
         Self {
             segment_index,
             lane: UpdateLane::Finalize,

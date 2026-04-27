@@ -256,9 +256,7 @@ impl LiveSession {
                         // duration we're about to send. Slice A's
                         // local-only path returns Continue every time;
                         // the verdict is recorded for telemetry.
-                        let dur = Duration::from_secs_f32(
-                            pcm.len() as f32 / sample_rate as f32,
-                        );
+                        let dur = Duration::from_secs_f32(pcm.len() as f32 / sample_rate as f32);
                         let verdict = budget_for_pump
                             .lock()
                             .map(|mut b| b.record(dur))
@@ -284,11 +282,8 @@ impl LiveSession {
                     Ok(FrameEvent::SegmentBoundary { .. }) => {
                         if prosody_on {
                             let tail_vec: Vec<f32> = tail.iter().copied().collect();
-                            let ext = prosody_extend_ms(
-                                &tail_vec,
-                                sample_rate,
-                                prosody_extend_ms_cap,
-                            );
+                            let ext =
+                                prosody_extend_ms(&tail_vec, sample_rate, prosody_extend_ms_cap);
                             if ext > 0 {
                                 if let Ok(mut g) = prosody_metric_for_pump.lock() {
                                     *g = g.saturating_add(ext);
@@ -360,9 +355,11 @@ impl LiveSession {
         // calling `pump.finish()` next session. Slice D's adaptive-EOU
         // work makes the extension first-class.
         if heuristics.hold_on_filler {
-            if let Some(reason) =
-                drain_should_extend(&transcript.committed, &heuristics.filler_words, &heuristics.dangling_words)
-            {
+            if let Some(reason) = drain_should_extend(
+                &transcript.committed,
+                &heuristics.filler_words,
+                &heuristics.dangling_words,
+            ) {
                 match reason {
                     DrainExtensionReason::Filler(w) => {
                         transcript.drain_extended_by_filler = true;
@@ -590,7 +587,12 @@ pub(crate) fn prosody_extend_ms(tail_pcm: &[f32], sample_rate: u32, base_extend_
 /// Time-domain autocorrelation pitch tracker for one fixed-size frame.
 /// Returns `None` if the autocorr peak is below a small SNR floor
 /// (treats noise / silence as unvoiced).
-fn autocorr_f0(frame: &[f32], sample_rate: u32, min_period: usize, max_period: usize) -> Option<f32> {
+fn autocorr_f0(
+    frame: &[f32],
+    sample_rate: u32,
+    min_period: usize,
+    max_period: usize,
+) -> Option<f32> {
     // Cap max_period at half the frame so there's at least N/2
     // overlap for the autocorrelation lag — at 10 ms / 16 kHz the
     // frame is 160 samples and we'd otherwise reject any pitch below
@@ -643,16 +645,20 @@ pub(crate) fn drain_should_extend(
     {
         return None;
     }
-    let stripped: String = trailing
-        .trim_end_matches([',', ';', ':'])
-        .to_lowercase();
+    let stripped: String = trailing.trim_end_matches([',', ';', ':']).to_lowercase();
     if stripped.is_empty() {
         return None;
     }
-    if filler_words.iter().any(|w| w.eq_ignore_ascii_case(&stripped)) {
+    if filler_words
+        .iter()
+        .any(|w| w.eq_ignore_ascii_case(&stripped))
+    {
         return Some(DrainExtensionReason::Filler(stripped));
     }
-    if dangling_words.iter().any(|w| w.eq_ignore_ascii_case(&stripped)) {
+    if dangling_words
+        .iter()
+        .any(|w| w.eq_ignore_ascii_case(&stripped))
+    {
         return Some(DrainExtensionReason::Dangling(stripped));
     }
     None
@@ -693,8 +699,14 @@ mod tests {
     #[test]
     fn quality_floor_parser_falls_back_to_max() {
         assert!(matches!(parse_quality_floor("max"), QualityFloor::Max));
-        assert!(matches!(parse_quality_floor("BALANCED"), QualityFloor::Balanced));
-        assert!(matches!(parse_quality_floor("Aggressive"), QualityFloor::Aggressive));
+        assert!(matches!(
+            parse_quality_floor("BALANCED"),
+            QualityFloor::Balanced
+        ));
+        assert!(matches!(
+            parse_quality_floor("Aggressive"),
+            QualityFloor::Aggressive
+        ));
         assert!(matches!(parse_quality_floor("nonsense"), QualityFloor::Max));
     }
 

@@ -178,8 +178,8 @@ impl BudgetController {
         if self.streamed.is_zero() {
             return BudgetVerdict::Continue;
         }
-        let per_minute = (self.spent_umicros * 60_000)
-            / u128::from(self.streamed.as_millis().max(1) as u64);
+        let per_minute =
+            (self.spent_umicros * 60_000) / u128::from(self.streamed.as_millis().max(1) as u64);
         let ceiling = u128::from(self.ceiling_per_minute_umicros);
         if per_minute > ceiling * 3 / 2 {
             BudgetVerdict::StopStreaming
@@ -234,7 +234,10 @@ mod tests {
     #[test]
     fn price_table_falls_back_to_zero_for_unknown_provider() {
         let t = PriceTable::defaults();
-        assert_eq!(t.get("definitely-not-a-provider"), PerSecondCostUMicros::ZERO);
+        assert_eq!(
+            t.get("definitely-not-a-provider"),
+            PerSecondCostUMicros::ZERO
+        );
         assert_eq!(t.get("local"), PerSecondCostUMicros::ZERO);
         assert!(t.get("openai").0 > 0);
     }

@@ -635,7 +635,12 @@ async fn record_cmd(
     };
     drop(handle);
 
-    let stt = fono_stt::build_stt(&config.stt, &config.general, &secrets, &paths.whisper_models_dir())?;
+    let stt = fono_stt::build_stt(
+        &config.stt,
+        &config.general,
+        &secrets,
+        &paths.whisper_models_dir(),
+    )?;
     let llm = fono_llm::build_llm(&config.llm, &secrets, &paths.llm_models_dir())?;
 
     eprintln!(
@@ -696,7 +701,12 @@ async fn transcribe_cmd(
     let secrets = Secrets::load(&paths.secrets_file())?;
     let (pcm, sample_rate) =
         read_wav_mono_f32(wav).with_context(|| format!("read wav {}", wav.display()))?;
-    let stt = fono_stt::build_stt(&config.stt, &config.general, &secrets, &paths.whisper_models_dir())?;
+    let stt = fono_stt::build_stt(
+        &config.stt,
+        &config.general,
+        &secrets,
+        &paths.whisper_models_dir(),
+    )?;
     let llm = if no_llm {
         None
     } else {
@@ -1384,9 +1394,7 @@ async fn record_cmd_live(
     // (the generic `build_stt` factory returns `Arc<dyn SpeechToText>`,
     // which doesn't expose the streaming method).
     let model = &config.stt.local.model;
-    let model_path = paths
-        .whisper_models_dir()
-        .join(format!("ggml-{model}.bin"));
+    let model_path = paths.whisper_models_dir().join(format!("ggml-{model}.bin"));
     if !model_path.exists() {
         return Err(anyhow::anyhow!(
             "local whisper model {model:?} not found at {} — \
@@ -1394,9 +1402,8 @@ async fn record_cmd_live(
             model_path.display()
         ));
     }
-    let stt: Arc<dyn StreamingStt> = Arc::new(fono_stt::whisper_local::WhisperLocal::new(
-        model_path,
-    ));
+    let stt: Arc<dyn StreamingStt> =
+        Arc::new(fono_stt::whisper_local::WhisperLocal::new(model_path));
 
     // Open the overlay; tolerate failure gracefully (headless / hostile compositor).
     let overlay = match RealOverlay::spawn() {
@@ -1458,12 +1465,13 @@ async fn record_cmd_live(
     // has a live subscriber for every frame and nothing is lost.
     let mut pump = Pump::new(fono_audio::StreamConfig::default());
     let frame_rx = pump.take_receiver()?;
-    let session = LiveSession::new(Arc::clone(&stt), cap_cfg.target_sample_rate)
-        .with_language(if config.general.language == "auto" {
+    let session = LiveSession::new(Arc::clone(&stt), cap_cfg.target_sample_rate).with_language(
+        if config.general.language == "auto" {
             None
         } else {
             Some(config.general.language.clone())
-        });
+        },
+    );
     let session = if let Some(o) = overlay.as_ref() {
         session.with_overlay(o.clone())
     } else {

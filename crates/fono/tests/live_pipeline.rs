@@ -133,7 +133,8 @@ fn emit_segment(
     }
     let seg = remaining.remove(0);
     for (i, p) in seg.previews.iter().enumerate() {
-        let upd = TranscriptUpdate::preview(idx, p.clone(), elapsed + Duration::from_millis(i as u64));
+        let upd =
+            TranscriptUpdate::preview(idx, p.clone(), elapsed + Duration::from_millis(i as u64));
         if tx.send(upd).is_err() {
             return;
         }
@@ -194,10 +195,7 @@ async fn live_session_concatenates_finalized_segments() {
     pump.finish();
     drop(pump);
 
-    let transcript = task
-        .await
-        .expect("join")
-        .expect("run result");
+    let transcript = task.await.expect("join").expect("run result");
 
     assert_eq!(
         transcript.committed, "hello world",
@@ -228,10 +226,7 @@ async fn live_session_returns_empty_on_early_finish_with_no_voice() {
     pump.finish();
     drop(pump);
 
-    let transcript = task
-        .await
-        .expect("join")
-        .expect("run result");
+    let transcript = task.await.expect("join").expect("run result");
 
     assert!(
         transcript.committed.is_empty(),

@@ -28,10 +28,7 @@ pub const DEFAULT_CAPACITY: usize = 64;
 #[derive(Debug, Clone)]
 pub enum FrameEvent {
     /// A voiced PCM frame (post-VAD-gating). 16 kHz mono f32.
-    Voiced {
-        pcm: Vec<f32>,
-        elapsed: Duration,
-    },
+    Voiced { pcm: Vec<f32>, elapsed: Duration },
     /// VAD detected a silence boundary that's long enough to mark the
     /// end of a logical segment. The streaming STT uses this as the
     /// trigger to run a finalize-lane pass.
@@ -120,7 +117,10 @@ impl AudioFrameStream {
                 VadDecision::Speech => {
                     self.silence_run = 0;
                     self.saw_voice_in_segment = true;
-                    let _ = self.tx.send(FrameEvent::Voiced { pcm: frame, elapsed });
+                    let _ = self.tx.send(FrameEvent::Voiced {
+                        pcm: frame,
+                        elapsed,
+                    });
                 }
                 VadDecision::Silence => {
                     self.silence_run += 1;
@@ -209,9 +209,13 @@ mod tests {
         stream.push(&vec![0.5_f32; 16], &mut vad); // 1 voiced frame
         stream.push(&vec![0.0_f32; 16 * 3], &mut vad); // 3 silent frames → boundary
         let evs = drain(&mut rx);
-        assert!(evs
-            .iter()
-            .any(|e| matches!(e, FrameEvent::SegmentBoundary { segment_index: 0, .. })));
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            FrameEvent::SegmentBoundary {
+                segment_index: 0,
+                ..
+            }
+        )));
     }
 
     #[test]

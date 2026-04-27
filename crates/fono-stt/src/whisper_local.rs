@@ -232,7 +232,9 @@ fn pick_from_allow_list(
     let prefix_len = pcm.len().min(LANG_DETECT_PREFIX_SAMPLES);
     let prefix = &pcm[..prefix_len];
 
-    let mut state = ctx.create_state().context("create whisper state (lang_detect)")?;
+    let mut state = ctx
+        .create_state()
+        .context("create whisper state (lang_detect)")?;
     state
         .pcm_to_mel(prefix, threads as usize)
         .context("whisper pcm_to_mel for lang_detect")?;
@@ -246,9 +248,7 @@ fn pick_from_allow_list(
     let mut considered = 0usize;
     for code in codes {
         let Some(id) = whisper_rs::get_lang_id(code) else {
-            tracing::warn!(
-                "language allow-list contains unknown BCP-47 code {code:?}; skipping"
-            );
+            tracing::warn!("language allow-list contains unknown BCP-47 code {code:?}; skipping");
             continue;
         };
         let idx = id as usize;
@@ -305,9 +305,7 @@ mod streaming_impl {
     use tokio::sync::mpsc;
     use tokio_stream::wrappers::UnboundedReceiverStream;
 
-    use crate::streaming::{
-        LocalAgreement, StreamFrame, StreamingStt, TranscriptUpdate,
-    };
+    use crate::streaming::{LocalAgreement, StreamFrame, StreamingStt, TranscriptUpdate};
 
     /// Minimum buffered audio (in samples at 16 kHz) before we run the
     /// preview lane. 0.8 s — small enough to hit a sub-400 ms TTFF after
@@ -335,9 +333,7 @@ mod streaming_impl {
             // re-reads the prefix language; users routinely switch
             // languages mid-session and a stream-wide cache would lock
             // them into the first guess.
-            let selection_seed = self
-                .effective_selection(lang.as_deref())
-                .clone();
+            let selection_seed = self.effective_selection(lang.as_deref()).clone();
             let started = Instant::now();
             let stt = self.clone_arc();
 
@@ -362,17 +358,19 @@ mod streaming_impl {
                                 last_preview_at.is_none_or(|t| t.elapsed() >= PREVIEW_MIN_INTERVAL);
                             if big_enough && cooled {
                                 if segment_lang.is_none() {
-                                    segment_lang = resolve_segment_lang(
-                                        &stt,
-                                        &selection_seed,
-                                        &segment_pcm,
-                                    );
+                                    segment_lang =
+                                        resolve_segment_lang(&stt, &selection_seed, &segment_pcm);
                                 }
                                 let preview_pcm = segment_pcm.clone();
                                 let lang = segment_lang.clone();
                                 let stt2 = Arc::clone(&stt);
                                 let res = tokio::task::spawn_blocking(move || {
-                                    decode_blocking(&stt2, &preview_pcm, sample_rate, lang.as_deref())
+                                    decode_blocking(
+                                        &stt2,
+                                        &preview_pcm,
+                                        sample_rate,
+                                        lang.as_deref(),
+                                    )
                                 })
                                 .await;
                                 if let Ok(Ok(text)) = res {
@@ -399,11 +397,8 @@ mod streaming_impl {
                             // both passes agreed on. Plan R3.
                             if !segment_pcm.is_empty() {
                                 if segment_lang.is_none() {
-                                    segment_lang = resolve_segment_lang(
-                                        &stt,
-                                        &selection_seed,
-                                        &segment_pcm,
-                                    );
+                                    segment_lang =
+                                        resolve_segment_lang(&stt, &selection_seed, &segment_pcm);
                                 }
                                 let mut la_final = LocalAgreement::new();
                                 let mut last_text = String::new();
@@ -422,11 +417,7 @@ mod streaming_impl {
                                     }
                                 }
                                 let stable = la_final.stable().join(" ");
-                                let final_text = if stable.is_empty() {
-                                    last_text
-                                } else {
-                                    stable
-                                };
+                                let final_text = if stable.is_empty() { last_text } else { stable };
                                 let upd = TranscriptUpdate::finalize(
                                     segment_index,
                                     final_text,
@@ -631,14 +622,20 @@ mod streaming_impl {
         fn strips_lowercase_parenthetical_verbs() {
             assert_eq!(strip_whisper_artifacts("(applause)"), "");
             assert_eq!(strip_whisper_artifacts("(coughing)"), "");
-            assert_eq!(strip_whisper_artifacts("hello (laughs) world"), "hello world");
+            assert_eq!(
+                strip_whisper_artifacts("hello (laughs) world"),
+                "hello world"
+            );
         }
 
         #[test]
         fn preserves_mixed_case_user_content() {
             // Mixed case → user dictated "see Fig 3", whisper rendered it.
             assert_eq!(strip_whisper_artifacts("see (Fig 3)"), "see (Fig 3)");
-            assert_eq!(strip_whisper_artifacts("note [version 2]"), "note [version 2]");
+            assert_eq!(
+                strip_whisper_artifacts("note [version 2]"),
+                "note [version 2]"
+            );
         }
 
         #[test]

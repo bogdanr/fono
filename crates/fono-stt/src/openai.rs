@@ -83,8 +83,7 @@ impl OpenAiStt {
         if !status.is_success() {
             anyhow::bail!("openai STT {status}: {body}");
         }
-        serde_json::from_str(&body)
-            .with_context(|| format!("parse openai response: {body}"))
+        serde_json::from_str(&body).with_context(|| format!("parse openai response: {body}"))
     }
 }
 
@@ -136,9 +135,7 @@ impl SpeechToText for OpenAiStt {
                         let retried = self.do_request(&wav, Some(primary)).await?;
                         return Ok(Transcription {
                             text: retried.text,
-                            language: retried
-                                .language
-                                .or_else(|| Some(primary.to_string())),
+                            language: retried.language.or_else(|| Some(primary.to_string())),
                             duration_ms: None,
                         });
                     }

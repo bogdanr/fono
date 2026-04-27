@@ -247,8 +247,9 @@ async fn configure_cloud(
         .with_prompt("Languages (comma-separated BCP-47 codes, or 'auto' for unconstrained detect)")
         .default("auto".into())
         .interact_text()?;
-    config.general.languages =
-        fono_stt::LanguageSelection::parse_csv(&langs).codes().to_vec();
+    config.general.languages = fono_stt::LanguageSelection::parse_csv(&langs)
+        .codes()
+        .to_vec();
     Ok(())
 }
 
@@ -309,8 +310,9 @@ async fn configure_mixed(
         .with_prompt("Languages (comma-separated BCP-47 codes, or 'auto' for unconstrained detect)")
         .default("auto".into())
         .interact_text()?;
-    config.general.languages =
-        fono_stt::LanguageSelection::parse_csv(&langs).codes().to_vec();
+    config.general.languages = fono_stt::LanguageSelection::parse_csv(&langs)
+        .codes()
+        .to_vec();
     Ok(())
 }
 
@@ -707,7 +709,12 @@ async fn probe_local_latency(paths: &fono_core::Paths, config: &Config, tier: Lo
         Secrets::default()
     };
 
-    let stt = match build_stt(&config.stt, &config.general, &secrets, &paths.whisper_models_dir()) {
+    let stt = match build_stt(
+        &config.stt,
+        &config.general,
+        &secrets,
+        &paths.whisper_models_dir(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("  (latency probe skipped: {e:#})");

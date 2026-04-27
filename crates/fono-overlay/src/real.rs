@@ -191,7 +191,9 @@ fn load_system_font() -> Option<ab_glyph::FontArc> {
         "C:\\Windows\\Fonts\\arial.ttf",
     ];
     for p in CANDIDATES {
-        let Ok(bytes) = std::fs::read(p) else { continue };
+        let Ok(bytes) = std::fs::read(p) else {
+            continue;
+        };
         if let Ok(f) = ab_glyph::FontArc::try_from_vec(bytes) {
             tracing::debug!("overlay: loaded font from {p}");
             return Some(f);
@@ -234,7 +236,14 @@ fn blend(bg: u32, fg: u32, coverage_alpha: u8) -> u32 {
 }
 
 /// Draw a filled rounded rectangle with anti-aliased corners.
-fn fill_round_rect(buf: &mut [u32], stride: u32, h: u32, rect: (f32, f32, f32, f32), radius: f32, color: u32) {
+fn fill_round_rect(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    rect: (f32, f32, f32, f32),
+    radius: f32,
+    color: u32,
+) {
     let (x0, y0, x1, y1) = rect;
     let r = radius.min((x1 - x0) / 2.0).min((y1 - y0) / 2.0);
     let yi0 = y0.max(0.0) as i32;
@@ -310,7 +319,8 @@ fn wrap_text(font: &ab_glyph::FontArc, text: &str, size_px: f32, max_width: f32)
             current.push_str(word);
             continue;
         }
-        let candidate_width = advance(&current) + scaled.h_advance(font.glyph_id(' ')) + advance(word);
+        let candidate_width =
+            advance(&current) + scaled.h_advance(font.glyph_id(' ')) + advance(word);
         if candidate_width <= max_width {
             current.push(' ');
             current.push_str(word);
@@ -327,7 +337,9 @@ fn wrap_text(font: &ab_glyph::FontArc, text: &str, size_px: f32, max_width: f32)
     for line in &mut lines {
         if advance(line) > max_width {
             // Drop chars from the end until it fits, append ellipsis.
-            while !line.is_empty() && advance(line) + scaled.h_advance(font.glyph_id('…')) > max_width {
+            while !line.is_empty()
+                && advance(line) + scaled.h_advance(font.glyph_id('…')) > max_width
+            {
                 line.pop();
             }
             line.push('…');
@@ -504,7 +516,9 @@ fn run_event_loop(
                     let mon_size = monitor.size();
                     let win_size = w.outer_size();
                     let x = (mon_size.width.saturating_sub(win_size.width)) / 2;
-                    let y = mon_size.height.saturating_sub(win_size.height + BOTTOM_OFFSET);
+                    let y = mon_size
+                        .height
+                        .saturating_sub(win_size.height + BOTTOM_OFFSET);
                     w.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
                 }
                 let ctx = match softbuffer::Context::new(std::sync::Arc::clone(&w)) {
@@ -623,12 +637,7 @@ fn run_event_loop(
 
         // Convert logical coords to physical using the window's scale.
         let scale = window.scale_factor() as f32;
-        let panel = (
-            0.0,
-            0.0,
-            w as f32,
-            h as f32,
-        );
+        let panel = (0.0, 0.0, w as f32, h as f32);
         // Rounded panel (translucent dark charcoal).
         fill_round_rect(&mut buf, w, h, panel, CORNER_RADIUS * scale, COLOR_BG);
 
@@ -643,14 +652,7 @@ fn run_event_loop(
                 ACCENT_WIDTH * scale,
                 h as f32 - CORNER_RADIUS * scale * 0.4,
             );
-            fill_round_rect(
-                &mut buf,
-                w,
-                h,
-                stripe,
-                ACCENT_WIDTH * scale * 0.5,
-                accent,
-            );
+            fill_round_rect(&mut buf, w, h, stripe, ACCENT_WIDTH * scale * 0.5, accent);
         }
 
         // Text content.
@@ -677,9 +679,9 @@ fn run_event_loop(
             if !app.wrapped.is_empty() {
                 let text_top = pad_top + STATUS_FONT_PX * scale + STATUS_TO_TEXT * scale;
                 let mut baseline = text_top + TEXT_FONT_PX * scale * 0.85;
-                let max_visible_lines =
-                    ((h as f32 - text_top - PADDING_BOT * scale)
-                        / (TEXT_FONT_PX * scale + LINE_GAP * scale)) as usize;
+                let max_visible_lines = ((h as f32 - text_top - PADDING_BOT * scale)
+                    / (TEXT_FONT_PX * scale + LINE_GAP * scale))
+                    as usize;
                 let total = app.wrapped.len();
                 // If content exceeds visible space, show the TAIL —
                 // most recent text always visible.

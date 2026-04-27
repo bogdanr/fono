@@ -387,9 +387,7 @@ fn levenshtein_chars(a: &[char], b: &[char]) -> usize {
         curr[0] = i + 1;
         for (j, cb) in b.iter().enumerate() {
             let cost = usize::from(ca != cb);
-            curr[j + 1] = (prev[j + 1] + 1)
-                .min(curr[j] + 1)
-                .min(prev[j] + cost);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -435,8 +433,8 @@ pub async fn run_fixture(
         }
     }
 
-    let wav = crate::wav::read(&path)
-        .with_context(|| format!("read fixture {}", path.display()))?;
+    let wav =
+        crate::wav::read(&path).with_context(|| format!("read fixture {}", path.display()))?;
     let pcm = wav.samples;
     let sample_rate = wav.sample_rate;
     let duration_s = if sample_rate > 0 {
@@ -463,7 +461,9 @@ pub async fn run_fixture(
 
     // Streaming pass (only when streaming is available + compiled in).
     let (streaming, levenshtein) = if let Some(stream) = streaming_stt.as_ref() {
-        let stream_res = stream.run_streaming(&pcm, sample_rate, lang_owned.clone()).await?;
+        let stream_res = stream
+            .run_streaming(&pcm, sample_rate, lang_owned.clone())
+            .await?;
         let lev = levenshtein_norm(&stream_res.text, &batch.text);
         (Some(stream_res), lev)
     } else {
@@ -480,9 +480,7 @@ pub async fn run_fixture(
         Some(levenshtein_norm(&batch.text, &fixture.reference))
     };
 
-    let ttff_ratio = streaming
-        .as_ref()
-        .map(|s| ratio(s.ttff_ms, batch.ttff_ms));
+    let ttff_ratio = streaming.as_ref().map(|s| ratio(s.ttff_ms, batch.ttff_ms));
     let ttc_ratio = streaming
         .as_ref()
         .map(|s| ratio(s.elapsed_ms, batch.elapsed_ms));
@@ -654,8 +652,7 @@ mod streaming_impl {
             }
             let _ = tx.send(StreamFrame::Eof);
             drop(tx);
-            let frames: BoxStream<'static, StreamFrame> =
-                UnboundedReceiverStream::new(rx).boxed();
+            let frames: BoxStream<'static, StreamFrame> = UnboundedReceiverStream::new(rx).boxed();
 
             let started = Instant::now();
             let mut updates = self
@@ -753,8 +750,7 @@ mod tests {
             pinned_params: Some(BoundaryKnobs::defaults()),
         };
         let json = serde_json::to_string(&report).expect("serialize");
-        let back: EquivalenceReport =
-            serde_json::from_str(&json).expect("deserialize");
+        let back: EquivalenceReport = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.results.len(), 1);
         assert_eq!(back.results[0].verdict, Verdict::Pass);
         assert_eq!(back.overall_verdict(), Verdict::Pass);
@@ -916,26 +912,14 @@ mod tests {
         // Accuracy only, failing.
         assert_eq!(decide_verdict(None, Some(0.40), 0.20), Verdict::Fail);
         // Both gates evaluated and pass.
-        assert_eq!(
-            decide_verdict(Some(0.02), Some(0.05), 0.20),
-            Verdict::Pass
-        );
+        assert_eq!(decide_verdict(Some(0.02), Some(0.05), 0.20), Verdict::Pass);
         // Equiv passes, accuracy fails → Fail (catches "tiny.en
         // hallucinates the same gibberish in both lanes").
-        assert_eq!(
-            decide_verdict(Some(0.00), Some(0.80), 0.20),
-            Verdict::Fail
-        );
+        assert_eq!(decide_verdict(Some(0.00), Some(0.80), 0.20), Verdict::Fail);
         // Equiv fails, accuracy passes → Fail.
-        assert_eq!(
-            decide_verdict(Some(0.50), Some(0.05), 0.20),
-            Verdict::Fail
-        );
+        assert_eq!(decide_verdict(Some(0.50), Some(0.05), 0.20), Verdict::Fail);
         // Boundary: exactly at threshold counts as pass on both gates.
-        assert_eq!(
-            decide_verdict(Some(0.20), Some(0.20), 0.20),
-            Verdict::Pass
-        );
+        assert_eq!(decide_verdict(Some(0.20), Some(0.20), 0.20), Verdict::Pass);
     }
 
     #[test]

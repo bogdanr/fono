@@ -220,10 +220,7 @@ mod tests {
     #[test]
     fn primary_picks_first() {
         assert_eq!(LanguageSelection::Auto.primary(), None);
-        assert_eq!(
-            LanguageSelection::Forced("en".into()).primary(),
-            Some("en")
-        );
+        assert_eq!(LanguageSelection::Forced("en".into()).primary(), Some("en"));
         assert_eq!(
             LanguageSelection::AllowList(vec!["en".into(), "ro".into()]).primary(),
             Some("en")

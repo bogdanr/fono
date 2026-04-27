@@ -10,9 +10,9 @@ use fono_hotkey::{
 };
 use fono_ipc::{read_frame, write_frame, Request, Response};
 use fono_tray::{TrayAction, TrayState};
-use std::sync::{Arc, RwLock};
 #[cfg(feature = "interactive")]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};

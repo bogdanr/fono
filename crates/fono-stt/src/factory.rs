@@ -142,11 +142,7 @@ fn detect_physical_cores() -> usize {
 }
 
 #[cfg(not(feature = "whisper-local"))]
-fn build_local(
-    _cfg: &Stt,
-    _dir: &Path,
-    _languages: Vec<String>,
-) -> Result<Arc<dyn SpeechToText>> {
+fn build_local(_cfg: &Stt, _dir: &Path, _languages: Vec<String>) -> Result<Arc<dyn SpeechToText>> {
     Err(anyhow!(
         "local STT requested but this binary was built without the \
          `whisper-local` feature; rebuild with `cargo build --features whisper-local` \

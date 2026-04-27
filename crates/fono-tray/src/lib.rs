@@ -475,12 +475,7 @@ mod backend {
     /// background checker's verdict. The entry is added to the menu
     /// only when an upgrade is available and removed otherwise so the
     /// menu stays free of passive "Check for updates…" buttons.
-    fn set_update_visible(
-        menu: &Menu,
-        item: &MenuItem,
-        present: &mut bool,
-        label: Option<&str>,
-    ) {
+    fn set_update_visible(menu: &Menu, item: &MenuItem, present: &mut bool, label: Option<&str>) {
         match (label, *present) {
             (Some(text), true) => {
                 item.set_text(text);

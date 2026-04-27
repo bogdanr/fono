@@ -632,8 +632,8 @@ pub fn default_filler_words() -> Vec<String> {
 #[must_use]
 pub fn default_dangling_words() -> Vec<String> {
     [
-        "and", "but", "or", "so", "because", "the", "a", "an", "of", "to", "with", "for",
-        "in", "on", "at", "from",
+        "and", "but", "or", "so", "because", "the", "a", "an", "of", "to", "with", "for", "in",
+        "on", "at", "from",
     ]
     .iter()
     .map(|s| (*s).to_string())
@@ -889,11 +889,7 @@ mod tests {
     fn legacy_language_auto_migrates_to_empty_allow_list() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("legacy_auto.toml");
-        std::fs::write(
-            &path,
-            "version = 1\n[general]\nlanguage = \"auto\"\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "version = 1\n[general]\nlanguage = \"auto\"\n").unwrap();
         let cfg = Config::load(&path).unwrap();
         assert!(
             cfg.general.languages.is_empty(),
@@ -911,7 +907,8 @@ mod tests {
         cfg.save(&path).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(
-            !raw.lines().any(|l| l.trim_start().starts_with("language =")),
+            !raw.lines()
+                .any(|l| l.trim_start().starts_with("language =")),
             "deprecated scalar must not be serialised: {raw}"
         );
         assert!(raw.contains("languages = ["));

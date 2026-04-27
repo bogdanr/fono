@@ -19,9 +19,9 @@ pub mod openai;
 #[cfg(feature = "whisper-local")]
 pub mod whisper_local;
 
-pub use factory::build_stt;
 #[cfg(feature = "streaming")]
 pub use factory::build_streaming_stt;
+pub use factory::build_stt;
 pub use lang::LanguageSelection;
 pub use registry::{ModelInfo, ModelRegistry};
 pub use traits::{SpeechToText, Transcription};

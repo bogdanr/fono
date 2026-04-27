@@ -384,13 +384,18 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
             continue;
         }
 
-        pb.set_message(format!(
-            "{}/{} {} — batch",
-            fixture_num, total, fx.name
-        ));
+        pb.set_message(format!("{}/{} {} — batch", fixture_num, total, fx.name));
         pb.tick();
 
-        match run_fixture(fx, &fixtures_dir, Arc::clone(&stt), streaming.clone(), quick).await {
+        match run_fixture(
+            fx,
+            &fixtures_dir,
+            Arc::clone(&stt),
+            streaming.clone(),
+            quick,
+        )
+        .await
+        {
             Ok(r) => {
                 // run_fixture does batch + streaming internally; advance
                 // by 2 unless the fixture was skipped (no streaming pass).
@@ -471,7 +476,18 @@ fn print_table(report: &EquivalenceReport, legend: bool) {
     // ANSI escape codes (invisible to alignment) don't shift columns.
     let hdr = format!(
         " {:<22} {:>6} {:>6} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10} {:>7} {:<5} {}",
-        "fixture", "lev", "acc", "audio_s", "batch_s", "stream_s", "ttff_s", "ttff_r", "ttc_r", "result", "lang", "note"
+        "fixture",
+        "lev",
+        "acc",
+        "audio_s",
+        "batch_s",
+        "stream_s",
+        "ttff_s",
+        "ttff_r",
+        "ttc_r",
+        "result",
+        "lang",
+        "note"
     );
     println!("{hdr}");
     println!("{}", "─".repeat(hdr.len()));
@@ -503,7 +519,11 @@ fn print_table(report: &EquivalenceReport, legend: bool) {
 
         // Color the lev value: green at 0, yellow approaching threshold, red at/above.
         // Visible width must be 6 to match the header column.
-        let lev_str = fmt_lev(r.metrics.stt_levenshtein_norm, report.threshold_levenshtein, &s);
+        let lev_str = fmt_lev(
+            r.metrics.stt_levenshtein_norm,
+            report.threshold_levenshtein,
+            &s,
+        );
         let acc_str = match r.metrics.stt_accuracy_levenshtein {
             Some(a) => fmt_lev(a, report.threshold_levenshtein, &s),
             None => format!("{:>6}", "-"),
@@ -530,10 +550,7 @@ fn print_table(report: &EquivalenceReport, legend: bool) {
     }
 
     println!("{}", "─".repeat(hdr.len()));
-    println!(
-        " overall: {}",
-        fmt_verdict(report.overall_verdict(), &s)
-    );
+    println!(" overall: {}", fmt_verdict(report.overall_verdict(), &s));
     println!();
     if legend {
         println!("Legend:");
@@ -541,13 +558,20 @@ fn print_table(report: &EquivalenceReport, legend: bool) {
         println!("  batch_s    Batch transcription total time (seconds)");
         println!("  stream_s   Streaming transcription total time (seconds)");
         println!("  ttff_s     Time to first feedback from streaming (seconds)");
-        println!("  ttff_r     Streaming TTFF / batch TTC  (< 1.0 = streaming shows first word sooner)");
-        println!("  ttc_r      Streaming TTC / batch TTC   (< 1.0 = streaming completes faster overall)");
+        println!(
+            "  ttff_r     Streaming TTFF / batch TTC  (< 1.0 = streaming shows first word sooner)"
+        );
+        println!(
+            "  ttc_r      Streaming TTC / batch TTC   (< 1.0 = streaming completes faster overall)"
+        );
         println!("  lev        Stream↔batch Levenshtein (0.0 = streaming and batch agree)");
-        println!("  acc        Batch↔reference Levenshtein (0.0 = batch matches the canonical text)");
+        println!(
+            "  acc        Batch↔reference Levenshtein (0.0 = batch matches the canonical text)"
+        );
         println!();
         println!("Color key:");
-        println!("  {} = good        {} = marginal / caution        {} = bad / over threshold",
+        println!(
+            "  {} = good        {} = marginal / caution        {} = bad / over threshold",
             s.green("green"),
             s.yellow("yellow"),
             s.red("red"),

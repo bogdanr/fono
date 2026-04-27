@@ -250,8 +250,13 @@ impl SessionOrchestrator {
         paths: &Paths,
         action_tx: mpsc::UnboundedSender<HotkeyAction>,
     ) -> Result<Self> {
-        let stt = fono_stt::build_stt(&config.stt, &config.general, secrets, &paths.whisper_models_dir())
-            .context("build STT backend")?;
+        let stt = fono_stt::build_stt(
+            &config.stt,
+            &config.general,
+            secrets,
+            &paths.whisper_models_dir(),
+        )
+        .context("build STT backend")?;
         let llm = match fono_llm::build_llm(&config.llm, secrets, &paths.llm_models_dir()) {
             Ok(opt) => opt,
             Err(e) => {
@@ -283,7 +288,12 @@ impl SessionOrchestrator {
         // gracefully falls back to batch when the slot is `None`.
         #[cfg(feature = "interactive")]
         {
-            match fono_stt::build_streaming_stt(&config.stt, &config.general, secrets, &paths.whisper_models_dir()) {
+            match fono_stt::build_streaming_stt(
+                &config.stt,
+                &config.general,
+                secrets,
+                &paths.whisper_models_dir(),
+            ) {
                 Ok(opt) => {
                     if let Ok(mut g) = orch.streaming_stt.write() {
                         *g = opt;
@@ -348,8 +358,13 @@ impl SessionOrchestrator {
             .clone();
         let cfg = Config::load(&paths.config_file()).context("reload: read config")?;
         let secrets = Secrets::load(&paths.secrets_file()).context("reload: read secrets")?;
-        let new_stt = fono_stt::build_stt(&cfg.stt, &cfg.general, &secrets, &paths.whisper_models_dir())
-            .context("reload: build STT")?;
+        let new_stt = fono_stt::build_stt(
+            &cfg.stt,
+            &cfg.general,
+            &secrets,
+            &paths.whisper_models_dir(),
+        )
+        .context("reload: build STT")?;
         let new_llm = match fono_llm::build_llm(&cfg.llm, &secrets, &paths.llm_models_dir()) {
             Ok(opt) => opt,
             Err(e) => {
@@ -801,11 +816,7 @@ impl SessionOrchestrator {
         // was spawned once in `Self::new` and lives for the daemon's
         // lifetime. Per-session we just clone the handle and toggle
         // visibility via `set_state`.
-        let overlay = self
-            .overlay
-            .read()
-            .ok()
-            .and_then(|g| g.clone());
+        let overlay = self.overlay.read().ok().and_then(|g| g.clone());
 
         // ---- Build the pump + LiveSession ------------------------
         let mut pump = crate::live::Pump::new(fono_audio::StreamConfig::default());
@@ -815,8 +826,8 @@ impl SessionOrchestrator {
         } else {
             Some(cfg.general.language.clone())
         };
-        let mut session = crate::live::LiveSession::new(streaming, sample_rate)
-            .with_language(language);
+        let mut session =
+            crate::live::LiveSession::new(streaming, sample_rate).with_language(language);
         if let Some(o) = overlay.as_ref() {
             session = session.with_overlay(o.clone());
         }
@@ -986,12 +997,8 @@ impl SessionOrchestrator {
                     o.update_text(raw.clone());
                 }
                 let (app_class, app_title) = self.focus.probe();
-                let ctx = build_format_context(
-                    &cfg,
-                    app_class.as_deref(),
-                    app_title.as_deref(),
-                    None,
-                );
+                let ctx =
+                    build_format_context(&cfg, app_class.as_deref(), app_title.as_deref(), None);
                 match llm.format(&raw, &ctx).await {
                     Ok(c) => {
                         let trimmed = c.trim().to_string();
@@ -1058,10 +1065,7 @@ impl SessionOrchestrator {
 
         // History (non-fatal on failure).
         if cfg.history.enabled {
-            let stt_label = self
-                .current_stt()
-                .name()
-                .to_string();
+            let stt_label = self.current_stt().name().to_string();
             let llm_label = if cleaned.is_some() {
                 self.current_llm().map(|l| l.name().to_string())
             } else {

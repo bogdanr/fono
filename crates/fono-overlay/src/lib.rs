@@ -14,7 +14,9 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayState {
     Hidden,
-    Recording { db: i8 },
+    Recording {
+        db: i8,
+    },
     Processing,
     /// Live dictation in progress. The text is shown via
     /// [`OverlayHandle::update_text`].
