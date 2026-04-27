@@ -21,6 +21,21 @@ a laptop, so this matters: the wizard continues to default-skip the local
 LLM for tiers ≤ `Recommended`. Local LLM model auto-download (H9 / H10) is
 still open — follow-up.
 
+**Build constraint.** `whisper-rs-sys` and `llama-cpp-sys-2` each statically
+link their own copy of ggml; combining both in one binary collides on every
+`ggml_*` symbol. We keep the static-binary stance (no sidecar `libllama.so`)
+by guarding the combo with a `compile_error!` in `crates/fono/src/lib.rs`.
+Default-features build (whisper-local + cloud LLM) works as before. Users
+who want local LLM cleanup build cloud-STT instead:
+
+```
+cargo build --release --no-default-features --features tray,llama-local,cloud-all
+```
+
+Lifting this constraint requires moving llama.cpp to a shared library
+(`llama-cpp-sys-2/dynamic-link`), which is **not** the path forward — fono
+ships as a single self-contained binary.
+
 ## Recent fix — silenced GTK/GDK startup warnings
 
 User reported a `Gdk-CRITICAL: gdk_window_thaw_toplevel_updates: assertion ...
