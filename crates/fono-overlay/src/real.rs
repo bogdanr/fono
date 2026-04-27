@@ -461,19 +461,36 @@ fn run_event_loop(
                 // *focused* window) lands in the overlay itself.
                 .with_active(false)
                 .with_visible(false);
-            // Platform-specific focus-suppression. On X11, declare
-            // the window as a notification toplevel so window
-            // managers (i3 / KWin / Mutter) skip it for focus,
-            // taskbar, alt-tab cycling, and pager. On Wayland the
-            // compositor decides; without xdg_activation_v1 there's
-            // no programmatic "do not focus" hint, but the layer
-            // surface used in Slice B will fix that — for Slice A
-            // most Wayland compositors already skip transparent
-            // borderless toplevels for focus by default.
+            // Platform-specific focus-suppression. On X11 we use a
+            // belt-and-braces approach because window managers
+            // disagree about how aggressively to honour the hints
+            // above on subsequent map cycles (the overlay is shown
+            // and hidden once per dictation, and many WMs default to
+            // "give focus on map" on the second+ map even for
+            // notification windows):
+            //
+            //   * with_x11_window_type(Notification) — declares the
+            //     window as a notification toplevel per EWMH. WMs
+            //     should skip focus, taskbar, pager, alt-tab.
+            //   * with_override_redirect(true) — bypasses the WM
+            //     entirely. The X server never asks the WM about
+            //     focus, mapping, or stacking for this window. This
+            //     is what tooltips, dmenu, rofi all do; it makes
+            //     focus theft physically impossible on X11
+            //     regardless of WM behaviour. Trade-off: we lose
+            //     WM-managed always-on-top, but borderless
+            //     override-redirect windows naturally stack above
+            //     normal toplevels because the WM doesn't move them.
+            //
+            // On Wayland the compositor controls focus completely;
+            // a proper xdg_activation_v1 / wlr-layer-shell solution
+            // lands in Slice B's subprocess overlay refactor.
             #[cfg(all(unix, not(target_os = "macos")))]
             let attrs = {
                 use winit::platform::x11::{WindowAttributesExtX11, WindowType};
-                attrs.with_x11_window_type(vec![WindowType::Notification])
+                attrs
+                    .with_x11_window_type(vec![WindowType::Notification])
+                    .with_override_redirect(true)
             };
             let win = el.create_window(attrs).map_or_else(
                 |e| {

@@ -1,6 +1,60 @@
 # Fono — Project Status
 
-Last updated: 2026-04-27
+Last updated: 2026-04-28
+
+## 2026-04-28 — Overlay focus-theft eliminated (X11 override-redirect)
+
+User reported: *"The overlay window still seems to be stealing focus
+twice; when it appears in live mode and when it does cleanup."*
+
+The previous mitigation (`.with_active(false)` +
+`WindowType::Notification`, landed in `1f23194`) is correct in spirit,
+but X11 window managers disagree about how aggressively to honour
+those hints across multiple map cycles. The overlay is shown → hidden
+→ shown again twice per dictation (live state, then
+processing/finalize state), and many WMs default to "give focus on
+map" on the second-and-subsequent map even for notification toplevels.
+Net result was that every overlay state transition re-stole focus
+from the user's editor / terminal / browser, and the synthesized
+`Shift+Insert` paste then landed in the overlay itself rather than
+the original target window.
+
+**Fix landed in `d2823f1`** (`crates/fono-overlay/src/real.rs:488-494`):
+add `.with_override_redirect(true)` to the X11 window attributes on
+top of the existing `.with_active(false)` and
+`WindowType::Notification` hints. Override-redirect windows are
+completely outside WM management — the X server never asks the WM
+about focus, mapping, or stacking for them. This is what tooltips,
+dmenu, and rofi all do; it makes focus theft physically impossible
+on X11 regardless of WM behaviour.
+
+**Trade-offs**
+
+- WM-managed always-on-top is lost. Mitigation: borderless
+  override-redirect windows naturally stack above normal toplevels
+  because the WM never moves them on focus changes; no observable
+  regression vs the prior `WindowLevel::AlwaysOnTop` hint.
+- Compositor-managed transparency varies slightly across compositors
+  for OR windows. picom honours it; KWin and Mutter compose it
+  correctly. The solid-charcoal fallback at `COLOR_BG = 0xEE17171B`
+  still applies if the compositor refuses the alpha channel.
+
+**Wayland deferred to Slice B.** On Wayland the compositor controls
+focus completely; the proper solution is `xdg_activation_v1` /
+`wlr-layer-shell` from a dedicated overlay subprocess, which is the
+Slice B subprocess-overlay refactor (ADR 0009 §5). For Slice A this
+X11-only fix matches the dominant target environment.
+
+**Verification**
+
+| Command | Result |
+|---|---|
+| `cargo build  -p fono-overlay --features real-window` | clean |
+| `cargo clippy -p fono-overlay --features real-window -- -D warnings` | clean |
+| `cargo test   -p fono-overlay --lib` | 2/0 |
+
+(Workspace clippy currently reports unrelated in-flight bench errors
+from the v7 equivalence-fixtures swap; tracked separately.)
 
 ## 2026-04-27 — Slice A v7 delta landed (boundary heuristics)
 
