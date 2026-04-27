@@ -24,6 +24,8 @@ use fono_core::{Paths, Secrets};
 use fono_hotkey::{HotkeyAction, RecordingMode};
 use fono_llm::{FormatContext, TextFormatter};
 use fono_stt::SpeechToText;
+#[cfg(feature = "interactive")]
+use fono_stt::StreamingStt;
 use std::sync::Mutex as StdMutex;
 use std::thread::JoinHandle;
 use tokio::sync::{mpsc, Mutex};
@@ -60,6 +62,33 @@ impl CaptureSession {
             .unwrap_or_default();
         (pcm, elapsed)
     }
+}
+
+/// Active live-dictation session, parallel to [`CaptureSession`] but
+/// driving the streaming pump + run-task. The capture thread owns the
+/// cpal stream (which is `!Send` on Linux); the drain task ferries
+/// freshly-captured PCM from the shared buffer into the [`crate::live::Pump`]
+/// at a fixed cadence; the run task awaits the streaming STT and
+/// produces the final [`crate::live::LiveTranscript`].
+#[cfg(feature = "interactive")]
+struct LiveCaptureSession {
+    /// Stops the capture thread (drops the cpal stream).
+    capture_stop_tx: std::sync::mpsc::Sender<()>,
+    capture_join: Option<JoinHandle<()>>,
+    /// Stops the drain task (signals it to call `pump.finish()`).
+    drain_stop_tx: tokio::sync::oneshot::Sender<()>,
+    /// JoinHandle for the drain task; awaited during shutdown so we
+    /// don't tear down the pump before all captured PCM has been
+    /// pushed.
+    drain_join: tokio::task::JoinHandle<()>,
+    /// JoinHandle for the [`crate::live::LiveSession::run`] task.
+    run_join: tokio::task::JoinHandle<anyhow::Result<crate::live::LiveTranscript>>,
+    /// Overlay handle (if available) — kept so we can hide the window
+    /// when the session ends.
+    overlay: Option<fono_overlay::OverlayHandle>,
+    started_at: Instant,
+    #[allow(dead_code)]
+    mode: RecordingMode,
 }
 
 /// Snapshot of the per-stage latencies for one dictation. Logged at
@@ -99,8 +128,15 @@ pub enum PipelineOutcome {
 
 /// Trait abstraction over text injection so the integration test can
 /// substitute a buffer-collector and skip the real keyboard backend.
+///
+/// Returns `true` when the inject path itself has already populated the
+/// system clipboard with the final text (e.g. the X11 `xtest-paste`
+/// backend, or the clipboard fallback). The orchestrator uses that
+/// signal to skip the redundant belt‑and‑suspenders copy in
+/// `run_pipeline`, which otherwise duplicates clipboard writes (and
+/// log lines) on every dictation.
 pub trait Injector: Send + Sync + 'static {
-    fn inject(&self, text: &str) -> Result<()>;
+    fn inject(&self, text: &str) -> Result<bool>;
 }
 
 /// Default injector — calls into [`fono_inject::type_text_with_outcome`]
@@ -112,11 +148,17 @@ pub trait Injector: Send + Sync + 'static {
 pub struct RealInjector;
 
 impl Injector for RealInjector {
-    fn inject(&self, text: &str) -> Result<()> {
+    fn inject(&self, text: &str) -> Result<bool> {
         match fono_inject::type_text_with_outcome(text)? {
             fono_inject::InjectOutcome::Typed(backend) => {
                 tracing::info!("inject backend: typed via {backend}");
-                Ok(())
+                // `xtest-paste` pastes by populating the X CLIPBOARD
+                // and synthesising Shift+Insert, so the clipboard
+                // already holds `text` — no belt-and-suspenders copy
+                // needed afterwards. All other typed backends
+                // (`wtype`/`ydotool`/`xdotool`/`enigo`) inject keys
+                // directly and leave the clipboard untouched.
+                Ok(backend == "xtest-paste")
             }
             fono_inject::InjectOutcome::Clipboard(tool) => {
                 tracing::info!("inject backend: clipboard via {tool} (no key-injection worked)");
@@ -128,7 +170,7 @@ impl Injector for RealInjector {
                     ))
                     .timeout(notify_rust::Timeout::Milliseconds(6_000))
                     .show();
-                Ok(())
+                Ok(true)
             }
         }
     }
@@ -162,10 +204,21 @@ impl FocusProbe for RealFocusProbe {
 /// in-flight pipeline. Provider-switching plan task S12.
 pub struct SessionOrchestrator {
     stt: Arc<StdRwLock<Arc<dyn SpeechToText>>>,
+    /// Optional streaming variant of the active STT backend. Populated
+    /// when `[interactive]` is enabled and the backend supports
+    /// streaming (Slice A: local only). `None` means the live path
+    /// must gracefully fall back to the batch path.
+    #[cfg(feature = "interactive")]
+    streaming_stt: Arc<StdRwLock<Option<Arc<dyn StreamingStt>>>>,
     llm: Arc<StdRwLock<Option<Arc<dyn TextFormatter>>>>,
     history: Arc<Mutex<HistoryDb>>,
     capture_cfg: CaptureConfig,
     capture: Arc<Mutex<Option<CaptureSession>>>,
+    /// Active live-dictation session, parallel to [`Self::capture`] but
+    /// holding the streaming pump + run-task instead of the batch
+    /// recorder. Wiring fix follow-up to Slice A v7.
+    #[cfg(feature = "interactive")]
+    live_capture: Arc<Mutex<Option<LiveCaptureSession>>>,
     pipeline_in_flight: Arc<AtomicBool>,
     config: Arc<StdRwLock<Arc<Config>>>,
     /// Resolved XDG paths; used by [`Self::reload`] to re-read config
@@ -209,12 +262,31 @@ impl SessionOrchestrator {
             llm,
             history,
             capture_cfg,
-            config,
+            Arc::clone(&config),
             action_tx,
             Arc::new(RealInjector),
             Arc::new(RealFocusProbe),
         );
         orch.paths = Some(Arc::new(paths.clone()));
+        // Populate the streaming-STT slot when this build supports
+        // interactive mode. Errors are non-fatal — the live path
+        // gracefully falls back to batch when the slot is `None`.
+        #[cfg(feature = "interactive")]
+        {
+            match fono_stt::build_streaming_stt(&config.stt, secrets, &paths.whisper_models_dir()) {
+                Ok(opt) => {
+                    if let Ok(mut g) = orch.streaming_stt.write() {
+                        *g = opt;
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "streaming STT factory failed; live dictation will fall back \
+                         to batch: {e:#}"
+                    );
+                }
+            }
+        }
         // Apply [inject].paste_shortcut to the FONO_PASTE_SHORTCUT env
         // var so xtest-paste picks up the configured combo without
         // plumbing it through the Injector trait.
@@ -257,6 +329,26 @@ impl SessionOrchestrator {
         // Lock-write order matches read order in the hot path.
         if let Ok(mut guard) = self.stt.write() {
             *guard = new_stt;
+        }
+        #[cfg(feature = "interactive")]
+        {
+            let new_streaming = match fono_stt::build_streaming_stt(
+                &cfg.stt,
+                &secrets,
+                &paths.whisper_models_dir(),
+            ) {
+                Ok(opt) => opt,
+                Err(e) => {
+                    warn!(
+                        "reload: streaming STT factory failed; live dictation will fall \
+                         back to batch: {e:#}"
+                    );
+                    None
+                }
+            };
+            if let Ok(mut guard) = self.streaming_stt.write() {
+                *guard = new_streaming;
+            }
         }
         if let Ok(mut guard) = self.llm.write() {
             *guard = new_llm;
@@ -354,10 +446,14 @@ impl SessionOrchestrator {
     ) -> Self {
         Self {
             stt: Arc::new(StdRwLock::new(stt)),
+            #[cfg(feature = "interactive")]
+            streaming_stt: Arc::new(StdRwLock::new(None)),
             llm: Arc::new(StdRwLock::new(llm)),
             history,
             capture_cfg,
             capture: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "interactive")]
+            live_capture: Arc::new(Mutex::new(None)),
             pipeline_in_flight: Arc::new(AtomicBool::new(false)),
             config: Arc::new(StdRwLock::new(config)),
             paths: None,
@@ -571,6 +667,370 @@ impl SessionOrchestrator {
     }
 }
 
+#[cfg(feature = "interactive")]
+impl SessionOrchestrator {
+    /// Snapshot of the live (streaming) STT slot, mirroring
+    /// [`Self::current_stt`]. Returns `None` when no streaming-capable
+    /// backend is currently loaded — the caller MUST then fall back to
+    /// the batch path. Slice A wiring follow-up.
+    fn current_streaming_stt(&self) -> Option<Arc<dyn StreamingStt>> {
+        self.streaming_stt
+            .read()
+            .expect("streaming_stt lock poisoned")
+            .clone()
+    }
+
+    /// Begin a live (streaming) dictation session. Same in-flight
+    /// guarantees as [`Self::on_start_recording`]: refuses if a
+    /// previous pipeline is still running.
+    ///
+    /// Falls back to [`Self::on_start_recording`] when no streaming
+    /// backend is available — currently true for every cloud STT in
+    /// Slice A. The fallback keeps `[interactive].enabled = true`
+    /// from breaking dictation entirely on a Groq-configured user's
+    /// machine; the daemon logs a `warn!` so the diagnosis is obvious.
+    #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
+    pub async fn on_start_live_dictation(&self, mode: RecordingMode) -> Result<()> {
+        let Some(streaming) = self.current_streaming_stt() else {
+            warn!(
+                "live-dictation: no streaming-capable STT backend currently loaded \
+                 (set `[stt].backend = \"local\"` or wait for Slice B); \
+                 falling back to batch path"
+            );
+            return self.on_start_recording(mode).await;
+        };
+        if self.pipeline_in_flight.load(Ordering::SeqCst) {
+            warn!("live-dictation requested while previous pipeline still running; ignoring");
+            return Ok(());
+        }
+        let mut slot = self.live_capture.lock().await;
+        if slot.is_some() {
+            warn!("live-dictation already in progress; ignoring duplicate start");
+            return Ok(());
+        }
+
+        // Slice A: streaming pipeline operates at 16 kHz to keep the
+        // pump's broadcast frame budget aligned with whisper. The
+        // capture stage resamples for us.
+        let sample_rate = 16_000_u32;
+        let cap_cfg = CaptureConfig {
+            input_device: self.capture_cfg.input_device.clone(),
+            target_sample_rate: sample_rate,
+        };
+
+        // ---- Spawn the capture thread ----------------------------
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<
+            std::result::Result<Arc<StdMutex<RecordingBuffer>>, String>,
+        >();
+        let (capture_stop_tx, capture_stop_rx) = std::sync::mpsc::channel::<()>();
+        let cap_cfg_thread = cap_cfg.clone();
+        let capture_join = std::thread::Builder::new()
+            .name("fono-live-capture".into())
+            .spawn(move || {
+                let cap = AudioCapture::new(cap_cfg_thread);
+                match cap.start() {
+                    Ok(handle) => {
+                        let _ = started_tx.send(Ok(Arc::clone(&handle.buffer)));
+                        let _ = capture_stop_rx.recv();
+                        drop(handle);
+                    }
+                    Err(e) => {
+                        let _ = started_tx.send(Err(format!("{e:#}")));
+                    }
+                }
+            })
+            .context("spawn live-capture thread")?;
+        let buffer = match started_rx.recv() {
+            Ok(Ok(b)) => b,
+            Ok(Err(e)) => {
+                let _ = capture_join.join();
+                return Err(anyhow::anyhow!("live audio capture failed to start: {e}"));
+            }
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "live capture thread died before reporting status"
+                ))
+            }
+        };
+
+        let cfg = self.current_config();
+        if cfg.general.auto_mute_system {
+            fono_audio::mute::set_default_sink_mute(true);
+        }
+
+        // ---- Spawn the overlay (best-effort) ---------------------
+        let overlay = if cfg.interactive.overlay {
+            match fono_overlay::RealOverlay::spawn() {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    warn!("live-dictation: overlay unavailable ({e:#}); continuing without it");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // ---- Build the pump + LiveSession ------------------------
+        let mut pump = crate::live::Pump::new(fono_audio::StreamConfig::default());
+        let frame_rx = pump.take_receiver().context("take live frame receiver")?;
+        let language = if cfg.general.language == "auto" || cfg.general.language.is_empty() {
+            None
+        } else {
+            Some(cfg.general.language.clone())
+        };
+        let mut session = crate::live::LiveSession::new(streaming, sample_rate)
+            .with_language(language);
+        if let Some(o) = overlay.as_ref() {
+            session = session.with_overlay(o.clone());
+        }
+        let quality_floor = crate::live::parse_quality_floor(&cfg.interactive.quality_floor);
+
+        // ---- Spawn the run task ----------------------------------
+        let run_join = tokio::spawn(session.run(frame_rx, quality_floor));
+
+        // ---- Spawn the drain task (cpal buffer -> Pump::push) -----
+        let (drain_stop_tx, mut drain_stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let drain_join = tokio::spawn(async move {
+            // Tracks how many samples we've already pushed so we only
+            // forward newly-captured PCM. Polls every 30 ms — same
+            // cadence the offline replay path in `fono record --live`
+            // uses, well below whisper's preview interval.
+            let mut offset: usize = 0;
+            let mut interval = tokio::time::interval(Duration::from_millis(30));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut pump = pump;
+            loop {
+                tokio::select! {
+                    _ = &mut drain_stop_rx => break,
+                    _ = interval.tick() => {
+                        let snapshot: Option<Vec<f32>> = {
+                            buffer.lock().ok().and_then(|b| {
+                                let s = b.samples();
+                                if s.len() > offset {
+                                    let new = s[offset..].to_vec();
+                                    offset = s.len();
+                                    Some(new)
+                                } else {
+                                    None
+                                }
+                            })
+                        };
+                        if let Some(chunk) = snapshot {
+                            pump.push(&chunk);
+                        }
+                    }
+                }
+            }
+            // Drain final tail before signalling EOF.
+            if let Ok(b) = buffer.lock() {
+                let s = b.samples();
+                if s.len() > offset {
+                    let tail = s[offset..].to_vec();
+                    pump.push(&tail);
+                }
+            }
+            pump.finish();
+            // Drop pump explicitly so the broadcast sender side closes.
+            drop(pump);
+        });
+
+        info!(
+            "live-dictation started (mode={:?} sample_rate={} device={:?})",
+            mode, sample_rate, cap_cfg.input_device
+        );
+        self.pipeline_in_flight.store(true, Ordering::SeqCst);
+        *slot = Some(LiveCaptureSession {
+            capture_stop_tx,
+            capture_join: Some(capture_join),
+            drain_stop_tx,
+            drain_join,
+            run_join,
+            overlay,
+            started_at: Instant::now(),
+            mode,
+        });
+        Ok(())
+    }
+
+    /// Stop the active live-dictation session, await the streaming STT
+    /// to drain, then commit the assembled transcript through the
+    /// inject + history path. Mirrors [`Self::on_stop_recording`] in
+    /// shape but with a pre-existing transcript text instead of a
+    /// blob of PCM.
+    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
+    pub async fn on_stop_live_dictation(&self) {
+        let taken = self.live_capture.lock().await.take();
+        let Some(mut session) = taken else {
+            debug!("live-stop with no active live capture");
+            let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
+            return;
+        };
+        let cfg = self.current_config();
+        if cfg.general.auto_mute_system {
+            fono_audio::mute::set_default_sink_mute(false);
+        }
+        let elapsed = session.started_at.elapsed();
+        let capture_ms = elapsed.as_millis() as u64;
+
+        // 1. Tell the drain task to call pump.finish() and drop the pump.
+        let _ = session.drain_stop_tx.send(());
+        // 2. Stop cpal capture (frees the device promptly).
+        let _ = session.capture_stop_tx.send(());
+        if let Some(j) = session.capture_join.take() {
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = j.join();
+            })
+            .await;
+        }
+        // 3. Wait for the drain task itself to exit (it owns the pump).
+        let _ = session.drain_join.await;
+        // 4. Await the streaming STT run-task. This is the only place
+        //    we hear about the final transcript.
+        let transcript_res = session.run_join.await;
+        if let Some(o) = session.overlay.as_ref() {
+            o.set_state(fono_overlay::OverlayState::Hidden);
+            o.shutdown();
+        }
+        let transcript = match transcript_res {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => {
+                error!("live-dictation: streaming STT failed: {e:#}");
+                self.pipeline_in_flight.store(false, Ordering::SeqCst);
+                let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
+                return;
+            }
+            Err(e) => {
+                error!("live-dictation: run task join error: {e:#}");
+                self.pipeline_in_flight.store(false, Ordering::SeqCst);
+                let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
+                return;
+            }
+        };
+
+        let raw = transcript.committed.trim().to_string();
+        if raw.is_empty() {
+            warn!("live-dictation: empty transcript after {capture_ms} ms");
+            self.pipeline_in_flight.store(false, Ordering::SeqCst);
+            let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
+            return;
+        }
+        info!(
+            "live-dictation: committed {} chars in {} ms ({} segments)",
+            raw.chars().count(),
+            capture_ms,
+            transcript.segments_finalized
+        );
+
+        // Slice A simplification (documented inline): we do NOT pipe
+        // the live-committed text through the full `run_pipeline`
+        // function — that path expects raw PCM and runs the batch STT
+        // a second time. Instead we run an optional LLM cleanup pass
+        // and inject directly. History gets the raw + cleaned pair so
+        // `fono history` and the tray's "Recent transcriptions" menu
+        // surface live dictations identically to batch ones. The
+        // boundary-heuristic flags from the LiveTranscript are
+        // intentionally not persisted yet — Slice B telemetry work
+        // adds dedicated columns.
+        let cleaned = if cfg.interactive.cleanup_on_finalize {
+            if let Some(llm) = self.current_llm() {
+                let (app_class, app_title) = self.focus.probe();
+                let ctx = build_format_context(
+                    &cfg,
+                    app_class.as_deref(),
+                    app_title.as_deref(),
+                    None,
+                );
+                match llm.format(&raw, &ctx).await {
+                    Ok(c) => {
+                        let trimmed = c.trim().to_string();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed)
+                        }
+                    }
+                    Err(e) => {
+                        warn!("live-dictation: LLM cleanup failed: {e:#}");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let final_text = cleaned.as_deref().unwrap_or(&raw).to_string();
+
+        // Inject — best-effort, same as the batch path.
+        let injector = Arc::clone(&self.injector);
+        let final_for_inject = final_text.clone();
+        let clipboard_already_populated =
+            tokio::task::spawn_blocking(move || injector.inject(&final_for_inject))
+                .await
+                .ok()
+                .and_then(std::result::Result::ok)
+                .unwrap_or(false);
+        if cfg.general.also_copy_to_clipboard && !clipboard_already_populated {
+            if let Err(e) = fono_inject::copy_to_clipboard(&final_text) {
+                warn!("live-dictation: clipboard copy failed: {e:#}");
+            }
+        }
+
+        if cfg.general.notify_on_dictation {
+            let body = if final_text.chars().count() > 240 {
+                let mut s: String = final_text.chars().take(240).collect();
+                s.push('…');
+                s
+            } else {
+                final_text.clone()
+            };
+            let _ = notify_rust::Notification::new()
+                .summary("Fono — dictated (live)")
+                .body(&body)
+                .icon("audio-input-microphone")
+                .timeout(notify_rust::Timeout::Milliseconds(4_000))
+                .show();
+        }
+
+        // History (non-fatal on failure).
+        if cfg.history.enabled {
+            let stt_label = self
+                .current_stt()
+                .name()
+                .to_string();
+            let llm_label = if cleaned.is_some() {
+                self.current_llm().map(|l| l.name().to_string())
+            } else {
+                None
+            };
+            let (app_class, app_title) = self.focus.probe();
+            let row = HistoryRow {
+                id: None,
+                ts: now_unix(),
+                duration_ms: Some(capture_ms as i64),
+                raw: raw.clone(),
+                cleaned: cleaned.clone(),
+                app_class,
+                app_title,
+                stt_backend: Some(stt_label),
+                llm_backend: llm_label,
+                language: None,
+            };
+            let redact = cfg.history.redact_secrets;
+            let db = self.history.lock().await;
+            if let Err(e) = db.insert(&row, redact) {
+                warn!("live-dictation: history insert failed: {e:#}");
+            }
+        }
+
+        self.pipeline_in_flight.store(false, Ordering::SeqCst);
+        let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 #[allow(clippy::cognitive_complexity)]
 async fn run_pipeline(
@@ -718,9 +1178,13 @@ async fn run_pipeline(
 
     // ---- Inject -----------------------------------------------------
     let inject_started = Instant::now();
-    if let Err(e) = injector.inject(&final_text) {
-        warn!("inject failed: {e:#}");
-    }
+    let clipboard_already_populated = match injector.inject(&final_text) {
+        Ok(populated) => populated,
+        Err(e) => {
+            warn!("inject failed: {e:#}");
+            false
+        }
+    };
     metrics.inject_ms = inject_started.elapsed().as_millis() as u64;
     debug!("inject: {}ms", metrics.inject_ms);
     tracing::debug!(target: "fono::pipeline", "inject.text: {final_text:?}");
@@ -731,7 +1195,12 @@ async fn run_pipeline(
     // the focused window. Always also placing the cleaned text on the
     // system clipboard means the user can press Ctrl+V to recover even
     // when the inject silently no-op'd. Best-effort; never fatal.
-    if config.general.also_copy_to_clipboard {
+    //
+    // Skipped when the inject path itself already populated the
+    // clipboard (`xtest-paste` backend, or the clipboard fallback) —
+    // re-copying the same text would just duplicate log lines and
+    // clipboard-manager history entries on every dictation.
+    if config.general.also_copy_to_clipboard && !clipboard_already_populated {
         match fono_inject::copy_to_clipboard(&final_text) {
             Ok(tool) => {
                 info!("clipboard: copied via {tool} (paste with Ctrl+V if inject didn't land)");

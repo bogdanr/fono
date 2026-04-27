@@ -11,12 +11,68 @@ use fono_hotkey::{
 use fono_ipc::{read_frame, write_frame, Request, Response};
 use fono_tray::{TrayAction, TrayState};
 use std::sync::{Arc, RwLock};
+#[cfg(feature = "interactive")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
 use crate::cli::Verbosity;
 use crate::session::SessionOrchestrator;
+
+/// Translate the standard `Hold*` / `Toggle*` actions to their `Live*`
+/// counterparts when `[interactive].enabled = true`, the binary was
+/// built with `--features interactive`, and an orchestrator is
+/// available to drive the live state. Off otherwise — the action is
+/// passed through unchanged.
+///
+/// `CancelPressed`, `ProcessingDone`, and `ProcessingStarted` are
+/// always passed through; the FSM already routes Cancel from any
+/// state to Idle.
+fn translate_for_interactive(
+    action: HotkeyAction,
+    config: &Config,
+    orchestrator_present: bool,
+) -> HotkeyAction {
+    #[cfg(feature = "interactive")]
+    {
+        if orchestrator_present && config.interactive.enabled {
+            return match action {
+                HotkeyAction::HoldPressed => HotkeyAction::LiveHoldPressed,
+                HotkeyAction::HoldReleased => HotkeyAction::LiveHoldReleased,
+                HotkeyAction::TogglePressed => HotkeyAction::LiveTogglePressed,
+                other => other,
+            };
+        }
+    }
+    #[cfg(not(feature = "interactive"))]
+    {
+        let _ = (config, orchestrator_present);
+    }
+    action
+}
+
+/// One-shot guard so the "Live dictation active" desktop notification
+/// fires only on the first successful `StartLiveDictation` per daemon
+/// run. Helps users discover the overlay without nagging on every
+/// hotkey press.
+#[cfg(feature = "interactive")]
+static LIVE_FIRST_RUN_NOTIFIED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "interactive")]
+fn notify_live_first_run() {
+    if LIVE_FIRST_RUN_NOTIFIED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        let _ = notify_rust::Notification::new()
+            .summary("Fono — live dictation active")
+            .body("Live dictation active — overlay visible at bottom of screen")
+            .icon("audio-input-microphone")
+            .timeout(notify_rust::Timeout::Milliseconds(4_000))
+            .show();
+    }
+}
 
 #[allow(clippy::too_many_lines)]
 pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<()> {
@@ -77,12 +133,14 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
         };
 
     // ---------------------------------------------------------------
-    // Background update checker — hits GitHub releases on a slow timer
-    // and surfaces results through `update_status` so the tray menu
+    // Background update checker — hits GitHub releases once on startup
+    // and surfaces the result through `update_status` so the tray menu
     // (and IPC consumers) can render an "Update to vX.Y.Z" entry.
     // Honours `[update].auto_check`, `FONO_NO_UPDATE_CHECK=1`, and the
-    // configured channel/interval. Disabled entirely on package-managed
-    // installs to avoid fighting the distro.
+    // configured channel. Disabled entirely on package-managed installs
+    // to avoid fighting the distro. One-shot rather than periodic — fono
+    // is started often enough that a recurring timer would just add log
+    // noise without catching releases any sooner.
     // ---------------------------------------------------------------
     let update_status: Arc<RwLock<Option<fono_update::UpdateStatus>>> = Arc::new(RwLock::new(None));
     {
@@ -99,35 +157,31 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
         if auto_check {
             let channel = fono_update::Channel::parse(&config.update.channel)
                 .unwrap_or(fono_update::Channel::Stable);
-            let interval = std::time::Duration::from_secs(
-                u64::from(config.update.interval_hours.max(1)) * 3600,
-            );
             let status_for_task = Arc::clone(&update_status);
             let cache_path_task = cache_path;
             tokio::spawn(async move {
+                // Brief delay so the check doesn't compete with daemon
+                // startup work (audio init, model load, tray spawn).
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                loop {
-                    let current = env!("CARGO_PKG_VERSION");
-                    let st = fono_update::check(current, channel).await;
-                    match &st {
-                        fono_update::UpdateStatus::Available { info: rel, .. } => {
-                            info!(
-                                "update check: new version available {current} -> {} ({})",
-                                rel.version, rel.html_url
-                            );
-                        }
-                        fono_update::UpdateStatus::UpToDate { current: c } => {
-                            info!("update check: running latest version v{c}; no update available");
-                        }
-                        fono_update::UpdateStatus::CheckFailed { error, .. } => {
-                            info!("update check: failed ({error}); will retry later");
-                        }
+                let current = env!("CARGO_PKG_VERSION");
+                let st = fono_update::check(current, channel).await;
+                match &st {
+                    fono_update::UpdateStatus::Available { info: rel, .. } => {
+                        info!(
+                            "update check: new version available {current} -> {} ({})",
+                            rel.version, rel.html_url
+                        );
                     }
-                    fono_update::save_cache(&cache_path_task, &st);
-                    if let Ok(mut guard) = status_for_task.write() {
-                        *guard = Some(st);
+                    fono_update::UpdateStatus::UpToDate { current: c } => {
+                        info!("update check: running latest version v{c}; no update available");
                     }
-                    tokio::time::sleep(interval).await;
+                    fono_update::UpdateStatus::CheckFailed { error, .. } => {
+                        info!("update check: failed ({error}); will retry on next start");
+                    }
+                }
+                fono_update::save_cache(&cache_path_task, &st);
+                if let Ok(mut guard) = status_for_task.write() {
+                    *guard = Some(st);
                 }
             });
         } else if pkg_managed {
@@ -310,20 +364,45 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                             o.on_cancel().await;
                         });
                     }
-                    // Plan R7.4: live-dictation start/stop. Slice A's
-                    // orchestrator does not yet hold a streaming
-                    // pipeline (the wiring lives in `crate::live`); the
-                    // daemon currently logs the transition and falls
-                    // back to the batch path so the binary stays
-                    // functional even when [interactive].enabled = true
-                    // but the orchestrator-side hook hasn't been
-                    // implemented for a given backend. Slice B closes
-                    // the loop with cloud streaming and the subprocess
-                    // overlay refactor.
+                    // Plan R7.4: live-dictation start/stop. Wires the
+                    // streaming pipeline through the orchestrator's
+                    // dedicated `on_start_live_dictation` /
+                    // `on_stop_live_dictation` methods when the
+                    // `interactive` feature is compiled in. Slim
+                    // builds keep the original batch-fallback path so
+                    // a config with `[interactive].enabled = true`
+                    // still produces working dictation when the
+                    // feature was opted out at build time.
+                    #[cfg(feature = "interactive")]
+                    HotkeyEvent::StartLiveDictation(mode) => {
+                        if let Err(err) = o.on_start_live_dictation(mode).await {
+                            warn!(
+                                "start_live_dictation failed: {err:#} — \
+                                 falling back to batch path"
+                            );
+                            if let Err(err2) = o.on_start_recording(mode).await {
+                                warn!("start_recording fallback also failed: {err2:#}");
+                                if let Some(t) = tray.as_ref().as_ref() {
+                                    t.set_state(TrayState::Idle);
+                                }
+                                let _ = action_tx_ev.send(HotkeyAction::ProcessingDone);
+                            }
+                        } else {
+                            notify_live_first_run();
+                        }
+                    }
+                    #[cfg(feature = "interactive")]
+                    HotkeyEvent::StopLiveDictation => {
+                        let o = Arc::clone(o);
+                        tokio::spawn(async move {
+                            o.on_stop_live_dictation().await;
+                        });
+                    }
+                    #[cfg(not(feature = "interactive"))]
                     HotkeyEvent::StartLiveDictation(mode) => {
                         tracing::info!(
                             "live-dictation start ({mode:?}) — falling back to batch path \
-                             until orchestrator wiring lands (Slice B)"
+                             (binary built without `--features interactive`)"
                         );
                         if let Err(err) = o.on_start_recording(mode).await {
                             warn!("start_recording failed: {err:#}");
@@ -333,6 +412,7 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                             let _ = action_tx_ev.send(HotkeyAction::ProcessingDone);
                         }
                     }
+                    #[cfg(not(feature = "interactive"))]
                     HotkeyEvent::StopLiveDictation => {
                         let o = Arc::clone(o);
                         tokio::spawn(async move {
@@ -347,12 +427,27 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
     // ---------------------------------------------------------------
     // Action dispatcher — drains HotkeyAction into the FSM. Also flips
     // the tray to Idle when the pipeline reports ProcessingDone.
+    //
+    // When `[interactive].enabled = true` and this build was compiled
+    // with the `interactive` feature, incoming Hold/Toggle actions are
+    // translated to their `Live*` variants so the FSM enters
+    // `LiveDictating` and emits `StartLiveDictation` to the
+    // orchestrator. The translation only fires when an orchestrator is
+    // available — degraded mode (no orchestrator) skips it because
+    // there is nothing to drive the live state through.
     // ---------------------------------------------------------------
     {
         let fsm = Arc::clone(&fsm);
         let tray = Arc::clone(&tray);
+        let config_for_dispatch = Arc::clone(&config);
+        let orch_for_dispatch = orchestrator.clone();
         tokio::spawn(async move {
             while let Some(action) = action_rx.recv().await {
+                let action = translate_for_interactive(
+                    action,
+                    &config_for_dispatch,
+                    orch_for_dispatch.is_some(),
+                );
                 let new_state = fsm.lock().await.dispatch(action);
                 tracing::debug!("dispatch {action:?} -> {new_state:?}");
                 if matches!(action, HotkeyAction::ProcessingDone) {
@@ -439,8 +534,9 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                 let fsm = Arc::clone(&fsm);
                 let action_tx = action_tx.clone();
                 let orch = orchestrator.clone();
+                let config = Arc::clone(&config);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, fsm, action_tx, orch).await {
+                    if let Err(e) = handle_client(stream, fsm, action_tx, orch, config).await {
                         warn!("client error: {e}");
                     }
                 });
@@ -470,6 +566,34 @@ fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbos
             "not compiled"
         }
     );
+    // [interactive] visibility — always emitted, even on slim builds
+    // where the streaming pipeline is compiled out, so the user can
+    // diagnose "I set `enabled = true` and nothing happened" without
+    // turning on debug logging.
+    #[cfg(feature = "interactive")]
+    {
+        info!(
+            "interactive  : {} (mode={}, overlay={})",
+            if config.interactive.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            config.interactive.mode,
+            config.interactive.overlay,
+        );
+    }
+    #[cfg(not(feature = "interactive"))]
+    {
+        if config.interactive.enabled {
+            warn!(
+                "interactive  : not compiled in (rebuild with `--features interactive`); \
+                 `[interactive].enabled = true` in config will be ignored"
+            );
+        } else {
+            info!("interactive  : not compiled in (rebuild with `--features interactive`)");
+        }
+    }
     info!("hw accel     : {}", hardware_acceleration_summary());
     debug!(
         "config       : {} ({})",
@@ -640,19 +764,24 @@ async fn handle_client(
     fsm: Arc<Mutex<RecordingFsm>>,
     action_tx: mpsc::UnboundedSender<HotkeyAction>,
     orchestrator: Option<Arc<SessionOrchestrator>>,
+    config: Arc<Config>,
 ) -> Result<()> {
     let req: Request = read_frame(&mut stream).await?;
+    let orch_present = orchestrator.is_some();
+    let send_translated = |a: HotkeyAction| {
+        let _ = action_tx.send(translate_for_interactive(a, &config, orch_present));
+    };
     let resp = match req {
         Request::Toggle => {
-            let _ = action_tx.send(HotkeyAction::TogglePressed);
+            send_translated(HotkeyAction::TogglePressed);
             Response::Ok
         }
         Request::HoldPress => {
-            let _ = action_tx.send(HotkeyAction::HoldPressed);
+            send_translated(HotkeyAction::HoldPressed);
             Response::Ok
         }
         Request::HoldRelease => {
-            let _ = action_tx.send(HotkeyAction::HoldReleased);
+            send_translated(HotkeyAction::HoldReleased);
             Response::Ok
         }
         Request::PasteLast => {
@@ -1170,5 +1299,85 @@ async fn apply_update_via_tray(update_status: Arc<RwLock<Option<fono_update::Upd
                 .timeout(notify_rust::Timeout::Milliseconds(8_000))
                 .show();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Slim build: translation never fires regardless of config.
+    #[cfg(not(feature = "interactive"))]
+    #[test]
+    fn translate_passthrough_when_feature_off() {
+        let mut cfg = Config::default();
+        cfg.interactive.enabled = true;
+        assert_eq!(
+            translate_for_interactive(HotkeyAction::HoldPressed, &cfg, true),
+            HotkeyAction::HoldPressed
+        );
+        assert_eq!(
+            translate_for_interactive(HotkeyAction::TogglePressed, &cfg, true),
+            HotkeyAction::TogglePressed
+        );
+    }
+
+    /// `interactive` feature on, `[interactive].enabled = true`, and an
+    /// orchestrator is present → Hold/Toggle become their `Live*`
+    /// variants. Cancel and processing actions pass through.
+    #[cfg(feature = "interactive")]
+    #[test]
+    fn translate_hold_toggle_to_live_when_enabled() {
+        let mut cfg = Config::default();
+        cfg.interactive.enabled = true;
+        assert_eq!(
+            translate_for_interactive(HotkeyAction::HoldPressed, &cfg, true),
+            HotkeyAction::LiveHoldPressed
+        );
+        assert_eq!(
+            translate_for_interactive(HotkeyAction::HoldReleased, &cfg, true),
+            HotkeyAction::LiveHoldReleased
+        );
+        assert_eq!(
+            translate_for_interactive(HotkeyAction::TogglePressed, &cfg, true),
+            HotkeyAction::LiveTogglePressed
+        );
+        // Cancel / Processing variants always pass through.
+        assert_eq!(
+            translate_for_interactive(HotkeyAction::CancelPressed, &cfg, true),
+            HotkeyAction::CancelPressed
+        );
+        assert_eq!(
+            translate_for_interactive(HotkeyAction::ProcessingDone, &cfg, true),
+            HotkeyAction::ProcessingDone
+        );
+        assert_eq!(
+            translate_for_interactive(HotkeyAction::ProcessingStarted, &cfg, true),
+            HotkeyAction::ProcessingStarted
+        );
+    }
+
+    /// `enabled = false` → no translation even with the feature on.
+    #[cfg(feature = "interactive")]
+    #[test]
+    fn translate_passthrough_when_disabled() {
+        let cfg = Config::default(); // interactive.enabled defaults to false
+        assert_eq!(
+            translate_for_interactive(HotkeyAction::HoldPressed, &cfg, true),
+            HotkeyAction::HoldPressed
+        );
+    }
+
+    /// Degraded mode (no orchestrator) → translation is suppressed
+    /// because the FSM's `LiveDictating` state has no driver.
+    #[cfg(feature = "interactive")]
+    #[test]
+    fn translate_passthrough_in_degraded_mode() {
+        let mut cfg = Config::default();
+        cfg.interactive.enabled = true;
+        assert_eq!(
+            translate_for_interactive(HotkeyAction::HoldPressed, &cfg, false),
+            HotkeyAction::HoldPressed
+        );
     }
 }

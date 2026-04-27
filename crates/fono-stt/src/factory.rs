@@ -159,6 +159,64 @@ fn build_openai(_: &Stt, _: &Secrets) -> Result<Arc<dyn SpeechToText>> {
     ))
 }
 
+/// Streaming-STT factory. Mirrors [`build_stt`] but returns
+/// `Arc<dyn StreamingStt>`. Slice A only implements the local
+/// (`whisper-rs`) streaming path; cloud backends return `Ok(None)`
+/// with a `warn!` so the caller (the daemon) can fall back to the
+/// batch path gracefully. Slice B will fill in cloud streaming.
+#[cfg(feature = "streaming")]
+pub fn build_streaming_stt(
+    cfg: &Stt,
+    _secrets: &Secrets,
+    whisper_models_dir: &Path,
+) -> Result<Option<Arc<dyn crate::streaming::StreamingStt>>> {
+    match &cfg.backend {
+        SttBackend::Local => build_local_streaming(cfg, whisper_models_dir).map(Some),
+        other => {
+            let label = fono_core::providers::stt_backend_str(other);
+            tracing::warn!(
+                "streaming STT not yet supported for backend {label}; \
+                 live dictation will fall back to batch"
+            );
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(all(feature = "streaming", feature = "whisper-local"))]
+fn build_local_streaming(
+    cfg: &Stt,
+    dir: &Path,
+) -> Result<Arc<dyn crate::streaming::StreamingStt>> {
+    let model = &cfg.local.model;
+    let path = dir.join(format!("ggml-{model}.bin"));
+    if !path.exists() {
+        return Err(anyhow!(
+            "local whisper model {model:?} not found at {} — \
+             run `fono models install {model}`",
+            path.display()
+        ));
+    }
+    let threads: i32 = match cfg.local.threads {
+        0 => i32::try_from(detect_physical_cores()).unwrap_or(4),
+        n => i32::try_from(n).unwrap_or(i32::MAX),
+    };
+    Ok(Arc::new(crate::whisper_local::WhisperLocal::with_threads(
+        path, threads,
+    )))
+}
+
+#[cfg(all(feature = "streaming", not(feature = "whisper-local")))]
+fn build_local_streaming(
+    _cfg: &Stt,
+    _dir: &Path,
+) -> Result<Arc<dyn crate::streaming::StreamingStt>> {
+    Err(anyhow!(
+        "local streaming STT requested but this binary was built without \
+         the `whisper-local` feature"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,6 +251,48 @@ mod tests {
         assert!(
             err.contains("GROQ_API_KEY") && err.contains("fono keys add"),
             "error message should mention env var and remediation: {err}"
+        );
+    }
+
+    #[cfg(all(feature = "streaming", feature = "groq"))]
+    #[test]
+    fn build_streaming_stt_returns_none_for_cloud_backend() {
+        // Groq is configured (key present) but is not yet a streaming
+        // backend in Slice A; the factory should report `None` and let
+        // the caller fall back to the batch path.
+        let cfg = SttCfg {
+            backend: SttBackend::Groq,
+            cloud: None,
+            ..SttCfg::default()
+        };
+        let mut secrets = Secrets::default();
+        secrets.insert("GROQ_API_KEY", "gsk-test");
+        let dir = std::path::PathBuf::from("/tmp");
+        let got = build_streaming_stt(&cfg, &secrets, &dir).expect("ok");
+        assert!(got.is_none(), "cloud backend should yield None in Slice A");
+    }
+
+    #[cfg(all(feature = "streaming", feature = "whisper-local"))]
+    #[test]
+    fn build_streaming_stt_local_missing_model_errors_clearly() {
+        // Local *does* support streaming, but the model file is absent
+        // — the factory should surface the same explicit error
+        // `build_stt` uses so the daemon can warn the user rather than
+        // silently falling back.
+        let cfg = SttCfg {
+            backend: SttBackend::Local,
+            ..SttCfg::default()
+        };
+        let secrets = Secrets::default();
+        let dir = std::env::temp_dir().join("fono-streaming-stt-test-empty");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let err = build_streaming_stt(&cfg, &secrets, &dir)
+            .err()
+            .expect("missing model should error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found") && msg.contains("models install"),
+            "error should mention remediation: {msg}"
         );
     }
 }
