@@ -586,7 +586,7 @@ fn fmt_ratio(ratio: Option<f32>, s: &Style) -> String {
     match ratio {
         None => format!("{:>10}", "-"),
         Some(v) => {
-            let txt = format!("{:>10.2}", v);
+            let txt = format!("{v:>10.2}");
             if v <= 1.0 {
                 s.green(&txt)
             } else if v <= 2.0 {
@@ -602,7 +602,7 @@ fn fmt_ratio(ratio: Option<f32>, s: &Style) -> String {
 /// threshold = yellow, at/above = red.
 /// Visible width = 6 (matches header column).
 fn fmt_lev(lev: f32, threshold: f32, s: &Style) -> String {
-    let txt = format!("{:>6.4}", lev);
+    let txt = format!("{lev:>6.4}");
     if lev <= 0.0 {
         s.green(&txt)
     } else if lev < threshold * 0.5 {
@@ -638,7 +638,7 @@ impl Style {
 
     fn green(&self, text: &str) -> String {
         if self.enabled {
-            format!("\x1b[32m{}\x1b[0m", text)
+            format!("\x1b[32m{text}\x1b[0m")
         } else {
             text.to_string()
         }
@@ -646,7 +646,7 @@ impl Style {
 
     fn yellow(&self, text: &str) -> String {
         if self.enabled {
-            format!("\x1b[33m{}\x1b[0m", text)
+            format!("\x1b[33m{text}\x1b[0m")
         } else {
             text.to_string()
         }
@@ -654,7 +654,7 @@ impl Style {
 
     fn red(&self, text: &str) -> String {
         if self.enabled {
-            format!("\x1b[31m{}\x1b[0m", text)
+            format!("\x1b[31m{text}\x1b[0m")
         } else {
             text.to_string()
         }
