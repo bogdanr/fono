@@ -52,9 +52,9 @@ impl TextFormatter for FakeLlm {
 struct CapturingInjector(Arc<Mutex<Vec<String>>>);
 
 impl Injector for CapturingInjector {
-    fn inject(&self, text: &str) -> Result<()> {
+    fn inject(&self, text: &str) -> Result<bool> {
         self.0.lock().unwrap().push(text.to_string());
-        Ok(())
+        Ok(true)
     }
 }
 

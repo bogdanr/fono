@@ -243,14 +243,16 @@ async fn configure_cloud(
     configure_cloud_stt(theme, config, secrets).await?;
     configure_cloud_llm(theme, config, secrets).await?;
 
-    let _lang: String = Input::with_theme(theme)
-        .with_prompt("Default language (BCP-47 code, or 'auto')")
+    let langs: String = Input::with_theme(theme)
+        .with_prompt("Languages (comma-separated BCP-47 codes, or 'auto' for unconstrained detect)")
         .default("auto".into())
         .interact_text()?;
+    config.general.languages =
+        fono_stt::LanguageSelection::parse_csv(&langs).codes().to_vec();
     Ok(())
 }
 
-/// R3.3 — Mixed path: ask STT and LLM independently, no coupling.
+/// R3.3 -- Mixed path: ask STT and LLM independently, no coupling.
 async fn configure_mixed(
     theme: &ColorfulTheme,
     config: &mut Config,
@@ -303,10 +305,12 @@ async fn configure_mixed(
         _ => configure_cloud_llm(theme, config, secrets).await?,
     }
 
-    let _lang: String = Input::with_theme(theme)
-        .with_prompt("Default language (BCP-47 code, or 'auto')")
+    let langs: String = Input::with_theme(theme)
+        .with_prompt("Languages (comma-separated BCP-47 codes, or 'auto' for unconstrained detect)")
         .default("auto".into())
         .interact_text()?;
+    config.general.languages =
+        fono_stt::LanguageSelection::parse_csv(&langs).codes().to_vec();
     Ok(())
 }
 
@@ -703,7 +707,7 @@ async fn probe_local_latency(paths: &fono_core::Paths, config: &Config, tier: Lo
         Secrets::default()
     };
 
-    let stt = match build_stt(&config.stt, &secrets, &paths.whisper_models_dir()) {
+    let stt = match build_stt(&config.stt, &config.general, &secrets, &paths.whisper_models_dir()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("  (latency probe skipped: {e:#})");

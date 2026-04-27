@@ -101,7 +101,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
     let secrets = Secrets::load(&paths.secrets_file()).unwrap_or_default();
     if let Some(c) = cfg.as_ref() {
         writeln!(out, "Backends:")?;
-        match fono_stt::build_stt(&c.stt, &secrets, &paths.whisper_models_dir()) {
+        match fono_stt::build_stt(&c.stt, &c.general, &secrets, &paths.whisper_models_dir()) {
             Ok(s) => writeln!(out, "  stt: {} ready", s.name())?,
             Err(e) => writeln!(out, "  stt: FAIL — {e:#}")?,
         }

@@ -2,6 +2,55 @@
 
 Last updated: 2026-04-28
 
+## 2026-04-28 — Language allow-list (constrained Whisper auto-detect)
+
+User reported: *"A lot of the people will use fono in more than one
+language. But whisper might autodetect some of the other languages.
+We need to be able to specify a list of languages that should be
+considered and the others should essentially be banned."*
+
+Plan: `plans/2026-04-28-stt-language-allow-list-v1.md`.
+
+**Schema** — `[general]` and `[stt.local]` gain a new `languages:
+Vec<String>` field. Empty = unconstrained Whisper auto-detect (today's
+default); one entry = forced single language (today's `language = "ro"`);
+two-or-more = constrained auto-detect: Whisper picks from the allow-list,
+every other language is **banned**. The legacy scalar `language: String`
+is still accepted on read and migrated into `languages` on first save
+(`skip_serializing_if = "String::is_empty"` drops it from disk).
+
+**Local Whisper** (`crates/fono-stt/src/whisper_local.rs`) — when an
+allow-list is in effect, run `WhisperState::lang_detect` on the prefix
+mel, mask probabilities to allow-list members only, argmax → run
+`full()` with the picked code locked. Forced and Auto paths preserve
+the previous one-pass behaviour (no extra cost).
+
+**Cloud STT** (`groq.rs`, `openai.rs`) — banning is impossible at the
+provider API. Two opt-in knobs on `[general]`:
+`cloud_force_primary_language` (sends `languages[0]` instead of `auto`)
+and `cloud_rerun_on_language_mismatch` (one extra round-trip when the
+returned `language` is outside the allow-list). Defaults preserve the
+current cost profile.
+
+**New module** `crates/fono-stt/src/lang.rs` carries the
+`LanguageSelection` enum (`Auto` / `Forced(code)` / `AllowList(Vec)`)
+and the parser, so backends never compare sentinel strings like
+`"auto"` directly.
+
+**Wizard** — both `configure_cloud` and `configure_mixed` now persist
+their language prompt (previously discarded into `_lang`) into
+`general.languages` via `LanguageSelection::parse_csv`.
+
+**Verification** — `cargo build --workspace`, `cargo test --workspace
+--lib`, and `cargo clippy -p fono-stt -p fono-core -p fono --lib --bins
+-- -D warnings` all green. New tests in `lang.rs` cover the parser /
+normaliser; `config.rs::languages_round_trip_drops_legacy_field` and
+`explicit_languages_wins_over_legacy_scalar` lock the migration.
+
+The pre-existing `crates/fono/tests/pipeline.rs` `Injector` signature
+mismatch is unrelated to this change and was already broken on
+`main`.
+
 ## 2026-04-28 — Overlay focus-theft eliminated (X11 override-redirect)
 
 User reported: *"The overlay window still seems to be stealing focus

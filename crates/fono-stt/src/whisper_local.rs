@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use std::sync::Once;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+use crate::lang::LanguageSelection;
 use crate::traits::{SpeechToText, Transcription};
 
 /// Install whisper-rs's tracing bridge once per process so whisper.cpp + GGML
@@ -37,6 +38,10 @@ pub struct WhisperLocal {
     model_path: PathBuf,
     ctx: Arc<Mutex<Option<WhisperContext>>>,
     threads: i32,
+    /// Configured allow-list. Empty = unconstrained auto-detect.
+    /// One = forced. Two or more = constrained auto-detect via
+    /// `state.lang_detect` masked to this set.
+    languages: Vec<String>,
 }
 
 impl WhisperLocal {
@@ -50,7 +55,24 @@ impl WhisperLocal {
             model_path: model_path.into(),
             ctx: Arc::new(Mutex::new(None)),
             threads,
+            languages: Vec::new(),
         }
+    }
+
+    /// Builder: set the language allow-list. Codes are normalised
+    /// (trimmed, lowercased, `"auto"` collapsed). See
+    /// [`crate::lang::LanguageSelection`] for semantics.
+    #[must_use]
+    pub fn with_languages(mut self, codes: Vec<String>) -> Self {
+        self.languages = codes;
+        self
+    }
+
+    /// Resolve the effective selection for a single call: a per-call
+    /// `lang` override beats the configured allow-list, and the alias
+    /// `"auto"` clears any constraint.
+    fn effective_selection(&self, lang_override: Option<&str>) -> LanguageSelection {
+        LanguageSelection::from_config(&self.languages).with_override(lang_override)
     }
 
     fn ensure_ctx(&self) -> Result<()> {
@@ -80,29 +102,36 @@ impl SpeechToText for WhisperLocal {
         lang: Option<&str>,
     ) -> Result<Transcription> {
         self.ensure_ctx()?;
-        let pcm = pcm.to_vec();
-        let lang = lang.map(str::to_string);
+        let selection = self.effective_selection(lang);
         let threads = self.threads;
         let guard = self
             .ctx
             .lock()
             .map_err(|_| anyhow!("whisper mutex poisoned"))?;
         let ctx = guard.as_ref().expect("ensure_ctx succeeded");
+
+        // Resolve the single language code we'll lock the decoder to.
+        // For `Auto` this stays `None` (full whisper auto-detect).
+        // For `Forced` we use the code directly. For `AllowList` we
+        // run an encoder-only `lang_detect` pass over the audio prefix
+        // and argmax over the masked subset — that's the "banning"
+        // mechanism that gives users multi-language dictation without
+        // letting Whisper drift into unrelated languages.
+        let resolved = resolve_language(ctx, &selection, pcm, threads)?;
+
         let mut state = ctx.create_state().context("create whisper state")?;
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(threads);
         params.set_translate(false);
-        if let Some(l) = lang.as_deref() {
-            if l != "auto" {
-                params.set_language(Some(l));
-            }
+        if let Some(code) = resolved.as_deref() {
+            params.set_language(Some(code));
         }
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
 
-        state.full(params, &pcm).context("whisper full()")?;
+        state.full(params, pcm).context("whisper full()")?;
         let segments = state.full_n_segments();
         let mut text = String::new();
         for i in 0..segments {
@@ -112,9 +141,13 @@ impl SpeechToText for WhisperLocal {
                 }
             }
         }
+        // Surface the language whisper actually decoded against —
+        // either our resolved pick or, for unconstrained auto, the
+        // post-hoc lang id from the state.
+        let detected = resolved.or_else(|| post_hoc_lang(&state));
         Ok(Transcription {
             text: text.trim().to_string(),
-            language: lang,
+            language: detected,
             duration_ms: None,
         })
     }
@@ -149,6 +182,112 @@ fn num_cpus() -> i32 {
     std::thread::available_parallelism()
         .map(|n| n.get() as i32)
         .unwrap_or(4)
+}
+
+// ---------------------------------------------------------------------
+// Constrained language detection. The "ban languages outside the
+// allow-list" mechanism: run an encoder-only `lang_detect` pass over
+// the audio prefix, mask the resulting probability vector to the
+// allow-list, argmax -- then pin the decoder to that single code via
+// `params.set_language`. Whisper itself has no native multi-language
+// constraint; this is the supported wrapper-layer enforcement.
+// ---------------------------------------------------------------------
+
+/// At most this many seconds of leading audio are fed to the
+/// `lang_detect` encoder pass. Whisper internally only looks at the
+/// first 30 s anyway; capping in the wrapper keeps very long buffers
+/// from re-running the encoder over audio the detector won't use.
+const LANG_DETECT_PREFIX_SAMPLES: usize = 16_000 * 30;
+
+/// Resolve the single language code we'll lock the decoder to for one
+/// pipeline call. Returns `Ok(None)` for [`LanguageSelection::Auto`],
+/// which keeps today's "let whisper auto-detect freely" behaviour.
+fn resolve_language(
+    ctx: &WhisperContext,
+    selection: &LanguageSelection,
+    pcm: &[f32],
+    threads: i32,
+) -> Result<Option<String>> {
+    match selection {
+        LanguageSelection::Auto => Ok(None),
+        LanguageSelection::Forced(c) => Ok(Some(c.clone())),
+        LanguageSelection::AllowList(codes) => {
+            let pick = pick_from_allow_list(ctx, codes, pcm, threads)?;
+            Ok(Some(pick))
+        }
+    }
+}
+
+/// Run `pcm_to_mel` + `lang_detect` on the first ~30 s of audio and
+/// argmax over the allow-list. Falls back to the first allow-list
+/// entry if the detector returns nonsense (negative probs, all-zero
+/// row, unknown codes), so the worst-case "ban" still produces a
+/// transcript in a known-allowed language.
+fn pick_from_allow_list(
+    ctx: &WhisperContext,
+    codes: &[String],
+    pcm: &[f32],
+    threads: i32,
+) -> Result<String> {
+    let prefix_len = pcm.len().min(LANG_DETECT_PREFIX_SAMPLES);
+    let prefix = &pcm[..prefix_len];
+
+    let mut state = ctx.create_state().context("create whisper state (lang_detect)")?;
+    state
+        .pcm_to_mel(prefix, threads as usize)
+        .context("whisper pcm_to_mel for lang_detect")?;
+    let (_top_id, probs) = state
+        .lang_detect(0, threads.max(1) as usize)
+        .context("whisper lang_detect")?;
+
+    // Translate each user-supplied BCP-47 code to whisper's internal
+    // language id, then argmax. Unknown codes are dropped with a warn.
+    let mut best: Option<(f32, &str)> = None;
+    let mut considered = 0usize;
+    for code in codes {
+        let Some(id) = whisper_rs::get_lang_id(code) else {
+            tracing::warn!(
+                "language allow-list contains unknown BCP-47 code {code:?}; skipping"
+            );
+            continue;
+        };
+        let idx = id as usize;
+        let prob = probs.get(idx).copied().unwrap_or(0.0);
+        considered += 1;
+        if best.is_none_or(|(p, _)| prob > p) {
+            best = Some((prob, code.as_str()));
+        }
+    }
+
+    if considered == 0 {
+        // Every supplied code was unknown to whisper. Fall through to
+        // the first entry as a deterministic last resort.
+        let fallback = codes.first().cloned().unwrap_or_default();
+        tracing::warn!(
+            "no language in allow-list {codes:?} is known to whisper; \
+             falling back to {fallback:?} (transcript may be garbled)"
+        );
+        return Ok(fallback);
+    }
+
+    let (best_prob, best_code) = best.expect("considered > 0 implies Some(best)");
+    tracing::debug!(
+        target: "fono_stt::lang",
+        "lang_detect picked {best_code} (p={best_prob:.3}) from allow-list of {} codes",
+        codes.len()
+    );
+    Ok(best_code.to_string())
+}
+
+/// Best-effort post-decode language id read-back. Used for the `Auto`
+/// path where we want history rows to record the language whisper
+/// actually decoded against, not just `None`.
+fn post_hoc_lang(state: &whisper_rs::WhisperState) -> Option<String> {
+    let id = state.full_lang_id_from_state();
+    if id < 0 {
+        return None;
+    }
+    whisper_rs::get_lang_str(id).map(str::to_string)
 }
 
 // ---------------------------------------------------------------------
@@ -190,7 +329,15 @@ mod streaming_impl {
             self.ensure_ctx()?;
 
             let (tx, rx) = mpsc::unbounded_channel::<TranscriptUpdate>();
-            let lang_owned = lang;
+            // Selection seed for this entire stream. Constraint
+            // resolution (allow-list -> single code) happens per
+            // segment in `resolve_segment_lang` below so each segment
+            // re-reads the prefix language; users routinely switch
+            // languages mid-session and a stream-wide cache would lock
+            // them into the first guess.
+            let selection_seed = self
+                .effective_selection(lang.as_deref())
+                .clone();
             let started = Instant::now();
             let stt = self.clone_arc();
 
@@ -199,6 +346,11 @@ mod streaming_impl {
                 let mut segment_pcm: Vec<f32> = Vec::with_capacity(16_000 * 30);
                 let mut last_preview_at: Option<Instant> = None;
                 let mut agreement = LocalAgreement::new();
+                // Per-segment cached pick from `lang_detect`. We
+                // detect on the first qualifying preview pass and
+                // reuse the picked code for every subsequent decode
+                // of this segment, resetting on SegmentBoundary/Eof.
+                let mut segment_lang: Option<String> = None;
 
                 while let Some(frame) = frames.next().await {
                     match frame {
@@ -209,8 +361,15 @@ mod streaming_impl {
                             let cooled =
                                 last_preview_at.is_none_or(|t| t.elapsed() >= PREVIEW_MIN_INTERVAL);
                             if big_enough && cooled {
+                                if segment_lang.is_none() {
+                                    segment_lang = resolve_segment_lang(
+                                        &stt,
+                                        &selection_seed,
+                                        &segment_pcm,
+                                    );
+                                }
                                 let preview_pcm = segment_pcm.clone();
-                                let lang = lang_owned.clone();
+                                let lang = segment_lang.clone();
                                 let stt2 = Arc::clone(&stt);
                                 let res = tokio::task::spawn_blocking(move || {
                                     decode_blocking(&stt2, &preview_pcm, sample_rate, lang.as_deref())
@@ -225,7 +384,7 @@ mod streaming_impl {
                                         if stable.is_empty() { text } else { stable },
                                         started.elapsed(),
                                     )
-                                    .with_language(lang_owned.clone());
+                                    .with_language(segment_lang.clone());
                                     if tx.send(upd).is_err() {
                                         return;
                                     }
@@ -239,11 +398,18 @@ mod streaming_impl {
                             // LocalAgreement to keep only the prefix
                             // both passes agreed on. Plan R3.
                             if !segment_pcm.is_empty() {
+                                if segment_lang.is_none() {
+                                    segment_lang = resolve_segment_lang(
+                                        &stt,
+                                        &selection_seed,
+                                        &segment_pcm,
+                                    );
+                                }
                                 let mut la_final = LocalAgreement::new();
                                 let mut last_text = String::new();
                                 for _ in 0..2 {
                                     let pcm = segment_pcm.clone();
-                                    let lang = lang_owned.clone();
+                                    let lang = segment_lang.clone();
                                     let stt2 = Arc::clone(&stt);
                                     let res = tokio::task::spawn_blocking(move || {
                                         decode_blocking(&stt2, &pcm, sample_rate, lang.as_deref())
@@ -266,12 +432,13 @@ mod streaming_impl {
                                     final_text,
                                     started.elapsed(),
                                 )
-                                .with_language(lang_owned.clone());
+                                .with_language(segment_lang.clone());
                                 let _ = tx.send(upd);
                             }
                             segment_pcm.clear();
                             agreement.reset();
                             last_preview_at = None;
+                            segment_lang = None;
                             segment_index += 1;
                             if matches!(frame, StreamFrame::Eof) {
                                 break;
@@ -286,6 +453,40 @@ mod streaming_impl {
 
         fn name(&self) -> &'static str {
             <Self as crate::SpeechToText>::name(self)
+        }
+    }
+
+    /// Resolve the allow-list to a single locked code for the current
+    /// segment, calling `lang_detect` once. Returns the forced code
+    /// directly, `None` for `Auto`, and the detector's pick for
+    /// `AllowList`. Errors degrade to the allow-list's first entry so
+    /// streaming never aborts mid-session over a transient detect
+    /// failure.
+    fn resolve_segment_lang(
+        stt: &Arc<WhisperLocal>,
+        selection: &LanguageSelection,
+        pcm: &[f32],
+    ) -> Option<String> {
+        if matches!(selection, LanguageSelection::Auto) {
+            return None;
+        }
+        let guard = match stt.ctx.lock() {
+            Ok(g) => g,
+            Err(_) => return selection.primary().map(str::to_string),
+        };
+        let ctx = match guard.as_ref() {
+            Some(c) => c,
+            None => return selection.primary().map(str::to_string),
+        };
+        match resolve_language(ctx, selection, pcm, stt.threads) {
+            Ok(opt) => opt,
+            Err(e) => {
+                tracing::warn!(
+                    "lang_detect failed mid-stream ({e}); falling back to {:?}",
+                    selection.primary()
+                );
+                selection.primary().map(str::to_string)
+            }
         }
     }
 
@@ -406,6 +607,7 @@ mod streaming_impl {
                 model_path: self.model_path.clone(),
                 ctx: Arc::clone(&self.ctx),
                 threads: self.threads,
+                languages: self.languages.clone(),
             })
         }
     }

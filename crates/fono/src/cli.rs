@@ -635,7 +635,7 @@ async fn record_cmd(
     };
     drop(handle);
 
-    let stt = fono_stt::build_stt(&config.stt, &secrets, &paths.whisper_models_dir())?;
+    let stt = fono_stt::build_stt(&config.stt, &config.general, &secrets, &paths.whisper_models_dir())?;
     let llm = fono_llm::build_llm(&config.llm, &secrets, &paths.llm_models_dir())?;
 
     eprintln!(
@@ -643,11 +643,7 @@ async fn record_cmd(
         pcm.len(),
         elapsed.as_millis()
     );
-    let lang = if config.general.language == "auto" {
-        None
-    } else {
-        Some(config.general.language.as_str())
-    };
+    let lang = config.general.language_override();
     let trans = stt
         .transcribe(&pcm, cap_cfg.target_sample_rate, lang)
         .await?;
@@ -700,7 +696,7 @@ async fn transcribe_cmd(
     let secrets = Secrets::load(&paths.secrets_file())?;
     let (pcm, sample_rate) =
         read_wav_mono_f32(wav).with_context(|| format!("read wav {}", wav.display()))?;
-    let stt = fono_stt::build_stt(&config.stt, &secrets, &paths.whisper_models_dir())?;
+    let stt = fono_stt::build_stt(&config.stt, &config.general, &secrets, &paths.whisper_models_dir())?;
     let llm = if no_llm {
         None
     } else {

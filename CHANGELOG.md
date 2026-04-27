@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — STT language allow-list
+
+- New `[general].languages: Vec<String>` (and `[stt.local].languages`
+  override) replaces the single-language `language` scalar with a
+  proper allow-list. Empty = unconstrained Whisper auto-detect; one
+  entry = forced; two-or-more = constrained auto-detect (Whisper picks
+  from the allow-list and **bans** every other language). The legacy
+  `language` scalar still parses and is migrated automatically.
+- `crates/fono-stt/src/lang.rs` exposes a `LanguageSelection` enum
+  threaded through `SpeechToText` / `StreamingStt` so backends never
+  compare sentinel strings.
+- Local Whisper backend (`crates/fono-stt/src/whisper_local.rs`)
+  runs `WhisperState::lang_detect` on the prefix mel, masks
+  probabilities to allow-list members, then runs `full()` with the
+  picked code locked. Forced and Auto paths keep the previous one-pass
+  cost.
+- Cloud STT (`groq.rs`, `openai.rs`) honours the allow-list
+  best-effort via two opt-in `[general]` knobs:
+  `cloud_force_primary_language` and
+  `cloud_rerun_on_language_mismatch`.
+- Wizard now persists the language prompt into `general.languages`
+  (previously discarded).
+
 ## [0.2.0] — 2026-04-27
 
 Single-binary local stack: STT (`whisper.cpp`) and LLM cleanup

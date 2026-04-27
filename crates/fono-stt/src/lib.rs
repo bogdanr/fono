@@ -5,6 +5,7 @@
 
 pub mod defaults;
 pub mod factory;
+pub mod lang;
 pub mod registry;
 pub mod traits;
 
@@ -21,6 +22,7 @@ pub mod whisper_local;
 pub use factory::build_stt;
 #[cfg(feature = "streaming")]
 pub use factory::build_streaming_stt;
+pub use lang::LanguageSelection;
 pub use registry::{ModelInfo, ModelRegistry};
 pub use traits::{SpeechToText, Transcription};
 

@@ -250,7 +250,7 @@ impl SessionOrchestrator {
         paths: &Paths,
         action_tx: mpsc::UnboundedSender<HotkeyAction>,
     ) -> Result<Self> {
-        let stt = fono_stt::build_stt(&config.stt, secrets, &paths.whisper_models_dir())
+        let stt = fono_stt::build_stt(&config.stt, &config.general, secrets, &paths.whisper_models_dir())
             .context("build STT backend")?;
         let llm = match fono_llm::build_llm(&config.llm, secrets, &paths.llm_models_dir()) {
             Ok(opt) => opt,
@@ -283,7 +283,7 @@ impl SessionOrchestrator {
         // gracefully falls back to batch when the slot is `None`.
         #[cfg(feature = "interactive")]
         {
-            match fono_stt::build_streaming_stt(&config.stt, secrets, &paths.whisper_models_dir()) {
+            match fono_stt::build_streaming_stt(&config.stt, &config.general, secrets, &paths.whisper_models_dir()) {
                 Ok(opt) => {
                     if let Ok(mut g) = orch.streaming_stt.write() {
                         *g = opt;
@@ -348,7 +348,7 @@ impl SessionOrchestrator {
             .clone();
         let cfg = Config::load(&paths.config_file()).context("reload: read config")?;
         let secrets = Secrets::load(&paths.secrets_file()).context("reload: read secrets")?;
-        let new_stt = fono_stt::build_stt(&cfg.stt, &secrets, &paths.whisper_models_dir())
+        let new_stt = fono_stt::build_stt(&cfg.stt, &cfg.general, &secrets, &paths.whisper_models_dir())
             .context("reload: build STT")?;
         let new_llm = match fono_llm::build_llm(&cfg.llm, &secrets, &paths.llm_models_dir()) {
             Ok(opt) => opt,
@@ -369,6 +369,7 @@ impl SessionOrchestrator {
         {
             let new_streaming = match fono_stt::build_streaming_stt(
                 &cfg.stt,
+                &cfg.general,
                 &secrets,
                 &paths.whisper_models_dir(),
             ) {
