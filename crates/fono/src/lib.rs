@@ -7,24 +7,16 @@
 //! a microphone or a network.
 
 // `whisper-rs-sys` and `llama-cpp-sys-2` each statically link their own
-// copy of ggml. Combining both in one binary blows up at link time with
-// "multiple definition of ggml_backend_*" errors. Until `llama-cpp-sys-2`'s
-// `dynamic-link` feature is wired up (which would build libllama.so and
-// ship it in our distro packages), users have to pick one local backend:
-//
-//   * default build:   local STT (whisper) + cloud LLM (recommended for
-//                      laptops — see docs/status.md)
-//   * llama-local:     cloud STT + local LLM cleanup; build with
-//                      `cargo build --release --no-default-features \
-//                       --features tray,llama-local,cloud-all`
-#[cfg(all(feature = "local-models", feature = "llama-local"))]
-compile_error!(
-    "fono cannot enable both `local-models` (whisper-local) and `llama-local` \
-     at once: whisper-rs-sys and llama-cpp-sys-2 both statically link ggml, \
-     which collides at link time. Build with --no-default-features and \
-     re-add only the features you want, e.g.:\n\n    \
-     cargo build --release --no-default-features --features tray,llama-local,cloud-all"
-);
+// copy of ggml. The workspace-level `.cargo/config.toml` passes
+// `-Wl,--allow-multiple-definition` to the GNU/musl linker so the
+// duplicate ggml symbols dedupe at link time instead of aborting the
+// build. Both bundled ggml versions come from the same upstream
+// (`ggerganov/ggml`) and are ABI-compatible by construction, so the
+// linker keeping the first copy and discarding the second is safe;
+// the smoke test in `crates/fono/tests/pipeline.rs` exercises both
+// engines in the same process to catch any regression. See
+// `plans/2026-04-27-shared-ggml-static-binary-v1.md` for the full
+// rationale and the long-term shared-ggml plan.
 
 pub mod cli;
 pub mod daemon;

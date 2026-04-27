@@ -33,13 +33,20 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Install Linux desktop deps (gtk3 + appindicator + xdotool)
+      - name: Install Linux build + desktop deps
+        # `clang`, `cmake`, `libclang-dev`, `build-essential` are needed
+        # by `whisper-rs-sys` and `llama-cpp-sys-2` (both vendor C/C++
+        # ggml sources and shell out to cmake at build time). The rest
+        # are runtime deps for the tray + text-injection stack. Keep
+        # this list in sync with the `Install Linux build deps` step in
+        # `.github/workflows/release.yml`.
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
+            build-essential clang cmake pkg-config libclang-dev \
             libgtk-3-dev libayatana-appindicator3-dev libxdo-dev \
-            libasound2-dev pkg-config
+            libasound2-dev
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2

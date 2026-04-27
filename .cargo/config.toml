@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Workspace-wide cargo config. The link-arg below resolves the
+# `whisper-rs-sys` × `llama-cpp-sys-2` static-ggml symbol collision:
+# both crates statically build their own copy of ggml and the linker
+# would otherwise abort with "multiple definition of ggml_*". Both
+# bundled ggml versions are pinned in lockstep with their parent
+# crates and are sourced from the same upstream (ggerganov/ggml),
+# which makes them ABI-compatible — `--allow-multiple-definition`
+# tells the GNU linker to silently keep the first copy and discard
+# the second. This is the lightest-touch fix that lets us ship one
+# static binary with both local STT (whisper.cpp) and local LLM
+# cleanup (llama.cpp), per
+# `plans/2026-04-27-shared-ggml-static-binary-v1.md`.
+#
+# We scope the flag to Linux + Windows GNU targets where it is well
+# defined; macOS uses `ld64` which has its own duplicate-symbol
+# semantics (default = warn, not error), so the flag is unnecessary
+# there. MSVC's `link.exe` ignores duplicate COMDATs by default.
+
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))']
+rustflags = ["-C", "link-arg=-Wl,--allow-multiple-definition"]
+
+[target.'cfg(all(target_os = "linux", target_env = "musl"))']
+rustflags = ["-C", "link-arg=-Wl,--allow-multiple-definition"]
+
+[target.'cfg(all(target_os = "windows", target_env = "gnu"))']
+rustflags = ["-C", "link-arg=-Wl,--allow-multiple-definition"]

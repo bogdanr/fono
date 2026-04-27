@@ -33,7 +33,7 @@ Neither compositor implements the `org.freedesktop.portal.GlobalShortcuts`
 portal as of 2026-04. Bind a compositor-level shortcut to `fono toggle`:
 
 * **GNOME:** Settings → Keyboard → View and Customize Shortcuts → Custom
-  Shortcut → `Ctrl+Alt+Space` → `fono toggle`.
+  Shortcut → `F9` → `fono toggle`.
 * **KDE:** System Settings → Shortcuts → Custom Shortcuts → Edit → New →
   Global Shortcut → Command/URL → `fono toggle`.
 

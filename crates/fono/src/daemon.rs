@@ -59,7 +59,6 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
     let bindings = HotkeyBindings {
         hold: config.hotkeys.hold.clone(),
         toggle: config.hotkeys.toggle.clone(),
-        paste_last: config.hotkeys.paste_last.clone(),
         cancel: config.hotkeys.cancel.clone(),
     };
     let cancel_ctrl: Option<HotkeyControlSender> =
@@ -186,7 +185,6 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                         HotkeyEvent::StopRecording | HotkeyEvent::Cancel => {
                             let _ = ctrl.send(HotkeyControl::DisableCancel);
                         }
-                        HotkeyEvent::PasteLast => { /* no grab change */ }
                     }
                 }
                 if let Some(t) = tray.as_ref().as_ref() {
@@ -194,7 +192,6 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                         HotkeyEvent::StartRecording(_) => t.set_state(TrayState::Recording),
                         HotkeyEvent::StopRecording => t.set_state(TrayState::Processing),
                         HotkeyEvent::Cancel => t.set_state(TrayState::Idle),
-                        HotkeyEvent::PasteLast => { /* no state change */ }
                     }
                 }
                 let Some(o) = orch.as_ref() else {
@@ -237,12 +234,6 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                         let o = Arc::clone(o);
                         tokio::spawn(async move {
                             o.on_cancel().await;
-                        });
-                    }
-                    HotkeyEvent::PasteLast => {
-                        let o = Arc::clone(o);
-                        tokio::spawn(async move {
-                            o.on_paste_last().await;
                         });
                     }
                 }
@@ -355,6 +346,7 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
     Ok(())
 }
 
+#[allow(clippy::cognitive_complexity)]
 fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbosity) {
     let config_path = paths.config_file();
     let config_present = config_path.exists();
@@ -371,6 +363,7 @@ fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbos
             "not compiled"
         }
     );
+    info!("hw accel     : {}", hardware_acceleration_summary());
     debug!(
         "config       : {} ({})",
         config_path.display(),
@@ -399,11 +392,8 @@ fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbos
         }
     );
     debug!(
-        "hotkeys      : hold={}  toggle={}  paste_last={}  cancel={}",
-        config.hotkeys.hold,
-        config.hotkeys.toggle,
-        config.hotkeys.paste_last,
-        config.hotkeys.cancel
+        "hotkeys      : hold={}  toggle={}  cancel={}",
+        config.hotkeys.hold, config.hotkeys.toggle, config.hotkeys.cancel
     );
     debug!(
         "stt backend  : {:?}  (local model: {})",
@@ -447,6 +437,97 @@ fn which_in_path(tool: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// One-line summary of the hardware acceleration this binary will use,
+/// emitted at `info` level on every daemon start so users immediately
+/// see whether their machine is running with the expected accelerator.
+///
+/// `whisper-rs` and `llama-cpp-2` share a single statically-linked
+/// `ggml` (the duplicate-symbol collision is resolved by
+/// `-Wl,--allow-multiple-definition` in `.cargo/config.toml`); whatever
+/// accelerator backends are compiled into either crate are therefore
+/// exercised by both engines. Today the default ship build is CPU-only
+/// — the line is `CPU AVX2+FMA+F16C` on a typical x86_64 laptop. When
+/// GPU accelerator features land in `fono-stt`/`fono-llm` the matching
+/// `cfg(feature = …)` blocks below light up, e.g. `CUDA + CPU AVX2`.
+fn hardware_acceleration_summary() -> String {
+    // `mut` is required when any of the cfg(feature = "accel-*") arms
+    // below are active. On the default CPU-only build none fire, hence
+    // the allow.
+    #[allow(unused_mut)]
+    let mut accels: Vec<&'static str> = Vec::new();
+
+    // GPU / accelerator backends — pulled in via opt-in cargo features
+    // on `fono-stt` / `fono-llm`. Both crates consume the same ggml,
+    // so a single compile-time feature flag enables the backend for
+    // STT + LLM in lockstep. The cfg blocks here mirror the feature
+    // graph and are no-ops on the default CPU-only build.
+    #[cfg(feature = "accel-cuda")]
+    accels.push("CUDA");
+    #[cfg(feature = "accel-metal")]
+    accels.push("Metal");
+    #[cfg(feature = "accel-vulkan")]
+    accels.push("Vulkan");
+    #[cfg(feature = "accel-rocm")]
+    accels.push("ROCm/HIP");
+    #[cfg(feature = "accel-coreml")]
+    accels.push("CoreML");
+    #[cfg(feature = "accel-openblas")]
+    accels.push("OpenBLAS");
+
+    // CPU SIMD probe is runtime — even an AVX2-compiled binary has to
+    // report honestly when run on an older CPU. ggml internally falls
+    // back along the same path; this string just tells the user which
+    // kernels will actually be picked.
+    let cpu = cpu_simd_summary();
+    let mut parts: Vec<String> = accels.into_iter().map(String::from).collect();
+    parts.push(format!("CPU {cpu}"));
+    parts.join(" + ")
+}
+
+/// Best-effort summary of the host CPU's SIMD feature set. Used by
+/// [`hardware_acceleration_summary`] to tell users which kernels ggml
+/// will pick on their machine.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn cpu_simd_summary() -> String {
+    let mut feats: Vec<&'static str> = Vec::new();
+    if std::is_x86_feature_detected!("avx512f") {
+        feats.push("AVX512");
+    } else if std::is_x86_feature_detected!("avx2") {
+        feats.push("AVX2");
+    } else if std::is_x86_feature_detected!("avx") {
+        feats.push("AVX");
+    } else if std::is_x86_feature_detected!("sse4.2") {
+        feats.push("SSE4.2");
+    } else {
+        feats.push("baseline");
+    }
+    if std::is_x86_feature_detected!("fma") {
+        feats.push("FMA");
+    }
+    if std::is_x86_feature_detected!("f16c") {
+        feats.push("F16C");
+    }
+    feats.join("+")
+}
+
+#[cfg(target_arch = "aarch64")]
+fn cpu_simd_summary() -> String {
+    // aarch64 always has NEON; report the optional dot-product +
+    // fp16 extensions when present, since ggml's arm64 kernels
+    // pick them up.
+    let mut feats: Vec<&'static str> = vec!["NEON"];
+    #[cfg(target_feature = "dotprod")]
+    feats.push("DotProd");
+    #[cfg(target_feature = "fp16")]
+    feats.push("FP16");
+    feats.join("+")
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+fn cpu_simd_summary() -> String {
+    std::env::consts::ARCH.to_string()
+}
+
 async fn handle_client(
     mut stream: UnixStream,
     fsm: Arc<Mutex<RecordingFsm>>,
@@ -468,7 +549,9 @@ async fn handle_client(
             Response::Ok
         }
         Request::PasteLast => {
-            let _ = action_tx.send(HotkeyAction::PasteLastPressed);
+            if let Some(o) = orchestrator.as_ref() {
+                o.on_paste_last().await;
+            }
             Response::Ok
         }
         Request::Status => {
@@ -637,6 +720,13 @@ async fn paste_history_at(paths: &Paths, idx: usize) {
 
 /// Switch the active STT backend from the tray submenu and trigger a
 /// hot-reload of the orchestrator. Same code path as `fono use stt …`.
+///
+/// Special case: switching **to Local** when the configured whisper
+/// model is missing kicks off an auto-download in this same task —
+/// surfacing "downloading…" / "ready" / "failed" notifications — and
+/// only reloads the orchestrator once the file is on disk. The reload
+/// would otherwise fail with "model file not found" and leave the user
+/// stuck on a broken backend.
 async fn switch_stt_via_tray(
     paths: &fono_core::Paths,
     orch: Option<&Arc<crate::session::SessionOrchestrator>>,
@@ -660,6 +750,11 @@ async fn switch_stt_via_tray(
     match result {
         Ok(Ok(())) => {
             info!("tray: switched STT to {label}");
+            if matches!(backend, fono_core::config::SttBackend::Local)
+                && !ensure_local_stt_with_notify(paths).await
+            {
+                return;
+            }
             if let Some(o) = orch {
                 if let Err(e) = o.reload().await {
                     warn!("tray: STT reload failed: {e:#}");
@@ -717,6 +812,11 @@ async fn switch_llm_via_tray(
     match result {
         Ok(Ok(())) => {
             info!("tray: switched LLM to {label}");
+            if matches!(backend, fono_core::config::LlmBackend::Local)
+                && !ensure_local_llm_with_notify(paths).await
+            {
+                return;
+            }
             if let Some(o) = orch {
                 if let Err(e) = o.reload().await {
                     warn!("tray: LLM reload failed: {e:#}");
@@ -746,5 +846,109 @@ async fn switch_llm_via_tray(
                 .show();
         }
         Err(e) => warn!("tray: LLM switch task join error: {e}"),
+    }
+}
+
+/// Ensure the local STT (whisper) model referenced by the on-disk
+/// config is present, surfacing user-visible notifications around any
+/// download. Returns `true` when the model is ready to load (either
+/// already present or successfully downloaded), `false` on failure —
+/// callers must NOT proceed to reload the orchestrator on `false`.
+async fn ensure_local_stt_with_notify(paths: &fono_core::Paths) -> bool {
+    let cfg = match fono_core::Config::load(&paths.config_file()) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("ensure_local_stt: config load failed: {e:#}");
+            return false;
+        }
+    };
+    let model = cfg.stt.local.model.clone();
+    let size_hint = crate::models::local_stt_size_mb(&model);
+    let dest_exists = paths
+        .whisper_models_dir()
+        .join(format!("ggml-{model}.bin"))
+        .exists();
+    if !dest_exists {
+        let body = size_hint.map_or_else(
+            || format!("Whisper model: {model}"),
+            |mb| format!("Whisper model: {model} ({mb} MB)"),
+        );
+        let _ = notify_rust::Notification::new()
+            .summary("Fono — downloading speech model")
+            .body(&body)
+            .icon("emblem-downloads")
+            .timeout(notify_rust::Timeout::Milliseconds(4_000))
+            .show();
+    }
+    match crate::models::ensure_local_stt(paths, &model).await {
+        Ok(crate::models::EnsureOutcome::Downloaded) => {
+            let _ = notify_rust::Notification::new()
+                .summary("Fono — speech model ready")
+                .body(&format!("{model} downloaded and cached"))
+                .icon("emblem-default")
+                .timeout(notify_rust::Timeout::Milliseconds(4_000))
+                .show();
+            true
+        }
+        Ok(_) => true,
+        Err(e) => {
+            warn!("ensure_local_stt: download failed: {e:#}");
+            let _ = notify_rust::Notification::new()
+                .summary("Fono — speech model download failed")
+                .body(&format!("{e}"))
+                .icon("dialog-error")
+                .timeout(notify_rust::Timeout::Milliseconds(6_000))
+                .show();
+            false
+        }
+    }
+}
+
+/// LLM counterpart to [`ensure_local_stt_with_notify`]. Same contract:
+/// returns `true` when the GGUF is ready to load, `false` on failure.
+async fn ensure_local_llm_with_notify(paths: &fono_core::Paths) -> bool {
+    let cfg = match fono_core::Config::load(&paths.config_file()) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("ensure_local_llm: config load failed: {e:#}");
+            return false;
+        }
+    };
+    let model = cfg.llm.local.model.clone();
+    let size_hint = crate::models::local_llm_size_mb(&model);
+    let dest_exists = paths.llm_models_dir().join(format!("{model}.gguf")).exists();
+    if !dest_exists {
+        let body = size_hint.map_or_else(
+            || format!("LLM model: {model}"),
+            |mb| format!("LLM model: {model} ({mb} MB)"),
+        );
+        let _ = notify_rust::Notification::new()
+            .summary("Fono — downloading cleanup model")
+            .body(&body)
+            .icon("emblem-downloads")
+            .timeout(notify_rust::Timeout::Milliseconds(4_000))
+            .show();
+    }
+    match crate::models::ensure_local_llm(paths, &model).await {
+        Ok(crate::models::EnsureOutcome::Downloaded) => {
+            let _ = notify_rust::Notification::new()
+                .summary("Fono — cleanup model ready")
+                .body(&format!("{model} downloaded and cached"))
+                .icon("emblem-default")
+                .timeout(notify_rust::Timeout::Milliseconds(4_000))
+                .show();
+            true
+        }
+        Ok(_) => true,
+        Err(e) => {
+            warn!("ensure_local_llm: download failed: {e:#}");
+            let _ = notify_rust::Notification::new()
+                .summary("Fono — cleanup model download failed")
+                .body(&format!("{e}"))
+                .icon("dialog-error")
+                .timeout(notify_rust::Timeout::Milliseconds(6_000))
+                .show();
+            false
+        }
     }
 }

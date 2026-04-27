@@ -52,8 +52,9 @@ show `(active) reachable` next to your selected backend.
 
 - Another app may already own the binding. Try a different hotkey via
   `fono setup` or by editing `[hotkeys]` in config.
-- Check the keyboard layout — `Ctrl+Alt+Space` requires literal Ctrl,
-  Alt, and Space in your active layout.
+- Check the keyboard layout — `F9`/`F8` should work everywhere; modifier
+  combos like `Ctrl+Alt+Space` need literal Ctrl, Alt, and Space in your
+  active layout.
 
 ### Wayland (sway, Hyprland, KDE-Wayland, GNOME-Wayland)
 
@@ -65,13 +66,13 @@ your compositor's hotkey to `fono toggle` (IPC fallback):
 bindsym $mod+space exec fono toggle
 
 # KDE Plasma — System Settings → Shortcuts → Custom Shortcuts → New →
-#   Trigger: Ctrl+Alt+Space
+#   Trigger: F9
 #   Action:  fono toggle
 
 # GNOME — Settings → Keyboard → Custom Shortcuts → +
 #   Name:    Fono toggle
 #   Command: fono toggle
-#   Set:     Ctrl+Alt+Space
+#   Set:     F9
 ```
 
 ## Pipeline ran but nothing pasted

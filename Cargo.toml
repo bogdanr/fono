@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.82"
 license = "GPL-3.0-only"
@@ -129,6 +129,18 @@ non_std_lazy_statics = "allow"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
+
+# Default release profile: stripped + thin-LTO. Trades ~30s of extra build
+# time for a ~5 MB binary-size win (debug symbols + cross-crate inlining)
+# without sacrificing the dev iteration loop. Packaging CI uses the
+# `release-slim` profile below for the final ~3 MB squeeze (fat-LTO + 1
+# codegen unit). End-user binary on a typical x86_64 box: ~19 MB default
+# release, ~15 MB release-slim. The bulk is whisper.cpp + llama.cpp +
+# ggml machine code (~11 MB of `.text`) which is non-negotiable for SOTA
+# local inference.
+[profile.release]
+strip = "symbols"
+lto = "thin"
 
 # Slim release profile used by packaging/release CI (see release.yml).
 [profile.release-slim]

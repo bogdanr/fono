@@ -20,6 +20,17 @@ openai = ["dep:reqwest"]
 deepgram = ["dep:reqwest", "dep:tokio-tungstenite"]
 # Local whisper — opt-in because it vendors whisper.cpp (C++ build).
 whisper-local = ["dep:whisper-rs"]
+# Hardware acceleration features — forward to whisper-rs, which then
+# forwards to whisper-rs-sys's CMake build. Off by default because
+# they require the corresponding SDK / headers at build time. See
+# `crates/fono/src/daemon.rs::hardware_acceleration_summary` for the
+# matching surfacing logic.
+accel-cuda = ["whisper-local", "whisper-rs/cuda"]
+accel-metal = ["whisper-local", "whisper-rs/metal"]
+accel-vulkan = ["whisper-local", "whisper-rs/vulkan"]
+accel-hipblas = ["whisper-local", "whisper-rs/hipblas"]
+accel-coreml = ["whisper-local", "whisper-rs/coreml"]
+accel-openblas = ["whisper-local", "whisper-rs/openblas"]
 
 [dependencies]
 fono-core = { path = "../fono-core" }

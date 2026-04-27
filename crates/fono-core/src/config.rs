@@ -109,16 +109,14 @@ impl Default for General {
 pub struct Hotkeys {
     pub hold: String,
     pub toggle: String,
-    pub paste_last: String,
     pub cancel: String,
 }
 
 impl Default for Hotkeys {
     fn default() -> Self {
         Self {
-            hold: "Ctrl+Alt+Grave".into(),
-            toggle: "Ctrl+Alt+Space".into(),
-            paste_last: "Ctrl+Alt+Period".into(),
+            hold: "F8".into(),
+            toggle: "F9".into(),
             cancel: "Escape".into(),
         }
     }

@@ -45,24 +45,43 @@ pub enum Verbosity {
 
 impl Verbosity {
     pub fn as_filter(self) -> &'static str {
+        // Targets demoted at default verbosity so the INFO-level model-load
+        // chatter from whisper.cpp / llama.cpp / ggml stays out of normal
+        // startup output. Re-enable any of them on demand with e.g.
+        // `FONO_LOG=llama-cpp-2=info`.
+        //
+        // `llama-cpp-2=error` (rather than `=warn`) intentionally hides two
+        // chronic, harmless warnings that fire on every model load and every
+        // inference call respectively:
+        //   1. `control-looking token: ... '</s>' was not control-type` —
+        //      cosmetic Qwen2.5 GGUF metadata quirk; llama.cpp overrides
+        //      the type internally and continues correctly.
+        //   2. `n_ctx_seq (N) < n_ctx_train (M) -- the full capacity of the
+        //      model will not be utilized` — informational, not an error;
+        //      cleanup prompts never need the model's full training ctx.
+        // Real load / inference errors propagate via `anyhow` from
+        // `LlamaModel::load_from_file` / `ctx.decode` and surface with full
+        // context regardless of this filter.
         match self {
             Self::Quiet => {
-                "warn,whisper_rs::ggml_logging_hook=warn,whisper_rs::whisper_logging_hook=warn"
+                "warn,whisper_rs::ggml_logging_hook=warn,whisper_rs::whisper_logging_hook=warn,\
+                 llama-cpp-2=error"
             }
             Self::Info => {
-                "info,whisper_rs::ggml_logging_hook=warn,whisper_rs::whisper_logging_hook=warn"
+                "info,whisper_rs::ggml_logging_hook=warn,whisper_rs::whisper_logging_hook=warn,\
+                 llama-cpp-2=error"
             }
             Self::Debug => {
                 "fono=debug,fono_core=debug,fono_hotkey=debug,fono_tray=debug,\
                 fono_audio=debug,fono_stt=debug,fono_llm=debug,fono_inject=debug,\
                 fono_ipc=debug,fono_download=debug,whisper_rs::ggml_logging_hook=warn,\
-                whisper_rs::whisper_logging_hook=warn,info"
+                whisper_rs::whisper_logging_hook=warn,llama-cpp-2=warn,info"
             }
             Self::Trace => {
                 "fono=trace,fono_core=trace,fono_hotkey=trace,fono_tray=trace,\
                 fono_audio=trace,fono_stt=trace,fono_llm=trace,fono_inject=trace,\
                 fono_ipc=trace,fono_download=trace,whisper_rs::ggml_logging_hook=warn,\
-                whisper_rs::whisper_logging_hook=warn,debug"
+                whisper_rs::whisper_logging_hook=warn,llama-cpp-2=info,debug"
             }
         }
     }

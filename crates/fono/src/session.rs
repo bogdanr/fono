@@ -274,23 +274,19 @@ impl SessionOrchestrator {
         Ok(format!("active: stt={stt_name} llm={llm_name}"))
     }
 
-    /// Read-only snapshot of the active backend names. Used by the
-    /// daemon's Status / Doctor responses and by tests.
+    /// Read-only snapshot of the active backend names. Returns the
+    /// **canonical** lowercase identifier from
+    /// [`fono_core::providers::stt_backend_str`] /
+    /// [`fono_core::providers::llm_backend_str`] (e.g. `"local"`,
+    /// `"groq"`, `"none"`) so the tray's active-marker comparison and
+    /// the doctor / status output stay in sync. The trait `name()`s
+    /// (e.g. `"whisper-local"`, `"llama-local"`) are intentionally
+    /// **not** used here — they're an implementation detail.
     #[must_use]
     pub fn active_backends(&self) -> (String, String) {
-        let stt = self
-            .stt
-            .read()
-            .map(|s| s.name().to_string())
-            .unwrap_or_default();
-        let llm = self
-            .llm
-            .read()
-            .map(|s| {
-                s.as_ref()
-                    .map_or_else(|| "none".to_string(), |l| l.name().to_string())
-            })
-            .unwrap_or_default();
+        let cfg = self.current_config();
+        let stt = fono_core::providers::stt_backend_str(&cfg.stt.backend).to_string();
+        let llm = fono_core::providers::llm_backend_str(&cfg.llm.backend).to_string();
         (stt, llm)
     }
 

@@ -2,6 +2,59 @@
 
 Last updated: 2026-04-27
 
+## Hotkey ergonomics — single-key defaults
+
+Default hotkeys switched from three-key chords to single function keys:
+
+- `toggle = "F9"` (was `Ctrl+Alt+Space`)
+- `hold = "F8"` (was `Ctrl+Alt+Grave`)
+- `cancel = "Escape"` (unchanged — only grabbed while recording)
+- `paste_last` hotkey **removed**. The tray's "Recent transcriptions"
+  submenu and the `fono paste-last` CLI cover the same need with a
+  better UX (re-paste any of the last 10, not just the newest).
+
+Touched: `crates/fono-core/src/config.rs`, `crates/fono-hotkey/{fsm,listener,parse}.rs`,
+`crates/fono-ipc/src/lib.rs` (kept `Request::PasteLast` for CLI), `crates/fono/src/{daemon,wizard}.rs`,
+`crates/fono-tray/src/lib.rs`, `README.md`, `docs/troubleshooting.md`, `docs/wayland.md`.
+
+`Request::PasteLast` now routes directly to `orch.on_paste_last()` instead of
+through the FSM, since there is no longer a hotkey path for it.
+
+## Single-binary local STT + local LLM (ggml symbol collision resolved)
+
+Default builds now ship **both** local STT (`whisper-rs`) and local LLM
+(`llama-cpp-2`) statically linked into one self-contained `fono` binary —
+the previous `compile_error!` guard in `crates/fono/src/lib.rs` is gone, and
+`crates/fono/Cargo.toml` re-enables `llama-local` in `default`.
+
+The `ggml` duplicate-symbol collision (each sys crate vendors its own static
+`ggml`) is resolved at link time via `-Wl,--allow-multiple-definition` in
+the new `.cargo/config.toml`. Both crates' `ggml` copies originate from the
+same `ggerganov` upstream and are ABI-compatible; the linker keeps one set
+of symbols and discards the duplicate. Verified post-link with
+`nm target/release/fono | grep ' [Tt] ggml_init$'` → exactly one entry.
+
+A new smoke test `crates/fono/tests/local_backends_coexist.rs` constructs a
+`WhisperLocal` and a `LlamaLocal` in the same process to guard against
+runtime breakage from any future upgrade of either sys crate.
+
+### Hardware acceleration banner
+
+Every daemon start now logs an `info`-level summary of the actual
+accelerator path the binary will use, e.g.:
+
+```
+hw accel     : CPU AVX2+FMA+F16C
+```
+
+Implemented in `crates/fono/src/daemon.rs::hardware_acceleration_summary`.
+GPU backends are wired through opt-in cargo features
+(`accel-cuda` / `accel-metal` / `accel-vulkan` / `accel-rocm` /
+`accel-coreml` / `accel-openblas`) on `fono`, `fono-stt`, and `fono-llm`;
+flipping any of them prepends the matching label (e.g. `CUDA + CPU AVX2`).
+The default ship build stays CPU-only — single binary, runs everywhere,
+auto-picks the best SIMD kernel ggml has compiled in.
+
 ## H8 landed — real local LLM cleanup via `llama-cpp-2`
 
 `crates/fono-llm/src/llama_local.rs` is no longer a stub. The `llama-local`

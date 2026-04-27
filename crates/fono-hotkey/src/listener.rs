@@ -2,7 +2,7 @@
 //! Background global-hotkey listener.
 //!
 //! Owns a [`GlobalHotKeyManager`] on a dedicated OS thread, registers the
-//! three recording hotkeys (hold / toggle / paste-last) plus an optional
+//! two recording hotkeys (hold / toggle) plus an optional
 //! cancel key, and translates incoming events into [`HotkeyAction`]s that
 //! are forwarded to the daemon's FSM through a tokio channel.
 //!
@@ -26,7 +26,6 @@ use crate::parse::{parse_hotkey, ParsedHotkey};
 pub struct HotkeyBindings {
     pub hold: String,
     pub toggle: String,
-    pub paste_last: String,
     pub cancel: String,
 }
 
@@ -46,7 +45,6 @@ pub enum HotkeyControl {
 enum Role {
     Hold,
     Toggle,
-    PasteLast,
     Cancel,
 }
 
@@ -71,9 +69,6 @@ pub fn spawn(
     let toggle = parse_hotkey(&bindings.toggle)
         .with_context(|| format!("parsing hotkeys.toggle = {:?}", bindings.toggle))?
         .into_hotkey();
-    let paste_last = parse_hotkey(&bindings.paste_last)
-        .with_context(|| format!("parsing hotkeys.paste_last = {:?}", bindings.paste_last))?
-        .into_hotkey();
     // Cancel is parsed but NOT registered at startup; we only grab it
     // while recording so the key stays usable in other apps the rest
     // of the time.
@@ -86,7 +81,7 @@ pub fn spawn(
     let thread = std::thread::Builder::new()
         .name("fono-hotkey".into())
         .spawn(move || {
-            if let Err(e) = run_manager(hold, toggle, paste_last, cancel, tx, &bindings, ctrl_rx) {
+            if let Err(e) = run_manager(hold, toggle, cancel, tx, &bindings, ctrl_rx) {
                 warn!("hotkey manager exited: {e:#}");
             }
         })
@@ -101,7 +96,6 @@ pub fn spawn(
 fn run_manager(
     hold: global_hotkey::hotkey::HotKey,
     toggle: global_hotkey::hotkey::HotKey,
-    paste_last: global_hotkey::hotkey::HotKey,
     cancel: Option<global_hotkey::hotkey::HotKey>,
     tx: mpsc::UnboundedSender<HotkeyAction>,
     bindings: &HotkeyBindings,
@@ -115,13 +109,6 @@ fn run_manager(
     let mut roles: HashMap<u32, Role> = HashMap::new();
     register(&manager, hold, Role::Hold, &bindings.hold, &mut roles);
     register(&manager, toggle, Role::Toggle, &bindings.toggle, &mut roles);
-    register(
-        &manager,
-        paste_last,
-        Role::PasteLast,
-        &bindings.paste_last,
-        &mut roles,
-    );
 
     if roles.is_empty() {
         anyhow::bail!("no hotkeys were successfully registered");
@@ -241,7 +228,6 @@ fn map_event(role: Role, state: HotKeyState) -> Option<HotkeyAction> {
         (Role::Hold, HotKeyState::Pressed) => Some(HotkeyAction::HoldPressed),
         (Role::Hold, HotKeyState::Released) => Some(HotkeyAction::HoldReleased),
         (Role::Toggle, HotKeyState::Pressed) => Some(HotkeyAction::TogglePressed),
-        (Role::PasteLast, HotKeyState::Pressed) => Some(HotkeyAction::PasteLastPressed),
         (Role::Cancel, HotKeyState::Pressed) => Some(HotkeyAction::CancelPressed),
         _ => None,
     }

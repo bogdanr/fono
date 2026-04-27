@@ -23,12 +23,12 @@ One static Rust binary — no Electron, no Python, no WebKit.
 
 | Distro                  | Command                                                                                              |
 |-------------------------|------------------------------------------------------------------------------------------------------|
-| **Arch / Manjaro**      | `sudo pacman -U fono-0.1.0-1-x86_64.pkg.tar.zst` *(from [Releases](https://github.com/bogdanr/fono/releases/latest))* |
-| **Debian / Ubuntu**     | `sudo apt install ./fono_0.1.0_amd64.deb` *(from [Releases](https://github.com/bogdanr/fono/releases/latest))* |
-| **Slackware / NimbleX** | `installpkg fono-0.1.0-x86_64-1_NimbleX.txz` *(from [Releases](https://github.com/bogdanr/fono/releases/latest))* |
+| **Arch / Manjaro**      | `sudo pacman -U fono-0.2.0-1-x86_64.pkg.tar.zst` *(from [Releases](https://github.com/bogdanr/fono/releases/latest))* |
+| **Debian / Ubuntu**     | `sudo apt install ./fono_0.2.0_amd64.deb` *(from [Releases](https://github.com/bogdanr/fono/releases/latest))* |
+| **Slackware / NimbleX** | `installpkg fono-0.2.0-x86_64-1_NimbleX.txz` *(from [Releases](https://github.com/bogdanr/fono/releases/latest))* |
 | **NixOS / Nix flake**   | `nix profile install github:bogdanr/fono`                                                            |
-| **Any Linux (tarball)** | Download `fono-v0.1.0-x86_64-unknown-linux-gnu.tar.gz`, extract, `install -m755 fono /usr/local/bin/` |
-| **macOS / Windows**     | Planned after the Linux-first v0.1.0 release |
+| **Any Linux (tarball)** | Download `fono-v0.2.0-x86_64-unknown-linux-gnu.tar.gz`, extract, `install -m755 fono /usr/local/bin/` |
+| **macOS / Windows**     | Planned after the Linux-first releases |
 
 ## First run
 
@@ -37,7 +37,8 @@ fono setup    # picks local vs cloud based on your hardware, installs models
 fono          # starts the daemon (tray + hotkeys)
 ```
 
-Default hotkey: **`Ctrl+Alt+Space`** to start/stop. Speak. Text appears at your cursor.
+Default hotkeys: **`F9`** to toggle recording, **`F8`** to push-to-talk (hold).
+Speak. Text appears at your cursor.
 
 ## Switching providers
 

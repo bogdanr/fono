@@ -60,13 +60,15 @@ pub async fn run(paths: &Paths) -> Result<()> {
         secrets.save(&paths.secrets_file())?;
     }
 
-    // If the user chose local STT, download the model now (silently —
-    // it'll also be re-checked on every daemon start). Failures are
-    // non-fatal: the daemon will retry on next launch.
-    if config.stt.backend == SttBackend::Local {
+    // If the user chose any local backend (STT or LLM), download the
+    // model(s) now (silently — re-checked on every daemon start).
+    // Failures are non-fatal: the daemon will retry on next launch.
+    if config.stt.backend == SttBackend::Local || config.llm.backend == LlmBackend::Local {
         if let Err(e) = crate::models::ensure_models(paths, &config).await {
             eprintln!("  (model download failed: {e:#} — the daemon will retry on next start)");
         }
+    }
+    if config.stt.backend == SttBackend::Local {
         // R3.1 — in-wizard latency probe. Run a 3-second synthetic clip
         // through the just-installed whisper to confirm the host can
         // sustain its tier budget. Surfaces "first dictation will be
@@ -79,8 +81,8 @@ pub async fn run(paths: &Paths) -> Result<()> {
         paths.config_file().display()
     );
     println!(
-        "  Default hotkeys: hold={}   toggle={}   paste-last={}",
-        config.hotkeys.hold, config.hotkeys.toggle, config.hotkeys.paste_last
+        "  Default hotkeys: hold={}   toggle={}   cancel={}",
+        config.hotkeys.hold, config.hotkeys.toggle, config.hotkeys.cancel
     );
     println!("  Run `fono` to start the daemon, or `fono doctor` to diagnose your setup.\n");
     Ok(())
@@ -208,10 +210,11 @@ async fn configure_local(
         cloud: None,
     };
 
-    // For v0.1 the LLM-cleanup local path defers to v0.2. Offer cloud
-    // LLM cleanup OR skip — local LLM (LlamaLocal) is not yet wired.
+    // Tier-aware LLM cleanup choice. Local LLM (llama.cpp) is wired and
+    // ships in the default build; offer it alongside skip and cloud.
     let llm_options = vec![
-        "Skip LLM cleanup (recommended for now — raw whisper output)",
+        "Local LLM cleanup (qwen2.5, private, offline) — recommended",
+        "Skip LLM cleanup (raw whisper output)",
         "Cloud LLM cleanup (Cerebras / Groq / OpenAI / Anthropic — needs key)",
     ];
     let llm_choice = Select::with_theme(theme)
@@ -220,12 +223,14 @@ async fn configure_local(
         .default(0)
         .interact()?;
 
-    if llm_choice == 0 {
-        config.llm.backend = LlmBackend::None;
-        config.llm.enabled = false;
-        config.llm.local = LlmLocal::default();
-    } else {
-        configure_cloud_llm(theme, config, secrets).await?;
+    match llm_choice {
+        0 => configure_local_llm(theme, config, tier)?,
+        1 => {
+            config.llm.backend = LlmBackend::None;
+            config.llm.enabled = false;
+            config.llm.local = LlmLocal::default();
+        }
+        _ => configure_cloud_llm(theme, config, secrets).await?,
     }
     Ok(())
 }
@@ -280,19 +285,22 @@ async fn configure_mixed(
 
     // ----- LLM side -----
     let llm_options = &[
+        "Local LLM (qwen2.5, private, offline)",
         "Skip LLM cleanup (raw STT output)",
         "Cloud LLM (Cerebras / Groq / OpenAI / Anthropic)",
     ];
     let llm_idx = Select::with_theme(theme)
         .with_prompt("LLM cleanup:")
         .items(llm_options)
-        .default(0)
+        .default(usize::from(!tier.local_default()))
         .interact()?;
-    if llm_idx == 0 {
-        config.llm.backend = LlmBackend::None;
-        config.llm.enabled = false;
-    } else {
-        configure_cloud_llm(theme, config, secrets).await?;
+    match llm_idx {
+        0 => configure_local_llm(theme, config, tier)?,
+        1 => {
+            config.llm.backend = LlmBackend::None;
+            config.llm.enabled = false;
+        }
+        _ => configure_cloud_llm(theme, config, secrets).await?,
     }
 
     let _lang: String = Input::with_theme(theme)
@@ -336,6 +344,53 @@ fn pick_local_stt_model(theme: &ColorfulTheme, tier: LocalTier) -> Result<&'stat
         .default(default_idx)
         .interact()?;
     Ok(models[stt_idx])
+}
+
+/// Tier-aware local LLM model picker. Sets `config.llm` to the chosen
+/// `LlmBackend::Local` + matching `LlmLocal` defaults. The model file
+/// is downloaded later by `ensure_models` once the wizard finishes.
+fn configure_local_llm(theme: &ColorfulTheme, config: &mut Config, tier: LocalTier) -> Result<()> {
+    let (items, models, default_idx) = match tier {
+        LocalTier::HighEnd => (
+            vec![
+                "qwen2.5-3b-instruct  (~2.0 GB) — recommended for your machine",
+                "qwen2.5-1.5b-instruct (~1.0 GB) — lighter",
+                "qwen2.5-0.5b-instruct (~350 MB) — lightest",
+            ],
+            vec!["qwen2.5-3b-instruct", "qwen2.5-1.5b-instruct", "qwen2.5-0.5b-instruct"],
+            0usize,
+        ),
+        LocalTier::Recommended | LocalTier::Comfortable => (
+            vec![
+                "qwen2.5-1.5b-instruct (~1.0 GB) — recommended for your machine",
+                "qwen2.5-0.5b-instruct (~350 MB) — lighter (faster, lower quality)",
+                "qwen2.5-3b-instruct  (~2.0 GB) — slower but higher quality",
+            ],
+            vec!["qwen2.5-1.5b-instruct", "qwen2.5-0.5b-instruct", "qwen2.5-3b-instruct"],
+            0usize,
+        ),
+        LocalTier::Minimum | LocalTier::Unsuitable => (
+            vec![
+                "qwen2.5-0.5b-instruct (~350 MB) — recommended for your machine",
+                "qwen2.5-1.5b-instruct (~1.0 GB) — slower but higher quality",
+            ],
+            vec!["qwen2.5-0.5b-instruct", "qwen2.5-1.5b-instruct"],
+            0usize,
+        ),
+    };
+    let idx = Select::with_theme(theme)
+        .with_prompt("Pick a local LLM model")
+        .items(&items)
+        .default(default_idx)
+        .interact()?;
+    config.llm.backend = LlmBackend::Local;
+    config.llm.enabled = true;
+    config.llm.local = LlmLocal {
+        model: models[idx].into(),
+        ..LlmLocal::default()
+    };
+    config.llm.cloud = None;
+    Ok(())
 }
 
 async fn configure_cloud_stt(

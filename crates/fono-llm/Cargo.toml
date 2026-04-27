@@ -18,6 +18,15 @@ cerebras = ["dep:reqwest"]
 openai-compat = ["dep:reqwest"]
 anthropic = ["dep:reqwest"]
 llama-local = ["dep:llama-cpp-2", "dep:encoding_rs"]
+# Hardware acceleration features — forward to llama-cpp-2 / its sys
+# crate. Off by default; same opt-in story as `fono-stt`'s `accel-*`.
+# Both crates' ggml is statically linked together (deduped at link
+# time), so flipping these flags lights up the corresponding kernels
+# for both STT and LLM in lockstep.
+accel-cuda = ["llama-local", "llama-cpp-2/cuda"]
+accel-metal = ["llama-local", "llama-cpp-2/metal"]
+accel-vulkan = ["llama-local", "llama-cpp-2/vulkan"]
+accel-rocm = ["llama-local", "llama-cpp-2/rocm"]
 
 [dependencies]
 fono-core = { path = "../fono-core" }

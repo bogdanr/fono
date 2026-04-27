@@ -12,7 +12,6 @@ pub enum HotkeyEvent {
     StartRecording(RecordingMode),
     StopRecording,
     Cancel,
-    PasteLast,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +34,6 @@ pub enum HotkeyAction {
     HoldReleased,
     TogglePressed,
     CancelPressed,
-    PasteLastPressed,
     /// Orchestrator signals STT/LLM pipeline finished.
     ProcessingDone,
     /// Orchestrator signals STT/LLM pipeline started.
@@ -90,10 +88,6 @@ impl RecordingFsm {
             }
             (State::Recording(_), HotkeyAction::CancelPressed) => {
                 let _ = self.tx.send(HotkeyEvent::Cancel);
-                State::Idle
-            }
-            (State::Idle, HotkeyAction::PasteLastPressed) => {
-                let _ = self.tx.send(HotkeyEvent::PasteLast);
                 State::Idle
             }
             (_, HotkeyAction::ProcessingStarted) => State::Processing,

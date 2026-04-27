@@ -1,6 +1,6 @@
 # Maintainer: Bogdan Rădulescu <bogdan@nimblex.net>
 pkgname=fono
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Lightweight native voice dictation — press a hotkey, speak, text appears"
 arch=('x86_64' 'aarch64')

@@ -1,3 +1,14 @@
+fono (0.2.0-1) unstable; urgency=low
+
+  * Single-binary local STT + LLM (whisper.cpp + llama.cpp coexist).
+  * Default hotkeys: F9 (toggle), F8 (push-to-talk).
+  * Wizard offers local LLM cleanup with tier-aware Qwen2.5 model picker.
+  * Tray STT/LLM submenus mark the active backend; auto-download with
+    notifications when switching to local.
+  * Hardware-acceleration banner; LLM startup logging trimmed.
+
+ -- Bogdan Rădulescu <bogdan@nimblex.net>  Mon, 27 Apr 2026 00:00:00 +0000
+
 fono (0.1.0-1) unstable; urgency=low
 
   * Initial packaging.

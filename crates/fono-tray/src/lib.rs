@@ -353,7 +353,7 @@ mod backend {
     fn build_menu(stt_labels: &[String], llm_labels: &[String]) -> Result<MenuParts> {
         let menu = Menu::new();
         let status = MenuItem::new(status_label(TrayState::Idle), false, None);
-        let toggle = MenuItem::new("Toggle recording  (Ctrl+Alt+Space)", true, None);
+        let toggle = MenuItem::new("Toggle recording  (F9)", true, None);
         let pause = MenuItem::new("Pause hotkeys", true, None);
 
         // Recent transcriptions submenu — pre-allocate `RECENT_SLOTS`

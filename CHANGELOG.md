@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-04-27
+
+Single-binary local stack: STT (`whisper.cpp`) and LLM cleanup
+(`llama.cpp`) now ship together in one statically-linked `fono` binary,
+out of the box, with hardware-accelerated CPU SIMD selected at runtime.
+
+### Added — single-binary local STT + LLM
+
+- `llama-local` is now part of the `default` features set. The previous
+  `compile_error!` guard in `crates/fono/src/lib.rs` is gone — both
+  `whisper-rs` and `llama-cpp-2` link into the same ELF.
+- `.cargo/config.toml` adds `-Wl,--allow-multiple-definition` to
+  deduplicate the otherwise-colliding `ggml` symbols vendored by both sys
+  crates. Both copies originate from the same `ggerganov` upstream and
+  are ABI-compatible; the linker keeps one set, no UB at runtime.
+- New `accel-cuda` / `accel-metal` / `accel-vulkan` / `accel-rocm` /
+  `accel-coreml` / `accel-openblas` features on `crates/fono` that
+  forward to matching `whisper-rs` / `llama-cpp-2` features for opt-in
+  GPU acceleration.
+- Startup banner prints a new `hw accel : <accelerators> + CPU <SIMD>`
+  line (runtime SIMD probe: AVX512 / AVX2 / AVX / SSE4.2 + FMA + F16C on
+  x86; NEON + DotProd + FP16 on aarch64).
+- `LlamaLocal::run_inference` redirects llama.cpp / ggml's internal
+  `printf`-style logging through `tracing` (matches the existing
+  `whisper_rs::install_logging_hooks` pattern). Default verbosity now
+  emits a single `LLM ready: <model> (<MB>, <threads> threads, ctx=<n>)
+  in <ms>` line; cosmetic load-time warnings (control-token type,
+  `n_ctx_seq < n_ctx_train`) are silenced. Re-enable on demand with
+  `FONO_LOG=llama-cpp-2=info`.
+- New smoke test `crates/fono/tests/local_backends_coexist.rs` boots
+  `WhisperLocal` and `LlamaLocal` in the same process to lock in the
+  no-collision contract.
+
+### Added — wizard local LLM path
+
+- First-run wizard now offers `Local LLM cleanup (qwen2.5, private,
+  offline)` as a top-level option in both the Local and Mixed paths, in
+  addition to `Skip` and `Cloud`. New `configure_local_llm` helper picks
+  a tier-aware model: `qwen2.5-3b-instruct` (HighEnd),
+  `qwen2.5-1.5b-instruct` (Recommended/Comfortable),
+  `qwen2.5-0.5b-instruct` (Minimum/Unsuitable). All Apache-2.0 per
+  ADR 0004.
+- The wizard's auto-download now fires for either local STT *or* local
+  LLM (was STT-only).
+
+### Added — tray UX
+
+- Tray STT and LLM submenus now show a `●` marker beside the active
+  backend (was missing — `active_backends()` returned the trait `name()`
+  while the comparison logic expected the canonical config-string
+  identifier).
+- Switching to the local STT or LLM backend from the tray now ensures
+  the corresponding model file is on disk first, with a "downloading…"
+  notification, a "ready" notification on completion, and a clear error
+  notification on failure (with the orchestrator reload skipped to keep
+  the user on a working backend).
+
+### Changed — hotkey defaults
+
+- `toggle = "F9"` (was `Ctrl+Alt+Space`). Single key, no default
+  binding on any major desktop, easy to fire blind.
+- `hold = "F8"` (was `Ctrl+Alt+Grave`). Adjacent to F9 for natural
+  push-to-talk muscle memory.
+- `cancel = "Escape"` unchanged (only grabbed while recording).
+- `paste_last` hotkey **removed**. The tray's "Recent transcriptions"
+  submenu and the `fono paste-last` CLI cover the same need with a
+  better UX (re-paste any of the last 10, not just the newest).
+  `Request::PasteLast` IPC and `Cmd::PasteLast` CLI are preserved and
+  now route directly to `orch.on_paste_last()`.
+
+### Changed — release profile size
+
+- `[profile.release]` now sets `strip = "symbols"` and `lto = "thin"`,
+  trimming the dev `cargo build --release` artifact from ~23 MB → ~19 MB
+  (no code removal — only `.symtab` / `.strtab` deduplication).
+  `release-slim` (used by packaging CI) is unchanged at ~15 MB.
+
+### Documented
+
+- `docs/status.md` — new entries for hotkey ergonomics and the
+  single-binary local-stack resolution.
+- `docs/troubleshooting.md`, `docs/wayland.md`, `README.md` updated for
+  the new default hotkeys.
+- New plans: `plans/2026-04-27-shared-ggml-static-binary-v1.md` (the
+  shared-ggml strategy that informed the linker-dedupe shortcut),
+  `plans/2026-04-27-llama-dynamic-link-sota-v1.md`,
+  `plans/2026-04-27-candle-backend-benchmark-v1.md`,
+  `plans/2026-04-27-local-stt-llm-resolution-v1.md`.
+
 ## [0.1.0] — 2026-04-25
 
 First public release. Pipeline (audio → STT → LLM → inject) is fully wired
@@ -130,5 +219,6 @@ feature and ships fully wired in v0.2.
 - Local LLM cleanup (Qwen / SmolLM) is opt-in / preview.
 - Real `winit + softbuffer` overlay window is a stub (event channel only).
 
-[Unreleased]: https://github.com/bogdanr/fono/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/bogdanr/fono/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/bogdanr/fono/releases/tag/v0.2.0
 [0.1.0]: https://github.com/bogdanr/fono/releases/tag/v0.1.0

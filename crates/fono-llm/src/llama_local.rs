@@ -21,7 +21,7 @@
 
 use std::num::NonZeroU32;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
@@ -32,7 +32,7 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::traits::{FormatContext, TextFormatter};
 
@@ -45,6 +45,22 @@ const MAX_NEW_TOKENS: i32 = 256;
 /// Default n_ctx fallback if the caller passes 0 / a sub-512 value.
 const MIN_CTX: u32 = 512;
 
+/// Install the `llama_cpp_2` → `tracing` redirector once per process so
+/// llama.cpp + ggml's chatty INFO-level startup output (architecture
+/// metadata, KV-cache layout, tensor stats — dozens of lines per model
+/// load) flows through `tracing` where the daemon's normal log filter
+/// can demote it. Mirrors the equivalent `whisper_rs::install_logging_hooks`
+/// hook in `fono-stt`. The default `info` filter (`crates/fono/src/cli.rs`)
+/// pins the `llama-cpp-2` target to `warn` so model load is silent unless
+/// something actually goes wrong; users debugging can re-enable with
+/// `FONO_LOG=llama-cpp-2=info`.
+static LLAMA_LOG_INIT: Once = Once::new();
+fn init_llama_logging() {
+    LLAMA_LOG_INIT.call_once(|| {
+        llama_cpp_2::send_logs_to_tracing(llama_cpp_2::LogOptions::default());
+    });
+}
+
 /// Process-wide llama.cpp backend. `LlamaBackend::init()` flips global
 /// state inside llama.cpp; multiple inits return BackendAlreadyInitialized.
 /// We cache the handle so the second daemon hot-swap into LlamaLocal
@@ -52,6 +68,10 @@ const MIN_CTX: u32 = 512;
 fn backend() -> &'static LlamaBackend {
     static BACKEND: OnceLock<LlamaBackend> = OnceLock::new();
     BACKEND.get_or_init(|| {
+        // Install the tracing redirector before the first backend init so
+        // backend-init's own log lines (CPU feature detection, etc.) go
+        // through tracing rather than straight to stderr.
+        init_llama_logging();
         LlamaBackend::init().expect(
             "LlamaBackend::init() failed — another library has already \
              initialised llama.cpp in this process",
@@ -113,10 +133,24 @@ impl LlamaLocal {
         let params = LlamaModelParams::default();
         let model = LlamaModel::load_from_file(backend(), &self.model_path, &params)
             .with_context(|| format!("loading GGUF model from {:?}", self.model_path))?;
-        debug!(
-            elapsed_ms = t.elapsed().as_millis() as u64,
-            path = %self.model_path.display(),
-            "llama-local model loaded"
+        // Single, concise INFO line summarising what got loaded — name +
+        // on-disk size (≈ resident memory once mapped) + load wall time.
+        // Verbose architecture/KV/tensor dumps from llama.cpp itself are
+        // routed through `init_llama_logging()` and demoted to warn by
+        // the default tracing filter so they don't crowd this line.
+        let elapsed_ms = t.elapsed().as_millis() as u64;
+        let model_name = self
+            .model_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?");
+        let size_mb = std::fs::metadata(&self.model_path)
+            .map(|m| m.len() / (1024 * 1024))
+            .unwrap_or(0);
+        info!(
+            "LLM ready: {model_name} ({size_mb} MB, {threads} threads, ctx={ctx}) in {elapsed_ms} ms",
+            threads = self.threads,
+            ctx = self.context_size,
         );
         *guard = Some(model);
         Ok(())
@@ -175,6 +209,7 @@ impl LlamaLocal {
         let im_end = model
             .str_to_token("<|im_end|>", AddBos::Never)
             .ok()
+            .filter(|v| v.len() == 1)
             .and_then(|v| v.into_iter().next());
         let mut out = String::new();
         let mut sample_idx = last_prefill_idx;

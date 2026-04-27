@@ -1,13 +1,13 @@
 PRGNAM="fono"
-VERSION="0.1.0"
+VERSION="0.2.0"
 HOMEPAGE="https://github.com/bogdanr/fono"
 # Binary-mode default; source-mode consumers set FROM_SOURCE=1 and ignore
 # these. Pre-built musl tarballs are produced by .github/workflows/release.yml.
 DOWNLOAD=""
 MD5SUM=""
-DOWNLOAD_x86_64="https://github.com/bogdanr/fono/releases/download/v0.1.0/fono-v0.1.0-x86_64-unknown-linux-musl.tar.gz"
+DOWNLOAD_x86_64="https://github.com/bogdanr/fono/releases/download/v0.2.0/fono-v0.2.0-x86_64-unknown-linux-musl.tar.gz"
 MD5SUM_x86_64=""
-DOWNLOAD_aarch64="https://github.com/bogdanr/fono/releases/download/v0.1.0/fono-v0.1.0-aarch64-unknown-linux-musl.tar.gz"
+DOWNLOAD_aarch64="https://github.com/bogdanr/fono/releases/download/v0.2.0/fono-v0.2.0-aarch64-unknown-linux-musl.tar.gz"
 MD5SUM_aarch64=""
 REQUIRES=""
 MAINTAINER="Bogdan Rădulescu"

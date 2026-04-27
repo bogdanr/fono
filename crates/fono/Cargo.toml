@@ -20,14 +20,28 @@ name = "fono"
 path = "src/main.rs"
 
 [features]
-# Default release ships with local STT (whisper.cpp) and tray. Slim
-# cloud-only build: `cargo build --no-default-features --features tray`.
-# Local LLM (`llama-local`) stays opt-in until the v0.2 wiring lands —
-# see docs/plans/2026-04-25-fono-local-default-v1.md task H8.
-default = ["tray", "local-models"]
+# Default release ships a single static binary with both local STT
+# (whisper.cpp via whisper-rs) and local LLM cleanup (llama.cpp via
+# llama-cpp-2). The duplicate-ggml symbol collision is resolved at
+# link time by `-Wl,--allow-multiple-definition` set in
+# `.cargo/config.toml`. Slim cloud-only build:
+# `cargo build --no-default-features --features tray`.
+default = ["tray", "local-models", "llama-local"]
 tray = ["fono-tray/tray-backend"]
 local-models = ["fono-stt/whisper-local"]
 llama-local = ["fono-llm/llama-local"]
+# Hardware acceleration features — fan out to the matching opt-in
+# features on `fono-stt` and `fono-llm`, which themselves forward to
+# `whisper-rs`/`llama-cpp-2`. Off by default because they require the
+# corresponding SDK at build time (CUDA toolkit, Vulkan SDK, etc.);
+# devs / packaging matrices opt in. Surfaced at runtime via
+# `daemon::hardware_acceleration_summary`.
+accel-cuda = ["fono-stt/accel-cuda", "fono-llm/accel-cuda"]
+accel-metal = ["fono-stt/accel-metal", "fono-llm/accel-metal"]
+accel-vulkan = ["fono-stt/accel-vulkan", "fono-llm/accel-vulkan"]
+accel-rocm = ["fono-stt/accel-hipblas", "fono-llm/accel-rocm"]
+accel-coreml = ["fono-stt/accel-coreml"]
+accel-openblas = ["fono-stt/accel-openblas"]
 # X11 key injection via enigo (libxdo). Keep opt-in: requires `libxdo`
 # at build time, which isn't installed on every Linux desktop. Users
 # without `wtype`/`ydotool` on Wayland or `enigo` on X11 still get a

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Parse human-readable hotkey strings such as `Ctrl+Alt+Space`.
+//! Parse human-readable hotkey strings such as `F9` or `Ctrl+Alt+Space`.
 
 use anyhow::{anyhow, Result};
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
@@ -98,15 +98,19 @@ mod tests {
 
     #[test]
     fn parses_common_combos() {
+        let p = parse_hotkey("F9").unwrap();
+        assert!(p.modifiers.is_empty());
+        assert_eq!(p.code, Code::F9);
+
+        let p = parse_hotkey("F8").unwrap();
+        assert_eq!(p.code, Code::F8);
+
         let p = parse_hotkey("Ctrl+Alt+Space").unwrap();
         assert!(p.modifiers.contains(Modifiers::CONTROL | Modifiers::ALT));
         assert_eq!(p.code, Code::Space);
 
         let p = parse_hotkey("Ctrl+Alt+Grave").unwrap();
         assert_eq!(p.code, Code::Backquote);
-
-        let p = parse_hotkey("Ctrl+Alt+Period").unwrap();
-        assert_eq!(p.code, Code::Period);
 
         let p = parse_hotkey("Escape").unwrap();
         assert_eq!(p.code, Code::Escape);
