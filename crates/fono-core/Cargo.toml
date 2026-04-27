@@ -12,6 +12,11 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# Live-dictation budget controller + provider price table. Plan R12.
+budget = []
+
 [dependencies]
 anyhow = { workspace = true }
 thiserror = { workspace = true }

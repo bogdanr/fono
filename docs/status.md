@@ -2,6 +2,116 @@
 
 Last updated: 2026-04-27
 
+## 2026-04-27 — Slice A landed (interactive / live dictation)
+
+Plan v6 (`plans/2026-04-27-fono-interactive-v6.md`) Slice A is in.
+Five commits on `main`, each DCO-signed:
+
+| SHA       | Title |
+|-----------|-------|
+| `7fbf974` | Slice A checkpoint: streaming primitives, overlay, budget, live session |
+| `92d4cc3` | Slice A: live pipeline integration tests (plan v6 R10.2) |
+| `074a6c7` | Slice A: equivalence harness foundation + 2 fixtures (plan v6 R18) |
+| `c3f2b68` | Slice A: ADR 0009 + interactive.md user guide (plan v6 R11) |
+| (this)    | Slice A: docs/status.md — Slice A complete, Slice B queued |
+
+The four Forge follow-up commits to `7fbf974` cover deliverables R10.2,
+R18 (foundation), R11.1, R11.2, and R17 (status update).
+
+### What Slice A actually ships
+
+- **R1 / R3** — `fono-stt::StreamingStt` trait + `LocalAgreement`
+  helper + dual-pass finalize lane on top of `WhisperLocal`. Gated
+  behind the `streaming` cargo feature on `fono-stt`.
+- **R2** — `fono-audio::AudioFrameStream` + `FrameEvent` enum + VAD-
+  driven segment-boundary heuristic. Gated behind `fono-audio/streaming`.
+- **R5** — Live overlay (`fono-overlay::OverlayState::LiveDictating`
+  + `RealOverlay` winit window) painting preview / finalize text.
+  In-process; sub-process refactor deferred to Slice B (see ADR 0009 §5).
+- **R7.4 / R10.2** — `fono::live::LiveSession` orchestrator that wires
+  `Pump` → `AudioFrameStream` → `StreamingStt` → overlay. Two new
+  integration tests (`crates/fono/tests/live_pipeline.rs`) drive it
+  with a synthetic `StreamingStt` and assert (a) two-segment
+  concatenation under preview→finalize lanes and (b) clean
+  cancellation when no voiced frames arrive.
+- **R10.4** — `fono record --live` CLI — record-then-replay-through-
+  streaming. Realtime cpal-callback push lands in Slice B.
+- **R11.1** — ADR `docs/decisions/0009-interactive-live-dictation.md`
+  capturing the six locked architectural decisions for Slice A.
+- **R11.2** — User-facing guide `docs/interactive.md` covering
+  `[interactive].enabled`, the `interactive` cargo feature, the
+  `fono record --live` and `fono test-overlay` flows, and the two
+  known issues (hostile compositors, Wayland focus theft).
+- **R12** — `fono-core::BudgetController` (price table + per-minute
+  ceiling + `BudgetVerdict::{Continue, StopStreaming}`) wired into
+  `LiveSession::run`. Gated behind `fono-core/budget`.
+- **R17.1 / R18 (foundation)** — Streaming↔batch equivalence harness
+  in `crates/fono-bench/src/equivalence.rs` + `fono-bench equivalence`
+  subcommand + two synthetic-tone WAV fixtures
+  (`tests/fixtures/equivalence/{short-clean,medium-pauses}.wav`,
+  ~410 KB total). 7 new unit tests cover the levenshtein
+  normalization, JSON round-trip, overall-verdict aggregation, and
+  manifest parsing. End-to-end smoke (`--stt local --model tiny.en`)
+  produced PASS on both fixtures.
+
+### Bug fixed in passing
+
+`LiveSession::run` previously called `pump.subscribe()` *after* the
+caller had pushed PCM and called `pump.finish()` — which loses every
+frame because `tokio::sync::broadcast` does not deliver pre-subscribe
+messages to fresh subscribers. `Pump` now pre-subscribes a primary
+receiver at construction and exposes it via
+`Pump::take_receiver()`; `LiveSession::run` takes a
+`broadcast::Receiver<FrameEvent>` directly, and `fono record --live`
+spawns the run task before pushing so the broadcast buffer drains
+between pushes. Caught while landing the live integration tests; not
+in scope of `7fbf974` itself.
+
+### Build matrix (verified this session)
+
+| Command | Result |
+|---|---|
+| `cargo build --workspace` | ✅ |
+| `cargo build --workspace --features fono/interactive` | ✅ |
+| `cargo clippy --workspace --no-deps -- -D warnings` | ✅ |
+| `cargo clippy --workspace --no-deps --features fono/interactive -- -D warnings` | ✅ |
+| `cargo test --workspace --lib --tests` | ✅ 110 ok, 0 fail (was 103 at HEAD) |
+| `cargo test --workspace --lib --tests --features fono/interactive` | ✅ 126 ok, 0 fail |
+| `cargo run -p fono-bench --features equivalence,whisper-local -- equivalence --stt local --model tiny.en --output report.json` | ✅ both fixtures PASS |
+
+### Deferred to Slice B (next session candidates)
+
+- **R4 / R8 / R10.4 (realtime)** — Cloud streaming providers (Groq,
+  OpenAI realtime, Deepgram, AssemblyAI) and the realtime cpal-
+  callback audio push so the overlay paints text *while* you speak.
+- **R5.6** — Overlay sub-process refactor for crash isolation.
+- **R18 cloud rows** — Cloud-streaming equivalence rows of R18
+  (`--stt groq` and friends). Requires the cloud-mock recordings
+  pipeline that the v6 plan R18.12 sketches.
+- **R18 Tier-2** — With-LLM equivalence comparison (`--llm local
+  qwen-0.5b`). The Tier-1 (whisper-only) gate is in; Tier-2 needs
+  the deterministic-LLM scaffolding (n_threads=1 + seed-pinning) to
+  produce stable outputs.
+- **R18.6 fixture set completion** — The remaining 10 fixtures of the
+  curated 12-fixture set (long-monologue, noisy-cafe, accented-EN,
+  numbers/commands, whispered, with-music, multi-speaker,
+  code-dictation, long-with-pauses, short-noisy-quick). Needs real
+  CC0 audio sources.
+- **R16** — Tray icon-state palette refactor.
+
+### Recommended next session
+
+1. **Slice B kickoff** — wire the realtime cpal-callback push and the
+   first cloud streaming provider (Groq's faster-whisper streaming
+   endpoint is the obvious first target — same auth flow as the
+   existing Groq batch backend).
+2. **Or, if Slice B is too big a chunk to start cold:** drop the
+   remaining 10 R18 fixtures into `tests/fixtures/equivalence/` from
+   real CC0 LibriVox / Common Voice clips, recompute SHA-256s, set
+   `synthetic_placeholder = false` in the manifest, and tighten
+   `TIER1_LEVENSHTEIN_THRESHOLD` from `0.05` back to the v6 plan's
+   strict `0.01` in the same commit. Self-contained, fast feedback.
+
 ## Hotkey ergonomics — single-key defaults
 
 Default hotkeys switched from three-key chords to single function keys:

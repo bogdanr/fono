@@ -42,6 +42,17 @@ accel-vulkan = ["fono-stt/accel-vulkan", "fono-llm/accel-vulkan"]
 accel-rocm = ["fono-stt/accel-hipblas", "fono-llm/accel-rocm"]
 accel-coreml = ["fono-stt/accel-coreml"]
 accel-openblas = ["fono-stt/accel-openblas"]
+# Live-dictation streaming pipeline. Plan v6 / Slice A. Off by default
+# until v0.2.0-alpha tag. Pulls the matching feature in each crate
+# whose code participates in streaming.
+interactive = [
+    "fono-stt/streaming",
+    "fono-audio/streaming",
+    "fono-overlay/real-window",
+    "fono-core/budget",
+    "dep:futures",
+    "dep:tokio-stream",
+]
 # X11 key injection via enigo (libxdo). Keep opt-in: requires `libxdo`
 # at build time, which isn't installed on every Linux desktop. Users
 # without `wtype`/`ydotool` on Wayland or `enigo` on X11 still get a
@@ -76,6 +87,8 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 notify-rust = { workspace = true }
 reqwest = { workspace = true }
+futures = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

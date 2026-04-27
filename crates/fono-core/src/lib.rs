@@ -11,8 +11,14 @@ pub mod paths;
 pub mod providers;
 pub mod secrets;
 
+#[cfg(feature = "budget")]
+pub mod budget;
+
 pub use config::Config;
 pub use error::{Error, Result};
 pub use hwcheck::{HardwareSnapshot, LocalTier};
 pub use paths::Paths;
 pub use secrets::Secrets;
+
+#[cfg(feature = "budget")]
+pub use budget::{BudgetController, BudgetVerdict, PerSecondCostUMicros, PriceTable, QualityFloor};

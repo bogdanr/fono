@@ -16,6 +16,10 @@ workspace = true
 # winit + softbuffer pull a large dep tree; keep the overlay opt-in.
 default = []
 overlay-backend = ["dep:winit", "dep:softbuffer"]
+# Real window with text rendering — used by live dictation. Plan R5.
+# Slice A keeps the overlay in-process (winit thread); subprocess
+# refactor is deferred to Slice B per ADR 0009.
+real-window = ["dep:winit", "dep:softbuffer"]
 
 [dependencies]
 fono-core = { path = "../fono-core" }

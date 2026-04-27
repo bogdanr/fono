@@ -249,25 +249,36 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                 debug!("fsm event: {e:?}");
                 if let Some(ctrl) = cancel_ctrl_ev.as_ref() {
                     match e {
-                        HotkeyEvent::StartRecording(_) => {
+                        HotkeyEvent::StartRecording(_) | HotkeyEvent::StartLiveDictation(_) => {
                             let _ = ctrl.send(HotkeyControl::EnableCancel);
                         }
-                        HotkeyEvent::StopRecording | HotkeyEvent::Cancel => {
+                        HotkeyEvent::StopRecording
+                        | HotkeyEvent::StopLiveDictation
+                        | HotkeyEvent::Cancel => {
                             let _ = ctrl.send(HotkeyControl::DisableCancel);
                         }
                     }
                 }
                 if let Some(t) = tray.as_ref().as_ref() {
                     match e {
-                        HotkeyEvent::StartRecording(_) => t.set_state(TrayState::Recording),
-                        HotkeyEvent::StopRecording => t.set_state(TrayState::Processing),
+                        HotkeyEvent::StartRecording(_) | HotkeyEvent::StartLiveDictation(_) => {
+                            t.set_state(TrayState::Recording);
+                        }
+                        HotkeyEvent::StopRecording | HotkeyEvent::StopLiveDictation => {
+                            t.set_state(TrayState::Processing);
+                        }
                         HotkeyEvent::Cancel => t.set_state(TrayState::Idle),
                     }
                 }
                 let Some(o) = orch.as_ref() else {
                     // Degraded mode: just emit ProcessingDone so the FSM
                     // returns to Idle without us hanging.
-                    if matches!(e, HotkeyEvent::StopRecording | HotkeyEvent::Cancel) {
+                    if matches!(
+                        e,
+                        HotkeyEvent::StopRecording
+                            | HotkeyEvent::StopLiveDictation
+                            | HotkeyEvent::Cancel
+                    ) {
                         let _ = action_tx_ev.send(HotkeyAction::ProcessingDone);
                         if let Some(t) = tray.as_ref().as_ref() {
                             t.set_state(TrayState::Idle);
@@ -290,20 +301,42 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                         let o = Arc::clone(o);
                         tokio::spawn(async move {
                             o.on_stop_recording().await;
-                            // Pipeline emits ProcessingDone when it
-                            // finishes; we just clear the tray here once
-                            // FSM returns to Idle. (The action dispatcher
-                            // below sees ProcessingDone arrive and
-                            // transitions; tray state is updated by the
-                            // FSM event loop via Cancel/Idle paths or
-                            // we explicitly tint to Idle once Done.)
-                            let _ = tray_for_done; // borrowed; future overlay tie-in
+                            let _ = tray_for_done;
                         });
                     }
                     HotkeyEvent::Cancel => {
                         let o = Arc::clone(o);
                         tokio::spawn(async move {
                             o.on_cancel().await;
+                        });
+                    }
+                    // Plan R7.4: live-dictation start/stop. Slice A's
+                    // orchestrator does not yet hold a streaming
+                    // pipeline (the wiring lives in `crate::live`); the
+                    // daemon currently logs the transition and falls
+                    // back to the batch path so the binary stays
+                    // functional even when [interactive].enabled = true
+                    // but the orchestrator-side hook hasn't been
+                    // implemented for a given backend. Slice B closes
+                    // the loop with cloud streaming and the subprocess
+                    // overlay refactor.
+                    HotkeyEvent::StartLiveDictation(mode) => {
+                        tracing::info!(
+                            "live-dictation start ({mode:?}) — falling back to batch path \
+                             until orchestrator wiring lands (Slice B)"
+                        );
+                        if let Err(err) = o.on_start_recording(mode).await {
+                            warn!("start_recording failed: {err:#}");
+                            if let Some(t) = tray.as_ref().as_ref() {
+                                t.set_state(TrayState::Idle);
+                            }
+                            let _ = action_tx_ev.send(HotkeyAction::ProcessingDone);
+                        }
+                    }
+                    HotkeyEvent::StopLiveDictation => {
+                        let o = Arc::clone(o);
+                        tokio::spawn(async move {
+                            o.on_stop_recording().await;
                         });
                     }
                 }

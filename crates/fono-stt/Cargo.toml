@@ -20,6 +20,10 @@ openai = ["dep:reqwest"]
 deepgram = ["dep:reqwest", "dep:tokio-tungstenite"]
 # Local whisper — opt-in because it vendors whisper.cpp (C++ build).
 whisper-local = ["dep:whisper-rs"]
+# Live-dictation streaming primitives + per-backend stream_transcribe
+# implementations. Plan R1/R3. Off by default until v0.2.0-alpha proves
+# the slim build remains slim.
+streaming = ["dep:futures", "dep:tokio-stream"]
 # Hardware acceleration features — forward to whisper-rs, which then
 # forwards to whisper-rs-sys's CMake build. Off by default because
 # they require the corresponding SDK / headers at build time. See
@@ -44,3 +48,5 @@ serde_json = { workspace = true }
 reqwest = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 whisper-rs = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true }

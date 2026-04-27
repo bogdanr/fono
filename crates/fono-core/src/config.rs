@@ -45,6 +45,13 @@ pub struct Config {
 
     #[serde(default)]
     pub update: Update,
+
+    /// Live-dictation (streaming) settings. Plan R7.4 / R18.21. The
+    /// cargo `interactive` feature gates *compilation* of streaming
+    /// code; this block governs whether the daemon turns it on at
+    /// runtime when the feature is compiled in.
+    #[serde(default)]
+    pub interactive: Interactive,
 }
 
 impl Default for Config {
@@ -61,6 +68,7 @@ impl Default for Config {
             history: History::default(),
             inject: Inject::default(),
             update: Update::default(),
+            interactive: Interactive::default(),
         }
     }
 }
@@ -423,6 +431,44 @@ impl Default for Update {
             auto_check: true,
             interval_hours: 24,
             channel: "stable".into(),
+        }
+    }
+}
+
+/// Live-dictation runtime toggle and tuning knobs. Plan R7.4 / R18.21.
+///
+/// When the cargo `interactive` feature is **not** compiled in, this
+/// block is parsed but ignored (the daemon has no streaming code to
+/// turn on). When the feature *is* compiled in, the daemon consults
+/// `enabled` at startup and on every `Reload` IPC.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Interactive {
+    /// Master toggle. Default `false` everywhere in v0.2.0-alpha. Tier-
+    /// aware auto-enable is a Slice B decision (see ADR 0009).
+    pub enabled: bool,
+    /// Per-minute spending ceiling, in USD micro-cents (1¢ = 10_000 µ¢).
+    /// `0` disables the budget controller entirely (default — local STT
+    /// is free). Cloud streaming sets a sensible default at wizard time.
+    pub budget_ceiling_per_minute_umicros: u64,
+    /// Quality floor under budget pressure. `"max"` (default) never
+    /// skips finalize; `"balanced"` may slow preview cadence;
+    /// `"aggressive"` may skip finalize on high-confidence segments.
+    pub quality_floor: String,
+    /// Show the live-dictation overlay. Independent of the static
+    /// `[overlay].enabled` knob so the user can keep the recording-
+    /// indicator overlay disabled but still see live text. Default
+    /// `true`.
+    pub overlay: bool,
+}
+
+impl Default for Interactive {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            budget_ceiling_per_minute_umicros: 0,
+            quality_floor: "max".into(),
+            overlay: true,
         }
     }
 }

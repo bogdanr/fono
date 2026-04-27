@@ -31,6 +31,9 @@ tracing-subscriber = { workspace = true }
 fono-stt = { path = "../fono-stt", default-features = false }
 fono-llm = { path = "../fono-llm" }
 fono-download = { path = "../fono-download" }
+toml = { workspace = true }
+futures = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
@@ -42,6 +45,11 @@ default = ["groq"]
 groq = ["fono-stt/groq"]
 openai = ["fono-stt/openai"]
 whisper-local = ["fono-stt/whisper-local"]
+# Streaming↔batch equivalence harness (plan v6 R18). Pulls in the
+# streaming primitives from fono-stt and the small futures glue
+# needed to build a BoxStream<StreamFrame> from an in-memory PCM
+# buffer.
+equivalence = ["fono-stt/streaming", "dep:futures", "dep:tokio-stream"]
 
 [[bin]]
 name = "fono-bench"

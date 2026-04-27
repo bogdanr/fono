@@ -35,6 +35,7 @@ categories = ["command-line-utilities", "multimedia::audio"]
 [workspace.dependencies]
 # Async runtime / utilities
 tokio = { version = "1.40", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
 async-trait = "0.1"
 

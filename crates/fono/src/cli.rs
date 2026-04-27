@@ -131,6 +131,12 @@ pub enum Cmd {
         /// Use `none` to skip cleanup.
         #[arg(long)]
         llm: Option<String>,
+        /// Run in live (streaming) mode for this call only. Requires
+        /// the binary to have been built with the `interactive` cargo
+        /// feature; without it, this flag prints a helpful error and
+        /// falls back to batch mode. Plan v6 R7.4 / R18.22.
+        #[arg(long)]
+        live: bool,
     },
     /// Transcribe a WAV file (16-bit PCM mono, any sample rate) without
     /// touching the microphone. Useful for verifying API keys.
@@ -196,6 +202,13 @@ pub enum Cmd {
         #[arg(long, value_name = "SHORTCUT")]
         shortcut: Option<String>,
     },
+    /// Smoke-test the live-dictation overlay: open the real overlay
+    /// window for ~3 seconds with a sample status sequence, then exit.
+    /// Useful for verifying the `interactive` feature was compiled in
+    /// and that winit/softbuffer can paint on this compositor. Plan
+    /// R5 / Slice A. Without `--features interactive`, prints a hint
+    /// and exits.
+    TestOverlay,
     /// Probe the host's hardware and print the recommended local-model tier.
     Hwprobe {
         /// Emit machine-readable JSON instead of the default text report.
@@ -343,11 +356,16 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Some(Cmd::Use { action }) => use_cmd(&paths, action).await,
         Some(Cmd::Keys { action }) => keys_cmd(&paths, action).await,
+        Some(Cmd::TestOverlay) => {
+            test_overlay_cmd();
+            Ok(())
+        }
         Some(Cmd::Record {
             no_inject,
             max_seconds,
             stt,
             llm,
+            live,
         }) => {
             record_cmd(
                 &paths,
@@ -355,6 +373,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 max_seconds,
                 stt.as_deref(),
                 llm.as_deref(),
+                live,
             )
             .await
         }
@@ -566,6 +585,7 @@ async fn record_cmd(
     max_seconds: u64,
     stt_override: Option<&str>,
     llm_override: Option<&str>,
+    live: bool,
 ) -> Result<()> {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -577,6 +597,10 @@ async fn record_cmd(
     apply_backend_overrides(&mut config, stt_override, llm_override)?;
     let config = Arc::new(config);
     let secrets = Secrets::load(&paths.secrets_file())?;
+
+    if live {
+        return record_cmd_live(paths, &config, &secrets, max_seconds, no_inject).await;
+    }
 
     let cap_cfg = CaptureConfig {
         input_device: config.audio.input_device.clone(),
@@ -1299,4 +1323,214 @@ async fn update_cmd(
     // execv replaces the process image and never returns.
     let Err(e) = fono_update::restart_in_place();
     Err(e)
+}
+
+// ---------------------------------------------------------------------
+// `fono record --live` and `fono test-overlay`. Both are only fully
+// functional when the binary was built with `--features interactive`;
+// the slim build provides stubs that print a helpful hint.
+// Plan v6 / Slice A.
+// ---------------------------------------------------------------------
+
+#[cfg(not(feature = "interactive"))]
+async fn record_cmd_live(
+    _paths: &Paths,
+    _config: &fono_core::Config,
+    _secrets: &fono_core::Secrets,
+    _max_seconds: u64,
+    _no_inject: bool,
+) -> Result<()> {
+    Err(anyhow::anyhow!(
+        "live mode requires the `interactive` cargo feature; rebuild with \
+         `cargo build --features interactive` (Slice A — see plans/2026-04-27-fono-interactive-v6.md)"
+    ))
+}
+
+#[cfg(not(feature = "interactive"))]
+fn test_overlay_cmd() {
+    println!(
+        "test-overlay: this binary was built without the `interactive` cargo feature.\n\
+         Rebuild with `cargo build --features interactive` to exercise the real \
+         winit+softbuffer overlay (plan v6 / Slice A)."
+    );
+}
+
+#[cfg(feature = "interactive")]
+#[allow(clippy::too_many_lines)]
+async fn record_cmd_live(
+    paths: &Paths,
+    config: &fono_core::Config,
+    _secrets: &fono_core::Secrets,
+    max_seconds: u64,
+    no_inject: bool,
+) -> Result<()> {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use fono_audio::{AudioCapture, CaptureConfig};
+    use fono_core::config::SttBackend;
+    use fono_overlay::RealOverlay;
+    use fono_stt::StreamingStt;
+
+    use crate::live::{LiveSession, Pump};
+
+    // Slice A is local-first. Cloud streaming lands in Slice B.
+    if !matches!(config.stt.backend, SttBackend::Local) {
+        return Err(anyhow::anyhow!(
+            "live mode in Slice A only supports the local whisper backend; \
+             active backend is {:?}. Run `fono use stt local` first, or wait for Slice B \
+             cloud streaming.",
+            config.stt.backend
+        ));
+    }
+
+    // Build WhisperLocal directly so we get the StreamingStt impl
+    // (the generic `build_stt` factory returns `Arc<dyn SpeechToText>`,
+    // which doesn't expose the streaming method).
+    let model = &config.stt.local.model;
+    let model_path = paths
+        .whisper_models_dir()
+        .join(format!("ggml-{model}.bin"));
+    if !model_path.exists() {
+        return Err(anyhow::anyhow!(
+            "local whisper model {model:?} not found at {} — \
+             run `fono models install {model}`",
+            model_path.display()
+        ));
+    }
+    let stt: Arc<dyn StreamingStt> = Arc::new(fono_stt::whisper_local::WhisperLocal::new(
+        model_path,
+    ));
+
+    // Open the overlay; tolerate failure gracefully (headless / hostile compositor).
+    let overlay = match RealOverlay::spawn() {
+        Ok(h) => Some(h),
+        Err(e) => {
+            eprintln!("fono record --live: overlay unavailable ({e:#}); continuing without it");
+            None
+        }
+    };
+
+    let cap_cfg = CaptureConfig {
+        input_device: config.audio.input_device.clone(),
+        target_sample_rate: 16_000, // streaming pipeline operates at 16 kHz
+    };
+    let cap = AudioCapture::new(cap_cfg.clone());
+    let handle = cap.start().context("start audio capture")?;
+    eprintln!(
+        "fono record --live: capturing from default input ({} Hz). Press Ctrl-C or wait \
+         {max_seconds}s to stop.",
+        cap_cfg.target_sample_rate
+    );
+
+    // Slice A capture loop: record-then-replay-through-streaming.
+    // True real-time push (cpal callback -> AudioFrameStream) lands in
+    // Slice B alongside the cpal-callback refactor; the streaming code
+    // path is still fully exercised below.
+    let started = Instant::now();
+    let max = if max_seconds == 0 {
+        Duration::from_secs(60 * 60)
+    } else {
+        Duration::from_secs(max_seconds)
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("fono record --live: stopped by Ctrl-C");
+        }
+        () = tokio::time::sleep(max) => {
+            eprintln!("fono record --live: hit {max_seconds}s timeout");
+        }
+    }
+    let elapsed = started.elapsed();
+    let pcm = {
+        let buf = handle.buffer.lock().expect("buffer mutex");
+        buf.samples().to_vec()
+    };
+    drop(handle);
+    eprintln!(
+        "fono record --live: captured {} samples ({} ms); running streaming STT…",
+        pcm.len(),
+        elapsed.as_millis()
+    );
+
+    // Replay the captured PCM through the streaming pipeline in
+    // ~30 ms chunks so the preview/finalize lanes still exercise their
+    // full code path.
+    //
+    // The receiver is taken from the pump *before* the run task is
+    // spawned and *before* the first push, so the broadcast channel
+    // has a live subscriber for every frame and nothing is lost.
+    let mut pump = Pump::new(fono_audio::StreamConfig::default());
+    let frame_rx = pump.take_receiver()?;
+    let session = LiveSession::new(Arc::clone(&stt), cap_cfg.target_sample_rate)
+        .with_language(if config.general.language == "auto" {
+            None
+        } else {
+            Some(config.general.language.clone())
+        });
+    let session = if let Some(o) = overlay.as_ref() {
+        session.with_overlay(o.clone())
+    } else {
+        session
+    };
+
+    let task = tokio::spawn(session.run(frame_rx, fono_core::QualityFloor::Max));
+
+    let chunk = (cap_cfg.target_sample_rate as usize / 1000) * 30; // 30 ms
+    for window in pcm.chunks(chunk.max(1)) {
+        pump.push(window);
+        // Yield so the run task can drain the broadcast buffer between
+        // pushes; otherwise a long replay can outpace the channel
+        // capacity (default 64 frames).
+        tokio::task::yield_now().await;
+    }
+    pump.finish();
+    drop(pump);
+
+    let transcript = task.await??;
+
+    if let Some(o) = overlay.as_ref() {
+        o.shutdown();
+    }
+
+    let final_text = transcript.committed.trim().to_string();
+    if final_text.is_empty() {
+        eprintln!("fono record --live: streaming STT returned empty text");
+        return Ok(());
+    }
+    println!("{final_text}");
+    if !no_inject {
+        if let Err(e) = fono_inject::type_text(&final_text) {
+            eprintln!("fono record --live: inject failed: {e:#}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "interactive")]
+fn test_overlay_cmd() {
+    use std::time::Duration;
+
+    use fono_overlay::{OverlayState, RealOverlay};
+
+    println!("fono test-overlay: spawning real overlay window…");
+    let handle = match RealOverlay::spawn() {
+        Ok(h) => h,
+        Err(e) => {
+            println!("test-overlay: overlay failed to spawn: {e:#}");
+            return;
+        }
+    };
+    println!("[1/3] Recording (red), 1s");
+    handle.set_state(OverlayState::Recording { db: -20 });
+    std::thread::sleep(Duration::from_secs(1));
+    println!("[2/3] LiveDictating with sample text (blue), 1s");
+    handle.set_state(OverlayState::LiveDictating);
+    handle.update_text("Hello from fono live mode");
+    std::thread::sleep(Duration::from_secs(1));
+    println!("[3/3] Processing (amber), 1s");
+    handle.set_state(OverlayState::Processing);
+    std::thread::sleep(Duration::from_secs(1));
+    println!("test-overlay: shutting down");
+    handle.shutdown();
 }

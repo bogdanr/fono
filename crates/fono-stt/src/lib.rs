@@ -8,6 +8,9 @@ pub mod factory;
 pub mod registry;
 pub mod traits;
 
+#[cfg(feature = "streaming")]
+pub mod streaming;
+
 #[cfg(feature = "groq")]
 pub mod groq;
 #[cfg(feature = "openai")]
@@ -18,3 +21,6 @@ pub mod whisper_local;
 pub use factory::build_stt;
 pub use registry::{ModelInfo, ModelRegistry};
 pub use traits::{SpeechToText, Transcription};
+
+#[cfg(feature = "streaming")]
+pub use streaming::{LocalAgreement, StreamFrame, StreamingStt, TranscriptUpdate, UpdateLane};

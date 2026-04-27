@@ -12,6 +12,15 @@ pub enum HotkeyEvent {
     StartRecording(RecordingMode),
     StopRecording,
     Cancel,
+    /// Live dictation started — orchestrator should start the streaming
+    /// pipeline. Plan R7.4. Distinct from `StartRecording` so the
+    /// orchestrator can branch on its config without re-deriving the
+    /// mode from FSM state. The `mode` field carries the trigger
+    /// (Hold/Toggle) for symmetry with [`HotkeyEvent::StartRecording`].
+    StartLiveDictation(RecordingMode),
+    /// Live dictation finished — orchestrator commits accumulated text
+    /// and tears down the streaming pipeline.
+    StopLiveDictation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +33,13 @@ pub enum RecordingMode {
 pub enum State {
     Idle,
     Recording(RecordingMode),
+    /// Live (streaming) dictation. The streaming pipeline is consuming
+    /// audio frames and emitting preview/finalize updates. Plan R7.4 /
+    /// R18.21. Reached from `Idle` via [`HotkeyAction::HoldPressed`] /
+    /// [`HotkeyAction::TogglePressed`] **only when the orchestrator's
+    /// runtime config has `[interactive].enabled = true`** (the
+    /// orchestrator decides which start variant to dispatch).
+    LiveDictating(RecordingMode),
     Processing,
 }
 
@@ -38,6 +54,12 @@ pub enum HotkeyAction {
     ProcessingDone,
     /// Orchestrator signals STT/LLM pipeline started.
     ProcessingStarted,
+    /// Live-dictation variants. Plan R7.4. The hotkey listener and IPC
+    /// surface dispatch these instead of `HoldPressed` / `TogglePressed`
+    /// when the orchestrator has enabled live mode.
+    LiveHoldPressed,
+    LiveHoldReleased,
+    LiveTogglePressed,
 }
 
 pub struct RecordingFsm {
@@ -87,6 +109,30 @@ impl RecordingFsm {
                 State::Processing
             }
             (State::Recording(_), HotkeyAction::CancelPressed) => {
+                let _ = self.tx.send(HotkeyEvent::Cancel);
+                State::Idle
+            }
+            (State::Idle, HotkeyAction::LiveHoldPressed) => {
+                let _ = self
+                    .tx
+                    .send(HotkeyEvent::StartLiveDictation(RecordingMode::Hold));
+                State::LiveDictating(RecordingMode::Hold)
+            }
+            (State::Idle, HotkeyAction::LiveTogglePressed) => {
+                let _ = self
+                    .tx
+                    .send(HotkeyEvent::StartLiveDictation(RecordingMode::Toggle));
+                State::LiveDictating(RecordingMode::Toggle)
+            }
+            (State::LiveDictating(RecordingMode::Hold), HotkeyAction::LiveHoldReleased) => {
+                let _ = self.tx.send(HotkeyEvent::StopLiveDictation);
+                State::Processing
+            }
+            (State::LiveDictating(RecordingMode::Toggle), HotkeyAction::LiveTogglePressed) => {
+                let _ = self.tx.send(HotkeyEvent::StopLiveDictation);
+                State::Processing
+            }
+            (State::LiveDictating(_), HotkeyAction::CancelPressed) => {
                 let _ = self.tx.send(HotkeyEvent::Cancel);
                 State::Idle
             }
@@ -144,5 +190,35 @@ mod tests {
         assert_eq!(fsm.state(), State::Processing);
         // A fresh hold press while Processing is ignored.
         assert_eq!(fsm.dispatch(HotkeyAction::HoldPressed), State::Processing);
+    }
+
+    #[test]
+    fn live_hold_flow() {
+        let (mut fsm, mut rx) = RecordingFsm::new();
+        assert_eq!(
+            fsm.dispatch(HotkeyAction::LiveHoldPressed),
+            State::LiveDictating(RecordingMode::Hold)
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            HotkeyEvent::StartLiveDictation(RecordingMode::Hold)
+        );
+        assert_eq!(
+            fsm.dispatch(HotkeyAction::LiveHoldReleased),
+            State::Processing
+        );
+        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StopLiveDictation);
+        assert_eq!(fsm.dispatch(HotkeyAction::ProcessingDone), State::Idle);
+    }
+
+    #[test]
+    fn live_toggle_flow_and_cancel() {
+        let (mut fsm, _rx) = RecordingFsm::new();
+        assert_eq!(
+            fsm.dispatch(HotkeyAction::LiveTogglePressed),
+            State::LiveDictating(RecordingMode::Toggle)
+        );
+        // Cancel from live state goes back to Idle without Processing.
+        assert_eq!(fsm.dispatch(HotkeyAction::CancelPressed), State::Idle);
     }
 }

@@ -1,0 +1,36 @@
+# Equivalence-harness fixture manifest. Plan v6 R18.4.
+#
+# Slice A ships these as synthetic-tone placeholders so the streaming↔
+# batch equivalence harness can be exercised end-to-end without
+# depending on a network fetch at build time. Real CC0 / CC-BY speech
+# fixtures replace these in-place once curated; the harness picks them
+# up automatically as long as the file names and reference transcripts
+# in this manifest are kept in sync.
+#
+# TODO (Slice A → B handoff): replace the two synthetic-tone WAVs with
+# real-speech CC0 LibriVox / Wikimedia Commons clips. Drop them at the
+# same paths, recompute the sha256 with `sha256sum`, and update
+# `synthetic_placeholder = false` + a meaningful `reference` and
+# `language`. Keep total committed payload ≤ 1 MB.
+
+[[fixtures]]
+name = "short-clean"
+path = "short-clean.wav"
+sha256 = "33ac9f5940963a0fed7c1e97972e0d0858e252d74a1f10e73423907178812130"
+source_url = "synthesized in-tree by crates/fono-bench/examples/gen_equivalence_fixtures.rs"
+license = "GPL-3.0-only (synthesized — no upstream)"
+reference = ""
+language = "en"
+synthetic_placeholder = true
+duration_estimate_s = 3.0
+
+[[fixtures]]
+name = "medium-pauses"
+path = "medium-pauses.wav"
+sha256 = "d8a35101ae4e7169efa32bd42642fd7cf297cf995fb4294263b341fbfe0898e7"
+source_url = "synthesized in-tree by crates/fono-bench/examples/gen_equivalence_fixtures.rs"
+license = "GPL-3.0-only (synthesized — no upstream)"
+reference = ""
+language = "en"
+synthetic_placeholder = true
+duration_estimate_s = 10.0

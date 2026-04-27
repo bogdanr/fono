@@ -24,3 +24,6 @@ pub mod doctor;
 pub mod models;
 pub mod session;
 pub mod wizard;
+
+#[cfg(feature = "interactive")]
+pub mod live;
