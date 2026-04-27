@@ -219,6 +219,31 @@ pub enum Cmd {
         #[arg(value_enum)]
         shell: Shell,
     },
+    /// Check for a newer release on GitHub and (optionally) self-update
+    /// the running binary in place. Background tray-icon equivalent
+    /// runs automatically on the daemon when `[update] auto_check`
+    /// is enabled (the default).
+    Update {
+        /// Only print the status; never download.
+        /// Exit code is `0` when up-to-date and `1` when an update
+        /// is available — handy for scripts.
+        #[arg(long)]
+        check: bool,
+        /// Skip the interactive confirmation prompt.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Resolve and verify the new binary, but do not replace the
+        /// running executable.
+        #[arg(long)]
+        dry_run: bool,
+        /// `stable` (default) or `prerelease`.
+        #[arg(long, default_value = "stable")]
+        channel: String,
+        /// After a successful update, do **not** re-exec into the new
+        /// binary. The next manual start picks it up.
+        #[arg(long)]
+        no_restart: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -352,6 +377,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             clap_complete::generate(shell, &mut cmd, "fono", &mut std::io::stdout());
             Ok(())
         }
+        Some(Cmd::Update {
+            check,
+            yes,
+            dry_run,
+            channel,
+            no_restart,
+        }) => update_cmd(check, yes, dry_run, &channel, no_restart).await,
     }
 }
 
@@ -1177,4 +1209,94 @@ fn readback_clipboard() -> Option<String> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------
+// `fono update` — check and (optionally) self-replace the binary.
+// ---------------------------------------------------------------------
+#[allow(clippy::fn_params_excessive_bools)]
+async fn update_cmd(
+    check_only: bool,
+    yes: bool,
+    dry_run: bool,
+    channel: &str,
+    no_restart: bool,
+) -> Result<()> {
+    use fono_update::{apply_update, check, ApplyOpts, Channel, UpdateStatus};
+    use std::io::Write;
+
+    let chan = Channel::parse(channel).ok_or_else(|| {
+        anyhow::anyhow!("unknown channel {channel:?}; try `stable` or `prerelease`")
+    })?;
+
+    let current = env!("CARGO_PKG_VERSION");
+    println!("fono {current} — checking for updates on the {channel} channel…");
+    let status = check(current, chan).await;
+    match &status {
+        UpdateStatus::UpToDate { .. } => {
+            println!("up-to-date {current}");
+            if check_only {
+                std::process::exit(0);
+            }
+            return Ok(());
+        }
+        UpdateStatus::CheckFailed { error, .. } => {
+            return Err(anyhow::anyhow!("update check failed: {error}"));
+        }
+        UpdateStatus::Available { info, .. } => {
+            println!(
+                "available {current}->{} ({} MB)",
+                info.version,
+                info.asset_size / 1_048_576
+            );
+            println!("  asset:  {}", info.asset_name);
+            println!("  notes:  {}", info.html_url);
+            if check_only {
+                std::process::exit(1);
+            }
+        }
+    }
+    let info = status
+        .available()
+        .ok_or_else(|| anyhow::anyhow!("no update available"))?;
+
+    if !yes {
+        eprint!("Apply update now? [y/N] ");
+        std::io::stderr().flush().ok();
+        let mut s = String::new();
+        std::io::stdin().read_line(&mut s)?;
+        let confirmed = matches!(s.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+        if !confirmed {
+            println!("aborted");
+            return Ok(());
+        }
+    }
+
+    let opts = ApplyOpts {
+        dry_run,
+        target_override: None,
+    };
+    let outcome = apply_update(info, opts).await?;
+    println!(
+        "installed {} bytes (sha256={}) at {}",
+        outcome.bytes,
+        outcome.sha256,
+        outcome.installed_at.display()
+    );
+    if let Some(bak) = outcome.backup_at.as_ref() {
+        println!("previous binary kept at {}", bak.display());
+    }
+    if dry_run {
+        println!("(dry-run; running binary unchanged)");
+        return Ok(());
+    }
+    if no_restart {
+        println!("restart fono to use the new binary");
+        return Ok(());
+    }
+    println!("re-executing into new binary…");
+    // `restart_in_place`'s Ok variant is `Infallible`; on success
+    // execv replaces the process image and never returns.
+    let Err(e) = fono_update::restart_in_place();
+    Err(e)
 }

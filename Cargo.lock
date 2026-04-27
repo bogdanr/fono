@@ -1306,6 +1306,7 @@ dependencies = [
  "fono-overlay",
  "fono-stt",
  "fono-tray",
+ "fono-update",
  "notify-rust",
  "reqwest",
  "serde_json",
@@ -1473,6 +1474,23 @@ dependencies = [
  "tokio",
  "tracing",
  "tray-icon",
+]
+
+[[package]]
+name = "fono-update"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "hex",
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -62,6 +62,7 @@ fono-tray = { path = "../fono-tray" }
 fono-overlay = { path = "../fono-overlay" }
 fono-ipc = { path = "../fono-ipc" }
 fono-download = { path = "../fono-download" }
+fono-update = { path = "../fono-update" }
 
 anyhow = { workspace = true }
 tracing = { workspace = true }

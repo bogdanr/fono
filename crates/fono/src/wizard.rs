@@ -357,7 +357,11 @@ fn configure_local_llm(theme: &ColorfulTheme, config: &mut Config, tier: LocalTi
                 "qwen2.5-1.5b-instruct (~1.0 GB) — lighter",
                 "qwen2.5-0.5b-instruct (~350 MB) — lightest",
             ],
-            vec!["qwen2.5-3b-instruct", "qwen2.5-1.5b-instruct", "qwen2.5-0.5b-instruct"],
+            vec![
+                "qwen2.5-3b-instruct",
+                "qwen2.5-1.5b-instruct",
+                "qwen2.5-0.5b-instruct",
+            ],
             0usize,
         ),
         LocalTier::Recommended | LocalTier::Comfortable => (
@@ -366,7 +370,11 @@ fn configure_local_llm(theme: &ColorfulTheme, config: &mut Config, tier: LocalTi
                 "qwen2.5-0.5b-instruct (~350 MB) — lighter (faster, lower quality)",
                 "qwen2.5-3b-instruct  (~2.0 GB) — slower but higher quality",
             ],
-            vec!["qwen2.5-1.5b-instruct", "qwen2.5-0.5b-instruct", "qwen2.5-3b-instruct"],
+            vec![
+                "qwen2.5-1.5b-instruct",
+                "qwen2.5-0.5b-instruct",
+                "qwen2.5-3b-instruct",
+            ],
             0usize,
         ),
         LocalTier::Minimum | LocalTier::Unsuitable => (

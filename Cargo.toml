@@ -12,6 +12,7 @@ members = [
     "crates/fono-overlay",
     "crates/fono-ipc",
     "crates/fono-download",
+    "crates/fono-update",
     "crates/fono-bench",
 ]
 

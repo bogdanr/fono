@@ -1,0 +1,26 @@
+[package]
+name = "fono-update"
+description = "Self-update: GitHub release check + atomic binary replace + restart."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+semver = "1.0"

@@ -10,7 +10,7 @@ use fono_hotkey::{
 };
 use fono_ipc::{read_frame, write_frame, Request, Response};
 use fono_tray::{TrayAction, TrayState};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
@@ -75,6 +75,67 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                 None
             }
         };
+
+    // ---------------------------------------------------------------
+    // Background update checker — hits GitHub releases on a slow timer
+    // and surfaces results through `update_status` so the tray menu
+    // (and IPC consumers) can render an "Update to vX.Y.Z" entry.
+    // Honours `[update].auto_check`, `FONO_NO_UPDATE_CHECK=1`, and the
+    // configured channel/interval. Disabled entirely on package-managed
+    // installs to avoid fighting the distro.
+    // ---------------------------------------------------------------
+    let update_status: Arc<RwLock<Option<fono_update::UpdateStatus>>> = Arc::new(RwLock::new(None));
+    {
+        let cache_path = paths.state_dir.join("update.json");
+        if let Some(cached) = fono_update::load_cache(&cache_path) {
+            *update_status.write().expect("update_status lock") = Some(cached.status);
+        }
+        let pkg_managed = std::env::current_exe()
+            .map(|p| fono_update::is_package_managed(&p))
+            .unwrap_or(false);
+        let auto_check = config.update.auto_check
+            && !pkg_managed
+            && std::env::var_os("FONO_NO_UPDATE_CHECK").is_none_or(|v| v != "1");
+        if auto_check {
+            let channel = fono_update::Channel::parse(&config.update.channel)
+                .unwrap_or(fono_update::Channel::Stable);
+            let interval = std::time::Duration::from_secs(
+                u64::from(config.update.interval_hours.max(1)) * 3600,
+            );
+            let status_for_task = Arc::clone(&update_status);
+            let cache_path_task = cache_path;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                loop {
+                    let current = env!("CARGO_PKG_VERSION");
+                    let st = fono_update::check(current, channel).await;
+                    match &st {
+                        fono_update::UpdateStatus::Available { info: rel, .. } => {
+                            info!(
+                                "update check: new version available {current} -> {} ({})",
+                                rel.version, rel.html_url
+                            );
+                        }
+                        fono_update::UpdateStatus::UpToDate { current: c } => {
+                            info!("update check: running latest version v{c}; no update available");
+                        }
+                        fono_update::UpdateStatus::CheckFailed { error, .. } => {
+                            info!("update check: failed ({error}); will retry later");
+                        }
+                    }
+                    fono_update::save_cache(&cache_path_task, &st);
+                    if let Ok(mut guard) = status_for_task.write() {
+                        *guard = Some(st);
+                    }
+                    tokio::time::sleep(interval).await;
+                }
+            });
+        } else if pkg_managed {
+            debug!("update checker disabled: binary is package-managed");
+        } else {
+            debug!("update checker disabled by config / env");
+        }
+    }
 
     // ---------------------------------------------------------------
     // Tray icon (feature-gated; no-op if the backend is compiled out)
@@ -161,6 +222,15 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
             stt_labels,
             llm_labels,
             active_provider,
+            {
+                // Render the "Update to vX.Y.Z" tray label whenever the
+                // background checker has surfaced a newer release.
+                // Returning `None` keeps the menu item on its default
+                // "Check for updates…" copy, which still works as an
+                // on-demand trigger when the user clicks it.
+                let status = Arc::clone(&update_status);
+                Arc::new(move || update_label(&status)) as fono_tray::UpdateProvider
+            },
         );
         (Some(t), rx)
     };
@@ -275,6 +345,7 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
             fono_core::providers::configured_stt_backends(&secrets, &config.stt.backend);
         let llm_backends_for_dispatch: Vec<_> =
             fono_core::providers::configured_llm_backends(&secrets, &config.llm.backend);
+        let update_status_tray = Arc::clone(&update_status);
         tokio::spawn(async move {
             while let Some(ta) = tray_rx.recv().await {
                 debug!("tray action: {ta:?}");
@@ -310,6 +381,9 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                             idx,
                         )
                         .await;
+                    }
+                    TrayAction::ApplyUpdate => {
+                        apply_update_via_tray(Arc::clone(&update_status_tray)).await;
                     }
                 }
             }
@@ -916,7 +990,10 @@ async fn ensure_local_llm_with_notify(paths: &fono_core::Paths) -> bool {
     };
     let model = cfg.llm.local.model.clone();
     let size_hint = crate::models::local_llm_size_mb(&model);
-    let dest_exists = paths.llm_models_dir().join(format!("{model}.gguf")).exists();
+    let dest_exists = paths
+        .llm_models_dir()
+        .join(format!("{model}.gguf"))
+        .exists();
     if !dest_exists {
         let body = size_hint.map_or_else(
             || format!("LLM model: {model}"),
@@ -949,6 +1026,116 @@ async fn ensure_local_llm_with_notify(paths: &fono_core::Paths) -> bool {
                 .timeout(notify_rust::Timeout::Milliseconds(6_000))
                 .show();
             false
+        }
+    }
+}
+
+/// Render the tray "Update to vX.Y.Z" label from the shared update
+/// status; returns `None` when no upgrade is available so the menu
+/// falls back to its on-demand "Check for updates…" copy.
+#[allow(clippy::significant_drop_tightening)]
+fn update_label(status: &Arc<RwLock<Option<fono_update::UpdateStatus>>>) -> Option<String> {
+    let g = status.read().ok()?;
+    let info = g.as_ref()?.available()?;
+    Some(format!("Update to {}", info.tag))
+}
+
+/// Tray-driven update flow. Two modes depending on `update_status`:
+///
+/// * If a check has already classified an update as `Available`, jump
+///   straight to download + apply, then re-exec the daemon into the new
+///   binary so the user immediately runs the new version.
+/// * If the cache is empty or up-to-date, run an on-demand check and
+///   surface the result via a desktop notification (clicking the menu
+///   entry without a pending update behaves like `fono update --check`).
+async fn apply_update_via_tray(update_status: Arc<RwLock<Option<fono_update::UpdateStatus>>>) {
+    let cached = update_status.read().ok().and_then(|g| g.clone());
+    let info_opt = cached
+        .as_ref()
+        .and_then(fono_update::UpdateStatus::available)
+        .cloned();
+    let info = if let Some(i) = info_opt {
+        i
+    } else {
+        // No pending update — run an on-demand check and notify.
+        let st = fono_update::check(env!("CARGO_PKG_VERSION"), fono_update::Channel::Stable).await;
+        if let Ok(mut g) = update_status.write() {
+            *g = Some(st.clone());
+        }
+        match st {
+            fono_update::UpdateStatus::UpToDate { current } => {
+                let _ = notify_rust::Notification::new()
+                    .summary("Fono — up to date")
+                    .body(&format!("Running v{current}; no newer release available."))
+                    .icon("emblem-default")
+                    .timeout(notify_rust::Timeout::Milliseconds(4_000))
+                    .show();
+                return;
+            }
+            fono_update::UpdateStatus::CheckFailed { error, .. } => {
+                warn!("tray update check failed: {error}");
+                let _ = notify_rust::Notification::new()
+                    .summary("Fono — update check failed")
+                    .body(&error)
+                    .icon("dialog-error")
+                    .timeout(notify_rust::Timeout::Milliseconds(5_000))
+                    .show();
+                return;
+            }
+            fono_update::UpdateStatus::Available { info, .. } => info,
+        }
+    };
+
+    let _ = notify_rust::Notification::new()
+        .summary("Fono — downloading update")
+        .body(&format!(
+            "Fetching {} ({} MB)…",
+            info.asset_name,
+            info.asset_size / 1_048_576
+        ))
+        .icon("emblem-downloads")
+        .timeout(notify_rust::Timeout::Milliseconds(4_000))
+        .show();
+
+    match fono_update::apply_update(&info, fono_update::ApplyOpts::default()).await {
+        Ok(out) => {
+            info!(
+                "tray: installed update at {} ({} bytes, sha={})",
+                out.installed_at.display(),
+                out.bytes,
+                out.sha256
+            );
+            let _ = notify_rust::Notification::new()
+                .summary("Fono — update installed")
+                .body(&format!("Restarting into {} …", info.tag))
+                .icon("emblem-default")
+                .timeout(notify_rust::Timeout::Milliseconds(3_000))
+                .show();
+            // Give the notification daemon a beat to render before we
+            // replace the process image.
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            // `restart_in_place`'s Ok variant is `Infallible`, so on
+            // success it never returns; we only land here when execv
+            // failed to replace the process image.
+            let Err(e) = fono_update::restart_in_place();
+            warn!("tray: re-exec failed: {e:#}");
+            let _ = notify_rust::Notification::new()
+                .summary("Fono — restart failed")
+                .body(&format!(
+                    "Update installed; please restart Fono manually.\n{e}"
+                ))
+                .icon("dialog-warning")
+                .timeout(notify_rust::Timeout::Milliseconds(8_000))
+                .show();
+        }
+        Err(e) => {
+            warn!("tray: apply_update failed: {e:#}");
+            let _ = notify_rust::Notification::new()
+                .summary("Fono — update failed")
+                .body(&format!("{e}"))
+                .icon("dialog-error")
+                .timeout(notify_rust::Timeout::Milliseconds(8_000))
+                .show();
         }
     }
 }

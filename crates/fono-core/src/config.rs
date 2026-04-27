@@ -42,6 +42,9 @@ pub struct Config {
 
     #[serde(default)]
     pub inject: Inject,
+
+    #[serde(default)]
+    pub update: Update,
 }
 
 impl Default for Config {
@@ -57,6 +60,7 @@ impl Default for Config {
             overlay: Overlay::default(),
             history: History::default(),
             inject: Inject::default(),
+            update: Update::default(),
         }
     }
 }
@@ -391,6 +395,34 @@ impl Default for Inject {
     fn default() -> Self {
         Self {
             paste_shortcut: "shift-insert".into(),
+        }
+    }
+}
+
+/// Background update-check settings. The daemon spawns a worker that
+/// hits the GitHub Releases API on the configured cadence and surfaces
+/// results in the tray menu. All knobs are opt-out — the privacy-
+/// conscious user can disable the entire feature with one flag, the
+/// `FONO_NO_UPDATE_CHECK=1` env var, or by sticking to a distro
+/// package (which auto-disables self-replace anyway).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Update {
+    /// Spawn the background checker on daemon start. Default `true`.
+    pub auto_check: bool,
+    /// Hours between background checks. Default `24`.
+    pub interval_hours: u32,
+    /// `"stable"` (default) or `"prerelease"`. Prerelease enumerates
+    /// every release including drafts/RCs.
+    pub channel: String,
+}
+
+impl Default for Update {
+    fn default() -> Self {
+        Self {
+            auto_check: true,
+            interval_hours: 24,
+            channel: "stable".into(),
         }
     }
 }

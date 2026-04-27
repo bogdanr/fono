@@ -38,6 +38,17 @@ pub type RecentProvider = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 /// fono knows about (custom OpenAI-compatible endpoint etc.).
 pub type ActiveProvider = Arc<dyn Fn() -> (u8, u8) + Send + Sync>;
 
+/// Provider returning the current update label for the tray's
+/// "Update" menu item, or `None` to keep the item hidden/disabled.
+/// Called on the same ~2 s poll as the recent/active providers.
+///
+/// Convention:
+/// - `None` → "Check for updates" (always-clickable, kicks an
+///   on-demand check; equivalent to `fono update --check`).
+/// - `Some(label)` → e.g. "Update to v0.3.0" — clicking fires
+///   [`TrayAction::ApplyUpdate`].
+pub type UpdateProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
 /// FSM-aligned tray state used to tint the icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -62,6 +73,10 @@ pub enum TrayAction {
     /// Switch the active LLM backend. Index into the `llm_labels`
     /// slice passed to [`spawn`].
     UseLlm(u8),
+    /// User clicked the "Update to vX" / "Check for updates" entry.
+    /// The daemon handles this by running a check and (when available)
+    /// applying the update via `fono-update::apply_update`.
+    ApplyUpdate,
     OpenConfig,
     Quit,
 }
@@ -115,6 +130,7 @@ pub fn spawn(
     stt_labels: Vec<String>,
     llm_labels: Vec<String>,
     active_provider: ActiveProvider,
+    update_provider: UpdateProvider,
 ) -> (Tray, mpsc::UnboundedReceiver<TrayAction>) {
     let shared = Arc::new(AtomicU8::new(TrayState::Idle as u8));
     let (tx, rx) = mpsc::unbounded_channel();
@@ -129,6 +145,7 @@ pub fn spawn(
             stt_labels,
             llm_labels,
             active_provider,
+            update_provider,
         ) {
             tracing::warn!("tray backend failed to start: {e:#}; continuing without tray");
         }
@@ -149,7 +166,9 @@ pub fn spawn(
 
 #[cfg(feature = "tray-backend")]
 mod backend {
-    use super::{ActiveProvider, RecentProvider, TrayAction, TrayState, RECENT_SLOTS};
+    use super::{
+        ActiveProvider, RecentProvider, TrayAction, TrayState, UpdateProvider, RECENT_SLOTS,
+    };
     use anyhow::{Context, Result};
     use std::sync::{
         atomic::{AtomicU8, Ordering},
@@ -167,6 +186,7 @@ mod backend {
         pause: u32,
         config: u32,
         quit: u32,
+        update: u32,
         recent_slots: [u32; RECENT_SLOTS],
         stt_slots: Vec<u32>,
         llm_slots: Vec<u32>,
@@ -181,6 +201,7 @@ mod backend {
         // already updated the atomic.
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         tooltip: String,
         shared: Arc<AtomicU8>,
@@ -189,6 +210,7 @@ mod backend {
         stt_labels: Vec<String>,
         llm_labels: Vec<String>,
         active_provider: ActiveProvider,
+        update_provider: UpdateProvider,
     ) -> Result<()> {
         std::thread::Builder::new()
             .name("fono-tray".into())
@@ -201,6 +223,7 @@ mod backend {
                     stt_labels,
                     llm_labels,
                     active_provider,
+                    update_provider,
                 ) {
                     tracing::warn!("tray thread exited: {e:#}");
                 }
@@ -219,6 +242,7 @@ mod backend {
         stt_labels: Vec<String>,
         llm_labels: Vec<String>,
         active_provider: ActiveProvider,
+        update_provider: UpdateProvider,
     ) -> Result<()> {
         // tray-icon uses gtk on Linux and requires its main loop.
         gtk::init().context("gtk::init() failed — is gtk+-3.0 installed?")?;
@@ -230,8 +254,9 @@ mod backend {
         // pollute the daemon's stderr at startup.
         install_gtk_log_filters();
 
-        let (menu, status_item, recent_items, stt_items, llm_items) =
+        let (menu, status_item, recent_items, stt_items, llm_items, update_item) =
             build_menu(&stt_labels, &llm_labels)?;
+        let menu_for_updates = menu.clone();
         let tray = TrayIconBuilder::new()
             .with_tooltip(tooltip)
             .with_menu(Box::new(menu))
@@ -247,6 +272,8 @@ mod backend {
         let mut last_state: u8 = TrayState::Idle as u8;
         let mut last_recent: Vec<String> = Vec::new();
         let mut last_active: (u8, u8) = (u8::MAX, u8::MAX);
+        let mut last_update_label: Option<String> = None;
+        let mut update_present = false;
         let mut tick: u32 = 0;
         glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
             while let Ok(ev) = MenuEvent::receiver().try_recv() {
@@ -285,6 +312,16 @@ mod backend {
                     update_active(&stt_items, &stt_labels, active.0);
                     update_active(&llm_items, &llm_labels, active.1);
                     last_active = active;
+                }
+                let upd = update_provider();
+                if upd != last_update_label {
+                    set_update_visible(
+                        &menu_for_updates,
+                        &update_item,
+                        &mut update_present,
+                        upd.as_deref(),
+                    );
+                    last_update_label = upd;
                 }
             }
             glib::ControlFlow::Continue
@@ -331,6 +368,7 @@ mod backend {
         _stt_labels: Vec<String>,
         _llm_labels: Vec<String>,
         _active_provider: ActiveProvider,
+        _update_provider: UpdateProvider,
     ) -> Result<()> {
         let _tray = TrayIconBuilder::new()
             .with_tooltip(tooltip)
@@ -348,7 +386,15 @@ mod backend {
         [MenuItem; RECENT_SLOTS],
         Vec<MenuItem>,
         Vec<MenuItem>,
+        MenuItem,
     );
+
+    /// Position at which the update entry is inserted into the tray
+    /// menu when an upgrade is detected. Counts the items appended in
+    /// `build_menu` (status, sep, toggle, pause, sep, recent, stt, llm,
+    /// sep, config) — the entry slots in just before the final
+    /// separator + Quit.
+    const UPDATE_INSERT_POS: usize = 10;
 
     fn build_menu(stt_labels: &[String], llm_labels: &[String]) -> Result<MenuParts> {
         let menu = Menu::new();
@@ -387,6 +433,11 @@ mod backend {
         }
 
         let config = MenuItem::new("Edit config", true, None);
+        // The update entry is intentionally **not** appended here. The
+        // background checker injects it into the menu at runtime via
+        // `set_update_visible` only after a newer release is detected,
+        // so users never see a passive "Check for updates…" button.
+        let update = MenuItem::new("", true, None);
         let quit = MenuItem::new("Quit", true, None);
 
         menu.append(&status)?;
@@ -412,11 +463,46 @@ mod backend {
             pause: id_of(&pause),
             config: id_of(&config),
             quit: id_of(&quit),
+            update: id_of(&update),
             recent_slots,
             stt_slots,
             llm_slots,
         });
-        Ok((menu, status, recent_items, stt_items, llm_items))
+        Ok((menu, status, recent_items, stt_items, llm_items, update))
+    }
+
+    /// Show or hide the tray's "Update to vX.Y.Z" entry based on the
+    /// background checker's verdict. The entry is added to the menu
+    /// only when an upgrade is available and removed otherwise so the
+    /// menu stays free of passive "Check for updates…" buttons.
+    fn set_update_visible(
+        menu: &Menu,
+        item: &MenuItem,
+        present: &mut bool,
+        label: Option<&str>,
+    ) {
+        match (label, *present) {
+            (Some(text), true) => {
+                item.set_text(text);
+            }
+            (Some(text), false) => {
+                item.set_text(text);
+                item.set_enabled(true);
+                if let Err(e) = menu.insert(item, UPDATE_INSERT_POS) {
+                    tracing::warn!("tray: insert update item failed: {e:#}");
+                } else {
+                    *present = true;
+                }
+            }
+            (None, true) => {
+                if let Err(e) = menu.remove(item) {
+                    tracing::warn!("tray: remove update item failed: {e:#}");
+                } else {
+                    *present = false;
+                }
+            }
+            (None, false) => {}
+        }
     }
 
     fn update_recent(items: &[MenuItem; RECENT_SLOTS], labels: &[String]) {
@@ -499,6 +585,9 @@ mod backend {
         }
         if id == ids.quit {
             return Some(TrayAction::Quit);
+        }
+        if id == ids.update {
+            return Some(TrayAction::ApplyUpdate);
         }
         for (i, slot_id) in ids.recent_slots.iter().enumerate() {
             if id == *slot_id {
