@@ -308,6 +308,12 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
         tier: "tier1".to_string(),
         threshold_levenshtein: TIER1_LEVENSHTEIN_THRESHOLD,
         results: Vec::with_capacity(manifest.fixtures.len()),
+        // R18.23: pin the v7 default boundary knobs into the report so
+        // streaming runs are fully reproducible. The CLI does not yet
+        // dispatch the four A2-* rows separately (deferred to Slice
+        // B's Tier-2 wiring); this pin records the knob set used by
+        // the gating row.
+        pinned_params: Some(fono_bench::equivalence::BoundaryKnobs::defaults()),
     };
 
     let quick = if args.quick { Some(5.0_f32) } else { None };

@@ -416,10 +416,13 @@ impl Default for Inject {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Update {
-    /// Spawn the background checker on daemon start. Default `true`.
+    /// Run a one-shot update check on daemon start. Default `true`.
+    /// The check fires once ~10 s after launch and never again until
+    /// the next start — fono is a desktop tool that's started often
+    /// enough that a recurring timer would just add noise without
+    /// catching releases any sooner. Disable to suppress the GitHub
+    /// API request entirely.
     pub auto_check: bool,
-    /// Hours between background checks. Default `24`.
-    pub interval_hours: u32,
     /// `"stable"` (default) or `"prerelease"`. Prerelease enumerates
     /// every release including drafts/RCs.
     pub channel: String,
@@ -429,7 +432,6 @@ impl Default for Update {
     fn default() -> Self {
         Self {
             auto_check: true,
-            interval_hours: 24,
             channel: "stable".into(),
         }
     }
@@ -443,6 +445,7 @@ impl Default for Update {
 /// `enabled` at startup and on every `Reload` IPC.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Interactive {
     /// Master toggle. Default `false` everywhere in v0.2.0-alpha. Tier-
     /// aware auto-enable is a Slice B decision (see ADR 0009).
@@ -460,6 +463,75 @@ pub struct Interactive {
     /// indicator overlay disabled but still see live text. Default
     /// `true`.
     pub overlay: bool,
+    // ----- v6 carryover knobs (R7.4 / R9.1) ---------------------------
+    /// Pipeline mode. `"hybrid"` (default) uses streaming preview +
+    /// finalize-on-segment-boundary + cleanup-on-finalize. Reserved
+    /// for Slice B variants (`"streaming-only"`, `"batch"`).
+    pub mode: String,
+    /// Initial chunk window the streaming decoder waits before its
+    /// first preview pass, in milliseconds. Smaller = lower TTFF,
+    /// noisier early previews.
+    pub chunk_ms_initial: u32,
+    /// Steady-state chunk window between preview passes, in
+    /// milliseconds.
+    pub chunk_ms_steady: u32,
+    /// When `true`, run the LLM cleanup pass once on the assembled
+    /// transcript after the user releases the hotkey. Default `true`.
+    pub cleanup_on_finalize: bool,
+    /// Hard ceiling on a single live session, in seconds. The daemon
+    /// auto-finishes at this cap to bound the budget controller and
+    /// the overlay's resident memory.
+    pub max_session_seconds: u32,
+    /// Optional hard cost cap for cloud-streaming sessions, in USD.
+    /// `None` (default) defers to `budget_ceiling_per_minute_umicros`.
+    pub max_session_cost_usd: Option<f32>,
+    // ----- v7 boundary heuristics (R2.5 / R7.3a / R9.1) ---------------
+    /// Engage the prosody-aware chunk-boundary heuristic (R2.5). When
+    /// `true`, segment boundaries are delayed up to
+    /// `commit_prosody_extend_ms` if the speaker's pitch contour is
+    /// flat or rising at the boundary (signal of unfinished thought).
+    /// Default `false` until Slice B real-fixture telemetry validates
+    /// the heuristic.
+    pub commit_use_prosody: bool,
+    /// Extension granted by the prosody heuristic when it fires, in
+    /// milliseconds. Capped by the session at `chunk_ms_steady * 1.5`.
+    pub commit_prosody_extend_ms: u32,
+    /// Engage the punctuation-hint chunk-boundary heuristic (R2.5).
+    /// When `true`, segment boundaries that would interrupt mid-clause
+    /// (preview text ends in `,;:` or alphanumerics — i.e. no terminal
+    /// punctuation) are delayed by `commit_punct_extend_ms`. Default
+    /// `true`.
+    pub commit_use_punctuation_hint: bool,
+    /// Extension granted by the punctuation hint when it fires, in
+    /// milliseconds.
+    pub commit_punct_extend_ms: u32,
+    /// At end-of-input (R7.3a), if the trailing word of the committed
+    /// transcript is a filler or a syntactically-dangling word, hold
+    /// the session open for `eou_drain_extended_ms` to wait for a
+    /// continuation. Default `true`.
+    pub commit_hold_on_filler: bool,
+    /// Filler-word vocabulary checked by `commit_hold_on_filler`.
+    /// English-only by default; users dictating in other languages
+    /// should override. Comparison is case-insensitive after stripping
+    /// trailing `.,;:!?`.
+    pub commit_filler_words: Vec<String>,
+    /// Syntactically-dangling word vocabulary (conjunctions, articles,
+    /// prepositions). English-only by default; see
+    /// `commit_filler_words` for the localization caveat.
+    pub commit_dangling_words: Vec<String>,
+    /// End-of-utterance extended drain window, in milliseconds. The
+    /// session waits up to this long for additional voiced PCM after
+    /// the upstream stream closes when a filler/dangling suffix is
+    /// detected. Has no effect unless `commit_hold_on_filler = true`.
+    pub eou_drain_extended_ms: u32,
+    /// Reserved for Slice D (R15); inert in Slice A. Future adaptive
+    /// EOU detector will replace the static drain window with a
+    /// silence-distribution estimator.
+    pub eou_adaptive: bool,
+    /// Reserved for Slice D (R15); inert in Slice A. Grace window in
+    /// milliseconds during which a re-pressed hotkey resumes the prior
+    /// session instead of opening a new one.
+    pub resume_grace_ms: u32,
 }
 
 impl Default for Interactive {
@@ -469,8 +541,46 @@ impl Default for Interactive {
             budget_ceiling_per_minute_umicros: 0,
             quality_floor: "max".into(),
             overlay: true,
+            mode: "hybrid".into(),
+            chunk_ms_initial: 600,
+            chunk_ms_steady: 1500,
+            cleanup_on_finalize: true,
+            max_session_seconds: 120,
+            max_session_cost_usd: None,
+            commit_use_prosody: false,
+            commit_prosody_extend_ms: 250,
+            commit_use_punctuation_hint: true,
+            commit_punct_extend_ms: 150,
+            commit_hold_on_filler: true,
+            commit_filler_words: default_filler_words(),
+            commit_dangling_words: default_dangling_words(),
+            eou_drain_extended_ms: 1500,
+            eou_adaptive: false,
+            resume_grace_ms: 0,
         }
     }
+}
+
+/// Default English filler-word vocabulary for `commit_hold_on_filler`.
+/// Centralised so the equivalence harness can reference the same list.
+#[must_use]
+pub fn default_filler_words() -> Vec<String> {
+    ["um", "uh", "er", "ah", "mm", "like", "you know"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+/// Default English syntactically-dangling-word vocabulary.
+#[must_use]
+pub fn default_dangling_words() -> Vec<String> {
+    [
+        "and", "but", "or", "so", "because", "the", "a", "an", "of", "to", "with", "for",
+        "in", "on", "at", "from",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
 }
 
 impl Config {
@@ -598,6 +708,81 @@ mod tests {
             cfg.migrate(),
             Err(Error::ConfigVersionTooNew { .. })
         ));
+    }
+
+    #[test]
+    fn interactive_v7_keys_round_trip() {
+        let raw = r#"
+            version = 1
+            [interactive]
+            enabled = true
+            budget_ceiling_per_minute_umicros = 1000
+            quality_floor = "balanced"
+            overlay = false
+            mode = "hybrid"
+            chunk_ms_initial = 700
+            chunk_ms_steady = 1400
+            cleanup_on_finalize = false
+            max_session_seconds = 60
+            max_session_cost_usd = 0.25
+            commit_use_prosody = true
+            commit_prosody_extend_ms = 200
+            commit_use_punctuation_hint = false
+            commit_punct_extend_ms = 100
+            commit_hold_on_filler = false
+            commit_filler_words = ["uh", "erm"]
+            commit_dangling_words = ["and"]
+            eou_drain_extended_ms = 2000
+            eou_adaptive = true
+            resume_grace_ms = 250
+        "#;
+        let cfg: Config = toml::from_str(raw).expect("parse");
+        let i = &cfg.interactive;
+        assert!(i.enabled);
+        assert_eq!(i.budget_ceiling_per_minute_umicros, 1000);
+        assert_eq!(i.quality_floor, "balanced");
+        assert!(!i.overlay);
+        assert_eq!(i.mode, "hybrid");
+        assert_eq!(i.chunk_ms_initial, 700);
+        assert_eq!(i.chunk_ms_steady, 1400);
+        assert!(!i.cleanup_on_finalize);
+        assert_eq!(i.max_session_seconds, 60);
+        assert!((i.max_session_cost_usd.unwrap() - 0.25).abs() < 1e-6);
+        assert!(i.commit_use_prosody);
+        assert_eq!(i.commit_prosody_extend_ms, 200);
+        assert!(!i.commit_use_punctuation_hint);
+        assert_eq!(i.commit_punct_extend_ms, 100);
+        assert!(!i.commit_hold_on_filler);
+        assert_eq!(i.commit_filler_words, vec!["uh", "erm"]);
+        assert_eq!(i.commit_dangling_words, vec!["and"]);
+        assert_eq!(i.eou_drain_extended_ms, 2000);
+        assert!(i.eou_adaptive);
+        assert_eq!(i.resume_grace_ms, 250);
+    }
+
+    #[test]
+    fn empty_interactive_block_yields_defaults() {
+        let raw = "version = 1\n[interactive]\n";
+        let cfg: Config = toml::from_str(raw).expect("parse");
+        let d = Interactive::default();
+        let i = &cfg.interactive;
+        assert_eq!(i.enabled, d.enabled);
+        assert_eq!(i.mode, d.mode);
+        assert_eq!(i.chunk_ms_initial, d.chunk_ms_initial);
+        assert_eq!(i.chunk_ms_steady, d.chunk_ms_steady);
+        assert_eq!(i.cleanup_on_finalize, d.cleanup_on_finalize);
+        assert_eq!(i.max_session_seconds, d.max_session_seconds);
+        assert_eq!(i.max_session_cost_usd, d.max_session_cost_usd);
+        assert_eq!(i.commit_use_prosody, d.commit_use_prosody);
+        assert_eq!(i.commit_prosody_extend_ms, d.commit_prosody_extend_ms);
+        assert_eq!(i.commit_use_punctuation_hint, d.commit_use_punctuation_hint);
+        assert_eq!(i.commit_punct_extend_ms, d.commit_punct_extend_ms);
+        assert_eq!(i.commit_hold_on_filler, d.commit_hold_on_filler);
+        assert_eq!(i.commit_filler_words, d.commit_filler_words);
+        assert_eq!(i.commit_dangling_words, d.commit_dangling_words);
+        assert_eq!(i.eou_drain_extended_ms, d.eou_drain_extended_ms);
+        assert_eq!(i.eou_adaptive, d.eou_adaptive);
+        assert_eq!(i.resume_grace_ms, d.resume_grace_ms);
     }
 
     #[test]

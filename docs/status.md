@@ -2,6 +2,46 @@
 
 Last updated: 2026-04-27
 
+## 2026-04-27 — Slice A v7 delta landed (boundary heuristics)
+
+Plan v7 (`plans/2026-04-27-fono-interactive-v7.md`) extends Slice A with
+boundary-quality heuristics. Four DCO-signed commits on top of v6 Slice A:
+
+| SHA       | Title |
+|-----------|-------|
+| `ce6a21e` | fono-core(config): v7 `[interactive]` keys (boundary heuristics) |
+| `d0e21a0` | fono(live): R2.5 prosody/punct chunk-boundary + R7.3a hold-on-filler drain |
+| `beae861` | fono-bench(equivalence): pin v7 boundary knobs + A2 row variants |
+| `6a6c6c1` | docs: ADR 0015 + interactive.md tuning section |
+
+**What landed**
+
+- R9.1 — `[interactive]` config grew from 4 keys to 18, covering the v6
+  carryover (`mode`, `chunk_ms_initial/steady`, `cleanup_on_finalize`,
+  `max_session_seconds/cost_usd`) and the v7 heuristic knobs
+  (`commit_use_prosody`, `commit_use_punctuation_hint`,
+  `commit_hold_on_filler`, `commit_filler_words`,
+  `commit_dangling_words`, plus matching `*_ms` extensions). Reserved
+  `eou_adaptive` / `resume_grace_ms` defined but inert until Slice D.
+- R2.5 — prosody pitch-tail tracker (hand-rolled time-domain
+  autocorrelation, no FFT dep) wired into the FrameEvent → StreamFrame
+  translator; punctuation-hint pure function shipped, full wiring
+  deferred to Slice B (translator can't yet see preview text).
+- R7.3a — filler/dangling-word suffix detection; ships as informational
+  signal on `LiveTranscript` rather than a true drain extension to
+  avoid an >80 LoC pump refactor. Daemon can act on the flags now;
+  Slice D's adaptive-EOU work will make the extension first-class.
+- R10.5 / R10.6 — tracing fields on `live.first_stable` + 13 new
+  heuristic-isolation unit tests + 2 new equivalence-harness tests.
+- R18.10 / R18.23 — pinned heuristic knobs in equivalence reports;
+  four A2 row variants (`A2-no-heur`, `A2-default`, `A2-prosody`,
+  `A2-filler`); `A2-default` gates Tier-1 + Tier-2.
+- ADR 0015 — boundary-heuristics architecture, additive-only invariant,
+  forward-reference to adaptive EOU in Slice D.
+
+Verification gate (slim + `interactive` feature): build clean, clippy
+clean with `-D warnings`, all tests green (no regressions).
+
 ## 2026-04-27 — Slice A landed (interactive / live dictation)
 
 Plan v6 (`plans/2026-04-27-fono-interactive-v6.md`) Slice A is in.

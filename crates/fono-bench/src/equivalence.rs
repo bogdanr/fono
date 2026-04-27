@@ -139,6 +139,11 @@ pub struct EquivalenceReport {
     pub tier: String,
     pub threshold_levenshtein: f32,
     pub results: Vec<EquivalenceResult>,
+    /// R18.23: pinned `[interactive]` boundary knobs (and any other
+    /// streaming-determinism inputs) so the JSON report is fully
+    /// reproducible. `None` for legacy / older reports.
+    #[serde(default)]
+    pub pinned_params: Option<BoundaryKnobs>,
 }
 
 impl EquivalenceReport {
@@ -161,6 +166,171 @@ impl EquivalenceReport {
             Verdict::Skipped
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// v7 boundary-knob harness pinning (R18.10 amended + R18.23).
+// ---------------------------------------------------------------------
+
+/// The set of `[interactive]` boundary-heuristic knobs the harness
+/// pins for a streaming run, copied verbatim into the JSON report's
+/// `pinned_params` block (R18.23). Persisting the values makes
+/// streaming-vs-batch comparisons reproducible across machines and
+/// guards against the "we changed the default and the diff drifted
+/// silently" failure mode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundaryKnobs {
+    pub commit_use_prosody: bool,
+    pub commit_prosody_extend_ms: u32,
+    pub commit_use_punctuation_hint: bool,
+    pub commit_punct_extend_ms: u32,
+    pub commit_hold_on_filler: bool,
+    pub commit_filler_words: Vec<String>,
+    pub commit_dangling_words: Vec<String>,
+    pub eou_drain_extended_ms: u32,
+    pub chunk_ms_initial: u32,
+    pub chunk_ms_steady: u32,
+}
+
+impl BoundaryKnobs {
+    /// Defaults match `fono_core::config::Interactive::default()`.
+    /// Used by the `A2-default` row, which is also the v6 / Slice A
+    /// equivalence-gate row.
+    #[must_use]
+    pub fn defaults() -> Self {
+        Self {
+            commit_use_prosody: false,
+            commit_prosody_extend_ms: 250,
+            commit_use_punctuation_hint: true,
+            commit_punct_extend_ms: 150,
+            commit_hold_on_filler: true,
+            commit_filler_words: vec![
+                "um".into(),
+                "uh".into(),
+                "er".into(),
+                "ah".into(),
+                "mm".into(),
+                "like".into(),
+                "you know".into(),
+            ],
+            commit_dangling_words: vec![
+                "and".into(),
+                "but".into(),
+                "or".into(),
+                "so".into(),
+                "because".into(),
+                "the".into(),
+                "a".into(),
+                "an".into(),
+                "of".into(),
+                "to".into(),
+                "with".into(),
+                "for".into(),
+                "in".into(),
+                "on".into(),
+                "at".into(),
+                "from".into(),
+            ],
+            eou_drain_extended_ms: 1500,
+            chunk_ms_initial: 600,
+            chunk_ms_steady: 1500,
+        }
+    }
+
+    /// All-off variant: every heuristic disabled, every extension
+    /// zeroed. The `A2-no-heur` row uses this to prove heuristics are
+    /// additive — Tier-1 + Tier-2 must still pass under this config.
+    #[must_use]
+    pub fn all_off() -> Self {
+        Self {
+            commit_use_prosody: false,
+            commit_prosody_extend_ms: 0,
+            commit_use_punctuation_hint: false,
+            commit_punct_extend_ms: 0,
+            commit_hold_on_filler: false,
+            commit_filler_words: Vec::new(),
+            commit_dangling_words: Vec::new(),
+            eou_drain_extended_ms: 0,
+            chunk_ms_initial: 600,
+            chunk_ms_steady: 1500,
+        }
+    }
+}
+
+/// Named A/B variant of the boundary knobs the harness can run a fixture
+/// against. Tier-1 / Tier-2 *gate* on the `A2-default` row only; the
+/// other three rows ship as informational diff reports for tuning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarnessVariant {
+    pub name: String,
+    /// `true` for the row whose verdict gates CI; `false` for
+    /// informational rows.
+    pub gating: bool,
+    pub knobs: BoundaryKnobs,
+}
+
+/// Default top-level config the harness CLI hands to `run_fixture` for
+/// each row. Currently a thin wrapper around the variant list; future
+/// fields (per-tier overrides, cloud-row knobs, etc.) land here without
+/// re-typing the row vec at every call site.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarnessConfig {
+    pub variants: Vec<HarnessVariant>,
+}
+
+impl Default for HarnessConfig {
+    fn default() -> Self {
+        Self {
+            variants: a2_variants(),
+        }
+    }
+}
+
+/// The four R18.23 A2 rows. Order is stable so the JSON report renders
+/// deterministically.
+#[must_use]
+pub fn a2_variants() -> Vec<HarnessVariant> {
+    let prosody_only = BoundaryKnobs {
+        commit_use_prosody: true,
+        ..BoundaryKnobs::all_off()
+    };
+    let filler_only = {
+        let d = BoundaryKnobs::defaults();
+        BoundaryKnobs {
+            commit_use_prosody: false,
+            commit_use_punctuation_hint: false,
+            commit_hold_on_filler: true,
+            commit_filler_words: d.commit_filler_words,
+            commit_dangling_words: d.commit_dangling_words,
+            eou_drain_extended_ms: d.eou_drain_extended_ms,
+            commit_prosody_extend_ms: 0,
+            commit_punct_extend_ms: 0,
+            chunk_ms_initial: d.chunk_ms_initial,
+            chunk_ms_steady: d.chunk_ms_steady,
+        }
+    };
+    vec![
+        HarnessVariant {
+            name: "A2-no-heur".into(),
+            gating: false,
+            knobs: BoundaryKnobs::all_off(),
+        },
+        HarnessVariant {
+            name: "A2-default".into(),
+            gating: true,
+            knobs: BoundaryKnobs::defaults(),
+        },
+        HarnessVariant {
+            name: "A2-prosody".into(),
+            gating: false,
+            knobs: prosody_only,
+        },
+        HarnessVariant {
+            name: "A2-filler".into(),
+            gating: false,
+            knobs: filler_only,
+        },
+    ]
 }
 
 // ---------------------------------------------------------------------
@@ -511,6 +681,7 @@ mod tests {
             tier: "tier1".into(),
             threshold_levenshtein: TIER1_LEVENSHTEIN_THRESHOLD,
             results: vec![res],
+            pinned_params: Some(BoundaryKnobs::defaults()),
         };
         let json = serde_json::to_string(&report).expect("serialize");
         let back: EquivalenceReport =
@@ -528,6 +699,7 @@ mod tests {
             tier: "tier1".into(),
             threshold_levenshtein: 0.05,
             results: Vec::new(),
+            pinned_params: None,
         };
         report.results.push(make_result("a", Verdict::Pass));
         report.results.push(make_result("b", Verdict::Fail));
@@ -542,6 +714,7 @@ mod tests {
             tier: "tier1".into(),
             threshold_levenshtein: 0.05,
             results: Vec::new(),
+            pinned_params: None,
         };
         report.results.push(make_result("a", Verdict::Skipped));
         report.results.push(make_result("b", Verdict::Skipped));
@@ -585,5 +758,76 @@ mod tests {
         assert_eq!(m.fixtures.len(), 1);
         assert_eq!(m.fixtures[0].name, "demo");
         assert!(m.fixtures[0].synthetic_placeholder);
+    }
+
+    #[test]
+    fn harness_default_has_four_distinguishable_a2_variants() {
+        let cfg = HarnessConfig::default();
+        assert_eq!(cfg.variants.len(), 4);
+        let names: Vec<&str> = cfg.variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["A2-no-heur", "A2-default", "A2-prosody", "A2-filler"]
+        );
+
+        // Exactly one gating row.
+        let gating: Vec<&str> = cfg
+            .variants
+            .iter()
+            .filter(|v| v.gating)
+            .map(|v| v.name.as_str())
+            .collect();
+        assert_eq!(gating, vec!["A2-default"]);
+
+        // Knob sets must be pairwise distinct — otherwise the diff
+        // report would duplicate a row.
+        for i in 0..cfg.variants.len() {
+            for j in (i + 1)..cfg.variants.len() {
+                assert_ne!(
+                    cfg.variants[i].knobs, cfg.variants[j].knobs,
+                    "variants {} and {} share an identical knob set",
+                    cfg.variants[i].name, cfg.variants[j].name,
+                );
+            }
+        }
+
+        // Specific shape checks: A2-no-heur must have every flag off,
+        // A2-default must keep punct + filler on, A2-prosody must
+        // isolate the prosody flag, A2-filler must isolate the
+        // filler-hold flag.
+        let no_heur = &cfg.variants[0].knobs;
+        assert!(!no_heur.commit_use_prosody);
+        assert!(!no_heur.commit_use_punctuation_hint);
+        assert!(!no_heur.commit_hold_on_filler);
+
+        let default = &cfg.variants[1].knobs;
+        assert!(!default.commit_use_prosody);
+        assert!(default.commit_use_punctuation_hint);
+        assert!(default.commit_hold_on_filler);
+
+        let prosody = &cfg.variants[2].knobs;
+        assert!(prosody.commit_use_prosody);
+        assert!(!prosody.commit_use_punctuation_hint);
+        assert!(!prosody.commit_hold_on_filler);
+
+        let filler = &cfg.variants[3].knobs;
+        assert!(!filler.commit_use_prosody);
+        assert!(!filler.commit_use_punctuation_hint);
+        assert!(filler.commit_hold_on_filler);
+    }
+
+    #[test]
+    fn pinned_params_round_trip_through_report() {
+        let report = EquivalenceReport {
+            fono_version: "0".into(),
+            stt_backend: "fake".into(),
+            tier: "tier1".into(),
+            threshold_levenshtein: 0.05,
+            results: Vec::new(),
+            pinned_params: Some(BoundaryKnobs::defaults()),
+        };
+        let json = serde_json::to_string(&report).expect("serialize");
+        let back: EquivalenceReport = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.pinned_params, Some(BoundaryKnobs::defaults()));
     }
 }

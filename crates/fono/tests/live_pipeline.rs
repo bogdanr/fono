@@ -30,7 +30,7 @@ use fono_audio::StreamConfig;
 use fono_core::QualityFloor;
 use fono_stt::{StreamFrame, StreamingStt, TranscriptUpdate};
 
-use fono::live::{LiveSession, Pump};
+use fono::live::{HeuristicConfig, LiveSession, Pump};
 
 /// Per-segment script: a list of preview texts followed by the
 /// authoritative finalize text. Constructed by the test.
@@ -239,4 +239,45 @@ async fn live_session_returns_empty_on_early_finish_with_no_voice() {
     );
     assert_eq!(transcript.segments_finalized, 0);
     assert!(transcript.last_preview.is_none());
+}
+
+/// R10.6: heuristics-off vs default-heuristics path produce identical
+/// `committed` text on a fixture that does not trigger any heuristic
+/// ("hello world" — no filler, no dangling-word suffix, no prosody-
+/// driven boundary delay since prosody is off by default anyway). This
+/// is the additive-only contract: heuristics never *change* the
+/// transcript, only delay segment boundaries.
+#[tokio::test]
+async fn heuristics_are_additive_when_no_trigger_present() {
+    async fn run_once(heur: HeuristicConfig) -> String {
+        let stt = Arc::new(FakeStreamingStt::new(vec![
+            SegmentScript::new(["hell", "hello"], "hello"),
+            SegmentScript::new(["wor"], "world"),
+        ]));
+        let mut pump = Pump::new(test_stream_config());
+        let frame_rx = pump.take_receiver().expect("take_receiver");
+        let session = LiveSession::new(stt, 16_000).with_heuristics(heur);
+        let task = tokio::spawn(session.run(frame_rx, QualityFloor::Max));
+        for _ in 0..4 {
+            pump.push(&voiced_frame());
+        }
+        for _ in 0..2 {
+            pump.push(&silent_frame());
+        }
+        for _ in 0..4 {
+            pump.push(&voiced_frame());
+        }
+        pump.finish();
+        drop(pump);
+        let transcript = task.await.expect("join").expect("run");
+        transcript.committed
+    }
+
+    let off = run_once(HeuristicConfig::all_off()).await;
+    let on = run_once(HeuristicConfig::default()).await;
+    assert_eq!(
+        off, on,
+        "heuristics must be additive: same input → same committed text"
+    );
+    assert_eq!(off, "hello world");
 }
