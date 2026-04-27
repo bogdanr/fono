@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use indicatif::{ProgressBar, ProgressStyle};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -152,6 +153,12 @@ struct EquivalenceArgs {
     /// smoke pass for local development.
     #[arg(long, default_value_t = false)]
     quick: bool,
+
+    /// Suppress the legend and color key below the results table.
+    /// Useful when running multiple benchmarks back-to-back so the
+    /// legend only appears once (printed by the caller script).
+    #[arg(long, default_value_t = false)]
+    no_legend: bool,
 }
 
 #[tokio::main]
@@ -159,7 +166,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_env("FONO_BENCH_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_env("FONO_BENCH_LOG").unwrap_or_else(|_e| {
+                // Default: info for fono crates, warn for whisper.cpp/GGML
+                // (which is extremely chatty at info level). Override with
+                // FONO_BENCH_LOG=info to see everything.
+                EnvFilter::new("info,whisper_rs=warn")
+            }),
         )
         .init();
     match cli.cmd {
@@ -318,15 +330,86 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
 
     let quick = if args.quick { Some(5.0_f32) } else { None };
 
-    for fx in &manifest.fixtures {
+    // English-only models (whisper `*.en` GGML files) cannot transcribe
+    // non-English fixtures. Skipping them pre-inference avoids both
+    // wasted CPU and the "PASS-by-mojibake" trap where both lanes
+    // hallucinate the same English-ish output and the equivalence gate
+    // rubber-stamps the result. Cloud SKUs are always multilingual
+    // today, so this only fires on `--stt local`.
+    let english_only = args.stt == "local" && args.model.ends_with(".en");
+
+    // Progress bar: 2 steps per fixture (batch pass + streaming pass).
+    let total_steps = manifest.fixtures.len() as u64 * 2;
+    let pb = ProgressBar::new(total_steps);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "  {spinner:.green} [{elapsed_precise}] {wide_bar:.cyan/blue} {pos}/{len} {msg}",
+        )
+        .expect("valid progress template")
+        .progress_chars("█▓░"),
+    );
+    pb.enable_steady_tick(std::time::Duration::from_millis(200));
+
+    for (i, fx) in manifest.fixtures.iter().enumerate() {
+        let fixture_num = i + 1;
+        let total = manifest.fixtures.len();
+
+        if english_only && fx.language != "en" {
+            pb.inc(2);
+            report.results.push(fono_bench::EquivalenceResult {
+                fixture: fx.name.clone(),
+                language: fx.language.clone(),
+                synthetic_placeholder: fx.synthetic_placeholder,
+                duration_s: 0.0,
+                modes: fono_bench::Modes {
+                    batch: fono_bench::ModeResult {
+                        text: String::new(),
+                        elapsed_ms: 0,
+                        ttff_ms: 0,
+                    },
+                    streaming: None,
+                },
+                metrics: fono_bench::Metrics {
+                    stt_levenshtein_norm: 0.0,
+                    stt_accuracy_levenshtein: None,
+                    ttff_ratio: None,
+                    ttc_ratio: None,
+                },
+                verdict: fono_bench::Verdict::Skipped,
+                note: format!(
+                    "model {} is English-only; fixture language is {}",
+                    args.model, fx.language
+                ),
+            });
+            continue;
+        }
+
+        pb.set_message(format!(
+            "{}/{} {} — batch",
+            fixture_num, total, fx.name
+        ));
+        pb.tick();
+
         match run_fixture(fx, &fixtures_dir, Arc::clone(&stt), streaming.clone(), quick).await {
-            Ok(r) => report.results.push(r),
+            Ok(r) => {
+                // run_fixture does batch + streaming internally; advance
+                // by 2 unless the fixture was skipped (no streaming pass).
+                let steps = if r.verdict == fono_bench::Verdict::Skipped {
+                    1
+                } else {
+                    2
+                };
+                pb.inc(steps);
+                report.results.push(r);
+            }
             Err(e) => {
+                pb.inc(2);
                 warn!("fixture {} failed: {e:#}", fx.name);
                 report.results.push(fono_bench::EquivalenceResult {
                     fixture: fx.name.clone(),
                     language: fx.language.clone(),
                     synthetic_placeholder: fx.synthetic_placeholder,
+                    duration_s: 0.0,
                     modes: fono_bench::Modes {
                         batch: fono_bench::ModeResult {
                             text: String::new(),
@@ -337,6 +420,7 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
                     },
                     metrics: fono_bench::Metrics {
                         stt_levenshtein_norm: 0.0,
+                        stt_accuracy_levenshtein: None,
                         ttff_ratio: None,
                         ttc_ratio: None,
                     },
@@ -347,7 +431,9 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
         }
     }
 
-    print_table(&report);
+    pb.finish_and_clear();
+
+    print_table(&report, !args.no_legend);
 
     if let Some(out) = args.output.as_ref() {
         let payload = serde_json::to_string_pretty(&report)?;
@@ -367,51 +453,187 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
     }
 }
 
-fn print_table(report: &EquivalenceReport) {
+use std::io::IsTerminal;
+
+fn print_table(report: &EquivalenceReport, legend: bool) {
+    let color = std::io::stdout().is_terminal();
+    let s = Style::new(color);
+
     println!();
     println!(
         "fono-bench equivalence ({}, threshold ≤ {:.3})",
         report.tier, report.threshold_levenshtein
     );
-    println!(
-        "{:<24} {:>8} {:>10} {:>10} {:>8} {:<10} note",
-        "fixture", "lev", "ttff_ms", "ttc_ms", "verdict", "lang"
+    println!();
+
+    // Column widths must match the data formatting below exactly.
+    // Each data field is pre-padded to its header column width so that
+    // ANSI escape codes (invisible to alignment) don't shift columns.
+    let hdr = format!(
+        " {:<22} {:>6} {:>6} {:>8} {:>8} {:>8} {:>8} {:>10} {:>10} {:>7} {:<5} {}",
+        "fixture", "lev", "acc", "audio_s", "batch_s", "stream_s", "ttff_s", "ttff_r", "ttc_r", "result", "lang", "note"
     );
+    println!("{hdr}");
+    println!("{}", "─".repeat(hdr.len()));
+
     for r in &report.results {
-        let stream_ttff = r
+        let audio_s = if r.duration_s > 0.0 {
+            format!("{:>8.1}", r.duration_s)
+        } else {
+            format!("{:>8}", "-")
+        };
+        let batch_s = format!("{:>8.1}", r.modes.batch.elapsed_ms as f64 / 1000.0);
+        let stream_s = r
             .modes
             .streaming
             .as_ref()
-            .map(|m| m.ttff_ms.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        let stream_ttc = r
+            .map(|m| format!("{:>8.1}", m.elapsed_ms as f64 / 1000.0))
+            .unwrap_or_else(|| format!("{:>8}", "-"));
+        let ttff_s = r
             .modes
             .streaming
             .as_ref()
-            .map(|m| m.elapsed_ms.to_string())
-            .unwrap_or_else(|| "-".to_string());
+            .map(|m| format!("{:>8.1}", m.ttff_ms as f64 / 1000.0))
+            .unwrap_or_else(|| format!("{:>8}", "-"));
+
+        // Ratios with color: green = good, yellow = marginal, red = bad.
+        // Visible width must be 10 to match the header column.
+        let ttff_r = fmt_ratio(r.metrics.ttff_ratio, &s);
+        let ttc_r = fmt_ratio(r.metrics.ttc_ratio, &s);
+
+        // Color the lev value: green at 0, yellow approaching threshold, red at/above.
+        // Visible width must be 6 to match the header column.
+        let lev_str = fmt_lev(r.metrics.stt_levenshtein_norm, report.threshold_levenshtein, &s);
+        let acc_str = match r.metrics.stt_accuracy_levenshtein {
+            Some(a) => fmt_lev(a, report.threshold_levenshtein, &s),
+            None => format!("{:>6}", "-"),
+        };
+
+        // Color the verdict. Visible width must be 7 to match the header column.
+        let verdict_str = fmt_verdict(r.verdict, &s);
+
         println!(
-            "{:<24} {:>8.4} {:>10} {:>10} {:>8} {:<10} {}",
+            " {:<22} {} {} {} {} {} {} {} {} {} {:<5} {}",
             r.fixture,
-            r.metrics.stt_levenshtein_norm,
-            stream_ttff,
-            stream_ttc,
-            verdict_label(r.verdict),
+            lev_str,
+            acc_str,
+            audio_s,
+            batch_s,
+            stream_s,
+            ttff_s,
+            ttff_r,
+            ttc_r,
+            verdict_str,
             r.language,
             r.note
         );
     }
+
+    println!("{}", "─".repeat(hdr.len()));
     println!(
-        "overall: {}",
-        verdict_label(report.overall_verdict())
+        " overall: {}",
+        fmt_verdict(report.overall_verdict(), &s)
     );
+    println!();
+    if legend {
+        println!("Legend:");
+        println!("  audio_s    Duration of the audio clip (seconds)");
+        println!("  batch_s    Batch transcription total time (seconds)");
+        println!("  stream_s   Streaming transcription total time (seconds)");
+        println!("  ttff_s     Time to first feedback from streaming (seconds)");
+        println!("  ttff_r     Streaming TTFF / batch TTC  (< 1.0 = streaming shows first word sooner)");
+        println!("  ttc_r      Streaming TTC / batch TTC   (< 1.0 = streaming completes faster overall)");
+        println!("  lev        Stream↔batch Levenshtein (0.0 = streaming and batch agree)");
+        println!("  acc        Batch↔reference Levenshtein (0.0 = batch matches the canonical text)");
+        println!();
+        println!("Color key:");
+        println!("  {} = good        {} = marginal / caution        {} = bad / over threshold",
+            s.green("green"),
+            s.yellow("yellow"),
+            s.red("red"),
+        );
+    }
 }
 
-fn verdict_label(v: fono_bench::Verdict) -> &'static str {
+/// Format a ratio with color coding.
+/// < 1.0 = green (streaming advantage), 1.0–2.0 = yellow, > 2.0 = red.
+/// Visible width = 10 (matches header column).
+fn fmt_ratio(ratio: Option<f32>, s: &Style) -> String {
+    match ratio {
+        None => format!("{:>10}", "-"),
+        Some(v) => {
+            let txt = format!("{:>10.2}", v);
+            if v <= 1.0 {
+                s.green(&txt)
+            } else if v <= 2.0 {
+                s.yellow(&txt)
+            } else {
+                s.red(&txt)
+            }
+        }
+    }
+}
+
+/// Format the Levenshtein value with color: 0.0 = green, approaching
+/// threshold = yellow, at/above = red.
+/// Visible width = 6 (matches header column).
+fn fmt_lev(lev: f32, threshold: f32, s: &Style) -> String {
+    let txt = format!("{:>6.4}", lev);
+    if lev <= 0.0 {
+        s.green(&txt)
+    } else if lev < threshold * 0.5 {
+        s.yellow(&txt)
+    } else {
+        s.red(&txt)
+    }
+}
+
+/// Format the verdict with color.
+/// Visible width = 7 (matches header column).
+fn fmt_verdict(v: fono_bench::Verdict, s: &Style) -> String {
     match v {
-        fono_bench::Verdict::Pass => "PASS",
-        fono_bench::Verdict::Fail => "FAIL",
-        fono_bench::Verdict::Skipped => "SKIP",
+        fono_bench::Verdict::Pass => s.green("   PASS"),
+        fono_bench::Verdict::Fail => s.red("   FAIL"),
+        fono_bench::Verdict::Skipped => s.yellow("   SKIP"),
+    }
+}
+
+// ---------------------------------------------------------------------
+// Minimal ANSI styling helper. No external dependency; no-ops when
+// colors are disabled (piped output, CI, etc.).
+// ---------------------------------------------------------------------
+
+struct Style {
+    enabled: bool,
+}
+
+impl Style {
+    fn new(enabled: bool) -> Self {
+        Self { enabled }
+    }
+
+    fn green(&self, text: &str) -> String {
+        if self.enabled {
+            format!("\x1b[32m{}\x1b[0m", text)
+        } else {
+            text.to_string()
+        }
+    }
+
+    fn yellow(&self, text: &str) -> String {
+        if self.enabled {
+            format!("\x1b[33m{}\x1b[0m", text)
+        } else {
+            text.to_string()
+        }
+    }
+
+    fn red(&self, text: &str) -> String {
+        if self.enabled {
+            format!("\x1b[31m{}\x1b[0m", text)
+        } else {
+            text.to_string()
+        }
     }
 }
 

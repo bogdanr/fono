@@ -102,7 +102,16 @@ pub struct Modes {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Metrics {
+    /// Stream↔batch consistency: normalized Levenshtein between the
+    /// streaming-lane Finalize text and the batch-lane transcript.
+    /// This is the original Slice A R18 equivalence number.
     pub stt_levenshtein_norm: f32,
+    /// Accuracy: normalized Levenshtein between the batch transcript
+    /// and the manifest's `reference` text. `None` when no reference
+    /// is supplied for the fixture. `#[serde(default)]` so older JSON
+    /// reports without this field continue to deserialize cleanly.
+    #[serde(default)]
+    pub stt_accuracy_levenshtein: Option<f32>,
     /// Streaming TTFF / batch TTC. `None` when streaming wasn't run.
     pub ttff_ratio: Option<f32>,
     /// Streaming TTC / batch TTC. `None` when streaming wasn't run.
@@ -124,6 +133,9 @@ pub struct EquivalenceResult {
     pub fixture: String,
     pub language: String,
     pub synthetic_placeholder: bool,
+    /// Audio duration in seconds, computed from the WAV sample count /
+    /// sample rate. `0.0` for skipped or errored fixtures.
+    pub duration_s: f64,
     pub modes: Modes,
     pub metrics: Metrics,
     pub verdict: Verdict,
@@ -427,6 +439,11 @@ pub async fn run_fixture(
         .with_context(|| format!("read fixture {}", path.display()))?;
     let pcm = wav.samples;
     let sample_rate = wav.sample_rate;
+    let duration_s = if sample_rate > 0 {
+        pcm.len() as f64 / sample_rate as f64
+    } else {
+        0.0
+    };
 
     // Batch pass.
     let lang_owned = if fixture.language.is_empty() {
@@ -453,6 +470,16 @@ pub async fn run_fixture(
         (None, 0.0)
     };
 
+    // Accuracy pass: compare the batch transcript to the manifest's
+    // canonical reference, when one was supplied. Independent of the
+    // streaming pass — a fixture with a reference still gets an
+    // accuracy number even when no streaming runtime is wired up.
+    let accuracy = if fixture.reference.is_empty() {
+        None
+    } else {
+        Some(levenshtein_norm(&batch.text, &fixture.reference))
+    };
+
     let ttff_ratio = streaming
         .as_ref()
         .map(|s| ratio(s.ttff_ms, batch.ttff_ms));
@@ -463,15 +490,17 @@ pub async fn run_fixture(
     let threshold = fixture
         .levenshtein_threshold
         .unwrap_or(TIER1_LEVENSHTEIN_THRESHOLD);
-    let verdict = if streaming.is_none() {
-        // No streaming pass means we can't compare; not a failure but
-        // not a pass either.
-        Verdict::Skipped
-    } else if levenshtein <= threshold {
-        Verdict::Pass
-    } else {
-        Verdict::Fail
-    };
+
+    // Two independent gates against the same per-fixture threshold:
+    //   * equiv  — stream-lane vs batch-lane Levenshtein.
+    //   * acc    — batch-lane vs manifest reference Levenshtein.
+    // A fixture is `Pass` only when every gate that can be evaluated
+    // passes. If neither gate has data (no streaming runtime AND no
+    // reference text) we report `Skipped` rather than a vacuous pass.
+    let equiv_evaluated = streaming.is_some();
+    let equiv_input = equiv_evaluated.then_some(levenshtein);
+    let verdict = decide_verdict(equiv_input, accuracy, threshold);
+    let equiv_pass = equiv_input.is_none_or(|v| v <= threshold);
 
     let mut note = String::new();
     if fixture.synthetic_placeholder {
@@ -480,14 +509,24 @@ pub async fn run_fixture(
     if let Some(t) = fixture.levenshtein_threshold {
         note.push_str(&format!("per-fixture threshold {t}; "));
     }
+    if equiv_evaluated && !equiv_pass {
+        note.push_str(&format!("equiv {levenshtein:.3} > {threshold:.3}; "));
+    }
+    if let Some(a) = accuracy {
+        if a > threshold {
+            note.push_str(&format!("acc {a:.3} > {threshold:.3}; "));
+        }
+    }
 
     Ok(EquivalenceResult {
         fixture: fixture.name.clone(),
         language: fixture.language.clone(),
         synthetic_placeholder: fixture.synthetic_placeholder,
+        duration_s,
         modes: Modes { batch, streaming },
         metrics: Metrics {
             stt_levenshtein_norm: levenshtein,
+            stt_accuracy_levenshtein: accuracy,
             ttff_ratio,
             ttc_ratio,
         },
@@ -503,11 +542,38 @@ fn ratio(num_ms: u128, den_ms: u128) -> f32 {
     num_ms as f32 / den_ms as f32
 }
 
+/// Combine the optional equivalence (stream↔batch) and accuracy
+/// (batch↔reference) Levenshtein values into a single fixture verdict.
+///
+/// * `equiv` — `Some` when a streaming pass was run, carrying the
+///   stream↔batch distance; `None` when streaming wasn't available.
+/// * `accuracy` — `Some` when the manifest supplied a non-empty
+///   `reference`, carrying the batch↔reference distance; `None`
+///   otherwise.
+/// * `threshold` — single per-fixture threshold applied to both gates.
+///
+/// Returns `Skipped` when neither input was evaluated, `Pass` when
+/// every evaluated input is at or below the threshold, `Fail` when at
+/// least one evaluated input exceeds it.
+fn decide_verdict(equiv: Option<f32>, accuracy: Option<f32>, threshold: f32) -> Verdict {
+    if equiv.is_none() && accuracy.is_none() {
+        return Verdict::Skipped;
+    }
+    let equiv_ok = equiv.is_none_or(|v| v <= threshold);
+    let acc_ok = accuracy.is_none_or(|v| v <= threshold);
+    if equiv_ok && acc_ok {
+        Verdict::Pass
+    } else {
+        Verdict::Fail
+    }
+}
+
 fn skipped(fixture: &ManifestFixture, reason: impl Into<String>) -> EquivalenceResult {
     EquivalenceResult {
         fixture: fixture.name.clone(),
         language: fixture.language.clone(),
         synthetic_placeholder: fixture.synthetic_placeholder,
+        duration_s: 0.0,
         modes: Modes {
             batch: ModeResult {
                 text: String::new(),
@@ -518,6 +584,7 @@ fn skipped(fixture: &ManifestFixture, reason: impl Into<String>) -> EquivalenceR
         },
         metrics: Metrics {
             stt_levenshtein_norm: 0.0,
+            stt_accuracy_levenshtein: None,
             ttff_ratio: None,
             ttc_ratio: None,
         },
@@ -655,6 +722,7 @@ mod tests {
             fixture: "demo".into(),
             language: "en".into(),
             synthetic_placeholder: false,
+            duration_s: 3.0,
             modes: Modes {
                 batch: ModeResult {
                     text: "hi".into(),
@@ -669,6 +737,7 @@ mod tests {
             },
             metrics: Metrics {
                 stt_levenshtein_norm: 0.0,
+                stt_accuracy_levenshtein: None,
                 ttff_ratio: Some(0.3),
                 ttc_ratio: Some(1.1),
             },
@@ -726,6 +795,7 @@ mod tests {
             fixture: name.into(),
             language: "en".into(),
             synthetic_placeholder: false,
+            duration_s: 0.0,
             modes: Modes {
                 batch: ModeResult {
                     text: String::new(),
@@ -736,6 +806,7 @@ mod tests {
             },
             metrics: Metrics {
                 stt_levenshtein_norm: 0.0,
+                stt_accuracy_levenshtein: None,
                 ttff_ratio: None,
                 ttc_ratio: None,
             },
@@ -829,5 +900,58 @@ mod tests {
         let json = serde_json::to_string(&report).expect("serialize");
         let back: EquivalenceReport = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.pinned_params, Some(BoundaryKnobs::defaults()));
+    }
+
+    #[test]
+    fn decide_verdict_two_gates() {
+        // Neither evaluated → Skipped.
+        assert_eq!(decide_verdict(None, None, 0.20), Verdict::Skipped);
+        // Equiv only, passing.
+        assert_eq!(decide_verdict(Some(0.05), None, 0.20), Verdict::Pass);
+        // Equiv only, failing.
+        assert_eq!(decide_verdict(Some(0.30), None, 0.20), Verdict::Fail);
+        // Accuracy only, passing — verdict reflects accuracy even
+        // without a streaming pass.
+        assert_eq!(decide_verdict(None, Some(0.10), 0.20), Verdict::Pass);
+        // Accuracy only, failing.
+        assert_eq!(decide_verdict(None, Some(0.40), 0.20), Verdict::Fail);
+        // Both gates evaluated and pass.
+        assert_eq!(
+            decide_verdict(Some(0.02), Some(0.05), 0.20),
+            Verdict::Pass
+        );
+        // Equiv passes, accuracy fails → Fail (catches "tiny.en
+        // hallucinates the same gibberish in both lanes").
+        assert_eq!(
+            decide_verdict(Some(0.00), Some(0.80), 0.20),
+            Verdict::Fail
+        );
+        // Equiv fails, accuracy passes → Fail.
+        assert_eq!(
+            decide_verdict(Some(0.50), Some(0.05), 0.20),
+            Verdict::Fail
+        );
+        // Boundary: exactly at threshold counts as pass on both gates.
+        assert_eq!(
+            decide_verdict(Some(0.20), Some(0.20), 0.20),
+            Verdict::Pass
+        );
+    }
+
+    #[test]
+    fn metrics_back_compat_deserializes_without_accuracy_field() {
+        // Old reports written before stt_accuracy_levenshtein existed
+        // must continue to deserialize cleanly. The field defaults to
+        // None via #[serde(default)].
+        let legacy = r#"{
+            "stt_levenshtein_norm": 0.05,
+            "ttff_ratio": 0.4,
+            "ttc_ratio": 1.1
+        }"#;
+        let m: Metrics = serde_json::from_str(legacy).expect("legacy deserializes");
+        assert!((m.stt_levenshtein_norm - 0.05).abs() < 1e-6);
+        assert!(m.stt_accuracy_levenshtein.is_none());
+        assert_eq!(m.ttff_ratio, Some(0.4));
+        assert_eq!(m.ttc_ratio, Some(1.1));
     }
 }

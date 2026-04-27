@@ -1345,6 +1345,7 @@ dependencies = [
  "fono-stt",
  "futures",
  "hex",
+ "indicatif",
  "serde",
  "serde_json",
  "sha2",
