@@ -54,38 +54,54 @@ jobs:
       - name: Build (native)
         run: cargo build --profile release-slim --target ${{ matrix.target }} -p fono
 
-      - name: Stage + archive
+      - name: Stage release binary + internal staging tarball
         shell: bash
         run: |
           set -euo pipefail
           version="${{ github.ref_name }}"
           target="${{ matrix.target }}"
-          stem="${BIN_NAME}-${version}-${target}"
-          stage="dist/${stem}"
+          # Map cargo target triple -> short arch label used in release names.
+          case "${target}" in
+            x86_64-*)   arch=x86_64 ;;
+            aarch64-*)  arch=aarch64 ;;
+            *)          arch="${target}" ;;
+          esac
+
+          bin_src="target/${target}/release-slim/${BIN_NAME}"
+          if [[ "${target}" == *windows* ]]; then bin_src="${bin_src}.exe"; fi
+
+          # 1) Bare binary that will be uploaded as a release asset.
+          mkdir -p out-bin
+          asset="${BIN_NAME}-${version}-${arch}"
+          [[ "${target}" == *windows* ]] && asset="${asset}.exe"
+          cp "${bin_src}" "out-bin/${asset}"
+          chmod +x "out-bin/${asset}"
+
+          # 2) Internal staging tarball consumed by the .deb/.arch/.txz/.lzm
+          #    package jobs below. Not uploaded to the GitHub release.
+          stem="${BIN_NAME}-${version}-${arch}"
+          stage="out-stage/${stem}"
           mkdir -p "${stage}"
-
-          bin="target/${target}/release-slim/${BIN_NAME}"
-          if [[ "${target}" == *windows* ]]; then bin="${bin}.exe"; fi
-          cp "${bin}" "${stage}/"
+          cp "${bin_src}" "${stage}/${BIN_NAME}"
           cp README.md LICENSE CHANGELOG.md "${stage}/"
-          cp -r packaging "${stage}/" || true
+          cp -r packaging "${stage}/"
+          tar -czf "out-stage/${stem}.tar.gz" -C out-stage "${stem}"
+          rm -rf "${stage}"
+          ls -la out-bin out-stage
 
-          cd dist
-          if [[ "${{ matrix.archive }}" == "zip" ]]; then
-            7z a "${stem}.zip" "${stem}"
-          else
-            tar -czf "${stem}.tar.gz" "${stem}"
-          fi
-          ls -la
-
-      - name: Upload archive
+      - name: Upload bare binary (release asset)
         uses: actions/upload-artifact@v5
         with:
-          name: fono-archive-${{ matrix.target }}
-          path: |
-            dist/*.tar.gz
-            dist/*.zip
-          if-no-files-found: ignore
+          name: fono-bin-${{ matrix.target }}
+          path: out-bin/*
+          if-no-files-found: error
+
+      - name: Upload internal staging tarball (package-job input)
+        uses: actions/upload-artifact@v5
+        with:
+          name: fono-stage-${{ matrix.target }}
+          path: out-stage/*.tar.gz
+          if-no-files-found: error
 
   linux-deb:
     name: Debian package (.deb)
@@ -96,7 +112,7 @@ jobs:
 
       - uses: actions/download-artifact@v5
         with:
-          name: fono-archive-x86_64-unknown-linux-gnu
+          name: fono-stage-x86_64-unknown-linux-gnu
           path: linux-bin
 
       - name: Build binary Debian package
@@ -104,7 +120,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          stem="fono-v${version}-x86_64-unknown-linux-gnu"
+          stem="fono-v${version}-x86_64"
           sudo apt-get update -qq
           sudo apt-get install -y -qq dpkg-dev
 
@@ -142,7 +158,7 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
-          name: fono-archive-deb
+          name: fono-pkg-deb
           path: dist-deb/*.deb
           if-no-files-found: error
 
@@ -155,7 +171,7 @@ jobs:
 
       - uses: actions/download-artifact@v5
         with:
-          name: fono-archive-x86_64-unknown-linux-gnu
+          name: fono-stage-x86_64-unknown-linux-gnu
           path: linux-bin
 
       - name: Build binary Arch package
@@ -163,7 +179,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          stem="fono-v${version}-x86_64-unknown-linux-gnu"
+          stem="fono-v${version}-x86_64"
           sudo apt-get update -qq
           sudo apt-get install -y -qq libarchive-tools zstd
 
@@ -205,7 +221,7 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
-          name: fono-archive-arch
+          name: fono-pkg-arch
           path: dist-arch/*.pkg.tar.zst
           if-no-files-found: error
 
@@ -220,7 +236,7 @@ jobs:
 
       - uses: actions/download-artifact@v5
         with:
-          name: fono-archive-x86_64-unknown-linux-gnu
+          name: fono-stage-x86_64-unknown-linux-gnu
           path: linux-bin
 
       - name: Run SlackBuild in binary mode
@@ -228,7 +244,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          stem="fono-v${version}-x86_64-unknown-linux-gnu"
+          stem="fono-v${version}-x86_64"
           # SlackBuild expects the upstream tarball alongside its directory.
           cp "linux-bin/${stem}.tar.gz" packaging/slackbuild/fono/
           cd packaging/slackbuild/fono
@@ -239,7 +255,7 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
-          name: fono-archive-slack
+          name: fono-pkg-slack
           path: dist-slack/*.txz
           if-no-files-found: error
 
@@ -252,7 +268,7 @@ jobs:
 
       - uses: actions/download-artifact@v5
         with:
-          name: fono-archive-x86_64-unknown-linux-gnu
+          name: fono-stage-x86_64-unknown-linux-gnu
           path: linux-bin
 
       - name: Build NimbleX .lzm
@@ -260,7 +276,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          stem="fono-v${version}-x86_64-unknown-linux-gnu"
+          stem="fono-v${version}-x86_64"
           sudo apt-get update -qq
           sudo apt-get install -y -qq squashfs-tools
 
@@ -287,7 +303,7 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
-          name: fono-archive-nimblex
+          name: fono-pkg-nimblex
           path: dist-nimblex/*.lzm
           if-no-files-found: error
 
@@ -298,7 +314,13 @@ jobs:
     steps:
       - uses: actions/download-artifact@v5
         with:
-          pattern: fono-archive-*
+          pattern: fono-bin-*
+          path: artifacts
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: fono-pkg-*
           path: artifacts
           merge-multiple: true
 
@@ -307,7 +329,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.deb" -o -name "*.pkg.tar.zst" -o -name "*.txz" -o -name "*.lzm" \) -exec cp {} release/ \;
+          find artifacts -type f \( -name "fono-v*-x86_64" -o -name "fono-v*-aarch64" -o -name "fono-v*-x86_64.exe" -o -name "*.deb" -o -name "*.pkg.tar.zst" -o -name "*.txz" -o -name "*.lzm" \) -exec cp {} release/ \;
           cd release
           sha256sum * > SHA256SUMS
           ls -la

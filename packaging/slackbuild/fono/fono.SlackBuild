@@ -49,6 +49,10 @@ case "$ARCH" in
   *)       echo "unsupported ARCH=$ARCH" >&2 ; exit 1 ;;
 esac
 
+# Short architecture label used by upstream release filenames
+# (matches the asset names produced by .github/workflows/release.yml).
+ASSET_ARCH="$ARCH"
+
 TMP=${TMP:-/tmp/SBo}
 PKG=$TMP/package-$PRGNAM
 OUTPUT=${OUTPUT:-/tmp}
@@ -75,18 +79,35 @@ if [ "${FROM_SOURCE:-0}" = "1" ]; then
   BIN_SRC="target/$RUST_TARGET/release-slim/fono"
 else
   # --- Binary mode -------------------------------------------------------
-  # Expected asset: fono-v<VERSION>-<RUST_TARGET>.tar.gz
-  STEM="fono-v${VERSION}-${RUST_TARGET}"
+  # CI passes a pre-staged tarball alongside this script. End users running
+  # the SlackBuild manually will hit the fallback that downloads the bare
+  # binary published as a release asset. Either path leaves $BIN_SRC
+  # pointing at the executable.
+  STEM="fono-v${VERSION}-${ASSET_ARCH}"
   TARBALL="$CWD/${STEM}.tar.gz"
-  if [ ! -f "$TARBALL" ]; then
-    echo "Fetching ${STEM}.tar.gz from ${RELEASE_BASE}/v${VERSION}/"
-    curl -fL -o "$TARBALL" "${RELEASE_BASE}/v${VERSION}/${STEM}.tar.gz"
+  if [ -f "$TARBALL" ]; then
+    cd $TMP
+    rm -rf "$STEM"
+    tar xvf "$TARBALL"
+    cd "$STEM"
+    BIN_SRC="fono"
+  else
+    # Bare-binary release asset.
+    BIN_DST="$TMP/${STEM}"
+    if [ ! -f "$BIN_DST" ]; then
+      echo "Fetching ${STEM} from ${RELEASE_BASE}/v${VERSION}/"
+      curl -fL -o "$BIN_DST" "${RELEASE_BASE}/v${VERSION}/${STEM}"
+    fi
+    chmod +x "$BIN_DST"
+    cd $TMP
+    BIN_SRC="$BIN_DST"
+    # Fetch the docs the package layout expects from the source tarball.
+    if [ ! -f README.md ]; then
+      curl -fsSL "https://raw.githubusercontent.com/bogdanr/fono/v${VERSION}/README.md" -o README.md || true
+      curl -fsSL "https://raw.githubusercontent.com/bogdanr/fono/v${VERSION}/LICENSE" -o LICENSE || true
+      curl -fsSL "https://raw.githubusercontent.com/bogdanr/fono/v${VERSION}/CHANGELOG.md" -o CHANGELOG.md || true
+    fi
   fi
-  cd $TMP
-  rm -rf "$STEM"
-  tar xvf "$TARBALL"
-  cd "$STEM"
-  BIN_SRC="fono"
 fi
 
 chown -R root:root .
