@@ -722,7 +722,7 @@ async fn run_pipeline(
         warn!("inject failed: {e:#}");
     }
     metrics.inject_ms = inject_started.elapsed().as_millis() as u64;
-    info!("inject: {}ms", metrics.inject_ms);
+    debug!("inject: {}ms", metrics.inject_ms);
     tracing::debug!(target: "fono::pipeline", "inject.text: {final_text:?}");
 
     // ---- Belt-and-suspenders: also copy to clipboard --------------
