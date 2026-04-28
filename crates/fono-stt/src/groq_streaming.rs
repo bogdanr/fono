@@ -98,6 +98,10 @@ pub struct GroqStreaming {
     /// wanted to fire a preview but found the prior request still in
     /// flight. Surfaced via [`Self::preview_skipped_count`].
     preview_skipped_count: Arc<AtomicU64>,
+    /// Captured for `with_prompts` rebuild. Empty for closure-injected
+    /// test/mock paths (which don't use real-API closures anyway).
+    api_key_for_rebuild: String,
+    model_for_rebuild: String,
 }
 
 impl GroqStreaming {
@@ -105,30 +109,58 @@ impl GroqStreaming {
     /// captures `api_key` + `model` + a warmed `reqwest::Client`
     /// (HTTP/2 keep-alive via [`crate::groq::warm_client`]).
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        let api_key = api_key.into();
-        let model = model.into();
+        Self::with_prompts_inner(
+            api_key.into(),
+            model.into(),
+            std::collections::HashMap::new(),
+        )
+    }
+
+    fn with_prompts_inner(
+        api_key: String,
+        model: String,
+        prompts: std::collections::HashMap<String, String>,
+    ) -> Self {
         let client = warm_client();
+        let prompts = Arc::new(prompts);
         let request_fn: GroqRequestFn = {
             let client = client.clone();
             let api_key = api_key.clone();
             let model = model.clone();
+            let prompts = Arc::clone(&prompts);
             Arc::new(move |wav: Vec<u8>, lang: Option<String>| {
                 let client = client.clone();
                 let api_key = api_key.clone();
                 let model = model.clone();
+                let prompts = Arc::clone(&prompts);
                 Box::pin(async move {
-                    groq_post_wav(&client, &api_key, &model, &wav, lang.as_deref()).await
+                    let prompt = lang
+                        .as_deref()
+                        .and_then(|l| prompts.get(l))
+                        .map(String::as_str);
+                    groq_post_wav(&client, &api_key, &model, &wav, lang.as_deref(), prompt).await
                 }) as GroqRequestFuture
             })
         };
-        let verbose_fn: GroqVerboseFn = Arc::new(move |wav: Vec<u8>, lang: Option<String>| {
-            let client = client.clone();
-            let api_key = api_key.clone();
-            let model = model.clone();
-            Box::pin(async move {
-                groq_post_wav_verbose(&client, &api_key, &model, &wav, lang.as_deref()).await
-            }) as GroqVerboseFuture
-        });
+        let verbose_fn: GroqVerboseFn = {
+            let api_key_v = api_key.clone();
+            let model_v = model.clone();
+            let prompts = Arc::clone(&prompts);
+            Arc::new(move |wav: Vec<u8>, lang: Option<String>| {
+                let client = client.clone();
+                let api_key = api_key_v.clone();
+                let model = model_v.clone();
+                let prompts = Arc::clone(&prompts);
+                Box::pin(async move {
+                    let prompt = lang
+                        .as_deref()
+                        .and_then(|l| prompts.get(l))
+                        .map(String::as_str);
+                    groq_post_wav_verbose(&client, &api_key, &model, &wav, lang.as_deref(), prompt)
+                        .await
+                }) as GroqVerboseFuture
+            })
+        };
         Self {
             request_fn,
             verbose_fn: Some(verbose_fn),
@@ -138,7 +170,28 @@ impl GroqStreaming {
             lang_cache: LanguageCache::global(),
             preview_cadence: Some(PSEUDO_STREAM_INTERVAL),
             preview_skipped_count: Arc::new(AtomicU64::new(0)),
+            api_key_for_rebuild: api_key,
+            model_for_rebuild: model,
         }
+    }
+
+    /// Builder: per-language initial-prompt map. Rebuilds the internal
+    /// request closures so the prompt is sent on every preview tick
+    /// and rerun. Empty map = no prompts (default).
+    #[must_use]
+    pub fn with_prompts(self, prompts: std::collections::HashMap<String, String>) -> Self {
+        let mut next = Self::with_prompts_inner(
+            self.api_key_for_rebuild.clone(),
+            self.model_for_rebuild.clone(),
+            prompts,
+        );
+        // Preserve other builder state set before with_prompts.
+        next.languages = self.languages;
+        next.cloud_force_primary = self.cloud_force_primary;
+        next.cloud_rerun_on_mismatch = self.cloud_rerun_on_mismatch;
+        next.lang_cache = self.lang_cache;
+        next.preview_cadence = self.preview_cadence;
+        next
     }
 
     /// Test / cloud-mock entry point. The supplied closure replaces
@@ -156,6 +209,8 @@ impl GroqStreaming {
             lang_cache: LanguageCache::global(),
             preview_cadence: Some(PSEUDO_STREAM_INTERVAL),
             preview_skipped_count: Arc::new(AtomicU64::new(0)),
+            api_key_for_rebuild: String::new(),
+            model_for_rebuild: String::new(),
         }
     }
 
@@ -175,6 +230,8 @@ impl GroqStreaming {
             lang_cache: LanguageCache::global(),
             preview_cadence: Some(PSEUDO_STREAM_INTERVAL),
             preview_skipped_count: Arc::new(AtomicU64::new(0)),
+            api_key_for_rebuild: String::new(),
+            model_for_rebuild: String::new(),
         }
     }
 

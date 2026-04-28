@@ -101,15 +101,28 @@ pub fn build_stt(
     whisper_models_dir: &Path,
 ) -> Result<Arc<dyn SpeechToText>> {
     let languages = effective_languages(cfg, general);
+    let prompts = cfg.prompts.clone();
     #[allow(deprecated)]
     let cloud_force_primary = general.cloud_force_primary_language;
     let cloud_rerun = general.cloud_rerun_on_language_mismatch;
     match &cfg.backend {
-        SttBackend::Local => build_local(cfg, whisper_models_dir, languages),
-        SttBackend::Groq => build_groq(cfg, secrets, languages, cloud_force_primary, cloud_rerun),
-        SttBackend::OpenAI => {
-            build_openai(cfg, secrets, languages, cloud_force_primary, cloud_rerun)
-        }
+        SttBackend::Local => build_local(cfg, whisper_models_dir, languages, prompts),
+        SttBackend::Groq => build_groq(
+            cfg,
+            secrets,
+            languages,
+            prompts,
+            cloud_force_primary,
+            cloud_rerun,
+        ),
+        SttBackend::OpenAI => build_openai(
+            cfg,
+            secrets,
+            languages,
+            prompts,
+            cloud_force_primary,
+            cloud_rerun,
+        ),
         other => Err(anyhow!(
             "STT backend {other:?} is not yet implemented in this build; \
              pick `groq`, `openai`, or `local` (rebuild with `--features whisper-local` \
@@ -128,7 +141,12 @@ fn effective_languages(cfg: &Stt, general: &General) -> Vec<String> {
 }
 
 #[cfg(feature = "whisper-local")]
-fn build_local(cfg: &Stt, dir: &Path, languages: Vec<String>) -> Result<Arc<dyn SpeechToText>> {
+fn build_local(
+    cfg: &Stt,
+    dir: &Path,
+    languages: Vec<String>,
+    mut prompts: std::collections::HashMap<String, String>,
+) -> Result<Arc<dyn SpeechToText>> {
     let model = &cfg.local.model;
     let path = dir.join(format!("ggml-{model}.bin"));
     if !path.exists() {
@@ -145,9 +163,32 @@ fn build_local(cfg: &Stt, dir: &Path, languages: Vec<String>) -> Result<Arc<dyn 
         0 => i32::try_from(detect_physical_cores()).unwrap_or(4),
         n => i32::try_from(n).unwrap_or(i32::MAX),
     };
+    // English-only model (`*.en` suffix) defaults to a built-in
+    // English prompt that biases Whisper away from training-corpus
+    // closers ("Thank you for watching") without affecting accent
+    // or vocabulary. Multilingual models stay unprompted unless the
+    // user configured `[stt.prompts]` explicitly, since a wrong-
+    // language prompt can mislead the language classifier.
+    if is_english_only_model(model) {
+        prompts.entry("en".to_string()).or_insert_with(|| {
+            "Professional dictation. Output exactly what the speaker says with proper \
+                 punctuation and capitalization."
+                .to_string()
+        });
+    }
     Ok(Arc::new(
-        crate::whisper_local::WhisperLocal::with_threads(path, threads).with_languages(languages),
+        crate::whisper_local::WhisperLocal::with_threads(path, threads)
+            .with_languages(languages)
+            .with_prompts(prompts),
     ))
+}
+
+/// English-only Whisper variant detection (e.g. `tiny.en`, `small.en-q5_1`).
+#[cfg(feature = "whisper-local")]
+fn is_english_only_model(model: &str) -> bool {
+    model
+        .split(['-', '.'])
+        .any(|part| part.eq_ignore_ascii_case("en"))
 }
 
 /// Best-effort physical-core count. Falls back to `available_parallelism`
@@ -166,7 +207,12 @@ fn detect_physical_cores() -> usize {
 }
 
 #[cfg(not(feature = "whisper-local"))]
-fn build_local(_cfg: &Stt, _dir: &Path, _languages: Vec<String>) -> Result<Arc<dyn SpeechToText>> {
+fn build_local(
+    _cfg: &Stt,
+    _dir: &Path,
+    _languages: Vec<String>,
+    _prompts: std::collections::HashMap<String, String>,
+) -> Result<Arc<dyn SpeechToText>> {
     Err(anyhow!(
         "local STT requested but this binary was built without the \
          `whisper-local` feature; rebuild with `cargo build --features whisper-local` \
@@ -179,6 +225,7 @@ fn build_groq(
     cfg: &Stt,
     secrets: &Secrets,
     languages: Vec<String>,
+    prompts: std::collections::HashMap<String, String>,
     cloud_force_primary: bool,
     cloud_rerun: bool,
 ) -> Result<Arc<dyn SpeechToText>> {
@@ -187,6 +234,7 @@ fn build_groq(
     Ok(Arc::new(
         crate::groq::GroqStt::with_model(key, model)
             .with_languages(languages)
+            .with_prompts(prompts)
             .with_cloud_force_primary(cloud_force_primary)
             .with_cloud_rerun_on_mismatch(cloud_rerun),
     ))
@@ -197,6 +245,7 @@ fn build_groq(
     _: &Stt,
     _: &Secrets,
     _: Vec<String>,
+    _: std::collections::HashMap<String, String>,
     _: bool,
     _: bool,
 ) -> Result<Arc<dyn SpeechToText>> {
@@ -210,6 +259,7 @@ fn build_openai(
     cfg: &Stt,
     secrets: &Secrets,
     languages: Vec<String>,
+    prompts: std::collections::HashMap<String, String>,
     cloud_force_primary: bool,
     cloud_rerun: bool,
 ) -> Result<Arc<dyn SpeechToText>> {
@@ -218,6 +268,7 @@ fn build_openai(
     Ok(Arc::new(
         crate::openai::OpenAiStt::with_model(key, model)
             .with_languages(languages)
+            .with_prompts(prompts)
             .with_cloud_force_primary(cloud_force_primary)
             .with_cloud_rerun_on_mismatch(cloud_rerun),
     ))
@@ -228,6 +279,7 @@ fn build_openai(
     _: &Stt,
     _: &Secrets,
     _: Vec<String>,
+    _: std::collections::HashMap<String, String>,
     _: bool,
     _: bool,
 ) -> Result<Arc<dyn SpeechToText>> {
@@ -257,10 +309,11 @@ pub fn build_streaming_stt(
     let cloud_rerun = general.cloud_rerun_on_language_mismatch;
     let cloud_streaming = cfg.cloud.as_ref().is_some_and(|c| c.streaming);
     let cadence = interactive.preview_cadence();
+    let prompts = cfg.prompts.clone();
     match &cfg.backend {
         SttBackend::Local => {
             let languages = effective_languages(cfg, general);
-            build_local_streaming(cfg, whisper_models_dir, languages).map(Some)
+            build_local_streaming(cfg, whisper_models_dir, languages, prompts).map(Some)
         }
         SttBackend::Groq if cloud_streaming => {
             let languages = effective_languages(cfg, general);
@@ -268,6 +321,7 @@ pub fn build_streaming_stt(
                 cfg,
                 secrets,
                 languages,
+                prompts,
                 cloud_force_primary,
                 cloud_rerun,
                 cadence,
@@ -291,6 +345,7 @@ fn build_groq_streaming(
     cfg: &Stt,
     secrets: &Secrets,
     languages: Vec<String>,
+    prompts: std::collections::HashMap<String, String>,
     cloud_force_primary: bool,
     cloud_rerun: bool,
     cadence: fono_core::config::PreviewCadence,
@@ -306,6 +361,7 @@ fn build_groq_streaming(
     Ok(Arc::new(
         crate::groq_streaming::GroqStreaming::new(key, model)
             .with_languages(languages)
+            .with_prompts(prompts)
             .with_cloud_force_primary(cloud_force_primary)
             .with_cloud_rerun_on_mismatch(cloud_rerun)
             .with_preview_cadence(cadence_opt),
@@ -317,6 +373,7 @@ fn build_groq_streaming(
     _cfg: &Stt,
     _secrets: &Secrets,
     _languages: Vec<String>,
+    _prompts: std::collections::HashMap<String, String>,
     _cloud_force_primary: bool,
     _cloud_rerun: bool,
     _cadence: fono_core::config::PreviewCadence,
@@ -332,6 +389,7 @@ fn build_local_streaming(
     cfg: &Stt,
     dir: &Path,
     languages: Vec<String>,
+    mut prompts: std::collections::HashMap<String, String>,
 ) -> Result<Arc<dyn crate::streaming::StreamingStt>> {
     let model = &cfg.local.model;
     let path = dir.join(format!("ggml-{model}.bin"));
@@ -346,8 +404,17 @@ fn build_local_streaming(
         0 => i32::try_from(detect_physical_cores()).unwrap_or(4),
         n => i32::try_from(n).unwrap_or(i32::MAX),
     };
+    if is_english_only_model(model) {
+        prompts.entry("en".to_string()).or_insert_with(|| {
+            "Professional dictation. Output exactly what the speaker says with proper \
+                 punctuation and capitalization."
+                .to_string()
+        });
+    }
     Ok(Arc::new(
-        crate::whisper_local::WhisperLocal::with_threads(path, threads).with_languages(languages),
+        crate::whisper_local::WhisperLocal::with_threads(path, threads)
+            .with_languages(languages)
+            .with_prompts(prompts),
     ))
 }
 
@@ -356,6 +423,7 @@ fn build_local_streaming(
     _cfg: &Stt,
     _dir: &Path,
     _languages: Vec<String>,
+    _prompts: std::collections::HashMap<String, String>,
 ) -> Result<Arc<dyn crate::streaming::StreamingStt>> {
     Err(anyhow!(
         "local streaming STT requested but this binary was built without \

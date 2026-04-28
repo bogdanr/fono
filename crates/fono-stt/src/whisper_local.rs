@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::Once;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -42,7 +43,19 @@ pub struct WhisperLocal {
     /// One = forced. Two or more = constrained auto-detect via
     /// `state.lang_detect` masked to this set.
     languages: Vec<String>,
+    /// Optional per-language initial prompts. Keys are BCP-47 alpha-2
+    /// codes (e.g. `"en"`, `"ro"`). Selected at call time based on
+    /// the resolved language.
+    prompts: HashMap<String, String>,
 }
+
+/// Built-in default prompt used when the model is English-only and
+/// the user has not configured a custom `[stt.prompts].en`. Biases
+/// Whisper away from training-set closers ("Thank you for watching")
+/// without affecting accent / vocabulary.
+const DEFAULT_EN_PROMPT: &str =
+    "Professional dictation. Output exactly what the speaker says with proper \
+     punctuation and capitalization.";
 
 impl WhisperLocal {
     pub fn new(model_path: impl Into<PathBuf>) -> Self {
@@ -56,6 +69,7 @@ impl WhisperLocal {
             ctx: Arc::new(Mutex::new(None)),
             threads,
             languages: Vec::new(),
+            prompts: HashMap::new(),
         }
     }
 
@@ -66,6 +80,40 @@ impl WhisperLocal {
     pub fn with_languages(mut self, codes: Vec<String>) -> Self {
         self.languages = codes;
         self
+    }
+
+    /// Builder: set the per-language initial-prompt map.
+    #[must_use]
+    pub fn with_prompts(mut self, prompts: HashMap<String, String>) -> Self {
+        self.prompts = prompts;
+        self
+    }
+
+    /// Returns true when the model file name carries Whisper's `.en`
+    /// suffix (e.g. `ggml-small.en.bin`), indicating an English-only
+    /// model.
+    fn model_is_english_only(&self) -> bool {
+        self.model_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.contains(".en"))
+    }
+
+    /// Resolve the initial prompt to send for a given language.
+    /// Returns `None` when the language is unknown (cold-start
+    /// auto-detect) so we don't bias the language classifier.
+    fn resolve_prompt(&self, lang: Option<&str>) -> Option<String> {
+        let code = lang?;
+        if let Some(p) = self.prompts.get(code) {
+            return Some(p.clone());
+        }
+        // English-only model + English audio + no custom prompt:
+        // ship the built-in default to suppress the YouTube-flavoured
+        // "Thank you" hallucination at minimal risk.
+        if code == "en" && self.model_is_english_only() {
+            return Some(DEFAULT_EN_PROMPT.to_string());
+        }
+        None
     }
 
     /// Resolve the effective selection for a single call: a per-call
@@ -125,6 +173,19 @@ impl SpeechToText for WhisperLocal {
         params.set_translate(false);
         if let Some(code) = resolved.as_deref() {
             params.set_language(Some(code));
+        }
+        // Hallucination guards. `whisper-rs::FullParams::new()` leaves
+        // these disabled even though canonical whisper.cpp enables them
+        // by default. Without these, Whisper-large/turbo readily
+        // hallucinate "Thank you" / "Bye" / "you you you" on silent or
+        // low-volume tails. Values match whisper.cpp defaults.
+        params.set_no_speech_thold(0.6);
+        params.set_logprob_thold(-1.0);
+        params.set_temperature_inc(0.2);
+        // Resolve initial prompt by language for the active call.
+        let prompt = self.resolve_prompt(resolved.as_deref());
+        if let Some(p) = prompt.as_deref() {
+            params.set_initial_prompt(p);
         }
         params.set_print_special(false);
         params.set_print_progress(false);
@@ -502,6 +563,15 @@ mod streaming_impl {
                 params.set_language(Some(l));
             }
         }
+        // Same hallucination guards as the batch path.
+        params.set_no_speech_thold(0.6);
+        params.set_logprob_thold(-1.0);
+        params.set_temperature_inc(0.2);
+        let lang_code = lang.filter(|l| *l != "auto");
+        let prompt = stt.resolve_prompt(lang_code);
+        if let Some(p) = prompt.as_deref() {
+            params.set_initial_prompt(p);
+        }
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
@@ -597,6 +667,7 @@ mod streaming_impl {
                 ctx: Arc::clone(&self.ctx),
                 threads: self.threads,
                 languages: self.languages.clone(),
+                prompts: self.prompts.clone(),
             })
         }
     }

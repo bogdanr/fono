@@ -2,6 +2,7 @@
 //! OpenAI STT backend (whisper-1 / gpt-4o-transcribe). Compatible JSON shape
 //! with Groq for the text field.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -26,6 +27,7 @@ pub struct OpenAiStt {
     cloud_force_primary: bool,
     cloud_rerun_on_mismatch: bool,
     lang_cache: Arc<LanguageCache>,
+    prompts: HashMap<String, String>,
 }
 
 impl OpenAiStt {
@@ -41,6 +43,7 @@ impl OpenAiStt {
             cloud_force_primary: false,
             cloud_rerun_on_mismatch: false,
             lang_cache: LanguageCache::global(),
+            prompts: HashMap::new(),
         }
     }
 
@@ -68,8 +71,21 @@ impl OpenAiStt {
         self
     }
 
+    /// Builder: per-language initial-prompt map. The prompt for the
+    /// resolved language (if any) is included as the `prompt` form
+    /// field on every request.
+    #[must_use]
+    pub fn with_prompts(mut self, prompts: HashMap<String, String>) -> Self {
+        self.prompts = prompts;
+        self
+    }
+
     fn effective_selection(&self, lang_override: Option<&str>) -> LanguageSelection {
         LanguageSelection::from_config(&self.languages).with_override(lang_override)
+    }
+
+    fn prompt_for(&self, lang: Option<&str>) -> Option<&str> {
+        lang.and_then(|l| self.prompts.get(l)).map(String::as_str)
     }
 
     async fn do_request(&self, wav: &[u8], lang: Option<&str>) -> Result<Resp> {
@@ -86,6 +102,9 @@ impl OpenAiStt {
             .part("file", part);
         if let Some(l) = lang {
             form = form.text("language", l.to_string());
+        }
+        if let Some(p) = self.prompt_for(lang) {
+            form = form.text("prompt", p.to_string());
         }
         let res = self
             .client
@@ -118,6 +137,9 @@ impl OpenAiStt {
             .part("file", part);
         if let Some(l) = lang {
             form = form.text("language", l.to_string());
+        }
+        if let Some(p) = self.prompt_for(lang) {
+            form = form.text("prompt", p.to_string());
         }
         let res = self
             .client

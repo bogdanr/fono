@@ -93,6 +93,8 @@ pub struct GroqStt {
     /// Per-backend in-memory language memory. Read on rerun, written
     /// on every in-allow-list detection. See `crate::lang_cache`.
     lang_cache: Arc<LanguageCache>,
+    /// Per-language initial-prompt map. See [`crate::groq::GroqStt::resolve_prompt`].
+    prompts: std::collections::HashMap<String, String>,
 }
 
 impl GroqStt {
@@ -110,6 +112,7 @@ impl GroqStt {
             cloud_force_primary: false,
             cloud_rerun_on_mismatch: false,
             lang_cache: LanguageCache::global(),
+            prompts: std::collections::HashMap::new(),
         }
     }
 
@@ -143,6 +146,22 @@ impl GroqStt {
     pub fn with_lang_cache(mut self, cache: Arc<LanguageCache>) -> Self {
         self.lang_cache = cache;
         self
+    }
+
+    /// Builder: per-language initial-prompt map. Sent as the cloud
+    /// `prompt` form field when the resolved language has a key. Empty
+    /// map = no prompts (default behaviour).
+    #[must_use]
+    pub fn with_prompts(mut self, prompts: std::collections::HashMap<String, String>) -> Self {
+        self.prompts = prompts;
+        self
+    }
+
+    /// Resolve the prompt for a known language; `None` if unknown
+    /// (cold-start auto-detect — sending a prompt then would bias the
+    /// language classifier).
+    fn resolve_prompt(&self, lang: Option<&str>) -> Option<&str> {
+        self.prompts.get(lang?).map(String::as_str)
     }
 
     fn effective_selection(&self, lang_override: Option<&str>) -> LanguageSelection {
@@ -221,24 +240,20 @@ pub(crate) async fn groq_post_wav(
     model: &str,
     wav: &[u8],
     lang: Option<&str>,
+    prompt: Option<&str>,
 ) -> Result<GroqResponse> {
     let part = multipart::Part::bytes(wav.to_vec())
         .file_name("audio.wav")
         .mime_str("audio/wav")?;
-    // Always request `verbose_json` so the response includes the
-    // detected `language` field. Plain `json` (the default) does NOT
-    // include it, which means the post-validation gate would never
-    // fire — the bug that produced Bulgarian / Russian text on screen
-    // for an English speaker with `languages = ["ro", "en"]`.
-    // Latency of `verbose_json` is identical to `json` for our use:
-    // we ignore `segments` in this hot path; the rerun lane still
-    // calls `groq_post_wav_verbose` separately to score by avg_logprob.
     let mut form = multipart::Form::new()
         .text("model", model.to_string())
         .text("response_format", "verbose_json")
         .part("file", part);
     if let Some(l) = lang {
         form = form.text("language", l.to_string());
+    }
+    if let Some(p) = prompt {
+        form = form.text("prompt", p.to_string());
     }
     let res = client
         .post(GROQ_ENDPOINT)
@@ -270,6 +285,7 @@ pub async fn groq_post_wav_verbose(
     model: &str,
     wav: &[u8],
     lang: Option<&str>,
+    prompt: Option<&str>,
 ) -> Result<GroqVerboseResponse> {
     let part = multipart::Part::bytes(wav.to_vec())
         .file_name("audio.wav")
@@ -280,6 +296,9 @@ pub async fn groq_post_wav_verbose(
         .part("file", part);
     if let Some(l) = lang {
         form = form.text("language", l.to_string());
+    }
+    if let Some(p) = prompt {
+        form = form.text("prompt", p.to_string());
     }
     let res = client
         .post(GROQ_ENDPOINT)
@@ -402,7 +421,8 @@ impl GroqStt {
     /// optional `language` form field. Factored out so the
     /// post-validation rerun path is one extra await away.
     async fn do_request(&self, wav: &[u8], lang: Option<&str>) -> Result<GroqResponse> {
-        groq_post_wav(&self.client, &self.api_key, &self.model, wav, lang).await
+        let prompt = self.resolve_prompt(lang);
+        groq_post_wav(&self.client, &self.api_key, &self.model, wav, lang, prompt).await
     }
 
     /// `verbose_json` variant for the rerun lane.
@@ -411,7 +431,8 @@ impl GroqStt {
         wav: &[u8],
         lang: Option<&str>,
     ) -> Result<GroqVerboseResponse> {
-        groq_post_wav_verbose(&self.client, &self.api_key, &self.model, wav, lang).await
+        let prompt = self.resolve_prompt(lang);
+        groq_post_wav_verbose(&self.client, &self.api_key, &self.model, wav, lang, prompt).await
     }
 
     /// Run one verbose request per peer, pick the response with the

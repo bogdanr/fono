@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Whisper trailing-closer hallucinations ("Thank you", "Bye", "Thanks
+  for watching") on silent tails. Three layers, root-cause-first:
+  - **Layer A** — local `whisper-rs` now opts in to the four
+    hallucination guards that `FullParams::new()` leaves disabled by
+    default: `set_no_speech_thold(0.6)`, `set_logprob_thold(-1.0)`,
+    `set_compress_thold(2.4)`, `set_temperature_inc(0.2)`. Matches
+    the canonical whisper.cpp CLI defaults.
+  - **Layer B** — new `[stt.prompts]` config: a per-language
+    `HashMap<bcp47, String>` whose entry for the request's resolved
+    language is sent as the Whisper `initial_prompt` (local) or
+    `prompt` (Groq + OpenAI form-data field). When no entry matches
+    the resolved language, no prompt is sent — preserving today's
+    unbiased behaviour for languages the user hasn't configured.
+    English-only Whisper variants (e.g. `tiny.en`, `small.en`,
+    `*-en-q5_1`) auto-seed `prompts.en` with a neutral professional-
+    dictation default unless the user already set one.
+  - **Layer C** — `interactive.hold_release_grace_ms` default
+    lowered from 300 ms to 150 ms. Halves the silent tail Whisper
+    sees on F8 release. Smoke-test: if trailing words get truncated,
+    raise back to 300.
+- LLM cleanup observability: new INFO line `llm: cleanup added=N
+  removed=M chars` after each successful cleanup so users can see
+  whether the LLM is doing real work or operating as a near-no-op
+  pass-through.
+
 ### Removed
 
 - `general.notify_on_dictation` config field. Redundant with the

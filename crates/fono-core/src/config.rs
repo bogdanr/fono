@@ -219,6 +219,17 @@ pub struct Stt {
     pub local: SttLocal,
     #[serde(default)]
     pub cloud: Option<SttCloud>,
+    /// Optional initial prompts keyed by BCP-47 alpha-2 language code
+    /// (e.g. `"en"`, `"ro"`). Sent to Whisper as `initial_prompt`
+    /// (local) / `prompt` (cloud) when the resolved language matches a
+    /// key. A short prompt biases Whisper away from training-corpus
+    /// closers ("Thank you for watching") without affecting accent
+    /// or vocabulary; mismatched languages can mislead the language
+    /// classifier so we only send a prompt once the language is known.
+    /// Out of the box this map is empty; English-only local models
+    /// fall back to a built-in default prompt for `en` audio.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub prompts: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -684,7 +695,7 @@ impl Default for Interactive {
             eou_adaptive: false,
             resume_grace_ms: 0,
             streaming_interval: 1.0,
-            hold_release_grace_ms: 300,
+            hold_release_grace_ms: 150,
         }
     }
 }
@@ -970,7 +981,7 @@ mod tests {
         assert_eq!(i.eou_drain_extended_ms, d.eou_drain_extended_ms);
         assert_eq!(i.eou_adaptive, d.eou_adaptive);
         assert_eq!(i.resume_grace_ms, d.resume_grace_ms);
-        assert_eq!(i.hold_release_grace_ms, 300);
+        assert_eq!(i.hold_release_grace_ms, 150);
         assert_eq!(i.hold_release_grace_ms, d.hold_release_grace_ms);
     }
 

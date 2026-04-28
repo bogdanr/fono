@@ -209,6 +209,7 @@ async fn configure_local(
             ..Default::default()
         },
         cloud: None,
+        prompts: std::collections::HashMap::new(),
     };
 
     // Tier-aware LLM cleanup choice. Local LLM (llama.cpp) is wired and
@@ -276,6 +277,7 @@ async fn configure_mixed(
                 ..Default::default()
             },
             cloud: None,
+            prompts: std::collections::HashMap::new(),
         };
     } else {
         configure_cloud_stt(theme, config, secrets).await?;

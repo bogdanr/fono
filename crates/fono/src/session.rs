@@ -1256,12 +1256,21 @@ async fn run_pipeline(
             Ok(c) => {
                 metrics.llm_ms = llm_started.elapsed().as_millis() as u64;
                 let trimmed = c.trim().to_string();
+                let raw_chars = raw.chars().count();
+                let new_chars = trimmed.chars().count();
                 info!(
                     "llm: {} {}ms → {} chars",
                     llm_backend.name(),
                     metrics.llm_ms,
-                    trimmed.chars().count()
+                    new_chars
                 );
+                let diff =
+                    i64::try_from(new_chars).unwrap_or(0) - i64::try_from(raw_chars).unwrap_or(0);
+                if trimmed == raw {
+                    info!("llm: cleanup no-op (input unchanged, {raw_chars} chars)");
+                } else {
+                    info!("llm: cleanup diff {raw_chars} → {new_chars} chars ({diff:+})");
+                }
                 tracing::debug!(target: "fono::pipeline", "llm.output: {trimmed:?}");
                 if trimmed.is_empty() {
                     None
