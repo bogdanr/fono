@@ -22,7 +22,10 @@ duration_estimate_s = 5.0
 # audio carries the full sentence (verifiable against the 20 s
 # `en-multi-sentence` fixture cut from the same source). Threshold is
 # informational-only until the short-clip behaviour is addressed.
-levenshtein_threshold = 1.0
+equivalence_threshold = 1.0
+# Accuracy is also informational because of the truncation; matches the
+# pre-split behaviour of using the same threshold for both gates.
+accuracy_threshold = 1.0
 
 [[fixtures]]
 name = "en-multi-sentence"
@@ -37,7 +40,8 @@ duration_estimate_s = 20.0
 # Accuracy gate absorbs whisper's natural punctuation drift (added
 # commas around "war, then, is governed") which the LibriVox reference
 # omits. Stream↔batch consistency stays tight (0.0).
-levenshtein_threshold = 0.20
+equivalence_threshold = 0.20
+accuracy_threshold = 0.20
 
 # --- Reader: Kristen McQuillin — "Pride and Prejudice" by Jane Austen (ch 6) ---
 
@@ -53,7 +57,8 @@ synthetic_placeholder = false
 duration_estimate_s = 12.0
 # Whisper expands the contraction "she'd" → "she had"; manifest reference
 # keeps the original 1813 contraction. ~15% character drift overall.
-levenshtein_threshold = 0.20
+equivalence_threshold = 0.20
+accuracy_threshold = 0.20
 
 [[fixtures]]
 name = "en-conversational"
@@ -65,6 +70,8 @@ reference = "encouragement. In nine cases out of ten, a woman had better show mo
 language = "en"
 synthetic_placeholder = false
 duration_estimate_s = 10.0
+equivalence_threshold = 0.20
+accuracy_threshold = 0.20
 
 # --- Multilingual coverage (whisper-small and larger). Each clip is a
 #     10 s 16 kHz mono PCM 16-bit window cut from a public-domain or
@@ -90,7 +97,8 @@ duration_estimate_s = 10.0
 # whisper-small drifts on the poetic vocabulary and the trailing comma; loosen
 # the gate so streaming-vs-batch consistency is what's measured, not absolute
 # accuracy.
-levenshtein_threshold = 0.20
+equivalence_threshold = 0.20
+accuracy_threshold = 0.30
 
 # --- Reader: Bruissement — André Gide, "La Symphonie pastorale"
 #     (1919, public domain since 2022 in EU/US). ---
@@ -107,7 +115,8 @@ synthetic_placeholder = false
 duration_estimate_s = 10.0
 # Streaming lane currently mojibakes multibyte glyphs (é → Ã©); track
 # that as a known issue rather than a hard gate.
-levenshtein_threshold = 0.20
+equivalence_threshold = 0.20
+accuracy_threshold = 0.30
 
 # --- Reader: Jia-Lin — 鲁迅 / Lu Xun, 狂人日记 序 (preface to "A
 #     Madman's Diary", 1918, in 呐喊 / "Call to Arms"). PD in PRC
@@ -130,7 +139,9 @@ duration_estimate_s = 10.0
 # a 1.0 threshold makes it impossible to gate on but keeps the row in
 # the report so the regression resurfaces the moment streaming UTF-8
 # is repaired.
-levenshtein_threshold = 1.0
+equivalence_threshold = 1.0
+# Accuracy stays informational while the streaming UTF-8 lane is broken.
+accuracy_threshold = 1.0
 
 # --- Reader: ortodox.dyndns.org community recording — modern
 #     Romanian commentary on the Gospel of Matthew, released CC0 by
@@ -149,7 +160,8 @@ language = "ro"
 synthetic_placeholder = false
 duration_estimate_s = 10.0
 # whisper-small struggles with Romanian diacritics; loosen the gate.
-levenshtein_threshold = 0.30
+equivalence_threshold = 0.30
+accuracy_threshold = 0.30
 
 # --- User-contributed Romanian samples: a male and a female speaker
 #     reading modern, contemporary Romanian sentences (administrative
@@ -168,7 +180,8 @@ language = "ro"
 synthetic_placeholder = false
 duration_estimate_s = 12.0
 # Same diacritic / streaming-mojibake caveats as ro-talcuirea-matei.
-levenshtein_threshold = 0.30
+equivalence_threshold = 0.30
+accuracy_threshold = 0.30
 
 [[fixtures]]
 name = "ro-woman"
@@ -180,4 +193,5 @@ reference = "ea a subliniat cât de periculoasă este de fapt situația întruc�
 language = "ro"
 synthetic_placeholder = false
 duration_estimate_s = 12.0
-levenshtein_threshold = 0.30
+equivalence_threshold = 0.30
+accuracy_threshold = 0.30

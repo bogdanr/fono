@@ -15,6 +15,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+use fono_bench::capabilities::ModelCapabilities;
 use fono_bench::equivalence::{
     run_fixture, EquivalenceReport, Manifest, TIER1_LEVENSHTEIN_THRESHOLD,
 };
@@ -272,6 +273,7 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
     );
 
     let stt_backend_name;
+    let caps: ModelCapabilities;
     let stt: Arc<dyn fono_stt::SpeechToText> = match args.stt.as_str() {
         "local" => {
             #[cfg(feature = "whisper-local")]
@@ -288,6 +290,7 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
                     std::process::exit(2);
                 }
                 stt_backend_name = format!("local:{}", args.model);
+                caps = ModelCapabilities::for_local_whisper(&args.model);
                 Arc::new(fono_stt::whisper_local::WhisperLocal::new(path))
             }
             #[cfg(not(feature = "whisper-local"))]
@@ -302,6 +305,12 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
         }
         "fake" => {
             stt_backend_name = "fake".to_string();
+            // The fake STT is multilingual by construction (it returns a
+            // canned string regardless of input language).
+            caps = ModelCapabilities {
+                english_only: false,
+                model_label: "fake".to_string(),
+            };
             Arc::new(FakeStt::new("the quick brown fox jumps over the lazy dog"))
         }
         other => {
@@ -326,17 +335,10 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
         // B's Tier-2 wiring); this pin records the knob set used by
         // the gating row.
         pinned_params: Some(fono_bench::equivalence::BoundaryKnobs::defaults()),
+        model_capabilities: Some(caps.clone()),
     };
 
     let quick = if args.quick { Some(5.0_f32) } else { None };
-
-    // English-only models (whisper `*.en` GGML files) cannot transcribe
-    // non-English fixtures. Skipping them pre-inference avoids both
-    // wasted CPU and the "PASS-by-mojibake" trap where both lanes
-    // hallucinate the same English-ish output and the equivalence gate
-    // rubber-stamps the result. Cloud SKUs are always multilingual
-    // today, so this only fires on `--stt local`.
-    let english_only = args.stt == "local" && args.model.ends_with(".en");
 
     // Progress bar: 2 steps per fixture (batch pass + streaming pass).
     let total_steps = manifest.fixtures.len() as u64 * 2;
@@ -354,36 +356,6 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
         let fixture_num = i + 1;
         let total = manifest.fixtures.len();
 
-        if english_only && fx.language != "en" {
-            pb.inc(2);
-            report.results.push(fono_bench::EquivalenceResult {
-                fixture: fx.name.clone(),
-                language: fx.language.clone(),
-                synthetic_placeholder: fx.synthetic_placeholder,
-                duration_s: 0.0,
-                modes: fono_bench::Modes {
-                    batch: fono_bench::ModeResult {
-                        text: String::new(),
-                        elapsed_ms: 0,
-                        ttff_ms: 0,
-                    },
-                    streaming: None,
-                },
-                metrics: fono_bench::Metrics {
-                    stt_levenshtein_norm: 0.0,
-                    stt_accuracy_levenshtein: None,
-                    ttff_ratio: None,
-                    ttc_ratio: None,
-                },
-                verdict: fono_bench::Verdict::Skipped,
-                note: format!(
-                    "model {} is English-only; fixture language is {}",
-                    args.model, fx.language
-                ),
-            });
-            continue;
-        }
-
         pb.set_message(format!("{}/{} {} — batch", fixture_num, total, fx.name));
         pb.tick();
 
@@ -392,6 +364,7 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
             &fixtures_dir,
             Arc::clone(&stt),
             streaming.clone(),
+            &caps,
             quick,
         )
         .await
@@ -430,6 +403,7 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
                         ttc_ratio: None,
                     },
                     verdict: fono_bench::Verdict::Fail,
+                    skip_reason: None,
                     note: format!("error: {e:#}"),
                 });
             }

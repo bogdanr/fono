@@ -26,6 +26,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::capabilities::ModelCapabilities;
 use fono_stt::SpeechToText;
 
 /// Slice-A normalized-Levenshtein PASS threshold. Looser than the v6
@@ -60,9 +61,23 @@ pub struct ManifestFixture {
     /// skip fixtures longer than the configured ceiling.
     #[serde(default)]
     pub duration_estimate_s: f32,
-    /// Optional per-fixture override for the levenshtein threshold.
+    /// Optional per-fixture override for the equivalence (stream↔batch)
+    /// gate threshold. The legacy `levenshtein_threshold` TOML key
+    /// continues to deserialize into this field via `serde(alias)`
+    /// during the v0.2 → v0.3 transition; new fixtures should use
+    /// `equivalence_threshold` directly.
+    #[serde(default, alias = "levenshtein_threshold")]
+    pub equivalence_threshold: Option<f32>,
+    /// Optional per-fixture override for the accuracy (batch↔reference)
+    /// gate threshold. When unset, `run_fixture` falls back to
+    /// `equivalence_threshold` so existing manifests retain their
+    /// pre-split behaviour.
     #[serde(default)]
-    pub levenshtein_threshold: Option<f32>,
+    pub accuracy_threshold: Option<f32>,
+    /// Explicit override for the "this fixture demands a multilingual
+    /// model" decision. When `None`, the harness derives `language != "en"`.
+    #[serde(default)]
+    pub requires_multilingual: Option<bool>,
 }
 
 fn default_lang() -> String {
@@ -128,6 +143,25 @@ pub enum Verdict {
     Skipped,
 }
 
+/// Typed cause of a `Verdict::Skipped` row, persisted into the JSON
+/// report so downstream consumers can distinguish capability-induced
+/// skips (English-only model on a non-English fixture) from runtime
+/// skips (`--quick` ceiling, missing streaming runtime, error before
+/// inference completed).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    /// Model lacks the language needed to transcribe the fixture.
+    Capability,
+    /// `--quick` filter elided the fixture as too long.
+    Quick,
+    /// Streaming runtime not wired up and no reference text supplied,
+    /// so neither equivalence nor accuracy could be measured.
+    NoStreaming,
+    /// Inference raised an error before producing a verdict.
+    RuntimeError,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EquivalenceResult {
     pub fixture: String,
@@ -139,6 +173,11 @@ pub struct EquivalenceResult {
     pub modes: Modes,
     pub metrics: Metrics,
     pub verdict: Verdict,
+    /// Typed skip reason for `Verdict::Skipped` rows. `None` for
+    /// `Pass` / `Fail` rows or for legacy reports that predate this
+    /// field.
+    #[serde(default)]
+    pub skip_reason: Option<SkipReason>,
     /// Free-text note (skip reason, threshold-override note, etc.).
     #[serde(default)]
     pub note: String,
@@ -156,23 +195,52 @@ pub struct EquivalenceReport {
     /// reproducible. `None` for legacy / older reports.
     #[serde(default)]
     pub pinned_params: Option<BoundaryKnobs>,
+    /// Typed capability surface for the resolved STT backend (Wave 2
+    /// Thread A). `None` for legacy reports written before the field
+    /// landed.
+    #[serde(default)]
+    pub model_capabilities: Option<ModelCapabilities>,
 }
 
 impl EquivalenceReport {
+    /// Roll up per-fixture verdicts into a single run-level verdict.
+    ///
+    /// Capability-induced skips (`SkipReason::Capability`) never make
+    /// the run `Skipped` — they're an expected outcome on English-only
+    /// models running over a multilingual manifest. A run is `Skipped`
+    /// only when every row was skipped *for non-capability reasons*
+    /// (no streaming runtime, `--quick` filter, etc.) — i.e. the
+    /// developer ran the harness on hardware/config that simply has
+    /// no executable rows.
     #[must_use]
     pub fn overall_verdict(&self) -> Verdict {
         if self.results.is_empty() {
             return Verdict::Skipped;
         }
         let mut saw_pass = false;
+        let mut all_skipped_capability = true;
+        let mut all_skipped = true;
         for r in &self.results {
             match r.verdict {
                 Verdict::Fail => return Verdict::Fail,
-                Verdict::Pass => saw_pass = true,
-                Verdict::Skipped => {}
+                Verdict::Pass => {
+                    saw_pass = true;
+                    all_skipped = false;
+                    all_skipped_capability = false;
+                }
+                Verdict::Skipped => {
+                    if r.skip_reason != Some(SkipReason::Capability) {
+                        all_skipped_capability = false;
+                    }
+                }
             }
         }
         if saw_pass {
+            Verdict::Pass
+        } else if all_skipped && all_skipped_capability {
+            // Pure capability-skip run with zero executable rows still
+            // counts as Pass (the manifest is just incompatible with
+            // the chosen model — not a failure of the harness).
             Verdict::Pass
         } else {
             Verdict::Skipped
@@ -418,13 +486,35 @@ pub async fn run_fixture(
     fixture_root: &Path,
     stt: Arc<dyn SpeechToText>,
     streaming_stt: Option<Arc<dyn StreamingSttHandle>>,
+    caps: &ModelCapabilities,
     quick_max_seconds: Option<f32>,
 ) -> Result<EquivalenceResult> {
+    // Capability gate first — short-circuits before any WAV read so
+    // the test for English-only models on multilingual fixtures stays
+    // free of disk I/O, and the mock-STT capability-skip integration
+    // test can drive it without committing more audio.
+    if caps.english_only
+        && ModelCapabilities::fixture_requires_multilingual(
+            &fixture.language,
+            fixture.requires_multilingual,
+        )
+    {
+        return Ok(skipped_with_reason(
+            fixture,
+            SkipReason::Capability,
+            format!(
+                "model {} is English-only; fixture language is {}",
+                caps.model_label, fixture.language
+            ),
+        ));
+    }
+
     let path = fixture_root.join(&fixture.path);
     if let Some(max) = quick_max_seconds {
         if fixture.duration_estimate_s > max {
-            return Ok(skipped(
+            return Ok(skipped_with_reason(
                 fixture,
+                SkipReason::Quick,
                 format!(
                     "fixture longer than --quick ceiling ({:.1}s > {:.1}s)",
                     fixture.duration_estimate_s, max
@@ -485,11 +575,16 @@ pub async fn run_fixture(
         .as_ref()
         .map(|s| ratio(s.elapsed_ms, batch.elapsed_ms));
 
-    let threshold = fixture
-        .levenshtein_threshold
+    let equiv_threshold = fixture
+        .equivalence_threshold
         .unwrap_or(TIER1_LEVENSHTEIN_THRESHOLD);
+    // When no separate accuracy threshold is set, fall back to the
+    // equivalence threshold so existing manifests preserve their
+    // pre-split behaviour.
+    let acc_threshold = fixture.accuracy_threshold.unwrap_or(equiv_threshold);
 
-    // Two independent gates against the same per-fixture threshold:
+    // Two independent gates against (potentially) distinct per-fixture
+    // thresholds:
     //   * equiv  — stream-lane vs batch-lane Levenshtein.
     //   * acc    — batch-lane vs manifest reference Levenshtein.
     // A fixture is `Pass` only when every gate that can be evaluated
@@ -497,24 +592,35 @@ pub async fn run_fixture(
     // reference text) we report `Skipped` rather than a vacuous pass.
     let equiv_evaluated = streaming.is_some();
     let equiv_input = equiv_evaluated.then_some(levenshtein);
-    let verdict = decide_verdict(equiv_input, accuracy, threshold);
-    let equiv_pass = equiv_input.is_none_or(|v| v <= threshold);
+    let verdict = decide_verdict(equiv_input, accuracy, equiv_threshold, acc_threshold);
+    let equiv_pass = equiv_input.is_none_or(|v| v <= equiv_threshold);
 
     let mut note = String::new();
     if fixture.synthetic_placeholder {
         note.push_str("synthetic placeholder (not real speech); ");
     }
-    if let Some(t) = fixture.levenshtein_threshold {
-        note.push_str(&format!("per-fixture threshold {t}; "));
+    if let Some(t) = fixture.equivalence_threshold {
+        note.push_str(&format!("per-fixture equiv threshold {t}; "));
+    }
+    if let Some(t) = fixture.accuracy_threshold {
+        note.push_str(&format!("per-fixture acc threshold {t}; "));
     }
     if equiv_evaluated && !equiv_pass {
-        note.push_str(&format!("equiv {levenshtein:.3} > {threshold:.3}; "));
+        note.push_str(&format!(
+            "equiv {levenshtein:.3} > {equiv_threshold:.3}; "
+        ));
     }
     if let Some(a) = accuracy {
-        if a > threshold {
-            note.push_str(&format!("acc {a:.3} > {threshold:.3}; "));
+        if a > acc_threshold {
+            note.push_str(&format!("acc {a:.3} > {acc_threshold:.3}; "));
         }
     }
+
+    let skip_reason = if matches!(verdict, Verdict::Skipped) {
+        Some(SkipReason::NoStreaming)
+    } else {
+        None
+    };
 
     Ok(EquivalenceResult {
         fixture: fixture.name.clone(),
@@ -529,6 +635,7 @@ pub async fn run_fixture(
             ttc_ratio,
         },
         verdict,
+        skip_reason,
         note: note.trim_end_matches("; ").to_string(),
     })
 }
@@ -553,12 +660,17 @@ fn ratio(num_ms: u128, den_ms: u128) -> f32 {
 /// Returns `Skipped` when neither input was evaluated, `Pass` when
 /// every evaluated input is at or below the threshold, `Fail` when at
 /// least one evaluated input exceeds it.
-fn decide_verdict(equiv: Option<f32>, accuracy: Option<f32>, threshold: f32) -> Verdict {
+fn decide_verdict(
+    equiv: Option<f32>,
+    accuracy: Option<f32>,
+    equiv_threshold: f32,
+    acc_threshold: f32,
+) -> Verdict {
     if equiv.is_none() && accuracy.is_none() {
         return Verdict::Skipped;
     }
-    let equiv_ok = equiv.is_none_or(|v| v <= threshold);
-    let acc_ok = accuracy.is_none_or(|v| v <= threshold);
+    let equiv_ok = equiv.is_none_or(|v| v <= equiv_threshold);
+    let acc_ok = accuracy.is_none_or(|v| v <= acc_threshold);
     if equiv_ok && acc_ok {
         Verdict::Pass
     } else {
@@ -566,7 +678,12 @@ fn decide_verdict(equiv: Option<f32>, accuracy: Option<f32>, threshold: f32) -> 
     }
 }
 
-fn skipped(fixture: &ManifestFixture, reason: impl Into<String>) -> EquivalenceResult {
+/// Build a `Verdict::Skipped` row with a typed skip reason.
+pub(crate) fn skipped_with_reason(
+    fixture: &ManifestFixture,
+    reason: SkipReason,
+    note: impl Into<String>,
+) -> EquivalenceResult {
     EquivalenceResult {
         fixture: fixture.name.clone(),
         language: fixture.language.clone(),
@@ -587,7 +704,8 @@ fn skipped(fixture: &ManifestFixture, reason: impl Into<String>) -> EquivalenceR
             ttc_ratio: None,
         },
         verdict: Verdict::Skipped,
-        note: reason.into(),
+        skip_reason: Some(reason),
+        note: note.into(),
     }
 }
 
@@ -739,6 +857,7 @@ mod tests {
                 ttc_ratio: Some(1.1),
             },
             verdict: Verdict::Pass,
+            skip_reason: None,
             note: String::new(),
         };
         let report = EquivalenceReport {
@@ -748,6 +867,7 @@ mod tests {
             threshold_levenshtein: TIER1_LEVENSHTEIN_THRESHOLD,
             results: vec![res],
             pinned_params: Some(BoundaryKnobs::defaults()),
+            model_capabilities: None,
         };
         let json = serde_json::to_string(&report).expect("serialize");
         let back: EquivalenceReport = serde_json::from_str(&json).expect("deserialize");
@@ -765,6 +885,7 @@ mod tests {
             threshold_levenshtein: 0.05,
             results: Vec::new(),
             pinned_params: None,
+            model_capabilities: None,
         };
         report.results.push(make_result("a", Verdict::Pass));
         report.results.push(make_result("b", Verdict::Fail));
@@ -780,10 +901,39 @@ mod tests {
             threshold_levenshtein: 0.05,
             results: Vec::new(),
             pinned_params: None,
+            model_capabilities: None,
         };
-        report.results.push(make_result("a", Verdict::Skipped));
-        report.results.push(make_result("b", Verdict::Skipped));
+        // Non-capability skips (NoStreaming) keep the run as Skipped.
+        let mut a = make_result("a", Verdict::Skipped);
+        a.skip_reason = Some(SkipReason::NoStreaming);
+        let mut b = make_result("b", Verdict::Skipped);
+        b.skip_reason = Some(SkipReason::NoStreaming);
+        report.results.push(a);
+        report.results.push(b);
         assert_eq!(report.overall_verdict(), Verdict::Skipped);
+    }
+
+    #[test]
+    fn overall_verdict_pass_when_all_skipped_capability() {
+        // A pure capability-skip run (English-only model on a fully
+        // multilingual manifest) reports Pass, not Skipped — there's
+        // nothing the harness could have run.
+        let mut report = EquivalenceReport {
+            fono_version: "0".into(),
+            stt_backend: "x".into(),
+            tier: "tier1".into(),
+            threshold_levenshtein: 0.05,
+            results: Vec::new(),
+            pinned_params: None,
+            model_capabilities: None,
+        };
+        let mut a = make_result("a", Verdict::Skipped);
+        a.skip_reason = Some(SkipReason::Capability);
+        let mut b = make_result("b", Verdict::Skipped);
+        b.skip_reason = Some(SkipReason::Capability);
+        report.results.push(a);
+        report.results.push(b);
+        assert_eq!(report.overall_verdict(), Verdict::Pass);
     }
 
     fn make_result(name: &str, v: Verdict) -> EquivalenceResult {
@@ -807,6 +957,7 @@ mod tests {
                 ttc_ratio: None,
             },
             verdict: v,
+            skip_reason: None,
             note: String::new(),
         }
     }
@@ -892,6 +1043,7 @@ mod tests {
             threshold_levenshtein: 0.05,
             results: Vec::new(),
             pinned_params: Some(BoundaryKnobs::defaults()),
+            model_capabilities: None,
         };
         let json = serde_json::to_string(&report).expect("serialize");
         let back: EquivalenceReport = serde_json::from_str(&json).expect("deserialize");
@@ -901,25 +1053,77 @@ mod tests {
     #[test]
     fn decide_verdict_two_gates() {
         // Neither evaluated → Skipped.
-        assert_eq!(decide_verdict(None, None, 0.20), Verdict::Skipped);
+        assert_eq!(decide_verdict(None, None, 0.20, 0.20), Verdict::Skipped);
         // Equiv only, passing.
-        assert_eq!(decide_verdict(Some(0.05), None, 0.20), Verdict::Pass);
+        assert_eq!(
+            decide_verdict(Some(0.05), None, 0.20, 0.20),
+            Verdict::Pass
+        );
         // Equiv only, failing.
-        assert_eq!(decide_verdict(Some(0.30), None, 0.20), Verdict::Fail);
+        assert_eq!(
+            decide_verdict(Some(0.30), None, 0.20, 0.20),
+            Verdict::Fail
+        );
         // Accuracy only, passing — verdict reflects accuracy even
         // without a streaming pass.
-        assert_eq!(decide_verdict(None, Some(0.10), 0.20), Verdict::Pass);
+        assert_eq!(
+            decide_verdict(None, Some(0.10), 0.20, 0.20),
+            Verdict::Pass
+        );
         // Accuracy only, failing.
-        assert_eq!(decide_verdict(None, Some(0.40), 0.20), Verdict::Fail);
+        assert_eq!(
+            decide_verdict(None, Some(0.40), 0.20, 0.20),
+            Verdict::Fail
+        );
         // Both gates evaluated and pass.
-        assert_eq!(decide_verdict(Some(0.02), Some(0.05), 0.20), Verdict::Pass);
+        assert_eq!(
+            decide_verdict(Some(0.02), Some(0.05), 0.20, 0.20),
+            Verdict::Pass
+        );
         // Equiv passes, accuracy fails → Fail (catches "tiny.en
         // hallucinates the same gibberish in both lanes").
-        assert_eq!(decide_verdict(Some(0.00), Some(0.80), 0.20), Verdict::Fail);
+        assert_eq!(
+            decide_verdict(Some(0.00), Some(0.80), 0.20, 0.20),
+            Verdict::Fail
+        );
         // Equiv fails, accuracy passes → Fail.
-        assert_eq!(decide_verdict(Some(0.50), Some(0.05), 0.20), Verdict::Fail);
+        assert_eq!(
+            decide_verdict(Some(0.50), Some(0.05), 0.20, 0.20),
+            Verdict::Fail
+        );
         // Boundary: exactly at threshold counts as pass on both gates.
-        assert_eq!(decide_verdict(Some(0.20), Some(0.20), 0.20), Verdict::Pass);
+        assert_eq!(
+            decide_verdict(Some(0.20), Some(0.20), 0.20, 0.20),
+            Verdict::Pass
+        );
+        // Split thresholds: equiv tight, accuracy loose.
+        assert_eq!(
+            decide_verdict(Some(0.05), Some(0.25), 0.05, 0.30),
+            Verdict::Pass
+        );
+        // Split thresholds: equiv loose, accuracy tight — acc fails.
+        assert_eq!(
+            decide_verdict(Some(0.05), Some(0.25), 0.30, 0.05),
+            Verdict::Fail
+        );
+    }
+
+    #[test]
+    fn manifest_alias_levenshtein_threshold_reads_into_equivalence() {
+        // Back-compat: legacy manifests using `levenshtein_threshold`
+        // continue to deserialize into the renamed
+        // `equivalence_threshold` field via #[serde(alias)].
+        let raw = r#"
+            [[fixtures]]
+            name = "legacy"
+            path = "legacy.wav"
+            language = "en"
+            duration_estimate_s = 5.0
+            levenshtein_threshold = 0.42
+        "#;
+        let m: Manifest = toml::from_str(raw).expect("parse legacy alias");
+        assert_eq!(m.fixtures[0].equivalence_threshold, Some(0.42));
+        assert!(m.fixtures[0].accuracy_threshold.is_none());
     }
 
     #[test]

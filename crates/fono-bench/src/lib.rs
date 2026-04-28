@@ -6,6 +6,7 @@
 //! plan it implements. The streaming↔batch equivalence harness lives
 //! in [`equivalence`] (plan v6 R18).
 
+pub mod capabilities;
 pub mod equivalence;
 pub mod fakes;
 pub mod fixtures;
@@ -14,9 +15,10 @@ pub mod runner;
 pub mod wav;
 pub mod wer;
 
+pub use capabilities::ModelCapabilities;
 pub use equivalence::{
     levenshtein_norm, normalize_for_compare, EquivalenceReport, EquivalenceResult, Manifest,
-    ManifestFixture, Metrics, ModeResult, Modes, Verdict,
+    ManifestFixture, Metrics, ModeResult, Modes, SkipReason, Verdict,
 };
 pub use fixtures::{Fixture, FIXTURES};
 pub use report::{ClipReport, LangReport, Report};
