@@ -2,6 +2,22 @@
 
 Last updated: 2026-04-28
 
+## 2026-04-28 — v0.3.0 release
+
+Tagged v0.3.0. Bundles three user-visible fixes plus the release-time
+cloud quality gate:
+
+- LLM cleanup clarification fix (universal across all backends).
+- In-memory cloud-STT language stickiness, peer-symmetric.
+- Live Groq equivalence gate at release time (~0.5 % of free-tier
+  daily cap per release).
+
+Baseline `docs/bench/baseline-cloud-groq.json` bootstrapped by the
+maintainer; all 10 fixtures (en × 4, ro × 3, es, fr, zh) passing.
+CHANGELOG promoted from `[Unreleased]` to `[0.3.0]`. ROADMAP entries
+moved into Shipped with the v0.3.0 tag and date. Workspace version
+bumped to 0.3.0 in `Cargo.toml`.
+
 ## 2026-04-28 — Wave 3 Slice B1 Thread C: live Groq equivalence gate
 
 Plan: `plans/2026-04-28-wave-3-slice-b1-thread-c-live-groq-v2.md`

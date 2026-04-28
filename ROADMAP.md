@@ -12,20 +12,15 @@ The home page is [fono.page](https://fono.page).
 
 ## In progress
 
-- **Bootstrap the cloud-equivalence baseline.** The release-time
-  Groq equivalence gate is wired into CI; the maintainer needs to run
-  it once locally to capture the per-fixture verdict baseline that
-  future releases diff against. After this one-time step the gate is
-  fully automatic and **v0.3.0** is ready to tag.
-
-## Planned — next
-
 - **Smarter first-run setup.** Ask one question — *"Will you dictate
   only in English, or in multiple languages?"* — then suggest the
   best on-device speech model your computer can comfortably run, with
   an honest accuracy estimate for each language you picked.
   English-only models are smaller and more accurate per megabyte, so
   English-only users get a better experience automatically.
+
+## Planned — next
+
 - **Automatic translation.** Speak in one language, get text in
   another. Works in both directions, with per-app rules (e.g. always
   translate to English when typing in your code editor, but keep the
@@ -72,19 +67,19 @@ Newest first. Each entry says which release carried it.
   Whisper and refuses to publish if any fixture's verdict diverges
   from the committed baseline. Catches both our regressions and
   upstream provider changes (schema drift, model deprecations) within
-  minutes of tagging. — *Queued for v0.3.0.*
+  minutes of tagging. — *v0.3.0, 2026-04-28.*
 - **Cloud transcription that learns your language.** If your cloud
   provider occasionally mishears your accent (e.g. flags English as
   Russian), Fono now self-corrects after the first mistake and gets
   it right from then on. Bilingual users can switch languages freely
   without any toggle. Setup automatically adds English alongside
-  whatever other language you pick. — *Queued for v0.3.0.*
+  whatever other language you pick. — *v0.3.0, 2026-04-28.*
 - **Reliable AI cleanup.** Fixed a long-standing bug where the cleanup
   step would occasionally reply with a question ("Could you provide
   the full text?") instead of cleaning your dictation. Affected every
   cloud and local AI provider; the fix applies universally. Very short
   utterances (one or two words) now skip cleanup entirely, saving
-  about half a second. — *Queued for v0.3.0.*
+  about half a second. — *v0.3.0, 2026-04-28.*
 - **Live dictation actually ships.** The streaming "see your words
   appear as you speak" mode was built but accidentally left out of the
   packaged binary. v0.2.2 turns it on by default. — *v0.2.2,
@@ -125,3 +120,4 @@ Newest first. Each entry says which release carried it.
 [v0.2.0]: https://github.com/bogdanr/fono/releases/tag/v0.2.0
 [v0.2.1]: https://github.com/bogdanr/fono/releases/tag/v0.2.1
 [v0.2.2]: https://github.com/bogdanr/fono/releases/tag/v0.2.2
+[v0.3.0]: https://github.com/bogdanr/fono/releases/tag/v0.3.0

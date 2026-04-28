@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-04-28
+
+Cloud STT now self-heals from one-off language misdetections, the LLM
+cleanup stage stops occasionally replying with a question instead of
+the cleaned text, and every release tag is gated on a real Groq
+equivalence check across five languages.
+
 ### Added
 
 - Cloud equivalence gate at release time: a new `cloud-equivalence`
@@ -469,6 +476,9 @@ feature and ships fully wired in v0.2.
 - Local LLM cleanup (Qwen / SmolLM) is opt-in / preview.
 - Real `winit + softbuffer` overlay window is a stub (event channel only).
 
-[Unreleased]: https://github.com/bogdanr/fono/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/bogdanr/fono/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/bogdanr/fono/releases/tag/v0.3.0
+[0.2.2]: https://github.com/bogdanr/fono/releases/tag/v0.2.2
+[0.2.1]: https://github.com/bogdanr/fono/releases/tag/v0.2.1
 [0.2.0]: https://github.com/bogdanr/fono/releases/tag/v0.2.0
 [0.1.0]: https://github.com/bogdanr/fono/releases/tag/v0.1.0
