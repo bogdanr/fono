@@ -256,6 +256,14 @@ pub enum Cmd {
         /// binary. The next manual start picks it up.
         #[arg(long)]
         no_restart: bool,
+        /// Override the install directory. Useful when running with
+        /// elevated privileges and the autodetected `current_exe()`
+        /// is in `/usr/local/bin/fono`. Equivalent to `BIN_DIR`
+        /// semantics from the install script. The package-managed
+        /// path refusal still applies (`/usr/bin`, `/bin`,
+        /// `/usr/sbin`).
+        #[arg(long)]
+        bin_dir: Option<std::path::PathBuf>,
     },
 }
 
@@ -402,7 +410,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             dry_run,
             channel,
             no_restart,
-        }) => update_cmd(check, yes, dry_run, &channel, no_restart).await,
+            bin_dir,
+        }) => update_cmd(check, yes, dry_run, &channel, no_restart, bin_dir).await,
     }
 }
 
@@ -1251,6 +1260,7 @@ async fn update_cmd(
     dry_run: bool,
     channel: &str,
     no_restart: bool,
+    bin_dir: Option<std::path::PathBuf>,
 ) -> Result<()> {
     use fono_update::{apply_update, check, ApplyOpts, Channel, UpdateStatus};
     use std::io::Write;
@@ -1304,7 +1314,10 @@ async fn update_cmd(
 
     let opts = ApplyOpts {
         dry_run,
-        target_override: None,
+        // Wave 2 Thread B: --bin-dir <path> overrides the autodetected
+        // current_exe(). The is_package_managed refusal in apply_update
+        // still fires for system paths regardless of the override.
+        target_override: bin_dir.map(|d| d.join("fono")),
     };
     let outcome = apply_update(info, opts).await?;
     println!(

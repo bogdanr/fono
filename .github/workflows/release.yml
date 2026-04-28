@@ -332,6 +332,15 @@ jobs:
           find artifacts -type f \( -name "fono-v*-x86_64" -o -name "fono-v*-aarch64" -o -name "fono-v*-x86_64.exe" -o -name "*.deb" -o -name "*.pkg.tar.zst" -o -name "*.txz" -o -name "*.lzm" \) -exec cp {} release/ \;
           cd release
           sha256sum * > SHA256SUMS
+          # Wave 2 Thread B — emit a per-asset `<asset>.sha256` sidecar
+          # for every release artefact. `fono update` (≥0.3.0) verifies
+          # the streamed SHA-256 against this sidecar and refuses to
+          # apply on mismatch. See crates/fono-update/src/lib.rs:462.
+          for f in fono-v*-x86_64 fono-v*-aarch64 fono-v*-x86_64.exe \
+                   *.deb *.pkg.tar.zst *.txz *.lzm; do
+            [ -e "$f" ] || continue
+            sha256sum "$f" > "${f}.sha256"
+          done
           ls -la
 
       - name: Sign SHA256SUMS with minisign (optional)

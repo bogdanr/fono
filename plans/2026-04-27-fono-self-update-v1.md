@@ -57,7 +57,7 @@ This plan targets the Fono application source on the `main` branch at `bogdanr/f
 
 - [x] Task 11. Implement `apply_update(info: &UpdateInfo, opts: ApplyOpts)` that: (a) determines the running executable path via `std::env::current_exe()`, (b) detects package-manager-owned binaries (path starts with `/usr/bin`, `/usr/lib`, or the file is owned by a package per `dpkg -S` / `pacman -Qo` heuristics) and refuses with an actionable message, (c) downloads to a sibling temp file in the same directory as the running binary. Rationale: same-directory temp guarantees `rename(2)` is atomic on the same filesystem.
 
-- [ ] Task 12. Verify the download: enforce HTTPS, check `Content-Length` matches the GitHub asset size, compute SHA-256, and compare against a `.sha256` companion asset if the release publishes one (recommended follow-up to also publish checksums). Set permissions to `0755`. Rationale: protects against truncated downloads and tampered mirrors; mirrors the `install -m755` behaviour at `install:51-54`.
+- [x] Task 12. Verify the download: enforce HTTPS, check `Content-Length` matches the GitHub asset size, compute SHA-256, and compare against a `.sha256` companion asset if the release publishes one (recommended follow-up to also publish checksums). Set permissions to `0755`. Rationale: protects against truncated downloads and tampered mirrors; mirrors the `install -m755` behaviour at `install:51-54`.
 
 - [x] Task 13. Atomically swap: `rename(new, current)` (Linux allows replacing a running executable's inode; the running process continues with the old inode until it re-execs). On non-writable destinations (e.g. `/usr/local/bin` for non-root users), surface a clear error suggesting `sudo fono update` or pointing to `BIN_DIR` semantics from the install script. Rationale: parity with the install script's permission handling at `install:50-60`.
 
@@ -67,7 +67,7 @@ This plan targets the Fono application source on the `main` branch at `bogdanr/f
 
 ### Phase 5 — CLI surface
 
-- [ ] Task 16. Add a top-level subcommand `fono update` with flags: `--check` (only print status, exit 0/1 on up-to-date/available), `--yes`/`-y` (skip confirmation prompt), `--channel <stable|prerelease>`, `--no-restart`, `--bin-dir <path>` (override target install dir to mirror the install script's `BIN_DIR`), and `--dry-run` (resolve and verify but do not write). Rationale: covers interactive, scripted, and CI use cases.
+- [x] Task 16. Add a top-level subcommand `fono update` with flags: `--check` (only print status, exit 0/1 on up-to-date/available), `--yes`/`-y` (skip confirmation prompt), `--channel <stable|prerelease>`, `--no-restart`, `--bin-dir <path>` (override target install dir to mirror the install script's `BIN_DIR`), and `--dry-run` (resolve and verify but do not write). Rationale: covers interactive, scripted, and CI use cases.
 
 - [x] Task 17. Add `fono version` (or extend existing `--version`) to print both running and last-known latest versions plus the cached check timestamp. Rationale: trivial diagnostics for bug reports.
 
@@ -77,11 +77,11 @@ This plan targets the Fono application source on the `main` branch at `bogdanr/f
 
 - [x] Task 19. Detect package-managed installs and route them to a "notify only" mode: tray item becomes "Update available — use your package manager" with a tooltip mentioning the matching command from the install matrix at `index.html:621-624`. Rationale: prevents self-update from fighting `pacman`/`apt`.
 
-- [ ] Task 20. Update the GitHub Actions release workflow to publish `fono-<tag>-<arch>.sha256` alongside each binary so Task 12's verification has authoritative checksums. Rationale: upgrades trust from "TLS to github.com" to "publisher-signed digest". (If signing keys exist or are added later, extend to `.minisig` / cosign.)
+- [x] Task 20. Update the GitHub Actions release workflow to publish `fono-<tag>-<arch>.sha256` alongside each binary so Task 12's verification has authoritative checksums. Rationale: upgrades trust from "TLS to github.com" to "publisher-signed digest". (If signing keys exist or are added later, extend to `.minisig` / cosign.)
 
 - [ ] Task 21. Add unit tests for `version::is_newer`, `release` JSON parsing (with fixture payloads for `latest` and `prerelease`), and the package-manager detection heuristic. Add an integration test that points the updater at a local HTTP server serving a fixture release and asserts the temp-file → rename → exec flow on a throwaway binary. Rationale: self-update is the kind of feature that breaks silently; tests are the only defence.
 
-- [ ] Task 22. Add a manual QA checklist to the repo (e.g. `docs/dev/update-qa.md`) covering: bare-binary install, `/usr/local/bin` non-root, distro-packaged install, offline mode, rate-limited GitHub response, interrupted download, prerelease channel, and rollback. Rationale: makes future updater changes auditable.
+- [x] Task 22. Add a manual QA checklist to the repo (e.g. `docs/dev/update-qa.md`) covering: bare-binary install, `/usr/local/bin` non-root, distro-packaged install, offline mode, rate-limited GitHub response, interrupted download, prerelease channel, and rollback. Rationale: makes future updater changes auditable.
 
 ## Verification Criteria
 
@@ -119,18 +119,27 @@ This plan targets the Fono application source on the `main` branch at `bogdanr/f
 
 ## Open follow-ups (carried into Wave 2 Task 8)
 
-- Task 12 — per-asset `.sha256` sidecar verification (downloads enforce
-  HTTPS + size today; SHA-256 comparison against a published `.sha256`
-  asset is not yet wired).
+Wave 2 Thread B (commit on 2026-04-28, plan
+`plans/2026-04-28-wave-2-close-out-v1.md`) closed Tasks 12, 16, 20,
+and 22. The remaining open box is:
+
 - Task 15 (smoke half) — `--self-check` exit-0 smoke flag for the new
   binary before clearing the `.bak` sidecar.
-- Task 16 — `fono update --bin-dir <path>` flag mirroring the install
-  script's `BIN_DIR` semantics.
-- Task 20 — release workflow emits `fono-<tag>-<arch>.sha256` per asset.
-- Task 21 — unit + integration tests for the updater (`version::is_newer`,
-  release JSON parsing fixtures, package-manager detection, end-to-end
-  fixture-server flow).
-- Task 22 — manual QA checklist `docs/dev/update-qa.md`.
+- Task 21 — end-to-end fixture-server integration test for the updater
+  (the unit-level pieces — `is_newer`, sidecar parsing, package-manager
+  detection — are covered in `crates/fono-update/src/lib.rs:671-768`).
+
+Wave 2 Thread B evidence:
+
+- Task 12 — `crates/fono-update/src/lib.rs:462-499` (sidecar
+  verification, fail-closed on mismatch, fail-warn-and-proceed when
+  no sidecar published) plus the parser at
+  `:598-625`.
+- Task 16 — `crates/fono/src/cli.rs:259-266` (CLI flag) and
+  `:1313-1321` (override threaded into `ApplyOpts.target_override`).
+- Task 20 — `.github/workflows/release.yml:334-343` (per-asset
+  `<asset>.sha256` emission step).
+- Task 22 — `docs/dev/update-qa.md` (ten-scenario checklist).
 
 Evidence for the landed work:
 

@@ -77,6 +77,16 @@ pub struct UpdateInfo {
     pub notes: String,
     /// Release was flagged prerelease on GitHub.
     pub prerelease: bool,
+    /// URL of the asset's `.sha256` sidecar, when one was published
+    /// alongside the release. `None` for legacy releases (v0.1.x /
+    /// v0.2.x) that predate per-asset sidecars.
+    #[serde(default)]
+    pub sha256_url: Option<String>,
+    /// Pre-fetched sidecar digest (lowercase hex). Populated by
+    /// `fetch_latest` when the sidecar is small enough to ride on the
+    /// metadata request; otherwise resolved at apply time.
+    #[serde(default)]
+    pub expected_sha256: Option<String>,
 }
 
 /// Cached/computed status of the most recent update check.
@@ -227,6 +237,8 @@ pub struct GhReleaseChoice {
     pub asset_name: String,
     pub asset_url: String,
     pub asset_size: u64,
+    pub sha256_url: Option<String>,
+    pub expected_sha256: Option<String>,
 }
 
 fn pick_release(releases: &[GhRelease], channel: Channel) -> Result<GhReleaseChoice> {
@@ -245,6 +257,16 @@ fn pick_release(releases: &[GhRelease], channel: Channel) -> Result<GhReleaseCho
             );
         };
         if let Some(asset) = r.assets.iter().find(|a| a.name == want) {
+            // Look for a sibling `<asset>.sha256` published in the
+            // same release. Wave 2 Thread B — supply-chain hardening:
+            // when the sidecar is present, `apply_update` requires the
+            // streamed digest to match it.
+            let sidecar_name = format!("{}.sha256", asset.name);
+            let sha256_url = r
+                .assets
+                .iter()
+                .find(|a| a.name == sidecar_name)
+                .map(|a| a.browser_download_url.clone());
             return Ok(GhReleaseChoice {
                 tag: r.tag_name.clone(),
                 html_url: r.html_url.clone(),
@@ -253,6 +275,10 @@ fn pick_release(releases: &[GhRelease], channel: Channel) -> Result<GhReleaseCho
                 asset_name: asset.name.clone(),
                 asset_url: asset.browser_download_url.clone(),
                 asset_size: asset.size,
+                sha256_url,
+                // Resolved lazily in apply_update; pre-fetching here
+                // would couple `fetch_latest` to the download client.
+                expected_sha256: None,
             });
         }
     }
@@ -284,6 +310,8 @@ pub async fn check(current_version: &str, channel: Channel) -> UpdateStatus {
                         html_url: choice.html_url,
                         notes: choice.notes,
                         prerelease: choice.prerelease,
+                        sha256_url: choice.sha256_url,
+                        expected_sha256: choice.expected_sha256,
                     },
                 }
             } else {
@@ -378,6 +406,7 @@ pub struct ApplyOutcome {
 /// rollback or remove on first successful re-exec).
 ///
 /// Rejects package-manager-owned installs (see [`is_package_managed`]).
+#[allow(clippy::too_many_lines)]
 pub async fn apply_update(info: &UpdateInfo, opts: ApplyOpts) -> Result<ApplyOutcome> {
     let target: PathBuf = if let Some(p) = opts.target_override.as_ref() {
         p.clone()
@@ -428,6 +457,45 @@ pub async fn apply_update(info: &UpdateInfo, opts: ApplyOpts) -> Result<ApplyOut
             "downloaded {} bytes, GitHub announced {}",
             bytes,
             info.asset_size
+        );
+    }
+
+    // Wave 2 Thread B — verify against the published `.sha256` sidecar
+    // when one is available. Fail-closed on mismatch (the temp file is
+    // dropped without renaming, so the running binary stays intact).
+    // Fail-warn-and-proceed when no sidecar was published, for
+    // back-compat with v0.1.x / v0.2.x releases that predate the
+    // sidecar publication step in release.yml.
+    let expected = if let Some(hex) = info.expected_sha256.as_deref() {
+        Some(hex.to_ascii_lowercase())
+    } else if let Some(url) = info.sha256_url.as_deref() {
+        match fetch_sidecar(url, &info.asset_name).await {
+            Ok(hex) => Some(hex),
+            Err(e) => {
+                anyhow::bail!(
+                    "failed to fetch .sha256 sidecar from {url}: {e:#}; \
+                     refusing to apply unverified binary"
+                );
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(want) = expected.as_deref() {
+        if !sha.eq_ignore_ascii_case(want) {
+            anyhow::bail!(
+                "sha256 mismatch for {}: downloaded {} but sidecar published {}; \
+                 refusing to apply (running binary unchanged)",
+                info.asset_name,
+                sha,
+                want
+            );
+        }
+    } else {
+        tracing::warn!(
+            tag = info.tag.as_str(),
+            "no .sha256 sidecar published for {}; trusting Content-Length + TLS only",
+            info.tag
         );
     }
 
@@ -499,6 +567,66 @@ async fn stream_download(url: &str, out: &mut std::fs::File) -> Result<(u64, Str
     out.flush().ok();
     out.sync_all().ok();
     Ok((total, hex::encode(hasher.finalize())))
+}
+
+/// Fetch the `.sha256` sidecar from GitHub and parse it.
+async fn fetch_sidecar(url: &str, expected_filename: &str) -> Result<String> {
+    if !url.starts_with("https://") {
+        anyhow::bail!("refusing non-HTTPS sidecar URL: {url}");
+    }
+    let client = download_client()?;
+    let resp = client.get(url).send().await.context("GET sidecar")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("HTTP {} fetching {url}", resp.status());
+    }
+    let body = resp.text().await.context("read sidecar body")?;
+    parse_sha256_sidecar(&body, expected_filename)
+}
+
+/// Parse a `.sha256` sidecar body and extract the digest matching
+/// `expected_filename`.
+///
+/// Tolerates the four canonical sidecar shapes:
+///
+/// * `<hex>\n` (sha256sum bare digest, no filename column)
+/// * `<hex>  <name>\n` (sha256sum default "text mode")
+/// * `<hex> *<name>\n` (sha256sum "binary mode")
+/// * Multi-entry sidecars — picks the row whose filename matches
+///   `expected_filename`, otherwise falls back to the first valid row.
+///
+/// Trailing whitespace and blank lines are skipped. Rejects too-short
+/// or non-hex digests.
+pub fn parse_sha256_sidecar(body: &str, expected_filename: &str) -> Result<String> {
+    let mut first_valid: Option<String> = None;
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Split on first whitespace run.
+        let mut parts = line.splitn(2, char::is_whitespace);
+        let Some(hex) = parts.next() else {
+            continue;
+        };
+        if !is_valid_sha256_hex(hex) {
+            continue;
+        }
+        let rest = parts.next().unwrap_or("").trim();
+        // Strip the optional `*` binary-mode prefix.
+        let name = rest.strip_prefix('*').unwrap_or(rest);
+        let hex_lc = hex.to_ascii_lowercase();
+        if name.is_empty() || name == expected_filename {
+            return Ok(hex_lc);
+        }
+        if first_valid.is_none() {
+            first_valid = Some(hex_lc);
+        }
+    }
+    first_valid.ok_or_else(|| anyhow!("no valid sha256 digest in sidecar body"))
+}
+
+fn is_valid_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Replace the running process with the (just-installed) binary,
@@ -586,5 +714,57 @@ mod tests {
         save_cache(&p, &st);
         let loaded = load_cache(&p).unwrap();
         assert_eq!(loaded.status.current(), "0.2.0");
+    }
+
+    #[test]
+    fn parse_sidecar_bare_digest() {
+        let hex = "a".repeat(64);
+        let body = format!("{hex}\n");
+        let got = parse_sha256_sidecar(&body, "fono-v1-x86_64").expect("parse");
+        assert_eq!(got, hex);
+    }
+
+    #[test]
+    fn parse_sidecar_text_mode() {
+        let hex = "b".repeat(64);
+        let body = format!("{hex}  fono-v1-x86_64\n");
+        let got = parse_sha256_sidecar(&body, "fono-v1-x86_64").expect("parse");
+        assert_eq!(got, hex);
+    }
+
+    #[test]
+    fn parse_sidecar_binary_mode() {
+        let hex = "c".repeat(64);
+        let body = format!("{hex} *fono-v1-x86_64\n");
+        let got = parse_sha256_sidecar(&body, "fono-v1-x86_64").expect("parse");
+        assert_eq!(got, hex);
+    }
+
+    #[test]
+    fn parse_sidecar_multi_entry_picks_matching_filename() {
+        let want = "d".repeat(64);
+        let other = "e".repeat(64);
+        let body = format!("{other}  fono-v1-aarch64\n{want}  fono-v1-x86_64\n");
+        let got = parse_sha256_sidecar(&body, "fono-v1-x86_64").expect("parse");
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn parse_sidecar_rejects_short_or_non_hex() {
+        // Too short.
+        assert!(parse_sha256_sidecar("deadbeef\n", "x").is_err());
+        // Non-hex character.
+        let bad = format!("{}{}\n", "z".repeat(63), "a");
+        assert!(parse_sha256_sidecar(&bad, "x").is_err());
+        // Empty body.
+        assert!(parse_sha256_sidecar("\n\n\n", "x").is_err());
+    }
+
+    #[test]
+    fn parse_sidecar_uppercase_normalised_to_lowercase() {
+        let hex = "A".repeat(64);
+        let body = format!("{hex}  fono-v1-x86_64\n");
+        let got = parse_sha256_sidecar(&body, "fono-v1-x86_64").expect("parse");
+        assert_eq!(got, hex.to_ascii_lowercase());
     }
 }
