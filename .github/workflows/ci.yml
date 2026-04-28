@@ -64,8 +64,61 @@ jobs:
       - name: fono-bench latency smoke (ignored tests)
         run: cargo test -p fono-bench --release -- --ignored --nocapture
 
-      - name: fono-bench criterion (compile-only sanity)
-        run: cargo bench -p fono-bench --no-run
+      # Wave 2 Thread C: real-fixture equivalence gate. Replaces the
+      # prior `cargo bench --no-run` compile-only sanity. The whisper
+      # tiny.en model is cached across runs by hashing on the pinned
+      # SHA below; a fresh download takes ~30s (76 MiB) and a poisoned
+      # mirror is caught by the sha256sum --check step.
+      - name: Cache whisper tiny.en model
+        id: whisper-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/fono/models/whisper/ggml-tiny.en.bin
+          key: whisper-ggml-tiny-en-921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f
+
+      - name: Download whisper tiny.en model (cache miss)
+        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache_dir="${HOME}/.cache/fono/models/whisper"
+          mkdir -p "${cache_dir}"
+          curl -fsSL --retry 3 \
+            -o "${cache_dir}/ggml-tiny.en.bin" \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin"
+          echo "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f  ${cache_dir}/ggml-tiny.en.bin" \
+            | sha256sum --check -
+
+      - name: fono-bench equivalence (tiny.en gate)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --release -p fono-bench \
+            --features equivalence,whisper-local -- \
+            equivalence \
+              --stt local \
+              --model tiny.en \
+              --output ci-bench.json \
+              --baseline \
+              --no-legend
+          # Compare structural verdicts against the committed baseline.
+          # Timings are not compared (the baseline file omits them).
+          python3 - <<'PY'
+          import json, sys
+          ours = json.load(open('ci-bench.json'))
+          gold = json.load(open('docs/bench/baseline-comfortable-tiny-en.json'))
+          diffs = []
+          ours_by = {r['fixture']: r['verdict'] for r in ours['results']}
+          gold_by = {r['fixture']: r['verdict'] for r in gold['results']}
+          for k in sorted(set(ours_by) | set(gold_by)):
+              if ours_by.get(k) != gold_by.get(k):
+                  diffs.append(f"{k}: ci={ours_by.get(k)} baseline={gold_by.get(k)}")
+          if diffs:
+              print("equivalence verdicts diverged from baseline:")
+              for d in diffs: print(f"  {d}")
+              sys.exit(1)
+          print(f"OK \u2014 {len(ours_by)} fixture verdicts match baseline.")
+          PY
 
   deny:
     name: cargo-deny

@@ -160,6 +160,17 @@ struct EquivalenceArgs {
     /// legend only appears once (printed by the caller script).
     #[arg(long, default_value_t = false)]
     no_legend: bool,
+
+    /// When set together with `--output`, write the **deterministic
+    /// subset** of the report (no absolute timings: `elapsed_ms`,
+    /// `ttff_ms`, `duration_s` are stripped). Used to commit a
+    /// per-PR comparison anchor at
+    /// `docs/bench/baseline-comfortable-tiny-en.json`. CI compares
+    /// fresh runs against the committed baseline by per-fixture
+    /// verdict; the timings would flap on shared runners and aren't
+    /// part of the contract. See `docs/bench/README.md`.
+    #[arg(long, default_value_t = false)]
+    baseline: bool,
 }
 
 #[tokio::main]
@@ -415,7 +426,16 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
     print_table(&report, !args.no_legend);
 
     if let Some(out) = args.output.as_ref() {
-        let payload = serde_json::to_string_pretty(&report)?;
+        // Wave 2 Thread C: `--baseline` strips absolute timings so the
+        // committed `docs/bench/baseline-comfortable-tiny-en.json`
+        // anchor doesn't churn on every CI run. The verdict per
+        // fixture and the structural metadata (model_capabilities,
+        // pinned_params, skip_reason) stay.
+        let payload = if args.baseline {
+            serde_json::to_string_pretty(&fono_bench::baseline_subset(&report))?
+        } else {
+            serde_json::to_string_pretty(&report)?
+        };
         std::fs::write(out, payload).with_context(|| format!("write {}", out.display()))?;
         info!("wrote report to {}", out.display());
     }

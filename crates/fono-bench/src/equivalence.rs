@@ -248,6 +248,44 @@ impl EquivalenceReport {
     }
 }
 
+/// Strip absolute timing fields from an [`EquivalenceReport`] so it can
+/// be committed as a deterministic per-PR comparison anchor.
+///
+/// Wave 2 Thread C: CI runs `fono-bench equivalence ... --baseline
+/// --output ci-bench.json` on every PR and diffs `ci-bench.json`
+/// against `docs/bench/baseline-comfortable-tiny-en.json`. The
+/// committed baseline must therefore contain only fields that are
+/// stable across machines / runs: per-fixture verdicts, structural
+/// metadata (`model_capabilities`, `pinned_params`, `skip_reason`),
+/// and **ratios** (which are relative). Absolute milliseconds and
+/// audio durations would flap on shared runners and are not part of
+/// the contract.
+///
+/// Returns a `serde_json::Value` so downstream tooling can pretty-print
+/// or hash it without the JSON object being coupled to a Rust type.
+#[must_use]
+pub fn baseline_subset(report: &EquivalenceReport) -> serde_json::Value {
+    let mut v = serde_json::to_value(report).expect("EquivalenceReport always serialises");
+    if let Some(results) = v.get_mut("results").and_then(|r| r.as_array_mut()) {
+        for row in results.iter_mut() {
+            if let Some(obj) = row.as_object_mut() {
+                obj.remove("duration_s");
+                if let Some(modes) = obj.get_mut("modes").and_then(|m| m.as_object_mut()) {
+                    for k in ["batch", "streaming"] {
+                        if let Some(mode) = modes.get_mut(k) {
+                            if let Some(mo) = mode.as_object_mut() {
+                                mo.remove("elapsed_ms");
+                                mo.remove("ttff_ms");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    v
+}
+
 // ---------------------------------------------------------------------
 // v7 boundary-knob harness pinning (R18.10 amended + R18.23).
 // ---------------------------------------------------------------------

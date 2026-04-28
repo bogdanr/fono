@@ -2,6 +2,66 @@
 
 Last updated: 2026-04-28
 
+## 2026-04-28 — Wave 2: half-shipped plans closed out + real-fixture CI gate
+
+Three DCO-signed commits delivered the trust-restoration leg of the
+revised strategic plan (driven by
+`plans/2026-04-28-wave-2-close-out-v1.md`).
+
+| Thread | SHA | Subject |
+|---|---|---|
+| A | `76b9b08` | `feat(fono-bench): typed ModelCapabilities + split equivalence/accuracy thresholds` |
+| B | `87221a2` | `feat(fono-update): per-asset sha256 sidecar verification + --bin-dir` |
+| C | _this commit_ | `ci(fono-bench): real-fixture equivalence gate with tiny.en + baseline JSON anchor` |
+
+**Thread A** lifted the inline `english_only` boolean
+(`crates/fono-bench/src/bin/fono-bench.rs:339` pre-wave) into a typed
+`ModelCapabilities` value at `crates/fono-bench/src/capabilities.rs`
+with `for_local_whisper` / `for_cloud` resolvers, split the conflated
+single threshold into `equivalence_threshold` and `accuracy_threshold`
+on `ManifestFixture`, and added a typed `SkipReason` (`Capability` /
+`Quick` / `NoStreaming` / `RuntimeError`) so `overall_verdict` no
+longer needs to substring-match notes. New mock-STT capability-skip
+integration test asserts `transcribe` is never invoked.
+
+**Thread B** closed the supply-chain gap in `apply_update`: per-asset
+`.sha256` sidecars are now fetched and verified during
+`fetch_latest` / `apply_update`, with a `parse_sha256_sidecar` helper
+covering bare-digest, text-mode, binary-mode, and multi-entry
+sidecars. `--bin-dir <path>` is exposed on `fono update` for
+non-default install layouts. Release workflow emits a `<asset>.sha256`
+file per artefact alongside the aggregate `SHA256SUMS`.
+`docs/dev/update-qa.md` carries the ten-scenario manual verification
+checklist (bare-binary, `/usr/local/bin`, distro-packaged, offline,
+rate-limited, mismatched sidecar, prerelease, `--bin-dir`, rollback).
+
+**Thread C** replaced the compile-only `cargo bench --no-run` step at
+`.github/workflows/ci.yml:64-68` with a real-fixture equivalence gate:
+the workflow fetches the whisper `tiny.en` GGML weights (cached via
+`actions/cache@v4` keyed on the model SHA, integrity-checked against
+`921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f`),
+runs `fono-bench equivalence --stt local --model tiny.en --baseline
+--no-legend`, and diffs per-fixture verdicts against
+`docs/bench/baseline-comfortable-tiny-en.json`. The `--baseline` flag
+strips absolute timings (`elapsed_ms`, `ttff_ms`, `duration_s`) from
+the JSON so the committed anchor is deterministic across CI runners.
+Regeneration procedure + flapping-fixture mitigation documented in
+`docs/bench/README.md`. R5.1 and R5.2 in
+`docs/plans/2026-04-25-fono-roadmap-v2.md` now ticked as fully shipped.
+
+Bonus: `tests/check.sh` lands as a single command that mirrors the CI
+build/clippy/test matrix locally (full / `--quick` / `--slim` /
+`--no-test` modes) so contributors can run the same gate before
+pushing.
+
+Verification (this session):
+
+| Command | Result |
+|---|---|
+| `cargo build --workspace --all-targets` | clean |
+| `cargo test --workspace --lib --tests` | green (all suites incl. new `parse_sidecar_*` tests) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+
 ## 2026-04-28 — Doc reconciliation pass
 
 Pure-doc pass driven by `plans/2026-04-28-doc-reconciliation-v1.md`. No
@@ -831,24 +891,30 @@ compiled in. Cleaned text was lost.
 
 ## Recommended next session
 
-> Recommended next session: execute **Wave 2** of the revised strategic
-> plan (this conversation, 2026-04-28). Wave 2 closes out the
-> half-shipped self-update and accuracy-gate plans, and tightens the
-> CI bench gate from compile-sanity to a real-fixture equivalence run.
-> Concretely:
+> Recommended next session: execute **Wave 3** of the revised strategic
+> plan (Slice B1 — realtime cpal-callback push + first cloud streaming
+> provider). Wave 2 landed in three DCO-signed commits:
+> `76b9b08` (typed `ModelCapabilities` + split equivalence/accuracy
+> thresholds), `87221a2` (per-asset `.sha256` sidecar verification +
+> `--bin-dir` CLI flag), and the Thread-C CI gate commit (real-fixture
+> `fono-bench equivalence` run against
+> `docs/bench/baseline-comfortable-tiny-en.json` on every PR).
 >
-> 1. Equivalence accuracy gate close-out — typed `ModelCapabilities`
->    in `crates/fono-bench/src/capabilities.rs`, `accuracy_threshold` /
->    `requires_multilingual` on `ManifestFixture`, `model_capabilities`
->    in `EquivalenceReport`, mock-STT capability-skip test.
-> 2. Self-update finishing pass — per-asset `.sha256` sidecar
->    verification, `--bin-dir` CLI flag, `docs/dev/update-qa.md`
->    checklist, release workflow emits `.sha256` per asset.
-> 3. Real-fixture CI gate — replace `cargo bench --no-run` in
->    `.github/workflows/ci.yml:64-68` with a `fono-bench equivalence`
->    run against `tests/fixtures/equivalence/manifest.toml` and commit
->    `docs/bench/baseline-local-comfortable.json` as the PR comparison
->    anchor (R5.2).
+> Wave 3 concretely:
+>
+> 1. **Realtime cpal-callback push** (R4 / R10.4 of
+>    `plans/2026-04-27-fono-interactive-v6.md`). Replace the
+>    record-then-replay live path so the overlay paints text *as the
+>    user speaks*. The `Pump` / `broadcast` plumbing landed in
+>    Slice A; this is now scope-bounded.
+> 2. **Groq streaming STT backend** (R8). Same auth path as the
+>    existing Groq batch backend; the `StreamingStt` trait already
+>    lives at `crates/fono-stt/src/streaming.rs`. Selectable via
+>    `fono use stt groq` with `[interactive].enabled = true`.
+> 3. **Equivalence harness cloud rows** (R18.12). Mocked-HTTP
+>    recordings so the CI gate runs offline; extend
+>    `docs/bench/baseline-comfortable-tiny-en.json` (or sibling) once
+>    cloud rows produce stable verdicts.
 
 ### Earlier next-session notes (preserved for context)
 

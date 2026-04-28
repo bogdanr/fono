@@ -1,0 +1,257 @@
+{
+  "fono_version": "0.2.1",
+  "model_capabilities": {
+    "english_only": true,
+    "model_label": "local:tiny.en"
+  },
+  "pinned_params": {
+    "chunk_ms_initial": 600,
+    "chunk_ms_steady": 1500,
+    "commit_dangling_words": [
+      "and",
+      "but",
+      "or",
+      "so",
+      "because",
+      "the",
+      "a",
+      "an",
+      "of",
+      "to",
+      "with",
+      "for",
+      "in",
+      "on",
+      "at",
+      "from"
+    ],
+    "commit_filler_words": [
+      "um",
+      "uh",
+      "er",
+      "ah",
+      "mm",
+      "like",
+      "you know"
+    ],
+    "commit_hold_on_filler": true,
+    "commit_prosody_extend_ms": 250,
+    "commit_punct_extend_ms": 150,
+    "commit_use_prosody": false,
+    "commit_use_punctuation_hint": true,
+    "eou_drain_extended_ms": 1500
+  },
+  "results": [
+    {
+      "fixture": "en-single-sentence",
+      "language": "en",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.0,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": 1.119260549545288,
+        "ttff_ratio": 0.3324388861656189
+      },
+      "modes": {
+        "batch": {
+          "text": "neglected. The art of war then is governed by five constant factors."
+        },
+        "streaming": {
+          "text": "neglected. The art of war then is governed by five constant factors."
+        }
+      },
+      "note": "per-fixture equiv threshold 1; per-fixture acc threshold 1",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    },
+    {
+      "fixture": "en-multi-sentence",
+      "language": "en",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.0,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": 2.3121440410614014,
+        "ttff_ratio": 0.27946028113365173
+      },
+      "modes": {
+        "batch": {
+          "text": "neglected. The art of war then is governed by five constant factors to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field. These are one, the moral law, two, heaven, three, earth,"
+        },
+        "streaming": {
+          "text": "neglected. The art of war then is governed by five constant factors to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field. These are one, the moral law, two, heaven, three, earth,"
+        }
+      },
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    },
+    {
+      "fixture": "en-narrative-pause",
+      "language": "en",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.0,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": 3.492932081222534,
+        "ttff_ratio": 0.7473779916763306
+      },
+      "modes": {
+        "batch": {
+          "text": "that Jane was yielding to the preference which she'd begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general."
+        },
+        "streaming": {
+          "text": "that Jane was yielding to the preference which she'd begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general."
+        }
+      },
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    },
+    {
+      "fixture": "en-conversational",
+      "language": "en",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.0,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": 3.3603150844573975,
+        "ttff_ratio": 0.8982807993888855
+      },
+      "modes": {
+        "batch": {
+          "text": "encouragement. In nine cases out of ten, a woman had better show more affection than she feels. Bingley likes your sister undoubtedly, but he may never do more than"
+        },
+        "streaming": {
+          "text": "encouragement. In nine cases out of ten, a woman had better show more affection than she feels. Bingley likes your sister undoubtedly, but he may never do more than"
+        }
+      },
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    },
+    {
+      "fixture": "es-lorca-reyerta",
+      "language": "es",
+      "metrics": {
+        "stt_accuracy_levenshtein": null,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": ""
+        },
+        "streaming": null
+      },
+      "note": "model local:tiny.en is English-only; fixture language is es",
+      "skip_reason": "capability",
+      "synthetic_placeholder": false,
+      "verdict": "skipped"
+    },
+    {
+      "fixture": "fr-gide-symphonie",
+      "language": "fr",
+      "metrics": {
+        "stt_accuracy_levenshtein": null,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": ""
+        },
+        "streaming": null
+      },
+      "note": "model local:tiny.en is English-only; fixture language is fr",
+      "skip_reason": "capability",
+      "synthetic_placeholder": false,
+      "verdict": "skipped"
+    },
+    {
+      "fixture": "zh-luxun-kuangren",
+      "language": "zh",
+      "metrics": {
+        "stt_accuracy_levenshtein": null,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": ""
+        },
+        "streaming": null
+      },
+      "note": "model local:tiny.en is English-only; fixture language is zh",
+      "skip_reason": "capability",
+      "synthetic_placeholder": false,
+      "verdict": "skipped"
+    },
+    {
+      "fixture": "ro-talcuirea-matei",
+      "language": "ro",
+      "metrics": {
+        "stt_accuracy_levenshtein": null,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": ""
+        },
+        "streaming": null
+      },
+      "note": "model local:tiny.en is English-only; fixture language is ro",
+      "skip_reason": "capability",
+      "synthetic_placeholder": false,
+      "verdict": "skipped"
+    },
+    {
+      "fixture": "ro-man",
+      "language": "ro",
+      "metrics": {
+        "stt_accuracy_levenshtein": null,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": ""
+        },
+        "streaming": null
+      },
+      "note": "model local:tiny.en is English-only; fixture language is ro",
+      "skip_reason": "capability",
+      "synthetic_placeholder": false,
+      "verdict": "skipped"
+    },
+    {
+      "fixture": "ro-woman",
+      "language": "ro",
+      "metrics": {
+        "stt_accuracy_levenshtein": null,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": ""
+        },
+        "streaming": null
+      },
+      "note": "model local:tiny.en is English-only; fixture language is ro",
+      "skip_reason": "capability",
+      "synthetic_placeholder": false,
+      "verdict": "skipped"
+    }
+  ],
+  "stt_backend": "local:tiny.en",
+  "threshold_levenshtein": 0.05000000074505806,
+  "tier": "tier1"
+}

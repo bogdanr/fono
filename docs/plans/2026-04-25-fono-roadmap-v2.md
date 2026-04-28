@@ -61,15 +61,20 @@ v0.1.0, high-value features for v0.1.x, and longer-term v0.2 items.
 
 ### R5. Real-audio benchmark coverage
 
-* [~] **R5.1** (partial). Compile-sanity wired in
-  `.github/workflows/ci.yml:64-68` (`cargo bench --no-run`); real-fixture
-  equivalence-harness gate is Wave 2 Task 9 of
-  `plans/2026-04-28-doc-reconciliation-v1.md`. Original goal: wire
-  `fono-bench` into CI as a once-per-PR gate against the fake-stage
-  baseline.
-* [ ] **R5.2** Local-tier bench: `fono-bench --provider local
-  --languages en,es` runs against the recommended whisper model and
-  asserts p95 < tier budget. Seed `docs/bench/baseline-local-comfortable.json`.
+* [x] **R5.1** Real-fixture equivalence gate live in
+  `.github/workflows/ci.yml` (Wave 2 Thread C). Runs
+  `fono-bench equivalence --stt local --model tiny.en --baseline`
+  on every PR and diffs per-fixture verdicts against
+  `docs/bench/baseline-comfortable-tiny-en.json`. Whisper `tiny.en`
+  weights cached via `actions/cache@v4` keyed on the model SHA.
+* [x] **R5.2** Baseline JSON anchor seeded at
+  `docs/bench/baseline-comfortable-tiny-en.json` (Wave 2 Thread C).
+  Captures per-fixture verdicts + `model_capabilities` +
+  `pinned_params`; absolute timings stripped via the `--baseline`
+  flag so the file is deterministic across CI runners. Regen
+  procedure documented in `docs/bench/README.md`. (`tiny.en` shape
+  today; multilingual `small` baseline + p95 latency budget remain a
+  follow-up — see Wave 5 / nightly job in the strategic plan.)
 
 ---
 
