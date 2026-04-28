@@ -1,124 +1,117 @@
 # Fono Roadmap
 
-This is the public roadmap for [Fono](https://github.com/bogdanr/fono).
-It is intentionally short and lives in the repo so it stays honest:
-items move from **Planned** to **In progress** to **Shipped** as work
-lands. Shipped items collect at the bottom with the date and the
-release that carried them.
+Fono is a tiny voice-dictation app for Linux: press a hotkey, speak,
+and your words land at the cursor — in any window, any app. This page
+is a plain-English view of where Fono is going. Items move from
+**Planned** → **In progress** → **Shipped** as work lands.
 
-The [`CHANGELOG.md`](CHANGELOG.md) is the authoritative per-release
-record; this file is the higher-altitude view of *where Fono is going*.
-
-> **Maintainer note.** The release procedure (see `AGENTS.md`) updates
-> this file: every roadmap item that ships in a release is moved into
-> the **Shipped** section with the release tag and date *before*
-> tagging.
+For exact per-release details, see [`CHANGELOG.md`](CHANGELOG.md).
+The home page is [fono.page](https://fono.page).
 
 ---
 
 ## In progress
 
-- **Wave 3 Slice B1 Thread C — cloud-mock equivalence lane.** Per-PR
-  gate that exercises the cloud streaming path offline using committed
-  WAV→JSON fixtures. Closes out Slice B1 and unlocks the `v0.3.0` tag.
-  Plan: `plans/2026-04-28-wave-3-slice-b1-v1.md` Tasks C1–C9.
+- **Faster, safer release process.** Make sure every change to the
+  cloud transcription path keeps working the way it did, on every pull
+  request, without spending money on real cloud calls. This is the
+  last piece holding back the **v0.3.0** release.
 
 ## Planned — next
 
-- **Hardware- and language-aware local-model picker in the wizard.**
-  Ask English-only vs multilingual first, filter the local Whisper
-  shortlist by RAM/CPU/GPU, show per-language WER estimates inline,
-  default the cursor to the largest model the machine can run
-  comfortably. Plan:
-  `plans/2026-04-28-wizard-local-model-selection-v1.md`.
-- **Automatic translation pipeline.** STT → optional translate →
-  cleanup → inject. Arbitrary BCP-47 `(source, target)` pairs,
-  per-app overrides, batch + live parity, opt-in fast paths via
-  Whisper `set_translate` and cloud `/audio/translations` when the
-  target is English. Plan: `plans/2026-04-28-fono-auto-translation-v1.md`.
-- **Self-update finishing pass.** ~85% landed; remaining items
-  tracked under Wave 2 close-out. Plan:
-  `plans/2026-04-27-fono-self-update-v1.md`.
+- **Smarter first-run setup.** Ask one question — *"Will you dictate
+  only in English, or in multiple languages?"* — then suggest the
+  best on-device speech model your computer can comfortably run, with
+  an honest accuracy estimate for each language you picked.
+  English-only models are smaller and more accurate per megabyte, so
+  English-only users get a better experience automatically.
+- **Automatic translation.** Speak in one language, get text in
+  another. Works in both directions, with per-app rules (e.g. always
+  translate to English when typing in your code editor, but keep the
+  original language in your chat app).
+- **Polish the auto-update.** "Fono, update yourself" is mostly there
+  already — finishing touches to handle a few edge cases gracefully.
 
 ## Planned — later
 
-- **macOS port.** Native menubar (no tray crate dependency on macOS),
-  CoreAudio capture, `CGEvent`-based injection, codesigned `.dmg`
-  artefact in the release workflow.
-- **Windows port.** Tray via `tray-icon`, WASAPI capture,
-  `SendInput` injection, MSI / portable `.exe` artefact.
-- **Wayland global hotkey via `org.freedesktop.portal.GlobalShortcuts`**
-  once the portal is stable in mainstream compositors. Today Fono
-  relies on compositor-side bindings to `fono toggle` on Wayland.
-- **Streaming LLM cleanup.** Currently batch-only; the live overlay
-  shows STT partials but cleanup runs once on commit. Streaming
-  cleanup would let punctuation and casing settle as the user
-  speaks.
+- **macOS support.** Native menu-bar app, proper system integration,
+  signed `.dmg` download.
+- **Windows support.** System-tray app, native installer.
+- **Better Wayland hotkeys.** Today on Wayland (KDE, GNOME) you have
+  to bind the hotkey through your desktop's settings. Once Linux
+  desktops finish shipping the new shared-shortcut standard, Fono will
+  pick it up automatically with no setup.
+- **Live cleanup as you speak.** Today the AI cleanup (punctuation,
+  capitalisation, removing filler words) runs once when you stop
+  speaking. Doing it gradually, while you're still talking, would feel
+  more responsive.
 
 ## Won't do (for now)
 
-- **Telemetry / phone-home.** Fono does not and will not collect
-  usage data. See `docs/privacy.md`.
-- **Llama-/Gemma-family default models.** Their licences are not
-  OSI-approved. Available as opt-in only. See ADR
-  `docs/decisions/0004-default-models.md`.
-- **Web/Electron UI.** The whole point of Fono is to stay native and
-  small. The tray + overlay + CLI are the UI surface.
+- **No tracking, no analytics.** Fono will never phone home. See
+  [`docs/privacy.md`](docs/privacy.md).
+- **No "default" models with restrictive licences.** Models from
+  Meta's Llama or Google's Gemma families are available if you opt in,
+  but won't be downloaded by default — their licences aren't
+  open-source-approved. See ADR
+  [`0004-default-models.md`](docs/decisions/0004-default-models.md).
+- **No web or Electron interface.** The whole point of Fono is to
+  stay small and native. The tray icon, the floating overlay, and the
+  command line are the only interfaces.
 
 ---
 
 ## Shipped
 
-Newest first. Each entry links to the release it shipped in.
+Newest first. Each entry says which release carried it.
 
-- **In-memory cloud-STT language stickiness, peer-symmetric (no
-  primary).** Self-heals one-off cloud STT misdetections (e.g. Groq
-  Turbo flagging accented English as Russian) without breaking
-  bilingual switchers. Wizard auto-adds English when only one
-  non-English language is selected. — *Unreleased; queued for
-  v0.3.0.*
-- **Universal LLM cleanup clarification-reply fix.** Hardened
-  default cleanup prompt, transcript fenced in `<<<` / `>>>`,
-  refusal detector with raw-text fallback, `skip_if_words_lt`
-  default raised to 3. Applies identically to all cloud and local
-  cleanup backends. — *Unreleased; queued for v0.3.0.*
-- **Streaming live-dictation pipeline reachable from the shipped
-  binary.** `interactive` is now a default release feature; existing
-  v0.2.1 users see live mode work for the first time after upgrade.
-  — *v0.2.2, 2026-04-28.*
-- **Self-update supply-chain hardening.** Per-asset `.sha256`
-  sidecar verification; `--bin-dir` flag; refuses to overwrite
-  package-managed paths. — *v0.2.2, 2026-04-28.*
-- **`fono-bench` typed accuracy gate.** `ModelCapabilities`
-  resolvers, split equivalence/accuracy thresholds, real-fixture CI
-  bench gate using whisper `tiny.en` against committed baselines.
-  — *v0.2.2, 2026-04-28.*
-- **Streaming/interactive dictation mode.** Slice A foundation:
-  streaming STT, latency budget, overlay live text, equivalence
-  harness gating stream↔batch consistency per fixture. — *v0.2.1,
+- **Cloud transcription that learns your language.** If your cloud
+  provider occasionally mishears your accent (e.g. flags English as
+  Russian), Fono now self-corrects after the first mistake and gets
+  it right from then on. Bilingual users can switch languages freely
+  without any toggle. Setup automatically adds English alongside
+  whatever other language you pick. — *Queued for v0.3.0.*
+- **Reliable AI cleanup.** Fixed a long-standing bug where the cleanup
+  step would occasionally reply with a question ("Could you provide
+  the full text?") instead of cleaning your dictation. Affected every
+  cloud and local AI provider; the fix applies universally. Very short
+  utterances (one or two words) now skip cleanup entirely, saving
+  about half a second. — *Queued for v0.3.0.*
+- **Live dictation actually ships.** The streaming "see your words
+  appear as you speak" mode was built but accidentally left out of the
+  packaged binary. v0.2.2 turns it on by default. — *v0.2.2,
   2026-04-28.*
-- **STT language allow-list.** `[general].languages: Vec<String>`
-  replaces the single `language` scalar; constrained Whisper
-  auto-detect with a hard ban on out-of-list languages. — *v0.2.1,
+- **Tamper-proof self-update.** `fono update` now verifies every file
+  it downloads against a published checksum, refuses to overwrite
+  files installed by your system package manager, and accepts a
+  custom install directory. — *v0.2.2, 2026-04-28.*
+- **Automated quality gate.** Every pull request now runs a real
+  speech-recognition test against committed audio samples, so we
+  catch accuracy regressions before they ship. — *v0.2.2, 2026-04-28.*
+- **Streaming dictation mode.** First version of the live overlay —
+  see your words appear as you speak, not only after you stop. —
+  *v0.2.1, 2026-04-28.*
+- **Pick your dictation languages.** Replace the single-language
+  setting with a list. Whisper now constrains itself to the languages
+  you actually speak, instead of guessing wrong. — *v0.2.1,
   2026-04-28.*
-- **Overlay focus-theft fix on X11.** Override-redirect on the
-  overlay window so it no longer intercepts `Shift+Insert`. — *v0.2.1,
-  2026-04-28.*
-- **Single-binary local stack (Whisper + Llama).** Both
-  `whisper.cpp` and `llama.cpp` link into the same statically-built
-  ELF; runtime SIMD probe; opt-in GPU acceleration via `accel-*`
-  features. — *v0.2.0, 2026-04-27.*
-- **Wizard local LLM path.** Tier-aware Qwen2.5 model selection
-  (3B / 1.5B / 0.5B) alongside the existing local Whisper auto-download.
-  — *v0.2.0, 2026-04-27.*
-- **Hotkey defaults: F9 toggle / F8 push-to-talk.** Single keys, no
-  default binding on any major desktop, easy to fire blind. — *v0.2.0,
-  2026-04-27.*
-- **First public release.** Audio → STT → LLM → inject pipeline wired
-  end-to-end; local Whisper out of the box; multi-provider STT and LLM
-  cleanup; tray with live provider switching; `fono record` /
-  `transcribe` / `use` / `keys` / `doctor` / `hwprobe`. — *v0.1.0,
-  2026-04-25.*
+- **Overlay no longer steals keyboard focus** on X11 desktops. —
+  *v0.2.1, 2026-04-28.*
+- **One binary, full local stack.** Both Whisper (speech-to-text) and
+  a small local LLM (cleanup) ship inside the same single executable,
+  with optional GPU acceleration. No Python, no Node, no Electron. —
+  *v0.2.0, 2026-04-27.*
+- **Local cleanup AI in the setup wizard.** First-run setup now
+  offers an offline LLM that runs entirely on your machine, sized
+  automatically to your hardware. — *v0.2.0, 2026-04-27.*
+- **Friendlier hotkeys.** F9 to toggle, F8 for push-to-talk — single
+  keys, no awkward chords, no clashes with desktop shortcuts. —
+  *v0.2.0, 2026-04-27.*
+- **First public release.** Press a hotkey, speak, see your words at
+  the cursor. Works with on-device Whisper out of the box, or with
+  Groq / OpenAI / Anthropic / Cerebras / Deepgram if you'd rather use
+  the cloud. Tray icon, history of recent dictations, hot-swappable
+  providers. — *v0.1.0, 2026-04-25.*
 
 [v0.1.0]: https://github.com/bogdanr/fono/releases/tag/v0.1.0
 [v0.2.0]: https://github.com/bogdanr/fono/releases/tag/v0.2.0
