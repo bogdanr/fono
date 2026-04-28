@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::traits::{FormatContext, TextFormatter};
+use crate::traits::{looks_like_clarification, user_prompt, FormatContext, TextFormatter};
 
 pub struct OpenAiCompat {
     endpoint: String,
@@ -140,6 +140,7 @@ struct RespMessage {
 impl TextFormatter for OpenAiCompat {
     async fn format(&self, raw: &str, ctx: &FormatContext) -> Result<String> {
         let system = ctx.system_prompt();
+        let user = user_prompt(raw);
         let req = ChatReq {
             model: &self.model,
             messages: vec![
@@ -149,7 +150,7 @@ impl TextFormatter for OpenAiCompat {
                 },
                 Message {
                     role: "user",
-                    content: raw,
+                    content: &user,
                 },
             ],
             // Latency plan L19 — short cleanup outputs, deterministic
@@ -173,14 +174,28 @@ impl TextFormatter for OpenAiCompat {
         }
         let parsed: ChatResp = serde_json::from_str(&body)
             .with_context(|| format!("parse {} response: {body}", self.backend_name))?;
-        Ok(parsed
+        let out = parsed
             .choices
             .into_iter()
             .next()
             .map(|c| c.message.content)
             .unwrap_or_default()
             .trim()
-            .to_string())
+            .to_string();
+        if looks_like_clarification(&out) {
+            // Some chat-tuned models (Llama-3.3-70B, gpt-4o-mini, …)
+            // occasionally respond to short / ambiguous push-to-talk
+            // captures with a clarification question instead of a
+            // cleaned transcript. Reject so the caller falls back to
+            // the raw STT text. See
+            // `plans/2026-04-28-llm-cleanup-clarification-refusal-fix-v1.md`.
+            anyhow::bail!(
+                "{} LLM returned a clarification reply instead of a cleaned transcript; \
+                 falling back to raw text. response: {out:?}",
+                self.backend_name
+            );
+        }
+        Ok(out)
     }
 
     fn name(&self) -> &'static str {

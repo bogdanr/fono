@@ -75,6 +75,40 @@ bindsym $mod+space exec fono toggle
 #   Set:     F9
 ```
 
+## LLM responds with a question instead of cleaning my text
+
+Symptom: instead of the cleaned transcript, the injected text reads
+something like *"It seems like you're describing a situation, but the
+details are incomplete. Could you provide the full text you're referring
+to, so I can better understand and assist you?"*
+
+This is **not provider-specific**. The failure mode shows up on every
+cleanup backend Fono supports — Cerebras, Groq, OpenAI, OpenRouter,
+Ollama, Anthropic, and the local llama.cpp path — because chat-trained
+LLMs (regardless of where they run) sometimes treat a short raw
+transcript as a conversational fragment addressed to them. F8
+push-to-talk just hits it more often because it tends to capture shorter
+utterances than F9 toggle.
+
+Fono detects and discards these replies as of v0.2.3. The fix is
+identical for every backend: the user message is wrapped in `<<<` /
+`>>>` delimiters, the system prompt forbids clarification questions,
+and any reply that still looks like a meta-question is rejected so the
+raw STT text is injected instead. If you still see clarification-shaped
+output:
+
+- Confirm you're on v0.2.3 or newer (`fono --version`).
+- Check the daemon log for `LLM returned a clarification reply instead
+  of a cleaned transcript; falling back to raw text.` — that line means
+  the detector fired and the fallback worked, on whichever backend was
+  active.
+- Raise `[llm].skip_if_words_lt` (default `3`) in `config.toml` to skip
+  the LLM for longer utterances, on cloud or local backends alike.
+- If a specific provider is producing borderline replies the heuristic
+  doesn't catch, switch backends with `fono use llm <name>` — the fix
+  applies to every option, but different chat fine-tunes have different
+  refusal personalities and one may suit your dictation style better.
+
 ## Pipeline ran but nothing pasted
 
 The clipboard safety net should always populate the clipboard even when

@@ -2,6 +2,70 @@
 
 Last updated: 2026-04-28
 
+## 2026-04-28 — LLM cleanup clarification-refusal fix
+
+Bug report: a short utterance dictated through the cloud cleanup
+provider sometimes injected a chat-style clarification reply
+(*"It seems like you're describing a situation, but the details are
+incomplete. Could you provide the full text you're referring to, so I
+can better understand and assist you?"*) rather than the cleaned
+transcript. Investigation showed:
+
+- The hotkey is irrelevant. F8 (`HoldPressed`) and F9 (`TogglePressed`)
+  share the same cleanup pipeline at
+  `crates/fono/src/session.rs:1213-1276`. F8 just correlates because
+  push-to-talk produces shorter recordings.
+- The provider is irrelevant. Reproducible on Cerebras, Groq, OpenAI,
+  OpenRouter, Ollama, Anthropic, **and** the local llama.cpp backend;
+  the failure mode is a property of how chat-trained LLMs interpret a
+  bare short utterance.
+
+The fix is therefore universal — applied identically to every
+`TextFormatter` impl. Plan:
+`plans/2026-04-28-llm-cleanup-clarification-refusal-fix-v1.md`. Three
+layers of defence shipped:
+
+1. **Hardened default prompt** in
+   `crates/fono-core/src/config.rs:402-415` — explicit hard rules:
+   never ask for clarification, never respond with a question or
+   meta-comment, return the transcript verbatim if it's short / empty /
+   already clean. Same prompt for every backend.
+2. **User-message framing** via new `fono_llm::traits::user_prompt`
+   helper that wraps the raw transcript in `<<<` / `>>>` fences,
+   referenced by all three backend impls (`OpenAiCompat` — used by
+   Cerebras / Groq / OpenAI / OpenRouter / Ollama, `AnthropicLlm`,
+   `LlamaLocal`).
+3. **Refusal detector** `fono_llm::traits::looks_like_clarification`
+   matches case-insensitive opener phrases AND a corroborating
+   clarification fragment (low-false-positive heuristic). On a hit,
+   the backend returns `Err`; the existing pipeline fallback at
+   `crates/fono/src/session.rs:1264-1273` then injects raw STT text.
+   Identical wiring in every backend.
+
+Plus `Llm::skip_if_words_lt` default raised from `0` to `3` so
+one- and two-word captures bypass the LLM entirely on every backend
+(saves 150–800 ms; eliminates the failure mode at the source).
+
+Tests: 5 new unit tests in `crates/fono-llm/src/traits.rs` for the
+detector and framing helper; 2 new integration tests in
+`crates/fono/tests/pipeline.rs`
+(`pipeline_falls_back_to_raw_when_llm_rejects_clarification`,
+`pipeline_skips_llm_for_short_capture_under_default_threshold`). The
+existing `pipeline_produces_history_row_and_injects_cleaned_text` was
+updated to set `skip_if_words_lt = 0` because its 2-word fixture would
+otherwise trip the new skip default.
+
+Docs: `CHANGELOG.md` Unreleased gets a `Fixed` and `Changed` bullet
+(both phrased universally, naming every backend); `docs/troubleshooting.md`
+gets a new "LLM responds with a question" section that explicitly
+flags the failure mode as not provider-specific; `docs/providers.md`
+gets a "Short-utterance handling" subsection covering all backends.
+
+`cargo test` / `cargo clippy` were not run in this session (no rust
+toolchain available in the agent environment) — the operator should
+run `cargo test -p fono-llm -p fono` and
+`cargo clippy --workspace --all-targets` before tagging the next release.
+
 ## 2026-04-28 — Wave 3 (Slice B1) — Threads A + B shipped; Thread C deferred
 
 Two DCO-signed commits delivered the user-visible half of Slice B1

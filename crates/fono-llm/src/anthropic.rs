@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::traits::{FormatContext, TextFormatter};
+use crate::traits::{looks_like_clarification, user_prompt, FormatContext, TextFormatter};
 
 const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 
@@ -57,6 +57,7 @@ struct Block {
 impl TextFormatter for AnthropicLlm {
     async fn format(&self, raw: &str, ctx: &FormatContext) -> Result<String> {
         let system = ctx.system_prompt();
+        let user = user_prompt(raw);
         let req = Req {
             model: &self.model,
             // Latency plan L19 — short cleanup outputs.
@@ -66,7 +67,7 @@ impl TextFormatter for AnthropicLlm {
             system: &system,
             messages: vec![Message {
                 role: "user",
-                content: raw,
+                content: &user,
             }],
         };
         let res = self
@@ -85,14 +86,21 @@ impl TextFormatter for AnthropicLlm {
         }
         let parsed: Resp = serde_json::from_str(&body)
             .with_context(|| format!("parse anthropic response: {body}"))?;
-        Ok(parsed
+        let out = parsed
             .content
             .into_iter()
             .map(|b| b.text)
             .collect::<Vec<_>>()
             .join("")
             .trim()
-            .to_string())
+            .to_string();
+        if looks_like_clarification(&out) {
+            anyhow::bail!(
+                "anthropic LLM returned a clarification reply instead of a cleaned transcript; \
+                 falling back to raw text. response: {out:?}"
+            );
+        }
+        Ok(out)
     }
 
     fn name(&self) -> &'static str {

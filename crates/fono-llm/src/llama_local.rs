@@ -34,7 +34,7 @@ use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use tracing::{debug, info, warn};
 
-use crate::traits::{FormatContext, TextFormatter};
+use crate::traits::{looks_like_clarification, user_prompt, FormatContext, TextFormatter};
 
 /// Hard cap on tokens generated for a cleanup pass. Cleanup outputs are
 /// usually shorter than the input; capping bounds runtime on slow hardware
@@ -259,7 +259,7 @@ fn build_chatml_prompt(system: &str, user: &str) -> String {
 #[async_trait]
 impl TextFormatter for LlamaLocal {
     async fn format(&self, raw: &str, ctx: &FormatContext) -> Result<String> {
-        let prompt = build_chatml_prompt(&ctx.system_prompt(), raw);
+        let prompt = build_chatml_prompt(&ctx.system_prompt(), &user_prompt(raw));
         let me = self.clone_thin();
         let started = Instant::now();
         let text = tokio::task::spawn_blocking(move || -> Result<String> {
@@ -279,6 +279,12 @@ impl TextFormatter for LlamaLocal {
             );
         } else {
             debug!(elapsed_ms, "llama-local cleanup ok");
+        }
+        if looks_like_clarification(&text) {
+            anyhow::bail!(
+                "llama-local returned a clarification reply instead of a cleaned transcript; \
+                 falling back to raw text. response: {text:?}"
+            );
         }
         Ok(text)
     }

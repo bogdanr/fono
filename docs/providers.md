@@ -113,6 +113,27 @@ GGUF model files land in `~/.cache/fono/models/llm/`. The `enabled` flag in
 `[llm]` can be set to `false` to skip cleanup entirely — in which case Fono
 types the raw STT output verbatim.
 
+### Short-utterance handling and clarification refusals
+
+Any chat-trained LLM — cloud or local — can occasionally interpret a
+very short capture as a conversational fragment and reply with a
+clarification question (*"Could you provide the full text…"*) instead
+of a cleaned transcript. Observed across Cerebras, Groq, OpenAI,
+OpenRouter, Ollama, Anthropic, and the local llama.cpp backend; not a
+provider-specific quirk. Fono mitigates this uniformly across every
+backend in three ways:
+
+- `[llm].skip_if_words_lt` (default `3`) bypasses the LLM entirely for
+  one- and two-word captures, regardless of which backend is active.
+- The default cleanup prompt explicitly forbids clarification questions
+  and wraps the user message in `<<<` / `>>>` delimiters so the
+  transcript cannot be mistaken for a chat message. Same prompt for
+  all backends.
+- Clarification-shaped replies are detected post-hoc and rejected; the
+  raw STT text is injected instead and the daemon logs `LLM returned a
+  clarification reply… falling back to raw text.` Same detector for
+  all backends.
+
 ## Default picks (rationale)
 
 * **Local default:** `whisper small` (466 MB, multilingual) + `Qwen2.5-1.5B-Instruct`

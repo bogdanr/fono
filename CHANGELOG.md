@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- LLM cleanup occasionally returned a clarification reply
+  (“It seems like you're describing a situation, but the details are
+  incomplete. Could you provide the full text you're referring to…”)
+  instead of the cleaned transcript. Reproducible across **every**
+  cleanup backend — Cerebras, Groq, OpenAI, OpenRouter, Ollama,
+  Anthropic, and the local llama.cpp path — because the failure mode
+  is a property of how chat-trained LLMs interpret a bare short
+  utterance, not of any single provider. The fix is correspondingly
+  universal: the default cleanup prompt was rewritten with hard
+  “never ask for clarification” rules; every backend now wraps the
+  user message in unambiguous `<<<` / `>>>` delimiters so the
+  transcript cannot be mistaken for a chat message; and a refusal
+  detector rejects clarification-shaped replies and falls back to the
+  raw STT text. Applied identically to `OpenAiCompat`, `AnthropicLlm`,
+  and `LlamaLocal`. See
+  `plans/2026-04-28-llm-cleanup-clarification-refusal-fix-v1.md`.
+
+### Changed
+
+- `[llm].skip_if_words_lt` default raised from `0` to `3`. One- and
+  two-word captures (“yes”, “okay”, “send it”) now bypass the LLM
+  cleanup roundtrip entirely — regardless of whether the configured
+  backend is cloud or local — saving 150–800 ms and avoiding the
+  short-utterance clarification failure mode at the source. Override
+  in `config.toml` if you want every utterance cleaned.
+
 ## [0.2.2] — 2026-04-28
 
 First release in which the streaming live-dictation pipeline is

@@ -302,8 +302,14 @@ pub struct Llm {
     pub prompt: Prompt,
     /// Skip the LLM cleanup roundtrip when the raw STT output has
     /// fewer than this many words (whitespace-split). 0 = never skip.
-    /// Latency plan L9 — for short utterances (chat, search bars) the
-    /// LLM costs more than it cleans.
+    /// Latency plan L9 — for short utterances (chat, search bars,
+    /// quick push-to-talk taps) the LLM costs more than it cleans, and
+    /// chat-trained models (cloud or local alike) are also more likely
+    /// to misinterpret a short fragment as a question and respond with
+    /// a clarification ("Could you provide the full text?") instead of
+    /// a cleaned transcript. The default of 3 keeps the cleanup pass
+    /// for any sentence-shaped utterance while short-circuiting one-
+    /// and two-word captures regardless of which backend is active.
     pub skip_if_words_lt: u32,
 }
 
@@ -319,7 +325,7 @@ impl Default for Llm {
             local: LlmLocal::default(),
             cloud: None,
             prompt: Prompt::default(),
-            skip_if_words_lt: 0,
+            skip_if_words_lt: 3,
         }
     }
 }
@@ -388,11 +394,29 @@ impl Default for Prompt {
 }
 
 /// Baked-in default main prompt (Phase 5 Task 5.5).
+///
+/// The hard rules at the top exist to stop chat-trained LLMs (cloud or
+/// local: Cerebras / Groq Llama-3.3-70B, gpt-4o-mini, Claude Haiku, the
+/// local llama.cpp backend, …) from responding with clarification
+/// questions like *"Could you provide the full text you're referring
+/// to?"* on short or ambiguous captures. The failure mode is a property
+/// of chat fine-tuning, not of any specific provider, so this prompt is
+/// applied identically across every `TextFormatter` impl. Tested
+/// against the bug report in
+/// `plans/2026-04-28-llm-cleanup-clarification-refusal-fix-v1.md`.
 pub const fn default_prompt_main() -> &'static str {
-    "You are a transcription cleanup assistant. Given raw speech-to-text output, return the \
-same text with filler words removed (um, uh, like), proper punctuation and capitalization \
-added, and obvious stutters collapsed. Preserve the speaker's language and tone exactly — \
-do not translate, summarise, or add content. Output only the cleaned text with no commentary."
+    "You are a transcription cleanup post-processor, not a chat assistant. The user message \
+between the <<< and >>> markers is a raw speech-to-text transcript. Your only job is to \
+return that transcript with filler words removed (um, uh, like), proper punctuation and \
+capitalization added, and obvious stutters collapsed. Preserve the speaker's language and \
+tone exactly — do not translate, summarise, explain, or add content.\n\n\
+Hard rules:\n\
+- Output ONLY the cleaned transcript text. No quotes, no markdown, no preamble, no commentary.\n\
+- NEVER ask the user for clarification or more context. NEVER respond with a question, an \
+apology, or a meta-comment about the input.\n\
+- If the transcript is short, ambiguous, a single word, empty, or already clean, return it \
+verbatim (with at most punctuation/capitalization fixes). Do not invent missing content.\n\
+- Do not include the <<< or >>> markers in your output."
 }
 
 /// Baked-in default advanced prompt (Phase 5 Task 5.5).
