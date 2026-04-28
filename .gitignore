@@ -21,3 +21,6 @@ secrets.toml
 
 # Logs
 *.log
+# Vim swap/undo files at repo root
+.*.un~
+*~

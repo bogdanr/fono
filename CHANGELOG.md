@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Cloud equivalence gate at release time: a new `cloud-equivalence`
+  job in `.github/workflows/release.yml` calls Groq's
+  `whisper-large-v3-turbo` against the existing multilingual fixture
+  set (en × 4, ro × 3, es × 1, fr × 1, zh × 1; ~110 audio-seconds
+  total) and diffs the per-fixture verdicts against a committed
+  baseline at `docs/bench/baseline-cloud-groq.json`. Blocks artefact
+  production on failure. Auto-skipped when `GROQ_API_KEY` is unset
+  (forks, bootstrap tags) or the tag carries the `-no-cloud-gate`
+  suffix (operator escape hatch). Cost per release: < 0.5 % of
+  Groq's free-tier daily cap. See ADR
+  [`0021-cloud-equivalence-via-real-api.md`](docs/decisions/0021-cloud-equivalence-via-real-api.md)
+  and `docs/dev/release-checklist.md`.
+- `fono-bench equivalence --stt groq` accepts cloud Groq as an STT
+  backend. Reads `GROQ_API_KEY` from env; default model
+  `whisper-large-v3-turbo`, overridable via `--model`. New
+  `--rate-limit-ms <ms>` flag (default 250 ms for `--stt groq`, 0
+  otherwise) paces requests under Groq's 30-req/min ceiling. HTTP
+  429 is a hard fail with code 3 and an explanatory message; never
+  retried.
+- New `docs/dev/release-checklist.md` documenting the bootstrap
+  command for the cloud-equivalence baseline, the regenerate
+  conditions, and the `-no-cloud-gate` override.
+
 ### Fixed
 
 - LLM cleanup occasionally returned a clarification reply

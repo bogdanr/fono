@@ -12,10 +12,11 @@ The home page is [fono.page](https://fono.page).
 
 ## In progress
 
-- **Faster, safer release process.** Make sure every change to the
-  cloud transcription path keeps working the way it did, on every pull
-  request, without spending money on real cloud calls. This is the
-  last piece holding back the **v0.3.0** release.
+- **Bootstrap the cloud-equivalence baseline.** The release-time
+  Groq equivalence gate is wired into CI; the maintainer needs to run
+  it once locally to capture the per-fixture verdict baseline that
+  future releases diff against. After this one-time step the gate is
+  fully automatic and **v0.3.0** is ready to tag.
 
 ## Planned — next
 
@@ -65,6 +66,13 @@ The home page is [fono.page](https://fono.page).
 
 Newest first. Each entry says which release carried it.
 
+- **Release-time cloud quality gate.** Before producing release
+  artefacts, every tag now runs the existing multilingual fixture set
+  (English, Romanian, Spanish, French, Chinese) through Groq's cloud
+  Whisper and refuses to publish if any fixture's verdict diverges
+  from the committed baseline. Catches both our regressions and
+  upstream provider changes (schema drift, model deprecations) within
+  minutes of tagging. — *Queued for v0.3.0.*
 - **Cloud transcription that learns your language.** If your cloud
   provider occasionally mishears your accent (e.g. flags English as
   Russian), Fono now self-corrects after the first mistake and gets

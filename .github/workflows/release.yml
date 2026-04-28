@@ -21,8 +21,72 @@ env:
 # attach SHA256SUMS.minisig to the draft release.
 
 jobs:
+  cloud-equivalence:
+    name: Cloud STT equivalence (Groq)
+    runs-on: ubuntu-latest
+    # Skip when:
+    #   * the GROQ_API_KEY repo secret is unset (forks; bootstrap tags
+    #     before the maintainer adds the key);
+    #   * the tag carries the `-no-cloud-gate` suffix (operator escape
+    #     hatch for "Groq is down" or non-STT security fixes).
+    if: >-
+      ${{ secrets.GROQ_API_KEY != ''
+          && !endsWith(github.ref, '-no-cloud-gate') }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cloud-equivalence
+
+      - name: Install Linux build deps
+        # fono-bench depends transitively on fono-stt + fono-llm; clang
+        # / cmake are needed by whisper-rs-sys even though we only run
+        # the cloud Groq backend (the binary still has to link).
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential clang cmake pkg-config libclang-dev libasound2-dev
+
+      - name: Run live Groq equivalence
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          set -euo pipefail
+          cargo run --release -p fono-bench --features equivalence -- \
+            equivalence \
+              --stt groq \
+              --output cloud-bench.json \
+              --baseline \
+              --no-legend
+
+      - name: Diff against committed baseline
+        run: |
+          python3 .github/scripts/diff-cloud-bench.py \
+            cloud-bench.json \
+            docs/bench/baseline-cloud-groq.json
+
+      - name: Upload report (always, for debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-bench-${{ github.ref_name }}
+          path: cloud-bench.json
+          retention-days: 30
+
   build:
     name: build (${{ matrix.target }})
+    needs: [cloud-equivalence]
+    # Run even when cloud-equivalence is skipped (no key, override
+    # tag) — `needs` defaults to "succeeded()", which fails on
+    # skipped jobs. The explicit condition allows skipped+success.
+    if: >-
+      ${{ always()
+          && (needs.cloud-equivalence.result == 'success'
+              || needs.cloud-equivalence.result == 'skipped') }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

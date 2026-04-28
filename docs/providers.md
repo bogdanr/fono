@@ -65,6 +65,14 @@ fono keys check                  # reachability probe per key
 Whisper model files land in `~/.cache/fono/models/whisper/ggml-<name>.bin`.
 Override the download host with `FONO_MODEL_MIRROR=https://your.mirror`.
 
+> **Note for CI / forks.** `GROQ_API_KEY` is also consumed by the
+> release-time cloud equivalence gate (`.github/workflows/release.yml`'s
+> `cloud-equivalence` job). The job is auto-skipped on tags pushed
+> from forks (where the secret is not exposed) and on tags carrying
+> the `-no-cloud-gate` suffix. End users do not need to set this for
+> normal Fono usage; it's only consumed by your own CI when *you*
+> tag a release. See `docs/dev/release-checklist.md`.
+
 ### Groq streaming dictation (pseudo-stream)
 
 Groq has no native streaming endpoint today. Fono ships an opt-in

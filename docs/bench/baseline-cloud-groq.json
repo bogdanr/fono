@@ -1,0 +1,249 @@
+{
+  "fono_version": "0.2.2",
+  "model_capabilities": {
+    "english_only": false,
+    "model_label": "whisper-large-v3-turbo"
+  },
+  "pinned_params": {
+    "chunk_ms_initial": 600,
+    "chunk_ms_steady": 1500,
+    "commit_dangling_words": [
+      "and",
+      "but",
+      "or",
+      "so",
+      "because",
+      "the",
+      "a",
+      "an",
+      "of",
+      "to",
+      "with",
+      "for",
+      "in",
+      "on",
+      "at",
+      "from"
+    ],
+    "commit_filler_words": [
+      "um",
+      "uh",
+      "er",
+      "ah",
+      "mm",
+      "like",
+      "you know"
+    ],
+    "commit_hold_on_filler": true,
+    "commit_prosody_extend_ms": 250,
+    "commit_punct_extend_ms": 150,
+    "commit_use_prosody": false,
+    "commit_use_punctuation_hint": true,
+    "eou_drain_extended_ms": 1500
+  },
+  "results": [
+    {
+      "fixture": "en-single-sentence",
+      "language": "en",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.043478261679410934,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": " neglected. The art of war, then, is governed by five constant factors"
+        },
+        "streaming": null
+      },
+      "note": "per-fixture equiv threshold 1; per-fixture acc threshold 1",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    },
+    {
+      "fixture": "en-multi-sentence",
+      "language": "en",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.03375527262687683,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": " neglected the art of war then is governed by five constant factors to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field these are one the moral law two heaven three earth"
+        },
+        "streaming": null
+      },
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    },
+    {
+      "fixture": "en-narrative-pause",
+      "language": "en",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.04897959157824516,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": " that Jane was yielding to the preference which she had begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general, saying,"
+        },
+        "streaming": null
+      },
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    },
+    {
+      "fixture": "en-conversational",
+      "language": "en",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.0,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": " encouragement. In nine cases out of ten, a woman had better show more affection than she feels. Bingley likes your sister undoubtedly, but he may never do more than"
+        },
+        "streaming": null
+      },
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    },
+    {
+      "fixture": "es-lorca-reyerta",
+      "language": "es",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.0357142873108387,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": " tocando viene por un anfibio sendero de cristales y laureles el silencio sin estrellas huyendo del sonsonete"
+        },
+        "streaming": null
+      },
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.3",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    },
+    {
+      "fixture": "fr-gide-symphonie",
+      "language": "fr",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.095238097012043,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": " à gertrude j'avais dû apprendre moi-même l'alphabet des aveugles mais bientôt elle devint beaucoup plus habile que moi à lire cette écriture où j'avais assez de peine à me"
+        },
+        "streaming": null
+      },
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.3",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    },
+    {
+      "fixture": "zh-luxun-kuangren",
+      "language": "zh",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.5789473652839661,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": "劳君远道来事然依早遇赴某地后补义应大笑出示日记二册未可见当日病状"
+        },
+        "streaming": null
+      },
+      "note": "per-fixture equiv threshold 1; per-fixture acc threshold 1",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    },
+    {
+      "fixture": "ro-talcuirea-matei",
+      "language": "ro",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.2281879186630249,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": " I-a urmat lui Saul, cel lepădat de la Dumnezeu și urât, așa și Hristul, după ce s-a lipsit Adam de împărăția și domnia pe care o avea asupra tuturor,"
+        },
+        "streaming": null
+      },
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.3",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    },
+    {
+      "fixture": "ro-man",
+      "language": "ro",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.10582010447978973,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": " La învățământul de zi, durata normală a studiilor universitare de licență este de 3-4 ani și corespunde unui număr de 60 de credite de studii transferabile pentru un an de studiu."
+        },
+        "streaming": null
+      },
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.3",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    },
+    {
+      "fixture": "ro-woman",
+      "language": "ro",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.024242423474788666,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": " Ea a subliniat cât de periculoasă este de fapt situația, într-un cât un număr atât de restrâns de persoane are la degetul mic o asemenea putere economică și nu numai"
+        },
+        "streaming": null
+      },
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.3",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    }
+  ],
+  "stt_backend": "groq:whisper-large-v3-turbo",
+  "threshold_levenshtein": 0.05000000074505806,
+  "tier": "tier1"
+}

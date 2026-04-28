@@ -2,6 +2,61 @@
 
 Last updated: 2026-04-28
 
+## 2026-04-28 — Wave 3 Slice B1 Thread C: live Groq equivalence gate
+
+Plan: `plans/2026-04-28-wave-3-slice-b1-thread-c-live-groq-v2.md`
+(supersedes the cloud-mock approach in v1 Tasks C1–C9). User pushed
+back on mocks: they catch our regressions but not upstream Groq
+schema/behaviour changes, and the maintenance cost of refreshing
+recordings is recurring.
+
+What landed:
+
+- `fono-bench equivalence --stt groq` arm at
+  `crates/fono-bench/src/bin/fono-bench.rs:327-364`. Reads
+  `GROQ_API_KEY` from env (exits with code 2 + bootstrap-friendly
+  message when missing). Default model `whisper-large-v3-turbo`,
+  overridable via `--model`. `caps.english_only = false`
+  (multilingual).
+- `--rate-limit-ms <ms>` flag with provider-aware default (250 ms for
+  Groq, 0 otherwise). 429 detection + hard-fail with code 3 and a
+  named-fixture message; never retried.
+- `.github/workflows/release.yml` gains a `cloud-equivalence` job
+  that runs **before** the build matrix. Auto-skipped when
+  `GROQ_API_KEY` is empty (forks; bootstrap tags) or the tag carries
+  the `-no-cloud-gate` suffix (operator escape hatch). `build` job
+  uses `if: always() && (success || skipped)` so skip propagates
+  cleanly without blocking releases that pre-date the secret.
+- `.github/scripts/diff-cloud-bench.py` — exit code 1 on verdict
+  divergence, exit code 2 on missing baseline (with the exact
+  bootstrap command printed to stderr), exit code 0 on match.
+- ADR `docs/decisions/0021-cloud-equivalence-via-real-api.md`
+  records the live-vs-mock decision and the cost-shape analysis (10
+  fixtures, ~110 audio-seconds, < 0.5 % of free-tier daily cap).
+- `docs/dev/release-checklist.md` — bootstrap command, regenerate
+  conditions, override-tag instructions, manual-rerun-after-outage
+  steps.
+- `CHANGELOG.md` Unreleased Added entries; `ROADMAP.md` In progress
+  flipped to "bootstrap the baseline" + new Shipped entry.
+
+Operator owes (one-time): bootstrap the baseline locally. The diff
+script prints the command on the first CI run if you'd rather see it
+fail-soft once before running locally:
+
+```sh
+GROQ_API_KEY=gsk_... \
+  cargo run --release -p fono-bench --features equivalence -- \
+  equivalence --stt groq \
+    --output docs/bench/baseline-cloud-groq.json \
+    --baseline --no-legend
+```
+
+Sanity-check the resulting JSON, commit it, and `v0.3.0` is ready to
+tag.
+
+Build verified: `cargo build -p fono-bench --features equivalence`
+compiles clean.
+
 ## 2026-04-28 — Multi-language STT, no primary, in-memory stickiness
 
 Plan: `plans/2026-04-28-multi-language-stt-no-primary-v3.md`. User

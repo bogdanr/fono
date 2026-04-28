@@ -171,6 +171,13 @@ struct EquivalenceArgs {
     /// part of the contract. See `docs/bench/README.md`.
     #[arg(long, default_value_t = false)]
     baseline: bool,
+
+    /// Sleep this many milliseconds between fixtures. Useful with
+    /// `--stt groq` to stay comfortably under the free-tier
+    /// rate-limit (30 req/min). 0 = no sleep. Default 250 ms when
+    /// `--stt groq`, 0 otherwise.
+    #[arg(long)]
+    rate_limit_ms: Option<u64>,
 }
 
 #[tokio::main]
@@ -324,10 +331,49 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
             };
             Arc::new(FakeStt::new("the quick brown fox jumps over the lazy dog"))
         }
+        "groq" => {
+            #[cfg(feature = "groq")]
+            {
+                let key = match std::env::var("GROQ_API_KEY") {
+                    Ok(k) if !k.is_empty() => k,
+                    _ => {
+                        eprintln!(
+                            "fono-bench equivalence --stt groq: GROQ_API_KEY not set.\n\
+                             Set it in your shell (`export GROQ_API_KEY=gsk_...`) or in CI \
+                             (repo Settings → Secrets and variables → Actions)."
+                        );
+                        std::process::exit(2);
+                    }
+                };
+                // Default model = whisper-large-v3-turbo (Groq's lowest-latency
+                // multilingual Whisper). `--model` can override.
+                let model = if args.model.is_empty() || args.model == "tiny.en" {
+                    "whisper-large-v3-turbo".to_string()
+                } else {
+                    args.model.clone()
+                };
+                stt_backend_name = format!("groq:{model}");
+                // Groq's Whisper is multilingual.
+                caps = ModelCapabilities {
+                    english_only: false,
+                    model_label: model.clone(),
+                };
+                Arc::new(fono_stt::groq::GroqStt::with_model(key, model))
+            }
+            #[cfg(not(feature = "groq"))]
+            {
+                eprintln!(
+                    "fono-bench equivalence: built without --features groq.\n\
+                     Rebuild with `cargo build -p fono-bench --features equivalence,groq`."
+                );
+                std::process::exit(2);
+            }
+        }
         other => {
             return Err(anyhow!(
-                "unsupported --stt {other:?}; Slice A supports `local` (or `fake` for harness shape testing). \
-                 Cloud streaming rows of R18 land in Slice B."
+                "unsupported --stt {other:?}; supported: `local` (whisper.cpp), \
+                 `groq` (cloud Whisper-large-v3-turbo via GROQ_API_KEY), \
+                 `fake` (harness shape testing)."
             ));
         }
     };
@@ -351,6 +397,17 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
 
     let quick = if args.quick { Some(5.0_f32) } else { None };
 
+    // Inter-fixture pacing — defaults to 250 ms for cloud Groq, 0 for
+    // anything else. Burns less than 3 s of wall time over our current
+    // 10-fixture set and keeps us comfortably under Groq's 30 req/min.
+    let rate_limit_ms = args.rate_limit_ms.unwrap_or_else(|| {
+        if args.stt == "groq" {
+            250
+        } else {
+            0
+        }
+    });
+
     // Progress bar: 2 steps per fixture (batch pass + streaming pass).
     let total_steps = manifest.fixtures.len() as u64 * 2;
     let pb = ProgressBar::new(total_steps);
@@ -366,6 +423,10 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
     for (i, fx) in manifest.fixtures.iter().enumerate() {
         let fixture_num = i + 1;
         let total = manifest.fixtures.len();
+
+        if i > 0 && rate_limit_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(rate_limit_ms)).await;
+        }
 
         pb.set_message(format!("{}/{} {} — batch", fixture_num, total, fx.name));
         pb.tick();
@@ -393,7 +454,22 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
             }
             Err(e) => {
                 pb.inc(2);
-                warn!("fixture {} failed: {e:#}", fx.name);
+                let msg = format!("{e:#}");
+                // Hard-fail on rate-limit: explanatory exit so a release
+                // bumping into the cap gets a clear signal instead of
+                // looping. Recovery is "merge later"; not the harness's
+                // job to retry.
+                if msg.contains("429") || msg.to_lowercase().contains("rate limit") {
+                    eprintln!(
+                        "fono-bench equivalence: hit Groq rate limit on fixture {}.\n\
+                         Wait an hour and re-run, or push the tag with the \
+                         `-no-cloud-gate` suffix to bypass.\n\
+                         Underlying error: {msg}",
+                        fx.name
+                    );
+                    std::process::exit(3);
+                }
+                warn!("fixture {} failed: {msg}", fx.name);
                 report.results.push(fono_bench::EquivalenceResult {
                     fixture: fx.name.clone(),
                     language: fx.language.clone(),
