@@ -117,17 +117,24 @@ pub struct General {
     /// showing the dictated text. Default `true` so users always have
     /// feedback even when injection silently fails.
     pub notify_on_dictation: bool,
-    /// Cloud STT only: when [`General::languages`] has > 1 entry,
-    /// send the primary code on the first request rather than letting
-    /// the provider auto-detect. Default `false`.
+    /// **Deprecated** (plan v3). Cloud STT only: when
+    /// [`General::languages`] has > 1 entry, force `fallback_hint()`
+    /// on the first request rather than letting the provider
+    /// auto-detect. v3 supersedes this with cache-as-rerun-target;
+    /// scheduled for removal in v0.5. Default `false`.
+    #[deprecated(note = "see plan v3 — superseded by in-memory language cache (lang_cache.rs)")]
     pub cloud_force_primary_language: bool,
-    /// Cloud STT only: if the provider returns a language outside the
-    /// allow-list, re-issue the same audio with the primary code
-    /// forced. Costs an extra round-trip per mismatch. Default
-    /// `false`.
+    /// Cloud STT only: when the provider returns a banned language
+    /// **and** the in-memory language cache holds a previously-
+    /// observed peer code for this backend, re-issue the request
+    /// with that code forced. Cold-start (empty cache) accepts the
+    /// unforced response and lets the cache populate from the next
+    /// correct detection. Default `true` (plan v3); set to `false`
+    /// to skip the rerun unconditionally for cost-sensitive setups.
     pub cloud_rerun_on_language_mismatch: bool,
 }
 
+#[allow(deprecated)]
 impl Default for General {
     fn default() -> Self {
         Self {
@@ -140,7 +147,7 @@ impl Default for General {
             also_copy_to_clipboard: true,
             notify_on_dictation: true,
             cloud_force_primary_language: false,
-            cloud_rerun_on_language_mismatch: false,
+            cloud_rerun_on_language_mismatch: true,
         }
     }
 }

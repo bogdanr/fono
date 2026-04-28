@@ -10,10 +10,32 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use fono_core::config::{General, Stt, SttBackend, SttCloud};
+use fono_core::locale::detect_os_languages;
 use fono_core::providers::stt_key_env;
 use fono_core::Secrets;
 
+use crate::lang_cache::LanguageCache;
 use crate::traits::SpeechToText;
+
+/// Best-effort: seed the global language cache for `backend_key`
+/// from the OS locale, but only if the detected code is in
+/// `allow_list`. No-ops once the cache is populated. Plan v3 task 3.
+fn bootstrap_language_cache(allow_list: &[String], backend_key: &'static str) {
+    if allow_list.len() < 2 {
+        return; // single-language / auto: no peer set to disambiguate
+    }
+    let cache = LanguageCache::global();
+    let allow_lc: Vec<String> = allow_list
+        .iter()
+        .map(|c| c.trim().to_ascii_lowercase())
+        .collect();
+    for code in detect_os_languages() {
+        if allow_lc.iter().any(|c| c == &code) {
+            cache.seed_if_empty(backend_key, code);
+            return;
+        }
+    }
+}
 
 /// Resolve the effective `(api_key_ref, model)` pair for a cloud STT
 /// backend. When `cfg.cloud` is missing, fall through to the canonical
@@ -79,6 +101,7 @@ pub fn build_stt(
     whisper_models_dir: &Path,
 ) -> Result<Arc<dyn SpeechToText>> {
     let languages = effective_languages(cfg, general);
+    #[allow(deprecated)]
     let cloud_force_primary = general.cloud_force_primary_language;
     let cloud_rerun = general.cloud_rerun_on_language_mismatch;
     match &cfg.backend {
@@ -160,6 +183,7 @@ fn build_groq(
     cloud_rerun: bool,
 ) -> Result<Arc<dyn SpeechToText>> {
     let (key, model) = resolve_cloud(cfg, secrets, &SttBackend::Groq, "groq")?;
+    bootstrap_language_cache(&languages, crate::groq::BACKEND_KEY);
     Ok(Arc::new(
         crate::groq::GroqStt::with_model(key, model)
             .with_languages(languages)
@@ -190,6 +214,7 @@ fn build_openai(
     cloud_rerun: bool,
 ) -> Result<Arc<dyn SpeechToText>> {
     let (key, model) = resolve_cloud(cfg, secrets, &SttBackend::OpenAI, "openai")?;
+    bootstrap_language_cache(&languages, crate::openai::BACKEND_KEY);
     Ok(Arc::new(
         crate::openai::OpenAiStt::with_model(key, model)
             .with_languages(languages)
@@ -226,6 +251,7 @@ pub fn build_streaming_stt(
     whisper_models_dir: &Path,
 ) -> Result<Option<Arc<dyn crate::streaming::StreamingStt>>> {
     let _ = secrets;
+    #[allow(deprecated)]
     let cloud_force_primary = general.cloud_force_primary_language;
     let cloud_rerun = general.cloud_rerun_on_language_mismatch;
     let cloud_streaming = cfg.cloud.as_ref().is_some_and(|c| c.streaming);
@@ -260,6 +286,7 @@ fn build_groq_streaming(
     cloud_rerun: bool,
 ) -> Result<Arc<dyn crate::streaming::StreamingStt>> {
     let (key, model) = resolve_cloud(cfg, secrets, &SttBackend::Groq, "groq")?;
+    bootstrap_language_cache(&languages, crate::groq::BACKEND_KEY);
     Ok(Arc::new(
         crate::groq_streaming::GroqStreaming::new(key, model)
             .with_languages(languages)

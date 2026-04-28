@@ -24,8 +24,9 @@ use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::groq::{groq_post_wav, warm_client, GroqResponse};
+use crate::groq::{groq_post_wav, warm_client, GroqResponse, BACKEND_KEY};
 use crate::lang::LanguageSelection;
+use crate::lang_cache::LanguageCache;
 use crate::streaming::{LocalAgreement, StreamFrame, StreamingStt, TranscriptUpdate};
 
 /// Trailing audio window (in samples at 16 kHz) we re-POST on each
@@ -69,6 +70,7 @@ pub struct GroqStreaming {
     languages: Vec<String>,
     cloud_force_primary: bool,
     cloud_rerun_on_mismatch: bool,
+    lang_cache: Arc<LanguageCache>,
     /// Diagnostic counter — incremented every time a 700 ms cadence
     /// tick wanted to fire a preview but found the prior request
     /// still in flight. Surfaced via [`Self::preview_skipped_count`]
@@ -98,6 +100,7 @@ impl GroqStreaming {
             languages: Vec::new(),
             cloud_force_primary: false,
             cloud_rerun_on_mismatch: false,
+            lang_cache: LanguageCache::global(),
             preview_skipped_count: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -113,6 +116,7 @@ impl GroqStreaming {
             languages: Vec::new(),
             cloud_force_primary: false,
             cloud_rerun_on_mismatch: false,
+            lang_cache: LanguageCache::global(),
             preview_skipped_count: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -133,12 +137,19 @@ impl GroqStreaming {
         self
     }
 
-    /// Builder: re-issue the request with the primary code if the
+    /// Builder: re-issue the request with a cached peer code if the
     /// provider returned a banned language (finalize lane only —
     /// preview lane skips re-runs to keep cadence tight).
     #[must_use]
     pub fn with_cloud_rerun_on_mismatch(mut self, on: bool) -> Self {
         self.cloud_rerun_on_mismatch = on;
+        self
+    }
+
+    /// Builder: inject a specific language cache (tests + bench).
+    #[must_use]
+    pub fn with_lang_cache(mut self, cache: Arc<LanguageCache>) -> Self {
+        self.lang_cache = cache;
         self
     }
 
@@ -171,6 +182,7 @@ impl StreamingStt for GroqStreaming {
         let selection = self.effective_selection(lang.as_deref());
         let cloud_force_primary = self.cloud_force_primary;
         let cloud_rerun_on_mismatch = self.cloud_rerun_on_mismatch;
+        let lang_cache = Arc::clone(&self.lang_cache);
         let started = Instant::now();
         // In-flight cap = 1 for the *preview* lane: an AtomicBool that
         // the frame loop swap-sets before spawning a preview request,
@@ -189,7 +201,7 @@ impl StreamingStt for GroqStreaming {
             LanguageSelection::Forced(c) => Some(c.clone()),
             LanguageSelection::AllowList(_) => {
                 if cloud_force_primary {
-                    selection.primary().map(str::to_string)
+                    selection.fallback_hint().map(str::to_string)
                 } else {
                     None
                 }
@@ -291,26 +303,34 @@ impl StreamingStt for GroqStreaming {
                             let req = (request_fn)(wav.clone(), first_pass_lang.clone());
                             match req.await {
                                 Ok(mut resp) => {
-                                    // Allow-list post-validation +
-                                    // optional rerun. Mirrors the
-                                    // batch path at groq.rs:130-159.
+                                    // Allow-list post-validation. Plan v3:
+                                    // cache-as-rerun-target. On in-list
+                                    // detection, record. On banned + cache
+                                    // hit, rerun with cached code. Cold
+                                    // start (cache empty) accepts the
+                                    // unforced response.
                                     if let LanguageSelection::AllowList(_) = &selection {
                                         if let Some(detected) = resp.language.as_deref() {
-                                            if !selection.contains(detected) {
-                                                let primary = selection.primary().unwrap_or("");
-                                                if cloud_rerun_on_mismatch && !primary.is_empty() {
+                                            if selection.contains(detected) {
+                                                lang_cache.record(BACKEND_KEY, detected);
+                                            } else if cloud_rerun_on_mismatch {
+                                                if let Some(cached) = lang_cache.get(BACKEND_KEY) {
                                                     tracing::warn!(
                                                         "groq returned banned language \
                                                          {detected:?} on finalize; \
-                                                         re-issuing with language={primary}"
+                                                         re-issuing with cached language={cached}"
                                                     );
-                                                    let req2 = (request_fn)(
-                                                        wav,
-                                                        Some(primary.to_string()),
-                                                    );
+                                                    let req2 =
+                                                        (request_fn)(wav, Some(cached.clone()));
                                                     if let Ok(retried) = req2.await {
                                                         resp = retried;
                                                     }
+                                                } else {
+                                                    tracing::debug!(
+                                                        "groq finalize: banned language \
+                                                         {detected:?}, cache empty; \
+                                                         accepting unforced response"
+                                                    );
                                                 }
                                             }
                                         }

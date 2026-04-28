@@ -285,6 +285,17 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                 let status = Arc::clone(&update_status);
                 Arc::new(move || update_label(&status)) as fono_tray::UpdateProvider
             },
+            {
+                // Languages provider for the "Languages" submenu (plan
+                // v3 task 8). Polled every ~2 s; reflects whatever is
+                // currently in `general.languages` after `Reload`.
+                let config_path = paths.config_file();
+                Arc::new(move || {
+                    fono_core::Config::load(&config_path)
+                        .map(|c| c.general.languages)
+                        .unwrap_or_default()
+                }) as fono_tray::LanguagesProvider
+            },
         );
         (Some(t), rx)
     };
@@ -512,6 +523,10 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                     }
                     TrayAction::ApplyUpdate => {
                         apply_update_via_tray(Arc::clone(&update_status_tray)).await;
+                    }
+                    TrayAction::ClearLanguageMemory => {
+                        fono_stt::LanguageCache::global().clear();
+                        info!("language memory cleared via tray");
                     }
                 }
             }

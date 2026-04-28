@@ -2,17 +2,21 @@
 //! OpenAI STT backend (whisper-1 / gpt-4o-transcribe). Compatible JSON shape
 //! with Groq for the text field.
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use reqwest::multipart;
 use serde::Deserialize;
 
 use crate::lang::LanguageSelection;
+use crate::lang_cache::LanguageCache;
 use crate::traits::{SpeechToText, Transcription};
 
 const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/audio/transcriptions";
 const OPENAI_MODELS_ENDPOINT: &str = "https://api.openai.com/v1/models";
 const DEFAULT_MODEL: &str = "whisper-1";
+pub(crate) const BACKEND_KEY: &str = "openai";
 
 pub struct OpenAiStt {
     api_key: String,
@@ -21,6 +25,7 @@ pub struct OpenAiStt {
     languages: Vec<String>,
     cloud_force_primary: bool,
     cloud_rerun_on_mismatch: bool,
+    lang_cache: Arc<LanguageCache>,
 }
 
 impl OpenAiStt {
@@ -35,6 +40,7 @@ impl OpenAiStt {
             languages: Vec::new(),
             cloud_force_primary: false,
             cloud_rerun_on_mismatch: false,
+            lang_cache: LanguageCache::global(),
         }
     }
 
@@ -53,6 +59,12 @@ impl OpenAiStt {
     #[must_use]
     pub fn with_cloud_rerun_on_mismatch(mut self, on: bool) -> Self {
         self.cloud_rerun_on_mismatch = on;
+        self
+    }
+
+    #[must_use]
+    pub fn with_lang_cache(mut self, cache: Arc<LanguageCache>) -> Self {
+        self.lang_cache = cache;
         self
     }
 
@@ -113,7 +125,7 @@ impl SpeechToText for OpenAiStt {
             LanguageSelection::Forced(c) => Some(c.clone()),
             LanguageSelection::AllowList(_) => {
                 if self.cloud_force_primary {
-                    selection.primary().map(str::to_string)
+                    selection.fallback_hint().map(str::to_string)
                 } else {
                     None
                 }
@@ -124,25 +136,29 @@ impl SpeechToText for OpenAiStt {
 
         if let LanguageSelection::AllowList(_) = &selection {
             if let Some(detected) = parsed.language.as_deref() {
-                if !selection.contains(detected) {
-                    let primary = selection.primary().unwrap_or("");
-                    if self.cloud_rerun_on_mismatch && !primary.is_empty() {
+                if selection.contains(detected) {
+                    self.lang_cache.record(BACKEND_KEY, detected);
+                } else if self.cloud_rerun_on_mismatch {
+                    if let Some(cached) = self.lang_cache.get(BACKEND_KEY) {
                         tracing::warn!(
                             "openai returned banned language {detected:?} (allow-list \
-                             {:?}); re-issuing with language={primary}",
+                             {:?}); re-issuing with cached language={cached}",
                             self.languages
                         );
-                        let retried = self.do_request(&wav, Some(primary)).await?;
+                        let retried = self.do_request(&wav, Some(&cached)).await?;
                         return Ok(Transcription {
                             text: retried.text,
-                            language: retried.language.or_else(|| Some(primary.to_string())),
+                            language: retried.language.or(Some(cached)),
                             duration_ms: None,
                         });
                     }
-                    tracing::warn!(
-                        "openai detected language {detected:?} is outside the allow-list \
-                         {:?}; accepting transcript as-is",
-                        self.languages
+                    tracing::debug!(
+                        "openai detected banned language {detected:?}; cache empty, \
+                         accepting unforced response"
+                    );
+                } else {
+                    tracing::debug!(
+                        "openai detected banned language {detected:?}; rerun disabled"
                     );
                 }
             }
@@ -153,7 +169,7 @@ impl SpeechToText for OpenAiStt {
         let language = parsed
             .language
             .or_else(|| first_pass_lang.clone())
-            .or_else(|| selection.primary().map(str::to_string));
+            .or_else(|| selection.fallback_hint().map(str::to_string));
 
         Ok(Transcription {
             text: parsed.text,

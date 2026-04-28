@@ -2,6 +2,107 @@
 
 Last updated: 2026-04-28
 
+## 2026-04-28 — Multi-language STT, no primary, in-memory stickiness
+
+Plan: `plans/2026-04-28-multi-language-stt-no-primary-v3.md`. User
+report: Groq's `whisper-large-v3-turbo` frequently misclassifies the
+user's accented English as Russian. Wanted a fix that (a) keeps Fono
+lightweight on cloud-only builds, (b) handles bilingual switchers
+without breaking them, (c) avoids a "primary / secondary" UX, (d) uses
+OS hints rather than asking the user.
+
+Three earlier plan iterations explored and rejected: a local-Whisper
+"language bridge" (v1, contradicts cloud users' lightweight constraint),
+a cache-as-first-call-force (v2, breaks switchers — once stickiness
+pins the wrong language every following call is mangled), and a
+file-persisted cache (v2, marginal cold-start benefit + active harm
+when stale). v3 (executed here) is **rerun-target only, in-memory
+only, peer-symmetric**.
+
+What landed:
+
+- **`crates/fono-stt/src/lang_cache.rs`** — `LanguageCache` with
+  `record` / `get` / `seed_if_empty` / `clear`, keyed by backend
+  `&'static str`. Process-wide singleton via `LanguageCache::global()`
+  shared across batch + streaming variants. 8 unit tests.
+- **`crates/fono-core/src/locale.rs`** — POSIX → BCP-47 alpha-2 parser
+  (`LANG=ro_RO.UTF-8` → `Some("ro")`, `C` / `POSIX` / empty → `None`).
+  Used by both the cache bootstrap and the wizard.
+- **`LanguageSelection::primary()` renamed to `fallback_hint()`**
+  with a doc-comment that scope-restricts callers to single-language
+  transports. The old name is kept as `#[deprecated]` for one release.
+- **`groq.rs`, `openai.rs`, `groq_streaming.rs`** — first call is
+  unforced; the response's detected language is checked against the
+  allow-list; in-list → `cache.record()`; banned + cache populated +
+  rerun knob on → re-issue with `language=<cached>`; banned + cache
+  empty → accept unforced response, debug-log the skip.
+- **`cloud_rerun_on_language_mismatch` default flipped to `true`** in
+  `crates/fono-core/src/config.rs`. Combined with the cache, cloud STT
+  self-heals from one-off Turbo misfires after the first correctly
+  detected utterance per session (or immediately on cold start when OS
+  locale ∈ allow-list).
+- **`cloud_force_primary_language` deprecated** with a `#[deprecated]`
+  attribute on the field. Removed in v0.5.
+- **Wizard rework** in `crates/fono/src/wizard.rs` — checkbox-style
+  "Languages you dictate in" picker with English pre-checked but
+  freely uncheckable. Detected OS locale gets pre-checked alongside.
+  No "primary" anywhere in the copy.
+- **Tray Languages submenu** in `crates/fono-tray/src/lib.rs` —
+  read-only peer-list display + "Clear language memory" action that
+  emits `TrayAction::ClearLanguageMemory`; the daemon dispatcher at
+  `crates/fono/src/daemon.rs:524-530` calls
+  `LanguageCache::global().clear()`.
+- **ADR
+  [`docs/decisions/0017-cloud-stt-language-stickiness.md`](decisions/0017-cloud-stt-language-stickiness.md)**
+  records the rejection rationale for local-bridge / file-persisted /
+  cache-as-first-call / primary-secondary alternatives, so future
+  agents don't regress to one of them.
+- **`docs/providers.md`** — new "Multilingual STT and language
+  stickiness" section.
+- **`docs/troubleshooting.md`** — new "Cloud STT keeps detecting the
+  wrong language" section explaining cache, rerun, tray clear, config
+  edit recourses.
+- **`CHANGELOG.md`** — `Added` / `Changed` / `Deprecated` entries.
+
+### Switcher safety guarantee
+
+Two configs `general.languages = ["ro", "en"]` and `["en", "ro"]`
+behave identically at runtime — config order is consulted nowhere in
+the request path. The cache reflects what was last heard. Trace with
+`ro → en → en → ro` produces three correct transcripts and zero
+reruns; the switching cost is whatever the cloud provider's
+auto-detect already absorbs.
+
+### Owed verification (no Rust toolchain in this environment)
+
+```sh
+cargo test -p fono-stt -p fono-core -p fono
+cargo test --no-default-features --features tray,cloud-all -p fono-stt
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+The `--no-default-features --features tray,cloud-all` invocation
+verifies the slim cloud-only build still compiles without
+`whisper-rs`. Once green, commit with `git commit -s` per AGENTS.md
+DCO rule.
+
+### Deferred follow-ups (not blocking the user's bug fix)
+
+- **HTTP-mock switcher integration test for `groq.rs` and
+  `openai.rs`.** `groq_streaming.rs` already has `with_request_fn`
+  closure injection (Wave 3 Thread B); adding the same hook to the
+  batch backends is a small but separate refactor. Cache invariants
+  are already covered by the 8 unit tests in `lang_cache.rs`.
+- **Desktop toast on rerun.** Currently a `tracing::warn!` line ("groq
+  returned banned language … re-issuing with cached
+  language=<code>"). Promoting it to a `notify-rust` toast requires
+  adding `notify-rust` to `fono-stt` (it currently lives only in
+  `fono`); deferred to keep `fono-stt` notification-free.
+- **One-shot tray "Force next dictation as: <language>" radio.** The
+  Languages submenu currently exposes the read-only checkboxes and
+  "Clear language memory"; the per-utterance force radio (plan task
+  8 sub-bullet) is design-complete but unwired.
+
 ## 2026-04-28 — LLM cleanup clarification-refusal fix
 
 Bug report: a short utterance dictated through the cloud cleanup

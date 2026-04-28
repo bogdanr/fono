@@ -462,19 +462,19 @@ mod streaming_impl {
             return None;
         }
         let Ok(guard) = stt.ctx.lock() else {
-            return selection.primary().map(str::to_string);
+            return selection.fallback_hint().map(str::to_string);
         };
         let Some(ctx) = guard.as_ref() else {
-            return selection.primary().map(str::to_string);
+            return selection.fallback_hint().map(str::to_string);
         };
         match resolve_language(ctx, selection, pcm, stt.threads) {
             Ok(opt) => opt,
             Err(e) => {
                 tracing::warn!(
                     "lang_detect failed mid-stream ({e}); falling back to {:?}",
-                    selection.primary()
+                    selection.fallback_hint()
                 );
-                selection.primary().map(str::to_string)
+                selection.fallback_hint().map(str::to_string)
             }
         }
     }

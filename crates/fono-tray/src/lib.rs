@@ -49,6 +49,12 @@ pub type ActiveProvider = Arc<dyn Fn() -> (u8, u8) + Send + Sync>;
 ///   [`TrayAction::ApplyUpdate`].
 pub type UpdateProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
+/// Provider returning the configured language peer set (BCP-47 codes,
+/// in `general.languages` order). Polled every ~2 s; the tray's
+/// "Languages" submenu refreshes its read-only peer display when the
+/// list changes. Plan v3 task 8.
+pub type LanguagesProvider = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
 /// FSM-aligned tray state used to tint the icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -77,6 +83,10 @@ pub enum TrayAction {
     /// The daemon handles this by running a check and (when available)
     /// applying the update via `fono-update::apply_update`.
     ApplyUpdate,
+    /// User clicked "Clear language memory" in the Languages submenu.
+    /// Resets the per-backend in-memory language cache so the next
+    /// dictation starts from a clean slate. Plan v3 task 8.
+    ClearLanguageMemory,
     OpenConfig,
     Quit,
 }
@@ -131,6 +141,7 @@ pub fn spawn(
     llm_labels: Vec<String>,
     active_provider: ActiveProvider,
     update_provider: UpdateProvider,
+    languages_provider: LanguagesProvider,
 ) -> (Tray, mpsc::UnboundedReceiver<TrayAction>) {
     let shared = Arc::new(AtomicU8::new(TrayState::Idle as u8));
     let (tx, rx) = mpsc::unbounded_channel();
@@ -146,6 +157,7 @@ pub fn spawn(
             llm_labels,
             active_provider,
             update_provider,
+            languages_provider,
         ) {
             tracing::warn!("tray backend failed to start: {e:#}; continuing without tray");
         }
@@ -167,7 +179,8 @@ pub fn spawn(
 #[cfg(feature = "tray-backend")]
 mod backend {
     use super::{
-        ActiveProvider, RecentProvider, TrayAction, TrayState, UpdateProvider, RECENT_SLOTS,
+        ActiveProvider, LanguagesProvider, RecentProvider, TrayAction, TrayState, UpdateProvider,
+        RECENT_SLOTS,
     };
     use anyhow::{Context, Result};
     use std::sync::{
@@ -187,6 +200,7 @@ mod backend {
         config: u32,
         quit: u32,
         update: u32,
+        clear_lang_memory: u32,
         recent_slots: [u32; RECENT_SLOTS],
         stt_slots: Vec<u32>,
         llm_slots: Vec<u32>,
@@ -211,6 +225,7 @@ mod backend {
         llm_labels: Vec<String>,
         active_provider: ActiveProvider,
         update_provider: UpdateProvider,
+        languages_provider: LanguagesProvider,
     ) -> Result<()> {
         std::thread::Builder::new()
             .name("fono-tray".into())
@@ -224,6 +239,7 @@ mod backend {
                     llm_labels,
                     active_provider,
                     update_provider,
+                    languages_provider,
                 ) {
                     tracing::warn!("tray thread exited: {e:#}");
                 }
@@ -243,6 +259,7 @@ mod backend {
         llm_labels: Vec<String>,
         active_provider: ActiveProvider,
         update_provider: UpdateProvider,
+        languages_provider: LanguagesProvider,
     ) -> Result<()> {
         // tray-icon uses gtk on Linux and requires its main loop.
         gtk::init().context("gtk::init() failed — is gtk+-3.0 installed?")?;
@@ -254,8 +271,15 @@ mod backend {
         // pollute the daemon's stderr at startup.
         install_gtk_log_filters();
 
-        let (menu, status_item, recent_items, stt_items, llm_items, update_item) =
-            build_menu(&stt_labels, &llm_labels)?;
+        let (
+            menu,
+            status_item,
+            recent_items,
+            stt_items,
+            llm_items,
+            update_item,
+            lang_items,
+        ) = build_menu(&stt_labels, &llm_labels)?;
         let menu_for_updates = menu.clone();
         let tray = TrayIconBuilder::new()
             .with_tooltip(tooltip)
@@ -273,6 +297,7 @@ mod backend {
         let mut last_recent: Vec<String> = Vec::new();
         let mut last_active: (u8, u8) = (u8::MAX, u8::MAX);
         let mut last_update_label: Option<String> = None;
+        let mut last_languages: Vec<String> = Vec::new();
         let mut update_present = false;
         let mut tick: u32 = 0;
         glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
@@ -323,6 +348,11 @@ mod backend {
                     );
                     last_update_label = upd;
                 }
+                let langs = languages_provider();
+                if langs != last_languages {
+                    update_languages(&lang_items, &langs);
+                    last_languages = langs;
+                }
             }
             glib::ControlFlow::Continue
         });
@@ -369,6 +399,7 @@ mod backend {
         _llm_labels: Vec<String>,
         _active_provider: ActiveProvider,
         _update_provider: UpdateProvider,
+        _languages_provider: LanguagesProvider,
     ) -> Result<()> {
         let _tray = TrayIconBuilder::new()
             .with_tooltip(tooltip)
@@ -387,14 +418,21 @@ mod backend {
         Vec<MenuItem>,
         Vec<MenuItem>,
         MenuItem,
+        [MenuItem; LANG_SLOTS],
     );
+
+    /// Number of language peer slots in the tray "Languages" submenu.
+    /// Pre-allocated like the Recent submenu so we refresh labels in
+    /// place rather than rebuilding the menu on every config reload.
+    /// Eight is comfortably above any reasonable peer set.
+    const LANG_SLOTS: usize = 8;
 
     /// Position at which the update entry is inserted into the tray
     /// menu when an upgrade is detected. Counts the items appended in
     /// `build_menu` (status, sep, toggle, pause, sep, recent, stt, llm,
-    /// sep, config) — the entry slots in just before the final
-    /// separator + Quit.
-    const UPDATE_INSERT_POS: usize = 10;
+    /// languages, sep, config) — the entry slots in just before the
+    /// final separator + Quit.
+    const UPDATE_INSERT_POS: usize = 11;
 
     fn build_menu(stt_labels: &[String], llm_labels: &[String]) -> Result<MenuParts> {
         let menu = Menu::new();
@@ -432,6 +470,22 @@ mod backend {
             llm_submenu.append(it).ok();
         }
 
+        // Languages submenu (plan v3 task 8). Pre-allocated `LANG_SLOTS`
+        // read-only items show the configured peer set; one clickable
+        // "Clear language memory" action item resets the in-memory
+        // language cache on the daemon side. The submenu is purely
+        // informational + recovery — adding/removing peers happens in
+        // the wizard or `config.toml`.
+        let lang_submenu = Submenu::new("Languages", true);
+        let lang_items: [MenuItem; LANG_SLOTS] =
+            std::array::from_fn(|_| MenuItem::new("(none)", false, None));
+        for it in &lang_items {
+            lang_submenu.append(it).ok();
+        }
+        let _ = lang_submenu.append(&PredefinedMenuItem::separator());
+        let clear_lang_memory = MenuItem::new("Clear language memory", true, None);
+        lang_submenu.append(&clear_lang_memory).ok();
+
         let config = MenuItem::new("Edit config", true, None);
         // The update entry is intentionally **not** appended here. The
         // background checker injects it into the menu at runtime via
@@ -448,6 +502,7 @@ mod backend {
         menu.append(&recent_submenu)?;
         menu.append(&stt_submenu)?;
         menu.append(&llm_submenu)?;
+        menu.append(&lang_submenu)?;
         menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&config)?;
         menu.append(&PredefinedMenuItem::separator())?;
@@ -464,11 +519,20 @@ mod backend {
             config: id_of(&config),
             quit: id_of(&quit),
             update: id_of(&update),
+            clear_lang_memory: id_of(&clear_lang_memory),
             recent_slots,
             stt_slots,
             llm_slots,
         });
-        Ok((menu, status, recent_items, stt_items, llm_items, update))
+        Ok((
+            menu,
+            status,
+            recent_items,
+            stt_items,
+            llm_items,
+            update,
+            lang_items,
+        ))
     }
 
     /// Show or hide the tray's "Update to vX.Y.Z" entry based on the
@@ -512,6 +576,23 @@ mod backend {
                     ""
                 });
                 item.set_enabled(false);
+            }
+        }
+    }
+
+    /// Refresh the read-only peer items in the Languages submenu.
+    /// Empty `codes` collapses to "(auto-detect, no allow-list)" in
+    /// the first slot and blanks the rest.
+    fn update_languages(items: &[MenuItem; LANG_SLOTS], codes: &[String]) {
+        for (i, item) in items.iter().enumerate() {
+            if codes.is_empty() && i == 0 {
+                item.set_text("(auto-detect — no allow-list)");
+                continue;
+            }
+            if let Some(code) = codes.get(i) {
+                item.set_text(format!("• {code}"));
+            } else {
+                item.set_text("");
             }
         }
     }
@@ -583,6 +664,9 @@ mod backend {
         }
         if id == ids.update {
             return Some(TrayAction::ApplyUpdate);
+        }
+        if id == ids.clear_lang_memory {
+            return Some(TrayAction::ClearLanguageMemory);
         }
         for (i, slot_id) in ids.recent_slots.iter().enumerate() {
             if id == *slot_id {

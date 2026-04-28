@@ -35,6 +35,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   short-utterance clarification failure mode at the source. Override
   in `config.toml` if you want every utterance cleaned.
 
+- `[stt.cloud].cloud_rerun_on_language_mismatch` default flipped from
+  `false` to `true`. Combined with the new in-memory language cache,
+  cloud STT now self-heals from one-off language misdetections (e.g.
+  Groq Turbo flagging accented English as Russian) at the cost of one
+  extra round-trip per misfire. Set `false` to opt out.
+
+### Added
+
+- In-memory per-backend language cache
+  (`crates/fono-stt/src/lang_cache.rs`). Records the most recently
+  correctly-detected language code per cloud STT backend; consulted
+  **only as a rerun target** when post-validation fires. No file I/O,
+  no persistence — daemon restarts rebuild within one or two
+  utterances. OS locale (`LANG` / `LC_ALL`) seeds the cache at start
+  if and only if its alpha-2 code is in `general.languages`.
+- New `crates/fono-core/src/locale.rs` — POSIX-locale → BCP-47 alpha-2
+  parser; used by both the cache bootstrap and the wizard.
+- Tray **Languages** submenu (Linux): read-only checkbox display of
+  the configured peer set plus a "Clear language memory" item that
+  drops every entry from the in-memory cache.
+- New ADR
+  [`docs/decisions/0017-cloud-stt-language-stickiness.md`](docs/decisions/0017-cloud-stt-language-stickiness.md)
+  documenting why the cache is rerun-only, in-memory only, and
+  peer-symmetric (no primary/secondary).
+
+### Deprecated
+
+- `[stt.cloud].cloud_force_primary_language` — superseded by the
+  in-memory language cache. Field still parses for one release; will
+  be removed in v0.5.
+- `LanguageSelection::primary()` — renamed to `fallback_hint()`. The
+  alias is retained as `#[deprecated]` for one release; usage is
+  scope-restricted in its doc-comment to single-language transports.
+
+See `plans/2026-04-28-multi-language-stt-no-primary-v3.md`.
+
 ## [0.2.2] — 2026-04-28
 
 First release in which the streaming live-dictation pipeline is

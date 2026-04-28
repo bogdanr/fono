@@ -69,17 +69,31 @@ impl LanguageSelection {
         matches!(self, Self::Auto)
     }
 
-    /// Primary BCP-47 code: the forced code, or the first entry of
-    /// the allow-list. `None` for [`Self::Auto`]. Useful as a "best
-    /// single guess" to send to a cloud provider that only accepts a
-    /// single `language` field.
+    /// Last-resort single BCP-47 code for transports that physically
+    /// cannot accept a peer set (local Whisper's `set_language`,
+    /// single-language cloud `language=` form fields when no cache
+    /// hint is available, …). **Do not** use this as a "primary
+    /// language" notion in user-visible code paths — Fono treats every
+    /// entry in `general.languages` as an equal peer and order is
+    /// cosmetic. The plumbing-level fallback is: forced code itself,
+    /// or first allow-list entry, or `None` for auto.
     #[must_use]
-    pub fn primary(&self) -> Option<&str> {
+    pub fn fallback_hint(&self) -> Option<&str> {
         match self {
             Self::Auto => None,
             Self::Forced(c) => Some(c.as_str()),
             Self::AllowList(v) => v.first().map(String::as_str),
         }
+    }
+
+    /// Deprecated alias for [`Self::fallback_hint`]. Kept for one
+    /// release while callers migrate; the historical name implied a
+    /// primary/secondary hierarchy that v3 of the language plan
+    /// explicitly rejected.
+    #[deprecated(note = "use fallback_hint(); see plan v3 — peers are equal, order is cosmetic")]
+    #[must_use]
+    pub fn primary(&self) -> Option<&str> {
+        self.fallback_hint()
     }
 
     /// All codes in the selection (single-element slice for forced;
@@ -218,11 +232,14 @@ mod tests {
     }
 
     #[test]
-    fn primary_picks_first() {
-        assert_eq!(LanguageSelection::Auto.primary(), None);
-        assert_eq!(LanguageSelection::Forced("en".into()).primary(), Some("en"));
+    fn fallback_hint_picks_first() {
+        assert_eq!(LanguageSelection::Auto.fallback_hint(), None);
         assert_eq!(
-            LanguageSelection::AllowList(vec!["en".into(), "ro".into()]).primary(),
+            LanguageSelection::Forced("en".into()).fallback_hint(),
+            Some("en")
+        );
+        assert_eq!(
+            LanguageSelection::AllowList(vec!["en".into(), "ro".into()]).fallback_hint(),
             Some("en")
         );
     }

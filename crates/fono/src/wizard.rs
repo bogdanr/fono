@@ -12,11 +12,12 @@
 
 use anyhow::{Context, Result};
 use dialoguer::console::{Key, Term};
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, MultiSelect, Select};
 use fono_core::config::{
     Config, LlmBackend, LlmCloud, LlmLocal, Stt, SttBackend, SttCloud, SttLocal,
 };
 use fono_core::hwcheck::{self, HardwareSnapshot, LocalTier};
+use fono_core::locale::detect_os_languages;
 use fono_core::{Paths, Secrets};
 use std::time::Duration;
 
@@ -243,13 +244,7 @@ async fn configure_cloud(
     configure_cloud_stt(theme, config, secrets).await?;
     configure_cloud_llm(theme, config, secrets).await?;
 
-    let langs: String = Input::with_theme(theme)
-        .with_prompt("Languages (comma-separated BCP-47 codes, or 'auto' for unconstrained detect)")
-        .default("auto".into())
-        .interact_text()?;
-    config.general.languages = fono_stt::LanguageSelection::parse_csv(&langs)
-        .codes()
-        .to_vec();
+    config.general.languages = pick_languages(theme)?;
     Ok(())
 }
 
@@ -306,14 +301,87 @@ async fn configure_mixed(
         _ => configure_cloud_llm(theme, config, secrets).await?,
     }
 
-    let langs: String = Input::with_theme(theme)
-        .with_prompt("Languages (comma-separated BCP-47 codes, or 'auto' for unconstrained detect)")
-        .default("auto".into())
-        .interact_text()?;
-    config.general.languages = fono_stt::LanguageSelection::parse_csv(&langs)
-        .codes()
-        .to_vec();
+    let langs = pick_languages(theme)?;
+    config.general.languages = langs;
     Ok(())
+}
+
+/// Languages-you-dictate-in picker. Plan v3 task 7. Builds a checkbox
+/// list from a curated common-language set unioned with the OS-detected
+/// locale, with `en` and any OS-detected entry pre-checked. Order in
+/// the resulting `Vec` is cosmetic — Fono treats every entry as a peer.
+/// Returning an empty `Vec` is allowed (collapses to unconstrained
+/// auto-detect at runtime).
+fn pick_languages(theme: &ColorfulTheme) -> Result<Vec<String>> {
+    // Curated common dictation languages, BCP-47 alpha-2 + display name.
+    // Order is presentation-only.
+    let curated: Vec<(&str, &str)> = vec![
+        ("en", "English"),
+        ("es", "Spanish"),
+        ("fr", "French"),
+        ("de", "German"),
+        ("it", "Italian"),
+        ("pt", "Portuguese"),
+        ("nl", "Dutch"),
+        ("ro", "Romanian"),
+        ("pl", "Polish"),
+        ("ru", "Russian"),
+        ("uk", "Ukrainian"),
+        ("tr", "Turkish"),
+        ("zh", "Chinese"),
+        ("ja", "Japanese"),
+        ("ko", "Korean"),
+        ("hi", "Hindi"),
+        ("ar", "Arabic"),
+    ];
+    let os_codes = detect_os_languages();
+
+    // Build the candidate list: curated first, plus any OS code missing
+    // from curated (appended with a "(detected)" label). Codes are
+    // de-duplicated; `(label, code, default_checked)` triples drive the
+    // MultiSelect.
+    let mut entries: Vec<(String, String, bool)> = Vec::new();
+    for (code, name) in &curated {
+        let detected = os_codes.iter().any(|c| c == code);
+        let label = if detected {
+            format!("{name} ({code}) — detected from OS")
+        } else {
+            format!("{name} ({code})")
+        };
+        let checked = *code == "en" || detected;
+        entries.push((label, (*code).to_string(), checked));
+    }
+    for code in &os_codes {
+        if !curated.iter().any(|(c, _)| c == code) {
+            entries.push((
+                format!("{code} (detected from OS)"),
+                code.clone(),
+                true,
+            ));
+        }
+    }
+
+    println!(
+        "  Languages you dictate in (Fono treats every selection as an equal peer — \
+         no primary). Press Space to toggle, Enter to confirm."
+    );
+    let labels: Vec<&str> = entries.iter().map(|(l, _, _)| l.as_str()).collect();
+    let defaults: Vec<bool> = entries.iter().map(|(_, _, d)| *d).collect();
+    let chosen = MultiSelect::with_theme(theme)
+        .with_prompt("Languages")
+        .items(&labels)
+        .defaults(&defaults)
+        .interact()?;
+
+    let mut codes: Vec<String> = chosen
+        .into_iter()
+        .map(|i| entries[i].1.clone())
+        .collect();
+    // Normalise via LanguageSelection so dedupe + lowercase rules apply
+    // uniformly with the rest of the runtime.
+    let normalised = fono_stt::LanguageSelection::from_config(&codes);
+    codes = normalised.codes().to_vec();
+    Ok(codes)
 }
 
 fn pick_local_stt_model(theme: &ColorfulTheme, tier: LocalTier) -> Result<&'static str> {

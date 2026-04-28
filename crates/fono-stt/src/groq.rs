@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Groq STT backend — fastest hosted whisper. HTTPS via reqwest+rustls.
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use reqwest::multipart;
 use serde::Deserialize;
 
 use crate::lang::LanguageSelection;
+use crate::lang_cache::LanguageCache;
 use crate::traits::{SpeechToText, Transcription};
 
 const GROQ_ENDPOINT: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
@@ -14,6 +17,10 @@ const GROQ_MODELS_ENDPOINT: &str = "https://api.groq.com/openai/v1/models";
 /// Default Groq STT model. Latency plan L15 picks `whisper-large-v3-turbo`
 /// (≈5× faster than `whisper-1`) — overridable via `stt.cloud.model`.
 const DEFAULT_MODEL: &str = "whisper-large-v3-turbo";
+/// Cache key shared between `GroqStt` (batch) and `GroqStreaming`
+/// (pseudo-stream) so a session that mixes the two converges on a
+/// single language memory.
+pub(crate) const BACKEND_KEY: &str = "groq";
 
 pub struct GroqStt {
     api_key: String,
@@ -21,13 +28,20 @@ pub struct GroqStt {
     client: reqwest::Client,
     /// Configured language allow-list (see `crate::lang`).
     languages: Vec<String>,
-    /// When the allow-list has > 1 entry, send the primary code on
-    /// the first request instead of letting Groq auto-detect.
+    /// **Deprecated** (plan v3). Legacy: when the allow-list has > 1
+    /// entry, force `fallback_hint()` on the first request. v3
+    /// supersedes this with cache-as-rerun-target. Honoured for
+    /// backward compat; no-op when `false` (the new default).
     cloud_force_primary: bool,
-    /// When the provider returns a language outside the allow-list,
-    /// re-issue the request with the primary code forced. Costs an
-    /// extra round-trip per mismatch; off by default.
+    /// When the provider returns a banned language **and** the cache
+    /// has a previously-observed peer code for this backend, rerun
+    /// once with that code forced. Cold-start (empty cache) skips
+    /// the rerun and accepts the unforced response. Default `true`
+    /// in v3.
     cloud_rerun_on_mismatch: bool,
+    /// Per-backend in-memory language memory. Read on rerun, written
+    /// on every in-allow-list detection. See `crate::lang_cache`.
+    lang_cache: Arc<LanguageCache>,
 }
 
 impl GroqStt {
@@ -44,6 +58,7 @@ impl GroqStt {
             languages: Vec::new(),
             cloud_force_primary: false,
             cloud_rerun_on_mismatch: false,
+            lang_cache: LanguageCache::global(),
         }
     }
 
@@ -63,11 +78,19 @@ impl GroqStt {
         self
     }
 
-    /// Builder: re-issue the request with the primary code if the
-    /// provider returned a banned language. Default `false`.
+    /// Builder: re-issue the request with a cached peer code if the
+    /// provider returned a banned language. Default `true` in v3.
     #[must_use]
     pub fn with_cloud_rerun_on_mismatch(mut self, on: bool) -> Self {
         self.cloud_rerun_on_mismatch = on;
+        self
+    }
+
+    /// Builder: inject a specific language cache (tests + bench). The
+    /// default constructor uses `LanguageCache::global()`.
+    #[must_use]
+    pub fn with_lang_cache(mut self, cache: Arc<LanguageCache>) -> Self {
+        self.lang_cache = cache;
         self
     }
 
@@ -147,15 +170,16 @@ impl SpeechToText for GroqStt {
         let wav = encode_wav(pcm, sample_rate);
         let selection = self.effective_selection(lang);
 
-        // First-pass language to send: forced -> the code; auto -> none;
-        // allow-list -> primary if `cloud_force_primary`, else none and
-        // we post-validate the provider's detected language.
+        // First-pass language: forced -> the code; auto -> none;
+        // allow-list -> none in v3 (let cloud auto-detect, then
+        // post-validate). The legacy `cloud_force_primary` knob still
+        // honoured for backward compat but defaults off.
         let first_pass_lang: Option<String> = match &selection {
             LanguageSelection::Auto => None,
             LanguageSelection::Forced(c) => Some(c.clone()),
             LanguageSelection::AllowList(_) => {
                 if self.cloud_force_primary {
-                    selection.primary().map(str::to_string)
+                    selection.fallback_hint().map(str::to_string)
                 } else {
                     None
                 }
@@ -164,32 +188,37 @@ impl SpeechToText for GroqStt {
 
         let parsed = self.do_request(&wav, first_pass_lang.as_deref()).await?;
 
-        // Post-validate against the allow-list. Whisper-flavoured cloud
-        // STT providers (Groq, OpenAI) return the detected language in
-        // the response; if it falls outside our allow-list, optionally
-        // re-issue the same audio with the primary code forced.
+        // Post-validate against the allow-list. Plan v3: cache-as-
+        // rerun-target. On in-list detection, record the code. On
+        // banned detection, rerun ONLY when the cache holds a peer
+        // code; otherwise accept the unforced transcript so we don't
+        // guess the rerun's `language=` from config order.
         if let LanguageSelection::AllowList(_) = &selection {
             if let Some(detected) = parsed.language.as_deref() {
-                if !selection.contains(detected) {
-                    let primary = selection.primary().unwrap_or("");
-                    if self.cloud_rerun_on_mismatch && !primary.is_empty() {
+                if selection.contains(detected) {
+                    self.lang_cache.record(BACKEND_KEY, detected);
+                } else if self.cloud_rerun_on_mismatch {
+                    if let Some(cached) = self.lang_cache.get(BACKEND_KEY) {
                         tracing::warn!(
                             "groq returned banned language {detected:?} (allow-list \
-                             {:?}); re-issuing with language={primary}",
+                             {:?}); re-issuing with cached language={cached}",
                             self.languages
                         );
-                        let retried = self.do_request(&wav, Some(primary)).await?;
+                        let retried = self.do_request(&wav, Some(&cached)).await?;
                         return Ok(Transcription {
                             text: retried.text,
-                            language: retried.language.or_else(|| Some(primary.to_string())),
+                            language: retried.language.or(Some(cached)),
                             duration_ms: None,
                         });
                     }
-                    tracing::warn!(
-                        "groq detected language {detected:?} is outside the allow-list \
-                         {:?}; accepting transcript as-is (set \
-                         general.cloud_rerun_on_language_mismatch = true to re-issue)",
-                        self.languages
+                    tracing::debug!(
+                        "groq detected banned language {detected:?}; cache empty, \
+                         accepting unforced response (cache will populate from the \
+                         next correct detection)"
+                    );
+                } else {
+                    tracing::debug!(
+                        "groq detected banned language {detected:?}; rerun disabled"
                     );
                 }
             }

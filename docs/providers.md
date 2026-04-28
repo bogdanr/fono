@@ -134,6 +134,37 @@ backend in three ways:
   clarification reply… falling back to raw text.` Same detector for
   all backends.
 
+### Multilingual STT and language stickiness
+
+Fono treats every entry of `general.languages` as an equal peer — there is
+no primary/secondary distinction. Cloud STT calls go out **without** a
+forced `language=` so the provider's auto-detect handles language switching
+(e.g. dictating Romanian, then English, then Romanian again) for free.
+
+Some providers (notably Groq's `whisper-large-v3-turbo` for non-native
+English speakers) occasionally misdetect — e.g. flagging accented English
+as Russian. Fono's defence is a tiny in-memory cache of the most recently
+correctly-detected language per backend:
+
+- On every successful in-allow-list detection, the cache records the code.
+- When the provider returns a *banned* (out-of-allow-list) detection and
+  the cache holds a peer code for that backend, Fono re-issues the same
+  audio once with `language=<cached>` — a self-healing rerun that recovers
+  from one Turbo misfire per occurrence.
+- Order of `general.languages` is **not** consulted. The cache reflects
+  what was actually heard; the config is just an unordered set.
+
+The cache is in-memory only (no file I/O). On daemon start the OS locale's
+alpha-2 code is used to seed the cache *if* it appears in the configured
+allow-list; otherwise the cache stays empty and the first banned
+detection is accepted as-is, with the cache populating from the next
+correctly-detected utterance.
+
+Knob: `[stt.cloud].cloud_rerun_on_language_mismatch` (default `true`).
+Tray submenu: **Languages** → checkbox per peer + "Clear language memory".
+
+Design rationale: [ADR 0017](decisions/0017-cloud-stt-language-stickiness.md).
+
 ## Default picks (rationale)
 
 * **Local default:** `whisper small` (466 MB, multilingual) + `Qwen2.5-1.5B-Instruct`

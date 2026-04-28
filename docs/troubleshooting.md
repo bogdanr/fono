@@ -109,6 +109,40 @@ output:
   applies to every option, but different chat fine-tunes have different
   refusal personalities and one may suit your dictation style better.
 
+## Cloud STT keeps detecting the wrong language
+
+Symptom: a Groq / OpenAI / etc. transcription comes back in a language
+you don't speak (e.g. Russian when you only dictate English and
+Romanian). Common with Groq's `whisper-large-v3-turbo` for non-native
+English speakers — the model occasionally mis-classifies accented
+English.
+
+Fono mitigates this with an in-memory per-backend language cache. The
+first correctly-detected utterance populates the cache; the next time
+the provider returns a banned (out-of-allow-list) detection, Fono
+re-issues the request once with `language=<cached>` and returns the
+recovered transcript. Logs show `re-issuing with cached
+language=<code>` on the rerun.
+
+What to do if a single utterance still injects the wrong language:
+
+- **Wait for the next utterance.** If your cache was empty (cold start
+  with no OS-locale overlap), the first banned detection is accepted as
+  the populating sample; the *second* utterance should self-heal.
+- **Tray → Languages → Clear language memory.** Useful when the cache
+  is stale (e.g. you switched topics from English to Romanian and the
+  rerun forced English on the first Romanian clip).
+- **Edit `config.toml`** to remove a language from `general.languages`
+  permanently. Order doesn't matter; English is just a wizard
+  suggestion and can be removed freely.
+- **Disable the rerun** with `[stt.cloud].cloud_rerun_on_language_mismatch
+  = false` if you'd rather get the (wrong) raw detection than pay one
+  extra round-trip on misfires.
+
+The cache resets on every daemon restart and is keyed only by backend
+name, never by config-file order — two configs with the same allow-list
+in different orders behave identically.
+
 ## Pipeline ran but nothing pasted
 
 The clipboard safety net should always populate the clipboard even when
