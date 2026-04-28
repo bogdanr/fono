@@ -271,15 +271,8 @@ mod backend {
         // pollute the daemon's stderr at startup.
         install_gtk_log_filters();
 
-        let (
-            menu,
-            status_item,
-            recent_items,
-            stt_items,
-            llm_items,
-            update_item,
-            lang_items,
-        ) = build_menu(&stt_labels, &llm_labels)?;
+        let (menu, status_item, recent_items, stt_items, llm_items, update_item, lang_items) =
+            build_menu(&stt_labels, &llm_labels)?;
         let menu_for_updates = menu.clone();
         let tray = TrayIconBuilder::new()
             .with_tooltip(tooltip)

@@ -400,13 +400,8 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
     // Inter-fixture pacing — defaults to 250 ms for cloud Groq, 0 for
     // anything else. Burns less than 3 s of wall time over our current
     // 10-fixture set and keeps us comfortably under Groq's 30 req/min.
-    let rate_limit_ms = args.rate_limit_ms.unwrap_or_else(|| {
-        if args.stt == "groq" {
-            250
-        } else {
-            0
-        }
-    });
+    let default_rate = if args.stt == "groq" { 250 } else { 0 };
+    let rate_limit_ms = args.rate_limit_ms.unwrap_or(default_rate);
 
     // Progress bar: 2 steps per fixture (batch pass + streaming pass).
     let total_steps = manifest.fixtures.len() as u64 * 2;

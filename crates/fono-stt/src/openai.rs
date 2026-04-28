@@ -157,9 +157,7 @@ impl SpeechToText for OpenAiStt {
                          accepting unforced response"
                     );
                 } else {
-                    tracing::debug!(
-                        "openai detected banned language {detected:?}; rerun disabled"
-                    );
+                    tracing::debug!("openai detected banned language {detected:?}; rerun disabled");
                 }
             }
         }

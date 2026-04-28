@@ -217,9 +217,7 @@ impl SpeechToText for GroqStt {
                          next correct detection)"
                     );
                 } else {
-                    tracing::debug!(
-                        "groq detected banned language {detected:?}; rerun disabled"
-                    );
+                    tracing::debug!("groq detected banned language {detected:?}; rerun disabled");
                 }
             }
         }

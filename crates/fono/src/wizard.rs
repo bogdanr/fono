@@ -353,11 +353,7 @@ fn pick_languages(theme: &ColorfulTheme) -> Result<Vec<String>> {
     }
     for code in &os_codes {
         if !curated.iter().any(|(c, _)| c == code) {
-            entries.push((
-                format!("{code} (detected from OS)"),
-                code.clone(),
-                true,
-            ));
+            entries.push((format!("{code} (detected from OS)"), code.clone(), true));
         }
     }
 
@@ -373,10 +369,7 @@ fn pick_languages(theme: &ColorfulTheme) -> Result<Vec<String>> {
         .defaults(&defaults)
         .interact()?;
 
-    let mut codes: Vec<String> = chosen
-        .into_iter()
-        .map(|i| entries[i].1.clone())
-        .collect();
+    let mut codes: Vec<String> = chosen.into_iter().map(|i| entries[i].1.clone()).collect();
     // Normalise via LanguageSelection so dedupe + lowercase rules apply
     // uniformly with the rest of the runtime.
     let normalised = fono_stt::LanguageSelection::from_config(&codes);

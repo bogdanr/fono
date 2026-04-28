@@ -82,8 +82,8 @@ async fn pipeline_produces_history_row_and_injects_cleaned_text() {
     let mut cfg = Config::default();
     cfg.llm.enabled = true;
     cfg.llm.backend = LlmBackend::OpenAI; // anything non-None
-    // Force the LLM to run regardless of the default short-utterance
-    // skip threshold; this test covers the cleaned-output path.
+                                          // Force the LLM to run regardless of the default short-utterance
+                                          // skip threshold; this test covers the cleaned-output path.
     cfg.llm.skip_if_words_lt = 0;
     let cfg = Arc::new(cfg);
 
