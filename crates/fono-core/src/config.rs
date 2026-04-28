@@ -153,18 +153,21 @@ impl Default for General {
 }
 
 impl General {
-    /// Per-call `lang` override threaded into the STT trait's
-    /// `transcribe(... lang: Option<&str>)`. Returns `None` for "no override" (the backend then uses its
-    /// configured allow-list); returns `Some(code)` only when the user
-    /// has pinned a single forced language. The wider allow-list is
-    /// plumbed through the factory at construction time, not via this
-    /// per-call hook, so multi-language constraints survive.
+    /// Per-call `lang` override for the STT trait's
+    /// `transcribe(... lang: Option<&str>)`. Always returns `None` so
+    /// the backend uses its allow-list + rerun-target cache regardless
+    /// of how many languages are configured.
+    ///
+    /// The old behaviour — returning `Some(code)` for a single-entry
+    /// `languages` list — turned every request into a hard force, which
+    /// caused English audio to be transcribed as Romanian (or any other
+    /// sole configured language). Single-entry allow-lists are now
+    /// treated identically to multi-entry ones: the cloud provider
+    /// auto-detects, and a rerun fires only when the detection is
+    /// outside the list and the cache holds a prior peer code.
     #[must_use]
     pub fn language_override(&self) -> Option<&str> {
-        match self.languages.len() {
-            1 => Some(self.languages[0].as_str()),
-            _ => None,
-        }
+        None
     }
 }
 

@@ -381,6 +381,23 @@ fn pick_languages(theme: &ColorfulTheme) -> Result<Vec<String>> {
     // uniformly with the rest of the runtime.
     let normalised = fono_stt::LanguageSelection::from_config(&codes);
     codes = normalised.codes().to_vec();
+
+    // If the user selected exactly one non-English language, silently add
+    // English as a peer. Without it, a single-entry allow-list would cause
+    // the rerun mechanism to force that language on any clip that Groq
+    // auto-detects as something outside the list — including genuine English
+    // speech — producing garbled output. English as a peer is harmless for
+    // speakers who never use it (it will simply never be detected) and
+    // essential for bilingual users.
+    if codes.len() == 1 && codes[0] != "en" {
+        codes.push("en".to_string());
+        println!(
+            "  ℹ  English added as a peer language — Fono works best with at\n\
+             \x20     least two languages. You can remove it later by editing\n\
+             \x20     general.languages in your config file."
+        );
+    }
+
     Ok(codes)
 }
 
