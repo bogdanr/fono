@@ -61,6 +61,14 @@ The home page is [fono.page](https://fono.page).
 
 Newest first. Each entry says which release carried it.
 
+- **Cold-start language self-correction.** When the cloud transcriber's
+  first response of a session is a wrong language (e.g. English audio
+  flagged as Russian for an accented speaker), Fono now retries against
+  every language you've configured and picks the one Whisper was most
+  confident about — instead of injecting the wrong-language text. The
+  streaming overlay also stops briefly flashing wrong-language text
+  before the corrected result arrives. — *v0.3.1, 2026-04-28.*
+
 - **Release-time cloud quality gate.** Before producing release
   artefacts, every tag now runs the existing multilingual fixture set
   (English, Romanian, Spanish, French, Chinese) through Groq's cloud
