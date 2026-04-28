@@ -52,6 +52,12 @@ Target users: Linux desktop (i3 / sway / KDE / GNOME, X11 and Wayland), Windows,
   Release body via `body_path: release/RELEASE_NOTES.md`
   (`.github/workflows/release.yml`). A missing section yields a fallback one-liner
   body and a CI warning — don't ship without the changelog entry.
+- For every release: also update `ROADMAP.md` **before** tagging. Move every
+  roadmap item that ships in the release from the **In progress** / **Planned**
+  sections into **Shipped** at the bottom, annotated with the release tag and
+  date (`*vX.Y.Z, YYYY-MM-DD.*`). The roadmap is published at the repo root and
+  linked from the README and the project site; keeping it in sync at tag time
+  is non-negotiable.
 
 ## Next-step template
 

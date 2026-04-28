@@ -64,6 +64,7 @@ No telemetry, ever. See [`docs/privacy.md`](docs/privacy.md).
 
 ## Documentation
 
+* [Roadmap](ROADMAP.md) — what's in progress, planned next, and shipped.
 * [Provider matrix](docs/providers.md) — STT + LLM endpoints, env vars, default models.
 * [Text injection guide](docs/inject.md) — Shift+Insert, override per-app.
 * [Wayland notes](docs/wayland.md) — KDE/GNOME compositor binding.
