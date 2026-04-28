@@ -292,20 +292,6 @@ pub struct SttCloud {
     pub provider: String,
     pub api_key_ref: String,
     pub model: String,
-    /// Opt-in to the streaming pseudo-stream pipeline for hosted
-    /// providers that do not expose a native streaming endpoint (Groq
-    /// today). When `true`, the live-dictation path re-POSTs the
-    /// trailing N seconds of audio every ~700 ms to the same batch
-    /// endpoint and pipes results through the `LocalAgreement` helper
-    /// to produce preview text. Costs roughly +25% vs a single batch
-    /// POST per utterance — opt in deliberately on usage-billed
-    /// plans. Default `false` so existing Groq users stay on the
-    /// cheaper batch profile.
-    ///
-    /// Plan: `plans/2026-04-27-fono-interactive-v1.md` R4.2 /
-    /// `plans/2026-04-28-wave-3-slice-b1-v1.md` Thread B.
-    #[serde(default)]
-    pub streaming: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -569,11 +555,6 @@ pub struct Interactive {
     /// skips finalize; `"balanced"` may slow preview cadence;
     /// `"aggressive"` may skip finalize on high-confidence segments.
     pub quality_floor: String,
-    /// Show the live-dictation overlay. Independent of the static
-    /// `[overlay].enabled` knob so the user can keep the recording-
-    /// indicator overlay disabled but still see live text. Default
-    /// `true`.
-    pub overlay: bool,
     // ----- v6 carryover knobs (R7.4 / R9.1) ---------------------------
     /// Pipeline mode. `"hybrid"` (default) uses streaming preview +
     /// finalize-on-segment-boundary + cleanup-on-finalize. Reserved
@@ -677,7 +658,6 @@ impl Default for Interactive {
             enabled: false,
             budget_ceiling_per_minute_umicros: 0,
             quality_floor: "max".into(),
-            overlay: true,
             mode: "hybrid".into(),
             chunk_ms_initial: 600,
             chunk_ms_steady: 1500,
@@ -916,7 +896,6 @@ mod tests {
             enabled = true
             budget_ceiling_per_minute_umicros = 1000
             quality_floor = "balanced"
-            overlay = false
             mode = "hybrid"
             chunk_ms_initial = 700
             chunk_ms_steady = 1400
@@ -939,7 +918,6 @@ mod tests {
         assert!(i.enabled);
         assert_eq!(i.budget_ceiling_per_minute_umicros, 1000);
         assert_eq!(i.quality_floor, "balanced");
-        assert!(!i.overlay);
         assert_eq!(i.mode, "hybrid");
         assert_eq!(i.chunk_ms_initial, 700);
         assert_eq!(i.chunk_ms_steady, 1400);
@@ -1030,6 +1008,33 @@ mod tests {
             reloaded.general.languages,
             vec!["en".to_string(), "ro".into(), "fr".into()]
         );
+    }
+
+    /// Plan `2026-04-29-streaming-config-collapse-v1.md` Task A5: the
+    /// two collapsed knobs `[stt.cloud].streaming` and
+    /// `[interactive].overlay` are dropped from the schema in v0.3.5+.
+    /// Existing configs that still carry them must continue to parse
+    /// (serde silently ignores unknown fields by default); pin that
+    /// behaviour so the next refactor doesn't accidentally flip on
+    /// `deny_unknown_fields`.
+    #[test]
+    fn legacy_streaming_and_overlay_keys_silently_ignored() {
+        let raw = r#"
+            version = 1
+            [interactive]
+            enabled = true
+            overlay = false
+            [stt.cloud]
+            provider = "groq"
+            api_key_ref = "GROQ_API_KEY"
+            model = "whisper-large-v3-turbo"
+            streaming = true
+        "#;
+        let cfg: Config = toml::from_str(raw).expect("legacy keys must parse");
+        assert!(cfg.interactive.enabled);
+        let cloud = cfg.stt.cloud.expect("cloud block parsed");
+        assert_eq!(cloud.provider, "groq");
+        assert_eq!(cloud.model, "whisper-large-v3-turbo");
     }
 
     #[test]

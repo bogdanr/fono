@@ -606,14 +606,13 @@ fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbos
     #[cfg(feature = "interactive")]
     {
         info!(
-            "interactive  : {} (mode={}, overlay={})",
+            "interactive  : {} (mode={})",
             if config.interactive.enabled {
                 "enabled"
             } else {
                 "disabled"
             },
             config.interactive.mode,
-            config.interactive.overlay,
         );
     }
     #[cfg(not(feature = "interactive"))]

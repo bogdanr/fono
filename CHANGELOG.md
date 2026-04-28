@@ -36,6 +36,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- `[stt.cloud].streaming` config field. Streaming for cloud Groq is
+  now derived from `[interactive].enabled` — the master live-
+  dictation switch — so there is no separate per-backend opt-in. A
+  user who picks Groq and turns on live mode gets the pseudo-stream
+  client automatically; cost can be bounded via
+  `interactive.streaming_interval > 3.0` (finalize-only mode) or
+  `interactive.budget_ceiling_per_minute_umicros`. Existing configs
+  with `streaming = true` parse without warning (serde silently
+  ignores unknown fields); the value is no longer consulted. Plan:
+  `plans/2026-04-29-streaming-config-collapse-v1.md`.
+- `[interactive].overlay` config field. The live-dictation overlay
+  is now always shown when `[interactive].enabled = true` — it is
+  the only feedback surface for live previews, so a per-section
+  toggle was incoherent. The previous warn-and-ignore code path
+  (added in v0.3.3) is gone. `[overlay].enabled` continues to
+  control the passive recording indicator in batch mode.
+- Wizard's third question on the cloud-STT path ("Enable Groq
+  streaming dictation?"). Live-mode users on Groq now go straight
+  through; users who want batch-only Groq just leave
+  `[interactive].enabled = false`.
+
 - `general.notify_on_dictation` config field. Redundant with the
   existing clipboard-fallback notification: when injection works the
   cleaned text is already at the cursor (the actual feedback); when

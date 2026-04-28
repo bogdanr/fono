@@ -46,7 +46,10 @@ Implement Groq streaming as a "pseudo-stream":
    next 700 ms tick causes the would-be preview to be dropped
    (counted in `preview_skipped_count` for diagnostics) rather than
    queued.
-6. Opt-in via `[stt.cloud].streaming = true`. Default `false`.
+6. Opt-in via `[interactive].enabled = true`. Default `false`. (Until
+   v0.3.4 a separate `[stt.cloud].streaming` knob also gated this; it
+   was collapsed into the master live-dictation switch in v0.3.5 — see
+   `plans/2026-04-29-streaming-config-collapse-v1.md`.)
 
 ### Why 700 ms
 

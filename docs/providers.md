@@ -88,7 +88,7 @@ single batch POST that the non-live `record` path uses, because each
 preview tick re-uploads the trailing window. On a usage-billed Groq
 plan, opt in deliberately.
 
-Enable with both knobs on:
+Enable with the master live-dictation switch:
 
 ```toml
 [interactive]
@@ -98,12 +98,13 @@ enabled = true
 provider = "groq"
 api_key_ref = "GROQ_API_KEY"
 model = "whisper-large-v3-turbo"
-streaming = true
 ```
 
-The wizard prompts for `streaming` when you pick Groq with
-`[interactive].enabled = true`. Defaults to `false` so existing
-batch-only Groq users stay on the cheaper profile.
+The wizard sets this automatically when you pick Groq and answer
+"yes" to live mode — there is no separate streaming opt-in. To
+bound cost, set `interactive.streaming_interval` above `3.0` (only
+finalize requests fire on VAD boundaries; previews are disabled) or
+set `interactive.budget_ceiling_per_minute_umicros` to a hard cap.
 
 Design + cost rationale: [ADR 0020](decisions/0020-groq-pseudo-stream.md).
 

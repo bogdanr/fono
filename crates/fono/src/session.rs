@@ -324,14 +324,6 @@ impl SessionOrchestrator {
         #[cfg(feature = "interactive")]
         {
             if config.interactive.enabled {
-                if !config.interactive.overlay {
-                    warn!(
-                        "overlay: `[interactive].overlay = false` is ignored while \
-                         streaming is enabled — the overlay is the only feedback \
-                         surface for live previews. Set `[interactive].enabled = false` \
-                         to disable streaming entirely."
-                    );
-                }
                 match fono_overlay::RealOverlay::spawn() {
                     Ok(h) => {
                         if let Ok(mut g) = orch.overlay.write() {

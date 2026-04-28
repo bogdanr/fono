@@ -84,7 +84,6 @@ pub fn synthetic_cloud(backend: &SttBackend, provider_name: &str) -> SttCloud {
         provider: provider_name.to_string(),
         api_key_ref: stt_key_env(backend).to_string(),
         model: crate::defaults::default_cloud_model(provider_name).to_string(),
-        streaming: false,
     }
 }
 
@@ -293,8 +292,13 @@ fn build_openai(
 /// (`whisper-rs`) streaming path; cloud backends return `Ok(None)`
 /// with a `warn!` so the caller (the daemon) can fall back to the
 /// batch path gracefully. Slice B1 / Thread B adds Groq via a
-/// pseudo-stream (re-POST trailing N seconds every 700 ms),
-/// opt-in via `[stt.cloud].streaming = true`.
+/// pseudo-stream (re-POST trailing N seconds every 700 ms).
+///
+/// Whether streaming runs at all is gated on `[interactive].enabled`
+/// — the master live-dictation switch. Prior to v0.3.5 a separate
+/// `[stt.cloud].streaming` knob also gated the Groq path; that knob
+/// was removed (see
+/// `plans/2026-04-29-streaming-config-collapse-v1.md`).
 #[cfg(feature = "streaming")]
 pub fn build_streaming_stt(
     cfg: &Stt,
@@ -307,7 +311,7 @@ pub fn build_streaming_stt(
     #[allow(deprecated)]
     let cloud_force_primary = general.cloud_force_primary_language;
     let cloud_rerun = general.cloud_rerun_on_language_mismatch;
-    let cloud_streaming = cfg.cloud.as_ref().is_some_and(|c| c.streaming);
+    let cloud_streaming = interactive.enabled;
     let cadence = interactive.preview_cadence();
     let prompts = cfg.prompts.clone();
     match &cfg.backend {
@@ -332,7 +336,7 @@ pub fn build_streaming_stt(
             let label = fono_core::providers::stt_backend_str(other);
             tracing::warn!(
                 "streaming STT not yet supported for backend {label} \
-                 (or `[stt.cloud].streaming = false`); \
+                 (or `[interactive].enabled = false`); \
                  live dictation will fall back to batch"
             );
             Ok(None)
@@ -475,10 +479,12 @@ mod tests {
 
     #[cfg(all(feature = "streaming", feature = "groq"))]
     #[test]
-    fn build_streaming_stt_returns_none_for_cloud_backend() {
-        // Groq is configured (key present) but is not yet a streaming
-        // backend in Slice A; the factory should report `None` and let
-        // the caller fall back to the batch path.
+    fn build_streaming_stt_returns_none_when_interactive_disabled() {
+        // Groq IS a streaming backend (Slice B1 Thread B), but the
+        // factory only constructs a streaming client when the master
+        // `[interactive].enabled` switch is on. With the default
+        // `Interactive` (`enabled = false`), Groq must yield `None`
+        // so the daemon falls back to the batch path.
         let cfg = SttCfg {
             backend: SttBackend::Groq,
             cloud: None,
@@ -489,8 +495,35 @@ mod tests {
         secrets.insert("GROQ_API_KEY", "gsk-test");
         let dir = std::path::PathBuf::from("/tmp");
         let interactive = fono_core::config::Interactive::default();
+        assert!(!interactive.enabled, "sanity");
         let got = build_streaming_stt(&cfg, &general, &interactive, &secrets, &dir).expect("ok");
-        assert!(got.is_none(), "cloud backend should yield None in Slice A");
+        assert!(
+            got.is_none(),
+            "interactive disabled should yield None for Groq"
+        );
+    }
+
+    #[cfg(all(feature = "streaming", feature = "groq"))]
+    #[test]
+    fn build_streaming_stt_returns_groq_when_interactive_enabled() {
+        let cfg = SttCfg {
+            backend: SttBackend::Groq,
+            cloud: None,
+            ..SttCfg::default()
+        };
+        let general = fono_core::config::General::default();
+        let mut secrets = Secrets::default();
+        secrets.insert("GROQ_API_KEY", "gsk-test");
+        let dir = std::path::PathBuf::from("/tmp");
+        let interactive = fono_core::config::Interactive {
+            enabled: true,
+            ..fono_core::config::Interactive::default()
+        };
+        let got = build_streaming_stt(&cfg, &general, &interactive, &secrets, &dir).expect("ok");
+        assert!(
+            got.is_some(),
+            "interactive enabled should yield Some(GroqStreaming) for Groq"
+        );
     }
 
     #[cfg(all(feature = "streaming", feature = "whisper-local"))]

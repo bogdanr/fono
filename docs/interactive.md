@@ -65,10 +65,13 @@ Two switches:
    budget_ceiling_per_minute_umicros = 0
    # Quality floor under budget pressure: "max" | "balanced" | "aggressive".
    quality_floor = "max"
-   # Show the live-dictation overlay window. Independent of the
-   # static [overlay].enabled toggle.
-   overlay = true
    ```
+
+   The live-dictation overlay is shown unconditionally when
+   `enabled = true` — it's the only feedback surface for live
+   previews, so there is no separate toggle. The `[overlay].enabled`
+   flag controls only the passive recording indicator used in batch
+   mode (when `[interactive].enabled = false`).
 
 The runtime toggle is read at daemon startup *and* on every `Reload`
 IPC (so `fono use stt local` or any other config-rewrite triggers a
