@@ -199,6 +199,13 @@ pub(crate) async fn groq_post_wav(
     let status = res.status();
     let body = res.text().await.unwrap_or_default();
     if !status.is_success() {
+        if status.as_u16() == 429 {
+            tracing::info!(
+                "groq cloud rate-limited (429): {body}. \
+                 Try increasing `interactive.streaming_interval` to 2.0 or higher \
+                 in your config to stay under the per-minute request cap."
+            );
+        }
         anyhow::bail!("groq STT {status}: {body}");
     }
     serde_json::from_str(&body).with_context(|| format!("parse groq response: {body}"))
@@ -234,6 +241,13 @@ pub async fn groq_post_wav_verbose(
     let status = res.status();
     let body = res.text().await.unwrap_or_default();
     if !status.is_success() {
+        if status.as_u16() == 429 {
+            tracing::info!(
+                "groq cloud rate-limited (429): {body}. \
+                 Try increasing `interactive.streaming_interval` to 2.0 or higher \
+                 in your config to stay under the per-minute request cap."
+            );
+        }
         anyhow::bail!("groq STT verbose {status}: {body}");
     }
     serde_json::from_str(&body).with_context(|| format!("parse groq verbose response: {body}"))

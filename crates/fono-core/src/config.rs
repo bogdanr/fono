@@ -637,6 +637,24 @@ pub struct Interactive {
     /// milliseconds during which a re-pressed hotkey resumes the prior
     /// session instead of opening a new one.
     pub resume_grace_ms: u32,
+    /// Cloud streaming preview cadence, in seconds. Re-POSTs the
+    /// trailing audio window at this interval to drive the live
+    /// overlay. Default `1.0`.
+    ///
+    /// Effective range: clamped to `0.5` minimum (anything below
+    /// drowns the cloud in requests). Values **greater than `3.0`**
+    /// disable the preview lane entirely — Fono only decodes on VAD
+    /// segment boundaries (slower feedback, but the cheapest mode for
+    /// rate-limited free tiers).
+    ///
+    /// Worked-out req/min budgets, continuous speech:
+    /// - `1.0` ≈ 60 previews/min + ~5 finalizes (paid Groq tier).
+    /// - `1.5` ≈ 40 previews/min (mid).
+    /// - `2.0` ≈ 30 previews/min (suggested when 429s are observed).
+    /// - `> 3.0` ≈ ~5 finalizes/min only (free-tier safe).
+    ///
+    /// Local Whisper backends ignore this knob (no rate limit).
+    pub streaming_interval: f32,
 }
 
 impl Default for Interactive {
@@ -662,7 +680,37 @@ impl Default for Interactive {
             eou_drain_extended_ms: 1500,
             eou_adaptive: false,
             resume_grace_ms: 0,
+            streaming_interval: 1.0,
         }
+    }
+}
+
+/// Resolved cadence for the cloud streaming preview lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewCadence {
+    /// Steady-state preview cadence in milliseconds. Already clamped
+    /// to the `[0.5s, 3.0s]` valid range.
+    Interval(u32),
+    /// User-configured value > 3.0s: preview lane is disabled and
+    /// only VAD-boundary finalize requests are sent.
+    DisabledFinalizeOnly,
+}
+
+impl Interactive {
+    /// Resolve `streaming_interval` to the effective cadence policy.
+    /// Clamps below `0.5s`, switches to `DisabledFinalizeOnly` above
+    /// `3.0s`. NaN/negative collapses to the default `1.0s`.
+    #[must_use]
+    pub fn preview_cadence(&self) -> PreviewCadence {
+        let s = self.streaming_interval;
+        if !s.is_finite() || s <= 0.0 {
+            return PreviewCadence::Interval(1000);
+        }
+        if s > 3.0 {
+            return PreviewCadence::DisabledFinalizeOnly;
+        }
+        let clamped = s.max(0.5);
+        PreviewCadence::Interval((clamped * 1000.0) as u32)
     }
 }
 

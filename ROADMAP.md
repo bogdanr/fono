@@ -61,6 +61,16 @@ The home page is [fono.page](https://fono.page).
 
 Newest first. Each entry says which release carried it.
 
+- **Configurable streaming cadence + 429 awareness.** Live preview
+  cadence is now controlled by `interactive.streaming_interval`
+  (seconds, default 1.0, valid range 0.5-3.0). Values above 3.0
+  disable the preview lane entirely so only VAD-boundary finalize
+  requests are sent — recommended for free-tier cloud users with
+  strict per-minute caps. When the cloud responds with HTTP 429 the
+  log now suggests bumping the interval to 2.0 or higher. The overlay
+  is also forced on whenever streaming is enabled, since it's the
+  only feedback surface live previews have. — *v0.3.3, 2026-04-28.*
+
 - **Banned-language gate actually fires.** v0.3.1's wrong-language
   self-correction was correct in design but unreachable in practice:
   the cloud transcribe call wasn't asking for the detail that includes

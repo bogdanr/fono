@@ -295,6 +295,7 @@ impl SessionOrchestrator {
             match fono_stt::build_streaming_stt(
                 &config.stt,
                 &config.general,
+                &config.interactive,
                 secrets,
                 &paths.whisper_models_dir(),
             ) {
@@ -320,7 +321,15 @@ impl SessionOrchestrator {
         // works.
         #[cfg(feature = "interactive")]
         {
-            if config.interactive.enabled && config.interactive.overlay {
+            if config.interactive.enabled {
+                if !config.interactive.overlay {
+                    warn!(
+                        "overlay: `[interactive].overlay = false` is ignored while \
+                         streaming is enabled — the overlay is the only feedback \
+                         surface for live previews. Set `[interactive].enabled = false` \
+                         to disable streaming entirely."
+                    );
+                }
                 match fono_overlay::RealOverlay::spawn() {
                     Ok(h) => {
                         if let Ok(mut g) = orch.overlay.write() {
@@ -389,6 +398,7 @@ impl SessionOrchestrator {
             let new_streaming = match fono_stt::build_streaming_stt(
                 &cfg.stt,
                 &cfg.general,
+                &cfg.interactive,
                 &secrets,
                 &paths.whisper_models_dir(),
             ) {

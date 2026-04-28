@@ -247,6 +247,7 @@ fn build_openai(
 pub fn build_streaming_stt(
     cfg: &Stt,
     general: &General,
+    interactive: &fono_core::config::Interactive,
     secrets: &Secrets,
     whisper_models_dir: &Path,
 ) -> Result<Option<Arc<dyn crate::streaming::StreamingStt>>> {
@@ -255,6 +256,7 @@ pub fn build_streaming_stt(
     let cloud_force_primary = general.cloud_force_primary_language;
     let cloud_rerun = general.cloud_rerun_on_language_mismatch;
     let cloud_streaming = cfg.cloud.as_ref().is_some_and(|c| c.streaming);
+    let cadence = interactive.preview_cadence();
     match &cfg.backend {
         SttBackend::Local => {
             let languages = effective_languages(cfg, general);
@@ -262,8 +264,15 @@ pub fn build_streaming_stt(
         }
         SttBackend::Groq if cloud_streaming => {
             let languages = effective_languages(cfg, general);
-            build_groq_streaming(cfg, secrets, languages, cloud_force_primary, cloud_rerun)
-                .map(Some)
+            build_groq_streaming(
+                cfg,
+                secrets,
+                languages,
+                cloud_force_primary,
+                cloud_rerun,
+                cadence,
+            )
+            .map(Some)
         }
         other => {
             let label = fono_core::providers::stt_backend_str(other);
@@ -284,14 +293,22 @@ fn build_groq_streaming(
     languages: Vec<String>,
     cloud_force_primary: bool,
     cloud_rerun: bool,
+    cadence: fono_core::config::PreviewCadence,
 ) -> Result<Arc<dyn crate::streaming::StreamingStt>> {
     let (key, model) = resolve_cloud(cfg, secrets, &SttBackend::Groq, "groq")?;
     bootstrap_language_cache(&languages, crate::groq::BACKEND_KEY);
+    let cadence_opt = match cadence {
+        fono_core::config::PreviewCadence::Interval(ms) => {
+            Some(std::time::Duration::from_millis(u64::from(ms)))
+        }
+        fono_core::config::PreviewCadence::DisabledFinalizeOnly => None,
+    };
     Ok(Arc::new(
         crate::groq_streaming::GroqStreaming::new(key, model)
             .with_languages(languages)
             .with_cloud_force_primary(cloud_force_primary)
-            .with_cloud_rerun_on_mismatch(cloud_rerun),
+            .with_cloud_rerun_on_mismatch(cloud_rerun)
+            .with_preview_cadence(cadence_opt),
     ))
 }
 
@@ -302,6 +319,7 @@ fn build_groq_streaming(
     _languages: Vec<String>,
     _cloud_force_primary: bool,
     _cloud_rerun: bool,
+    _cadence: fono_core::config::PreviewCadence,
 ) -> Result<Arc<dyn crate::streaming::StreamingStt>> {
     Err(anyhow!(
         "Groq streaming STT requested but this binary was built without \
@@ -402,7 +420,8 @@ mod tests {
         let mut secrets = Secrets::default();
         secrets.insert("GROQ_API_KEY", "gsk-test");
         let dir = std::path::PathBuf::from("/tmp");
-        let got = build_streaming_stt(&cfg, &general, &secrets, &dir).expect("ok");
+        let interactive = fono_core::config::Interactive::default();
+        let got = build_streaming_stt(&cfg, &general, &interactive, &secrets, &dir).expect("ok");
         assert!(got.is_none(), "cloud backend should yield None in Slice A");
     }
 
@@ -421,7 +440,8 @@ mod tests {
         let secrets = Secrets::default();
         let dir = std::env::temp_dir().join("fono-streaming-stt-test-empty");
         std::fs::create_dir_all(&dir).expect("mkdir");
-        let err = build_streaming_stt(&cfg, &general, &secrets, &dir)
+        let interactive = fono_core::config::Interactive::default();
+        let err = build_streaming_stt(&cfg, &general, &interactive, &secrets, &dir)
             .err()
             .expect("missing model should error");
         let msg = err.to_string();

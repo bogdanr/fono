@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-04-28
+
+### Added
+
+- `interactive.streaming_interval` config (seconds, f32). Default `1.0`.
+  Controls the cloud streaming preview cadence formerly hardcoded at
+  700 ms. Valid range `[0.5, 3.0]`; values above `3.0` disable the
+  preview lane entirely (only VAD-boundary finalize requests are sent —
+  recommended for free-tier cloud users with strict per-minute caps).
+  Values below `0.5` are clamped up; NaN/negative collapses to `1.0`.
+- HTTP 429 detection in Groq cloud requests. When the cloud responds
+  with `429 Too Many Requests`, an INFO log line now suggests bumping
+  `interactive.streaming_interval` to `2.0` or higher.
+
+### Changed
+
+- The overlay is now always shown when streaming/interactive mode is
+  enabled. `[interactive].overlay = false` is ignored (with a warning)
+  while `[interactive].enabled = true`, because the overlay is the
+  only feedback surface for live previews — without it there is no
+  user-visible signal that streaming is doing anything. To run without
+  the overlay, set `[interactive].enabled = false` and use batch mode.
+
 ## [0.3.2] — 2026-04-28
 
 Hotfix: cloud STT post-validation gate did not actually run because the
@@ -527,7 +550,8 @@ feature and ships fully wired in v0.2.
 - Local LLM cleanup (Qwen / SmolLM) is opt-in / preview.
 - Real `winit + softbuffer` overlay window is a stub (event channel only).
 
-[Unreleased]: https://github.com/bogdanr/fono/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/bogdanr/fono/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/bogdanr/fono/releases/tag/v0.3.3
 [0.3.2]: https://github.com/bogdanr/fono/releases/tag/v0.3.2
 [0.3.1]: https://github.com/bogdanr/fono/releases/tag/v0.3.1
 [0.3.0]: https://github.com/bogdanr/fono/releases/tag/v0.3.0

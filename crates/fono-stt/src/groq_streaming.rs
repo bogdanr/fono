@@ -89,11 +89,14 @@ pub struct GroqStreaming {
     cloud_force_primary: bool,
     cloud_rerun_on_mismatch: bool,
     lang_cache: Arc<LanguageCache>,
-    /// Diagnostic counter — incremented every time a 700 ms cadence
-    /// tick wanted to fire a preview but found the prior request
-    /// still in flight. Surfaced via [`Self::preview_skipped_count`]
-    /// so `fono doctor` (or a follow-up commit) can flag chronically
-    ///-bursty audio.
+    /// Steady-state preview cadence. `Some(d)` re-POSTs every `d`;
+    /// `None` disables the preview lane entirely (decode only at
+    /// VAD segment boundaries — the cheapest mode for free-tier cloud
+    /// users with strict req/min limits).
+    preview_cadence: Option<Duration>,
+    /// Diagnostic counter — incremented every time a cadence tick
+    /// wanted to fire a preview but found the prior request still in
+    /// flight. Surfaced via [`Self::preview_skipped_count`].
     preview_skipped_count: Arc<AtomicU64>,
 }
 
@@ -133,6 +136,7 @@ impl GroqStreaming {
             cloud_force_primary: false,
             cloud_rerun_on_mismatch: false,
             lang_cache: LanguageCache::global(),
+            preview_cadence: Some(PSEUDO_STREAM_INTERVAL),
             preview_skipped_count: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -150,6 +154,7 @@ impl GroqStreaming {
             cloud_force_primary: false,
             cloud_rerun_on_mismatch: false,
             lang_cache: LanguageCache::global(),
+            preview_cadence: Some(PSEUDO_STREAM_INTERVAL),
             preview_skipped_count: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -168,6 +173,7 @@ impl GroqStreaming {
             cloud_force_primary: false,
             cloud_rerun_on_mismatch: false,
             lang_cache: LanguageCache::global(),
+            preview_cadence: Some(PSEUDO_STREAM_INTERVAL),
             preview_skipped_count: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -201,6 +207,16 @@ impl GroqStreaming {
     #[must_use]
     pub fn with_lang_cache(mut self, cache: Arc<LanguageCache>) -> Self {
         self.lang_cache = cache;
+        self
+    }
+
+    /// Builder: set the steady-state preview cadence.
+    /// `None` disables the preview lane entirely (only VAD-boundary
+    /// finalize requests are sent — for free-tier cloud users with
+    /// strict req/min limits).
+    #[must_use]
+    pub fn with_preview_cadence(mut self, cadence: Option<Duration>) -> Self {
+        self.preview_cadence = cadence;
         self
     }
 
@@ -260,6 +276,8 @@ impl StreamingStt for GroqStreaming {
             }
         };
 
+        let preview_cadence = self.preview_cadence;
+
         tokio::spawn(async move {
             let mut segment_index: u32 = 0;
             let mut segment_pcm: Vec<f32> = Vec::with_capacity(16_000 * 30);
@@ -271,9 +289,11 @@ impl StreamingStt for GroqStreaming {
                 match frame {
                     StreamFrame::Pcm(chunk) => {
                         segment_pcm.extend_from_slice(&chunk);
+                        let Some(cadence) = preview_cadence else {
+                            continue;
+                        };
                         let big_enough = segment_pcm.len() >= PREVIEW_MIN_SAMPLES;
-                        let cooled =
-                            last_preview_at.is_none_or(|t| t.elapsed() >= PSEUDO_STREAM_INTERVAL);
+                        let cooled = last_preview_at.is_none_or(|t| t.elapsed() >= cadence);
                         let grew = segment_pcm.len() > last_decoded_len;
                         if !(big_enough && cooled && grew) {
                             continue;
