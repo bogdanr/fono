@@ -174,6 +174,131 @@ fn normalise_codes(codes: &[String]) -> Vec<String> {
     out
 }
 
+/// Normalise a Whisper language identifier (alpha-2 code or full English
+/// name) to its alpha-2 form for `LanguageSelection::contains` checks.
+///
+/// Cloud STT `verbose_json` responses echo `language` as the full English
+/// name (`"english"`, `"russian"`, `"bulgarian"`), while user configs and
+/// `LanguageSelection::AllowList` use the alpha-2 code (`"en"`, `"ru"`,
+/// `"bg"`). Without normalisation, the post-validation gate would never
+/// fire because `"bulgarian" != "bg"`.
+///
+/// Unknown names pass through lowercased as-is — safe default: an
+/// unrecognised name will not match the allow-list, so the rerun gate
+/// fires (which is the conservative outcome for an unexpected detection).
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn whisper_lang_to_code(s: &str) -> String {
+    let lc = s.trim().to_ascii_lowercase();
+    if lc.len() <= 3 {
+        return lc;
+    }
+    let code = match lc.as_str() {
+        "english" => "en",
+        "chinese" | "mandarin" => "zh",
+        "german" => "de",
+        "spanish" | "castilian" => "es",
+        "russian" => "ru",
+        "korean" => "ko",
+        "french" => "fr",
+        "japanese" => "ja",
+        "portuguese" => "pt",
+        "turkish" => "tr",
+        "polish" => "pl",
+        "catalan" | "valencian" => "ca",
+        "dutch" | "flemish" => "nl",
+        "arabic" => "ar",
+        "swedish" => "sv",
+        "italian" => "it",
+        "indonesian" => "id",
+        "hindi" => "hi",
+        "finnish" => "fi",
+        "vietnamese" => "vi",
+        "hebrew" => "he",
+        "ukrainian" => "uk",
+        "greek" => "el",
+        "malay" => "ms",
+        "czech" => "cs",
+        "romanian" | "moldavian" | "moldovan" => "ro",
+        "danish" => "da",
+        "hungarian" => "hu",
+        "tamil" => "ta",
+        "norwegian" => "no",
+        "thai" => "th",
+        "urdu" => "ur",
+        "croatian" => "hr",
+        "bulgarian" => "bg",
+        "lithuanian" => "lt",
+        "latin" => "la",
+        "maori" => "mi",
+        "malayalam" => "ml",
+        "welsh" => "cy",
+        "slovak" => "sk",
+        "telugu" => "te",
+        "persian" => "fa",
+        "latvian" => "lv",
+        "bengali" => "bn",
+        "serbian" => "sr",
+        "azerbaijani" => "az",
+        "slovenian" => "sl",
+        "kannada" => "kn",
+        "estonian" => "et",
+        "macedonian" => "mk",
+        "breton" => "br",
+        "basque" => "eu",
+        "icelandic" => "is",
+        "armenian" => "hy",
+        "nepali" => "ne",
+        "mongolian" => "mn",
+        "bosnian" => "bs",
+        "kazakh" => "kk",
+        "albanian" => "sq",
+        "swahili" => "sw",
+        "galician" => "gl",
+        "marathi" => "mr",
+        "punjabi" | "panjabi" => "pa",
+        "sinhala" | "sinhalese" => "si",
+        "khmer" => "km",
+        "shona" => "sn",
+        "yoruba" => "yo",
+        "somali" => "so",
+        "afrikaans" => "af",
+        "occitan" => "oc",
+        "georgian" => "ka",
+        "belarusian" => "be",
+        "tajik" => "tg",
+        "sindhi" => "sd",
+        "gujarati" => "gu",
+        "amharic" => "am",
+        "yiddish" => "yi",
+        "lao" => "lo",
+        "uzbek" => "uz",
+        "faroese" => "fo",
+        "haitian creole" | "haitian" => "ht",
+        "pashto" | "pushto" => "ps",
+        "turkmen" => "tk",
+        "nynorsk" => "nn",
+        "maltese" => "mt",
+        "sanskrit" => "sa",
+        "luxembourgish" | "letzeburgesch" => "lb",
+        "myanmar" | "burmese" => "my",
+        "tibetan" => "bo",
+        "tagalog" | "filipino" => "tl",
+        "malagasy" => "mg",
+        "assamese" => "as",
+        "tatar" => "tt",
+        "hawaiian" => "haw",
+        "lingala" => "ln",
+        "hausa" => "ha",
+        "bashkir" => "ba",
+        "javanese" => "jw",
+        "sundanese" => "su",
+        "cantonese" => "yue",
+        _ => return lc,
+    };
+    code.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-04-28
+
+Hotfix: cloud STT post-validation gate did not actually run because the
+default `json` response format does not include the detected language.
+v0.3.1's confidence-aware rerun was correct but unreachable.
+
+### Fixed
+
+- Cloud STT post-validation gate now actually fires. The first-pass
+  Groq / OpenAI request was using `response_format=json` (the implicit
+  default), which does **not** include the detected `language` field —
+  only `verbose_json` does. The post-validation block at
+  `groq.rs:271`/`openai.rs:217`/`groq_streaming.rs:399` therefore
+  silently skipped on every call, even when Groq returned Bulgarian
+  for English audio with `languages = ["ro", "en"]`. Both batch and
+  streaming first-pass requests now send `response_format=verbose_json`
+  (zero latency cost — same endpoint, different output shape).
+- Detected language is now normalised from Whisper's full English name
+  (`"english"`, `"bulgarian"`) to alpha-2 (`"en"`, `"bg"`) before the
+  allow-list check, via a new `crate::lang::whisper_lang_to_code`
+  helper covering all 99 Whisper-supported languages. Without
+  normalisation, `"bulgarian" != "bg"` would have prevented the gate
+  from firing even with `verbose_json`.
+
 ## [0.3.1] — 2026-04-28
 
 Hotfix for a cold-start banned-language injection bug in cloud STT.
@@ -503,7 +527,8 @@ feature and ships fully wired in v0.2.
 - Local LLM cleanup (Qwen / SmolLM) is opt-in / preview.
 - Real `winit + softbuffer` overlay window is a stub (event channel only).
 
-[Unreleased]: https://github.com/bogdanr/fono/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/bogdanr/fono/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/bogdanr/fono/releases/tag/v0.3.2
 [0.3.1]: https://github.com/bogdanr/fono/releases/tag/v0.3.1
 [0.3.0]: https://github.com/bogdanr/fono/releases/tag/v0.3.0
 [0.2.2]: https://github.com/bogdanr/fono/releases/tag/v0.2.2

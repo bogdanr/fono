@@ -174,8 +174,17 @@ pub(crate) async fn groq_post_wav(
     let part = multipart::Part::bytes(wav.to_vec())
         .file_name("audio.wav")
         .mime_str("audio/wav")?;
+    // Always request `verbose_json` so the response includes the
+    // detected `language` field. Plain `json` (the default) does NOT
+    // include it, which means the post-validation gate would never
+    // fire — the bug that produced Bulgarian / Russian text on screen
+    // for an English speaker with `languages = ["ro", "en"]`.
+    // Latency of `verbose_json` is identical to `json` for our use:
+    // we ignore `segments` in this hot path; the rerun lane still
+    // calls `groq_post_wav_verbose` separately to score by avg_logprob.
     let mut form = multipart::Form::new()
         .text("model", model.to_string())
+        .text("response_format", "verbose_json")
         .part("file", part);
     if let Some(l) = lang {
         form = form.text("language", l.to_string());
@@ -269,13 +278,16 @@ impl SpeechToText for GroqStt {
         // confidence picks the right peer even when the cache holds
         // the wrong code from a previous topic.
         if let LanguageSelection::AllowList(peers) = &selection {
-            if let Some(detected) = parsed.language.as_deref() {
-                if selection.contains(detected) {
-                    self.lang_cache.record(BACKEND_KEY, detected);
+            if let Some(detected_raw) = parsed.language.as_deref() {
+                // verbose_json echoes the full English name ("english",
+                // "bulgarian"); the allow-list is alpha-2. Normalise.
+                let detected = crate::lang::whisper_lang_to_code(detected_raw);
+                if selection.contains(&detected) {
+                    self.lang_cache.record(BACKEND_KEY, &detected);
                 } else if self.cloud_rerun_on_mismatch {
                     tracing::info!(
-                        "groq returned banned language {detected:?} (allow-list \
-                         {:?}); reranking by per-peer avg_logprob",
+                        "groq returned banned language {detected_raw:?} (normalised \
+                         {detected:?}, allow-list {:?}); reranking by per-peer avg_logprob",
                         self.languages
                     );
                     if let Some((picked, resp)) = self.pick_best_peer(&wav, peers).await {
@@ -291,7 +303,7 @@ impl SpeechToText for GroqStt {
                          falling back to unforced response"
                     );
                 } else {
-                    tracing::info!("groq detected banned language {detected:?}; rerun disabled");
+                    tracing::info!("groq detected banned language {detected_raw:?} (normalised {detected:?}); rerun disabled");
                 }
             }
         }

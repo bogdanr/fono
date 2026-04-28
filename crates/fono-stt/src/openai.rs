@@ -76,8 +76,13 @@ impl OpenAiStt {
         let part = multipart::Part::bytes(wav.to_vec())
             .file_name("audio.wav")
             .mime_str("audio/wav")?;
+        // Always request `verbose_json` so the response includes the
+        // detected `language` field. whisper-1's plain `json` shape
+        // does not, which means the post-validation gate would never
+        // fire. See the matching comment in `groq::groq_post_wav`.
         let mut form = multipart::Form::new()
             .text("model", self.model.clone())
+            .text("response_format", "verbose_json")
             .part("file", part);
         if let Some(l) = lang {
             form = form.text("language", l.to_string());
@@ -215,13 +220,14 @@ impl SpeechToText for OpenAiStt {
         let parsed = self.do_request(&wav, first_pass_lang.as_deref()).await?;
 
         if let LanguageSelection::AllowList(peers) = &selection {
-            if let Some(detected) = parsed.language.as_deref() {
-                if selection.contains(detected) {
-                    self.lang_cache.record(BACKEND_KEY, detected);
+            if let Some(detected_raw) = parsed.language.as_deref() {
+                let detected = crate::lang::whisper_lang_to_code(detected_raw);
+                if selection.contains(&detected) {
+                    self.lang_cache.record(BACKEND_KEY, &detected);
                 } else if self.cloud_rerun_on_mismatch {
                     tracing::info!(
-                        "openai returned banned language {detected:?} (allow-list \
-                         {:?}); reranking by per-peer avg_logprob",
+                        "openai returned banned language {detected_raw:?} (normalised \
+                         {detected:?}, allow-list {:?}); reranking by per-peer avg_logprob",
                         self.languages
                     );
                     if let Some((picked, resp)) = self.pick_best_peer(&wav, peers).await {
@@ -237,7 +243,7 @@ impl SpeechToText for OpenAiStt {
                          falling back to unforced response"
                     );
                 } else {
-                    tracing::info!("openai detected banned language {detected:?}; rerun disabled");
+                    tracing::info!("openai detected banned language {detected_raw:?} (normalised {detected:?}); rerun disabled");
                 }
             }
         }

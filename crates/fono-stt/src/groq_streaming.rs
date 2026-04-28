@@ -328,18 +328,19 @@ impl StreamingStt for GroqStreaming {
                                     // next preview can still promote
                                     // the right tokens once Groq's
                                     // detection settles.
-                                    if let (Some(allow), Some(detected)) =
+                                    if let (Some(allow), Some(detected_raw)) =
                                         (allow_list_p.as_ref(), resp.language.as_deref())
                                     {
-                                        let detected_lc = detected.trim().to_ascii_lowercase();
+                                        let detected_lc =
+                                            crate::lang::whisper_lang_to_code(detected_raw);
                                         let in_list = allow
                                             .iter()
                                             .any(|c| c.eq_ignore_ascii_case(&detected_lc));
                                         if !in_list {
                                             tracing::info!(
                                                 "groq preview: detected banned language \
-                                                 {detected:?} (allow-list {allow:?}); \
-                                                 suppressing overlay update"
+                                                 {detected_raw:?} (normalised {detected_lc:?}, \
+                                                 allow-list {allow:?}); suppressing overlay update"
                                             );
                                             in_flight_p.store(false, Ordering::Release);
                                             return;
@@ -396,15 +397,20 @@ impl StreamingStt for GroqStreaming {
                                     // No-op when verbose_fn is None
                                     // (test-only `with_request_fn`
                                     // construction).
-                                    if let (LanguageSelection::AllowList(peers), Some(detected)) =
-                                        (&selection, resp.language.as_deref())
+                                    if let (
+                                        LanguageSelection::AllowList(peers),
+                                        Some(detected_raw),
+                                    ) = (&selection, resp.language.as_deref())
                                     {
-                                        if selection.contains(detected) {
-                                            lang_cache.record(BACKEND_KEY, detected);
+                                        let detected =
+                                            crate::lang::whisper_lang_to_code(detected_raw);
+                                        if selection.contains(&detected) {
+                                            lang_cache.record(BACKEND_KEY, &detected);
                                         } else if cloud_rerun_on_mismatch {
                                             tracing::info!(
-                                                "groq returned banned language {detected:?} \
-                                                 on finalize (allow-list {peers:?}); \
+                                                "groq returned banned language {detected_raw:?} \
+                                                 (normalised {detected:?}) on finalize \
+                                                 (allow-list {peers:?}); \
                                                  reranking by per-peer avg_logprob"
                                             );
                                             if let Some(vfn) = verbose_fn.as_ref() {

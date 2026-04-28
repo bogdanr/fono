@@ -61,6 +61,14 @@ The home page is [fono.page](https://fono.page).
 
 Newest first. Each entry says which release carried it.
 
+- **Banned-language gate actually fires.** v0.3.1's wrong-language
+  self-correction was correct in design but unreachable in practice:
+  the cloud transcribe call wasn't asking for the detail that includes
+  the detected language code, so the gate never noticed a mismatch.
+  Now the request always asks for that detail, and the language name
+  is normalised to its short code before checking against your
+  configured list. — *v0.3.2, 2026-04-28.*
+
 - **Cold-start language self-correction.** When the cloud transcriber's
   first response of a session is a wrong language (e.g. English audio
   flagged as Russian for an accented speaker), Fono now retries against
