@@ -99,7 +99,7 @@ pub fn detect_os_languages() -> Vec<String> {
         }
     }
 
-    let _ = Command::new; // silence unused-import on platforms without the cfg arm
+    let _ = Command::new::<&str>; // silence unused-import on platforms without the cfg arm
     out
 }
 

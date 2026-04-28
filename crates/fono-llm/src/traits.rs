@@ -70,9 +70,6 @@ pub fn user_prompt(raw: &str) -> String {
 /// start with similar words.
 #[must_use]
 pub fn looks_like_clarification(out: &str) -> bool {
-    let trimmed = out.trim_start_matches(|c: char| !c.is_alphanumeric());
-    let lower = trimmed.to_ascii_lowercase();
-
     const OPENERS: &[&str] = &[
         "it seems like you",
         "it looks like you",
@@ -107,11 +104,13 @@ pub fn looks_like_clarification(out: &str) -> bool {
         "the text you",
         "to assist you",
         "to better understand",
-        "could you provide",
-        "please provide",
-        "please clarify",
-        "incomplete",
+        // Note: "please provide", "please clarify", "could you provide" are intentionally
+        // omitted here — they appear in OPENERS already and would create self-referential
+        // matches on sentences like "Please provide the report by Friday."
     ];
+
+    let trimmed = out.trim_start_matches(|c: char| !c.is_alphanumeric());
+    let lower = trimmed.to_ascii_lowercase();
 
     let opener_hit = OPENERS.iter().any(|p| lower.starts_with(p));
     if !opener_hit {

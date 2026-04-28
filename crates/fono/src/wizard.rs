@@ -12,7 +12,7 @@
 
 use anyhow::{Context, Result};
 use dialoguer::console::{Key, Term};
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, MultiSelect, Select};
+use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect, Select};
 use fono_core::config::{
     Config, LlmBackend, LlmCloud, LlmLocal, Stt, SttBackend, SttCloud, SttLocal,
 };
