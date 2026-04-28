@@ -79,6 +79,29 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
     let config = Arc::new(Config::load(&paths.config_file()).context("load config")?);
     let secrets = Secrets::load(&paths.secrets_file()).context("load secrets")?;
     print_banner(paths, &config, no_tray, verbosity);
+
+    // Single-instance guard via the IPC socket. If another daemon is
+    // already running it answers `connect()`; bail before we duplicate
+    // hotkey grabs, audio captures, and model loads. A stale socket
+    // file from a crashed previous run yields ConnectionRefused (or
+    // ENOENT) and the bind below replaces it cleanly.
+    let socket_path = paths.ipc_socket();
+    if socket_path.exists() {
+        match tokio::net::UnixStream::connect(&socket_path).await {
+            Ok(_) => anyhow::bail!(
+                "another fono daemon is already running (IPC socket {} is live). \
+                 Stop it before starting a new instance.",
+                socket_path.display()
+            ),
+            Err(_) => {
+                tracing::debug!(
+                    "stale IPC socket at {} — cleaning up and continuing",
+                    socket_path.display()
+                );
+            }
+        }
+    }
+
     write_pid(paths)?;
 
     // Ensure referenced models are on disk before we wire the orchestrator.
@@ -386,6 +409,7 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                     // feature was opted out at build time.
                     #[cfg(feature = "interactive")]
                     HotkeyEvent::StartLiveDictation(mode) => {
+                        tracing::info!("live: started ({mode:?})");
                         if let Err(err) = o.on_start_live_dictation(mode).await {
                             warn!(
                                 "start_live_dictation failed: {err:#} — \
@@ -404,6 +428,7 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                     }
                     #[cfg(feature = "interactive")]
                     HotkeyEvent::StopLiveDictation => {
+                        tracing::info!("live: stopped");
                         let o = Arc::clone(o);
                         tokio::spawn(async move {
                             o.on_stop_live_dictation().await;
@@ -460,7 +485,7 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                     orch_for_dispatch.is_some(),
                 );
                 let new_state = fsm.lock().await.dispatch(action);
-                tracing::debug!("dispatch {action:?} -> {new_state:?}");
+                tracing::info!("hotkey: {action:?} -> {new_state:?}");
                 if matches!(action, HotkeyAction::ProcessingDone) {
                     if let Some(t) = tray.as_ref().as_ref() {
                         t.set_state(TrayState::Idle);

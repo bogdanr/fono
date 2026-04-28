@@ -62,6 +62,9 @@ pub fn spawn(
     bindings: HotkeyBindings,
     tx: mpsc::UnboundedSender<HotkeyAction>,
 ) -> Result<ListenerHandle> {
+    // Install our X11 error handler before any XGrabKey call so we can
+    // turn raw `BadAccess` stderr noise into actionable tracing output.
+    crate::xerror::install();
     // Pre-parse so we fail the daemon early on a bad config.
     let hold = parse_hotkey(&bindings.hold)
         .with_context(|| format!("parsing hotkeys.hold = {:?}", bindings.hold))?

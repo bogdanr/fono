@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `interactive.hold_release_grace_ms` config (default `300`). On F8
+  release (and F9 toggle-off), the orchestrator now waits this many
+  milliseconds before signalling the capture thread to stop. Closes a
+  truncation bug where the last 100–300 ms of audio buffered in the
+  cpal host callback were abandoned when the user released the hotkey
+  early on a short utterance.
+- Desktop notification on cloud STT rate-limit (HTTP 429), deduped to
+  at most once per dictation session (per F8/F9 press). Surfaces via
+  `notify-rust` in the default build; slim builds without the `notify`
+  feature still emit a `tracing::warn!` line. A defensive 120 s
+  auto-reset re-arms the flag if the orchestrator's reset path is
+  skipped (e.g. by panic).
+- 60-second preview-lane throttle after any cloud STT 429. The
+  streaming pseudo-stream loop checks
+  `rate_limit_notify::is_throttled()` before each preview tick and
+  skips it; only VAD-boundary finalize requests fire during the
+  throttle window. Self-clears after 60 s.
+- Single-instance guard via the IPC socket. The daemon now probes the
+  Unix socket on startup with `UnixStream::connect`; if a previous
+  daemon answers, we bail before duplicating hotkey grabs and model
+  loads. Stale sockets from crashed prior runs yield
+  `ConnectionRefused` and proceed normally. No PID file parsing, no
+  process probing — the socket itself is the source of truth.
+
+### Changed
+
+- Hotkey dispatch and live-dictation start/stop now log at INFO instead
+  of DEBUG, so streaming sessions show `hotkey: …`,
+  `live dictation: starting capture`, and
+  `live dictation: stopping capture (grace=…ms)` at default verbosity.
+  Steady-state per-update lines remain at DEBUG.
+- 429 sites in `groq_post_wav` and `groq_post_wav_verbose` upgraded
+  from `tracing::info!` to `tracing::warn!` so they appear at default
+  log level. The verbose JSON body is now compacted to a single human-
+  readable line (model + RPM ceiling + retry-in seconds) instead of
+  being dumped raw. Streaming finalize and preview lanes detect 429
+  in the closure-error string and trip the same warn + notification +
+  throttle path the batch backend uses.
+
+### Fixed
+
+- Hotkey-grab conflicts on X11 no longer print the bare
+  `X Error of failed request: BadAccess … X_GrabKey` to stderr.
+  A custom `XSetErrorHandler` is installed at daemon startup that
+  converts BadAccess-on-XGrabKey into an actionable
+  `tracing::error!` message naming the conflict and pointing at
+  `[hotkeys].hold` / `[hotkeys].toggle` in the config. Other X11
+  errors are surfaced at WARN with their numeric codes instead of
+  being printed by libxlib's default handler.
+
 ## [0.3.3] — 2026-04-28
 
 ### Added

@@ -67,7 +67,7 @@ cloud-all = ["fono-stt/openai", "fono-llm/anthropic"]
 [dependencies]
 fono-core = { path = "../fono-core" }
 fono-audio = { path = "../fono-audio" }
-fono-stt = { path = "../fono-stt" }
+fono-stt = { path = "../fono-stt", features = ["notify"] }
 fono-llm = { path = "../fono-llm" }
 fono-hotkey = { path = "../fono-hotkey" }
 fono-inject = { path = "../fono-inject" }

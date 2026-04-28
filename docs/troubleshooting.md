@@ -56,6 +56,24 @@ show `(active) reachable` next to your selected backend.
   combos like `Ctrl+Alt+Space` need literal Ctrl, Alt, and Space in your
   active layout.
 
+If you see this in the log:
+
+```
+ERROR X11 hotkey grab denied (BadAccess on X_GrabKey): another
+      application … already owns one of the keys you bound. Change
+      `[hotkeys].hold` or `[hotkeys].toggle` in ~/.config/fono/config.toml
+      …
+```
+
+— it means another running process (window manager, browser
+extension, screen-recorder, OBS, KDE shortcut, etc.) has grabbed the
+key first. Pick a different hotkey in `[hotkeys]` and restart Fono.
+Common conflict-free choices: `F11`, `Pause`, `ScrollLock`, or
+`Mod4+space` (Super+Space). Note that prior to v0.3.4 this surfaced
+as a raw `X Error of failed request: BadAccess … X_GrabKey` line on
+stderr without a tracing prefix; if you upgrade and still see the raw
+form, you're running an older daemon — `pkill fono` and start fresh.
+
 ### Wayland (sway, Hyprland, KDE-Wayland, GNOME-Wayland)
 
 Most Wayland compositors don't deliver global keys to applications. Bind

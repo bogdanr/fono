@@ -532,6 +532,7 @@ impl SessionOrchestrator {
 
     /// Begin recording. Refuses if a previous pipeline is still running.
     pub async fn on_start_recording(&self, mode: RecordingMode) -> Result<()> {
+        fono_stt::rate_limit_notify::reset_session_flag();
         if self.pipeline_in_flight.load(Ordering::SeqCst) {
             warn!("recording requested while previous pipeline still running; ignoring");
             return Ok(());
@@ -758,6 +759,8 @@ impl SessionOrchestrator {
     /// machine; the daemon logs a `warn!` so the diagnosis is obvious.
     #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
     pub async fn on_start_live_dictation(&self, mode: RecordingMode) -> Result<()> {
+        fono_stt::rate_limit_notify::reset_session_flag();
+        tracing::info!("live dictation: starting capture (mode={mode:?})");
         let Some(streaming) = self.current_streaming_stt() else {
             warn!(
                 "live-dictation: no streaming-capable STT backend currently loaded \
@@ -930,6 +933,7 @@ impl SessionOrchestrator {
     /// blob of PCM.
     #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
     pub async fn on_stop_live_dictation(&self) {
+        tracing::info!("live dictation: stopping capture");
         let taken = self.live_capture.lock().await.take();
         let Some(mut session) = taken else {
             debug!("live-stop with no active live capture");
@@ -944,6 +948,9 @@ impl SessionOrchestrator {
         let capture_ms = elapsed.as_millis() as u64;
 
         // Realtime push teardown order:
+        //  0. Sleep `hold_release_grace_ms` so cpal's pending callback
+        //     samples reach the audio bridge — without this, F8 release
+        //     mid-pause drops the trailing word.
         //  1. Stop cpal capture — drops the forwarder closure (owned
         //     by the Stream), which drops the realtime SPSC `Sender`,
         //     signalling EOF to the bridge thread.
@@ -955,6 +962,11 @@ impl SessionOrchestrator {
         //     None, so it calls `pump.finish()` and exits.
         //  5. Existing post-drain logic (`run_join.await`, transcript
         //     handling) is unchanged.
+        let grace_ms = u64::from(cfg.interactive.hold_release_grace_ms);
+        if grace_ms > 0 {
+            tracing::info!("live dictation: stopping capture (grace={grace_ms}ms)");
+            tokio::time::sleep(Duration::from_millis(grace_ms)).await;
+        }
         let _ = session.capture_stop_tx.send(());
         if let Some(j) = session.capture_join.take() {
             let _ = tokio::task::spawn_blocking(move || {

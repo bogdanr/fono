@@ -6,6 +6,7 @@
 pub mod fsm;
 pub mod listener;
 pub mod parse;
+pub mod xerror;
 
 pub use fsm::{HotkeyAction, HotkeyEvent, RecordingFsm, RecordingMode, State};
 pub use listener::{spawn as spawn_listener, HotkeyBindings, HotkeyControl, ListenerHandle};

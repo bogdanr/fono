@@ -289,6 +289,13 @@ impl StreamingStt for GroqStreaming {
                 match frame {
                     StreamFrame::Pcm(chunk) => {
                         segment_pcm.extend_from_slice(&chunk);
+                        // Honour the global rate-limit throttle: when a 429
+                        // was observed within THROTTLE_WINDOW, suppress
+                        // preview entirely and let finalize handle the
+                        // segment at VAD boundary.
+                        if crate::rate_limit_notify::is_throttled() {
+                            continue;
+                        }
                         let Some(cadence) = preview_cadence else {
                             continue;
                         };
@@ -386,9 +393,26 @@ impl StreamingStt for GroqStreaming {
                                     let _ = tx_p.send(upd);
                                 }
                                 Err(e) => {
-                                    tracing::warn!(
-                                        "groq pseudo-stream: preview decode failed: {e:#}"
-                                    );
+                                    let msg = e.to_string();
+                                    if msg.contains("429") {
+                                        let summary = crate::groq::summarise_429_public(&msg);
+                                        tracing::warn!(
+                                            "groq pseudo-stream: preview rate-limited \
+                                             (429): {summary}. Suppressing preview \
+                                             requests for the next minute."
+                                        );
+                                        crate::rate_limit_notify::mark_rate_limited();
+                                        crate::rate_limit_notify::notify_once(
+                                            "groq",
+                                            "Rate-limited; preview disabled for ~60s. \
+                                             Increase interactive.streaming_interval \
+                                             (e.g. 2.0) or upgrade your Groq plan.",
+                                        );
+                                    } else {
+                                        tracing::warn!(
+                                            "groq pseudo-stream: preview decode failed: {e:#}"
+                                        );
+                                    }
                                 }
                             }
                             in_flight_p.store(false, Ordering::Release);
@@ -495,9 +519,26 @@ impl StreamingStt for GroqStreaming {
                                     let _ = tx.send(upd);
                                 }
                                 Err(e) => {
-                                    tracing::warn!(
-                                        "groq pseudo-stream: finalize decode failed: {e:#}"
-                                    );
+                                    let msg = e.to_string();
+                                    if msg.contains("429") {
+                                        let summary = crate::groq::summarise_429_public(&msg);
+                                        tracing::warn!(
+                                            "groq pseudo-stream: finalize rate-limited \
+                                             (429): {summary}. Suppressing preview \
+                                             requests for the next minute."
+                                        );
+                                        crate::rate_limit_notify::mark_rate_limited();
+                                        crate::rate_limit_notify::notify_once(
+                                            "groq",
+                                            "Rate-limited; preview disabled for ~60s. \
+                                             Increase interactive.streaming_interval \
+                                             (e.g. 2.0) or upgrade your Groq plan.",
+                                        );
+                                    } else {
+                                        tracing::warn!(
+                                            "groq pseudo-stream: finalize decode failed: {e:#}"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -580,6 +621,7 @@ mod tests {
 
     #[tokio::test]
     async fn three_previews_promote_lcp_then_finalize_emits_full_text() {
+        crate::rate_limit_notify::clear_throttle_for_tests();
         let (req, counter) = scripted(vec![
             "the",
             "the quick",
@@ -639,6 +681,7 @@ mod tests {
 
     #[tokio::test]
     async fn in_flight_cap_drops_overlap_and_increments_counter() {
+        crate::rate_limit_notify::clear_throttle_for_tests();
         // The mock holds the AsyncMutex for ~500 ms; meanwhile we
         // send 5 PCM chunks back-to-back. Only the first acquires
         // the in_flight guard; the next four bump the

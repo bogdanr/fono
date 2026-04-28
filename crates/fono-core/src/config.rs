@@ -655,6 +655,14 @@ pub struct Interactive {
     ///
     /// Local Whisper backends ignore this knob (no rate limit).
     pub streaming_interval: f32,
+    /// Delay between `LiveHoldReleased` arriving at the session
+    /// orchestrator and the actual cpal capture stop, in
+    /// milliseconds. Gives cpal's host-side callback buffer time to
+    /// drain through the audio bridge so the trailing portion of the
+    /// utterance reaches the streaming STT before EOF. Default `300`.
+    /// Lower (e.g. `150`) for snappier feel; raise (e.g. `500`) on
+    /// audio interfaces with longer internal buffers.
+    pub hold_release_grace_ms: u32,
 }
 
 impl Default for Interactive {
@@ -681,6 +689,7 @@ impl Default for Interactive {
             eou_adaptive: false,
             resume_grace_ms: 0,
             streaming_interval: 1.0,
+            hold_release_grace_ms: 300,
         }
     }
 }
@@ -966,6 +975,8 @@ mod tests {
         assert_eq!(i.eou_drain_extended_ms, d.eou_drain_extended_ms);
         assert_eq!(i.eou_adaptive, d.eou_adaptive);
         assert_eq!(i.resume_grace_ms, d.resume_grace_ms);
+        assert_eq!(i.hold_release_grace_ms, 300);
+        assert_eq!(i.hold_release_grace_ms, d.hold_release_grace_ms);
     }
 
     #[test]

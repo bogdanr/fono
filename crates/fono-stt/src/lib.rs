@@ -7,6 +7,7 @@ pub mod defaults;
 pub mod factory;
 pub mod lang;
 pub mod lang_cache;
+pub mod rate_limit_notify;
 pub mod registry;
 pub mod traits;
 

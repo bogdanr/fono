@@ -22,6 +22,57 @@ const DEFAULT_MODEL: &str = "whisper-large-v3-turbo";
 /// single language memory.
 pub(crate) const BACKEND_KEY: &str = "groq";
 
+/// Body text shared by the warn-log line and the desktop notification
+/// when Groq returns HTTP 429. Centralised so the two surfaces stay
+/// in sync.
+const RATE_LIMIT_HINT: &str = "Try increasing `interactive.streaming_interval` to 2.0 or \
+                               higher in your config to stay under the per-minute request cap.";
+
+/// Parse Groq's verbose 429 JSON body into a single human-readable
+/// line. Falls back to a 120-char excerpt of the raw body when the
+/// body isn't the expected `{ "error": { "message": "Rate limit reached
+/// for model X in organization Y on requests per minute (RPM): Limit N,
+/// Used N, Requested 1. Please try again in Ts." } }` shape.
+fn summarise_429(body: &str) -> String {
+    #[derive(serde::Deserialize)]
+    struct ErrEnvelope {
+        error: ErrInner,
+    }
+    #[derive(serde::Deserialize)]
+    struct ErrInner {
+        #[serde(default)]
+        message: Option<String>,
+    }
+    let parsed: Option<ErrEnvelope> = serde_json::from_str(body).ok();
+    let Some(msg) = parsed.as_ref().and_then(|e| e.error.message.as_deref()) else {
+        // Truncate raw body for the fallback so we don't dump a multi-
+        // line JSON blob into the log.
+        let trimmed: String = body.chars().take(120).collect();
+        return if body.len() > 120 {
+            format!("{trimmed}…")
+        } else {
+            trimmed
+        };
+    };
+    // The upstream message is itself dense but readable; trim the
+    // upgrade pitch ("Need more tokens? Upgrade to Dev Tier today …")
+    // since we already point users at config tuning.
+    let cut = msg.find("Need more tokens?").unwrap_or(msg.len());
+    msg[..cut].trim().to_string()
+}
+
+/// Crate-public wrapper so `groq_streaming.rs` can compact 429 bodies
+/// observed via the `with_request_fn` closure (which surfaces them as
+/// `anyhow::Error` strings). The body here is usually the full
+/// `groq STT 429 …: {json}` error message, not the bare JSON.
+pub(crate) fn summarise_429_public(body: &str) -> String {
+    // Try to find the JSON envelope inside the wrapped error.
+    if let Some(start) = body.find('{') {
+        return summarise_429(&body[start..]);
+    }
+    summarise_429(body)
+}
+
 pub struct GroqStt {
     api_key: String,
     model: String,
@@ -200,11 +251,10 @@ pub(crate) async fn groq_post_wav(
     let body = res.text().await.unwrap_or_default();
     if !status.is_success() {
         if status.as_u16() == 429 {
-            tracing::info!(
-                "groq cloud rate-limited (429): {body}. \
-                 Try increasing `interactive.streaming_interval` to 2.0 or higher \
-                 in your config to stay under the per-minute request cap."
-            );
+            let summary = summarise_429(&body);
+            tracing::warn!("groq rate-limited (429): {summary}. {RATE_LIMIT_HINT}");
+            crate::rate_limit_notify::mark_rate_limited();
+            crate::rate_limit_notify::notify_once("groq", RATE_LIMIT_HINT);
         }
         anyhow::bail!("groq STT {status}: {body}");
     }
@@ -242,11 +292,10 @@ pub async fn groq_post_wav_verbose(
     let body = res.text().await.unwrap_or_default();
     if !status.is_success() {
         if status.as_u16() == 429 {
-            tracing::info!(
-                "groq cloud rate-limited (429): {body}. \
-                 Try increasing `interactive.streaming_interval` to 2.0 or higher \
-                 in your config to stay under the per-minute request cap."
-            );
+            let summary = summarise_429(&body);
+            tracing::warn!("groq verbose rate-limited (429): {summary}. {RATE_LIMIT_HINT}");
+            crate::rate_limit_notify::mark_rate_limited();
+            crate::rate_limit_notify::notify_once("groq", RATE_LIMIT_HINT);
         }
         anyhow::bail!("groq STT verbose {status}: {body}");
     }
