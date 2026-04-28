@@ -85,6 +85,47 @@ impl LocalTier {
     }
 }
 
+/// Predicted feasibility of running a specific whisper model on this hardware.
+///
+/// Returned by [`HardwareSnapshot::affords_model`]. The three buckets let the
+/// wizard filter, warn, or hide models without exposing raw numbers to users.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Affordability {
+    /// Fits in RAM and the CPU can keep up with real-time transcription.
+    /// Safe to offer as a default in the wizard.
+    Comfortable,
+    /// Fits in RAM but the effective real-time factor is below the live-mode
+    /// threshold on this machine — batch dictation will be smooth but live
+    /// preview may lag. Offered with a warning suffix in the wizard.
+    Borderline,
+    /// Insufficient available RAM or free disk space — the model cannot load
+    /// without swapping. Hidden from the wizard shortlist; a footer explains
+    /// why it was excluded.
+    Unsuitable,
+}
+
+/// Minimum effective batch real-time factor required for comfortable
+/// live-mode transcription on a CPU-only machine. Live mode adds
+/// roughly 2–4× compute amplification on top of batch decoding
+/// (overlapping windows, look-ahead context), so a model that decodes
+/// at 4× batch realtime is *only just* fast enough for streaming.
+///
+/// Empirically: small (rf=4) on an 8-physical-core 12th-gen Intel
+/// (no NPU) lags noticeably; the same model on a 12-core Zen 4 keeps
+/// up. Threshold is calibrated to match that observation.
+pub const LIVE_REALTIME_MIN_CPU: f32 = 6.0;
+
+/// Minimum effective batch real-time factor on machines with hardware
+/// acceleration (Apple Silicon Metal/CoreML today; future: CUDA,
+/// Vulkan, Intel NPU). Whisper.cpp's accelerated path uses far less
+/// CPU per audio-second, so streaming overhead is much smaller and a
+/// model needs only ~1.5× batch realtime to feel snappy live.
+pub const LIVE_REALTIME_MIN_ACCEL: f32 = 1.5;
+
+/// Number of physical cores on the AVX2 reference machine used for the
+/// `realtime_factor_cpu_avx2` benchmark in the model registry.
+pub const REFERENCE_CORES: f32 = 8.0;
+
 /// Reason the snapshot was classified `Unsuitable`. Used to print a
 /// specific user-facing message in the wizard.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +188,106 @@ impl HardwareSnapshot {
             LocalTier::Comfortable
         } else {
             LocalTier::Minimum
+        }
+    }
+
+    /// Predict whether this machine can run a model with the given parameters.
+    ///
+    /// This is a pure function over the hardware snapshot — no I/O. The wizard
+    /// calls it for each candidate model; `fono-stt`'s `ModelInfo` fields map
+    /// directly to the three parameters so the caller avoids a circular dep
+    /// (`fono-core` ← `fono-stt`):
+    ///
+    /// ```ignore
+    /// let aff = snap.affords_model(
+    ///     model.min_ram_mb,
+    ///     model.approx_mb,
+    ///     model.realtime_factor_cpu_avx2,
+    /// );
+    /// ```
+    ///
+    /// # Parameters
+    /// - `min_ram_mb`: minimum available RAM (MiB) the model needs.
+    /// - `approx_mb`: on-disk size (MiB); needs 2× headroom on free disk.
+    /// - `realtime_factor_cpu_avx2`: audio-seconds per wall-second on the
+    ///   8-core AVX2 reference machine ([`REFERENCE_CORES`]).
+    #[must_use]
+    pub fn affords_model(
+        &self,
+        min_ram_mb: u32,
+        approx_mb: u32,
+        realtime_factor_cpu_avx2: f32,
+    ) -> Affordability {
+        let avail_ram_mb = (self.available_ram_bytes / (1024 * 1024)) as u32;
+        let free_disk_mb = (self.free_disk_bytes / (1024 * 1024)) as u32;
+
+        // Cannot load without swapping or without disk headroom.
+        if avail_ram_mb < min_ram_mb || free_disk_mb < approx_mb * 2 {
+            return Affordability::Unsuitable;
+        }
+
+        // Scale the reference realtime factor by this machine's CPU capability.
+        let core_scale = (self.physical_cores as f32 / REFERENCE_CORES).clamp(0.25, 2.0);
+        let isa_scale = if self.cpu_features.avx2 || self.cpu_features.neon {
+            1.0_f32
+        } else {
+            0.5 // non-vectorised path is roughly 2× slower
+        };
+        let effective_rf = realtime_factor_cpu_avx2 * core_scale * isa_scale;
+
+        // Apple Silicon (and future GPU/NPU paths) decode much closer to
+        // batch realtime under streaming load — use the relaxed threshold.
+        let threshold = if self.accelerated() {
+            LIVE_REALTIME_MIN_ACCEL
+        } else {
+            LIVE_REALTIME_MIN_CPU
+        };
+
+        if effective_rf < threshold {
+            Affordability::Borderline
+        } else {
+            Affordability::Comfortable
+        }
+    }
+
+    /// Whether whisper.cpp can use a hardware accelerator on this host.
+    ///
+    /// Currently true only on Apple Silicon (`macos` + `aarch64`), where
+    /// whisper.cpp ships with Metal/CoreML kernels enabled by default.
+    /// Linux/Windows GPU builds (CUDA / Vulkan) are not detected because
+    /// our default release build is CPU-only; users with custom GPU
+    /// builds can override the wizard's recommendation explicitly.
+    #[must_use]
+    pub fn accelerated(&self) -> bool {
+        self.os == "macos" && self.arch == "aarch64"
+    }
+
+    /// One-line, human-readable description of the speech-recognition
+    /// acceleration available on this host.
+    ///
+    /// The wizard prints this under the cores/ram lines so users see at a
+    /// glance what hardware will be doing the speech work, and roughly how
+    /// much it helps live (streaming) transcription.
+    ///
+    /// The expected-impact figures are rough — they reflect the ratio of
+    /// the strict CPU realtime threshold to the relaxed accel threshold
+    /// (`LIVE_REALTIME_MIN_CPU / LIVE_REALTIME_MIN_ACCEL` ≈ 4×) and the
+    /// observation that whisper.cpp's Metal path often runs the encoder
+    /// 3–5× faster than AVX2 on the same machine.
+    #[must_use]
+    pub fn acceleration_summary(&self) -> String {
+        if self.os == "macos" && self.arch == "aarch64" {
+            "Apple Silicon (Metal + CoreML) — ~3–5× faster, live mode OK".to_string()
+        } else if self.cpu_features.avx512 {
+            "CPU only (AVX-512) — solid for batch dictation; live mode works for tiny / base".to_string()
+        } else if self.cpu_features.avx2 && self.cpu_features.fma {
+            "CPU only (AVX2 + FMA) — fine for batch dictation; live mode best with tiny".to_string()
+        } else if self.cpu_features.avx2 {
+            "CPU only (AVX2) — fine for batch dictation; live mode best with tiny".to_string()
+        } else if self.cpu_features.neon {
+            "CPU only (NEON) — fine for batch dictation; live mode not recommended".to_string()
+        } else {
+            "CPU only (no vector extensions) — local models will be very slow, cloud STT recommended".to_string()
         }
     }
 
@@ -476,5 +617,150 @@ mod tests {
         let r = UnsuitableReason::TooFewCores { have: 2, need: 4 };
         assert!(r.to_string().contains("only 2"));
         assert!(r.to_string().contains("minimum is 4"));
+    }
+
+    // ── affords_model tests ──────────────────────────────────────────────
+
+    /// Realistic small.en: min_ram=1000 MiB, approx=466 MiB, rf=4.0
+    const SMALL_EN: (u32, u32, f32) = (1_000, 466, 4.0);
+    /// Realistic large-v3-turbo: min_ram=3400 MiB, approx=1620 MiB, rf=2.5
+    const TURBO: (u32, u32, f32) = (3_400, 1_620, 2.5);
+    /// Realistic tiny.en: min_ram=250 MiB, approx=75 MiB, rf=20
+    const TINY_EN: (u32, u32, f32) = (250, 75, 20.0);
+
+    fn affords(s: &HardwareSnapshot, (min_ram, approx, rf): (u32, u32, f32)) -> Affordability {
+        s.affords_model(min_ram, approx, rf)
+    }
+
+    #[test]
+    fn affords_tiny_comfortable_on_8_core_avx2() {
+        // tiny rf=20 × 1.0 × 1.0 = 20 ≥ 6.0 (CPU threshold) → Comfortable
+        let s = snap(8, 16, 100, true);
+        assert_eq!(affords(&s, TINY_EN), Affordability::Comfortable);
+    }
+
+    #[test]
+    fn affords_small_borderline_on_8_core_cpu_only() {
+        // small rf=4.0 × 1.0 × 1.0 = 4.0 < 6.0 (CPU threshold) → Borderline.
+        // Matches the user's 12th-gen Intel observation: small lags in live
+        // mode without hardware acceleration.
+        let s = snap(8, 16, 100, true);
+        assert_eq!(affords(&s, SMALL_EN), Affordability::Borderline);
+    }
+
+    #[test]
+    fn affords_small_comfortable_on_12_core_cpu_only() {
+        // 12 cores: small rf=4.0 × 1.5 × 1.0 = 6.0 ≥ 6.0 → Comfortable
+        let s = snap(12, 32, 200, true);
+        assert_eq!(affords(&s, SMALL_EN), Affordability::Comfortable);
+    }
+
+    #[test]
+    fn affords_turbo_borderline_on_cpu_only() {
+        // turbo rf=2.5 × 1.5 × 1.0 = 3.75 < 6.0 → Borderline even on 12 cores.
+        let s = snap(12, 32, 200, true);
+        assert_eq!(affords(&s, TURBO), Affordability::Borderline);
+    }
+
+    #[test]
+    fn affords_small_comfortable_on_apple_silicon() {
+        // Apple Silicon: relaxed threshold (1.5). small rf=4.0 ≥ 1.5 → Comfortable
+        let s = HardwareSnapshot {
+            os: "macos".into(),
+            arch: "aarch64".into(),
+            cpu_features: CpuFeatures {
+                neon: true,
+                ..Default::default()
+            },
+            ..snap(8, 16, 100, false)
+        };
+        assert!(s.accelerated());
+        assert_eq!(affords(&s, SMALL_EN), Affordability::Comfortable);
+        assert_eq!(affords(&s, TURBO), Affordability::Comfortable);
+    }
+
+    #[test]
+    fn affords_unsuitable_when_not_enough_ram() {
+        let s = HardwareSnapshot {
+            physical_cores: 8,
+            logical_cores: 16,
+            total_ram_bytes: GB * 8,
+            available_ram_bytes: 512 * 1024 * 1024,
+            free_disk_bytes: GB * 100,
+            cpu_features: CpuFeatures { avx2: true, ..Default::default() },
+            os: "linux".into(),
+            arch: "x86_64".into(),
+        };
+        assert_eq!(affords(&s, SMALL_EN), Affordability::Unsuitable);
+    }
+
+    #[test]
+    fn affords_unsuitable_when_not_enough_disk() {
+        // small.en needs 466 MB × 2 = 932 MB — only 800 MB free disk
+        let s = HardwareSnapshot {
+            physical_cores: 8,
+            logical_cores: 16,
+            total_ram_bytes: GB * 16,
+            available_ram_bytes: GB * 8,
+            free_disk_bytes: 800 * 1024 * 1024,
+            cpu_features: CpuFeatures { avx2: true, ..Default::default() },
+            os: "linux".into(),
+            arch: "x86_64".into(),
+        };
+        assert_eq!(affords(&s, SMALL_EN), Affordability::Unsuitable);
+    }
+
+    #[test]
+    fn accelerated_only_on_apple_silicon() {
+        let mac_arm = HardwareSnapshot {
+            os: "macos".into(),
+            arch: "aarch64".into(),
+            ..snap(8, 16, 100, false)
+        };
+        assert!(mac_arm.accelerated());
+
+        let mac_intel = HardwareSnapshot {
+            os: "macos".into(),
+            arch: "x86_64".into(),
+            ..snap(8, 16, 100, true)
+        };
+        assert!(!mac_intel.accelerated());
+
+        let linux = HardwareSnapshot {
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            ..snap(8, 16, 100, true)
+        };
+        assert!(!linux.accelerated());
+    }
+
+    #[test]
+    fn acceleration_summary_apple_silicon_mentions_metal() {
+        let mac_arm = HardwareSnapshot {
+            os: "macos".into(),
+            arch: "aarch64".into(),
+            cpu_features: CpuFeatures {
+                neon: true,
+                ..Default::default()
+            },
+            ..snap(8, 16, 100, false)
+        };
+        let s = mac_arm.acceleration_summary();
+        assert!(s.contains("Apple Silicon"));
+        assert!(s.contains("Metal"));
+    }
+
+    #[test]
+    fn acceleration_summary_avx2_says_cpu_only() {
+        let s = snap(8, 16, 100, true).acceleration_summary();
+        assert!(s.starts_with("CPU only"));
+        assert!(s.contains("AVX2"));
+    }
+
+    #[test]
+    fn acceleration_summary_no_vector_isa_warns() {
+        let s = snap(8, 16, 100, false).acceleration_summary();
+        assert!(s.contains("no vector"));
+        assert!(s.contains("cloud"));
     }
 }

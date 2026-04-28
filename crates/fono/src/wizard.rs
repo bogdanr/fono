@@ -9,6 +9,26 @@
 //! immediately, not on the first dictation), and the top-level path picker
 //! offers a "Mixed" option that asks for STT and LLM backends independently
 //! (e.g. local STT + cloud LLM cleanup).
+//!
+//! Wizard local-model plan: `plans/2026-04-28-wizard-local-model-selection-v1.md`.
+//! The model picker is now data-driven from `WHISPER_MODELS`:
+//!
+//! 1. **Language scope first** — "English only?" before the model picker so
+//!    `.en` variants are only shown to mono-lingual English users.
+//! 2. **Hardware-aware shortlist** — `HardwareSnapshot::affords_model` gates
+//!    each candidate; Unsuitable models are hidden, Borderline models appear
+//!    with a friendly warning. The shortlist is capped to **3 entries** so
+//!    new users aren't overwhelmed.
+//! 3. **Friendly accuracy labels** — each item shows a quality bucket
+//!    (Excellent / Good / Acceptable / Inaccurate) computed from the
+//!    model's worst WER across the user's selected languages. Raw
+//!    percentages are intentionally not surfaced.
+//! 4. **Interactive mode question** — after the STT model is chosen, the
+//!    wizard asks whether to enable live dictation, with a recommendation
+//!    that factors in hardware acceleration (Apple Silicon Metal/CoreML)
+//!    in addition to RAM/cores. On CPU-only Intel/AMD, live mode is only
+//!    recommended for small or smaller models on machines that comfortably
+//!    clear the streaming threshold.
 
 use anyhow::{Context, Result};
 use dialoguer::console::{Key, Term};
@@ -16,9 +36,10 @@ use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect, Select};
 use fono_core::config::{
     Config, LlmBackend, LlmCloud, LlmLocal, Stt, SttBackend, SttCloud, SttLocal,
 };
-use fono_core::hwcheck::{self, HardwareSnapshot, LocalTier};
+use fono_core::hwcheck::{Affordability, HardwareSnapshot, LocalTier};
 use fono_core::locale::detect_os_languages;
 use fono_core::{Paths, Secrets};
+use fono_stt::registry::{ModelInfo, ModelRegistry, WHISPER_MODELS};
 use std::time::Duration;
 
 pub async fn run(paths: &Paths) -> Result<()> {
@@ -42,7 +63,7 @@ pub async fn run(paths: &Paths) -> Result<()> {
     };
 
     // ---------- Hardware probe + tier ----------
-    let snap = hwcheck::probe(&paths.cache_dir);
+    let snap = fono_core::hwcheck::probe(&paths.cache_dir);
     let tier = snap.tier();
     print_hw_summary(&snap, tier);
 
@@ -51,9 +72,9 @@ pub async fn run(paths: &Paths) -> Result<()> {
     let mut config = Config::default();
 
     match path_choice {
-        PathChoice::Local => configure_local(&theme, &mut config, &mut secrets, tier).await?,
-        PathChoice::Cloud => configure_cloud(&theme, &mut config, &mut secrets).await?,
-        PathChoice::Mixed => configure_mixed(&theme, &mut config, &mut secrets, tier).await?,
+        PathChoice::Local => configure_local(&theme, &mut config, &mut secrets, &snap).await?,
+        PathChoice::Cloud => configure_cloud(&theme, &mut config, &mut secrets, &snap).await?,
+        PathChoice::Mixed => configure_mixed(&theme, &mut config, &mut secrets, &snap).await?,
     }
 
     config.save(&paths.config_file())?;
@@ -102,34 +123,28 @@ enum PathChoice {
 fn print_hw_summary(snap: &HardwareSnapshot, tier: LocalTier) {
     let ram_gb = snap.total_ram_bytes / (1024 * 1024 * 1024);
     let disk_gb = snap.free_disk_bytes / (1024 * 1024 * 1024);
-    let isa = if snap.cpu_features.avx2 {
-        "AVX2"
-    } else if snap.cpu_features.neon {
-        "NEON"
-    } else {
-        "no-vec"
-    };
     println!("  Detected hardware:");
     println!(
-        "    cores : {} physical / {} logical  ({})",
-        snap.physical_cores, snap.logical_cores, isa
+        "    cores : {} physical / {} logical",
+        snap.physical_cores, snap.logical_cores
     );
     println!(
-        "    ram   : {ram_gb} GB total · disk free : {disk_gb} GB · arch : {}/{}",
+        "    ram   : {ram_gb} GB total · disk free : {disk_gb} GB · platform : {}/{}",
         snap.os, snap.arch
     );
+    println!("    accel : {}", snap.acceleration_summary());
     let blurb = match tier {
-        LocalTier::Unsuitable => "  Local-model tier: UNSUITABLE — recommended path is cloud APIs.",
+        LocalTier::Unsuitable => "  Local models look unsuitable for this machine — the wizard will default to cloud APIs.",
         LocalTier::Minimum => {
-            "  Local-model tier: MINIMUM — local will work but expect ~2 s per dictation."
+            "  This machine is on the lower end for local models — expect ~2 s per dictation."
         }
         LocalTier::Comfortable => {
-            "  Local-model tier: COMFORTABLE — local STT recommended (whisper-small)."
+            "  This machine handles local models well."
         }
         LocalTier::Recommended => {
-            "  Local-model tier: RECOMMENDED — local STT runs fast (whisper-small, ~1 s)."
+            "  This machine runs local models smoothly."
         }
-        LocalTier::HighEnd => "  Local-model tier: HIGH-END — local STT/LLM both viable.",
+        LocalTier::HighEnd => "  Plenty of headroom for local models on this machine.",
     };
     println!("{blurb}\n");
 }
@@ -168,7 +183,7 @@ fn pick_path(
             (
                 &[
                     "Local models (recommended for your machine — private, offline)",
-                    "Mixed     (local STT + cloud LLM, or vice-versa)",
+                    "Mixed     (local speech-to-text + cloud cleanup, or vice-versa)",
                     "Cloud APIs (fast, needs internet, bring your own key)",
                 ],
                 0,
@@ -178,7 +193,7 @@ fn pick_path(
             (
                 &[
                     "Cloud APIs (faster on your machine)",
-                    "Mixed     (local STT + cloud LLM, or vice-versa)",
+                    "Mixed     (local speech-to-text + cloud cleanup, or vice-versa)",
                     "Local models (will work but slower — ~2 s per dictation)",
                 ],
                 0,
@@ -199,9 +214,22 @@ async fn configure_local(
     theme: &ColorfulTheme,
     config: &mut Config,
     secrets: &mut Secrets,
-    tier: LocalTier,
+    snap: &HardwareSnapshot,
 ) -> Result<()> {
-    let stt_model = pick_local_stt_model(theme, tier)?;
+    let tier = snap.tier();
+
+    // Step 1 — English-only or multilingual?
+    let english_only = pick_english_only(theme);
+
+    // Step 2 — Language selection
+    if english_only {
+        config.general.languages = vec!["en".to_string()];
+    } else {
+        config.general.languages = pick_languages(theme)?;
+    }
+
+    // Step 3 — Pick a local STT model (language- and hardware-aware).
+    let stt_model = pick_local_stt_model(theme, english_only, &config.general.languages, snap)?;
     config.stt = Stt {
         backend: SttBackend::Local,
         local: SttLocal {
@@ -212,7 +240,10 @@ async fn configure_local(
         prompts: std::collections::HashMap::new(),
     };
 
-    // Tier-aware LLM cleanup choice. Local LLM (llama.cpp) is wired and
+    // Step 4 — Live dictation (interactive) mode.
+    pick_interactive_mode(theme, config, snap, true, Some(stt_model));
+
+    // Step 5 — Tier-aware LLM cleanup choice. Local LLM (llama.cpp) is wired and
     // ships in the default build; offer it alongside skip and cloud.
     let llm_options = vec![
         "Local LLM cleanup (qwen2.5, private, offline) — recommended",
@@ -241,11 +272,13 @@ async fn configure_cloud(
     theme: &ColorfulTheme,
     config: &mut Config,
     secrets: &mut Secrets,
+    snap: &HardwareSnapshot,
 ) -> Result<()> {
     configure_cloud_stt(theme, config, secrets).await?;
     configure_cloud_llm(theme, config, secrets).await?;
-
     config.general.languages = pick_languages(theme)?;
+    // Live dictation is always feasible for cloud STT.
+    pick_interactive_mode(theme, config, snap, false, None);
     Ok(())
 }
 
@@ -254,8 +287,9 @@ async fn configure_mixed(
     theme: &ColorfulTheme,
     config: &mut Config,
     secrets: &mut Secrets,
-    tier: LocalTier,
+    snap: &HardwareSnapshot,
 ) -> Result<()> {
+    let tier = snap.tier();
     println!("  Mixed mode — pick speech-to-text and LLM cleanup independently.\n");
 
     // ----- STT side -----
@@ -268,8 +302,21 @@ async fn configure_mixed(
         .items(stt_options)
         .default(usize::from(!tier.local_default()))
         .interact()?;
+
+    let stt_is_local;
+    let local_model_chosen: Option<String>;
+
     if stt_idx == 0 {
-        let stt_model = pick_local_stt_model(theme, tier)?;
+        stt_is_local = true;
+        let english_only = pick_english_only(theme);
+        if english_only {
+            config.general.languages = vec!["en".to_string()];
+        } else {
+            config.general.languages = pick_languages(theme)?;
+        }
+        let stt_model =
+            pick_local_stt_model(theme, english_only, &config.general.languages, snap)?;
+        local_model_chosen = Some(stt_model.to_string());
         config.stt = Stt {
             backend: SttBackend::Local,
             local: SttLocal {
@@ -280,8 +327,20 @@ async fn configure_mixed(
             prompts: std::collections::HashMap::new(),
         };
     } else {
+        stt_is_local = false;
+        local_model_chosen = None;
         configure_cloud_stt(theme, config, secrets).await?;
+        config.general.languages = pick_languages(theme)?;
     }
+
+    // Interactive mode question (depends on STT backend + model).
+    pick_interactive_mode(
+        theme,
+        config,
+        snap,
+        stt_is_local,
+        local_model_chosen.as_deref(),
+    );
 
     // ----- LLM side -----
     let llm_options = &[
@@ -303,9 +362,31 @@ async fn configure_mixed(
         _ => configure_cloud_llm(theme, config, secrets).await?,
     }
 
-    let langs = pick_languages(theme)?;
-    config.general.languages = langs;
     Ok(())
+}
+
+// ─── Language scope ────────────────────────────────────────────────────────
+
+/// Ask whether the user dictates only in English. This fast-path skips the
+/// multi-language checkbox UI and allows the model picker to offer more
+/// accurate `.en` variants. Default cursor is "Yes" because the majority of
+/// first-time users are monolingual English speakers; OS locale `en_*`
+/// reinforces the default but does not force it.
+fn pick_english_only(theme: &ColorfulTheme) -> bool {
+    let os_codes = fono_core::locale::detect_os_languages();
+    let os_is_english = os_codes.iter().any(|c| c == "en");
+    // If OS locale is non-English, default to "No" so bilingual users
+    // immediately see the full checkbox picker.
+    let default_yes = os_is_english || os_codes.is_empty();
+
+    Confirm::with_theme(theme)
+        .with_prompt(
+            "Will you dictate only in English? \
+             (English-only models are smaller and a bit more accurate)",
+        )
+        .default(default_yes)
+        .interact()
+        .unwrap_or(default_yes)
 }
 
 /// Languages-you-dictate-in picker. Plan v3 task 7. Builds a checkbox
@@ -396,41 +477,325 @@ fn pick_languages(theme: &ColorfulTheme) -> Result<Vec<String>> {
     Ok(codes)
 }
 
-fn pick_local_stt_model(theme: &ColorfulTheme, tier: LocalTier) -> Result<&'static str> {
-    let (items, models, default_idx) = match tier {
-        LocalTier::HighEnd => (
-            vec![
-                "whisper medium (multilingual, ~1.5 GB) — recommended for your machine",
-                "whisper small  (multilingual, ~466 MB) — lighter",
-                "whisper base   (multilingual, ~142 MB) — lightest",
-            ],
-            vec!["medium", "small", "base"],
-            0usize,
-        ),
-        LocalTier::Recommended | LocalTier::Comfortable => (
-            vec![
-                "whisper small (multilingual, ~466 MB) — recommended for your machine",
-                "whisper base  (multilingual, ~142 MB) — lighter (faster, lower accuracy)",
-            ],
-            vec!["small", "base"],
-            0usize,
-        ),
-        LocalTier::Minimum | LocalTier::Unsuitable => (
-            vec![
-                "whisper base (multilingual, ~142 MB) — recommended for your machine",
-                "whisper small (multilingual, ~466 MB) — slower but more accurate",
-            ],
-            vec!["base", "small"],
-            0usize,
-        ),
-    };
-    let stt_idx = Select::with_theme(theme)
-        .with_prompt("Pick a local speech-to-text model")
-        .items(&items)
-        .default(default_idx)
-        .interact()?;
-    Ok(models[stt_idx])
+// ─── Local STT model picker ────────────────────────────────────────────────
+
+/// Friendly accuracy bucket derived from the model's worst WER across the
+/// user's selected languages. Surfaces quality without showing raw
+/// percentages or technical jargon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccuracyBucket {
+    Excellent,
+    Good,
+    Acceptable,
+    /// Worst-case WER above 15% on at least one selected language.
+    Inaccurate,
+    /// No published benchmark for any of the user's languages.
+    Unknown,
 }
+
+impl AccuracyBucket {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Excellent => "Excellent",
+            Self::Good => "Good",
+            Self::Acceptable => "Acceptable",
+            Self::Inaccurate => "Inaccurate",
+            Self::Unknown => "Untested",
+        }
+    }
+}
+
+/// Compute the accuracy bucket for a model given the user's selected
+/// languages. Returns `Unknown` if none of the languages have published
+/// WER data; otherwise returns the bucket corresponding to the *worst*
+/// (highest) WER — the model is only as accurate as its weakest selected
+/// language.
+fn accuracy_for_langs(model: &ModelInfo, langs: &[String]) -> AccuracyBucket {
+    let langs: &[String] = if langs.is_empty() {
+        // English-only path passes an empty list before language selection;
+        // fall back to English so we still produce a meaningful bucket.
+        &[]
+    } else {
+        langs
+    };
+    let worst = if langs.is_empty() {
+        model
+            .wer_by_lang
+            .iter()
+            .find(|(l, _)| *l == "en")
+            .map(|&(_, w)| w)
+    } else {
+        langs
+            .iter()
+            .filter_map(|lang| {
+                model
+                    .wer_by_lang
+                    .iter()
+                    .find(|(l, _)| l == lang)
+                    .map(|&(_, w)| w)
+            })
+            .fold(None, |acc, w| Some(acc.map_or(w, |a: f32| a.max(w))))
+    };
+    match worst {
+        None => AccuracyBucket::Unknown,
+        Some(w) if w <= 6.0 => AccuracyBucket::Excellent,
+        Some(w) if w <= 10.0 => AccuracyBucket::Good,
+        Some(w) if w <= 15.0 => AccuracyBucket::Acceptable,
+        Some(_) => AccuracyBucket::Inaccurate,
+    }
+}
+
+/// A candidate model for the wizard shortlist.
+pub struct ShortlistEntry {
+    pub model: &'static ModelInfo,
+    pub affordability: Affordability,
+    pub accuracy: AccuracyBucket,
+}
+
+/// Maximum number of model choices shown in the wizard. New users get
+/// overwhelmed by long lists; three covers "fastest / balanced / best".
+pub const SHORTLIST_MAX: usize = 3;
+
+/// Build an ordered shortlist of whisper models for this hardware + language
+/// scope. Excluded:
+///
+/// - models with `wizard_visible: false` (legacy variants kept for compat),
+/// - models the hardware cannot load at all (`Affordability::Unsuitable`),
+/// - models whose accuracy is `Inaccurate` for the selected languages
+///   (worst WER > 15%) — unless every remaining candidate is also
+///   Inaccurate, in which case we keep them as a fallback.
+///
+/// Within the shortlist, entries are sorted by:
+///
+/// 1. Affordability (Comfortable before Borderline);
+/// 2. Accuracy (Excellent → Good → Acceptable);
+/// 3. Largest-first (better quality first).
+///
+/// Capped at [`SHORTLIST_MAX`] entries so the picker stays uncluttered.
+///
+/// This is a pure function — no I/O, no TTY. Unit-testable directly.
+pub fn build_local_stt_shortlist(
+    english_only: bool,
+    langs: &[String],
+    snap: &HardwareSnapshot,
+) -> Vec<ShortlistEntry> {
+    let candidates: Vec<ShortlistEntry> = WHISPER_MODELS
+        .iter()
+        .filter(|m| m.wizard_visible)
+        .filter(|m| m.multilingual != english_only)
+        .filter_map(|m| {
+            let aff = snap.affords_model(m.min_ram_mb, m.approx_mb, m.realtime_factor_cpu_avx2);
+            if aff == Affordability::Unsuitable {
+                None
+            } else {
+                Some(ShortlistEntry {
+                    model: m,
+                    affordability: aff,
+                    accuracy: accuracy_for_langs(m, langs),
+                })
+            }
+        })
+        .collect();
+
+    // Drop "Inaccurate" entries unless every candidate is Inaccurate
+    // (keeps the wizard usable even on language combinations where no
+    // model meets the 15% threshold).
+    let any_acceptable = candidates
+        .iter()
+        .any(|e| e.accuracy != AccuracyBucket::Inaccurate);
+    let mut entries: Vec<ShortlistEntry> = if any_acceptable {
+        candidates
+            .into_iter()
+            .filter(|e| e.accuracy != AccuracyBucket::Inaccurate)
+            .collect()
+    } else {
+        candidates
+    };
+
+    entries.sort_by(|a, b| {
+        let aff_order = |aff: &Affordability| match aff {
+            Affordability::Comfortable => 0,
+            Affordability::Borderline => 1,
+            Affordability::Unsuitable => 2,
+        };
+        let acc_order = |acc: &AccuracyBucket| match acc {
+            AccuracyBucket::Excellent => 0,
+            AccuracyBucket::Good => 1,
+            AccuracyBucket::Acceptable => 2,
+            AccuracyBucket::Unknown => 3,
+            AccuracyBucket::Inaccurate => 4,
+        };
+        aff_order(&a.affordability)
+            .cmp(&aff_order(&b.affordability))
+            .then_with(|| acc_order(&a.accuracy).cmp(&acc_order(&b.accuracy)))
+            .then(b.model.approx_mb.cmp(&a.model.approx_mb))
+    });
+
+    entries.truncate(SHORTLIST_MAX);
+    entries
+}
+
+/// Format the size field for display: `"~466 MB"` or `"~1.6 GB"`.
+fn size_label(approx_mb: u32) -> String {
+    if approx_mb >= 1_000 {
+        format!("~{:.1} GB", approx_mb as f32 / 1_000.0)
+    } else {
+        format!("~{approx_mb} MB")
+    }
+}
+
+/// Friendly model display name. Hides internal whisper variant names
+/// (`large-v3-turbo`, `small.en`) behind a more approachable label that
+/// fits the way most users think about model size.
+fn friendly_model_label(model: &ModelInfo) -> &'static str {
+    match model.name {
+        "tiny" | "tiny.en" => "Tiny (fastest, lowest quality)",
+        "base" | "base.en" => "Base (fast, good for clean speech)",
+        "small" | "small.en" => "Small (balanced quality)",
+        "large-v3-turbo" => "Turbo (best quality, needs more memory)",
+        "medium" | "medium.en" => "Medium (legacy)",
+        other => other,
+    }
+}
+
+/// Data-driven local STT model picker. Replaces the hard-coded tier match.
+///
+/// Shows at most [`SHORTLIST_MAX`] models matching the language scope
+/// (`.en` for English-only, multilingual otherwise). Borderline models
+/// appear with a friendly "may lag in live mode" suffix. The default
+/// cursor points at the highest-ranked entry (Comfortable + best
+/// accuracy first).
+fn pick_local_stt_model(
+    theme: &ColorfulTheme,
+    english_only: bool,
+    langs: &[String],
+    snap: &HardwareSnapshot,
+) -> Result<&'static str> {
+    let shortlist = build_local_stt_shortlist(english_only, langs, snap);
+
+    if shortlist.is_empty() {
+        // Edge case: every visible model is Unsuitable. Fall back to the
+        // smallest model in the correct language family (still in the
+        // registry, even if marked wizard_visible=false for medium).
+        let fallback = WHISPER_MODELS
+            .iter()
+            .filter(|m| m.multilingual != english_only)
+            .min_by_key(|m| m.approx_mb);
+        if let Some(m) = fallback {
+            eprintln!(
+                "  No model fits comfortably on your machine — falling back to '{}' ({}).",
+                friendly_model_label(m),
+                size_label(m.approx_mb)
+            );
+            return Ok(m.name);
+        }
+        anyhow::bail!("no local speech-to-text models available for the selected languages");
+    }
+
+    // Build the Select items with friendly labels.
+    let items: Vec<String> = shortlist
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let label = friendly_model_label(entry.model);
+            let size = size_label(entry.model.approx_mb);
+            let acc = entry.accuracy.label();
+            let warn = match entry.affordability {
+                Affordability::Comfortable => "",
+                Affordability::Borderline => " — may lag in live mode on this machine",
+                Affordability::Unsuitable => unreachable!("filtered above"),
+            };
+            let default_tag = if i == 0 { "  (recommended)" } else { "" };
+            format!("{label}, {size} — accuracy: {acc}{warn}{default_tag}")
+        })
+        .collect();
+
+    println!(
+        "  Pick a speech-to-text model. Smaller = faster; larger = more accurate.\n  \
+         Accuracy ratings reflect typical real-world dictation across your selected languages.\n"
+    );
+
+    let idx = Select::with_theme(theme)
+        .with_prompt("Pick a speech-to-text model")
+        .items(&items)
+        .default(0)
+        .interact()?;
+
+    Ok(shortlist[idx].model.name)
+}
+
+// ─── Interactive (live) mode question ─────────────────────────────────────
+
+/// Ask whether to enable live dictation (streaming overlay preview while
+/// speaking). Recommendation matrix:
+///
+/// - **Cloud STT**: always recommend — the server handles the compute.
+/// - **Local STT, accelerated host (Apple Silicon)**: recommend if the
+///   model is `Comfortable` under the relaxed accel threshold.
+/// - **Local STT, CPU-only host**: recommend only when the model is
+///   `Comfortable` under the strict CPU threshold (typically tiny/base;
+///   small only on >=12 cores; turbo never on CPU-only). Borderline →
+///   default to off and explain that live mode may lag.
+/// - **Local STT, model unknown**: fall back to hardware tier.
+fn pick_interactive_mode(
+    theme: &ColorfulTheme,
+    config: &mut Config,
+    snap: &HardwareSnapshot,
+    stt_is_local: bool,
+    local_model_name: Option<&str>,
+) {
+    let (recommend, reason): (bool, String) = if stt_is_local {
+        local_model_name.and_then(ModelRegistry::get).map_or_else(
+            || {
+                (
+                    snap.tier().local_default(),
+                    "recommendation based on detected hardware".to_string(),
+                )
+            },
+            |m| match snap.affords_model(m.min_ram_mb, m.approx_mb, m.realtime_factor_cpu_avx2) {
+                Affordability::Comfortable => {
+                    let reason = if snap.accelerated() {
+                        "hardware-accelerated speech recognition keeps live preview snappy".to_string()
+                    } else {
+                        "this CPU should keep up with real-time transcription".to_string()
+                    };
+                    (true, reason)
+                }
+                Affordability::Borderline => {
+                    let reason = if snap.accelerated() {
+                        "this model is heavy even with hardware acceleration; batch dictation will feel snappier".to_string()
+                    } else {
+                        "on this CPU, live preview is not recommended".to_string()
+                    };
+                    (false, reason)
+                }
+                Affordability::Unsuitable => (
+                    false,
+                    "this hardware can't sustain live mode for the chosen model".to_string(),
+                ),
+            },
+        )
+    } else {
+        (
+            true,
+            "transcription will do more API calls".to_string(),
+        )
+    };
+
+    println!(
+        "\n  Live dictation shows a real-time preview as you speak. It works best on\n  \
+         fast machines or with cloud transcription; otherwise batch mode (full\n  \
+         transcription appears when you release the hotkey) is smoother."
+    );
+    let enable = Confirm::with_theme(theme)
+        .with_prompt(format!("Enable live dictation? — {reason}"))
+        .default(recommend)
+        .interact()
+        .unwrap_or(recommend);
+
+    config.interactive.enabled = enable;
+}
+// ─── LLM configuration helpers ─────────────────────────────────────────────
 
 /// Tier-aware local LLM model picker. Sets `config.llm` to the chosen
 /// `LlmBackend::Local` + matching `LlmLocal` defaults. The model file
@@ -574,6 +939,8 @@ async fn configure_cloud_llm(
     });
     Ok(())
 }
+
+// ─── API key helpers ────────────────────────────────────────────────────────
 
 /// R3.2 — wraps `prompt_api_key` with a reachability probe. If the user
 /// types a new key, validate it against the provider before persisting.
@@ -740,6 +1107,8 @@ fn prompt_masked_api_key(key_name: &str) -> Result<String> {
     Ok(key)
 }
 
+// ─── Local STT latency probe ───────────────────────────────────────────────
+
 /// Tier-specific p50 budget for transcribing a 3-second clip with the
 /// recommended whisper model on that tier. Numbers come from the latency
 /// budget table in `docs/plans/2026-04-25-fono-latency-v1.md`. The probe
@@ -838,5 +1207,240 @@ async fn probe_local_latency(paths: &fono_core::Paths, config: &Config, tier: Lo
             eprintln!("  ⚠ Probe failed: {e:#}");
             eprintln!("    The model loaded but inference errored — daemon may need a different model size.");
         }
+    }
+}
+
+// ─── Tests ─────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fono_core::hwcheck::{CpuFeatures, HardwareSnapshot};
+
+    fn snap(cores: u32, ram_gb: u32, disk_gb: u32, avx2: bool) -> HardwareSnapshot {
+        const GB: u64 = 1024 * 1024 * 1024;
+        HardwareSnapshot {
+            physical_cores: cores,
+            logical_cores: cores * 2,
+            total_ram_bytes: u64::from(ram_gb) * GB,
+            available_ram_bytes: u64::from(ram_gb) * GB,
+            free_disk_bytes: u64::from(disk_gb) * GB,
+            cpu_features: CpuFeatures {
+                avx2,
+                avx512: false,
+                fma: false,
+                neon: false,
+            },
+            os: "linux".into(),
+            arch: "x86_64".into(),
+        }
+    }
+
+    // ── build_local_stt_shortlist ────────────────────────────────────────
+
+    #[test]
+    fn shortlist_english_only_excludes_multilingual() {
+        let s = snap(12, 32, 200, true);
+        let shortlist = build_local_stt_shortlist(true, &["en".to_string()], &s);
+        for entry in &shortlist {
+            assert!(
+                !entry.model.multilingual,
+                "english_only shortlist must not contain multilingual model '{}'",
+                entry.model.name
+            );
+        }
+    }
+
+    #[test]
+    fn shortlist_multilingual_excludes_en_only() {
+        let s = snap(12, 32, 200, true);
+        let shortlist =
+            build_local_stt_shortlist(false, &["en".to_string(), "fr".to_string()], &s);
+        for entry in &shortlist {
+            assert!(
+                entry.model.multilingual,
+                "multilingual shortlist must not contain .en model '{}'",
+                entry.model.name
+            );
+        }
+    }
+
+    #[test]
+    fn shortlist_capped_at_three_entries() {
+        // Big machine: many models qualify, but we never show more than 3.
+        let s = snap(16, 64, 500, true);
+        let shortlist =
+            build_local_stt_shortlist(false, &["en".to_string()], &s);
+        assert!(
+            shortlist.len() <= SHORTLIST_MAX,
+            "shortlist len {} exceeds cap {}",
+            shortlist.len(),
+            SHORTLIST_MAX
+        );
+    }
+
+    #[test]
+    fn shortlist_hides_legacy_medium_models() {
+        // Even on a beefy box that affords medium, the wizard never offers it
+        // (wizard_visible=false). Turbo replaces it.
+        let s = snap(16, 64, 500, true);
+        let names_en: Vec<&str> = build_local_stt_shortlist(true, &["en".to_string()], &s)
+            .iter()
+            .map(|e| e.model.name)
+            .collect();
+        assert!(!names_en.contains(&"medium.en"));
+        let names_multi: Vec<&str> =
+            build_local_stt_shortlist(false, &["en".to_string()], &s)
+                .iter()
+                .map(|e| e.model.name)
+                .collect();
+        assert!(!names_multi.contains(&"medium"));
+    }
+
+    #[test]
+    fn english_only_recommended_pick_is_small_en_on_high_end_cpu() {
+        // With turbo not having a .en variant and the new realtime thresholds,
+        // small.en is the highest-quality English-only model that's
+        // Comfortable on a 12-core CPU-only machine.
+        let s = snap(12, 32, 200, true);
+        let shortlist = build_local_stt_shortlist(true, &["en".to_string()], &s);
+        assert!(!shortlist.is_empty());
+        assert_eq!(shortlist[0].model.name, "small.en");
+        assert_eq!(shortlist[0].affordability, Affordability::Comfortable);
+    }
+
+    #[test]
+    fn multilingual_recommended_pick_is_turbo_on_apple_silicon() {
+        // Apple Silicon: relaxed live threshold lets turbo become Comfortable.
+        let s = HardwareSnapshot {
+            os: "macos".into(),
+            arch: "aarch64".into(),
+            cpu_features: CpuFeatures {
+                neon: true,
+                ..Default::default()
+            },
+            ..snap(8, 16, 200, false)
+        };
+        let shortlist = build_local_stt_shortlist(false, &["en".to_string()], &s);
+        assert!(!shortlist.is_empty());
+        assert_eq!(shortlist[0].model.name, "large-v3-turbo");
+        assert_eq!(shortlist[0].affordability, Affordability::Comfortable);
+    }
+
+    #[test]
+    fn small_is_borderline_on_8_core_cpu_only() {
+        // The user's 12th-gen Intel scenario: small lags in live mode.
+        // Shortlist still includes small but flags it Borderline.
+        let s = snap(8, 16, 200, true);
+        let entry = build_local_stt_shortlist(true, &["en".to_string()], &s)
+            .into_iter()
+            .find(|e| e.model.name == "small.en")
+            .expect("small.en should be in shortlist");
+        assert_eq!(entry.affordability, Affordability::Borderline);
+    }
+
+    #[test]
+    fn low_ram_machine_hides_large_models() {
+        let s = HardwareSnapshot {
+            physical_cores: 8,
+            logical_cores: 16,
+            total_ram_bytes: 2 * 1024 * 1024 * 1024,
+            available_ram_bytes: 1024 * 1024 * 1024,
+            free_disk_bytes: 200 * 1024 * 1024 * 1024,
+            cpu_features: CpuFeatures {
+                avx2: true,
+                ..Default::default()
+            },
+            os: "linux".into(),
+            arch: "x86_64".into(),
+        };
+        let names: Vec<&str> = build_local_stt_shortlist(true, &["en".to_string()], &s)
+            .iter()
+            .map(|e| e.model.name)
+            .collect();
+        assert!(!names.contains(&"medium.en"), "medium.en should be hidden");
+        assert!(names.contains(&"base.en"), "base.en should be in shortlist");
+    }
+
+    #[test]
+    fn comfortable_first_in_shortlist() {
+        let s = snap(6, 16, 200, true);
+        let shortlist =
+            build_local_stt_shortlist(true, &["en".to_string()], &s);
+        let mut seen_borderline = false;
+        for entry in &shortlist {
+            if entry.affordability == Affordability::Borderline {
+                seen_borderline = true;
+            }
+            if seen_borderline {
+                assert_ne!(
+                    entry.affordability,
+                    Affordability::Comfortable,
+                    "Comfortable entry '{}' found after a Borderline entry",
+                    entry.model.name
+                );
+            }
+        }
+    }
+
+    // ── accuracy_for_langs ───────────────────────────────────────────────
+
+    #[test]
+    fn accuracy_excellent_for_small_en_on_english() {
+        let m = ModelRegistry::get("small.en").unwrap();
+        assert_eq!(
+            accuracy_for_langs(m, &["en".to_string()]),
+            AccuracyBucket::Excellent
+        );
+    }
+
+    #[test]
+    fn accuracy_inaccurate_for_tiny_on_polish() {
+        // tiny multilingual: pl=30% → Inaccurate
+        let m = ModelRegistry::get("tiny").unwrap();
+        assert_eq!(
+            accuracy_for_langs(m, &["pl".to_string()]),
+            AccuracyBucket::Inaccurate
+        );
+    }
+
+    #[test]
+    fn accuracy_uses_worst_language() {
+        // small: en=6 (Excellent), pl=15 (Acceptable). Combined → Acceptable.
+        let m = ModelRegistry::get("small").unwrap();
+        assert_eq!(
+            accuracy_for_langs(m, &["en".to_string(), "pl".to_string()]),
+            AccuracyBucket::Acceptable
+        );
+    }
+
+    #[test]
+    fn accuracy_unknown_for_unbenchmarked_language() {
+        let m = ModelRegistry::get("small").unwrap();
+        assert_eq!(
+            accuracy_for_langs(m, &["xx".to_string()]),
+            AccuracyBucket::Unknown
+        );
+    }
+
+    #[test]
+    fn shortlist_drops_inaccurate_entries_when_alternatives_exist() {
+        // For Polish on a high-end machine: tiny=30% (Inaccurate), base=22%
+        // (Inaccurate), small=15% (Acceptable), turbo=10% (Good). Inaccurate
+        // entries must be filtered out.
+        let s = snap(16, 64, 500, true);
+        let shortlist =
+            build_local_stt_shortlist(false, &["pl".to_string()], &s);
+        for entry in &shortlist {
+            assert_ne!(
+                entry.accuracy,
+                AccuracyBucket::Inaccurate,
+                "Inaccurate entry '{}' should have been filtered (alternatives exist)",
+                entry.model.name
+            );
+        }
+        // turbo should appear and rank highest by accuracy.
+        let names: Vec<&str> = shortlist.iter().map(|e| e.model.name).collect();
+        assert!(names.contains(&"large-v3-turbo"));
     }
 }
