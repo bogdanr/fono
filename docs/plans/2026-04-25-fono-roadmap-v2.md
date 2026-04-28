@@ -23,7 +23,7 @@ v0.1.0, high-value features for v0.1.x, and longer-term v0.2 items.
 
 ### R2. Notification & tray polish
 
-* [ ] **R2.1** Tray submenus for STT/LLM switching (deferred S15–S17).
+* [x] **R2.1** Tray submenus for STT/LLM switching (deferred S15–S17).
   Right-click → `STT: ▾` / `LLM: ▾` shows every backend with active
   ticked; click to switch. Single source of truth (`set_active_stt`)
   shared with CLI.
@@ -35,32 +35,38 @@ v0.1.0, high-value features for v0.1.x, and longer-term v0.2 items.
 
 ### R3. Wizard path-of-least-surprise
 
-* [ ] **R3.1** In-wizard latency probe (deferred H7/H14). After model
+* [x] **R3.1** In-wizard latency probe (commit `7bea0a9`; `crates/fono/src/wizard.rs:72,720,725`).
+  After model
   download in the local branch, run a canned 3-second WAV through the
   just-installed whisper. If `stt_ms > 1500`, downgrade tier and
   re-prompt.
-* [ ] **R3.2** Cloud branch: paste-to-validate keys before persisting.
+* [x] **R3.2** Cloud branch: paste-to-validate keys before persisting.
   Reuses `fono keys check` reachability probe.
-* [ ] **R3.3** Wizard offers mixed pipeline: "Cloud STT + Local LLM" and
+* [x] **R3.3** Wizard offers mixed pipeline: "Cloud STT + Local LLM" and
   "Local STT + Cloud LLM". Currently it's all-cloud or all-local.
 
 ### R4. Docs + release plumbing
 
-* [ ] **R4.1** README first-run snippet matches current defaults
+* [x] **R4.1** README first-run snippet matches current defaults
   (Shift+Insert, `fono use`, `fono keys`, `fono hwprobe`).
-* [ ] **R4.2** New `docs/inject.md` covering paste shortcut precedence,
+* [x] **R4.2** New `docs/inject.md` covering paste shortcut precedence,
   override examples, troubleshooting recipes (clipit, KDE Wayland,
   Shift+Insert in tmux copy mode).
-* [ ] **R4.3** New `docs/troubleshooting.md` consolidating common
+* [x] **R4.3** New `docs/troubleshooting.md` consolidating common
   symptoms → fix recipes.
-* [ ] **R4.4** Release notes draft + `git tag v0.1.0`. CHANGELOG already
+* [x] **R4.4** Release notes draft + `git tag v0.1.0`. CHANGELOG already
   exists — enumerate shipped models + SHA256s + the four landed plans
-  (W/L/H/S).
+  (W/L/H/S). Tags `v0.1.0`, `v0.1.1`, `v0.2.0`, `v0.2.1` exist; current
+  tip is `v0.2.1`.
 
 ### R5. Real-audio benchmark coverage
 
-* [ ] **R5.1** Wire `fono-bench` into CI as a once-per-PR gate against
-  the fake-stage baseline.
+* [~] **R5.1** (partial). Compile-sanity wired in
+  `.github/workflows/ci.yml:64-68` (`cargo bench --no-run`); real-fixture
+  equivalence-harness gate is Wave 2 Task 9 of
+  `plans/2026-04-28-doc-reconciliation-v1.md`. Original goal: wire
+  `fono-bench` into CI as a once-per-PR gate against the fake-stage
+  baseline.
 * [ ] **R5.2** Local-tier bench: `fono-bench --provider local
   --languages en,es` runs against the recommended whisper model and
   asserts p95 < tier budget. Seed `docs/bench/baseline-local-comfortable.json`.

@@ -144,10 +144,11 @@ out of the box, with hardware-accelerated CPU SIMD selected at runtime.
   single-binary local-stack resolution.
 - `docs/troubleshooting.md`, `docs/wayland.md`, `README.md` updated for
   the new default hotkeys.
-- New plans: `plans/2026-04-27-shared-ggml-static-binary-v1.md` (the
-  shared-ggml strategy that informed the linker-dedupe shortcut),
-  `plans/2026-04-27-llama-dynamic-link-sota-v1.md`,
-  `plans/2026-04-27-candle-backend-benchmark-v1.md`,
+- New plans: `plans/closed/2026-04-27-shared-ggml-static-binary-v1.md` (the
+  shared-ggml strategy that informed the linker-dedupe shortcut; later
+  superseded by `--allow-multiple-definition`),
+  `plans/closed/2026-04-27-llama-dynamic-link-sota-v1.md`,
+  `plans/closed/2026-04-27-candle-backend-benchmark-v1.md`,
   `plans/2026-04-27-local-stt-llm-resolution-v1.md`.
 
 ## [0.1.0] — 2026-04-25

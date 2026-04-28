@@ -1,5 +1,18 @@
 # Fono: SOTA Local LLM via Dynamic-Linked llama.cpp
 
+## Status: Superseded
+
+This plan was never executed. The `ggml` symbol collision it was
+designed to resolve via dynamic linking was instead resolved in-tree
+with the static `-Wl,--allow-multiple-definition` link trick at
+`.cargo/config.toml:21-28` (documented in `docs/status.md:276-310` and
+in `docs/decisions/0018-ggml-link-trick.md`). The "single static
+binary" identity is preserved; no shared `libllama.so` ships.
+
+Rollback path if the link trick ever fails on a future linker: plan H
+— `plans/closed/2026-04-27-shared-ggml-static-binary-v1.md` — is the
+documented escape hatch (shared ggml).
+
 ## Objective
 
 Adopt `llama-cpp-sys-2`'s `dynamic-link` feature as Fono's single, canonical local LLM backend. Resolve the `ggml` symbol collision with `whisper-rs` by isolating llama.cpp into a private shared library shipped inside Fono's distribution packages. End users get state-of-the-art local-LLM performance with zero build steps, zero system dependencies to install, zero choices to make. Devs/CI keep `candle` only as a benchmark control to validate the chosen backend stays best.

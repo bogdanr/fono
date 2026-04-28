@@ -1,5 +1,19 @@
 # Fono: Implementing Candle as Alternative Default Backend & Benchmarking
 
+## Status: Superseded
+
+This plan was never executed. The `whisper-rs` × `llama-cpp-2` ggml
+symbol collision it was designed to work around was instead resolved
+in-tree by `-Wl,--allow-multiple-definition` at
+`.cargo/config.toml:21-28` (documented in `docs/status.md:276-310` and
+in `docs/decisions/0018-ggml-link-trick.md`). The single-binary outcome
+the plan targeted now ships from `llama-cpp-2` directly, with no candle
+dependency added.
+
+Rollback path if the link trick ever fails on a future linker: plan H
+— `plans/closed/2026-04-27-shared-ggml-static-binary-v1.md` — is the
+documented escape hatch (shared ggml).
+
 ## Objective
 
 Introduce `candle` as an alternative local LLM backend (`candle-local`) to solve the `ggml` linker collision while keeping `llama-cpp-2` (`llama-local`) available for benchmarking. Add comprehensive benchmarking to compare the performance of both backends.

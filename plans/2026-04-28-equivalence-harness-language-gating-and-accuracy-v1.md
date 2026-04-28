@@ -1,5 +1,12 @@
 # Equivalence Harness: Language Gating + Accuracy Check
 
+## Status
+
+~50% landed in commits `b6596c0` and `7db29b5` (2026-04-28) as inline
+behaviour rather than a typed `ModelCapabilities` API. Remaining
+typed-API refactor and combined-verdict work tracked as Wave 2 Task 7
+of `plans/2026-04-28-doc-reconciliation-v1.md`.
+
 ## Objective
 
 Stop wasting inference on fixtures the loaded model cannot possibly transcribe (e.g. running `tiny.en` over Spanish/French/Chinese/Romanian audio), and start producing a real accuracy verdict for the fixtures the model *is* expected to handle. The harness must keep its existing streaming↔batch equivalence gate intact and add a second, independent gate that compares the batch transcript against the manifest's `reference` text. End-state: when you run `./tests/bench.sh tiny.en`, the four English fixtures run normally and the six non-English fixtures show `SKIP — model is English-only`; when you run `./tests/bench.sh small`, every fixture runs and the report shows both an `equiv` (stream↔batch) verdict and an `acc` (batch↔reference) verdict.
@@ -27,15 +34,15 @@ Stop wasting inference on fixtures the loaded model cannot possibly transcribe (
 
 ### Phase 3 — Two-gate verdict in `run_fixture`
 
-- [ ] Task 7. Change `run_fixture` (`crates/fono-bench/src/equivalence.rs:409-506`) to accept the resolved `ModelCapabilities` (or pass it through `EquivalenceConfig` if a config struct is already plumbed) and short-circuit before any `stt.transcribe` / `stream_transcribe` call when `caps.english_only && fx.requires_multilingual`. Return `Verdict::Skipped` with note `"model is English-only; fixture requires multilingual"`. Rationale: the user's hard requirement is "don't run inference on models that are supposed to fail" — the skip has to happen *before* any encoder pass, not just before the verdict.
-- [ ] Task 8. After the existing batch pass, compute `accuracy = levenshtein_norm(&batch.text, &fx.reference)` whenever `fx.reference` is non-empty. Store it on `Metrics` as a new `stt_accuracy_levenshtein: Option<f32>`. Rationale: surface the number even when no threshold is configured so reports always show "how close was the model to the canonical text".
+- [x] Task 7. Change `run_fixture` (partial — implemented as inline boolean `english_only = args.stt == "local" && args.model.ends_with(".en")` at `crates/fono-bench/src/bin/fono-bench.rs:339`, not as a typed `ModelCapabilities`; `Verdict::Skipped` shape with note matches plan intent) (`crates/fono-bench/src/equivalence.rs:409-506`) to accept the resolved `ModelCapabilities` (or pass it through `EquivalenceConfig` if a config struct is already plumbed) and short-circuit before any `stt.transcribe` / `stream_transcribe` call when `caps.english_only && fx.requires_multilingual`. Return `Verdict::Skipped` with note `"model is English-only; fixture requires multilingual"`. Rationale: the user's hard requirement is "don't run inference on models that are supposed to fail" — the skip has to happen *before* any encoder pass, not just before the verdict.
+- [x] Task 8. After the existing batch pass, compute `accuracy = levenshtein_norm(&batch.text, &fx.reference)` whenever `fx.reference` is non-empty. Store it on `Metrics` as a new `stt_accuracy_levenshtein: Option<f32>` (evidence: `crates/fono-bench/src/equivalence.rs:113-114`, populated at `:527`). Rationale: surface the number even when no threshold is configured so reports always show "how close was the model to the canonical text".
 - [ ] Task 9. Combine the two gates into the verdict: `Pass` requires (a) the existing equivalence gate to pass *and* (b) when an accuracy threshold is in scope, `accuracy ≤ accuracy_threshold`. If the streaming pass is skipped (no streaming runtime available) but the accuracy check still produced a number, the verdict should reflect the accuracy result alone rather than today's blanket `Skipped`. Rationale: today the harness collapses to `Skipped` whenever streaming isn't wired; with a real reference comparison we have a meaningful answer even without streaming.
 - [ ] Task 10. Extend `EquivalenceResult::note` to include both per-gate sub-verdicts when relevant (`equiv pass, acc fail (0.42 > 0.30)` style). Rationale: a single boolean verdict is too coarse once we have two independent gates; the operator needs to know which gate failed.
 
 ### Phase 4 — CLI wiring and reporting
 
 - [ ] Task 11. In `crates/fono-bench/src/bin/fono-bench.rs:255-415`, resolve capabilities once after the STT is built (`Arc::new(WhisperLocal::new(path))` site at line 291; cloud arms once added) and thread the value into the `run_fixture` calls at line 355. Rationale: capabilities are a property of the loaded model, not of each fixture, so resolving once avoids re-deriving them per row.
-- [ ] Task 12. Add an `acc` column to the printed table (`print_table` at `crates/fono-bench/src/bin/fono-bench.rs:419-511`) showing the accuracy Levenshtein with the same green/yellow/red colour bands `fmt_lev` already provides. Update the legend block to describe the two gates. Rationale: the headline value the user wants ("how accurate is the model on this fixture") needs to be visible without piping JSON.
+- [x] Task 12. Add an `acc` column to the printed table (evidence: `crates/fono-bench/src/bin/fono-bench.rs:527`) (`print_table` at `crates/fono-bench/src/bin/fono-bench.rs:419-511`) showing the accuracy Levenshtein with the same green/yellow/red colour bands `fmt_lev` already provides. Update the legend block to describe the two gates. Rationale: the headline value the user wants ("how accurate is the model on this fixture") needs to be visible without piping JSON.
 - [ ] Task 13. Persist the resolved capabilities into `EquivalenceReport` (new optional field, e.g. `model_capabilities: Option<ModelCapabilities>`) so downstream tools (`tests/bench.sh`, CI dashboards) can tell whether a `SKIP` row is operator-induced or capability-induced. Rationale: closes the audit loop — anyone reading the JSON should see why a fixture was skipped.
 - [ ] Task 14. Update `EquivalenceReport::overall_verdict` (`crates/fono-bench/src/equivalence.rs:152-172`) so capability-induced skips never count toward `Skipped`-only outcomes — i.e., a run that skipped six rows due to English-only capabilities and passed four English rows must still report `Pass`, not `Skipped`. Rationale: the user explicitly wants `tiny.en` to be a *valid* run that just exercises a smaller subset.
 
@@ -43,8 +50,8 @@ Stop wasting inference on fixtures the loaded model cannot possibly transcribe (
 
 - [ ] Task 15. Add unit tests in `crates/fono-bench/src/equivalence.rs` (alongside the existing `tests` module): one verifying capability-induced skip path returns `Skipped` with the right note and zero inference calls (use a mock STT that panics on `transcribe` to prove non-execution); one verifying the two-gate verdict (`equiv pass + acc fail` → `Fail`, `equiv pass + acc pass` → `Pass`, `equiv pass + no reference` → `Pass`); one verifying overall verdict treats capability-induced skips as inert. Rationale: locks in the contract the user is asking for so refactors don't silently regress it.
 - [ ] Task 16. Add an integration smoke test (gated on `cfg(feature = "whisper-local")` and a present `tiny.en` model in cache) that runs the harness against the manifest and asserts: every `language != "en"` fixture is skipped with reason `model is English-only`, every English fixture runs both lanes. Rationale: end-to-end proof at the level the user invokes the tool.
-- [ ] Task 17. Update `tests/bench.sh` legend output (and the script's leading comment block) to mention the new `acc` column and the capability-skip behaviour. Rationale: the wrapper script is the canonical user entry point; its docs should match the new harness output.
-- [ ] Task 18. Update `docs/status.md` with the phase outcome and any follow-ups (e.g. tighten `acc` thresholds once `whisper-small` mojibake is fixed). Rationale: AGENTS.md mandates session log updates.
+- [x] Task 17. Update `tests/bench.sh` legend output (and the script's leading comment block) to mention the new `acc` column and the capability-skip behaviour. Multilingual fixtures shipped in tree (commit `b6596c0`). Rationale: the wrapper script is the canonical user entry point; its docs should match the new harness output.
+- [x] Task 18. Update `docs/status.md` with the phase outcome and any follow-ups (e.g. tighten `acc` thresholds once `whisper-small` mojibake is fixed). Done in `plans/2026-04-28-doc-reconciliation-v1.md` Task 3 entry on `docs/status.md`.
 
 ## Verification Criteria
 
@@ -66,6 +73,29 @@ Stop wasting inference on fixtures the loaded model cannot possibly transcribe (
    Mitigation: keep the resolver explicit (per-provider match arms) so adding a new SKU forces a code change, and surface unknown SKUs as a warning rather than silent multilingual.
 5. **Hidden coupling with the legacy `bench` subcommand.** The plan touches `equivalence.rs` and the equivalence CLI arm, but `runner::BenchRunner` (`crates/fono-bench/src/bin/fono-bench.rs:183-253`) also iterates fixtures and could regress if it shares the manifest type.
    Mitigation: search the workspace for users of `ManifestFixture` and `Manifest` before merging Task 4; if the legacy bench runner consumes them, mirror the new fields with `#[serde(default)]` so older code paths continue to compile and ignore the additions.
+
+## Open follow-ups (carried into Wave 2 Task 7)
+
+- Tasks 1–6 — typed `ModelCapabilities` value type in a new
+  `crates/fono-bench/src/capabilities.rs`, `for_local_whisper` /
+  `for_cloud` resolvers + unit tests, `accuracy_threshold` and
+  `requires_multilingual` fields on `ManifestFixture`,
+  `equivalence_threshold` serde alias, per-fixture default thresholds.
+- Tasks 9–10 — combined two-gate verdict in `run_fixture` (Pass requires
+  equivalence pass *and* accuracy within threshold) + per-gate
+  sub-verdicts in `EquivalenceResult::note`.
+- Task 11 — capabilities resolved once after STT build and threaded
+  through `run_fixture` (today re-derived inline at the call site).
+- Task 13 — `EquivalenceReport.model_capabilities` field for downstream
+  tooling.
+- Task 14 — `EquivalenceReport::overall_verdict` treats capability
+  skips as inert by typed contract (incidentally true today as inline
+  behaviour).
+- Task 15 — mock-STT capability-skip unit test + two-gate verdict
+  unit tests (Pass / Fail / no-reference cases) + overall-verdict
+  inertness test.
+- Task 16 — integration smoke test gated on `cfg(feature = "whisper-local")`
+  and a present `tiny.en` model.
 
 ## Alternative Approaches
 

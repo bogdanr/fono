@@ -1,5 +1,20 @@
 # Fono: Single Static Binary with SOTA Local Whisper + Llama via Shared `ggml`
 
+## Status: Superseded
+
+This plan was never executed. The lighter-touch
+`-Wl,--allow-multiple-definition` link trick at
+`.cargo/config.toml:21-28` ships the same single-binary outcome without
+the work of forking the two sys crates onto a shared `ggml`. See
+`docs/status.md:276-310` and `docs/decisions/0018-ggml-link-trick.md`
+for the active decision.
+
+This plan is preserved — not deleted — because it remains the
+**documented rollback path** if a future linker (lld, ld64, or a
+hardened gold) ever stops honouring `--allow-multiple-definition`. If
+that day comes, this plan is the escape hatch: drop the duplicate ggml
+sources and link against a single shared copy.
+
 ## Objective
 
 Ship Fono as a single, statically-linked binary that bundles both `whisper.cpp` (STT) and `llama.cpp` (LLM cleanup) at full upstream performance, with hardware acceleration (CPU SIMD, Vulkan, CUDA, Metal) auto-detected and selected at runtime. No system dependencies, no companion `.so` files, no extracted helper binaries. Distro packages are kept as a marginal convenience but are not the primary distribution channel — `target/release/fono` is the ship vehicle.

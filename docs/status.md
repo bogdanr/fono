@@ -2,6 +2,70 @@
 
 Last updated: 2026-04-28
 
+## 2026-04-28 — Doc reconciliation pass
+
+Pure-doc pass driven by `plans/2026-04-28-doc-reconciliation-v1.md`. No
+Rust source touched. Highlights:
+
+- **`crates/fono/tests/pipeline.rs` is not broken on `main`.** The earlier
+  status entry below (line ~50) calling out an `Injector` signature
+  mismatch was stale: the signatures align in the current source
+  (`crates/fono/src/session.rs:140-142` vs
+  `crates/fono/tests/pipeline.rs:54-58`) and the workspace test gate runs
+  green. Verified this session: `cargo build --workspace`,
+  `cargo test --workspace --lib --tests`, and `cargo clippy --workspace
+  --no-deps -- -D warnings` are all clean.
+- **Self-update plan `plans/2026-04-27-fono-self-update-v1.md`** —
+  ~85% landed in commit `3e2c742` (2026-04-22) without ever being
+  reflected in the plan tree. This pass ticks Tasks 1–11, 13–15
+  (partial), 17–19 and adds an explicit Status header + Open
+  follow-ups list. Remaining work (Tasks 12, 16, 20–22) carried
+  forward as Wave 2 Task 8.
+- **Equivalence accuracy gate plan
+  `plans/2026-04-28-equivalence-harness-language-gating-and-accuracy-v1.md`**
+  — ~50% landed in commits `b6596c0` and `7db29b5` (2026-04-28) as
+  inline behaviour (`english_only = args.stt == "local" &&
+  args.model.ends_with(".en")` at
+  `crates/fono-bench/src/bin/fono-bench.rs:339`,
+  `Metrics.stt_accuracy_levenshtein` at
+  `crates/fono-bench/src/equivalence.rs:113-114`), without the typed
+  `ModelCapabilities` API the plan describes. This pass ticks Tasks 7,
+  8, 12, 17, 18 with annotations and carries the typed-API refactor
+  forward as Wave 2 Task 7.
+- **R3.1 in-wizard latency probe** shipped in commit `7bea0a9`
+  (`crates/fono/src/wizard.rs:72, 720, 725`). The same commit advertised
+  a "R5.1 CI bench gate" but only added `cargo bench --no-run`
+  compile-sanity at `.github/workflows/ci.yml:64-68`; the real-fixture
+  equivalence-harness gate is carried forward as Wave 2 Task 9.
+  `docs/plans/2026-04-25-fono-roadmap-v2.md` Tier-1 reconciled to
+  reality (R2.1, R3.1, R3.2, R3.3, R4.1, R4.2, R4.3, R4.4 ticked; R5.1
+  demoted to partial).
+- **Three obsolete plans superseded** by the
+  `--allow-multiple-definition` link trick already live in
+  `.cargo/config.toml:21-28`:
+  `plans/2026-04-27-candle-backend-benchmark-v1.md`,
+  `plans/2026-04-27-llama-dynamic-link-sota-v1.md`, and
+  `plans/2026-04-27-shared-ggml-static-binary-v1.md` were moved to
+  `plans/closed/` with `Status: Superseded` headers. None of the three
+  was ever executed; the linker workaround landed first.
+- **ADR backfill.** `docs/decisions/` previously listed only
+  `0001`–`0004`, `0009`, `0015`, `0016` while plan history and status
+  entries referenced `0005`–`0008` and `0010`–`0014`. Reconstructed
+  stubs for the missing numbers landed this pass with `Status:
+  Reconstructed (original lost in filter-branch rewrite)` headers, plus
+  three new ADRs: `0017-auto-translation.md` (forward-reference for the
+  pending feature), `0018-ggml-link-trick.md` (active `--allow-multiple-definition`
+  decision), and `0019-platform-scope.md` (v0.x Linux-multi-package
+  scope).
+
+Verification (this session, `4517133` + doc edits only):
+
+| Command | Result |
+|---|---|
+| `cargo build --workspace` | clean |
+| `cargo test --workspace --lib --tests` | green |
+| `cargo clippy --workspace --no-deps -- -D warnings` | clean |
+
 ## 2026-04-28 — Language allow-list (constrained Whisper auto-detect)
 
 User reported: *"A lot of the people will use fono in more than one
@@ -540,6 +604,10 @@ new `Request::Reload` IPC; the orchestrator hot-swaps STT/LLM behind a
 | `docs/plans/2026-04-25-fono-latency-v1.md` (L1–L30) | ✅ 17/30 landed, 13 deferred-to-v0.2 |
 | `docs/plans/2026-04-25-fono-local-default-v1.md` (H1–H25) | ✅ 11/25 landed, 14 deferred-to-v0.2 |
 | `docs/plans/2026-04-25-fono-provider-switching-v1.md` (S1–S27) | ✅ 16/27 landed, 11 deferred-to-v0.2 |
+| `plans/2026-04-27-fono-self-update-v1.md` | ~85% landed in `3e2c742`; finishing pass tracked as Wave 2 Task 8 |
+| `plans/2026-04-28-equivalence-harness-language-gating-and-accuracy-v1.md` | ~50% landed in `b6596c0`/`7db29b5`; typed-API refactor tracked as Wave 2 Task 7 |
+| `plans/2026-04-28-fono-auto-translation-v1.md` | Not started (Wave 4 of revised strategic plan) |
+| `plans/closed/` (candle / dynamic-link / shared-ggml) | Superseded by `--allow-multiple-definition` link trick (ADR 0018) |
 
 ## Phase progress
 
@@ -762,6 +830,27 @@ compiled in. Cleaned text was lost.
 | `cargo run -p fono -- hwprobe --json` | ✅ structured snapshot + tier |
 
 ## Recommended next session
+
+> Recommended next session: execute **Wave 2** of the revised strategic
+> plan (this conversation, 2026-04-28). Wave 2 closes out the
+> half-shipped self-update and accuracy-gate plans, and tightens the
+> CI bench gate from compile-sanity to a real-fixture equivalence run.
+> Concretely:
+>
+> 1. Equivalence accuracy gate close-out — typed `ModelCapabilities`
+>    in `crates/fono-bench/src/capabilities.rs`, `accuracy_threshold` /
+>    `requires_multilingual` on `ManifestFixture`, `model_capabilities`
+>    in `EquivalenceReport`, mock-STT capability-skip test.
+> 2. Self-update finishing pass — per-asset `.sha256` sidecar
+>    verification, `--bin-dir` CLI flag, `docs/dev/update-qa.md`
+>    checklist, release workflow emits `.sha256` per asset.
+> 3. Real-fixture CI gate — replace `cargo bench --no-run` in
+>    `.github/workflows/ci.yml:64-68` with a `fono-bench equivalence`
+>    run against `tests/fixtures/equivalence/manifest.toml` and commit
+>    `docs/bench/baseline-local-comfortable.json` as the PR comparison
+>    anchor (R5.2).
+
+### Earlier next-session notes (preserved for context)
 
 1. Implement **H8** (`LlamaLocal` against `llama-cpp-2`) so the local
    path also covers LLM cleanup. Keep behind `llama-local` feature flag
