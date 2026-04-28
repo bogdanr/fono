@@ -2,6 +2,104 @@
 
 Last updated: 2026-04-28
 
+## 2026-04-28 — Wave 3 (Slice B1) — Threads A + B shipped; Thread C deferred
+
+Two DCO-signed commits delivered the user-visible half of Slice B1
+(driven by `plans/2026-04-28-wave-3-slice-b1-v1.md`); Thread C
+(equivalence harness cloud rows) is deferred to a follow-up.
+
+| Thread | SHA | Subject |
+|---|---|---|
+| A | `1e5682f` | `feat(fono-audio): cpal-callback push for live capture (Thread A / R10.x)` |
+| B | `eaf46a3` | `feat(fono-stt): Groq streaming pseudo-stream backend (R4.2)` |
+| C | _deferred_ | cloud-mock equivalence rows + recorded-HTTP Groq fixtures (R18.12) |
+
+**Thread A** replaces the 30 ms-poll `RecordingBuffer` drain at
+the live-dictation hot path with a true cpal-callback push pipeline:
+each cpal data callback resamples to mono f32 and `try_send`s its
+slice into a bounded(64) crossbeam SPSC; a dedicated `fono-live-bridge`
+std::thread forwards into a tokio mpsc; the drain task pulls
+straight into the streaming `Pump`. No 30 ms tick, no
+`Mutex<RecordingBuffer>` middleman for live sessions. The batch
+path (`run_oneshot`) still uses `RecordingBuffer` unchanged. New
+unit test `forwarder_receives_every_callback_in_order` drives a
+synthetic cpal stand-in 100x without a real device. Phase A4
+manual latency measurement
+(`live.first_partial < 400 ms` on the reference machine) cannot be
+produced from a headless agent and is left for the operator to
+record post-merge.
+
+**Thread B** adds an opt-in Groq streaming STT backend implemented
+as a "pseudo-stream": every 700 ms the streaming task re-POSTs the
+trailing 28 s of buffered audio to Groq's existing batch endpoint,
+pipes each decode through `LocalAgreement` to extract a stable
+token-prefix preview, and emits a single finalize decode on
+`SegmentBoundary` / `Eof`. In-flight cap = 1 (drop on overlap;
+counted in `preview_skipped_count`). New ADR
+`docs/decisions/0020-groq-pseudo-stream.md` captures the design
+trade-offs (no Groq WebSocket today, 700 ms cadence trade-off,
+~25-40× cost overhead vs single batch POST). Selectable via
+`fono use stt groq` + `[interactive].enabled = true` +
+`[stt.cloud].streaming = true`; the wizard prompts for the third
+knob when the first two are set. `docs/providers.md` updated. The
+backend takes a `GroqRequestFn` closure for production HTTPS, tests,
+and the future cloud-mock equivalence path — keeping the Thread C
+hook free.
+
+**Thread C** is deferred. Scope:
+1. New `--stt cloud-mock --provider groq` mode in
+   `fono-bench equivalence` that swaps the real Groq client for a
+   recorded-HTTP closure injected via
+   `GroqStreaming::with_request_fn`.
+2. Recording format (one JSON file per fixture per provider with
+   `(request_audio_sha256, response_body)` exchange list) and at
+   least one committed recording.
+3. Second per-PR CI gate that runs the cloud-mock lane against a
+   sibling baseline anchor (`docs/bench/baseline-cloud-mock-groq.json`).
+
+Why deferred: Thread C is test infrastructure that doesn't block
+users. The plumbing alone (mock client + recording format + JSON
+fixture + manifest threshold extension + CI workflow change) is a
+focused session in its own right; landing it half-done would leave
+the equivalence report shape inconsistent. The `GroqRequestFn`
+closure injection in Thread B's `groq_streaming.rs` already
+preserves the hook Thread C will use, so deferring costs nothing
+architecturally. Tracked as the next-session focus.
+
+### Verification gate
+
+`tests/check.sh` (full matrix incl. slim cloud-only build):
+- `cargo fmt --check` — clean
+- `cargo build` (default + default+interactive + slim + slim+interactive) — clean
+- `cargo clippy` (same matrix) — clean
+- `cargo test` (same matrix) — green (incl. new
+  `forwarder_receives_every_callback_in_order` and
+  `groq_streaming::tests::*`)
+
+### Recommended next session
+
+**Wave 3 Thread C** — drop in the cloud-mock equivalence lane.
+Plan: `plans/2026-04-28-wave-3-slice-b1-v1.md` Thread C (Tasks
+C1-C9). The closure-injection hook is already in
+`crates/fono-stt/src/groq_streaming.rs::GroqStreaming::with_request_fn`;
+the manifest threshold types are already typed (Wave 2). The work
+is scoped to:
+1. `crates/fono-bench/src/cloud_mock.rs` — recording loader +
+   `SpeechToText` / `StreamingStt` impls keyed by request-WAV SHA.
+2. `tests/fixtures/cloud-recordings/groq/<fixture>.json` recording
+   fixture format + 1-2 committed recordings (real-key capture
+   preferred; placeholder via local-Whisper output is the
+   documented fallback).
+3. `--stt cloud-mock --provider groq` flag wiring at
+   `crates/fono-bench/src/bin/fono-bench.rs:288-333` and
+   `:659-684`.
+4. Sibling baseline `docs/bench/baseline-cloud-mock-groq.json` and
+   second CI job in `.github/workflows/ci.yml`.
+
+Once Thread C lands, the `v0.3.0` release tag becomes appropriate
+(Slice B1 fully delivered; CHANGELOG entry + `release.yml`
+auto-extracts CHANGELOG sections per `4577dd7`).
+
 ## 2026-04-28 — Wave 2: half-shipped plans closed out + real-fixture CI gate
 
 Three DCO-signed commits delivered the trust-restoration leg of the
