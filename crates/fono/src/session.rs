@@ -1031,6 +1031,9 @@ impl SessionOrchestrator {
         // boundary-heuristic flags from the LiveTranscript are
         // intentionally not persisted yet — Slice B telemetry work
         // adds dedicated columns.
+        let llm_started = Instant::now();
+        let mut llm_ms: u64 = 0;
+        let mut llm_label_for_log: Option<String> = None;
         let cleaned = if cfg.interactive.cleanup_on_finalize {
             if let Some(llm) = self.current_llm() {
                 // Show "polishing…" so the user knows we haven't
@@ -1042,9 +1045,24 @@ impl SessionOrchestrator {
                 let (app_class, app_title) = self.focus.probe();
                 let ctx =
                     build_format_context(&cfg, app_class.as_deref(), app_title.as_deref(), None);
+                llm_label_for_log = Some(llm.name().to_string());
                 match llm.format(&raw, &ctx).await {
                     Ok(c) => {
+                        llm_ms = llm_started.elapsed().as_millis() as u64;
                         let trimmed = c.trim().to_string();
+                        let raw_chars = raw.chars().count();
+                        let new_chars = trimmed.chars().count();
+                        // Mirror the batch pipeline's INFO logs at
+                        // `session.rs:1253-1265` so live and batch produce
+                        // structurally-identical operator output.
+                        info!("llm: {} {}ms → {} chars", llm.name(), llm_ms, new_chars);
+                        let diff = i64::try_from(new_chars).unwrap_or(0)
+                            - i64::try_from(raw_chars).unwrap_or(0);
+                        if trimmed == raw {
+                            info!("llm: cleanup no-op (input unchanged, {raw_chars} chars)");
+                        } else {
+                            info!("llm: cleanup diff {raw_chars} → {new_chars} chars ({diff:+})");
+                        }
                         if trimmed.is_empty() {
                             None
                         } else {
@@ -1052,7 +1070,8 @@ impl SessionOrchestrator {
                         }
                     }
                     Err(e) => {
-                        warn!("live-dictation: LLM cleanup failed: {e:#}");
+                        llm_ms = llm_started.elapsed().as_millis() as u64;
+                        warn!("live-dictation: LLM cleanup failed after {llm_ms}ms: {e:#}");
                         None
                     }
                 }
@@ -1076,6 +1095,7 @@ impl SessionOrchestrator {
         }
 
         // Inject — best-effort, same as the batch path.
+        let inject_started = Instant::now();
         let injector = Arc::clone(&self.injector);
         let final_for_inject = final_text.clone();
         let clipboard_already_populated =
@@ -1089,6 +1109,26 @@ impl SessionOrchestrator {
                 warn!("live-dictation: clipboard copy failed: {e:#}");
             }
         }
+        let inject_ms = inject_started.elapsed().as_millis() as u64;
+
+        // Mirror the batch summary at `session.rs:684-696` so live and
+        // batch dictations produce structurally-identical operator
+        // output. Live mode has no trim stage (streaming consumed PCM
+        // continuously), so we omit the trim leg; everything else
+        // matches.
+        let raw_chars = raw.chars().count();
+        let final_chars = final_text.chars().count();
+        let llm_label = llm_label_for_log.as_deref().unwrap_or("none");
+        info!(
+            "pipeline ok (live): capture={}ms stt=streaming({} segments) llm={} {}ms inject={}ms ({} → {} chars)",
+            capture_ms,
+            transcript.segments_finalized,
+            llm_label,
+            llm_ms,
+            inject_ms,
+            raw_chars,
+            final_chars,
+        );
 
         // History (non-fatal on failure).
         if cfg.history.enabled {

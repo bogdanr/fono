@@ -622,9 +622,9 @@ fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbos
                 "interactive  : not compiled in (rebuild with `--features interactive`); \
                  `[interactive].enabled = true` in config will be ignored"
             );
-        } else {
-            info!("interactive  : not compiled in (rebuild with `--features interactive`)");
         }
+        // Else: silent. A slim build with `[interactive].enabled = false`
+        // is a fully-supported configuration; no log line needed.
     }
     info!("hw accel     : {}", hardware_acceleration_summary());
     debug!(

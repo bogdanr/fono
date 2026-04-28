@@ -333,12 +333,16 @@ pub fn build_streaming_stt(
             .map(Some)
         }
         other => {
-            let label = fono_core::providers::stt_backend_str(other);
-            tracing::warn!(
-                "streaming STT not yet supported for backend {label} \
-                 (or `[interactive].enabled = false`); \
-                 live dictation will fall back to batch"
-            );
+            // When interactive is off the user explicitly asked for batch
+            // mode; calling that "a fallback" is misleading. Only warn
+            // when streaming was requested and the backend cannot deliver.
+            if interactive.enabled {
+                let label = fono_core::providers::stt_backend_str(other);
+                tracing::warn!(
+                    "streaming STT not yet supported for backend {label}; \
+                     live dictation will fall back to batch"
+                );
+            }
             Ok(None)
         }
     }

@@ -36,7 +36,7 @@ use fono_stt::{StreamFrame, StreamingStt, TranscriptUpdate, UpdateLane};
 use futures::stream::{BoxStream, StreamExt};
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::{debug, field, info, instrument, warn, Span};
+use tracing::{debug, field, instrument, warn, Span};
 
 /// Tunable knobs for the boundary heuristics. Built from
 /// `fono_core::config::Interactive` by the orchestrator (see
@@ -396,7 +396,12 @@ impl LiveSession {
             span.record("live.drain_extended_by_dangling", w);
         }
 
-        info!(
+        // Heuristic outcomes (prosody/filler/dangling) are already stamped on
+        // the run span via R10.5 above; segment + char counts surface in the
+        // unified `pipeline ok (live)` summary in session.rs. Keep this at
+        // debug! so diagnosing live-mode boundary heuristics is still possible
+        // without duplicating the INFO surface.
+        debug!(
             "live session done: {} segments, {} committed chars, prosody+{}ms, filler={}, dangling={:?}",
             transcript.segments_finalized,
             transcript.committed.len(),
