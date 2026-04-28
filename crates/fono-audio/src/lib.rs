@@ -15,7 +15,9 @@ pub mod vad;
 #[cfg(feature = "streaming")]
 pub mod stream;
 
-pub use capture::{AudioCapture, CaptureConfig, CaptureHandle, RecordingBuffer};
+pub use capture::{
+    AudioCapture, CaptureConfig, CaptureHandle, CaptureStreamHandle, RecordingBuffer,
+};
 pub use trim::{trim_silence, TrimConfig};
 pub use vad::{SileroVad, Vad, VadDecision, WebRtcVadStub};
 

@@ -1295,6 +1295,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "console",
+ "crossbeam-channel",
  "dialoguer",
  "fono-audio",
  "fono-core",

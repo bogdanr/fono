@@ -72,11 +72,15 @@ impl CaptureSession {
 /// produces the final [`crate::live::LiveTranscript`].
 #[cfg(feature = "interactive")]
 struct LiveCaptureSession {
-    /// Stops the capture thread (drops the cpal stream).
+    /// Stops the capture thread (drops the cpal stream, which in turn
+    /// drops the forwarder closure and the realtime SPSC `Sender`,
+    /// signalling EOF to the bridge thread).
     capture_stop_tx: std::sync::mpsc::Sender<()>,
     capture_join: Option<JoinHandle<()>>,
-    /// Stops the drain task (signals it to call `pump.finish()`).
-    drain_stop_tx: tokio::sync::oneshot::Sender<()>,
+    /// Bridge thread that ferries PCM from the realtime crossbeam
+    /// channel to the async drain task. Joined during shutdown so we
+    /// don't tear down the pump while audio is still in flight.
+    bridge_join: Option<JoinHandle<()>>,
     /// JoinHandle for the drain task; awaited during shutdown so we
     /// don't tear down the pump before all captured PCM has been
     /// pushed.
@@ -772,18 +776,41 @@ impl SessionOrchestrator {
         };
 
         // ---- Spawn the capture thread ----------------------------
-        let (started_tx, started_rx) = std::sync::mpsc::channel::<
-            std::result::Result<Arc<StdMutex<RecordingBuffer>>, String>,
-        >();
+        // The cpal stream uses the new realtime forwarder API:
+        // each data callback resamples to mono f32 @ 16 kHz and
+        // pushes the slice into a bounded crossbeam SPSC. The audio
+        // thread MUST NOT block on a tokio runtime, so we drop on
+        // overflow (logged at warn) rather than queue. The forwarder
+        // closure is owned by the cpal `Stream`; dropping the stream
+        // (when capture_stop_rx fires) drops the closure and thereby
+        // the `audio_tx` Sender, signalling EOF to the bridge thread
+        // downstream. Slice B1 / R10.x — replaces the prior 30 ms
+        // RecordingBuffer-poll drain.
+        let (audio_tx, audio_rx) = crossbeam_channel::bounded::<Vec<f32>>(64);
+        let (started_tx, started_rx) =
+            std::sync::mpsc::channel::<std::result::Result<(), String>>();
         let (capture_stop_tx, capture_stop_rx) = std::sync::mpsc::channel::<()>();
         let cap_cfg_thread = cap_cfg.clone();
         let capture_join = std::thread::Builder::new()
             .name("fono-live-capture".into())
             .spawn(move || {
                 let cap = AudioCapture::new(cap_cfg_thread);
-                match cap.start() {
+                let forwarder_tx = audio_tx;
+                let result = cap.start_with_forwarder(move |pcm: &[f32]| {
+                    // Bounded try_send: drop on overflow (a frame
+                    // dropped on the audio thread is preferable to a
+                    // glitch caused by allocator pressure under
+                    // pump backpressure).
+                    if forwarder_tx.try_send(pcm.to_vec()).is_err() {
+                        warn!(
+                            "live-capture: realtime SPSC full ({} samples dropped)",
+                            pcm.len()
+                        );
+                    }
+                });
+                match result {
                     Ok(handle) => {
-                        let _ = started_tx.send(Ok(Arc::clone(&handle.buffer)));
+                        let _ = started_tx.send(Ok(()));
                         let _ = capture_stop_rx.recv();
                         drop(handle);
                     }
@@ -793,8 +820,8 @@ impl SessionOrchestrator {
                 }
             })
             .context("spawn live-capture thread")?;
-        let buffer = match started_rx.recv() {
-            Ok(Ok(b)) => b,
+        match started_rx.recv() {
+            Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 let _ = capture_join.join();
                 return Err(anyhow::anyhow!("live audio capture failed to start: {e}"));
@@ -804,7 +831,7 @@ impl SessionOrchestrator {
                     "live capture thread died before reporting status"
                 ))
             }
-        };
+        }
 
         let cfg = self.current_config();
         if cfg.general.auto_mute_system {
@@ -836,46 +863,32 @@ impl SessionOrchestrator {
         // ---- Spawn the run task ----------------------------------
         let run_join = tokio::spawn(session.run(frame_rx, quality_floor));
 
-        // ---- Spawn the drain task (cpal buffer -> Pump::push) -----
-        let (drain_stop_tx, mut drain_stop_rx) = tokio::sync::oneshot::channel::<()>();
-        let drain_join = tokio::spawn(async move {
-            // Tracks how many samples we've already pushed so we only
-            // forward newly-captured PCM. Polls every 30 ms — same
-            // cadence the offline replay path in `fono record --live`
-            // uses, well below whisper's preview interval.
-            let mut offset: usize = 0;
-            let mut interval = tokio::time::interval(Duration::from_millis(30));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let mut pump = pump;
-            loop {
-                tokio::select! {
-                    _ = &mut drain_stop_rx => break,
-                    _ = interval.tick() => {
-                        let snapshot: Option<Vec<f32>> = {
-                            buffer.lock().ok().and_then(|b| {
-                                let s = b.samples();
-                                if s.len() > offset {
-                                    let new = s[offset..].to_vec();
-                                    offset = s.len();
-                                    Some(new)
-                                } else {
-                                    None
-                                }
-                            })
-                        };
-                        if let Some(chunk) = snapshot {
-                            pump.push(&chunk);
-                        }
+        // ---- Bridge: realtime crossbeam rx → tokio mpsc ----------
+        // A dedicated std::thread blocks on `audio_rx.recv()` and
+        // forwards into a tokio unbounded mpsc; the tokio drain task
+        // awaits that side. We avoid a `spawn_blocking` per recv
+        // (which would defeat the latency win this thread is chasing)
+        // by spending exactly one OS thread on the bridge.
+        let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
+        let bridge_join = std::thread::Builder::new()
+            .name("fono-live-bridge".into())
+            .spawn(move || {
+                while let Ok(chunk) = audio_rx.recv() {
+                    if tokio_tx.send(chunk).is_err() {
+                        break;
                     }
                 }
-            }
-            // Drain final tail before signalling EOF.
-            if let Ok(b) = buffer.lock() {
-                let s = b.samples();
-                if s.len() > offset {
-                    let tail = s[offset..].to_vec();
-                    pump.push(&tail);
-                }
+                // audio_rx returned Err(Disconnected) — capture stream
+                // has shut down; drop tokio_tx implicitly to signal
+                // EOF to the drain task.
+            })
+            .context("spawn live-capture bridge thread")?;
+
+        // ---- Spawn the drain task (tokio mpsc -> Pump::push) -----
+        let drain_join = tokio::spawn(async move {
+            let mut pump = pump;
+            while let Some(chunk) = tokio_rx.recv().await {
+                pump.push(&chunk);
             }
             pump.finish();
             // Drop pump explicitly so the broadcast sender side closes.
@@ -890,7 +903,7 @@ impl SessionOrchestrator {
         *slot = Some(LiveCaptureSession {
             capture_stop_tx,
             capture_join: Some(capture_join),
-            drain_stop_tx,
+            bridge_join: Some(bridge_join),
             drain_join,
             run_join,
             overlay,
@@ -920,9 +933,18 @@ impl SessionOrchestrator {
         let elapsed = session.started_at.elapsed();
         let capture_ms = elapsed.as_millis() as u64;
 
-        // 1. Tell the drain task to call pump.finish() and drop the pump.
-        let _ = session.drain_stop_tx.send(());
-        // 2. Stop cpal capture (frees the device promptly).
+        // Realtime push teardown order:
+        //  1. Stop cpal capture — drops the forwarder closure (owned
+        //     by the Stream), which drops the realtime SPSC `Sender`,
+        //     signalling EOF to the bridge thread.
+        //  2. Wait for the capture thread to exit (releases the
+        //     audio device promptly).
+        //  3. Wait for the bridge thread — it observes the disconnected
+        //     `audio_rx` and drops the tokio mpsc Sender.
+        //  4. Wait for the drain task — `tokio_rx.recv()` returns
+        //     None, so it calls `pump.finish()` and exits.
+        //  5. Existing post-drain logic (`run_join.await`, transcript
+        //     handling) is unchanged.
         let _ = session.capture_stop_tx.send(());
         if let Some(j) = session.capture_join.take() {
             let _ = tokio::task::spawn_blocking(move || {
@@ -930,10 +952,15 @@ impl SessionOrchestrator {
             })
             .await;
         }
-        // 3. Wait for the drain task itself to exit (it owns the pump).
+        if let Some(j) = session.bridge_join.take() {
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = j.join();
+            })
+            .await;
+        }
         let _ = session.drain_join.await;
-        // 4. Await the streaming STT run-task. This is the only place
-        //    we hear about the final transcript.
+        // Await the streaming STT run-task. This is the only place
+        // we hear about the final transcript.
         let transcript_res = session.run_join.await;
         // Keep the overlay visible — we'll switch it to Processing
         // during LLM cleanup and back to LiveDictating with the final
