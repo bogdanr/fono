@@ -17,8 +17,8 @@ pub mod wer;
 
 pub use capabilities::ModelCapabilities;
 pub use equivalence::{
-    baseline_subset, levenshtein_norm, normalize_for_compare, EquivalenceReport,
-    EquivalenceResult, Manifest, ManifestFixture, Metrics, ModeResult, Modes, SkipReason, Verdict,
+    baseline_subset, levenshtein_norm, normalize_for_compare, EquivalenceReport, EquivalenceResult,
+    Manifest, ManifestFixture, Metrics, ModeResult, Modes, SkipReason, Verdict,
 };
 pub use fixtures::{Fixture, FIXTURES};
 pub use report::{ClipReport, LangReport, Report};

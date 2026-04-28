@@ -333,7 +333,7 @@ mod streaming_impl {
             // re-reads the prefix language; users routinely switch
             // languages mid-session and a stream-wide cache would lock
             // them into the first guess.
-            let selection_seed = self.effective_selection(lang.as_deref()).clone();
+            let selection_seed = self.effective_selection(lang.as_deref());
             let started = Instant::now();
             let stt = self.clone_arc();
 
@@ -461,13 +461,11 @@ mod streaming_impl {
         if matches!(selection, LanguageSelection::Auto) {
             return None;
         }
-        let guard = match stt.ctx.lock() {
-            Ok(g) => g,
-            Err(_) => return selection.primary().map(str::to_string),
+        let Ok(guard) = stt.ctx.lock() else {
+            return selection.primary().map(str::to_string);
         };
-        let ctx = match guard.as_ref() {
-            Some(c) => c,
-            None => return selection.primary().map(str::to_string),
+        let Some(ctx) = guard.as_ref() else {
+            return selection.primary().map(str::to_string);
         };
         match resolve_language(ctx, selection, pcm, stt.threads) {
             Ok(opt) => opt,

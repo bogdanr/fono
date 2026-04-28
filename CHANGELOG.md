@@ -7,6 +7,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-04-28
+
+First release in which the streaming live-dictation pipeline is
+actually reachable from the shipped binary, plus supply-chain
+hardening for `fono update`, a typed accuracy-gate API for
+`fono-bench`, and the doc-reconciliation pass that closed out the
+half-shipped plans inherited from v0.2.1.
+
+### Changed — `interactive` is now a default release feature
+
+- `crates/fono/Cargo.toml` flips `interactive` into the default
+  feature set. **Before v0.2.2 the released binary contained none of
+  the Slice A streaming code** — `record --live`, the live overlay,
+  `test-overlay`, and the `[interactive].enabled` config knob were
+  all `#[cfg(feature = "interactive")]`-gated and the release
+  workflow built without that feature. Existing v0.2.1 users will
+  see the live mode work for the first time after upgrading.
+- Slim cloud-only builds remain available via
+  `cargo build --no-default-features --features tray,cloud-all`.
+
+### Added — self-update supply-chain hardening
+
+- `apply_update` now verifies each downloaded asset against a
+  per-asset `<asset>.sha256` sidecar published alongside the
+  aggregate `SHA256SUMS` file. Mismatches fail closed (no rename,
+  original binary untouched). Legacy releases without sidecars fall
+  back to TLS-only trust with a `warn!` log.
+- `parse_sha256_sidecar` accepts bare-digest, text-mode
+  (`<hex>  <name>`), binary-mode (`<hex> *<name>`), and multi-entry
+  sidecars; rejects too-short or non-hex inputs.
+- New `--bin-dir <path>` flag on `fono update` overrides the install
+  directory (matches the install-script `BIN_DIR` semantics). Useful
+  when running with elevated privileges or when `current_exe()`
+  resolves to a non-writable path. Still refuses to overwrite
+  package-managed paths (`/usr/bin`, `/bin`, `/usr/sbin`).
+- `.github/workflows/release.yml` now emits a `<asset>.sha256` file
+  per artefact alongside the aggregate `SHA256SUMS`.
+
+### Added — `fono-bench` typed capability surface
+
+- New `crates/fono-bench/src/capabilities.rs` with
+  `ModelCapabilities::for_local_whisper(model_stem)` and
+  `for_cloud(provider, model)` resolvers. Replaces the inline
+  `english_only` boolean previously sprinkled through `fono-bench`'s
+  CLI.
+- `ManifestFixture` schema split into `equivalence_threshold` and
+  `accuracy_threshold` (with a `serde(alias = "levenshtein_threshold")`
+  for back-compat). The two gates can now be tightened
+  independently. `requires_multilingual: Option<bool>` lets fixtures
+  override the derived `language != "en"` default.
+- `EquivalenceReport` carries a populated `model_capabilities` block
+  on every run; skipped rows now carry a typed `SkipReason`
+  (`Capability` / `Quick` / `NoStreaming` / `RuntimeError`) instead
+  of stringly-typed note fingerprints.
+- New mock-STT capability-skip integration test asserts
+  `transcribe` is never invoked on English-only models against
+  non-English fixtures.
+
+### Added — real-fixture CI bench gate
+
+- `.github/workflows/ci.yml` replaces the prior `cargo bench --no-run`
+  compile-only sanity step with a real-fixture equivalence run on
+  every PR. The workflow fetches the whisper `tiny.en` GGML weights
+  (cached via `actions/cache@v4` keyed on the model SHA), runs
+  `fono-bench equivalence --stt local --model tiny.en --baseline
+  --no-legend`, and diffs per-fixture verdicts against
+  `docs/bench/baseline-comfortable-tiny-en.json`. Verdict divergence
+  fails the build.
+- New `--baseline` flag on `fono-bench equivalence` strips the
+  non-deterministic timing fields (`elapsed_ms`, `ttff_ms`,
+  `duration_s`) so the committed JSON is stable across runners.
+- `tests/check.sh` mirrors the CI build/clippy/test matrix locally
+  (full / `--quick` / `--slim` / `--no-test`) so contributors can
+  run the same gate before pushing.
+
+### Documentation
+
+- Three obsolete plans superseded by the
+  `--allow-multiple-definition` link trick (already live in
+  `.cargo/config.toml`) moved to `plans/closed/` with `Status:
+  Superseded` headers: `2026-04-27-candle-backend-benchmark-v1`,
+  `2026-04-27-llama-dynamic-link-sota-v1`,
+  `2026-04-27-shared-ggml-static-binary-v1`.
+- `docs/decisions/` backfilled to numbers `0001`–`0019`. Recovered
+  ADRs for `0005`–`0008` and `0010`–`0014` carry explicit
+  `Status: Reconstructed` headers; new `0017` (auto-translation
+  forward-reference), `0018` (`--allow-multiple-definition` link
+  trick), `0019` (Linux-multi-package platform scope).
+- `docs/dev/update-qa.md` lists the ten manual verification scenarios
+  for self-update changes (bare binary, `/usr/local/bin`,
+  distro-packaged, offline, rate-limited, mismatched sidecar,
+  prerelease, `--bin-dir`, rollback).
+- `docs/bench/README.md` documents how to regenerate the committed
+  baseline anchor and how the CI gate interprets it.
+- `docs/plans/2026-04-25-fono-roadmap-v2.md` Tier-1 R5.1 + R5.2
+  ticked as fully shipped.
+
+### Fixed — clippy violations exposed by `interactive` default
+
+- `crates/fono-stt/src/whisper_local.rs:336` redundant clone removed
+  on `effective_selection`'s already-owned return.
+- `crates/fono-stt/src/whisper_local.rs:464-471` two `match` blocks
+  rewritten as `let...else` per the `manual_let_else` lint.
+- `crates/fono-audio/src/stream.rs:209-230` three `vec!` calls in
+  test code replaced with array literals.
+
 ## [0.2.1] — 2026-04-28
 
 Streaming/interactive dictation lands as a first-class mode, the

@@ -206,8 +206,8 @@ mod tests {
         });
         let mut rx = stream.subscribe();
         let mut vad = WebRtcVadStub::default();
-        stream.push(&vec![0.5_f32; 16], &mut vad); // 1 voiced frame
-        stream.push(&vec![0.0_f32; 16 * 3], &mut vad); // 3 silent frames → boundary
+        stream.push(&[0.5_f32; 16], &mut vad); // 1 voiced frame
+        stream.push(&[0.0_f32; 16 * 3], &mut vad); // 3 silent frames → boundary
         let evs = drain(&mut rx);
         assert!(evs.iter().any(|e| matches!(
             e,
@@ -227,7 +227,7 @@ mod tests {
         });
         let mut rx = stream.subscribe();
         let mut vad = WebRtcVadStub::default();
-        stream.push(&vec![0.5_f32; 32], &mut vad);
+        stream.push(&[0.5_f32; 32], &mut vad);
         stream.finish();
         let evs = drain(&mut rx);
         let last_two: Vec<&FrameEvent> = evs.iter().rev().take(2).collect();

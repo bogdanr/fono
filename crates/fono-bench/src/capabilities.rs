@@ -48,8 +48,8 @@ impl ModelCapabilities {
     #[must_use]
     pub fn for_cloud(provider: &str, model: &str) -> Self {
         let english_only = match provider {
-            "groq" | "openai" | "assemblyai" | "deepgram" | "azure" | "google"
-            | "speechmatics" | "cartesia" | "nemotron" => false,
+            "groq" | "openai" | "assemblyai" | "deepgram" | "azure" | "google" | "speechmatics"
+            | "cartesia" | "nemotron" => false,
             other => {
                 tracing::warn!(
                     provider = other,
@@ -216,7 +216,9 @@ mod tests {
 
     #[test]
     fn fixture_requires_multilingual_default_and_override() {
-        assert!(!ModelCapabilities::fixture_requires_multilingual("en", None));
+        assert!(!ModelCapabilities::fixture_requires_multilingual(
+            "en", None
+        ));
         assert!(ModelCapabilities::fixture_requires_multilingual("ro", None));
         assert!(ModelCapabilities::fixture_requires_multilingual(
             "en",

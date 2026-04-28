@@ -644,9 +644,7 @@ pub async fn run_fixture(
         note.push_str(&format!("per-fixture acc threshold {t}; "));
     }
     if equiv_evaluated && !equiv_pass {
-        note.push_str(&format!(
-            "equiv {levenshtein:.3} > {equiv_threshold:.3}; "
-        ));
+        note.push_str(&format!("equiv {levenshtein:.3} > {equiv_threshold:.3}; "));
     }
     if let Some(a) = accuracy {
         if a > acc_threshold {
@@ -1093,26 +1091,14 @@ mod tests {
         // Neither evaluated → Skipped.
         assert_eq!(decide_verdict(None, None, 0.20, 0.20), Verdict::Skipped);
         // Equiv only, passing.
-        assert_eq!(
-            decide_verdict(Some(0.05), None, 0.20, 0.20),
-            Verdict::Pass
-        );
+        assert_eq!(decide_verdict(Some(0.05), None, 0.20, 0.20), Verdict::Pass);
         // Equiv only, failing.
-        assert_eq!(
-            decide_verdict(Some(0.30), None, 0.20, 0.20),
-            Verdict::Fail
-        );
+        assert_eq!(decide_verdict(Some(0.30), None, 0.20, 0.20), Verdict::Fail);
         // Accuracy only, passing — verdict reflects accuracy even
         // without a streaming pass.
-        assert_eq!(
-            decide_verdict(None, Some(0.10), 0.20, 0.20),
-            Verdict::Pass
-        );
+        assert_eq!(decide_verdict(None, Some(0.10), 0.20, 0.20), Verdict::Pass);
         // Accuracy only, failing.
-        assert_eq!(
-            decide_verdict(None, Some(0.40), 0.20, 0.20),
-            Verdict::Fail
-        );
+        assert_eq!(decide_verdict(None, Some(0.40), 0.20, 0.20), Verdict::Fail);
         // Both gates evaluated and pass.
         assert_eq!(
             decide_verdict(Some(0.02), Some(0.05), 0.20, 0.20),

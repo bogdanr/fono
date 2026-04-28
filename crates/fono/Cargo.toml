@@ -26,7 +26,7 @@ path = "src/main.rs"
 # link time by `-Wl,--allow-multiple-definition` set in
 # `.cargo/config.toml`. Slim cloud-only build:
 # `cargo build --no-default-features --features tray`.
-default = ["tray", "local-models", "llama-local"]
+default = ["tray", "local-models", "llama-local", "interactive"]
 tray = ["fono-tray/tray-backend"]
 local-models = ["fono-stt/whisper-local"]
 llama-local = ["fono-llm/llama-local"]
@@ -42,9 +42,11 @@ accel-vulkan = ["fono-stt/accel-vulkan", "fono-llm/accel-vulkan"]
 accel-rocm = ["fono-stt/accel-hipblas", "fono-llm/accel-rocm"]
 accel-coreml = ["fono-stt/accel-coreml"]
 accel-openblas = ["fono-stt/accel-openblas"]
-# Live-dictation streaming pipeline. Plan v6 / Slice A. Off by default
-# until v0.2.0-alpha tag. Pulls the matching feature in each crate
-# whose code participates in streaming.
+# Live-dictation streaming pipeline. Plan v6 / Slice A. Flipped into
+# the default set in v0.2.2 — the released binary now ships with the
+# streaming overlay, `record --live`, and `test-overlay`. Slim
+# cloud-only builds (`--no-default-features --features tray,cloud-all`)
+# still opt in explicitly.
 interactive = [
     "fono-stt/streaming",
     "fono-audio/streaming",
