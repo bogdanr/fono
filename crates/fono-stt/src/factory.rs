@@ -62,6 +62,7 @@ pub fn synthetic_cloud(backend: &SttBackend, provider_name: &str) -> SttCloud {
         provider: provider_name.to_string(),
         api_key_ref: stt_key_env(backend).to_string(),
         model: crate::defaults::default_cloud_model(provider_name).to_string(),
+        streaming: false,
     }
 }
 
@@ -214,28 +215,71 @@ fn build_openai(
 /// `Arc<dyn StreamingStt>`. Slice A only implements the local
 /// (`whisper-rs`) streaming path; cloud backends return `Ok(None)`
 /// with a `warn!` so the caller (the daemon) can fall back to the
-/// batch path gracefully. Slice B will fill in cloud streaming.
+/// batch path gracefully. Slice B1 / Thread B adds Groq via a
+/// pseudo-stream (re-POST trailing N seconds every 700 ms),
+/// opt-in via `[stt.cloud].streaming = true`.
 #[cfg(feature = "streaming")]
 pub fn build_streaming_stt(
     cfg: &Stt,
     general: &General,
-    _secrets: &Secrets,
+    secrets: &Secrets,
     whisper_models_dir: &Path,
 ) -> Result<Option<Arc<dyn crate::streaming::StreamingStt>>> {
+    let _ = secrets;
+    let cloud_force_primary = general.cloud_force_primary_language;
+    let cloud_rerun = general.cloud_rerun_on_language_mismatch;
+    let cloud_streaming = cfg.cloud.as_ref().is_some_and(|c| c.streaming);
     match &cfg.backend {
         SttBackend::Local => {
             let languages = effective_languages(cfg, general);
             build_local_streaming(cfg, whisper_models_dir, languages).map(Some)
         }
+        SttBackend::Groq if cloud_streaming => {
+            let languages = effective_languages(cfg, general);
+            build_groq_streaming(cfg, secrets, languages, cloud_force_primary, cloud_rerun)
+                .map(Some)
+        }
         other => {
             let label = fono_core::providers::stt_backend_str(other);
             tracing::warn!(
-                "streaming STT not yet supported for backend {label}; \
+                "streaming STT not yet supported for backend {label} \
+                 (or `[stt.cloud].streaming = false`); \
                  live dictation will fall back to batch"
             );
             Ok(None)
         }
     }
+}
+
+#[cfg(all(feature = "streaming", feature = "groq"))]
+fn build_groq_streaming(
+    cfg: &Stt,
+    secrets: &Secrets,
+    languages: Vec<String>,
+    cloud_force_primary: bool,
+    cloud_rerun: bool,
+) -> Result<Arc<dyn crate::streaming::StreamingStt>> {
+    let (key, model) = resolve_cloud(cfg, secrets, &SttBackend::Groq, "groq")?;
+    Ok(Arc::new(
+        crate::groq_streaming::GroqStreaming::new(key, model)
+            .with_languages(languages)
+            .with_cloud_force_primary(cloud_force_primary)
+            .with_cloud_rerun_on_mismatch(cloud_rerun),
+    ))
+}
+
+#[cfg(all(feature = "streaming", not(feature = "groq")))]
+fn build_groq_streaming(
+    _cfg: &Stt,
+    _secrets: &Secrets,
+    _languages: Vec<String>,
+    _cloud_force_primary: bool,
+    _cloud_rerun: bool,
+) -> Result<Arc<dyn crate::streaming::StreamingStt>> {
+    Err(anyhow!(
+        "Groq streaming STT requested but this binary was built without \
+         the `groq` feature on `fono-stt`"
+    ))
 }
 
 #[cfg(all(feature = "streaming", feature = "whisper-local"))]

@@ -14,6 +14,8 @@ pub mod streaming;
 
 #[cfg(feature = "groq")]
 pub mod groq;
+#[cfg(all(feature = "groq", feature = "streaming"))]
+pub mod groq_streaming;
 #[cfg(feature = "openai")]
 pub mod openai;
 #[cfg(feature = "whisper-local")]
@@ -28,3 +30,9 @@ pub use traits::{SpeechToText, Transcription};
 
 #[cfg(feature = "streaming")]
 pub use streaming::{LocalAgreement, StreamFrame, StreamingStt, TranscriptUpdate, UpdateLane};
+
+#[cfg(all(feature = "groq", feature = "streaming"))]
+pub use groq_streaming::{GroqRequestFn, GroqRequestFuture, GroqStreaming};
+
+#[cfg(feature = "groq")]
+pub use groq::GroqResponse;

@@ -56,7 +56,7 @@ fono keys check                  # reachability probe per key
 | Backend       | Type       | Model(s)                               | API key env var       | Streaming |
 |---------------|------------|----------------------------------------|-----------------------|-----------|
 | Whisper local | local      | ggml tiny · tiny.en · base · base.en · small · small.en · medium · large-v3 | — | no |
-| Groq          | cloud HTTP | `whisper-large-v3`, `whisper-large-v3-turbo` | `GROQ_API_KEY`        | no (batch) |
+| Groq          | cloud HTTP | `whisper-large-v3`, `whisper-large-v3-turbo` | `GROQ_API_KEY`        | yes (pseudo-stream, opt-in) |
 | OpenAI        | cloud HTTP | `whisper-1`, `gpt-4o-transcribe`       | `OPENAI_API_KEY`      | no |
 | Deepgram      | cloud WS   | `nova-2`, `nova-3`                     | `DEEPGRAM_API_KEY`    | yes |
 | Cartesia      | cloud HTTP | `sonic-transcribe`                     | `CARTESIA_API_KEY`    | yes |
@@ -64,6 +64,40 @@ fono keys check                  # reachability probe per key
 
 Whisper model files land in `~/.cache/fono/models/whisper/ggml-<name>.bin`.
 Override the download host with `FONO_MODEL_MIRROR=https://your.mirror`.
+
+### Groq streaming dictation (pseudo-stream)
+
+Groq has no native streaming endpoint today. Fono ships an opt-in
+"pseudo-stream" backend that re-POSTs the trailing 28 s of buffered
+audio to the standard batch endpoint every 700 ms while the user is
+speaking, pipes each decode through a stable-prefix agreement
+helper, and emits preview text into the live overlay. On
+`SegmentBoundary` / `Eof` a single final POST against the full
+segment audio produces the finalized transcript.
+
+Trade-off: roughly 25–40× the dollar cost per utterance vs the
+single batch POST that the non-live `record` path uses, because each
+preview tick re-uploads the trailing window. On a usage-billed Groq
+plan, opt in deliberately.
+
+Enable with both knobs on:
+
+```toml
+[interactive]
+enabled = true
+
+[stt.cloud]
+provider = "groq"
+api_key_ref = "GROQ_API_KEY"
+model = "whisper-large-v3-turbo"
+streaming = true
+```
+
+The wizard prompts for `streaming` when you pick Groq with
+`[interactive].enabled = true`. Defaults to `false` so existing
+batch-only Groq users stay on the cheaper profile.
+
+Design + cost rationale: [ADR 0020](decisions/0020-groq-pseudo-stream.md).
 
 ## LLM cleanup
 

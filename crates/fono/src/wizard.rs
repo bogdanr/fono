@@ -436,11 +436,28 @@ async fn configure_cloud_stt(
         secrets.insert(stt_key_name, k);
     }
 
-    config.stt.backend = stt_backend;
+    config.stt.backend = stt_backend.clone();
+    // Streaming pseudo-stream is opt-in: prompt only when the user
+    // picked Groq AND has interactive enabled. Other cloud providers
+    // don't have a pseudo-stream backend yet (Slice B1 ships Groq
+    // first; OpenAI realtime lands in a follow-up).
+    let streaming = if matches!(stt_backend, SttBackend::Groq) && config.interactive.enabled {
+        dialoguer::Confirm::with_theme(theme)
+            .with_prompt(
+                "Enable Groq streaming dictation? \
+                 (~25% extra cost vs batch — see docs/providers.md)",
+            )
+            .default(false)
+            .interact()
+            .unwrap_or(false)
+    } else {
+        false
+    };
     config.stt.cloud = Some(SttCloud {
         provider: stt_key_name.trim_end_matches("_API_KEY").to_lowercase(),
         api_key_ref: stt_key_name.into(),
         model: stt_default_model.into(),
+        streaming,
     });
     Ok(())
 }

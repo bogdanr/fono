@@ -276,6 +276,20 @@ pub struct SttCloud {
     pub provider: String,
     pub api_key_ref: String,
     pub model: String,
+    /// Opt-in to the streaming pseudo-stream pipeline for hosted
+    /// providers that do not expose a native streaming endpoint (Groq
+    /// today). When `true`, the live-dictation path re-POSTs the
+    /// trailing N seconds of audio every ~700 ms to the same batch
+    /// endpoint and pipes results through the `LocalAgreement` helper
+    /// to produce preview text. Costs roughly +25% vs a single batch
+    /// POST per utterance — opt in deliberately on usage-billed
+    /// plans. Default `false` so existing Groq users stay on the
+    /// cheaper batch profile.
+    ///
+    /// Plan: `plans/2026-04-27-fono-interactive-v1.md` R4.2 /
+    /// `plans/2026-04-28-wave-3-slice-b1-v1.md` Thread B.
+    #[serde(default)]
+    pub streaming: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

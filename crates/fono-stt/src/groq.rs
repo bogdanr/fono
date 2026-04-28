@@ -92,11 +92,48 @@ pub(crate) fn warm_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
-#[derive(Deserialize)]
-struct GroqResponse {
-    text: String,
+#[derive(Deserialize, Debug, Clone)]
+pub struct GroqResponse {
+    pub text: String,
     #[serde(default)]
-    language: Option<String>,
+    pub language: Option<String>,
+}
+
+/// Issue a single transcription request to Groq's batch endpoint.
+/// Shared between [`GroqStt`] (batch) and the streaming pseudo-stream
+/// backend in [`crate::groq_streaming`] (re-POSTs the trailing N
+/// seconds every 700 ms). The caller resolves the model + language
+/// allow-list semantics; this helper just does the multipart POST and
+/// parses the JSON.
+pub(crate) async fn groq_post_wav(
+    client: &reqwest::Client,
+    api_key: &str,
+    model: &str,
+    wav: &[u8],
+    lang: Option<&str>,
+) -> Result<GroqResponse> {
+    let part = multipart::Part::bytes(wav.to_vec())
+        .file_name("audio.wav")
+        .mime_str("audio/wav")?;
+    let mut form = multipart::Form::new()
+        .text("model", model.to_string())
+        .part("file", part);
+    if let Some(l) = lang {
+        form = form.text("language", l.to_string());
+    }
+    let res = client
+        .post(GROQ_ENDPOINT)
+        .bearer_auth(api_key)
+        .multipart(form)
+        .send()
+        .await
+        .context("groq POST failed")?;
+    let status = res.status();
+    let body = res.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("groq STT {status}: {body}");
+    }
+    serde_json::from_str(&body).with_context(|| format!("parse groq response: {body}"))
 }
 
 #[async_trait]
@@ -189,29 +226,7 @@ impl GroqStt {
     /// optional `language` form field. Factored out so the
     /// post-validation rerun path is one extra await away.
     async fn do_request(&self, wav: &[u8], lang: Option<&str>) -> Result<GroqResponse> {
-        let part = multipart::Part::bytes(wav.to_vec())
-            .file_name("audio.wav")
-            .mime_str("audio/wav")?;
-        let mut form = multipart::Form::new()
-            .text("model", self.model.clone())
-            .part("file", part);
-        if let Some(l) = lang {
-            form = form.text("language", l.to_string());
-        }
-        let res = self
-            .client
-            .post(GROQ_ENDPOINT)
-            .bearer_auth(&self.api_key)
-            .multipart(form)
-            .send()
-            .await
-            .context("groq POST failed")?;
-        let status = res.status();
-        let body = res.text().await.unwrap_or_default();
-        if !status.is_success() {
-            anyhow::bail!("groq STT {status}: {body}");
-        }
-        serde_json::from_str(&body).with_context(|| format!("parse groq response: {body}"))
+        groq_post_wav(&self.client, &self.api_key, &self.model, wav, lang).await
     }
 }
 
