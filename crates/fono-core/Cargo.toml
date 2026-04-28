@@ -32,3 +32,10 @@ once_cell = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+# notify-rust is the macOS/Windows backend for fono_core::notify. On
+# Linux we shell out to `notify-send` instead (libnotify's bus discovery
+# is more forgiving than zbus's pure-Rust path), so notify-rust is not
+# pulled in for Linux builds.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+notify-rust = { workspace = true }

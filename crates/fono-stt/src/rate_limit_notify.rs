@@ -97,6 +97,7 @@ pub fn is_throttled() -> bool {
 /// Call [`mark_rate_limited`] separately at the 429 site so the
 /// throttle and notification can be tested independently.
 pub fn notify_once(provider: &str, body: &str) -> bool {
+    tracing::debug!("rate_limit_notify: notify_once called provider={provider}");
     // Auto-reset stale flag — covers the panic-skips-reset edge case.
     if let Ok(mut g) = LAST_NOTIFIED_AT.lock() {
         if let Some(at) = *g {
@@ -123,20 +124,14 @@ pub fn notify_once(provider: &str, body: &str) -> bool {
     true
 }
 
-#[cfg(feature = "notify")]
 fn fire_notification(provider: &str, body: &str) {
-    let _ = notify_rust::Notification::new()
-        .summary(&format!("Fono — {provider} rate-limited"))
-        .body(body)
-        .icon("dialog-warning")
-        .timeout(notify_rust::Timeout::Milliseconds(8_000))
-        .show();
-}
-
-#[cfg(not(feature = "notify"))]
-fn fire_notification(_provider: &str, _body: &str) {
-    // Slim builds without notify-rust: the `tracing::warn!` at the
-    // 429 site is the only surface.
+    fono_core::notify::send(
+        &format!("Fono — {provider} rate-limited"),
+        body,
+        "dialog-warning",
+        8_000,
+        fono_core::notify::Urgency::Normal,
+    );
 }
 
 #[cfg(test)]

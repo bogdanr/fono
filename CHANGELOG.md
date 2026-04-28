@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- `general.notify_on_dictation` config field. Redundant with the
+  existing clipboard-fallback notification: when injection works the
+  cleaned text is already at the cursor (the actual feedback); when
+  it falls back to clipboard the dedicated `"Fono — copied to
+  clipboard"` toast at `session.rs:171` fires with a Ctrl+V hint.
+  The per-dictation toast just duplicated case 1.
+- "Fono — live dictation active" toast on first F9 toggle-on.
+  The on-screen overlay is the user-visible indicator.
+- "Fono — STT switched" / "Fono — LLM switched" tray success toasts.
+  The user just clicked the tray menu and the tray label updates to
+  reflect the change. Switch *failures* still fire critical-urgency
+  notifications.
+
+### Changed
+
+- Linux desktop notifications now route through `notify-send` (libnotify
+  CLI) instead of `notify-rust`'s pure-Rust zbus path. Fixes a class of
+  "no notification appeared" bugs in non-canonical environments (root
+  sessions without `XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS`,
+  systemd `--user` units without `PassEnvironment=`, container
+  desktops, Flatpak/Snap launchers, etc.) where libnotify's autolaunch
+  succeeds but zbus fails with "No such file or directory". `notify-rust`
+  is retained behind `cfg(any(target_os = "macos", target_os =
+  "windows"))` for the future cross-platform ports. New
+  `fono_core::notify::send()` helper funnels every notification through
+  one code path; ~40 inline `notify_rust::Notification::new()` call
+  sites in `daemon.rs`/`session.rs` removed.
+
 ### Added
 
 - `interactive.hold_release_grace_ms` config (default `300`). On F8

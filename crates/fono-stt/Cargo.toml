@@ -35,10 +35,6 @@ accel-vulkan = ["whisper-local", "whisper-rs/vulkan"]
 accel-hipblas = ["whisper-local", "whisper-rs/hipblas"]
 accel-coreml = ["whisper-local", "whisper-rs/coreml"]
 accel-openblas = ["whisper-local", "whisper-rs/openblas"]
-# Desktop notifications for cloud-side events (e.g. HTTP 429 rate
-# limits). Pulled in transitively by `fono` so the binary always has
-# them; left optional here so slim test/bench targets can opt out.
-notify = ["dep:notify-rust"]
 
 [dependencies]
 fono-core = { path = "../fono-core" }
@@ -54,4 +50,3 @@ tokio-tungstenite = { workspace = true, optional = true }
 whisper-rs = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 tokio-stream = { workspace = true, optional = true }
-notify-rust = { workspace = true, optional = true }

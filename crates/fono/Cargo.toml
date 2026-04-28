@@ -67,7 +67,7 @@ cloud-all = ["fono-stt/openai", "fono-llm/anthropic"]
 [dependencies]
 fono-core = { path = "../fono-core" }
 fono-audio = { path = "../fono-audio" }
-fono-stt = { path = "../fono-stt", features = ["notify"] }
+fono-stt = { path = "../fono-stt" }
 fono-llm = { path = "../fono-llm" }
 fono-hotkey = { path = "../fono-hotkey" }
 fono-inject = { path = "../fono-inject" }
@@ -87,7 +87,6 @@ console = { workspace = true }
 dialoguer = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
-notify-rust = { workspace = true }
 reqwest = { workspace = true }
 crossbeam-channel = { workspace = true }
 futures = { workspace = true, optional = true }

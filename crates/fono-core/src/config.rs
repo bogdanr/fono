@@ -113,10 +113,6 @@ pub struct General {
     /// Robust against KDE Wayland where `wtype` exits 0 but doesn't
     /// actually deliver keys to the focused window. Default `true`.
     pub also_copy_to_clipboard: bool,
-    /// Pop a desktop notification after every successful pipeline
-    /// showing the dictated text. Default `true` so users always have
-    /// feedback even when injection silently fails.
-    pub notify_on_dictation: bool,
     /// **Deprecated** (plan v3). Cloud STT only: when
     /// [`General::languages`] has > 1 entry, force `fallback_hint()`
     /// on the first request rather than letting the provider
@@ -145,7 +141,6 @@ impl Default for General {
             auto_mute_system: true,
             always_warm_mic: false,
             also_copy_to_clipboard: true,
-            notify_on_dictation: true,
             cloud_force_primary_language: false,
             cloud_rerun_on_language_mismatch: true,
         }

@@ -1309,7 +1309,6 @@ dependencies = [
  "fono-tray",
  "fono-update",
  "futures",
- "notify-rust",
  "reqwest",
  "serde_json",
  "tempfile",
@@ -1363,6 +1362,7 @@ version = "0.3.4"
 dependencies = [
  "anyhow",
  "directories",
+ "notify-rust",
  "once_cell",
  "regex",
  "rusqlite",
@@ -1463,7 +1463,6 @@ dependencies = [
  "async-trait",
  "fono-core",
  "futures",
- "notify-rust",
  "reqwest",
  "serde",
  "serde_json",

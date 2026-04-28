@@ -168,14 +168,16 @@ impl Injector for RealInjector {
             }
             fono_inject::InjectOutcome::Clipboard(tool) => {
                 tracing::info!("inject backend: clipboard via {tool} (no key-injection worked)");
-                let _ = notify_rust::Notification::new()
-                    .summary("Fono — copied to clipboard")
-                    .body(&format!(
+                fono_core::notify::send(
+                    "Fono — copied to clipboard",
+                    &format!(
                         "No key-injection backend was available. The cleaned text \
                          is on the clipboard (via {tool}); press Ctrl+V to paste."
-                    ))
-                    .timeout(notify_rust::Timeout::Milliseconds(6_000))
-                    .show();
+                    ),
+                    "edit-paste",
+                    6_000,
+                    fono_core::notify::Urgency::Normal,
+                );
                 Ok(true)
             }
         }
@@ -1096,22 +1098,6 @@ impl SessionOrchestrator {
             }
         }
 
-        if cfg.general.notify_on_dictation {
-            let body = if final_text.chars().count() > 240 {
-                let mut s: String = final_text.chars().take(240).collect();
-                s.push('…');
-                s
-            } else {
-                final_text.clone()
-            };
-            let _ = notify_rust::Notification::new()
-                .summary("Fono — dictated (live)")
-                .body(&body)
-                .icon("audio-input-microphone")
-                .timeout(notify_rust::Timeout::Milliseconds(4_000))
-                .show();
-        }
-
         // History (non-fatal on failure).
         if cfg.history.enabled {
             let stt_label = self.current_stt().name().to_string();
@@ -1331,26 +1317,6 @@ async fn run_pipeline(
             }
             Err(e) => warn!("clipboard copy failed: {e:#}"),
         }
-    }
-
-    // ---- Desktop notification (always, when enabled) -----------------
-    // Gives the user visible feedback even when injection silently
-    // failed. Truncated to keep the toast short; the full text is in
-    // the clipboard and history db.
-    if config.general.notify_on_dictation {
-        let body = if final_text.chars().count() > 240 {
-            let mut s: String = final_text.chars().take(240).collect();
-            s.push('…');
-            s
-        } else {
-            final_text.clone()
-        };
-        let _ = notify_rust::Notification::new()
-            .summary("Fono — dictated")
-            .body(&body)
-            .icon("audio-input-microphone")
-            .timeout(notify_rust::Timeout::Milliseconds(4_000))
-            .show();
     }
 
     // ---- History (off the hot path; failure is non-fatal) -----------

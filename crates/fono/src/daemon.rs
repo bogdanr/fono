@@ -61,17 +61,10 @@ static LIVE_FIRST_RUN_NOTIFIED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "interactive")]
 fn notify_live_first_run() {
-    if LIVE_FIRST_RUN_NOTIFIED
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        let _ = notify_rust::Notification::new()
-            .summary("Fono — live dictation active")
-            .body("Live dictation active — overlay visible at bottom of screen")
-            .icon("audio-input-microphone")
-            .timeout(notify_rust::Timeout::Milliseconds(4_000))
-            .show();
-    }
+    // Mark first-run for any future use; the toast was removed because
+    // the on-screen overlay is the user-visible indicator.
+    let _ =
+        LIVE_FIRST_RUN_NOTIFIED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst);
 }
 
 #[allow(clippy::too_many_lines)]
@@ -675,8 +668,8 @@ fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbos
         config.llm.backend, config.llm.enabled
     );
     debug!(
-        "inject       : also_copy_to_clipboard={}  notify_on_dictation={}",
-        config.general.also_copy_to_clipboard, config.general.notify_on_dictation
+        "inject       : also_copy_to_clipboard={}",
+        config.general.also_copy_to_clipboard
     );
     // Probe and print which inject + clipboard tools are detected, so
     // users immediately see whether they have a working delivery path.
@@ -896,16 +889,16 @@ fn notify_last_transcription(paths: &Paths) {
             )
         },
     );
-    if let Err(e) = notify_rust::Notification::new()
-        .summary("Fono — last transcription")
-        .body(&body)
-        .icon("audio-input-microphone")
-        .timeout(notify_rust::Timeout::Milliseconds(8_000))
-        .show()
-    {
-        // Fall back to logging when no notification daemon is running.
-        warn!("notify failed ({e:#}); last transcription:\n{body}");
-    }
+    fono_core::notify::send(
+        "Fono — last transcription",
+        &body,
+        "audio-input-microphone",
+        8_000,
+        fono_core::notify::Urgency::Normal,
+    );
+    // Always log the transcription too so it's recoverable from logs
+    // when notifications are unavailable.
+    debug!("last transcription notify body:\n{body}");
 }
 
 fn open_path(path: &std::path::Path) {
@@ -981,12 +974,13 @@ async fn paste_history_at(paths: &Paths, idx: usize) {
         }
         Some(fono_inject::InjectOutcome::Clipboard(t)) => {
             info!("paste_history[{idx}]: copied to clipboard via {t} (paste with Ctrl+V)");
-            let _ = notify_rust::Notification::new()
-                .summary("Fono — copied to clipboard")
-                .body(&format!("Press Ctrl+V to paste (via {t})"))
-                .icon("edit-paste")
-                .timeout(notify_rust::Timeout::Milliseconds(4_000))
-                .show();
+            fono_core::notify::send(
+                "Fono — copied to clipboard",
+                &format!("Press Ctrl+V to paste (via {t})"),
+                "edit-paste",
+                4_000,
+                fono_core::notify::Urgency::Low,
+            );
         }
         None => {
             warn!("paste_history[{idx}]: no inject backend and no clipboard tool available");
@@ -1034,30 +1028,27 @@ async fn switch_stt_via_tray(
             if let Some(o) = orch {
                 if let Err(e) = o.reload().await {
                     warn!("tray: STT reload failed: {e:#}");
-                    let _ = notify_rust::Notification::new()
-                        .summary("Fono — STT reload failed")
-                        .body(&format!("{e}"))
-                        .icon("dialog-error")
-                        .timeout(notify_rust::Timeout::Milliseconds(5_000))
-                        .show();
-                    return;
+                    fono_core::notify::send(
+                        "Fono — STT reload failed",
+                        &format!("{e}"),
+                        "dialog-error",
+                        5_000,
+                        fono_core::notify::Urgency::Critical,
+                    );
                 }
             }
-            let _ = notify_rust::Notification::new()
-                .summary("Fono — STT switched")
-                .body(&format!("Active speech-to-text backend: {label}"))
-                .icon("audio-input-microphone")
-                .timeout(notify_rust::Timeout::Milliseconds(3_000))
-                .show();
+            // Success toast removed: user just clicked the tray menu;
+            // the tray label updates to reflect the change.
         }
         Ok(Err(e)) => {
             warn!("tray: STT switch failed: {e:#}");
-            let _ = notify_rust::Notification::new()
-                .summary("Fono — STT switch failed")
-                .body(&format!("{e}"))
-                .icon("dialog-error")
-                .timeout(notify_rust::Timeout::Milliseconds(5_000))
-                .show();
+            fono_core::notify::send(
+                "Fono — STT switch failed",
+                &format!("{e}"),
+                "dialog-error",
+                5_000,
+                fono_core::notify::Urgency::Critical,
+            );
         }
         Err(e) => warn!("tray: STT switch task join error: {e}"),
     }
@@ -1096,30 +1087,27 @@ async fn switch_llm_via_tray(
             if let Some(o) = orch {
                 if let Err(e) = o.reload().await {
                     warn!("tray: LLM reload failed: {e:#}");
-                    let _ = notify_rust::Notification::new()
-                        .summary("Fono — LLM reload failed")
-                        .body(&format!("{e}"))
-                        .icon("dialog-error")
-                        .timeout(notify_rust::Timeout::Milliseconds(5_000))
-                        .show();
-                    return;
+                    fono_core::notify::send(
+                        "Fono — LLM reload failed",
+                        &format!("{e}"),
+                        "dialog-error",
+                        5_000,
+                        fono_core::notify::Urgency::Critical,
+                    );
                 }
             }
-            let _ = notify_rust::Notification::new()
-                .summary("Fono — LLM switched")
-                .body(&format!("Active text-cleanup backend: {label}"))
-                .icon("accessories-text-editor")
-                .timeout(notify_rust::Timeout::Milliseconds(3_000))
-                .show();
+            // Success toast removed: user just clicked the tray menu;
+            // the tray label updates to reflect the change.
         }
         Ok(Err(e)) => {
             warn!("tray: LLM switch failed: {e:#}");
-            let _ = notify_rust::Notification::new()
-                .summary("Fono — LLM switch failed")
-                .body(&format!("{e}"))
-                .icon("dialog-error")
-                .timeout(notify_rust::Timeout::Milliseconds(5_000))
-                .show();
+            fono_core::notify::send(
+                "Fono — LLM switch failed",
+                &format!("{e}"),
+                "dialog-error",
+                5_000,
+                fono_core::notify::Urgency::Critical,
+            );
         }
         Err(e) => warn!("tray: LLM switch task join error: {e}"),
     }
@@ -1149,32 +1137,35 @@ async fn ensure_local_stt_with_notify(paths: &fono_core::Paths) -> bool {
             || format!("Whisper model: {model}"),
             |mb| format!("Whisper model: {model} ({mb} MB)"),
         );
-        let _ = notify_rust::Notification::new()
-            .summary("Fono — downloading speech model")
-            .body(&body)
-            .icon("emblem-downloads")
-            .timeout(notify_rust::Timeout::Milliseconds(4_000))
-            .show();
+        fono_core::notify::send(
+            "Fono — downloading speech model",
+            &body,
+            "emblem-downloads",
+            4_000,
+            fono_core::notify::Urgency::Normal,
+        );
     }
     match crate::models::ensure_local_stt(paths, &model).await {
         Ok(crate::models::EnsureOutcome::Downloaded) => {
-            let _ = notify_rust::Notification::new()
-                .summary("Fono — speech model ready")
-                .body(&format!("{model} downloaded and cached"))
-                .icon("emblem-default")
-                .timeout(notify_rust::Timeout::Milliseconds(4_000))
-                .show();
+            fono_core::notify::send(
+                "Fono — speech model ready",
+                &format!("{model} downloaded and cached"),
+                "emblem-default",
+                4_000,
+                fono_core::notify::Urgency::Normal,
+            );
             true
         }
         Ok(_) => true,
         Err(e) => {
             warn!("ensure_local_stt: download failed: {e:#}");
-            let _ = notify_rust::Notification::new()
-                .summary("Fono — speech model download failed")
-                .body(&format!("{e}"))
-                .icon("dialog-error")
-                .timeout(notify_rust::Timeout::Milliseconds(6_000))
-                .show();
+            fono_core::notify::send(
+                "Fono — speech model download failed",
+                &format!("{e}"),
+                "dialog-error",
+                6_000,
+                fono_core::notify::Urgency::Critical,
+            );
             false
         }
     }
@@ -1201,32 +1192,35 @@ async fn ensure_local_llm_with_notify(paths: &fono_core::Paths) -> bool {
             || format!("LLM model: {model}"),
             |mb| format!("LLM model: {model} ({mb} MB)"),
         );
-        let _ = notify_rust::Notification::new()
-            .summary("Fono — downloading cleanup model")
-            .body(&body)
-            .icon("emblem-downloads")
-            .timeout(notify_rust::Timeout::Milliseconds(4_000))
-            .show();
+        fono_core::notify::send(
+            "Fono — downloading cleanup model",
+            &body,
+            "emblem-downloads",
+            4_000,
+            fono_core::notify::Urgency::Normal,
+        );
     }
     match crate::models::ensure_local_llm(paths, &model).await {
         Ok(crate::models::EnsureOutcome::Downloaded) => {
-            let _ = notify_rust::Notification::new()
-                .summary("Fono — cleanup model ready")
-                .body(&format!("{model} downloaded and cached"))
-                .icon("emblem-default")
-                .timeout(notify_rust::Timeout::Milliseconds(4_000))
-                .show();
+            fono_core::notify::send(
+                "Fono — cleanup model ready",
+                &format!("{model} downloaded and cached"),
+                "emblem-default",
+                4_000,
+                fono_core::notify::Urgency::Normal,
+            );
             true
         }
         Ok(_) => true,
         Err(e) => {
             warn!("ensure_local_llm: download failed: {e:#}");
-            let _ = notify_rust::Notification::new()
-                .summary("Fono — cleanup model download failed")
-                .body(&format!("{e}"))
-                .icon("dialog-error")
-                .timeout(notify_rust::Timeout::Milliseconds(6_000))
-                .show();
+            fono_core::notify::send(
+                "Fono — cleanup model download failed",
+                &format!("{e}"),
+                "dialog-error",
+                6_000,
+                fono_core::notify::Urgency::Critical,
+            );
             false
         }
     }
@@ -1266,38 +1260,41 @@ async fn apply_update_via_tray(update_status: Arc<RwLock<Option<fono_update::Upd
         }
         match st {
             fono_update::UpdateStatus::UpToDate { current } => {
-                let _ = notify_rust::Notification::new()
-                    .summary("Fono — up to date")
-                    .body(&format!("Running v{current}; no newer release available."))
-                    .icon("emblem-default")
-                    .timeout(notify_rust::Timeout::Milliseconds(4_000))
-                    .show();
+                fono_core::notify::send(
+                    "Fono — up to date",
+                    &format!("Running v{current}; no newer release available."),
+                    "emblem-default",
+                    4_000,
+                    fono_core::notify::Urgency::Low,
+                );
                 return;
             }
             fono_update::UpdateStatus::CheckFailed { error, .. } => {
                 warn!("tray update check failed: {error}");
-                let _ = notify_rust::Notification::new()
-                    .summary("Fono — update check failed")
-                    .body(&error)
-                    .icon("dialog-error")
-                    .timeout(notify_rust::Timeout::Milliseconds(5_000))
-                    .show();
+                fono_core::notify::send(
+                    "Fono — update check failed",
+                    &error,
+                    "dialog-error",
+                    5_000,
+                    fono_core::notify::Urgency::Critical,
+                );
                 return;
             }
             fono_update::UpdateStatus::Available { info, .. } => info,
         }
     };
 
-    let _ = notify_rust::Notification::new()
-        .summary("Fono — downloading update")
-        .body(&format!(
+    fono_core::notify::send(
+        "Fono — downloading update",
+        &format!(
             "Fetching {} ({} MB)…",
             info.asset_name,
             info.asset_size / 1_048_576
-        ))
-        .icon("emblem-downloads")
-        .timeout(notify_rust::Timeout::Milliseconds(4_000))
-        .show();
+        ),
+        "emblem-downloads",
+        4_000,
+        fono_core::notify::Urgency::Normal,
+    );
 
     match fono_update::apply_update(&info, fono_update::ApplyOpts::default()).await {
         Ok(out) => {
@@ -1307,12 +1304,13 @@ async fn apply_update_via_tray(update_status: Arc<RwLock<Option<fono_update::Upd
                 out.bytes,
                 out.sha256
             );
-            let _ = notify_rust::Notification::new()
-                .summary("Fono — update installed")
-                .body(&format!("Restarting into {} …", info.tag))
-                .icon("emblem-default")
-                .timeout(notify_rust::Timeout::Milliseconds(3_000))
-                .show();
+            fono_core::notify::send(
+                "Fono — update installed",
+                &format!("Restarting into {} …", info.tag),
+                "emblem-default",
+                3_000,
+                fono_core::notify::Urgency::Normal,
+            );
             // Give the notification daemon a beat to render before we
             // replace the process image.
             tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -1321,23 +1319,23 @@ async fn apply_update_via_tray(update_status: Arc<RwLock<Option<fono_update::Upd
             // failed to replace the process image.
             let Err(e) = fono_update::restart_in_place();
             warn!("tray: re-exec failed: {e:#}");
-            let _ = notify_rust::Notification::new()
-                .summary("Fono — restart failed")
-                .body(&format!(
-                    "Update installed; please restart Fono manually.\n{e}"
-                ))
-                .icon("dialog-warning")
-                .timeout(notify_rust::Timeout::Milliseconds(8_000))
-                .show();
+            fono_core::notify::send(
+                "Fono — restart failed",
+                &format!("Update installed; please restart Fono manually.\n{e}"),
+                "dialog-warning",
+                8_000,
+                fono_core::notify::Urgency::Critical,
+            );
         }
         Err(e) => {
             warn!("tray: apply_update failed: {e:#}");
-            let _ = notify_rust::Notification::new()
-                .summary("Fono — update failed")
-                .body(&format!("{e}"))
-                .icon("dialog-error")
-                .timeout(notify_rust::Timeout::Milliseconds(8_000))
-                .show();
+            fono_core::notify::send(
+                "Fono — update failed",
+                &format!("{e}"),
+                "dialog-error",
+                8_000,
+                fono_core::notify::Urgency::Critical,
+            );
         }
     }
 }
