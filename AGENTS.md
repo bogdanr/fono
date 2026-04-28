@@ -47,6 +47,11 @@ Target users: Linux desktop (i3 / sway / KDE / GNOME, X11 and Wayland), Windows,
   `docs/providers.md` or the SlackBuild `REQUIRES=` and let the user install them.
 - Work **one phase at a time**; tick checkboxes in the design plan as you go; update
   `docs/status.md` at the end of every session.
+- For every release: add a `## [X.Y.Z] — YYYY-MM-DD` section to `CHANGELOG.md`
+  **before** tagging. The release workflow extracts that section into the GitHub
+  Release body via `body_path: release/RELEASE_NOTES.md`
+  (`.github/workflows/release.yml`). A missing section yields a fallback one-liner
+  body and a CI warning — don't ship without the changelog entry.
 
 ## Next-step template
 

@@ -312,6 +312,11 @@ jobs:
     needs: [build, linux-deb, linux-arch, linux-slack, linux-nimblex]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
+        with:
+          # Only need CHANGELOG.md; shallow clone is fine.
+          fetch-depth: 1
+
       - uses: actions/download-artifact@v5
         with:
           pattern: fono-bin-*
@@ -360,9 +365,42 @@ jobs:
           rm ../minisign.key
           ls -la
 
+      - name: Extract CHANGELOG section
+        # Pull the body for this release out of CHANGELOG.md so the
+        # GitHub release page shows the curated entry instead of the
+        # auto-generated PR/commit list. Looks for a `## [X.Y.Z]`
+        # heading matching the pushed tag (`v` prefix stripped) and
+        # captures everything up to the next `## [` heading. If no
+        # matching section exists, falls back to a one-line note so
+        # the release still has *something* and `generate_release_notes`
+        # appends the auto-generated PR list below it.
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          notes_file="release/RELEASE_NOTES.md"
+          mkdir -p release
+          if grep -qE "^## \[${version}\]" CHANGELOG.md; then
+            awk -v ver="${version}" '
+              $0 ~ "^## \\[" ver "\\]" { capture=1; next }
+              capture && /^## \[/ { exit }
+              capture { print }
+            ' CHANGELOG.md > "${notes_file}"
+            # Trim leading/trailing blank lines.
+            sed -i -e '/./,$!d' -e :a -e '/^$/{$d;N;ba' -e '}' "${notes_file}"
+            echo "Extracted $(wc -l < ${notes_file}) lines from CHANGELOG.md for ${version}."
+          else
+            printf 'Release %s. See [CHANGELOG.md](https://github.com/%s/blob/main/CHANGELOG.md) for details.\n' \
+              "${version}" "${GITHUB_REPOSITORY}" > "${notes_file}"
+            echo "::warning::No CHANGELOG.md section for ${version}; using fallback body."
+          fi
+
       - name: Create draft release
         uses: softprops/action-gh-release@v2
         with:
           draft: true
           generate_release_notes: true
+          body_path: release/RELEASE_NOTES.md
           files: release/*
