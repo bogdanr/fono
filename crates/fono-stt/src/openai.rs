@@ -97,6 +97,62 @@ impl OpenAiStt {
         }
         serde_json::from_str(&body).with_context(|| format!("parse openai response: {body}"))
     }
+
+    /// `verbose_json` variant for the per-peer rerun lane. Same shape
+    /// as Groq's `verbose_json` (whisper-1 compatible). Some
+    /// gpt-4o-transcribe deployments may return an empty `segments`
+    /// array; in that case `mean_logprob()` returns `f32::NEG_INFINITY`
+    /// and the first peer in iteration order wins by default.
+    async fn do_request_verbose(&self, wav: &[u8], lang: Option<&str>) -> Result<VerboseResp> {
+        let part = multipart::Part::bytes(wav.to_vec())
+            .file_name("audio.wav")
+            .mime_str("audio/wav")?;
+        let mut form = multipart::Form::new()
+            .text("model", self.model.clone())
+            .text("response_format", "verbose_json")
+            .part("file", part);
+        if let Some(l) = lang {
+            form = form.text("language", l.to_string());
+        }
+        let res = self
+            .client
+            .post(OPENAI_ENDPOINT)
+            .bearer_auth(&self.api_key)
+            .multipart(form)
+            .send()
+            .await
+            .context("openai verbose POST failed")?;
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("openai STT verbose {status}: {body}");
+        }
+        serde_json::from_str(&body)
+            .with_context(|| format!("parse openai verbose response: {body}"))
+    }
+
+    /// Per-peer rerun: identical strategy to
+    /// [`crate::groq::GroqStt::pick_best_peer`].
+    async fn pick_best_peer(&self, wav: &[u8], peers: &[String]) -> Option<(String, VerboseResp)> {
+        let mut best: Option<(f32, String, VerboseResp)> = None;
+        for peer in peers {
+            match self.do_request_verbose(wav, Some(peer)).await {
+                Ok(r) => {
+                    let score = r.mean_logprob();
+                    tracing::info!(
+                        "openai rerun candidate language={peer}: avg_logprob={score:.3}"
+                    );
+                    if best.as_ref().is_none_or(|(s, _, _)| score > *s) {
+                        best = Some((score, peer.clone(), r));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("openai rerun candidate language={peer} failed: {e:#}");
+                }
+            }
+        }
+        best.map(|(_, code, resp)| (code, resp))
+    }
 }
 
 #[derive(Deserialize)]
@@ -107,6 +163,30 @@ struct Resp {
     /// default JSON shape does not. Keep it optional so both work.
     #[serde(default)]
     language: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct VerboseResp {
+    text: String,
+    #[serde(default)]
+    segments: Vec<VerboseSeg>,
+}
+
+#[derive(Deserialize)]
+struct VerboseSeg {
+    #[serde(default)]
+    avg_logprob: Option<f32>,
+}
+
+impl VerboseResp {
+    fn mean_logprob(&self) -> f32 {
+        let scored: Vec<f32> = self.segments.iter().filter_map(|s| s.avg_logprob).collect();
+        if scored.is_empty() {
+            f32::NEG_INFINITY
+        } else {
+            scored.iter().sum::<f32>() / scored.len() as f32
+        }
+    }
 }
 
 #[async_trait]
@@ -134,30 +214,30 @@ impl SpeechToText for OpenAiStt {
 
         let parsed = self.do_request(&wav, first_pass_lang.as_deref()).await?;
 
-        if let LanguageSelection::AllowList(_) = &selection {
+        if let LanguageSelection::AllowList(peers) = &selection {
             if let Some(detected) = parsed.language.as_deref() {
                 if selection.contains(detected) {
                     self.lang_cache.record(BACKEND_KEY, detected);
                 } else if self.cloud_rerun_on_mismatch {
-                    if let Some(cached) = self.lang_cache.get(BACKEND_KEY) {
-                        tracing::warn!(
-                            "openai returned banned language {detected:?} (allow-list \
-                             {:?}); re-issuing with cached language={cached}",
-                            self.languages
-                        );
-                        let retried = self.do_request(&wav, Some(&cached)).await?;
+                    tracing::info!(
+                        "openai returned banned language {detected:?} (allow-list \
+                         {:?}); reranking by per-peer avg_logprob",
+                        self.languages
+                    );
+                    if let Some((picked, resp)) = self.pick_best_peer(&wav, peers).await {
+                        self.lang_cache.record(BACKEND_KEY, &picked);
                         return Ok(Transcription {
-                            text: retried.text,
-                            language: retried.language.or(Some(cached)),
+                            text: resp.text,
+                            language: Some(picked),
                             duration_ms: None,
                         });
                     }
-                    tracing::debug!(
-                        "openai detected banned language {detected:?}; cache empty, \
-                         accepting unforced response"
+                    tracing::warn!(
+                        "openai rerun: every peer attempt failed; \
+                         falling back to unforced response"
                     );
                 } else {
-                    tracing::debug!("openai detected banned language {detected:?}; rerun disabled");
+                    tracing::info!("openai detected banned language {detected:?}; rerun disabled");
                 }
             }
         }

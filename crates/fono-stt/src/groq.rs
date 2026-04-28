@@ -122,6 +122,42 @@ pub struct GroqResponse {
     pub language: Option<String>,
 }
 
+/// `response_format=verbose_json` shape — used by the rerun lane to
+/// score candidate peers by mean per-segment `avg_logprob`. The outer
+/// `language` field is intentionally ignored: when we force `language=`
+/// the peer code we sent IS the code we record on a winning rerun, so
+/// the verbose echo (which is the full English name like "english",
+/// not the alpha-2 code) would only confuse `LanguageSelection::contains`.
+#[derive(Deserialize, Debug, Clone)]
+pub struct GroqVerboseResponse {
+    pub text: String,
+    #[serde(default)]
+    pub segments: Vec<GroqSegment>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct GroqSegment {
+    #[serde(default)]
+    pub avg_logprob: Option<f32>,
+}
+
+impl GroqVerboseResponse {
+    /// Mean per-segment `avg_logprob`. Returns `f32::NEG_INFINITY` when
+    /// the response carries no segments (very short clip, parser drift)
+    /// so this candidate loses every tiebreak and we fall through to
+    /// the next peer. Negative-infinity rather than 0.0 because a
+    /// real Whisper score is always ≤ 0; using 0.0 would make a missing
+    /// score artificially win.
+    pub fn mean_logprob(&self) -> f32 {
+        let scored: Vec<f32> = self.segments.iter().filter_map(|s| s.avg_logprob).collect();
+        if scored.is_empty() {
+            f32::NEG_INFINITY
+        } else {
+            scored.iter().sum::<f32>() / scored.len() as f32
+        }
+    }
+}
+
 /// Issue a single transcription request to Groq's batch endpoint.
 /// Shared between [`GroqStt`] (batch) and the streaming pseudo-stream
 /// backend in [`crate::groq_streaming`] (re-POSTs the trailing N
@@ -159,6 +195,41 @@ pub(crate) async fn groq_post_wav(
     serde_json::from_str(&body).with_context(|| format!("parse groq response: {body}"))
 }
 
+/// `verbose_json` variant of [`groq_post_wav`]. Used by the rerun lane
+/// to obtain per-segment `avg_logprob` scores so we can pick the peer
+/// most likely to be the spoken language.
+pub async fn groq_post_wav_verbose(
+    client: &reqwest::Client,
+    api_key: &str,
+    model: &str,
+    wav: &[u8],
+    lang: Option<&str>,
+) -> Result<GroqVerboseResponse> {
+    let part = multipart::Part::bytes(wav.to_vec())
+        .file_name("audio.wav")
+        .mime_str("audio/wav")?;
+    let mut form = multipart::Form::new()
+        .text("model", model.to_string())
+        .text("response_format", "verbose_json")
+        .part("file", part);
+    if let Some(l) = lang {
+        form = form.text("language", l.to_string());
+    }
+    let res = client
+        .post(GROQ_ENDPOINT)
+        .bearer_auth(api_key)
+        .multipart(form)
+        .send()
+        .await
+        .context("groq verbose POST failed")?;
+    let status = res.status();
+    let body = res.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("groq STT verbose {status}: {body}");
+    }
+    serde_json::from_str(&body).with_context(|| format!("parse groq verbose response: {body}"))
+}
+
 #[async_trait]
 impl SpeechToText for GroqStt {
     async fn transcribe(
@@ -188,36 +259,39 @@ impl SpeechToText for GroqStt {
 
         let parsed = self.do_request(&wav, first_pass_lang.as_deref()).await?;
 
-        // Post-validate against the allow-list. Plan v3: cache-as-
-        // rerun-target. On in-list detection, record the code. On
-        // banned detection, rerun ONLY when the cache holds a peer
-        // code; otherwise accept the unforced transcript so we don't
-        // guess the rerun's `language=` from config order.
-        if let LanguageSelection::AllowList(_) = &selection {
+        // Post-validate against the allow-list. v3.1: confidence-aware
+        // rerun. On in-list detection, record. On banned detection
+        // **and** rerun enabled, issue one verbose_json request per
+        // peer and pick the one with the highest mean per-segment
+        // `avg_logprob` (the standard Whisper "this is the language
+        // I'm most confident about" signal). This handles cold-start
+        // (cache empty) and warm-but-wrong-cache cases uniformly:
+        // confidence picks the right peer even when the cache holds
+        // the wrong code from a previous topic.
+        if let LanguageSelection::AllowList(peers) = &selection {
             if let Some(detected) = parsed.language.as_deref() {
                 if selection.contains(detected) {
                     self.lang_cache.record(BACKEND_KEY, detected);
                 } else if self.cloud_rerun_on_mismatch {
-                    if let Some(cached) = self.lang_cache.get(BACKEND_KEY) {
-                        tracing::warn!(
-                            "groq returned banned language {detected:?} (allow-list \
-                             {:?}); re-issuing with cached language={cached}",
-                            self.languages
-                        );
-                        let retried = self.do_request(&wav, Some(&cached)).await?;
+                    tracing::info!(
+                        "groq returned banned language {detected:?} (allow-list \
+                         {:?}); reranking by per-peer avg_logprob",
+                        self.languages
+                    );
+                    if let Some((picked, resp)) = self.pick_best_peer(&wav, peers).await {
+                        self.lang_cache.record(BACKEND_KEY, &picked);
                         return Ok(Transcription {
-                            text: retried.text,
-                            language: retried.language.or(Some(cached)),
+                            text: resp.text,
+                            language: Some(picked),
                             duration_ms: None,
                         });
                     }
-                    tracing::debug!(
-                        "groq detected banned language {detected:?}; cache empty, \
-                         accepting unforced response (cache will populate from the \
-                         next correct detection)"
+                    tracing::warn!(
+                        "groq rerun: every peer attempt failed; \
+                         falling back to unforced response"
                     );
                 } else {
-                    tracing::debug!("groq detected banned language {detected:?}; rerun disabled");
+                    tracing::info!("groq detected banned language {detected:?}; rerun disabled");
                 }
             }
         }
@@ -254,6 +328,43 @@ impl GroqStt {
     /// post-validation rerun path is one extra await away.
     async fn do_request(&self, wav: &[u8], lang: Option<&str>) -> Result<GroqResponse> {
         groq_post_wav(&self.client, &self.api_key, &self.model, wav, lang).await
+    }
+
+    /// `verbose_json` variant for the rerun lane.
+    async fn do_request_verbose(
+        &self,
+        wav: &[u8],
+        lang: Option<&str>,
+    ) -> Result<GroqVerboseResponse> {
+        groq_post_wav_verbose(&self.client, &self.api_key, &self.model, wav, lang).await
+    }
+
+    /// Run one verbose request per peer, pick the response with the
+    /// highest mean per-segment `avg_logprob`. Returns `Some((code,
+    /// resp))` on success, `None` only when every peer attempt errors.
+    /// On the rare tie or empty-segments edge case, the first peer in
+    /// `peers` wins (since `>` not `>=`).
+    pub(crate) async fn pick_best_peer(
+        &self,
+        wav: &[u8],
+        peers: &[String],
+    ) -> Option<(String, GroqVerboseResponse)> {
+        let mut best: Option<(f32, String, GroqVerboseResponse)> = None;
+        for peer in peers {
+            match self.do_request_verbose(wav, Some(peer)).await {
+                Ok(r) => {
+                    let score = r.mean_logprob();
+                    tracing::info!("groq rerun candidate language={peer}: avg_logprob={score:.3}");
+                    if best.as_ref().is_none_or(|(s, _, _)| score > *s) {
+                        best = Some((score, peer.clone(), r));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("groq rerun candidate language={peer} failed: {e:#}");
+                }
+            }
+        }
+        best.map(|(_, code, resp)| (code, resp))
     }
 }
 

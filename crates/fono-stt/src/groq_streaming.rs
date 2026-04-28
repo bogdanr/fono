@@ -24,7 +24,10 @@ use tokio::sync::mpsc;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::groq::{groq_post_wav, warm_client, GroqResponse, BACKEND_KEY};
+use crate::groq::{
+    groq_post_wav, groq_post_wav_verbose, warm_client, GroqResponse, GroqVerboseResponse,
+    BACKEND_KEY,
+};
 use crate::lang::LanguageSelection;
 use crate::lang_cache::LanguageCache;
 use crate::streaming::{LocalAgreement, StreamFrame, StreamingStt, TranscriptUpdate};
@@ -60,6 +63,17 @@ pub type GroqRequestFuture = Pin<Box<dyn Future<Output = Result<GroqResponse>> +
 /// [`GroqStreaming::with_request_fn`].
 pub type GroqRequestFn = Arc<dyn Fn(Vec<u8>, Option<String>) -> GroqRequestFuture + Send + Sync>;
 
+/// Owned-future helper alias for the verbose-rerun closure. Returns
+/// `GroqVerboseResponse` so the per-peer rerun lane can score
+/// candidates by `avg_logprob`.
+pub type GroqVerboseFuture =
+    Pin<Box<dyn Future<Output = Result<GroqVerboseResponse>> + Send + 'static>>;
+
+/// Verbose-mode counterpart of [`GroqRequestFn`]. Optional; tests that
+/// only exercise the streaming pump (not the rerun lane) leave this
+/// unset and reruns become no-ops.
+pub type GroqVerboseFn = Arc<dyn Fn(Vec<u8>, Option<String>) -> GroqVerboseFuture + Send + Sync>;
+
 /// Streaming wrapper around the Groq batch endpoint. Implements
 /// [`StreamingStt`] by re-POSTing the trailing
 /// [`TRAILING_WINDOW_SAMPLES`] every [`PSEUDO_STREAM_INTERVAL`] (with
@@ -67,6 +81,10 @@ pub type GroqRequestFn = Arc<dyn Fn(Vec<u8>, Option<String>) -> GroqRequestFutur
 /// piping results through [`LocalAgreement`].
 pub struct GroqStreaming {
     request_fn: GroqRequestFn,
+    /// Verbose-mode request closure used by the per-peer rerun lane.
+    /// `None` for tests that only need the streaming pump; reruns
+    /// become no-ops in that case.
+    verbose_fn: Option<GroqVerboseFn>,
     languages: Vec<String>,
     cloud_force_primary: bool,
     cloud_rerun_on_mismatch: bool,
@@ -87,16 +105,30 @@ impl GroqStreaming {
         let api_key = api_key.into();
         let model = model.into();
         let client = warm_client();
-        let request_fn: GroqRequestFn = Arc::new(move |wav: Vec<u8>, lang: Option<String>| {
+        let request_fn: GroqRequestFn = {
+            let client = client.clone();
+            let api_key = api_key.clone();
+            let model = model.clone();
+            Arc::new(move |wav: Vec<u8>, lang: Option<String>| {
+                let client = client.clone();
+                let api_key = api_key.clone();
+                let model = model.clone();
+                Box::pin(async move {
+                    groq_post_wav(&client, &api_key, &model, &wav, lang.as_deref()).await
+                }) as GroqRequestFuture
+            })
+        };
+        let verbose_fn: GroqVerboseFn = Arc::new(move |wav: Vec<u8>, lang: Option<String>| {
             let client = client.clone();
             let api_key = api_key.clone();
             let model = model.clone();
             Box::pin(async move {
-                groq_post_wav(&client, &api_key, &model, &wav, lang.as_deref()).await
-            }) as GroqRequestFuture
+                groq_post_wav_verbose(&client, &api_key, &model, &wav, lang.as_deref()).await
+            }) as GroqVerboseFuture
         });
         Self {
             request_fn,
+            verbose_fn: Some(verbose_fn),
             languages: Vec::new(),
             cloud_force_primary: false,
             cloud_rerun_on_mismatch: false,
@@ -113,6 +145,25 @@ impl GroqStreaming {
     pub fn with_request_fn(request_fn: GroqRequestFn) -> Self {
         Self {
             request_fn,
+            verbose_fn: None,
+            languages: Vec::new(),
+            cloud_force_primary: false,
+            cloud_rerun_on_mismatch: false,
+            lang_cache: LanguageCache::global(),
+            preview_skipped_count: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Test entry point pairing a `request_fn` with a verbose-mode
+    /// closure for exercising the per-peer rerun lane.
+    #[must_use]
+    pub fn with_request_and_verbose_fn(
+        request_fn: GroqRequestFn,
+        verbose_fn: GroqVerboseFn,
+    ) -> Self {
+        Self {
+            request_fn,
+            verbose_fn: Some(verbose_fn),
             languages: Vec::new(),
             cloud_force_primary: false,
             cloud_rerun_on_mismatch: false,
@@ -178,6 +229,7 @@ impl StreamingStt for GroqStreaming {
         let (tx, rx) = mpsc::unbounded_channel::<TranscriptUpdate>();
 
         let request_fn = Arc::clone(&self.request_fn);
+        let verbose_fn = self.verbose_fn.clone();
         let preview_skipped = Arc::clone(&self.preview_skipped_count);
         let selection = self.effective_selection(lang.as_deref());
         let cloud_force_primary = self.cloud_force_primary;
@@ -251,6 +303,10 @@ impl StreamingStt for GroqStreaming {
                         let tx_p = tx.clone();
                         let lang_p = first_pass_lang.clone();
                         let seg_idx = segment_index;
+                        let allow_list_p: Option<Vec<String>> = match &selection {
+                            LanguageSelection::AllowList(v) => Some(v.clone()),
+                            _ => None,
+                        };
                         // Spawn the request as a detached task so the
                         // frame loop keeps consuming PCM while Groq
                         // round-trips. Holds `finalize_gate` for its
@@ -260,6 +316,35 @@ impl StreamingStt for GroqStreaming {
                             let res = (request_fn_p)(wav, lang_p).await;
                             match res {
                                 Ok(resp) => {
+                                    // Suppress preview when the
+                                    // detected language is outside the
+                                    // allow-list. The overlay would
+                                    // otherwise flash garbage in the
+                                    // wrong language while the user
+                                    // is still speaking; finalize will
+                                    // run the per-peer rerun and emit
+                                    // the corrected text. Only LCP
+                                    // bookkeeping is skipped — the
+                                    // next preview can still promote
+                                    // the right tokens once Groq's
+                                    // detection settles.
+                                    if let (Some(allow), Some(detected)) =
+                                        (allow_list_p.as_ref(), resp.language.as_deref())
+                                    {
+                                        let detected_lc = detected.trim().to_ascii_lowercase();
+                                        let in_list = allow
+                                            .iter()
+                                            .any(|c| c.eq_ignore_ascii_case(&detected_lc));
+                                        if !in_list {
+                                            tracing::info!(
+                                                "groq preview: detected banned language \
+                                                 {detected:?} (allow-list {allow:?}); \
+                                                 suppressing overlay update"
+                                            );
+                                            in_flight_p.store(false, Ordering::Release);
+                                            return;
+                                        }
+                                    }
                                     let tokens = whitespace_tokens(&resp.text);
                                     let stable_text = {
                                         let mut g = agreement_p.lock().unwrap();
@@ -303,35 +388,75 @@ impl StreamingStt for GroqStreaming {
                             let req = (request_fn)(wav.clone(), first_pass_lang.clone());
                             match req.await {
                                 Ok(mut resp) => {
-                                    // Allow-list post-validation. Plan v3:
-                                    // cache-as-rerun-target. On in-list
-                                    // detection, record. On banned + cache
-                                    // hit, rerun with cached code. Cold
-                                    // start (cache empty) accepts the
-                                    // unforced response.
-                                    if let LanguageSelection::AllowList(_) = &selection {
-                                        if let Some(detected) = resp.language.as_deref() {
-                                            if selection.contains(detected) {
-                                                lang_cache.record(BACKEND_KEY, detected);
-                                            } else if cloud_rerun_on_mismatch {
-                                                if let Some(cached) = lang_cache.get(BACKEND_KEY) {
-                                                    tracing::warn!(
-                                                        "groq returned banned language \
-                                                         {detected:?} on finalize; \
-                                                         re-issuing with cached language={cached}"
-                                                    );
+                                    // Allow-list post-validation. v3.1:
+                                    // confidence-aware rerun. On
+                                    // banned detection, issue one
+                                    // verbose request per peer and
+                                    // pick the highest avg_logprob.
+                                    // No-op when verbose_fn is None
+                                    // (test-only `with_request_fn`
+                                    // construction).
+                                    if let (LanguageSelection::AllowList(peers), Some(detected)) =
+                                        (&selection, resp.language.as_deref())
+                                    {
+                                        if selection.contains(detected) {
+                                            lang_cache.record(BACKEND_KEY, detected);
+                                        } else if cloud_rerun_on_mismatch {
+                                            tracing::info!(
+                                                "groq returned banned language {detected:?} \
+                                                 on finalize (allow-list {peers:?}); \
+                                                 reranking by per-peer avg_logprob"
+                                            );
+                                            if let Some(vfn) = verbose_fn.as_ref() {
+                                                let mut best: Option<(f32, String, String)> = None;
+                                                for peer in peers {
                                                     let req2 =
-                                                        (request_fn)(wav, Some(cached.clone()));
-                                                    if let Ok(retried) = req2.await {
-                                                        resp = retried;
+                                                        (vfn)(wav.clone(), Some(peer.clone()));
+                                                    match req2.await {
+                                                        Ok(verbose) => {
+                                                            let score = verbose.mean_logprob();
+                                                            tracing::info!(
+                                                                "groq finalize rerun candidate \
+                                                                 language={peer}: \
+                                                                 avg_logprob={score:.3}"
+                                                            );
+                                                            if best
+                                                                .as_ref()
+                                                                .is_none_or(|(s, _, _)| score > *s)
+                                                            {
+                                                                best = Some((
+                                                                    score,
+                                                                    peer.clone(),
+                                                                    verbose.text,
+                                                                ));
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::warn!(
+                                                                "groq finalize rerun candidate \
+                                                                 language={peer} failed: {e:#}"
+                                                            );
+                                                        }
                                                     }
+                                                }
+                                                if let Some((_, picked, text)) = best {
+                                                    lang_cache.record(BACKEND_KEY, &picked);
+                                                    resp = GroqResponse {
+                                                        text,
+                                                        language: Some(picked),
+                                                    };
                                                 } else {
-                                                    tracing::debug!(
-                                                        "groq finalize: banned language \
-                                                         {detected:?}, cache empty; \
-                                                         accepting unforced response"
+                                                    tracing::warn!(
+                                                        "groq finalize rerun: every peer \
+                                                         attempt failed; falling back to \
+                                                         unforced response"
                                                     );
                                                 }
+                                            } else {
+                                                tracing::debug!(
+                                                    "groq finalize: verbose_fn unset (test \
+                                                     harness); skipping rerun"
+                                                );
                                             }
                                         }
                                     }

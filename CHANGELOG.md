@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Cloud STT cold-start banned-language injection. When Groq's first
+  response on a fresh session was a banned language (e.g. English audio
+  misdetected as Russian) and the in-memory language cache was still
+  empty, the unforced response was injected verbatim — producing
+  Russian text on screen for an English speaker with `languages =
+  ["ro", "en"]`. The rerun branch now runs a confidence-aware loop
+  across every allow-list peer, requesting `verbose_json` to obtain
+  per-segment `avg_logprob`, and injects the transcript with the
+  highest mean log-probability (the language Whisper was most sure
+  about). The previous warm-cache rerun path used a single forced
+  retry; it now uses the same all-peers-by-confidence selection,
+  closing the symmetric failure mode where the cache happened to hold
+  a stale peer. Applied identically to the batch (`groq.rs`),
+  streaming finalize (`groq_streaming.rs`), and OpenAI (`openai.rs`)
+  backends. Streaming preview lane now suppresses banned-language
+  partials so users do not briefly see Russian / Bulgarian / etc. on
+  the overlay before the corrected finalize result arrives.
+- Banned-language detections now log at INFO level with the detected
+  code, banned-vs-allowed list, and chosen rerun action, so users can
+  diagnose misdetections from the daemon log without enabling DEBUG.
+
 ## [0.3.0] — 2026-04-28
 
 Cloud STT now self-heals from one-off language misdetections, the LLM
