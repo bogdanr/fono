@@ -409,7 +409,7 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                     // feature was opted out at build time.
                     #[cfg(feature = "interactive")]
                     HotkeyEvent::StartLiveDictation(mode) => {
-                        tracing::info!("live: started ({mode:?})");
+                        tracing::debug!("live: started ({mode:?})");
                         if let Err(err) = o.on_start_live_dictation(mode).await {
                             warn!(
                                 "start_live_dictation failed: {err:#} — \
@@ -485,7 +485,7 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                     orch_for_dispatch.is_some(),
                 );
                 let new_state = fsm.lock().await.dispatch(action);
-                tracing::info!("hotkey: {action:?} -> {new_state:?}");
+                tracing::debug!("hotkey: {action:?} -> {new_state:?}");
                 if matches!(action, HotkeyAction::ProcessingDone) {
                     if let Some(t) = tray.as_ref().as_ref() {
                         t.set_state(TrayState::Idle);

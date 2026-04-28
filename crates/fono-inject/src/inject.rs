@@ -85,8 +85,11 @@ impl Injector {
             // Last resort: enigo can sometimes work via libei.
             return Self::Enigo;
         }
-        let _ = wayland;
-        Self::None
+        #[cfg(not(feature = "enigo-backend"))]
+        {
+            let _ = wayland;
+            Self::None
+        }
     }
 
     pub fn inject(self, text: &str) -> Result<()> {

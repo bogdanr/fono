@@ -760,7 +760,7 @@ impl SessionOrchestrator {
     #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
     pub async fn on_start_live_dictation(&self, mode: RecordingMode) -> Result<()> {
         fono_stt::rate_limit_notify::reset_session_flag();
-        tracing::info!("live dictation: starting capture (mode={mode:?})");
+        tracing::debug!("live dictation: starting capture (mode={mode:?})");
         let Some(streaming) = self.current_streaming_stt() else {
             warn!(
                 "live-dictation: no streaming-capable STT backend currently loaded \
@@ -933,7 +933,7 @@ impl SessionOrchestrator {
     /// blob of PCM.
     #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
     pub async fn on_stop_live_dictation(&self) {
-        tracing::info!("live dictation: stopping capture");
+        tracing::debug!("live dictation: stopping capture");
         let taken = self.live_capture.lock().await.take();
         let Some(mut session) = taken else {
             debug!("live-stop with no active live capture");
@@ -964,7 +964,7 @@ impl SessionOrchestrator {
         //     handling) is unchanged.
         let grace_ms = u64::from(cfg.interactive.hold_release_grace_ms);
         if grace_ms > 0 {
-            tracing::info!("live dictation: stopping capture (grace={grace_ms}ms)");
+            tracing::debug!("live dictation: stopping capture (grace={grace_ms}ms)");
             tokio::time::sleep(Duration::from_millis(grace_ms)).await;
         }
         let _ = session.capture_stop_tx.send(());

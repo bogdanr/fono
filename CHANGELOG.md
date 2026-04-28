@@ -35,18 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Hotkey dispatch and live-dictation start/stop now log at INFO instead
-  of DEBUG, so streaming sessions show `hotkey: …`,
-  `live dictation: starting capture`, and
-  `live dictation: stopping capture (grace=…ms)` at default verbosity.
-  Steady-state per-update lines remain at DEBUG.
-- 429 sites in `groq_post_wav` and `groq_post_wav_verbose` upgraded
-  from `tracing::info!` to `tracing::warn!` so they appear at default
-  log level. The verbose JSON body is now compacted to a single human-
-  readable line (model + RPM ceiling + retry-in seconds) instead of
-  being dumped raw. Streaming finalize and preview lanes detect 429
-  in the closure-error string and trip the same warn + notification +
-  throttle path the batch backend uses.
+- Hotkey dispatch and live-dictation start/stop now log at DEBUG —
+  the existing `pipeline ok: capture=… stt=… llm=… inject=…`
+  summary at INFO is enough at default verbosity. Bump
+  `RUST_LOG=fono=debug` to see the per-event detail. 429 sites
+  upgraded from `tracing::info!` to `tracing::warn!` so they
+  appear at default log level, with the verbose JSON body now
+  compacted to a single human-readable line (model + RPM ceiling
+  + retry-in seconds) instead of being dumped raw. Streaming
+  finalize and preview lanes detect 429 in the closure-error
+  string and trip the same warn + notification + throttle path
+  the batch backend uses.
 
 ### Fixed
 
