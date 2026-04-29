@@ -7,7 +7,9 @@
 //! the `fono-audio` deps (requires the model blob to be vendored).
 
 pub mod capture;
+pub mod devices;
 pub mod mute;
+pub mod pulse;
 pub mod resample;
 pub mod trim;
 pub mod vad;

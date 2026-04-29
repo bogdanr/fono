@@ -81,11 +81,6 @@ fn default_version() -> u32 {
 #[serde(default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct General {
-    /// **Deprecated** in favour of [`General::languages`]. Kept for
-    /// one release cycle so v1 configs with `language = "ro"` migrate
-    /// cleanly. New code should read `languages` exclusively.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub language: String,
     /// BCP-47 codes restricting which languages whisper / cloud STT
     /// is allowed to consider:
     ///
@@ -113,13 +108,6 @@ pub struct General {
     /// Robust against KDE Wayland where `wtype` exits 0 but doesn't
     /// actually deliver keys to the focused window. Default `true`.
     pub also_copy_to_clipboard: bool,
-    /// **Deprecated** (plan v3). Cloud STT only: when
-    /// [`General::languages`] has > 1 entry, force `fallback_hint()`
-    /// on the first request rather than letting the provider
-    /// auto-detect. v3 supersedes this with cache-as-rerun-target;
-    /// scheduled for removal in v0.5. Default `false`.
-    #[deprecated(note = "see plan v3 — superseded by in-memory language cache (lang_cache.rs)")]
-    pub cloud_force_primary_language: bool,
     /// Cloud STT only: when the provider returns a banned language
     /// **and** the in-memory language cache holds a previously-
     /// observed peer code for this backend, re-issue the request
@@ -130,18 +118,15 @@ pub struct General {
     pub cloud_rerun_on_language_mismatch: bool,
 }
 
-#[allow(deprecated)]
 impl Default for General {
     fn default() -> Self {
         Self {
-            language: String::new(),
             languages: Vec::new(),
             startup_autostart: false,
             sound_feedback: true,
             auto_mute_system: true,
             always_warm_mic: false,
             also_copy_to_clipboard: true,
-            cloud_force_primary_language: false,
             cloud_rerun_on_language_mismatch: true,
         }
     }
@@ -187,7 +172,6 @@ impl Default for Hotkeys {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Audio {
-    pub input_device: String,
     pub sample_rate: u32,
     pub vad_backend: String,
     /// Trim leading/trailing silence before passing audio to STT.
@@ -203,7 +187,6 @@ pub struct Audio {
 impl Default for Audio {
     fn default() -> Self {
         Self {
-            input_device: String::new(),
             sample_rate: 16000,
             vad_backend: "silero".into(),
             trim_silence: true,
@@ -258,12 +241,6 @@ impl Default for SttBackend {
 pub struct SttLocal {
     pub model: String,
     pub quantization: String,
-    /// **Deprecated** in favour of [`SttLocal::languages`] / the
-    /// top-level [`General::languages`]. Kept for one release cycle
-    /// for migration. Empty string means "fall through to
-    /// `general.languages`".
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub language: String,
     /// Optional per-backend allow-list override. When non-empty,
     /// overrides [`General::languages`] for the local Whisper backend
     /// only. Most users configure the list once on `[general]`; this
@@ -280,7 +257,6 @@ impl Default for SttLocal {
         Self {
             model: "small".into(),
             quantization: "q5_1".into(),
-            language: String::new(),
             languages: Vec::new(),
             threads: 0,
         }
@@ -762,32 +738,6 @@ impl Config {
             });
         }
 
-        // ----- Language allow-list migration (ADR 0016) -------------------
-        // v0.1 had a single `general.language = "auto" | "<bcp-47>"` knob.
-        // v0.2 introduces `general.languages: Vec<String>` (allow-list);
-        // empty = unconstrained auto-detect, one = forced, many = banned
-        // outside the list. Lift the legacy scalar exactly once, then drop
-        // it from disk on the next save (`skip_serializing_if`).
-        if self.general.languages.is_empty() {
-            let legacy = self.general.language.trim().to_ascii_lowercase();
-            if !legacy.is_empty() && legacy != "auto" {
-                self.general.languages = vec![legacy];
-            }
-        }
-        // Keep on disk only when explicitly cleared by the user; the
-        // serializer will skip the empty string.
-        self.general.language.clear();
-
-        // Same migration on `[stt.local]` for users who pinned the
-        // language at the backend level rather than at `[general]`.
-        if self.stt.local.languages.is_empty() {
-            let legacy = self.stt.local.language.trim().to_ascii_lowercase();
-            if !legacy.is_empty() && legacy != "auto" {
-                self.stt.local.languages = vec![legacy];
-            }
-        }
-        self.stt.local.language.clear();
-
         self.version = CURRENT_VERSION;
         Ok(())
     }
@@ -864,7 +814,6 @@ mod tests {
             loaded.general.languages.is_empty(),
             "default = unconstrained auto-detect"
         );
-        assert!(loaded.general.language.is_empty());
         assert_eq!(loaded.stt.local.model, "small");
         assert_eq!(loaded.llm.local.model, "qwen2.5-1.5b-instruct");
     }
@@ -967,26 +916,11 @@ mod tests {
     fn partial_toml_fills_defaults() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("partial.toml");
-        std::fs::write(&path, "version = 1\n[general]\nlanguage = \"ro\"\n").unwrap();
+        std::fs::write(&path, "version = 1\n[general]\nlanguages = [\"ro\"]\n").unwrap();
         let cfg = Config::load(&path).unwrap();
-        // Migration lifts the legacy scalar into the new allow-list.
         assert_eq!(cfg.general.languages, vec!["ro"]);
-        assert!(cfg.general.language.is_empty(), "deprecated key cleared");
         assert!(cfg.general.sound_feedback);
         assert_eq!(cfg.stt.local.model, "small");
-    }
-
-    #[test]
-    fn legacy_language_auto_migrates_to_empty_allow_list() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("legacy_auto.toml");
-        std::fs::write(&path, "version = 1\n[general]\nlanguage = \"auto\"\n").unwrap();
-        let cfg = Config::load(&path).unwrap();
-        assert!(
-            cfg.general.languages.is_empty(),
-            "auto -> unconstrained allow-list"
-        );
-        assert!(cfg.general.language.is_empty());
     }
 
     #[test]
@@ -1037,17 +971,22 @@ mod tests {
         assert_eq!(cloud.model, "whisper-large-v3-turbo");
     }
 
+    /// Pre-v0.4 configs that still carry the dropped scalar
+    /// `[general].language` / `[stt.local].language` keys must keep
+    /// loading — serde silently ignores unknown fields by default.
+    /// This pins that behaviour so the next refactor doesn't
+    /// accidentally flip on `deny_unknown_fields`.
     #[test]
-    fn explicit_languages_wins_over_legacy_scalar() {
+    fn dropped_legacy_language_scalars_silently_ignored() {
         let raw = r#"
             version = 1
             [general]
-            language = "fr"
+            language = "ro"
             languages = ["en", "ro"]
+            [stt.local]
+            language = "fr"
         "#;
-        let mut cfg: Config = toml::from_str(raw).expect("parse");
-        cfg.migrate().expect("migrate");
+        let cfg: Config = toml::from_str(raw).expect("legacy keys must parse");
         assert_eq!(cfg.general.languages, vec!["en", "ro"]);
-        assert!(cfg.general.language.is_empty());
     }
 }

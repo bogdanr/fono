@@ -79,11 +79,6 @@ pub struct GroqStt {
     client: reqwest::Client,
     /// Configured language allow-list (see `crate::lang`).
     languages: Vec<String>,
-    /// **Deprecated** (plan v3). Legacy: when the allow-list has > 1
-    /// entry, force `fallback_hint()` on the first request. v3
-    /// supersedes this with cache-as-rerun-target. Honoured for
-    /// backward compat; no-op when `false` (the new default).
-    cloud_force_primary: bool,
     /// When the provider returns a banned language **and** the cache
     /// has a previously-observed peer code for this backend, rerun
     /// once with that code forced. Cold-start (empty cache) skips
@@ -109,7 +104,6 @@ impl GroqStt {
             model: model.into(),
             client: warm_client(),
             languages: Vec::new(),
-            cloud_force_primary: false,
             cloud_rerun_on_mismatch: false,
             lang_cache: LanguageCache::global(),
             prompts: std::collections::HashMap::new(),
@@ -121,14 +115,6 @@ impl GroqStt {
     #[must_use]
     pub fn with_languages(mut self, codes: Vec<String>) -> Self {
         self.languages = codes;
-        self
-    }
-
-    /// Builder: when the allow-list has > 1 entry, force the primary
-    /// code on the first request. Default `false`.
-    #[must_use]
-    pub fn with_cloud_force_primary(mut self, on: bool) -> Self {
-        self.cloud_force_primary = on;
         self
     }
 
@@ -333,19 +319,12 @@ impl SpeechToText for GroqStt {
         let selection = self.effective_selection(lang);
 
         // First-pass language: forced -> the code; auto -> none;
-        // allow-list -> none in v3 (let cloud auto-detect, then
-        // post-validate). The legacy `cloud_force_primary` knob still
-        // honoured for backward compat but defaults off.
+        // allow-list -> none (let cloud auto-detect, then
+        // post-validate against the allow-list).
         let first_pass_lang: Option<String> = match &selection {
             LanguageSelection::Auto => None,
             LanguageSelection::Forced(c) => Some(c.clone()),
-            LanguageSelection::AllowList(_) => {
-                if self.cloud_force_primary {
-                    selection.fallback_hint().map(str::to_string)
-                } else {
-                    None
-                }
-            }
+            LanguageSelection::AllowList(_) => None,
         };
 
         let parsed = self.do_request(&wav, first_pass_lang.as_deref()).await?;

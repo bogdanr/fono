@@ -49,11 +49,14 @@ pub type ActiveProvider = Arc<dyn Fn() -> (u8, u8) + Send + Sync>;
 ///   [`TrayAction::ApplyUpdate`].
 pub type UpdateProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
-/// Provider returning the configured language peer set (BCP-47 codes,
-/// in `general.languages` order). Polled every ~2 s; the tray's
-/// "Languages" submenu refreshes its read-only peer display when the
-/// list changes. Plan v3 task 8.
-pub type LanguagesProvider = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+/// Provider returning `(devices, active_idx)` for the "Microphone"
+/// submenu — `devices` is the live input-device list (display
+/// names) and `active_idx` is the index of the device the OS reports
+/// as the current default, or `u8::MAX` when none of the listed
+/// devices is the default ("Auto / system default" row stays marked).
+/// Polled every ~2 s; the tray refreshes the submenu in place when
+/// either changes.
+pub type MicrophonesProvider = Arc<dyn Fn() -> (Vec<String>, u8) + Send + Sync>;
 
 /// FSM-aligned tray state used to tint the icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,10 +86,12 @@ pub enum TrayAction {
     /// The daemon handles this by running a check and (when available)
     /// applying the update via `fono-update::apply_update`.
     ApplyUpdate,
-    /// User clicked "Clear language memory" in the Languages submenu.
-    /// Resets the per-backend in-memory language cache so the next
-    /// dictation starts from a clean slate. Plan v3 task 8.
-    ClearLanguageMemory,
+    /// Switch the active input device. The `u8` is an index into the
+    /// device list returned by [`MicrophonesProvider`] at the time of
+    /// the click. On Pulse / PipeWire hosts the daemon dispatches
+    /// this to `pactl set-default-source`; the cpal branch hides
+    /// the submenu so this is never fired there.
+    SetInputDevice(u8),
     OpenConfig,
     Quit,
 }
@@ -141,7 +146,7 @@ pub fn spawn(
     llm_labels: Vec<String>,
     active_provider: ActiveProvider,
     update_provider: UpdateProvider,
-    languages_provider: LanguagesProvider,
+    microphones_provider: MicrophonesProvider,
 ) -> (Tray, mpsc::UnboundedReceiver<TrayAction>) {
     let shared = Arc::new(AtomicU8::new(TrayState::Idle as u8));
     let (tx, rx) = mpsc::unbounded_channel();
@@ -157,7 +162,7 @@ pub fn spawn(
             llm_labels,
             active_provider,
             update_provider,
-            languages_provider,
+            microphones_provider,
         ) {
             tracing::warn!("tray backend failed to start: {e:#}; continuing without tray");
         }
@@ -179,7 +184,7 @@ pub fn spawn(
 #[cfg(feature = "tray-backend")]
 mod backend {
     use super::{
-        ActiveProvider, LanguagesProvider, RecentProvider, TrayAction, TrayState, UpdateProvider,
+        ActiveProvider, MicrophonesProvider, RecentProvider, TrayAction, TrayState, UpdateProvider,
         RECENT_SLOTS,
     };
     use anyhow::{Context, Result};
@@ -200,10 +205,10 @@ mod backend {
         config: u32,
         quit: u32,
         update: u32,
-        clear_lang_memory: u32,
         recent_slots: [u32; RECENT_SLOTS],
         stt_slots: Vec<u32>,
         llm_slots: Vec<u32>,
+        mic_slots: [u32; MIC_SLOTS],
     }
 
     static MENU_IDS: OnceLock<MenuIds> = OnceLock::new();
@@ -225,7 +230,7 @@ mod backend {
         llm_labels: Vec<String>,
         active_provider: ActiveProvider,
         update_provider: UpdateProvider,
-        languages_provider: LanguagesProvider,
+        microphones_provider: MicrophonesProvider,
     ) -> Result<()> {
         std::thread::Builder::new()
             .name("fono-tray".into())
@@ -239,7 +244,7 @@ mod backend {
                     llm_labels,
                     active_provider,
                     update_provider,
-                    languages_provider,
+                    microphones_provider,
                 ) {
                     tracing::warn!("tray thread exited: {e:#}");
                 }
@@ -259,7 +264,7 @@ mod backend {
         llm_labels: Vec<String>,
         active_provider: ActiveProvider,
         update_provider: UpdateProvider,
-        languages_provider: LanguagesProvider,
+        microphones_provider: MicrophonesProvider,
     ) -> Result<()> {
         // tray-icon uses gtk on Linux and requires its main loop.
         gtk::init().context("gtk::init() failed — is gtk+-3.0 installed?")?;
@@ -271,8 +276,16 @@ mod backend {
         // pollute the daemon's stderr at startup.
         install_gtk_log_filters();
 
-        let (menu, status_item, recent_items, stt_items, llm_items, update_item, lang_items) =
-            build_menu(&stt_labels, &llm_labels)?;
+        let (
+            menu,
+            status_item,
+            recent_items,
+            stt_items,
+            llm_items,
+            update_item,
+            mic_items,
+            mic_auto_item,
+        ) = build_menu(&stt_labels, &llm_labels)?;
         let menu_for_updates = menu.clone();
         let tray = TrayIconBuilder::new()
             .with_tooltip(tooltip)
@@ -290,7 +303,7 @@ mod backend {
         let mut last_recent: Vec<String> = Vec::new();
         let mut last_active: (u8, u8) = (u8::MAX, u8::MAX);
         let mut last_update_label: Option<String> = None;
-        let mut last_languages: Vec<String> = Vec::new();
+        let mut last_microphones: (Vec<String>, u8) = (Vec::new(), u8::MAX);
         let mut update_present = false;
         let mut tick: u32 = 0;
         glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
@@ -341,10 +354,10 @@ mod backend {
                     );
                     last_update_label = upd;
                 }
-                let langs = languages_provider();
-                if langs != last_languages {
-                    update_languages(&lang_items, &langs);
-                    last_languages = langs;
+                let mics = microphones_provider();
+                if mics != last_microphones {
+                    update_microphones(&mic_items, &mic_auto_item, &mics.0, mics.1);
+                    last_microphones = mics;
                 }
             }
             glib::ControlFlow::Continue
@@ -392,7 +405,7 @@ mod backend {
         _llm_labels: Vec<String>,
         _active_provider: ActiveProvider,
         _update_provider: UpdateProvider,
-        _languages_provider: LanguagesProvider,
+        _microphones_provider: MicrophonesProvider,
     ) -> Result<()> {
         let _tray = TrayIconBuilder::new()
             .with_tooltip(tooltip)
@@ -411,21 +424,24 @@ mod backend {
         Vec<MenuItem>,
         Vec<MenuItem>,
         MenuItem,
-        [MenuItem; LANG_SLOTS],
+        [MenuItem; MIC_SLOTS],
+        MenuItem,
     );
 
-    /// Number of language peer slots in the tray "Languages" submenu.
-    /// Pre-allocated like the Recent submenu so we refresh labels in
-    /// place rather than rebuilding the menu on every config reload.
-    /// Eight is comfortably above any reasonable peer set.
-    const LANG_SLOTS: usize = 8;
+    /// Number of microphone slots in the tray "Microphone" submenu.
+    /// Pre-allocated for the same reason as the language slots: the
+    /// alternative is rebuilding the submenu on every poll, which
+    /// causes flicker on KDE/GNOME indicator hosts. Eight covers the
+    /// vast majority of desktops (laptop builtin + USB headset + dock
+    /// + maybe a second USB device) without scaling the menu height.
+    const MIC_SLOTS: usize = 8;
 
     /// Position at which the update entry is inserted into the tray
     /// menu when an upgrade is detected. Counts the items appended in
     /// `build_menu` (status, sep, toggle, pause, sep, recent, stt, llm,
-    /// languages, sep, config) — the entry slots in just before the
-    /// final separator + Quit.
-    const UPDATE_INSERT_POS: usize = 11;
+    /// languages, microphone, sep, config) — the entry slots in just
+    /// before the final separator + Quit.
+    const UPDATE_INSERT_POS: usize = 12;
 
     fn build_menu(stt_labels: &[String], llm_labels: &[String]) -> Result<MenuParts> {
         let menu = Menu::new();
@@ -463,21 +479,21 @@ mod backend {
             llm_submenu.append(it).ok();
         }
 
-        // Languages submenu (plan v3 task 8). Pre-allocated `LANG_SLOTS`
-        // read-only items show the configured peer set; one clickable
-        // "Clear language memory" action item resets the in-memory
-        // language cache on the daemon side. The submenu is purely
-        // informational + recovery — adding/removing peers happens in
-        // the wizard or `config.toml`.
-        let lang_submenu = Submenu::new("Languages", true);
-        let lang_items: [MenuItem; LANG_SLOTS] =
-            std::array::from_fn(|_| MenuItem::new("(none)", false, None));
-        for it in &lang_items {
-            lang_submenu.append(it).ok();
+        // Microphone submenu. Pre-allocated `MIC_SLOTS` items get
+        // refreshed in place by `update_microphones` whenever the
+        // device list changes; `mic_auto` is an informational
+        // "Auto (system default)" entry — Fono no longer keeps an
+        // input-device override, so clicking it is a no-op (the
+        // ID is not bound to any TrayAction).
+        let mic_submenu = Submenu::new("Microphone", true);
+        let mic_auto = MenuItem::new("● Auto (system default)", false, None);
+        mic_submenu.append(&mic_auto).ok();
+        let _ = mic_submenu.append(&PredefinedMenuItem::separator());
+        let mic_items: [MenuItem; MIC_SLOTS] =
+            std::array::from_fn(|_| MenuItem::new("", false, None));
+        for it in &mic_items {
+            mic_submenu.append(it).ok();
         }
-        let _ = lang_submenu.append(&PredefinedMenuItem::separator());
-        let clear_lang_memory = MenuItem::new("Clear language memory", true, None);
-        lang_submenu.append(&clear_lang_memory).ok();
 
         let config = MenuItem::new("Edit config", true, None);
         // The update entry is intentionally **not** appended here. The
@@ -495,7 +511,7 @@ mod backend {
         menu.append(&recent_submenu)?;
         menu.append(&stt_submenu)?;
         menu.append(&llm_submenu)?;
-        menu.append(&lang_submenu)?;
+        menu.append(&mic_submenu)?;
         menu.append(&PredefinedMenuItem::separator())?;
         menu.append(&config)?;
         menu.append(&PredefinedMenuItem::separator())?;
@@ -504,6 +520,7 @@ mod backend {
         let recent_slots: [u32; RECENT_SLOTS] = std::array::from_fn(|i| id_of(&recent_items[i]));
         let stt_slots: Vec<u32> = stt_items.iter().map(id_of).collect();
         let llm_slots: Vec<u32> = llm_items.iter().map(id_of).collect();
+        let mic_slots: [u32; MIC_SLOTS] = std::array::from_fn(|i| id_of(&mic_items[i]));
 
         let _ = MENU_IDS.set(MenuIds {
             status: id_of(&status),
@@ -512,10 +529,10 @@ mod backend {
             config: id_of(&config),
             quit: id_of(&quit),
             update: id_of(&update),
-            clear_lang_memory: id_of(&clear_lang_memory),
             recent_slots,
             stt_slots,
             llm_slots,
+            mic_slots,
         });
         Ok((
             menu,
@@ -524,7 +541,8 @@ mod backend {
             stt_items,
             llm_items,
             update,
-            lang_items,
+            mic_items,
+            mic_auto,
         ))
     }
 
@@ -573,19 +591,37 @@ mod backend {
         }
     }
 
-    /// Refresh the read-only peer items in the Languages submenu.
-    /// Empty `codes` collapses to "(auto-detect, no allow-list)" in
-    /// the first slot and blanks the rest.
-    fn update_languages(items: &[MenuItem; LANG_SLOTS], codes: &[String]) {
+    /// Refresh the Microphone submenu. Slot `i` displays
+    /// `devices[i]` (truncated for sanity) and is enabled when the
+    /// device exists; empty trailing slots are blanked + disabled.
+    /// `active_idx` is the index of the device the OS reports as
+    /// the current default, or `u8::MAX` when none of the listed
+    /// devices is currently default (the "Auto" row stays marked).
+    fn update_microphones(
+        items: &[MenuItem; MIC_SLOTS],
+        auto_item: &MenuItem,
+        devices: &[String],
+        active_idx: u8,
+    ) {
+        // Auto entry: marked active when no listed device is the
+        // OS default (e.g. before the first poll, or transient
+        // states between PA source switches).
+        let auto_active = active_idx == u8::MAX;
+        auto_item.set_text(if auto_active {
+            "● Auto (system default)"
+        } else {
+            "  Auto (system default)"
+        });
+
         for (i, item) in items.iter().enumerate() {
-            if codes.is_empty() && i == 0 {
-                item.set_text("(auto-detect — no allow-list)");
-                continue;
-            }
-            if let Some(code) = codes.get(i) {
-                item.set_text(format!("• {code}"));
+            if let Some(name) = devices.get(i) {
+                let is_active = u8::try_from(i).is_ok_and(|i_u8| i_u8 == active_idx);
+                let prefix = if is_active { "● " } else { "  " };
+                item.set_text(format!("{prefix}{}", truncate_label(name, 60)));
+                item.set_enabled(true);
             } else {
                 item.set_text("");
+                item.set_enabled(false);
             }
         }
     }
@@ -658,9 +694,6 @@ mod backend {
         if id == ids.update {
             return Some(TrayAction::ApplyUpdate);
         }
-        if id == ids.clear_lang_memory {
-            return Some(TrayAction::ClearLanguageMemory);
-        }
         for (i, slot_id) in ids.recent_slots.iter().enumerate() {
             if id == *slot_id {
                 return Some(TrayAction::PasteHistory(i));
@@ -674,6 +707,13 @@ mod backend {
         for (i, slot_id) in ids.llm_slots.iter().enumerate() {
             if id == *slot_id {
                 return Some(TrayAction::UseLlm(u8::try_from(i).unwrap_or(u8::MAX)));
+            }
+        }
+        for (i, slot_id) in ids.mic_slots.iter().enumerate() {
+            if id == *slot_id {
+                return Some(TrayAction::SetInputDevice(
+                    u8::try_from(i).unwrap_or(u8::MAX),
+                ));
             }
         }
         None

@@ -12,8 +12,8 @@
 //!   picks, but only from the supplied set. Local Whisper enforces this
 //!   by running `lang_detect` on the audio prefix and argmaxing over
 //!   the masked subset; cloud STT degrades gracefully via
-//!   post-validation (see `cloud_force_primary_language` and
-//!   `cloud_rerun_on_language_mismatch` in `[general]`).
+//!   post-validation (see `cloud_rerun_on_language_mismatch` in
+//!   `[general]`).
 //!
 //! Codes are normalised on entry (trimmed, lowercased, the alias
 //! `"auto"` is dropped). Duplicates are collapsed.

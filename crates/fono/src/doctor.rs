@@ -191,6 +191,31 @@ pub async fn report(paths: &Paths) -> Result<String> {
     writeln!(out)?;
 
     writeln!(out, "Audio stack : {:?}", fono_audio::mute::detect())?;
+    // Input device matrix: list every device the active stack
+    // (PulseAudio / PipeWire via pactl, or cpal as fallback) reports,
+    // marking whichever the OS currently considers default. Fono no
+    // longer keeps an `[audio].input_device` override; microphone
+    // selection is delegated to the OS layer (pavucontrol / GNOME /
+    // KDE settings on Linux, Sound preferences on macOS / Windows).
+    let devices = fono_audio::devices::list_input_devices();
+    writeln!(out, "Audio inputs:")?;
+    if devices.is_empty() {
+        writeln!(
+            out,
+            "  (no input devices reported — check pactl / cpal permissions, \
+             or that your microphone is plugged in)"
+        )?;
+    } else {
+        for d in &devices {
+            let mark = if d.is_default { "*" } else { " " };
+            writeln!(out, "  {mark} {}", d.display_name)?;
+        }
+        writeln!(
+            out,
+            "(* = system default. Change via the tray Microphone submenu, \
+             pavucontrol, or your OS sound settings.)"
+        )?;
+    }
     let injector = fono_inject::inject::Injector::detect();
     writeln!(out, "Injector    : {injector:?}")?;
     // Show the configured XTEST paste shortcut so users can confirm

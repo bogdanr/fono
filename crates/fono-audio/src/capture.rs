@@ -23,8 +23,6 @@ pub const SOFT_CAP: Duration = Duration::from_secs(2 * 60);
 
 #[derive(Debug, Clone)]
 pub struct CaptureConfig {
-    /// cpal device name; empty = system default.
-    pub input_device: String,
     /// Preferred sample rate (will resample if device doesn't support it).
     pub target_sample_rate: u32,
 }
@@ -32,7 +30,6 @@ pub struct CaptureConfig {
 impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
-            input_device: String::new(),
             target_sample_rate: TARGET_SAMPLE_RATE,
         }
     }
@@ -116,18 +113,9 @@ impl AudioCapture {
     /// f32 mono samples until the handle is dropped.
     pub fn start(&self) -> Result<CaptureHandle> {
         let host = cpal::default_host();
-        let device = if self.cfg.input_device.is_empty() {
-            host.default_input_device()
-                .ok_or_else(|| anyhow!("no default input device"))?
-        } else {
-            host.input_devices()?
-                .find(|d| {
-                    d.name()
-                        .map(|n| n == self.cfg.input_device)
-                        .unwrap_or(false)
-                })
-                .ok_or_else(|| anyhow!("input device {:?} not found", self.cfg.input_device))?
-        };
+        let device = host
+            .default_input_device()
+            .ok_or_else(|| anyhow!("no default input device"))?;
 
         let supported = device
             .default_input_config()
@@ -240,18 +228,9 @@ impl AudioCapture {
         F: FnMut(&[f32]) + Send + 'static,
     {
         let host = cpal::default_host();
-        let device = if self.cfg.input_device.is_empty() {
-            host.default_input_device()
-                .ok_or_else(|| anyhow!("no default input device"))?
-        } else {
-            host.input_devices()?
-                .find(|d| {
-                    d.name()
-                        .map(|n| n == self.cfg.input_device)
-                        .unwrap_or(false)
-                })
-                .ok_or_else(|| anyhow!("input device {:?} not found", self.cfg.input_device))?
-        };
+        let device = host
+            .default_input_device()
+            .ok_or_else(|| anyhow!("no default input device"))?;
 
         let supported = device
             .default_input_config()

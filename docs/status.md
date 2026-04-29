@@ -1,6 +1,109 @@
 # Fono — Project Status
 
-Last updated: 2026-04-28
+Last updated: 2026-04-29
+
+## 2026-04-29 — OS-delegated microphone selection (PulseAudio-first + config purge)
+
+Plans (combined execution):
+- `plans/2026-04-29-pulseaudio-first-microphone-enumeration-v1.md`
+- `plans/2026-04-29-drop-input-device-config-knob-v1.md`
+
+Pivot triggered by two follow-up issues against the v2 recovery work
+shipped earlier today: (a) the tray "Microphone" submenu was full of
+ALSA plugin pseudo-devices (`pulse`, `oss`, `speex`, `default`,
+`surround51`, …) and the daemon spammed `snd_pcm_dsnoop_open: unable
+to open slave` because cpal's ALSA host enumerates every PCM in
+`asound.conf`; (b) the user — a sample size of one but a strong one —
+correctly observed that `[audio].input_device` was the wrong place to
+solve "which microphone?" because every modern OS already owns that
+question.
+
+End-state: Fono no longer keeps a microphone override. The OS layer
+is the source of truth.
+
+- **PulseAudio-first enumeration.** New `crates/fono-audio/src/pulse.rs`
+  shells to `pactl list sources [short]` and `pactl get-default-source`
+  / `pactl set-default-source`, mirroring the `mute.rs` shell-out
+  pattern. `crates/fono-audio/src/devices.rs` dispatches on
+  `AudioStack::detect()`: `PulseAudio` / `PipeWire` → `pulse`,
+  `Unknown` → cpal. Sink monitors are dropped at the source on the
+  Pulse branch; the `is_likely_microphone` heuristic only matters on
+  the cpal fallback. `InputBackend::{Pulse{pa_name}, Cpal{cpal_name}}`
+  carries the backend-specific identifier through to the daemon.
+- **Tray "Microphone" submenu rewired** to `pactl set-default-source`.
+  Clicking a row mutates Pulse's default-source system-wide (visible
+  to `pavucontrol`, GNOME / KDE settings, every other app), then
+  triggers `Request::Reload` so cpal re-opens its default-source
+  stream on the new endpoint. Submenu hidden on `Unknown` hosts —
+  the OS owns the UI there.
+- **Config purge.** `[audio].input_device` removed (no migration —
+  no released users yet). `[general].language`, `[stt.local].language`
+  (deprecated language scalars superseded by `languages: Vec<String>`)
+  and `[general].cloud_force_primary_language` (superseded by the
+  in-memory language cache) all gone. `cloud_force_primary` builder /
+  struct field / dead first-pass branch removed from `GroqStt`,
+  `GroqStreaming`, `OpenAiStt`. Schema migration block in
+  `Config::migrate` collapsed to the version check.
+- **Recovery hook reworded** — body now points at "the tray Microphone
+  submenu" + `pavucontrol` / OS sound settings; the deprecated
+  `fono use input "<name>"` advice is gone (test pinned).
+- **CLI / wizard / doctor cleanup.** `fono use input` removed.
+  Wizard microphone picker removed. `fono doctor` "Audio inputs:"
+  is informational — flat list with one row marked as the OS default,
+  no override-aware highlight.
+- **Tray surface trimmed.** `TrayAction::ClearInputDevice` removed
+  (no override to clear); the "Auto (system default)" entry stays
+  as informational only (disabled, no menu-event ID bound).
+
+Status: implementation complete. `tests/check.sh` (full matrix —
+fmt, build × default + interactive, clippy × default + interactive,
+test × default + interactive) green. CHANGELOG `[Unreleased]`
+section reorganised into Added / Changed / Removed reflecting the
+new design.
+
+## 2026-04-29 — Empty-transcript microphone recovery (plan v2)
+
+Plan: `plans/2026-04-29-empty-transcript-microphone-recovery-v2.md`.
+Triggered by a real-world dock complaint: external dock advertises a
+passive capture endpoint with no microphone wired to it, the OS elects
+it as `@DEFAULT_SOURCE@`, and Fono's recordings come out flat-line
+silent — Whisper hallucinates or returns empty, and the user is left
+without an actionable signal.
+
+Three layers, all stacked behind the existing `STT returned empty
+text` signal at `crates/fono/src/session.rs` (no new RMS/peak detector
+needed):
+
+- **Phase 1 — empty-transcript notification.** New
+  `crates/fono/src/audio_recovery.rs` fires a critical desktop toast
+  when capture ≥ 5 s and the transcript is empty. Body names the
+  silent device, the recording duration in seconds, and the recourse:
+  "switch to '<name>'" + `fono use input` CLI when exactly one
+  non-loopback alternative is detected, or "open tray Microphone
+  submenu" when 2+ alternatives exist. The user's
+  `[audio].input_device` override is never silently rewritten. Five
+  unit tests cover the body composer.
+- **Phase 2 — tray "Microphone" submenu.** Mirrors the existing STT/
+  LLM/Languages pattern at `crates/fono-tray/src/lib.rs`. `Auto` plus
+  a row per cpal device, active-marked. Clicking writes
+  `[audio].input_device` and triggers `Request::Reload` so the next
+  capture opens the new endpoint without restarting. New
+  `TrayAction::SetInputDevice(u8)` / `ClearInputDevice` + a
+  `MicrophonesProvider` polled every ~2 s by the tray refresh loop.
+- **Phase 3 — wizard probe + doctor row + `fono use input` CLI.**
+  First-run wizard offers a microphone picker only when 2+ devices
+  are visible (single-mic laptops skip the prompt). `fono doctor`
+  gains an "Audio inputs:" matrix with the active marker and surfaces
+  "configured device not currently visible" when the override is
+  unplugged. `fono use input <name>` (and `auto` to clear) is
+  symmetric with `fono use stt` / `fono use llm`, with
+  case-insensitive name matching.
+
+Status: implementation complete. `tests/check.sh` (full matrix —
+fmt, build × default + interactive, clippy × default + interactive,
+test × default + interactive) green on the work branch. CHANGELOG
+[Unreleased] section updated with the four user-visible additions;
+will graduate to a versioned section at next release.
 
 ## 2026-04-28 — v0.3.0 release
 

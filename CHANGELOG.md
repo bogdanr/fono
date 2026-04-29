@@ -5,7 +5,75 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.6] — 2026-04-29
+
+### Added
+
+- Empty-transcript microphone recovery. When a recording lasts at
+  least 3 seconds but produces no transcribed text — the typical
+  symptom of an external dock advertising a passive capture endpoint
+  the OS elected as the default source — Fono now pops a critical
+  desktop notification naming the silent device, the recording
+  duration, and the recourse: switch via the tray "Microphone"
+  submenu, `pavucontrol`, or your OS sound settings. Auto-suggested
+  alternatives are filtered to exclude HDMI / monitor / loopback /
+  S/PDIF decoys.
+- Tray "Microphone" submenu (Linux desktops with PulseAudio /
+  PipeWire). One row per source the audio server reports, marked
+  with the system default. Clicking a row runs
+  `pactl set-default-source` so the change applies system-wide and
+  is reflected in `pavucontrol` / GNOME / KDE settings, then
+  hot-reloads the daemon so the next capture opens the new
+  endpoint. Hidden on hosts where `AudioStack::detect()` returns
+  `Unknown` (macOS, Windows, pure-ALSA Linux) — the OS owns
+  microphone selection there.
+
+### Changed
+
+- Microphone enumeration is now PulseAudio-first on Linux. When the
+  audio stack is `PulseAudio` or `PipeWire` (Pulse compat layer),
+  Fono lists sources via `pactl list sources` instead of cpal's
+  ALSA host. Submenu rows show the source's friendly description
+  ("Built-in Audio Analog Stereo", "Logitech BRIO") instead of
+  cpal's raw `plughw:CARD=…` PCM names; the chronic
+  `snd_pcm_dsnoop_open: unable to open slave` errors and the
+  ALSA plugin pseudo-device clutter (`pulse`, `oss`, `speex`,
+  `default`, `surround51`, …) that previously appeared in the
+  submenu are gone. macOS, Windows, and pure-ALSA Linux fall back
+  to cpal enumeration — unchanged.
+- Microphone selection is fully delegated to the OS layer. Fono
+  follows the PulseAudio / PipeWire default-source on Linux, the
+  macOS Sound input device, and the Windows recording default.
+  `pavucontrol`, GNOME / KDE settings, System Preferences and the
+  Sound control panel are the canonical places to choose a
+  microphone.
+- `fono doctor` "Audio inputs:" section is now informational only.
+  Lists every device the active stack reports with one row marked
+  as the OS default; advice points at the tray submenu, pavucontrol,
+  or OS sound settings.
+
+### Removed
+
+- Tray "Languages" submenu removed. The Languages submenu that
+  previously listed the configured BCP-47 peer set and offered
+  a "Clear language memory" action has been removed from the tray.
+  The language cache is cleared automatically and language preference
+  is managed via `config.toml` or `fono use language`.
+- `[audio].input_device` config field. Fono no longer keeps a
+  capture-device override; the OS default is always used.
+- `fono use input <name>` CLI subcommand. Use the tray "Microphone"
+  submenu, `pavucontrol`, or your OS audio settings instead.
+- First-run wizard's microphone picker. New users get the OS
+  default; switching afterwards is a tray-submenu click on Linux
+  desktops or an OS-settings change elsewhere.
+- `[general].language` (deprecated scalar — use `[general].languages`).
+- `[stt.local].language` (deprecated scalar — use
+  `[stt.local].languages` or `[general].languages`).
+- `[general].cloud_force_primary_language` (superseded by the
+  in-memory language cache shipped in v0.3.x).
+- `cloud_force_primary` builders, struct fields, and dead first-pass
+  branches on `GroqStt`, `GroqStreaming`, and `OpenAiStt`.
+- `TrayAction::ClearInputDevice` variant (no override to clear).
 
 ## [0.3.5] — 2026-04-29
 
@@ -681,7 +749,8 @@ feature and ships fully wired in v0.2.
 - Local LLM cleanup (Qwen / SmolLM) is opt-in / preview.
 - Real `winit + softbuffer` overlay window is a stub (event channel only).
 
-[Unreleased]: https://github.com/bogdanr/fono/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/bogdanr/fono/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/bogdanr/fono/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/bogdanr/fono/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/bogdanr/fono/releases/tag/v0.3.4
 [0.3.3]: https://github.com/bogdanr/fono/releases/tag/v0.3.3

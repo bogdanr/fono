@@ -101,27 +101,11 @@ pub fn build_stt(
 ) -> Result<Arc<dyn SpeechToText>> {
     let languages = effective_languages(cfg, general);
     let prompts = cfg.prompts.clone();
-    #[allow(deprecated)]
-    let cloud_force_primary = general.cloud_force_primary_language;
     let cloud_rerun = general.cloud_rerun_on_language_mismatch;
     match &cfg.backend {
         SttBackend::Local => build_local(cfg, whisper_models_dir, languages, prompts),
-        SttBackend::Groq => build_groq(
-            cfg,
-            secrets,
-            languages,
-            prompts,
-            cloud_force_primary,
-            cloud_rerun,
-        ),
-        SttBackend::OpenAI => build_openai(
-            cfg,
-            secrets,
-            languages,
-            prompts,
-            cloud_force_primary,
-            cloud_rerun,
-        ),
+        SttBackend::Groq => build_groq(cfg, secrets, languages, prompts, cloud_rerun),
+        SttBackend::OpenAI => build_openai(cfg, secrets, languages, prompts, cloud_rerun),
         other => Err(anyhow!(
             "STT backend {other:?} is not yet implemented in this build; \
              pick `groq`, `openai`, or `local` (rebuild with `--features whisper-local` \
@@ -225,7 +209,6 @@ fn build_groq(
     secrets: &Secrets,
     languages: Vec<String>,
     prompts: std::collections::HashMap<String, String>,
-    cloud_force_primary: bool,
     cloud_rerun: bool,
 ) -> Result<Arc<dyn SpeechToText>> {
     let (key, model) = resolve_cloud(cfg, secrets, &SttBackend::Groq, "groq")?;
@@ -234,7 +217,6 @@ fn build_groq(
         crate::groq::GroqStt::with_model(key, model)
             .with_languages(languages)
             .with_prompts(prompts)
-            .with_cloud_force_primary(cloud_force_primary)
             .with_cloud_rerun_on_mismatch(cloud_rerun),
     ))
 }
@@ -245,7 +227,6 @@ fn build_groq(
     _: &Secrets,
     _: Vec<String>,
     _: std::collections::HashMap<String, String>,
-    _: bool,
     _: bool,
 ) -> Result<Arc<dyn SpeechToText>> {
     Err(anyhow!(
@@ -259,7 +240,6 @@ fn build_openai(
     secrets: &Secrets,
     languages: Vec<String>,
     prompts: std::collections::HashMap<String, String>,
-    cloud_force_primary: bool,
     cloud_rerun: bool,
 ) -> Result<Arc<dyn SpeechToText>> {
     let (key, model) = resolve_cloud(cfg, secrets, &SttBackend::OpenAI, "openai")?;
@@ -268,7 +248,6 @@ fn build_openai(
         crate::openai::OpenAiStt::with_model(key, model)
             .with_languages(languages)
             .with_prompts(prompts)
-            .with_cloud_force_primary(cloud_force_primary)
             .with_cloud_rerun_on_mismatch(cloud_rerun),
     ))
 }
@@ -279,7 +258,6 @@ fn build_openai(
     _: &Secrets,
     _: Vec<String>,
     _: std::collections::HashMap<String, String>,
-    _: bool,
     _: bool,
 ) -> Result<Arc<dyn SpeechToText>> {
     Err(anyhow!(
@@ -308,8 +286,6 @@ pub fn build_streaming_stt(
     whisper_models_dir: &Path,
 ) -> Result<Option<Arc<dyn crate::streaming::StreamingStt>>> {
     let _ = secrets;
-    #[allow(deprecated)]
-    let cloud_force_primary = general.cloud_force_primary_language;
     let cloud_rerun = general.cloud_rerun_on_language_mismatch;
     let cloud_streaming = interactive.enabled;
     let cadence = interactive.preview_cadence();
@@ -321,16 +297,7 @@ pub fn build_streaming_stt(
         }
         SttBackend::Groq if cloud_streaming => {
             let languages = effective_languages(cfg, general);
-            build_groq_streaming(
-                cfg,
-                secrets,
-                languages,
-                prompts,
-                cloud_force_primary,
-                cloud_rerun,
-                cadence,
-            )
-            .map(Some)
+            build_groq_streaming(cfg, secrets, languages, prompts, cloud_rerun, cadence).map(Some)
         }
         other => {
             // When interactive is off the user explicitly asked for batch
@@ -354,7 +321,6 @@ fn build_groq_streaming(
     secrets: &Secrets,
     languages: Vec<String>,
     prompts: std::collections::HashMap<String, String>,
-    cloud_force_primary: bool,
     cloud_rerun: bool,
     cadence: fono_core::config::PreviewCadence,
 ) -> Result<Arc<dyn crate::streaming::StreamingStt>> {
@@ -370,7 +336,6 @@ fn build_groq_streaming(
         crate::groq_streaming::GroqStreaming::new(key, model)
             .with_languages(languages)
             .with_prompts(prompts)
-            .with_cloud_force_primary(cloud_force_primary)
             .with_cloud_rerun_on_mismatch(cloud_rerun)
             .with_preview_cadence(cadence_opt),
     ))
@@ -382,7 +347,6 @@ fn build_groq_streaming(
     _secrets: &Secrets,
     _languages: Vec<String>,
     _prompts: std::collections::HashMap<String, String>,
-    _cloud_force_primary: bool,
     _cloud_rerun: bool,
     _cadence: fono_core::config::PreviewCadence,
 ) -> Result<Arc<dyn crate::streaming::StreamingStt>> {

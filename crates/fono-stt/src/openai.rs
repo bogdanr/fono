@@ -24,7 +24,6 @@ pub struct OpenAiStt {
     model: String,
     client: reqwest::Client,
     languages: Vec<String>,
-    cloud_force_primary: bool,
     cloud_rerun_on_mismatch: bool,
     lang_cache: Arc<LanguageCache>,
     prompts: HashMap<String, String>,
@@ -40,7 +39,6 @@ impl OpenAiStt {
             model: model.into(),
             client: crate::groq::warm_client(),
             languages: Vec::new(),
-            cloud_force_primary: false,
             cloud_rerun_on_mismatch: false,
             lang_cache: LanguageCache::global(),
             prompts: HashMap::new(),
@@ -50,12 +48,6 @@ impl OpenAiStt {
     #[must_use]
     pub fn with_languages(mut self, codes: Vec<String>) -> Self {
         self.languages = codes;
-        self
-    }
-
-    #[must_use]
-    pub fn with_cloud_force_primary(mut self, on: bool) -> Self {
-        self.cloud_force_primary = on;
         self
     }
 
@@ -230,13 +222,7 @@ impl SpeechToText for OpenAiStt {
         let first_pass_lang: Option<String> = match &selection {
             LanguageSelection::Auto => None,
             LanguageSelection::Forced(c) => Some(c.clone()),
-            LanguageSelection::AllowList(_) => {
-                if self.cloud_force_primary {
-                    selection.fallback_hint().map(str::to_string)
-                } else {
-                    None
-                }
-            }
+            LanguageSelection::AllowList(_) => None,
         };
 
         let parsed = self.do_request(&wav, first_pass_lang.as_deref()).await?;

@@ -86,7 +86,6 @@ pub struct GroqStreaming {
     /// become no-ops in that case.
     verbose_fn: Option<GroqVerboseFn>,
     languages: Vec<String>,
-    cloud_force_primary: bool,
     cloud_rerun_on_mismatch: bool,
     lang_cache: Arc<LanguageCache>,
     /// Steady-state preview cadence. `Some(d)` re-POSTs every `d`;
@@ -165,7 +164,6 @@ impl GroqStreaming {
             request_fn,
             verbose_fn: Some(verbose_fn),
             languages: Vec::new(),
-            cloud_force_primary: false,
             cloud_rerun_on_mismatch: false,
             lang_cache: LanguageCache::global(),
             preview_cadence: Some(PSEUDO_STREAM_INTERVAL),
@@ -187,7 +185,6 @@ impl GroqStreaming {
         );
         // Preserve other builder state set before with_prompts.
         next.languages = self.languages;
-        next.cloud_force_primary = self.cloud_force_primary;
         next.cloud_rerun_on_mismatch = self.cloud_rerun_on_mismatch;
         next.lang_cache = self.lang_cache;
         next.preview_cadence = self.preview_cadence;
@@ -204,7 +201,6 @@ impl GroqStreaming {
             request_fn,
             verbose_fn: None,
             languages: Vec::new(),
-            cloud_force_primary: false,
             cloud_rerun_on_mismatch: false,
             lang_cache: LanguageCache::global(),
             preview_cadence: Some(PSEUDO_STREAM_INTERVAL),
@@ -225,7 +221,6 @@ impl GroqStreaming {
             request_fn,
             verbose_fn: Some(verbose_fn),
             languages: Vec::new(),
-            cloud_force_primary: false,
             cloud_rerun_on_mismatch: false,
             lang_cache: LanguageCache::global(),
             preview_cadence: Some(PSEUDO_STREAM_INTERVAL),
@@ -240,14 +235,6 @@ impl GroqStreaming {
     #[must_use]
     pub fn with_languages(mut self, codes: Vec<String>) -> Self {
         self.languages = codes;
-        self
-    }
-
-    /// Builder: force the primary code on the first request when the
-    /// allow-list has > 1 entry.
-    #[must_use]
-    pub fn with_cloud_force_primary(mut self, on: bool) -> Self {
-        self.cloud_force_primary = on;
         self
     }
 
@@ -305,7 +292,6 @@ impl StreamingStt for GroqStreaming {
         let verbose_fn = self.verbose_fn.clone();
         let preview_skipped = Arc::clone(&self.preview_skipped_count);
         let selection = self.effective_selection(lang.as_deref());
-        let cloud_force_primary = self.cloud_force_primary;
         let cloud_rerun_on_mismatch = self.cloud_rerun_on_mismatch;
         let lang_cache = Arc::clone(&self.lang_cache);
         let started = Instant::now();
@@ -318,19 +304,11 @@ impl StreamingStt for GroqStreaming {
         let finalize_gate = Arc::new(AsyncMutex::new(()));
 
         // First-pass language to send: forced -> the code; auto -> none;
-        // allow-list -> primary if cloud_force_primary, else None and
-        // we accept the provider's pick. Mirrors the batch path at
-        // crates/fono-stt/src/groq.rs:116-126.
+        // allow-list -> none (let cloud auto-detect, then post-validate).
         let first_pass_lang: Option<String> = match &selection {
             LanguageSelection::Auto => None,
             LanguageSelection::Forced(c) => Some(c.clone()),
-            LanguageSelection::AllowList(_) => {
-                if cloud_force_primary {
-                    selection.fallback_hint().map(str::to_string)
-                } else {
-                    None
-                }
-            }
+            LanguageSelection::AllowList(_) => None,
         };
 
         let preview_cadence = self.preview_cadence;

@@ -612,7 +612,6 @@ async fn record_cmd(
     }
 
     let cap_cfg = CaptureConfig {
-        input_device: config.audio.input_device.clone(),
         target_sample_rate: config.audio.sample_rate,
     };
     let cap = AudioCapture::new(cap_cfg.clone());
@@ -1428,7 +1427,6 @@ async fn record_cmd_live(
     };
 
     let cap_cfg = CaptureConfig {
-        input_device: config.audio.input_device.clone(),
         target_sample_rate: 16_000, // streaming pipeline operates at 16 kHz
     };
     let cap = AudioCapture::new(cap_cfg.clone());
@@ -1478,13 +1476,16 @@ async fn record_cmd_live(
     // has a live subscriber for every frame and nothing is lost.
     let mut pump = Pump::new(fono_audio::StreamConfig::default());
     let frame_rx = pump.take_receiver()?;
-    let session = LiveSession::new(Arc::clone(&stt), cap_cfg.target_sample_rate).with_language(
-        if config.general.language == "auto" {
-            None
-        } else {
-            Some(config.general.language.clone())
-        },
-    );
+    let session =
+        LiveSession::new(Arc::clone(&stt), cap_cfg.target_sample_rate).with_language(match config
+            .general
+            .languages
+            .as_slice()
+        {
+            [] => None,
+            [single] => Some(single.clone()),
+            _ => None,
+        });
     let session = if let Some(o) = overlay.as_ref() {
         session.with_overlay(o.clone())
     } else {

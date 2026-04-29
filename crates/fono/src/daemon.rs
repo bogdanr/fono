@@ -302,15 +302,32 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                 Arc::new(move || update_label(&status)) as fono_tray::UpdateProvider
             },
             {
-                // Languages provider for the "Languages" submenu (plan
-                // v3 task 8). Polled every ~2 s; reflects whatever is
-                // currently in `general.languages` after `Reload`.
-                let config_path = paths.config_file();
+                // Microphones provider for the "Microphone" submenu.
+                // On Pulse/PipeWire hosts the audio server is the
+                // authority on what's a microphone; on `Unknown` hosts
+                // (macOS / Windows / pure-ALSA) the submenu is hidden
+                // because the tray can't actually switch capture there.
                 Arc::new(move || {
-                    fono_core::Config::load(&config_path)
-                        .map(|c| c.general.languages)
-                        .unwrap_or_default()
-                }) as fono_tray::LanguagesProvider
+                    use fono_audio::devices::{list_input_devices, InputBackend};
+                    let devices = list_input_devices();
+                    // Hide the submenu on cpal-only hosts: leaving it
+                    // populated would offer a switch we can't honour.
+                    let pulse_only: Vec<_> = devices
+                        .iter()
+                        .filter(|d| matches!(d.backend, InputBackend::Pulse { .. }))
+                        .collect();
+                    if pulse_only.is_empty() {
+                        return (Vec::new(), u8::MAX);
+                    }
+                    let names: Vec<String> =
+                        pulse_only.iter().map(|d| d.display_name.clone()).collect();
+                    let active_idx = pulse_only
+                        .iter()
+                        .position(|d| d.is_default)
+                        .and_then(|i| u8::try_from(i).ok())
+                        .unwrap_or(u8::MAX);
+                    (names, active_idx)
+                }) as fono_tray::MicrophonesProvider
             },
         );
         (Some(t), rx)
@@ -542,9 +559,8 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                     TrayAction::ApplyUpdate => {
                         apply_update_via_tray(Arc::clone(&update_status_tray)).await;
                     }
-                    TrayAction::ClearLanguageMemory => {
-                        fono_stt::LanguageCache::global().clear();
-                        info!("language memory cleared via tray");
+                    TrayAction::SetInputDevice(idx) => {
+                        switch_input_device_via_tray(orch_for_tray.as_ref(), idx).await;
                     }
                 }
             }
@@ -1109,6 +1125,63 @@ async fn switch_llm_via_tray(
             );
         }
         Err(e) => warn!("tray: LLM switch task join error: {e}"),
+    }
+}
+
+/// Switch the active input device from the tray "Microphone" submenu.
+/// On Pulse/PipeWire hosts this calls `pactl set-default-source` so
+/// the change applies system-wide and is reflected in pavucontrol /
+/// GNOME / KDE settings; on cpal hosts the submenu is hidden so this
+/// path is never taken. No config write — Fono no longer keeps an
+/// `[audio].input_device` override.
+async fn switch_input_device_via_tray(
+    orch: Option<&Arc<crate::session::SessionOrchestrator>>,
+    idx: u8,
+) {
+    use fono_audio::devices::{list_input_devices, InputBackend};
+    let devices: Vec<_> = list_input_devices()
+        .into_iter()
+        .filter(|d| matches!(d.backend, InputBackend::Pulse { .. }))
+        .collect();
+    let Some(dev) = devices.get(idx as usize) else {
+        warn!(
+            "tray SetInputDevice({idx}): out of range (max={})",
+            devices.len()
+        );
+        return;
+    };
+    let InputBackend::Pulse { pa_name } = &dev.backend else {
+        // Filter above guarantees Pulse, but be defensive.
+        warn!("tray SetInputDevice({idx}): not a Pulse source");
+        return;
+    };
+    let display_name = dev.display_name.clone();
+    match fono_audio::pulse::set_default_pulse_source(pa_name) {
+        Ok(()) => {
+            info!("tray: switched default Pulse source to {display_name} ({pa_name})");
+            if let Some(o) = orch {
+                if let Err(e) = o.reload().await {
+                    warn!("tray: input device reload failed: {e:#}");
+                    fono_core::notify::send(
+                        "Fono — microphone reload failed",
+                        &format!("{e}"),
+                        "dialog-error",
+                        5_000,
+                        fono_core::notify::Urgency::Critical,
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            warn!("tray: pactl set-default-source failed: {e:#}");
+            fono_core::notify::send(
+                "Fono — microphone switch failed",
+                &format!("{e}"),
+                "dialog-error",
+                5_000,
+                fono_core::notify::Urgency::Critical,
+            );
+        }
     }
 }
 

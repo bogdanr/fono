@@ -279,7 +279,8 @@ impl HardwareSnapshot {
         if self.os == "macos" && self.arch == "aarch64" {
             "Apple Silicon (Metal + CoreML) — ~3–5× faster, live mode OK".to_string()
         } else if self.cpu_features.avx512 {
-            "CPU only (AVX-512) — solid for batch dictation; live mode works for tiny / base".to_string()
+            "CPU only (AVX-512) — solid for batch dictation; live mode works for tiny / base"
+                .to_string()
         } else if self.cpu_features.avx2 && self.cpu_features.fma {
             "CPU only (AVX2 + FMA) — fine for batch dictation; live mode best with tiny".to_string()
         } else if self.cpu_features.avx2 {
@@ -687,7 +688,10 @@ mod tests {
             total_ram_bytes: GB * 8,
             available_ram_bytes: 512 * 1024 * 1024,
             free_disk_bytes: GB * 100,
-            cpu_features: CpuFeatures { avx2: true, ..Default::default() },
+            cpu_features: CpuFeatures {
+                avx2: true,
+                ..Default::default()
+            },
             os: "linux".into(),
             arch: "x86_64".into(),
         };
@@ -703,7 +707,10 @@ mod tests {
             total_ram_bytes: GB * 16,
             available_ram_bytes: GB * 8,
             free_disk_bytes: 800 * 1024 * 1024,
-            cpu_features: CpuFeatures { avx2: true, ..Default::default() },
+            cpu_features: CpuFeatures {
+                avx2: true,
+                ..Default::default()
+            },
             os: "linux".into(),
             arch: "x86_64".into(),
         };

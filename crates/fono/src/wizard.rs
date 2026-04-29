@@ -82,6 +82,10 @@ pub async fn run(paths: &Paths) -> Result<()> {
         secrets.save(&paths.secrets_file())?;
     }
 
+    // (Microphone picker removed — Fono now follows the OS default
+    // unconditionally; users override via pavucontrol / GNOME / KDE
+    // sound settings or the tray Microphone submenu at runtime.)
+
     // If the user chose any local backend (STT or LLM), download the
     // model(s) now (silently — re-checked on every daemon start).
     // Failures are non-fatal: the daemon will retry on next launch.
@@ -314,8 +318,7 @@ async fn configure_mixed(
         } else {
             config.general.languages = pick_languages(theme)?;
         }
-        let stt_model =
-            pick_local_stt_model(theme, english_only, &config.general.languages, snap)?;
+        let stt_model = pick_local_stt_model(theme, english_only, &config.general.languages, snap)?;
         local_model_chosen = Some(stt_model.to_string());
         config.stt = Stt {
             backend: SttBackend::Local,
@@ -776,10 +779,7 @@ fn pick_interactive_mode(
             },
         )
     } else {
-        (
-            true,
-            "transcription will do more API calls".to_string(),
-        )
+        (true, "transcription will do more API calls".to_string())
     };
 
     println!(
@@ -1254,8 +1254,7 @@ mod tests {
     #[test]
     fn shortlist_multilingual_excludes_en_only() {
         let s = snap(12, 32, 200, true);
-        let shortlist =
-            build_local_stt_shortlist(false, &["en".to_string(), "fr".to_string()], &s);
+        let shortlist = build_local_stt_shortlist(false, &["en".to_string(), "fr".to_string()], &s);
         for entry in &shortlist {
             assert!(
                 entry.model.multilingual,
@@ -1269,8 +1268,7 @@ mod tests {
     fn shortlist_capped_at_three_entries() {
         // Big machine: many models qualify, but we never show more than 3.
         let s = snap(16, 64, 500, true);
-        let shortlist =
-            build_local_stt_shortlist(false, &["en".to_string()], &s);
+        let shortlist = build_local_stt_shortlist(false, &["en".to_string()], &s);
         assert!(
             shortlist.len() <= SHORTLIST_MAX,
             "shortlist len {} exceeds cap {}",
@@ -1284,17 +1282,12 @@ mod tests {
         // Even on a beefy box that affords medium, the wizard never offers it
         // (wizard_visible=false). Turbo replaces it.
         let s = snap(16, 64, 500, true);
-        let names_en: Vec<&str> = build_local_stt_shortlist(true, &["en".to_string()], &s)
+        assert!(!build_local_stt_shortlist(true, &["en".to_string()], &s)
             .iter()
-            .map(|e| e.model.name)
-            .collect();
-        assert!(!names_en.contains(&"medium.en"));
-        let names_multi: Vec<&str> =
-            build_local_stt_shortlist(false, &["en".to_string()], &s)
-                .iter()
-                .map(|e| e.model.name)
-                .collect();
-        assert!(!names_multi.contains(&"medium"));
+            .any(|e| e.model.name == "medium.en"));
+        assert!(!build_local_stt_shortlist(false, &["en".to_string()], &s)
+            .iter()
+            .any(|e| e.model.name == "medium"));
     }
 
     #[test]
@@ -1365,8 +1358,7 @@ mod tests {
     #[test]
     fn comfortable_first_in_shortlist() {
         let s = snap(6, 16, 200, true);
-        let shortlist =
-            build_local_stt_shortlist(true, &["en".to_string()], &s);
+        let shortlist = build_local_stt_shortlist(true, &["en".to_string()], &s);
         let mut seen_borderline = false;
         for entry in &shortlist {
             if entry.affordability == Affordability::Borderline {
@@ -1429,8 +1421,7 @@ mod tests {
         // (Inaccurate), small=15% (Acceptable), turbo=10% (Good). Inaccurate
         // entries must be filtered out.
         let s = snap(16, 64, 500, true);
-        let shortlist =
-            build_local_stt_shortlist(false, &["pl".to_string()], &s);
+        let shortlist = build_local_stt_shortlist(false, &["pl".to_string()], &s);
         for entry in &shortlist {
             assert_ne!(
                 entry.accuracy,
@@ -1440,7 +1431,6 @@ mod tests {
             );
         }
         // turbo should appear and rank highest by accuracy.
-        let names: Vec<&str> = shortlist.iter().map(|e| e.model.name).collect();
-        assert!(names.contains(&"large-v3-turbo"));
+        assert!(shortlist.iter().any(|e| e.model.name == "large-v3-turbo"));
     }
 }

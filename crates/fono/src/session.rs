@@ -274,7 +274,6 @@ impl SessionOrchestrator {
             HistoryDb::open(&paths.history_db()).context("open history db")?,
         ));
         let capture_cfg = CaptureConfig {
-            input_device: config.audio.input_device.clone(),
             target_sample_rate: config.audio.sample_rate,
         };
         let config_for_env = Arc::clone(&config);
@@ -574,8 +573,8 @@ impl SessionOrchestrator {
             fono_audio::mute::set_default_sink_mute(true);
         }
         info!(
-            "recording started (mode={:?} sample_rate={} device={:?})",
-            mode, self.capture_cfg.target_sample_rate, self.capture_cfg.input_device
+            "recording started (mode={:?} sample_rate={})",
+            mode, self.capture_cfg.target_sample_rate
         );
         *slot = Some(CaptureSession {
             buffer,
@@ -778,7 +777,6 @@ impl SessionOrchestrator {
         // capture stage resamples for us.
         let sample_rate = 16_000_u32;
         let cap_cfg = CaptureConfig {
-            input_device: self.capture_cfg.input_device.clone(),
             target_sample_rate: sample_rate,
         };
 
@@ -797,7 +795,7 @@ impl SessionOrchestrator {
         let (started_tx, started_rx) =
             std::sync::mpsc::channel::<std::result::Result<(), String>>();
         let (capture_stop_tx, capture_stop_rx) = std::sync::mpsc::channel::<()>();
-        let cap_cfg_thread = cap_cfg.clone();
+        let cap_cfg_thread = cap_cfg;
         let capture_join = std::thread::Builder::new()
             .name("fono-live-capture".into())
             .spawn(move || {
@@ -855,10 +853,10 @@ impl SessionOrchestrator {
         // ---- Build the pump + LiveSession ------------------------
         let mut pump = crate::live::Pump::new(fono_audio::StreamConfig::default());
         let frame_rx = pump.take_receiver().context("take live frame receiver")?;
-        let language = if cfg.general.language == "auto" || cfg.general.language.is_empty() {
-            None
-        } else {
-            Some(cfg.general.language.clone())
+        let language = match cfg.general.languages.as_slice() {
+            [] => None,
+            [single] => Some(single.clone()),
+            _ => None,
         };
         let mut session =
             crate::live::LiveSession::new(streaming, sample_rate).with_language(language);
@@ -903,8 +901,8 @@ impl SessionOrchestrator {
         });
 
         info!(
-            "live-dictation started (mode={:?} sample_rate={} device={:?})",
-            mode, sample_rate, cap_cfg.input_device
+            "live-dictation started (mode={:?} sample_rate={})",
+            mode, sample_rate
         );
         self.pipeline_in_flight.store(true, Ordering::SeqCst);
         *slot = Some(LiveCaptureSession {
@@ -1007,6 +1005,11 @@ impl SessionOrchestrator {
         let raw = transcript.committed.trim().to_string();
         if raw.is_empty() {
             warn!("live-dictation: empty transcript after {capture_ms} ms");
+            // Empty-transcript microphone recovery hook (live path).
+            // Mirror of the batch hook at the `raw.is_empty()` site
+            // in `run_pipeline` — same dock-with-no-mic failure mode,
+            // same toast. Plan v2 Phase 1.
+            crate::audio_recovery::notify_empty_capture(capture_ms);
             if let Some(o) = session.overlay.as_ref() {
                 o.set_state(fono_overlay::OverlayState::Hidden);
             }
@@ -1239,6 +1242,14 @@ async fn run_pipeline(
     metrics.raw_chars = raw.chars().count();
     if raw.is_empty() {
         warn!("STT returned empty text — nothing to inject");
+        // Empty-transcript microphone recovery hook. When the user
+        // held the hotkey for >= 5 s and the STT still produced
+        // nothing, the most likely cause is a silent input device
+        // (typically: an external dock with a passive capture
+        // endpoint elected as the OS default source). Notify the
+        // user and point at the tray Microphone submenu / `fono use
+        // input` CLI. Plan v2 Phase 1.
+        crate::audio_recovery::notify_empty_capture(capture_ms);
         return PipelineOutcome::EmptyOrTooShort {
             duration_ms: capture_ms,
         };
@@ -1389,11 +1400,10 @@ async fn run_pipeline(
 }
 
 fn lang_for(config: &Config) -> Option<String> {
-    let l = &config.general.language;
-    if l.is_empty() || l == "auto" {
-        None
-    } else {
-        Some(l.clone())
+    match config.general.languages.as_slice() {
+        [] => None,
+        [single] => Some(single.clone()),
+        _ => None,
     }
 }
 
@@ -1519,10 +1529,12 @@ mod tests {
     #[test]
     fn lang_auto_returns_none() {
         let mut c = Config::default();
-        c.general.language = "auto".into();
+        c.general.languages.clear();
         assert!(lang_for(&c).is_none());
-        c.general.language = "ro".into();
+        c.general.languages = vec!["ro".into()];
         assert_eq!(lang_for(&c).as_deref(), Some("ro"));
+        c.general.languages = vec!["en".into(), "ro".into()];
+        assert!(lang_for(&c).is_none());
     }
 
     #[test]
