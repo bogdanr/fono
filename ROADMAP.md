@@ -14,14 +14,6 @@ The home page is [fono.page](https://fono.page).
 
 ## In progress
 
-### Smarter first-run setup
-
-The setup wizard will ask one question — *"Will you dictate only in English, or in
-multiple languages?"* — and then recommend the best on-device speech model your
-computer can comfortably run, with an honest accuracy estimate per language. English-only
-models are smaller and more accurate per megabyte, so English-only users get the right
-default automatically.
-
 ---
 
 ## Planned — next
@@ -100,6 +92,15 @@ gracefully.
 ## Shipped
 
 Newest first. Each entry says which release carried it.
+
+- **Smarter first-run setup.** The setup wizard now asks whether you dictate only in
+  English or multiple languages, then recommends the best on-device speech model your
+  hardware can comfortably run. Technical jargon (WER%, AVX2, Whisper) removed; plain
+  language hardware summary with a single-line accelerator description (e.g. "CPU only
+  (AVX2 + FMA) — fine for batch dictation; live mode best with tiny"). Model shortlist
+  capped at 3 choices; `medium` retired in favour of `large-v3-turbo`. Live-mode
+  recommendation calibrated against CPU-only vs. hardware-accelerated thresholds.
+  — *v0.3.5, 2026-04-29.*
 
 - **Configurable streaming cadence + 429 awareness.** Live preview cadence is now
   controlled by `interactive.streaming_interval` (seconds, default 1.0, valid range

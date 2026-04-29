@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5] — 2026-04-29
+
 ### Fixed
 
 - Whisper trailing-closer hallucinations ("Thank you", "Bye", "Thanks
@@ -679,7 +681,9 @@ feature and ships fully wired in v0.2.
 - Local LLM cleanup (Qwen / SmolLM) is opt-in / preview.
 - Real `winit + softbuffer` overlay window is a stub (event channel only).
 
-[Unreleased]: https://github.com/bogdanr/fono/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/bogdanr/fono/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/bogdanr/fono/compare/v0.3.4...v0.3.5
+[0.3.4]: https://github.com/bogdanr/fono/releases/tag/v0.3.4
 [0.3.3]: https://github.com/bogdanr/fono/releases/tag/v0.3.3
 [0.3.2]: https://github.com/bogdanr/fono/releases/tag/v0.3.2
 [0.3.1]: https://github.com/bogdanr/fono/releases/tag/v0.3.1
