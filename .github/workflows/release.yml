@@ -24,12 +24,10 @@ jobs:
   cloud-equivalence:
     name: Cloud STT equivalence (Groq)
     runs-on: ubuntu-latest
-    # Skip when:
-    #   * the GROQ_API_KEY repo secret is unset (forks; bootstrap tags
-    #     before the maintainer adds the key);
-    #   * the tag carries the `-no-cloud-gate` suffix (operator escape
-    #     hatch for "Groq is down" or non-STT security fixes).
-    if: ${{ secrets.GROQ_API_KEY != '' && !endsWith(github.ref, '-no-cloud-gate') }}
+    # The `secrets` context is not available in job-level if conditions,
+    # so only the tag-suffix escape hatch is checked here. The API-key
+    # presence check is handled inside the step below.
+    if: ${{ !endsWith(github.ref, '-no-cloud-gate') }}
     steps:
       - uses: actions/checkout@v5
 
@@ -54,6 +52,10 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           set -euo pipefail
+          if [ -z "${GROQ_API_KEY:-}" ]; then
+            echo "GROQ_API_KEY secret not set — skipping cloud equivalence gate."
+            exit 0
+          fi
           cargo run --release -p fono-bench --features equivalence -- \
             equivalence \
               --stt groq \
@@ -62,13 +64,14 @@ jobs:
               --no-legend
 
       - name: Diff against committed baseline
+        if: ${{ hashFiles('cloud-bench.json') != '' }}
         run: |
           python3 .github/scripts/diff-cloud-bench.py \
             cloud-bench.json \
             docs/bench/baseline-cloud-groq.json
 
       - name: Upload report (always, for debugging)
-        if: always()
+        if: ${{ always() && hashFiles('cloud-bench.json') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: cloud-bench-${{ github.ref_name }}
