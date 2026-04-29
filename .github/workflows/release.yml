@@ -29,9 +29,7 @@ jobs:
     #     before the maintainer adds the key);
     #   * the tag carries the `-no-cloud-gate` suffix (operator escape
     #     hatch for "Groq is down" or non-STT security fixes).
-    if: >-
-      ${{ secrets.GROQ_API_KEY != ''
-          && !endsWith(github.ref, '-no-cloud-gate') }}
+    if: ${{ secrets.GROQ_API_KEY != '' && !endsWith(github.ref, '-no-cloud-gate') }}
     steps:
       - uses: actions/checkout@v5
 
