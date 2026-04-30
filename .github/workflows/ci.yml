@@ -141,8 +141,9 @@ jobs:
             -w /work \
             -e CARGO_TERM_COLOR=always \
             -e RUST_BACKTRACE=1 \
+            -e PATH=/usr/local/cargo/bin:/usr/local/rustup/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
             rust:1.88-alpine \
-            sh -lc '
+            sh -c '
               set -eu
               apk add --no-cache \
                 bash build-base ca-certificates clang-dev cmake git linux-headers perl pkgconf
