@@ -145,6 +145,16 @@ jobs:
           sudo apt-get install -y -qq \
             build-essential clang cmake pkg-config libclang-dev \
             musl-tools musl-dev
+          # Ubuntu's musl-tools package provides x86_64-linux-musl-gcc
+          # (via musl-gcc) but not the matching g++ driver name that
+          # whisper.cpp's CMake probe asks for. Provide a small wrapper
+          # that keeps the musl specs file while using the system g++
+          # frontend for C++ sources.
+          sudo tee /usr/local/bin/x86_64-linux-musl-g++ >/dev/null <<'EOF'
+          #!/usr/bin/env sh
+          exec g++ -specs /usr/lib/x86_64-linux-musl/musl-gcc.specs "$@"
+          EOF
+          sudo chmod +x /usr/local/bin/x86_64-linux-musl-g++
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2

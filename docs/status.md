@@ -2,6 +2,20 @@
 
 Last updated: 2026-04-30
 
+## 2026-04-30 — CI musl size-budget toolchain fix
+
+The v0.3.7 Release workflow published successfully, but the `main` CI run failed
+in the `size-budget (musl, release-slim)` job because Ubuntu's `musl-tools`
+package provides `x86_64-linux-musl-gcc` but no matching
+`x86_64-linux-musl-g++` executable. The CI musl dependency setup now installs a
+small wrapper at `/usr/local/bin/x86_64-linux-musl-g++` so whisper.cpp's CMake
+compiler probe can resolve the C++ compiler name it requests.
+
+Verification: `git diff --check`, workflow YAML parsing via Python `yaml`, and
+`cargo fmt --all -- --check` pass on the current Linux host. Full musl
+size-budget validation remains CI-only on this host because the local NimbleX
+environment still lacks the musl Rust standard library and musl C toolchain.
+
 ## 2026-04-30 — v0.3.7 release prep
 
 Prepared the v0.3.7 release metadata: workspace and lockfile versions are now
