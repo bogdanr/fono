@@ -147,7 +147,10 @@ jobs:
               apk add --no-cache \
                 bash build-base ca-certificates clang-dev cmake git linux-headers perl pkgconf
               git config --global --add safe.directory /work
-              rustup component add rustfmt clippy
+              rustc --version
+              cargo --version
+              cargo fmt --version
+              cargo clippy --version
               ./tests/check.sh --size-budget --no-test
             '
 
