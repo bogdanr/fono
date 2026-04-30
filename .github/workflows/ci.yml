@@ -147,14 +147,23 @@ jobs:
             musl-tools musl-dev
           # Ubuntu's musl-tools package provides x86_64-linux-musl-gcc
           # (via musl-gcc) but not the matching g++ driver name that
-          # whisper.cpp's CMake probe asks for. Provide a small wrapper
-          # that keeps the musl specs file while using the system g++
-          # frontend for C++ sources.
+          # whisper.cpp's CMake probe asks for. Provide a wrapper that
+          # preserves the musl specs file and restores the libstdc++
+          # header search paths that the specs file's -nostdinc removes.
           sudo tee /usr/local/bin/x86_64-linux-musl-g++ >/dev/null <<'EOF'
           #!/usr/bin/env sh
-          exec g++ -specs /usr/lib/x86_64-linux-musl/musl-gcc.specs "$@"
+          set -eu
+          cxx_version="$(g++ -dumpversion)"
+          exec g++ \
+            -specs /usr/lib/x86_64-linux-musl/musl-gcc.specs \
+            -isystem "/usr/include/c++/${cxx_version}" \
+            -isystem "/usr/include/x86_64-linux-gnu/c++/${cxx_version}" \
+            -isystem "/usr/include/c++/${cxx_version}/backward" \
+            "$@"
           EOF
           sudo chmod +x /usr/local/bin/x86_64-linux-musl-g++
+          printf '#include <array>\nint main(){std::array<int, 1> a{1}; return a[0] != 1;}\n' \
+            | x86_64-linux-musl-g++ -std=gnu++17 -x c++ - -o /tmp/musl-cxx-smoke
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
