@@ -2,17 +2,36 @@
 //! Tray-icon integration. Phase 7 Task 7.1.
 //!
 //! When the `tray-backend` feature is enabled (default for the `fono`
-//! binary on Linux), this crate spawns a real system-tray icon on a
-//! dedicated thread. Without the feature, a no-op [`Tray`] keeps the code
-//! paths compiling for headless builds and cross-platform CI.
+//! binary on Linux), this crate spawns a real system-tray icon as a
+//! tokio task driving a pure-Rust StatusNotifierItem (SNI) D-Bus
+//! service via [`ksni`]. Without the feature, a no-op [`Tray`] keeps
+//! the code paths compiling for headless builds and cross-platform CI.
 //!
-//! UX features beyond a static menu:
+//! # No GTK, no shared libraries
+//!
+//! Earlier versions used `tray-icon`'s libappindicator backend, which
+//! dragged GTK3 + glib + cairo + pango + gio + gdk-pixbuf into the
+//! binary's `NEEDED` list. SNI is the protocol every modern desktop
+//! tray host already speaks (KDE Plasma, GNOME with the SNI shell
+//! extension, sway+waybar, hyprland+waybar, i3+i3status, xfce4-panel,
+//! lxqt-panel) — there's no reason to drag a toolkit through it.
+//! `ksni` talks SNI + `com.canonical.dbusmenu` over `zbus` directly,
+//! pure Rust, no C dependencies. Phase 2 Task 2.1 of
+//! `plans/2026-04-30-fono-single-binary-size-v1.md`.
+//!
+//! # UX features
 //!
 //! - **Recent transcriptions submenu** — the last `RECENT_SLOTS`
 //!   dictations are shown as clickable menu items. Clicking one fires
 //!   [`TrayAction::PasteHistory`] with the slot index (0 = newest); the
 //!   daemon then re-injects/copies that text. This is the clipit-style
 //!   workflow users asked for.
+//! - **STT / LLM backend submenus** — switch the active provider on
+//!   the fly; the active backend wears a leading "● " marker.
+//! - **Microphone submenu** — list Pulse/PipeWire input devices and
+//!   set default via the daemon.
+//! - **Update submenu entry** — appears only when the background
+//!   checker has detected a new release.
 
 use std::sync::{
     atomic::{AtomicU8, Ordering},
@@ -25,7 +44,7 @@ pub const RECENT_SLOTS: usize = 10;
 
 /// Provider that returns the most recent transcription labels (newest
 /// first) for display in the tray's "Recent" submenu. Called from the
-/// tray thread on a poll interval.
+/// tray task on a poll interval.
 pub type RecentProvider = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 
 /// Provider that returns `(stt_idx, llm_idx)` — indices into
@@ -43,8 +62,7 @@ pub type ActiveProvider = Arc<dyn Fn() -> (u8, u8) + Send + Sync>;
 /// Called on the same ~2 s poll as the recent/active providers.
 ///
 /// Convention:
-/// - `None` → "Check for updates" (always-clickable, kicks an
-///   on-demand check; equivalent to `fono update --check`).
+/// - `None` → entry is hidden.
 /// - `Some(label)` → e.g. "Update to v0.3.0" — clicking fires
 ///   [`TrayAction::ApplyUpdate`].
 pub type UpdateProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
@@ -82,9 +100,9 @@ pub enum TrayAction {
     /// Switch the active LLM backend. Index into the `llm_labels`
     /// slice passed to [`spawn`].
     UseLlm(u8),
-    /// User clicked the "Update to vX" / "Check for updates" entry.
-    /// The daemon handles this by running a check and (when available)
-    /// applying the update via `fono-update::apply_update`.
+    /// User clicked the "Update to vX" entry. The daemon handles
+    /// this by running a check and applying the update via
+    /// `fono-update::apply_update`.
     ApplyUpdate,
     /// Switch the active input device. The `u8` is an index into the
     /// device list returned by [`MicrophonesProvider`] at the time of
@@ -96,12 +114,13 @@ pub enum TrayAction {
     Quit,
 }
 
-/// Handle returned by [`Tray::spawn`]. Dropping it tears down the tray
-/// thread on a best-effort basis.
+/// Handle returned by [`spawn`]. Dropping it tears down the tray task
+/// on a best-effort basis (the underlying `mpsc` channel closes; the
+/// ksni service then exits at the next tick).
 pub struct Tray {
     shared_state: Arc<AtomicU8>,
-    #[allow(dead_code)] // only the real backend reads this
-    actions_rx_sentinel: (),
+    #[cfg(feature = "tray-backend")]
+    state_tx: Option<mpsc::UnboundedSender<TrayState>>,
 }
 
 impl Tray {
@@ -109,7 +128,9 @@ impl Tray {
     pub fn set_state(&self, state: TrayState) {
         self.shared_state.store(state as u8, Ordering::Relaxed);
         #[cfg(feature = "tray-backend")]
-        backend::request_redraw(state);
+        if let Some(tx) = self.state_tx.as_ref() {
+            let _ = tx.send(state);
+        }
     }
 
     /// Last state stored via [`Tray::set_state`]. Useful for tests.
@@ -123,7 +144,7 @@ impl Tray {
     }
 }
 
-/// Spawn the tray on a dedicated thread.
+/// Spawn the tray on the ambient tokio runtime.
 ///
 /// Returns `(handle, actions_rx)`. `actions_rx` yields [`TrayAction`]s the
 /// user clicked in the menu. If the feature is off (or init fails) the
@@ -138,6 +159,10 @@ impl Tray {
 /// * `active_provider` — invoked on the same poll; returns the indices
 ///   of the currently-active STT and LLM in the slices above. Used to
 ///   paint the active-marker (`●`) and migrate it on `Reload`.
+/// * `update_provider` — `Some(label)` shows / refreshes the "Update
+///   to vX" entry; `None` hides it.
+/// * `microphones_provider` — `(devices, active_idx)` for the
+///   Microphone submenu; empty list hides the submenu.
 #[allow(unused_variables, clippy::too_many_arguments)]
 pub fn spawn(
     tooltip: &str,
@@ -149,36 +174,45 @@ pub fn spawn(
     microphones_provider: MicrophonesProvider,
 ) -> (Tray, mpsc::UnboundedReceiver<TrayAction>) {
     let shared = Arc::new(AtomicU8::new(TrayState::Idle as u8));
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (action_tx, action_rx) = mpsc::unbounded_channel();
 
     #[cfg(feature = "tray-backend")]
     {
-        if let Err(e) = backend::spawn(
+        let (state_tx, state_rx) = mpsc::unbounded_channel::<TrayState>();
+        let started = backend::spawn(
             tooltip.to_string(),
-            Arc::clone(&shared),
-            tx,
+            action_tx,
+            state_rx,
             recent_provider,
             stt_labels,
             llm_labels,
             active_provider,
             update_provider,
             microphones_provider,
-        ) {
-            tracing::warn!("tray backend failed to start: {e:#}; continuing without tray");
-        }
+        );
+        let state_tx = if started { Some(state_tx) } else { None };
+        (
+            Tray {
+                shared_state: shared,
+                state_tx,
+            },
+            action_rx,
+        )
     }
 
-    (
-        Tray {
-            shared_state: shared,
-            actions_rx_sentinel: (),
-        },
-        rx,
-    )
+    #[cfg(not(feature = "tray-backend"))]
+    {
+        (
+            Tray {
+                shared_state: shared,
+            },
+            action_rx,
+        )
+    }
 }
 
 // -------------------------------------------------------------------------
-// Real backend (Linux / libappindicator via `tray-icon`).
+// Real backend (pure-Rust SNI via `ksni`).
 // -------------------------------------------------------------------------
 
 #[cfg(feature = "tray-backend")]
@@ -187,458 +221,417 @@ mod backend {
         ActiveProvider, MicrophonesProvider, RecentProvider, TrayAction, TrayState, UpdateProvider,
         RECENT_SLOTS,
     };
-    use anyhow::{Context, Result};
-    use std::sync::{
-        atomic::{AtomicU8, Ordering},
-        Arc, OnceLock,
+    use fono_core::notify::{self, Urgency};
+    use ksni::{
+        menu::{StandardItem, SubMenu},
+        Handle, MenuItem, ToolTip, TrayMethods,
     };
     use tokio::sync::mpsc;
-    use tray_icon::{
-        menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
-        TrayIconBuilder, TrayIconEvent,
-    };
 
-    struct MenuIds {
-        status: u32,
-        toggle: u32,
-        pause: u32,
-        config: u32,
-        quit: u32,
-        update: u32,
-        recent_slots: [u32; RECENT_SLOTS],
-        stt_slots: Vec<u32>,
-        llm_slots: Vec<u32>,
-        mic_slots: [u32; MIC_SLOTS],
+    const MISSING_WATCHER_NOTIFICATION_TIMEOUT_MS: u32 = 20_000;
+    const MISSING_WATCHER_NOTIFICATION_TITLE: &str = "Fono tray unavailable";
+    const MISSING_WATCHER_NOTIFICATION_BODY: &str = "No StatusNotifierWatcher found. Start a tray host, e.g. Waybar tray, KDE tray, xfce4-panel, or snixembed, then restart Fono.";
+
+    /// Microphone slots in the "Microphone" submenu. Pre-allocated for
+    /// the same reason as the STT/LLM lists: rebuilding causes flicker
+    /// on KDE/GNOME indicator hosts. Eight covers the common case
+    /// (laptop builtin + USB headset + dock + a second USB device).
+    const MIC_SLOTS: usize = 8;
+
+    /// Backing model for the SNI tray. ksni periodically queries this
+    /// (via the `Tray` trait methods) to repaint the icon and menu
+    /// when the desktop's tray host requests a refresh, so we keep
+    /// every UI input as a plain field and let the trait methods
+    /// transform them into menu items / icon pixmaps lazily.
+    struct KsniTray {
+        tooltip: String,
+        state: TrayState,
+        recent: Vec<String>,
+        stt_labels: Vec<String>,
+        llm_labels: Vec<String>,
+        active: (u8, u8),
+        update_label: Option<String>,
+        microphones: (Vec<String>, u8),
+        actions: mpsc::UnboundedSender<TrayAction>,
     }
 
-    static MENU_IDS: OnceLock<MenuIds> = OnceLock::new();
+    impl ksni::Tray for KsniTray {
+        fn id(&self) -> String {
+            // Unique-per-application id; keeping it stable across
+            // sessions so panel hosts can persist position / order.
+            "fono".into()
+        }
 
-    pub fn request_redraw(_state: TrayState) {
-        // The actual redraw happens on the tray (GTK) thread which polls
-        // the shared AtomicU8 every 50ms and calls TrayIcon::set_icon
-        // when the state changes. Nothing to do here — set_state has
-        // already updated the atomic.
+        fn title(&self) -> String {
+            status_label(self.state).to_string()
+        }
+
+        fn tool_tip(&self) -> ToolTip {
+            ToolTip {
+                title: self.tooltip.clone(),
+                description: status_label(self.state).into(),
+                ..Default::default()
+            }
+        }
+
+        fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+            vec![icon_for(self.state)]
+        }
+
+        // Left-click/status activation. Tray hosts that call the SNI
+        // `Activate` method (including snixembed) show the same status
+        // notification as the explicit menu action; right-click still
+        // opens the D-Bus menu through the host's normal ContextMenu
+        // path.
+        fn activate(&mut self, _x: i32, _y: i32) {
+            let _ = self.actions.send(TrayAction::ShowStatus);
+        }
+
+        fn menu(&self) -> Vec<MenuItem<Self>> {
+            build_menu(self)
+        }
     }
 
+    /// Spawn the SNI tray task. Returns `true` on success; on failure
+    /// the caller falls back to a "no tray, hotkeys still work" path.
+    /// Caller-side, success means the [`Tray`] handle gets a real
+    /// [`mpsc::UnboundedSender<TrayState>`]; failure means it gets
+    /// `None` and `set_state` becomes a no-op.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         tooltip: String,
-        shared: Arc<AtomicU8>,
         actions: mpsc::UnboundedSender<TrayAction>,
+        state_rx: mpsc::UnboundedReceiver<TrayState>,
         recent_provider: RecentProvider,
         stt_labels: Vec<String>,
         llm_labels: Vec<String>,
         active_provider: ActiveProvider,
         update_provider: UpdateProvider,
         microphones_provider: MicrophonesProvider,
-    ) -> Result<()> {
-        std::thread::Builder::new()
-            .name("fono-tray".into())
-            .spawn(move || {
-                if let Err(e) = run(
-                    &tooltip,
-                    shared,
-                    actions,
-                    recent_provider,
-                    stt_labels,
-                    llm_labels,
-                    active_provider,
-                    update_provider,
-                    microphones_provider,
-                ) {
-                    tracing::warn!("tray thread exited: {e:#}");
-                }
-            })
-            .context("spawn tray thread")?;
-        Ok(())
-    }
-
-    #[cfg(target_os = "linux")]
-    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-    fn run(
-        tooltip: &str,
-        shared: Arc<AtomicU8>,
-        actions: mpsc::UnboundedSender<TrayAction>,
-        recent_provider: RecentProvider,
-        stt_labels: Vec<String>,
-        llm_labels: Vec<String>,
-        active_provider: ActiveProvider,
-        update_provider: UpdateProvider,
-        microphones_provider: MicrophonesProvider,
-    ) -> Result<()> {
-        // tray-icon uses gtk on Linux and requires its main loop.
-        gtk::init().context("gtk::init() failed — is gtk+-3.0 installed?")?;
-        // libappindicator + GTK3 emit a benign but noisy
-        // `Gdk-CRITICAL: gdk_window_thaw_toplevel_updates: assertion ...
-        // freeze_count > 0 failed` during the indicator's first paint on
-        // KDE/StatusNotifier hosts. The tray still works correctly.
-        // Demote these GTK/GDK warnings to tracing::debug so they don't
-        // pollute the daemon's stderr at startup.
-        install_gtk_log_filters();
-
-        let (
-            menu,
-            status_item,
-            recent_items,
-            stt_items,
-            llm_items,
-            update_item,
-            mic_items,
-            mic_auto_item,
-        ) = build_menu(&stt_labels, &llm_labels)?;
-        let menu_for_updates = menu.clone();
-        let tray = TrayIconBuilder::new()
-            .with_tooltip(tooltip)
-            .with_menu(Box::new(menu))
-            .with_icon(icon_for(TrayState::Idle))
-            .build()
-            .context("TrayIconBuilder::build() failed — is libappindicator3 installed?")?;
-
-        // Forward menu click events into the action channel and repaint
-        // the icon when the FSM state changes. We poll the tray-icon
-        // crate's crossbeam channels and the shared state from a 50 ms
-        // timeout instead of `glib::idle_add_local`, which would re-fire
-        // immediately on every main-loop iteration and pin a CPU at 100%.
-        let mut last_state: u8 = TrayState::Idle as u8;
-        let mut last_recent: Vec<String> = Vec::new();
-        let mut last_active: (u8, u8) = (u8::MAX, u8::MAX);
-        let mut last_update_label: Option<String> = None;
-        let mut last_microphones: (Vec<String>, u8) = (Vec::new(), u8::MAX);
-        let mut update_present = false;
-        let mut tick: u32 = 0;
-        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-            while let Ok(ev) = MenuEvent::receiver().try_recv() {
-                if let Some(action) = MENU_IDS
-                    .get()
-                    .and_then(|ids| map_menu_event(ids, ev.id.0.parse::<u32>().unwrap_or(0)))
-                {
-                    let _ = actions.send(action);
-                }
-            }
-            while TrayIconEvent::receiver().try_recv().is_ok() {
-                // left-click etc. — ignored for now, menu handles it.
-            }
-            let cur = shared.load(Ordering::Relaxed);
-            if cur != last_state {
-                last_state = cur;
-                let st = decode_state(cur);
-                if let Err(e) = tray.set_icon(Some(icon_for(st))) {
-                    tracing::warn!("tray set_icon failed: {e:#}");
-                }
-                status_item.set_text(status_label(st));
-            }
-            // Refresh the Recent submenu and STT/LLM active markers
-            // every ~2 s. Cheap (history read + a single config snapshot
-            // read) but skip when nothing changed so we don't churn
-            // KDE/GNOME indicator state.
-            tick = tick.wrapping_add(1);
-            if tick % 40 == 0 {
-                let next = recent_provider();
-                if next != last_recent {
-                    update_recent(&recent_items, &next);
-                    last_recent = next;
-                }
-                let active = active_provider();
-                if active != last_active {
-                    update_active(&stt_items, &stt_labels, active.0);
-                    update_active(&llm_items, &llm_labels, active.1);
-                    last_active = active;
-                }
-                let upd = update_provider();
-                if upd != last_update_label {
-                    set_update_visible(
-                        &menu_for_updates,
-                        &update_item,
-                        &mut update_present,
-                        upd.as_deref(),
+    ) -> bool {
+        // We need to be inside a tokio runtime to spawn the ksni
+        // service; the daemon always is. Probe `Handle::try_current`
+        // and bail cleanly if not (tests / odd embedders).
+        if tokio::runtime::Handle::try_current().is_err() {
+            tracing::warn!("tray backend skipped: no current tokio runtime");
+            return false;
+        }
+        tokio::spawn(async move {
+            if let Err(e) = run(
+                tooltip,
+                actions,
+                state_rx,
+                recent_provider,
+                stt_labels,
+                llm_labels,
+                active_provider,
+                update_provider,
+                microphones_provider,
+            )
+            .await
+            {
+                if is_missing_status_notifier_watcher(&e) {
+                    notify_missing_status_notifier_watcher();
+                    tracing::warn!(
+                        "tray unavailable: no StatusNotifierWatcher is registered on the session bus; \
+                         start a tray host/watcher (for example KDE Plasma's tray, waybar with tray, \
+                         xfce4-panel, or snixembed) or run with --no-tray. Dictation and the overlay \
+                         continue without the tray icon."
                     );
-                    last_update_label = upd;
-                }
-                let mics = microphones_provider();
-                if mics != last_microphones {
-                    update_microphones(&mic_items, &mic_auto_item, &mics.0, mics.1);
-                    last_microphones = mics;
+                } else {
+                    tracing::warn!("tray task exited: {e:#}");
                 }
             }
-            glib::ControlFlow::Continue
         });
+        true
+    }
 
-        tracing::debug!("tray icon ready");
-        gtk::main();
+    fn notify_missing_status_notifier_watcher() {
+        notify::send(
+            MISSING_WATCHER_NOTIFICATION_TITLE,
+            MISSING_WATCHER_NOTIFICATION_BODY,
+            "dialog-error",
+            MISSING_WATCHER_NOTIFICATION_TIMEOUT_MS,
+            Urgency::Critical,
+        );
+    }
+
+    fn is_missing_status_notifier_watcher(err: &anyhow::Error) -> bool {
+        let msg = err.to_string();
+        msg.contains("org.kde.StatusNotifierWatcher") || msg.contains("StatusNotifierWatcher")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run(
+        tooltip: String,
+        actions: mpsc::UnboundedSender<TrayAction>,
+        mut state_rx: mpsc::UnboundedReceiver<TrayState>,
+        recent_provider: RecentProvider,
+        stt_labels: Vec<String>,
+        llm_labels: Vec<String>,
+        active_provider: ActiveProvider,
+        update_provider: UpdateProvider,
+        microphones_provider: MicrophonesProvider,
+    ) -> anyhow::Result<()> {
+        let model = KsniTray {
+            tooltip,
+            state: TrayState::Idle,
+            recent: Vec::new(),
+            stt_labels,
+            llm_labels,
+            active: (u8::MAX, u8::MAX),
+            update_label: None,
+            microphones: (Vec::new(), u8::MAX),
+            actions,
+        };
+
+        // `TrayMethods::spawn` connects to the session bus, registers
+        // with `org.kde.StatusNotifierWatcher`, and returns a handle.
+        // On hosts without a watcher (no DISPLAY, no D-Bus session
+        // bus, etc.) this errors immediately — we surface it as a
+        // warn! and let the rest of the daemon run unaffected.
+        let handle: Handle<KsniTray> = model
+            .spawn()
+            .await
+            .map_err(|e| anyhow::anyhow!("ksni::Tray::spawn failed: {e}"))?;
+
+        tracing::debug!("tray icon ready (SNI)");
+
+        // Poll providers every 2 seconds and push the diff into the
+        // ksni model. Cheap (history read + a config snapshot read)
+        // but skip when nothing changed so we don't churn KDE/GNOME
+        // indicator state.
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                Some(state) = state_rx.recv() => {
+                    handle.update(|t: &mut KsniTray| t.state = state).await;
+                }
+                _ = interval.tick() => {
+                    let recent = recent_provider();
+                    let active = active_provider();
+                    let upd = update_provider();
+                    let mics = microphones_provider();
+                    handle.update(move |t: &mut KsniTray| {
+                        if t.recent != recent { t.recent = recent; }
+                        if t.active != active { t.active = active; }
+                        if t.update_label != upd { t.update_label = upd; }
+                        if t.microphones != mics { t.microphones = mics; }
+                    }).await;
+                }
+                else => break,
+            }
+        }
         Ok(())
     }
 
-    /// Demote noisy GTK/GDK CRITICAL+WARNING log lines (notably the
-    /// libappindicator `gdk_window_thaw_toplevel_updates` assertion that
-    /// fires once at startup on KDE) to `tracing::debug!`. Only installed
-    /// on Linux where the GTK backend is in use.
-    #[cfg(target_os = "linux")]
-    fn install_gtk_log_filters() {
-        use glib::{log_set_handler, LogLevel, LogLevels};
-        // Install a handler per noisy domain. Passing `false` for both
-        // `fatal` and `recursion` matches g_log_set_handler defaults.
-        let levels = LogLevels::LEVEL_CRITICAL
-            | LogLevels::LEVEL_WARNING
-            | LogLevels::LEVEL_MESSAGE
-            | LogLevels::LEVEL_INFO;
-        for domain in ["Gdk", "Gtk", "GLib-GObject", "libappindicator-gtk3"] {
-            log_set_handler(Some(domain), levels, false, false, |dom, lvl, msg| {
-                let dom = dom.unwrap_or("?");
-                match lvl {
-                    LogLevel::Error | LogLevel::Critical | LogLevel::Warning => {
-                        tracing::debug!("{dom}: {msg}");
-                    }
-                    _ => tracing::trace!("{dom}: {msg}"),
+    #[allow(clippy::too_many_lines, clippy::vec_init_then_push)]
+    fn build_menu(t: &KsniTray) -> Vec<MenuItem<KsniTray>> {
+        let mut items: Vec<MenuItem<KsniTray>> = Vec::new();
+
+        // Status row (disabled, informational).
+        items.push(
+            StandardItem {
+                label: status_label(t.state).into(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+        );
+        items.push(MenuItem::Separator);
+
+        items.push(
+            StandardItem {
+                label: "Toggle recording  (F9)".into(),
+                activate: send_action(TrayAction::ToggleRecording),
+                ..Default::default()
+            }
+            .into(),
+        );
+        items.push(
+            StandardItem {
+                label: "Pause hotkeys".into(),
+                activate: send_action(TrayAction::Pause),
+                ..Default::default()
+            }
+            .into(),
+        );
+        items.push(MenuItem::Separator);
+
+        // Recent transcriptions submenu.
+        let mut recent_items: Vec<MenuItem<KsniTray>> = Vec::new();
+        if t.recent.is_empty() {
+            recent_items.push(
+                StandardItem {
+                    label: "(no transcriptions yet)".into(),
+                    enabled: false,
+                    ..Default::default()
                 }
-            });
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    #[allow(clippy::too_many_arguments)]
-    fn run(
-        tooltip: &str,
-        _shared: Arc<AtomicU8>,
-        _actions: mpsc::UnboundedSender<TrayAction>,
-        _recent_provider: RecentProvider,
-        _stt_labels: Vec<String>,
-        _llm_labels: Vec<String>,
-        _active_provider: ActiveProvider,
-        _update_provider: UpdateProvider,
-        _microphones_provider: MicrophonesProvider,
-    ) -> Result<()> {
-        let _tray = TrayIconBuilder::new()
-            .with_tooltip(tooltip)
-            .with_icon(icon_for(TrayState::Idle))
-            .build()
-            .context("TrayIconBuilder::build() failed")?;
-        loop {
-            std::thread::park();
-        }
-    }
-
-    type MenuParts = (
-        Menu,
-        MenuItem,
-        [MenuItem; RECENT_SLOTS],
-        Vec<MenuItem>,
-        Vec<MenuItem>,
-        MenuItem,
-        [MenuItem; MIC_SLOTS],
-        MenuItem,
-    );
-
-    /// Number of microphone slots in the tray "Microphone" submenu.
-    /// Pre-allocated for the same reason as the language slots: the
-    /// alternative is rebuilding the submenu on every poll, which
-    /// causes flicker on KDE/GNOME indicator hosts. Eight covers the
-    /// vast majority of desktops (laptop builtin + USB headset + dock
-    /// + maybe a second USB device) without scaling the menu height.
-    const MIC_SLOTS: usize = 8;
-
-    /// Position at which the update entry is inserted into the tray
-    /// menu when an upgrade is detected. Counts the items appended in
-    /// `build_menu` (status, sep, toggle, pause, sep, recent, stt, llm,
-    /// languages, microphone, sep, config) — the entry slots in just
-    /// before the final separator + Quit.
-    const UPDATE_INSERT_POS: usize = 12;
-
-    fn build_menu(stt_labels: &[String], llm_labels: &[String]) -> Result<MenuParts> {
-        let menu = Menu::new();
-        let status = MenuItem::new(status_label(TrayState::Idle), false, None);
-        let toggle = MenuItem::new("Toggle recording  (F9)", true, None);
-        let pause = MenuItem::new("Pause hotkeys", true, None);
-
-        // Recent transcriptions submenu — pre-allocate `RECENT_SLOTS`
-        // items so we can refresh labels in place rather than rebuilding
-        // the menu (which causes flicker on KDE/GNOME indicators).
-        let recent_submenu = Submenu::new("Recent transcriptions", true);
-        let recent_items: [MenuItem; RECENT_SLOTS] =
-            std::array::from_fn(|_| MenuItem::new("(empty)", false, None));
-        for it in &recent_items {
-            recent_submenu.append(it).ok();
-        }
-
-        // STT / LLM submenus — one MenuItem per backend label. The
-        // active item gets a leading "● " prefix; others get "  ".
-        // Prefix migration happens in `update_active` on every poll.
-        let stt_submenu = Submenu::new("STT backend", true);
-        let stt_items: Vec<MenuItem> = stt_labels
-            .iter()
-            .map(|s| MenuItem::new(format!("  {s}"), true, None))
-            .collect();
-        for it in &stt_items {
-            stt_submenu.append(it).ok();
-        }
-        let llm_submenu = Submenu::new("LLM backend", true);
-        let llm_items: Vec<MenuItem> = llm_labels
-            .iter()
-            .map(|s| MenuItem::new(format!("  {s}"), true, None))
-            .collect();
-        for it in &llm_items {
-            llm_submenu.append(it).ok();
-        }
-
-        // Microphone submenu. Pre-allocated `MIC_SLOTS` items get
-        // refreshed in place by `update_microphones` whenever the
-        // device list changes; `mic_auto` is an informational
-        // "Auto (system default)" entry — Fono no longer keeps an
-        // input-device override, so clicking it is a no-op (the
-        // ID is not bound to any TrayAction).
-        let mic_submenu = Submenu::new("Microphone", true);
-        let mic_auto = MenuItem::new("● Auto (system default)", false, None);
-        mic_submenu.append(&mic_auto).ok();
-        let _ = mic_submenu.append(&PredefinedMenuItem::separator());
-        let mic_items: [MenuItem; MIC_SLOTS] =
-            std::array::from_fn(|_| MenuItem::new("", false, None));
-        for it in &mic_items {
-            mic_submenu.append(it).ok();
-        }
-
-        let config = MenuItem::new("Edit config", true, None);
-        // The update entry is intentionally **not** appended here. The
-        // background checker injects it into the menu at runtime via
-        // `set_update_visible` only after a newer release is detected,
-        // so users never see a passive "Check for updates…" button.
-        let update = MenuItem::new("", true, None);
-        let quit = MenuItem::new("Quit", true, None);
-
-        menu.append(&status)?;
-        menu.append(&PredefinedMenuItem::separator())?;
-        menu.append(&toggle)?;
-        menu.append(&pause)?;
-        menu.append(&PredefinedMenuItem::separator())?;
-        menu.append(&recent_submenu)?;
-        menu.append(&stt_submenu)?;
-        menu.append(&llm_submenu)?;
-        menu.append(&mic_submenu)?;
-        menu.append(&PredefinedMenuItem::separator())?;
-        menu.append(&config)?;
-        menu.append(&PredefinedMenuItem::separator())?;
-        menu.append(&quit)?;
-
-        let recent_slots: [u32; RECENT_SLOTS] = std::array::from_fn(|i| id_of(&recent_items[i]));
-        let stt_slots: Vec<u32> = stt_items.iter().map(id_of).collect();
-        let llm_slots: Vec<u32> = llm_items.iter().map(id_of).collect();
-        let mic_slots: [u32; MIC_SLOTS] = std::array::from_fn(|i| id_of(&mic_items[i]));
-
-        let _ = MENU_IDS.set(MenuIds {
-            status: id_of(&status),
-            toggle: id_of(&toggle),
-            pause: id_of(&pause),
-            config: id_of(&config),
-            quit: id_of(&quit),
-            update: id_of(&update),
-            recent_slots,
-            stt_slots,
-            llm_slots,
-            mic_slots,
-        });
-        Ok((
-            menu,
-            status,
-            recent_items,
-            stt_items,
-            llm_items,
-            update,
-            mic_items,
-            mic_auto,
-        ))
-    }
-
-    /// Show or hide the tray's "Update to vX.Y.Z" entry based on the
-    /// background checker's verdict. The entry is added to the menu
-    /// only when an upgrade is available and removed otherwise so the
-    /// menu stays free of passive "Check for updates…" buttons.
-    fn set_update_visible(menu: &Menu, item: &MenuItem, present: &mut bool, label: Option<&str>) {
-        match (label, *present) {
-            (Some(text), true) => {
-                item.set_text(text);
-            }
-            (Some(text), false) => {
-                item.set_text(text);
-                item.set_enabled(true);
-                if let Err(e) = menu.insert(item, UPDATE_INSERT_POS) {
-                    tracing::warn!("tray: insert update item failed: {e:#}");
-                } else {
-                    *present = true;
-                }
-            }
-            (None, true) => {
-                if let Err(e) = menu.remove(item) {
-                    tracing::warn!("tray: remove update item failed: {e:#}");
-                } else {
-                    *present = false;
-                }
-            }
-            (None, false) => {}
-        }
-    }
-
-    fn update_recent(items: &[MenuItem; RECENT_SLOTS], labels: &[String]) {
-        for (i, item) in items.iter().enumerate() {
-            if let Some(label) = labels.get(i) {
-                item.set_text(format!("{}. {}", i + 1, truncate_label(label, 60)));
-                item.set_enabled(true);
-            } else {
-                item.set_text(if i == 0 {
-                    "(no transcriptions yet)"
-                } else {
-                    ""
-                });
-                item.set_enabled(false);
-            }
-        }
-    }
-
-    /// Refresh the Microphone submenu. Slot `i` displays
-    /// `devices[i]` (truncated for sanity) and is enabled when the
-    /// device exists; empty trailing slots are blanked + disabled.
-    /// `active_idx` is the index of the device the OS reports as
-    /// the current default, or `u8::MAX` when none of the listed
-    /// devices is currently default (the "Auto" row stays marked).
-    fn update_microphones(
-        items: &[MenuItem; MIC_SLOTS],
-        auto_item: &MenuItem,
-        devices: &[String],
-        active_idx: u8,
-    ) {
-        // Auto entry: marked active when no listed device is the
-        // OS default (e.g. before the first poll, or transient
-        // states between PA source switches).
-        let auto_active = active_idx == u8::MAX;
-        auto_item.set_text(if auto_active {
-            "● Auto (system default)"
+                .into(),
+            );
         } else {
-            "  Auto (system default)"
-        });
-
-        for (i, item) in items.iter().enumerate() {
-            if let Some(name) = devices.get(i) {
-                let is_active = u8::try_from(i).is_ok_and(|i_u8| i_u8 == active_idx);
-                let prefix = if is_active { "● " } else { "  " };
-                item.set_text(format!("{prefix}{}", truncate_label(name, 60)));
-                item.set_enabled(true);
-            } else {
-                item.set_text("");
-                item.set_enabled(false);
+            for (i, label) in t.recent.iter().take(RECENT_SLOTS).enumerate() {
+                let action = TrayAction::PasteHistory(i);
+                recent_items.push(
+                    StandardItem {
+                        label: format!("{}. {}", i + 1, truncate_label(label, 60)),
+                        activate: send_action(action),
+                        ..Default::default()
+                    }
+                    .into(),
+                );
             }
         }
+        items.push(
+            SubMenu {
+                label: "Recent transcriptions".into(),
+                submenu: recent_items,
+                ..Default::default()
+            }
+            .into(),
+        );
+
+        // STT backend submenu.
+        let stt_items: Vec<MenuItem<KsniTray>> = t
+            .stt_labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| {
+                let active = u8::try_from(i).is_ok_and(|i_u8| i_u8 == t.active.0);
+                let prefix = if active { "● " } else { "  " };
+                let idx_u8 = u8::try_from(i).unwrap_or(u8::MAX);
+                StandardItem {
+                    label: format!("{prefix}{label}"),
+                    activate: send_action(TrayAction::UseStt(idx_u8)),
+                    ..Default::default()
+                }
+                .into()
+            })
+            .collect();
+        items.push(
+            SubMenu {
+                label: "STT backend".into(),
+                submenu: stt_items,
+                ..Default::default()
+            }
+            .into(),
+        );
+
+        // LLM backend submenu.
+        let llm_items: Vec<MenuItem<KsniTray>> = t
+            .llm_labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| {
+                let active = u8::try_from(i).is_ok_and(|i_u8| i_u8 == t.active.1);
+                let prefix = if active { "● " } else { "  " };
+                let idx_u8 = u8::try_from(i).unwrap_or(u8::MAX);
+                StandardItem {
+                    label: format!("{prefix}{label}"),
+                    activate: send_action(TrayAction::UseLlm(idx_u8)),
+                    ..Default::default()
+                }
+                .into()
+            })
+            .collect();
+        items.push(
+            SubMenu {
+                label: "LLM backend".into(),
+                submenu: llm_items,
+                ..Default::default()
+            }
+            .into(),
+        );
+
+        // Microphone submenu — only when the daemon supplied at least
+        // one Pulse/PipeWire device. Empty list means we're on a
+        // cpal-only host; hide the menu entirely so we don't offer a
+        // switch we can't honour.
+        if !t.microphones.0.is_empty() {
+            let auto_active = t.microphones.1 == u8::MAX;
+            let mut mic_items: Vec<MenuItem<KsniTray>> = Vec::new();
+            mic_items.push(
+                StandardItem {
+                    label: if auto_active {
+                        "● Auto (system default)".into()
+                    } else {
+                        "  Auto (system default)".into()
+                    },
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+            mic_items.push(MenuItem::Separator);
+            for (i, name) in t.microphones.0.iter().take(MIC_SLOTS).enumerate() {
+                let active = u8::try_from(i).is_ok_and(|i_u8| i_u8 == t.microphones.1);
+                let prefix = if active { "● " } else { "  " };
+                let idx_u8 = u8::try_from(i).unwrap_or(u8::MAX);
+                mic_items.push(
+                    StandardItem {
+                        label: format!("{prefix}{}", truncate_label(name, 60)),
+                        activate: send_action(TrayAction::SetInputDevice(idx_u8)),
+                        ..Default::default()
+                    }
+                    .into(),
+                );
+            }
+            items.push(
+                SubMenu {
+                    label: "Microphone".into(),
+                    submenu: mic_items,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        items.push(MenuItem::Separator);
+
+        // Update entry — surfaced only when the background checker
+        // has detected a newer release. Hidden otherwise so users
+        // never see a passive "Check for updates…" button.
+        if let Some(label) = t.update_label.as_ref() {
+            items.push(
+                StandardItem {
+                    label: label.clone(),
+                    activate: send_action(TrayAction::ApplyUpdate),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+
+        items.push(
+            StandardItem {
+                label: "Edit config".into(),
+                activate: send_action(TrayAction::OpenConfig),
+                ..Default::default()
+            }
+            .into(),
+        );
+        items.push(MenuItem::Separator);
+        items.push(
+            StandardItem {
+                label: "Quit".into(),
+                activate: send_action(TrayAction::Quit),
+                ..Default::default()
+            }
+            .into(),
+        );
+
+        items
     }
 
-    /// Repaint a STT/LLM submenu so the active backend gets a leading
-    /// "● " marker and everything else gets two-spaces of padding (so
-    /// label widths stay consistent and click targets don't jump).
-    fn update_active(items: &[MenuItem], labels: &[String], active_idx: u8) {
-        for (i, item) in items.iter().enumerate() {
-            let label = labels.get(i).map_or_else(|| "?".to_string(), Clone::clone);
-            let prefix = if u8::try_from(i).is_ok_and(|i_u8| i_u8 == active_idx) {
-                "● "
-            } else {
-                "  "
-            };
-            item.set_text(format!("{prefix}{label}"));
-        }
+    /// Build a menu-item activate callback that fires `action` on the
+    /// tray's action channel. The closure ignores the `&mut KsniTray`
+    /// argument because every action is a pure outbound message — the
+    /// daemon owns the state machine, not the tray.
+    fn send_action(action: TrayAction) -> Box<dyn Fn(&mut KsniTray) + Send + Sync + 'static> {
+        Box::new(move |t: &mut KsniTray| {
+            let _ = t.actions.send(action);
+        })
     }
 
     fn truncate_label(s: &str, max_chars: usize) -> String {
@@ -662,89 +655,38 @@ mod backend {
         }
     }
 
-    fn decode_state(raw: u8) -> TrayState {
-        match raw {
-            1 => TrayState::Recording,
-            2 => TrayState::Processing,
-            3 => TrayState::Paused,
-            _ => TrayState::Idle,
-        }
-    }
-
-    fn id_of(item: &MenuItem) -> u32 {
-        item.id().0.parse::<u32>().unwrap_or(0)
-    }
-
-    fn map_menu_event(ids: &MenuIds, id: u32) -> Option<TrayAction> {
-        if id == ids.status {
-            return Some(TrayAction::ShowStatus);
-        }
-        if id == ids.toggle {
-            return Some(TrayAction::ToggleRecording);
-        }
-        if id == ids.pause {
-            return Some(TrayAction::Pause);
-        }
-        if id == ids.config {
-            return Some(TrayAction::OpenConfig);
-        }
-        if id == ids.quit {
-            return Some(TrayAction::Quit);
-        }
-        if id == ids.update {
-            return Some(TrayAction::ApplyUpdate);
-        }
-        for (i, slot_id) in ids.recent_slots.iter().enumerate() {
-            if id == *slot_id {
-                return Some(TrayAction::PasteHistory(i));
-            }
-        }
-        for (i, slot_id) in ids.stt_slots.iter().enumerate() {
-            if id == *slot_id {
-                return Some(TrayAction::UseStt(u8::try_from(i).unwrap_or(u8::MAX)));
-            }
-        }
-        for (i, slot_id) in ids.llm_slots.iter().enumerate() {
-            if id == *slot_id {
-                return Some(TrayAction::UseLlm(u8::try_from(i).unwrap_or(u8::MAX)));
-            }
-        }
-        for (i, slot_id) in ids.mic_slots.iter().enumerate() {
-            if id == *slot_id {
-                return Some(TrayAction::SetInputDevice(
-                    u8::try_from(i).unwrap_or(u8::MAX),
-                ));
-            }
-        }
-        None
-    }
-
-    /// Solid-colour 32x32 icon tinted by FSM state. Keeping the icon
-    /// generated in-code means we don't need a PNG at packaging time.
-    fn icon_for(state: TrayState) -> tray_icon::Icon {
-        const SIZE: u32 = 32;
+    /// Solid-colour 32x32 ARGB icon tinted by FSM state. Generated
+    /// in-code so we don't need a PNG at packaging time. SNI's
+    /// pixmap format is ARGB32 in network byte order (A, R, G, B);
+    /// not RGBA — the byte order is the one bit easy to get wrong.
+    fn icon_for(state: TrayState) -> ksni::Icon {
+        const SIZE: i32 = 32;
         let (r, g, b) = match state {
             TrayState::Idle => (0x3b, 0x82, 0xf6),       // blue
             TrayState::Recording => (0xef, 0x44, 0x44),  // red
             TrayState::Processing => (0xf5, 0x9e, 0x0b), // amber
             TrayState::Paused => (0x6b, 0x72, 0x80),     // grey
         };
-        let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-        let cx = SIZE as i32 / 2;
-        let cy = SIZE as i32 / 2;
-        let radius = (SIZE as i32 / 2) - 2;
-        for y in 0..SIZE as i32 {
-            for x in 0..SIZE as i32 {
+        let mut data = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+        let cx = SIZE / 2;
+        let cy = SIZE / 2;
+        let radius = (SIZE / 2) - 2;
+        for y in 0..SIZE {
+            for x in 0..SIZE {
                 let dx = x - cx;
                 let dy = y - cy;
                 let inside = dx * dx + dy * dy <= radius * radius;
                 if inside {
-                    rgba.extend_from_slice(&[r, g, b, 0xff]);
+                    data.extend_from_slice(&[0xff, r, g, b]);
                 } else {
-                    rgba.extend_from_slice(&[0, 0, 0, 0]);
+                    data.extend_from_slice(&[0, 0, 0, 0]);
                 }
             }
         }
-        tray_icon::Icon::from_rgba(rgba, SIZE, SIZE).expect("valid icon bytes")
+        ksni::Icon {
+            width: SIZE,
+            height: SIZE,
+            data,
+        }
     }
 }

@@ -241,6 +241,7 @@ async fn configure_local(
             ..Default::default()
         },
         cloud: None,
+        wyoming: None,
         prompts: std::collections::HashMap::new(),
     };
 
@@ -327,6 +328,7 @@ async fn configure_mixed(
                 ..Default::default()
             },
             cloud: None,
+            wyoming: None,
             prompts: std::collections::HashMap::new(),
         };
     } else {

@@ -1,15 +1,29 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! cpal-based capture with ring-buffer + soft/hard recording caps.
+//! Audio capture with ring-buffer + soft/hard recording caps.
+//!
+//! Linux release builds use a process-backed PulseAudio/PipeWire path
+//! (`parec`) so the Fono binary does not link ALSA/libasound. The cpal
+//! implementation remains available behind the `cpal-backend` feature for
+//! non-Linux targets and explicit bare-ALSA Linux builds.
 
+#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+use std::io::Read;
+#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
+#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Sample, SampleFormat};
+use anyhow::{Context, Result};
 use tracing::{debug, warn};
 
+#[cfg(feature = "cpal-backend")]
 use crate::resample::Resampler;
+#[cfg(feature = "cpal-backend")]
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(feature = "cpal-backend")]
+use cpal::{Sample, SampleFormat};
 
 /// Target rate fed to whisper. Non-negotiable.
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
@@ -77,31 +91,31 @@ impl RecordingBuffer {
     }
 }
 
-/// Capture orchestrator. Owns the `cpal` stream and a shared buffer.
+/// Capture orchestrator. Owns the platform stream/process and a shared buffer.
 pub struct AudioCapture {
     cfg: CaptureConfig,
 }
 
-/// RAII handle — dropping it stops the stream.
+/// RAII handle — dropping it stops capture.
 pub struct CaptureHandle {
-    _stream: cpal::Stream,
+    _backend: CaptureBackendHandle,
     pub buffer: Arc<Mutex<RecordingBuffer>>,
 }
 
 /// RAII handle for a forwarder-driven capture stream. Dropping it stops
-/// the cpal stream. Differs from [`CaptureHandle`] in that it does not
-/// own a [`RecordingBuffer`] — every PCM slice produced by the cpal
-/// callback is pushed straight through the user-supplied forwarder.
-///
-/// This is the realtime-push path used by the live-dictation pipeline
-/// (Slice B1 / R10.x): the cpal callback resamples mono f32 to
-/// `target_sample_rate` and invokes `forward(&[f32])` directly, so
-/// audio reaches the streaming pump at hardware cadence (~10 ms at
-/// 16 kHz / 160 sample buffers) rather than via a 30 ms-poll mutex
-/// drain. See [`AudioCapture::start_with_forwarder`].
+/// capture. Differs from [`CaptureHandle`] in that it does not own a
+/// [`RecordingBuffer`] — every PCM slice produced by the backend is pushed
+/// straight through the user-supplied forwarder.
 pub struct CaptureStreamHandle {
-    _stream: cpal::Stream,
+    _backend: CaptureBackendHandle,
 }
+
+#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+type CaptureBackendHandle = ProcessCapture;
+#[cfg(feature = "cpal-backend")]
+type CaptureBackendHandle = cpal::Stream;
+#[cfg(all(not(target_os = "linux"), not(feature = "cpal-backend")))]
+struct CaptureBackendHandle;
 
 impl AudioCapture {
     #[must_use]
@@ -112,207 +126,246 @@ impl AudioCapture {
     /// Begin capture. Returns a handle whose `buffer` fills with resampled
     /// f32 mono samples until the handle is dropped.
     pub fn start(&self) -> Result<CaptureHandle> {
-        let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or_else(|| anyhow!("no default input device"))?;
-
-        let supported = device
-            .default_input_config()
-            .context("default_input_config failed")?;
-        debug!(
-            "capture: device={:?} rate={} ch={} fmt={:?}",
-            device.name(),
-            supported.sample_rate().0,
-            supported.channels(),
-            supported.sample_format()
-        );
-
-        let device_rate = supported.sample_rate().0;
-        let channels = supported.channels() as usize;
         let target_rate = self.cfg.target_sample_rate;
-
         let cap_samples = (HARD_CAP.as_secs() as usize) * (target_rate as usize);
-
         let buffer = Arc::new(Mutex::new(RecordingBuffer::default()));
         let buffer_cb = Arc::clone(&buffer);
+        let backend = self.start_backend(move |pcm: &[f32]| {
+            if let Ok(mut b) = buffer_cb.lock() {
+                b.push_slice(pcm, cap_samples);
+            }
+        })?;
 
-        let mut resampler = if device_rate == target_rate {
-            None
-        } else {
-            Some(Resampler::new(device_rate, target_rate)?)
-        };
-
-        let err_cb = |e| warn!("cpal stream error: {e}");
-
-        let fmt = supported.sample_format();
-        let config: cpal::StreamConfig = supported.into();
-
-        let stream = match fmt {
-            SampleFormat::F32 => device.build_input_stream(
-                &config,
-                move |data: &[f32], _| {
-                    let mono = to_mono_f32(data, channels);
-                    let resampled = match resampler.as_mut() {
-                        Some(r) => r.process(&mono),
-                        None => mono,
-                    };
-                    if let Ok(mut b) = buffer_cb.lock() {
-                        b.push_slice(&resampled, cap_samples);
-                    }
-                },
-                err_cb,
-                None,
-            )?,
-            SampleFormat::I16 => device.build_input_stream(
-                &config,
-                move |data: &[i16], _| {
-                    let f: Vec<f32> = data.iter().map(|s| s.to_sample::<f32>()).collect();
-                    let mono = to_mono_f32(&f, channels);
-                    let resampled = match resampler.as_mut() {
-                        Some(r) => r.process(&mono),
-                        None => mono,
-                    };
-                    if let Ok(mut b) = buffer_cb.lock() {
-                        b.push_slice(&resampled, cap_samples);
-                    }
-                },
-                err_cb,
-                None,
-            )?,
-            SampleFormat::U16 => device.build_input_stream(
-                &config,
-                move |data: &[u16], _| {
-                    let f: Vec<f32> = data.iter().map(|s| s.to_sample::<f32>()).collect();
-                    let mono = to_mono_f32(&f, channels);
-                    let resampled = match resampler.as_mut() {
-                        Some(r) => r.process(&mono),
-                        None => mono,
-                    };
-                    if let Ok(mut b) = buffer_cb.lock() {
-                        b.push_slice(&resampled, cap_samples);
-                    }
-                },
-                err_cb,
-                None,
-            )?,
-            other => return Err(anyhow!("unsupported cpal sample format {other:?}")),
-        };
-
-        stream.play()?;
         Ok(CaptureHandle {
-            _stream: stream,
+            _backend: backend,
             buffer,
         })
     }
 
-    /// Begin capture wired to a real-time PCM forwarder. Each cpal
-    /// data-callback invocation resamples its input to mono f32 at
-    /// [`CaptureConfig::target_sample_rate`] and then calls
-    /// `forward(&[f32])` synchronously on the audio thread. Differs
-    /// from [`Self::start`] in that no [`RecordingBuffer`] sits between
-    /// the device and the consumer — useful for the live-dictation
-    /// streaming pipeline which wants hardware-cadence push semantics.
+    /// Begin capture wired to a real-time PCM forwarder. Each backend callback
+    /// yields mono f32 at [`CaptureConfig::target_sample_rate`] and invokes
+    /// `forward(&[f32])` synchronously on the capture thread.
     ///
-    /// The forwarder MUST be cheap. The cpal callback runs on a
-    /// real-time audio thread; the typical pattern is to
-    /// `crossbeam_channel::Sender::try_send` into a bounded SPSC and
-    /// drop on overflow rather than block. The existing
-    /// [`crate::resample::Resampler`] is currently allocation-bearing
-    /// (it constructs short-lived `Vec`s per process); this matches
-    /// the pre-existing [`Self::start`] callback shape, so it's no
-    /// worse than the polled-buffer drain it replaces. Future work may
-    /// move the resample step onto a hop thread.
-    pub fn start_with_forwarder<F>(&self, mut forward: F) -> Result<CaptureStreamHandle>
+    /// The forwarder MUST be cheap. The typical pattern is to
+    /// `crossbeam_channel::Sender::try_send` into a bounded SPSC and drop on
+    /// overflow rather than block.
+    pub fn start_with_forwarder<F>(&self, forward: F) -> Result<CaptureStreamHandle>
     where
         F: FnMut(&[f32]) + Send + 'static,
     {
-        let host = cpal::default_host();
-        let device = host
-            .default_input_device()
-            .ok_or_else(|| anyhow!("no default input device"))?;
+        Ok(CaptureStreamHandle {
+            _backend: self.start_backend(forward)?,
+        })
+    }
 
-        let supported = device
-            .default_input_config()
-            .context("default_input_config failed")?;
-        debug!(
-            "capture(forwarder): device={:?} rate={} ch={} fmt={:?}",
-            device.name(),
-            supported.sample_rate().0,
-            supported.channels(),
-            supported.sample_format()
-        );
+    #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+    fn start_backend<F>(&self, forward: F) -> Result<CaptureBackendHandle>
+    where
+        F: FnMut(&[f32]) + Send + 'static,
+    {
+        start_process_capture(self.cfg.target_sample_rate, forward)
+    }
 
-        let device_rate = supported.sample_rate().0;
-        let channels = supported.channels() as usize;
-        let target_rate = self.cfg.target_sample_rate;
+    #[cfg(feature = "cpal-backend")]
+    fn start_backend<F>(&self, forward: F) -> Result<CaptureBackendHandle>
+    where
+        F: FnMut(&[f32]) + Send + 'static,
+    {
+        start_cpal_capture(self.cfg.target_sample_rate, forward)
+    }
 
-        let mut resampler = if device_rate == target_rate {
-            None
-        } else {
-            Some(Resampler::new(device_rate, target_rate)?)
-        };
-
-        let err_cb = |e| warn!("cpal stream error: {e}");
-        let fmt = supported.sample_format();
-        let config: cpal::StreamConfig = supported.into();
-
-        let stream = match fmt {
-            SampleFormat::F32 => device.build_input_stream(
-                &config,
-                move |data: &[f32], _| {
-                    let mono = to_mono_f32(data, channels);
-                    let resampled = match resampler.as_mut() {
-                        Some(r) => r.process(&mono),
-                        None => mono,
-                    };
-                    if !resampled.is_empty() {
-                        forward(&resampled);
-                    }
-                },
-                err_cb,
-                None,
-            )?,
-            SampleFormat::I16 => device.build_input_stream(
-                &config,
-                move |data: &[i16], _| {
-                    let f: Vec<f32> = data.iter().map(|s| s.to_sample::<f32>()).collect();
-                    let mono = to_mono_f32(&f, channels);
-                    let resampled = match resampler.as_mut() {
-                        Some(r) => r.process(&mono),
-                        None => mono,
-                    };
-                    if !resampled.is_empty() {
-                        forward(&resampled);
-                    }
-                },
-                err_cb,
-                None,
-            )?,
-            SampleFormat::U16 => device.build_input_stream(
-                &config,
-                move |data: &[u16], _| {
-                    let f: Vec<f32> = data.iter().map(|s| s.to_sample::<f32>()).collect();
-                    let mono = to_mono_f32(&f, channels);
-                    let resampled = match resampler.as_mut() {
-                        Some(r) => r.process(&mono),
-                        None => mono,
-                    };
-                    if !resampled.is_empty() {
-                        forward(&resampled);
-                    }
-                },
-                err_cb,
-                None,
-            )?,
-            other => return Err(anyhow!("unsupported cpal sample format {other:?}")),
-        };
-
-        stream.play()?;
-        Ok(CaptureStreamHandle { _stream: stream })
+    #[cfg(all(not(target_os = "linux"), not(feature = "cpal-backend")))]
+    fn start_backend<F>(&self, _forward: F) -> Result<CaptureBackendHandle>
+    where
+        F: FnMut(&[f32]) + Send + 'static,
+    {
+        Err(anyhow::anyhow!(
+            "audio capture on this platform requires the fono-audio/cpal-backend feature"
+        ))
     }
 }
 
+#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+struct ProcessCapture {
+    child: Child,
+    reader: Option<JoinHandle<()>>,
+}
+
+#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+impl Drop for ProcessCapture {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+fn start_process_capture<F>(target_rate: u32, mut forward: F) -> Result<ProcessCapture>
+where
+    F: FnMut(&[f32]) + Send + 'static,
+{
+    let mut child = spawn_parec(target_rate)?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("parec did not expose stdout for PCM capture")?;
+
+    let reader = thread::Builder::new()
+        .name("fono-parec-capture".into())
+        .spawn(move || {
+            let mut buf = [0_u8; 8192];
+            let mut pending = Vec::<u8>::new();
+            loop {
+                match stdout.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        pending.extend_from_slice(&buf[..n]);
+                        let even_len = pending.len() & !1;
+                        if even_len == 0 {
+                            continue;
+                        }
+                        let pcm = s16le_to_f32(&pending[..even_len]);
+                        pending.drain(..even_len);
+                        if !pcm.is_empty() {
+                            forward(&pcm);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("parec capture read failed: {e}");
+                        break;
+                    }
+                }
+            }
+        })
+        .context("spawn parec capture reader thread")?;
+
+    Ok(ProcessCapture {
+        child,
+        reader: Some(reader),
+    })
+}
+
+#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+fn spawn_parec(target_rate: u32) -> Result<Child> {
+    debug!("capture: spawning parec raw s16le mono at {target_rate} Hz");
+    Command::new("parec")
+        .args([
+            "--raw",
+            "--format=s16le",
+            "--channels=1",
+            &format!("--rate={target_rate}"),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| {
+            "spawn parec for PulseAudio/PipeWire capture failed; install PulseAudio/PipeWire \
+             client tools or build with fono-audio/cpal-backend for bare ALSA"
+        })
+}
+
+#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+fn s16le_to_f32(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / i16::MAX as f32)
+        .collect()
+}
+
+#[cfg(feature = "cpal-backend")]
+fn start_cpal_capture<F>(target_rate: u32, mut forward: F) -> Result<cpal::Stream>
+where
+    F: FnMut(&[f32]) + Send + 'static,
+{
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .ok_or_else(|| anyhow::anyhow!("no default input device"))?;
+
+    let supported = device
+        .default_input_config()
+        .context("default_input_config failed")?;
+    debug!(
+        "capture(cpal): device={:?} rate={} ch={} fmt={:?}",
+        device.name(),
+        supported.sample_rate().0,
+        supported.channels(),
+        supported.sample_format()
+    );
+
+    let device_rate = supported.sample_rate().0;
+    let channels = supported.channels() as usize;
+
+    let mut resampler = if device_rate == target_rate {
+        None
+    } else {
+        Some(Resampler::new(device_rate, target_rate)?)
+    };
+
+    let err_cb = |e| warn!("cpal stream error: {e}");
+    let fmt = supported.sample_format();
+    let config: cpal::StreamConfig = supported.into();
+
+    let stream = match fmt {
+        SampleFormat::F32 => device.build_input_stream(
+            &config,
+            move |data: &[f32], _| {
+                let mono = to_mono_f32(data, channels);
+                let resampled = match resampler.as_mut() {
+                    Some(r) => r.process(&mono),
+                    None => mono,
+                };
+                if !resampled.is_empty() {
+                    forward(&resampled);
+                }
+            },
+            err_cb,
+            None,
+        )?,
+        SampleFormat::I16 => device.build_input_stream(
+            &config,
+            move |data: &[i16], _| {
+                let f: Vec<f32> = data.iter().map(|s| s.to_sample::<f32>()).collect();
+                let mono = to_mono_f32(&f, channels);
+                let resampled = match resampler.as_mut() {
+                    Some(r) => r.process(&mono),
+                    None => mono,
+                };
+                if !resampled.is_empty() {
+                    forward(&resampled);
+                }
+            },
+            err_cb,
+            None,
+        )?,
+        SampleFormat::U16 => device.build_input_stream(
+            &config,
+            move |data: &[u16], _| {
+                let f: Vec<f32> = data.iter().map(|s| s.to_sample::<f32>()).collect();
+                let mono = to_mono_f32(&f, channels);
+                let resampled = match resampler.as_mut() {
+                    Some(r) => r.process(&mono),
+                    None => mono,
+                };
+                if !resampled.is_empty() {
+                    forward(&resampled);
+                }
+            },
+            err_cb,
+            None,
+        )?,
+        other => return Err(anyhow::anyhow!("unsupported cpal sample format {other:?}")),
+    };
+
+    stream.play()?;
+    Ok(stream)
+}
+
+#[cfg(any(test, feature = "cpal-backend"))]
 /// Collapse `n`-channel interleaved f32 to mono by averaging channels.
 fn to_mono_f32(data: &[f32], channels: usize) -> Vec<f32> {
     if channels <= 1 {
@@ -349,15 +402,20 @@ mod tests {
         assert_eq!(out, vec![2.0, 3.0]);
     }
 
-    /// Synthetic cpal-callback stand-in: drive a forwarder closure 100x
-    /// with deterministic samples and assert every sample arrives in
-    /// order, exactly once. This exercises the contract that
-    /// [`AudioCapture::start_with_forwarder`] gives its caller — that
-    /// the forwarder is invoked synchronously from each callback with
-    /// resampled mono f32 — without requiring a real cpal device.
-    /// (The inner mono+resample plumbing is covered by
-    /// [`mono_averages_channels`] and [`crate::resample::tests`]
-    /// respectively.)
+    #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+    #[test]
+    fn s16le_conversion_maps_samples() {
+        let pcm = s16le_to_f32(&[0, 0, 0xff, 0x7f, 0x00, 0x80]);
+        assert!(pcm[0].abs() < f32::EPSILON);
+        assert!((pcm[1] - 1.0).abs() < 0.000_1);
+        assert!((pcm[2] + 1.000_03).abs() < 0.000_1);
+    }
+
+    /// Synthetic callback stand-in: drive a forwarder closure 100x with
+    /// deterministic samples and assert every sample arrives in order,
+    /// exactly once. This exercises the contract that
+    /// [`AudioCapture::start_with_forwarder`] gives its caller without
+    /// requiring a real audio device.
     #[test]
     fn forwarder_receives_every_callback_in_order() {
         let collected = Arc::new(Mutex::new(Vec::<f32>::new()));
@@ -366,9 +424,6 @@ mod tests {
             collected_cb.lock().unwrap().extend_from_slice(pcm);
         };
 
-        // Stand in for cpal: 100 invocations of a 4-sample buffer,
-        // each carrying a monotonically-increasing index so we can
-        // verify both ordering and exact-once delivery.
         for i in 0..100u32 {
             let base = (i * 4) as f32;
             let buf = [base, base + 1.0, base + 2.0, base + 3.0];

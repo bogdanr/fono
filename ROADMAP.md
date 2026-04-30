@@ -13,17 +13,46 @@ The home page is [fono.page](https://fono.page).
 
 | ![Up next](https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge) | ![On the horizon](https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge) | ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge) |
 |:---|:---|:---|
-| **[Automatic translation](#automatic-translation)**<br>Speak in any language, type in another — any pair, per-app rules, batch and live parity. | **[Network inference](#network-inference)**<br>Stream audio from a thin client to a powerful LAN box; near-zero client resources. | **Silent-dock recovery + PulseAudio mic**<br>3-second empty-transcript toast; tray Microphone submenu via pactl; config purge. ![v0.3.6](https://img.shields.io/badge/v0.3.6-blue?style=flat-square) |
-| **[Auto-update polish](#polish-the-auto-update)**<br>Finishing touches on `fono update`. | **[Whisper protocol](#whisper-protocol-support)**<br>Drop-in client or server for existing faster-whisper / whisper.cpp deployments. | **Streaming cadence controls**<br>Fine-tune live preview rate; 429-aware backoff. ![v0.3.3](https://img.shields.io/badge/v0.3.3-blue?style=flat-square) |
-| | **[Wake-word activation](#wake-word-activation)**<br>Say the magic word — Fono wakes and starts dictating. No hotkey, no hands. | **Language self-correction**<br>Cloud STT fixes its own wrong-language mistakes in-session. ![v0.3.1](https://img.shields.io/badge/v0.3.1-blue?style=flat-square) |
-| | **[Hover-context injection](#hover-context-injection)** *(experimental)*<br>Terminal hovered → shell prompts. Code editor hovered → identifier casing. | |
-| | **[REST API + MCP server](#local-rest-api--mcp-server)**<br>Scripts and AI coding assistants drive Fono over HTTP. | |
+| **[Network inference + Wyoming + autodiscovery](#network-inference)**<br>Speak Wyoming to interop with Home Assistant / faster-whisper. WebSocket-based Fono protocol so a browser can be a client too. mDNS auto-populates LAN servers in the tray menu — zero config. | **[Wake-word activation](#wake-word-activation)**<br>Say the magic word — Fono wakes and starts dictating. No hotkey, no hands. | **Wyoming + mDNS foundations**<br>Wyoming STT client/server, LAN discovery, pure-Rust SNI tray, and size-budget prep. ![v0.3.7](https://img.shields.io/badge/v0.3.7-blue?style=flat-square) |
+| **[Automatic translation](#automatic-translation)**<br>Speak in any language, type in another — any pair, per-app rules, batch and live parity. | **[Hover-context injection](#hover-context-injection)** *(experimental)*<br>Terminal hovered → shell prompts. Code editor hovered → identifier casing. | **Silent-dock recovery + PulseAudio mic**<br>3-second empty-transcript toast; tray Microphone submenu via pactl; config purge. ![v0.3.6](https://img.shields.io/badge/v0.3.6-blue?style=flat-square) |
+| **[Auto-update polish](#polish-the-auto-update)**<br>Finishing touches on `fono update`. | **[REST API + MCP server](#local-rest-api--mcp-server)**<br>Scripts and AI coding assistants drive Fono over HTTP. | **Streaming cadence controls**<br>Fine-tune live preview rate; 429-aware backoff. ![v0.3.3](https://img.shields.io/badge/v0.3.3-blue?style=flat-square) |
 | | **[Better Wayland hotkeys](#better-wayland-hotkeys)**<br>Auto-register via the `GlobalShortcuts` portal when available. | |
 | | **[macOS + Windows](#macos-and-windows)**<br>Native platform integrations. | |
+| | **[Audio visualisation overlay](#audio-visualisation-overlay)**<br>Waveform bars, oscilloscope, or breathing pulse while you dictate. Signal-level VU bar during live dictation. GUI builds only. | |
 
 ---
 
 ## Up next
+
+### Network inference
+
+> Your old laptop, your tablet, your phone, your browser tab — all get first-class
+> dictation because your powerful machine does the thinking for all of them.
+
+Run the Fono server on your desktop; every other machine on your LAN automatically
+sees it in the tray menu and uses it with one click. No host:port to type, no config
+file to edit. The thin client streams audio over the LAN; the server runs Whisper and
+the LLM cleanup. The result lands at the cursor on the client using near-zero CPU and
+RAM — even on a ten-year-old laptop. Every byte stays on your private network; nothing
+touches the cloud unless you explicitly configure a cloud provider on the server.
+
+Three protocols, one experience:
+
+- **[Wyoming](https://github.com/OHF-Voice/wyoming)** — the open standard for voice
+  services. Fono speaks it as both client and server, so any existing
+  faster-whisper / whisper.cpp / Piper / openWakeWord container drops in as a Fono
+  backend, and conversely any Home Assistant satellite, Rhasspy, or Wyoming-compatible
+  consumer can drive Fono's local Whisper.
+- **Fono-native over WebSocket** — covers the parts Wyoming has no event types for
+  (LLM cleanup, history mirror, app-context routing for hover-context rules). Built on
+  WebSocket so a future browser-based Fono client is a small JavaScript bundle, not a
+  protocol redesign.
+- **mDNS / DNS-SD autodiscovery** — both protocols announce themselves on the LAN.
+  Discovered servers appear automatically in the tray STT and LLM submenus alongside
+  Local and Cloud. Click a row → Fono switches to that server. Restart the daemon →
+  it rediscovers everything fresh; no discovery toggle required.
+
+Full design: [`plans/2026-04-29-2026-04-29-client-server-wyoming-fono-and-mdns-v2.md`](plans/2026-04-29-2026-04-29-client-server-wyoming-fono-and-mdns-v2.md).
 
 ### Automatic translation
 
@@ -51,26 +80,6 @@ gracefully.
 ---
 
 ## On the horizon
-
-### Network inference
-
-> Your old laptop, your tablet, your thin client — all get first-class dictation because
-> your powerful machine does the thinking for all of them.
-
-Run the Fono server on your desktop; install a featherweight Fono client on every other
-machine on your local network. The client streams raw audio over the LAN; the server
-runs Whisper and the LLM cleanup. The result lands at the cursor on the client using
-near-zero CPU and RAM — even on a ten-year-old laptop. Every byte stays on your private
-network; nothing touches the cloud unless you explicitly configure a cloud provider on
-the server.
-
-### Whisper protocol support
-
-As a companion to network inference, Fono will speak the Whisper server protocol so it
-can act as a drop-in replacement for, or thin client of, any existing
-faster-whisper / whisper.cpp server deployment on your network. If you already have a
-GPU machine running a Whisper endpoint, Fono on your other machines will just point at
-it.
 
 ### Wake-word activation
 
@@ -111,11 +120,41 @@ setup.
 Native integrations for both platforms: menu-bar app and signed `.dmg` on macOS;
 system-tray app and native installer on Windows.
 
+### Audio visualisation overlay
+
+> See your voice, not just the tray icon.
+
+*GUI builds only — not available in server or headless deployments.*
+
+Two companion features for the overlay panel, both opt-in:
+
+- **Standalone waveform overlay** (when live-dictation mode is off). The bottom-centre
+  panel appears as soon as you press the hotkey and shows a real-time audio visualisation
+  until the transcription finishes. Three styles, user-selectable via `[overlay].style`:
+  - **`bars`** — a scrolling bar chart; bars glow brighter at higher amplitude.
+  - **`oscilloscope`** — a connected-line waveform drawn from raw PCM samples at ~60 fps.
+  - **`pulse`** — a single breathing circle whose radius and glow track your voice level.
+- **Interactive signal bar** (when live-dictation mode is on). A narrow vertical VU bar on
+  the right edge of the live-dictation panel shows real-time microphone signal level at a
+  glance — so you can see whether your voice is too quiet without interrupting the
+  transcript. Enabled by default (`[overlay].volume_bar = true`), opt-out.
+
+Full implementation plan: `plans/2026-04-29-waveform-overlay-v2.md`.
+
 ---
 
 ## Shipped
 
 Newest first.
+
+- ![v0.3.7](https://img.shields.io/badge/v0.3.7-2026--04--30-blue?style=flat-square)
+  **Wyoming + mDNS network foundations and binary-size prep.** Fono can now use
+  Wyoming-compatible STT servers on the LAN and host its own Wyoming listener when
+  enabled. mDNS/DNS-SD discovery tracks Wyoming and Fono peers in-memory and exposes
+  them through IPC and `fono discover`. The tray backend moved to pure-Rust SNI via
+  `ksni`, default Linux audio no longer pulls ALSA into the main build, and the
+  release checks now include size/dependency guardrails for the 20 MiB static-musl
+  target.
 
 - ![v0.3.6](https://img.shields.io/badge/v0.3.6-2026--04--29-blue?style=flat-square)
   **Silent-dock auto-recovery + PulseAudio-first microphone.** When a 3+ second
@@ -217,5 +256,6 @@ Newest first.
 [v0.3.1]: https://github.com/bogdanr/fono/releases/tag/v0.3.1
 [v0.3.2]: https://github.com/bogdanr/fono/releases/tag/v0.3.2
 [v0.3.3]: https://github.com/bogdanr/fono/releases/tag/v0.3.3
-[v0.3.6]: https://github.com/bogdanr/fono/releases/tag/v0.3.6
 [v0.3.5]: https://github.com/bogdanr/fono/releases/tag/v0.3.5
+[v0.3.6]: https://github.com/bogdanr/fono/releases/tag/v0.3.6
+[v0.3.7]: https://github.com/bogdanr/fono/releases/tag/v0.3.7

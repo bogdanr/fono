@@ -52,6 +52,21 @@ pub struct Config {
     /// runtime when the feature is compiled in.
     #[serde(default)]
     pub interactive: Interactive,
+
+    /// LAN-server settings. Slice 3 of the network plan. When
+    /// `[server.wyoming].enabled = true`, the daemon hosts a
+    /// Wyoming-protocol STT server on the LAN bound to the active
+    /// `Arc<dyn SpeechToText>`. Off by default — Fono is a desktop
+    /// dictation tool first, a network service second.
+    #[serde(default)]
+    pub server: Server,
+
+    /// LAN-discovery (mDNS) settings. Discovery browsing is always on
+    /// when the daemon starts successfully; servers advertise themselves
+    /// automatically when their `[server.*].enabled` block is true.
+    /// This block is only for cosmetic mDNS metadata overrides.
+    #[serde(default, skip_serializing_if = "Network::is_default")]
+    pub network: Network,
 }
 
 impl Default for Config {
@@ -69,6 +84,8 @@ impl Default for Config {
             inject: Inject::default(),
             update: Update::default(),
             interactive: Interactive::default(),
+            server: Server::default(),
+            network: Network::default(),
         }
     }
 }
@@ -202,6 +219,12 @@ pub struct Stt {
     pub local: SttLocal,
     #[serde(default)]
     pub cloud: Option<SttCloud>,
+    /// LAN Wyoming server (e.g. `wyoming-faster-whisper`, another
+    /// `fono serve wyoming` instance, Rhasspy). Optional — populated
+    /// either by `fono use stt wyoming --uri …` or by clicking a
+    /// discovered peer in the tray menu (Slice 4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wyoming: Option<SttWyoming>,
     /// Optional initial prompts keyed by BCP-47 alpha-2 language code
     /// (e.g. `"en"`, `"ro"`). Sent to Whisper as `initial_prompt`
     /// (local) / `prompt` (cloud) when the resolved language matches a
@@ -228,6 +251,10 @@ pub enum SttBackend {
     Speechmatics,
     Google,
     Nemotron,
+    /// Wyoming-protocol speech-to-text server on the LAN
+    /// (`wyoming-faster-whisper`, `fono serve wyoming`, Rhasspy, etc.).
+    /// Configure via `[stt.wyoming]`.
+    Wyoming,
 }
 
 impl Default for SttBackend {
@@ -268,6 +295,26 @@ pub struct SttCloud {
     pub provider: String,
     pub api_key_ref: String,
     pub model: String,
+}
+
+/// `[stt.wyoming]` — coordinates of a Wyoming-protocol STT server on
+/// the LAN. Slice 2 of the network plan. The URI accepts
+/// `tcp://host:port`, bare `host:port`, or just `host` (default port
+/// 10300).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SttWyoming {
+    /// `tcp://host:port`, `host:port`, or `host`.
+    pub uri: String,
+    /// Optional model hint (`transcribe.name` on the wire). Empty =
+    /// server picks default.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    /// Optional pre-shared bearer token reference (resolved through
+    /// `secrets.toml` / env). Empty = no auth (Wyoming v1 has no
+    /// in-band auth; Fono will gain an extension event in Slice 5).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub auth_token_ref: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -507,6 +554,78 @@ impl Default for Update {
             auto_check: true,
             channel: "stable".into(),
         }
+    }
+}
+
+/// LAN-server settings. Slice 3 of
+/// `plans/2026-04-29-2026-04-29-client-server-wyoming-fono-and-mdns-v2.md`.
+///
+/// Holds the `[server.wyoming]` block today; gains `[server.fono]` in
+/// Slice 6 (the WebSocket-based Fono-native server). All flags are
+/// off by default — Fono only listens on a network socket if the user
+/// explicitly opts in.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Server {
+    /// Wyoming-protocol STT server. Hosts the active
+    /// `Arc<dyn SpeechToText>` so Home Assistant satellites and other
+    /// Wyoming peers can route inference through this daemon.
+    pub wyoming: ServerWyoming,
+}
+
+/// `[server.wyoming]` — coordinates of the LAN Wyoming server. The
+/// listener is **only** spawned when `enabled = true`. `bind` is the
+/// exposure control: keep the default loopback address for local-only
+/// serving, set `0.0.0.0` / `::` for all interfaces, or set a specific
+/// interface address to serve only that network.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ServerWyoming {
+    /// Master switch. Default `false`.
+    pub enabled: bool,
+    /// Bind address. Default `"127.0.0.1"` (loopback only). Set to
+    /// `"0.0.0.0"` to accept LAN peers on every interface, or to a
+    /// specific interface address (`"192.168.1.5"`) to bind one NIC.
+    pub bind: String,
+    /// TCP port. Default `10300` (the de-facto Wyoming port).
+    pub port: u16,
+    /// Optional pre-shared bearer token reference, resolved through
+    /// `secrets.toml` / env. Empty = no auth (Wyoming v1 has no in-band
+    /// auth; the Fono-native protocol gains it in Slice 5).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub auth_token_ref: String,
+}
+
+impl Default for ServerWyoming {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: "127.0.0.1".to_string(),
+            port: 10_300,
+            auth_token_ref: String::new(),
+        }
+    }
+}
+
+/// `[network]` — optional mDNS / DNS-SD metadata overrides. Discovery
+/// browsing is always enabled while the daemon is running. Advertising is
+/// automatic for enabled `[server.*]` blocks, so there is no user-facing
+/// discovery on/off switch.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Network {
+    /// Friendly instance-name override. Empty (default) ⇒ derive from
+    /// `hostname` at startup (`fono-<hostname>`). mDNS guarantees
+    /// uniqueness per service type per LAN even when several hosts
+    /// pick the same friendly name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instance_name: String,
+}
+
+impl Network {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
     }
 }
 
@@ -937,6 +1056,10 @@ mod tests {
             "deprecated scalar must not be serialised: {raw}"
         );
         assert!(raw.contains("languages = ["));
+        assert!(
+            !raw.contains("[network]"),
+            "default discovery settings must not be serialized as user-facing knobs: {raw}"
+        );
         let reloaded = Config::load(&path).unwrap();
         assert_eq!(
             reloaded.general.languages,

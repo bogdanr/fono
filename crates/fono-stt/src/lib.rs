@@ -22,6 +22,8 @@ pub mod groq_streaming;
 pub mod openai;
 #[cfg(feature = "whisper-local")]
 pub mod whisper_local;
+#[cfg(feature = "wyoming")]
+pub mod wyoming;
 
 #[cfg(feature = "streaming")]
 pub use factory::build_streaming_stt;

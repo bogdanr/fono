@@ -444,6 +444,15 @@ impl SessionOrchestrator {
         Arc::clone(&self.stt.read().expect("stt lock poisoned"))
     }
 
+    /// Public snapshot of the active STT backend. Used by the LAN
+    /// Wyoming server (Slice 3 of the network plan) to obtain a fresh
+    /// `Arc` per accepted connection so `Reload`-driven backend swaps
+    /// are tracked without restarting the listener.
+    #[must_use]
+    pub fn stt_snapshot(&self) -> Arc<dyn SpeechToText> {
+        self.current_stt()
+    }
+
     fn current_llm(&self) -> Option<Arc<dyn TextFormatter>> {
         self.llm.read().expect("llm lock poisoned").clone()
     }

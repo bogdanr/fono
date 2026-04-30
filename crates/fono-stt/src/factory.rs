@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use fono_core::config::{General, Stt, SttBackend, SttCloud};
+use fono_core::config::{General, Stt, SttBackend, SttCloud, SttWyoming};
 use fono_core::locale::detect_os_languages;
 use fono_core::providers::stt_key_env;
 use fono_core::Secrets;
@@ -106,9 +106,10 @@ pub fn build_stt(
         SttBackend::Local => build_local(cfg, whisper_models_dir, languages, prompts),
         SttBackend::Groq => build_groq(cfg, secrets, languages, prompts, cloud_rerun),
         SttBackend::OpenAI => build_openai(cfg, secrets, languages, prompts, cloud_rerun),
+        SttBackend::Wyoming => build_wyoming(cfg, secrets, languages),
         other => Err(anyhow!(
             "STT backend {other:?} is not yet implemented in this build; \
-             pick `groq`, `openai`, or `local` (rebuild with `--features whisper-local` \
+             pick `groq`, `openai`, `wyoming`, or `local` (rebuild with `--features whisper-local` \
              for `local`)"
         )),
     }
@@ -262,6 +263,46 @@ fn build_openai(
 ) -> Result<Arc<dyn SpeechToText>> {
     Err(anyhow!(
         "OpenAI STT not compiled in (enable the `openai` feature on `fono-stt`)"
+    ))
+}
+
+#[cfg(feature = "wyoming")]
+fn build_wyoming(
+    cfg: &Stt,
+    secrets: &Secrets,
+    languages: Vec<String>,
+) -> Result<Arc<dyn SpeechToText>> {
+    let wy: &SttWyoming = cfg.wyoming.as_ref().ok_or_else(|| {
+        anyhow!(
+            "wyoming STT selected but `[stt.wyoming]` is missing — run \
+             `fono use stt wyoming --uri tcp://host:10300` or pick a \
+             discovered peer from the tray menu"
+        )
+    })?;
+    if wy.uri.trim().is_empty() {
+        return Err(anyhow!(
+            "wyoming STT selected but `[stt.wyoming].uri` is empty — set it to a \
+             URL like `tcp://kitchen-pc.local:10300`"
+        ));
+    }
+    let token = if wy.auth_token_ref.trim().is_empty() {
+        None
+    } else {
+        secrets.resolve(&wy.auth_token_ref)
+    };
+    let mut backend = crate::wyoming::WyomingStt::from_uri(&wy.uri)?
+        .with_languages(languages)
+        .with_auth_token(token);
+    if !wy.model.trim().is_empty() {
+        backend = backend.with_model(wy.model.clone());
+    }
+    Ok(Arc::new(backend))
+}
+
+#[cfg(not(feature = "wyoming"))]
+fn build_wyoming(_: &Stt, _: &Secrets, _: Vec<String>) -> Result<Arc<dyn SpeechToText>> {
+    Err(anyhow!(
+        "Wyoming STT not compiled in (enable the `wyoming` feature on `fono-stt`)"
     ))
 }
 

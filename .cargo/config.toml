@@ -1,28 +1,70 @@
 # SPDX-License-Identifier: GPL-3.0-only
 #
-# Workspace-wide cargo config. The link-arg below resolves the
-# `whisper-rs-sys` × `llama-cpp-sys-2` static-ggml symbol collision:
-# both crates statically build their own copy of ggml and the linker
-# would otherwise abort with "multiple definition of ggml_*". Both
-# bundled ggml versions are pinned in lockstep with their parent
-# crates and are sourced from the same upstream (ggerganov/ggml),
-# which makes them ABI-compatible — `--allow-multiple-definition`
-# tells the GNU linker to silently keep the first copy and discard
-# the second. This is the lightest-touch fix that lets us ship one
-# static binary with both local STT (whisper.cpp) and local LLM
-# cleanup (llama.cpp), per
-# `plans/2026-04-27-shared-ggml-static-binary-v1.md`.
+# Workspace-wide cargo config. Three concerns are encoded here:
 #
-# We scope the flag to Linux + Windows GNU targets where it is well
-# defined; macOS uses `ld64` which has its own duplicate-symbol
-# semantics (default = warn, not error), so the flag is unnecessary
-# there. MSVC's `link.exe` ignores duplicate COMDATs by default.
+# 1. Duplicate-ggml resolution (legacy, retiring under Phase 1 Task 1.2 of
+#    `plans/2026-04-30-fono-single-binary-size-v1.md`). Both
+#    `whisper-rs-sys` and `llama-cpp-sys-2` statically build their own copy
+#    of ggml; without the link flag below GNU ld aborts with "multiple
+#    definition of ggml_*". `--allow-multiple-definition` tells ld to keep
+#    the first copy and discard the second. Both ggml builds are pinned
+#    upstream to the same `ggerganov/ggml` family so the surviving copy is
+#    ABI-compatible. This is the lightest-touch fix, recorded in ADR 0018.
+#    It will be removed once we land source-level shared ggml (Task 1.2).
+#
+# 2. Dead-code elimination flags (Phase 1 Task 1.3 of the same plan).
+#    `-ffunction-sections -fdata-sections` on the C/C++ side combined with
+#    `-Wl,--gc-sections,--as-needed` on the linker line lets ld drop unused
+#    arch kernels (AVX-512 / AMX / etc.) and helper functions that ggml,
+#    whisper.cpp, and llama.cpp ship by default. Estimated saving: 1–2 MB
+#    of `.text` after LTO. `--as-needed` further drops unused `NEEDED`
+#    entries that intermediate linkage might otherwise pin.
+#
+# 3. Static C++/OpenMP runtime on ship builds (Phase 2 Task 2.3 of the same
+#    plan). The actual `libstdc++` / `libgomp` linkage is controlled by the
+#    `llama-cpp-2/static-stdcxx` and `llama-cpp-2/static-openmp` features in
+#    `Cargo.toml`; those make the sys crate emit `static=stdc++` and
+#    `static=gomp` in the correct place on the final link line. The musl
+#    rustflags below only keep linker GC/as-needed enabled and add the generic
+#    GCC runtime static flag for toolchains that honour it.
+#
+# We scope the flags conservatively — Linux GNU + Linux musl + Windows
+# GNU. macOS uses ld64 (different duplicate-symbol semantics, no
+# --gc-sections); MSVC's link.exe ignores duplicate COMDATs by default.
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))']
-rustflags = ["-C", "link-arg=-Wl,--allow-multiple-definition"]
+rustflags = [
+    "-C", "link-arg=-Wl,--allow-multiple-definition",
+    "-C", "link-arg=-Wl,--gc-sections",
+    "-C", "link-arg=-Wl,--as-needed",
+]
 
 [target.'cfg(all(target_os = "linux", target_env = "musl"))']
-rustflags = ["-C", "link-arg=-Wl,--allow-multiple-definition"]
+rustflags = [
+    "-C", "link-arg=-Wl,--allow-multiple-definition",
+    "-C", "link-arg=-Wl,--gc-sections",
+    "-C", "link-arg=-Wl,--as-needed",
+    # Keep GCC helper routines static when the musl toolchain supports it.
+    # C++ stdlib and OpenMP static linkage come from the sys-crate features
+    # in `Cargo.toml`, not from late `link-arg` ordering here.
+    "-C", "link-arg=-static-libgcc",
+]
 
 [target.'cfg(all(target_os = "windows", target_env = "gnu"))']
-rustflags = ["-C", "link-arg=-Wl,--allow-multiple-definition"]
+rustflags = [
+    "-C", "link-arg=-Wl,--allow-multiple-definition",
+    "-C", "link-arg=-Wl,--gc-sections",
+]
+
+# `-Os -ffunction-sections -fdata-sections` for the C/C++ compiles run by
+# `whisper-rs-sys` and `llama-cpp-sys-2` build scripts. Setting them via
+# `[env]` so they apply to every cmake/cc invocation in the workspace
+# without each sys crate's `build.rs` having to opt in.
+#
+# `-Os` trades ~5 % runtime perf for ~10 % code size on whisper.cpp /
+# llama.cpp; the autovectorised hot kernels are explicitly opted into
+# higher opt-levels by ggml's CMakeLists, so this only shrinks the
+# scaffolding around them.
+[env]
+CFLAGS = "-Os -ffunction-sections -fdata-sections"
+CXXFLAGS = "-Os -ffunction-sections -fdata-sections"

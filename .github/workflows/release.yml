@@ -113,11 +113,25 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
-            build-essential clang cmake pkg-config libasound2-dev libclang-dev \
-            libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
+            build-essential clang cmake pkg-config libclang-dev \
+            libxdo-dev
 
       - name: Build (native)
         run: cargo build --profile release-slim --target ${{ matrix.target }} -p fono
+
+      - name: Verify Linux binary has no audio/OpenMP runtime deps
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release-slim/${BIN_NAME}"
+          needed="$(readelf -d "${bin}" | grep 'NEEDED' || true)"
+          if grep -E 'lib(asound|gomp)\.so' <<<"${needed}"; then
+            echo "Unexpected linked runtime dependency in ${bin}:"
+            echo "${needed}"
+            exit 1
+          fi
+          echo "${needed}"
 
       - name: Stage release binary + internal staging tarball
         shell: bash

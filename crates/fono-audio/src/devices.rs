@@ -3,11 +3,11 @@
 //!
 //! On Linux desktops where `AudioStack::detect()` returns `PulseAudio`
 //! or `PipeWire` (the Pulse compat layer), enumeration is delegated to
-//! the audio server via [`crate::pulse::list_pulse_sources`]. The cpal
-//! branch in this module is the fallback for `Unknown` hosts:
-//! macOS, Windows, and bare-ALSA Linux without any user-session audio
-//! server. See `crates/fono-audio/src/pulse.rs` for the parse-and-
-//! delegate model.
+//! the audio server via [`crate::pulse::list_pulse_sources`]. The optional
+//! cpal branch is only for explicit `cpal-backend` builds on `Unknown`
+//! hosts: macOS, Windows, and bare-ALSA Linux without any user-session
+//! audio server. See `crates/fono-audio/src/pulse.rs` for the
+//! parse-and-delegate model.
 //!
 //! Filtering: monitor / loopback / HDMI / S/PDIF capture endpoints are
 //! common decoys on bare-ALSA Linux (HDMI sinks register a passive
@@ -19,6 +19,7 @@
 //! [`crate::pulse::list_pulse_sources`], so the heuristic doesn't need
 //! to fire there.
 
+#[cfg(feature = "cpal-backend")]
 use cpal::traits::{DeviceTrait, HostTrait};
 
 /// Which audio backend produced this row, and the backend-specific
@@ -71,10 +72,11 @@ pub fn list_input_devices() -> Vec<InputDevice> {
     }
 }
 
-/// Bare-cpal enumeration. Used only on the `Unknown` audio-stack
-/// branch (macOS / Windows / pure-ALSA Linux without Pulse or
-/// PipeWire). On Pulse / PipeWire systems we never call this — the
-/// audio server is the authority on what's a microphone.
+/// Bare-cpal enumeration. Used only on explicit `cpal-backend` builds
+/// for the `Unknown` audio-stack branch (macOS / Windows / pure-ALSA
+/// Linux without Pulse or PipeWire). On Pulse / PipeWire systems we never
+/// call this — the audio server is the authority on what's a microphone.
+#[cfg(feature = "cpal-backend")]
 #[must_use]
 fn enumerate_cpal_inputs() -> Vec<InputDevice> {
     let host = cpal::default_host();
@@ -100,6 +102,14 @@ fn enumerate_cpal_inputs() -> Vec<InputDevice> {
         });
     }
     out
+}
+
+/// Default release builds do not include cpal, so `Unknown` hosts report no
+/// switchable inputs instead of linking ALSA/libasound into the binary.
+#[cfg(not(feature = "cpal-backend"))]
+#[must_use]
+fn enumerate_cpal_inputs() -> Vec<InputDevice> {
+    Vec::new()
 }
 
 /// Heuristic: does this device look like a real microphone (vs an

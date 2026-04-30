@@ -13,17 +13,17 @@ repository.workspace = true
 workspace = true
 
 [features]
-# tray-icon pulls a large dependency tree; opt-in.
+# `ksni` is light (zbus only, no GTK), but it's still optional so a
+# library consumer that doesn't want a tray surface (e.g. the
+# `fono-server`-style headless invocation, or unit tests) can build
+# `fono-tray` as a no-op. Default off; the top-level `fono` binary
+# enables `tray-backend` via its own `tray` feature.
 default = []
-tray-backend = ["dep:tray-icon", "dep:gtk", "dep:glib"]
+tray-backend = ["dep:ksni"]
 
 [dependencies]
 fono-core = { path = "../fono-core" }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
-tray-icon = { workspace = true, optional = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-gtk = { version = "0.18", optional = true }
-glib = { version = "0.18", optional = true }
+ksni = { workspace = true, optional = true }

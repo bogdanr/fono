@@ -76,6 +76,11 @@ fono-overlay = { path = "../fono-overlay" }
 fono-ipc = { path = "../fono-ipc" }
 fono-download = { path = "../fono-download" }
 fono-update = { path = "../fono-update" }
+# LAN servers (Wyoming today; mDNS + Fono-native land in Slices 4–6).
+# Default-on so `fono serve wyoming` works in the standard build; can
+# be disabled by slim builds via `default-features = false`.
+fono-net = { path = "../fono-net", features = ["discovery"] }
+mdns-sd = { workspace = true }
 
 anyhow = { workspace = true }
 tracing = { workspace = true }

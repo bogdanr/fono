@@ -27,6 +27,7 @@
 
 #![allow(clippy::suboptimal_flops, clippy::branches_sharing_code)]
 
+use std::io;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -88,7 +89,8 @@ pub struct RealOverlay;
 impl RealOverlay {
     pub fn spawn() -> std::io::Result<OverlayHandle> {
         let (tx, rx) = channel::<OverlayCmd>();
-        let (proxy_tx, proxy_rx) = std::sync::mpsc::channel();
+        let (proxy_tx, proxy_rx) =
+            std::sync::mpsc::channel::<Result<winit::event_loop::EventLoopProxy<()>, String>>();
         let join = std::thread::Builder::new()
             .name("fono-overlay".into())
             .spawn(move || {
@@ -96,13 +98,23 @@ impl RealOverlay {
                     tracing::warn!("overlay: event loop ended with error: {e:#}");
                 }
             })?;
-        let proxy = proxy_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .ok();
+        let proxy = match proxy_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(Ok(proxy)) => proxy,
+            Ok(Err(msg)) => {
+                let _ = join.join();
+                return Err(io::Error::other(msg));
+            }
+            Err(e) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("overlay event loop did not become ready within 2s: {e}"),
+                ));
+            }
+        };
         Ok(OverlayHandle {
             inner: Arc::new(HandleInner {
                 tx,
-                proxy: Mutex::new(proxy),
+                proxy: Mutex::new(Some(proxy)),
                 join: Mutex::new(Some(join)),
             }),
         })
@@ -405,7 +417,7 @@ fn target_height(n_lines: usize) -> f32 {
 #[allow(clippy::items_after_statements, clippy::too_many_lines)]
 fn run_event_loop(
     rx: std::sync::mpsc::Receiver<OverlayCmd>,
-    proxy_tx: std::sync::mpsc::Sender<winit::event_loop::EventLoopProxy<()>>,
+    proxy_tx: std::sync::mpsc::Sender<Result<winit::event_loop::EventLoopProxy<()>, String>>,
 ) -> Result<(), String> {
     use std::num::NonZeroU32;
     use winit::application::ApplicationHandler;
@@ -430,16 +442,23 @@ fn run_event_loop(
             }
             builder
                 .build()
-                .map_err(|e| format!("EventLoop::with_user_event().build(): {e}"))?
+                .map_err(|e| format!("EventLoop::with_user_event().build(): {e}"))
         }
         #[cfg(not(target_os = "linux"))]
         {
             EventLoop::<()>::with_user_event()
                 .build()
-                .map_err(|e| format!("EventLoop::with_user_event().build(): {e}"))?
+                .map_err(|e| format!("EventLoop::with_user_event().build(): {e}"))
         }
     };
-    let _ = proxy_tx.send(event_loop.create_proxy());
+    let event_loop = match event_loop {
+        Ok(event_loop) => event_loop,
+        Err(msg) => {
+            let _ = proxy_tx.send(Err(msg.clone()));
+            return Err(msg);
+        }
+    };
+    let _ = proxy_tx.send(Ok(event_loop.create_proxy()));
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
 
     struct App {

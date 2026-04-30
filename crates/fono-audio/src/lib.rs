@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Audio capture via `cpal`, resampling to 16 kHz mono f32, and a pluggable
-//! VAD trait. Phase 2 of `docs/plans/2026-04-24-fono-design-v1.md`.
+//! Audio capture via PulseAudio/PipeWire process capture on Linux (or optional
+//! `cpal`), resampling to 16 kHz mono f32, and a pluggable VAD trait. Phase 2
+//! of `docs/plans/2026-04-24-fono-design-v1.md`.
 //!
 //! Silero VAD (ONNX) and auto-mute integration are scaffolded here as
 //! pluggable interfaces; concrete ONNX wiring lands once `ort` is added to

@@ -1,0 +1,49 @@
+[package]
+name = "fono-net"
+description = "Networking for Fono — Wyoming + Fono-native servers, clients, and mDNS autodiscovery."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Default: server side + LAN autodiscovery. Discovery is cheap (a
+# single passive multicast listener) and pairs with the server so the
+# default build is what an end-user wants. Slim / cloud-only builds
+# drop both via `default-features = false`.
+default = ["wyoming-server", "discovery"]
+# Wyoming protocol server — accept LAN peers and drive an existing
+# `Arc<dyn SpeechToText>` (whisper-rs, cloud, …).
+wyoming-server = []
+# mDNS / DNS-SD browser + advertiser. Slice 4 of the network plan.
+discovery = ["dep:mdns-sd"]
+# Future slices wire these on:
+#   wyoming-client = []   # superseded by `fono-stt::wyoming` (Slice 2)
+#   fono-server   = []    # Fono-native server, Slice 6
+#   fono-client   = []    # Fono-native client, Slice 5
+
+[dependencies]
+fono-core = { path = "../fono-core" }
+fono-net-codec = { path = "../fono-net-codec" }
+fono-stt = { path = "../fono-stt", default-features = false }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+mdns-sd = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Integration test exercises the real Wyoming client (Slice 2) against
+# the server in this crate, with a mock `SpeechToText` underneath.
+fono-stt = { path = "../fono-stt", features = ["wyoming"] }
+tokio = { workspace = true, features = ["full"] }

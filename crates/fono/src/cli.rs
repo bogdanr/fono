@@ -232,6 +232,14 @@ pub enum Cmd {
         #[arg(value_enum)]
         shell: Shell,
     },
+    /// List LAN servers (Wyoming and Fono-native) discovered via mDNS.
+    /// Slice 4 of the network plan. Reads the daemon's live registry —
+    /// no daemon, no peers.
+    Discover {
+        /// Emit machine-readable JSON instead of the default table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Check for a newer release on GitHub and (optionally) self-update
     /// the running binary in place. Background tray-icon equivalent
     /// runs automatically on the daemon when `[update] auto_check`
@@ -404,6 +412,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             clap_complete::generate(shell, &mut cmd, "fono", &mut std::io::stdout());
             Ok(())
         }
+        Some(Cmd::Discover { json }) => discover_cmd(&paths, json).await,
         Some(Cmd::Update {
             check,
             yes,
@@ -422,9 +431,46 @@ async fn ipc_simple(paths: &Paths, req: Request) -> Result<()> {
             println!("{t}");
             Ok(())
         }
+        Ok(Response::Discovered(_)) => Ok(()),
         Ok(Response::Error(e)) => Err(anyhow::anyhow!(e)),
         Err(e) => Err(e),
     }
+}
+
+/// `fono discover [--json]` — print the daemon's live mDNS registry.
+/// Slice 4 of the network plan.
+async fn discover_cmd(paths: &Paths, json: bool) -> Result<()> {
+    let resp = fono_ipc::request(&paths.ipc_socket(), &fono_ipc::Request::ListDiscovered).await?;
+    let peers = match resp {
+        fono_ipc::Response::Discovered(p) => p,
+        fono_ipc::Response::Error(e) => return Err(anyhow::anyhow!(e)),
+        _ => return Err(anyhow::anyhow!("unexpected response from daemon")),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&peers)?);
+        return Ok(());
+    }
+    if peers.is_empty() {
+        println!(
+            "no LAN peers discovered (ensure the daemon is running and any LAN server has [server.wyoming].enabled = true)"
+        );
+        return Ok(());
+    }
+    println!(
+        "KIND     HOST                         PORT   PROTO          MODEL                    AUTH"
+    );
+    for p in &peers {
+        println!(
+            "{:<8} {:<28} {:<6} {:<14} {:<24} {}",
+            p.kind,
+            p.hostname,
+            p.port,
+            p.proto,
+            p.model.as_deref().unwrap_or("-"),
+            if p.auth_required { "token" } else { "none" },
+        );
+    }
+    Ok(())
 }
 
 fn history_cmd(
@@ -963,6 +1009,7 @@ async fn use_cmd(paths: &Paths, action: UseCmd) -> Result<()> {
         Ok(fono_ipc::Response::Text(t)) => println!("daemon: {t}"),
         Ok(fono_ipc::Response::Ok) => println!("daemon: reloaded"),
         Ok(fono_ipc::Response::Error(e)) => println!("daemon reload error: {e}"),
+        Ok(fono_ipc::Response::Discovered(_)) => println!("daemon: reloaded"),
         Err(_) => println!("daemon: not running (config saved; will apply on next start)"),
     }
     Ok(())

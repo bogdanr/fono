@@ -27,6 +27,7 @@ pub const fn stt_backend_str(b: &SttBackend) -> &'static str {
         SttBackend::Speechmatics => "speechmatics",
         SttBackend::Google => "google",
         SttBackend::Nemotron => "nemotron",
+        SttBackend::Wyoming => "wyoming",
     }
 }
 
@@ -45,6 +46,7 @@ pub fn parse_stt_backend(s: &str) -> Option<SttBackend> {
         "speechmatics" => Some(SttBackend::Speechmatics),
         "google" => Some(SttBackend::Google),
         "nemotron" => Some(SttBackend::Nemotron),
+        "wyoming" => Some(SttBackend::Wyoming),
         _ => None,
     }
 }
@@ -97,6 +99,9 @@ pub const fn stt_key_env(b: &SttBackend) -> &'static str {
         SttBackend::Speechmatics => "SPEECHMATICS_API_KEY",
         SttBackend::Google => "GOOGLE_API_KEY",
         SttBackend::Nemotron => "NEMOTRON_API_KEY",
+        // Wyoming v1 has no in-band auth; an optional pre-shared token
+        // is configured via `[stt.wyoming].auth_token_ref` instead.
+        SttBackend::Wyoming => "",
     }
 }
 
@@ -115,7 +120,7 @@ pub const fn llm_key_env(b: &LlmBackend) -> &'static str {
 
 #[must_use]
 pub const fn stt_requires_key(b: &SttBackend) -> bool {
-    !matches!(b, SttBackend::Local)
+    !matches!(b, SttBackend::Local | SttBackend::Wyoming)
 }
 
 #[must_use]
@@ -143,7 +148,7 @@ pub fn cloud_pair(name: &str) -> Option<(SttBackend, LlmBackend)> {
 
 /// Iterator over every STT backend (for doctor enumeration etc.).
 #[must_use]
-pub fn all_stt_backends() -> [SttBackend; 10] {
+pub fn all_stt_backends() -> [SttBackend; 11] {
     [
         SttBackend::Local,
         SttBackend::Groq,
@@ -155,6 +160,7 @@ pub fn all_stt_backends() -> [SttBackend; 10] {
         SttBackend::Speechmatics,
         SttBackend::Google,
         SttBackend::Nemotron,
+        SttBackend::Wyoming,
     ]
 }
 
@@ -188,6 +194,13 @@ pub fn configured_stt_backends(secrets: &crate::Secrets, active: &SttBackend) ->
         .filter(|b| {
             if std::mem::discriminant(b) == std::mem::discriminant(active) {
                 return true;
+            }
+            // Wyoming has no API key — its opt-in is `[stt.wyoming].uri`
+            // (manual config) or mDNS discovery (Slice 4 will inject
+            // discovered peers separately). Hide it from the menu
+            // until then to avoid a dead row.
+            if matches!(b, SttBackend::Wyoming) {
+                return false;
             }
             if !stt_requires_key(b) {
                 return true;

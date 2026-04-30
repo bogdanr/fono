@@ -1,6 +1,300 @@
 # Fono — Project Status
 
-Last updated: 2026-04-29
+Last updated: 2026-04-30
+
+## 2026-04-30 — v0.3.7 release prep
+
+Prepared the v0.3.7 release metadata: workspace and lockfile versions are now
+0.3.7, `CHANGELOG.md` has a `## [0.3.7] — 2026-04-30` section, and
+`ROADMAP.md` lists the Wyoming + mDNS network foundations and binary-size prep
+as recently shipped.
+
+Verification: `cargo fmt --all -- --check`, `cargo check -p fono`,
+`./tests/check.sh`, and the Rust-source SPDX header audit pass on the current
+Linux host. `./tests/check.sh --size-budget --no-test` passes the build,
+dependency, format, and clippy portions, then stops at the size-budget
+preflight because this host lacks the `x86_64-unknown-linux-musl` Rust standard
+library under `/usr`; CI/release runners remain responsible for the canonical
+musl artefact gate.
+
+## 2026-04-30 — Tray left-click now shows status under snixembed
+
+The SNI tray backend now handles `Activate` by dispatching the existing
+`ShowStatus` tray action. This gives snixembed and other hosts that call
+`org.kde.StatusNotifierItem.Activate` a useful left-click path, while the normal
+right-click D-Bus menu path remains unchanged.
+
+The libdbusmenu warning seen under snixembed was traced to the upstream `ksni`
+D-Bus menu layout builder adding `children-display = "submenu"` to the root
+layout item. The root is the menu container rather than a visible submenu item,
+so libdbusmenu-gtk warns even though Fono's actual submenu items are populated.
+
+Verification: `cargo fmt --check`, `cargo check -p fono-tray --features
+tray-backend`, `cargo test -p fono-tray --lib`, and `cargo clippy -p fono-tray
+--features tray-backend -- -D warnings` pass on the current Linux host.
+
+## 2026-04-30 — Discovery and bind config cleanup
+
+Removed the unreleased `[network].autodiscover`, `[network].advertise`, and
+`[server.wyoming].allow_public` config fields entirely. Discovery browsing is
+always on while the daemon is running, Wyoming advertising is automatic only
+when `[server.wyoming].enabled = true`, and `[server.wyoming].bind` is now the
+sole network exposure control. The network plan and unreleased changelog were
+updated to match the simplified config surface.
+
+Verification: `cargo fmt --check`, `cargo test -p fono-core config::tests`,
+and `cargo check -p fono` pass on the current Linux host.
+
+## 2026-04-30 — Missing tray watcher now raises a desktop notification
+
+When the SNI tray backend fails because the session bus has no
+`org.kde.StatusNotifierWatcher`, Fono now sends a critical desktop
+notification titled "Fono tray unavailable" with a 20-second requested
+expiry. The notification now uses a short body that fits typical notification
+popups while telling the user to start a tray host such as Waybar tray, KDE
+tray, xfce4-panel, or snixembed before restarting Fono. The existing warning
+log keeps the longer explanation for terminal/service diagnostics.
+
+Verification: `cargo fmt --check`, `cargo test -p fono-tray --lib`, `cargo
+check -p fono-tray --features tray-backend`, `cargo clippy -p fono-tray
+--features tray-backend -- -D warnings`, and `cargo check -p fono --features
+tray,interactive` pass on the current Linux host.
+
+## 2026-04-30 — mDNS discovery is always-on
+
+Discovery browsing is not controlled by a config toggle, and server
+advertising is not controlled by a config toggle. The daemon now always starts
+the mDNS browser when it can create the mDNS service daemon, and advertises
+Wyoming automatically whenever `[server.wyoming].enabled = true`.
+`[network].instance_name` remains as the optional friendly-name override.
+
+Verification: `cargo fmt --check`, `cargo test -p fono-core config::tests`,
+and `cargo check -p fono` pass on the current Linux host.
+
+## 2026-04-30 — Tray watcher absence now degrades cleanly
+
+NimbleX/i3-style sessions without an SNI StatusNotifierWatcher now get an
+actionable tray warning instead of the raw `ksni::Tray::spawn` error. Fono
+continues hotkeys, dictation, and overlay operation without a tray icon, and
+points the user at a tray host/watcher such as KDE Plasma's tray, waybar tray,
+xfce4-panel, or snixembed.
+
+Overlay startup now reports early winit event-loop failures back to the caller
+instead of returning a handle whose wake proxy is missing. This makes overlay
+startup failures visible at daemon startup rather than silently dropping later
+`set_state` / `update_text` commands.
+
+Verification: `cargo fmt --check`, `cargo test -p fono-tray --lib`, `cargo test
+-p fono-overlay --lib`, `cargo check -p fono-tray --features tray-backend`,
+`cargo check -p fono-overlay --features real-window`, `cargo clippy -p
+fono-tray --features tray-backend -- -D warnings`, `cargo clippy -p
+fono-overlay --features real-window -- -D warnings`, and `cargo check -p fono
+--features tray,interactive` pass on the current Linux host. A broader `cargo
+test -p fono-tray -p fono-overlay` was also attempted but this host cannot run
+the overlay doctest because `rustdoc` is unavailable in `PATH`.
+
+## 2026-04-30 — Default Linux audio no longer links ALSA/libasound
+
+Moved Linux default microphone capture off `cpal` and onto a process-backed
+PulseAudio/PipeWire path (`parec` raw mono s16le at the target sample rate),
+so the default Fono binary no longer pulls `cpal`, `alsa`, or `alsa-sys` into
+the dependency graph. `cpal` remains available behind `fono-audio`'s
+`cpal-backend` feature for macOS, Windows, and explicit bare-ALSA Linux builds.
+
+Release/CI guardrails now reject regressions: `tests/check.sh` fails if the
+default Linux dependency tree includes `cpal`, `alsa`, or `alsa-sys`, the
+musl size-budget gate already requires zero `NEEDED` entries, and the release
+workflow rejects Linux artifacts with `libasound.so` or `libgomp.so` in
+`NEEDED`. CI/release package installs no longer install `libasound2-dev`.
+
+Verification: `cargo check -p fono`, `cargo check -p fono-audio`,
+`cargo check -p fono-audio --features cpal-backend`, `cargo test -p
+fono-audio --lib`, `cargo test -p fono-audio --lib --features
+cpal-backend`, `cargo clippy -p fono-audio --all-targets -- -D warnings`,
+`cargo fmt --all -- --check`, and `./tests/check.sh --quick --no-test` all
+pass on the current Linux host. `./tests/check.sh --size-budget --no-test`
+passes build/clippy/dependency checks, then stops at the preflight because this
+host still lacks the `x86_64-unknown-linux-musl` Rust standard library under
+`/usr`.
+
+## 2026-04-30 — Release GNU no longer links libgomp/libstdc++ dynamically
+
+User reported that `cargo build --release -p fono` still produced a GNU
+binary with `libgomp.so.1` in `NEEDED`, and that the musl build does not
+start locally. Root cause: late `.cargo/config.toml` `link-arg` flags do
+not override `cargo:rustc-link-lib=gomp` / `dylib=stdc++` emitted by
+`llama-cpp-sys-2`'s build script. Fixed on fork branch
+`bogdanr/llama-cpp-rs:feature/static-runtime-linkage` (commit
+`e9f5cc12`) by adding `static-openmp` and Linux-capable `static-stdcxx`
+features that make the sys crate emit `static=gomp` / `static=stdc++` at
+the right point in the link line, including compiler-discovered archive
+search paths.
+
+Fono now pins `[patch.crates-io]` to that branch and enables
+`llama-cpp-2` features `openmp`, `static-openmp`, and `static-stdcxx`.
+Verification: `cargo build --release -p fono` succeeds, and `ldd
+target/release/fono` / `readelf -d` show no `libgomp.so.1` and no
+`libstdc++.so.6`. Remaining GNU `NEEDED`: `libasound.so.2`,
+`libgcc_s.so.1`, `libm.so.6`, `libc.so.6`, `ld-linux-x86-64.so.2`.
+Those are expected until the canonical musl artefact builds.
+
+Musl recheck still fails before any C/C++ linkage with Rust error E0463:
+this NimbleX host has distro `rustc`/`cargo` but no `rustup`, no
+`x86_64-unknown-linux-musl` Rust standard library, and no musl C/C++
+cross compiler in `PATH`. `tests/check.sh --size-budget` now detects the
+missing Rust std cleanly on non-rustup hosts instead of assuming `rustup`
+exists. CI musl deps were also cleaned up to drop obsolete GTK packages.
+
+## 2026-04-30 — Task 2.1 complete: GTK gone, pure-Rust SNI tray
+
+Phase 2 Task 2.1 of `plans/2026-04-30-fono-single-binary-size-v1.md`.
+Replaced `tray-icon`'s libappindicator + GTK3 backend with a
+pure-Rust StatusNotifierItem (SNI) implementation via `ksni 0.3`
+(Unlicense, public-domain) talking `zbus`. Confirmed via
+`cargo tree -p fono --features tray`: `tray-icon`, `gtk`, `gdk`,
+`cairo-rs`, `pango`, `gdk-pixbuf`, `glib`, and every `*-sys` shim
+(`gtk-sys`, `gdk-sys`, `pango-sys`, `glib-sys`, `gobject-sys`,
+`cairo-sys-rs`, `gdk-pixbuf-sys`) have left the dep tree. The new
+`fono-tray` keeps the public API identical (`Tray::set_state`,
+`spawn`, the four `*Provider` aliases, `TrayAction`); the daemon's
+spawn site at `crates/fono/src/daemon.rs:328` was unchanged.
+
+Internally the backend now spawns a tokio task instead of a
+dedicated GTK thread, owns a `KsniTray` model implementing
+`ksni::Tray`, and pushes provider snapshots into the model every
+two seconds via `Handle::update`. Menu rebuild is declarative —
+`menu()` returns the current `Vec<MenuItem<KsniTray>>` and ksni
+diffs against the last snapshot, so we no longer maintain
+pre-allocated slot arrays + ID maps. Icon is still the in-code
+ARGB32 circle (byte order corrected for SNI: `[A, R, G, B]` not
+`[R, G, B, A]`).
+
+`cargo check -p fono --features tray` clean. `cargo clippy -p
+fono-tray --features tray-backend` clean. The five
+`graphical_session` unit tests still pass (no behaviour change at
+the daemon's runtime gate).
+
+`deny.toml` updated to allow the `bogdanr/llama-cpp-rs.git` git
+source consumed via `[patch.crates-io]`.
+
+Task 1.2 (source-level shared ggml on a second `bogdanr/llama-cpp-rs`
+branch) remains the next blocker.
+
+## 2026-04-30 — Task 1.1 wired into Fono via fork
+
+Upstream PR submitted: [utilityai/llama-cpp-rs#1015](https://github.com/utilityai/llama-cpp-rs/pull/1015).
+Fork branch `feature/optional-common-build` on
+`github.com/bogdanr/llama-cpp-rs` is now consumed via
+`[patch.crates-io]` in `Cargo.toml`. Fono's existing
+`default-features = false, features = ["openmp"]` declaration on
+`llama-cpp-2` means we automatically opt out of the new `common`
+feature, so building Fono today drops `libcommon.a` (~14 MB) and the
+`wrapper_common`/`wrapper_oai` shim archives (~10 MB) from the link
+line — a ~24 MB raw archive saving, expected to land as ~6–10 MB of
+`.text` after LTO + `--gc-sections`. `cargo check -p fono` clean. Task
+1.1 closed; Task 1.2 (source-level shared ggml) is the next blocker.
+
+## 2026-04-30 — Binary-size pass kickoff: single 20 MiB static-musl ELF
+
+Plan: `plans/2026-04-30-fono-single-binary-size-v1.md`. ADR:
+`docs/decisions/0022-binary-size-budget.md` (supersedes 0018 once Task
+1.2 lands).
+
+User feedback: the release artefact had drifted to ~25–30 MiB stripped
+and was dynamically linked to GTK 3 + glib + cairo + libstdc++ + libgomp
++ glibc — both contradicting the v1 design plan's "single static-musl
+ELF, `ldd` not a dynamic executable" promise. Target rolled back to
+**≤ 20 MiB with all features**, **one binary** (no
+desktop/server/cloud-only flavours; graphical surfaces runtime-gated on
+`DISPLAY`/`WAYLAND_DISPLAY`), and **zero `NEEDED` shared libraries**.
+
+What landed this session (prep work; the structural wins are next):
+
+- `Cargo.toml` — removed unused workspace deps (`ort`, `rodio`,
+  `swayipc`, `hyprland`). Confirmed zero `use` sites; cosmetic cleanup.
+- `.cargo/config.toml` — added dead-code link flags
+  (`-Wl,--gc-sections`, `-Wl,--as-needed`) and C/C++ size flags
+  (`-Os -ffunction-sections -fdata-sections`) for every supported
+  target. Added `-static-libstdc++`, `-static-libgcc`,
+  `-l:libgomp.a` for the musl target so the final ELF has no C++/OMP
+  `NEEDED`. The legacy `--allow-multiple-definition` flag stays until
+  Task 1.2 lands the source-level shared ggml; both flags now coexist
+  with documented retirement path in the file's header comment.
+- `crates/fono/src/daemon.rs:232-247` — tray spawn now runtime-gated
+  on `DISPLAY`/`WAYLAND_DISPLAY`. Headless hosts get a `debug!` log
+  line and an empty tray channel; the rest of the daemon runs
+  unmodified. This is the architectural keystone of the
+  one-binary-many-roles contract.
+- `tests/check.sh --size-budget` — new gate that builds
+  `release-slim x86_64-unknown-linux-musl` and asserts (a) binary
+  size ≤ 20 971 520 bytes, (b) `ldd` reports "not a dynamic
+  executable", (c) `nm` shows exactly one `ggml_init` symbol. Skips
+  cleanly when the musl target isn't installed.
+- `plans/2026-04-30-llama-cpp-sys-2-strip-common.patch.md` — the
+  upstream / fork patch ready to apply for Task 1.1 (kill 24 MB of
+  unused llama.cpp `common/`). Two application paths documented
+  (vendored fork at `vendor/llama-cpp-sys-2/` vs git fork on GitHub);
+  blocked on operator choice.
+- ADR 0022 published; ADR 0018 will be marked Superseded once Task
+  1.2 lands.
+
+Next-session blockers (operator decisions):
+
+1. **Task 1.1 application path.** Vendor 22 MiB of patched
+   llama-cpp-sys-2 into `vendor/` (option A), or push a fork to
+   GitHub and reference it via `[patch.crates-io]` git URL (option
+   B)? Patch contents are the same either way.
+2. **Task 2.1 tray library swap.** Replace the libappindicator/GTK
+   backend of `tray-icon` with a pure-Rust `ksni` SNI implementation.
+   Drops every GTK / glib / cairo `NEEDED` from the ELF; adds the
+   `ksni` + `zbus` deps. Worth confirming the SNI compatibility with
+   the operator's panel before swinging the change.
+
+Once both decisions land the path forward is mechanical: apply
+patch → build → measure → repeat. Phase 4 Rust trims held in reserve
+in case Phases 1 + 2 + 3 don't already hit budget.
+
+## 2026-04-29 — Slice 4: mDNS LAN autodiscovery
+
+Plan: `plans/2026-04-29-2026-04-29-client-server-wyoming-fono-and-mdns-v2.md`
+
+Slice 4 lights up the *Discovered on LAN* surface that Slices 5–7 will
+build on. Concrete deliverables:
+
+- New crate-internal module `fono_net::discovery` with `Browser`,
+  `Advertiser`, `Registry`, and `DiscoveredPeer`. One passive `tokio`
+  task per service type (`_wyoming._tcp.local.`, `_fono._tcp.local.`)
+  feeds an `Arc<RwLock<HashMap<fullname, DiscoveredPeer>>>`; peers
+  stale after 120 s and are evicted on a 15 s sweep.
+- New `[network]` config block: only `instance_name` remains as a
+  cosmetic override (empty ⇒ `fono-<hostname>`). Discovery browsing is
+  always on while the daemon is running; advertising happens
+  automatically for enabled servers.
+- Daemon hooks: spawn browser + (optional) advertiser at startup; hold
+  handles for the daemon's lifetime so `unregister` fires goodbye
+  packets on `Drop`.
+- IPC `Request::ListDiscovered` / `Response::Discovered(Vec<DiscoveredPeer>)`
+  surfaces the live registry to clients.
+- New CLI `fono discover [--json]` prints the registry as a fixed-width
+  table or pretty JSON.
+- Integration test (`crates/fono-net/tests/discovery_round_trip.rs`)
+  drives two independent `ServiceDaemon` instances over loopback
+  multicast and asserts the TXT round-trip lands in the registry
+  within 5 s. Skips cleanly on sandboxes without multicast.
+- Single new dependency: `mdns-sd 0.13` (pure-Rust, dual MIT/Apache-2.0,
+  no Avahi/Bonjour FFI).
+
+Verification: `cargo build --workspace`, `cargo test --workspace --lib`,
+`cargo test -p fono-net --tests --features discovery`,
+`cargo test -p fono-stt --tests`, `cargo clippy --workspace --all-targets
+-- -D warnings -A dead_code`, `cargo fmt --all -- --check` all green.
+
+Tray *Discovered on LAN* submenu population is split off into Slice 7
+(tray polish) per the v2 plan; the IPC contract is in place so the
+tray can read from a single source when that lands.
+
+Next up: **Slice 5 — Fono-native protocol design + `FonoLlm`/`FonoStt`
+client over WebSocket.**
 
 ## 2026-04-29 — OS-delegated microphone selection (PulseAudio-first + config purge)
 

@@ -14,6 +14,10 @@ workspace = true
 
 [features]
 default = []
+# Native cpal backend. Off by default on Linux release builds so the
+# default binary does not link ALSA/libasound; keep it available for
+# macOS, Windows, and explicit bare-ALSA Linux builds.
+cpal-backend = ["dep:cpal"]
 # Voiced-frame broadcast stream + segment-boundary events used by the
 # live-dictation pipeline. Plan R2.
 streaming = []
@@ -23,6 +27,6 @@ fono-core = { path = "../fono-core" }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-cpal = { workspace = true }
+cpal = { workspace = true, optional = true }
 rubato = { workspace = true }
 tokio = { workspace = true }

@@ -29,8 +29,47 @@ pub enum Request {
     /// restart the daemon to switch providers. Provider-switching plan
     /// task S11.
     Reload,
+    /// Snapshot the current LAN-discovery registry. Slice 4 of the
+    /// network plan — backs `fono discover` and the tray's
+    /// *Discovered on LAN* submenu.
+    ListDiscovered,
     /// Graceful shutdown.
     Shutdown,
+}
+
+/// Serializable, IPC-friendly view of one mDNS-discovered peer. Mirrors
+/// `fono_net::discovery::DiscoveredPeer` minus the `Instant`/`IpAddr`
+/// types. Slice 4.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiscoveredPeer {
+    /// `"wyoming"` | `"fono"`.
+    pub kind: String,
+    /// mDNS instance fullname (e.g. `fono-A._wyoming._tcp.local.`).
+    pub fullname: String,
+    /// Friendly instance name (the part before the service type).
+    pub name: String,
+    /// Resolved hostname (typically `<host>.local.`, trailing dot
+    /// stripped before serialisation).
+    pub hostname: String,
+    /// First resolved address as a string, if any.
+    pub address: Option<String>,
+    /// Service port.
+    pub port: u16,
+    /// `proto` TXT key (`wyoming/1` / `fono/1`).
+    pub proto: String,
+    /// `version` TXT key.
+    pub version: String,
+    /// `caps` TXT key, comma-split.
+    pub caps: Vec<String>,
+    /// `model` TXT key — Wyoming-only.
+    pub model: Option<String>,
+    /// `auth` TXT key — `true` if peer expects a bearer token.
+    pub auth_required: bool,
+    /// `path` TXT key — WebSocket path for Fono-native peers.
+    pub path: Option<String>,
+    /// Seconds since the registry last saw a `ServiceResolved` for
+    /// this peer (truncated `u64`).
+    pub age_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -38,6 +77,8 @@ pub enum Response {
     Ok,
     /// Textual payload (e.g. status summary, doctor report).
     Text(String),
+    /// Snapshot of the LAN-discovery registry. Slice 4.
+    Discovered(Vec<DiscoveredPeer>),
     Error(String),
 }
 

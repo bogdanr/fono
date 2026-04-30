@@ -5,6 +5,150 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.3.7] — 2026-04-30
+
+### Changed
+
+- **Binary size & shape — single 20 MiB static-musl ELF** (in progress
+  per `plans/2026-04-30-fono-single-binary-size-v1.md`, ADR 0022).
+  Fono ships as **one** binary that runs as desktop client, headless
+  server, or LAN client of a remote peer; no `--features
+  server`/`gui`/`headless` flavours. Graphical surfaces (tray,
+  overlay, text injection) are runtime-detected from `DISPLAY` /
+  `WAYLAND_DISPLAY` and silently no-op when the host is headless.
+  This release lands the prep work: dead-code link flags
+  (`-Wl,--gc-sections,--as-needed`), C/C++ size flags
+  (`-Os -ffunction-sections -fdata-sections`), static llama.cpp C++ +
+  OpenMP runtime linkage via fork features (`static-stdcxx`,
+  `static-openmp`), daemon tray runtime gate on `DISPLAY` /
+  `WAYLAND_DISPLAY`, and a new `tests/check.sh --size-budget` gate that
+  asserts ≤ 20 MiB + `ldd`-empty + single ggml on the canonical
+  `release-slim x86_64-unknown-linux-musl` artefact. Subsequent slices
+  land source-level shared ggml and the remaining musl toolchain fixes
+  that close the budget.
+- **`llama-cpp-2` / `llama-cpp-sys-2` pinned to fork** at
+  `github.com/bogdanr/llama-cpp-rs` branch `feature/static-runtime-linkage`
+  via `[patch.crates-io]`. The branch includes the upstream-submitted
+  default-on `common` cargo feature gating `llama.cpp`'s `common/`
+  static library and the `wrapper_common` / `wrapper_oai` C++ shims
+  (~24 MB of static archives), plus follow-up `static-openmp` and
+  `static-stdcxx` features. Fono builds with `default-features = false,
+  features = ["openmp", "static-openmp", "static-stdcxx"]`, so it opts
+  out of `common` and links llama.cpp's `libgomp` / `libstdc++`
+  statically. `cargo build --release -p fono` no longer has
+  `libgomp.so.1` or `libstdc++.so.6` in `NEEDED`; the remaining GNU
+  shared libraries are `libasound`, `libgcc_s`, `libm`, `libc`, and the
+  dynamic loader until the musl ship build is fully operational.
+  `common` patch submitted upstream as
+  [utilityai/llama-cpp-rs#1015](https://github.com/utilityai/llama-cpp-rs/pull/1015);
+  fork stays in place until merge.
+- **Tray backend swapped from `tray-icon` (libappindicator + GTK3) to
+  pure-Rust `ksni`** (Unlicense, public-domain), Phase 2 Task 2.1 of
+  the binary-size plan. Drops `tray-icon`, `gtk`, `gdk`, `cairo-rs`,
+  `pango`, `gdk-pixbuf`, `glib`, plus their `*-sys` shims and the
+  libappindicator runtime — every transitive dep that pulled libgtk-3,
+  libgdk-3, libcairo, libpango, libgio-2.0, libglib-2.0, and
+  libgdk_pixbuf into the binary's `NEEDED` list. `ksni` speaks SNI +
+  `com.canonical.dbusmenu` over `zbus` directly; KDE Plasma, GNOME
+  (with the SNI shell extension), sway+waybar, hyprland+waybar,
+  i3+i3status, xfce4-panel, and lxqt-panel all host SNI natively.
+  Public API of `fono-tray` (`Tray::set_state`, `spawn`, providers,
+  actions) unchanged; the daemon's tray spawn site at
+  `crates/fono/src/daemon.rs:328` needed no edit. Architectural
+  keystone of the "no shared libraries" promise on the static-musl
+  ship build.
+
+### Removed
+
+- Unused `[workspace.dependencies]` declarations: `ort`, `rodio`,
+  `swayipc`, `hyprland`. Confirmed zero `use` sites in the codebase;
+  cosmetic cleanup, no binary impact.
+
+### Added
+
+- LAN **autodiscovery** via mDNS / DNS-SD (Slice 4 of the network
+  plan). New `fono-net::discovery` module hosts an always-on passive
+  `Browser` that maintains an ephemeral `Registry` of
+  `_wyoming._tcp.local.` and `_fono._tcp.local.` peers, plus an
+  automatic `Advertiser` that publishes the local Wyoming server when
+  `[server.wyoming].enabled` is set. `[network].instance_name` remains
+  available as an optional friendly-name override; there are no user-facing
+  discovery enable/disable booleans. Discovered peers carry a typed
+  `DiscoveredPeer { kind, hostname, port, proto, version, caps,
+  model, auth_required, path, … }` with `host_port()` /
+  `tray_label()` accessors so the tray and CLI render identical
+  labels. Discovery state is **never** persisted — restart Fono and
+  the LAN is rediscovered fresh, eliminating a whole class of
+  stale-config bugs. Single new dependency: `mdns-sd 0.13`
+  (pure-Rust, dual MIT/Apache-2.0, no Avahi/Bonjour FFI).
+- IPC `Request::ListDiscovered` / `Response::Discovered(Vec<…>)`
+  exposing the live registry to clients of the daemon. Snapshot
+  conversion strips `Instant` / `IpAddr` for cross-process safety
+  and reports peer age as `age_secs: u64`.
+- New CLI `fono discover [--json]` prints the daemon's current
+  registry as a fixed-width table or pretty JSON for scripting.
+- Daemon goodbye-on-exit: graceful shutdown unregisters the mDNS
+  publication so peers evict immediately rather than waiting for
+  TTL.
+- Integration test `crates/fono-net/tests/discovery_round_trip.rs`
+  drives a real advertiser and a real browser on two independent
+  `ServiceDaemon` instances over loopback multicast, asserting the
+  TXT round-trip (`proto`, `model`, `caps`, `auth`) lands in the
+  registry within 5 s. Skips cleanly on sandboxes without multicast.
+- Wyoming-protocol STT **server** (`fono-net::wyoming::server`,
+  `[server.wyoming]` config block). When enabled, the daemon hosts a
+  Wyoming-compatible STT listener on the LAN backed by whatever
+  `Arc<dyn SpeechToText>` the active config selects (local whisper-rs,
+  Groq, OpenAI, Wyoming relay, …) — Home Assistant satellites and
+  other Wyoming peers can route inference through this instance. Off
+  by default; opt in via `[server.wyoming].enabled = true`. Loopback-
+  only by default; set `[server.wyoming].bind` to `0.0.0.0`, `::`, or a
+  specific interface address to expose it beyond the local machine.
+  Provider-closure design tracks `Reload`-driven backend swaps without
+  restarting the listener. Streaming-response
+  (`transcript-start`/`-chunk`/`-stop`) lane will plug in once
+  `Arc<dyn StreamingStt>` is plumbed; the one-shot `transcript`
+  envelope is fully wired today and advertised via
+  `info.asr.supports_transcript_streaming = false`. Two integration
+  tests drive the real `WyomingStt` client (Slice 2) against the real
+  server with a recording mock STT underneath, verifying the int16 LE
+  PCM round-trip survives the wire end-to-end. Slice 3 of
+  `plans/2026-04-29-2026-04-29-client-server-wyoming-fono-and-mdns-v2.md`.
+- New internal `fono-net` crate hosting the LAN server + future mDNS
+  browser/advertiser (Slice 4) + Fono-native WebSocket protocol
+  (Slices 5–6). Wyoming-server feature is default-on; slim builds can
+  opt out via `default-features = false`.
+
+- Wyoming-protocol STT client backend (`SttBackend::Wyoming`,
+  `[stt.wyoming]` config block). Fono can now use any
+  Wyoming-compatible STT server on the LAN — `wyoming-faster-whisper`,
+  `wyoming-whisper-cpp`, Rhasspy, Home Assistant satellites, and
+  future `fono serve wyoming` daemons — as a drop-in cloud STT
+  replacement that runs over TCP on the local network. Default port
+  10300, optional model + auth-token hints, IPv6-literal URIs
+  supported, fresh connection per `transcribe()` call, `prewarm()`
+  pre-pays TCP handshake by issuing `describe`/`info`. Both the
+  one-shot `transcript` flow and the streaming
+  `transcript-start`/`-chunk`/`-stop` flow are handled by the same
+  client. Two integration tests stand up an in-process Wyoming
+  server stub and round-trip canned transcripts over a real loopback
+  socket. Slice 2 of
+  `plans/2026-04-29-2026-04-29-client-server-wyoming-fono-and-mdns-v2.md`.
+- Internal `fono-net-codec` crate carrying the wire-format primitives
+  for the upcoming network-inference work: a transport-agnostic
+  `Frame { kind, data, payload }` codec covering Wyoming's JSONL
+  header + optional UTF-8 data block + optional binary payload, typed
+  event structs for the Wyoming STT subset (audio / describe / info /
+  transcribe / transcript + streaming variants) and the Fono-native
+  protocol (hello / cleanup / history / context / error / ping /
+  pong), and a connection-arm allow-list that rejects cross-protocol
+  events at parse time. Foundation only — no network I/O yet; full
+  client + server slices, mDNS autodiscovery, and tray integration
+  follow per
+  `plans/2026-04-29-2026-04-29-client-server-wyoming-fono-and-mdns-v2.md`.
+
 ## [0.3.6] — 2026-04-29
 
 ### Added
@@ -749,7 +893,8 @@ feature and ships fully wired in v0.2.
 - Local LLM cleanup (Qwen / SmolLM) is opt-in / preview.
 - Real `winit + softbuffer` overlay window is a stub (event channel only).
 
-[Unreleased]: https://github.com/bogdanr/fono/compare/v0.3.6...HEAD
+[Unreleased]: https://github.com/bogdanr/fono/compare/v0.3.7...HEAD
+[0.3.7]: https://github.com/bogdanr/fono/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/bogdanr/fono/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/bogdanr/fono/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/bogdanr/fono/releases/tag/v0.3.4

@@ -67,7 +67,7 @@ fn notify_live_first_run() {
         LIVE_FIRST_RUN_NOTIFIED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst);
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<()> {
     let config = Arc::new(Config::load(&paths.config_file()).context("load config")?);
     let secrets = Secrets::load(&paths.secrets_file()).context("load secrets")?;
@@ -124,6 +124,26 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                 None
             }
         };
+
+    // ---------------------------------------------------------------
+    // LAN Wyoming server (Slice 3 of the network plan). Off by default;
+    // spawned only when `[server.wyoming].enabled = true` *and* the
+    // orchestrator came up (degraded mode skips serving — there's no
+    // STT backend to host). The handle is dropped on daemon exit which
+    // closes the listener; in-flight connections finish naturally.
+    // ---------------------------------------------------------------
+    let _wyoming_server: Option<fono_net::wyoming::server::WyomingServerHandle> =
+        spawn_wyoming_server_if_enabled(&config, orchestrator.as_ref()).await;
+
+    // ---------------------------------------------------------------
+    // mDNS discovery (Slice 4 of the network plan). The browser is
+    // always on when the daemon can create an mDNS service daemon — it
+    // populates the LAN registry exposed via IPC `ListDiscovered`. The
+    // advertiser only runs when a `[server.*]` block is enabled.
+    // ---------------------------------------------------------------
+    let discovery = spawn_discovery_if_enabled(&config).await;
+    let discovery_registry: Option<fono_net::discovery::Registry> =
+        discovery.as_ref().map(|d| d.registry.clone());
 
     // ---------------------------------------------------------------
     // Global hotkey listener
@@ -208,10 +228,27 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
     }
 
     // ---------------------------------------------------------------
-    // Tray icon (feature-gated; no-op if the backend is compiled out)
+    // Tray icon — runtime-gated.
+    //
+    // The single Fono binary serves both graphical desktops and headless
+    // servers. The tray crate is always compiled in; we just refuse to
+    // spawn it when (a) the operator passed `--no-tray`, or (b) the host
+    // is headless (no `DISPLAY` and no `WAYLAND_DISPLAY` in the daemon's
+    // environment). On a headless host attempting to bring up an SNI
+    // tray either fails noisily (no D-Bus session bus) or blocks the
+    // libappindicator thread forever — neither is acceptable for the
+    // `fono serve` use case.
+    //
+    // See `plans/2026-04-30-fono-single-binary-size-v1.md` Phase 3
+    // Task 3.1 for the runtime-detection contract.
     // ---------------------------------------------------------------
-    let (tray, mut tray_rx) = if no_tray {
-        debug!("tray disabled (--no-tray)");
+    let graphical = crate::is_graphical_session();
+    let (tray, mut tray_rx) = if no_tray || !graphical {
+        if no_tray {
+            debug!("tray disabled (--no-tray)");
+        } else {
+            debug!("tray skipped (headless: no DISPLAY / WAYLAND_DISPLAY)");
+        }
         let (_tx, rx) = mpsc::unbounded_channel::<TrayAction>();
         (None, rx)
     } else {
@@ -584,8 +621,9 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                 let action_tx = action_tx.clone();
                 let orch = orchestrator.clone();
                 let config = Arc::clone(&config);
+                let registry = discovery_registry.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, fsm, action_tx, orch, config).await {
+                    if let Err(e) = handle_client(stream, fsm, action_tx, orch, config, registry).await {
                         warn!("client error: {e}");
                     }
                 });
@@ -813,6 +851,7 @@ async fn handle_client(
     action_tx: mpsc::UnboundedSender<HotkeyAction>,
     orchestrator: Option<Arc<SessionOrchestrator>>,
     config: Arc<Config>,
+    discovery_registry: Option<fono_net::discovery::Registry>,
 ) -> Result<()> {
     let req: Request = read_frame(&mut stream).await?;
     let orch_present = orchestrator.is_some();
@@ -864,6 +903,13 @@ async fn handle_client(
         }
         Request::Doctor => {
             Response::Text("doctor via IPC not yet available; run `fono doctor` directly".into())
+        }
+        Request::ListDiscovered => {
+            let peers = discovery_registry
+                .as_ref()
+                .map(snapshot_discovered)
+                .unwrap_or_default();
+            Response::Discovered(peers)
         }
         Request::Shutdown => {
             std::process::exit(0);
@@ -1412,6 +1458,278 @@ async fn apply_update_via_tray(update_status: Arc<RwLock<Option<fono_update::Upd
     }
 }
 
+/// Spawn the LAN Wyoming server if `[server.wyoming].enabled = true`
+/// and the orchestrator is alive. Returns `None` when the server is
+/// disabled, the orchestrator is in degraded mode, or the listener
+/// fails to bind (failures are logged at `warn!` and never abort the
+/// daemon — dictation must keep working even if the LAN server can't
+/// come up). Slice 3 of
+/// `plans/2026-04-29-2026-04-29-client-server-wyoming-fono-and-mdns-v2.md`.
+async fn spawn_wyoming_server_if_enabled(
+    config: &Config,
+    orchestrator: Option<&Arc<SessionOrchestrator>>,
+) -> Option<fono_net::wyoming::server::WyomingServerHandle> {
+    let cfg = &config.server.wyoming;
+    if !cfg.enabled {
+        return None;
+    }
+    let Some(orch) = orchestrator else {
+        warn!(
+            "[server.wyoming].enabled = true but the daemon is in degraded mode \
+             (no STT backend); skipping Wyoming server"
+        );
+        return None;
+    };
+
+    let loopback_only = cfg.bind == "127.0.0.1" || cfg.bind == "::1";
+    let auth_token = if cfg.auth_token_ref.is_empty() {
+        None
+    } else {
+        std::env::var(&cfg.auth_token_ref).ok()
+    };
+    let model = config.stt.local.model.clone();
+    let server_cfg = fono_net::wyoming::server::WyomingServerConfig {
+        bind: cfg.bind.clone(),
+        port: cfg.port,
+        auth_token,
+        server_name: "fono".to_string(),
+        server_version: env!("CARGO_PKG_VERSION").to_string(),
+        models: vec![fono_net::wyoming::server::AdvertisedModel {
+            name: model,
+            languages: config.general.languages.clone(),
+            description: Some(format!(
+                "fono daemon backend: {}",
+                fono_core::providers::stt_backend_str(&config.stt.backend)
+            )),
+            version: None,
+        }],
+        loopback_only,
+    };
+
+    let orch_for_provider = Arc::clone(orch);
+    let provider: fono_net::wyoming::server::SttProvider =
+        Arc::new(move || orch_for_provider.stt_snapshot());
+    let server = fono_net::wyoming::server::WyomingServer::new(server_cfg, provider);
+    match server.start().await {
+        Ok(handle) => {
+            info!(
+                "Wyoming server listening on {} (loopback_only={})",
+                handle.local_addr(),
+                loopback_only
+            );
+            Some(handle)
+        }
+        Err(e) => {
+            warn!("Wyoming server failed to start: {e:#}");
+            None
+        }
+    }
+}
+
+/// Live discovery runtime: shared registry, browser, and (optional)
+/// advertisers. Held by the daemon for its lifetime so the goodbye
+/// packets fire when it exits.
+struct DiscoveryRuntime {
+    registry: fono_net::discovery::Registry,
+    _browser: Option<fono_net::discovery::browser::BrowserHandle>,
+    _wyoming_advert: Option<fono_net::discovery::advertiser::AdvertiserHandle>,
+}
+
+/// Spawn the always-on mDNS browser and the matching advertisers for
+/// any enabled `[server.*]` blocks. All failure paths log and continue —
+/// discovery is a convenience layer, not a hard dependency. Slice 4 of
+/// the network plan.
+async fn spawn_discovery_if_enabled(config: &Config) -> Option<DiscoveryRuntime> {
+    let server = &config.server;
+
+    let daemon = match mdns_sd::ServiceDaemon::new() {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("mdns: ServiceDaemon::new() failed; LAN discovery disabled: {e:#}");
+            return None;
+        }
+    };
+
+    let registry = fono_net::discovery::Registry::new();
+    let browser = {
+        let b = fono_net::discovery::Browser::new(daemon.clone(), registry.clone());
+        match b.start(&[
+            fono_net::discovery::PeerKind::Wyoming,
+            fono_net::discovery::PeerKind::Fono,
+        ]) {
+            Ok(handle) => {
+                info!("mDNS browser started");
+                Some(handle)
+            }
+            Err(e) => {
+                warn!("mdns browser failed to start: {e:#}");
+                None
+            }
+        }
+    };
+
+    let wyoming_advert = if server.wyoming.enabled {
+        spawn_wyoming_advert(&daemon, config)
+    } else {
+        None
+    };
+
+    // Seed the local Wyoming service directly into the registry so that
+    // `fono discover` shows it immediately without waiting for the
+    // mDNS probing phase + multicast-loopback round-trip. The browser
+    // will keep the entry fresh via loopback announcements once the
+    // probing phase completes (~750 ms); the initial upsert ensures the
+    // peer is visible even if the first `fono discover` call races the
+    // probe.
+    if let Some((ref handle, ref short_host)) = wyoming_advert {
+        let peer = local_wyoming_peer(config, short_host, handle.fullname());
+        registry.upsert(peer);
+        debug!(
+            target: "fono::discovery",
+            fullname = %handle.fullname(),
+            "seeded local wyoming peer into registry"
+        );
+    }
+
+    Some(DiscoveryRuntime {
+        registry,
+        _browser: browser,
+        _wyoming_advert: wyoming_advert.map(|(h, _)| h),
+    })
+}
+
+fn spawn_wyoming_advert(
+    daemon: &mdns_sd::ServiceDaemon,
+    config: &Config,
+) -> Option<(fono_net::discovery::advertiser::AdvertiserHandle, String)> {
+    let cfg = &config.server.wyoming;
+    let Some(host) = hostname() else {
+        warn!("mdns: cannot determine hostname; skipping advertise");
+        return None;
+    };
+    let instance = if config.network.instance_name.is_empty() {
+        format!("fono-{host}")
+    } else {
+        config.network.instance_name.clone()
+    };
+    // mDNS hostnames must be in the `<name>.local.` form (RFC 6762 §19).
+    // `hostname()` returns the bare short name (e.g. "nimblex"); append
+    // ".local" so `ensure_trailing_dot` in the advertiser produces the
+    // correct "nimblex.local." FQDN. Without this the SRV record's host
+    // field is "nimblex." which mdns-sd browsers on other hosts cannot
+    // resolve via mDNS.
+    let mdns_host = if host.contains('.') {
+        host.clone() // already qualified (e.g. "kitchen.local")
+    } else {
+        format!("{host}.local")
+    };
+    let spec = fono_net::discovery::advertiser::AdvertiseSpec {
+        kind: fono_net::discovery::PeerKind::Wyoming,
+        instance_name: instance,
+        hostname: mdns_host,
+        port: cfg.port,
+        addresses: vec![],
+        proto: "wyoming/1".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        caps: vec!["stt".into()],
+        model: Some(config.stt.local.model.clone()),
+        auth_required: !cfg.auth_token_ref.is_empty(),
+        path: None,
+    };
+    let advertiser = fono_net::discovery::Advertiser::new(daemon.clone());
+    match advertiser.register(spec) {
+        Ok(h) => {
+            info!(
+                "mDNS advertising _wyoming._tcp on port {} as {}",
+                cfg.port,
+                h.fullname()
+            );
+            Some((h, host))
+        }
+        Err(e) => {
+            warn!("mdns wyoming advertise failed: {e:#}");
+            None
+        }
+    }
+}
+
+/// Build a [`fono_net::discovery::DiscoveredPeer`] representing the
+/// locally-running Wyoming service. Used to seed the registry at startup
+/// so that `fono discover` shows the local peer without waiting for the
+/// mDNS probing phase + multicast-loopback round-trip.
+fn local_wyoming_peer(
+    config: &Config,
+    short_host: &str,
+    fullname: &str,
+) -> fono_net::discovery::DiscoveredPeer {
+    use fono_net::discovery::{DiscoveredPeer, PeerKind, WYOMING_SERVICE_TYPE};
+    use std::time::Instant;
+    let hostname = format!("{short_host}.local.");
+    // Strip the service-type suffix to get the friendly instance name.
+    let name = fullname
+        .strip_suffix(WYOMING_SERVICE_TYPE)
+        .and_then(|s| s.strip_suffix('.'))
+        .unwrap_or(fullname)
+        .to_string();
+    DiscoveredPeer {
+        kind: PeerKind::Wyoming,
+        fullname: fullname.to_string(),
+        name,
+        hostname,
+        address: None,
+        port: config.server.wyoming.port,
+        proto: "wyoming/1".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        caps: vec!["stt".into()],
+        model: Some(config.stt.local.model.clone()),
+        auth_required: !config.server.wyoming.auth_token_ref.is_empty(),
+        path: None,
+        last_seen: Instant::now(),
+    }
+}
+
+fn hostname() -> Option<String> {
+    // Best-effort. `gethostname` would pull a new dep; the env / file
+    // fallbacks cover every Linux + macOS we care about.
+    if let Ok(h) = std::env::var("HOSTNAME") {
+        if !h.is_empty() {
+            return Some(h);
+        }
+    }
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Convert a `fono_net::discovery::Registry` snapshot into the
+/// IPC-friendly representation. Slice 4.
+fn snapshot_discovered(registry: &fono_net::discovery::Registry) -> Vec<fono_ipc::DiscoveredPeer> {
+    let now = std::time::Instant::now();
+    registry
+        .snapshot()
+        .into_iter()
+        .map(|p| fono_ipc::DiscoveredPeer {
+            kind: match p.kind {
+                fono_net::discovery::PeerKind::Wyoming => "wyoming".into(),
+                fono_net::discovery::PeerKind::Fono => "fono".into(),
+            },
+            fullname: p.fullname,
+            name: p.name,
+            hostname: p.hostname.trim_end_matches('.').to_string(),
+            address: p.address.map(|a| a.to_string()),
+            port: p.port,
+            proto: p.proto,
+            version: p.version,
+            caps: p.caps,
+            model: p.model,
+            auth_required: p.auth_required,
+            path: p.path,
+            age_secs: now.saturating_duration_since(p.last_seen).as_secs(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1489,5 +1807,48 @@ mod tests {
             translate_for_interactive(HotkeyAction::HoldPressed, &cfg, false),
             HotkeyAction::HoldPressed
         );
+    }
+
+    /// `local_wyoming_peer` produces a properly-formed `DiscoveredPeer`:
+    /// hostname gets a `.local.` suffix, fullname is preserved, friendly
+    /// name strips the service-type tail, and port/model come from config.
+    #[test]
+    fn local_wyoming_peer_fields() {
+        let mut cfg = Config::default();
+        cfg.server.wyoming.port = 10300;
+        cfg.stt.local.model = "small".into();
+        let fullname = "fono-nimblex._wyoming._tcp.local.";
+        let peer = local_wyoming_peer(&cfg, "nimblex", fullname);
+        assert_eq!(peer.hostname, "nimblex.local.");
+        assert_eq!(peer.name, "fono-nimblex");
+        assert_eq!(peer.fullname, fullname);
+        assert_eq!(peer.port, 10300);
+        assert_eq!(peer.model.as_deref(), Some("small"));
+        assert_eq!(peer.proto, "wyoming/1");
+        assert!(!peer.auth_required);
+    }
+
+    /// A bare short hostname (e.g. "kitchen") gets ".local" appended so
+    /// that the mDNS SRV record carries a valid `<name>.local.` FQDN.
+    /// An already-qualified name (e.g. "kitchen.local") is left alone.
+    #[test]
+    fn mdns_host_qualification() {
+        // bare → qualified
+        let bare = "kitchen";
+        let qualified = if bare.contains('.') {
+            bare.to_string()
+        } else {
+            format!("{bare}.local")
+        };
+        assert_eq!(qualified, "kitchen.local");
+
+        // already qualified → unchanged
+        let already = "kitchen.local";
+        let still_qualified = if already.contains('.') {
+            already.to_string()
+        } else {
+            format!("{already}.local")
+        };
+        assert_eq!(still_qualified, "kitchen.local");
     }
 }

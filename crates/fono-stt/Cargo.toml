@@ -13,13 +13,17 @@ repository.workspace = true
 workspace = true
 
 [features]
-default = ["groq"]
+default = ["groq", "wyoming"]
 # Cloud backends — each behind a feature flag per Phase 4 Task 4.3.
 groq = ["dep:reqwest"]
 openai = ["dep:reqwest"]
 deepgram = ["dep:reqwest", "dep:tokio-tungstenite"]
 # Local whisper — opt-in because it vendors whisper.cpp (C++ build).
 whisper-local = ["dep:whisper-rs"]
+# Wyoming STT client — talks to wyoming-faster-whisper / fono-server /
+# any Rhasspy or Home Assistant speech-to-phrase-style server. Ships
+# in default builds (cheap, no native deps).
+wyoming = ["dep:fono-net-codec"]
 # Live-dictation streaming primitives + per-backend stream_transcribe
 # implementations. Plan R1/R3. Off by default until v0.2.0-alpha proves
 # the slim build remains slim.
@@ -50,3 +54,11 @@ tokio-tungstenite = { workspace = true, optional = true }
 whisper-rs = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 tokio-stream = { workspace = true, optional = true }
+fono-net-codec = { path = "../fono-net-codec", optional = true }
+
+[dev-dependencies]
+# Integration tests for the Wyoming client need the codec directly to
+# stand up an in-process server stub.
+fono-net-codec = { path = "../fono-net-codec" }
+serde_json = { workspace = true }
+tokio = { workspace = true }
