@@ -71,7 +71,7 @@ jobs:
       # mirror is caught by the sha256sum --check step.
       - name: Cache whisper tiny.en model
         id: whisper-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/fono/models/whisper/ggml-tiny.en.bin
           key: whisper-ggml-tiny-en-921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f
@@ -173,7 +173,7 @@ jobs:
 
       - name: Upload cargo-bloat reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cargo-bloat
           path: cargo-bloat-*.txt

@@ -72,7 +72,7 @@ jobs:
 
       - name: Upload report (always, for debugging)
         if: ${{ always() && hashFiles('cloud-bench.json') != '' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cloud-bench-${{ github.ref_name }}
           path: cloud-bench.json
@@ -169,14 +169,14 @@ jobs:
           ls -la out-bin out-stage
 
       - name: Upload bare binary (release asset)
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: fono-bin-${{ matrix.target }}
           path: out-bin/*
           if-no-files-found: error
 
       - name: Upload internal staging tarball (package-job input)
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: fono-stage-${{ matrix.target }}
           path: out-stage/*.tar.gz
@@ -189,7 +189,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v7
         with:
           name: fono-stage-x86_64-unknown-linux-gnu
           path: linux-bin
@@ -235,7 +235,7 @@ jobs:
           mkdir -p dist-deb
           dpkg-deb --build --root-owner-group debroot "dist-deb/fono_${version}-1_amd64.deb"
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: fono-pkg-deb
           path: dist-deb/*.deb
@@ -248,7 +248,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v7
         with:
           name: fono-stage-x86_64-unknown-linux-gnu
           path: linux-bin
@@ -298,7 +298,7 @@ jobs:
           (cd pkg && bsdtar --zstd -cf "../dist-arch/fono-${version}-1-x86_64.pkg.tar.zst" .)
           ls -la dist-arch
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: fono-pkg-arch
           path: dist-arch/*.pkg.tar.zst
@@ -313,7 +313,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v7
         with:
           name: fono-stage-x86_64-unknown-linux-gnu
           path: linux-bin
@@ -332,7 +332,7 @@ jobs:
           mkdir -p "${GITHUB_WORKSPACE}/dist-slack"
           cp "/tmp/fono-${version}-x86_64-1.txz" "${GITHUB_WORKSPACE}/dist-slack/"
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: fono-pkg-slack
           path: dist-slack/*.txz
@@ -345,7 +345,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v7
         with:
           name: fono-stage-x86_64-unknown-linux-gnu
           path: linux-bin
@@ -380,7 +380,7 @@ jobs:
             -comp xz -b 256K -noappend -no-recovery
           ls -la dist-nimblex
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: fono-pkg-nimblex
           path: dist-nimblex/*.lzm
@@ -396,13 +396,13 @@ jobs:
           # Only need CHANGELOG.md; shallow clone is fine.
           fetch-depth: 1
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v7
         with:
           pattern: fono-bin-*
           path: artifacts
           merge-multiple: true
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v7
         with:
           pattern: fono-pkg-*
           path: artifacts
@@ -477,7 +477,7 @@ jobs:
           fi
 
       - name: Create draft release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           draft: true
           generate_release_notes: true
