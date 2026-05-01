@@ -134,25 +134,61 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Run size-budget gate in Alpine musl toolchain
+      - name: Run size-budget gate in glibc-hosted musl cross toolchain
         run: |
           docker run --rm \
             -v "${GITHUB_WORKSPACE}:/work" \
             -w /work \
             -e CARGO_TERM_COLOR=always \
             -e RUST_BACKTRACE=1 \
-            -e PATH=/usr/local/cargo/bin:/usr/local/rustup/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-            rust:1.88-alpine \
+            -e RUST_MIN_STACK=33554432 \
+            -e RUSTUP_TOOLCHAIN=stable \
+            -e CARGO_BUILD_JOBS=2 \
+            -e CMAKE_BUILD_PARALLEL_LEVEL=2 \
+            messense/rust-musl-cross:x86_64-musl \
             sh -c '
               set -eu
-              apk add --no-cache \
-                bash build-base ca-certificates clang-dev cmake git linux-headers perl pkgconf
+              unset CARGO_BUILD_TARGET
               git config --global --add safe.directory /work
               rustc --version
               cargo --version
-              cargo fmt --version
-              cargo clippy --version
-              ./tests/check.sh --size-budget --no-test
+              command -v x86_64-unknown-linux-musl-g++
+              printf "#include <array>\nint main(){std::array<int,1> a{1}; return a[0] != 1;}\n" \
+                | x86_64-unknown-linux-musl-g++ -std=gnu++17 -x c++ - -o /tmp/cxx-smoke
+
+              target=x86_64-unknown-linux-musl
+              budget_bytes=20971520
+              cargo build -p fono --profile release-slim --target "${target}"
+
+              bin="target/${target}/release-slim/fono"
+              test -f "${bin}"
+              size="$(stat -c%s "${bin}")"
+              printf "size: %s bytes — budget %s bytes\n" "${size}" "${budget_bytes}"
+              if [ "${size}" -gt "${budget_bytes}" ]; then
+                echo "FAIL: binary exceeds 20 MiB budget by $((size - budget_bytes)) bytes" >&2
+                exit 5
+              fi
+
+              ldd_out="$(ldd "${bin}" 2>&1 || true)"
+              if ! printf "%s\n" "${ldd_out}" | grep -q "not a dynamic executable"; then
+                echo "FAIL: binary is dynamically linked" >&2
+                printf "%s\n" "${ldd_out}" >&2
+                exit 5
+              fi
+
+              needed="$(readelf -d "${bin}" 2>/dev/null | grep NEEDED || true)"
+              if [ -n "${needed}" ]; then
+                echo "FAIL: binary has dynamic NEEDED entries" >&2
+                printf "%s\n" "${needed}" >&2
+                exit 5
+              fi
+
+              ggml_count="$(nm "${bin}" 2>/dev/null | grep -c "^[0-9a-f][0-9a-f]* [Tt] ggml_init$" || true)"
+              if [ "${ggml_count}" -gt 1 ]; then
+                echo "FAIL: ${ggml_count} copies of ggml_init in binary (expected 1)" >&2
+                exit 5
+              fi
+              printf "size-budget gate passed; ggml_init symbols: %s\n" "${ggml_count}"
             '
 
       - name: cargo-bloat top contributors (artefact)
