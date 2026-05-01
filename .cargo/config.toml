@@ -44,9 +44,10 @@ rustflags = [
     "-C", "link-arg=-Wl,--allow-multiple-definition",
     "-C", "link-arg=-Wl,--gc-sections",
     "-C", "link-arg=-Wl,--as-needed",
-    # Keep GCC helper routines static when the musl toolchain supports it.
-    # C++ stdlib and OpenMP static linkage come from the sys-crate features
-    # in `Cargo.toml`, not from late `link-arg` ordering here.
+    # Some musl cross images do not propagate llama-cpp-sys' static OpenMP
+    # directive onto the final binary link line. Keep a final explicit gomp
+    # link argument so ggml OpenMP symbols resolve for static-musl CI builds.
+    "-C", "link-arg=-lgomp",
     "-C", "link-arg=-static-libgcc",
 ]
 
