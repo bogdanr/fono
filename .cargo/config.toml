@@ -45,10 +45,10 @@ rustflags = [
     "-C", "link-arg=-Wl,--gc-sections",
     "-C", "link-arg=-Wl,--as-needed",
     # Some musl cross images do not propagate llama-cpp-sys' static OpenMP
-    # directive onto the final binary link line. Ask the GCC linker driver to
-    # resolve OpenMP and force its runtime static for static-musl CI builds.
-    "-C", "link-arg=-fopenmp",
-    "-C", "link-arg=-static-libgomp",
+    # directive onto the final binary link line. Keep gomp behind an explicit
+    # static linker mode so the final ship binary does not gain libgomp.so.
+    "-C", "link-arg=-Wl,-Bstatic",
+    "-C", "link-arg=-lgomp",
     "-C", "link-arg=-static-libgcc",
 ]
 
