@@ -1345,8 +1345,9 @@ async fn update_cmd(
     })?;
 
     let current = env!("CARGO_PKG_VERSION");
+    let current_prefix = crate::variant::VARIANT.release_asset_prefix();
     println!("fono {current} — checking for updates on the {channel} channel…");
-    let status = check(current, chan).await;
+    let status = check(current, current_prefix, chan).await;
     match &status {
         UpdateStatus::UpToDate { .. } => {
             println!("up-to-date {current}");

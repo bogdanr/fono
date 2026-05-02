@@ -2,6 +2,63 @@
 
 Last updated: 2026-05-02
 
+## 2026-05-02 — CPU/GPU variants slice 3: auto-variant update + tray entry
+
+Slice 3 of `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`. The
+plan was simplified mid-implementation: instead of a wizard prompt
++ config flag + `--variant cpu/gpu` CLI + tray menu, we landed
+**one decision in one place**.
+
+`fono update` now probes Vulkan and auto-picks the right release
+asset:
+
+- CPU build on no-GPU host → `fono-vX.Y.Z-x86_64` (same variant,
+  version bump only).
+- CPU build on GPU+Vulkan host → `fono-gpu-vX.Y.Z-x86_64` (cross-
+  variant switch, possibly + version bump).
+- GPU build on a host that lost Vulkan capability → switches back
+  to CPU on next update.
+
+`fono_update::check` now takes the running binary's current asset
+prefix and treats a prefix mismatch as "update available" even
+when the version hasn't changed. That's how the tray's new
+"Update for GPU acceleration" item lights up at the same version.
+
+The tray entry is the single discoverable surface: shown only on a
+CPU-variant build with a usable Vulkan host. Click → reuses the
+existing `apply_update_via_tray` handler (which now picks the
+right asset automatically). New `TrayAction::UpdateForGpuAcceleration`
++ `GpuUpgradeProvider` callback type in `fono-tray`.
+
+`vulkan_probe` was moved from `crates/fono/src/` into
+`crates/fono-core/src/` behind a `vulkan-probe` cargo feature
+(off by default), so `fono` and `fono-update` both opt in without
+forcing `ash` onto every other workspace consumer.
+
+No wizard prompt. No `[update] gpu_upgrade_prompted` config flag.
+No `--variant` CLI flag. Per the user-feedback memory
+`feedback_centralize_decisions`: prefer one automatic decision in
+one place over scattered prompts/toggles.
+
+Files touched: `Cargo.toml` (ash workspace dep moved),
+`crates/fono-core/{Cargo.toml, src/lib.rs, src/vulkan_probe.rs}` (probe
+module + feature), `crates/fono-update/{Cargo.toml, src/lib.rs}`
+(variant-aware check + asset selection), `crates/fono-tray/src/lib.rs`
+(new action + provider + menu entry), `crates/fono/{Cargo.toml,
+src/lib.rs, src/daemon.rs, src/cli.rs, src/doctor.rs}` (call sites
++ daemon plumbing; vulkan_probe module deleted).
+
+`fono doctor` and the daemon log line continue to work, now sourcing
+the probe from `fono_core::vulkan_probe` instead of
+`crate::vulkan_probe`.
+
+Verification: `cargo fmt`, `cargo clippy --workspace --all-targets
+-- -D warnings`, `cargo test --workspace --all-targets` all green
+locally. Smoke-tested `fono doctor` shows the "Compute backends"
+section unchanged from slice 2; the new tray entry visibility was
+not exercised live (no tray-host running on this Proxmox box) but
+the daemon path compiles and dispatches correctly.
+
 ## 2026-05-02 — CPU/GPU variants slice 2: runtime Vulkan probe + doctor surfacing
 
 Per slice 2 of `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`,

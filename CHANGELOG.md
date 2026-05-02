@@ -33,9 +33,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `fono-gpu` release asset. Implemented via `ash` runtime-loaded
   bindings (`Entry::load()` → `dlopen("libvulkan.so.1")`) so the
   CPU variant still has the strict 4-NEEDED-entry allowlist —
-  libvulkan never appears in NEEDED. New
-  `crates/fono/src/vulkan_probe.rs`. Slice 2 of
+  libvulkan never appears in NEEDED. Module lives at
+  `crates/fono-core/src/vulkan_probe.rs` behind the `vulkan-probe`
+  feature; both `fono` and `fono-update` opt in. Slice 2 of
   `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`.
+- **Auto-variant `fono update`.** Every `fono update` invocation now
+  probes Vulkan on the host and fetches the matching release asset:
+  `fono-vX.Y.Z-x86_64` when no usable GPU is present, or
+  `fono-gpu-vX.Y.Z-x86_64` when libvulkan + a physical device are
+  available. CPU users on GPU-equipped hardware are switched to
+  the GPU build on their next update; if they later move to a
+  GPU-less machine, the next update switches them back. No CLI
+  flag, no wizard prompt, no config knob — one decision in one
+  place. `fono_update::check` now takes the running binary's
+  current asset prefix and treats a prefix mismatch as "update
+  available" even at the same version. Slice 3 of
+  `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`.
+- **Tray "Update for GPU acceleration" entry.** On a CPU-variant
+  build with a usable Vulkan host, the tray menu surfaces an
+  explicit "Update for GPU acceleration" item that triggers the
+  same auto-variant `apply_update` path. Hidden on GPU builds and
+  on hosts without Vulkan. New `fono_tray::TrayAction::UpdateForGpuAcceleration`
+  + `GpuUpgradeProvider` callback type.
 - **CI gate split.** The `Binary size & deps audit` job now runs as
   a matrix `(cpu, gpu)`, asserting both variants stay within their
   respective budgets and NEEDED allowlists. CPU: ≤ 20 MiB + 4-entry

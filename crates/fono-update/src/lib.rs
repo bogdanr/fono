@@ -140,15 +140,47 @@ fn strip_v(s: &str) -> &str {
     s.strip_prefix('v').unwrap_or(s)
 }
 
-/// Asset name expected for the running build. Returns `None` on
-/// platforms / arches we don't publish a binary for.
-pub fn asset_name_for(tag: &str) -> Option<String> {
+/// Asset-name prefix for the CPU-only build.
+pub const CPU_ASSET_PREFIX: &str = "fono";
+/// Asset-name prefix for the Vulkan-enabled GPU build.
+pub const GPU_ASSET_PREFIX: &str = "fono-gpu";
+
+/// Asset name expected for the running build, given an explicit prefix.
+/// Returns `None` on platforms / arches we don't publish a binary for.
+///
+/// The prefix is one of `CPU_ASSET_PREFIX` or `GPU_ASSET_PREFIX`. Use
+/// [`desired_asset_prefix`] to pick automatically based on the host's
+/// Vulkan capability.
+pub fn asset_name_for(tag: &str, prefix: &str) -> Option<String> {
     let arch = current_arch()?;
     // Linux-only today; the install script enforces the same.
     if !cfg!(target_os = "linux") {
         return None;
     }
-    Some(format!("fono-{tag}-{arch}"))
+    Some(format!("{prefix}-{tag}-{arch}"))
+}
+
+/// Pick the right release-asset prefix for this host: GPU-enabled
+/// (`fono-gpu`) when Vulkan is available, CPU-only (`fono`) otherwise.
+///
+/// Per slice 3 of `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`, the
+/// update flow is automatic — `fono update` always fetches the variant
+/// that matches the host's hardware. If the user is currently on the
+/// CPU build but has a GPU + libvulkan installed, the next update
+/// switches them to the GPU build. If they later move to a GPU-less
+/// machine, the next update switches back to CPU. No explicit flag,
+/// no wizard prompt; one decision in one place.
+///
+/// Cost: ~50–300 ms on Mesa, ~10 ms when libvulkan is absent. Callers
+/// that invoke this multiple times in one process should cache the
+/// result.
+#[must_use]
+pub fn desired_asset_prefix() -> &'static str {
+    if fono_core::vulkan_probe::probe().is_usable() {
+        GPU_ASSET_PREFIX
+    } else {
+        CPU_ASSET_PREFIX
+    }
 }
 
 fn current_arch() -> Option<&'static str> {
@@ -206,7 +238,12 @@ fn download_client() -> Result<reqwest::Client> {
 
 /// Fetch the most recent release on the requested channel that ships an
 /// asset for the running platform/arch.
-pub async fn fetch_latest(channel: Channel) -> Result<GhReleaseChoice> {
+/// Resolve the latest release matching the given channel and asset
+/// prefix. Pass [`desired_asset_prefix()`](desired_asset_prefix) for
+/// auto-pick-by-host-capability behaviour, or one of
+/// [`CPU_ASSET_PREFIX`] / [`GPU_ASSET_PREFIX`] to force a specific
+/// variant.
+pub async fn fetch_latest(channel: Channel, asset_prefix: &str) -> Result<GhReleaseChoice> {
     let client = http_client()?;
     let releases: Vec<GhRelease> = match channel {
         Channel::Stable => {
@@ -224,7 +261,7 @@ pub async fn fetch_latest(channel: Channel) -> Result<GhReleaseChoice> {
             r.json::<Vec<GhRelease>>().await.context("parse releases")?
         }
     };
-    pick_release(&releases, channel)
+    pick_release(&releases, channel, asset_prefix)
 }
 
 #[doc(hidden)]
@@ -241,7 +278,11 @@ pub struct GhReleaseChoice {
     pub expected_sha256: Option<String>,
 }
 
-fn pick_release(releases: &[GhRelease], channel: Channel) -> Result<GhReleaseChoice> {
+fn pick_release(
+    releases: &[GhRelease],
+    channel: Channel,
+    asset_prefix: &str,
+) -> Result<GhReleaseChoice> {
     for r in releases {
         if r.draft {
             continue;
@@ -249,7 +290,7 @@ fn pick_release(releases: &[GhRelease], channel: Channel) -> Result<GhReleaseCho
         if matches!(channel, Channel::Stable) && r.prerelease {
             continue;
         }
-        let Some(want) = asset_name_for(&r.tag_name) else {
+        let Some(want) = asset_name_for(&r.tag_name, asset_prefix) else {
             anyhow::bail!(
                 "no published binary for {}/{}; install via your package manager",
                 std::env::consts::OS,
@@ -289,16 +330,34 @@ fn pick_release(releases: &[GhRelease], channel: Channel) -> Result<GhReleaseCho
 
 /// Compare the latest release against `current_version` and return a
 /// classified [`UpdateStatus`]. Honours `FONO_NO_UPDATE_CHECK=1`.
-pub async fn check(current_version: &str, channel: Channel) -> UpdateStatus {
+///
+/// `current_asset_prefix` is the prefix of *this running binary*
+/// (`CPU_ASSET_PREFIX` for the default `fono` build, `GPU_ASSET_PREFIX`
+/// for `fono-gpu`). The check internally computes the *desired* prefix
+/// via [`desired_asset_prefix()`](desired_asset_prefix) (Vulkan-probe
+/// based) and treats a prefix mismatch as an available update even when
+/// the version hasn't changed — that's how the auto-switch from CPU to
+/// GPU lands when a user's hardware gains a usable GPU.
+pub async fn check(
+    current_version: &str,
+    current_asset_prefix: &str,
+    channel: Channel,
+) -> UpdateStatus {
     if std::env::var_os("FONO_NO_UPDATE_CHECK").is_some_and(|v| v == "1") {
         return UpdateStatus::UpToDate {
             current: current_version.to_string(),
         };
     }
-    match fetch_latest(channel).await {
+    let desired_prefix = desired_asset_prefix();
+    match fetch_latest(channel, desired_prefix).await {
         Ok(choice) => {
             let remote = strip_v(&choice.tag).to_string();
-            if is_newer(&choice.tag, current_version) {
+            // A prefix mismatch is "an update is available" even at the
+            // same version — that's how the host-capability change
+            // (e.g. plugged in an eGPU) propagates to the user without
+            // waiting for a new release.
+            let variant_changed = desired_prefix != current_asset_prefix;
+            if variant_changed || is_newer(&choice.tag, current_version) {
                 UpdateStatus::Available {
                     current: current_version.to_string(),
                     info: UpdateInfo {
@@ -691,8 +750,10 @@ mod tests {
     #[test]
     fn asset_name_includes_arch_on_linux() {
         if cfg!(target_os = "linux") {
-            let n = asset_name_for("v1.2.3").unwrap();
-            assert!(n.starts_with("fono-v1.2.3-"));
+            let cpu = asset_name_for("v1.2.3", CPU_ASSET_PREFIX).unwrap();
+            assert!(cpu.starts_with("fono-v1.2.3-"));
+            let gpu = asset_name_for("v1.2.3", GPU_ASSET_PREFIX).unwrap();
+            assert!(gpu.starts_with("fono-gpu-v1.2.3-"));
         }
     }
 

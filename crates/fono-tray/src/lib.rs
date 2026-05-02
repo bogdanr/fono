@@ -69,6 +69,23 @@ pub type ActiveProvider = Arc<dyn Fn() -> (u8, u8) + Send + Sync>;
 ///   [`TrayAction::ApplyUpdate`].
 pub type UpdateProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
+/// Provider for the "Update for GPU acceleration" menu entry —
+/// distinct from the version-bump update because it triggers a
+/// cross-variant switch (CPU build → GPU build) using the same
+/// self-update infrastructure. Slice 3 of
+/// `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`.
+///
+/// Returns `Some(label)` only when:
+/// - the running binary is the CPU variant, AND
+/// - Vulkan is usable on this host (libvulkan.so.1 loadable + ≥1
+///   physical device), AND
+/// - a GPU-variant release asset for the latest tag exists.
+///
+/// Clicking fires [`TrayAction::UpdateForGpuAcceleration`]; the
+/// daemon then runs `fono_update::apply_update` against the
+/// `fono-gpu` asset prefix.
+pub type GpuUpgradeProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
 /// Provider returning labels for Wyoming servers discovered on the LAN.
 /// Called on the same ~2 s poll as the backend providers. The daemon
 /// filters out its own local advertisement before returning labels, so
@@ -115,6 +132,12 @@ pub enum TrayAction {
     /// this by running a check and applying the update via
     /// `fono-update::apply_update`.
     ApplyUpdate,
+    /// User clicked the "Update for GPU acceleration" entry. The
+    /// daemon dispatches this to `fono_update::apply_update` against
+    /// the `fono-gpu` asset prefix to swap the running CPU binary for
+    /// the Vulkan-enabled one. Only present in the menu on a CPU
+    /// build with a usable Vulkan host.
+    UpdateForGpuAcceleration,
     /// Switch the active input device. The `u8` is an index into the
     /// device list returned by [`MicrophonesProvider`] at the time of
     /// the click. On Pulse / PipeWire hosts the daemon dispatches
@@ -174,6 +197,10 @@ impl Tray {
 ///   discovered via mDNS; empty list renders a disabled placeholder.
 /// * `update_provider` — `Some(label)` shows / refreshes the "Update
 ///   to vX" entry; `None` hides it.
+/// * `gpu_upgrade_provider` — `Some(label)` shows the "Update for GPU
+///   acceleration" entry on a CPU-variant build with a usable Vulkan
+///   host; `None` hides it. Distinct from `update_provider` because it
+///   triggers a cross-variant switch, not a version bump.
 /// * `microphones_provider` — `(devices, active_idx)` for the
 ///   Microphone submenu; empty list hides the submenu.
 #[allow(unused_variables, clippy::too_many_arguments)]
@@ -185,6 +212,7 @@ pub fn spawn(
     active_provider: ActiveProvider,
     discovered_stt_provider: DiscoveredSttProvider,
     update_provider: UpdateProvider,
+    gpu_upgrade_provider: GpuUpgradeProvider,
     microphones_provider: MicrophonesProvider,
 ) -> (Tray, mpsc::UnboundedReceiver<TrayAction>) {
     let shared = Arc::new(AtomicU8::new(TrayState::Idle as u8));
@@ -203,6 +231,7 @@ pub fn spawn(
             active_provider,
             discovered_stt_provider,
             update_provider,
+            gpu_upgrade_provider,
             microphones_provider,
         );
         let state_tx = if started { Some(state_tx) } else { None };
@@ -233,8 +262,8 @@ pub fn spawn(
 #[cfg(feature = "tray-backend")]
 mod backend {
     use super::{
-        ActiveProvider, DiscoveredSttProvider, MicrophonesProvider, RecentProvider, TrayAction,
-        TrayState, UpdateProvider, RECENT_SLOTS,
+        ActiveProvider, DiscoveredSttProvider, GpuUpgradeProvider, MicrophonesProvider,
+        RecentProvider, TrayAction, TrayState, UpdateProvider, RECENT_SLOTS,
     };
     use fono_core::notify::{self, Urgency};
     use ksni::{
@@ -267,6 +296,7 @@ mod backend {
         active: (u8, u8),
         discovered_stt: Vec<String>,
         update_label: Option<String>,
+        gpu_upgrade_label: Option<String>,
         microphones: (Vec<String>, u8),
         actions: mpsc::UnboundedSender<TrayAction>,
     }
@@ -314,6 +344,7 @@ mod backend {
     /// [`mpsc::UnboundedSender<TrayState>`]; failure means it gets
     /// `None` and `set_state` becomes a no-op.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         tooltip: String,
         actions: mpsc::UnboundedSender<TrayAction>,
@@ -324,6 +355,7 @@ mod backend {
         active_provider: ActiveProvider,
         discovered_stt_provider: DiscoveredSttProvider,
         update_provider: UpdateProvider,
+        gpu_upgrade_provider: GpuUpgradeProvider,
         microphones_provider: MicrophonesProvider,
     ) -> bool {
         // We need to be inside a tokio runtime to spawn the ksni
@@ -344,6 +376,7 @@ mod backend {
                 active_provider,
                 discovered_stt_provider,
                 update_provider,
+                gpu_upgrade_provider,
                 microphones_provider,
             )
             .await
@@ -390,6 +423,7 @@ mod backend {
         active_provider: ActiveProvider,
         discovered_stt_provider: DiscoveredSttProvider,
         update_provider: UpdateProvider,
+        gpu_upgrade_provider: GpuUpgradeProvider,
         microphones_provider: MicrophonesProvider,
     ) -> anyhow::Result<()> {
         let model = KsniTray {
@@ -401,6 +435,7 @@ mod backend {
             active: (u8::MAX, u8::MAX),
             discovered_stt: Vec::new(),
             update_label: None,
+            gpu_upgrade_label: None,
             microphones: (Vec::new(), u8::MAX),
             actions,
         };
@@ -434,12 +469,14 @@ mod backend {
                     let active = active_provider();
                     let discovered_stt = discovered_stt_provider();
                     let upd = update_provider();
+                    let gpu_upd = gpu_upgrade_provider();
                     let mics = microphones_provider();
                     handle.update(move |t: &mut KsniTray| {
                         if t.recent != recent { t.recent = recent; }
                         if t.active != active { t.active = active; }
                         if t.discovered_stt != discovered_stt { t.discovered_stt = discovered_stt; }
                         if t.update_label != upd { t.update_label = upd; }
+                        if t.gpu_upgrade_label != gpu_upd { t.gpu_upgrade_label = gpu_upd; }
                         if t.microphones != mics { t.microphones = mics; }
                     }).await;
                 }
@@ -644,6 +681,22 @@ mod backend {
                 StandardItem {
                     label: label.clone(),
                     activate: send_action(TrayAction::ApplyUpdate),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+
+        // GPU-upgrade entry — surfaced only on a CPU-variant build
+        // running on a host with a usable Vulkan loader + GPU. The
+        // daemon's provider returns Some(label) only when both
+        // conditions hold; clicking dispatches to apply_update with
+        // the `fono-gpu` asset prefix.
+        if let Some(label) = t.gpu_upgrade_label.as_ref() {
+            items.push(
+                StandardItem {
+                    label: label.clone(),
+                    activate: send_action(TrayAction::UpdateForGpuAcceleration),
                     ..Default::default()
                 }
                 .into(),
