@@ -57,6 +57,33 @@ pub async fn report(paths: &Paths) -> Result<String> {
     }
     writeln!(out)?;
 
+    // Compute backends — what's compiled into this variant + what the
+    // host's Vulkan loader reports. Slice 2 of
+    // `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`.
+    {
+        use crate::variant::{Variant, VARIANT};
+        use crate::vulkan_probe::probe;
+        writeln!(out, "Compute backends:")?;
+        writeln!(
+            out,
+            "  variant  : {} ({})",
+            VARIANT.label(),
+            VARIANT.description()
+        )?;
+        let outcome = probe();
+        writeln!(out, "  vulkan   : {}", outcome.summary_line())?;
+        if matches!(VARIANT, Variant::Cpu) && outcome.is_usable() {
+            writeln!(
+                out,
+                "  hint     : your machine has Vulkan-capable GPU(s); the GPU release \
+                 variant runs inference faster on this hardware. Download \
+                 `fono-gpu-vX.Y.Z-x86_64` from the Releases page (or upgrade in-place \
+                 once `fono update --variant gpu` lands)."
+            )?;
+        }
+        writeln!(out)?;
+    }
+
     writeln!(out, "Paths:")?;
     writeln!(out, "  config : {}", paths.config_file().display())?;
     writeln!(out, "  data   : {}", paths.data_dir.display())?;

@@ -2,6 +2,38 @@
 
 Last updated: 2026-05-02
 
+## 2026-05-02 — CPU/GPU variants slice 2: runtime Vulkan probe + doctor surfacing
+
+Per slice 2 of `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`,
+`fono doctor` now runtime-probes the host's Vulkan loader and reports
+what it sees in a "Compute backends" section. On a CPU-variant binary
+where a Vulkan-capable GPU is detected, doctor surfaces an upgrade
+hint pointing at the `fono-gpu-vX.Y.Z-x86_64` release asset.
+
+The probe lives in `crates/fono/src/vulkan_probe.rs` and uses `ash`'s
+runtime-loaded bindings (`ash::Entry::load()` →
+`dlopen("libvulkan.so.1")` via libloading) — so the CPU variant
+keeps its strict 4-NEEDED-entry allowlist. Three states reported:
+
+- `Vulkan: detected (<device names>)` — loader + ≥ 1 device.
+- `Vulkan: loader present but no physical devices` — driver missing.
+- `Vulkan: not available (<reason>)` — libvulkan not loadable.
+
+The probe runs once at daemon startup (logged at info), and on every
+`fono doctor` invocation. Cost: ~50–300 ms on Mesa, ~10 ms when the
+loader is absent. No allocation of GPU memory; instance is destroyed
+before the function returns.
+
+Surfaced in the daemon startup log as the line `vulkan probe : ...`
+right after `hw accel`.
+
+**Slice 3 is next** — actual upgrade UX:
+
+- `fono update --variant gpu` (and `--variant cpu` for the reverse).
+- Tray menu: `SwitchToGpuBuild` / `SwitchToCpuBuild` actions.
+- First-run wizard prompt when Vulkan is detected on the CPU variant.
+- `[update] gpu_upgrade_prompted` config flag for "never ask again".
+
 ## 2026-05-02 — Two-variant release (CPU default + GPU optional), slice 1
 
 Releases will now ship two binaries side-by-side: the default

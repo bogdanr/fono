@@ -707,6 +707,10 @@ fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbos
     }
     info!("variant      : {}", crate::variant::VARIANT.label());
     info!("hw accel     : {}", hardware_acceleration_summary());
+    info!(
+        "vulkan probe : {}",
+        crate::vulkan_probe::probe().summary_line()
+    );
     debug!(
         "config       : {} ({})",
         config_path.display(),

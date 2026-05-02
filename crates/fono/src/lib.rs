@@ -26,6 +26,7 @@ pub mod install;
 pub mod models;
 pub mod session;
 pub mod variant;
+pub mod vulkan_probe;
 pub mod wizard;
 
 #[cfg(feature = "interactive")]

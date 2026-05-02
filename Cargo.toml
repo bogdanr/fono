@@ -109,6 +109,14 @@ winit = "0.30"
 softbuffer = "0.4"
 notify-rust = "4.11"
 
+# Vulkan runtime probe used by the CPU variant to detect whether the
+# host has libvulkan.so.1 + at least one Vulkan-capable device, so the
+# upgrade UX (`fono doctor`, the wizard, the tray menu) can offer to
+# switch to the GPU release variant. `loaded` opens libvulkan at runtime
+# via `libloading`; we deliberately do NOT use `linked` (would add
+# libvulkan.so.1 to the CPU variant's NEEDED set and fail the gate).
+ash = { version = "0.38", default-features = false, features = ["loaded"] }
+
 # Focus detection
 x11rb = { version = "0.13", features = ["xtest"] }
 

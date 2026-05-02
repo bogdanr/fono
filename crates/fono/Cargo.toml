@@ -98,6 +98,12 @@ crossbeam-channel = { workspace = true }
 tempfile = { workspace = true }
 futures = { workspace = true, optional = true }
 tokio-stream = { workspace = true, optional = true }
+# Runtime Vulkan probe used by `crate::vulkan_probe` (slice 2 of
+# `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`). `ash` with
+# `default-features = false, features = ["loaded"]` opens libvulkan.so.1
+# at runtime; nothing is link-time. CPU-variant binary picks up zero
+# NEEDED entries from this dep.
+ash = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
