@@ -62,7 +62,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
     // `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`.
     {
         use crate::variant::{Variant, VARIANT};
-        use crate::vulkan_probe::probe;
+        use fono_core::vulkan_probe::probe;
         writeln!(out, "Compute backends:")?;
         writeln!(
             out,

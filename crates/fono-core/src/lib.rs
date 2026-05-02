@@ -16,6 +16,9 @@ pub mod secrets;
 #[cfg(feature = "budget")]
 pub mod budget;
 
+#[cfg(feature = "vulkan-probe")]
+pub mod vulkan_probe;
+
 pub use config::Config;
 pub use error::{Error, Result};
 pub use hwcheck::{HardwareSnapshot, LocalTier};

@@ -1188,7 +1188,6 @@ name = "fono"
 version = "0.4.0"
 dependencies = [
  "anyhow",
- "ash",
  "async-trait",
  "clap",
  "clap_complete",
@@ -1262,6 +1261,7 @@ name = "fono-core"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "ash",
  "directories",
  "notify-rust",
  "once_cell",
@@ -1420,6 +1420,7 @@ name = "fono-update"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "fono-core",
  "futures",
  "hex",
  "reqwest",

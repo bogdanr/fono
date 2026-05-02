@@ -185,71 +185,64 @@ both.
    own NEEDED set or a magic string before swapping in — defensive
    check against asset-name confusion).
 
-### CLI
+### CLI (simplified 2026-05-02)
 
-Extend the existing `Update` subcommand in `crates/fono/src/cli.rs`:
+`fono update` keeps its existing flags. **The variant decision is
+internal**: every invocation probes Vulkan and picks `fono` or
+`fono-gpu` automatically. Users do not pass a `--variant` flag —
+the binary always self-aligns with the host's hardware:
 
-```
-fono update [--check] [-y/--yes] [--dry-run]
-            [--channel stable|prerelease]
-            [--no-restart] [--bin-dir <path>]
-            [--variant cpu|gpu]    ← NEW
-```
+- CPU build on a host without usable Vulkan → next update fetches
+  `fono-vX.Y.Z-x86_64` (same variant, version bump only).
+- CPU build on a host *with* usable Vulkan → next update fetches
+  `fono-gpu-vX.Y.Z-x86_64` (variant switch + possible version bump).
+- GPU build on a host without usable Vulkan (laptop undocked, eGPU
+  unplugged, driver removed) → next update fetches the CPU asset.
+- GPU build on a host with Vulkan → stays on `fono-gpu`.
 
-When `--variant` is omitted, `fono update` keeps current variant.
-When set, it swaps the binary to the requested variant.
+Per [user feedback memory `feedback_centralize_decisions`]: one
+decision in one place. No CLI flag, no wizard prompt, no
+`gpu_upgrade_prompted` config knob.
 
-### Tray UX
+### Tray UX (simplified 2026-05-02)
 
-Extend `TrayAction` in `crates/fono-tray/src/lib.rs`:
+A single tray item — **"Update for GPU acceleration"** — shows up
+only on a CPU-variant build with a usable Vulkan host. Click → the
+existing `apply_update` path runs (which auto-picks `fono-gpu`
+because the probe says so).
 
-```rust
-pub enum TrayAction {
-    // existing variants…
-    SwitchToGpuBuild,
-    SwitchToCpuBuild,   // for symmetry; only relevant on GPU variant
-}
-```
+`fono-tray::TrayAction::UpdateForGpuAcceleration` + the
+`GpuUpgradeProvider` callback type are added; the daemon's provider
+returns `Some("Update for GPU acceleration")` only when both
+conditions hold (CPU variant + probe `is_usable`). The action is
+routed to the same `apply_update_via_tray` handler as `ApplyUpdate`
+— no separate code path needed because the variant choice is now
+folded into `fono_update::check`.
 
-The tray menu shows:
+No "Switch to CPU build" item on the GPU variant: if the user is
+on the GPU build and loses Vulkan capability, the next normal
+update auto-switches them back. The tray doesn't need to surface
+that explicitly.
 
-- **On CPU variant + Vulkan detected**: a "Switch to GPU build
-  (~3× faster on this hardware)" item under the existing Update
-  group, surfacing `SwitchToGpuBuild`.
-- **On GPU variant**: a "Switch to CPU build (smaller, no GPU
-  required)" item, surfacing `SwitchToCpuBuild`. Less prominent.
+### `fono_update::check` API (simplified 2026-05-02)
 
-Daemon handler (`crates/fono/src/daemon.rs`) routes the action to
-the same `fono-update::apply_update` path that the CLI uses, with
-the cross-variant flag set.
+Signature change: `check(current_version, current_asset_prefix, channel)`.
+The `current_asset_prefix` is `crate::variant::VARIANT.release_asset_prefix()`
+in the binary call sites. Internally `check` calls
+`desired_asset_prefix()` (which probes Vulkan) and treats a prefix
+mismatch as an available update — that's how the
+"Update for GPU acceleration" tray item lights up even at the same
+version.
 
-### Wizard prompt
+`asset_name_for(tag, prefix)` is parameterised on prefix.
+`pick_release` and `fetch_latest` carry the prefix through.
+`CPU_ASSET_PREFIX = "fono"` and `GPU_ASSET_PREFIX = "fono-gpu"`
+constants live in `fono-update`.
 
-At the end of `fono setup` (in `crates/fono/src/wizard.rs`), if:
+### No wizard prompt; no config knob
 
-- variant == Cpu
-- Vulkan probe detected ≥1 device
-- the user hasn't dismissed it before (config flag
-  `[update] gpu_upgrade_prompted = true`)
-
-…ask:
-
-```
-Detected GPU: Intel UHD Graphics 770, NVIDIA RTX 4070
-The GPU-enabled fono build is ~3× faster on this hardware (~60 MB
-download). Switch now? [Y/n/never]
-```
-
-- `Y` → run `fono update --variant gpu`.
-- `n` → continue, ask again on next setup.
-- `never` → set `gpu_upgrade_prompted = true` in config; never ask
-  again. The tray menu still has the option for users who change
-  their mind.
-
-### Config knob
-
-`[update]` section gains `gpu_upgrade_prompted: bool` (default
-`false`). Set to `true` when the wizard asked-and-was-declined-with-never.
+Both removed from the original plan per simplification. The user's
+hardware speaks for itself; we listen on every update.
 
 ## Phasing
 

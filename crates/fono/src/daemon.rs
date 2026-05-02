@@ -200,7 +200,8 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                 // startup work (audio init, model load, tray spawn).
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 let current = env!("CARGO_PKG_VERSION");
-                let st = fono_update::check(current, channel).await;
+                let current_prefix = crate::variant::VARIANT.release_asset_prefix();
+                let st = fono_update::check(current, current_prefix, channel).await;
                 match &st {
                     fono_update::UpdateStatus::Available { info: rel, .. } => {
                         info!(
@@ -350,6 +351,22 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                 // on-demand trigger when the user clicks it.
                 let status = Arc::clone(&update_status);
                 Arc::new(move || update_label(&status)) as fono_tray::UpdateProvider
+            },
+            {
+                // Render the "Update for GPU acceleration" entry only on
+                // a CPU-variant build with a usable Vulkan host. Probed
+                // once at daemon startup and cached for the session —
+                // hardware doesn't grow a GPU between ticks.
+                let probe_is_usable =
+                    matches!(crate::variant::VARIANT, crate::variant::Variant::Cpu,)
+                        && fono_core::vulkan_probe::probe().is_usable();
+                Arc::new(move || {
+                    if probe_is_usable {
+                        Some("Update for GPU acceleration".to_string())
+                    } else {
+                        None
+                    }
+                }) as fono_tray::GpuUpgradeProvider
             },
             {
                 // Microphones provider for the "Microphone" submenu.
@@ -618,7 +635,14 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                         )
                         .await;
                     }
-                    TrayAction::ApplyUpdate => {
+                    TrayAction::ApplyUpdate | TrayAction::UpdateForGpuAcceleration => {
+                        // Both actions land here. `apply_update_via_tray`
+                        // re-runs the version+variant check against the
+                        // host's current Vulkan probe; on a CPU binary
+                        // with a usable GPU it naturally picks up the
+                        // `fono-gpu` asset for the same tag. So a click
+                        // on either menu item resolves to the right
+                        // download for this hardware.
                         apply_update_via_tray(Arc::clone(&update_status_tray)).await;
                     }
                     TrayAction::SetInputDevice(idx) => {
@@ -709,7 +733,7 @@ fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbos
     info!("hw accel     : {}", hardware_acceleration_summary());
     info!(
         "vulkan probe : {}",
-        crate::vulkan_probe::probe().summary_line()
+        fono_core::vulkan_probe::probe().summary_line()
     );
     debug!(
         "config       : {} ({})",
@@ -1512,7 +1536,12 @@ async fn apply_update_via_tray(update_status: Arc<RwLock<Option<fono_update::Upd
         i
     } else {
         // No pending update — run an on-demand check and notify.
-        let st = fono_update::check(env!("CARGO_PKG_VERSION"), fono_update::Channel::Stable).await;
+        let st = fono_update::check(
+            env!("CARGO_PKG_VERSION"),
+            crate::variant::VARIANT.release_asset_prefix(),
+            fono_update::Channel::Stable,
+        )
+        .await;
         if let Ok(mut g) = update_status.write() {
             *g = Some(st.clone());
         }
