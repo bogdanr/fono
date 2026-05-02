@@ -46,6 +46,14 @@ default = ["groq"]
 groq = ["fono-stt/groq"]
 openai = ["fono-stt/openai"]
 whisper-local = ["fono-stt/whisper-local"]
+# Hardware-acceleration passthroughs. Off by default; require the
+# matching SDK on the build host (CUDA toolkit, Vulkan SDK, ROCm).
+# Enable to bench GPU-accelerated whisper.cpp inference against the
+# CPU baseline.
+accel-cuda = ["whisper-local", "fono-stt/accel-cuda"]
+accel-vulkan = ["whisper-local", "fono-stt/accel-vulkan"]
+accel-hipblas = ["whisper-local", "fono-stt/accel-hipblas"]
+accel-openblas = ["whisper-local", "fono-stt/accel-openblas"]
 # Streaming↔batch equivalence harness (plan v6 R18). Pulls in the
 # streaming primitives from fono-stt and the small futures glue
 # needed to build a BoxStream<StreamFrame> from an in-memory PCM
