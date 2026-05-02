@@ -273,6 +273,33 @@ pub enum Cmd {
         #[arg(long)]
         bin_dir: Option<std::path::PathBuf>,
     },
+    /// Install fono system-wide on this machine. Requires root.
+    ///
+    /// Default (desktop mode): installs the binary, menu desktop entry,
+    /// XDG autostart entry, icon, and shell completions; the daemon
+    /// launches automatically on next graphical login.
+    ///
+    /// `--server`: installs the binary, a hardened system-wide systemd
+    /// unit running as a dedicated `fono` system user, and shell
+    /// completions; the unit is enabled and started immediately.
+    Install {
+        /// Install in headless server mode (systemd unit, no desktop
+        /// or autostart entries).
+        #[arg(long)]
+        server: bool,
+        /// Print what would be done without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Reverse a previous `fono install`. Reads the install marker
+    /// written at install time and removes exactly the files it
+    /// recorded. User data under `~/.config/fono`,
+    /// `~/.local/share/fono`, and `~/.cache/fono` is never touched.
+    Uninstall {
+        /// Print what would be done without removing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -421,6 +448,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             no_restart,
             bin_dir,
         }) => update_cmd(check, yes, dry_run, &channel, no_restart, bin_dir).await,
+        Some(Cmd::Install { server, dry_run }) => crate::install::run_install(server, dry_run),
+        Some(Cmd::Uninstall { dry_run }) => crate::install::run_uninstall(dry_run),
     }
 }
 

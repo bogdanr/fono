@@ -79,7 +79,7 @@ jobs:
           retention-days: 30
 
   build:
-    name: Release binary (${{ matrix.target }})
+    name: Release binary (${{ matrix.variant }}, ${{ matrix.target }})
     needs: [cloud-equivalence]
     # Run even when cloud-equivalence is skipped (no key, override
     # tag) — `needs` defaults to "succeeded()", which fails on
@@ -99,10 +99,25 @@ jobs:
           # to ubuntu-latest (24.04, glibc 2.39) would silently exclude
           # ~3 years of supported distros. The `size-budget` job in
           # `ci.yml` must mirror this pin — keep them in lockstep.
+          #
+          # Two variants per
+          # `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`:
+          # CPU-only (compact, default download, fully packaged) and
+          # GPU (Vulkan-enabled, raw binary + .sha256 only).
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
             cross: false
             archive: tar.gz
+            variant: cpu
+            asset_prefix: fono
+            features: ""
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            cross: false
+            archive: tar.gz
+            variant: gpu
+            asset_prefix: fono-gpu
+            features: accel-vulkan
     steps:
       - uses: actions/checkout@v5
 
@@ -113,34 +128,67 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Suffix the cache key with the runner image. Swatinem's
-          # default key only varies on `runner.os` ("Linux"), not the
-          # specific runner image — so a cache populated on a runner
-          # with newer glibc would restore build-script binaries that
-          # refuse to execute on this older-glibc runner.
-          key: ${{ matrix.target }}-${{ matrix.os }}
+          # Suffix the cache key with the runner image AND variant.
+          # Swatinem's default key only varies on `runner.os` ("Linux");
+          # different glibc generations and different feature sets must
+          # not share cached build-script binaries.
+          key: ${{ matrix.target }}-${{ matrix.os }}-${{ matrix.variant }}
 
       - name: Install Linux build deps
+        # GPU variant adds `libvulkan-dev` + `glslang-tools` for
+        # ggml-vulkan's SPIR-V shader compilation at build time.
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             build-essential clang cmake pkg-config libclang-dev \
             libxdo-dev
+          if [ "${{ matrix.variant }}" = "gpu" ]; then
+            # See ci.yml: `glslc` (Google shaderc) is required by
+            # ggml-vulkan's CMake but not in Ubuntu 22.04's main repo.
+            # Pull from LunarG's Vulkan SDK apt repo.
+            wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
+              | sudo gpg --dearmor -o /usr/share/keyrings/lunarg.gpg
+            echo "deb [signed-by=/usr/share/keyrings/lunarg.gpg] https://packages.lunarg.com/vulkan/ jammy main" \
+              | sudo tee /etc/apt/sources.list.d/lunarg-vulkan-jammy.list >/dev/null
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq vulkan-sdk
+          fi
 
       - name: Build (native)
-        run: cargo build --profile release-slim --target ${{ matrix.target }} -p fono
+        run: |
+          extra=""
+          if [ -n "${{ matrix.features }}" ]; then
+            extra="--features ${{ matrix.features }}"
+          fi
+          cargo build --profile release-slim --target ${{ matrix.target }} -p fono $extra
 
-      - name: Verify Linux binary has no audio/OpenMP runtime deps
+      - name: Verify Linux binary NEEDED set
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
           bin="target/${{ matrix.target }}/release-slim/${BIN_NAME}"
           needed="$(readelf -d "${bin}" | grep 'NEEDED' || true)"
+          # Both variants forbid libasound and libgomp.so (audio is
+          # delegated to pactl; OpenMP is statically embedded).
           if grep -E 'lib(asound|gomp)\.so' <<<"${needed}"; then
             echo "Unexpected linked runtime dependency in ${bin}:"
             echo "${needed}"
             exit 1
+          fi
+          # GPU variant requires libvulkan.so.1; CPU variant forbids it.
+          if [ "${{ matrix.variant }}" = "gpu" ]; then
+            if ! grep -q 'libvulkan\.so' <<<"${needed}"; then
+              echo "GPU variant missing libvulkan.so NEEDED entry:"
+              echo "${needed}"
+              exit 1
+            fi
+          else
+            if grep -q 'libvulkan\.so' <<<"${needed}"; then
+              echo "CPU variant must not link libvulkan:"
+              echo "${needed}"
+              exit 1
+            fi
           fi
           echo "${needed}"
 
@@ -150,6 +198,8 @@ jobs:
           set -euo pipefail
           version="${{ github.ref_name }}"
           target="${{ matrix.target }}"
+          asset_prefix="${{ matrix.asset_prefix }}"
+          variant="${{ matrix.variant }}"
           # Map cargo target triple -> short arch label used in release names.
           case "${target}" in
             x86_64-*)   arch=x86_64 ;;
@@ -161,32 +211,39 @@ jobs:
           if [[ "${target}" == *windows* ]]; then bin_src="${bin_src}.exe"; fi
 
           # 1) Bare binary that will be uploaded as a release asset.
+          #    CPU: `fono-vX.Y.Z-x86_64`. GPU: `fono-gpu-vX.Y.Z-x86_64`.
           mkdir -p out-bin
-          asset="${BIN_NAME}-${version}-${arch}"
+          asset="${asset_prefix}-${version}-${arch}"
           [[ "${target}" == *windows* ]] && asset="${asset}.exe"
           cp "${bin_src}" "out-bin/${asset}"
           chmod +x "out-bin/${asset}"
 
           # 2) Internal staging tarball consumed by the .deb/.arch/.txz/.lzm
-          #    package jobs below. Not uploaded to the GitHub release.
-          stem="${BIN_NAME}-${version}-${arch}"
-          stage="out-stage/${stem}"
-          mkdir -p "${stage}"
-          cp "${bin_src}" "${stage}/${BIN_NAME}"
-          cp README.md LICENSE CHANGELOG.md "${stage}/"
-          cp -r packaging "${stage}/"
-          tar -czf "out-stage/${stem}.tar.gz" -C out-stage "${stem}"
-          rm -rf "${stage}"
-          ls -la out-bin out-stage
+          #    package jobs below. Only the CPU variant gets full distro
+          #    packaging in v0.5.0 launch; GPU variant ships raw binary
+          #    + .sha256 only (per the variants plan, slice 1).
+          if [ "${variant}" = "cpu" ]; then
+            stem="${BIN_NAME}-${version}-${arch}"
+            stage="out-stage/${stem}"
+            mkdir -p "${stage}"
+            cp "${bin_src}" "${stage}/${BIN_NAME}"
+            cp README.md LICENSE CHANGELOG.md "${stage}/"
+            cp -r packaging "${stage}/"
+            tar -czf "out-stage/${stem}.tar.gz" -C out-stage "${stem}"
+            rm -rf "${stage}"
+          fi
+          ls -la out-bin
+          ls -la out-stage 2>/dev/null || true
 
       - name: Upload bare binary (release asset)
         uses: actions/upload-artifact@v6
         with:
-          name: fono-bin-${{ matrix.target }}
+          name: fono-bin-${{ matrix.variant }}-${{ matrix.target }}
           path: out-bin/*
           if-no-files-found: error
 
       - name: Upload internal staging tarball (package-job input)
+        if: matrix.variant == 'cpu'
         uses: actions/upload-artifact@v6
         with:
           name: fono-stage-${{ matrix.target }}
@@ -424,7 +481,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          find artifacts -type f \( -name "fono-v*-x86_64" -o -name "fono-v*-aarch64" -o -name "fono-v*-x86_64.exe" -o -name "*.deb" -o -name "*.pkg.tar.zst" -o -name "*.txz" -o -name "*.lzm" \) -exec cp {} release/ \;
+          # Pick up both the CPU `fono-v*-...` and GPU `fono-gpu-v*-...`
+          # bare binaries, plus the distro packages (CPU only ships those).
+          find artifacts -type f \
+            \( -name "fono-v*-x86_64" -o -name "fono-v*-aarch64" -o -name "fono-v*-x86_64.exe" \
+               -o -name "fono-gpu-v*-x86_64" -o -name "fono-gpu-v*-aarch64" \
+               -o -name "*.deb" -o -name "*.pkg.tar.zst" -o -name "*.txz" -o -name "*.lzm" \) \
+            -exec cp {} release/ \;
           cd release
           sha256sum * > SHA256SUMS
           # Wave 2 Thread B — emit a per-asset `<asset>.sha256` sidecar
@@ -432,6 +495,7 @@ jobs:
           # the streamed SHA-256 against this sidecar and refuses to
           # apply on mismatch. See crates/fono-update/src/lib.rs:462.
           for f in fono-v*-x86_64 fono-v*-aarch64 fono-v*-x86_64.exe \
+                   fono-gpu-v*-x86_64 fono-gpu-v*-aarch64 \
                    *.deb *.pkg.tar.zst *.txz *.lzm; do
             [ -e "$f" ] || continue
             sha256sum "$f" > "${f}.sha256"

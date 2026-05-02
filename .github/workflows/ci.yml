@@ -144,8 +144,27 @@ jobs:
     # glibc 2.39 would silently bump the floor and exclude ~3 years
     # of supported distros. Must stay in lockstep with `release.yml`'s
     # build matrix.
-    name: Binary size & deps audit
+    name: Binary size & deps audit (${{ matrix.variant }})
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # CPU variant — the default download. Strict 4-entry allowlist,
+          # 20 MiB budget. Mirrors the canonical `fono-vX.Y.Z-x86_64`
+          # release asset.
+          - variant: cpu
+            features: ""
+            budget_bytes: 20971520
+            extra_needed: ""
+          # GPU variant — Vulkan-enabled, ~60 MB. Adds `libvulkan.so.1`
+          # to the NEEDED allowlist; budget is loose at 64 MiB (sanity
+          # ceiling, not a tight gate). Mirrors `fono-gpu-vX.Y.Z-x86_64`.
+          # Per `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`.
+          - variant: gpu
+            features: accel-vulkan
+            budget_bytes: 67108864
+            extra_needed: libvulkan.so.1
     steps:
       - uses: actions/checkout@v5
 
@@ -154,45 +173,66 @@ jobs:
 
       - name: Install Linux build deps
         # Mirror `release.yml`'s "Install Linux build deps" step exactly
-        # so the gate measures the same artefact users ship.
+        # so the gate measures the same artefact users ship. The GPU
+        # variant adds `libvulkan-dev` + `glslang-tools` for ggml-vulkan's
+        # SPIR-V shader compilation at build time.
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             build-essential clang cmake pkg-config libclang-dev \
             libxdo-dev
+          if [ "${{ matrix.variant }}" = "gpu" ]; then
+            # ggml-vulkan's CMake invokes Google shaderc's `glslc` to
+            # compile its 150+ SPIR-V shaders. `glslc` is not packaged
+            # standalone in Ubuntu 22.04's main repo (added in 24.04+);
+            # pull it from LunarG's official Vulkan SDK apt repo, which
+            # tracks Khronos releases and ships `vulkan-sdk` (loader +
+            # headers + glslc + glslangValidator + validation layers).
+            wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
+              | sudo gpg --dearmor -o /usr/share/keyrings/lunarg.gpg
+            echo "deb [signed-by=/usr/share/keyrings/lunarg.gpg] https://packages.lunarg.com/vulkan/ jammy main" \
+              | sudo tee /etc/apt/sources.list.d/lunarg-vulkan-jammy.list >/dev/null
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq vulkan-sdk
+          fi
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Suffix the cache key with the runner image. Swatinem's
-          # default key only varies on `runner.os` ("Linux"), not the
-          # specific runner image — so a cache populated on
-          # ubuntu-latest (glibc 2.39) would restore build-script
-          # binaries that refuse to execute on this ubuntu-22.04
-          # (glibc 2.35) runner.
-          key: size-budget-ubuntu-22.04
+          # Suffix the cache key with the runner image AND variant.
+          # Swatinem's default key only varies on `runner.os` ("Linux");
+          # different glibc generations and different feature sets must
+          # not share cached build-script binaries.
+          key: size-budget-ubuntu-22.04-${{ matrix.variant }}
 
       - name: Build canonical ship binary
-        run: cargo build -p fono --profile release-slim --target x86_64-unknown-linux-gnu
+        run: |
+          extra=""
+          if [ -n "${{ matrix.features }}" ]; then
+            extra="--features ${{ matrix.features }}"
+          fi
+          cargo build -p fono --profile release-slim --target x86_64-unknown-linux-gnu $extra
 
       - name: Assert size budget + NEEDED allowlist
         shell: bash
         run: |
           set -euo pipefail
           bin="target/x86_64-unknown-linux-gnu/release-slim/fono"
-          budget_bytes=20971520
+          budget_bytes=${{ matrix.budget_bytes }}
           # Universal glibc + libgcc_s ABI. Modern glibc (≥ 2.34) merged
-          # libpthread/librt/libdl back into libc.so.6, so they don't
-          # appear here. Audio is delegated to `pactl` (no libasound);
-          # libgomp/libstdc++ are statically embedded via
-          # `llama-cpp-2/static-openmp,static-stdcxx`; tray is ksni
-          # (pure-Rust D-Bus, no GTK).
-          allowlist='libc.so.6 libm.so.6 libgcc_s.so.1 ld-linux-x86-64.so.2'
+          # libpthread/librt/libdl back into libc.so.6. Audio is delegated
+          # to `pactl` (no libasound); libgomp/libstdc++ are statically
+          # embedded via `llama-cpp-2/static-openmp,static-stdcxx`; tray is
+          # ksni (pure-Rust D-Bus, no GTK). The GPU variant adds
+          # `libvulkan.so.1` (provided by `vulkan-loader` /
+          # `mesa-vulkan-loaders` / `libvulkan1` on every modern desktop
+          # Linux distro).
+          allowlist='libc.so.6 libm.so.6 libgcc_s.so.1 ld-linux-x86-64.so.2 ${{ matrix.extra_needed }}'
 
           test -f "${bin}"
           size="$(stat -c%s "${bin}")"
           printf "size: %s bytes — budget %s bytes\n" "${size}" "${budget_bytes}"
           if [ "${size}" -gt "${budget_bytes}" ]; then
-            echo "FAIL: binary exceeds 20 MiB budget by $((size - budget_bytes)) bytes" >&2
+            echo "FAIL: ${{ matrix.variant }} binary exceeds budget by $((size - budget_bytes)) bytes" >&2
             exit 5
           fi
 
@@ -210,31 +250,37 @@ jobs:
             printf "  %s\n" ${actual_needed} >&2
             exit 5
           fi
-          echo "size-budget gate passed; NEEDED:"
+          echo "size-budget gate passed (${{ matrix.variant }}); NEEDED:"
           printf "  %s\n" ${actual_needed}
 
       - name: cargo-bloat top contributors (artefact)
         if: always()
         run: |
+          extra=""
+          if [ -n "${{ matrix.features }}" ]; then
+            extra="--features ${{ matrix.features }}"
+          fi
           cargo install cargo-bloat --locked --quiet || true
           cargo bloat \
             -p fono \
             --profile release-slim \
             --target x86_64-unknown-linux-gnu \
+            $extra \
             --crates -n 30 \
-            > cargo-bloat-crates.txt 2>&1 || true
+            > cargo-bloat-crates-${{ matrix.variant }}.txt 2>&1 || true
           cargo bloat \
             -p fono \
             --profile release-slim \
             --target x86_64-unknown-linux-gnu \
+            $extra \
             -n 50 \
-            > cargo-bloat-symbols.txt 2>&1 || true
+            > cargo-bloat-symbols-${{ matrix.variant }}.txt 2>&1 || true
 
       - name: Upload cargo-bloat reports
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: cargo-bloat
+          name: cargo-bloat-${{ matrix.variant }}
           path: cargo-bloat-*.txt
           if-no-files-found: ignore
 

@@ -2,6 +2,73 @@
 
 Last updated: 2026-05-02
 
+## 2026-05-02 — Two-variant release (CPU default + GPU optional), slice 1
+
+Releases will now ship two binaries side-by-side: the default
+`fono-vX.Y.Z-x86_64` (compact ~18 MB CPU-only build) and
+`fono-gpu-vX.Y.Z-x86_64` (Vulkan-enabled ~60 MB build). Both built
+from the same source; only the `accel-vulkan` cargo feature differs.
+
+This was prompted by a local measurement: enabling `accel-vulkan`
+in a single binary adds **+42 MB** (not the ~2 MB the initial
+investigation estimated), driven by 150+ precompiled SPIR-V shaders
+and ggml-vulkan C++ in `.text`. A single ~60 MB binary defeats the
+"compact, runs on every Linux distro" promise; a single ~18 MB
+binary defeats the "GPU acceleration available" promise. Two
+variants is the honest answer.
+
+This entry covers **slice 1** of
+`plans/2026-05-02-fono-cpu-gpu-variants-v1.md`:
+
+- `release.yml` build matrix expanded with `variant ∈ {cpu, gpu}`,
+  feature/asset-prefix/cache-key cascading. CPU keeps full distro
+  packaging (.deb / .pkg.tar.zst / .txz / .lzm); GPU ships raw
+  binary + .sha256 only at this release.
+- `ci.yml` size-budget job split into a `(cpu, gpu)` matrix. CPU
+  keeps the strict 4-NEEDED-entry / 20 MiB gate. GPU adds
+  `libvulkan.so.1` to the allowlist and a 64 MiB ceiling.
+- New `crates/fono/src/variant.rs` with a build-time `VARIANT`
+  constant gated by `accel-vulkan`. Surfaced in `fono doctor` and
+  the daemon startup log.
+- ADR 0022 second amendment, ROADMAP "Up next" entry, README
+  install-table row, CHANGELOG `[Unreleased]` Added entries.
+
+Slices 2 and 3 follow:
+
+- **Slice 2** — Vulkan runtime detection (via `ash` dlopen),
+  `fono doctor` "Compute backends" section.
+- **Slice 3** — upgrade UX in three surfaces: first-run wizard
+  prompt, tray menu item, `fono update --variant gpu` CLI.
+
+## 2026-05-02 — `fono install` / `fono uninstall` self-installer
+
+Release-asset users can now run `sudo ./fono-vX.Y.Z-x86_64 install`
+to get a fully-integrated system install without writing a distro
+package. Two modes via a single flag:
+
+- **Desktop (default):** `/usr/local/bin/fono`, menu desktop entry,
+  `/etc/xdg/autostart/fono.desktop` (auto-starts daemon on next
+  graphical login), hicolor SVG icon, three shell completions.
+- **Server (`--server`):** `/usr/local/bin/fono`, hardened
+  `/lib/systemd/system/fono.service` running as a dedicated `fono`
+  system user (created via `useradd --system`), enabled-and-started
+  immediately, plus completions.
+
+`--dry-run` previews actions without filesystem changes on either
+mode. `sudo fono uninstall` reads `/usr/local/share/fono/install_marker.toml`
+and removes exactly the recorded files; user config and history are
+never touched. Re-running `install` against a different mode is
+rejected with "run `fono uninstall` first".
+
+Implementation: `crates/fono/src/install.rs` (~700 LOC, 5 unit
+tests). Embedded assets at `packaging/assets/{fono.desktop,fono.svg,fono.service}`
+(single source of truth for the embedded copy and any future
+distro-recipe consumer). `fono doctor` gained an Install section.
+
+ADR: `docs/decisions/0023-self-installer.md`. Plan:
+`plans/2026-05-02-fono-install-subcommand-v3.md`. CHANGELOG entry
+under `[Unreleased]`.
+
 ## 2026-05-02 — Release v0.4.0
 
 Tagged v0.4.0. Headline changes:

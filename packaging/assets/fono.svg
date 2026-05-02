@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fono icon — minimalist microphone glyph, GPL-3.0-only. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#4aa3ff"/>
+      <stop offset="100%" stop-color="#2563eb"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="30" fill="url(#g)"/>
+  <rect x="24" y="14" width="16" height="26" rx="8" ry="8" fill="#ffffff"/>
+  <path d="M18 30 a14 14 0 0 0 28 0" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
+  <rect x="30" y="44" width="4" height="8" fill="#ffffff"/>
+  <rect x="22" y="50" width="20" height="3" rx="1.5" fill="#ffffff"/>
+</svg>

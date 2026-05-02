@@ -10,7 +10,14 @@ use fono_core::{Config, Paths, Secrets};
 #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 pub async fn report(paths: &Paths) -> Result<String> {
     let mut out = String::new();
-    writeln!(out, "Fono doctor — v{}", env!("CARGO_PKG_VERSION"))?;
+    let variant = crate::variant::VARIANT;
+    writeln!(
+        out,
+        "Fono doctor — v{} ({} variant — {})",
+        env!("CARGO_PKG_VERSION"),
+        variant.label(),
+        variant.description(),
+    )?;
     writeln!(out)?;
 
     // ----------------------------------------------------------------
@@ -55,6 +62,9 @@ pub async fn report(paths: &Paths) -> Result<String> {
     writeln!(out, "  data   : {}", paths.data_dir.display())?;
     writeln!(out, "  cache  : {}", paths.cache_dir.display())?;
     writeln!(out, "  state  : {}", paths.state_dir.display())?;
+    writeln!(out)?;
+
+    writeln!(out, "Install: {}", crate::install::doctor_state())?;
     writeln!(out)?;
 
     let config_exists = paths.config_file().exists();

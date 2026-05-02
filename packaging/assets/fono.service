@@ -1,0 +1,37 @@
+[Unit]
+Description=Fono voice dictation daemon (server / headless mode)
+Documentation=https://github.com/bogdanr/fono
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fono
+Group=fono
+ExecStart=/usr/local/bin/fono daemon --no-tray
+Restart=on-failure
+RestartSec=3
+
+# Hardening — server lane never touches a graphical session or a
+# user's home dir. Per-user XDG paths are replaced by systemd's
+# StateDirectory / CacheDirectory / ConfigurationDirectory so the
+# daemon's `Paths` resolver lands inside /var/lib/fono, /var/cache/fono,
+# and /etc/fono respectively (selected via $XDG_* env in the unit).
+Environment=XDG_CONFIG_HOME=/etc
+Environment=XDG_DATA_HOME=/var/lib
+Environment=XDG_CACHE_HOME=/var/cache
+Environment=XDG_STATE_HOME=/var/lib
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StateDirectory=fono
+CacheDirectory=fono
+ConfigurationDirectory=fono
+
+[Install]
+WantedBy=multi-user.target
