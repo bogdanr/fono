@@ -23,11 +23,11 @@ One static Rust binary — no Electron, no Python, no WebKit.
 
 | Distro                  | Command                                                                                              |
 |-------------------------|------------------------------------------------------------------------------------------------------|
-| **Arch / Manjaro**      | `sudo pacman -U fono-0.2.0-1-x86_64.pkg.tar.zst` *(from [Releases](https://github.com/bogdanr/fono/releases/latest))* |
-| **Debian / Ubuntu**     | `sudo apt install ./fono_0.2.0_amd64.deb` *(from [Releases](https://github.com/bogdanr/fono/releases/latest))* |
-| **Slackware / NimbleX** | `installpkg fono-0.2.0-x86_64-1.txz` *(from [Releases](https://github.com/bogdanr/fono/releases/latest))* |
+| **Arch / Manjaro**      | `sudo pacman -U fono-0.4.0-1-x86_64.pkg.tar.zst` *(from [Releases](https://github.com/bogdanr/fono/releases/latest))* |
+| **Debian / Ubuntu**     | `sudo apt install ./fono_0.4.0_amd64.deb` *(from [Releases](https://github.com/bogdanr/fono/releases/latest))* |
+| **Slackware / NimbleX** | `installpkg fono-0.4.0-x86_64-1.txz` *(from [Releases](https://github.com/bogdanr/fono/releases/latest))* |
 | **NixOS / Nix flake**   | `nix profile install github:bogdanr/fono`                                                            |
-| **Any Linux (one-liner)** | `curl -fsSL https://github.com/bogdanr/fono/releases/latest/download/fono-v0.2.0-x86_64 \| sudo install -m755 /dev/stdin /usr/local/bin/fono` |
+| **Any Linux (one-liner)** | `curl -fsSL https://github.com/bogdanr/fono/releases/latest/download/fono-v0.4.0-x86_64 \| sudo install -m755 /dev/stdin /usr/local/bin/fono` |
 | **macOS / Windows**     | Planned after the Linux-first releases |
 
 ## First run

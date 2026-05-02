@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-02
+
+### Added
+
+- **Wyoming Home Assistant wire compliance.** Frames now use canonical
+  Wyoming framing (header `version` + `data_length` with a separate
+  JSON data block; `WYOMING_VERSION = "1.8.0"`). `info.asr` is now a
+  `Vec<AsrProgram>` per Home Assistant's all-services-as-arrays
+  expectation, with placeholder arrays for tts/handle/intent/wake/mic/
+  snd/satellite. Server queues `transcribe` arriving before
+  `audio-stop` to match Home Assistant client behavior. New
+  `decode_pcm_le` handles variable bit-width and multi-channel
+  `audio-chunk` headers. New round-trip test
+  `server_accepts_home_assistant_transcribe_before_audio`.
+- **Discovered-server tray UX.** Tray gains a "Discovered Wyoming
+  servers" submenu under STT backend; clicking a peer hot-reloads the
+  daemon's STT config to point at the chosen remote. Daemon filters
+  its own local instance out of the discovered list. mDNS advertiser
+  uses `enable_addr_auto()` so A/AAAA records track network topology
+  changes.
+- **Glibc symbol-version compat.** Both the size-budget CI gate and
+  the release build matrix now pin `runs-on: ubuntu-22.04` (glibc
+  2.35), so the shipped binary runs on Ubuntu 22.04+, Debian 12+,
+  Fedora 36+, and any host with glibc ≥ 2.35.
+
+### Changed
+
+- **Canonical ship target is glibc-dynamic, not static-musl.**
+  `release.yml` builds `x86_64-unknown-linux-gnu` `release-slim` (it
+  always did); the new `Binary size & deps audit` CI gate mirrors
+  that target and asserts (a) size ≤ 20 MiB (measured at release:
+  18.08 MB, ~2 MB headroom) and (b) NEEDED set is exactly `libc.so.6
+  libm.so.6 libgcc_s.so.1 ld-linux-x86-64.so.2`. Modern glibc (≥ 2.34)
+  merges libpthread/librt/libdl into libc.so.6. Anything else (libgtk,
+  libstdc++, libgomp, libayatana, libxdo, libasound, libxkbcommon,
+  libwayland-*) fails the gate. ADR 0022 amended 2026-05-02; the
+  original "no shared libraries" wording is superseded.
+- **CI job names** rewritten for clarity: `test (ubuntu-latest)` →
+  `Build & test (ubuntu-latest)`; `size-budget (release-slim)` →
+  `Binary size & deps audit`; `cargo-deny` → `License & advisory
+  audit`; `build ($target)` → `Release binary ($target)`.
+- **Server name** `"fono"` → `"Fono"` for UI consistency in Home
+  Assistant and elsewhere.
+
+### Deferred
+
+- **Static-musl single binary (Phase 2.4 of the binary-size plan).**
+  `messense/rust-musl-cross:x86_64-musl` ships a `libgomp.a` that is
+  non-PIC (breaks `-static-pie`) and references glibc-only symbols
+  (`memalign`, `secure_getenv`) plus a chain of POSIX symbols whose
+  resolution depends on rust's link order. Eleven CI commits chased
+  the chain (preserved in `git log` as `901e41d..29cc577`, superseded
+  in spirit by `d2b54cb`). Resurrection path: switch `llama-cpp-2`
+  fork to llvm-openmp (libomp is PIC-friendly) **or** pin a PIC-built
+  libgomp.a from GCC sources in our own minimal cross image. Not
+  blocking the desktop ship target.
+
+### Fixed
+
+- **CI cache cross-glibc contamination.** Suffix the
+  Swatinem/rust-cache key with the runner image
+  (`size-budget-ubuntu-22.04`, `${{ matrix.target }}-${{ matrix.os }}`)
+  so cached build-script binaries don't migrate between runner-glibc
+  generations and fail at execute-time with `version 'GLIBC_2.X' not
+  found`.
+
 ## [0.3.7] — 2026-04-30
 
 ### Changed
