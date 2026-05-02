@@ -25,6 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gpu`). New `fono::variant::Variant` enum + `VARIANT` constant
   in `crates/fono/src/variant.rs` for runtime introspection (and
   for the upcoming GPU upgrade UX).
+- **Runtime Vulkan probe.** `fono doctor` gains a "Compute backends"
+  section that reports the host's Vulkan loader + physical device
+  state (e.g. *"Vulkan: detected (Intel(R) Iris(R) Xe Graphics,
+  llvmpipe (LLVM 22.1.3, 256 bits))"*). On a CPU-variant binary
+  with a Vulkan-capable GPU detected, an upgrade hint points at
+  the `fono-gpu` release asset. Implemented via `ash` runtime-loaded
+  bindings (`Entry::load()` → `dlopen("libvulkan.so.1")`) so the
+  CPU variant still has the strict 4-NEEDED-entry allowlist —
+  libvulkan never appears in NEEDED. New
+  `crates/fono/src/vulkan_probe.rs`. Slice 2 of
+  `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`.
 - **CI gate split.** The `Binary size & deps audit` job now runs as
   a matrix `(cpu, gpu)`, asserting both variants stay within their
   respective budgets and NEEDED allowlists. CPU: ≤ 20 MiB + 4-entry
