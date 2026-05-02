@@ -121,75 +121,84 @@ jobs:
           PY
 
   size-budget:
-    # Phase 5 of `plans/2026-04-30-fono-single-binary-size-v1.md` /
-    # ADR 0022. Builds the canonical ship artefact (single static-musl
-    # ELF, all default features) and asserts:
+    # ADR 0022 / Phase 5 of `plans/2026-04-30-fono-single-binary-size-v1.md`.
+    # Builds the canonical ship artefact (`x86_64-unknown-linux-gnu`,
+    # `release-slim`, default features — same target+profile as
+    # `release.yml`) and asserts:
     #   - size ≤ 20 MiB (20 971 520 bytes)
-    #   - `ldd` reports "not a dynamic executable" (no NEEDED .so deps)
-    #   - exactly one `ggml_init` symbol (no duplicate ggml link)
+    #   - `NEEDED` set is exactly the universal glibc + libgcc_s ABI
+    #     present on every desktop Linux ≥ ~2018. Anything else
+    #     (libgtk*, libstdc++, libgomp, libayatana, libxdo, libasound,
+    #     libxkbcommon, libwayland-*) fails the gate. ADR 0018's
+    #     `--allow-multiple-definition` keeps a single ggml copy at
+    #     link time; that invariant is enforced by the link itself, not
+    #     a post-strip nm grep (release-slim sets `strip = "symbols"`).
     #
-    # Runs in parallel with `test`; one byte over budget fails the PR.
-    name: size-budget (musl, release-slim)
+    # Runs in parallel with `test`; one byte or one stray NEEDED entry
+    # fails the PR. Static-musl ship is deferred (plan Phase 2.4); see
+    # ADR 0022 amendment.
+    name: size-budget (release-slim)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      - name: Run size-budget gate in glibc-hosted musl cross toolchain
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build deps
+        # Mirror `release.yml`'s "Install Linux build deps" step exactly
+        # so the gate measures the same artefact users ship.
         run: |
-          docker run --rm \
-            -v "${GITHUB_WORKSPACE}:/work" \
-            -w /work \
-            -e CARGO_TERM_COLOR=always \
-            -e RUST_BACKTRACE=1 \
-            -e RUST_MIN_STACK=33554432 \
-            -e RUSTUP_TOOLCHAIN=stable \
-            -e CARGO_BUILD_JOBS=2 \
-            -e CMAKE_BUILD_PARALLEL_LEVEL=2 \
-            messense/rust-musl-cross:x86_64-musl \
-            sh -c '
-              set -eu
-              unset CARGO_BUILD_TARGET
-              git config --global --add safe.directory /work
-              rustc --version
-              cargo --version
-              command -v x86_64-unknown-linux-musl-g++
-              printf "#include <array>\nint main(){std::array<int,1> a{1}; return a[0] != 1;}\n" \
-                | x86_64-unknown-linux-musl-g++ -std=gnu++17 -x c++ - -o /tmp/cxx-smoke
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential clang cmake pkg-config libclang-dev \
+            libxdo-dev
 
-              target=x86_64-unknown-linux-musl
-              budget_bytes=20971520
-              cargo build -p fono --profile release-slim --target "${target}"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: size-budget
 
-              bin="target/${target}/release-slim/fono"
-              test -f "${bin}"
-              size="$(stat -c%s "${bin}")"
-              printf "size: %s bytes — budget %s bytes\n" "${size}" "${budget_bytes}"
-              if [ "${size}" -gt "${budget_bytes}" ]; then
-                echo "FAIL: binary exceeds 20 MiB budget by $((size - budget_bytes)) bytes" >&2
-                exit 5
-              fi
+      - name: Build canonical ship binary
+        run: cargo build -p fono --profile release-slim --target x86_64-unknown-linux-gnu
 
-              ldd_out="$(ldd "${bin}" 2>&1 || true)"
-              if ! printf "%s\n" "${ldd_out}" | grep -q "not a dynamic executable"; then
-                echo "FAIL: binary is dynamically linked" >&2
-                printf "%s\n" "${ldd_out}" >&2
-                exit 5
-              fi
+      - name: Assert size budget + NEEDED allowlist
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/x86_64-unknown-linux-gnu/release-slim/fono"
+          budget_bytes=20971520
+          # Universal glibc + libgcc_s ABI. Modern glibc (≥ 2.34) merged
+          # libpthread/librt/libdl back into libc.so.6, so they don't
+          # appear here. Audio is delegated to `pactl` (no libasound);
+          # libgomp/libstdc++ are statically embedded via
+          # `llama-cpp-2/static-openmp,static-stdcxx`; tray is ksni
+          # (pure-Rust D-Bus, no GTK).
+          allowlist='libc.so.6 libm.so.6 libgcc_s.so.1 ld-linux-x86-64.so.2'
 
-              needed="$(readelf -d "${bin}" 2>/dev/null | grep NEEDED || true)"
-              if [ -n "${needed}" ]; then
-                echo "FAIL: binary has dynamic NEEDED entries" >&2
-                printf "%s\n" "${needed}" >&2
-                exit 5
-              fi
+          test -f "${bin}"
+          size="$(stat -c%s "${bin}")"
+          printf "size: %s bytes — budget %s bytes\n" "${size}" "${budget_bytes}"
+          if [ "${size}" -gt "${budget_bytes}" ]; then
+            echo "FAIL: binary exceeds 20 MiB budget by $((size - budget_bytes)) bytes" >&2
+            exit 5
+          fi
 
-              ggml_count="$(nm "${bin}" 2>/dev/null | grep -c "^[0-9a-f][0-9a-f]* [Tt] ggml_init$" || true)"
-              if [ "${ggml_count}" -gt 1 ]; then
-                echo "FAIL: ${ggml_count} copies of ggml_init in binary (expected 1)" >&2
-                exit 5
-              fi
-              printf "size-budget gate passed; ggml_init symbols: %s\n" "${ggml_count}"
-            '
+          # Extract NEEDED entries, one per line, brackets stripped.
+          actual_needed="$(readelf -d "${bin}" \
+            | awk '/\(NEEDED\)/ { gsub(/[][]/,"",$NF); print $NF }' \
+            | sort -u)"
+          allowed_sorted="$(printf "%s\n" ${allowlist} | sort -u)"
+
+          extras="$(comm -23 <(printf "%s\n" "${actual_needed}") <(printf "%s\n" "${allowed_sorted}") || true)"
+          if [ -n "${extras}" ]; then
+            echo "FAIL: unexpected NEEDED entries (not in allowlist):" >&2
+            printf "  %s\n" ${extras} >&2
+            echo "Full NEEDED set:" >&2
+            printf "  %s\n" ${actual_needed} >&2
+            exit 5
+          fi
+          echo "size-budget gate passed; NEEDED:"
+          printf "  %s\n" ${actual_needed}
 
       - name: cargo-bloat top contributors (artefact)
         if: always()
@@ -198,13 +207,13 @@ jobs:
           cargo bloat \
             -p fono \
             --profile release-slim \
-            --target x86_64-unknown-linux-musl \
+            --target x86_64-unknown-linux-gnu \
             --crates -n 30 \
             > cargo-bloat-crates.txt 2>&1 || true
           cargo bloat \
             -p fono \
             --profile release-slim \
-            --target x86_64-unknown-linux-musl \
+            --target x86_64-unknown-linux-gnu \
             -n 50 \
             > cargo-bloat-symbols.txt 2>&1 || true
 

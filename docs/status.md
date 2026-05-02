@@ -1,6 +1,207 @@
 # Fono — Project Status
 
-Last updated: 2026-04-30
+Last updated: 2026-05-02
+
+## 2026-05-02 — CI size-budget pivots from static-musl to glibc-dynamic + NEEDED allowlist
+
+The `size-budget` CI job no longer tries to build a fully-static
+`x86_64-unknown-linux-musl` artefact. Eleven post-v0.3.7 commits
+(`901e41d..29cc577`, excluding `01e9411`'s unrelated Node 24 bump)
+chased a chain of toolchain breakage in `messense/rust-musl-cross`'s
+`libgomp.a` — non-PIC archive (vs `-static-pie`), glibc-only `memalign`
+and `secure_getenv`, plus link-order-dependent POSIX symbols
+(`gethostname`, `strcasecmp`, `getloadavg`) — and abandoned. Each shim
+exposed the next layer; the libgomp.a in available musl-cross images
+is unfit for purpose without a custom build.
+
+The replacement gate builds `x86_64-unknown-linux-gnu` `release-slim`
+on `ubuntu-latest` (mirroring `release.yml`) and asserts:
+
+1. Size ≤ 20 MiB (20 971 520 bytes); measured today: **18 957 120 bytes
+   (≈ 18.08 MB)**, ~2 MB headroom.
+2. `NEEDED` set is exactly `libc.so.6 libm.so.6 libgcc_s.so.1
+   ld-linux-x86-64.so.2`. Modern glibc (≥ 2.34) merges
+   `libpthread/librt/libdl` into `libc.so.6` so they don't appear
+   separately. Anything else (libgtk, libstdc++, libgomp, libayatana,
+   libxdo, libasound, libxkbcommon, libwayland-*) fails the gate.
+
+The dedup invariant (single ggml copy) stays enforced at link time by
+`--allow-multiple-definition` in `.cargo/config.toml` (ADR 0018);
+release-slim's `strip = "symbols"` removes runtime symbol info, so a
+post-strip `nm` check is not possible. Breaking dedup yields
+multiple-definition link errors, not silent passes.
+
+Phase 2.4 of `plans/2026-04-30-fono-single-binary-size-v1.md` (musl
+ship) is **deferred**. Resurrection path: switch the `llama-cpp-2`
+fork to llvm-openmp (libomp is PIC-friendly) **or** pin a PIC-built
+`libgomp.a` from GCC sources in our own minimal cross image.
+
+Files: `.github/workflows/ci.yml` (size-budget job rewritten to
+glibc/native, with positive NEEDED allowlist), `.cargo/config.toml`
+(musl rustflags block deleted), `crates/fono/src/main.rs` (`memalign`
+and `secure_getenv` shims deleted),
+`plans/2026-04-30-fono-single-binary-size-v1.md` (Tasks 2.3/2.4,
+verification criteria, outcome table updated),
+`docs/decisions/0022-binary-size-budget.md` (status amended;
+Decision/Verification/Trade-offs reframed for glibc-dynamic +
+allowlist).
+
+Verification: local `cargo build -p fono --profile release-slim
+--target x86_64-unknown-linux-gnu` produced an 18 957 120-byte ELF
+with the expected NEEDED set. The gate's bash logic was exercised
+locally in both pass (full allowlist) and fail (deliberately tightened
+allowlist) paths against that binary.
+
+## 2026-05-01 — Alpine size-budget preserves Rust image PATH
+
+The Alpine-backed size-budget command no longer starts a login shell that can
+reset the Docker image PATH before invoking `rustc`. The job now passes the Rust
+image toolchain path explicitly and uses a non-login shell, so `rustc`, `cargo`,
+`cargo fmt`, and `cargo clippy` resolve before the size-budget script runs.
+
+Verification: `.github/workflows/ci.yml` YAML parsing, extracted shell syntax
+validation, and `git diff --check` pass on the current Linux host. A local Docker
+smoke test could not run because the Docker daemon is unavailable here.
+
+## 2026-05-01 — GitHub Actions now target Node 24
+
+The CI and Release workflows no longer rely on JavaScript actions that run on the
+Node 20 runtime. Cache, upload-artifact, download-artifact, and release-publishing
+actions were advanced to their Node 24 majors while checkout was already on the
+Node 24-compatible major.
+
+Verification: workflow YAML parsing and `git diff --check` pass on the current
+Linux host.
+
+## 2026-05-01 — Alpine size-budget no longer assumes rustup
+
+The first Alpine-backed size-budget run failed before the build because the
+`rust:1.88-alpine` image provides the Rust toolchain directly, but not `rustup`.
+The job no longer tries to add components with `rustup`; it prints `rustc`,
+`cargo`, `cargo fmt`, and `cargo clippy` versions before running the size-budget
+script so missing tools fail with a direct diagnostic.
+
+Verification: `git diff --check`, `.github/workflows/ci.yml` YAML parsing, and
+shell syntax validation for the Alpine size-budget step pass on the current Linux
+host.
+
+## 2026-05-01 — CI musl size-budget now runs in Alpine
+
+The third `main` CI attempt failed in the install-step smoke test because the
+Ubuntu host `libstdc++` headers are glibc-configured and are not safe to combine
+with `musl-gcc.specs`; `<array>` pulled in glibc-only preprocessor checks before
+the actual size-budget build could start. The size-budget job now runs the gate
+inside `rust:1.88-alpine`, installing Alpine's native musl C/C++ build toolchain
+so C, C++, libstdc++, and the Rust musl target all agree on musl from the start.
+
+Verification: `git diff --check`, `.github/workflows/ci.yml` YAML parsing, and
+shell syntax validation for the Docker-backed size-budget step pass on the
+current Linux host. A local Docker smoke test could not run because the Docker
+client is installed but the daemon is not running in this environment.
+
+## 2026-05-01 — CI musl C++ wrapper now restores standard headers
+
+The follow-up `main` CI run for the v0.3.7 release fix advanced past CMake's
+missing `x86_64-linux-musl-g++` probe, then failed while compiling whisper.cpp
+because the musl specs file removes the default C++ header search path and
+`ggml.cpp` could not include `<array>`. The CI wrapper now keeps the musl specs
+file and explicitly restores the host libstdc++ include directories, with an
+install-step smoke compile for `<array>` so this failure is caught before the
+full size-budget build.
+
+Verification: `git diff --check`, `.github/workflows/ci.yml` YAML parsing, and
+shell syntax validation for the patched musl install step pass on the current
+Linux host. Full musl size-budget validation remains CI-only here because this
+host lacks the musl Rust standard library and musl C/C++ toolchain.
+
+## 2026-05-01 — Live fallback stop now completes batch transcription
+
+When live dictation is enabled but the active STT backend is batch-only, Fono starts
+the normal batch capture path as a fallback. The daemon still receives the matching
+live-stop event, so the interactive stop handler now checks for and stops that batch
+fallback capture instead of immediately marking processing done. This fixes the
+"falling back to batch path" case where recording stopped but no transcript was
+injected.
+
+The Wyoming server now advertises its ASR program/attribution as `Fono`, matching the
+product name, and logs each remote transcription request at INFO level when processing
+starts and when the backend returns.
+
+Verification: `cargo fmt --all -- --check`, `cargo test -p fono-net --test
+wyoming_server_round_trip`, `cargo test -p fono-net
+wyoming::server::tests::build_info_advertises_models`, `cargo check -p fono
+--features interactive`, and `git diff --check` pass on the current Linux host.
+
+## 2026-05-01 — Wyoming ASR flow now matches Home Assistant event ordering
+
+Home Assistant's Wyoming ASR client sends `transcribe` first to select the
+language/model, then streams `audio-start` / `audio-chunk` events, and expects the
+`transcript` response when `audio-stop` arrives. Fono previously treated
+`transcribe` as the terminal event, so it invoked Whisper immediately with zero
+collected samples and closed the connection with `Input sample buffer was empty`.
+
+The Wyoming server now queues an early `transcribe` request until `audio-stop`,
+continues to support Fono's existing audio-first flow, accepts audio chunks even
+when a client omits `audio-start`, and decodes int16 LE mono/stereo payloads using
+the format fields from each `audio-chunk`. The probe's optional ASR flow now sends
+the Home Assistant ordering so it catches this compatibility issue.
+
+Verification: `cargo fmt --all -- --check`, `python3 -m py_compile
+tests/wyoming_protocol_probe.py`, `cargo test -p fono-net --test
+wyoming_server_round_trip`, `cargo test -p fono-net-codec -p fono-net -p fono-stt
+wyoming`, and `cargo check -p fono-net-codec -p fono-net -p fono-stt` pass on the
+current Linux host. The deployed server at `192.168.0.79:10300` still times out on
+the updated Home Assistant-style probe until rebuilt/restarted with this patch.
+
+## 2026-05-01 — Wyoming describe/info is now Home Assistant-compatible
+
+Home Assistant's Wyoming loader sends `describe`, waits for an `info` event, and
+parses `info.asr`, `info.tts`, `info.wake`, `info.handle`, `info.intent`,
+`info.mic`, and `info.snd` as service arrays. Fono's Wyoming server previously
+returned `asr` as a single object and omitted the empty service families, which
+made Home Assistant's `Info.from_event` reject the response. The codec now writes
+canonical Wyoming frames with `version` and `data_length` data blocks, and the
+server now advertises ASR as an installed program with models under
+`info.asr[]`, plus empty arrays for the unsupported service families.
+
+A new `tests/wyoming_protocol_probe.py` script sends the same describe/info
+handshake and validates the returned info shape against Home Assistant's schema.
+The currently deployed server on `192.168.0.79:10300` still reports the old shape
+until rebuilt/restarted, and the probe correctly flags that mismatch.
+
+Verification: `cargo fmt --all -- --check`, `python3 -m py_compile
+tests/wyoming_protocol_probe.py`, `cargo test -p fono-net-codec -p fono-net -p
+fono-stt wyoming`, `cargo test -p fono-net --test wyoming_server_round_trip`,
+`cargo test -p fono-stt --test wyoming_round_trip`, and `cargo check -p
+fono-net-codec -p fono-net -p fono-stt` pass on the current Linux host.
+
+## 2026-05-01 — Tray now exposes remote mDNS Wyoming servers
+
+The tray backend now appends live mDNS-discovered Wyoming servers to the existing
+"STT backend" submenu, using the same discovery registry as `fono discover`. The
+daemon filters out its own local Wyoming advertisement before passing labels to
+the tray, so the menu contains only remote, actionable servers. Selecting a
+discovered server writes `[stt.wyoming].uri`, switches `[stt].backend` to
+`wyoming`, and hot-reloads the orchestrator.
+
+Verification: `cargo fmt --all -- --check`, `cargo check -p fono-tray --features
+tray-backend`, `cargo check -p fono`, `cargo test -p fono
+daemon::tests::tray_wyoming_peers_filter_local_fullname`, `cargo build -p fono`,
+and `git diff --check` pass on the current Linux host.
+
+## 2026-05-01 — mDNS Wyoming advertisements now publish host addresses
+
+Manual Wyoming connections to the remote `ai` host worked, but automatic
+mDNS discovery resolved the Fono advertisement with no A/AAAA records. The
+advertiser now calls `mdns-sd` address auto-detection when no explicit publish
+addresses are configured, so `_wyoming._tcp.local.` registrations include the
+current non-loopback host addresses and stay updated as interfaces change.
+
+Verification: `cargo test -p fono-net discovery::advertiser` and `cargo build
+-p fono` pass. A patched debug binary copied to `ai` advertised
+`fono-ai-mdns-fixed._wyoming._tcp.local.` on port 10309; local
+`avahi-browse -rt _wyoming._tcp` resolved both IPv4 and IPv6 addresses, and
+`./target/debug/fono discover --json` listed the remote Wyoming peer.
 
 ## 2026-04-30 — CI musl size-budget toolchain fix
 

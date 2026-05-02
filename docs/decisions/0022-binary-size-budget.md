@@ -1,11 +1,19 @@
-# ADR 0022 — Binary size budget: single 20 MB static-musl binary
+# ADR 0022 — Binary size budget: 20 MiB glibc-dynamic ship with NEEDED allowlist
 
 ## Status
 
-Accepted 2026-04-30. Supersedes ADR 0018 (`--allow-multiple-definition`)
-once Phase 1 Task 1.2 of
-`plans/2026-04-30-fono-single-binary-size-v1.md` lands the source-level
-shared ggml.
+Accepted 2026-04-30. **Amended 2026-05-02:** the canonical ship target
+is `x86_64-unknown-linux-gnu` (glibc-dynamic) with a positive `NEEDED`
+allowlist, not `x86_64-unknown-linux-musl` (no NEEDED at all). The
+20 MiB budget stands; the no-shared-libraries invariant is replaced
+by an allowlist of universal glibc-stack libs. ADR 0018
+(`--allow-multiple-definition`) **stays Active** — Phase 1 Task 1.2
+(source-shared ggml) is still pending, so the link kludge still
+carries the dedup invariant. ADR 0022 will supersede ADR 0018 once
+Task 1.2 lands.
+
+The static-musl ship (Phase 2.4) is **deferred** — see "Rejected:
+static-musl with libgomp" in Trade-offs.
 
 ## Context
 
@@ -36,14 +44,13 @@ behind cargo features.
 ## Decision
 
 Adopt a hard **20 MiB (20 971 520 bytes)** budget for the
-`x86_64-unknown-linux-musl` `release-slim` artefact, **22 MiB** for the
-`aarch64-unknown-linux-musl` artefact, with **all default features
-enabled** (`tray + local-models + llama-local + interactive`). The
-canonical ship build is:
+`x86_64-unknown-linux-gnu` `release-slim` artefact with **all default
+features enabled** (`tray + local-models + llama-local + interactive`).
+The canonical ship build is:
 
 ```sh
 cargo build -p fono --profile release-slim \
-    --target x86_64-unknown-linux-musl
+    --target x86_64-unknown-linux-gnu
 ```
 
 The same binary must:
@@ -54,10 +61,29 @@ The same binary must:
   spawn at runtime when `DISPLAY` and `WAYLAND_DISPLAY` are both
   unset);
 - run as a Wyoming / Fono-native client to a remote peer;
-- have zero `NEEDED` shared libraries (`ldd` prints
-  *"not a dynamic executable"*);
-- contain exactly **one** copy of every `ggml_*` symbol
-  (`nm $bin | grep -c '^[0-9a-f]\+ [Tt] ggml_init$'` returns `1`).
+- present a **`NEEDED` set that is exactly the universal glibc + libgcc_s
+  ABI** present on every desktop Linux ≥ ~2018 — and nothing else:
+  - `libc.so.6`
+  - `libm.so.6`
+  - `libgcc_s.so.1`
+  - `ld-linux-x86-64.so.2`
+  Modern glibc (≥ 2.34) merges `libpthread/librt/libdl` into `libc.so.6`
+  so they no longer appear separately. Anything outside this allowlist
+  (libgtk, libstdc++, libgomp, libayatana, libxdo, libasound,
+  libxkbcommon, libwayland-*) fails the gate.
+- contain exactly **one** copy of every `ggml_*` symbol. The dedup
+  invariant is enforced at link time by `--allow-multiple-definition`
+  in `.cargo/config.toml` (ADR 0018); release-slim sets
+  `strip = "symbols"` so a runtime `nm` check is not possible. Breaking
+  the invariant produces a *multiple-definition* link error, not a
+  silent pass.
+
+**`ubuntu-latest` glibc symbol-version surface.** GitHub's
+`ubuntu-latest` runner stamps the binary with `GLIBC_2.39` symbols
+today. That restricts forward compatibility to RHEL 10+ / Debian 13+
+hosts. If broader compat is needed, switch the release.yml runner to
+`ubuntu-22.04` (glibc 2.35) at the cost of slightly older system
+libraries during build. Tracked as a follow-up; not blocking.
 
 The reductions live in
 `plans/2026-04-30-fono-single-binary-size-v1.md`. In summary:
@@ -94,18 +120,19 @@ local-inference path that the v2 network plan promises all require it.
 ## Verification
 
 - `cargo build -p fono --profile release-slim
-  --target x86_64-unknown-linux-musl` produces a `fono` ELF
-  ≤ 20 971 520 bytes.
-- `ldd target/.../release-slim/fono` prints *"not a dynamic
-  executable"*.
-- `nm target/.../release-slim/fono | grep -c '^[0-9a-f]\+ [Tt]
-  ggml_init$'` prints `1`.
+  --target x86_64-unknown-linux-gnu` produces a `fono` ELF
+  ≤ 20 971 520 bytes. Measured on 2026-05-02: **18 957 120 bytes
+  (≈ 18.08 MB)**, leaving ~2 MB of headroom.
+- `readelf -d target/.../release-slim/fono | grep NEEDED` produces
+  exactly `libc.so.6 libm.so.6 libgcc_s.so.1 ld-linux-x86-64.so.2`
+  (any order). Anything else fails CI.
 - The same binary, started with `DISPLAY` and `WAYLAND_DISPLAY` unset,
   brings up `fono serve` cleanly with tray and overlay refusing to
   spawn (`debug!` log lines, no errors).
 - The same binary on a graphical desktop brings up tray + overlay +
   injection identically to today.
-- `tests/check.sh --size-budget` passes in CI on every PR.
+- `.github/workflows/ci.yml` `size-budget` job passes in CI on every
+  PR. Failure modes: size > budget, NEEDED set diverges from allowlist.
 - Smoke test `crates/fono/tests/local_backends_coexist.rs` still
   passes — `WhisperLocal` and `LlamaLocal` co-load in the same
   process.
@@ -126,10 +153,23 @@ local-inference path that the v2 network plan promises all require it.
   today); sway+waybar / hyprland+waybar / i3+i3status / xfce4-panel /
   lxqt-panel all support it. Hostile hosts fall back to the opt-in
   `tray-gtk` feature.
-- **Static-libstdc++ + static-libgomp** on the musl target inflates
-  the binary by ~1–2 MB compared to a glibc-dynamic build, but is the
-  prerequisite for the no-shared-libs invariant. We accept the cost
-  because the budget is calibrated against the static figure.
+- **Static-libstdc++ + static-libgomp** on the canonical glibc target
+  inflates the binary by ~1–2 MB compared to a fully-dynamic build, but
+  drops `libstdc++.so.6` and `libgomp.so.1` from `NEEDED` — they appear
+  on most desktop Linuxes but not all (e.g. minimal containers), and
+  the version skew between distros makes them risky shared deps.
+- **Rejected: static-musl with libgomp.** Pursued for ~11 commits
+  (`901e41d..29cc577`) before being deferred 2026-05-02. The
+  `messense/rust-musl-cross:x86_64-musl` image's `libgomp.a` is
+  non-PIC (breaks `-static-pie`) and references glibc-only symbols
+  (`memalign`, `secure_getenv`) plus a chain of POSIX symbols whose
+  resolution depends on link-order details rust's driver controls.
+  Each shim/flag exposed the next layer. The binary works fine
+  glibc-dynamic with the four-entry NEEDED allowlist; chasing static-
+  musl was buying compatibility with Alpine/Void-musl users who are
+  not the target audience for a desktop voice-dictation tool. Recapture
+  if/when llama-cpp-2 swaps to llvm-openmp (libomp is PIC-friendly) or
+  a PIC-libgomp source build is pinned.
 
 ## Rollback path
 

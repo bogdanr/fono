@@ -39,34 +39,6 @@ rustflags = [
     "-C", "link-arg=-Wl,--as-needed",
 ]
 
-[target.'cfg(all(target_os = "linux", target_env = "musl"))']
-rustflags = [
-    # Disable -static-pie on musl. The OpenMP runtime that ships with the
-    # musl cross toolchains we build against (e.g. messense/rust-musl-cross)
-    # is not compiled with -fPIC, so PIE-mode linking aborts with
-    # "relocation R_X86_64_32 against hidden symbol gomp_global_icv can not
-    # be used when making a PIE object". Static-non-PIE keeps OpenMP intact
-    # at the cost of binary-text ASLR — acceptable for a single-user offline
-    # CLI. Revisit once `llama-cpp-2` switches to llvm-openmp or we ship a
-    # PIC-built libgomp in our own cross image.
-    "-C", "relocation-model=static",
-    "-C", "link-arg=-Wl,--allow-multiple-definition",
-    "-C", "link-arg=-Wl,--gc-sections",
-    "-C", "link-arg=-Wl,--as-needed",
-    # Some musl cross images do not propagate llama-cpp-sys' static OpenMP
-    # directive onto the final binary link line. Keep gomp behind an explicit
-    # static linker mode so the final ship binary does not gain libgomp.so.
-    # The trailing `-lc` is required because libgomp.a (from
-    # messense/rust-musl-cross) calls back into libc symbols (gethostname,
-    # strcasecmp, getloadavg, …) which the rustc-driven link processes
-    # before -lgomp; ld is single-pass on archives so libc must reappear
-    # after libgomp for those references to resolve.
-    "-C", "link-arg=-Wl,-Bstatic",
-    "-C", "link-arg=-lgomp",
-    "-C", "link-arg=-lc",
-    "-C", "link-arg=-static-libgcc",
-]
-
 [target.'cfg(all(target_os = "windows", target_env = "gnu"))']
 rustflags = [
     "-C", "link-arg=-Wl,--allow-multiple-definition",

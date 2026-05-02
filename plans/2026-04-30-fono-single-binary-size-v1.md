@@ -169,24 +169,31 @@ the rest of the plan is belt-and-braces.
   - Documented in `docs/troubleshooting.md` + `docs/wayland.md`.
   - Lets us flip the default without painting ourselves into a corner.
 
-* [ ] **Task 2.3.** Static C++ runtime + OpenMP on musl.
-  - GNU release builds now link llama.cpp's `libgomp` and `libstdc++`
+* [x] **Task 2.3.** Static C++ runtime + OpenMP on the canonical glibc
+  ship.
+  - GNU release builds link llama.cpp's `libgomp` and `libstdc++`
     statically via the forked `llama-cpp-2` features `static-openmp` and
-    `static-stdcxx`; verified `cargo build --release -p fono` has no
-    `libgomp.so.1` / `libstdc++.so.6` in `NEEDED`.
-  - Musl verification remains blocked on this NimbleX host because the
-    `x86_64-unknown-linux-musl` Rust std and musl C/C++ cross compiler are
-    not installed. Do not tick this task until the actual musl artefact
-    builds and `ldd $bin → "not a dynamic executable"` passes.
-  - Run on `aarch64-unknown-linux-musl` too — same features apply.
+    `static-stdcxx`; verified `cargo build --release -p fono` and the
+    glibc release-slim ship binary have no `libgomp.so.1` /
+    `libstdc++.so.6` in `NEEDED` (CI gate `size-budget` enforces this).
+  - **Musl variant deferred** — see Task 2.4.
 
-* [ ] **Task 2.4.** Promote `release-slim` + musl to the canonical release.
-  - `.github/workflows/release.yml` already builds musl; flip the profile
-    from `release` to `release-slim` (`Cargo.toml:155-161` already has
-    fat-LTO, codegen-units=1, panic=abort, strip=symbols).
-  - Drops glibc, libstdc++, libgomp, libm, libc, ld-linux from `NEEDED`
-    on top of Tasks 2.1 + 2.3.
-  - Saves 1–2 MB vs `release` profile.
+* [ ] **Task 2.4.** *(Deferred 2026-05-02)* Promote `release-slim` + musl
+  to the canonical release.
+  - **Status:** parked. `messense/rust-musl-cross:x86_64-musl` ships a
+    `libgomp.a` that is non-PIC (breaks `-static-pie`) **and** depends on
+    glibc-only symbols (`memalign`, `secure_getenv`) plus a chain of POSIX
+    references that musl libc can't resolve in the rust-driven link
+    order. We chased this for 11 commits (`901e41d..29cc577`) and
+    abandoned: each shim/flag exposed the next layer.
+  - Resurrection path: switch `llama-cpp-2` fork to llvm-openmp (libomp
+    is PIC-friendly) **or** build our own minimal cross image with a
+    PIC-built `libgomp.a` from GCC sources. ~1-2 days either way; not
+    worth blocking PRs on while the ship binary works.
+  - **Replacement gate (landed 2026-05-02):** the `size-budget` CI job
+    now builds `x86_64-unknown-linux-gnu` (matching `release.yml`) and
+    asserts size + a positive NEEDED allowlist. Catches GTK/libstdc++/
+    libgomp regressions just like the musl gate would have.
 
 ### Phase 3 — Runtime detection of GUI surfaces (no compile gates)
 
@@ -294,12 +301,17 @@ items below if the binary is still over 20 MB.
 
 ## Verification criteria
 
-- `cargo build --profile release-slim --target x86_64-unknown-linux-musl`
-  produces a `fono` ELF **≤ 20 MB** with the default feature set
-  (`tray + local-models + llama-local + interactive`).
-- `ldd target/.../release-slim/fono` prints **"not a dynamic executable"**.
-- `nm target/.../release-slim/fono | grep ' [Tt] ggml_init$' | wc -l`
-  prints **`1`**.
+- `cargo build --profile release-slim --target x86_64-unknown-linux-gnu`
+  produces a `fono` ELF **≤ 20 MiB (20 971 520 bytes)** with the default
+  feature set (`tray + local-models + llama-local + interactive`).
+- `readelf -d target/x86_64-unknown-linux-gnu/release-slim/fono | grep NEEDED`
+  produces **only** entries from the universal allowlist:
+  `libc.so.6`, `libm.so.6`, `libgcc_s.so.1`, `ld-linux-x86-64.so.2`.
+  Modern glibc (≥ 2.34) merged libpthread/librt/libdl into libc.so.6 so
+  they no longer appear separately.
+- The dedup invariant (single ggml copy) is enforced at link time by
+  `--allow-multiple-definition` in `.cargo/config.toml`; release-slim
+  strips symbols so a runtime `nm` check is not possible.
 - The same binary, run with `DISPLAY` / `WAYLAND_DISPLAY` unset, starts
   `fono serve` cleanly with no tray/overlay errors logged.
 - The same binary, run on a graphical desktop, brings up tray + overlay +
@@ -308,8 +320,11 @@ items below if the binary is still over 20 MB.
   passes (whisper + llama co-loaded in one process).
 - `tests/check.sh` matrix (fmt, build × default + interactive, clippy ×
   default + interactive, test × default + interactive) green.
-- CI size-budget gate fails the build at 20 MB + 1 byte.
-- ADR 0022 published; ADR 0018 marked **Superseded**.
+- CI `size-budget` gate fails the build at 20 MiB + 1 byte **or** when
+  any unexpected NEEDED entry appears.
+- ADR 0022 published with the 2026-05-02 amendment; ADR 0018 still
+  Active (not yet superseded — Phase 1 Task 1.2 source-shared ggml
+  also deferred).
 
 ## Risks and mitigations
 
@@ -367,16 +382,22 @@ items below if the binary is still over 20 MB.
 
 ## Estimated outcome
 
-| After phase | Binary size (musl static, all features) |
+| State | Binary size, all features |
 |---|---|
-| Today | ~28 MB, GTK + glibc + libstdc++ + libgomp `NEEDED` |
-| + Phase 1 (kill `common.a` + dedup ggml + gc-sections) | **~18–20 MB**, still dynamically linked |
-| + Phase 2 (ksni tray + static-libstdc++/libgomp + musl release-slim) | **~17–19 MB**, `ldd` empty |
+| Pre-Phase-1 | ~28 MB, GTK + glibc + libstdc++ + libgomp `NEEDED` |
+| + Phase 1 (kill `common.a` + dedup ggml + gc-sections) | **~18–20 MB**, dynamic |
+| + Phase 2.1 (ksni tray) + 2.3 (static C++/OpenMP on glibc) | **~18 MB**, NEEDED = {libc, libm, libgcc_s, ld-linux} ← **canonical ship as of 2026-05-02** |
+| + Phase 2.4 (musl ship, **deferred**) | future ~17 MB, `ldd` empty |
 | + Phase 4 (only if needed) | **~14–16 MB** |
 
-Phase 1 alone probably hits budget. Phase 2 delivers the architectural
-promise. Phase 3 ratifies the headless-on-the-same-binary contract.
-Phases 4–6 are defence in depth.
+The current measured ship binary is **18 957 120 bytes (≈ 18.08 MB)**
+on x86_64-unknown-linux-gnu. CI gates regressions at 20 MiB.
+Phase 2.4 (musl ship) is parked — see Task 2.4 above.
+
+Phase 1 hit budget. Phase 2.1+2.3 delivered the "no GTK / no C++ runtime"
+promise on the glibc target. Phase 2.4 (musl) is parked. Phase 3 ratifies
+the headless-on-the-same-binary contract. Phases 4–6 are defence in
+depth.
 
 ## Sequencing
 
