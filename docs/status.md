@@ -2,6 +2,28 @@
 
 Last updated: 2026-05-02
 
+## 2026-05-02 — Release v0.4.0
+
+Tagged v0.4.0. Headline changes:
+
+- **Wyoming Home Assistant wire compliance** + **discovered-server tray
+  UX** (~600 LOC; PR #1). Frame format aligned with upstream Python
+  Wyoming, `info.asr` array shape, queued-transcribe HA flow, multi-
+  channel PCM decode, mDNS auto-addresses, tray submenu for picking a
+  remote Wyoming server with hot-reload.
+- **CI size-budget gate** pivoted from static-musl to glibc-dynamic +
+  NEEDED allowlist (~20 MiB budget; measured at release: 18.08 MB).
+- **Artefact-producing runners** pinned to ubuntu-22.04 (glibc 2.35)
+  so the binary runs on Ubuntu 22.04+, Debian 12+, Fedora 36+.
+- **CI cache key** suffixed with the runner image to prevent
+  cross-glibc contamination of cached build-script binaries.
+- **CI job names** rewritten for UI clarity (Build & test, Binary
+  size & deps audit, License & advisory audit, Release binary).
+- **Phase 2.4 (musl ship)** formally deferred. Resurrection path
+  documented in ADR 0022 amendment + CHANGELOG.
+
+Release notes: `CHANGELOG.md` `[0.4.0]`.
+
 ## 2026-05-02 — Pin build runners to ubuntu-22.04 for older-distro glibc compat
 
 `size-budget` (`.github/workflows/ci.yml`) and the release build matrix

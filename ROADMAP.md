@@ -147,14 +147,31 @@ Full implementation plan: `plans/2026-04-29-waveform-overlay-v2.md`.
 
 Newest first.
 
+- ![v0.4.0](https://img.shields.io/badge/v0.4.0-2026--05--02-blue?style=flat-square)
+  **Wyoming Home Assistant interop + tray-side LAN server picker.** Fono's
+  Wyoming framing now matches the upstream Python library exactly (separate
+  data block, version header, `info.asr` array shape with placeholder arrays
+  for tts/handle/intent/wake/mic/snd/satellite), so Home Assistant treats Fono
+  as a complete Wyoming endpoint. The server queues `transcribe` arriving
+  before `audio-stop` (HA client behavior) and decodes variable bit-width /
+  multi-channel `audio-chunk` headers. The tray gains a "Discovered Wyoming
+  servers" submenu — clicking a peer hot-reloads the daemon's STT config to
+  point at that remote. mDNS A/AAAA records now follow network topology
+  changes via `enable_addr_auto`. The CI size-budget gate moved from the
+  blocked static-musl target to a glibc-dynamic + NEEDED-allowlist check
+  against the actual ship binary (~18 MB measured); artefact-producing
+  runners pin to ubuntu-22.04 (glibc 2.35) so the binary runs on Ubuntu
+  22.04+, Debian 12+, Fedora 36+. The Phase 2.4 static-musl ship is
+  formally deferred (see ADR 0022 amendment).
+
 - ![v0.3.7](https://img.shields.io/badge/v0.3.7-2026--04--30-blue?style=flat-square)
   **Wyoming + mDNS network foundations and binary-size prep.** Fono can now use
   Wyoming-compatible STT servers on the LAN and host its own Wyoming listener when
   enabled. mDNS/DNS-SD discovery tracks Wyoming and Fono peers in-memory and exposes
   them through IPC and `fono discover`. The tray backend moved to pure-Rust SNI via
   `ksni`, default Linux audio no longer pulls ALSA into the main build, and the
-  release checks now include size/dependency guardrails for the 20 MiB static-musl
-  target.
+  release checks now include size/dependency guardrails for the canonical
+  glibc-dynamic ship binary (gated by a NEEDED allowlist; see ADR 0022).
 
 - ![v0.3.6](https://img.shields.io/badge/v0.3.6-2026--04--29-blue?style=flat-square)
   **Silent-dock auto-recovery + PulseAudio-first microphone.** When a 3+ second
