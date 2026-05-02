@@ -2,6 +2,32 @@
 
 Last updated: 2026-05-02
 
+## 2026-05-02 — Release v0.5.0
+
+Tagged v0.5.0. Headline changes:
+
+- **Hardware acceleration on tap** (the big one). Two release
+  binaries side-by-side: `fono-vX.Y.Z-x86_64` (compact CPU-only,
+  ~18 MB) and `fono-gpu-vX.Y.Z-x86_64` (Vulkan-enabled, ~60 MB).
+  `fono update` probes Vulkan and auto-picks the matching asset on
+  every invocation. CPU build on a Vulkan-capable host gets switched
+  to the GPU build on its next update; if the host later loses its
+  GPU it switches back. Tray gains a single discoverable
+  "Update for GPU acceleration" entry on a CPU build with a usable
+  Vulkan host. `fono doctor` reports the running variant + the
+  live Vulkan device list. Three slices of
+  `plans/2026-05-02-fono-cpu-gpu-variants-v1.md` landed (PRs #3, #4,
+  #5).
+- **`fono install` / `fono uninstall` self-installer** (PR with
+  commit `1d80ace`). Run `sudo fono install` to drop the binary at
+  `/usr/local/bin/fono` plus desktop entry / autostart / icon /
+  shell completions; `--server` writes a hardened systemd unit
+  instead. `sudo fono uninstall` reverses it cleanly.
+- **Bench tooling**: `tests/bench.sh` auto-discovers models and
+  runs CPU-vs-GPU comparison (commit `da67a07`).
+
+Release notes: `CHANGELOG.md` `[0.5.0]`.
+
 ## 2026-05-02 — CPU/GPU variants slice 3: auto-variant update + tray entry
 
 Slice 3 of `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`. The
