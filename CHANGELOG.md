@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **GPU-accelerated release variant.** Releases now ship two
+  binaries side-by-side: the default `fono-vX.Y.Z-x86_64` (compact
+  ~18 MB CPU-only build, NEEDED set of 4 universal glibc libs) and
+  `fono-gpu-vX.Y.Z-x86_64` (Vulkan-enabled ~60 MB build, additionally
+  links `libvulkan.so.1`). Both built from the same source; only
+  the `accel-vulkan` cargo feature differs. Distro packages
+  (`.deb` / `.pkg.tar.zst` / `.txz` / `.lzm`) are CPU-only at this
+  release; raw GPU binary + `.sha256` ship as release assets.
+  Per `plans/2026-05-02-fono-cpu-gpu-variants-v1.md` slice 1.
+  CUDA / ROCm remain build-from-source-only; Vulkan covers ~80 % of
+  NVIDIA / ~90 % of AMD perf at zero vendor lock-in.
+- **Build variant identification.** `fono doctor` and the daemon
+  startup log now report which variant is running (`cpu` /
+  `gpu`). New `fono::variant::Variant` enum + `VARIANT` constant
+  in `crates/fono/src/variant.rs` for runtime introspection (and
+  for the upcoming GPU upgrade UX).
+- **CI gate split.** The `Binary size & deps audit` job now runs as
+  a matrix `(cpu, gpu)`, asserting both variants stay within their
+  respective budgets and NEEDED allowlists. CPU: ≤ 20 MiB + 4-entry
+  allowlist (unchanged). GPU: ≤ 64 MiB + 4-entry allowlist
+  + `libvulkan.so.1`.
+
 - **`fono install` / `fono uninstall` self-installer.** Run
   `sudo fono install` (or `sudo ./fono-vX.Y.Z-x86_64 install` from a
   fresh release-asset download) to install fono system-wide on a

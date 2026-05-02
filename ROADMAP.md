@@ -77,6 +77,17 @@ Fono will translate as it transcribes — the pipeline becomes
 `fono update` is already there. A few finishing touches remain to handle edge cases
 gracefully.
 
+### Hardware acceleration on tap
+
+A second release variant — `fono-gpu` — ships a Vulkan-enabled binary that runs
+inference on any cross-vendor (NVIDIA / AMD / Intel) GPU. The compact CPU build
+stays the default download; if you have a Vulkan-capable GPU on your machine the
+default build will detect it on first run and offer to swap itself for the
+GPU build. You can also opt in any time with `fono update --variant gpu` or
+through a tray menu item; reverse direction is symmetric. Vulkan is the
+supported GPU answer on every desktop Linux; CUDA / ROCm remain available via
+build-from-source for the last 10–20 % of vendor-specific perf.
+
 ---
 
 ## On the horizon

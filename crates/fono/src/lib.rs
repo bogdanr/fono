@@ -25,6 +25,7 @@ pub mod doctor;
 pub mod install;
 pub mod models;
 pub mod session;
+pub mod variant;
 pub mod wizard;
 
 #[cfg(feature = "interactive")]

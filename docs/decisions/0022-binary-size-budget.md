@@ -15,6 +15,22 @@ Task 1.2 lands.
 The static-musl ship (Phase 2.4) is **deferred** — see "Rejected:
 static-musl with libgomp" in Trade-offs.
 
+**Amended 2026-05-02 (part 2):** GPU acceleration ships as a **second
+release variant** rather than a default-on feature. Local measurement
+showed enabling `accel-vulkan` adds ~42 MB (150+ precompiled SPIR-V
+shaders + ggml-vulkan C++) — a 3× size blow-up that's incompatible
+with the 20 MiB budget. The two-variant approach (compact CPU default
++ optional `fono-gpu` build) honours the budget for the canonical
+download while still delivering GPU to users who want it. The CI
+size-budget gate is now a matrix:
+
+- `cpu`: ≤ 20 MiB, NEEDED ⊆ {`libc.so.6`, `libm.so.6`,
+  `libgcc_s.so.1`, `ld-linux-x86-64.so.2`}.
+- `gpu`: ≤ 64 MiB, NEEDED ⊆ above + `libvulkan.so.1`.
+
+See `plans/2026-05-02-fono-cpu-gpu-variants-v1.md` for the variant
+plumbing, runtime detection, and upcoming upgrade UX.
+
 ## Context
 
 The v1 design plan (`docs/plans/2026-04-24-fono-design-v1.md:514-516`)

@@ -29,6 +29,7 @@ One static Rust binary — no Electron, no Python, no WebKit.
 | **NixOS / Nix flake**   | `nix profile install github:bogdanr/fono`                                                            |
 | **Any Linux (one-liner)** | `curl -fsSL https://fono.page/install \| sh` *(installs to `/usr/local/bin/fono`; honours `BIN_DIR=` for a custom path)* |
 | **Any Linux (self-installer)** | Download the binary, then `sudo ./fono-v0.4.0-x86_64 install` (desktop) or `sudo ./fono-v0.4.0-x86_64 install --server` (headless systemd unit). `sudo fono uninstall` reverses it cleanly. Add `--dry-run` to either to preview. |
+| **GPU-accelerated build** *(optional)* | Download `fono-gpu-vX.Y.Z-x86_64` from [Releases](https://github.com/bogdanr/fono/releases/latest) — same binary with Vulkan compiled in (~60 MB; needs `libvulkan1` / `vulkan-loader`). The default CPU build will offer to switch you over if it detects a Vulkan-capable GPU on first run. |
 | **macOS / Windows**     | Planned after the Linux-first releases |
 
 ## First run

@@ -705,6 +705,7 @@ fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbos
         // Else: silent. A slim build with `[interactive].enabled = false`
         // is a fully-supported configuration; no log line needed.
     }
+    info!("variant      : {}", crate::variant::VARIANT.label());
     info!("hw accel     : {}", hardware_acceleration_summary());
     debug!(
         "config       : {} ({})",

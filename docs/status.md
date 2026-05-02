@@ -2,6 +2,44 @@
 
 Last updated: 2026-05-02
 
+## 2026-05-02 — Two-variant release (CPU default + GPU optional), slice 1
+
+Releases will now ship two binaries side-by-side: the default
+`fono-vX.Y.Z-x86_64` (compact ~18 MB CPU-only build) and
+`fono-gpu-vX.Y.Z-x86_64` (Vulkan-enabled ~60 MB build). Both built
+from the same source; only the `accel-vulkan` cargo feature differs.
+
+This was prompted by a local measurement: enabling `accel-vulkan`
+in a single binary adds **+42 MB** (not the ~2 MB the initial
+investigation estimated), driven by 150+ precompiled SPIR-V shaders
+and ggml-vulkan C++ in `.text`. A single ~60 MB binary defeats the
+"compact, runs on every Linux distro" promise; a single ~18 MB
+binary defeats the "GPU acceleration available" promise. Two
+variants is the honest answer.
+
+This entry covers **slice 1** of
+`plans/2026-05-02-fono-cpu-gpu-variants-v1.md`:
+
+- `release.yml` build matrix expanded with `variant ∈ {cpu, gpu}`,
+  feature/asset-prefix/cache-key cascading. CPU keeps full distro
+  packaging (.deb / .pkg.tar.zst / .txz / .lzm); GPU ships raw
+  binary + .sha256 only at this release.
+- `ci.yml` size-budget job split into a `(cpu, gpu)` matrix. CPU
+  keeps the strict 4-NEEDED-entry / 20 MiB gate. GPU adds
+  `libvulkan.so.1` to the allowlist and a 64 MiB ceiling.
+- New `crates/fono/src/variant.rs` with a build-time `VARIANT`
+  constant gated by `accel-vulkan`. Surfaced in `fono doctor` and
+  the daemon startup log.
+- ADR 0022 second amendment, ROADMAP "Up next" entry, README
+  install-table row, CHANGELOG `[Unreleased]` Added entries.
+
+Slices 2 and 3 follow:
+
+- **Slice 2** — Vulkan runtime detection (via `ash` dlopen),
+  `fono doctor` "Compute backends" section.
+- **Slice 3** — upgrade UX in three surfaces: first-run wizard
+  prompt, tray menu item, `fono update --variant gpu` CLI.
+
 ## 2026-05-02 — `fono install` / `fono uninstall` self-installer
 
 Release-asset users can now run `sudo ./fono-vX.Y.Z-x86_64 install`
