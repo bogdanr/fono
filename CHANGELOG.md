@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`fono install` / `fono uninstall` self-installer.** Run
+  `sudo fono install` (or `sudo ./fono-vX.Y.Z-x86_64 install` from a
+  fresh release-asset download) to install fono system-wide on a
+  desktop: places the binary at `/usr/local/bin/fono`, drops a menu
+  desktop entry, an `/etc/xdg/autostart/fono.desktop` entry so the
+  daemon launches automatically on next graphical login, the icon,
+  and shell completions. Add `--server` for a headless install
+  instead: writes a hardened systemd unit at
+  `/lib/systemd/system/fono.service` running as a dedicated `fono`
+  system user, and enables-and-starts it immediately. `--dry-run`
+  prints the planned actions without touching the filesystem on
+  either mode. `sudo fono uninstall` reads the install marker
+  written at install time and removes exactly the files it recorded;
+  per-user config and history are never touched. `fono doctor` now
+  reports the install state (self-installed desktop / server,
+  package-managed, or ad-hoc on PATH).
+
 ## [0.4.0] — 2026-05-02
 
 ### Added

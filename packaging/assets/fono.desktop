@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Fono
+GenericName=Voice Dictation
+Comment=Lightweight native voice dictation — press a hotkey, speak, text appears
+Exec=fono
+Icon=fono
+Terminal=false
+Categories=Utility;Audio;AudioVideo;Accessibility;
+Keywords=voice;dictation;speech;whisper;stt;
+StartupNotify=false

@@ -57,6 +57,9 @@ pub async fn report(paths: &Paths) -> Result<String> {
     writeln!(out, "  state  : {}", paths.state_dir.display())?;
     writeln!(out)?;
 
+    writeln!(out, "Install: {}", crate::install::doctor_state())?;
+    writeln!(out)?;
+
     let config_exists = paths.config_file().exists();
     writeln!(
         out,

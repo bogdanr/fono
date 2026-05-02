@@ -2,6 +2,35 @@
 
 Last updated: 2026-05-02
 
+## 2026-05-02 — `fono install` / `fono uninstall` self-installer
+
+Release-asset users can now run `sudo ./fono-vX.Y.Z-x86_64 install`
+to get a fully-integrated system install without writing a distro
+package. Two modes via a single flag:
+
+- **Desktop (default):** `/usr/local/bin/fono`, menu desktop entry,
+  `/etc/xdg/autostart/fono.desktop` (auto-starts daemon on next
+  graphical login), hicolor SVG icon, three shell completions.
+- **Server (`--server`):** `/usr/local/bin/fono`, hardened
+  `/lib/systemd/system/fono.service` running as a dedicated `fono`
+  system user (created via `useradd --system`), enabled-and-started
+  immediately, plus completions.
+
+`--dry-run` previews actions without filesystem changes on either
+mode. `sudo fono uninstall` reads `/usr/local/share/fono/install_marker.toml`
+and removes exactly the recorded files; user config and history are
+never touched. Re-running `install` against a different mode is
+rejected with "run `fono uninstall` first".
+
+Implementation: `crates/fono/src/install.rs` (~700 LOC, 5 unit
+tests). Embedded assets at `packaging/assets/{fono.desktop,fono.svg,fono.service}`
+(single source of truth for the embedded copy and any future
+distro-recipe consumer). `fono doctor` gained an Install section.
+
+ADR: `docs/decisions/0023-self-installer.md`. Plan:
+`plans/2026-05-02-fono-install-subcommand-v3.md`. CHANGELOG entry
+under `[Unreleased]`.
+
 ## 2026-05-02 — Release v0.4.0
 
 Tagged v0.4.0. Headline changes:

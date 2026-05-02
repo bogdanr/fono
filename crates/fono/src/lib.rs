@@ -22,6 +22,7 @@ pub mod audio_recovery;
 pub mod cli;
 pub mod daemon;
 pub mod doctor;
+pub mod install;
 pub mod models;
 pub mod session;
 pub mod wizard;
