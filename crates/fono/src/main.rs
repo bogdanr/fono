@@ -54,3 +54,26 @@ fn init_tracing(verbosity: cli::Verbosity) {
         .with_line_number(verbosity.is_trace())
         .init();
 }
+
+// musl + libgomp link shim. The libgomp `.a` shipped by
+// `messense/rust-musl-cross` references `memalign(3)`, a glibc-only
+// allocator; musl ships only `aligned_alloc`/`posix_memalign`. Provide
+// `memalign` as a thin wrapper so the static-musl link succeeds.
+// Compiled into the binary on every musl target — harmless if libgomp
+// isn't linked, and resolves the symbol if it is.
+#[cfg(all(target_os = "linux", target_env = "musl"))]
+#[no_mangle]
+pub unsafe extern "C" fn memalign(alignment: usize, size: usize) -> *mut core::ffi::c_void {
+    extern "C" {
+        fn posix_memalign(
+            memptr: *mut *mut core::ffi::c_void,
+            alignment: usize,
+            size: usize,
+        ) -> i32;
+    }
+    let mut ptr: *mut core::ffi::c_void = core::ptr::null_mut();
+    if posix_memalign(&mut ptr, alignment, size) != 0 {
+        return core::ptr::null_mut();
+    }
+    ptr
+}
