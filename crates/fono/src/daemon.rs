@@ -204,10 +204,18 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                 let st = fono_update::check(current, current_prefix, channel).await;
                 match &st {
                     fono_update::UpdateStatus::Available { info: rel, .. } => {
-                        info!(
-                            "update check: new version available {current} -> {} ({})",
-                            rel.version, rel.html_url
-                        );
+                        if rel.is_variant_switch_only(current) {
+                            info!(
+                                "update check: GPU build available for v{} ({} — same version, \
+                                 different variant; click \"Update for GPU acceleration\" in the tray to switch)",
+                                rel.version, rel.asset_name
+                            );
+                        } else {
+                            info!(
+                                "update check: new version available {current} -> {} ({})",
+                                rel.version, rel.html_url
+                            );
+                        }
                     }
                     fono_update::UpdateStatus::UpToDate { current: c } => {
                         info!("update check: running latest version v{c}; no update available");
@@ -1515,6 +1523,14 @@ async fn ensure_local_llm_with_notify(paths: &fono_core::Paths) -> bool {
 fn update_label(status: &Arc<RwLock<Option<fono_update::UpdateStatus>>>) -> Option<String> {
     let g = status.read().ok()?;
     let info = g.as_ref()?.available()?;
+    // Suppress the generic "Update to vX" entry when the only thing
+    // changing is the build variant (CPU↔GPU at the same version).
+    // The dedicated `gpu_upgrade_label` provider already surfaces a
+    // user-friendly "Update for GPU acceleration" entry in that case;
+    // showing both would just duplicate the action.
+    if info.is_variant_switch_only(env!("CARGO_PKG_VERSION")) {
+        return None;
+    }
     Some(format!("Update to {}", info.tag))
 }
 

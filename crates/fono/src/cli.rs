@@ -1360,11 +1360,19 @@ async fn update_cmd(
             return Err(anyhow::anyhow!("update check failed: {error}"));
         }
         UpdateStatus::Available { info, .. } => {
-            println!(
-                "available {current}->{} ({} MB)",
-                info.version,
-                info.asset_size / 1_048_576
-            );
+            if info.is_variant_switch_only(current) {
+                println!(
+                    "GPU build available for v{} ({} MB) — same version, different variant",
+                    info.version,
+                    info.asset_size / 1_048_576
+                );
+            } else {
+                println!(
+                    "available {current}->{} ({} MB)",
+                    info.version,
+                    info.asset_size / 1_048_576
+                );
+            }
             println!("  asset:  {}", info.asset_name);
             println!("  notes:  {}", info.html_url);
             if check_only {

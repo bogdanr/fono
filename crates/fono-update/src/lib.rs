@@ -89,6 +89,18 @@ pub struct UpdateInfo {
     pub expected_sha256: Option<String>,
 }
 
+impl UpdateInfo {
+    /// True when this Available update represents a *cross-variant
+    /// switch only* (the asset is for a different release variant of
+    /// the same version, e.g. `fono-v0.5.0-x86_64` →
+    /// `fono-gpu-v0.5.0-x86_64`). Compared against the running
+    /// binary's version (with or without leading `v`).
+    #[must_use]
+    pub fn is_variant_switch_only(&self, current_version: &str) -> bool {
+        self.version == strip_v(current_version)
+    }
+}
+
 /// Cached/computed status of the most recent update check.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
