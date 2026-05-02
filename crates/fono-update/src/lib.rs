@@ -700,16 +700,25 @@ fn is_valid_sha256_hex(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Replace the running process with the (just-installed) binary,
-/// preserving the original argv. On Unix this uses `execv` so the PID
-/// is preserved. Never returns on success.
+/// Replace the running process with the binary at `target`, preserving
+/// the original argv. On Unix this uses `execv` so the PID is
+/// preserved. Never returns on success.
+///
+/// **The caller MUST pass the path of the just-installed binary
+/// (`ApplyOutcome::installed_at`), not rely on `std::env::current_exe()`.**
+/// `apply_update` does a `rename(old → old.bak); rename(tmp → old)`
+/// dance that leaves the running process's inode at `old.bak`. On
+/// Linux, `/proc/self/exe` (and therefore `current_exe()`) resolves
+/// to the inode the kernel tracks for the running process — i.e. to
+/// `old.bak` after the rename. Exec'ing that path re-runs the OLD
+/// binary, defeating the update. Always pass the post-update target
+/// path explicitly.
 #[cfg(unix)]
-pub fn restart_in_place() -> Result<std::convert::Infallible> {
+pub fn restart_in_place(target: &Path) -> Result<std::convert::Infallible> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
-    let exe = std::env::current_exe().context("current_exe")?;
-    let exe_c = CString::new(exe.as_os_str().as_bytes()).context("exe path NUL")?;
+    let exe_c = CString::new(target.as_os_str().as_bytes()).context("exe path NUL")?;
     let args: Vec<CString> = std::env::args_os()
         .filter_map(|a| CString::new(a.as_bytes()).ok())
         .collect();
@@ -722,13 +731,14 @@ pub fn restart_in_place() -> Result<std::convert::Infallible> {
         libc::execv(exe_c.as_ptr(), argv.as_ptr());
     }
     Err(anyhow!(
-        "execv returned: {}",
+        "execv {} returned: {}",
+        target.display(),
         std::io::Error::last_os_error()
     ))
 }
 
 #[cfg(not(unix))]
-pub fn restart_in_place() -> Result<std::convert::Infallible> {
+pub fn restart_in_place(_target: &Path) -> Result<std::convert::Infallible> {
     anyhow::bail!("in-place restart not supported on this platform");
 }
 

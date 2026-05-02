@@ -1423,8 +1423,12 @@ async fn update_cmd(
     }
     println!("re-executing into new binary…");
     // `restart_in_place`'s Ok variant is `Infallible`; on success
-    // execv replaces the process image and never returns.
-    let Err(e) = fono_update::restart_in_place();
+    // execv replaces the process image and never returns. Pass the
+    // post-update target path explicitly: `current_exe()` resolves
+    // through `/proc/self/exe`, which on Linux still points at the
+    // pre-rename inode (now at `<target>.bak`) — exec'ing that runs
+    // the OLD binary and the update appears to silently fail.
+    let Err(e) = fono_update::restart_in_place(&outcome.installed_at);
     Err(e)
 }
 

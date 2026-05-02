@@ -1619,8 +1619,13 @@ async fn apply_update_via_tray(update_status: Arc<RwLock<Option<fono_update::Upd
             tokio::time::sleep(std::time::Duration::from_millis(800)).await;
             // `restart_in_place`'s Ok variant is `Infallible`, so on
             // success it never returns; we only land here when execv
-            // failed to replace the process image.
-            let Err(e) = fono_update::restart_in_place();
+            // failed to replace the process image. Pass `out.installed_at`
+            // explicitly: `current_exe()` resolves to the pre-rename
+            // inode (now at `<target>.bak`) and exec'ing that re-runs
+            // the OLD binary, so the update silently fails to take
+            // effect — the user has to manually restart for the new
+            // binary to load.
+            let Err(e) = fono_update::restart_in_place(&out.installed_at);
             warn!("tray: re-exec failed: {e:#}");
             fono_core::notify::send(
                 "Fono — restart failed",
