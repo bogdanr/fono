@@ -137,8 +137,15 @@ jobs:
     # Runs in parallel with `test`; one byte or one stray NEEDED entry
     # fails the PR. Static-musl ship is deferred (plan Phase 2.4); see
     # ADR 0022 amendment.
+    #
+    # Pinned to ubuntu-22.04 (glibc 2.35) so the binary's GLIBC_2.X
+    # symbol versions stay compatible with Ubuntu 22.04+, Debian 12+,
+    # Fedora 36+, and any glibc ≥ 2.35 host. ubuntu-latest = 24.04 =
+    # glibc 2.39 would silently bump the floor and exclude ~3 years
+    # of supported distros. Must stay in lockstep with `release.yml`'s
+    # build matrix.
     name: size-budget (release-slim)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
 

@@ -2,6 +2,25 @@
 
 Last updated: 2026-05-02
 
+## 2026-05-02 — Pin build runners to ubuntu-22.04 for older-distro glibc compat
+
+`size-budget` (`.github/workflows/ci.yml`) and the release build matrix
+(`.github/workflows/release.yml`) now both pin `runs-on:` to
+**`ubuntu-22.04`** (glibc 2.35) instead of `ubuntu-latest` (24.04 →
+glibc 2.39). The shipped binary's `GLIBC_2.X` symbol versions are
+stamped at link time by the build host's glibc; staying on the older
+image keeps the binary compatible with Ubuntu 22.04+, Debian 12+,
+Fedora 36+, and any host with glibc ≥ 2.35. The previous
+`ubuntu-latest` floor would have silently excluded ~3 years of
+supported distros.
+
+The `test` job in `ci.yml` stays on `ubuntu-latest` so we still get
+newer-environment regression coverage. Only artefact-producing jobs
+need the older glibc pin.
+
+ADR 0022's "Glibc symbol-version surface" note (formerly a
+follow-up TODO) is updated to reflect the pinned state.
+
 ## 2026-05-02 — CI size-budget pivots from static-musl to glibc-dynamic + NEEDED allowlist
 
 The `size-budget` CI job no longer tries to build a fully-static

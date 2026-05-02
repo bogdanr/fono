@@ -93,8 +93,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Pinned to ubuntu-22.04 (glibc 2.35) so the shipped binary's
+          # GLIBC_2.X symbol versions stay compatible with Ubuntu 22.04+,
+          # Debian 12+, Fedora 36+, and any glibc ≥ 2.35 host. Bumping
+          # to ubuntu-latest (24.04, glibc 2.39) would silently exclude
+          # ~3 years of supported distros. The `size-budget` job in
+          # `ci.yml` must mirror this pin — keep them in lockstep.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             cross: false
             archive: tar.gz
     steps:

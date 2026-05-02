@@ -78,12 +78,16 @@ The same binary must:
   the invariant produces a *multiple-definition* link error, not a
   silent pass.
 
-**`ubuntu-latest` glibc symbol-version surface.** GitHub's
-`ubuntu-latest` runner stamps the binary with `GLIBC_2.39` symbols
-today. That restricts forward compatibility to RHEL 10+ / Debian 13+
-hosts. If broader compat is needed, switch the release.yml runner to
-`ubuntu-22.04` (glibc 2.35) at the cost of slightly older system
-libraries during build. Tracked as a follow-up; not blocking.
+**Glibc symbol-version surface.** Both the `size-budget` CI gate and
+`release.yml`'s build matrix are pinned to **`ubuntu-22.04`** (glibc
+2.35) so the binary's `GLIBC_2.X` symbol versions stay compatible with
+Ubuntu 22.04+, Debian 12+, Fedora 36+, and any glibc ≥ 2.35 host.
+`ubuntu-latest` (24.04, glibc 2.39) would silently raise the floor and
+exclude ~3 years of supported distros. The two workflows must stay in
+lockstep — if you bump one, bump both. RHEL 9 (glibc 2.34) is just
+shy of our floor and not supported; targeting it would require an
+even older runner image (currently `ubuntu-20.04`, scheduled for
+removal) or a manylinux-style build container.
 
 The reductions live in
 `plans/2026-04-30-fono-single-binary-size-v1.md`. In summary:
