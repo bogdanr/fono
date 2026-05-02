@@ -77,17 +77,6 @@ Fono will translate as it transcribes — the pipeline becomes
 `fono update` is already there. A few finishing touches remain to handle edge cases
 gracefully.
 
-### Hardware acceleration on tap
-
-A second release variant — `fono-gpu` — ships a Vulkan-enabled binary that runs
-inference on any cross-vendor (NVIDIA / AMD / Intel) GPU. The compact CPU build
-stays the default download; if you have a Vulkan-capable GPU on your machine the
-default build will detect it on first run and offer to swap itself for the
-GPU build. You can also opt in any time with `fono update --variant gpu` or
-through a tray menu item; reverse direction is symmetric. Vulkan is the
-supported GPU answer on every desktop Linux; CUDA / ROCm remain available via
-build-from-source for the last 10–20 % of vendor-specific perf.
-
 ---
 
 ## On the horizon
@@ -157,6 +146,25 @@ Full implementation plan: `plans/2026-04-29-waveform-overlay-v2.md`.
 ## Shipped
 
 Newest first.
+
+- ![v0.5.0](https://img.shields.io/badge/v0.5.0-2026--05--02-blue?style=flat-square)
+  **Hardware acceleration on tap + self-installer + auto-variant
+  update.** Releases now ship two binaries: the default
+  `fono-vX.Y.Z-x86_64` (compact ~18 MB CPU-only build) and
+  `fono-gpu-vX.Y.Z-x86_64` (Vulkan-enabled ~60 MB build with
+  cross-vendor GPU acceleration on NVIDIA / AMD / Intel). `fono
+  update` probes Vulkan on the host and auto-picks the matching
+  asset every time — no flag, no prompt: a CPU build on a
+  Vulkan-capable machine is switched to the GPU build on its next
+  update; if that machine later loses its GPU it switches back. The
+  tray surfaces a single discoverable "Update for GPU acceleration"
+  entry on a CPU build with a usable Vulkan host. `fono doctor`
+  reports the running variant and the live Vulkan device list.
+  Separately: `sudo fono install` self-installs the running binary
+  system-wide on a desktop (or `--server` for a hardened systemd
+  unit); `sudo fono uninstall` reverses it cleanly. CUDA / ROCm
+  remain available via build-from-source for the last 10–20 % of
+  vendor-specific perf.
 
 - ![v0.4.0](https://img.shields.io/badge/v0.4.0-2026--05--02-blue?style=flat-square)
   **Wyoming Home Assistant interop + tray-side LAN server picker.** Fono's
