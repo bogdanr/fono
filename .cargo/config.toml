@@ -41,6 +41,15 @@ rustflags = [
 
 [target.'cfg(all(target_os = "linux", target_env = "musl"))']
 rustflags = [
+    # Disable -static-pie on musl. The OpenMP runtime that ships with the
+    # musl cross toolchains we build against (e.g. messense/rust-musl-cross)
+    # is not compiled with -fPIC, so PIE-mode linking aborts with
+    # "relocation R_X86_64_32 against hidden symbol gomp_global_icv can not
+    # be used when making a PIE object". Static-non-PIE keeps OpenMP intact
+    # at the cost of binary-text ASLR — acceptable for a single-user offline
+    # CLI. Revisit once `llama-cpp-2` switches to llvm-openmp or we ship a
+    # PIC-built libgomp in our own cross image.
+    "-C", "relocation-model=static",
     "-C", "link-arg=-Wl,--allow-multiple-definition",
     "-C", "link-arg=-Wl,--gc-sections",
     "-C", "link-arg=-Wl,--as-needed",
