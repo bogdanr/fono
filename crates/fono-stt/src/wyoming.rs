@@ -308,15 +308,15 @@ impl SpeechToText for WyomingStt {
             })??;
         if f.kind == INFO {
             let info: Info = serde_json::from_value(f.data).unwrap_or_default();
-            if let Some(asr) = info.asr {
-                tracing::debug!(
-                    target: "fono::wyoming",
-                    server = %self.endpoint(),
-                    models = asr.models.len(),
-                    streaming = asr.supports_transcript_streaming,
-                    "wyoming describe ok"
-                );
-            }
+            let models = info.asr.iter().map(|asr| asr.models.len()).sum::<usize>();
+            let streaming = info.asr.iter().any(|asr| asr.supports_transcript_streaming);
+            tracing::debug!(
+                target: "fono::wyoming",
+                server = %self.endpoint(),
+                models,
+                streaming,
+                "wyoming describe ok"
+            );
         }
         Ok(())
     }

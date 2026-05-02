@@ -8,6 +8,7 @@
 //! version away and will land in follow-up slices.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 // Event-type tags. Defined as `&str` constants so the connection-arm
 // allow-list can pattern-match without re-parsing the JSON.
@@ -90,34 +91,55 @@ pub struct Attribution {
     pub url: String,
 }
 
-/// One ASR model row in the `info.asr.models` list.
+/// One ASR model row in an `info.asr[].models` list.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AsrModel {
     pub name: String,
     pub languages: Vec<String>,
     pub installed: bool,
     pub attribution: Attribution,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub version: Option<String>,
 }
 
-/// `info.asr` block — one per-server entry advertising STT models.
+/// One ASR service entry in `info.asr`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AsrInfo {
+pub struct AsrProgram {
+    pub name: String,
+    pub attribution: Attribution,
+    pub installed: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
     pub models: Vec<AsrModel>,
     #[serde(default)]
     pub supports_transcript_streaming: bool,
 }
 
-/// `info` event — the full describe response. Other modality blocks
-/// (`tts`, `wake`, `handle`, `intent`, `satellite`, `mic`, `snd`) are
-/// not modelled yet; they round-trip as raw JSON inside `Frame::data`.
+/// `info` event — the full describe response. Home Assistant's Wyoming
+/// loader expects every service family to be present as an array, even
+/// when only ASR is installed.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Info {
+    #[serde(default)]
+    pub asr: Vec<AsrProgram>,
+    #[serde(default)]
+    pub tts: Vec<Value>,
+    #[serde(default)]
+    pub handle: Vec<Value>,
+    #[serde(default)]
+    pub intent: Vec<Value>,
+    #[serde(default)]
+    pub wake: Vec<Value>,
+    #[serde(default)]
+    pub mic: Vec<Value>,
+    #[serde(default)]
+    pub snd: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub asr: Option<AsrInfo>,
+    pub satellite: Option<Value>,
 }
 
 #[cfg(test)]
@@ -148,7 +170,15 @@ mod tests {
     #[test]
     fn info_round_trip_with_streaming_flag() {
         let info = Info {
-            asr: Some(AsrInfo {
+            asr: vec![AsrProgram {
+                name: "fono-asr".into(),
+                attribution: Attribution {
+                    name: "Fono".into(),
+                    url: "https://github.com/bogdanr/fono".into(),
+                },
+                installed: true,
+                description: Some("Fono speech-to-text".into()),
+                version: Some("0.0.0".into()),
                 models: vec![AsrModel {
                     name: "whisper-large-v3".into(),
                     languages: vec!["en".into(), "ro".into()],
@@ -161,7 +191,8 @@ mod tests {
                     version: Some("v3".into()),
                 }],
                 supports_transcript_streaming: true,
-            }),
+            }],
+            ..Info::default()
         };
         let v = serde_json::to_value(&info).unwrap();
         let back: Info = serde_json::from_value(v).unwrap();

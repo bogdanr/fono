@@ -34,8 +34,9 @@ pub struct AdvertiseSpec {
     /// Service port — `10300` for Wyoming, `10301` default for Fono.
     pub port: u16,
     /// IP addresses the daemon should publish in A/AAAA records.
-    /// Empty = auto-detect every non-loopback interface (mdns-sd
-    /// handles this when given an empty slice via the `&[]` form).
+    /// Empty = ask `mdns-sd` to auto-detect every non-loopback
+    /// interface and keep the published A/AAAA records updated as
+    /// addresses change.
     pub addresses: Vec<IpAddr>,
     /// Protocol revision string for the `proto` TXT key
     /// (`"wyoming/1"` / `"fono/1"`).
@@ -149,7 +150,7 @@ impl Advertiser {
         }
 
         let host = ensure_trailing_dot(&spec.hostname);
-        let info = ServiceInfo::new(
+        let mut info = ServiceInfo::new(
             spec.kind.service_type(),
             &spec.instance_name,
             &host,
@@ -158,6 +159,9 @@ impl Advertiser {
             Some(props),
         )
         .context("building mdns ServiceInfo")?;
+        if spec.addresses.is_empty() {
+            info = info.enable_addr_auto();
+        }
         let fullname = info.get_fullname().to_string();
         self.daemon
             .register(info)

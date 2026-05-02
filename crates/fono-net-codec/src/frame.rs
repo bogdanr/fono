@@ -10,13 +10,18 @@
 //! ```
 //!
 //! Parsing tolerates split data blocks (peers that send `data_length > 0`
-//! and a separate JSON object after the header). Our own writes always
-//! inline `data` into the header to keep the wire format minimal.
+//! and a separate JSON object after the header). Writes use the same
+//! canonical Wyoming shape as the upstream Python library: non-empty
+//! `data` is sent as a separate JSON block and the header carries
+//! `data_length` plus a protocol `version` marker.
 
 use serde_json::{Map, Value};
 use thiserror::Error;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+/// Wyoming Python package version whose wire shape we mirror for
+/// Home Assistant compatibility.
+pub const WYOMING_VERSION: &str = "1.8.0";
 /// 1 MiB max header line — defends against malicious peers feeding an
 /// unbounded line until OOM. Real Wyoming headers are < 1 KiB.
 pub const MAX_HEADER_LINE_BYTES: usize = 1024 * 1024;
@@ -160,24 +165,32 @@ impl Frame {
         })
     }
 
-    /// Serialise the frame onto `writer`. Inlines `data` into the
-    /// header (`data_length = 0`) and only writes a payload section
-    /// when it is non-empty. Flushes after the final byte.
+    /// Serialise the frame onto `writer`. Uses the canonical Wyoming
+    /// framing: header line with `type`, `version`, optional lengths,
+    /// then optional JSON data block and optional payload. Flushes after
+    /// the final byte.
     pub async fn write_async<W>(&self, writer: &mut W) -> Result<(), FrameError>
     where
         W: AsyncWrite + Unpin,
     {
         let mut header = Map::new();
         header.insert("type".to_string(), Value::String(self.kind.clone()));
-        // Only include data when it is a non-empty object — keeps the
-        // header line minimal for events like `audio-stop` that have
-        // no fields.
-        if let Value::Object(map) = &self.data {
-            if !map.is_empty() {
-                header.insert("data".to_string(), self.data.clone());
+        header.insert(
+            "version".to_string(),
+            Value::String(WYOMING_VERSION.to_string()),
+        );
+
+        let data_bytes = if let Value::Object(map) = &self.data {
+            if map.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_vec(&self.data)?)
             }
         } else {
-            header.insert("data".to_string(), self.data.clone());
+            Some(serde_json::to_vec(&self.data)?)
+        };
+        if let Some(bytes) = &data_bytes {
+            header.insert("data_length".to_string(), Value::Number(bytes.len().into()));
         }
         if !self.payload.is_empty() {
             header.insert(
@@ -188,6 +201,9 @@ impl Frame {
         let mut header_bytes = serde_json::to_vec(&Value::Object(header))?;
         header_bytes.push(b'\n');
         writer.write_all(&header_bytes).await?;
+        if let Some(bytes) = &data_bytes {
+            writer.write_all(bytes).await?;
+        }
         if !self.payload.is_empty() {
             writer.write_all(&self.payload).await?;
         }
@@ -305,6 +321,35 @@ mod tests {
         assert_eq!(f.data["rate"], 16000);
         assert_eq!(f.data["width"], 2);
         assert_eq!(f.data["channels"], 1);
+    }
+
+    #[tokio::test]
+    async fn writes_canonical_wyoming_data_block() {
+        let f = Frame::new("info").with_data(json!({"asr": []}));
+        let mut buf: Vec<u8> = Vec::new();
+        f.write_async(&mut buf).await.unwrap();
+
+        let header_end = buf.iter().position(|b| *b == b'\n').expect("newline");
+        let header: Value = serde_json::from_slice(&buf[..header_end]).unwrap();
+        assert_eq!(header["type"], "info");
+        assert_eq!(header["version"], WYOMING_VERSION);
+        assert_eq!(header["data_length"], 10);
+        assert!(header.get("data").is_none());
+        assert_eq!(&buf[(header_end + 1)..], br#"{"asr":[]}"#);
+    }
+
+    #[tokio::test]
+    async fn writes_empty_frame_without_data_length() {
+        let f = Frame::new("describe");
+        let mut buf: Vec<u8> = Vec::new();
+        f.write_async(&mut buf).await.unwrap();
+
+        let header_end = buf.iter().position(|b| *b == b'\n').expect("newline");
+        let header: Value = serde_json::from_slice(&buf[..header_end]).unwrap();
+        assert_eq!(header["type"], "describe");
+        assert_eq!(header["version"], WYOMING_VERSION);
+        assert!(header.get("data_length").is_none());
+        assert_eq!(buf.len(), header_end + 1);
     }
 
     #[tokio::test]

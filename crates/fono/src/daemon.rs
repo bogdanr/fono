@@ -323,12 +323,25 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
             (stt_idx, llm_idx)
         });
 
+        let discovered_registry_for_tray = discovery_registry.clone();
+        let local_wyoming_fullname_for_tray = local_wyoming_fullname(&config);
+        let discovered_stt_provider: fono_tray::DiscoveredSttProvider = Arc::new(move || {
+            discovered_wyoming_peers_for_tray(
+                discovered_registry_for_tray.as_ref(),
+                local_wyoming_fullname_for_tray.as_deref(),
+            )
+            .into_iter()
+            .map(|p| p.tray_label())
+            .collect()
+        });
+
         let (t, rx) = fono_tray::spawn(
             "Fono — voice dictation",
             recent_provider,
             stt_labels,
             llm_labels,
             active_provider,
+            discovered_stt_provider,
             {
                 // Render the "Update to vX.Y.Z" tray label whenever the
                 // background checker has surfaced a newer release.
@@ -557,6 +570,8 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
         let llm_backends_for_dispatch: Vec<_> =
             fono_core::providers::configured_llm_backends(&secrets, &config.llm.backend);
         let update_status_tray = Arc::clone(&update_status);
+        let discovered_registry_for_dispatch = discovery_registry.clone();
+        let local_wyoming_fullname_for_dispatch = local_wyoming_fullname(&config);
         tokio::spawn(async move {
             while let Some(ta) = tray_rx.recv().await {
                 debug!("tray action: {ta:?}");
@@ -580,6 +595,16 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                             &paths,
                             orch_for_tray.as_ref(),
                             &stt_backends_for_dispatch,
+                            idx,
+                        )
+                        .await;
+                    }
+                    TrayAction::UseDiscoveredStt(idx) => {
+                        switch_discovered_stt_via_tray(
+                            &paths,
+                            orch_for_tray.as_ref(),
+                            discovered_registry_for_dispatch.as_ref(),
+                            local_wyoming_fullname_for_dispatch.as_deref(),
                             idx,
                         )
                         .await;
@@ -1115,6 +1140,116 @@ async fn switch_stt_via_tray(
     }
 }
 
+fn remote_wyoming_uri(peer: &fono_net::discovery::DiscoveredPeer) -> String {
+    peer.address.map_or_else(
+        || {
+            format!(
+                "tcp://{}:{}",
+                peer.hostname.trim_end_matches('.'),
+                peer.port
+            )
+        },
+        |addr| match addr {
+            std::net::IpAddr::V4(v4) => format!("tcp://{v4}:{}", peer.port),
+            std::net::IpAddr::V6(v6) => format!("tcp://[{v6}]:{}", peer.port),
+        },
+    )
+}
+
+fn local_wyoming_fullname(config: &Config) -> Option<String> {
+    if !config.server.wyoming.enabled {
+        return None;
+    }
+    let instance = if config.network.instance_name.is_empty() {
+        format!("fono-{}", hostname()?)
+    } else {
+        config.network.instance_name.clone()
+    };
+    Some(format!(
+        "{instance}.{}",
+        fono_net::discovery::WYOMING_SERVICE_TYPE
+    ))
+}
+
+fn discovered_wyoming_peers_for_tray(
+    registry: Option<&fono_net::discovery::Registry>,
+    local_fullname: Option<&str>,
+) -> Vec<fono_net::discovery::DiscoveredPeer> {
+    registry
+        .map(|registry| {
+            registry
+                .snapshot()
+                .into_iter()
+                .filter(|peer| peer.kind == fono_net::discovery::PeerKind::Wyoming)
+                .filter(|peer| local_fullname != Some(peer.fullname.as_str()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+async fn switch_discovered_stt_via_tray(
+    paths: &fono_core::Paths,
+    orch: Option<&Arc<crate::session::SessionOrchestrator>>,
+    registry: Option<&fono_net::discovery::Registry>,
+    local_fullname: Option<&str>,
+    idx: u8,
+) {
+    let peers = discovered_wyoming_peers_for_tray(registry, local_fullname);
+    let Some(peer) = peers.get(idx as usize).cloned() else {
+        warn!(
+            "tray UseDiscoveredStt({idx}): out of range (max={})",
+            peers.len()
+        );
+        return;
+    };
+    let label = peer.tray_label();
+    let uri = remote_wyoming_uri(&peer);
+    let config_path = paths.config_file();
+    let model = peer.model.clone();
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let mut cfg = fono_core::Config::load(&config_path)?;
+        let mut wyoming = cfg.stt.wyoming.unwrap_or_default();
+        wyoming.uri = uri;
+        if let Some(model) = model {
+            wyoming.model = model;
+        }
+        cfg.stt.wyoming = Some(wyoming);
+        cfg.stt.backend = fono_core::config::SttBackend::Wyoming;
+        cfg.save(&config_path)?;
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => {
+            info!("tray: switched STT to discovered {label}");
+            if let Some(o) = orch {
+                if let Err(e) = o.reload().await {
+                    warn!("tray: discovered STT reload failed: {e:#}");
+                    fono_core::notify::send(
+                        "Fono — STT reload failed",
+                        &format!("{e}"),
+                        "dialog-error",
+                        5_000,
+                        fono_core::notify::Urgency::Critical,
+                    );
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            warn!("tray: discovered STT switch failed: {e:#}");
+            fono_core::notify::send(
+                "Fono — STT switch failed",
+                &format!("{e}"),
+                "dialog-error",
+                5_000,
+                fono_core::notify::Urgency::Critical,
+            );
+        }
+        Err(e) => warn!("tray: discovered STT switch task join error: {e}"),
+    }
+}
+
 /// Switch the active LLM backend from the tray submenu and trigger a
 /// hot-reload of the orchestrator. Same code path as `fono use llm …`.
 async fn switch_llm_via_tray(
@@ -1492,7 +1627,7 @@ async fn spawn_wyoming_server_if_enabled(
         bind: cfg.bind.clone(),
         port: cfg.port,
         auth_token,
-        server_name: "fono".to_string(),
+        server_name: "Fono".to_string(),
         server_version: env!("CARGO_PKG_VERSION").to_string(),
         models: vec![fono_net::wyoming::server::AdvertisedModel {
             name: model,
@@ -1826,6 +1961,46 @@ mod tests {
         assert_eq!(peer.model.as_deref(), Some("small"));
         assert_eq!(peer.proto, "wyoming/1");
         assert!(!peer.auth_required);
+    }
+
+    #[test]
+    fn tray_wyoming_peers_filter_local_fullname() {
+        use fono_net::discovery::{DiscoveredPeer, PeerKind, Registry};
+        use std::time::Instant;
+
+        fn peer(fullname: &str, host: &str) -> DiscoveredPeer {
+            DiscoveredPeer {
+                kind: PeerKind::Wyoming,
+                fullname: fullname.into(),
+                name: fullname
+                    .strip_suffix(fono_net::discovery::WYOMING_SERVICE_TYPE)
+                    .and_then(|s| s.strip_suffix('.'))
+                    .unwrap_or(fullname)
+                    .into(),
+                hostname: format!("{host}.local."),
+                address: None,
+                port: 10300,
+                proto: "wyoming/1".into(),
+                version: "test".into(),
+                caps: vec!["stt".into()],
+                model: Some("small".into()),
+                auth_required: false,
+                path: None,
+                last_seen: Instant::now(),
+            }
+        }
+
+        let registry = Registry::new();
+        registry.upsert(peer("fono-nimblex._wyoming._tcp.local.", "nimblex"));
+        registry.upsert(peer("fono-ai._wyoming._tcp.local.", "ai"));
+
+        let peers = discovered_wyoming_peers_for_tray(
+            Some(&registry),
+            Some("fono-nimblex._wyoming._tcp.local."),
+        );
+
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].fullname, "fono-ai._wyoming._tcp.local.");
     }
 
     /// A bare short hostname (e.g. "kitchen") gets ".local" appended so
