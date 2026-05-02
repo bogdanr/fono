@@ -790,8 +790,6 @@ mod tests {
         assert!(SYSTEMD_SYSTEM_UNIT.contains("User=fono"));
         // SVG must contain the SVG opening tag (catches accidental
         // truncation; can't use is_empty since the slice is a const).
-        assert!(std::str::from_utf8(ICON_SVG)
-            .unwrap_or("")
-            .contains("<svg"));
+        assert!(std::str::from_utf8(ICON_SVG).unwrap_or("").contains("<svg"));
     }
 }

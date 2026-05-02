@@ -182,7 +182,12 @@ jobs:
             build-essential clang cmake pkg-config libclang-dev \
             libxdo-dev
           if [ "${{ matrix.variant }}" = "gpu" ]; then
-            sudo apt-get install -y -qq libvulkan-dev glslang-tools
+            # `libvulkan-dev` for the Vulkan headers and loader pkg-config
+            # entries; `glslc` (Google shaderc) is what ggml-vulkan's CMake
+            # actually requires to compile its 150+ SPIR-V shaders.
+            # `glslang-tools` ships `glslangValidator` which is similar but
+            # not the binary CMake's FindVulkan looks for.
+            sudo apt-get install -y -qq libvulkan-dev glslc
           fi
 
       - uses: Swatinem/rust-cache@v2
