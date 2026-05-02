@@ -182,12 +182,18 @@ jobs:
             build-essential clang cmake pkg-config libclang-dev \
             libxdo-dev
           if [ "${{ matrix.variant }}" = "gpu" ]; then
-            # `libvulkan-dev` for the Vulkan headers and loader pkg-config
-            # entries; `glslc` (Google shaderc) is what ggml-vulkan's CMake
-            # actually requires to compile its 150+ SPIR-V shaders.
-            # `glslang-tools` ships `glslangValidator` which is similar but
-            # not the binary CMake's FindVulkan looks for.
-            sudo apt-get install -y -qq libvulkan-dev glslc
+            # ggml-vulkan's CMake invokes Google shaderc's `glslc` to
+            # compile its 150+ SPIR-V shaders. `glslc` is not packaged
+            # standalone in Ubuntu 22.04's main repo (added in 24.04+);
+            # pull it from LunarG's official Vulkan SDK apt repo, which
+            # tracks Khronos releases and ships `vulkan-sdk` (loader +
+            # headers + glslc + glslangValidator + validation layers).
+            wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
+              | sudo gpg --dearmor -o /usr/share/keyrings/lunarg.gpg
+            echo "deb [signed-by=/usr/share/keyrings/lunarg.gpg] https://packages.lunarg.com/vulkan/ jammy main" \
+              | sudo tee /etc/apt/sources.list.d/lunarg-vulkan-jammy.list >/dev/null
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq vulkan-sdk
           fi
 
       - uses: Swatinem/rust-cache@v2
