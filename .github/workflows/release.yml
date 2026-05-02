@@ -79,7 +79,7 @@ jobs:
           retention-days: 30
 
   build:
-    name: build (${{ matrix.target }})
+    name: Release binary (${{ matrix.target }})
     needs: [cloud-equivalence]
     # Run even when cloud-equivalence is skipped (no key, override
     # tag) — `needs` defaults to "succeeded()", which fails on
@@ -113,7 +113,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          # Suffix the cache key with the runner image. Swatinem's
+          # default key only varies on `runner.os` ("Linux"), not the
+          # specific runner image — so a cache populated on a runner
+          # with newer glibc would restore build-script binaries that
+          # refuse to execute on this older-glibc runner.
+          key: ${{ matrix.target }}-${{ matrix.os }}
 
       - name: Install Linux build deps
         run: |

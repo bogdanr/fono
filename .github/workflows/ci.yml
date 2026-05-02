@@ -16,7 +16,7 @@ env:
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
+    name: Build & test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -144,7 +144,7 @@ jobs:
     # glibc 2.39 would silently bump the floor and exclude ~3 years
     # of supported distros. Must stay in lockstep with `release.yml`'s
     # build matrix.
-    name: size-budget (release-slim)
+    name: Binary size & deps audit
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
@@ -163,7 +163,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: size-budget
+          # Suffix the cache key with the runner image. Swatinem's
+          # default key only varies on `runner.os` ("Linux"), not the
+          # specific runner image — so a cache populated on
+          # ubuntu-latest (glibc 2.39) would restore build-script
+          # binaries that refuse to execute on this ubuntu-22.04
+          # (glibc 2.35) runner.
+          key: size-budget-ubuntu-22.04
 
       - name: Build canonical ship binary
         run: cargo build -p fono --profile release-slim --target x86_64-unknown-linux-gnu
@@ -233,7 +239,7 @@ jobs:
           if-no-files-found: ignore
 
   deny:
-    name: cargo-deny
+    name: License & advisory audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
