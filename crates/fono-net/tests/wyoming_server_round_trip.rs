@@ -17,8 +17,16 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use fono_net::wyoming::server::{AdvertisedModel, WyomingServer, WyomingServerConfig};
+use fono_net_codec::wyoming::{
+    AudioChunk, AudioStart, AudioStop, Transcribe, AUDIO_CHUNK, AUDIO_START, AUDIO_STOP,
+    TRANSCRIBE, TRANSCRIPT,
+};
+use fono_net_codec::Frame;
 use fono_stt::traits::{SpeechToText, Transcription};
 use fono_stt::wyoming::WyomingStt;
+use serde_json::to_value;
+use tokio::io::BufReader;
+use tokio::net::TcpStream;
 
 /// Mock STT backend. Records every `transcribe` call so the test can
 /// inspect the PCM the server actually received from the wire.
@@ -111,6 +119,93 @@ async fn server_serves_real_client_round_trip() {
     handle.shutdown().await;
 }
 
+#[tokio::test]
+async fn server_accepts_home_assistant_transcribe_before_audio() {
+    let mock = Arc::new(MockStt {
+        canned_text: "salut din fono".to_string(),
+        calls: Mutex::new(Vec::new()),
+    });
+
+    let cfg = WyomingServerConfig {
+        bind: "127.0.0.1".to_string(),
+        port: 0,
+        models: vec![AdvertisedModel {
+            name: "mock-small".into(),
+            languages: vec!["ro".into()],
+            description: Some("mock backend".into()),
+            version: None,
+        }],
+        ..WyomingServerConfig::default()
+    };
+
+    let server = WyomingServer::with_fixed_stt(cfg, mock.clone());
+    let handle = server.start().await.expect("server starts");
+    let addr = handle.local_addr();
+    let mut sock = TcpStream::connect(addr).await.expect("connect");
+
+    // Home Assistant's Wyoming client sends Transcribe first to set the
+    // language/model, then streams audio, then expects the transcript at
+    // audio-stop. Fono must queue the request instead of transcribing an
+    // empty buffer immediately.
+    Frame::new(TRANSCRIBE)
+        .with_data(
+            to_value(&Transcribe {
+                name: None,
+                language: Some("ro".into()),
+            })
+            .unwrap(),
+        )
+        .write_async(&mut sock)
+        .await
+        .unwrap();
+    Frame::new(AUDIO_START)
+        .with_data(
+            to_value(&AudioStart {
+                rate: 16_000,
+                width: 2,
+                channels: 1,
+                timestamp: None,
+            })
+            .unwrap(),
+        )
+        .write_async(&mut sock)
+        .await
+        .unwrap();
+    Frame::new(AUDIO_CHUNK)
+        .with_data(
+            to_value(&AudioChunk {
+                rate: 16_000,
+                width: 2,
+                channels: 1,
+                timestamp: None,
+            })
+            .unwrap(),
+        )
+        .with_payload(vec![0_u8; 320])
+        .write_async(&mut sock)
+        .await
+        .unwrap();
+    Frame::new(AUDIO_STOP)
+        .with_data(to_value(AudioStop::default()).unwrap())
+        .write_async(&mut sock)
+        .await
+        .unwrap();
+
+    let mut reader = BufReader::new(sock);
+    let response = tokio::time::timeout(Duration::from_secs(5), Frame::read_async(&mut reader))
+        .await
+        .expect("response within 5 s")
+        .expect("response frame");
+    assert_eq!(response.kind, TRANSCRIPT);
+
+    let calls = mock.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "exactly one transcribe call");
+    assert_eq!(calls[0].sample_count, 160);
+    assert_eq!(calls[0].sample_rate, 16_000);
+    assert_eq!(calls[0].lang.as_deref(), Some("ro"));
+
+    handle.shutdown().await;
+}
 #[tokio::test]
 async fn server_rejects_non_loopback_when_loopback_only() {
     // Bind to 0.0.0.0 but with loopback_only = true. The accept loop

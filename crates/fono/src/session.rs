@@ -937,8 +937,8 @@ impl SessionOrchestrator {
         tracing::debug!("live dictation: stopping capture");
         let taken = self.live_capture.lock().await.take();
         let Some(mut session) = taken else {
-            debug!("live-stop with no active live capture");
-            let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
+            debug!("live-stop with no active live capture; checking batch fallback capture");
+            self.on_stop_recording().await;
             return;
         };
         let cfg = self.current_config();

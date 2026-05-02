@@ -27,7 +27,9 @@
 //!   daemon then re-injects/copies that text. This is the clipit-style
 //!   workflow users asked for.
 //! - **STT / LLM backend submenus** — switch the active provider on
-//!   the fly; the active backend wears a leading "● " marker.
+//!   the fly; the active backend wears a leading "● " marker. The STT
+//!   menu also includes live mDNS-discovered Wyoming servers, which the
+//!   daemon writes to config and hot-reloads when selected.
 //! - **Microphone submenu** — list Pulse/PipeWire input devices and
 //!   set default via the daemon.
 //! - **Update submenu entry** — appears only when the background
@@ -67,6 +69,12 @@ pub type ActiveProvider = Arc<dyn Fn() -> (u8, u8) + Send + Sync>;
 ///   [`TrayAction::ApplyUpdate`].
 pub type UpdateProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
+/// Provider returning labels for Wyoming servers discovered on the LAN.
+/// Called on the same ~2 s poll as the backend providers. The daemon
+/// filters out its own local advertisement before returning labels, so
+/// this list contains only actionable remote servers.
+pub type DiscoveredSttProvider = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
 /// Provider returning `(devices, active_idx)` for the "Microphone"
 /// submenu — `devices` is the live input-device list (display
 /// names) and `active_idx` is the index of the device the OS reports
@@ -97,6 +105,9 @@ pub enum TrayAction {
     /// Switch the active STT backend. Index into the `stt_labels`
     /// slice passed to [`spawn`]. Provider-switching plan task R2.1.
     UseStt(u8),
+    /// Switch to the i-th mDNS-discovered Wyoming server shown in the
+    /// tray's "STT backend" submenu.
+    UseDiscoveredStt(u8),
     /// Switch the active LLM backend. Index into the `llm_labels`
     /// slice passed to [`spawn`].
     UseLlm(u8),
@@ -159,6 +170,8 @@ impl Tray {
 /// * `active_provider` — invoked on the same poll; returns the indices
 ///   of the currently-active STT and LLM in the slices above. Used to
 ///   paint the active-marker (`●`) and migrate it on `Reload`.
+/// * `discovered_stt_provider` — live labels for remote Wyoming servers
+///   discovered via mDNS; empty list renders a disabled placeholder.
 /// * `update_provider` — `Some(label)` shows / refreshes the "Update
 ///   to vX" entry; `None` hides it.
 /// * `microphones_provider` — `(devices, active_idx)` for the
@@ -170,6 +183,7 @@ pub fn spawn(
     stt_labels: Vec<String>,
     llm_labels: Vec<String>,
     active_provider: ActiveProvider,
+    discovered_stt_provider: DiscoveredSttProvider,
     update_provider: UpdateProvider,
     microphones_provider: MicrophonesProvider,
 ) -> (Tray, mpsc::UnboundedReceiver<TrayAction>) {
@@ -187,6 +201,7 @@ pub fn spawn(
             stt_labels,
             llm_labels,
             active_provider,
+            discovered_stt_provider,
             update_provider,
             microphones_provider,
         );
@@ -218,8 +233,8 @@ pub fn spawn(
 #[cfg(feature = "tray-backend")]
 mod backend {
     use super::{
-        ActiveProvider, MicrophonesProvider, RecentProvider, TrayAction, TrayState, UpdateProvider,
-        RECENT_SLOTS,
+        ActiveProvider, DiscoveredSttProvider, MicrophonesProvider, RecentProvider, TrayAction,
+        TrayState, UpdateProvider, RECENT_SLOTS,
     };
     use fono_core::notify::{self, Urgency};
     use ksni::{
@@ -250,6 +265,7 @@ mod backend {
         stt_labels: Vec<String>,
         llm_labels: Vec<String>,
         active: (u8, u8),
+        discovered_stt: Vec<String>,
         update_label: Option<String>,
         microphones: (Vec<String>, u8),
         actions: mpsc::UnboundedSender<TrayAction>,
@@ -306,6 +322,7 @@ mod backend {
         stt_labels: Vec<String>,
         llm_labels: Vec<String>,
         active_provider: ActiveProvider,
+        discovered_stt_provider: DiscoveredSttProvider,
         update_provider: UpdateProvider,
         microphones_provider: MicrophonesProvider,
     ) -> bool {
@@ -325,6 +342,7 @@ mod backend {
                 stt_labels,
                 llm_labels,
                 active_provider,
+                discovered_stt_provider,
                 update_provider,
                 microphones_provider,
             )
@@ -370,6 +388,7 @@ mod backend {
         stt_labels: Vec<String>,
         llm_labels: Vec<String>,
         active_provider: ActiveProvider,
+        discovered_stt_provider: DiscoveredSttProvider,
         update_provider: UpdateProvider,
         microphones_provider: MicrophonesProvider,
     ) -> anyhow::Result<()> {
@@ -380,6 +399,7 @@ mod backend {
             stt_labels,
             llm_labels,
             active: (u8::MAX, u8::MAX),
+            discovered_stt: Vec::new(),
             update_label: None,
             microphones: (Vec::new(), u8::MAX),
             actions,
@@ -412,11 +432,13 @@ mod backend {
                 _ = interval.tick() => {
                     let recent = recent_provider();
                     let active = active_provider();
+                    let discovered_stt = discovered_stt_provider();
                     let upd = update_provider();
                     let mics = microphones_provider();
                     handle.update(move |t: &mut KsniTray| {
                         if t.recent != recent { t.recent = recent; }
                         if t.active != active { t.active = active; }
+                        if t.discovered_stt != discovered_stt { t.discovered_stt = discovered_stt; }
                         if t.update_label != upd { t.update_label = upd; }
                         if t.microphones != mics { t.microphones = mics; }
                     }).await;
@@ -493,8 +515,11 @@ mod backend {
             .into(),
         );
 
-        // STT backend submenu.
-        let stt_items: Vec<MenuItem<KsniTray>> = t
+        // STT backend submenu. Static provider-family rows come first;
+        // remote Wyoming servers discovered over mDNS are appended below
+        // a separator so users can choose either the generic backend or a
+        // concrete LAN host from the same menu.
+        let mut stt_items: Vec<MenuItem<KsniTray>> = t
             .stt_labels
             .iter()
             .enumerate()
@@ -510,6 +535,28 @@ mod backend {
                 .into()
             })
             .collect();
+        if !t.discovered_stt.is_empty() {
+            stt_items.push(MenuItem::Separator);
+            stt_items.push(
+                StandardItem {
+                    label: "Discovered Wyoming servers".into(),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+            for (i, label) in t.discovered_stt.iter().enumerate() {
+                let idx_u8 = u8::try_from(i).unwrap_or(u8::MAX);
+                stt_items.push(
+                    StandardItem {
+                        label: format!("  {}", truncate_label(label, 72)),
+                        activate: send_action(TrayAction::UseDiscoveredStt(idx_u8)),
+                        ..Default::default()
+                    }
+                    .into(),
+                );
+            }
+        }
         items.push(
             SubMenu {
                 label: "STT backend".into(),

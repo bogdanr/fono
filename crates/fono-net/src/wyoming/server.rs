@@ -31,13 +31,13 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use fono_net_codec::wyoming::{
-    AsrInfo, AsrModel, Attribution, AudioChunk, AudioStart, Info, Transcribe, Transcript,
-    AUDIO_CHUNK, AUDIO_START, AUDIO_STOP, DESCRIBE, INFO, TRANSCRIBE, TRANSCRIPT,
+    AsrModel, AsrProgram, Attribution, AudioChunk, AudioStart, AudioStop, Info, Transcribe,
+    Transcript, AUDIO_CHUNK, AUDIO_START, AUDIO_STOP, DESCRIBE, INFO, TRANSCRIBE, TRANSCRIPT,
 };
 use fono_net_codec::Frame;
 use fono_stt::traits::SpeechToText;
 use serde_json::to_value;
-use tokio::io::BufReader;
+use tokio::io::{AsyncWrite, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -63,13 +63,14 @@ pub struct WyomingServerConfig {
     /// extension; today its value is logged at `debug!` and otherwise
     /// unused. Storing it here keeps the wiring honest.
     pub auth_token: Option<String>,
-    /// Server name advertised in `info.asr.models[].attribution.name`
-    /// and (later) in mDNS TXT records. Typical: `"fono"`.
+    /// Server name advertised in `info.asr[].name`,
+    /// `info.asr[].models[].attribution.name`, and (later) in mDNS TXT
+    /// records. Typical: `"Fono"`.
     pub server_name: String,
     /// Server version string surfaced via `info`. Typical:
     /// `env!("CARGO_PKG_VERSION")`.
     pub server_version: String,
-    /// Models to advertise in `info.asr.models`. Synthesised by the
+    /// Models to advertise in `info.asr[].models`. Synthesised by the
     /// daemon from the active STT config; can be a single entry for
     /// most setups.
     pub models: Vec<AdvertisedModel>,
@@ -79,7 +80,7 @@ pub struct WyomingServerConfig {
     pub loopback_only: bool,
 }
 
-/// One model entry surfaced via `info.asr.models`.
+/// One model entry surfaced via `info.asr[].models`.
 #[derive(Debug, Clone)]
 pub struct AdvertisedModel {
     pub name: String,
@@ -94,7 +95,7 @@ impl Default for WyomingServerConfig {
             bind: "127.0.0.1".to_string(),
             port: DEFAULT_PORT,
             auth_token: None,
-            server_name: "fono".to_string(),
+            server_name: "Fono".to_string(),
             server_version: env!("CARGO_PKG_VERSION").to_string(),
             models: Vec::new(),
             loopback_only: true,
@@ -273,6 +274,7 @@ async fn handle_connection(
     let mut pcm_f32: Vec<f32> = Vec::new();
     let mut sample_rate: u32 = 16_000;
     let mut audio_started = false;
+    let mut pending_transcribe: Option<Transcribe> = None;
 
     loop {
         let frame = match tokio::time::timeout(IDLE_TIMEOUT, Frame::read_async(&mut reader)).await {
@@ -297,55 +299,59 @@ async fn handle_connection(
                 audio_started = true;
             }
             AUDIO_CHUNK => {
-                if !audio_started {
-                    return Err(anyhow!("audio-chunk before audio-start"));
-                }
-                let _hdr: AudioChunk =
+                let hdr: AudioChunk =
                     serde_json::from_value(frame.data).context("decoding audio-chunk header")?;
-                pcm_f32.extend(decode_int16_le(&frame.payload));
+                if !audio_started {
+                    tracing::trace!(
+                        target: "fono::wyoming::server",
+                        %peer,
+                        "accepting audio-chunk before audio-start"
+                    );
+                    audio_started = true;
+                }
+                sample_rate = hdr.rate;
+                pcm_f32.extend(decode_pcm_le(&frame.payload, hdr.width, hdr.channels)?);
             }
             AUDIO_STOP => {
-                // No-op beyond closing the stream — we keep collecting
-                // until `transcribe` arrives so a peer can issue
-                // multiple audio-stop / audio-start sequences if they
-                // really want to. (Spec doesn't require that, but
-                // tolerating it costs nothing.)
+                let _: AudioStop =
+                    serde_json::from_value(frame.data).context("decoding audio-stop")?;
                 audio_started = false;
+                if let Some(req) = pending_transcribe.take() {
+                    finish_transcription(
+                        peer,
+                        stt.as_ref(),
+                        &mut write_half,
+                        &mut pcm_f32,
+                        sample_rate,
+                        req,
+                    )
+                    .await?;
+                }
             }
             TRANSCRIBE => {
                 let req: Transcribe =
                     serde_json::from_value(frame.data).context("decoding transcribe")?;
-                let lang = req.language.as_deref();
-                tracing::debug!(
-                    target: "fono::wyoming::server",
-                    %peer,
-                    samples = pcm_f32.len(),
-                    rate = sample_rate,
-                    lang = lang,
-                    "transcribe request"
-                );
-                let started = std::time::Instant::now();
-                let res = stt
-                    .transcribe(&pcm_f32, sample_rate, lang)
-                    .await
-                    .context("backend stt.transcribe")?;
-                tracing::debug!(
-                    target: "fono::wyoming::server",
-                    %peer,
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    chars = res.text.chars().count(),
-                    "transcribe complete"
-                );
-                let resp = Transcript {
-                    text: res.text,
-                    language: res.language,
-                };
-                Frame::new(TRANSCRIPT)
-                    .with_data(to_value(&resp)?)
-                    .write_async(&mut write_half)
+                if pcm_f32.is_empty() || audio_started {
+                    tracing::debug!(
+                        target: "fono::wyoming::server",
+                        %peer,
+                        samples = pcm_f32.len(),
+                        rate = sample_rate,
+                        lang = req.language.as_deref(),
+                        "queued transcribe request until audio-stop"
+                    );
+                    pending_transcribe = Some(req);
+                } else {
+                    finish_transcription(
+                        peer,
+                        stt.as_ref(),
+                        &mut write_half,
+                        &mut pcm_f32,
+                        sample_rate,
+                        req,
+                    )
                     .await?;
-                pcm_f32.clear();
-                audio_started = false;
+                }
             }
             other => {
                 tracing::trace!(
@@ -358,10 +364,88 @@ async fn handle_connection(
     }
 }
 
+async fn finish_transcription<W>(
+    peer: SocketAddr,
+    stt: &dyn SpeechToText,
+    write_half: &mut W,
+    pcm_f32: &mut Vec<f32>,
+    sample_rate: u32,
+    req: Transcribe,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    if pcm_f32.is_empty() {
+        return Err(anyhow!("transcribe requested with no audio samples"));
+    }
+
+    let lang = req.language.as_deref();
+    tracing::info!(
+        target: "fono::wyoming::server",
+        %peer,
+        samples = pcm_f32.len(),
+        rate = sample_rate,
+        lang = lang,
+        "processing transcription request"
+    );
+    let started = std::time::Instant::now();
+    let res = stt
+        .transcribe(pcm_f32.as_slice(), sample_rate, lang)
+        .await
+        .context("backend stt.transcribe")?;
+    tracing::info!(
+        target: "fono::wyoming::server",
+        %peer,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        chars = res.text.chars().count(),
+        "transcription request complete"
+    );
+    let resp = Transcript {
+        text: res.text,
+        language: res.language,
+    };
+    Frame::new(TRANSCRIPT)
+        .with_data(to_value(&resp)?)
+        .write_async(write_half)
+        .await?;
+    pcm_f32.clear();
+    Ok(())
+}
+
+/// Convert PCM bytes to mono `f32` samples in the -1.0..1.0 range.
+/// Wyoming ASR clients, including Home Assistant, normally send signed
+/// int16 LE. Multi-channel int16 input is mixed down by averaging each
+/// interleaved frame.
+fn decode_pcm_le(bytes: &[u8], width: u32, channels: u32) -> Result<Vec<f32>> {
+    if width != 2 {
+        return Err(anyhow!(
+            "unsupported audio width {width}; expected 2-byte PCM"
+        ));
+    }
+    if channels == 0 {
+        return Err(anyhow!("unsupported audio channel count 0"));
+    }
+
+    let channel_count = channels as usize;
+    let frame_bytes = 2 * channel_count;
+    let mut out = Vec::with_capacity(bytes.len() / frame_bytes);
+    for frame in bytes.chunks_exact(frame_bytes) {
+        let mut sum = 0.0_f32;
+        for ch in 0..channel_count {
+            let offset = ch * 2;
+            let i = i16::from_le_bytes([frame[offset], frame[offset + 1]]);
+            sum += f32::from(i) / 32767.0;
+        }
+        out.push(sum / channels as f32);
+    }
+    Ok(out)
+}
+
 /// Convert int16 LE bytes (Wyoming wire format) to mono `f32` samples
 /// in the -1.0..1.0 range. Trailing odd byte is silently dropped (a
 /// valid stream is always even-length; the alternative is failing the
 /// connection on a single torn frame, which is harsher than helpful).
+#[cfg(test)]
 fn decode_int16_le(bytes: &[u8]) -> impl Iterator<Item = f32> + '_ {
     bytes.chunks_exact(2).map(|pair| {
         let i = i16::from_le_bytes([pair[0], pair[1]]);
@@ -392,12 +476,18 @@ fn build_info(cfg: &WyomingServerConfig) -> Info {
         })
         .collect();
     Info {
-        asr: Some(AsrInfo {
+        asr: vec![AsrProgram {
+            name: cfg.server_name.clone(),
+            attribution,
+            installed: true,
+            description: Some("Fono speech-to-text".to_string()),
+            version: Some(cfg.server_version.clone()),
             models,
             // Streaming-response support arrives when StreamingStt is
             // wired through. For now, advertise the one-shot lane only.
             supports_transcript_streaming: false,
-        }),
+        }],
+        ..Info::default()
     }
 }
 
@@ -439,11 +529,13 @@ mod tests {
             ..WyomingServerConfig::default()
         };
         let info = build_info(&cfg);
-        let asr = info.asr.expect("asr present");
+        let asr = info.asr.first().expect("asr present");
+        assert_eq!(asr.name, "Fono");
+        assert!(asr.installed);
         assert_eq!(asr.models.len(), 1);
         assert_eq!(asr.models[0].name, "small");
         assert_eq!(asr.models[0].languages, vec!["en", "ro"]);
         assert!(!asr.supports_transcript_streaming);
-        assert_eq!(asr.models[0].attribution.name, "fono");
+        assert_eq!(asr.models[0].attribution.name, "Fono");
     }
 }

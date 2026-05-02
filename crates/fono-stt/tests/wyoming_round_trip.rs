@@ -33,6 +33,7 @@ use tokio::net::TcpListener;
 
 /// Spawn the in-process server. Returns `(uri, transcribed_bytes_rx)`.
 /// The `mode` selects which of the two response shapes the server uses.
+#[allow(clippy::too_many_lines)] // mock-server boilerplate; splitting hides the protocol shape
 async fn spawn_server(
     mode: ServerMode,
     canned: &'static str,
@@ -59,10 +60,26 @@ async fn spawn_server(
                     // not exercised in this test, but keeps the server
                     // honest for future test additions.
                     let info = serde_json::json!({
-                        "asr": {
-                            "models": [],
-                            "supports_transcript_streaming": matches!(mode, ServerMode::Streaming),
-                        }
+                        "asr": [
+                            {
+                                "name": "mock-asr",
+                                "attribution": {
+                                    "name": "mock",
+                                    "url": "https://example.invalid/mock",
+                                },
+                                "installed": true,
+                                "description": null,
+                                "version": null,
+                                "models": [],
+                                "supports_transcript_streaming": matches!(mode, ServerMode::Streaming),
+                            }
+                        ],
+                        "tts": [],
+                        "handle": [],
+                        "intent": [],
+                        "wake": [],
+                        "mic": [],
+                        "snd": [],
                     });
                     Frame::new(INFO)
                         .with_data(info)
