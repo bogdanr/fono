@@ -56,8 +56,14 @@ rustflags = [
     # Some musl cross images do not propagate llama-cpp-sys' static OpenMP
     # directive onto the final binary link line. Keep gomp behind an explicit
     # static linker mode so the final ship binary does not gain libgomp.so.
+    # The trailing `-lc` is required because libgomp.a (from
+    # messense/rust-musl-cross) calls back into libc symbols (gethostname,
+    # strcasecmp, getloadavg, …) which the rustc-driven link processes
+    # before -lgomp; ld is single-pass on archives so libc must reappear
+    # after libgomp for those references to resolve.
     "-C", "link-arg=-Wl,-Bstatic",
     "-C", "link-arg=-lgomp",
+    "-C", "link-arg=-lc",
     "-C", "link-arg=-static-libgcc",
 ]
 

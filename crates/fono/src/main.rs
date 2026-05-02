@@ -72,8 +72,22 @@ pub unsafe extern "C" fn memalign(alignment: usize, size: usize) -> *mut core::f
         ) -> i32;
     }
     let mut ptr: *mut core::ffi::c_void = core::ptr::null_mut();
-    if posix_memalign(&mut ptr, alignment, size) != 0 {
+    // SAFETY: forwarding the contract of memalign to posix_memalign.
+    if unsafe { posix_memalign(&mut ptr, alignment, size) } != 0 {
         return core::ptr::null_mut();
     }
     ptr
+}
+
+// musl + libgomp link shim, part 2. libgomp's env parsing calls
+// `secure_getenv(3)`, a glibc extension. fono is a user-level CLI never
+// run setuid/setgid, so plain `getenv` is semantically equivalent.
+#[cfg(all(target_os = "linux", target_env = "musl"))]
+#[no_mangle]
+pub unsafe extern "C" fn secure_getenv(name: *const core::ffi::c_char) -> *mut core::ffi::c_char {
+    extern "C" {
+        fn getenv(name: *const core::ffi::c_char) -> *mut core::ffi::c_char;
+    }
+    // SAFETY: caller passes a NUL-terminated C string; we forward as-is.
+    unsafe { getenv(name) }
 }
