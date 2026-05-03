@@ -8,8 +8,30 @@ use tracing_subscriber::EnvFilter;
 
 use fono::cli;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // Vulkan probe re-exec hook (see `fono_core::vulkan_probe` module
+    // docs). When the parent process spawns us with
+    // `FONO_INTERNAL_VULKAN_PROBE=1` we run the in-process probe,
+    // print the result line on stdout, and exit before clap, tokio,
+    // tracing, or anything else gets a chance to start. This isolates
+    // the well-known shutdown segfault triggered by Mesa's `vulkan-
+    // mesa-lvp` ICD (and some buggy NVIDIA driver builds) into a
+    // disposable subprocess so the daemon itself shuts down cleanly.
+    //
+    // Crucially this MUST run before the tokio runtime is built —
+    // otherwise the probe child inherits worker threads it doesn't
+    // need and which only widen the shutdown-race surface.
+    fono_core::vulkan_probe::run_subprocess_probe_if_requested();
+
+    // Now build the runtime for the real entry point. Mirrors what
+    // `#[tokio::main]` would have produced.
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     let args = cli::Cli::parse();
     init_tracing(args.verbosity());
     cli::run(args).await

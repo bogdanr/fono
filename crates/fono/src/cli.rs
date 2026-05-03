@@ -371,7 +371,31 @@ pub async fn run(cli: Cli) -> Result<()> {
     match cli.cmd {
         None | Some(Cmd::Daemon { .. }) => {
             if needs_wizard {
-                wizard::run(&paths).await?;
+                // The interactive wizard requires a TTY (`dialoguer` reads
+                // arrow keys / "yes" prompts straight from stdin and aborts
+                // with `IO error: not a terminal` otherwise). Under systemd,
+                // SSH-without-pty, Docker, or any other non-interactive
+                // launch we'd otherwise crash-loop on first run. Detect
+                // that case and seed a sensible default config instead so
+                // the daemon can come up; the user can re-run the wizard
+                // interactively later (`fono setup`) or hand-edit
+                // `~/.config/fono/config.toml`.
+                use std::io::IsTerminal;
+                if std::io::stdin().is_terminal() {
+                    wizard::run(&paths).await?;
+                } else {
+                    let cfg_path = paths.config_file();
+                    Config::default()
+                        .save(&cfg_path)
+                        .with_context(|| format!("write default config to {}", cfg_path.display()))?;
+                    eprintln!(
+                        "fono: no interactive terminal detected; wrote default config to {}",
+                        cfg_path.display()
+                    );
+                    eprintln!(
+                        "fono: re-run `fono setup` from a terminal to configure STT/LLM backends."
+                    );
+                }
             }
             let no_tray = cli.no_tray || matches!(cli.cmd, Some(Cmd::Daemon { no_tray: true }));
             daemon::run(&paths, no_tray, cli.verbosity()).await

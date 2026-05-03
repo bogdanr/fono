@@ -147,13 +147,28 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
 
     // ---------------------------------------------------------------
     // Global hotkey listener
+    //
+    // Skipped entirely on headless hosts (no `DISPLAY`, no
+    // `WAYLAND_DISPLAY`). The `global-hotkey` 0.6.4 crate spawns an X11
+    // events_processor thread that calls `XOpenDisplay(NULL)` and then
+    // dereferences the returned pointer via `XDefaultRootWindow` *without
+    // checking for NULL* — when no X server is reachable the thread
+    // segfaults, taking the whole daemon with it. The same `fono`
+    // binary is used for headless inference servers (see `fono serve`),
+    // so we runtime-gate exactly the way the tray already does
+    // (see "Tray icon — runtime-gated" below).
+    //
+    // The daemon still serves IPC on the headless path, so
+    // `fono toggle`, `fono record`, `fono transcribe`, etc. continue to
+    // work; only the global hotkey grab is unavailable, which is
+    // meaningless on a host with no kernel input focus anyway.
     // ---------------------------------------------------------------
     let bindings = HotkeyBindings {
         hold: config.hotkeys.hold.clone(),
         toggle: config.hotkeys.toggle.clone(),
         cancel: config.hotkeys.cancel.clone(),
     };
-    let cancel_ctrl: Option<HotkeyControlSender> =
+    let cancel_ctrl: Option<HotkeyControlSender> = if crate::is_graphical_session() {
         match fono_hotkey::spawn_listener(bindings, action_tx.clone()) {
             Ok(handle) => {
                 debug!("global hotkeys registered");
@@ -166,7 +181,11 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                 );
                 None
             }
-        };
+        }
+    } else {
+        debug!("hotkey listener skipped (headless: no DISPLAY / WAYLAND_DISPLAY)");
+        None
+    };
 
     // ---------------------------------------------------------------
     // Background update checker — hits GitHub releases once on startup

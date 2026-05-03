@@ -8,7 +8,7 @@ Wants=network-online.target
 Type=simple
 User=fono
 Group=fono
-ExecStart=/usr/local/bin/fono daemon --no-tray
+ExecStart=/usr/local/bin/fono
 Restart=on-failure
 RestartSec=3
 

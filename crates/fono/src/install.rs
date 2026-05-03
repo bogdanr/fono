@@ -270,6 +270,55 @@ fn systemctl_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Best-effort post-`enable --now` health check. systemd's `enable --now`
+/// returns success the moment the unit is *started*, but a service that
+/// crashes during early init (TTY-required wizard, missing audio device,
+/// bad config) will fail a couple of seconds later and end up in a
+/// `Restart=on-failure` loop the user only notices much later. Wait
+/// briefly, then surface a one-line summary; if the unit is not active
+/// after the wait, dump the last few journal lines so the failure mode
+/// is visible without requiring the user to know the right `journalctl`
+/// invocation.
+fn verify_service_running(unit: &str) {
+    use std::{thread, time::Duration};
+
+    // Give systemd a moment to actually run ExecStart and let the
+    // process either settle or crash. 2 s is enough for the daemon's
+    // startup path on every machine we test on; if it isn't, the user
+    // sees a "still activating" line and can re-run `systemctl status`.
+    thread::sleep(Duration::from_secs(2));
+
+    let active = Command::new("systemctl")
+        .args(["is-active", unit])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    if active == "active" {
+        eprintln!("  · {unit} is active (running)");
+        return;
+    }
+
+    eprintln!("  · {unit} is {} (expected `active`)", if active.is_empty() { "<unknown>" } else { active.as_str() });
+    eprintln!("    --- last 20 journal lines for {unit} ---");
+    if let Ok(out) = Command::new("journalctl")
+        .args(["-u", unit, "-n", "20", "--no-pager"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            eprintln!("    {line}");
+        }
+    } else {
+        eprintln!("    (journalctl unavailable)");
+    }
+    eprintln!("    --- end ---");
+    eprintln!(
+        "    investigate with: systemctl status {unit} && journalctl -u {unit} -n 100 --no-pager"
+    );
+}
+
 // ---------------------------------------------------------------------
 // `fono doctor` integration
 // ---------------------------------------------------------------------
@@ -527,6 +576,10 @@ fn run_install_server() -> Result<()> {
         eprintln!(
             "  · systemd not detected; the unit file is in place but you must wire it into your init system manually"
         );
+    }
+
+    if enabled_service {
+        verify_service_running("fono.service");
     }
 
     let marker = Marker {
