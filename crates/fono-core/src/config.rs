@@ -29,7 +29,13 @@ pub struct Config {
     pub stt: Stt,
 
     #[serde(default)]
+    pub tts: Tts,
+
+    #[serde(default)]
     pub llm: Llm,
+
+    #[serde(default)]
+    pub assistant: Assistant,
 
     #[serde(default, rename = "context_rules")]
     pub context_rules: Vec<ContextRule>,
@@ -77,7 +83,9 @@ impl Default for Config {
             hotkeys: Hotkeys::default(),
             audio: Audio::default(),
             stt: Stt::default(),
+            tts: Tts::default(),
             llm: Llm::default(),
+            assistant: Assistant::default(),
             context_rules: Vec::new(),
             overlay: Overlay::default(),
             history: History::default(),
@@ -172,6 +180,18 @@ pub struct Hotkeys {
     pub hold: String,
     pub toggle: String,
     pub cancel: String,
+    /// Voice-assistant push-to-talk key. Empty disables the F10
+    /// path entirely (the daemon won't try to register the key, the
+    /// FSM never enters the assistant states). Distinct from the
+    /// dictation keys so a user can dictate into a focused window
+    /// and ask the assistant in the same session without changing
+    /// modes.
+    #[serde(default = "default_assistant_hotkey")]
+    pub assistant: String,
+}
+
+fn default_assistant_hotkey() -> String {
+    "F10".into()
 }
 
 impl Default for Hotkeys {
@@ -180,6 +200,7 @@ impl Default for Hotkeys {
             hold: "F8".into(),
             toggle: "F9".into(),
             cancel: "Escape".into(),
+            assistant: default_assistant_hotkey(),
         }
     }
 }
@@ -311,6 +332,89 @@ pub struct SttWyoming {
     /// Optional pre-shared bearer token reference (resolved through
     /// `secrets.toml` / env). Empty = no auth (Wyoming v1 has no
     /// in-band auth; Fono will gain an extension event in Slice 5).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub auth_token_ref: String,
+}
+
+/// `[tts]` — text-to-speech for the voice-assistant path. Off by
+/// default (`backend = none`); enabling it requires either a Wyoming
+/// TTS server on the LAN, the OpenAI TTS API, or a future in-process
+/// Piper build. The TTS pipeline is fully independent of `[stt]` /
+/// `[llm]`: a user can dictate with cloud STT + local cleanup and run
+/// the assistant against a different cloud + Wyoming TTS.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Tts {
+    pub backend: TtsBackend,
+    /// Voice override. Empty = backend default. Wyoming voices look
+    /// like `en_US-amy-low`; OpenAI voices are `alloy`/`echo`/etc.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub voice: String,
+    /// cpal output device name. Empty = system default.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub output_device: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<TtsCloud>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wyoming: Option<TtsWyoming>,
+}
+
+impl Default for Tts {
+    fn default() -> Self {
+        Self {
+            backend: TtsBackend::None,
+            voice: String::new(),
+            output_device: String::new(),
+            cloud: None,
+            wyoming: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TtsBackend {
+    None,
+    /// Wyoming-protocol TTS server on the LAN (e.g. `wyoming-piper`).
+    /// Configure via `[tts.wyoming]`.
+    Wyoming,
+    /// In-process Piper. **Stub in v1** — onnxruntime conflicts with
+    /// the static-musl ship build. The factory returns a clear error
+    /// pointing the user at the Wyoming backend.
+    Piper,
+    /// OpenAI `/v1/audio/speech` API. Configure via `[tts.cloud]`.
+    OpenAI,
+}
+
+impl Default for TtsBackend {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TtsCloud {
+    /// Provider identifier (`openai`, future: `elevenlabs`, ...).
+    pub provider: String,
+    /// Reference into `secrets.toml` / environment for the API key.
+    /// Empty falls through to the canonical env var
+    /// (e.g. `OPENAI_API_KEY`) so existing dictation keys work for TTS
+    /// too without reconfiguration.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_key_ref: String,
+    /// Model override. Empty = factory default (e.g. `tts-1`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+}
+
+/// `[tts.wyoming]` — coordinates of a Wyoming-protocol TTS server.
+/// Mirrors [`SttWyoming`]. Default port is 10200 (the wyoming-piper
+/// default), distinct from STT's 10300.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TtsWyoming {
+    pub uri: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub auth_token_ref: String,
 }
@@ -448,6 +552,113 @@ pub const fn default_prompt_advanced() -> &'static str {
 correction and drop the discarded fragment. If the speaker dictates a list (\"first\", \
 \"second\", \"next point\"), format it as a bulleted or numbered list. If the speaker names \
 a term in the personal dictionary, prefer that exact spelling."
+}
+
+/// `[assistant]` — voice-assistant chat config. Distinct from `[llm]`
+/// (the dictation cleanup pipeline) so a user can run a fast local
+/// model for cleanup and a bigger cloud model for the assistant
+/// (or vice versa). Off by default until the user opts in via the
+/// wizard or `fono use assistant <backend>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Assistant {
+    pub enabled: bool,
+    pub backend: AssistantBackend,
+    pub local: AssistantLocal,
+    pub cloud: Option<AssistantCloud>,
+    /// System prompt sent on every turn. Distinct from `[llm].prompt`
+    /// — the cleanup prompt forbids chat-style replies, this one
+    /// invites them, capped to 1-3 sentences for low TTS latency.
+    pub prompt_main: String,
+    /// Rolling-history time window. Turns older than this from the
+    /// most recent activity are pruned on every snapshot.
+    pub history_window_minutes: u32,
+    /// Belt-and-suspenders cap on the number of turns retained,
+    /// independent of the time window. Caps token cost on long
+    /// idle-then-resume flows.
+    pub history_max_turns: u32,
+    /// When the user presses a dictation key (F8/F9), clear the
+    /// assistant's rolling history. Default `true`: dictation and
+    /// assistant are separate intents; mixing their contexts is
+    /// rarely what the user wants.
+    pub auto_clear_on_dictation: bool,
+}
+
+impl Default for Assistant {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: AssistantBackend::None,
+            local: AssistantLocal::default(),
+            cloud: None,
+            prompt_main: default_assistant_prompt().into(),
+            history_window_minutes: 5,
+            history_max_turns: 12,
+            auto_clear_on_dictation: true,
+        }
+    }
+}
+
+/// Backend selector for the assistant. Same provider set as
+/// [`LlmBackend`] minus a shape change: assistant defaults to `None`
+/// (off) rather than `Local`, because turning on the assistant
+/// without picking a backend would be a footgun.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AssistantBackend {
+    None,
+    Local,
+    OpenAI,
+    Anthropic,
+    Gemini,
+    Groq,
+    Cerebras,
+    OpenRouter,
+    Ollama,
+}
+
+impl Default for AssistantBackend {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AssistantLocal {
+    pub model: String,
+    pub quantization: String,
+    pub context: u32,
+}
+
+impl Default for AssistantLocal {
+    fn default() -> Self {
+        // A 3B-class chat model is the floor for usable assistant
+        // quality; 1.5B (the cleanup default) tends to ramble.
+        Self {
+            model: "qwen2.5-3b-instruct".into(),
+            quantization: "q4_k_m".into(),
+            context: 8192,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AssistantCloud {
+    pub provider: String,
+    pub api_key_ref: String,
+    pub model: String,
+}
+
+/// Default chat-style system prompt for the voice assistant. Designed
+/// for low time-to-first-audio: short answers, plain prose, no
+/// markdown / lists / code that the TTS layer would have to skip.
+pub const fn default_assistant_prompt() -> &'static str {
+    "You are a concise voice assistant. Reply in 1-3 sentences unless the user explicitly asks \
+for detail. Spoken plain prose only — no markdown, no bullet lists, no code blocks, no headings. \
+If you would normally include code or a structured list, describe it briefly in spoken language \
+instead. Match the user's language."
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

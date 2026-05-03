@@ -27,6 +27,9 @@ pub struct HotkeyBindings {
     pub hold: String,
     pub toggle: String,
     pub cancel: String,
+    /// Voice-assistant push-to-talk key. Empty disables the assistant
+    /// hotkey path (the IPC + CLI surfaces still work).
+    pub assistant: String,
 }
 
 /// Out-of-band commands the daemon sends to the listener thread to
@@ -46,6 +49,7 @@ enum Role {
     Hold,
     Toggle,
     Cancel,
+    Assistant,
 }
 
 /// Handle returned by [`spawn`]: the join handle for the manager thread
@@ -78,13 +82,31 @@ pub fn spawn(
     let cancel = parse_hotkey(&bindings.cancel)
         .ok()
         .map(ParsedHotkey::into_hotkey);
+    // Assistant is optional — empty disables the F10 path. A bad
+    // (non-empty) string is logged but doesn't fail daemon startup,
+    // since the user can still trigger via IPC / CLI.
+    let assistant = if bindings.assistant.trim().is_empty() {
+        None
+    } else {
+        match parse_hotkey(&bindings.assistant) {
+            Ok(p) => Some(p.into_hotkey()),
+            Err(e) => {
+                warn!(
+                    "could not parse hotkeys.assistant = {:?}: {e:#}; \
+                     F10 disabled (use `fono assistant ...` from CLI / tray)",
+                    bindings.assistant
+                );
+                None
+            }
+        }
+    };
 
     let (ctrl_tx, ctrl_rx) = unbounded::<HotkeyControl>();
 
     let thread = std::thread::Builder::new()
         .name("fono-hotkey".into())
         .spawn(move || {
-            if let Err(e) = run_manager(hold, toggle, cancel, tx, &bindings, ctrl_rx) {
+            if let Err(e) = run_manager(hold, toggle, cancel, assistant, tx, &bindings, ctrl_rx) {
                 warn!("hotkey manager exited: {e:#}");
             }
         })
@@ -100,6 +122,7 @@ fn run_manager(
     hold: global_hotkey::hotkey::HotKey,
     toggle: global_hotkey::hotkey::HotKey,
     cancel: Option<global_hotkey::hotkey::HotKey>,
+    assistant: Option<global_hotkey::hotkey::HotKey>,
     tx: mpsc::UnboundedSender<HotkeyAction>,
     bindings: &HotkeyBindings,
     ctrl_rx: crossbeam_channel::Receiver<HotkeyControl>,
@@ -112,6 +135,15 @@ fn run_manager(
     let mut roles: HashMap<u32, Role> = HashMap::new();
     register(&manager, hold, Role::Hold, &bindings.hold, &mut roles);
     register(&manager, toggle, Role::Toggle, &bindings.toggle, &mut roles);
+    if let Some(hk) = assistant {
+        register(
+            &manager,
+            hk,
+            Role::Assistant,
+            &bindings.assistant,
+            &mut roles,
+        );
+    }
 
     if roles.is_empty() {
         anyhow::bail!("no hotkeys were successfully registered");
@@ -232,6 +264,8 @@ fn map_event(role: Role, state: HotKeyState) -> Option<HotkeyAction> {
         (Role::Hold, HotKeyState::Released) => Some(HotkeyAction::HoldReleased),
         (Role::Toggle, HotKeyState::Pressed) => Some(HotkeyAction::TogglePressed),
         (Role::Cancel, HotKeyState::Pressed) => Some(HotkeyAction::CancelPressed),
+        (Role::Assistant, HotKeyState::Pressed) => Some(HotkeyAction::AssistantPressed),
+        (Role::Assistant, HotKeyState::Released) => Some(HotkeyAction::AssistantReleased),
         _ => None,
     }
 }

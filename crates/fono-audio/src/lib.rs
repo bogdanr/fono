@@ -10,6 +10,7 @@
 pub mod capture;
 pub mod devices;
 pub mod mute;
+pub mod playback;
 pub mod pulse;
 pub mod resample;
 pub mod trim;
@@ -21,6 +22,7 @@ pub mod stream;
 pub use capture::{
     AudioCapture, CaptureConfig, CaptureHandle, CaptureStreamHandle, RecordingBuffer,
 };
+pub use playback::{AudioPlayback, PlaybackError};
 pub use trim::{trim_silence, TrimConfig};
 pub use vad::{SileroVad, Vad, VadDecision, WebRtcVadStub};
 

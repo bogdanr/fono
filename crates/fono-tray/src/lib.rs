@@ -238,6 +238,13 @@ pub enum TrayAction {
     /// xdg-terminal-exec.
     OpenSettingsTui,
     OpenConfig,
+    /// Stop an in-flight assistant reply (drain audio queue, abort
+    /// the LLM stream). History is preserved. Maps 1:1 to
+    /// [`fono_ipc::Request::AssistantStop`].
+    AssistantStop,
+    /// Wipe the rolling assistant conversation history. Independent
+    /// of the playback state; intended as a "fresh start" entry.
+    AssistantForget,
     Quit,
 }
 
@@ -663,6 +670,26 @@ mod backend {
             StandardItem {
                 label: "Pause hotkeys".into(),
                 activate: send_action(TrayAction::Pause),
+                ..Default::default()
+            }
+            .into(),
+        );
+        // Assistant controls. Always present: clicking Stop assistant
+        // when nothing is playing is a harmless no-op, and Forget
+        // conversation lets the user reset history without opening
+        // config. The daemon handles the no-op case gracefully.
+        items.push(
+            StandardItem {
+                label: "Stop assistant".into(),
+                activate: send_action(TrayAction::AssistantStop),
+                ..Default::default()
+            }
+            .into(),
+        );
+        items.push(
+            StandardItem {
+                label: "Forget conversation".into(),
+                activate: send_action(TrayAction::AssistantForget),
                 ..Default::default()
             }
             .into(),

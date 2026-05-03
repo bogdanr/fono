@@ -18,6 +18,7 @@
 // `plans/2026-04-27-shared-ggml-static-binary-v1.md` for the full
 // rationale and the long-term shared-ggml plan.
 
+pub mod assistant;
 pub mod audio_recovery;
 pub mod cli;
 pub mod daemon;

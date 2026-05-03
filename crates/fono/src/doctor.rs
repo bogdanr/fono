@@ -147,6 +147,16 @@ pub async fn report(paths: &Paths) -> Result<String> {
             Ok(None) => writeln!(out, "  llm: disabled (cleanup off)")?,
             Err(e) => writeln!(out, "  llm: FAIL — {e:#}")?,
         }
+        match fono_assistant::build_assistant(&c.assistant, &secrets) {
+            Ok(Some(a)) => writeln!(out, "  assistant: {} ready", a.name())?,
+            Ok(None) => writeln!(out, "  assistant: disabled (F10 will notify)")?,
+            Err(e) => writeln!(out, "  assistant: FAIL — {e:#}")?,
+        }
+        match fono_tts::build_tts(&c.tts, &secrets) {
+            Ok(Some(t)) => writeln!(out, "  tts: {} ready", t.name())?,
+            Ok(None) => writeln!(out, "  tts: disabled (assistant replies will be silent)")?,
+            Err(e) => writeln!(out, "  tts: FAIL — {e:#}")?,
+        }
         writeln!(out)?;
 
         // ------------------------------------------------------------
@@ -202,9 +212,56 @@ pub async fn report(paths: &Paths) -> Result<String> {
             writeln!(out, "  {mark} {name:<14} model={model:<32} {key_status}")?;
         }
         writeln!(out)?;
+
+        writeln!(out, "Providers (assistant):")?;
+        for b in fono_core::providers::all_assistant_backends() {
+            let active = b == c.assistant.backend;
+            let mark = if active { "*" } else { " " };
+            let name = fono_core::providers::assistant_backend_str(&b);
+            let needs_key = fono_core::providers::assistant_requires_key(&b);
+            let key_env = fono_core::providers::assistant_key_env(&b);
+            let key_status = if !needs_key {
+                "no key needed".to_string()
+            } else if secrets.resolve(key_env).is_some() {
+                format!("{key_env} present")
+            } else {
+                format!("{key_env} MISSING")
+            };
+            writeln!(out, "  {mark} {name:<14} {key_status}")?;
+        }
+        writeln!(out)?;
+
+        writeln!(out, "Providers (TTS):")?;
+        for b in fono_core::providers::all_tts_backends() {
+            let active = b == c.tts.backend;
+            let mark = if active { "*" } else { " " };
+            let name = fono_core::providers::tts_backend_str(&b);
+            let needs_key = fono_core::providers::tts_requires_key(&b);
+            let key_env = fono_core::providers::tts_key_env(&b);
+            let extra = match b {
+                fono_core::config::TtsBackend::Wyoming => c
+                    .tts
+                    .wyoming
+                    .as_ref()
+                    .map(|w| format!("uri={}", w.uri))
+                    .unwrap_or_else(|| "uri=(unset)".to_string()),
+                fono_core::config::TtsBackend::OpenAI => {
+                    if secrets.resolve(key_env).is_some() {
+                        format!("{key_env} present")
+                    } else {
+                        format!("{key_env} MISSING")
+                    }
+                }
+                fono_core::config::TtsBackend::Piper => "stub (use Wyoming-piper)".to_string(),
+                fono_core::config::TtsBackend::None => "—".to_string(),
+            };
+            let _ = needs_key;
+            writeln!(out, "  {mark} {name:<14} {extra}")?;
+        }
+        writeln!(out)?;
         writeln!(
             out,
-            "(* = active. Switch with `fono use stt <backend>` / `fono use llm <backend>`.)"
+            "(* = active. Switch with `fono use stt|llm|assistant|tts <backend>`.)"
         )?;
         writeln!(out)?;
     }

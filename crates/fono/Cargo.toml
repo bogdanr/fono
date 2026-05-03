@@ -75,7 +75,13 @@ cloud-all = ["fono-stt/openai", "fono-llm/anthropic"]
 fono-core = { path = "../fono-core", features = ["vulkan-probe"] }
 fono-audio = { path = "../fono-audio" }
 fono-stt = { path = "../fono-stt" }
+# Default to both Wyoming (LAN) and OpenAI cloud TTS so out-of-the-box
+# `fono use tts openai|wyoming` both work without rebuilding. The
+# OpenAI feature only adds an HTTP client (reqwest already pulled in
+# transitively), no native deps.
+fono-tts = { path = "../fono-tts", features = ["wyoming", "openai"] }
 fono-llm = { path = "../fono-llm" }
+fono-assistant = { path = "../fono-assistant" }
 fono-hotkey = { path = "../fono-hotkey" }
 fono-inject = { path = "../fono-inject" }
 fono-tray = { path = "../fono-tray" }

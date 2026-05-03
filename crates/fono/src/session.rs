@@ -17,6 +17,7 @@ use std::sync::RwLock as StdRwLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use fono_assistant::{Assistant, ConversationHistory};
 use fono_audio::{AudioCapture, CaptureConfig, RecordingBuffer};
 use fono_core::config::{Config, ContextRule};
 use fono_core::history::{HistoryDb, Transcription as HistoryRow};
@@ -26,10 +27,13 @@ use fono_llm::{FormatContext, TextFormatter};
 use fono_stt::SpeechToText;
 #[cfg(feature = "interactive")]
 use fono_stt::StreamingStt;
+use fono_tts::TextToSpeech;
 use std::sync::Mutex as StdMutex;
 use std::thread::JoinHandle;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Notify};
 use tracing::{debug, error, info, warn};
+
+use crate::assistant::{run_assistant_turn, AssistantSessionState, AssistantTurnInputs};
 
 /// Minimum duration of audio that will be passed to STT. Anything
 /// shorter is treated as a misfire.
@@ -280,6 +284,23 @@ pub struct SessionOrchestrator {
     #[cfg(feature = "interactive")]
     streaming_stt: Arc<StdRwLock<Option<Arc<dyn StreamingStt>>>>,
     llm: Arc<StdRwLock<Option<Arc<dyn TextFormatter>>>>,
+    /// TTS backend for the assistant's audio reply path. `None` when
+    /// `[tts].backend = none` or the factory failed.
+    tts: Arc<StdRwLock<Option<Arc<dyn TextToSpeech>>>>,
+    /// Streaming chat backend for the assistant. `None` when
+    /// `[assistant]` is disabled or the factory failed.
+    assistant_backend: Arc<StdRwLock<Option<Arc<dyn Assistant>>>>,
+    /// Per-orchestrator assistant runtime state: rolling history,
+    /// cancellation `Notify`, and lazy [`fono_audio::AudioPlayback`]
+    /// handle. Shared with the pump task spawned in
+    /// [`Self::on_assistant_hold_release`].
+    assistant_session: Arc<Mutex<AssistantSessionState>>,
+    /// Capture slot dedicated to the assistant push-to-talk path.
+    /// Independent of the dictation [`Self::capture`] slot so the two
+    /// pipelines can never trample each other (and so a future where
+    /// they overlap becomes a config decision rather than a state
+    /// hazard).
+    assistant_capture: Arc<Mutex<Option<CaptureSession>>>,
     history: Arc<Mutex<HistoryDb>>,
     capture_cfg: CaptureConfig,
     capture: Arc<Mutex<Option<CaptureSession>>>,
@@ -312,6 +333,7 @@ impl SessionOrchestrator {
     /// Returns an error if the STT factory fails — the daemon should
     /// still come up but in a "degraded" mode where hotkeys notify the
     /// user. LLM construction failure downgrades to "no cleanup".
+    #[allow(clippy::too_many_lines)]
     pub fn new(
         config: Arc<Config>,
         secrets: &Secrets,
@@ -329,6 +351,20 @@ impl SessionOrchestrator {
             Ok(opt) => opt,
             Err(e) => {
                 warn!("LLM backend unavailable; continuing without cleanup: {e:#}");
+                None
+            }
+        };
+        let tts = match fono_tts::build_tts(&config.tts, secrets) {
+            Ok(opt) => opt,
+            Err(e) => {
+                warn!("TTS backend unavailable; assistant replies will be silent: {e:#}");
+                None
+            }
+        };
+        let assistant_backend = match fono_assistant::build_assistant(&config.assistant, secrets) {
+            Ok(opt) => opt,
+            Err(e) => {
+                warn!("Assistant backend unavailable; F10 will notify but not respond: {e:#}");
                 None
             }
         };
@@ -350,6 +386,14 @@ impl SessionOrchestrator {
             Arc::new(RealFocusProbe),
         );
         orch.paths = Some(Arc::new(paths.clone()));
+        // Populate the assistant-side slots. Both are optional —
+        // F10 surfaces a notification when either is missing.
+        if let Ok(mut g) = orch.tts.write() {
+            *g = tts;
+        }
+        if let Ok(mut g) = orch.assistant_backend.write() {
+            *g = assistant_backend;
+        }
         // Populate the streaming-STT slot when this build supports
         // interactive mode. Errors are non-fatal — the live path
         // gracefully falls back to batch when the slot is `None`.
@@ -473,6 +517,20 @@ impl SessionOrchestrator {
                 None
             }
         };
+        let new_tts = match fono_tts::build_tts(&cfg.tts, &secrets) {
+            Ok(opt) => opt,
+            Err(e) => {
+                warn!("reload: TTS unavailable; assistant replies will be silent: {e:#}");
+                None
+            }
+        };
+        let new_assistant = match fono_assistant::build_assistant(&cfg.assistant, &secrets) {
+            Ok(opt) => opt,
+            Err(e) => {
+                warn!("reload: assistant unavailable: {e:#}");
+                None
+            }
+        };
         let stt_name = new_stt.name().to_string();
         let llm_name = new_llm
             .as_ref()
@@ -505,6 +563,20 @@ impl SessionOrchestrator {
         }
         if let Ok(mut guard) = self.llm.write() {
             *guard = new_llm;
+        }
+        if let Ok(mut guard) = self.tts.write() {
+            *guard = new_tts;
+        }
+        if let Ok(mut guard) = self.assistant_backend.write() {
+            *guard = new_assistant;
+        }
+        // Re-tune the rolling history window to match the freshly-
+        // loaded config.
+        {
+            let window = Duration::from_secs(60 * u64::from(cfg.assistant.history_window_minutes));
+            let max_turns = cfg.assistant.history_max_turns as usize;
+            let mut s = self.assistant_session.lock().await;
+            s.history = ConversationHistory::new(window, max_turns);
         }
         if let Ok(mut guard) = self.config.write() {
             *guard = Arc::new(cfg);
@@ -606,11 +678,21 @@ impl SessionOrchestrator {
         injector: Arc<dyn Injector>,
         focus: Arc<dyn FocusProbe>,
     ) -> Self {
+        let history_window = Duration::from_secs(60 * u64::from(
+            config.assistant.history_window_minutes,
+        ));
+        let history_max = config.assistant.history_max_turns as usize;
         Self {
             stt: Arc::new(StdRwLock::new(stt)),
             #[cfg(feature = "interactive")]
             streaming_stt: Arc::new(StdRwLock::new(None)),
             llm: Arc::new(StdRwLock::new(llm)),
+            tts: Arc::new(StdRwLock::new(None)),
+            assistant_backend: Arc::new(StdRwLock::new(None)),
+            assistant_session: Arc::new(Mutex::new(AssistantSessionState::new(
+                ConversationHistory::new(history_window, history_max),
+            ))),
+            assistant_capture: Arc::new(Mutex::new(None)),
             history,
             capture_cfg,
             capture: Arc::new(Mutex::new(None)),
@@ -639,6 +721,11 @@ impl SessionOrchestrator {
             warn!("recording requested while previous pipeline still running; ignoring");
             return Ok(());
         }
+        // Dictation and assistant are separate intents; if the user
+        // pivots from "ask" to "dictate" mid-conversation we wipe the
+        // assistant's rolling context (configurable). Also stops any
+        // assistant turn that's still speaking.
+        self.maybe_clear_assistant_on_dictation().await;
         let mut slot = self.capture.lock().await;
         if slot.is_some() {
             warn!("capture already in progress; ignoring duplicate start");
@@ -935,6 +1022,221 @@ impl SessionOrchestrator {
         let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
     }
 
+    // ---- assistant push-to-talk ---------------------------------------
+
+    /// Begin recording for the voice-assistant path. Mirrors
+    /// [`Self::on_start_recording`] but writes into a dedicated
+    /// capture slot, skips the dictation overlay / mute path, and
+    /// does not flip `pipeline_in_flight` (the assistant pipeline
+    /// gates on its own cancellation `Notify`).
+    #[allow(clippy::significant_drop_tightening)]
+    pub async fn on_assistant_hold_press(&self) -> Result<()> {
+        let mut slot = self.assistant_capture.lock().await;
+        if slot.is_some() {
+            warn!("assistant capture already in progress; ignoring duplicate start");
+            return Ok(());
+        }
+        // If a previous turn's playback is still finishing, stop it
+        // — second-press semantics: barge-in.
+        {
+            let mut s = self.assistant_session.lock().await;
+            s.stop_current_turn();
+        }
+        let cap_cfg = self.capture_cfg.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<
+            std::result::Result<Arc<StdMutex<RecordingBuffer>>, String>,
+        >();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let join = std::thread::Builder::new()
+            .name("fono-assistant-capture".into())
+            .spawn(move || {
+                let cap = AudioCapture::new(cap_cfg);
+                match cap.start() {
+                    Ok(handle) => {
+                        let _ = started_tx.send(Ok(Arc::clone(&handle.buffer)));
+                        let _ = stop_rx.recv();
+                        drop(handle);
+                    }
+                    Err(e) => {
+                        let _ = started_tx.send(Err(format!("{e:#}")));
+                    }
+                }
+            })
+            .context("spawn assistant capture thread")?;
+        let buffer = match started_rx.recv() {
+            Ok(Ok(b)) => b,
+            Ok(Err(e)) => {
+                let _ = join.join();
+                return Err(anyhow::anyhow!("assistant capture failed to start: {e}"));
+            }
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "assistant capture thread died before reporting status"
+                ))
+            }
+        };
+        let session = CaptureSession {
+            buffer,
+            stop_tx,
+            join: Some(join),
+            started_at: Instant::now(),
+            mode: RecordingMode::Hold,
+            #[cfg(any(feature = "interactive", feature = "waveform"))]
+            level_task: None,
+        };
+        *slot = Some(session);
+        info!("assistant recording started");
+        Ok(())
+    }
+
+    /// Stop assistant recording and kick off the streaming pump:
+    /// STT → assistant chat → SentenceSplitter → TTS → playback.
+    /// Returns immediately; the pump runs on a detached tokio task.
+    pub async fn on_assistant_hold_release(&self) {
+        let session = self.assistant_capture.lock().await.take();
+        let Some(session) = session else {
+            warn!("assistant release without a matching press; ignoring");
+            return;
+        };
+        let (pcm, elapsed) = match tokio::task::spawn_blocking(move || session.stop_and_drain())
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("assistant capture join failed: {e:#}");
+                return;
+            }
+        };
+        if elapsed < MIN_RECORDING || pcm.is_empty() {
+            info!(
+                "assistant recording too short ({}ms); skipping",
+                elapsed.as_millis()
+            );
+            return;
+        }
+        let cfg = self.current_config();
+        let stt = self.current_stt();
+        let assistant = self.current_assistant();
+        let tts = self.current_tts();
+        let (Some(assistant), Some(tts)) = (assistant, tts) else {
+            // The slots are populated by `build_assistant()` /
+            // `build_tts()` in `new()` and `reload()`. If the config
+            // flags are on but the slots are empty, the factory
+            // errored at startup (missing API key, missing
+            // sub-block, missing feature). Run `fono doctor` for the
+            // exact reason; the daemon also logged it on startup.
+            warn!(
+                "assistant turn requested but a runtime backend is missing \
+                 (assistant_loaded={} tts_loaded={}; config: assistant.enabled={} \
+                 tts.backend={:?}). Run `fono doctor` to see which factory failed.",
+                self.current_assistant().is_some(),
+                self.current_tts().is_some(),
+                cfg.assistant.enabled,
+                cfg.tts.backend,
+            );
+            fono_core::notify::send(
+                "Fono — assistant backend missing",
+                "The assistant or TTS factory failed at startup (likely a missing API key). \
+                 Run `fono doctor` to see which backend errored.",
+                "dialog-information",
+                6_000,
+                fono_core::notify::Urgency::Normal,
+            );
+            return;
+        };
+        let notify = Arc::new(Notify::new());
+        {
+            let mut s = self.assistant_session.lock().await;
+            s.current_turn = Some(notify.clone());
+        }
+        let inputs = AssistantTurnInputs {
+            pcm,
+            sample_rate: self.capture_cfg.target_sample_rate,
+            stt,
+            assistant,
+            tts,
+            system_prompt: cfg.assistant.prompt_main.clone(),
+            language: cfg.general.language_override().map(str::to_string),
+            action_tx: self.action_tx.clone(),
+        };
+        let state_for_task = self.assistant_session.clone();
+        let action_tx = self.action_tx.clone();
+        let notify_for_task = notify.clone();
+        let state_for_clear = state_for_task.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                run_assistant_turn(state_for_task, inputs, notify_for_task).await
+            {
+                warn!("assistant turn failed: {e:#}");
+            }
+            // Clear the current_turn slot so a fresh press doesn't
+            // think a stale pump is still running.
+            {
+                let mut s = state_for_clear.lock().await;
+                if let Some(active) = s.current_turn.as_ref() {
+                    if Arc::ptr_eq(active, &notify) {
+                        s.current_turn = None;
+                    }
+                }
+            }
+            // Tell the FSM we're idle. Harmless when the FSM's not
+            // wired (no hotkey for assistant in this slice — IPC
+            // triggers don't change FSM state).
+            let _ = action_tx.send(HotkeyAction::ProcessingDone);
+        });
+    }
+
+    /// Stop the active assistant turn immediately. Notifies the pump
+    /// to bail out and asks the playback handle to drain its queue.
+    /// Conversation history is preserved so a follow-up turn carries
+    /// context.
+    pub async fn on_assistant_stop(&self) {
+        {
+            let mut s = self.assistant_session.lock().await;
+            s.stop_current_turn();
+        }
+        info!("assistant stop requested");
+    }
+
+    /// Stop the active assistant turn AND clear the rolling history.
+    /// Backs the tray "Forget conversation" entry — a one-step
+    /// "fresh start" without changing config.
+    pub async fn on_assistant_forget(&self) {
+        {
+            let mut s = self.assistant_session.lock().await;
+            s.stop_current_turn();
+            s.history.clear();
+        }
+        info!("assistant history cleared");
+    }
+
+    fn current_assistant(&self) -> Option<Arc<dyn Assistant>> {
+        self.assistant_backend
+            .read()
+            .expect("assistant lock poisoned")
+            .clone()
+    }
+
+    fn current_tts(&self) -> Option<Arc<dyn TextToSpeech>> {
+        self.tts.read().expect("tts lock poisoned").clone()
+    }
+
+    /// Wipe the assistant's rolling history (and stop any in-flight
+    /// playback) when the user pivots to dictation. No-op when
+    /// `[assistant].auto_clear_on_dictation = false`.
+    async fn maybe_clear_assistant_on_dictation(&self) {
+        let cfg = self.current_config();
+        if !cfg.assistant.auto_clear_on_dictation {
+            return;
+        }
+        let mut s = self.assistant_session.lock().await;
+        s.stop_current_turn();
+        if !s.history.snapshot().is_empty() || !s.history.is_stale() {
+            debug!(target: "fono::assistant", "clearing assistant history (dictation pivot)");
+            s.history.clear();
+        }
+    }
+
     /// Re-inject the most recent cleaned (or raw) transcription.
     pub async fn on_paste_last(&self) {
         let last = {
@@ -1085,6 +1387,7 @@ impl SessionOrchestrator {
             warn!("live-dictation requested while previous pipeline still running; ignoring");
             return Ok(());
         }
+        self.maybe_clear_assistant_on_dictation().await;
         let mut slot = self.live_capture.lock().await;
         if slot.is_some() {
             warn!("live-dictation already in progress; ignoring duplicate start");

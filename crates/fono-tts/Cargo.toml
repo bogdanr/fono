@@ -1,0 +1,43 @@
+[package]
+name = "fono-tts"
+description = "Text-to-speech trait and local + cloud backends for Fono."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Wyoming TTS client ships in default builds — no native deps, lets users
+# point at a wyoming-piper or sibling fono-server without recompiling.
+default = ["wyoming"]
+# Cloud — each behind a feature flag.
+openai = ["dep:reqwest"]
+# LAN Wyoming TTS server.
+wyoming = ["dep:fono-net-codec"]
+# In-process Piper. Stub in v1 — see src/piper_local.rs for the rationale
+# (onnxruntime conflicts with the static-musl ship build). Compiles to a
+# function that returns a clear error pointing users at wyoming-piper.
+piper-local = []
+
+[dependencies]
+fono-core = { path = "../fono-core" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true, optional = true }
+fono-net-codec = { path = "../fono-net-codec", optional = true }
+
+[dev-dependencies]
+fono-net-codec = { path = "../fono-net-codec" }
+serde_json = { workspace = true }
+tokio = { workspace = true }

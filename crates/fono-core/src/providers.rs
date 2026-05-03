@@ -10,7 +10,7 @@
 //! Provider-switching plan S2 — keep changes here in sync with the
 //! `defaults` modules in `fono-stt` / `fono-llm` for model strings.
 
-use crate::config::{LlmBackend, SttBackend};
+use crate::config::{AssistantBackend, LlmBackend, SttBackend, TtsBackend};
 
 /// Canonical lower-case identifier for a STT backend (matches serde
 /// rename and what users type on the CLI: `fono use stt groq`).
@@ -128,6 +128,102 @@ pub const fn llm_requires_key(b: &LlmBackend) -> bool {
     !matches!(b, LlmBackend::Local | LlmBackend::None | LlmBackend::Ollama)
 }
 
+/// Canonical lower-case identifier for a TTS backend.
+#[must_use]
+pub const fn tts_backend_str(b: &TtsBackend) -> &'static str {
+    match b {
+        TtsBackend::None => "none",
+        TtsBackend::Wyoming => "wyoming",
+        TtsBackend::Piper => "piper",
+        TtsBackend::OpenAI => "openai",
+    }
+}
+
+#[must_use]
+pub fn parse_tts_backend(s: &str) -> Option<TtsBackend> {
+    match s.to_ascii_lowercase().as_str() {
+        "none" | "off" | "skip" => Some(TtsBackend::None),
+        "wyoming" => Some(TtsBackend::Wyoming),
+        "piper" => Some(TtsBackend::Piper),
+        "openai" => Some(TtsBackend::OpenAI),
+        _ => None,
+    }
+}
+
+/// Canonical environment-variable name for the API key of a cloud
+/// TTS backend. Returned even for `None`/`Wyoming`/`Piper` (where it's
+/// unused) for branch-free callers; check [`tts_requires_key`] first.
+#[must_use]
+pub const fn tts_key_env(b: &TtsBackend) -> &'static str {
+    match b {
+        TtsBackend::None | TtsBackend::Wyoming | TtsBackend::Piper => "",
+        TtsBackend::OpenAI => "OPENAI_API_KEY",
+    }
+}
+
+#[must_use]
+pub const fn tts_requires_key(b: &TtsBackend) -> bool {
+    matches!(b, TtsBackend::OpenAI)
+}
+
+/// Canonical lower-case identifier for an assistant chat backend.
+#[must_use]
+pub const fn assistant_backend_str(b: &AssistantBackend) -> &'static str {
+    match b {
+        AssistantBackend::None => "none",
+        AssistantBackend::Local => "local",
+        AssistantBackend::OpenAI => "openai",
+        AssistantBackend::Anthropic => "anthropic",
+        AssistantBackend::Gemini => "gemini",
+        AssistantBackend::Groq => "groq",
+        AssistantBackend::Cerebras => "cerebras",
+        AssistantBackend::OpenRouter => "openrouter",
+        AssistantBackend::Ollama => "ollama",
+    }
+}
+
+#[must_use]
+pub fn parse_assistant_backend(s: &str) -> Option<AssistantBackend> {
+    match s.to_ascii_lowercase().as_str() {
+        "none" | "off" | "skip" => Some(AssistantBackend::None),
+        "local" => Some(AssistantBackend::Local),
+        "openai" => Some(AssistantBackend::OpenAI),
+        "anthropic" => Some(AssistantBackend::Anthropic),
+        "gemini" => Some(AssistantBackend::Gemini),
+        "groq" => Some(AssistantBackend::Groq),
+        "cerebras" => Some(AssistantBackend::Cerebras),
+        "openrouter" => Some(AssistantBackend::OpenRouter),
+        "ollama" => Some(AssistantBackend::Ollama),
+        _ => None,
+    }
+}
+
+/// Canonical environment-variable name for the API key of a cloud
+/// assistant backend. Reuses the same env vars as the LLM cleanup
+/// path (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.), so a single
+/// stored key serves both consumers without duplicate prompts in
+/// the wizard.
+#[must_use]
+pub const fn assistant_key_env(b: &AssistantBackend) -> &'static str {
+    match b {
+        AssistantBackend::None | AssistantBackend::Local | AssistantBackend::Ollama => "",
+        AssistantBackend::OpenAI => "OPENAI_API_KEY",
+        AssistantBackend::Anthropic => "ANTHROPIC_API_KEY",
+        AssistantBackend::Gemini => "GEMINI_API_KEY",
+        AssistantBackend::Groq => "GROQ_API_KEY",
+        AssistantBackend::Cerebras => "CEREBRAS_API_KEY",
+        AssistantBackend::OpenRouter => "OPENROUTER_API_KEY",
+    }
+}
+
+#[must_use]
+pub const fn assistant_requires_key(b: &AssistantBackend) -> bool {
+    !matches!(
+        b,
+        AssistantBackend::None | AssistantBackend::Local | AssistantBackend::Ollama
+    )
+}
+
 /// Paired cloud preset for `fono use cloud <name>`. Returns `(stt, llm)`
 /// for the preset, or `None` if the name isn't a known pair.
 #[must_use]
@@ -176,6 +272,31 @@ pub fn all_llm_backends() -> [LlmBackend; 9] {
         LlmBackend::OpenRouter,
         LlmBackend::Ollama,
         LlmBackend::Gemini,
+    ]
+}
+
+#[must_use]
+pub fn all_assistant_backends() -> [AssistantBackend; 9] {
+    [
+        AssistantBackend::None,
+        AssistantBackend::Local,
+        AssistantBackend::Cerebras,
+        AssistantBackend::Groq,
+        AssistantBackend::OpenAI,
+        AssistantBackend::Anthropic,
+        AssistantBackend::OpenRouter,
+        AssistantBackend::Ollama,
+        AssistantBackend::Gemini,
+    ]
+}
+
+#[must_use]
+pub fn all_tts_backends() -> [TtsBackend; 4] {
+    [
+        TtsBackend::None,
+        TtsBackend::Wyoming,
+        TtsBackend::Piper,
+        TtsBackend::OpenAI,
     ]
 }
 

@@ -33,6 +33,23 @@ pub enum Request {
     /// network plan — backs `fono discover` and the tray's
     /// *Discovered on LAN* submenu.
     ListDiscovered,
+    /// Voice-assistant push-to-talk start. Mirrors `HoldPress` but
+    /// routes to the assistant pipeline (STT → assistant chat → TTS →
+    /// playback) instead of dictation. Step 3 of the assistant plan.
+    AssistantHoldPress,
+    /// Voice-assistant push-to-talk release. Triggers the streaming
+    /// assistant pump.
+    AssistantHoldRelease,
+    /// Stop assistant playback / pump immediately. Used for "shut
+    /// up"-style cancellation (Escape, tray "Stop assistant"). The
+    /// rolling history is preserved so a follow-up turn can build on
+    /// the conversation.
+    AssistantStop,
+    /// Wipe the assistant's rolling conversation history (and stop
+    /// any in-flight playback). Backs the tray "Forget conversation"
+    /// entry. Distinct from [`Self::AssistantStop`] so a casual stop
+    /// doesn't lose context.
+    AssistantForget,
     /// Graceful shutdown.
     Shutdown,
 }

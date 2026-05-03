@@ -147,6 +147,15 @@ pub enum Cmd {
     },
     /// Re-type the last cleaned transcription.
     PasteLast,
+    /// Voice-assistant push-to-talk control. Subcommands match the
+    /// IPC contract used by the future F10 hotkey: `press` starts
+    /// audio capture, `release` runs the streaming pump, `stop`
+    /// aborts an in-flight reply. Useful for end-to-end smoke tests
+    /// before the hotkey lands.
+    Assistant {
+        #[command(subcommand)]
+        action: AssistantCmd,
+    },
     /// Browse the transcription history.
     History {
         /// Filter to entries containing this substring.
@@ -293,6 +302,21 @@ pub enum UseCmd {
         /// none | local | cerebras | groq | openai | anthropic | openrouter | ollama | gemini
         backend: String,
     },
+    /// Switch the active voice-assistant chat backend. Independent of
+    /// the LLM cleanup pipeline (`fono use llm`).
+    Assistant {
+        /// none | local | cerebras | groq | openai | anthropic | openrouter | ollama | gemini
+        backend: String,
+    },
+    /// Switch the active TTS backend (assistant audio replies).
+    Tts {
+        /// none | wyoming | piper | openai
+        backend: String,
+        /// Optional Wyoming server URI when `backend = wyoming`,
+        /// e.g. `tcp://localhost:10200`.
+        #[arg(long)]
+        uri: Option<String>,
+    },
     /// Switch STT + LLM to a paired cloud preset.
     Cloud {
         /// groq | cerebras | openai | anthropic | openrouter | deepgram | assemblyai
@@ -333,6 +357,17 @@ pub enum ConfigCmd {
     Show,
     /// Print the path to the config file.
     Path,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AssistantCmd {
+    /// Start assistant audio capture. Mirrors holding F10.
+    Press,
+    /// End capture and run the streaming reply (STT → chat → TTS).
+    /// Mirrors releasing F10.
+    Release,
+    /// Stop an in-flight assistant reply (drain audio, abort pump).
+    Stop,
 }
 
 #[derive(Debug, Subcommand)]
@@ -396,6 +431,14 @@ pub async fn run(cli: Cli) -> Result<()> {
         Some(Cmd::Setup) => Box::pin(wizard::run(&paths)).await,
         Some(Cmd::Toggle) => ipc_simple(&paths, Request::Toggle).await,
         Some(Cmd::PasteLast) => ipc_simple(&paths, Request::PasteLast).await,
+        Some(Cmd::Assistant { action }) => {
+            let req = match action {
+                AssistantCmd::Press => Request::AssistantHoldPress,
+                AssistantCmd::Release => Request::AssistantHoldRelease,
+                AssistantCmd::Stop => Request::AssistantStop,
+            };
+            ipc_simple(&paths, req).await
+        }
         Some(Cmd::Doctor) => {
             let report = doctor::report(&paths).await?;
             println!("{report}");
@@ -986,6 +1029,45 @@ pub fn set_active_stt(cfg: &mut Config, backend: fono_core::config::SttBackend) 
     cfg.stt.cloud = None;
 }
 
+/// Atomically swap the active assistant backend, mirroring
+/// [`set_active_llm`]. Enables the assistant when a real backend is
+/// selected and disables it on `None`.
+pub fn set_active_assistant(cfg: &mut Config, backend: fono_core::config::AssistantBackend) {
+    use fono_core::config::AssistantBackend;
+    let none = matches!(backend, AssistantBackend::None);
+    cfg.assistant.backend = backend;
+    cfg.assistant.enabled = !none;
+    cfg.assistant.cloud = None;
+}
+
+/// Atomically swap the active TTS backend. `wyoming_uri` populates
+/// `[tts.wyoming].uri` when the backend is Wyoming; ignored otherwise.
+pub fn set_active_tts(
+    cfg: &mut Config,
+    backend: fono_core::config::TtsBackend,
+    wyoming_uri: Option<String>,
+) {
+    use fono_core::config::{TtsBackend, TtsWyoming};
+    cfg.tts.backend = backend.clone();
+    cfg.tts.cloud = None;
+    if matches!(backend, TtsBackend::Wyoming) {
+        let uri = wyoming_uri.unwrap_or_else(|| {
+            cfg.tts
+                .wyoming
+                .as_ref()
+                .map(|w| w.uri.clone())
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| fono_tts::defaults::DEFAULT_WYOMING_URI.to_string())
+        });
+        cfg.tts.wyoming = Some(TtsWyoming {
+            uri,
+            ..TtsWyoming::default()
+        });
+    } else {
+        cfg.tts.wyoming = None;
+    }
+}
+
 /// Atomically swap the active LLM backend. Enables/disables cleanup as
 /// appropriate (None → disabled, anything else → enabled).
 pub fn set_active_llm(cfg: &mut Config, backend: fono_core::config::LlmBackend) {
@@ -999,7 +1081,8 @@ pub fn set_active_llm(cfg: &mut Config, backend: fono_core::config::LlmBackend) 
 async fn use_cmd(paths: &Paths, action: UseCmd) -> Result<()> {
     use fono_core::config::{LlmBackend, SttBackend};
     use fono_core::providers::{
-        cloud_pair, llm_backend_str, parse_llm_backend, parse_stt_backend, stt_backend_str,
+        assistant_backend_str, cloud_pair, llm_backend_str, parse_assistant_backend,
+        parse_llm_backend, parse_stt_backend, parse_tts_backend, stt_backend_str, tts_backend_str,
     };
 
     let path = paths.config_file();
@@ -1022,6 +1105,27 @@ async fn use_cmd(paths: &Paths, action: UseCmd) -> Result<()> {
             set_active_llm(&mut cfg, b.clone());
             cfg.save(&path)?;
             format!("llm = {}", llm_backend_str(&b))
+        }
+        UseCmd::Assistant { backend } => {
+            let b = parse_assistant_backend(&backend).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown assistant backend {backend:?}; try none, anthropic, cerebras, \
+                     openai, groq, openrouter, ollama, local"
+                )
+            })?;
+            set_active_assistant(&mut cfg, b.clone());
+            cfg.save(&path)?;
+            format!("assistant = {}", assistant_backend_str(&b))
+        }
+        UseCmd::Tts { backend, uri } => {
+            let b = parse_tts_backend(&backend).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown TTS backend {backend:?}; try none, wyoming, piper, openai"
+                )
+            })?;
+            set_active_tts(&mut cfg, b.clone(), uri);
+            cfg.save(&path)?;
+            format!("tts = {}", tts_backend_str(&b))
         }
         UseCmd::Cloud { provider } => {
             let (s, l) = cloud_pair(&provider).ok_or_else(|| {
@@ -1071,14 +1175,22 @@ async fn use_cmd(paths: &Paths, action: UseCmd) -> Result<()> {
 }
 
 async fn print_show(paths: &Paths, cfg: &Config) {
-    use fono_core::providers::{llm_backend_str, stt_backend_str};
+    use fono_core::providers::{
+        assistant_backend_str, llm_backend_str, stt_backend_str, tts_backend_str,
+    };
     println!("config: {}", paths.config_file().display());
-    println!("  stt  : {}", stt_backend_str(&cfg.stt.backend));
+    println!("  stt      : {}", stt_backend_str(&cfg.stt.backend));
     println!(
-        "  llm  : {}{}",
+        "  llm      : {}{}",
         llm_backend_str(&cfg.llm.backend),
         if cfg.llm.enabled { "" } else { " (disabled)" }
     );
+    println!(
+        "  assistant: {}{}",
+        assistant_backend_str(&cfg.assistant.backend),
+        if cfg.assistant.enabled { "" } else { " (disabled)" }
+    );
+    println!("  tts      : {}", tts_backend_str(&cfg.tts.backend));
     match fono_ipc::request_any(
         &paths.client_ipc_socket_candidates(),
         &fono_ipc::Request::Status,

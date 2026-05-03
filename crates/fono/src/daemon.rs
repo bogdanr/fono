@@ -171,6 +171,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         hold: config.hotkeys.hold.clone(),
         toggle: config.hotkeys.toggle.clone(),
         cancel: config.hotkeys.cancel.clone(),
+        assistant: config.hotkeys.assistant.clone(),
     };
     let cancel_ctrl: Option<HotkeyControlSender> = if crate::is_graphical_session() {
         match fono_hotkey::spawn_listener(bindings, action_tx.clone()) {
@@ -489,13 +490,21 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                 debug!("fsm event: {e:?}");
                 if let Some(ctrl) = cancel_ctrl_ev.as_ref() {
                     match e {
-                        HotkeyEvent::StartRecording(_) | HotkeyEvent::StartLiveDictation(_) => {
+                        HotkeyEvent::StartRecording(_)
+                        | HotkeyEvent::StartLiveDictation(_)
+                        | HotkeyEvent::StartAssistant => {
                             let _ = ctrl.send(HotkeyControl::EnableCancel);
                         }
                         HotkeyEvent::StopRecording
                         | HotkeyEvent::StopLiveDictation
-                        | HotkeyEvent::Cancel => {
+                        | HotkeyEvent::Cancel
+                        | HotkeyEvent::StopAssistantPlayback => {
                             let _ = ctrl.send(HotkeyControl::DisableCancel);
+                        }
+                        HotkeyEvent::StopAssistant => {
+                            // Keep Escape grabbed while we're in
+                            // Thinking / Speaking — the user might
+                            // bail out of a long reply.
                         }
                     }
                 }
@@ -507,7 +516,11 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                         HotkeyEvent::StopRecording | HotkeyEvent::StopLiveDictation => {
                             t.set_state(TrayState::Processing);
                         }
-                        HotkeyEvent::Cancel => t.set_state(TrayState::Idle),
+                        HotkeyEvent::Cancel | HotkeyEvent::StopAssistantPlayback => {
+                            t.set_state(TrayState::Idle);
+                        }
+                        HotkeyEvent::StartAssistant => t.set_state(TrayState::Recording),
+                        HotkeyEvent::StopAssistant => t.set_state(TrayState::Processing),
                     }
                 }
                 let Some(o) = orch.as_ref() else {
@@ -518,6 +531,8 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                         HotkeyEvent::StopRecording
                             | HotkeyEvent::StopLiveDictation
                             | HotkeyEvent::Cancel
+                            | HotkeyEvent::StopAssistant
+                            | HotkeyEvent::StopAssistantPlayback
                     ) {
                         let _ = action_tx_ev.send(HotkeyAction::ProcessingDone);
                         if let Some(t) = tray.as_ref().as_ref() {
@@ -607,6 +622,33 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                             o.on_stop_recording().await;
                         });
                     }
+                    HotkeyEvent::StartAssistant => {
+                        if let Err(err) = o.on_assistant_hold_press().await {
+                            warn!("assistant start failed: {err:#}");
+                            if let Some(t) = tray.as_ref().as_ref() {
+                                t.set_state(TrayState::Idle);
+                            }
+                            let _ = action_tx_ev.send(HotkeyAction::ProcessingDone);
+                        }
+                    }
+                    HotkeyEvent::StopAssistant => {
+                        let o = Arc::clone(o);
+                        tokio::spawn(async move {
+                            o.on_assistant_hold_release().await;
+                        });
+                    }
+                    HotkeyEvent::StopAssistantPlayback => {
+                        let o = Arc::clone(o);
+                        let action_tx = action_tx_ev.clone();
+                        tokio::spawn(async move {
+                            o.on_assistant_stop().await;
+                            // Cancellation isn't reported back through
+                            // the pump's `ProcessingDone` path (it
+                            // bails out before that fires), so emit
+                            // it here so the FSM returns to Idle.
+                            let _ = action_tx.send(HotkeyAction::ProcessingDone);
+                        });
+                    }
                 }
             }
         });
@@ -664,6 +706,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         let update_status_tray = Arc::clone(&update_status);
         let discovered_registry_for_dispatch = discovery_registry.clone();
         let local_wyoming_fullname_for_dispatch = local_wyoming_fullname(&config);
+        let orchestrator_for_tray = orchestrator.clone();
         tokio::spawn(async move {
             while let Some(ta) = tray_rx.recv().await {
                 debug!("tray action: {ta:?}");
@@ -831,6 +874,16 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                     }
                     TrayAction::OpenSettingsTui => {
                         open_settings_tui();
+                    }
+                    TrayAction::AssistantStop => {
+                        if let Some(o) = orchestrator_for_tray.as_ref() {
+                            o.on_assistant_stop().await;
+                        }
+                    }
+                    TrayAction::AssistantForget => {
+                        if let Some(o) = orchestrator_for_tray.as_ref() {
+                            o.on_assistant_forget().await;
+                        }
                     }
                 }
             }
@@ -1150,6 +1203,34 @@ async fn handle_client(
                 .unwrap_or_default();
             Response::Discovered(peers)
         }
+        Request::AssistantHoldPress => match orchestrator.as_ref() {
+            Some(o) => match o.on_assistant_hold_press().await {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error(format!("assistant start failed: {e:#}")),
+            },
+            None => Response::Error("daemon is in degraded mode (no orchestrator)".into()),
+        },
+        Request::AssistantHoldRelease => match orchestrator.as_ref() {
+            Some(o) => {
+                o.on_assistant_hold_release().await;
+                Response::Ok
+            }
+            None => Response::Error("daemon is in degraded mode (no orchestrator)".into()),
+        },
+        Request::AssistantStop => match orchestrator.as_ref() {
+            Some(o) => {
+                o.on_assistant_stop().await;
+                Response::Ok
+            }
+            None => Response::Error("daemon is in degraded mode (no orchestrator)".into()),
+        },
+        Request::AssistantForget => match orchestrator.as_ref() {
+            Some(o) => {
+                o.on_assistant_forget().await;
+                Response::Ok
+            }
+            None => Response::Error("daemon is in degraded mode (no orchestrator)".into()),
+        },
         Request::Shutdown => {
             std::process::exit(0);
         }

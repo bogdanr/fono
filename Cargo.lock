@@ -1194,6 +1194,7 @@ dependencies = [
  "console",
  "crossbeam-channel",
  "dialoguer",
+ "fono-assistant",
  "fono-audio",
  "fono-core",
  "fono-download",
@@ -1205,6 +1206,7 @@ dependencies = [
  "fono-overlay",
  "fono-stt",
  "fono-tray",
+ "fono-tts",
  "fono-update",
  "futures",
  "mdns-sd",
@@ -1218,6 +1220,23 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "fono-assistant"
+version = "0.6.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fono-core",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tracing",
 ]
 
 [[package]]
@@ -1412,6 +1431,22 @@ dependencies = [
  "anyhow",
  "fono-core",
  "ksni",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "fono-tts"
+version = "0.6.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fono-core",
+ "fono-net-codec",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
  "tokio",
  "tracing",
 ]

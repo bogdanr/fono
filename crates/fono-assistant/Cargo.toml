@@ -1,0 +1,46 @@
+[package]
+name = "fono-assistant"
+description = "Streaming chat assistant trait and backends for Fono's voice-assistant path."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Cloud chat clients ship in default builds; local llama is opt-in
+# (mirrors fono-llm). Each cloud feature is gated independently so a
+# user can keep the binary small if they only run one provider.
+default = ["openai-compat", "anthropic"]
+# OpenAI-compatible chat completions: covers Cerebras, Groq, OpenAI,
+# OpenRouter, Ollama. SSE streaming via reqwest's `stream` feature.
+openai-compat = ["dep:reqwest"]
+# Anthropic Messages API streaming.
+anthropic = ["dep:reqwest"]
+# Local llama.cpp chat. **Stub in v1** — the cleanup path's
+# `fono-llm/llama_local` is a single-shot mutex-serialised inference;
+# threading streaming through the same lock requires plumbing we'll
+# add in a follow-up. Selecting `local` returns a clear error today.
+local = []
+
+[dependencies]
+fono-core = { path = "../fono-core" }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }

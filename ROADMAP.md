@@ -89,6 +89,42 @@ system-tray app and native installer on Windows.
 
 Newest first.
 
+- ![Unreleased](https://img.shields.io/badge/Unreleased-2ea44f?style=flat-square)
+  **Voice assistant.** A second push-to-talk key (F10 by default)
+  turns Fono into an offline-capable voice assistant. The pipeline
+  diverges after STT: instead of cleaning the transcript and
+  injecting it into the focused window, Fono asks a chat-capable
+  LLM, streams the reply sentence-by-sentence into a TTS backend,
+  and plays the audio through the speakers — first sentence
+  starts speaking before the model finishes generating, so
+  time-to-first-audio is bounded by one sentence's synth latency
+  rather than the full reply.
+
+  The assistant runs on its own `[assistant]` block with a
+  separate model selection from `[llm]` — pick a fast local 3B
+  for cleanup and a bigger cloud model for the assistant, or any
+  mix-and-match. Multi-turn rolling history is preserved within
+  a configurable time window (default 5 minutes). Pressing the
+  dictation key clears the assistant context (configurable);
+  pressing F10 again mid-reply barges in with history retained;
+  Escape stops playback ("shut up") without forgetting.
+
+  TTS supports Wyoming protocol (any `wyoming-piper` server on
+  the LAN), the OpenAI `/v1/audio/speech` API, and an in-process
+  Piper stub that points users at Wyoming-piper for now (the
+  static-musl ship build can't yet pull in onnxruntime). Chat
+  supports Anthropic and the full OpenAI-compatible family
+  (OpenAI, Cerebras, Groq, OpenRouter, Ollama). Audio playback
+  on Linux release uses `paplay` (no libasound link), or cpal
+  behind the existing `cpal-backend` feature.
+
+  CLI: `fono use assistant <backend>`, `fono use tts <backend>
+  [--uri ...]`, and `fono assistant {press,release,stop}` for
+  scripted end-to-end testing. The tray gains *Stop assistant*
+  and *Forget conversation* entries; `fono doctor` exercises
+  both factories at startup so a missing API key or unreachable
+  Wyoming server surfaces in one place.
+
 - ![v0.6.1](https://img.shields.io/badge/v0.6.1-2026--05--03-blue?style=flat-square)
   **Headless / systemd robustness.** Fono now starts cleanly on a
   headless inference box with no `DISPLAY` and no TTY: the Vulkan
