@@ -67,11 +67,15 @@ fn notify_live_first_run() {
         LIVE_FIRST_RUN_NOTIFIED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst);
 }
 
-#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
-pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<()> {
+#[allow(
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    clippy::if_not_else
+)]
+pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     let config = Arc::new(Config::load(&paths.config_file()).context("load config")?);
     let secrets = Secrets::load(&paths.secrets_file()).context("load secrets")?;
-    print_banner(paths, &config, no_tray, verbosity);
+    print_banner(paths, &config, verbosity);
 
     // Single-instance guard via the IPC socket. If another daemon is
     // already running it answers `connect()`; bail before we duplicate
@@ -274,23 +278,21 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
     //
     // The single Fono binary serves both graphical desktops and headless
     // servers. The tray crate is always compiled in; we just refuse to
-    // spawn it when (a) the operator passed `--no-tray`, or (b) the host
-    // is headless (no `DISPLAY` and no `WAYLAND_DISPLAY` in the daemon's
-    // environment). On a headless host attempting to bring up an SNI
-    // tray either fails noisily (no D-Bus session bus) or blocks the
-    // libappindicator thread forever — neither is acceptable for the
-    // `fono serve` use case.
+    // spawn it when the host is headless (no `DISPLAY` and no
+    // `WAYLAND_DISPLAY` in the daemon's environment). On a headless host
+    // attempting to bring up an SNI tray either fails noisily (no D-Bus
+    // session bus) or blocks the libappindicator thread forever — neither
+    // is acceptable for the `fono serve` use case. Graphical sessions
+    // without an SNI host (sway-without-waybar, bare X11) are handled
+    // inside `fono-tray` itself: the tray task logs one warning and
+    // exits cleanly while dictation + overlay continue.
     //
     // See `plans/2026-04-30-fono-single-binary-size-v1.md` Phase 3
     // Task 3.1 for the runtime-detection contract.
     // ---------------------------------------------------------------
     let graphical = crate::is_graphical_session();
-    let (tray, mut tray_rx) = if no_tray || !graphical {
-        if no_tray {
-            debug!("tray disabled (--no-tray)");
-        } else {
-            debug!("tray skipped (headless: no DISPLAY / WAYLAND_DISPLAY)");
-        }
+    let (tray, mut tray_rx) = if !graphical {
+        debug!("tray skipped (headless: no DISPLAY / WAYLAND_DISPLAY)");
         let (_tx, rx) = mpsc::unbounded_channel::<TrayAction>();
         (None, rx)
     } else {
@@ -867,17 +869,18 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
     Ok(())
 }
 
-#[allow(clippy::cognitive_complexity)]
-fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbosity) {
+#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
+fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
     let config_path = paths.config_file();
     let config_present = config_path.exists();
+    let graphical = crate::is_graphical_session();
     info!(
         "Fono v{} starting — stt={:?} llm={:?} tray={}",
         env!("CARGO_PKG_VERSION"),
         config.stt.backend,
         config.llm.backend,
-        if no_tray {
-            "disabled"
+        if !graphical {
+            "headless"
         } else if cfg!(feature = "tray") {
             "enabled"
         } else {
@@ -936,8 +939,8 @@ fn print_banner(paths: &Paths, config: &Config, no_tray: bool, verbosity: Verbos
     debug!("log level    : {verbosity:?}  (override with FONO_LOG=...)");
     debug!(
         "tray icon    : {}",
-        if no_tray {
-            "disabled (--no-tray)"
+        if !graphical {
+            "skipped (headless: no DISPLAY / WAYLAND_DISPLAY)"
         } else if cfg!(feature = "tray") {
             "enabled"
         } else {

@@ -28,7 +28,13 @@ ProtectHome=true
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# AF_NETLINK is required: mdns-sd enumerates network interfaces via
+# getifaddrs(3), which on Linux opens an AF_NETLINK / NETLINK_ROUTE
+# socket. Without it, the LAN advertiser silently registers in its
+# internal table but never binds UDP/5353 nor joins the 224.0.0.251
+# multicast group, so peers on the same subnet cannot discover the
+# server.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 StateDirectory=fono
 CacheDirectory=fono
 ConfigurationDirectory=fono

@@ -129,9 +129,59 @@ pub async fn connect(socket: &Path) -> Result<UnixStream> {
     })
 }
 
+/// Try a sequence of socket paths in order and return the first
+/// successful connection. Used by the CLI which prefers the
+/// system-service socket (`/var/lib/fono/fono.sock` — installed by the
+/// headless `fono.service` unit) and falls back to the per-user XDG
+/// socket so `systemctl --user` and standalone deployments keep
+/// working. The error path reports every path that was tried.
+pub async fn connect_any(sockets: &[std::path::PathBuf]) -> Result<UnixStream> {
+    let mut last_err: Option<std::io::Error> = None;
+    for sock in sockets {
+        match UnixStream::connect(sock).await {
+            Ok(s) => return Ok(s),
+            Err(e) => {
+                tracing::debug!(
+                    target: "fono::ipc",
+                    socket = %sock.display(),
+                    error = %e,
+                    "ipc connect candidate failed"
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+    let summary = if sockets.is_empty() {
+        "<none>".to_string()
+    } else {
+        sockets
+            .iter()
+            .map(|p| format!("{}", p.display()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let cause = last_err.map_or_else(
+        || "no IPC socket candidates configured".to_string(),
+        |e| format!("{e}"),
+    );
+    Err(anyhow::anyhow!(
+        "fono: daemon not running (tried: {summary}; last error: {cause}); start it with \
+         'fono' or install the autostart unit"
+    ))
+}
+
 /// Round-trip a single request on a fresh connection.
 pub async fn request(socket: &Path, req: &Request) -> Result<Response> {
     let mut stream = connect(socket).await?;
+    write_frame(&mut stream, req).await?;
+    let resp: Response = read_frame(&mut stream).await?;
+    Ok(resp)
+}
+
+/// Like [`request`] but tries each socket in `sockets` in order. The
+/// first successful connection is used to send the request.
+pub async fn request_any(sockets: &[std::path::PathBuf], req: &Request) -> Result<Response> {
+    let mut stream = connect_any(sockets).await?;
     write_frame(&mut stream, req).await?;
     let resp: Response = read_frame(&mut stream).await?;
     Ok(resp)

@@ -13,22 +13,19 @@ use crate::{daemon, doctor, wizard};
 #[command(
     name = "fono",
     version,
-    about = "Lightweight native voice dictation for Linux, Windows, and macOS."
+    about = "Lightweight native voice dictation for Linux, Windows, and macOS.",
+    long_about = "Lightweight native voice dictation for Linux, Windows, and macOS.\n\n\
+        Run `fono` with no subcommand to start the background daemon (the \
+        first-run wizard launches automatically when no config exists)."
 )]
 pub struct Cli {
-    /// Enable debug logging (shorthand for `FONO_LOG=debug`).
-    /// Pass twice (`-vv`) for trace-level + file/line annotations.
+    /// Enable debug logging (`-vv` for trace + file/line).
     #[arg(long = "debug", short = 'v', action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
 
     /// Silence everything below `warn`.
     #[arg(long = "quiet", short = 'q', global = true)]
     pub quiet: bool,
-
-    /// Skip the tray icon (use on TTY-only machines or when the compositor
-    /// has no system tray). Only affects the daemon.
-    #[arg(long = "no-tray", global = true)]
-    pub no_tray: bool,
 
     #[command(subcommand)]
     pub cmd: Option<Cmd>,
@@ -107,49 +104,44 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
-    /// Start the daemon (default when no subcommand is given).
-    Daemon {
-        /// Run without a tray icon (TTY-only machines).
-        #[arg(long)]
-        no_tray: bool,
-    },
-    /// IPC: toggle recording on the running daemon.
+    /// Toggle recording on the running daemon.
     Toggle,
-    /// One-shot: record until silence/Esc, transcribe, inject, exit.
+    /// Record once from the mic, transcribe, inject, exit.
+    ///
+    /// Captures audio until silence, Ctrl-C, or the `--max-seconds`
+    /// timeout, then runs the configured STT (and LLM cleanup) and
+    /// types the result into the focused window.
     Record {
-        /// Skip text injection — print the cleaned text to stdout only.
+        /// Print the cleaned text to stdout instead of typing it.
         #[arg(long)]
         no_inject: bool,
-        /// Maximum recording duration in seconds (0 = unbounded).
+        /// Stop recording after this many seconds (0 = no limit).
         #[arg(long, default_value_t = 30)]
         max_seconds: u64,
-        /// Override the persisted STT backend for this call only
-        /// (provider-switching plan task S6).
+        /// One-shot STT backend override (e.g. `local`, `groq`).
         #[arg(long)]
         stt: Option<String>,
-        /// Override the persisted LLM backend for this call only.
-        /// Use `none` to skip cleanup.
+        /// One-shot LLM backend override (`none` to skip cleanup).
         #[arg(long)]
         llm: Option<String>,
-        /// Run in live (streaming) mode for this call only. Requires
-        /// the binary to have been built with the `interactive` cargo
-        /// feature; without it, this flag prints a helpful error and
-        /// falls back to batch mode. Plan v6 R7.4 / R18.22.
+        /// Use live streaming mode (requires the `interactive` feature).
         #[arg(long)]
         live: bool,
     },
-    /// Transcribe a WAV file (16-bit PCM mono, any sample rate) without
-    /// touching the microphone. Useful for verifying API keys.
+    /// Transcribe a WAV file without touching the microphone.
+    ///
+    /// Accepts 16-bit PCM mono (any sample rate). Useful for testing
+    /// API keys or batch-processing recordings.
     Transcribe {
         /// Path to a WAV file.
         path: std::path::PathBuf,
         /// Skip the LLM cleanup step.
         #[arg(long)]
         no_llm: bool,
-        /// Override the persisted STT backend for this call only.
+        /// One-shot STT backend override.
         #[arg(long)]
         stt: Option<String>,
-        /// Override the persisted LLM backend for this call only.
+        /// One-shot LLM backend override.
         #[arg(long)]
         llm: Option<String>,
     },
@@ -157,35 +149,37 @@ pub enum Cmd {
     PasteLast,
     /// Browse the transcription history.
     History {
+        /// Filter to entries containing this substring.
         #[arg(long)]
         search: Option<String>,
+        /// Maximum number of entries to show.
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// Emit machine-readable JSON instead of plain text.
         #[arg(long)]
         json: bool,
-        /// Show only the most recent entry with full STT/LLM I/O detail
-        /// (raw transcript, cleaned LLM output, app context, backends,
-        /// timestamps). Combine with `--json` for machine-readable output.
+        /// Show only the most recent entry with full STT/LLM detail.
         #[arg(long)]
         last: bool,
     },
-    /// Manage configuration.
+    /// View or edit the configuration file.
     Config {
         #[command(subcommand)]
         action: ConfigCmd,
     },
-    /// Manage models.
+    /// List, install, or remove local Whisper models.
     Models {
         #[command(subcommand)]
         action: ModelsCmd,
     },
-    /// Re-run the first-run wizard.
+    /// Re-run the first-run setup wizard.
     Setup,
-    /// Diagnostic report.
+    /// Print a diagnostic report (config, paths, providers, audio).
     Doctor,
-    /// Smoke-test the inject + clipboard delivery path with literal
-    /// text (no audio, no STT, no LLM). Use this to verify that text
-    /// can actually reach your focused window or clipboard.
+    /// Type literal text to verify the inject + clipboard pipeline.
+    ///
+    /// Bypasses audio, STT, and LLM. Use this to confirm text can
+    /// actually reach your focused window or the clipboard.
     TestInject {
         /// Text to inject and copy to clipboard.
         text: String,
@@ -195,104 +189,89 @@ pub enum Cmd {
         /// Skip clipboard copy (only key-injection).
         #[arg(long)]
         no_clipboard: bool,
-        /// Override the X11 XTEST paste shortcut for this run.
-        /// Accepted: `shift-insert` (default — universal),
-        /// `ctrl-v` (GUI-only), `ctrl-shift-v` (modern terminals).
-        /// Sets `FONO_PASTE_SHORTCUT` for the duration of the call.
+        /// Paste shortcut: shift-insert | ctrl-v | ctrl-shift-v.
         #[arg(long, value_name = "SHORTCUT")]
         shortcut: Option<String>,
     },
-    /// Smoke-test the live-dictation overlay: open the real overlay
-    /// window for ~3 seconds with a sample status sequence, then exit.
-    /// Useful for verifying the `interactive` feature was compiled in
-    /// and that winit/softbuffer can paint on this compositor. Plan
-    /// R5 / Slice A. Without `--features interactive`, prints a hint
-    /// and exits.
+    /// Open the live-dictation overlay for a few seconds (smoke test).
+    ///
+    /// Verifies the `interactive` feature was compiled in and that
+    /// winit/softbuffer can paint on this compositor.
     TestOverlay,
-    /// Probe the host's hardware and print the recommended local-model tier.
+    /// Probe hardware and recommend a local-model tier.
     Hwprobe {
-        /// Emit machine-readable JSON instead of the default text report.
+        /// Emit machine-readable JSON instead of the text report.
         #[arg(long)]
         json: bool,
     },
-    /// Switch active STT / LLM backend (no daemon restart needed).
-    /// Provider-switching plan task S4.
+    /// Switch the active STT / LLM backend (no daemon restart needed).
     Use {
         #[command(subcommand)]
         action: UseCmd,
     },
     /// Manage API keys in `~/.config/fono/secrets.toml`.
-    /// Provider-switching plan task S7.
     Keys {
         #[command(subcommand)]
         action: KeysCmd,
     },
     /// Print shell completions (bash, zsh, fish, powershell, elvish).
     Completions {
+        /// Target shell.
         #[arg(value_enum)]
         shell: Shell,
     },
-    /// List LAN servers (Wyoming and Fono-native) discovered via mDNS.
-    /// Slice 4 of the network plan. Reads the daemon's live registry —
-    /// no daemon, no peers.
+    /// List LAN STT servers discovered via mDNS.
+    ///
+    /// Reads the running daemon's live registry — if no daemon is
+    /// running, no peers are listed.
     Discover {
-        /// Emit machine-readable JSON instead of the default table.
+        /// Emit machine-readable JSON instead of a table.
         #[arg(long)]
         json: bool,
     },
-    /// Check for a newer release on GitHub and (optionally) self-update
-    /// the running binary in place. Background tray-icon equivalent
-    /// runs automatically on the daemon when `[update] auto_check`
-    /// is enabled (the default).
+    /// Check for a newer release and self-update in place.
+    ///
+    /// The daemon also checks automatically in the background when
+    /// `[update] auto_check` is enabled (the default).
     Update {
-        /// Only print the status; never download.
-        /// Exit code is `0` when up-to-date and `1` when an update
-        /// is available — handy for scripts.
+        /// Only check; do not download. Exits 0 if up-to-date, 1 if not.
         #[arg(long)]
         check: bool,
-        /// Skip the interactive confirmation prompt.
+        /// Skip the confirmation prompt.
         #[arg(long, short = 'y')]
         yes: bool,
-        /// Resolve and verify the new binary, but do not replace the
-        /// running executable.
+        /// Resolve and verify, but do not replace the running binary.
         #[arg(long)]
         dry_run: bool,
-        /// `stable` (default) or `prerelease`.
+        /// Release channel: `stable` or `prerelease`.
         #[arg(long, default_value = "stable")]
         channel: String,
-        /// After a successful update, do **not** re-exec into the new
-        /// binary. The next manual start picks it up.
+        /// Do not re-exec into the new binary after updating.
         #[arg(long)]
         no_restart: bool,
-        /// Override the install directory. Useful when running with
-        /// elevated privileges and the autodetected `current_exe()`
-        /// is in `/usr/local/bin/fono`. Equivalent to `BIN_DIR`
-        /// semantics from the install script. The package-managed
-        /// path refusal still applies (`/usr/bin`, `/bin`,
-        /// `/usr/sbin`).
+        /// Override the install directory (e.g. `/usr/local/bin`).
         #[arg(long)]
         bin_dir: Option<std::path::PathBuf>,
     },
-    /// Install fono system-wide on this machine. Requires root.
+    /// Install fono system-wide. Requires root.
     ///
-    /// Default (desktop mode): installs the binary, menu desktop entry,
-    /// XDG autostart entry, icon, and shell completions; the daemon
-    /// launches automatically on next graphical login.
+    /// Default (desktop): binary, menu entry, XDG autostart entry,
+    /// icon, and shell completions. The daemon launches on next login.
     ///
-    /// `--server`: installs the binary, a hardened system-wide systemd
-    /// unit running as a dedicated `fono` system user, and shell
-    /// completions; the unit is enabled and started immediately.
+    /// With `--server`: binary, hardened systemd unit (running as a
+    /// dedicated `fono` user), and shell completions. The unit is
+    /// enabled and started immediately.
     Install {
-        /// Install in headless server mode (systemd unit, no desktop
-        /// or autostart entries).
+        /// Headless server mode (systemd unit, no desktop entries).
         #[arg(long)]
         server: bool,
         /// Print what would be done without writing anything.
         #[arg(long)]
         dry_run: bool,
     },
-    /// Reverse a previous `fono install`. Reads the install marker
-    /// written at install time and removes exactly the files it
+    /// Uninstall fono. Reverses a previous `fono install`.
+    ///
+    /// Reads the install marker and removes exactly the files it
     /// recorded. User data under `~/.config/fono`,
     /// `~/.local/share/fono`, and `~/.cache/fono` is never touched.
     Uninstall {
@@ -306,56 +285,71 @@ pub enum Cmd {
 pub enum UseCmd {
     /// Switch the active STT backend.
     Stt {
-        /// One of: local, groq, openai, deepgram, assemblyai, cartesia,
-        /// azure, speechmatics, google, nemotron.
+        /// local | groq | openai | deepgram | assemblyai | cartesia | azure | speechmatics | google | nemotron
         backend: String,
     },
     /// Switch the active LLM backend.
     Llm {
-        /// One of: none, local, cerebras, groq, openai, anthropic,
-        /// openrouter, ollama, gemini.
+        /// none | local | cerebras | groq | openai | anthropic | openrouter | ollama | gemini
         backend: String,
     },
-    /// Switch STT + LLM to a paired cloud preset. Known presets:
-    /// groq, cerebras, openai, anthropic, openrouter, deepgram,
-    /// assemblyai.
-    Cloud { provider: String },
+    /// Switch STT + LLM to a paired cloud preset.
+    Cloud {
+        /// groq | cerebras | openai | anthropic | openrouter | deepgram | assemblyai
+        provider: String,
+    },
     /// Switch to local STT (whisper) and disable LLM cleanup.
     Local,
-    /// Print the currently active STT/LLM and the running daemon's view.
+    /// Print the active STT/LLM and the running daemon's view.
     Show,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum KeysCmd {
-    /// List all API keys in secrets.toml (values are masked).
+    /// List all API keys (values are masked).
     List,
-    /// Add or replace an API key. Prompts on stdin if --value isn't given.
+    /// Add or replace an API key (prompts on stdin if `--value` is omitted).
     Add {
         /// Key name, e.g. `GROQ_API_KEY`.
         name: String,
-        /// Inline value (avoid in shell history; prefer the prompt).
+        /// Inline value (prefer the interactive prompt for safety).
         #[arg(long)]
         value: Option<String>,
     },
     /// Remove a key from secrets.toml.
-    Remove { name: String },
-    /// Probe each configured provider's API for reachability.
+    Remove {
+        /// Key name to remove.
+        name: String,
+    },
+    /// Show which provider keys are configured.
     Check,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigCmd {
+    /// Open the config file in `$EDITOR` (defaults to `nano`).
     Edit,
+    /// Print the current configuration to stdout.
     Show,
+    /// Print the path to the config file.
     Path,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ModelsCmd {
+    /// List available Whisper models and which are installed.
     List,
-    Install { name: String },
-    Remove { name: String },
+    /// Download and install a Whisper model (e.g. `base`, `small`).
+    Install {
+        /// Model name (see `fono models list`).
+        name: String,
+    },
+    /// Remove a previously installed Whisper model.
+    Remove {
+        /// Model name to remove.
+        name: String,
+    },
+    /// Verify the integrity of installed models.
     Verify,
 }
 
@@ -369,7 +363,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     let needs_wizard = !paths.config_file().exists();
 
     match cli.cmd {
-        None | Some(Cmd::Daemon { .. }) => {
+        None => {
             if needs_wizard {
                 // The interactive wizard requires a TTY (`dialoguer` reads
                 // arrow keys / "yes" prompts straight from stdin and aborts
@@ -397,8 +391,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     );
                 }
             }
-            let no_tray = cli.no_tray || matches!(cli.cmd, Some(Cmd::Daemon { no_tray: true }));
-            daemon::run(&paths, no_tray, cli.verbosity()).await
+            daemon::run(&paths, cli.verbosity()).await
         }
         Some(Cmd::Setup) => Box::pin(wizard::run(&paths)).await,
         Some(Cmd::Toggle) => ipc_simple(&paths, Request::Toggle).await,
@@ -478,7 +471,7 @@ pub async fn run(cli: Cli) -> Result<()> {
 }
 
 async fn ipc_simple(paths: &Paths, req: Request) -> Result<()> {
-    match fono_ipc::request(&paths.ipc_socket(), &req).await {
+    match fono_ipc::request_any(&paths.client_ipc_socket_candidates(), &req).await {
         Ok(Response::Ok) => Ok(()),
         Ok(Response::Text(t)) => {
             println!("{t}");
@@ -493,7 +486,11 @@ async fn ipc_simple(paths: &Paths, req: Request) -> Result<()> {
 /// `fono discover [--json]` — print the daemon's live mDNS registry.
 /// Slice 4 of the network plan.
 async fn discover_cmd(paths: &Paths, json: bool) -> Result<()> {
-    let resp = fono_ipc::request(&paths.ipc_socket(), &fono_ipc::Request::ListDiscovered).await?;
+    let resp = fono_ipc::request_any(
+        &paths.client_ipc_socket_candidates(),
+        &fono_ipc::Request::ListDiscovered,
+    )
+    .await?;
     let peers = match resp {
         fono_ipc::Response::Discovered(p) => p,
         fono_ipc::Response::Error(e) => return Err(anyhow::anyhow!(e)),
@@ -1058,7 +1055,12 @@ async fn use_cmd(paths: &Paths, action: UseCmd) -> Result<()> {
 
     // Hot-reload the running daemon (provider-switching plan S11). When
     // the daemon is not running this is a no-op with a friendly hint.
-    match fono_ipc::request(&paths.ipc_socket(), &fono_ipc::Request::Reload).await {
+    match fono_ipc::request_any(
+        &paths.client_ipc_socket_candidates(),
+        &fono_ipc::Request::Reload,
+    )
+    .await
+    {
         Ok(fono_ipc::Response::Text(t)) => println!("daemon: {t}"),
         Ok(fono_ipc::Response::Ok) => println!("daemon: reloaded"),
         Ok(fono_ipc::Response::Error(e)) => println!("daemon reload error: {e}"),
@@ -1077,7 +1079,12 @@ async fn print_show(paths: &Paths, cfg: &Config) {
         llm_backend_str(&cfg.llm.backend),
         if cfg.llm.enabled { "" } else { " (disabled)" }
     );
-    match fono_ipc::request(&paths.ipc_socket(), &fono_ipc::Request::Status).await {
+    match fono_ipc::request_any(
+        &paths.client_ipc_socket_candidates(),
+        &fono_ipc::Request::Status,
+    )
+    .await
+    {
         Ok(fono_ipc::Response::Text(t)) => println!("daemon: {t}"),
         Ok(_) => println!("daemon: running"),
         Err(_) => println!("daemon: not running"),
@@ -1105,14 +1112,22 @@ async fn keys_cmd(paths: &Paths, action: KeysCmd) -> Result<()> {
             secrets.save(&secrets_path)?;
             println!("added {name} → {}", secrets_path.display());
             // Hot-reload so the daemon picks up the new key.
-            let _ = fono_ipc::request(&paths.ipc_socket(), &fono_ipc::Request::Reload).await;
+            let _ = fono_ipc::request_any(
+                &paths.client_ipc_socket_candidates(),
+                &fono_ipc::Request::Reload,
+            )
+            .await;
         }
         KeysCmd::Remove { name } => {
             let mut secrets = Secrets::load(&secrets_path).unwrap_or_default();
             if secrets.keys.remove(&name).is_some() {
                 secrets.save(&secrets_path)?;
                 println!("removed {name}");
-                let _ = fono_ipc::request(&paths.ipc_socket(), &fono_ipc::Request::Reload).await;
+                let _ = fono_ipc::request_any(
+                    &paths.client_ipc_socket_candidates(),
+                    &fono_ipc::Request::Reload,
+                )
+                .await;
             } else {
                 println!("not found: {name}");
             }

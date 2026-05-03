@@ -269,16 +269,16 @@ Report the issue with the last 50 lines of the daemon log.
 
 These compositors require a StatusNotifier-compatible tray host. Confirm
 yours supports it (`sni-qt`, `waybar` with `tray` module, KDE Plasma's
-built-in tray). Without one, run with `--no-tray`:
-
-```sh
-fono --no-tray
-```
+built-in tray, `snixembed` as a shim). Without one, the daemon logs a
+single warning at startup and continues without a tray icon — dictation,
+the overlay, and the IPC commands (`fono toggle`, `fono record`, …) all
+keep working.
 
 ### XEmbed-only systems
 
 `tray-icon` 0.19 doesn't speak XEmbed. Bind the hotkey via your
-compositor's keyboard config and run with `--no-tray`.
+compositor's keyboard config; the tray icon will be skipped automatically
+on hosts where no StatusNotifier watcher is registered.
 
 ## Recording is empty / "no audio captured"
 

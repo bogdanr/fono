@@ -8,6 +8,13 @@ use crate::error::{Error, Result};
 /// Name used as the leaf directory under each XDG root.
 pub const APP_NAME: &str = "fono";
 
+/// Absolute path of the IPC socket used by the headless system service
+/// (`packaging/assets/fono.service` — runs as user `fono` with
+/// `XDG_STATE_HOME=/var/lib`). CLI clients try this path first so a
+/// root or fono-group user shell can drive the system-installed daemon
+/// without needing `XDG_STATE_HOME` overrides.
+pub const SYSTEM_IPC_SOCKET: &str = "/var/lib/fono/fono.sock";
+
 /// Resolved absolute paths for every file Fono touches.
 #[derive(Debug, Clone)]
 pub struct Paths {
@@ -86,6 +93,26 @@ impl Paths {
     #[must_use]
     pub fn ipc_socket(&self) -> PathBuf {
         self.state_dir.join("fono.sock")
+    }
+
+    /// Ordered list of socket paths a CLI client should attempt when
+    /// dialling a running daemon. The system-service socket
+    /// (`/var/lib/fono/fono.sock`) is tried first so a root shell or
+    /// `fono`-group member can drive the headless system unit without
+    /// `XDG_STATE_HOME` gymnastics; the per-user XDG socket
+    /// ([`Self::ipc_socket`]) is the fallback for standalone /
+    /// `systemctl --user` deployments. Deduped when the resolved user
+    /// path matches [`SYSTEM_IPC_SOCKET`] (e.g. the daemon itself
+    /// running as user `fono` with the same XDG layout).
+    #[must_use]
+    pub fn client_ipc_socket_candidates(&self) -> Vec<PathBuf> {
+        let user = self.ipc_socket();
+        let system = PathBuf::from(SYSTEM_IPC_SOCKET);
+        if user == system {
+            vec![user]
+        } else {
+            vec![system, user]
+        }
     }
 
     #[must_use]

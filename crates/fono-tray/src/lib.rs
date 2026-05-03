@@ -487,8 +487,8 @@ mod backend {
                     tracing::warn!(
                         "tray unavailable: no StatusNotifierWatcher is registered on the session bus; \
                          start a tray host/watcher (for example KDE Plasma's tray, waybar with tray, \
-                         xfce4-panel, or snixembed) or run with --no-tray. Dictation and the overlay \
-                         continue without the tray icon."
+                         xfce4-panel, or snixembed). Dictation and the overlay continue without the \
+                         tray icon."
                     );
                 }
                 Err(e) => {

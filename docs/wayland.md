@@ -50,8 +50,8 @@ systemctl --user enable --now ydotool.service
 KDE, GNOME (with the AppIndicator extension), sway + waybar with the
 `tray` module, and hyprland with `waybar` all host a StatusNotifierItem
 and Fono's tray icon appears automatically. Bare i3 without `polybar`/
-`waybar` has no tray host; Fono logs a warning and runs headless —
-`fono --no-tray` silences the warning.
+`waybar` has no tray host; Fono logs one warning and runs without the
+tray icon — dictation and the overlay are unaffected.
 
 ## Verification
 
