@@ -5,11 +5,94 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
 ## [0.6.0] — 2026-05-03
 
 ### Added
+
+- **Tray `Preferences ▸` submenu.** Right-click the tray icon to
+  toggle the most-touched settings without editing the TOML:
+  - Six native-checkbox booleans — start/stop chimes, mute system
+    audio while recording, keep mic always-on, also-copy to clipboard,
+    autostart, voice-activity detection.
+  - Auto-stop after silence (Off / 0.8 s / 1.5 s / 3 s).
+  - Visualisation overlay style (Bars / Oscilloscope / FFT / Heatmap).
+  - Multi-language allow-list — pick any combination of the curated
+    17 languages (English, Spanish, French, German, Italian,
+    Portuguese, Dutch, Romanian, Polish, Russian, Ukrainian, Turkish,
+    Chinese, Japanese, Korean, Hindi, Arabic) plus an Auto-detect
+    entry that clears the list. Each click writes
+    `general.languages` atomically and triggers an in-process
+    orchestrator reload — no daemon restart.
+
+  All toggles share a single canonical curated language shortlist
+  (`fono_core::languages::CURATED_LANGUAGES`) with the wizard, so
+  picking "English" in either surface writes the same value.
+
+- **Tray poll throttle.** The 2-second tray-state poll only fires
+  `handle.update` when at least one provider's result actually
+  changed since the last tick. Steady-state daemons emit zero
+  `LayoutUpdated` D-Bus signals; cuts wake-ups and gives flaky tray
+  hosts (notably snixembed) fewer events to mishandle.
+
+- **Tray-task exit logging.** The poll loop's `Ok(())` exit path is
+  now logged at `warn`, so a user noticing the icon disappear has a
+  breadcrumb in the daemon log.
+
+### Changed
+
+- **Wizard consistency rework.** Yes/No prompts (`pick_english_only`,
+  `pick_interactive_mode`) switched from `Confirm` to arrow-key
+  `Select` defaulting to **No** — first-time users can press Enter
+  on the safer choice and reach the full multi-language picker /
+  batch-mode default in one keystroke. `pick_local_stt_model`
+  auto-picks (and announces) when only one model fits the hardware
+  + language selection. LLM cleanup choice reordered to **Skip /
+  Cloud / Local** with a hardware-aware "— recommended" suffix:
+  Cloud is recommended on hosts without LLM acceleration; Local is
+  recommended only when Apple Silicon or a Vulkan-capable GPU is
+  detected. Default cursor on Skip — local LLM on a CPU-only host
+  is a frustrating first-run experience.
+
+- **Single canonical curated language list.** Wizard and tray now
+  draw from `fono_core::languages::CURATED_LANGUAGES`. Adding a
+  language to the list adds it to both surfaces.
+
+### Fixed
+
+- **Update prompt no longer offers downgrades on variant mismatch.**
+  When the GitHub releases API serves an older release as `latest`
+  (e.g. v0.6.0 was tagged but only published as a Draft, so the API
+  still returns v0.5.0), a CPU-variant binary on a Vulkan-capable
+  host no longer trips the variant-switch path into surfacing
+  "Update to v0.5.0". `fono_update::check` requires the remote
+  release to be `>= current_version` before the variant-switch
+  branch can fire. Two regression tests pin the behaviour.
+
+- **Stale `update.json` cache invalidation.** On daemon startup the
+  cached `UpdateStatus` is discarded if its `current` field doesn't
+  match the running binary's `CARGO_PKG_VERSION`. Prevents a stale
+  "Available" entry from briefly flashing in the tray after a
+  version bump until the 10-second background re-check overwrites it.
+
+### Performance
+
+- **Whisper-local prewarm now materialises GPU compute pipelines.** On
+  GPU-accelerated builds (`accel-vulkan` / `accel-cuda` / `accel-metal` /
+  `accel-hipblas` / `accel-coreml`), `WhisperLocal::prewarm()` runs a
+  one-shot silent decode (1 s of zeros at 16 kHz) right after loading
+  the model, so `whisper.cpp`'s backend builds every `VkPipeline` /
+  CUDA kernel / Metal pipeline-state and allocates its KV cache on the
+  device during the background warmup at session start, not on the
+  user's first dictation. Measured on RTX 4090 + Vulkan with
+  `large-v3-turbo`: first-fixture batch latency drops from 7.8 s to
+  1.0 s, and the total Vulkan bench batch time drops from 9.11 s to
+  2.27 s (4.0×). CPU-only builds keep the original cheap mmap
+  behaviour. The silent decode is best-effort — if it fails (e.g.
+  driver bug) it is logged at `debug` and prewarm still returns
+  success so real dictation can still proceed. See
+  `plans/2026-05-03-whisper-vulkan-prewarm-v1.md`.
+
+### Added (audio + visualisation)
 
 - **Audio-visualisation overlay + live-dictation VU bar.** A new
   `waveform` cargo feature (default-on, GUI-only) renders a 640-wide

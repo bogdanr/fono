@@ -16,7 +16,32 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Once;
+use tracing::debug;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+/// Whether this build links a GPU-accelerated `ggml` backend whose first
+/// inference call must materialise a large set of compute pipelines
+/// (Vulkan `VkPipeline`, CUDA / HIP kernels, Metal pipeline state). On those
+/// builds, `prewarm()` runs an extra silent-decode pass so the user does
+/// not pay 5–10 s of pipeline-create cost on their first dictation —
+/// see `plans/2026-05-03-whisper-vulkan-prewarm-v1.md`. CPU-only builds
+/// keep `prewarm()` as a cheap mmap.
+#[cfg(any(
+    feature = "accel-cuda",
+    feature = "accel-metal",
+    feature = "accel-vulkan",
+    feature = "accel-hipblas",
+    feature = "accel-coreml",
+))]
+const GPU_PREWARM: bool = true;
+#[cfg(not(any(
+    feature = "accel-cuda",
+    feature = "accel-metal",
+    feature = "accel-vulkan",
+    feature = "accel-hipblas",
+    feature = "accel-coreml",
+)))]
+const GPU_PREWARM: bool = false;
 
 use crate::lang::LanguageSelection;
 use crate::traits::{SpeechToText, Transcription};
@@ -220,8 +245,19 @@ impl SpeechToText for WhisperLocal {
     async fn prewarm(&self) -> Result<()> {
         // mmap the model on a blocking thread so we don't park an
         // async executor for 200–600 ms (latency plan L2).
+        //
+        // On GPU-accelerated builds we additionally run a tiny silent
+        // decode here so `whisper.cpp`'s backend materialises every
+        // `VkPipeline` / CUDA kernel / Metal PSO it needs, allocates
+        // the KV cache on-device, and primes the driver shader cache.
+        // Without this, the first real dictation pays a 5–10 s
+        // pipeline-create cost — see fixture #1 in
+        // `plans/2026-05-03-whisper-vulkan-prewarm-v1.md`. CPU-only
+        // builds skip the silent decode (`GPU_PREWARM = false`) since
+        // CPU TTFF is already in the 100 ms range.
         let path = self.model_path.clone();
         let ctx = Arc::clone(&self.ctx);
+        let threads = self.threads;
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut guard = ctx.lock().map_err(|_| anyhow!("whisper mutex poisoned"))?;
             if guard.is_none() {
@@ -232,11 +268,53 @@ impl SpeechToText for WhisperLocal {
                     .context("load whisper model")?;
                 *guard = Some(c);
             }
+            if GPU_PREWARM {
+                if let Some(ctx) = guard.as_ref() {
+                    // Best-effort: any failure here must not block the
+                    // user from dictating, since a real non-silent
+                    // buffer might still decode fine. Log at `debug!`
+                    // so we can spot driver bugs without spamming the
+                    // default log level.
+                    if let Err(e) = run_silent_decode(ctx, threads) {
+                        debug!("whisper prewarm: silent decode skipped: {e:#}");
+                    }
+                }
+            }
             Ok(())
         })
         .await
         .context("whisper prewarm join")?
     }
+}
+
+/// Drive a single short, silent decode through the loaded
+/// `WhisperContext` to force the GPU backend to materialise its
+/// compute pipelines and on-device buffers. Returns `Err` only on
+/// genuine API failures; the caller treats the error as a warning.
+fn run_silent_decode(ctx: &WhisperContext, threads: i32) -> Result<()> {
+    // 1.0 s of silence at 16 kHz. Long enough that the encoder runs a
+    // full 30 s mel window (whisper.cpp pads internally) and the
+    // decoder emits at least one no-speech token, which is what
+    // touches the bulk of the per-shape pipeline variants.
+    let silence = vec![0.0_f32; 16_000];
+    let mut state = ctx.create_state().context("create whisper prewarm state")?;
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    params.set_n_threads(threads);
+    params.set_translate(false);
+    params.set_language(Some("en"));
+    params.set_no_context(true);
+    params.set_single_segment(true);
+    params.set_temperature(0.0);
+    params.set_no_speech_thold(0.6);
+    params.set_logprob_thold(-1.0);
+    params.set_print_special(false);
+    params.set_print_progress(false);
+    params.set_print_realtime(false);
+    params.set_print_timestamps(false);
+    state
+        .full(params, &silence)
+        .context("whisper prewarm full()")?;
+    Ok(())
 }
 
 fn num_cpus() -> i32 {

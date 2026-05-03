@@ -181,8 +181,22 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
     let update_status: Arc<RwLock<Option<fono_update::UpdateStatus>>> = Arc::new(RwLock::new(None));
     {
         let cache_path = paths.state_dir.join("update.json");
+        let current_version = env!("CARGO_PKG_VERSION");
         if let Some(cached) = fono_update::load_cache(&cache_path) {
-            *update_status.write().expect("update_status lock") = Some(cached.status);
+            // Reject a stale cache whose `current` field doesn't match
+            // the running binary (typical case: user just upgraded
+            // 0.5.0 → 0.6.0 and the old cache still claims 0.5.0,
+            // which would surface a bogus "Update available" entry
+            // until the 10-second background re-check overwrites it).
+            if cached.status.current() == current_version {
+                *update_status.write().expect("update_status lock") = Some(cached.status);
+            } else {
+                tracing::debug!(
+                    "update cache: discarding entry for v{} (running v{})",
+                    cached.status.current(),
+                    current_version
+                );
+            }
         }
         let pkg_managed = std::env::current_exe()
             .map(|p| fono_update::is_package_managed(&p))
@@ -298,6 +312,25 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
             .map(|b| fono_core::providers::llm_backend_str(b).to_string())
             .collect();
 
+        // Startup diagnostic for the "tray STT/LLM submenu sometimes
+        // empty" intermittent — these labels are static after spawn,
+        // so logging them once gives us a definitive answer about
+        // whether the issue is data (empty here means empty menu) or
+        // host rendering (non-empty here + empty menu means it's
+        // KDE/GNOME mishandling LayoutUpdated). Always at info so
+        // users running with default verbosity see the line in their
+        // terminal when they reproduce.
+        info!(
+            "tray: configured STT backends ({}) = {:?}",
+            stt_labels.len(),
+            stt_labels
+        );
+        info!(
+            "tray: configured LLM backends ({}) = {:?}",
+            llm_labels.len(),
+            llm_labels
+        );
+
         // Active-provider closure — tray polls this every ~2 s. Reads
         // the orchestrator's current backend pair (which already reflects
         // any `Reload`-driven hot-swap) and falls back to the on-disk
@@ -343,6 +376,18 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
             .map(|p| p.tray_label())
             .collect()
         });
+
+        // Preferences provider for the "Preferences" submenu — reads
+        // the on-disk config every ~2 s so the tray reflects external
+        // edits (`fono config edit`, `fono settings`) without a daemon
+        // restart. Cheap: a single TOML parse, dropped after the
+        // closure returns. We deliberately read disk rather than the
+        // in-process Config Arc because tray-driven mutations write
+        // to disk and reload the orchestrator — disk is the source of
+        // truth that survives every code path.
+        let config_path_for_prefs = paths.config_file();
+        let preferences_provider: fono_tray::PreferencesProvider =
+            Arc::new(move || preferences_snapshot_from_disk(&config_path_for_prefs));
 
         let (t, rx) = fono_tray::spawn(
             "Fono — voice dictation",
@@ -404,6 +449,7 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                     (names, active_idx)
                 }) as fono_tray::MicrophonesProvider
             },
+            preferences_provider,
         );
         (Some(t), rx)
     };
@@ -655,6 +701,124 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                     }
                     TrayAction::SetInputDevice(idx) => {
                         switch_input_device_via_tray(orch_for_tray.as_ref(), idx).await;
+                    }
+                    TrayAction::SetSoundFeedback(v) => {
+                        apply_pref_via_tray(
+                            &paths,
+                            orch_for_tray.as_ref(),
+                            "sound_feedback",
+                            move |cfg| cfg.general.sound_feedback = v,
+                        )
+                        .await;
+                    }
+                    TrayAction::SetAutoMuteSystem(v) => {
+                        apply_pref_via_tray(
+                            &paths,
+                            orch_for_tray.as_ref(),
+                            "auto_mute_system",
+                            move |cfg| cfg.general.auto_mute_system = v,
+                        )
+                        .await;
+                    }
+                    TrayAction::SetAlwaysWarmMic(v) => {
+                        apply_pref_via_tray(
+                            &paths,
+                            orch_for_tray.as_ref(),
+                            "always_warm_mic",
+                            move |cfg| cfg.general.always_warm_mic = v,
+                        )
+                        .await;
+                    }
+                    TrayAction::SetAlsoCopyToClipboard(v) => {
+                        apply_pref_via_tray(
+                            &paths,
+                            orch_for_tray.as_ref(),
+                            "also_copy_to_clipboard",
+                            move |cfg| cfg.general.also_copy_to_clipboard = v,
+                        )
+                        .await;
+                    }
+                    TrayAction::SetStartupAutostart(v) => {
+                        apply_pref_via_tray(
+                            &paths,
+                            orch_for_tray.as_ref(),
+                            "startup_autostart",
+                            move |cfg| cfg.general.startup_autostart = v,
+                        )
+                        .await;
+                    }
+                    TrayAction::SetVadEnabled(v) => {
+                        // The schema stores VAD as a string (`"silero"`,
+                        // `"off"`, possibly more in the future); the tray
+                        // exposes it as a boolean for menu legibility.
+                        // Translate here. `"silero"` is the only enabled
+                        // backend today; future backends will need their
+                        // own tray entry rather than bundling under VAD.
+                        apply_pref_via_tray(
+                            &paths,
+                            orch_for_tray.as_ref(),
+                            "vad_backend",
+                            move |cfg| {
+                                cfg.audio.vad_backend =
+                                    if v { "silero".into() } else { "off".into() };
+                            },
+                        )
+                        .await;
+                    }
+                    TrayAction::SetAutoStopSilenceMs(ms) => {
+                        apply_pref_via_tray(
+                            &paths,
+                            orch_for_tray.as_ref(),
+                            "auto_stop_silence_ms",
+                            move |cfg| cfg.audio.auto_stop_silence_ms = ms,
+                        )
+                        .await;
+                    }
+                    TrayAction::SetWaveformStyle(idx) => {
+                        let Some(style) = waveform_style_from_idx(idx) else {
+                            warn!("tray SetWaveformStyle({idx}): out of range");
+                            continue;
+                        };
+                        apply_pref_via_tray(
+                            &paths,
+                            orch_for_tray.as_ref(),
+                            "overlay.style",
+                            move |cfg| cfg.overlay.style = style,
+                        )
+                        .await;
+                    }
+                    TrayAction::ToggleLanguage(idx) => {
+                        let Some(code) = language_code_from_idx(idx) else {
+                            warn!("tray ToggleLanguage({idx}): out of range");
+                            continue;
+                        };
+                        apply_pref_via_tray(
+                            &paths,
+                            orch_for_tray.as_ref(),
+                            "languages",
+                            move |cfg| {
+                                if let Some(pos) =
+                                    cfg.general.languages.iter().position(|c| c == code)
+                                {
+                                    cfg.general.languages.remove(pos);
+                                } else {
+                                    cfg.general.languages.push(code.to_string());
+                                }
+                            },
+                        )
+                        .await;
+                    }
+                    TrayAction::ClearLanguages => {
+                        apply_pref_via_tray(
+                            &paths,
+                            orch_for_tray.as_ref(),
+                            "languages",
+                            move |cfg| cfg.general.languages.clear(),
+                        )
+                        .await;
+                    }
+                    TrayAction::OpenSettingsTui => {
+                        open_settings_tui();
                     }
                 }
             }
@@ -1401,6 +1565,170 @@ async fn switch_input_device_via_tray(
             );
         }
     }
+}
+
+/// Take a snapshot of the on-disk config fields backing the tray's
+/// "Preferences" submenu. Returns a default snapshot on read failure
+/// rather than propagating: the tray prefers stale-but-renderable to
+/// no-menu, and a missing config file just means first-run defaults.
+fn preferences_snapshot_from_disk(config_path: &std::path::Path) -> fono_tray::PreferencesSnapshot {
+    let cfg = fono_core::Config::load(config_path).unwrap_or_default();
+    let waveform_style = waveform_style_to_idx(cfg.overlay.style);
+    fono_tray::PreferencesSnapshot {
+        sound_feedback: cfg.general.sound_feedback,
+        auto_mute_system: cfg.general.auto_mute_system,
+        always_warm_mic: cfg.general.always_warm_mic,
+        also_copy_to_clipboard: cfg.general.also_copy_to_clipboard,
+        startup_autostart: cfg.general.startup_autostart,
+        // Tray exposes VAD as a boolean. `"silero"` is the only enabled
+        // backend today; treat any other non-`"off"` value as "on" so
+        // future backends still light the menu correctly.
+        vad_enabled: !cfg.audio.vad_backend.eq_ignore_ascii_case("off"),
+        auto_stop_silence_ms: cfg.audio.auto_stop_silence_ms,
+        waveform_style,
+        languages: cfg.general.languages.clone(),
+    }
+}
+
+/// Map a `WaveformStyle` to its index in `fono_tray::WAVEFORM_STYLES`.
+fn waveform_style_to_idx(style: fono_core::config::WaveformStyle) -> u8 {
+    match style {
+        fono_core::config::WaveformStyle::Bars => 0,
+        fono_core::config::WaveformStyle::Oscilloscope => 1,
+        fono_core::config::WaveformStyle::Fft => 2,
+        fono_core::config::WaveformStyle::Heatmap => 3,
+    }
+}
+
+/// Inverse of `waveform_style_to_idx`. Returns `None` on out-of-range
+/// indices so the caller can surface a `warn!` instead of silently
+/// reverting to Bars.
+fn waveform_style_from_idx(idx: u8) -> Option<fono_core::config::WaveformStyle> {
+    match idx {
+        0 => Some(fono_core::config::WaveformStyle::Bars),
+        1 => Some(fono_core::config::WaveformStyle::Oscilloscope),
+        2 => Some(fono_core::config::WaveformStyle::Fft),
+        3 => Some(fono_core::config::WaveformStyle::Heatmap),
+        _ => None,
+    }
+}
+
+/// Map a tray `ToggleLanguage(idx)` index to the BCP-47 code in
+/// `LANGUAGE_SHORTLIST`. Returns `None` on out-of-range so the
+/// caller can `warn!` instead of silently no-oping.
+fn language_code_from_idx(idx: u8) -> Option<&'static str> {
+    fono_tray::LANGUAGE_SHORTLIST
+        .get(idx as usize)
+        .map(|(code, _)| *code)
+}
+
+/// Shared load → mutate → save → reload path for tray Preferences
+/// toggles. Mirrors the structure of `switch_stt_via_tray` /
+/// `switch_llm_via_tray` but parametrised on a closure so each new
+/// preference doesn't need its own ~30-line helper. The closure
+/// receives `&mut Config` and mutates one field; we re-load fresh
+/// from disk inside the spawn_blocking task to avoid clobbering any
+/// concurrent `fono use ...` write.
+async fn apply_pref_via_tray<F>(
+    paths: &fono_core::Paths,
+    orch: Option<&Arc<crate::session::SessionOrchestrator>>,
+    field: &'static str,
+    mutate: F,
+) where
+    F: FnOnce(&mut fono_core::Config) + Send + 'static,
+{
+    let config_path = paths.config_file();
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let mut cfg = fono_core::Config::load(&config_path)?;
+        mutate(&mut cfg);
+        cfg.save(&config_path)?;
+        Ok(())
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {
+            info!("tray: updated {field}");
+            if let Some(o) = orch {
+                if let Err(e) = o.reload().await {
+                    warn!("tray: {field} reload failed: {e:#}");
+                    fono_core::notify::send(
+                        "Fono — settings reload failed",
+                        &format!("{e}"),
+                        "dialog-error",
+                        5_000,
+                        fono_core::notify::Urgency::Critical,
+                    );
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            warn!("tray: {field} update failed: {e:#}");
+            fono_core::notify::send(
+                "Fono — settings update failed",
+                &format!("{e}"),
+                "dialog-error",
+                5_000,
+                fono_core::notify::Urgency::Critical,
+            );
+        }
+        Err(e) => warn!("tray: {field} update task join error: {e}"),
+    }
+}
+
+/// Spawn `fono settings` in the user's preferred terminal. Picked in
+/// order: `$TERMINAL` (honoured by the tray "Open settings (TUI)…"
+/// entry), then a small list of common Linux terminals. Falls back to
+/// `xdg-open` on the daemon's own argv0 with a `settings` arg, which
+/// most desktops will resolve via the `.desktop` file. The daemon
+/// does NOT block on the spawned process — the terminal lives until
+/// the user closes it.
+fn open_settings_tui() {
+    use std::process::Command;
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("fono"));
+    let exe_str = exe.to_string_lossy().into_owned();
+    let env_term = std::env::var("TERMINAL").ok();
+    let candidates: Vec<&str> = env_term
+        .as_deref()
+        .into_iter()
+        .chain([
+            "xdg-terminal-exec",
+            "kgx",
+            "konsole",
+            "alacritty",
+            "kitty",
+            "wezterm",
+            "foot",
+            "xfce4-terminal",
+            "gnome-terminal",
+            "xterm",
+        ])
+        .collect();
+    for term in candidates {
+        // Most terminals accept `-e <cmd> [args...]`; konsole prefers `-e`
+        // with a single string. We pass argv-style and let the shell
+        // re-quote — `fono` itself doesn't take spaces in argv0.
+        let spawn = match term {
+            "konsole" => Command::new(term)
+                .args(["-e", &exe_str, "settings"])
+                .spawn(),
+            // gnome-terminal needs `--` to terminate its option parser
+            // before forwarding.
+            "gnome-terminal" => Command::new(term)
+                .args(["--", &exe_str, "settings"])
+                .spawn(),
+            _ => Command::new(term)
+                .args(["-e", &exe_str, "settings"])
+                .spawn(),
+        };
+        if spawn.is_ok() {
+            info!("tray: launched settings TUI in {term}");
+            return;
+        }
+    }
+    warn!(
+        "tray: could not launch a terminal for `fono settings` — \
+         set $TERMINAL or run `fono settings` manually"
+    );
 }
 
 /// Ensure the local STT (whisper) model referenced by the on-disk

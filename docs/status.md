@@ -1,6 +1,47 @@
 # Fono — Project Status
 
-Last updated: 2026-05-02
+Last updated: 2026-05-03
+
+## 2026-05-03 — Vulkan prewarm: silent decode at session start
+
+`plans/2026-05-03-whisper-vulkan-prewarm-v1.md` landed.
+
+Bench on `ai` (RTX 4090 + Vulkan, `large-v3-turbo`) revealed that the
+first Vulkan fixture paid a 7.8 s pipeline-create stall while every
+subsequent fixture finished in 0.1–0.2 s — the cost was
+`whisper.cpp` lazily creating ~80–150 `VkPipeline` objects on the
+first `state.full(...)` call. `WhisperLocal::prewarm()`
+(`crates/fono-stt/src/whisper_local.rs:245-318`) was only mmapping
+the model and constructing a `WhisperContext`; it never created a
+`WhisperState` or ran inference, so all the pipeline work landed on
+the user's first hotkey press.
+
+`prewarm()` now additionally runs a 1 s silent decode through a
+fresh `WhisperState` on GPU-accelerated builds (gated by a new
+`GPU_PREWARM` constant covering `accel-vulkan` / `accel-cuda` /
+`accel-metal` / `accel-hipblas` / `accel-coreml`). The dummy decode
+runs on the same `tokio::task::spawn_blocking` thread that already
+loads the model, holds the prewarm mutex briefly, and treats any
+failure as best-effort (logged at `debug!` so a hypothetical driver
+bug can't block real dictation). CPU-only builds skip the silent
+decode entirely.
+
+Bench result on `ai` after the change:
+
+| backend | batch | stream | ttff | speedup vs CPU |
+|---|---:|---:|---:|---|
+| CPU | 68.05 s | 198.02 s | 6.16 s | (baseline) |
+| Vulkan (RTX 4090) | **2.27 s** | **3.98 s** | **0.12 s** | **29.98× / 49.75× / 51.33×** |
+
+The Vulkan first-fixture `batch_s` dropped from 7.8 s to 1.0 s
+(7.8× drop on the user-visible cost), and the overall Vulkan batch
+total dropped from 9.11 s to 2.27 s (4.0×). All ten fixtures still
+PASS the tier-1 equivalence threshold on both backends.
+
+Follow-up tracked but not landed in this slice: same prewarm pattern
+for `fono-llm/src/llama_local.rs::prewarm` so the first LLM cleanup
+call after session start doesn't pay the equivalent pipeline-compile
+cost on Vulkan-accelerated hosts.
 
 ## 2026-05-02 — Release v0.5.0
 

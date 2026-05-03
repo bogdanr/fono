@@ -101,6 +101,71 @@ pub type DiscoveredSttProvider = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 /// either changes.
 pub type MicrophonesProvider = Arc<dyn Fn() -> (Vec<String>, u8) + Send + Sync>;
 
+/// Provider returning the current `[general]`/`[audio]`/`[overlay]`
+/// values that back the "Preferences" submenu's checkmarks and radio
+/// groups. Polled every ~2 s alongside the other providers; the tray
+/// re-renders the submenu in place when any field changes (typical
+/// trigger: an external `fono settings` write or `fono use ...` flips
+/// a related field).
+pub type PreferencesProvider = Arc<dyn Fn() -> PreferencesSnapshot + Send + Sync>;
+
+/// Snapshot view of the user-facing config fields surfaced in the
+/// "Preferences" submenu. Tracked as a flat struct so the 2 s poll
+/// can diff with `PartialEq` and only repaint when something moved.
+///
+/// `language` is an index into [`LANGUAGE_SHORTLIST`] (`u8::MAX` for
+/// "auto / not in shortlist"). `waveform_style` is an index into
+/// [`WAVEFORM_STYLES`].
+//
+// `clippy::struct_excessive_bools` triggers because we keep the boolean
+// preferences as plain bools rather than collapsing them into a state
+// machine or bitfield. The flat shape is intentional: the tray polls
+// this every 2 s and diffs with `PartialEq`, and a state machine
+// would make `prefs_toggle` calls in `build_preferences_submenu`
+// indirect for no readability win. Allow.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PreferencesSnapshot {
+    pub sound_feedback: bool,
+    pub auto_mute_system: bool,
+    pub always_warm_mic: bool,
+    pub also_copy_to_clipboard: bool,
+    pub startup_autostart: bool,
+    pub vad_enabled: bool,
+    pub auto_stop_silence_ms: u32,
+    pub waveform_style: u8,
+    /// Currently-allowed language codes (BCP-47), in canonical order.
+    /// Empty list = "Auto-detect" (whisper free-detect; cloud
+    /// providers' built-in detection). Multiple entries = constrained
+    /// auto-detect / allow-list — Whisper picks from these and bans
+    /// every other language. The tray surfaces this as a CheckmarkItem
+    /// list so users can toggle individual languages on/off.
+    pub languages: Vec<String>,
+}
+
+/// Re-export of the canonical curated language shortlist. The wizard,
+/// the tray, and any future settings UI all draw from
+/// [`fono_core::languages::CURATED_LANGUAGES`] so picking a language in
+/// one surface looks identical in the others. Indices into this slice
+/// are stable — `TrayAction::ToggleLanguage(u8)` references them.
+pub use fono_core::languages::CURATED_LANGUAGES as LANGUAGE_SHORTLIST;
+
+/// Waveform-style names paired with their `WaveformStyle` discriminant
+/// label as serialised into TOML. Index used by
+/// `TrayAction::SetWaveformStyle(u8)`.
+pub const WAVEFORM_STYLES: &[(&str, &str)] = &[
+    ("bars", "Bars"),
+    ("oscilloscope", "Oscilloscope"),
+    ("fft", "FFT"),
+    ("heatmap", "Heatmap"),
+];
+
+/// Auto-stop silence presets surfaced in the tray's radio group.
+/// `0` means "Off" — the daemon's auto-stop silence timer is bypassed
+/// when the value is zero. Indices map to `TrayAction::SetAutoStopSilenceMs(u32)`.
+pub const AUTO_STOP_PRESETS_MS: &[(&str, u32)] =
+    &[("Off", 0), ("0.8 s", 800), ("1.5 s", 1500), ("3 s", 3000)];
+
 /// FSM-aligned tray state used to tint the icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -144,6 +209,37 @@ pub enum TrayAction {
     /// this to `pactl set-default-source`; the cpal branch hides
     /// the submenu so this is never fired there.
     SetInputDevice(u8),
+    /// Toggle `general.sound_feedback` (start/stop chimes).
+    SetSoundFeedback(bool),
+    /// Toggle `general.auto_mute_system` (mute other audio while recording).
+    SetAutoMuteSystem(bool),
+    /// Toggle `general.always_warm_mic` (keep cpal stream open between dictations).
+    SetAlwaysWarmMic(bool),
+    /// Toggle `general.also_copy_to_clipboard`.
+    SetAlsoCopyToClipboard(bool),
+    /// Toggle `general.startup_autostart`.
+    SetStartupAutostart(bool),
+    /// Toggle VAD by flipping `audio.vad_backend` between `"silero"` (on)
+    /// and `"off"`. The tray uses a boolean for menu legibility; the
+    /// daemon translates back to the string field.
+    SetVadEnabled(bool),
+    /// Set `audio.auto_stop_silence_ms` to one of the
+    /// [`AUTO_STOP_PRESETS_MS`] presets. `0` disables auto-stop.
+    SetAutoStopSilenceMs(u32),
+    /// Set `overlay.style` by index into [`WAVEFORM_STYLES`].
+    SetWaveformStyle(u8),
+    /// Toggle a curated language by index into [`LANGUAGE_SHORTLIST`]:
+    /// add it to `general.languages` if absent, remove it if present.
+    /// Multi-select multi-language allow-list — picking two languages
+    /// produces `general.languages = ["en", "ro"]` and so on.
+    ToggleLanguage(u8),
+    /// Clear `general.languages` so STT runs in unconstrained
+    /// auto-detect mode. The tray's "Auto-detect" entry fires this.
+    ClearLanguages,
+    /// Spawn a topical settings TUI (`fono settings`) in the user's
+    /// preferred terminal. Daemon shells out via `$TERMINAL` /
+    /// xdg-terminal-exec.
+    OpenSettingsTui,
     OpenConfig,
     Quit,
 }
@@ -203,6 +299,9 @@ impl Tray {
 ///   triggers a cross-variant switch, not a version bump.
 /// * `microphones_provider` — `(devices, active_idx)` for the
 ///   Microphone submenu; empty list hides the submenu.
+/// * `preferences_provider` — current values backing the
+///   "Preferences" submenu's checkmarks and radios. Polled on the same
+///   cadence as the others.
 #[allow(unused_variables, clippy::too_many_arguments)]
 pub fn spawn(
     tooltip: &str,
@@ -214,6 +313,7 @@ pub fn spawn(
     update_provider: UpdateProvider,
     gpu_upgrade_provider: GpuUpgradeProvider,
     microphones_provider: MicrophonesProvider,
+    preferences_provider: PreferencesProvider,
 ) -> (Tray, mpsc::UnboundedReceiver<TrayAction>) {
     let shared = Arc::new(AtomicU8::new(TrayState::Idle as u8));
     let (action_tx, action_rx) = mpsc::unbounded_channel();
@@ -233,6 +333,7 @@ pub fn spawn(
             update_provider,
             gpu_upgrade_provider,
             microphones_provider,
+            preferences_provider,
         );
         let state_tx = if started { Some(state_tx) } else { None };
         (
@@ -263,11 +364,12 @@ pub fn spawn(
 mod backend {
     use super::{
         ActiveProvider, DiscoveredSttProvider, GpuUpgradeProvider, MicrophonesProvider,
-        RecentProvider, TrayAction, TrayState, UpdateProvider, RECENT_SLOTS,
+        PreferencesProvider, PreferencesSnapshot, RecentProvider, TrayAction, TrayState,
+        UpdateProvider, AUTO_STOP_PRESETS_MS, LANGUAGE_SHORTLIST, RECENT_SLOTS, WAVEFORM_STYLES,
     };
     use fono_core::notify::{self, Urgency};
     use ksni::{
-        menu::{StandardItem, SubMenu},
+        menu::{CheckmarkItem, StandardItem, SubMenu},
         Handle, MenuItem, ToolTip, TrayMethods,
     };
     use tokio::sync::mpsc;
@@ -298,6 +400,7 @@ mod backend {
         update_label: Option<String>,
         gpu_upgrade_label: Option<String>,
         microphones: (Vec<String>, u8),
+        prefs: PreferencesSnapshot,
         actions: mpsc::UnboundedSender<TrayAction>,
     }
 
@@ -344,7 +447,6 @@ mod backend {
     /// [`mpsc::UnboundedSender<TrayState>`]; failure means it gets
     /// `None` and `set_state` becomes a no-op.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         tooltip: String,
         actions: mpsc::UnboundedSender<TrayAction>,
@@ -357,6 +459,7 @@ mod backend {
         update_provider: UpdateProvider,
         gpu_upgrade_provider: GpuUpgradeProvider,
         microphones_provider: MicrophonesProvider,
+        preferences_provider: PreferencesProvider,
     ) -> bool {
         // We need to be inside a tokio runtime to spawn the ksni
         // service; the daemon always is. Probe `Handle::try_current`
@@ -366,7 +469,7 @@ mod backend {
             return false;
         }
         tokio::spawn(async move {
-            if let Err(e) = run(
+            match run(
                 tooltip,
                 actions,
                 state_rx,
@@ -378,10 +481,11 @@ mod backend {
                 update_provider,
                 gpu_upgrade_provider,
                 microphones_provider,
+                preferences_provider,
             )
             .await
             {
-                if is_missing_status_notifier_watcher(&e) {
+                Err(e) if is_missing_status_notifier_watcher(&e) => {
                     notify_missing_status_notifier_watcher();
                     tracing::warn!(
                         "tray unavailable: no StatusNotifierWatcher is registered on the session bus; \
@@ -389,8 +493,20 @@ mod backend {
                          xfce4-panel, or snixembed) or run with --no-tray. Dictation and the overlay \
                          continue without the tray icon."
                     );
-                } else {
-                    tracing::warn!("tray task exited: {e:#}");
+                }
+                Err(e) => {
+                    tracing::warn!("tray task exited with error: {e:#}");
+                }
+                Ok(()) => {
+                    // The poll loop only returns `Ok(())` if every
+                    // provider's mpsc closed (i.e. the daemon is
+                    // shutting down). Logging at warn so a user who
+                    // notices the icon disappear has a breadcrumb.
+                    tracing::warn!(
+                        "tray task exited cleanly — icon will disappear. \
+                         Usually means the daemon dropped the providers; \
+                         restart fono to bring the tray back."
+                    );
                 }
             }
         });
@@ -425,6 +541,7 @@ mod backend {
         update_provider: UpdateProvider,
         gpu_upgrade_provider: GpuUpgradeProvider,
         microphones_provider: MicrophonesProvider,
+        preferences_provider: PreferencesProvider,
     ) -> anyhow::Result<()> {
         let model = KsniTray {
             tooltip,
@@ -437,6 +554,7 @@ mod backend {
             update_label: None,
             gpu_upgrade_label: None,
             microphones: (Vec::new(), u8::MAX),
+            prefs: PreferencesSnapshot::default(),
             actions,
         };
 
@@ -459,6 +577,20 @@ mod backend {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // Cached last-seen provider results so we can skip the
+        // `handle.update` round-trip (which always rebuilds + flattens
+        // the menu and emits dbusmenu signals) when nothing actually
+        // changed between ticks. Reduces D-Bus chatter to ~zero on a
+        // steady-state daemon and gives KDE Plasma fewer
+        // `LayoutUpdated` events to mis-render against.
+        let mut last_recent: Vec<String> = Vec::new();
+        let mut last_active: (u8, u8) = (u8::MAX, u8::MAX);
+        let mut last_discovered_stt: Vec<String> = Vec::new();
+        let mut last_upd: Option<String> = None;
+        let mut last_gpu_upd: Option<String> = None;
+        let mut last_mics: (Vec<String>, u8) = (Vec::new(), u8::MAX);
+        let mut last_prefs: PreferencesSnapshot = PreferencesSnapshot::default();
+
         loop {
             tokio::select! {
                 Some(state) = state_rx.recv() => {
@@ -471,13 +603,34 @@ mod backend {
                     let upd = update_provider();
                     let gpu_upd = gpu_upgrade_provider();
                     let mics = microphones_provider();
+                    let prefs = preferences_provider();
+
+                    let changed = recent != last_recent
+                        || active != last_active
+                        || discovered_stt != last_discovered_stt
+                        || upd != last_upd
+                        || gpu_upd != last_gpu_upd
+                        || mics != last_mics
+                        || prefs != last_prefs;
+                    if !changed {
+                        continue;
+                    }
+                    last_recent.clone_from(&recent);
+                    last_active = active;
+                    last_discovered_stt.clone_from(&discovered_stt);
+                    last_upd.clone_from(&upd);
+                    last_gpu_upd.clone_from(&gpu_upd);
+                    last_mics.clone_from(&mics);
+                    last_prefs.clone_from(&prefs);
+
                     handle.update(move |t: &mut KsniTray| {
-                        if t.recent != recent { t.recent = recent; }
-                        if t.active != active { t.active = active; }
-                        if t.discovered_stt != discovered_stt { t.discovered_stt = discovered_stt; }
-                        if t.update_label != upd { t.update_label = upd; }
-                        if t.gpu_upgrade_label != gpu_upd { t.gpu_upgrade_label = gpu_upd; }
-                        if t.microphones != mics { t.microphones = mics; }
+                        t.recent = recent;
+                        t.active = active;
+                        t.discovered_stt = discovered_stt;
+                        t.update_label = upd;
+                        t.gpu_upgrade_label = gpu_upd;
+                        t.microphones = mics;
+                        t.prefs = prefs;
                     }).await;
                 }
                 else => break,
@@ -519,7 +672,12 @@ mod backend {
         );
         items.push(MenuItem::Separator);
 
-        // Recent transcriptions submenu.
+        // Recent transcriptions submenu. Conditional inclusion of
+        // children — snixembed's libdbusmenu-gtk emits
+        // "Children but no menu" warnings when an item has the
+        // `children-display=submenu` property but every child has
+        // `visible: false`. So we accept `LayoutUpdated` churn over
+        // visibility-toggled stability.
         let mut recent_items: Vec<MenuItem<KsniTray>> = Vec::new();
         if t.recent.is_empty() {
             recent_items.push(
@@ -556,6 +714,12 @@ mod backend {
         // remote Wyoming servers discovered over mDNS are appended below
         // a separator so users can choose either the generic backend or a
         // concrete LAN host from the same menu.
+        if t.stt_labels.is_empty() {
+            tracing::warn!(
+                "tray: stt_labels is empty during build_menu — \
+                 daemon should have populated at least the active backend"
+            );
+        }
         let mut stt_items: Vec<MenuItem<KsniTray>> = t
             .stt_labels
             .iter()
@@ -572,6 +736,23 @@ mod backend {
                 .into()
             })
             .collect();
+        if stt_items.is_empty() {
+            // Defensive empty-state row so the submenu never renders as
+            // a blank popup (some tray hosts handle truly-empty submenus
+            // poorly on layout-update churn). Disabled so accidental
+            // clicks no-op.
+            stt_items.push(
+                StandardItem {
+                    label: "(no backends configured — `fono keys add …`)".into(),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        // Discovered Wyoming peers — conditional inclusion. See the
+        // Recent submenu comment above for why we don't pre-allocate
+        // hidden slots.
         if !t.discovered_stt.is_empty() {
             stt_items.push(MenuItem::Separator);
             stt_items.push(
@@ -604,7 +785,13 @@ mod backend {
         );
 
         // LLM backend submenu.
-        let llm_items: Vec<MenuItem<KsniTray>> = t
+        if t.llm_labels.is_empty() {
+            tracing::warn!(
+                "tray: llm_labels is empty during build_menu — \
+                 daemon should have populated at least the active backend"
+            );
+        }
+        let mut llm_items: Vec<MenuItem<KsniTray>> = t
             .llm_labels
             .iter()
             .enumerate()
@@ -620,6 +807,16 @@ mod backend {
                 .into()
             })
             .collect();
+        if llm_items.is_empty() {
+            llm_items.push(
+                StandardItem {
+                    label: "(no backends configured — `fono keys add …`)".into(),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
         items.push(
             SubMenu {
                 label: "LLM backend".into(),
@@ -630,9 +827,9 @@ mod backend {
         );
 
         // Microphone submenu — only when the daemon supplied at least
-        // one Pulse/PipeWire device. Empty list means we're on a
-        // cpal-only host; hide the menu entirely so we don't offer a
-        // switch we can't honour.
+        // one Pulse/PipeWire device. snixembed's libdbusmenu-gtk
+        // dislikes pre-allocated hidden slots, so we accept the
+        // structural change of toggling the submenu in/out.
         if !t.microphones.0.is_empty() {
             let auto_active = t.microphones.1 == u8::MAX;
             let mut mic_items: Vec<MenuItem<KsniTray>> = Vec::new();
@@ -671,11 +868,19 @@ mod backend {
                 .into(),
             );
         }
+
+        // Preferences submenu — quick toggles + radio groups for the
+        // settings users touch frequently. The empty-submenu render
+        // bug on snixembed appears to be in libdbusmenu-gtk itself
+        // and isn't fixed by flattening or by visible-toggling, so
+        // we keep the nested layout the user prefers and document the
+        // workaround (`pkill snixembed && snixembed &`) for now.
+        items.push(build_preferences_submenu(t));
         items.push(MenuItem::Separator);
 
         // Update entry — surfaced only when the background checker
-        // has detected a newer release. Hidden otherwise so users
-        // never see a passive "Check for updates…" button.
+        // has detected a newer release. Conditional inclusion (not
+        // visibility-toggled) for snixembed compat.
         if let Some(label) = t.update_label.as_ref() {
             items.push(
                 StandardItem {
@@ -687,11 +892,8 @@ mod backend {
             );
         }
 
-        // GPU-upgrade entry — surfaced only on a CPU-variant build
-        // running on a host with a usable Vulkan loader + GPU. The
-        // daemon's provider returns Some(label) only when both
-        // conditions hold; clicking dispatches to apply_update with
-        // the `fono-gpu` asset prefix.
+        // GPU-upgrade entry — same conditional pattern. Surfaced only
+        // on a CPU-variant build with a usable Vulkan loader + GPU.
         if let Some(label) = t.gpu_upgrade_label.as_ref() {
             items.push(
                 StandardItem {
@@ -722,6 +924,243 @@ mod backend {
         );
 
         items
+    }
+
+    /// Compose the `Preferences ▸` submenu — boolean toggles up top,
+    /// radio-style submenus (Auto-stop / Overlay / Language) below the
+    /// separator, and a tail entry that opens `fono settings` in a
+    /// for everything tray vocabulary can't express (free text,
+    /// prompts, per-app overrides, secrets).
+    //
+    // Length lint allowed: the function is essentially declarative menu
+    // composition — six boolean toggles plus three radio submenus —
+    // and inlining the per-submenu loops here keeps the visual order
+    // of the menu obvious at a glance. Splitting per-submenu would
+    // hide that ordering across helpers.
+    #[allow(clippy::too_many_lines, clippy::vec_init_then_push)]
+    fn build_preferences_submenu(t: &KsniTray) -> MenuItem<KsniTray> {
+        let p = &t.prefs;
+        let mut items: Vec<MenuItem<KsniTray>> = Vec::new();
+
+        // Booleans use ksni's native CheckmarkItem so the tray host
+        // renders a real checkbox glyph. Some hosts (snixembed +
+        // libdbusmenu-gtk) emit chatter warnings around dbusmenu but
+        // render checkmarks correctly; the user prefers the proper
+        // checkbox look over a `●`-prefix faux-checkmark.
+        items.push(prefs_check(
+            "Play start/stop chimes",
+            p.sound_feedback,
+            TrayAction::SetSoundFeedback,
+        ));
+        items.push(prefs_check(
+            "Mute system audio while recording",
+            p.auto_mute_system,
+            TrayAction::SetAutoMuteSystem,
+        ));
+        items.push(prefs_check(
+            "Keep microphone always-on (faster start, see privacy docs)",
+            p.always_warm_mic,
+            TrayAction::SetAlwaysWarmMic,
+        ));
+        items.push(prefs_check(
+            "Also copy transcript to clipboard",
+            p.also_copy_to_clipboard,
+            TrayAction::SetAlsoCopyToClipboard,
+        ));
+        items.push(prefs_check(
+            "Start Fono on login",
+            p.startup_autostart,
+            TrayAction::SetStartupAutostart,
+        ));
+        items.push(prefs_check(
+            "Voice-activity detection (auto-trim silence)",
+            p.vad_enabled,
+            TrayAction::SetVadEnabled,
+        ));
+
+        items.push(MenuItem::Separator);
+
+        // Radio submenus — the parent label always carries the
+        // current selection in the form "Title: <value>" so even if
+        // a tray host renders nested submenus oddly, the user can
+        // see the live state without expanding. The children carry
+        // the `● ` active marker for the picked row.
+
+        let auto_stop_label = AUTO_STOP_PRESETS_MS
+            .iter()
+            .find(|(_, ms)| *ms == p.auto_stop_silence_ms)
+            .map_or_else(
+                || format!("{} ms", p.auto_stop_silence_ms),
+                |(s, _)| (*s).to_string(),
+            );
+        let auto_stop_items: Vec<MenuItem<KsniTray>> = AUTO_STOP_PRESETS_MS
+            .iter()
+            .map(|(label, ms)| {
+                let active = *ms == p.auto_stop_silence_ms;
+                let prefix = if active { "● " } else { "    " };
+                let descriptive = if *ms == 0 {
+                    format!("{prefix}{label} (manual stop only)")
+                } else {
+                    format!("{prefix}{label} of silence")
+                };
+                let ms_val = *ms;
+                StandardItem {
+                    label: descriptive,
+                    activate: send_action(TrayAction::SetAutoStopSilenceMs(ms_val)),
+                    ..Default::default()
+                }
+                .into()
+            })
+            .collect();
+        items.push(
+            SubMenu {
+                label: format!("Auto-stop after silence: {auto_stop_label}"),
+                submenu: auto_stop_items,
+                ..Default::default()
+            }
+            .into(),
+        );
+
+        let waveform_label = WAVEFORM_STYLES
+            .get(p.waveform_style as usize)
+            .map_or("Bars", |(_, l)| *l);
+        let overlay_items: Vec<MenuItem<KsniTray>> = WAVEFORM_STYLES
+            .iter()
+            .enumerate()
+            .map(|(i, (_serde, label))| {
+                let idx_u8 = u8::try_from(i).unwrap_or(u8::MAX);
+                let active = idx_u8 == p.waveform_style;
+                let prefix = if active { "● " } else { "    " };
+                let descriptive = match *label {
+                    "Bars" => "Bars (volume bars)",
+                    "Oscilloscope" => "Oscilloscope (raw waveform)",
+                    "FFT" => "FFT (frequency spectrum)",
+                    "Heatmap" => "Heatmap (rolling spectrogram)",
+                    other => other,
+                };
+                StandardItem {
+                    label: format!("{prefix}{descriptive}"),
+                    activate: send_action(TrayAction::SetWaveformStyle(idx_u8)),
+                    ..Default::default()
+                }
+                .into()
+            })
+            .collect();
+        items.push(
+            SubMenu {
+                label: format!("Visualisation overlay: {waveform_label}"),
+                submenu: overlay_items,
+                ..Default::default()
+            }
+            .into(),
+        );
+
+        // Language — multi-select via CheckmarkItem so each entry
+        // shows a real checkbox glyph. Each click toggles the code
+        // in/out of `general.languages`; multiple entries can be
+        // checked simultaneously. "Auto-detect" is the empty-list
+        // state — checking it clears every other pick.
+        let language_label = language_summary(&p.languages);
+        let mut language_items: Vec<MenuItem<KsniTray>> = Vec::new();
+        language_items.push(
+            CheckmarkItem {
+                label: "Auto-detect (clear language list)".into(),
+                checked: p.languages.is_empty(),
+                activate: send_action(TrayAction::ClearLanguages),
+                ..Default::default()
+            }
+            .into(),
+        );
+        language_items.push(MenuItem::Separator);
+        for (i, (code, label)) in LANGUAGE_SHORTLIST.iter().enumerate() {
+            let idx_u8 = u8::try_from(i).unwrap_or(u8::MAX);
+            let already_in = p.languages.iter().any(|c| c == code);
+            language_items.push(
+                CheckmarkItem {
+                    label: format!("{label}  ({code})"),
+                    checked: already_in,
+                    activate: send_action(TrayAction::ToggleLanguage(idx_u8)),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        // Tail hint for users who want a language outside the shortlist.
+        language_items.push(MenuItem::Separator);
+        language_items.push(
+            StandardItem {
+                label: "(more languages — see Edit config)".into(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+        );
+        items.push(
+            SubMenu {
+                label: format!("Language: {language_label}"),
+                submenu: language_items,
+                ..Default::default()
+            }
+            .into(),
+        );
+
+        // Stage 2 will surface a "Open settings (TUI)…" entry here that
+        // launches `fono settings` in $TERMINAL. Variant + daemon handler
+        // exist already; the menu item is held back until the CLI
+        // subcommand lands so we don't ship a click that opens a
+        // terminal then errors out on an unknown subcommand. Until
+        // then, "Edit config" at the top level is the escape hatch.
+
+        SubMenu {
+            label: "Preferences".into(),
+            submenu: items,
+            ..Default::default()
+        }
+        .into()
+    }
+
+    /// Summary string for the `Language ▸` parent row. Tells the user
+    /// the live state at a glance, even before opening the submenu:
+    ///
+    /// - `[]`              → `Auto-detect`
+    /// - `[en]`            → `English`
+    /// - `[en, ro]`        → `English, Romanian`
+    /// - `[en, ro, fr]`    → `English, Romanian, French`
+    /// - `[en, ro, fr, …]` → `4 languages`
+    fn language_summary(languages: &[String]) -> String {
+        if languages.is_empty() {
+            return "Auto-detect".into();
+        }
+        if languages.len() > 3 {
+            return format!("{} languages", languages.len());
+        }
+        let names: Vec<String> = languages
+            .iter()
+            .map(|code| {
+                LANGUAGE_SHORTLIST
+                    .iter()
+                    .find(|(c, _)| c == code)
+                    .map_or_else(|| code.clone(), |(_, name)| (*name).to_string())
+            })
+            .collect();
+        names.join(", ")
+    }
+
+    /// Boolean preference checkbox using ksni's native [`CheckmarkItem`].
+    /// Renders as a real checkbox glyph on every modern tray host —
+    /// the user explicitly prefers this over a `● `-prefix faux marker.
+    fn prefs_check<F>(label: &str, value: bool, action_for: F) -> MenuItem<KsniTray>
+    where
+        F: FnOnce(bool) -> TrayAction,
+    {
+        let next = action_for(!value);
+        CheckmarkItem {
+            label: label.into(),
+            checked: value,
+            activate: send_action(next),
+            ..Default::default()
+        }
+        .into()
     }
 
     /// Build a menu-item activate callback that fires `action` on the

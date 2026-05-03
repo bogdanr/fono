@@ -248,13 +248,14 @@ async fn configure_local(
     // Step 4 — Live dictation (interactive) mode.
     pick_interactive_mode(theme, config, snap, true, Some(stt_model));
 
-    // Step 5 — Tier-aware LLM cleanup choice. Local LLM (llama.cpp) is wired and
-    // ships in the default build; offer it alongside skip and cloud.
-    let llm_options = vec![
-        "Local LLM cleanup (qwen2.5, private, offline) — recommended",
-        "Skip LLM cleanup (raw whisper output)",
-        "Cloud LLM cleanup (Cerebras / Groq / OpenAI / Anthropic — needs key)",
-    ];
+    // Step 5 — LLM cleanup choice. Default is **Skip**: dictation is
+    // valuable on its own without an LLM rewrite step, and the user
+    // can opt in later via `fono settings`. Cloud comes second
+    // (cheap, fast, no model download). Local comes last and is only
+    // marked "recommended" when the host has real LLM acceleration —
+    // CPU-only inference on a 1.5 GB Qwen model is a frustrating
+    // first-run experience.
+    let llm_options = build_llm_options(snap);
     let llm_choice = Select::with_theme(theme)
         .with_prompt("Apply LLM cleanup (filler-removal, capitalization, punctuation)?")
         .items(&llm_options)
@@ -262,15 +263,53 @@ async fn configure_local(
         .interact()?;
 
     match llm_choice {
-        0 => configure_local_llm(theme, config, tier)?,
-        1 => {
+        // Order matches `build_llm_options`: 0=Skip, 1=Cloud, 2=Local.
+        0 => {
             config.llm.backend = LlmBackend::None;
             config.llm.enabled = false;
             config.llm.local = LlmLocal::default();
         }
-        _ => configure_cloud_llm(theme, config, secrets).await?,
+        1 => configure_cloud_llm(theme, config, secrets).await?,
+        _ => configure_local_llm(theme, config, tier)?,
     }
     Ok(())
+}
+
+/// Build the LLM-cleanup-choice menu items in the standard order
+/// (Skip, Cloud, Local) with the "— recommended" suffix attached
+/// only to the entry the wizard actively wants the user to pick.
+/// Local gets the recommendation only when the host has hardware
+/// acceleration that makes local inference comfortable; otherwise
+/// Cloud picks up the suffix. Skip never carries the suffix —
+/// it's the safe default but not "the wizard's pick".
+fn build_llm_options(snap: &HardwareSnapshot) -> Vec<String> {
+    let local_accelerated = host_has_llm_acceleration(snap);
+    let local_label = if local_accelerated {
+        "Local LLM cleanup (qwen2.5, private, offline) — recommended"
+    } else {
+        "Local LLM cleanup (qwen2.5, private, offline) — slow without GPU/Apple Silicon"
+    };
+    let cloud_label = if local_accelerated {
+        "Cloud LLM cleanup (Cerebras / Groq / OpenAI / Anthropic — needs key)"
+    } else {
+        "Cloud LLM cleanup (Cerebras / Groq / OpenAI / Anthropic — needs key) — recommended"
+    };
+    vec![
+        "Skip LLM cleanup (raw whisper output)".to_string(),
+        cloud_label.to_string(),
+        local_label.to_string(),
+    ]
+}
+
+/// Whether this host has the kind of acceleration that makes local
+/// LLM cleanup comfortable enough to recommend to a first-time user.
+/// Today: Apple Silicon (Metal/CoreML) or a Vulkan-capable GPU.
+/// CUDA / ROCm / NPU detection lands when those backends are wired.
+fn host_has_llm_acceleration(snap: &HardwareSnapshot) -> bool {
+    if snap.accelerated() {
+        return true;
+    }
+    fono_core::vulkan_probe::probe().is_usable()
 }
 
 async fn configure_cloud(
@@ -348,23 +387,21 @@ async fn configure_mixed(
     );
 
     // ----- LLM side -----
-    let llm_options = &[
-        "Local LLM (qwen2.5, private, offline)",
-        "Skip LLM cleanup (raw STT output)",
-        "Cloud LLM (Cerebras / Groq / OpenAI / Anthropic)",
-    ];
+    // Standard ordering (Skip, Cloud, Local) with hardware-aware
+    // recommendation marker — see `build_llm_options` for the policy.
+    let llm_options = build_llm_options(snap);
     let llm_idx = Select::with_theme(theme)
         .with_prompt("LLM cleanup:")
-        .items(llm_options)
-        .default(usize::from(!tier.local_default()))
+        .items(&llm_options)
+        .default(0)
         .interact()?;
     match llm_idx {
-        0 => configure_local_llm(theme, config, tier)?,
-        1 => {
+        0 => {
             config.llm.backend = LlmBackend::None;
             config.llm.enabled = false;
         }
-        _ => configure_cloud_llm(theme, config, secrets).await?,
+        1 => configure_cloud_llm(theme, config, secrets).await?,
+        _ => configure_local_llm(theme, config, tier)?,
     }
 
     Ok(())
@@ -372,26 +409,23 @@ async fn configure_mixed(
 
 // ─── Language scope ────────────────────────────────────────────────────────
 
-/// Ask whether the user dictates only in English. This fast-path skips the
-/// multi-language checkbox UI and allows the model picker to offer more
-/// accurate `.en` variants. Default cursor is "Yes" because the majority of
-/// first-time users are monolingual English speakers; OS locale `en_*`
-/// reinforces the default but does not force it.
+/// Ask whether the user dictates only in English. This fast-path skips
+/// the multi-language checkbox UI and allows the model picker to offer
+/// more accurate `.en` variants. Renders as an arrow-key `Select`
+/// (No / Yes) defaulting to **No** — the safer choice that opens the
+/// full language picker; any user who really only dictates English
+/// can flip the cursor in one keypress.
 fn pick_english_only(theme: &ColorfulTheme) -> bool {
-    let os_codes = fono_core::locale::detect_os_languages();
-    let os_is_english = os_codes.iter().any(|c| c == "en");
-    // If OS locale is non-English, default to "No" so bilingual users
-    // immediately see the full checkbox picker.
-    let default_yes = os_is_english || os_codes.is_empty();
-
-    Confirm::with_theme(theme)
+    let idx = Select::with_theme(theme)
         .with_prompt(
             "Will you dictate only in English? \
              (English-only models are smaller and a bit more accurate)",
         )
-        .default(default_yes)
+        .items(&["No", "Yes"])
+        .default(0)
         .interact()
-        .unwrap_or(default_yes)
+        .unwrap_or(0);
+    idx == 1
 }
 
 /// Languages-you-dictate-in picker. Plan v3 task 7. Builds a checkbox
@@ -401,27 +435,10 @@ fn pick_english_only(theme: &ColorfulTheme) -> bool {
 /// Returning an empty `Vec` is allowed (collapses to unconstrained
 /// auto-detect at runtime).
 fn pick_languages(theme: &ColorfulTheme) -> Result<Vec<String>> {
-    // Curated common dictation languages, BCP-47 alpha-2 + display name.
-    // Order is presentation-only.
-    let curated: Vec<(&str, &str)> = vec![
-        ("en", "English"),
-        ("es", "Spanish"),
-        ("fr", "French"),
-        ("de", "German"),
-        ("it", "Italian"),
-        ("pt", "Portuguese"),
-        ("nl", "Dutch"),
-        ("ro", "Romanian"),
-        ("pl", "Polish"),
-        ("ru", "Russian"),
-        ("uk", "Ukrainian"),
-        ("tr", "Turkish"),
-        ("zh", "Chinese"),
-        ("ja", "Japanese"),
-        ("ko", "Korean"),
-        ("hi", "Hindi"),
-        ("ar", "Arabic"),
-    ];
+    // Single canonical curated list shared with the tray — picking
+    // "English" here writes the exact same `general.languages = ["en"]`
+    // that the tray's checkbox writes.
+    let curated: &[(&str, &str)] = fono_core::languages::CURATED_LANGUAGES;
     let os_codes = detect_os_languages();
 
     // Build the candidate list: curated first, plus any OS code missing
@@ -429,7 +446,7 @@ fn pick_languages(theme: &ColorfulTheme) -> Result<Vec<String>> {
     // de-duplicated; `(label, code, default_checked)` triples drive the
     // MultiSelect.
     let mut entries: Vec<(String, String, bool)> = Vec::new();
-    for (code, name) in &curated {
+    for (code, name) in curated {
         let detected = os_codes.iter().any(|c| c == code);
         let label = if detected {
             format!("{name} ({code}) — detected from OS")
@@ -697,6 +714,22 @@ fn pick_local_stt_model(
         anyhow::bail!("no local speech-to-text models available for the selected languages");
     }
 
+    // Single-option fast path: when the shortlist collapses to one
+    // entry (typically a low-RAM machine where only `tiny` fits, or
+    // English-only with one acceptable accuracy bucket), don't make
+    // the user press Enter on a list of one. Auto-pick and announce.
+    if shortlist.len() == 1 {
+        let entry = &shortlist[0];
+        let label = friendly_model_label(entry.model);
+        let size = size_label(entry.model.approx_mb);
+        let acc = entry.accuracy.label();
+        eprintln!(
+            "  Picking '{label}', {size} — accuracy: {acc} \
+             (only model that fits this machine + language selection)."
+        );
+        return Ok(entry.model.name);
+    }
+
     // Build the Select items with friendly labels.
     let items: Vec<String> = shortlist
         .iter()
@@ -789,13 +822,20 @@ fn pick_interactive_mode(
          fast machines or with cloud transcription; otherwise batch mode (full\n  \
          transcription appears when you release the hotkey) is smoother."
     );
-    let enable = Confirm::with_theme(theme)
+    // Arrow-key Select defaulting to "No" per the v0.6.0 wizard
+    // overhaul — first-time users with marginal hardware are better
+    // served by batch mode (smoother) and can flip live dictation on
+    // later from `fono settings` once they know they want it. When the
+    // hardware probe says "recommended", we still default to No but
+    // the prompt suffix tells the user it's safe to pick Yes.
+    let _ = recommend;
+    let idx = Select::with_theme(theme)
         .with_prompt(format!("Enable live dictation? — {reason}"))
-        .default(recommend)
+        .items(&["No", "Yes"])
+        .default(0)
         .interact()
-        .unwrap_or(recommend);
-
-    config.interactive.enabled = enable;
+        .unwrap_or(0);
+    config.interactive.enabled = idx == 1;
 }
 // ─── LLM configuration helpers ─────────────────────────────────────────────
 

@@ -7,6 +7,7 @@ pub mod config;
 pub mod error;
 pub mod history;
 pub mod hwcheck;
+pub mod languages;
 pub mod locale;
 pub mod notify;
 pub mod paths;

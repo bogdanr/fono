@@ -367,9 +367,18 @@ pub async fn check(
             // A prefix mismatch is "an update is available" even at the
             // same version — that's how the host-capability change
             // (e.g. plugged in an eGPU) propagates to the user without
-            // waiting for a new release.
+            // waiting for a new release. But **never** offer a
+            // downgrade: if `remote` is strictly older than `current`
+            // (e.g. v0.6.0 was published as a Draft on GitHub so the
+            // releases API still returns v0.5.0 as `latest`, while
+            // the user is already running v0.6.0), the variant-switch
+            // path would otherwise surface "Update to v0.5.0" — a
+            // bogus downgrade.
             let variant_changed = desired_prefix != current_asset_prefix;
-            if variant_changed || is_newer(&choice.tag, current_version) {
+            let remote_is_newer = is_newer(&choice.tag, current_version);
+            let remote_is_older = is_newer(current_version, &choice.tag);
+            let allow_variant_switch = variant_changed && !remote_is_older;
+            if remote_is_newer || allow_variant_switch {
                 UpdateStatus::Available {
                     current: current_version.to_string(),
                     info: UpdateInfo {
@@ -760,6 +769,42 @@ mod tests {
         assert!(is_newer("0.2.1", "v0.2.0"));
         assert!(!is_newer("v0.2.0", "0.2.0"));
         assert!(!is_newer("v0.1.9", "0.2.0"));
+    }
+
+    /// Regression: when the GitHub releases API serves an OLDER
+    /// release as "latest" (e.g. v0.6.0 was tagged but only published
+    /// as a Draft, so the API still returns v0.5.0), a CPU-variant
+    /// binary running on a Vulkan-capable host must NOT trip the
+    /// variant-switch branch into surfacing a downgrade prompt.
+    /// The combination is: remote=v0.5.0, current=0.6.0,
+    /// variant_changed=true → must yield UpToDate, not Available.
+    #[test]
+    fn variant_switch_never_offers_downgrade() {
+        let remote = "v0.5.0";
+        let current = "0.6.0";
+        let variant_changed = true;
+        let remote_is_newer = is_newer(remote, current);
+        let remote_is_older = is_newer(current, remote);
+        let allow_variant_switch = variant_changed && !remote_is_older;
+        let available = remote_is_newer || allow_variant_switch;
+        assert!(!available, "must not surface a downgrade prompt");
+    }
+
+    /// Same-version variant switch is the legitimate case the
+    /// downgrade guard must NOT block: remote and current at the same
+    /// version, but the desired prefix differs (CPU host gained a
+    /// usable GPU). Should yield Available so the user can switch
+    /// variants in place.
+    #[test]
+    fn variant_switch_at_same_version_offers_update() {
+        let remote = "v0.6.0";
+        let current = "0.6.0";
+        let variant_changed = true;
+        let remote_is_newer = is_newer(remote, current);
+        let remote_is_older = is_newer(current, remote);
+        let allow_variant_switch = variant_changed && !remote_is_older;
+        let available = remote_is_newer || allow_variant_switch;
+        assert!(available, "same-version variant switch must still fire");
     }
 
     #[test]
