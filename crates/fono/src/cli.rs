@@ -359,7 +359,7 @@ pub enum ModelsCmd {
     Verify,
 }
 
-#[allow(clippy::large_stack_frames)]
+#[allow(clippy::large_stack_frames, clippy::too_many_lines)]
 pub async fn run(cli: Cli) -> Result<()> {
     let paths = Paths::resolve().context("resolve XDG paths")?;
     paths.ensure()?;
