@@ -518,7 +518,7 @@ pub struct Overlay {
 impl Default for Overlay {
     fn default() -> Self {
         Self {
-            waveform: false,
+            waveform: true,
             style: WaveformStyle::default(),
             volume_bar: true,
         }
