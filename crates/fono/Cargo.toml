@@ -26,7 +26,7 @@ path = "src/main.rs"
 # link time by `-Wl,--allow-multiple-definition` set in
 # `.cargo/config.toml`. Slim cloud-only build:
 # `cargo build --no-default-features --features tray`.
-default = ["tray", "local-models", "llama-local", "interactive"]
+default = ["tray", "local-models", "llama-local", "interactive", "waveform"]
 tray = ["fono-tray/tray-backend"]
 local-models = ["fono-stt/whisper-local"]
 llama-local = ["fono-llm/llama-local"]
@@ -55,6 +55,13 @@ interactive = [
     "dep:futures",
     "dep:tokio-stream",
 ]
+# Standalone audio-visualisation overlay (bars/oscilloscope/pulse) for
+# batch recording, plus the right-side VU bar on the live-dictation
+# panel. Both share fono-overlay/real-window with `interactive`; having
+# both features enabled simultaneously is safe because only one spawn
+# path fires at daemon startup. GUI-only — must be absent from any
+# future server feature profile.
+waveform = ["fono-overlay/real-window"]
 # X11 key injection via enigo (libxdo). Keep opt-in: requires `libxdo`
 # at build time, which isn't installed on every Linux desktop. Users
 # without `wtype`/`ydotool` on Wayland or `enigo` on X11 still get a
@@ -98,6 +105,10 @@ crossbeam-channel = { workspace = true }
 tempfile = { workspace = true }
 futures = { workspace = true, optional = true }
 tokio-stream = { workspace = true, optional = true }
+# Real-input FFT for the `fft` and `heatmap` waveform styles. Small
+# (no_std-capable) and cheap; only invoked from the level-ticker task
+# when the standalone waveform overlay is active.
+realfft = "3"
 
 [dev-dependencies]
 async-trait = { workspace = true }

@@ -468,20 +468,59 @@ pub struct ContextMatch {
     pub window_title_regex: Option<String>,
 }
 
+/// Audio-visualisation style for the standalone waveform overlay.
+///
+/// Selects which rendering branch drives `OverlayState::Recording`
+/// when the overlay was spawned via `RealOverlay::spawn_waveform`.
+/// Has no effect when the standalone overlay is disabled.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WaveformStyle {
+    /// Scrolling amplitude bars; bars glow brighter at higher amplitude.
+    Bars,
+    /// Connected-line waveform drawn from raw PCM samples.
+    Oscilloscope,
+    /// Vertical spectrum bars from a real-input FFT — current frame
+    /// only.
+    Fft,
+    /// Rolling spectrogram (frequency on Y, time on X, magnitude as
+    /// colour).
+    Heatmap,
+}
+
+impl Default for WaveformStyle {
+    fn default() -> Self {
+        Self::Bars
+    }
+}
+
+/// Overlay panel configuration.
+///
+/// `waveform` and `style` drive the standalone bottom-centre panel
+/// shown during batch recording; `volume_bar` adds a thin vertical VU
+/// meter on the right side of the live-dictation panel. All fields
+/// are silently ignored on builds without the `real-window` /
+/// `waveform` features compiled in (server / headless).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Overlay {
-    pub enabled: bool,
-    pub position: String,
-    pub opacity: f32,
+    /// Enable the standalone waveform overlay during batch recording.
+    /// No effect when `[interactive].enabled = true` (live dictation
+    /// uses its own panel).
+    pub waveform: bool,
+    /// Visualisation style for the standalone overlay.
+    pub style: WaveformStyle,
+    /// Right-side VU bar on the live-dictation panel. Default on; set
+    /// to `false` to restore the pre-VU layout.
+    pub volume_bar: bool,
 }
 
 impl Default for Overlay {
     fn default() -> Self {
         Self {
-            enabled: true,
-            position: "bottom-right".into(),
-            opacity: 0.85,
+            waveform: false,
+            style: WaveformStyle::default(),
+            volume_bar: true,
         }
     }
 }

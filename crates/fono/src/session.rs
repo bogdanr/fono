@@ -35,6 +35,58 @@ use tracing::{debug, error, info, warn};
 /// shorter is treated as a misfire.
 pub const MIN_RECORDING: Duration = Duration::from_millis(300);
 
+/// Amplitude that maps to "full" on every audio-driven visualisation
+/// — RMS for bars + the live-dictation VU bar, peak amplitude for the
+/// oscilloscope. 0.22 is the value that looks balanced across all
+/// three at typical speaking-voice levels.
+#[cfg(any(feature = "interactive", feature = "waveform"))]
+const WAVEFORM_AMPLITUDE_CEILING: f32 = 0.22;
+
+/// FFT window size used by the `fft` and `heatmap` styles. 4096
+/// samples ≈ 256 ms at 16 kHz — gives ~3.9 Hz per source bin so
+/// 512 display bins across 0–3 kHz still average 1–2 source bins
+/// each.
+#[cfg(any(feature = "interactive", feature = "waveform"))]
+const WAVEFORM_FFT_SIZE: usize = 4096;
+
+/// Upper frequency cutoff for the FFT visualisations. Most voice
+/// intelligibility (fundamentals + first three formants) sits below
+/// 3 kHz — anything higher is sibilance or background noise that
+/// clutters the view.
+#[cfg(any(feature = "interactive", feature = "waveform"))]
+const WAVEFORM_FFT_MAX_HZ: f32 = 3000.0;
+
+/// Target display-bin count pushed to the overlay per frame. The
+/// ticker maps each display bin to a `[start, end)` slice of the
+/// source spectrum via integer multiply-divide, so non-integer
+/// source-to-display ratios distribute cleanly without rounding all
+/// the way down to a single source bin per display. 300 bars across
+/// the ~588 px content area lands each at ≈2 px wide.
+#[cfg(any(feature = "interactive", feature = "waveform"))]
+const WAVEFORM_FFT_BINS: usize = 300;
+
+/// dB range mapped to `[0.0, 1.0]` on the FFT / heatmap. Bins
+/// quieter than the floor read as 0 (so background noise doesn't
+/// light up the visualisation); louder than the ceiling saturate.
+/// −20 dB floor keeps room noise / breathing dark; +30 dB ceiling
+/// reserves the top of the scale for vowel peaks.
+#[cfg(any(feature = "interactive", feature = "waveform"))]
+const WAVEFORM_FFT_DB_FLOOR: f32 = -20.0;
+#[cfg(any(feature = "interactive", feature = "waveform"))]
+const WAVEFORM_FFT_DB_CEILING: f32 = 30.0;
+
+/// Compute RMS of an f32 slice and normalise against
+/// [`WAVEFORM_AMPLITUDE_CEILING`]. Result is clamped to `[0.0, 1.0]`.
+#[cfg(any(feature = "interactive", feature = "waveform"))]
+fn normalised_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+    let rms = (sum_sq / samples.len() as f32).sqrt();
+    (rms / WAVEFORM_AMPLITUDE_CEILING).clamp(0.0, 1.0)
+}
+
 /// Active capture session. The cpal stream itself is `!Send` on Linux
 /// (ALSA / PipeWire), so it is kept on a dedicated thread; we
 /// communicate with that thread via a stop signal and the shared
@@ -46,10 +98,19 @@ struct CaptureSession {
     started_at: Instant,
     #[allow(dead_code)]
     mode: RecordingMode,
+    /// AbortHandle for the audio-level ticker that feeds the standalone
+    /// waveform overlay. `None` when no overlay is attached or the
+    /// `waveform` feature is not compiled in.
+    #[cfg(any(feature = "interactive", feature = "waveform"))]
+    level_task: Option<tokio::task::AbortHandle>,
 }
 
 impl CaptureSession {
     fn stop_and_drain(mut self) -> (Vec<f32>, Duration) {
+        #[cfg(any(feature = "interactive", feature = "waveform"))]
+        if let Some(h) = self.level_task.take() {
+            h.abort();
+        }
         let _ = self.stop_tx.send(());
         if let Some(h) = self.join.take() {
             let _ = h.join();
@@ -228,12 +289,13 @@ pub struct SessionOrchestrator {
     #[cfg(feature = "interactive")]
     live_capture: Arc<Mutex<Option<LiveCaptureSession>>>,
     /// Long-lived overlay handle, spawned **once** at orchestrator
-    /// construction and reused across every live-dictation session.
-    /// winit refuses to construct a second `EventLoop` in the same
-    /// process, so we MUST keep this alive for the daemon's lifetime
-    /// rather than spawning per session. `None` means the overlay is
-    /// disabled in config or failed to spawn at startup.
-    #[cfg(feature = "interactive")]
+    /// construction and reused across every live-dictation and batch
+    /// recording session. winit refuses to construct a second
+    /// `EventLoop` in the same process, so we MUST keep this alive
+    /// for the daemon's lifetime rather than spawning per session.
+    /// `None` means the overlay is disabled in config or failed to
+    /// spawn at startup.
+    #[cfg(any(feature = "interactive", feature = "waveform"))]
     overlay: Arc<StdRwLock<Option<fono_overlay::OverlayHandle>>>,
     pipeline_in_flight: Arc<AtomicBool>,
     config: Arc<StdRwLock<Arc<Config>>>,
@@ -320,22 +382,55 @@ impl SessionOrchestrator {
         // `set_state` on each session start/stop. Best-effort: a
         // failure here just disables the overlay, dictation still
         // works.
-        #[cfg(feature = "interactive")]
+        //
+        // Two branches share the same long-lived handle:
+        //   * `[interactive].enabled` → the text-rendering overlay
+        //     used by live dictation. The VU bar config flag is
+        //     pushed once the handle is up.
+        //   * else if `[overlay].waveform` (and the `waveform`
+        //     feature is compiled in) → the standalone audio
+        //     visualisation overlay used during batch recording.
+        // Only one branch fires; live dictation takes precedence.
+        #[cfg(any(feature = "interactive", feature = "waveform"))]
         {
-            if config.interactive.enabled {
-                match fono_overlay::RealOverlay::spawn() {
-                    Ok(h) => {
-                        if let Ok(mut g) = orch.overlay.write() {
-                            *g = Some(h);
-                        }
-                    }
-                    Err(e) => {
-                        warn!(
-                            "overlay: spawn failed at orchestrator startup ({e:#}); \
-                             live dictation will run without an overlay window"
-                        );
+            let spawn_result: Option<std::io::Result<fono_overlay::OverlayHandle>> = {
+                #[cfg(feature = "interactive")]
+                {
+                    if config.interactive.enabled {
+                        Some(fono_overlay::RealOverlay::spawn())
+                    } else if cfg!(feature = "waveform") && config.overlay.waveform {
+                        Some(fono_overlay::RealOverlay::spawn_waveform(
+                            config.overlay.style,
+                        ))
+                    } else {
+                        None
                     }
                 }
+                #[cfg(all(feature = "waveform", not(feature = "interactive")))]
+                {
+                    if config.overlay.waveform {
+                        Some(fono_overlay::RealOverlay::spawn_waveform(
+                            config.overlay.style,
+                        ))
+                    } else {
+                        None
+                    }
+                }
+            };
+            match spawn_result {
+                Some(Ok(h)) => {
+                    h.set_volume_bar(config.overlay.volume_bar);
+                    if let Ok(mut g) = orch.overlay.write() {
+                        *g = Some(h);
+                    }
+                }
+                Some(Err(e)) => {
+                    warn!(
+                        "overlay: spawn failed at orchestrator startup ({e:#}); \
+                         dictation will run without an overlay window"
+                    );
+                }
+                None => {}
             }
         }
         // Apply [inject].paste_shortcut to the FONO_PASTE_SHORTCUT env
@@ -521,7 +616,7 @@ impl SessionOrchestrator {
             capture: Arc::new(Mutex::new(None)),
             #[cfg(feature = "interactive")]
             live_capture: Arc::new(Mutex::new(None)),
-            #[cfg(feature = "interactive")]
+            #[cfg(any(feature = "interactive", feature = "waveform"))]
             overlay: Arc::new(StdRwLock::new(None)),
             pipeline_in_flight: Arc::new(AtomicBool::new(false)),
             config: Arc::new(StdRwLock::new(config)),
@@ -533,6 +628,7 @@ impl SessionOrchestrator {
     }
 
     /// Begin recording. Refuses if a previous pipeline is still running.
+    #[allow(clippy::too_many_lines, clippy::suboptimal_flops, clippy::many_single_char_names)]
     pub async fn on_start_recording(&self, mode: RecordingMode) -> Result<()> {
         fono_stt::rate_limit_notify::reset_session_flag();
         if self.pipeline_in_flight.load(Ordering::SeqCst) {
@@ -585,12 +681,196 @@ impl SessionOrchestrator {
             "recording started (mode={:?} sample_rate={})",
             mode, self.capture_cfg.target_sample_rate
         );
+
+        // Standalone-waveform overlay: spawn the level ticker that
+        // feeds bars/pulse RMS or oscilloscope sample snapshots, and
+        // toggle the overlay to `Recording` so the panel shows up. Only
+        // fires when `[overlay].waveform = true` produced a live
+        // overlay handle at orchestrator startup. Live-dictation mode
+        // owns its own visibility transitions further down.
+        #[cfg(any(feature = "interactive", feature = "waveform"))]
+        let level_task = {
+            let want_waveform = cfg.overlay.waveform && !cfg.interactive.enabled;
+            let handle = self.overlay.read().ok().and_then(|g| g.clone());
+            match (want_waveform, handle) {
+                (true, Some(o)) => {
+                    o.set_state(fono_overlay::OverlayState::Recording { db: 0 });
+                    let style = cfg.overlay.style;
+                    let buf = Arc::clone(&buffer);
+                    let sample_rate = self.capture_cfg.target_sample_rate;
+                    let task = tokio::spawn(async move {
+                        match style {
+                            fono_core::config::WaveformStyle::Oscilloscope => {
+                                // 20 fps snapshots of the last 50 ms.
+                                // Samples are pre-scaled by
+                                // `1.0 / WAVEFORM_AMPLITUDE_CEILING`
+                                // so the trace fills a comfortable
+                                // chunk of the panel at typical
+                                // speaking-voice amplitude. The
+                                // overlay's 5000-sample ring buffer
+                                // (≈300 ms) keeps the trace scrolling
+                                // slowly enough for individual cycles
+                                // to be visible. 50 ms snapshots
+                                // (matching the tick rate) keep the
+                                // ring buffer gap-free as new chunks
+                                // are accumulated.
+                                let snap_len = (sample_rate as usize / 1000) * 50;
+                                let gain = 1.0 / WAVEFORM_AMPLITUDE_CEILING;
+                                let mut tick =
+                                    tokio::time::interval(Duration::from_millis(50));
+                                loop {
+                                    tick.tick().await;
+                                    let snap = buf
+                                        .lock()
+                                        .map(|b| {
+                                            let s = b.samples();
+                                            s[s.len().saturating_sub(snap_len)..]
+                                                .iter()
+                                                .map(|v| v * gain)
+                                                .collect::<Vec<f32>>()
+                                        })
+                                        .unwrap_or_default();
+                                    if !snap.is_empty() {
+                                        o.push_samples(snap);
+                                    }
+                                }
+                            }
+                            fono_core::config::WaveformStyle::Fft
+                            | fono_core::config::WaveformStyle::Heatmap => {
+                                // 20 fps real-input FFT. Hann window +
+                                // 1024-point R2C, then aggregate the
+                                // bottom of the spectrum (DC …
+                                // WAVEFORM_FFT_MAX_HZ) into display
+                                // bins via mean. Convert to dB and
+                                // normalise to [0, 1] so the colour /
+                                // bar mapping has a sane dynamic
+                                // range across both quiet and loud
+                                // speech.
+                                let mut planner =
+                                    realfft::RealFftPlanner::<f32>::new();
+                                let r2c = planner.plan_fft_forward(WAVEFORM_FFT_SIZE);
+                                let mut input_buf = r2c.make_input_vec();
+                                let mut output_buf = r2c.make_output_vec();
+                                let window: Vec<f32> = (0..WAVEFORM_FFT_SIZE)
+                                    .map(|i| {
+                                        let phase = std::f32::consts::PI * 2.0
+                                            * (i as f32)
+                                            / (WAVEFORM_FFT_SIZE as f32 - 1.0);
+                                        0.5 - 0.5 * phase.cos()
+                                    })
+                                    .collect();
+                                // How many source bins cover [0,
+                                // WAVEFORM_FFT_MAX_HZ]? At 16 kHz /
+                                // 4096 that's 3000 / 3.9 ≈ 768 bins.
+                                // We then carve them into `display_bins`
+                                // slices via integer multiply-divide
+                                // (see the per-bin loop below) which
+                                // handles any source-to-display ratio.
+                                let max_source_bin = ((WAVEFORM_FFT_MAX_HZ
+                                    * WAVEFORM_FFT_SIZE as f32)
+                                    / sample_rate as f32)
+                                    as usize;
+                                let display_bins =
+                                    WAVEFORM_FFT_BINS.max(1);
+                                let db_span = WAVEFORM_FFT_DB_CEILING
+                                    - WAVEFORM_FFT_DB_FLOOR;
+                                // 20 fps — matches the bars / oscilloscope
+                                // tick rate and halves the per-second
+                                // render cost vs the previous 30 fps.
+                                let mut tick =
+                                    tokio::time::interval(Duration::from_millis(50));
+                                loop {
+                                    tick.tick().await;
+                                    // Copy the most recent FFT_SIZE
+                                    // samples into the FFT input,
+                                    // applying the Hann window. If the
+                                    // buffer is shorter than the FFT,
+                                    // zero-pad on the front.
+                                    let filled = buf
+                                        .lock()
+                                        .map(|b| {
+                                            let s = b.samples();
+                                            let take = s.len().min(WAVEFORM_FFT_SIZE);
+                                            let head = WAVEFORM_FFT_SIZE - take;
+                                            for v in &mut input_buf[..head] {
+                                                *v = 0.0;
+                                            }
+                                            let tail = &s[s.len() - take..];
+                                            for (i, v) in tail.iter().enumerate() {
+                                                input_buf[head + i] = *v * window[head + i];
+                                            }
+                                            take
+                                        })
+                                        .unwrap_or(0);
+                                    if filled == 0 {
+                                        continue;
+                                    }
+                                    if r2c.process(&mut input_buf, &mut output_buf).is_err() {
+                                        continue;
+                                    }
+                                    let mut bins = vec![0.0_f32; display_bins];
+                                    for (display_i, slot) in bins.iter_mut().enumerate() {
+                                        // Integer multiply-divide
+                                        // distributes [0, max_source_bin)
+                                        // evenly across `display_bins`
+                                        // even when the ratio isn't a
+                                        // clean integer.
+                                        let start =
+                                            (display_i * max_source_bin) / display_bins;
+                                        let end_raw = ((display_i + 1)
+                                            * max_source_bin)
+                                            / display_bins;
+                                        let end = end_raw.max(start + 1).min(max_source_bin);
+                                        let mut sum = 0.0_f32;
+                                        for c in &output_buf[start..end] {
+                                            sum += c.re.hypot(c.im);
+                                        }
+                                        let mag = sum / (end - start) as f32;
+                                        let db = 20.0 * mag.max(1e-6).log10();
+                                        *slot = ((db - WAVEFORM_FFT_DB_FLOOR)
+                                            / db_span)
+                                            .clamp(0.0, 1.0);
+                                    }
+                                    o.push_fft_bins(bins);
+                                }
+                            }
+                            fono_core::config::WaveformStyle::Bars => {
+                                // 20 fps RMS for bars — fluid enough
+                                // for voice activity, half the redraw
+                                // cost of a 30 fps tick.
+                                let win_len = (sample_rate as usize / 1000) * 50;
+                                let mut tick =
+                                    tokio::time::interval(Duration::from_millis(50));
+                                loop {
+                                    tick.tick().await;
+                                    let level = buf
+                                        .lock()
+                                        .map(|b| {
+                                            let s = b.samples();
+                                            normalised_rms(
+                                                &s[s.len().saturating_sub(win_len)..],
+                                            )
+                                        })
+                                        .unwrap_or(0.0);
+                                    o.push_level(level);
+                                }
+                            }
+                        }
+                    });
+                    Some(task.abort_handle())
+                }
+                _ => None,
+            }
+        };
+
         *slot = Some(CaptureSession {
             buffer,
             stop_tx,
             join: Some(join),
             started_at: Instant::now(),
             mode,
+            #[cfg(any(feature = "interactive", feature = "waveform"))]
+            level_task,
         });
         drop(slot);
         Ok(())
@@ -608,6 +888,15 @@ impl SessionOrchestrator {
         if cfg.general.auto_mute_system {
             fono_audio::mute::set_default_sink_mute(false);
         }
+        // Standalone-waveform overlay: shift to amber `Processing`
+        // while STT runs. Live-dictation mode owns its own state
+        // transitions; only flip when this is the batch path.
+        #[cfg(any(feature = "interactive", feature = "waveform"))]
+        if cfg.overlay.waveform && !cfg.interactive.enabled {
+            if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
+                o.set_state(fono_overlay::OverlayState::Processing);
+            }
+        }
         let (samples, elapsed) = tokio::task::spawn_blocking(move || session.stop_and_drain())
             .await
             .unwrap_or_default();
@@ -619,6 +908,12 @@ impl SessionOrchestrator {
 
         if elapsed < MIN_RECORDING || samples.is_empty() {
             warn!("recording too short ({capture_ms} ms); skipping STT");
+            #[cfg(any(feature = "interactive", feature = "waveform"))]
+            if cfg.overlay.waveform && !cfg.interactive.enabled {
+                if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
+                    o.set_state(fono_overlay::OverlayState::Hidden);
+                }
+            }
             let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
             return;
         }
@@ -634,6 +929,14 @@ impl SessionOrchestrator {
             let cfg = self.current_config();
             if cfg.general.auto_mute_system {
                 fono_audio::mute::set_default_sink_mute(false);
+            }
+            // Standalone-waveform overlay: hide immediately on cancel
+            // (no pipeline phase follows).
+            #[cfg(any(feature = "interactive", feature = "waveform"))]
+            if cfg.overlay.waveform && !cfg.interactive.enabled {
+                if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
+                    o.set_state(fono_overlay::OverlayState::Hidden);
+                }
             }
             info!("recording cancelled by user");
         }
@@ -672,6 +975,17 @@ impl SessionOrchestrator {
         let injector = Arc::clone(&self.injector);
         let focus = Arc::clone(&self.focus);
         let sample_rate = self.capture_cfg.target_sample_rate;
+        // Standalone-waveform overlay: clone the handle so the pipeline
+        // task can hide the panel once STT + LLM + inject are done. The
+        // overlay was already shifted to `Processing` in
+        // `on_stop_recording`; we just clear it back to `Hidden` on
+        // every terminal outcome.
+        #[cfg(any(feature = "interactive", feature = "waveform"))]
+        let overlay = if config.overlay.waveform && !config.interactive.enabled {
+            self.overlay.read().ok().and_then(|g| g.clone())
+        } else {
+            None
+        };
 
         in_flight.store(true, Ordering::SeqCst);
         tokio::spawn(async move {
@@ -709,6 +1023,10 @@ impl SessionOrchestrator {
                 PipelineOutcome::Failed(msg) => {
                     error!("pipeline failed: {msg}");
                 }
+            }
+            #[cfg(any(feature = "interactive", feature = "waveform"))]
+            if let Some(o) = overlay {
+                o.set_state(fono_overlay::OverlayState::Hidden);
             }
             in_flight.store(false, Ordering::SeqCst);
             let _ = action_tx.send(HotkeyAction::ProcessingDone);
@@ -899,9 +1217,22 @@ impl SessionOrchestrator {
             .context("spawn live-capture bridge thread")?;
 
         // ---- Spawn the drain task (tokio mpsc -> Pump::push) -----
+        // Tap RMS off each chunk to feed the right-side VU bar on the
+        // overlay panel. Cheap (one pass over already-resident PCM)
+        // and keeps the pump / broadcast channel untouched. The
+        // boolean snapshot is stable for the session — config reload
+        // doesn't retroactively change running sessions.
+        let vu_overlay = if cfg.overlay.volume_bar {
+            overlay.clone()
+        } else {
+            None
+        };
         let drain_join = tokio::spawn(async move {
             let mut pump = pump;
             while let Some(chunk) = tokio_rx.recv().await {
+                if let Some(o) = vu_overlay.as_ref() {
+                    o.push_level(normalised_rms(&chunk));
+                }
                 pump.push(&chunk);
             }
             pump.finish();

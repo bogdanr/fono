@@ -257,6 +257,16 @@ fn spawn_parec(target_rate: u32) -> Result<Child> {
             "--format=s16le",
             "--channels=1",
             &format!("--rate={target_rate}"),
+            // Cap the PulseAudio fragment at 20 ms so PCM lands in
+            // small, frequent chunks. Without this PA picks a default
+            // fragment of several hundred ms — fine for plain
+            // capture, but it makes the waveform overlay's RMS tail
+            // look frozen between chunks (each tick re-reads the
+            // same bytes) and adds end-of-utterance latency to the
+            // streaming pipeline. 20 ms matches typical voice-VAD
+            // working sets and is well within PulseAudio's safe
+            // range.
+            "--latency-msec=20",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

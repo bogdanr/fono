@@ -25,20 +25,60 @@
 //!   user-event so `set_state` / `update_text` calls from the
 //!   orchestrator are reflected on screen with sub-frame latency.
 
-#![allow(clippy::suboptimal_flops, clippy::branches_sharing_code)]
+#![allow(
+    clippy::suboptimal_flops,
+    clippy::branches_sharing_code,
+    clippy::cognitive_complexity,
+    clippy::many_single_char_names
+)]
 
+use std::collections::VecDeque;
 use std::io;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use fono_core::config::WaveformStyle;
+
 use crate::OverlayState;
+
+/// How the overlay window renders the `Recording` state. `Text` keeps
+/// the existing transcript-style panel; `Waveform(style)` swaps the
+/// transcript area for an audio visualisation.
+#[derive(Debug, Clone, Copy)]
+enum OverlayMode {
+    Text,
+    Waveform(WaveformStyle),
+}
+
+/// Ring-buffer caps. 60 levels = 2 s at the 33 ms ticker cadence;
+/// 5000 samples ≈ 312 ms at 16 kHz — wide enough for the oscilloscope
+/// to scroll slowly across the panel, so individual voice cycles are
+/// visible rather than blurring into a uniform band. 120 FFT frames
+/// at 30 fps ≈ 4 s of spectrogram history.
+const LEVELS_CAP: usize = 60;
+const OSC_SAMPLES_CAP: usize = 5000;
+const FFT_FRAMES_CAP: usize = 120;
 
 /// Commands sent from the main thread to the overlay's winit thread.
 #[derive(Debug)]
 enum OverlayCmd {
     SetState(OverlayState),
     UpdateText(String),
+    /// Normalised RMS amplitude in `[0.0, 1.0]`. Drives the bars
+    /// ring buffer and the live-dictation VU bar.
+    AudioLevel(f32),
+    /// Raw f32 PCM samples (16 kHz mono). Only consumed by the
+    /// `Oscilloscope` style; kept separate from `AudioLevel` so the
+    /// higher-cadence path doesn't bloat the bar path.
+    AudioSamples(Vec<f32>),
+    /// One frame of normalised FFT magnitude bins in `[0.0, 1.0]`.
+    /// Consumed by the `Fft` style (latest frame only) and the
+    /// `Heatmap` style (rolling history).
+    FftBins(Vec<f32>),
+    /// Toggle the right-side VU bar on the live-dictation panel.
+    /// Pushed at startup once `Config.overlay.volume_bar` is known.
+    SetVolumeBar(bool),
     Shutdown,
 }
 
@@ -72,6 +112,34 @@ impl OverlayHandle {
         self.send(OverlayCmd::UpdateText(text.into()));
     }
 
+    /// Push a normalised RMS amplitude in `[0.0, 1.0]`. Used by both
+    /// the standalone waveform overlay (bars/pulse) and the live-
+    /// dictation VU bar.
+    pub fn push_level(&self, amplitude: f32) {
+        self.send(OverlayCmd::AudioLevel(amplitude));
+    }
+
+    /// Push a batch of raw f32 PCM samples (16 kHz mono). Consumed
+    /// only by the `Oscilloscope` waveform style.
+    pub fn push_samples(&self, samples: Vec<f32>) {
+        self.send(OverlayCmd::AudioSamples(samples));
+    }
+
+    /// Push one frame of normalised FFT magnitude bins. Each entry
+    /// is in `[0.0, 1.0]` (post-dB-mapping); the slice length is
+    /// fixed by the producer (typically 64). Consumed by the `Fft`
+    /// and `Heatmap` waveform styles.
+    pub fn push_fft_bins(&self, bins: Vec<f32>) {
+        self.send(OverlayCmd::FftBins(bins));
+    }
+
+    /// Enable or disable the right-side VU bar on the live-dictation
+    /// panel. Set once at orchestrator startup based on
+    /// `[overlay].volume_bar`.
+    pub fn set_volume_bar(&self, enabled: bool) {
+        self.send(OverlayCmd::SetVolumeBar(enabled));
+    }
+
     /// Stop the overlay and join its thread. Idempotent.
     pub fn shutdown(&self) {
         self.send(OverlayCmd::Shutdown);
@@ -87,14 +155,27 @@ impl OverlayHandle {
 pub struct RealOverlay;
 
 impl RealOverlay {
+    /// Spawn the standard text-based overlay used by live dictation.
+    /// `Recording` state shows the existing wrapped-transcript panel.
     pub fn spawn() -> std::io::Result<OverlayHandle> {
+        Self::spawn_with_mode(OverlayMode::Text)
+    }
+
+    /// Spawn the standalone audio-visualisation overlay used during
+    /// batch recording. `Recording` state renders the requested
+    /// waveform style instead of transcript text.
+    pub fn spawn_waveform(style: WaveformStyle) -> std::io::Result<OverlayHandle> {
+        Self::spawn_with_mode(OverlayMode::Waveform(style))
+    }
+
+    fn spawn_with_mode(mode: OverlayMode) -> std::io::Result<OverlayHandle> {
         let (tx, rx) = channel::<OverlayCmd>();
         let (proxy_tx, proxy_rx) =
             std::sync::mpsc::channel::<Result<winit::event_loop::EventLoopProxy<()>, String>>();
         let join = std::thread::Builder::new()
             .name("fono-overlay".into())
             .spawn(move || {
-                if let Err(e) = run_event_loop(rx, proxy_tx) {
+                if let Err(e) = run_event_loop(rx, proxy_tx, mode) {
                     tracing::warn!("overlay: event loop ended with error: {e:#}");
                 }
             })?;
@@ -131,6 +212,11 @@ const WIN_WIDTH: f32 = 640.0;
 /// of text; max prevents the overlay from dominating the screen.
 const WIN_MIN_HEIGHT: f32 = 80.0;
 const WIN_MAX_HEIGHT: f32 = 240.0;
+/// Fixed height for the standalone waveform overlay. Status row + a
+/// roomy ~56 px visualisation area; smaller than the live-dictation
+/// max so the panel doesn't dominate the screen during batch
+/// recording.
+const WIN_WAVEFORM_HEIGHT: f32 = 100.0;
 /// Inset from the bottom edge.
 const BOTTOM_OFFSET: u32 = 48;
 
@@ -138,6 +224,10 @@ const PADDING_X: f32 = 24.0;
 const PADDING_TOP: f32 = 14.0;
 const PADDING_BOT: f32 = 16.0;
 const ACCENT_WIDTH: f32 = 4.0;
+/// Right-side vertical VU meter on the live-dictation panel. Logical
+/// pixels — multiply by `scale` in renderers.
+const VU_BAR_WIDTH: f32 = 8.0;
+const VU_BAR_GAP: f32 = 6.0;
 const CORNER_RADIUS: f32 = 12.0;
 const STATUS_FONT_PX: f32 = 13.0;
 const TEXT_FONT_PX: f32 = 20.0;
@@ -248,6 +338,14 @@ fn blend(bg: u32, fg: u32, coverage_alpha: u8) -> u32 {
 }
 
 /// Draw a filled rounded rectangle with anti-aliased corners.
+///
+/// Hot path: ~99 % of pixels in a typical panel BG / accent-stripe
+/// fill sit in the rectilinear interior where the corner-distance
+/// computation always returns full coverage. Splitting the iteration
+/// into "AA bands" (corners + edges that touch them) and an
+/// "interior band" (a row range that's guaranteed dx == dy == 0)
+/// keeps the blend in the inner loop and skips the per-pixel sqrt
+/// for everything else.
 fn fill_round_rect(
     buf: &mut [u32],
     stride: u32,
@@ -260,48 +358,578 @@ fn fill_round_rect(
     let r = radius.min((x1 - x0) / 2.0).min((y1 - y0) / 2.0);
     let yi0 = y0.max(0.0) as i32;
     let yi1 = (y1.min(h as f32) as i32).max(yi0);
+    let xi0 = x0.max(0.0) as i32;
+    let xi1 = (x1.min(stride as f32) as i32).max(xi0);
+    if yi1 <= yi0 || xi1 <= xi0 {
+        return;
+    }
+    // Rectilinear interior bounds — pixels strictly inside this box
+    // satisfy `xf >= x0+r && xf <= x1-r && yf >= y0+r && yf <= y1-r`,
+    // which means dx == dy == 0 in the AA formula.
+    let inner_x0 = ((x0 + r).ceil() as i32).max(xi0);
+    let inner_x1 = ((x1 - r).floor() as i32).min(xi1);
+    let inner_y0 = ((y0 + r).ceil() as i32).max(yi0);
+    let inner_y1 = ((y1 - r).floor() as i32).min(yi1);
+    let r_outer_sq = (r + 0.5) * (r + 0.5);
     for yi in yi0..yi1 {
-        let yf = yi as f32 + 0.5;
-        let xi0 = x0.max(0.0) as i32;
-        let xi1 = (x1.min(stride as f32) as i32).max(xi0);
-        for xi in xi0..xi1 {
-            let xf = xi as f32 + 0.5;
-            // Distance to nearest corner — only relevant in the
-            // corner quadrants. For pixels in the rectilinear interior
-            // we just fill at full alpha.
-            let dx = if xf < x0 + r {
-                x0 + r - xf
-            } else if xf > x1 - r {
-                xf - (x1 - r)
-            } else {
-                0.0
-            };
-            let dy = if yf < y0 + r {
-                y0 + r - yf
-            } else if yf > y1 - r {
-                yf - (y1 - r)
-            } else {
-                0.0
-            };
-            let coverage = if dx == 0.0 && dy == 0.0 {
-                255u8
-            } else {
-                let d2 = dx * dx + dy * dy;
-                if d2 >= (r + 0.5) * (r + 0.5) {
-                    0
-                } else {
-                    // Soft edge across 1 px: cov = clamp(r + 0.5 - d, 0, 1).
-                    let d = d2.sqrt();
-                    let cov = (r + 0.5 - d).clamp(0.0, 1.0);
-                    (cov * 255.0) as u8
+        let in_inner_band = yi >= inner_y0 && yi < inner_y1;
+        if in_inner_band && inner_x1 > inner_x0 {
+            // Left AA edge.
+            for xi in xi0..inner_x0 {
+                fill_round_rect_aa_pixel(
+                    buf, stride, xi, yi, x0, y0, x1, y1, r, r_outer_sq, color,
+                );
+            }
+            // Interior fast path — full coverage, no distance math
+            // and no blend. Direct assignment because either:
+            //   * the pixel was just cleared to 0 (panel BG fill),
+            //     and `blend(0, color, 255)` collapses to `color`
+            //     exactly; or
+            //   * the pixel currently holds the panel BG colour
+            //     (accent stripe), and full-coverage write is the
+            //     intended "draw stripe over background" semantic.
+            let row_off = (yi as u32 * stride) as usize;
+            for xi in inner_x0..inner_x1 {
+                let idx = row_off + xi as usize;
+                if let Some(slot) = buf.get_mut(idx) {
+                    *slot = color;
                 }
-            };
-            if coverage == 0 {
+            }
+            // Right AA edge.
+            for xi in inner_x1..xi1 {
+                fill_round_rect_aa_pixel(
+                    buf, stride, xi, yi, x0, y0, x1, y1, r, r_outer_sq, color,
+                );
+            }
+        } else {
+            // Top / bottom AA band — full-width AA (corners + edge
+            // strip share this path).
+            for xi in xi0..xi1 {
+                fill_round_rect_aa_pixel(
+                    buf, stride, xi, yi, x0, y0, x1, y1, r, r_outer_sq, color,
+                );
+            }
+        }
+    }
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn fill_round_rect_aa_pixel(
+    buf: &mut [u32],
+    stride: u32,
+    xi: i32,
+    yi: i32,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    r: f32,
+    r_outer_sq: f32,
+    color: u32,
+) {
+    let xf = xi as f32 + 0.5;
+    let yf = yi as f32 + 0.5;
+    let dx = if xf < x0 + r {
+        x0 + r - xf
+    } else if xf > x1 - r {
+        xf - (x1 - r)
+    } else {
+        0.0
+    };
+    let dy = if yf < y0 + r {
+        y0 + r - yf
+    } else if yf > y1 - r {
+        yf - (y1 - r)
+    } else {
+        0.0
+    };
+    let coverage = if dx == 0.0 && dy == 0.0 {
+        255u8
+    } else {
+        let d2 = dx * dx + dy * dy;
+        if d2 >= r_outer_sq {
+            return;
+        }
+        let d = d2.sqrt();
+        let cov = (r + 0.5 - d).clamp(0.0, 1.0);
+        (cov * 255.0) as u8
+    };
+    let idx = (yi as u32 * stride + xi as u32) as usize;
+    if let Some(slot) = buf.get_mut(idx) {
+        *slot = blend(*slot, color, coverage);
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Audio visualisation primitives
+// ---------------------------------------------------------------------------
+
+/// Replace the alpha byte of an ARGB colour.
+#[inline]
+fn with_alpha(color: u32, alpha: u8) -> u32 {
+    (u32::from(alpha) << 24) | (color & 0x00FF_FFFF)
+}
+
+/// Single-pixel-wide line via Bresenham, clipped to the buffer. Blends
+/// via `blend()` at the supplied coverage_alpha.
+#[allow(clippy::too_many_arguments, clippy::cast_possible_wrap)]
+fn draw_line_segment(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    color: u32,
+    coverage_alpha: u8,
+) {
+    let mut x0 = x0.round() as i32;
+    let mut y0 = y0.round() as i32;
+    let x1 = x1.round() as i32;
+    let y1 = y1.round() as i32;
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    loop {
+        if x0 >= 0 && y0 >= 0 && (x0 as u32) < stride && (y0 as u32) < h {
+            let idx = (y0 as u32 * stride + x0 as u32) as usize;
+            if let Some(slot) = buf.get_mut(idx) {
+                *slot = blend(*slot, color, coverage_alpha);
+            }
+        }
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x0 += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+/// Scrolling amplitude bars. Bars fill the content area, glowing
+/// brighter as RMS rises; a 1-pixel floor line marks the baseline.
+#[allow(clippy::too_many_arguments)]
+fn draw_waveform_bars(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    levels: &VecDeque<f32>,
+    x0: f32,
+    x1: f32,
+    y_top: f32,
+    y_bot: f32,
+    accent: u32,
+    scale: f32,
+) {
+    let n = levels.len();
+    if n == 0 {
+        return;
+    }
+    let area_w = (x1 - x0).max(0.0);
+    let slot_w = area_w / n as f32;
+    let bar_w = (slot_w - 1.0 * scale).max(1.0);
+    let area_h = (y_bot - y_top).max(0.0);
+    for (i, &v) in levels.iter().enumerate() {
+        let v = v.clamp(0.0, 1.0);
+        let bar_h = (v * area_h).max(1.0 * scale);
+        let bx0 = x0 + i as f32 * slot_w;
+        let bx1 = bx0 + bar_w;
+        let alpha = 0x33 + ((0xFF - 0x33) as f32 * v) as u32;
+        let color = with_alpha(accent, alpha as u8);
+        fill_round_rect(
+            buf,
+            stride,
+            h,
+            (bx0, y_bot - bar_h, bx1, y_bot),
+            2.0 * scale,
+            color,
+        );
+    }
+    // Floor line so silence still looks alive.
+    let floor_y = y_bot.round() as i32;
+    if floor_y >= 0 && (floor_y as u32) < h {
+        let xi0 = x0.max(0.0).round() as i32;
+        let xi1 = (x1.min(stride as f32)).round() as i32;
+        for xi in xi0..xi1 {
+            if xi < 0 {
                 continue;
             }
-            let idx = (yi as u32 * stride + xi as u32) as usize;
+            let idx = (floor_y as u32 * stride + xi as u32) as usize;
             if let Some(slot) = buf.get_mut(idx) {
-                *slot = blend(*slot, color, coverage);
+                *slot = blend(*slot, COLOR_TEXT_DIM, 0x33);
+            }
+        }
+    }
+}
+
+/// Connected-line waveform centred on the content area. Subsamples
+/// the sample ring buffer to one column per logical pixel, drawing a
+/// 2-physical-pixel stroke.
+#[allow(clippy::too_many_arguments)]
+fn draw_oscilloscope(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    osc_samples: &VecDeque<f32>,
+    x0: f32,
+    x1: f32,
+    y_top: f32,
+    y_bot: f32,
+    accent: u32,
+    scale: f32,
+) {
+    let cols = ((x1 - x0).max(1.0) as usize).max(1);
+    let n = osc_samples.len();
+    let y_mid = (y_top + y_bot) * 0.5;
+    let half_h = (y_bot - y_top) * 0.5;
+    // Subtle centre guide.
+    let guide_y = y_mid.round() as i32;
+    if guide_y >= 0 && (guide_y as u32) < h {
+        let xi0 = x0.max(0.0).round() as i32;
+        let xi1 = (x1.min(stride as f32)).round() as i32;
+        for xi in xi0..xi1 {
+            if xi < 0 {
+                continue;
+            }
+            let idx = (guide_y as u32 * stride + xi as u32) as usize;
+            if let Some(slot) = buf.get_mut(idx) {
+                *slot = blend(*slot, COLOR_TEXT_DIM, 0x22);
+            }
+        }
+    }
+    if n == 0 {
+        return;
+    }
+    let map_y = |amp: f32| -> f32 {
+        let amp = amp.clamp(-1.0, 1.0);
+        (y_mid - amp * half_h).clamp(y_top, y_bot)
+    };
+    // Walk one pixel column at a time and decimate the ring buffer
+    // across the whole viewport. With ~5000 samples in the buffer and
+    // ~600 columns, this picks roughly every 8th sample — enough to
+    // preserve voice fundamentals while letting the visible window
+    // span ~300 ms of audio (a "slow" sweep that exposes individual
+    // cycles instead of a uniform blur).
+    let mut prev: Option<(f32, f32)> = None;
+    for px in 0..cols {
+        let frac = if cols <= 1 {
+            0.0
+        } else {
+            px as f32 / (cols - 1) as f32
+        };
+        let xf = x0 + frac * (x1 - x0);
+        let sample_idx = (frac * (n.saturating_sub(1)) as f32) as usize;
+        let amp = osc_samples[sample_idx.min(n - 1)];
+        let yf = map_y(amp);
+        if let Some((px0, py0)) = prev {
+            draw_line_segment(buf, stride, h, px0, py0, xf, yf, accent, 0xFF);
+            // Cheap 2-pixel stroke: shadow line one physical px down.
+            let off = scale.max(1.0);
+            draw_line_segment(
+                buf,
+                stride,
+                h,
+                px0,
+                py0 + off,
+                xf,
+                yf + off,
+                accent,
+                0x80,
+            );
+        }
+        prev = Some((xf, yf));
+    }
+}
+
+/// Vertical VU meter anchored to the right edge of the panel during
+/// live dictation. Filled from the bottom up; the unfilled portion
+/// stays as a faint ghost track so the bar's bounds are always
+/// visible.
+#[allow(clippy::too_many_arguments)]
+fn draw_vu_bar(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    level: f32,
+    x_right: f32,
+    y_top: f32,
+    y_bot: f32,
+    accent: u32,
+    scale: f32,
+) {
+    let level = level.clamp(0.0, 1.0);
+    let bar_w = VU_BAR_WIDTH * scale;
+    let radius = bar_w * 0.5;
+    let x0 = x_right - bar_w;
+    let x1 = x_right;
+    if x0 >= x1 || y_top >= y_bot {
+        return;
+    }
+    // Ghost track full-height.
+    let ghost = with_alpha(accent, 0x22);
+    fill_round_rect(buf, stride, h, (x0, y_top, x1, y_bot), radius, ghost);
+    // Filled portion, anchored to bottom.
+    let fill_h = level * (y_bot - y_top);
+    if fill_h > 0.0 {
+        fill_round_rect(
+            buf,
+            stride,
+            h,
+            (x0, y_bot - fill_h, x1, y_bot),
+            radius,
+            with_alpha(accent, 0xFF),
+        );
+    }
+}
+
+/// Spectrum bars (left-to-right = low → high frequency). Each bin's
+/// height tracks the magnitude pushed by the FFT producer; alpha
+/// glows with magnitude so quiet bins look subdued. Bars are drawn
+/// as pixel-aligned solid rects (no rounded corners, no AA) so
+/// adjacent bars share an exact pixel boundary — at 300 bins ÷
+/// 588 px content area the slots are fractional (≈1.96 px) and any
+/// AA between bars would leak through as a sub-pixel sliver.
+#[allow(clippy::too_many_arguments)]
+fn draw_fft(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    bins: &[f32],
+    x0: f32,
+    x1: f32,
+    y_top: f32,
+    y_bot: f32,
+    accent: u32,
+    scale: f32,
+) {
+    if bins.is_empty() {
+        return;
+    }
+    let area_w = (x1 - x0).max(0.0);
+    let area_h = (y_bot - y_top).max(0.0);
+    let bin_count = bins.len() as f32;
+    for (i, &v) in bins.iter().enumerate() {
+        let v = v.clamp(0.0, 1.0);
+        let bar_h = (v * area_h).max(1.0 * scale);
+        // Float bar bounds: bx1 of bar i equals bx0 of bar i+1, so
+        // the rounded pixel boundary is identical for both — no gap,
+        // no overlap, no fractional-pixel AA at the seam.
+        let bxf0 = x0 + (i as f32 / bin_count) * area_w;
+        let bxf1 = x0 + ((i + 1) as f32 / bin_count) * area_w;
+        let xi0 = bxf0.round() as i32;
+        let xi1 = bxf1.round() as i32;
+        let yi0 = (y_bot - bar_h).round() as i32;
+        let yi1 = y_bot.round() as i32;
+        if xi1 <= xi0 || yi1 <= yi0 {
+            continue;
+        }
+        let alpha = 0x33 + ((0xFF - 0x33) as f32 * v) as u32;
+        let color = with_alpha(accent, alpha as u8);
+        let cov = (color >> 24) as u8;
+        for yi in yi0..yi1 {
+            if yi < 0 || (yi as u32) >= h {
+                continue;
+            }
+            for xi in xi0..xi1 {
+                if xi < 0 || (xi as u32) >= stride {
+                    continue;
+                }
+                let idx = (yi as u32 * stride + xi as u32) as usize;
+                if let Some(slot) = buf.get_mut(idx) {
+                    *slot = blend(*slot, color, cov);
+                }
+            }
+        }
+    }
+    let _ = scale; // silence unused (kept for API symmetry)
+    // Floor line so silence still looks alive.
+    let floor_y = y_bot.round() as i32;
+    if floor_y >= 0 && (floor_y as u32) < h {
+        let xi0 = x0.max(0.0).round() as i32;
+        let xi1 = (x1.min(stride as f32)).round() as i32;
+        for xi in xi0..xi1 {
+            if xi < 0 {
+                continue;
+            }
+            let idx = (floor_y as u32 * stride + xi as u32) as usize;
+            if let Some(slot) = buf.get_mut(idx) {
+                *slot = blend(*slot, COLOR_TEXT_DIM, 0x33);
+            }
+        }
+    }
+}
+
+/// Resize and reset the heatmap cache to all-`COLOR_BG`. Returns
+/// `true` if the cache was reinitialised (so the caller knows to
+/// skip the leftward scroll for this push — the freshly-cleared
+/// buffer has no history to scroll).
+fn heatmap_cache_resize(
+    cache: &mut Vec<u32>,
+    cache_dim: &mut (u32, u32),
+    cols: u32,
+    rows: u32,
+) -> bool {
+    let needed = (cols as usize) * (rows as usize);
+    if *cache_dim == (cols, rows) && cache.len() == needed {
+        return false;
+    }
+    cache.clear();
+    cache.resize(needed, COLOR_BG);
+    *cache_dim = (cols, rows);
+    true
+}
+
+/// Render one column's worth of heatmap pixels (the full vertical
+/// frequency strip for `frame`) into `cache` at `[col_x, col_x +
+/// width)`. Pixels are stored as `blend(COLOR_BG, heatmap_color,
+/// alpha)` so `redraw` can blit them straight into the framebuffer.
+#[allow(clippy::too_many_arguments)]
+fn heatmap_render_column(
+    cache: &mut [u32],
+    cols: u32,
+    rows: u32,
+    col_x: u32,
+    width: u32,
+    frame: &[f32],
+    accent: u32,
+) {
+    if frame.is_empty() || width == 0 || rows == 0 {
+        return;
+    }
+    let bins_len = frame.len();
+    let row_span = rows.saturating_sub(1).max(1);
+    for ry in 0..rows {
+        let bin_frac = 1.0 - (ry as f32 / row_span as f32);
+        let bin_idx = (bin_frac * (bins_len - 1) as f32).round() as usize;
+        let v = *frame.get(bin_idx.min(bins_len - 1)).unwrap_or(&0.0);
+        let color = heatmap_color(v, accent);
+        let cov = (color >> 24) as u8;
+        let pre = blend(COLOR_BG, color, cov);
+        let row_off = (ry * cols) as usize;
+        for cx in col_x..(col_x + width).min(cols) {
+            if let Some(slot) = cache.get_mut(row_off + cx as usize) {
+                *slot = pre;
+            }
+        }
+    }
+}
+
+/// Apply a single FFT frame to the heatmap cache: shift everything
+/// leftward by one frame-width, then render the new frame into the
+/// rightmost columns. The cache is reinitialised to `COLOR_BG` if
+/// the panel content area has resized since the last push.
+fn heatmap_cache_push(
+    cache: &mut Vec<u32>,
+    cache_dim: &mut (u32, u32),
+    cols: u32,
+    rows: u32,
+    frame: &[f32],
+    accent: u32,
+) {
+    let was_resized = heatmap_cache_resize(cache, cache_dim, cols, rows);
+    if cols == 0 || rows == 0 {
+        return;
+    }
+    let step = (cols / FFT_FRAMES_CAP as u32).max(1);
+    if !was_resized && cols > step {
+        // Shift the whole cache leftward by `step` columns, row by
+        // row. `copy_within` handles overlapping source / destination.
+        let shift = step as usize;
+        let span = cols as usize;
+        for ry in 0..rows {
+            let row_start = (ry * cols) as usize;
+            cache.copy_within(row_start + shift..row_start + span, row_start);
+        }
+    }
+    let new_col_x = cols.saturating_sub(step);
+    heatmap_render_column(cache, cols, rows, new_col_x, step, frame, accent);
+}
+
+/// Map a normalised magnitude `[0, 1]` to a colour suitable for the
+/// spectrogram. Below 0.5 we ramp up alpha on the accent base; above
+/// 0.5 we shift towards white to highlight peaks.
+#[inline]
+fn heatmap_color(v: f32, accent: u32) -> u32 {
+    let v = v.clamp(0.0, 1.0);
+    if v < 0.5 {
+        let t = v * 2.0;
+        let alpha = (t * 255.0) as u8;
+        with_alpha(accent, alpha)
+    } else {
+        let t = (v - 0.5) * 2.0;
+        let lerp = |c: u32, target: u32| -> u32 {
+            let cf = c as f32;
+            let tf = target as f32;
+            (cf + (tf - cf) * t).round() as u32
+        };
+        let r = lerp((accent >> 16) & 0xFF, 0xFF);
+        let g = lerp((accent >> 8) & 0xFF, 0xFF);
+        let b = lerp(accent & 0xFF, 0xFF);
+        0xFF00_0000 | (r << 16) | (g << 8) | b
+    }
+}
+
+/// Rolling spectrogram. Time on X (oldest left, newest right);
+/// frequency on Y (low at the bottom, high at the top); magnitude as
+/// colour intensity.
+#[allow(clippy::too_many_arguments)]
+fn draw_heatmap(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    frames: &VecDeque<Vec<f32>>,
+    x0: f32,
+    x1: f32,
+    y_top: f32,
+    y_bot: f32,
+    accent: u32,
+) {
+    if frames.is_empty() {
+        return;
+    }
+    let frame_count = frames.len();
+    let cols = ((x1 - x0).max(1.0) as i32).max(1);
+    let rows = ((y_bot - y_top).max(1.0) as i32).max(1);
+    let bins_len = frames
+        .iter()
+        .map(Vec::len)
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let xi0 = x0.round() as i32;
+    let yi0 = y_top.round() as i32;
+    for cx in 0..cols {
+        let frame_frac = cx as f32 / (cols.max(1) - 1).max(1) as f32;
+        let frame_idx = (frame_frac * (frame_count - 1) as f32).round() as usize;
+        let frame = &frames[frame_idx.min(frame_count - 1)];
+        if frame.is_empty() {
+            continue;
+        }
+        for ry in 0..rows {
+            // y inverts so low frequencies sit at the bottom.
+            let bin_frac =
+                1.0 - (ry as f32 / (rows.max(1) - 1).max(1) as f32);
+            let bin_idx = (bin_frac * (bins_len - 1) as f32).round() as usize;
+            let v = *frame.get(bin_idx.min(frame.len() - 1)).unwrap_or(&0.0);
+            let color = heatmap_color(v, accent);
+            let px = xi0 + cx;
+            let py = yi0 + ry;
+            if px < 0 || py < 0 || (px as u32) >= stride || (py as u32) >= h {
+                continue;
+            }
+            let idx = (py as u32 * stride + px as u32) as usize;
+            if let Some(slot) = buf.get_mut(idx) {
+                *slot = blend(*slot, color, (color >> 24) as u8);
             }
         }
     }
@@ -418,6 +1046,7 @@ fn target_height(n_lines: usize) -> f32 {
 fn run_event_loop(
     rx: std::sync::mpsc::Receiver<OverlayCmd>,
     proxy_tx: std::sync::mpsc::Sender<Result<winit::event_loop::EventLoopProxy<()>, String>>,
+    mode: OverlayMode,
 ) -> Result<(), String> {
     use std::num::NonZeroU32;
     use winit::application::ApplicationHandler;
@@ -470,6 +1099,35 @@ fn run_event_loop(
         /// Cached wrapping for the current `text`; recomputed when
         /// text changes.
         wrapped: Vec<String>,
+        /// Whether this overlay was spawned as a standalone waveform
+        /// (and which style) or the regular text panel.
+        mode: OverlayMode,
+        /// Show the right-side VU bar during `LiveDictating`. Toggled
+        /// at startup via `set_volume_bar`; default off so the slim
+        /// path (and pre-config-load window) matches existing layout.
+        volume_bar: bool,
+        /// Ring buffer of normalised RMS amplitudes. Used by `Bars`
+        /// and `Pulse` standalone styles, and the live-dictation VU
+        /// bar in `Text` mode.
+        levels: VecDeque<f32>,
+        /// Ring buffer of raw PCM samples. Only consumed by the
+        /// `Oscilloscope` standalone style.
+        osc_samples: VecDeque<f32>,
+        /// Ring buffer of FFT magnitude frames. The `Fft` style only
+        /// reads the most recent frame; the `Heatmap` style scrolls
+        /// the whole buffer left-to-right as time advances.
+        fft_frames: VecDeque<Vec<f32>>,
+        /// Pre-blended heatmap pixel buffer covering the panel
+        /// content area. Each cell holds `blend(COLOR_BG,
+        /// heatmap_color, alpha)` for the frame-and-bin that ended
+        /// up there, so `redraw` can blit it into the panel
+        /// framebuffer with a straight `copy_from_slice` instead of
+        /// re-walking `cols × rows` per frame.
+        heatmap_cache: Vec<u32>,
+        /// `(cols, rows)` the cache is sized for, in physical
+        /// pixels. Reset on any geometry change so the next
+        /// `FftBins` push triggers a clean reinit.
+        heatmap_cache_dim: (u32, u32),
         rx: std::sync::mpsc::Receiver<OverlayCmd>,
     }
 
@@ -478,13 +1136,17 @@ fn run_event_loop(
             if self.window.is_some() {
                 return;
             }
+            let initial_h = match self.mode {
+                OverlayMode::Text => WIN_MIN_HEIGHT,
+                OverlayMode::Waveform(_) => WIN_WAVEFORM_HEIGHT,
+            };
             let attrs = Window::default_attributes()
                 .with_title("Fono")
                 .with_decorations(false)
                 .with_resizable(false)
                 .with_transparent(true)
                 .with_window_level(WindowLevel::AlwaysOnTop)
-                .with_inner_size(winit::dpi::LogicalSize::new(WIN_WIDTH, WIN_MIN_HEIGHT))
+                .with_inner_size(winit::dpi::LogicalSize::new(WIN_WIDTH, initial_h))
                 // Critical: don't steal focus from the user's
                 // currently-focused window. Without this, the moment
                 // the overlay maps it grabs keyboard focus and the
@@ -589,11 +1251,119 @@ fn run_event_loop(
                             self.wrapped = if let (Some(font), false) =
                                 (self.font.as_ref(), self.text.is_empty())
                             {
-                                let max_w = WIN_WIDTH - PADDING_X * 2.0 - ACCENT_WIDTH;
+                                let mut max_w = WIN_WIDTH - PADDING_X * 2.0 - ACCENT_WIDTH;
+                                if self.volume_bar
+                                    && matches!(self.state, OverlayState::LiveDictating)
+                                {
+                                    max_w -= VU_BAR_WIDTH + VU_BAR_GAP;
+                                }
                                 wrap_text(font, &self.text, TEXT_FONT_PX, max_w)
                             } else {
                                 Vec::new()
                             };
+                            if self.window.is_some() {
+                                needs_redraw = true;
+                                needs_resize = true;
+                            }
+                        }
+                    }
+                    OverlayCmd::AudioLevel(v) => {
+                        let v = v.clamp(0.0, 1.0);
+                        if self.levels.len() == LEVELS_CAP {
+                            self.levels.pop_front();
+                        }
+                        self.levels.push_back(v);
+                        if self.window.is_some()
+                            && !matches!(self.state, OverlayState::Hidden)
+                        {
+                            needs_redraw = true;
+                        }
+                    }
+                    OverlayCmd::AudioSamples(s) => {
+                        self.osc_samples.extend(s);
+                        while self.osc_samples.len() > OSC_SAMPLES_CAP {
+                            self.osc_samples.pop_front();
+                        }
+                        if matches!(self.mode, OverlayMode::Waveform(WaveformStyle::Oscilloscope))
+                            && self.window.is_some()
+                            && !matches!(self.state, OverlayState::Hidden)
+                        {
+                            needs_redraw = true;
+                        }
+                    }
+                    OverlayCmd::FftBins(bins) => {
+                        if self.fft_frames.len() == FFT_FRAMES_CAP {
+                            self.fft_frames.pop_front();
+                        }
+                        self.fft_frames.push_back(bins);
+                        // Heatmap mode: incrementally update the
+                        // pre-blended pixel cache so `redraw` can
+                        // memcpy it straight into the framebuffer
+                        // instead of re-walking `cols × rows` per
+                        // frame.
+                        if matches!(
+                            self.mode,
+                            OverlayMode::Waveform(WaveformStyle::Heatmap),
+                        ) {
+                            if let Some(window) = self.window.as_ref() {
+                                let scale = window.scale_factor() as f32;
+                                let size = window.inner_size();
+                                let cx0 = ((PADDING_X + ACCENT_WIDTH) * scale).round()
+                                    as i32;
+                                let cx1 = (size.width as f32 - PADDING_X * scale).round()
+                                    as i32;
+                                let pad_top = PADDING_TOP * scale;
+                                let cy0 = (pad_top
+                                    + STATUS_FONT_PX * scale
+                                    + STATUS_TO_TEXT * scale)
+                                    .round() as i32;
+                                let cy1 = (size.height as f32 - PADDING_BOT * scale)
+                                    .round()
+                                    as i32;
+                                let cols = (cx1 - cx0).max(0) as u32;
+                                let rows = (cy1 - cy0).max(0) as u32;
+                                if let Some(latest) = self.fft_frames.back() {
+                                    let accent = accent_color(self.state);
+                                    heatmap_cache_push(
+                                        &mut self.heatmap_cache,
+                                        &mut self.heatmap_cache_dim,
+                                        cols,
+                                        rows,
+                                        latest,
+                                        accent,
+                                    );
+                                }
+                            }
+                        }
+                        if matches!(
+                            self.mode,
+                            OverlayMode::Waveform(
+                                WaveformStyle::Fft | WaveformStyle::Heatmap,
+                            ),
+                        ) && self.window.is_some()
+                            && !matches!(self.state, OverlayState::Hidden)
+                        {
+                            needs_redraw = true;
+                        }
+                    }
+                    OverlayCmd::SetVolumeBar(enabled) => {
+                        if self.volume_bar != enabled {
+                            self.volume_bar = enabled;
+                            // Re-wrap so the text width matches the new
+                            // bar visibility.
+                            if let (Some(font), false) =
+                                (self.font.as_ref(), self.text.is_empty())
+                            {
+                                let mut max_w =
+                                    WIN_WIDTH - PADDING_X * 2.0 - ACCENT_WIDTH;
+                                if self.volume_bar
+                                    && matches!(self.state, OverlayState::LiveDictating)
+                                {
+                                    max_w -= VU_BAR_WIDTH + VU_BAR_GAP;
+                                }
+                                self.wrapped =
+                                    wrap_text(font, &self.text, TEXT_FONT_PX, max_w);
+                            }
                             if self.window.is_some() {
                                 needs_redraw = true;
                                 needs_resize = true;
@@ -606,7 +1376,7 @@ fn run_event_loop(
                     }
                 }
             }
-            if needs_resize {
+            if needs_resize && matches!(self.mode, OverlayMode::Text) {
                 if let Some(w) = self.window.as_ref() {
                     let h = target_height(self.wrapped.len());
                     let _ = w.request_inner_size(winit::dpi::LogicalSize::new(WIN_WIDTH, h));
@@ -623,10 +1393,16 @@ fn run_event_loop(
                     }
                 }
             }
-            if needs_redraw {
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
+            if needs_redraw && self.window.is_some() {
+                // Render synchronously rather than going through
+                // `request_redraw` → `RedrawRequested`. winit can
+                // coalesce / delay queued redraw events on Linux
+                // (especially for transparent override-redirect
+                // windows), which made 30-Hz audio-level pushes appear
+                // to update only every few seconds. Drawing inline
+                // bypasses that round-trip and lets the panel keep
+                // pace with the ticker.
+                redraw(self);
             }
         }
     }
@@ -649,10 +1425,10 @@ fn run_event_loop(
             return;
         };
         // Clear to fully transparent — compositor lets the desktop
-        // show through outside our rounded panel.
-        for px in buf.iter_mut() {
-            *px = 0x0000_0000;
-        }
+        // show through outside our rounded panel. `slice::fill`
+        // compiles to memset (or its SIMD equivalent), several × the
+        // throughput of the explicit per-pixel loop we used before.
+        buf.fill(0x0000_0000);
 
         // Convert logical coords to physical using the window's scale.
         let scale = window.scale_factor() as f32;
@@ -674,7 +1450,7 @@ fn run_event_loop(
             fill_round_rect(&mut buf, w, h, stripe, ACCENT_WIDTH * scale * 0.5, accent);
         }
 
-        // Text content.
+        // Status row + content (text or waveform).
         if let Some(font) = app.font.as_ref() {
             let pad_x = (PADDING_X + ACCENT_WIDTH) * scale;
             let pad_top = PADDING_TOP * scale;
@@ -694,32 +1470,152 @@ fn run_event_loop(
                     status_baseline,
                 );
             }
-            // Transcript rows.
-            if !app.wrapped.is_empty() {
-                let text_top = pad_top + STATUS_FONT_PX * scale + STATUS_TO_TEXT * scale;
-                let mut baseline = text_top + TEXT_FONT_PX * scale * 0.85;
-                let max_visible_lines = ((h as f32 - text_top - PADDING_BOT * scale)
-                    / (TEXT_FONT_PX * scale + LINE_GAP * scale))
-                    as usize;
-                let total = app.wrapped.len();
-                // If content exceeds visible space, show the TAIL —
-                // most recent text always visible.
-                let skip = total.saturating_sub(max_visible_lines.max(1));
-                for line in app.wrapped.iter().skip(skip) {
-                    draw_line(
-                        &mut buf,
-                        w,
-                        h,
-                        font,
-                        line,
-                        COLOR_TEXT,
-                        TEXT_FONT_PX * scale,
-                        pad_x,
-                        baseline,
-                    );
-                    baseline += TEXT_FONT_PX * scale + LINE_GAP * scale;
-                    if baseline > h as f32 - PADDING_BOT * scale {
-                        break;
+            // Content area.
+            let text_top = pad_top + STATUS_FONT_PX * scale + STATUS_TO_TEXT * scale;
+            match app.mode {
+                OverlayMode::Waveform(style)
+                    if matches!(app.state, OverlayState::Recording { .. }) =>
+                {
+                    let x0 = (PADDING_X + ACCENT_WIDTH) * scale;
+                    let x1 = w as f32 - PADDING_X * scale;
+                    let y_top = text_top;
+                    let y_bot = h as f32 - PADDING_BOT * scale;
+                    match style {
+                        WaveformStyle::Bars => draw_waveform_bars(
+                            &mut buf, w, h, &app.levels, x0, x1, y_top, y_bot, accent, scale,
+                        ),
+                        WaveformStyle::Oscilloscope => draw_oscilloscope(
+                            &mut buf,
+                            w,
+                            h,
+                            &app.osc_samples,
+                            x0,
+                            x1,
+                            y_top,
+                            y_bot,
+                            accent,
+                            scale,
+                        ),
+                        WaveformStyle::Fft => {
+                            if let Some(latest) = app.fft_frames.back() {
+                                draw_fft(
+                                    &mut buf, w, h, latest, x0, x1, y_top, y_bot, accent, scale,
+                                );
+                            }
+                        }
+                        WaveformStyle::Heatmap => {
+                            // Fast path: blit the pre-blended cache
+                            // built incrementally by the `FftBins`
+                            // handler. The cache already has the
+                            // panel BG composited under each pixel,
+                            // so a straight `copy_from_slice` per row
+                            // matches what the full `draw_heatmap`
+                            // walk would produce. Falls back to the
+                            // full walk when the cache hasn't caught
+                            // up to the current panel size yet
+                            // (first frame after spawn / resize).
+                            let cache_cols = (x1 - x0).round() as i32;
+                            let cache_rows = (y_bot - y_top).round() as i32;
+                            let cache_ok = cache_cols > 0
+                                && cache_rows > 0
+                                && app.heatmap_cache_dim
+                                    == (cache_cols as u32, cache_rows as u32)
+                                && app.heatmap_cache.len()
+                                    == (cache_cols * cache_rows) as usize;
+                            if cache_ok {
+                                let cx0 = x0.round() as i32;
+                                let cy0 = y_top.round() as i32;
+                                let cols_u = cache_cols as u32;
+                                let rows_u = cache_rows as u32;
+                                for ry in 0..rows_u {
+                                    let dst_y = cy0 + ry as i32;
+                                    if dst_y < 0 || (dst_y as u32) >= h {
+                                        continue;
+                                    }
+                                    let dst_x = cx0.max(0);
+                                    let skip = (dst_x - cx0).max(0) as u32;
+                                    if skip >= cols_u {
+                                        continue;
+                                    }
+                                    let dst_off =
+                                        (dst_y as u32 * w + dst_x as u32) as usize;
+                                    let src_off = (ry * cols_u + skip) as usize;
+                                    let avail_w = w.saturating_sub(dst_x as u32);
+                                    let copy_len =
+                                        (cols_u - skip).min(avail_w) as usize;
+                                    if copy_len == 0 {
+                                        continue;
+                                    }
+                                    if dst_off + copy_len <= buf.len()
+                                        && src_off + copy_len <= app.heatmap_cache.len()
+                                    {
+                                        buf[dst_off..dst_off + copy_len]
+                                            .copy_from_slice(
+                                                &app.heatmap_cache
+                                                    [src_off..src_off + copy_len],
+                                            );
+                                    }
+                                }
+                            } else {
+                                draw_heatmap(
+                                    &mut buf,
+                                    w,
+                                    h,
+                                    &app.fft_frames,
+                                    x0,
+                                    x1,
+                                    y_top,
+                                    y_bot,
+                                    accent,
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    // VU bar on the live-dictation panel — drawn before
+                    // text so that even very long lines (clipped at the
+                    // edge) don't cover it.
+                    if matches!(app.mode, OverlayMode::Text)
+                        && matches!(app.state, OverlayState::LiveDictating)
+                        && app.volume_bar
+                        && !app.levels.is_empty()
+                    {
+                        let level = app.levels.back().copied().unwrap_or(0.0);
+                        let x_right = w as f32 - PADDING_X * scale;
+                        let y_top = text_top;
+                        let y_bot = h as f32 - PADDING_BOT * scale;
+                        draw_vu_bar(&mut buf, w, h, level, x_right, y_top, y_bot, accent, scale);
+                    }
+                    // Transcript rows (text mode, or waveform mode in
+                    // non-Recording states which currently render
+                    // status-only).
+                    if !app.wrapped.is_empty() {
+                        let mut baseline = text_top + TEXT_FONT_PX * scale * 0.85;
+                        let max_visible_lines = ((h as f32 - text_top - PADDING_BOT * scale)
+                            / (TEXT_FONT_PX * scale + LINE_GAP * scale))
+                            as usize;
+                        let total = app.wrapped.len();
+                        // If content exceeds visible space, show the TAIL —
+                        // most recent text always visible.
+                        let skip = total.saturating_sub(max_visible_lines.max(1));
+                        for line in app.wrapped.iter().skip(skip) {
+                            draw_line(
+                                &mut buf,
+                                w,
+                                h,
+                                font,
+                                line,
+                                COLOR_TEXT,
+                                TEXT_FONT_PX * scale,
+                                pad_x,
+                                baseline,
+                            );
+                            baseline += TEXT_FONT_PX * scale + LINE_GAP * scale;
+                            if baseline > h as f32 - PADDING_BOT * scale {
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -735,6 +1631,13 @@ fn run_event_loop(
         state: OverlayState::Hidden,
         text: String::new(),
         wrapped: Vec::new(),
+        mode,
+        volume_bar: false,
+        levels: VecDeque::with_capacity(LEVELS_CAP),
+        osc_samples: VecDeque::with_capacity(OSC_SAMPLES_CAP),
+        fft_frames: VecDeque::with_capacity(FFT_FRAMES_CAP),
+        heatmap_cache: Vec::new(),
+        heatmap_cache_dim: (0, 0),
         rx,
     };
     event_loop

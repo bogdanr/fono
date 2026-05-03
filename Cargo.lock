@@ -1208,6 +1208,7 @@ dependencies = [
  "fono-update",
  "futures",
  "mdns-sd",
+ "realfft",
  "reqwest",
  "serde",
  "serde_json",

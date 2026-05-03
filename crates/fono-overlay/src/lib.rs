@@ -53,6 +53,22 @@ impl Overlay {
         tracing::trace!("overlay text -> {} chars", self.text.len());
     }
 
+    /// No-op stub — present so callers compile in non-`real-window`
+    /// builds (server / headless).
+    pub fn push_level(&self, _amplitude: f32) {}
+
+    /// No-op stub — present so callers compile in non-`real-window`
+    /// builds (server / headless).
+    pub fn push_samples(&self, _samples: Vec<f32>) {}
+
+    /// No-op stub — present so callers compile in non-`real-window`
+    /// builds (server / headless).
+    pub fn push_fft_bins(&self, _bins: Vec<f32>) {}
+
+    /// No-op stub — present so callers compile in non-`real-window`
+    /// builds (server / headless).
+    pub fn set_volume_bar(&self, _enabled: bool) {}
+
     #[must_use]
     pub fn state(&self) -> OverlayState {
         self.state

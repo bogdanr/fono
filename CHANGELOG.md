@@ -7,7 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.0] — 2026-05-02
+### Added
+
+- **Audio-visualisation overlay.** A new `waveform` cargo feature
+  (default-on, GUI-only) renders a 640-wide bottom-centre panel
+  during batch (push-to-talk) recording with a selectable visual
+  style: `bars` (scrolling amplitude bars, default),
+  `oscilloscope` (connected-line waveform from raw PCM), `fft`
+  (real-input spectrum bars), or `heatmap` (rolling spectrogram).
+  Configured via `[overlay].waveform = true` and
+  `[overlay].style = "bars" | "oscilloscope" | "fft" | "heatmap"`.
+  The same
+  pipeline feeds a thin right-side VU bar on the live-dictation
+  panel (`[overlay].volume_bar = true` by default), so users can
+  monitor mic level at a glance without breaking flow. Levels are
+  computed via RMS over a 50 ms window normalised against
+  `WAVEFORM_RMS_CEILING = 0.04`; the oscilloscope path snapshots
+  the last 20 ms of PCM at ~60 fps. The standalone overlay is
+  visible during `Recording`, transitions to amber `POLISHING`
+  while STT runs, and hides on completion or cancel. The
+  pre-existing `Overlay` config struct (which had unused
+  `enabled`/`position`/`opacity` fields) has been replaced in place
+  with the new shape; no other consumers existed. Per
+  `plans/2026-04-29-waveform-overlay-v2.md`.
+
+
 
 ### Added
 
