@@ -126,7 +126,6 @@ pub type PreferencesProvider = Arc<dyn Fn() -> PreferencesSnapshot + Send + Sync
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PreferencesSnapshot {
-    pub sound_feedback: bool,
     pub auto_mute_system: bool,
     pub always_warm_mic: bool,
     pub also_copy_to_clipboard: bool,
@@ -209,8 +208,6 @@ pub enum TrayAction {
     /// this to `pactl set-default-source`; the cpal branch hides
     /// the submenu so this is never fired there.
     SetInputDevice(u8),
-    /// Toggle `general.sound_feedback` (start/stop chimes).
-    SetSoundFeedback(bool),
     /// Toggle `general.auto_mute_system` (mute other audio while recording).
     SetAutoMuteSystem(bool),
     /// Toggle `general.always_warm_mic` (keep cpal stream open between dictations).
@@ -947,11 +944,6 @@ mod backend {
         // libdbusmenu-gtk) emit chatter warnings around dbusmenu but
         // render checkmarks correctly; the user prefers the proper
         // checkbox look over a `●`-prefix faux-checkmark.
-        items.push(prefs_check(
-            "Play start/stop chimes",
-            p.sound_feedback,
-            TrayAction::SetSoundFeedback,
-        ));
         items.push(prefs_check(
             "Mute system audio while recording",
             p.auto_mute_system,

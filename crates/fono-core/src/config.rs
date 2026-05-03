@@ -112,7 +112,6 @@ pub struct General {
     #[serde(default)]
     pub languages: Vec<String>,
     pub startup_autostart: bool,
-    pub sound_feedback: bool,
     pub auto_mute_system: bool,
     /// Keep the cpal input stream open continuously feeding a discarded
     /// buffer; on `StartRecording` flip a flag rather than open a new
@@ -140,7 +139,6 @@ impl Default for General {
         Self {
             languages: Vec::new(),
             startup_autostart: false,
-            sound_feedback: true,
             auto_mute_system: true,
             always_warm_mic: false,
             also_copy_to_clipboard: true,
@@ -1077,7 +1075,6 @@ mod tests {
         std::fs::write(&path, "version = 1\n[general]\nlanguages = [\"ro\"]\n").unwrap();
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.general.languages, vec!["ro"]);
-        assert!(cfg.general.sound_feedback);
         assert_eq!(cfg.stt.local.model, "small");
     }
 

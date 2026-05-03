@@ -721,15 +721,6 @@ pub async fn run(paths: &Paths, no_tray: bool, verbosity: Verbosity) -> Result<(
                     TrayAction::SetInputDevice(idx) => {
                         switch_input_device_via_tray(orch_for_tray.as_ref(), idx).await;
                     }
-                    TrayAction::SetSoundFeedback(v) => {
-                        apply_pref_via_tray(
-                            &paths,
-                            orch_for_tray.as_ref(),
-                            "sound_feedback",
-                            move |cfg| cfg.general.sound_feedback = v,
-                        )
-                        .await;
-                    }
                     TrayAction::SetAutoMuteSystem(v) => {
                         apply_pref_via_tray(
                             &paths,
@@ -1594,7 +1585,6 @@ fn preferences_snapshot_from_disk(config_path: &std::path::Path) -> fono_tray::P
     let cfg = fono_core::Config::load(config_path).unwrap_or_default();
     let waveform_style = waveform_style_to_idx(cfg.overlay.style);
     fono_tray::PreferencesSnapshot {
-        sound_feedback: cfg.general.sound_feedback,
         auto_mute_system: cfg.general.auto_mute_system,
         always_warm_mic: cfg.general.always_warm_mic,
         also_copy_to_clipboard: cfg.general.also_copy_to_clipboard,
