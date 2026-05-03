@@ -628,7 +628,11 @@ impl SessionOrchestrator {
     }
 
     /// Begin recording. Refuses if a previous pipeline is still running.
-    #[allow(clippy::too_many_lines, clippy::suboptimal_flops, clippy::many_single_char_names)]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::suboptimal_flops,
+        clippy::many_single_char_names
+    )]
     pub async fn on_start_recording(&self, mode: RecordingMode) -> Result<()> {
         fono_stt::rate_limit_notify::reset_session_flag();
         if self.pipeline_in_flight.load(Ordering::SeqCst) {
@@ -716,8 +720,7 @@ impl SessionOrchestrator {
                                 // are accumulated.
                                 let snap_len = (sample_rate as usize / 1000) * 50;
                                 let gain = 1.0 / WAVEFORM_AMPLITUDE_CEILING;
-                                let mut tick =
-                                    tokio::time::interval(Duration::from_millis(50));
+                                let mut tick = tokio::time::interval(Duration::from_millis(50));
                                 loop {
                                     tick.tick().await;
                                     let snap = buf
@@ -746,15 +749,13 @@ impl SessionOrchestrator {
                                 // bar mapping has a sane dynamic
                                 // range across both quiet and loud
                                 // speech.
-                                let mut planner =
-                                    realfft::RealFftPlanner::<f32>::new();
+                                let mut planner = realfft::RealFftPlanner::<f32>::new();
                                 let r2c = planner.plan_fft_forward(WAVEFORM_FFT_SIZE);
                                 let mut input_buf = r2c.make_input_vec();
                                 let mut output_buf = r2c.make_output_vec();
                                 let window: Vec<f32> = (0..WAVEFORM_FFT_SIZE)
                                     .map(|i| {
-                                        let phase = std::f32::consts::PI * 2.0
-                                            * (i as f32)
+                                        let phase = std::f32::consts::PI * 2.0 * (i as f32)
                                             / (WAVEFORM_FFT_SIZE as f32 - 1.0);
                                         0.5 - 0.5 * phase.cos()
                                     })
@@ -770,15 +771,12 @@ impl SessionOrchestrator {
                                     * WAVEFORM_FFT_SIZE as f32)
                                     / sample_rate as f32)
                                     as usize;
-                                let display_bins =
-                                    WAVEFORM_FFT_BINS.max(1);
-                                let db_span = WAVEFORM_FFT_DB_CEILING
-                                    - WAVEFORM_FFT_DB_FLOOR;
+                                let display_bins = WAVEFORM_FFT_BINS.max(1);
+                                let db_span = WAVEFORM_FFT_DB_CEILING - WAVEFORM_FFT_DB_FLOOR;
                                 // 20 fps — matches the bars / oscilloscope
                                 // tick rate and halves the per-second
                                 // render cost vs the previous 30 fps.
-                                let mut tick =
-                                    tokio::time::interval(Duration::from_millis(50));
+                                let mut tick = tokio::time::interval(Duration::from_millis(50));
                                 loop {
                                     tick.tick().await;
                                     // Copy the most recent FFT_SIZE
@@ -815,11 +813,9 @@ impl SessionOrchestrator {
                                         // evenly across `display_bins`
                                         // even when the ratio isn't a
                                         // clean integer.
-                                        let start =
-                                            (display_i * max_source_bin) / display_bins;
-                                        let end_raw = ((display_i + 1)
-                                            * max_source_bin)
-                                            / display_bins;
+                                        let start = (display_i * max_source_bin) / display_bins;
+                                        let end_raw =
+                                            ((display_i + 1) * max_source_bin) / display_bins;
                                         let end = end_raw.max(start + 1).min(max_source_bin);
                                         let mut sum = 0.0_f32;
                                         for c in &output_buf[start..end] {
@@ -827,8 +823,7 @@ impl SessionOrchestrator {
                                         }
                                         let mag = sum / (end - start) as f32;
                                         let db = 20.0 * mag.max(1e-6).log10();
-                                        *slot = ((db - WAVEFORM_FFT_DB_FLOOR)
-                                            / db_span)
+                                        *slot = ((db - WAVEFORM_FFT_DB_FLOOR) / db_span)
                                             .clamp(0.0, 1.0);
                                     }
                                     o.push_fft_bins(bins);
@@ -839,17 +834,14 @@ impl SessionOrchestrator {
                                 // for voice activity, half the redraw
                                 // cost of a 30 fps tick.
                                 let win_len = (sample_rate as usize / 1000) * 50;
-                                let mut tick =
-                                    tokio::time::interval(Duration::from_millis(50));
+                                let mut tick = tokio::time::interval(Duration::from_millis(50));
                                 loop {
                                     tick.tick().await;
                                     let level = buf
                                         .lock()
                                         .map(|b| {
                                             let s = b.samples();
-                                            normalised_rms(
-                                                &s[s.len().saturating_sub(win_len)..],
-                                            )
+                                            normalised_rms(&s[s.len().saturating_sub(win_len)..])
                                         })
                                         .unwrap_or(0.0);
                                     o.push_level(level);

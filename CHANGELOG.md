@@ -7,29 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-05-03
+
 ### Added
 
-- **Audio-visualisation overlay.** A new `waveform` cargo feature
-  (default-on, GUI-only) renders a 640-wide bottom-centre panel
-  during batch (push-to-talk) recording with a selectable visual
-  style: `bars` (scrolling amplitude bars, default),
-  `oscilloscope` (connected-line waveform from raw PCM), `fft`
-  (real-input spectrum bars), or `heatmap` (rolling spectrogram).
+- **Audio-visualisation overlay + live-dictation VU bar.** A new
+  `waveform` cargo feature (default-on, GUI-only) renders a 640-wide
+  bottom-centre overlay panel during batch (push-to-talk) recording
+  with a selectable style:
+  - `bars` — scrolling RMS amplitude bars; bars glow brighter at
+    higher amplitude.
+  - `oscilloscope` — connected-line waveform from raw PCM samples,
+    pre-scaled by `1.0 / WAVEFORM_AMPLITUDE_CEILING` so a typical
+    speaking voice fills a comfortable chunk of the panel; the
+    overlay's 5000-sample (~300 ms) ring buffer scrolls slowly
+    enough for individual cycles to be visible.
+  - `fft` — real-input spectrum bars from a 4096-pt Hann-windowed
+    FFT, aggregated into 300 display bins covering 0–3 kHz with a
+    −20 … +30 dB normalisation. Bars are pixel-tiled (no AA gap)
+    so the spectrum reads as a continuous gradient.
+  - `heatmap` — rolling spectrogram (frequency on Y, time on X,
+    magnitude as colour intensity), backed by a pre-blended pixel
+    cache that scrolls leftward by one frame-width per FFT push so
+    `redraw` is a straight blit.
+
   Configured via `[overlay].waveform = true` and
   `[overlay].style = "bars" | "oscilloscope" | "fft" | "heatmap"`.
-  The same
-  pipeline feeds a thin right-side VU bar on the live-dictation
-  panel (`[overlay].volume_bar = true` by default), so users can
-  monitor mic level at a glance without breaking flow. Levels are
-  computed via RMS over a 50 ms window normalised against
-  `WAVEFORM_RMS_CEILING = 0.04`; the oscilloscope path snapshots
-  the last 20 ms of PCM at ~60 fps. The standalone overlay is
-  visible during `Recording`, transitions to amber `POLISHING`
-  while STT runs, and hides on completion or cancel. The
-  pre-existing `Overlay` config struct (which had unused
-  `enabled`/`position`/`opacity` fields) has been replaced in place
-  with the new shape; no other consumers existed. Per
-  `plans/2026-04-29-waveform-overlay-v2.md`.
+  The standalone overlay is visible during `Recording`, transitions
+  to amber `POLISHING` while STT runs, and hides on completion or
+  cancel.
+
+- **Live-dictation VU bar.** When `[interactive].enabled = true`
+  the live-dictation panel now grows a thin right-side vertical
+  meter that tracks microphone level in real time
+  (`[overlay].volume_bar = true` by default). Drives off the same
+  `OverlayCmd::AudioLevel` pipeline as the `bars` waveform style,
+  so users can see whether their voice is too quiet without
+  interrupting the transcript.
+
+- **Smoother audio capture for visualisation + streaming.** The
+  Linux PulseAudio backend now invokes `parec --latency-msec=20`
+  so PCM lands in small frequent chunks (~20 ms). Without this PA
+  picked a default fragment of several hundred ms, which made the
+  waveform overlay's RMS tail look frozen between chunks and added
+  end-of-utterance latency to the streaming pipeline.
+
+### Changed
+
+- The pre-existing `[overlay]` config block (which had unused
+  `enabled`/`position`/`opacity` fields) is replaced in place with
+  the new `waveform` / `style` / `volume_bar` shape. No other
+  consumers existed in the workspace.
 
 
 

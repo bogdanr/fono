@@ -376,9 +376,7 @@ fn fill_round_rect(
         if in_inner_band && inner_x1 > inner_x0 {
             // Left AA edge.
             for xi in xi0..inner_x0 {
-                fill_round_rect_aa_pixel(
-                    buf, stride, xi, yi, x0, y0, x1, y1, r, r_outer_sq, color,
-                );
+                fill_round_rect_aa_pixel(buf, stride, xi, yi, x0, y0, x1, y1, r, r_outer_sq, color);
             }
             // Interior fast path — full coverage, no distance math
             // and no blend. Direct assignment because either:
@@ -397,17 +395,13 @@ fn fill_round_rect(
             }
             // Right AA edge.
             for xi in inner_x1..xi1 {
-                fill_round_rect_aa_pixel(
-                    buf, stride, xi, yi, x0, y0, x1, y1, r, r_outer_sq, color,
-                );
+                fill_round_rect_aa_pixel(buf, stride, xi, yi, x0, y0, x1, y1, r, r_outer_sq, color);
             }
         } else {
             // Top / bottom AA band — full-width AA (corners + edge
             // strip share this path).
             for xi in xi0..xi1 {
-                fill_round_rect_aa_pixel(
-                    buf, stride, xi, yi, x0, y0, x1, y1, r, r_outer_sq, color,
-                );
+                fill_round_rect_aa_pixel(buf, stride, xi, yi, x0, y0, x1, y1, r, r_outer_sq, color);
             }
         }
     }
@@ -635,17 +629,7 @@ fn draw_oscilloscope(
             draw_line_segment(buf, stride, h, px0, py0, xf, yf, accent, 0xFF);
             // Cheap 2-pixel stroke: shadow line one physical px down.
             let off = scale.max(1.0);
-            draw_line_segment(
-                buf,
-                stride,
-                h,
-                px0,
-                py0 + off,
-                xf,
-                yf + off,
-                accent,
-                0x80,
-            );
+            draw_line_segment(buf, stride, h, px0, py0 + off, xf, yf + off, accent, 0x80);
         }
         prev = Some((xf, yf));
     }
@@ -752,7 +736,7 @@ fn draw_fft(
         }
     }
     let _ = scale; // silence unused (kept for API symmetry)
-    // Floor line so silence still looks alive.
+                   // Floor line so silence still looks alive.
     let floor_y = y_bot.round() as i32;
     if floor_y >= 0 && (floor_y as u32) < h {
         let xi0 = x0.max(0.0).round() as i32;
@@ -900,12 +884,7 @@ fn draw_heatmap(
     let frame_count = frames.len();
     let cols = ((x1 - x0).max(1.0) as i32).max(1);
     let rows = ((y_bot - y_top).max(1.0) as i32).max(1);
-    let bins_len = frames
-        .iter()
-        .map(Vec::len)
-        .max()
-        .unwrap_or(0)
-        .max(1);
+    let bins_len = frames.iter().map(Vec::len).max().unwrap_or(0).max(1);
     let xi0 = x0.round() as i32;
     let yi0 = y_top.round() as i32;
     for cx in 0..cols {
@@ -917,8 +896,7 @@ fn draw_heatmap(
         }
         for ry in 0..rows {
             // y inverts so low frequencies sit at the bottom.
-            let bin_frac =
-                1.0 - (ry as f32 / (rows.max(1) - 1).max(1) as f32);
+            let bin_frac = 1.0 - (ry as f32 / (rows.max(1) - 1).max(1) as f32);
             let bin_idx = (bin_frac * (bins_len - 1) as f32).round() as usize;
             let v = *frame.get(bin_idx.min(frame.len() - 1)).unwrap_or(&0.0);
             let color = heatmap_color(v, accent);
@@ -1273,9 +1251,7 @@ fn run_event_loop(
                             self.levels.pop_front();
                         }
                         self.levels.push_back(v);
-                        if self.window.is_some()
-                            && !matches!(self.state, OverlayState::Hidden)
-                        {
+                        if self.window.is_some() && !matches!(self.state, OverlayState::Hidden) {
                             needs_redraw = true;
                         }
                     }
@@ -1284,8 +1260,10 @@ fn run_event_loop(
                         while self.osc_samples.len() > OSC_SAMPLES_CAP {
                             self.osc_samples.pop_front();
                         }
-                        if matches!(self.mode, OverlayMode::Waveform(WaveformStyle::Oscilloscope))
-                            && self.window.is_some()
+                        if matches!(
+                            self.mode,
+                            OverlayMode::Waveform(WaveformStyle::Oscilloscope)
+                        ) && self.window.is_some()
                             && !matches!(self.state, OverlayState::Hidden)
                         {
                             needs_redraw = true;
@@ -1301,25 +1279,17 @@ fn run_event_loop(
                         // memcpy it straight into the framebuffer
                         // instead of re-walking `cols × rows` per
                         // frame.
-                        if matches!(
-                            self.mode,
-                            OverlayMode::Waveform(WaveformStyle::Heatmap),
-                        ) {
+                        if matches!(self.mode, OverlayMode::Waveform(WaveformStyle::Heatmap),) {
                             if let Some(window) = self.window.as_ref() {
                                 let scale = window.scale_factor() as f32;
                                 let size = window.inner_size();
-                                let cx0 = ((PADDING_X + ACCENT_WIDTH) * scale).round()
-                                    as i32;
-                                let cx1 = (size.width as f32 - PADDING_X * scale).round()
-                                    as i32;
+                                let cx0 = ((PADDING_X + ACCENT_WIDTH) * scale).round() as i32;
+                                let cx1 = (size.width as f32 - PADDING_X * scale).round() as i32;
                                 let pad_top = PADDING_TOP * scale;
-                                let cy0 = (pad_top
-                                    + STATUS_FONT_PX * scale
-                                    + STATUS_TO_TEXT * scale)
-                                    .round() as i32;
-                                let cy1 = (size.height as f32 - PADDING_BOT * scale)
-                                    .round()
-                                    as i32;
+                                let cy0 =
+                                    (pad_top + STATUS_FONT_PX * scale + STATUS_TO_TEXT * scale)
+                                        .round() as i32;
+                                let cy1 = (size.height as f32 - PADDING_BOT * scale).round() as i32;
                                 let cols = (cx1 - cx0).max(0) as u32;
                                 let rows = (cy1 - cy0).max(0) as u32;
                                 if let Some(latest) = self.fft_frames.back() {
@@ -1337,9 +1307,7 @@ fn run_event_loop(
                         }
                         if matches!(
                             self.mode,
-                            OverlayMode::Waveform(
-                                WaveformStyle::Fft | WaveformStyle::Heatmap,
-                            ),
+                            OverlayMode::Waveform(WaveformStyle::Fft | WaveformStyle::Heatmap,),
                         ) && self.window.is_some()
                             && !matches!(self.state, OverlayState::Hidden)
                         {
@@ -1351,18 +1319,15 @@ fn run_event_loop(
                             self.volume_bar = enabled;
                             // Re-wrap so the text width matches the new
                             // bar visibility.
-                            if let (Some(font), false) =
-                                (self.font.as_ref(), self.text.is_empty())
+                            if let (Some(font), false) = (self.font.as_ref(), self.text.is_empty())
                             {
-                                let mut max_w =
-                                    WIN_WIDTH - PADDING_X * 2.0 - ACCENT_WIDTH;
+                                let mut max_w = WIN_WIDTH - PADDING_X * 2.0 - ACCENT_WIDTH;
                                 if self.volume_bar
                                     && matches!(self.state, OverlayState::LiveDictating)
                                 {
                                     max_w -= VU_BAR_WIDTH + VU_BAR_GAP;
                                 }
-                                self.wrapped =
-                                    wrap_text(font, &self.text, TEXT_FONT_PX, max_w);
+                                self.wrapped = wrap_text(font, &self.text, TEXT_FONT_PX, max_w);
                             }
                             if self.window.is_some() {
                                 needs_redraw = true;
@@ -1482,7 +1447,16 @@ fn run_event_loop(
                     let y_bot = h as f32 - PADDING_BOT * scale;
                     match style {
                         WaveformStyle::Bars => draw_waveform_bars(
-                            &mut buf, w, h, &app.levels, x0, x1, y_top, y_bot, accent, scale,
+                            &mut buf,
+                            w,
+                            h,
+                            &app.levels,
+                            x0,
+                            x1,
+                            y_top,
+                            y_bot,
+                            accent,
+                            scale,
                         ),
                         WaveformStyle::Oscilloscope => draw_oscilloscope(
                             &mut buf,
@@ -1518,10 +1492,8 @@ fn run_event_loop(
                             let cache_rows = (y_bot - y_top).round() as i32;
                             let cache_ok = cache_cols > 0
                                 && cache_rows > 0
-                                && app.heatmap_cache_dim
-                                    == (cache_cols as u32, cache_rows as u32)
-                                && app.heatmap_cache.len()
-                                    == (cache_cols * cache_rows) as usize;
+                                && app.heatmap_cache_dim == (cache_cols as u32, cache_rows as u32)
+                                && app.heatmap_cache.len() == (cache_cols * cache_rows) as usize;
                             if cache_ok {
                                 let cx0 = x0.round() as i32;
                                 let cy0 = y_top.round() as i32;
@@ -1537,23 +1509,19 @@ fn run_event_loop(
                                     if skip >= cols_u {
                                         continue;
                                     }
-                                    let dst_off =
-                                        (dst_y as u32 * w + dst_x as u32) as usize;
+                                    let dst_off = (dst_y as u32 * w + dst_x as u32) as usize;
                                     let src_off = (ry * cols_u + skip) as usize;
                                     let avail_w = w.saturating_sub(dst_x as u32);
-                                    let copy_len =
-                                        (cols_u - skip).min(avail_w) as usize;
+                                    let copy_len = (cols_u - skip).min(avail_w) as usize;
                                     if copy_len == 0 {
                                         continue;
                                     }
                                     if dst_off + copy_len <= buf.len()
                                         && src_off + copy_len <= app.heatmap_cache.len()
                                     {
-                                        buf[dst_off..dst_off + copy_len]
-                                            .copy_from_slice(
-                                                &app.heatmap_cache
-                                                    [src_off..src_off + copy_len],
-                                            );
+                                        buf[dst_off..dst_off + copy_len].copy_from_slice(
+                                            &app.heatmap_cache[src_off..src_off + copy_len],
+                                        );
                                     }
                                 }
                             } else {
