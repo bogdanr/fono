@@ -6,7 +6,15 @@
       "Bash(git config *)",
       "Bash(git add *)",
       "Bash(git commit *)",
-      "WebFetch(domain:api.anthropic.com)"
+      "WebFetch(domain:api.anthropic.com)",
+      "Bash(cargo build *)",
+      "Bash(cargo clippy *)",
+      "Bash(awk '/^    pub async fn on_start_recording/,/^    \\\\}$/' /mnt/live/memory/data/Work/fono/crates/fono/src/session.rs)",
+      "Bash(cargo test *)",
+      "Bash(command *)",
+      "Bash(cargo run *)",
+      "Bash(cargo check *)",
+      "Bash(gh issue *)"
     ]
   }
 }
