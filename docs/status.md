@@ -2,6 +2,38 @@
 
 Last updated: 2026-05-03
 
+## 2026-05-03 — Release v0.6.1
+
+Tagged v0.6.1. Patch release focused on headless / systemd
+robustness:
+
+- Vulkan probe moved into a disposable subprocess
+  (`FONO_INTERNAL_VULKAN_PROBE=1`) so a broken ICD (Mesa `lvp`
+  worker threads, etc.) can't segfault the daemon on shutdown via
+  `dl_fini`. Result cached in a `OnceLock`; spawn / timeout /
+  parse failures collapse to `Outcome::NotAvailable`.
+- `fono_hotkey::spawn_listener` gated on `is_graphical_session()`
+  to avoid `global-hotkey` 0.6.4's `XOpenDisplay(NULL)` ->
+  `XDefaultRootWindow` segfault on hosts without `DISPLAY` /
+  `WAYLAND_DISPLAY`.
+- Implicit first-run wizard gated on `stdin().is_terminal()` so
+  `fono.service` stops crash-looping on missing config; falls back
+  to `Config::default()`. Explicit `fono setup` unchanged.
+- `sudo fono install` now waits 2 s, runs `systemctl is-active`,
+  and dumps the last 20 journal lines + the recommended follow-up
+  command when the unit fails to stay up.
+- `daemon --no-tray` flag removed (tray is already runtime-gated).
+  CLI clients try `/run/fono/fono.sock` before the per-user socket,
+  so a system-wide `fono.service` is drivable from any account.
+- `general.sound_feedback` config + tray "Start/stop chimes"
+  toggle + chime playback action removed; the v0.6.0 audio-vis
+  overlay covers the same UX role.
+- `[overlay].waveform` defaults to `true` (was `false`); existing
+  configs with an explicit value are unaffected.
+
+CHANGELOG.md and ROADMAP.md updated; Cargo.toml + Cargo.lock bumped
+0.6.0 -> 0.6.1.
+
 ## 2026-05-03 — Vulkan prewarm: silent decode at session start
 
 `plans/2026-05-03-whisper-vulkan-prewarm-v1.md` landed.

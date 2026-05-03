@@ -89,6 +89,23 @@ system-tray app and native installer on Windows.
 
 Newest first.
 
+- ![v0.6.1](https://img.shields.io/badge/v0.6.1-2026--05--03-blue?style=flat-square)
+  **Headless / systemd robustness.** Fono now starts cleanly on a
+  headless inference box with no `DISPLAY` and no TTY: the Vulkan
+  probe runs in a disposable subprocess (so a broken ICD can't
+  segfault the daemon on shutdown), the global-hotkey listener is
+  skipped when no graphical session is present, and the implicit
+  first-run wizard falls back to `Config::default()` instead of
+  crash-looping under systemd. `sudo fono install` verifies the
+  unit actually came up and dumps the last 20 journal lines on
+  failure, so a misconfigured install no longer fails silently.
+  The redundant `daemon --no-tray` flag is gone; CLI clients try
+  the system-wide IPC socket first, so the daemon under
+  `fono.service` is drivable from any user account on the box.
+  The audio-visualisation overlay (`[overlay].waveform`) is now
+  on by default; the legacy start/stop chime path is removed in
+  favour of the visual feedback shipped in v0.6.0.
+
 - ![v0.6.0](https://img.shields.io/badge/v0.6.0-2026--05--03-blue?style=flat-square)
   **Audio-visualisation overlay + live-dictation VU bar.** A new
   `waveform` cargo feature (default-on, GUI-only) renders a 640-wide

@@ -5,6 +5,77 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] — 2026-05-03
+
+### Fixed
+
+- **Robust headless / systemd startup.** Five regressions surfaced
+  when running `fono daemon` on a headless inference box (Debian 13,
+  no `DISPLAY`, systemd) all collapsed into one pass:
+  - **Vulkan probe crash on shutdown.** `ash::Entry::load()` at
+    daemon start enumerates every Vulkan ICD on the host (incl.
+    Mesa `lvp` / LLVMpipe), which spawns CPU worker threads still
+    parked in futexes when glibc `dl_fini` unmaps `libvulkan` on
+    exit — segfault. The probe now runs in a disposable subprocess
+    (re-exec self with `FONO_INTERNAL_VULKAN_PROBE=1`) and the
+    parent reads a single tab-delimited result line off stdout
+    cached in a `OnceLock`. Any spawn / timeout / parse failure
+    collapses to `Outcome::NotAvailable` so the daemon never crashes
+    on a broken Vulkan stack.
+  - **`global-hotkey` null-display crash.** `global-hotkey` 0.6.4's
+    X11 `events_processor` calls `XOpenDisplay(NULL)` and then
+    dereferences the result via `XDefaultRootWindow` without a
+    NULL check, segfaulting on hosts without `DISPLAY` /
+    `WAYLAND_DISPLAY`. `fono_hotkey::spawn_listener` is now gated
+    on `is_graphical_session()`, the same runtime check the tray
+    already uses.
+  - **Systemd crash-loop on first run.** The implicit first-run
+    wizard ran whenever `~/.config/fono/config.toml` was missing;
+    under systemd `dialoguer` aborts with `IO error: not a terminal`
+    and the unit restart-loops. The implicit wizard is now gated on
+    `stdin().is_terminal()`; with no TTY, Fono writes
+    `Config::default()` and continues. Explicit `fono setup` is
+    unchanged.
+  - **Redundant `daemon --no-tray` in the systemd unit.** `daemon`
+    is the implicit default and the tray is already runtime-gated
+    on `is_graphical_session()`, so the flag was dead weight.
+    `ExecStart` is now plain `/usr/local/bin/fono`.
+  - **Silent install failures.** `systemctl enable --now` returns
+    success the moment `ExecStart` is spawned, so a unit that
+    crashes a second later (`Restart=on-failure` loop) was invisible
+    at install time. `sudo fono install` now waits 2 s, runs
+    `systemctl is-active`, and on failure dumps the last 20 journal
+    lines plus the recommended follow-up command.
+
+### Changed
+
+- **`--no-tray` flag removed; system IPC socket tried first.** The
+  tray is already runtime-gated on `is_graphical_session()`, making
+  `--no-tray` redundant. CLI clients (`fono toggle`, `fono history`,
+  `fono use …`, …) now try the system-wide IPC socket
+  (`/run/fono/fono.sock`) before the per-user one, so a `fono`
+  process running under the system `fono.service` unit can be
+  driven from any user account on the box without per-user setup.
+  Documentation in `docs/wayland.md` and `docs/troubleshooting.md`
+  updated to match.
+- **`general.sound_feedback` config field, tray "Start/stop chimes"
+  toggle, and the chime playback action removed.** The chime path
+  was a vestige from before the audio-visualisation overlay landed
+  in v0.6.0; the overlay's bottom-centre panel + right-side VU bar
+  now serves the same "did the recording start?" feedback role
+  without spawning a separate audio process. Existing configs that
+  set the field are silently ignored — no migration needed.
+
+- **`[overlay].waveform` now defaults to `true`.** The standalone
+  batch-mode overlay was off by default; new users had to discover
+  the setting and edit `~/.config/fono/config.toml` to turn it on.
+  The push-to-talk feedback panel (volume bars / oscilloscope /
+  FFT / heatmap) is the kind of UX that's better-on-than-off.
+  Existing configs are unaffected: the field is `#[serde(default)]`
+  on the `Overlay` struct, so a config that omits the line picks
+  up the new default; configs with an explicit `waveform = false`
+  stay opted-out as the user wrote them.
+
 ## [0.6.0] — 2026-05-03
 
 ### Added
