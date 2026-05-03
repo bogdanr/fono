@@ -54,10 +54,32 @@ pub type RecentProvider = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 /// the currently-active STT and LLM backends. Polled every ~2 s; the
 /// tray repaints the active marker (`●`) when the indices change.
 ///
-/// `u8::MAX` for either index means "unknown / not in the list" and
+/// `u8::MAX` for any index means "unknown / not in the list" and
 /// renders no checkmark — useful when the active backend isn't one
 /// fono knows about (custom OpenAI-compatible endpoint etc.).
-pub type ActiveProvider = Arc<dyn Fn() -> (u8, u8) + Send + Sync>;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ActiveBackends {
+    pub stt: u8,
+    pub llm: u8,
+    pub assistant: u8,
+    pub tts: u8,
+}
+
+impl ActiveBackends {
+    /// Sentinel for "no backend known". Mirrors the per-field
+    /// `u8::MAX` convention.
+    #[must_use]
+    pub fn unknown() -> Self {
+        Self {
+            stt: u8::MAX,
+            llm: u8::MAX,
+            assistant: u8::MAX,
+            tts: u8::MAX,
+        }
+    }
+}
+
+pub type ActiveProvider = Arc<dyn Fn() -> ActiveBackends + Send + Sync>;
 
 /// Provider returning the current update label for the tray's
 /// "Update" menu item, or `None` to keep the item hidden/disabled.
@@ -245,6 +267,12 @@ pub enum TrayAction {
     /// Wipe the rolling assistant conversation history. Independent
     /// of the playback state; intended as a "fresh start" entry.
     AssistantForget,
+    /// Switch the active assistant chat backend. Index into the
+    /// `assistant_labels` slice passed to [`spawn`]. Mirrors
+    /// [`Self::UseLlm`] but persists into `[assistant].backend`.
+    UseAssistant(u8),
+    /// Switch the active TTS backend. Index into `tts_labels`.
+    UseTts(u8),
     Quit,
 }
 
@@ -312,6 +340,8 @@ pub fn spawn(
     recent_provider: RecentProvider,
     stt_labels: Vec<String>,
     llm_labels: Vec<String>,
+    assistant_labels: Vec<String>,
+    tts_labels: Vec<String>,
     active_provider: ActiveProvider,
     discovered_stt_provider: DiscoveredSttProvider,
     update_provider: UpdateProvider,
@@ -332,6 +362,8 @@ pub fn spawn(
             recent_provider,
             stt_labels,
             llm_labels,
+            assistant_labels,
+            tts_labels,
             active_provider,
             discovered_stt_provider,
             update_provider,
@@ -367,9 +399,10 @@ pub fn spawn(
 #[cfg(feature = "tray-backend")]
 mod backend {
     use super::{
-        ActiveProvider, DiscoveredSttProvider, GpuUpgradeProvider, MicrophonesProvider,
-        PreferencesProvider, PreferencesSnapshot, RecentProvider, TrayAction, TrayState,
-        UpdateProvider, AUTO_STOP_PRESETS_MS, LANGUAGE_SHORTLIST, RECENT_SLOTS, WAVEFORM_STYLES,
+        ActiveBackends, ActiveProvider, DiscoveredSttProvider, GpuUpgradeProvider,
+        MicrophonesProvider, PreferencesProvider, PreferencesSnapshot, RecentProvider, TrayAction,
+        TrayState, UpdateProvider, AUTO_STOP_PRESETS_MS, LANGUAGE_SHORTLIST, RECENT_SLOTS,
+        WAVEFORM_STYLES,
     };
     use fono_core::notify::{self, Urgency};
     use ksni::{
@@ -399,7 +432,9 @@ mod backend {
         recent: Vec<String>,
         stt_labels: Vec<String>,
         llm_labels: Vec<String>,
-        active: (u8, u8),
+        assistant_labels: Vec<String>,
+        tts_labels: Vec<String>,
+        active: ActiveBackends,
         discovered_stt: Vec<String>,
         update_label: Option<String>,
         gpu_upgrade_label: Option<String>,
@@ -458,6 +493,8 @@ mod backend {
         recent_provider: RecentProvider,
         stt_labels: Vec<String>,
         llm_labels: Vec<String>,
+        assistant_labels: Vec<String>,
+        tts_labels: Vec<String>,
         active_provider: ActiveProvider,
         discovered_stt_provider: DiscoveredSttProvider,
         update_provider: UpdateProvider,
@@ -480,6 +517,8 @@ mod backend {
                 recent_provider,
                 stt_labels,
                 llm_labels,
+                assistant_labels,
+                tts_labels,
                 active_provider,
                 discovered_stt_provider,
                 update_provider,
@@ -540,6 +579,8 @@ mod backend {
         recent_provider: RecentProvider,
         stt_labels: Vec<String>,
         llm_labels: Vec<String>,
+        assistant_labels: Vec<String>,
+        tts_labels: Vec<String>,
         active_provider: ActiveProvider,
         discovered_stt_provider: DiscoveredSttProvider,
         update_provider: UpdateProvider,
@@ -553,7 +594,9 @@ mod backend {
             recent: Vec::new(),
             stt_labels,
             llm_labels,
-            active: (u8::MAX, u8::MAX),
+            assistant_labels,
+            tts_labels,
+            active: ActiveBackends::unknown(),
             discovered_stt: Vec::new(),
             update_label: None,
             gpu_upgrade_label: None,
@@ -588,7 +631,7 @@ mod backend {
         // steady-state daemon and gives KDE Plasma fewer
         // `LayoutUpdated` events to mis-render against.
         let mut last_recent: Vec<String> = Vec::new();
-        let mut last_active: (u8, u8) = (u8::MAX, u8::MAX);
+        let mut last_active: ActiveBackends = ActiveBackends::unknown();
         let mut last_discovered_stt: Vec<String> = Vec::new();
         let mut last_upd: Option<String> = None;
         let mut last_gpu_upd: Option<String> = None;
@@ -749,7 +792,7 @@ mod backend {
             .iter()
             .enumerate()
             .map(|(i, label)| {
-                let active = u8::try_from(i).is_ok_and(|i_u8| i_u8 == t.active.0);
+                let active = u8::try_from(i).is_ok_and(|i_u8| i_u8 == t.active.stt);
                 let prefix = if active { "● " } else { "  " };
                 let idx_u8 = u8::try_from(i).unwrap_or(u8::MAX);
                 StandardItem {
@@ -820,7 +863,7 @@ mod backend {
             .iter()
             .enumerate()
             .map(|(i, label)| {
-                let active = u8::try_from(i).is_ok_and(|i_u8| i_u8 == t.active.1);
+                let active = u8::try_from(i).is_ok_and(|i_u8| i_u8 == t.active.llm);
                 let prefix = if active { "● " } else { "  " };
                 let idx_u8 = u8::try_from(i).unwrap_or(u8::MAX);
                 StandardItem {
@@ -845,6 +888,44 @@ mod backend {
             SubMenu {
                 label: "LLM backend".into(),
                 submenu: llm_items,
+                ..Default::default()
+            }
+            .into(),
+        );
+
+        // Assistant backend submenu. Independent of the LLM cleanup
+        // pipeline above — this drives `[assistant].backend`. Empty
+        // when the user hasn't enabled the assistant or hasn't
+        // configured any keys.
+        let assistant_items: Vec<MenuItem<KsniTray>> = build_indexed_submenu_items(
+            &t.assistant_labels,
+            t.active.assistant,
+            "(assistant disabled — `fono use assistant …` to enable)",
+            TrayAction::UseAssistant,
+        );
+        items.push(
+            SubMenu {
+                label: "Assistant backend".into(),
+                submenu: assistant_items,
+                ..Default::default()
+            }
+            .into(),
+        );
+
+        // TTS backend submenu — `[tts].backend`. None / Wyoming /
+        // Piper / OpenAI; clicking switches the backend via
+        // `fono use tts <name>` semantics (the daemon dispatches
+        // the right `set_active_tts` + Reload).
+        let tts_items: Vec<MenuItem<KsniTray>> = build_indexed_submenu_items(
+            &t.tts_labels,
+            t.active.tts,
+            "(tts disabled — `fono use tts …` to enable)",
+            TrayAction::UseTts,
+        );
+        items.push(
+            SubMenu {
+                label: "TTS backend".into(),
+                submenu: tts_items,
                 ..Default::default()
             }
             .into(),
@@ -1190,6 +1271,41 @@ mod backend {
         Box::new(move |t: &mut KsniTray| {
             let _ = t.actions.send(action);
         })
+    }
+
+    /// Build a list of indexed submenu items with an active marker
+    /// and a fallback "empty" disabled row. Shared by the Assistant
+    /// and TTS backend submenus to keep their structure aligned with
+    /// the STT / LLM submenus.
+    fn build_indexed_submenu_items(
+        labels: &[String],
+        active_idx: u8,
+        empty_msg: &str,
+        action_for: impl Fn(u8) -> TrayAction,
+    ) -> Vec<MenuItem<KsniTray>> {
+        if labels.is_empty() {
+            return vec![StandardItem {
+                label: empty_msg.to_string(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into()];
+        }
+        labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| {
+                let active = u8::try_from(i).is_ok_and(|i_u8| i_u8 == active_idx);
+                let prefix = if active { "● " } else { "  " };
+                let idx_u8 = u8::try_from(i).unwrap_or(u8::MAX);
+                StandardItem {
+                    label: format!("{prefix}{label}"),
+                    activate: send_action(action_for(idx_u8)),
+                    ..Default::default()
+                }
+                .into()
+            })
+            .collect()
     }
 
     fn truncate_label(s: &str, max_chars: usize) -> String {

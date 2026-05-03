@@ -32,9 +32,10 @@
 
 use anyhow::{Context, Result};
 use dialoguer::console::{Key, Term};
-use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect, Select};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, MultiSelect, Select};
 use fono_core::config::{
-    Config, LlmBackend, LlmCloud, LlmLocal, Stt, SttBackend, SttCloud, SttLocal,
+    AssistantBackend, AssistantCloud, Config, LlmBackend, LlmCloud, LlmLocal, Stt, SttBackend,
+    SttCloud, SttLocal, TtsBackend, TtsCloud, TtsWyoming,
 };
 use fono_core::hwcheck::{Affordability, HardwareSnapshot, LocalTier};
 use fono_core::locale::detect_os_languages;
@@ -77,6 +78,11 @@ pub async fn run(paths: &Paths) -> Result<()> {
         PathChoice::Mixed => configure_mixed(&theme, &mut config, &mut secrets, &snap).await?,
     }
 
+    // Voice assistant — opt-in step. Independent of the dictation
+    // pipeline above (the assistant uses its own backend selection
+    // and a TTS layer that doesn't exist on the dictation path).
+    configure_assistant(&theme, &mut config, &mut secrets).await?;
+
     config.save(&paths.config_file())?;
     if !secrets.keys.is_empty() {
         secrets.save(&paths.secrets_file())?;
@@ -110,7 +116,172 @@ pub async fn run(paths: &Paths) -> Result<()> {
         "  Default hotkeys: hold={}   toggle={}   cancel={}",
         config.hotkeys.hold, config.hotkeys.toggle, config.hotkeys.cancel
     );
+    if config.assistant.enabled {
+        println!(
+            "  Voice assistant: hold {} to ask, release to hear the answer.",
+            config.hotkeys.assistant
+        );
+    }
     println!("  Run `fono` to start the daemon, or `fono doctor` to diagnose your setup.\n");
+    Ok(())
+}
+
+/// Optional final step — set up the voice assistant (F10 hold-to-talk
+/// → STT → chat → TTS → speakers). Skips entirely if the user declines.
+/// All cloud key prompts reuse keys already present in `secrets` so a
+/// re-run is non-destructive.
+#[allow(clippy::too_many_lines)]
+async fn configure_assistant(
+    theme: &ColorfulTheme,
+    config: &mut Config,
+    secrets: &mut Secrets,
+) -> Result<()> {
+    println!();
+    println!("  ── Voice assistant (optional) ──────────────────────────────");
+    println!(
+        "  Press {} to ask a question and hear the answer through your speakers.",
+        config.hotkeys.assistant
+    );
+    println!("  Independent of dictation cleanup — different model, different key.");
+
+    let want = Confirm::with_theme(theme)
+        .with_prompt("Enable the voice assistant?")
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+    if !want {
+        config.assistant.enabled = false;
+        config.assistant.backend = AssistantBackend::None;
+        config.tts.backend = TtsBackend::None;
+        return Ok(());
+    }
+
+    // ── Assistant chat backend ──────────────────────────────────────
+    let chat_options = [
+        "Anthropic (claude-haiku-4-5) — recommended",
+        "Cerebras (llama-3.3-70b, sub-second latency)",
+        "Groq (llama-3.3-70b-versatile)",
+        "OpenAI (gpt-4o-mini)",
+        "OpenRouter",
+        "Ollama (local server)",
+        "Skip — disable assistant",
+    ];
+    let chat_idx = Select::with_theme(theme)
+        .with_prompt("Pick an assistant chat backend")
+        .items(&chat_options)
+        .default(0)
+        .interact()?;
+
+    let (backend, key_name, model): (AssistantBackend, Option<&str>, &str) = match chat_idx {
+        0 => (
+            AssistantBackend::Anthropic,
+            Some("ANTHROPIC_API_KEY"),
+            "claude-haiku-4-5-20251001",
+        ),
+        1 => (
+            AssistantBackend::Cerebras,
+            Some("CEREBRAS_API_KEY"),
+            "llama-3.3-70b",
+        ),
+        2 => (
+            AssistantBackend::Groq,
+            Some("GROQ_API_KEY"),
+            "llama-3.3-70b-versatile",
+        ),
+        3 => (
+            AssistantBackend::OpenAI,
+            Some("OPENAI_API_KEY"),
+            "gpt-4o-mini",
+        ),
+        4 => (
+            AssistantBackend::OpenRouter,
+            Some("OPENROUTER_API_KEY"),
+            "anthropic/claude-haiku-4.5",
+        ),
+        5 => (AssistantBackend::Ollama, None, "llama3.2"),
+        _ => {
+            config.assistant.enabled = false;
+            config.assistant.backend = AssistantBackend::None;
+            config.tts.backend = TtsBackend::None;
+            return Ok(());
+        }
+    };
+    if let Some(name) = key_name {
+        if let Some(k) = prompt_api_key_with_validation(theme, secrets, name).await? {
+            secrets.insert(name, k);
+        }
+    }
+    config.assistant.enabled = true;
+    config.assistant.backend = backend;
+    config.assistant.cloud = key_name.map(|n| AssistantCloud {
+        provider: n.trim_end_matches("_API_KEY").to_lowercase(),
+        api_key_ref: n.into(),
+        model: model.into(),
+    });
+
+    // ── TTS backend ─────────────────────────────────────────────────
+    // Reuse OPENAI_API_KEY if the user already entered it for chat or
+    // STT/LLM cleanup, so the OpenAI option is friction-free.
+    let openai_key_present = secrets.resolve("OPENAI_API_KEY").is_some();
+    let openai_label = if openai_key_present {
+        "OpenAI TTS (cloud, key already set) — recommended"
+    } else {
+        "OpenAI TTS (cloud, will ask for key)"
+    };
+    let tts_options = [
+        openai_label,
+        "Wyoming TTS server (e.g. wyoming-piper on the LAN)",
+        "Skip — text-only assistant (no audio reply)",
+    ];
+    let tts_default = usize::from(!openai_key_present);
+    let tts_idx = Select::with_theme(theme)
+        .with_prompt("Pick a TTS backend (assistant audio replies)")
+        .items(&tts_options)
+        .default(tts_default)
+        .interact()?;
+
+    match tts_idx {
+        0 => {
+            // OpenAI TTS — reuse existing key, or prompt.
+            if !openai_key_present {
+                if let Some(k) =
+                    prompt_api_key_with_validation(theme, secrets, "OPENAI_API_KEY").await?
+                {
+                    secrets.insert("OPENAI_API_KEY", k);
+                }
+            }
+            config.tts.backend = TtsBackend::OpenAI;
+            config.tts.cloud = Some(TtsCloud {
+                provider: "openai".into(),
+                api_key_ref: "OPENAI_API_KEY".into(),
+                model: "tts-1".into(),
+            });
+            config.tts.voice = "alloy".into();
+        }
+        1 => {
+            // Wyoming TTS — ask for the URI.
+            let default_uri = config
+                .tts
+                .wyoming
+                .as_ref()
+                .map(|w| w.uri.clone())
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| fono_tts::defaults::DEFAULT_WYOMING_URI.into());
+            let uri: String = Input::with_theme(theme)
+                .with_prompt("Wyoming TTS server URI")
+                .default(default_uri)
+                .interact_text()
+                .unwrap_or_else(|_| fono_tts::defaults::DEFAULT_WYOMING_URI.into());
+            config.tts.backend = TtsBackend::Wyoming;
+            config.tts.wyoming = Some(TtsWyoming {
+                uri,
+                ..TtsWyoming::default()
+            });
+        }
+        _ => {
+            config.tts.backend = TtsBackend::None;
+        }
+    }
     Ok(())
 }
 

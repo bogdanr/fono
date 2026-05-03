@@ -607,6 +607,20 @@ impl SessionOrchestrator {
         (stt, llm)
     }
 
+    /// Same as [`Self::active_backends`] but also reports the
+    /// assistant + TTS backend identifiers. The tray's active-marker
+    /// uses this; doctor / status output keep using the 2-tuple.
+    #[must_use]
+    pub fn active_backends_full(&self) -> (String, String, String, String) {
+        let cfg = self.current_config();
+        let stt = fono_core::providers::stt_backend_str(&cfg.stt.backend).to_string();
+        let llm = fono_core::providers::llm_backend_str(&cfg.llm.backend).to_string();
+        let assistant =
+            fono_core::providers::assistant_backend_str(&cfg.assistant.backend).to_string();
+        let tts = fono_core::providers::tts_backend_str(&cfg.tts.backend).to_string();
+        (stt, llm, assistant, tts)
+    }
+
     fn current_stt(&self) -> Arc<dyn SpeechToText> {
         Arc::clone(&self.stt.read().expect("stt lock poisoned"))
     }

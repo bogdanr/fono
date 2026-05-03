@@ -325,6 +325,36 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
             fono_core::providers::configured_stt_backends(&secrets, &config.stt.backend);
         let llm_backends: Vec<_> =
             fono_core::providers::configured_llm_backends(&secrets, &config.llm.backend);
+        // Assistant + TTS submenus mirror the STT/LLM ones. We show
+        // every "configured" backend (key present in secrets, plus
+        // None / Local / Wyoming which never need a key) and the
+        // active one even if its key is missing — same convention as
+        // STT/LLM. Snapshot at startup; users who add a key via
+        // `fono keys add` need a daemon restart to see it appear.
+        let assistant_backends: Vec<_> = fono_core::providers::all_assistant_backends()
+            .into_iter()
+            .filter(|b| {
+                let active = *b == config.assistant.backend;
+                let needs_key = fono_core::providers::assistant_requires_key(b);
+                active
+                    || !needs_key
+                    || secrets
+                        .resolve(fono_core::providers::assistant_key_env(b))
+                        .is_some()
+            })
+            .collect();
+        let tts_backends: Vec<_> = fono_core::providers::all_tts_backends()
+            .into_iter()
+            .filter(|b| {
+                let active = *b == config.tts.backend;
+                let needs_key = fono_core::providers::tts_requires_key(b);
+                active
+                    || !needs_key
+                    || secrets
+                        .resolve(fono_core::providers::tts_key_env(b))
+                        .is_some()
+            })
+            .collect();
         let stt_labels: Vec<String> = stt_backends
             .iter()
             .map(|b| fono_core::providers::stt_backend_str(b).to_string())
@@ -332,6 +362,14 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         let llm_labels: Vec<String> = llm_backends
             .iter()
             .map(|b| fono_core::providers::llm_backend_str(b).to_string())
+            .collect();
+        let assistant_labels: Vec<String> = assistant_backends
+            .iter()
+            .map(|b| fono_core::providers::assistant_backend_str(b).to_string())
+            .collect();
+        let tts_labels: Vec<String> = tts_backends
+            .iter()
+            .map(|b| fono_core::providers::tts_backend_str(b).to_string())
             .collect();
 
         // Startup diagnostic for the "tray STT/LLM submenu sometimes
@@ -361,18 +399,25 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         let orch_for_tray = orchestrator.clone();
         let config_path = paths.config_file();
         let active_provider: fono_tray::ActiveProvider = Arc::new(move || {
-            let (stt_str, llm_str) = orch_for_tray.as_ref().map_or_else(
+            let (stt_str, llm_str, assistant_str, tts_str) = orch_for_tray.as_ref().map_or_else(
                 || {
                     fono_core::Config::load(&config_path)
                         .map(|c| {
                             (
                                 fono_core::providers::stt_backend_str(&c.stt.backend).to_string(),
                                 fono_core::providers::llm_backend_str(&c.llm.backend).to_string(),
+                                fono_core::providers::assistant_backend_str(
+                                    &c.assistant.backend,
+                                )
+                                .to_string(),
+                                fono_core::providers::tts_backend_str(&c.tts.backend).to_string(),
                             )
                         })
-                        .unwrap_or_else(|_| ("local".into(), "none".into()))
+                        .unwrap_or_else(|_| {
+                            ("local".into(), "none".into(), "none".into(), "none".into())
+                        })
                 },
-                |o| o.active_backends(),
+                |o| o.active_backends_full(),
             );
             let stt_idx = stt_backends
                 .iter()
@@ -384,7 +429,22 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                 .position(|b| fono_core::providers::llm_backend_str(b) == llm_str)
                 .and_then(|i| u8::try_from(i).ok())
                 .unwrap_or(u8::MAX);
-            (stt_idx, llm_idx)
+            let assistant_idx = assistant_backends
+                .iter()
+                .position(|b| fono_core::providers::assistant_backend_str(b) == assistant_str)
+                .and_then(|i| u8::try_from(i).ok())
+                .unwrap_or(u8::MAX);
+            let tts_idx = tts_backends
+                .iter()
+                .position(|b| fono_core::providers::tts_backend_str(b) == tts_str)
+                .and_then(|i| u8::try_from(i).ok())
+                .unwrap_or(u8::MAX);
+            fono_tray::ActiveBackends {
+                stt: stt_idx,
+                llm: llm_idx,
+                assistant: assistant_idx,
+                tts: tts_idx,
+            }
         });
 
         let discovered_registry_for_tray = discovery_registry.clone();
@@ -416,6 +476,8 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
             recent_provider,
             stt_labels,
             llm_labels,
+            assistant_labels,
+            tts_labels,
             active_provider,
             discovered_stt_provider,
             {
@@ -703,6 +765,35 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
             fono_core::providers::configured_stt_backends(&secrets, &config.stt.backend);
         let llm_backends_for_dispatch: Vec<_> =
             fono_core::providers::configured_llm_backends(&secrets, &config.llm.backend);
+        // Assistant + TTS dispatch lists mirror the tray's filter
+        // (active + key-present + no-key-needed) so a click resolves
+        // back to the same backend the user saw. Rebuilt here
+        // because the active_provider closure moved the original
+        // vectors when it was constructed.
+        let assistant_backends_for_dispatch: Vec<_> = fono_core::providers::all_assistant_backends()
+            .into_iter()
+            .filter(|b| {
+                let active = *b == config.assistant.backend;
+                let needs_key = fono_core::providers::assistant_requires_key(b);
+                active
+                    || !needs_key
+                    || secrets
+                        .resolve(fono_core::providers::assistant_key_env(b))
+                        .is_some()
+            })
+            .collect();
+        let tts_backends_for_dispatch: Vec<_> = fono_core::providers::all_tts_backends()
+            .into_iter()
+            .filter(|b| {
+                let active = *b == config.tts.backend;
+                let needs_key = fono_core::providers::tts_requires_key(b);
+                active
+                    || !needs_key
+                    || secrets
+                        .resolve(fono_core::providers::tts_key_env(b))
+                        .is_some()
+            })
+            .collect();
         let update_status_tray = Arc::clone(&update_status);
         let discovered_registry_for_dispatch = discovery_registry.clone();
         let local_wyoming_fullname_for_dispatch = local_wyoming_fullname(&config);
@@ -749,6 +840,24 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                             &paths,
                             orch_for_tray.as_ref(),
                             &llm_backends_for_dispatch,
+                            idx,
+                        )
+                        .await;
+                    }
+                    TrayAction::UseAssistant(idx) => {
+                        switch_assistant_via_tray(
+                            &paths,
+                            orch_for_tray.as_ref(),
+                            &assistant_backends_for_dispatch,
+                            idx,
+                        )
+                        .await;
+                    }
+                    TrayAction::UseTts(idx) => {
+                        switch_tts_via_tray(
+                            &paths,
+                            orch_for_tray.as_ref(),
+                            &tts_backends_for_dispatch,
                             idx,
                         )
                         .await;
@@ -1601,6 +1710,117 @@ async fn switch_llm_via_tray(
             );
         }
         Err(e) => warn!("tray: LLM switch task join error: {e}"),
+    }
+}
+
+/// Switch the assistant chat backend from the tray's "Assistant
+/// backend" submenu. Persists into `[assistant]` and triggers a
+/// hot-reload so the change is live without a daemon restart.
+async fn switch_assistant_via_tray(
+    paths: &fono_core::Paths,
+    orch: Option<&Arc<crate::session::SessionOrchestrator>>,
+    backends: &[fono_core::config::AssistantBackend],
+    idx: u8,
+) {
+    let Some(backend) = backends.get(idx as usize) else {
+        warn!(
+            "tray UseAssistant({idx}): out of range (max={})",
+            backends.len()
+        );
+        return;
+    };
+    let label = fono_core::providers::assistant_backend_str(backend);
+    let config_path = paths.config_file();
+    let backend_clone = backend.clone();
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let mut cfg = fono_core::Config::load(&config_path)?;
+        crate::cli::set_active_assistant(&mut cfg, backend_clone);
+        cfg.save(&config_path)?;
+        Ok(())
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {
+            info!("tray: switched assistant to {label}");
+            if let Some(o) = orch {
+                if let Err(e) = o.reload().await {
+                    warn!("tray: assistant reload failed: {e:#}");
+                    fono_core::notify::send(
+                        "Fono — assistant reload failed",
+                        &format!("{e}"),
+                        "dialog-error",
+                        5_000,
+                        fono_core::notify::Urgency::Critical,
+                    );
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            warn!("tray: assistant switch failed: {e:#}");
+            fono_core::notify::send(
+                "Fono — assistant switch failed",
+                &format!("{e}"),
+                "dialog-error",
+                5_000,
+                fono_core::notify::Urgency::Critical,
+            );
+        }
+        Err(e) => warn!("tray: assistant switch task join error: {e}"),
+    }
+}
+
+/// Switch the TTS backend from the tray's "TTS backend" submenu.
+/// For Wyoming, the existing `[tts.wyoming].uri` is preserved if set
+/// (or the default wyoming-piper URI is filled in); for OpenAI /
+/// Piper / None the sub-block is cleared so the factory picks up the
+/// canonical env-var or a stub error.
+async fn switch_tts_via_tray(
+    paths: &fono_core::Paths,
+    orch: Option<&Arc<crate::session::SessionOrchestrator>>,
+    backends: &[fono_core::config::TtsBackend],
+    idx: u8,
+) {
+    let Some(backend) = backends.get(idx as usize) else {
+        warn!("tray UseTts({idx}): out of range (max={})", backends.len());
+        return;
+    };
+    let label = fono_core::providers::tts_backend_str(backend);
+    let config_path = paths.config_file();
+    let backend_clone = backend.clone();
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let mut cfg = fono_core::Config::load(&config_path)?;
+        crate::cli::set_active_tts(&mut cfg, backend_clone, None);
+        cfg.save(&config_path)?;
+        Ok(())
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {
+            info!("tray: switched TTS to {label}");
+            if let Some(o) = orch {
+                if let Err(e) = o.reload().await {
+                    warn!("tray: TTS reload failed: {e:#}");
+                    fono_core::notify::send(
+                        "Fono — TTS reload failed",
+                        &format!("{e}"),
+                        "dialog-error",
+                        5_000,
+                        fono_core::notify::Urgency::Critical,
+                    );
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            warn!("tray: TTS switch failed: {e:#}");
+            fono_core::notify::send(
+                "Fono — TTS switch failed",
+                &format!("{e}"),
+                "dialog-error",
+                5_000,
+                fono_core::notify::Urgency::Critical,
+            );
+        }
+        Err(e) => warn!("tray: TTS switch task join error: {e}"),
     }
 }
 
