@@ -300,7 +300,14 @@ fn verify_service_running(unit: &str) {
         return;
     }
 
-    eprintln!("  · {unit} is {} (expected `active`)", if active.is_empty() { "<unknown>" } else { active.as_str() });
+    eprintln!(
+        "  · {unit} is {} (expected `active`)",
+        if active.is_empty() {
+            "<unknown>"
+        } else {
+            active.as_str()
+        }
+    );
     eprintln!("    --- last 20 journal lines for {unit} ---");
     if let Ok(out) = Command::new("journalctl")
         .args(["-u", unit, "-n", "20", "--no-pager"])

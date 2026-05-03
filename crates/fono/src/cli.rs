@@ -385,9 +385,9 @@ pub async fn run(cli: Cli) -> Result<()> {
                     wizard::run(&paths).await?;
                 } else {
                     let cfg_path = paths.config_file();
-                    Config::default()
-                        .save(&cfg_path)
-                        .with_context(|| format!("write default config to {}", cfg_path.display()))?;
+                    Config::default().save(&cfg_path).with_context(|| {
+                        format!("write default config to {}", cfg_path.display())
+                    })?;
                     eprintln!(
                         "fono: no interactive terminal detected; wrote default config to {}",
                         cfg_path.display()
