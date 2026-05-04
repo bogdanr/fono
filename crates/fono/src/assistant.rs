@@ -263,6 +263,28 @@ pub async fn run_assistant_turn(
         "assistant turn done"
     );
 
+    // FOLLOW-UP — playback-drain wait. This function returns the
+    // moment the LLM stream ends and the last sentence has been
+    // enqueued, but the `AudioPlayback` worker still has several
+    // seconds of audio in its queue. The caller's cleanup closure
+    // (see `SessionOrchestrator::on_assistant_hold_release`) then
+    // immediately aborts the thinking-animation task, hides the
+    // overlay, flips the tray back to Idle, and emits
+    // `ProcessingDone` — so visually the assistant looks "done"
+    // while the user is still hearing the reply.
+    //
+    // The fix is a cooperative drain poll right here: loop on
+    // `state.lock().await.playback.as_ref().map(|p| p.is_idle())`
+    // (with the same `notify` select-arm so Escape / barge-in still
+    // wins), break when idle. `AudioPlayback::is_idle()` already
+    // exists for exactly this purpose; we just never wired it in.
+    //
+    // Deferred because the existing UX is acceptable enough to
+    // ship the assistant in v1 — the visual cues just lead the
+    // audio by a few seconds. Implement when adding the
+    // post-monitor tap that would let the overlay show real
+    // playback levels (the same drain wait would be the natural
+    // home for either feature).
     Ok(any_audio)
 }
 

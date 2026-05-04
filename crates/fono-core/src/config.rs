@@ -699,7 +699,13 @@ pub enum WaveformStyle {
 
 impl Default for WaveformStyle {
     fn default() -> Self {
-        Self::Bars
+        // FFT reads as the most "active" of the four during both
+        // recording (real spectrum) and assistant-thinking
+        // (sweeping bell scanner with crisp inter-bar gaps), so
+        // it makes the strongest first-run impression. Users can
+        // switch to Bars/Oscilloscope/Heatmap from the tray
+        // submenu or `[overlay].style`.
+        Self::Fft
     }
 }
 
