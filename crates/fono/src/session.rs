@@ -578,6 +578,16 @@ impl SessionOrchestrator {
             let mut s = self.assistant_session.lock().await;
             s.history = ConversationHistory::new(window, max_turns);
         }
+        // Push the (possibly changed) waveform style to the
+        // long-lived overlay handle so a `[overlay].style` edit
+        // takes effect on the next visualisation tick instead of
+        // being stuck on whatever was set at daemon startup.
+        // No-op when the overlay is in `Text` mode or when the
+        // style is unchanged.
+        #[cfg(any(feature = "interactive", feature = "waveform"))]
+        if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
+            o.set_waveform_style(cfg.overlay.style);
+        }
         if let Ok(mut guard) = self.config.write() {
             *guard = Arc::new(cfg);
         }
@@ -776,6 +786,221 @@ impl SessionOrchestrator {
             }
             _ => None,
         }
+    }
+
+    /// Spawn the assistant-thinking animation: a per-style synthetic
+    /// generator that pushes time-evolving frames at 20 fps so the
+    /// overlay shows active feedback during the post-release dead
+    /// time (STT + LLM streaming + first TTS). All four waveform
+    /// styles get a hand-tuned animation distinct from the
+    /// real-audio one used during recording.
+    ///
+    /// Returns `None` when the overlay is disabled in config or
+    /// failed to spawn at startup. Callers stow the
+    /// [`tokio::task::AbortHandle`] so the animation stops when the
+    /// pump completes (or the user cancels).
+    /// Spawn the assistant-thinking synthetic visualisation. Each
+    /// waveform style gets its own time-evolving generator pushed
+    /// at 20 fps; renderer-side, the only state-aware branch is
+    /// the Bars draw which reads the per-bar profile from
+    /// `fft_frames.back()` during `AssistantThinking` and the FFT
+    /// draw which switches to a gapped layout.
+    ///
+    /// The math is deliberately framed against `time_ms` (f64) to
+    /// match the source the user audited; constants are unitless
+    /// (per-millisecond rates / per-bin widths) so the same numbers
+    /// behave correctly on any panel size.
+    #[cfg(any(feature = "interactive", feature = "waveform"))]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::suboptimal_flops,
+        clippy::items_after_statements,
+        clippy::cast_precision_loss
+    )]
+    fn spawn_thinking_animation_task(&self, cfg: &Config) -> Option<tokio::task::AbortHandle> {
+        let want_waveform = cfg.overlay.waveform && !cfg.interactive.enabled;
+        let handle = self.overlay.read().ok().and_then(|g| g.clone());
+        if !want_waveform {
+            return None;
+        }
+        let o = handle?;
+        let style = cfg.overlay.style;
+        let task = tokio::spawn(async move {
+            // Renderer-side ring sizes: the synthetic data must
+            // fully populate the visible window each tick.
+            // Heatmap uses 300 bins (one per row of vertical
+            // resolution); FFT in thinking mode uses fewer bins
+            // (120) so the 1-pixel gaps between bars round to
+            // even slot widths instead of producing
+            // unevenly-spaced phantom lines at sub-pixel rates.
+            const FFT_BINS_HEATMAP: usize = 300;
+            const FFT_BINS_THINKING: usize = 100;
+            const OSC_SAMPLES: usize = 5000;
+            // Bars draw width — matches LEVELS_CAP so the per-bar
+            // profile lines up 1:1 with the existing slot count.
+            const BARS: usize = 60;
+
+            let started = Instant::now();
+            // Heatmap transition: just push at the steady cadence
+            // and let the rolling cache do the work — the new
+            // strand columns scroll in from the right while the
+            // pre-thinking recording-FFT data scrolls left and out
+            // over ~6 s. Seamless and keeps the user's recent voice
+            // visible while it fades.
+            let mut tick = tokio::time::interval(Duration::from_millis(50));
+            loop {
+                tick.tick().await;
+                let time_ms = started.elapsed().as_secs_f64() * 1000.0;
+                match style {
+                    // ── FFT: spectrum scanning ────────────────────
+                    // Gaussian "scanner" (σ ≈ 20 bins out of 120)
+                    // sweeps across the bins; a per-bin breathing
+                    // baseline keeps every bar alive even far
+                    // from the focus. The two are blended
+                    // additively so the scanner blends smoothly
+                    // into the surrounding rhythm instead of
+                    // looking like a sharp spotlight on top of a
+                    // flat field.
+                    fono_core::config::WaveformStyle::Fft => {
+                        let n = FFT_BINS_THINKING;
+                        let scan_phase = ((time_ms * 0.0015).sin() + 1.0) / 2.0;
+                        let focus = scan_phase * n as f64;
+                        // σ = 8 bins; divisor = 2·σ² for the
+                        // unnormalised Gaussian. Visible bell
+                        // width is ≈8 % of the panel.
+                        let sigma_bins = 8.0_f64;
+                        let denom = 2.0 * sigma_bins * sigma_bins;
+                        let mut bins = vec![0.0_f32; n];
+                        for (i, slot) in bins.iter_mut().enumerate() {
+                            let dist = (i as f64) - focus;
+                            let scanner = (-(dist * dist) / denom).exp();
+                            let breathing =
+                                ((time_ms * 0.003 + (i as f64) * 0.2).sin() + 1.0) / 2.0;
+                            // Soft "screen" blend: scanner takes
+                            // priority near focus (peak = 1.0
+                            // exactly, no clipping), breathing
+                            // fills in the surrounding bars.
+                            // Mathematically: scanner +
+                            // (1 − scanner) · breathing · 0.30 —
+                            // scanner reaches 1.0 alone at focus
+                            // (where the (1 − scanner) factor
+                            // multiplies the breathing addition by
+                            // 0, eliminating the over-1.0
+                            // contribution that was causing the
+                            // flat-topped clip).
+                            let combined = scanner + (1.0 - scanner) * breathing * 0.30;
+                            *slot = combined.clamp(0.0, 1.0) as f32;
+                        }
+                        o.push_fft_bins(bins);
+                    }
+                    // ── Heatmap: neural strands ────────────────────
+                    // Two wandering paths combined as Gaussian
+                    // falloffs vertically. Each tick is one new
+                    // column; the rolling 6 s window traces them
+                    // out as crossing strands.
+                    fono_core::config::WaveformStyle::Heatmap => {
+                        // Strand positions in bin-index space.
+                        // Amplitudes sized so the pair stays well
+                        // inside the panel even at extremes.
+                        let mid = FFT_BINS_HEATMAP as f64 / 2.0;
+                        let amp_a = FFT_BINS_HEATMAP as f64 * 0.30;
+                        let amp_b = FFT_BINS_HEATMAP as f64 * 0.10;
+                        let amp_c = FFT_BINS_HEATMAP as f64 * 0.35;
+                        let strand1 =
+                            mid + (time_ms * 0.001).sin() * amp_a + (time_ms * 0.003).sin() * amp_b;
+                        let strand2 = mid + (time_ms * 0.0015).cos() * amp_c;
+                        // Falloff scaled to the bin axis so the
+                        // strand width reads as ~5 % of the panel
+                        // (visually equivalent to the user's
+                        // 10 px / 80 px-tall reference).
+                        let sigma_a_sq = (FFT_BINS_HEATMAP as f64 * 0.06).powi(2);
+                        let sigma_b_sq = (FFT_BINS_HEATMAP as f64 * 0.075).powi(2);
+                        let mut bins = vec![0.0_f32; FFT_BINS_HEATMAP];
+                        for (i, slot) in bins.iter_mut().enumerate() {
+                            let y = i as f64;
+                            let d1 = y - strand1;
+                            let d2 = y - strand2;
+                            let int1 = (-(d1 * d1) / sigma_a_sq).exp();
+                            let int2 = (-(d2 * d2) / sigma_b_sq).exp();
+                            *slot = (int1 + int2).min(1.0).clamp(0.0, 1.0) as f32;
+                        }
+                        o.push_fft_bins(bins);
+                    }
+                    // ── Oscilloscope: harmonic processing ──────────
+                    // Two interfering sine waves with edge taper
+                    // (sin(π · x/W) so x = 0 and x = 1 stay pinned
+                    // at the centerline). Pushing the full
+                    // OSC_SAMPLES_CAP each tick replaces the ring,
+                    // so the renderer always sees a fresh snapshot.
+                    // Amplitude is sized so the wave reaches ±1.0
+                    // (full panel height) routinely — partial
+                    // cancellation around the edges of the beat
+                    // envelope still touches the rails.
+                    fono_core::config::WaveformStyle::Oscilloscope => {
+                        let mut samples = vec![0.0_f32; OSC_SAMPLES];
+                        // Per-pixel constants (`f1=0.015, f2=0.010`)
+                        // are in pixel units; the renderer maps the
+                        // OSC_SAMPLES_CAP buffer linearly across
+                        // ~588 px of panel width.
+                        let panel_w = 588.0_f64;
+                        let f1_eff = 0.015 * panel_w / (OSC_SAMPLES as f64 - 1.0);
+                        let f2_eff = 0.010 * panel_w / (OSC_SAMPLES as f64 - 1.0);
+                        let beat_env = (time_ms * 0.001).sin();
+                        let t_bg = time_ms * 0.002;
+                        let t_fg = time_ms * 0.003;
+                        // Peak y_val ≈ 43 when all sines align;
+                        // dividing by 44 keeps the central antinode
+                        // just shy of ±1.0 across the typical beat
+                        // envelope, so the wave routinely touches
+                        // the rails without clipping. The renderer
+                        // also passes `headroom = 1.0` for the
+                        // thinking path, so the panel ceiling /
+                        // floor exactly equal ±1.0.
+                        let amp_div = 44.0_f64;
+                        for (i, slot) in samples.iter_mut().enumerate() {
+                            let xi = i as f64;
+                            let bg_b1 = (xi * f1_eff + t_bg).sin() * 20.0 * 0.6;
+                            let bg_b2 = (xi * f2_eff - t_bg * 1.5).sin() * 15.0 * 0.6 * beat_env;
+                            let fg_b1 = (xi * f1_eff + t_fg).sin() * 20.0 * 1.0;
+                            let fg_b2 = (xi * f2_eff - t_fg * 1.5).sin() * 15.0 * 1.0 * beat_env;
+                            // Foreground dominates; background
+                            // adds a softer beating texture on top.
+                            let y_val = fg_b1 + fg_b2 + 0.4 * (bg_b1 + bg_b2);
+                            // Edge taper sin(π · u) anchors x=0/x=1
+                            // back to the centreline.
+                            let u = xi / (OSC_SAMPLES as f64 - 1.0);
+                            let edge = (u * std::f64::consts::PI).sin();
+                            *slot = ((y_val * edge) / amp_div).clamp(-1.0, 1.0) as f32;
+                        }
+                        o.push_samples(samples);
+                    }
+                    // ── Bars: symmetric centre-out ─────────────────
+                    // Per-bar profile pushed via fft_frames; the
+                    // bars renderer reads it directly during
+                    // AssistantThinking and skips the levels ring.
+                    // Concentric outward-flowing waves with edge
+                    // taper produce a peak at the centre that
+                    // ripples toward the edges.
+                    fono_core::config::WaveformStyle::Bars => {
+                        let center = BARS as f64 / 2.0;
+                        let mut bins = vec![0.0_f32; BARS];
+                        for (i, slot) in bins.iter_mut().enumerate() {
+                            let dist = (i as f64) - center + 0.5;
+                            let dist = dist.abs();
+                            let phase = dist * 0.5 - time_ms * 0.003;
+                            let intensity = (phase.sin() + 1.0) / 2.0;
+                            let edge_taper = (1.0 - dist / center).max(0.0);
+                            // 0.05 floor so silence still reads
+                            // as "alive"; max ≈ 1.0 at centre.
+                            let h = 0.05 + intensity * edge_taper;
+                            *slot = (h.clamp(0.0, 1.0)) as f32;
+                        }
+                        o.push_fft_bins(bins);
+                    }
+                }
+            }
+        });
+        Some(task.abort_handle())
     }
 
     /// Fire-and-forget warmup for STT, LLM and the inject backend.
@@ -1097,6 +1322,7 @@ impl SessionOrchestrator {
     /// Stop assistant recording and kick off the streaming pump:
     /// STT → assistant chat → SentenceSplitter → TTS → playback.
     /// Returns immediately; the pump runs on a detached tokio task.
+    #[allow(clippy::too_many_lines)]
     pub async fn on_assistant_hold_release(&self) {
         // Every early-return path MUST emit `ProcessingDone` so the
         // FSM doesn't get stuck in `AssistantThinking` (which would
@@ -1162,15 +1388,21 @@ impl SessionOrchestrator {
             let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
             return;
         };
-        // Hide the overlay now: capture is done, the level-task was
-        // aborted in `stop_and_drain`, so the waveform would just
-        // sit on a stale frame for 4-5 s while STT + LLM run. The
-        // tray icon stays green for the duration so the user knows
-        // the assistant is still active. When AudioPlayback gains a
-        // post-monitor tap we can re-show with reply-audio levels;
-        // until then the overlay is dictation-only past the recording
-        // phase.
-        self.hide_assistant_overlay();
+        // Switch the overlay into "thinking" mode and spawn the
+        // synthetic-animation ticker. The renderer paints amber
+        // with a "THINKING" title; each waveform style gets a
+        // distinct hand-tuned animation (FFT bell sweep, heatmap
+        // intersecting paths, oscilloscope standing wave,
+        // centre-symmetric bars). The ticker runs until the pump's
+        // closure aborts it on completion / cancellation.
+        if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
+            o.set_state(fono_overlay::OverlayState::AssistantThinking);
+        }
+        #[cfg(any(feature = "interactive", feature = "waveform"))]
+        let thinking_task = self.spawn_thinking_animation_task(&cfg);
+        #[cfg(not(any(feature = "interactive", feature = "waveform")))]
+        let thinking_task: Option<tokio::task::AbortHandle> = None;
+        let overlay_for_task = self.overlay.read().ok().and_then(|g| g.clone());
         let notify = Arc::new(Notify::new());
         {
             let mut s = self.assistant_session.lock().await;
@@ -1206,8 +1438,16 @@ impl SessionOrchestrator {
                     }
                 }
             }
-            // Tell the FSM we're idle. The overlay was hidden when
-            // recording ended, so there's nothing to tear down here.
+            // Stop the thinking animation and hide the overlay —
+            // the pump is done, the user has heard (or aborted)
+            // the reply.
+            if let Some(t) = thinking_task {
+                t.abort();
+            }
+            if let Some(o) = overlay_for_task {
+                o.set_state(fono_overlay::OverlayState::Hidden);
+            }
+            // Tell the FSM we're idle.
             let _ = action_tx.send(HotkeyAction::ProcessingDone);
         });
     }

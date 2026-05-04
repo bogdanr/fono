@@ -581,15 +581,16 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                         HotkeyEvent::Cancel | HotkeyEvent::StopAssistantPlayback => {
                             t.set_state(TrayState::Idle);
                         }
-                        // Assistant flow: stay green through both
-                        // recording and the post-release pump
-                        // (thinking + speaking) so the user sees a
-                        // single, coherent "assistant active"
-                        // colour rather than a green→amber→green
-                        // flicker.
-                        HotkeyEvent::StartAssistant | HotkeyEvent::StopAssistant => {
-                            t.set_state(TrayState::Assistant);
-                        }
+                        // Assistant flow: green during the recording
+                        // phase (mirrors the overlay's green
+                        // accent), then amber on release through
+                        // the post-release pump (thinking +
+                        // speaking). The amber matches both the
+                        // overlay's "THINKING" panel and the
+                        // colour the user already associates with
+                        // "the LLM is working".
+                        HotkeyEvent::StartAssistant => t.set_state(TrayState::Assistant),
+                        HotkeyEvent::StopAssistant => t.set_state(TrayState::Processing),
                     }
                 }
                 let Some(o) = orch.as_ref() else {

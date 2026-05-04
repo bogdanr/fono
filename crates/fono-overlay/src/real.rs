@@ -79,6 +79,12 @@ enum OverlayCmd {
     /// Toggle the right-side VU bar on the live-dictation panel.
     /// Pushed at startup once `Config.overlay.volume_bar` is known.
     SetVolumeBar(bool),
+    /// Swap the waveform style at runtime so a `[overlay].style`
+    /// config edit (or tray "Waveform style" pick) takes effect
+    /// without a daemon restart. No-op when the overlay was spawned
+    /// in `Text` mode; the visualisation overlay only switches
+    /// between waveform variants.
+    SetWaveformStyle(WaveformStyle),
     Shutdown,
 }
 
@@ -138,6 +144,15 @@ impl OverlayHandle {
     /// `[overlay].volume_bar`.
     pub fn set_volume_bar(&self, enabled: bool) {
         self.send(OverlayCmd::SetVolumeBar(enabled));
+    }
+
+    /// Swap the active waveform style at runtime. No-op when the
+    /// overlay was spawned in `Text` mode (live-dictation overlay).
+    /// Pushed by the orchestrator's `reload()` after a
+    /// `[overlay].style` config change so the visualisation
+    /// switches without a daemon restart.
+    pub fn set_waveform_style(&self, style: WaveformStyle) {
+        self.send(OverlayCmd::SetWaveformStyle(style));
     }
 
     /// Stop the overlay and join its thread. Idempotent.
@@ -244,7 +259,8 @@ const COLOR_TEXT_DIM: u32 = 0xCCAA_AAB2;
 
 /// Accent stripe colour per state. Mirrored by the tray icon so the
 /// user sees the same colour story in both places: red = dictation,
-/// green = assistant, amber = processing, indigo = live dictation.
+/// green = assistant recording, amber = thinking / processing,
+/// indigo = live dictation.
 fn accent_color(state: OverlayState) -> u32 {
     match state {
         OverlayState::Hidden => 0x0000_0000,
@@ -252,6 +268,10 @@ fn accent_color(state: OverlayState) -> u32 {
         OverlayState::Recording { .. } => 0xFFE0_5454,
         // Saturated green (assistant recording).
         OverlayState::AssistantRecording { .. } => 0xFF22_C55E,
+        // Warm amber — assistant is thinking / TTS warming up.
+        // Matches the tray's `Processing` state so both surfaces
+        // tell the same colour story.
+        OverlayState::AssistantThinking => 0xFFF5_9E0B,
         // Warm amber (processing / polishing).
         OverlayState::Processing => 0xFFE0_A040,
         // Vibrant indigo (live dictation).
@@ -264,6 +284,7 @@ fn state_label(state: OverlayState) -> &'static str {
         OverlayState::Hidden => "",
         OverlayState::Recording { .. } => "RECORDING",
         OverlayState::AssistantRecording { .. } => "ASSISTANT",
+        OverlayState::AssistantThinking => "THINKING",
         OverlayState::Processing => "POLISHING",
         OverlayState::LiveDictating => "LIVE",
     }
@@ -571,9 +592,70 @@ fn draw_waveform_bars(
     }
 }
 
+/// Bars draw that takes a per-bar profile (newest at index 0..N,
+/// fully replaced each tick) instead of a time-series ring. Used
+/// during the assistant's "thinking" phase so the orchestrator
+/// can push a full symmetric centre-out shape via `push_fft_bins`
+/// and have the renderer paint each bin as one bar without
+/// reinterpreting it as time history. Floor line is drawn the
+/// same way so silence still reads as "alive".
+#[allow(clippy::too_many_arguments)]
+fn draw_waveform_bars_from_profile(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    profile: &[f32],
+    x0: f32,
+    x1: f32,
+    y_top: f32,
+    y_bot: f32,
+    accent: u32,
+    scale: f32,
+) {
+    let n = profile.len();
+    if n == 0 {
+        return;
+    }
+    let area_w = (x1 - x0).max(0.0);
+    let slot_w = area_w / n as f32;
+    let bar_w = (slot_w - 1.0 * scale).max(1.0);
+    let area_h = (y_bot - y_top).max(0.0);
+    for (i, &v) in profile.iter().enumerate() {
+        let v = v.clamp(0.0, 1.0);
+        let bar_h = (v * area_h).max(1.0 * scale);
+        let bx0 = x0 + i as f32 * slot_w;
+        let bx1 = bx0 + bar_w;
+        let alpha = 0x33 + ((0xFF - 0x33) as f32 * v) as u32;
+        let color = with_alpha(accent, alpha as u8);
+        fill_round_rect(
+            buf,
+            stride,
+            h,
+            (bx0, y_bot - bar_h, bx1, y_bot),
+            2.0 * scale,
+            color,
+        );
+    }
+    let floor_y = y_bot.round() as i32;
+    if floor_y >= 0 && (floor_y as u32) < h {
+        let xi0 = x0.max(0.0).round() as i32;
+        let xi1 = (x1.min(stride as f32)).round() as i32;
+        for xi in xi0..xi1 {
+            if xi < 0 {
+                continue;
+            }
+            let idx = (floor_y as u32 * stride + xi as u32) as usize;
+            if let Some(slot) = buf.get_mut(idx) {
+                *slot = blend(*slot, COLOR_TEXT_DIM, 0x33);
+            }
+        }
+    }
+}
+
 /// Connected-line waveform centred on the content area. Subsamples
 /// the sample ring buffer to one column per logical pixel, drawing a
 /// 2-physical-pixel stroke.
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn draw_oscilloscope(
     buf: &mut [u32],
@@ -586,11 +668,17 @@ fn draw_oscilloscope(
     y_bot: f32,
     accent: u32,
     scale: f32,
+    headroom: f32,
 ) {
     let cols = ((x1 - x0).max(1.0) as usize).max(1);
     let n = osc_samples.len();
     let y_mid = (y_top + y_bot) * 0.5;
-    let half_h = (y_bot - y_top) * 0.5;
+    // `headroom` shrinks the vertical mapping so loud PCM peaks
+    // don't slam into the panel edges. Recording paths pass a
+    // small reduction (≈0.88); the synthetic thinking path
+    // controls its own amplitude and passes 1.0 to use the full
+    // panel.
+    let half_h = (y_bot - y_top) * 0.5 * headroom;
     // Subtle centre guide.
     let guide_y = y_mid.round() as i32;
     if guide_y >= 0 && (guide_y as u32) < h {
@@ -742,6 +830,96 @@ fn draw_fft(
     }
     let _ = scale; // silence unused (kept for API symmetry)
                    // Floor line so silence still looks alive.
+    let floor_y = y_bot.round() as i32;
+    if floor_y >= 0 && (floor_y as u32) < h {
+        let xi0 = x0.max(0.0).round() as i32;
+        let xi1 = (x1.min(stride as f32)).round() as i32;
+        for xi in xi0..xi1 {
+            if xi < 0 {
+                continue;
+            }
+            let idx = (floor_y as u32 * stride + xi as u32) as usize;
+            if let Some(slot) = buf.get_mut(idx) {
+                *slot = blend(*slot, COLOR_TEXT_DIM, 0x33);
+            }
+        }
+    }
+}
+
+/// Like [`draw_fft`] but leaves a 1-px gap between bars. Used during
+/// the assistant's "thinking" phase where the gapped layout reads
+/// as a discrete spectrum rather than a continuous wall.
+///
+/// Slot widths are integer-aligned so every bar / gap pair is
+/// rendered with exactly the same pixel count. Computing the
+/// per-slot extents in float space (`i / n` × area_w) and then
+/// rounding to the nearest pixel — as `draw_fft` does — leaves
+/// some slots one pixel wider than others when the slot width is
+/// non-integer (e.g. 588 px / 100 bins = 5.88 px per slot rounds
+/// inconsistently); the gap then alternates 0 / 1 / 0 / 1 across
+/// the panel, which the user notices as "lines at unequal
+/// distances".
+#[allow(clippy::too_many_arguments)]
+fn draw_fft_gapped(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    bins: &[f32],
+    x0: f32,
+    x1: f32,
+    y_top: f32,
+    y_bot: f32,
+    accent: u32,
+    scale: f32,
+) {
+    if bins.is_empty() {
+        return;
+    }
+    let area_w = (x1 - x0).max(0.0);
+    let area_h = (y_bot - y_top).max(0.0);
+    let n = bins.len();
+    // Floor the slot to an integer pixel count and use that for
+    // every bar; any leftover area is centred so the bars sit in
+    // the middle of the content area. The gap is integer too
+    // (1 px at default DPI, scaled up for HiDPI) — clamped to at
+    // most half the slot so very dense bin counts still produce a
+    // visible bar.
+    let slot_px = (area_w / n as f32).floor().max(3.0) as i32;
+    // 2-px gap for crisper separation; clamped so dense panels
+    // never collapse to zero-pixel bars.
+    let gap_px = ((2.0 * scale).round() as i32).max(1).min(slot_px / 2);
+    let bar_px = (slot_px - gap_px).max(1);
+    let total_px = slot_px * n as i32;
+    let leftover = area_w as i32 - total_px;
+    let x_start = x0.round() as i32 + leftover.max(0) / 2;
+    for (i, &v) in bins.iter().enumerate() {
+        let v = v.clamp(0.0, 1.0);
+        let bar_h = (v * area_h).max(1.0 * scale);
+        let xi0 = x_start + i as i32 * slot_px;
+        let xi1 = xi0 + bar_px;
+        let yi0 = (y_bot - bar_h).round() as i32;
+        let yi1 = y_bot.round() as i32;
+        if xi1 <= xi0 || yi1 <= yi0 {
+            continue;
+        }
+        let alpha = 0x33 + ((0xFF - 0x33) as f32 * v) as u32;
+        let color = with_alpha(accent, alpha as u8);
+        let cov = (color >> 24) as u8;
+        for yi in yi0..yi1 {
+            if yi < 0 || (yi as u32) >= h {
+                continue;
+            }
+            for xi in xi0..xi1 {
+                if xi < 0 || (xi as u32) >= stride {
+                    continue;
+                }
+                let idx = (yi as u32 * stride + xi as u32) as usize;
+                if let Some(slot) = buf.get_mut(idx) {
+                    *slot = blend(*slot, color, cov);
+                }
+            }
+        }
+    }
     let floor_y = y_bot.round() as i32;
     if floor_y >= 0 && (floor_y as u32) < h {
         let xi0 = x0.max(0.0).round() as i32;
@@ -1310,13 +1488,48 @@ fn run_event_loop(
                                 }
                             }
                         }
-                        if matches!(
+                        // Trigger a redraw on every fft_frames push
+                        // for the waveform modes that consume them:
+                        // FFT and Heatmap always (real-audio path),
+                        // and Bars when in AssistantThinking (the
+                        // orchestrator pushes per-bar profiles via
+                        // fft_frames during thinking — without this
+                        // arm the bars sat on a stale frame after
+                        // F10 release).
+                        let consumes_fft = matches!(
                             self.mode,
-                            OverlayMode::Waveform(WaveformStyle::Fft | WaveformStyle::Heatmap,),
-                        ) && self.window.is_some()
+                            OverlayMode::Waveform(WaveformStyle::Fft | WaveformStyle::Heatmap)
+                        ) || matches!(
+                            (self.mode, self.state),
+                            (
+                                OverlayMode::Waveform(WaveformStyle::Bars),
+                                OverlayState::AssistantThinking
+                            )
+                        );
+                        if consumes_fft
+                            && self.window.is_some()
                             && !matches!(self.state, OverlayState::Hidden)
                         {
                             needs_redraw = true;
+                        }
+                    }
+                    OverlayCmd::SetWaveformStyle(style) => {
+                        // Only swap when this overlay is in
+                        // `Waveform` mode and the style actually
+                        // differs. Don't promote a `Text` overlay
+                        // (live-dictation) into `Waveform` — the
+                        // window geometry / text wrapping was sized
+                        // for one or the other at spawn time.
+                        if let OverlayMode::Waveform(current) = self.mode {
+                            if current != style {
+                                self.mode = OverlayMode::Waveform(style);
+                                if self.window.is_some()
+                                    && !matches!(self.state, OverlayState::Hidden)
+                                {
+                                    needs_redraw = true;
+                                }
+                                tracing::debug!("overlay: waveform style -> {style:?}");
+                            }
                         }
                     }
                     OverlayCmd::SetVolumeBar(enabled) => {
@@ -1448,13 +1661,27 @@ fn run_event_loop(
                         app.state,
                         OverlayState::Recording { .. }
                             | OverlayState::AssistantRecording { .. }
+                            | OverlayState::AssistantThinking
                     ) =>
                 {
                     let x0 = (PADDING_X + ACCENT_WIDTH) * scale;
                     let x1 = w as f32 - PADDING_X * scale;
                     let y_top = text_top;
                     let y_bot = h as f32 - PADDING_BOT * scale;
+                    let thinking = matches!(app.state, OverlayState::AssistantThinking);
                     match style {
+                        // During AssistantThinking the orchestrator
+                        // pushes a per-bar profile via fft_frames
+                        // (Symmetric Centre-Out shape); render the
+                        // latest profile directly rather than the
+                        // levels ring.
+                        WaveformStyle::Bars if thinking => {
+                            if let Some(profile) = app.fft_frames.back() {
+                                draw_waveform_bars_from_profile(
+                                    &mut buf, w, h, profile, x0, x1, y_top, y_bot, accent, scale,
+                                );
+                            }
+                        }
                         WaveformStyle::Bars => draw_waveform_bars(
                             &mut buf,
                             w,
@@ -1467,23 +1694,38 @@ fn run_event_loop(
                             accent,
                             scale,
                         ),
-                        WaveformStyle::Oscilloscope => draw_oscilloscope(
-                            &mut buf,
-                            w,
-                            h,
-                            &app.osc_samples,
-                            x0,
-                            x1,
-                            y_top,
-                            y_bot,
-                            accent,
-                            scale,
-                        ),
+                        WaveformStyle::Oscilloscope => {
+                            // Headroom: leave a small margin on
+                            // recording so loud PCM peaks don't
+                            // clip the panel edges; the thinking
+                            // generator emits samples already in
+                            // [-1, 1] so it gets the full height.
+                            let headroom = if thinking { 1.0 } else { 0.88 };
+                            draw_oscilloscope(
+                                &mut buf,
+                                w,
+                                h,
+                                &app.osc_samples,
+                                x0,
+                                x1,
+                                y_top,
+                                y_bot,
+                                accent,
+                                scale,
+                                headroom,
+                            );
+                        }
                         WaveformStyle::Fft => {
                             if let Some(latest) = app.fft_frames.back() {
-                                draw_fft(
-                                    &mut buf, w, h, latest, x0, x1, y_top, y_bot, accent, scale,
-                                );
+                                if thinking {
+                                    draw_fft_gapped(
+                                        &mut buf, w, h, latest, x0, x1, y_top, y_bot, accent, scale,
+                                    );
+                                } else {
+                                    draw_fft(
+                                        &mut buf, w, h, latest, x0, x1, y_top, y_bot, accent, scale,
+                                    );
+                                }
                             }
                         }
                         WaveformStyle::Heatmap => {

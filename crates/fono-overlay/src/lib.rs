@@ -25,6 +25,15 @@ pub enum OverlayState {
     AssistantRecording {
         db: i8,
     },
+    /// Voice-assistant post-release: STT + LLM streaming + first
+    /// TTS synthesis. The orchestrator pushes synthetic
+    /// time-evolving frames at 20 fps; each waveform style gets a
+    /// hand-tuned animation (FFT bell sweep, heatmap intersecting
+    /// paths, oscilloscope standing wave, centre-symmetric bars).
+    /// Renderer paints with an amber palette + "THINKING" title so
+    /// the user can tell apart from real-audio recording at a
+    /// glance.
+    AssistantThinking,
     Processing,
     /// Live dictation in progress. The text is shown via
     /// [`OverlayHandle::update_text`].
@@ -76,6 +85,10 @@ impl Overlay {
     /// No-op stub — present so callers compile in non-`real-window`
     /// builds (server / headless).
     pub fn set_volume_bar(&self, _enabled: bool) {}
+
+    /// No-op stub — present so callers compile in non-`real-window`
+    /// builds (server / headless).
+    pub fn set_waveform_style(&self, _style: fono_core::config::WaveformStyle) {}
 
     #[must_use]
     pub fn state(&self) -> OverlayState {
