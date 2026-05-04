@@ -242,12 +242,16 @@ const COLOR_BG: u32 = 0xEE17_171B;
 const COLOR_TEXT: u32 = 0xFFEC_ECF1;
 const COLOR_TEXT_DIM: u32 = 0xCCAA_AAB2;
 
-/// Accent stripe colour per state.
+/// Accent stripe colour per state. Mirrored by the tray icon so the
+/// user sees the same colour story in both places: red = dictation,
+/// green = assistant, amber = processing, indigo = live dictation.
 fn accent_color(state: OverlayState) -> u32 {
     match state {
         OverlayState::Hidden => 0x0000_0000,
-        // Soft red (recording).
+        // Soft red (dictation recording).
         OverlayState::Recording { .. } => 0xFFE0_5454,
+        // Saturated green (assistant recording).
+        OverlayState::AssistantRecording { .. } => 0xFF22_C55E,
         // Warm amber (processing / polishing).
         OverlayState::Processing => 0xFFE0_A040,
         // Vibrant indigo (live dictation).
@@ -259,6 +263,7 @@ fn state_label(state: OverlayState) -> &'static str {
     match state {
         OverlayState::Hidden => "",
         OverlayState::Recording { .. } => "RECORDING",
+        OverlayState::AssistantRecording { .. } => "ASSISTANT",
         OverlayState::Processing => "POLISHING",
         OverlayState::LiveDictating => "LIVE",
     }
@@ -1439,7 +1444,11 @@ fn run_event_loop(
             let text_top = pad_top + STATUS_FONT_PX * scale + STATUS_TO_TEXT * scale;
             match app.mode {
                 OverlayMode::Waveform(style)
-                    if matches!(app.state, OverlayState::Recording { .. }) =>
+                    if matches!(
+                        app.state,
+                        OverlayState::Recording { .. }
+                            | OverlayState::AssistantRecording { .. }
+                    ) =>
                 {
                     let x0 = (PADDING_X + ACCENT_WIDTH) * scale;
                     let x1 = w as f32 - PADDING_X * scale;

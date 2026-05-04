@@ -642,6 +642,142 @@ impl SessionOrchestrator {
         Arc::clone(&self.config.read().expect("config lock poisoned"))
     }
 
+    /// Spawn the standalone-waveform overlay's level ticker, set the
+    /// overlay state to `initial_state`, and return an
+    /// [`tokio::task::AbortHandle`] the caller stows in its
+    /// [`CaptureSession`] so the ticker stops when capture ends.
+    /// Returns `None` when the overlay is disabled in config or the
+    /// daemon failed to spawn the overlay handle at startup.
+    ///
+    /// Shared between the dictation path (`OverlayState::Recording`,
+    /// red palette) and the assistant path
+    /// (`OverlayState::AssistantRecording`, green palette) so both
+    /// pipelines get the same Bars / FFT / Heatmap / Oscilloscope
+    /// visualisations the user picked in `[overlay].style`.
+    #[cfg(any(feature = "interactive", feature = "waveform"))]
+    #[allow(clippy::too_many_lines, clippy::suboptimal_flops)]
+    fn spawn_waveform_level_task(
+        &self,
+        cfg: &Config,
+        initial_state: fono_overlay::OverlayState,
+        buffer: &Arc<StdMutex<RecordingBuffer>>,
+    ) -> Option<tokio::task::AbortHandle> {
+        let want_waveform = cfg.overlay.waveform && !cfg.interactive.enabled;
+        let handle = self.overlay.read().ok().and_then(|g| g.clone());
+        match (want_waveform, handle) {
+            (true, Some(o)) => {
+                o.set_state(initial_state);
+                let style = cfg.overlay.style;
+                let buf = Arc::clone(buffer);
+                let sample_rate = self.capture_cfg.target_sample_rate;
+                let task = tokio::spawn(async move {
+                    match style {
+                        fono_core::config::WaveformStyle::Oscilloscope => {
+                            let snap_len = (sample_rate as usize / 1000) * 50;
+                            let gain = 1.0 / WAVEFORM_AMPLITUDE_CEILING;
+                            let mut tick = tokio::time::interval(Duration::from_millis(50));
+                            loop {
+                                tick.tick().await;
+                                let snap = buf
+                                    .lock()
+                                    .map(|b| {
+                                        let s = b.samples();
+                                        s[s.len().saturating_sub(snap_len)..]
+                                            .iter()
+                                            .map(|v| v * gain)
+                                            .collect::<Vec<f32>>()
+                                    })
+                                    .unwrap_or_default();
+                                if !snap.is_empty() {
+                                    o.push_samples(snap);
+                                }
+                            }
+                        }
+                        fono_core::config::WaveformStyle::Fft
+                        | fono_core::config::WaveformStyle::Heatmap => {
+                            let mut planner = realfft::RealFftPlanner::<f32>::new();
+                            let r2c = planner.plan_fft_forward(WAVEFORM_FFT_SIZE);
+                            let mut input_buf = r2c.make_input_vec();
+                            let mut output_buf = r2c.make_output_vec();
+                            let window: Vec<f32> = (0..WAVEFORM_FFT_SIZE)
+                                .map(|i| {
+                                    let phase = std::f32::consts::PI * 2.0 * (i as f32)
+                                        / (WAVEFORM_FFT_SIZE as f32 - 1.0);
+                                    0.5 - 0.5 * phase.cos()
+                                })
+                                .collect();
+                            let max_source_bin = ((WAVEFORM_FFT_MAX_HZ
+                                * WAVEFORM_FFT_SIZE as f32)
+                                / sample_rate as f32)
+                                as usize;
+                            let display_bins = WAVEFORM_FFT_BINS.max(1);
+                            let db_span = WAVEFORM_FFT_DB_CEILING - WAVEFORM_FFT_DB_FLOOR;
+                            let mut tick = tokio::time::interval(Duration::from_millis(50));
+                            loop {
+                                tick.tick().await;
+                                let filled = buf
+                                    .lock()
+                                    .map(|b| {
+                                        let s = b.samples();
+                                        let take = s.len().min(WAVEFORM_FFT_SIZE);
+                                        let head = WAVEFORM_FFT_SIZE - take;
+                                        for v in &mut input_buf[..head] {
+                                            *v = 0.0;
+                                        }
+                                        let tail = &s[s.len() - take..];
+                                        for (i, v) in tail.iter().enumerate() {
+                                            input_buf[head + i] = *v * window[head + i];
+                                        }
+                                        take
+                                    })
+                                    .unwrap_or(0);
+                                if filled == 0 {
+                                    continue;
+                                }
+                                if r2c.process(&mut input_buf, &mut output_buf).is_err() {
+                                    continue;
+                                }
+                                let mut bins = vec![0.0_f32; display_bins];
+                                for (display_i, slot) in bins.iter_mut().enumerate() {
+                                    let start = (display_i * max_source_bin) / display_bins;
+                                    let end_raw =
+                                        ((display_i + 1) * max_source_bin) / display_bins;
+                                    let end = end_raw.max(start + 1).min(max_source_bin);
+                                    let mut sum = 0.0_f32;
+                                    for c in &output_buf[start..end] {
+                                        sum += c.re.hypot(c.im);
+                                    }
+                                    let mag = sum / (end - start) as f32;
+                                    let db = 20.0 * mag.max(1e-6).log10();
+                                    *slot = ((db - WAVEFORM_FFT_DB_FLOOR) / db_span)
+                                        .clamp(0.0, 1.0);
+                                }
+                                o.push_fft_bins(bins);
+                            }
+                        }
+                        fono_core::config::WaveformStyle::Bars => {
+                            let win_len = (sample_rate as usize / 1000) * 50;
+                            let mut tick = tokio::time::interval(Duration::from_millis(50));
+                            loop {
+                                tick.tick().await;
+                                let level = buf
+                                    .lock()
+                                    .map(|b| {
+                                        let s = b.samples();
+                                        normalised_rms(&s[s.len().saturating_sub(win_len)..])
+                                    })
+                                    .unwrap_or(0.0);
+                                o.push_level(level);
+                            }
+                        }
+                    }
+                });
+                Some(task.abort_handle())
+            }
+            _ => None,
+        }
+    }
+
     /// Fire-and-forget warmup for STT, LLM and the inject backend.
     /// Latency plan tasks L2 (whisper mmap), L3 (HTTP keep-alive),
     /// L5 (inject binary page-cache).
@@ -794,167 +930,11 @@ impl SessionOrchestrator {
         // overlay handle at orchestrator startup. Live-dictation mode
         // owns its own visibility transitions further down.
         #[cfg(any(feature = "interactive", feature = "waveform"))]
-        let level_task = {
-            let want_waveform = cfg.overlay.waveform && !cfg.interactive.enabled;
-            let handle = self.overlay.read().ok().and_then(|g| g.clone());
-            match (want_waveform, handle) {
-                (true, Some(o)) => {
-                    o.set_state(fono_overlay::OverlayState::Recording { db: 0 });
-                    let style = cfg.overlay.style;
-                    let buf = Arc::clone(&buffer);
-                    let sample_rate = self.capture_cfg.target_sample_rate;
-                    let task = tokio::spawn(async move {
-                        match style {
-                            fono_core::config::WaveformStyle::Oscilloscope => {
-                                // 20 fps snapshots of the last 50 ms.
-                                // Samples are pre-scaled by
-                                // `1.0 / WAVEFORM_AMPLITUDE_CEILING`
-                                // so the trace fills a comfortable
-                                // chunk of the panel at typical
-                                // speaking-voice amplitude. The
-                                // overlay's 5000-sample ring buffer
-                                // (≈300 ms) keeps the trace scrolling
-                                // slowly enough for individual cycles
-                                // to be visible. 50 ms snapshots
-                                // (matching the tick rate) keep the
-                                // ring buffer gap-free as new chunks
-                                // are accumulated.
-                                let snap_len = (sample_rate as usize / 1000) * 50;
-                                let gain = 1.0 / WAVEFORM_AMPLITUDE_CEILING;
-                                let mut tick = tokio::time::interval(Duration::from_millis(50));
-                                loop {
-                                    tick.tick().await;
-                                    let snap = buf
-                                        .lock()
-                                        .map(|b| {
-                                            let s = b.samples();
-                                            s[s.len().saturating_sub(snap_len)..]
-                                                .iter()
-                                                .map(|v| v * gain)
-                                                .collect::<Vec<f32>>()
-                                        })
-                                        .unwrap_or_default();
-                                    if !snap.is_empty() {
-                                        o.push_samples(snap);
-                                    }
-                                }
-                            }
-                            fono_core::config::WaveformStyle::Fft
-                            | fono_core::config::WaveformStyle::Heatmap => {
-                                // 20 fps real-input FFT. Hann window +
-                                // 1024-point R2C, then aggregate the
-                                // bottom of the spectrum (DC …
-                                // WAVEFORM_FFT_MAX_HZ) into display
-                                // bins via mean. Convert to dB and
-                                // normalise to [0, 1] so the colour /
-                                // bar mapping has a sane dynamic
-                                // range across both quiet and loud
-                                // speech.
-                                let mut planner = realfft::RealFftPlanner::<f32>::new();
-                                let r2c = planner.plan_fft_forward(WAVEFORM_FFT_SIZE);
-                                let mut input_buf = r2c.make_input_vec();
-                                let mut output_buf = r2c.make_output_vec();
-                                let window: Vec<f32> = (0..WAVEFORM_FFT_SIZE)
-                                    .map(|i| {
-                                        let phase = std::f32::consts::PI * 2.0 * (i as f32)
-                                            / (WAVEFORM_FFT_SIZE as f32 - 1.0);
-                                        0.5 - 0.5 * phase.cos()
-                                    })
-                                    .collect();
-                                // How many source bins cover [0,
-                                // WAVEFORM_FFT_MAX_HZ]? At 16 kHz /
-                                // 4096 that's 3000 / 3.9 ≈ 768 bins.
-                                // We then carve them into `display_bins`
-                                // slices via integer multiply-divide
-                                // (see the per-bin loop below) which
-                                // handles any source-to-display ratio.
-                                let max_source_bin = ((WAVEFORM_FFT_MAX_HZ
-                                    * WAVEFORM_FFT_SIZE as f32)
-                                    / sample_rate as f32)
-                                    as usize;
-                                let display_bins = WAVEFORM_FFT_BINS.max(1);
-                                let db_span = WAVEFORM_FFT_DB_CEILING - WAVEFORM_FFT_DB_FLOOR;
-                                // 20 fps — matches the bars / oscilloscope
-                                // tick rate and halves the per-second
-                                // render cost vs the previous 30 fps.
-                                let mut tick = tokio::time::interval(Duration::from_millis(50));
-                                loop {
-                                    tick.tick().await;
-                                    // Copy the most recent FFT_SIZE
-                                    // samples into the FFT input,
-                                    // applying the Hann window. If the
-                                    // buffer is shorter than the FFT,
-                                    // zero-pad on the front.
-                                    let filled = buf
-                                        .lock()
-                                        .map(|b| {
-                                            let s = b.samples();
-                                            let take = s.len().min(WAVEFORM_FFT_SIZE);
-                                            let head = WAVEFORM_FFT_SIZE - take;
-                                            for v in &mut input_buf[..head] {
-                                                *v = 0.0;
-                                            }
-                                            let tail = &s[s.len() - take..];
-                                            for (i, v) in tail.iter().enumerate() {
-                                                input_buf[head + i] = *v * window[head + i];
-                                            }
-                                            take
-                                        })
-                                        .unwrap_or(0);
-                                    if filled == 0 {
-                                        continue;
-                                    }
-                                    if r2c.process(&mut input_buf, &mut output_buf).is_err() {
-                                        continue;
-                                    }
-                                    let mut bins = vec![0.0_f32; display_bins];
-                                    for (display_i, slot) in bins.iter_mut().enumerate() {
-                                        // Integer multiply-divide
-                                        // distributes [0, max_source_bin)
-                                        // evenly across `display_bins`
-                                        // even when the ratio isn't a
-                                        // clean integer.
-                                        let start = (display_i * max_source_bin) / display_bins;
-                                        let end_raw =
-                                            ((display_i + 1) * max_source_bin) / display_bins;
-                                        let end = end_raw.max(start + 1).min(max_source_bin);
-                                        let mut sum = 0.0_f32;
-                                        for c in &output_buf[start..end] {
-                                            sum += c.re.hypot(c.im);
-                                        }
-                                        let mag = sum / (end - start) as f32;
-                                        let db = 20.0 * mag.max(1e-6).log10();
-                                        *slot = ((db - WAVEFORM_FFT_DB_FLOOR) / db_span)
-                                            .clamp(0.0, 1.0);
-                                    }
-                                    o.push_fft_bins(bins);
-                                }
-                            }
-                            fono_core::config::WaveformStyle::Bars => {
-                                // 20 fps RMS for bars — fluid enough
-                                // for voice activity, half the redraw
-                                // cost of a 30 fps tick.
-                                let win_len = (sample_rate as usize / 1000) * 50;
-                                let mut tick = tokio::time::interval(Duration::from_millis(50));
-                                loop {
-                                    tick.tick().await;
-                                    let level = buf
-                                        .lock()
-                                        .map(|b| {
-                                            let s = b.samples();
-                                            normalised_rms(&s[s.len().saturating_sub(win_len)..])
-                                        })
-                                        .unwrap_or(0.0);
-                                    o.push_level(level);
-                                }
-                            }
-                        }
-                    });
-                    Some(task.abort_handle())
-                }
-                _ => None,
-            }
-        };
+        let level_task = self.spawn_waveform_level_task(
+            &cfg,
+            fono_overlay::OverlayState::Recording { db: 0 },
+            &buffer,
+        );
 
         *slot = Some(CaptureSession {
             buffer,
@@ -1089,6 +1069,17 @@ impl SessionOrchestrator {
                 ))
             }
         };
+        // Reuse the dictation-side waveform overlay for the assistant
+        // recording. Same Bars / FFT / Heatmap / Oscilloscope styles —
+        // only the panel title ("ASSISTANT") and accent colour
+        // (saturated green, mirrored by the tray icon) differ.
+        let cfg = self.current_config();
+        #[cfg(any(feature = "interactive", feature = "waveform"))]
+        let level_task = self.spawn_waveform_level_task(
+            &cfg,
+            fono_overlay::OverlayState::AssistantRecording { db: 0 },
+            &buffer,
+        );
         let session = CaptureSession {
             buffer,
             stop_tx,
@@ -1096,7 +1087,7 @@ impl SessionOrchestrator {
             started_at: Instant::now(),
             mode: RecordingMode::Hold,
             #[cfg(any(feature = "interactive", feature = "waveform"))]
-            level_task: None,
+            level_task,
         };
         *slot = Some(session);
         info!("assistant recording started");
@@ -1115,6 +1106,7 @@ impl SessionOrchestrator {
         let session = self.assistant_capture.lock().await.take();
         let Some(session) = session else {
             warn!("assistant release without a matching press; ignoring");
+            self.hide_assistant_overlay();
             let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
             return;
         };
@@ -1124,6 +1116,7 @@ impl SessionOrchestrator {
             Ok(t) => t,
             Err(e) => {
                 warn!("assistant capture join failed: {e:#}");
+                self.hide_assistant_overlay();
                 let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
                 return;
             }
@@ -1133,6 +1126,7 @@ impl SessionOrchestrator {
                 "assistant recording too short ({}ms); skipping",
                 elapsed.as_millis()
             );
+            self.hide_assistant_overlay();
             let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
             return;
         }
@@ -1164,9 +1158,17 @@ impl SessionOrchestrator {
                 6_000,
                 fono_core::notify::Urgency::Normal,
             );
+            self.hide_assistant_overlay();
             let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
             return;
         };
+        // Keep the overlay visible while the pump runs — it doesn't
+        // currently have a "thinking" / "speaking" assistant variant
+        // (would need a new accent shade), so we just leave the
+        // recording-shaped panel up until the spawned pump completes.
+        // The pump task hides it via the orchestrator's `overlay`
+        // handle through the closure capture below.
+        let overlay_for_task = self.overlay.read().ok().and_then(|g| g.clone());
         let notify = Arc::new(Notify::new());
         {
             let mut s = self.assistant_session.lock().await;
@@ -1202,11 +1204,25 @@ impl SessionOrchestrator {
                     }
                 }
             }
+            // Hide the overlay — the pump is done, the user has heard
+            // (or aborted) the reply.
+            if let Some(o) = overlay_for_task {
+                o.set_state(fono_overlay::OverlayState::Hidden);
+            }
             // Tell the FSM we're idle. Harmless when the FSM's not
             // wired (no hotkey for assistant in this slice — IPC
             // triggers don't change FSM state).
             let _ = action_tx.send(HotkeyAction::ProcessingDone);
         });
+    }
+
+    /// Hide the standalone-waveform overlay. Best-effort — silently
+    /// noop'd when the overlay handle isn't present (e.g.
+    /// `[overlay].waveform = false` or no graphical session).
+    fn hide_assistant_overlay(&self) {
+        if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
+            o.set_state(fono_overlay::OverlayState::Hidden);
+        }
     }
 
     /// Stop the active assistant turn immediately. Notifies the pump
@@ -1218,6 +1234,7 @@ impl SessionOrchestrator {
             let mut s = self.assistant_session.lock().await;
             s.stop_current_turn();
         }
+        self.hide_assistant_overlay();
         info!("assistant stop requested");
     }
 

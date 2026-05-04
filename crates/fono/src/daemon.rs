@@ -581,8 +581,15 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                         HotkeyEvent::Cancel | HotkeyEvent::StopAssistantPlayback => {
                             t.set_state(TrayState::Idle);
                         }
-                        HotkeyEvent::StartAssistant => t.set_state(TrayState::Recording),
-                        HotkeyEvent::StopAssistant => t.set_state(TrayState::Processing),
+                        // Assistant flow: stay green through both
+                        // recording and the post-release pump
+                        // (thinking + speaking) so the user sees a
+                        // single, coherent "assistant active"
+                        // colour rather than a green→amber→green
+                        // flicker.
+                        HotkeyEvent::StartAssistant | HotkeyEvent::StopAssistant => {
+                            t.set_state(TrayState::Assistant);
+                        }
                     }
                 }
                 let Some(o) = orch.as_ref() else {

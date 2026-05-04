@@ -195,6 +195,12 @@ pub enum TrayState {
     Recording = 1,
     Processing = 2,
     Paused = 3,
+    /// Voice assistant is active (recording / thinking / speaking).
+    /// Painted green to mirror the overlay's accent stripe so the
+    /// user can tell the assistant flow apart from dictation at a
+    /// glance. Sub-phases collapse into one tray state because the
+    /// icon doesn't need that level of detail.
+    Assistant = 4,
 }
 
 /// User actions fired from the tray menu.
@@ -301,6 +307,7 @@ impl Tray {
             1 => TrayState::Recording,
             2 => TrayState::Processing,
             3 => TrayState::Paused,
+            4 => TrayState::Assistant,
             _ => TrayState::Idle,
         }
     }
@@ -1326,6 +1333,7 @@ mod backend {
             TrayState::Recording => "Fono — recording",
             TrayState::Processing => "Fono — processing",
             TrayState::Paused => "Fono — paused",
+            TrayState::Assistant => "Fono — assistant",
         }
     }
 
@@ -1337,9 +1345,12 @@ mod backend {
         const SIZE: i32 = 32;
         let (r, g, b) = match state {
             TrayState::Idle => (0x3b, 0x82, 0xf6),       // blue
-            TrayState::Recording => (0xef, 0x44, 0x44),  // red
+            TrayState::Recording => (0xef, 0x44, 0x44),  // red (dictation)
             TrayState::Processing => (0xf5, 0x9e, 0x0b), // amber
             TrayState::Paused => (0x6b, 0x72, 0x80),     // grey
+            // Saturated green — matches the overlay's accent stripe
+            // for assistant turns (`AssistantRecording`).
+            TrayState::Assistant => (0x22, 0xc5, 0x5e),
         };
         let mut data = Vec::with_capacity((SIZE * SIZE * 4) as usize);
         let cx = SIZE / 2;

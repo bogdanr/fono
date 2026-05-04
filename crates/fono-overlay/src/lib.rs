@@ -17,6 +17,14 @@ pub enum OverlayState {
     Recording {
         db: i8,
     },
+    /// Voice-assistant recording (F10 hold-to-talk). Same waveform
+    /// shapes as [`Self::Recording`], but the renderer uses a green
+    /// palette + "Assistant" title so the user can see at a glance
+    /// which pipeline they triggered. The orchestrator drives the
+    /// same level/sample/FFT push paths.
+    AssistantRecording {
+        db: i8,
+    },
     Processing,
     /// Live dictation in progress. The text is shown via
     /// [`OverlayHandle::update_text`].
