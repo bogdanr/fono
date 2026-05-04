@@ -174,11 +174,7 @@ impl SentenceSplitter {
 
             // Paragraph-break flush — outside fences only (we already
             // bailed out of fence mode above).
-            if c == b'\n'
-                && i + 1 < bytes.len()
-                && bytes[i + 1] == b'\n'
-                && !in_inline_code
-            {
+            if c == b'\n' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' && !in_inline_code {
                 if emit_chars >= MIN_EMIT_CHARS {
                     return Event::Boundary { end: i + 2 };
                 }
@@ -200,9 +196,7 @@ impl SentenceSplitter {
                 let is_boundary = matches!(after, Some(b' ' | b'\t' | b'\n' | b'\r'));
                 if is_boundary && emit_chars >= MIN_EMIT_CHARS {
                     let mut end = j;
-                    while end < bytes.len()
-                        && matches!(bytes[end], b' ' | b'\t' | b'\n' | b'\r')
-                    {
+                    while end < bytes.len() && matches!(bytes[end], b' ' | b'\t' | b'\n' | b'\r') {
                         end += 1;
                     }
                     return Event::Boundary { end };
@@ -214,10 +208,7 @@ impl SentenceSplitter {
             // Count visible characters towards the threshold. Skip
             // ASCII whitespace; for multi-byte UTF-8 count once per
             // code point (continuation bytes start with 0b10xxxxxx).
-            if !in_inline_code
-                && !c.is_ascii_whitespace()
-                && (c & 0xC0) != 0x80
-            {
+            if !in_inline_code && !c.is_ascii_whitespace() && (c & 0xC0) != 0x80 {
                 emit_chars += 1;
             }
             i += 1;
@@ -342,17 +333,13 @@ mod tests {
 
     #[test]
     fn handles_mid_token_deltas() {
-        let mut s = SentenceSplitter::new();
-        let a = s.push("Hel");
-        let b = s.push("lo there friend, how are");
-        let c = s.push(" you doing today my dear?");
-        let d = s.push(" I hope you are well at this hour.");
+        let mut splitter = SentenceSplitter::new();
         let mut got: Vec<String> = Vec::new();
-        got.extend(a);
-        got.extend(b);
-        got.extend(c);
-        got.extend(d);
-        if let Some(tail) = s.flush() {
+        got.extend(splitter.push("Hel"));
+        got.extend(splitter.push("lo there friend, how are"));
+        got.extend(splitter.push(" you doing today my dear?"));
+        got.extend(splitter.push(" I hope you are well at this hour."));
+        if let Some(tail) = splitter.flush() {
             got.push(tail);
         }
         assert_eq!(
@@ -380,23 +367,21 @@ mod tests {
     #[test]
     fn flush_returns_trailing_partial() {
         let mut s = SentenceSplitter::new();
-        let pushed = s.push(
-            "First sentence is right here in front of us. And then a partial without ending",
-        );
+        let pushed = s
+            .push("First sentence is right here in front of us. And then a partial without ending");
         assert_eq!(
             pushed,
             vec!["First sentence is right here in front of us.".to_string()]
         );
         let tail = s.flush();
-        assert_eq!(
-            tail,
-            Some("And then a partial without ending".to_string())
-        );
+        assert_eq!(tail, Some("And then a partial without ending".to_string()));
     }
 
     #[test]
     fn forced_flush_on_paragraph_break() {
-        let got = split_all("# Some Heading That Is Reasonably Long\n\nNext paragraph here, also of decent length.");
+        let got = split_all(
+            "# Some Heading That Is Reasonably Long\n\nNext paragraph here, also of decent length.",
+        );
         assert_eq!(
             got,
             vec![
@@ -444,7 +429,10 @@ mod tests {
     fn unterminated_short_input_held_until_flush() {
         let mut s = SentenceSplitter::new();
         let pushed = s.push("Hi there.");
-        assert!(pushed.is_empty(), "too short to emit mid-stream: {pushed:?}");
+        assert!(
+            pushed.is_empty(),
+            "too short to emit mid-stream: {pushed:?}"
+        );
         assert_eq!(s.flush(), Some("Hi there.".to_string()));
     }
 
@@ -463,9 +451,8 @@ mod tests {
         // Triple-backtick spans two pushes — must still drop fence
         // content correctly.
         let mut s = SentenceSplitter::new();
-        let mut got = s.push(
-            "Here is a long enough preamble before the fence opens.\n\n```\nlet x = 1.0;",
-        );
+        let mut got =
+            s.push("Here is a long enough preamble before the fence opens.\n\n```\nlet x = 1.0;");
         got.extend(s.push("\nfn foo() {}\n```\nNow some prose after the fence is over."));
         if let Some(tail) = s.flush() {
             got.push(tail);

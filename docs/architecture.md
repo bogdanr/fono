@@ -15,12 +15,21 @@ fono-audio       cpal capture → ring buffer, resampler, VAD stub, auto-mute
 fono-hotkey      accelerator parser, FSM, global-hotkey listener thread
 fono-stt         async SpeechToText trait + registry + backends
 fono-llm         async TextCleanup   trait + registry + backends
+fono-tts         async TextToSpeech  trait + Wyoming + OpenAI + Piper-stub
+fono-assistant   streaming chat (Anthropic + OpenAI-compat) + rolling history
 fono-inject      enigo typing + clipboard-paste fallback, focus detection
 fono-tray        tray-icon lifecycle + menu
-fono-overlay     winit/softbuffer recording indicator (deferred)
+fono-overlay     winit/softbuffer recording + thinking-animation overlay
 fono-ipc         Unix-socket single-instance protocol (length-prefixed JSON)
 fono-download    streaming HTTPS with SHA-256 verify + range resume
 ```
+
+The dictation pipeline goes **STT → LLM cleanup → text injection**.
+The voice-assistant pipeline (F10 hold-to-talk) diverges after STT:
+**STT → assistant chat → SentenceSplitter → TTS → AudioPlayback**,
+with no text injection. `fono::assistant` orchestrates the pump and
+hosts the rolling conversation history; `fono-audio::playback` is
+the cpal/paplay output worker the assistant flow uses.
 
 ## Runtime model
 

@@ -1119,9 +1119,7 @@ async fn use_cmd(paths: &Paths, action: UseCmd) -> Result<()> {
         }
         UseCmd::Tts { backend, uri } => {
             let b = parse_tts_backend(&backend).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "unknown TTS backend {backend:?}; try none, wyoming, piper, openai"
-                )
+                anyhow::anyhow!("unknown TTS backend {backend:?}; try none, wyoming, piper, openai")
             })?;
             set_active_tts(&mut cfg, b.clone(), uri);
             cfg.save(&path)?;
@@ -1188,7 +1186,11 @@ async fn print_show(paths: &Paths, cfg: &Config) {
     println!(
         "  assistant: {}{}",
         assistant_backend_str(&cfg.assistant.backend),
-        if cfg.assistant.enabled { "" } else { " (disabled)" }
+        if cfg.assistant.enabled {
+            ""
+        } else {
+            " (disabled)"
+        }
     );
     println!("  tts      : {}", tts_backend_str(&cfg.tts.backend));
     match fono_ipc::request_any(

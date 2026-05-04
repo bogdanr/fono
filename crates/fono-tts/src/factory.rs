@@ -20,7 +20,10 @@ use crate::traits::TextToSpeech;
 /// Construct a TTS backend from `cfg`. Returns `Ok(None)` for
 /// `TtsBackend::None` so callers can treat "TTS disabled" without
 /// matching on the enum themselves.
-#[cfg_attr(not(any(feature = "wyoming", feature = "openai")), allow(unused_variables))]
+#[cfg_attr(
+    not(any(feature = "wyoming", feature = "openai")),
+    allow(unused_variables)
+)]
 pub fn build_tts(cfg: &Tts, secrets: &Secrets) -> Result<Option<Arc<dyn TextToSpeech>>> {
     match cfg.backend {
         TtsBackend::None => Ok(None),

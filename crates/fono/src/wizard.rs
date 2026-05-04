@@ -159,9 +159,9 @@ async fn configure_assistant(
     // ── Assistant chat backend ──────────────────────────────────────
     let chat_options = [
         "Anthropic (claude-haiku-4-5) — recommended",
-        "Cerebras (llama-3.3-70b, sub-second latency)",
-        "Groq (llama-3.3-70b-versatile)",
-        "OpenAI (gpt-4o-mini)",
+        "Cerebras (qwen-3-235b-a22b-instruct-2507, sub-second latency)",
+        "Groq (openai/gpt-oss-120b)",
+        "OpenAI (gpt-5.4-mini)",
         "OpenRouter",
         "Ollama (local server)",
         "Skip — disable assistant",
@@ -181,17 +181,17 @@ async fn configure_assistant(
         1 => (
             AssistantBackend::Cerebras,
             Some("CEREBRAS_API_KEY"),
-            "llama-3.3-70b",
+            "qwen-3-235b-a22b-instruct-2507",
         ),
         2 => (
             AssistantBackend::Groq,
             Some("GROQ_API_KEY"),
-            "llama-3.3-70b-versatile",
+            "openai/gpt-oss-120b",
         ),
         3 => (
             AssistantBackend::OpenAI,
             Some("OPENAI_API_KEY"),
-            "gpt-4o-mini",
+            "gpt-5.4-mini",
         ),
         4 => (
             AssistantBackend::OpenRouter,
@@ -1113,10 +1113,10 @@ async fn configure_cloud_llm(
     secrets: &mut Secrets,
 ) -> Result<()> {
     let llm_providers = &[
-        "Cerebras (llama-3.3-70b, < 1s latency) — recommended",
-        "Groq (llama-3.3-70b-versatile)",
-        "OpenAI (gpt-4o-mini)",
-        "Anthropic (claude-3-5-haiku)",
+        "Cerebras (llama3.1-8b, < 1s latency) — recommended",
+        "Groq (openai/gpt-oss-20b)",
+        "OpenAI (gpt-5.4-nano)",
+        "Anthropic (claude-haiku-4-5)",
         "Skip LLM cleanup",
     ];
     let llm_idx = Select::with_theme(theme)
@@ -1131,13 +1131,13 @@ async fn configure_cloud_llm(
         return Ok(());
     }
     let (backend, key_name, model) = match llm_idx {
-        0 => (LlmBackend::Cerebras, "CEREBRAS_API_KEY", "llama-3.3-70b"),
-        1 => (LlmBackend::Groq, "GROQ_API_KEY", "llama-3.3-70b-versatile"),
-        2 => (LlmBackend::OpenAI, "OPENAI_API_KEY", "gpt-4o-mini"),
+        0 => (LlmBackend::Cerebras, "CEREBRAS_API_KEY", "llama3.1-8b"),
+        1 => (LlmBackend::Groq, "GROQ_API_KEY", "openai/gpt-oss-20b"),
+        2 => (LlmBackend::OpenAI, "OPENAI_API_KEY", "gpt-5.4-nano"),
         _ => (
             LlmBackend::Anthropic,
             "ANTHROPIC_API_KEY",
-            "claude-3-5-haiku-latest",
+            "claude-haiku-4-5-20251001",
         ),
     };
     if let Some(k) = prompt_api_key_with_validation(theme, secrets, key_name).await? {

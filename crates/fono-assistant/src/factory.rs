@@ -61,9 +61,18 @@ fn resolve_cloud(
 fn default_cloud_model(provider: &str) -> &'static str {
     match provider {
         "anthropic" => "claude-haiku-4-5-20251001",
-        "openai" => "gpt-4o-mini",
-        "cerebras" => "llama-3.3-70b",
-        "groq" => "llama-3.3-70b-versatile",
+        // OpenAI: assistant uses the larger sibling of the cleanup
+        // model so it can sustain a multi-turn conversation.
+        "openai" => "gpt-5.4-mini",
+        // Cerebras: qwen-3-235b-a22b-instruct-2507 is the default
+        // because it's available on every Cerebras tier (the
+        // alternative `gpt-oss-120b` is gated to billable / preview
+        // accounts and 404s on free-tier keys). Groq exposes OpenAI's
+        // open-weight gpt-oss-120b under an `openai/` namespace
+        // prefix and serves it without per-account gating, so it
+        // stays the Groq default.
+        "cerebras" => "qwen-3-235b-a22b-instruct-2507",
+        "groq" => "openai/gpt-oss-120b",
         "openrouter" => "anthropic/claude-haiku-4.5",
         // Ollama: user must configure their own — "default" model
         // names depend on what they've pulled.
@@ -101,25 +110,33 @@ pub fn build_assistant(
 #[cfg(feature = "openai-compat")]
 fn build_cerebras(cfg: &AssistantCfg, secrets: &Secrets) -> Result<Arc<dyn Assistant>> {
     let (k, m) = resolve_cloud(cfg, secrets, &AssistantBackend::Cerebras, "cerebras")?;
-    Ok(Arc::new(crate::openai_compat_chat::OpenAiCompatChat::cerebras(k, m)))
+    Ok(Arc::new(
+        crate::openai_compat_chat::OpenAiCompatChat::cerebras(k, m),
+    ))
 }
 
 #[cfg(feature = "openai-compat")]
 fn build_groq(cfg: &AssistantCfg, secrets: &Secrets) -> Result<Arc<dyn Assistant>> {
     let (k, m) = resolve_cloud(cfg, secrets, &AssistantBackend::Groq, "groq")?;
-    Ok(Arc::new(crate::openai_compat_chat::OpenAiCompatChat::groq(k, m)))
+    Ok(Arc::new(crate::openai_compat_chat::OpenAiCompatChat::groq(
+        k, m,
+    )))
 }
 
 #[cfg(feature = "openai-compat")]
 fn build_openai(cfg: &AssistantCfg, secrets: &Secrets) -> Result<Arc<dyn Assistant>> {
     let (k, m) = resolve_cloud(cfg, secrets, &AssistantBackend::OpenAI, "openai")?;
-    Ok(Arc::new(crate::openai_compat_chat::OpenAiCompatChat::openai(k, m)))
+    Ok(Arc::new(
+        crate::openai_compat_chat::OpenAiCompatChat::openai(k, m),
+    ))
 }
 
 #[cfg(feature = "openai-compat")]
 fn build_openrouter(cfg: &AssistantCfg, secrets: &Secrets) -> Result<Arc<dyn Assistant>> {
     let (k, m) = resolve_cloud(cfg, secrets, &AssistantBackend::OpenRouter, "openrouter")?;
-    Ok(Arc::new(crate::openai_compat_chat::OpenAiCompatChat::openrouter(k, m)))
+    Ok(Arc::new(
+        crate::openai_compat_chat::OpenAiCompatChat::openrouter(k, m),
+    ))
 }
 
 // Returns Result for symmetry with the other build_* functions, even
@@ -148,7 +165,9 @@ fn build_ollama(cfg: &AssistantCfg) -> Result<Arc<dyn Assistant>> {
         .map(|c| c.model.clone())
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| default_cloud_model("ollama").to_string());
-    Ok(Arc::new(crate::openai_compat_chat::OpenAiCompatChat::ollama(endpoint, model)))
+    Ok(Arc::new(
+        crate::openai_compat_chat::OpenAiCompatChat::ollama(endpoint, model),
+    ))
 }
 
 #[cfg(not(feature = "openai-compat"))]
@@ -230,7 +249,9 @@ mod tests {
             backend: AssistantBackend::None,
             ..AssistantCfg::default()
         };
-        assert!(build_assistant(&cfg, &Secrets::default()).unwrap().is_none());
+        assert!(build_assistant(&cfg, &Secrets::default())
+            .unwrap()
+            .is_none());
     }
 
     #[cfg(feature = "anthropic")]
@@ -305,6 +326,9 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
-        assert!(err.contains("Gemini") || err.contains("not implemented"), "{err}");
+        assert!(
+            err.contains("Gemini") || err.contains("not implemented"),
+            "{err}"
+        );
     }
 }

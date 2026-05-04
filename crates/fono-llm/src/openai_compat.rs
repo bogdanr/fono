@@ -109,6 +109,11 @@ struct ChatReq<'a> {
     messages: Vec<Message<'a>>,
     temperature: f32,
     top_p: f32,
+    // OpenAI's gpt-5 / o-series reject the legacy `max_tokens` field
+    // with a 400; the new name `max_completion_tokens` is accepted
+    // by all the OpenAI-compat providers we ship (Cerebras, Groq,
+    // OpenAI, OpenRouter, Ollama).
+    #[serde(rename = "max_completion_tokens")]
     max_tokens: u32,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     stop: Vec<&'a str>,

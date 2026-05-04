@@ -112,8 +112,7 @@ impl ConversationHistory {
     /// conversation" when applicable.
     #[must_use]
     pub fn is_stale(&self) -> bool {
-        self.last_activity
-            .is_none_or(|t| t.elapsed() > self.window)
+        self.last_activity.is_none_or(|t| t.elapsed() > self.window)
     }
 
     fn prune_window(&mut self) {

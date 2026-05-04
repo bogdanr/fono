@@ -52,7 +52,10 @@ pub struct AudioPlayback {
 }
 
 enum Cmd {
-    Play { pcm: Vec<f32>, sample_rate: u32 },
+    Play {
+        pcm: Vec<f32>,
+        sample_rate: u32,
+    },
     /// Drain queued Play commands without playing them and reset the
     /// abort flag, then resume normal operation. The worker stays
     /// alive — to actually shut it down, drop the
@@ -70,7 +73,12 @@ impl AudioPlayback {
         let pending = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
 
-        spawn_worker(rx, pending.clone(), stop.clone(), device.map(str::to_string))?;
+        spawn_worker(
+            rx,
+            pending.clone(),
+            stop.clone(),
+            device.map(str::to_string),
+        )?;
 
         Ok(Self { tx, pending, stop })
     }

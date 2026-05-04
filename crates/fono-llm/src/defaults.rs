@@ -5,14 +5,20 @@
 #[must_use]
 pub fn default_cloud_model(provider: &str) -> &'static str {
     match provider {
-        "cerebras" => "llama-3.3-70b",
-        "groq" => "llama-3.3-70b-versatile",
-        "openai" => "gpt-4o-mini",
-        "anthropic" => "claude-3-5-haiku-latest",
-        "openrouter" => "openai/gpt-4o-mini",
+        // Cerebras retired llama-3.3-70b — `llama3.1-8b` is their
+        // current cleanup-class recommendation (small, fast).
+        "cerebras" => "llama3.1-8b",
+        // Groq + OpenAI: use the smallest of the OpenAI-compat
+        // family for cleanup; the assistant gets the larger sibling.
+        // Groq exposes OpenAI's open-weight gpt-oss models under
+        // an `openai/` namespace prefix.
+        "groq" => "openai/gpt-oss-20b",
+        "openai" => "gpt-5.4-nano",
+        "anthropic" => "claude-haiku-4-5-20251001",
+        "openrouter" => "openai/gpt-5.4-nano",
         "ollama" => "llama3.2",
         "gemini" => "gemini-1.5-flash",
-        _ => "llama-3.3-70b",
+        _ => "llama3.1-8b",
     }
 }
 
@@ -22,8 +28,12 @@ mod tests {
 
     #[test]
     fn known_providers_resolve() {
-        assert_eq!(default_cloud_model("cerebras"), "llama-3.3-70b");
-        assert_eq!(default_cloud_model("openai"), "gpt-4o-mini");
-        assert_eq!(default_cloud_model("anthropic"), "claude-3-5-haiku-latest");
+        assert_eq!(default_cloud_model("cerebras"), "llama3.1-8b");
+        assert_eq!(default_cloud_model("groq"), "openai/gpt-oss-20b");
+        assert_eq!(default_cloud_model("openai"), "gpt-5.4-nano");
+        assert_eq!(
+            default_cloud_model("anthropic"),
+            "claude-haiku-4-5-20251001"
+        );
     }
 }

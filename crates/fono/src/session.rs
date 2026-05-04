@@ -716,8 +716,7 @@ impl SessionOrchestrator {
                                     0.5 - 0.5 * phase.cos()
                                 })
                                 .collect();
-                            let max_source_bin = ((WAVEFORM_FFT_MAX_HZ
-                                * WAVEFORM_FFT_SIZE as f32)
+                            let max_source_bin = ((WAVEFORM_FFT_MAX_HZ * WAVEFORM_FFT_SIZE as f32)
                                 / sample_rate as f32)
                                 as usize;
                             let display_bins = WAVEFORM_FFT_BINS.max(1);
@@ -750,8 +749,7 @@ impl SessionOrchestrator {
                                 let mut bins = vec![0.0_f32; display_bins];
                                 for (display_i, slot) in bins.iter_mut().enumerate() {
                                     let start = (display_i * max_source_bin) / display_bins;
-                                    let end_raw =
-                                        ((display_i + 1) * max_source_bin) / display_bins;
+                                    let end_raw = ((display_i + 1) * max_source_bin) / display_bins;
                                     let end = end_raw.max(start + 1).min(max_source_bin);
                                     let mut sum = 0.0_f32;
                                     for c in &output_buf[start..end] {
@@ -759,8 +757,8 @@ impl SessionOrchestrator {
                                     }
                                     let mag = sum / (end - start) as f32;
                                     let db = 20.0 * mag.max(1e-6).log10();
-                                    *slot = ((db - WAVEFORM_FFT_DB_FLOOR) / db_span)
-                                        .clamp(0.0, 1.0);
+                                    *slot =
+                                        ((db - WAVEFORM_FFT_DB_FLOOR) / db_span).clamp(0.0, 1.0);
                                 }
                                 o.push_fft_bins(bins);
                             }
@@ -1053,9 +1051,8 @@ impl SessionOrchestrator {
         injector: Arc<dyn Injector>,
         focus: Arc<dyn FocusProbe>,
     ) -> Self {
-        let history_window = Duration::from_secs(60 * u64::from(
-            config.assistant.history_window_minutes,
-        ));
+        let history_window =
+            Duration::from_secs(60 * u64::from(config.assistant.history_window_minutes));
         let history_max = config.assistant.history_max_turns as usize;
         Self {
             stt: Arc::new(StdRwLock::new(stt)),
@@ -1336,17 +1333,16 @@ impl SessionOrchestrator {
             let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
             return;
         };
-        let (pcm, elapsed) = match tokio::task::spawn_blocking(move || session.stop_and_drain())
-            .await
-        {
-            Ok(t) => t,
-            Err(e) => {
-                warn!("assistant capture join failed: {e:#}");
-                self.hide_assistant_overlay();
-                let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
-                return;
-            }
-        };
+        let (pcm, elapsed) =
+            match tokio::task::spawn_blocking(move || session.stop_and_drain()).await {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("assistant capture join failed: {e:#}");
+                    self.hide_assistant_overlay();
+                    let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
+                    return;
+                }
+            };
         if elapsed < MIN_RECORDING || pcm.is_empty() {
             info!(
                 "assistant recording too short ({}ms); skipping",
@@ -1423,9 +1419,7 @@ impl SessionOrchestrator {
         let notify_for_task = notify.clone();
         let state_for_clear = state_for_task.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                run_assistant_turn(state_for_task, inputs, notify_for_task).await
-            {
+            if let Err(e) = run_assistant_turn(state_for_task, inputs, notify_for_task).await {
                 warn!("assistant turn failed: {e:#}");
             }
             // Clear the current_turn slot so a fresh press doesn't

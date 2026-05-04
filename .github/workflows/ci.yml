@@ -3,11 +3,28 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "plans/**"
+      - "CHANGELOG.md"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE.md"
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "plans/**"
+      - "CHANGELOG.md"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE.md"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,6 +35,7 @@ jobs:
   test:
     name: Build & test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -37,17 +55,20 @@ jobs:
       - name: Install Linux build + desktop deps
         # `clang`, `cmake`, `libclang-dev`, `build-essential` are needed
         # by `whisper-rs-sys` and `llama-cpp-sys-2` (both vendor C/C++
-        # ggml sources and shell out to cmake at build time). The rest
-        # are runtime deps for the tray + text-injection stack. Keep
-        # this list in sync with the `Install Linux build deps` step in
-        # `.github/workflows/release.yml`.
+        # ggml sources and shell out to cmake at build time). `libxdo-dev`
+        # is the build-time header set for `fono-inject`'s X11 xtest path,
+        # and `libasound2-dev` is required by `cpal`'s build script even
+        # though the daemon delegates audio to `pactl` at runtime. The
+        # GTK / appindicator stack was dropped when the tray switched to
+        # pure-Rust `ksni` (no GTK crates remain in `Cargo.lock`); keep
+        # this list in lockstep with `release.yml`'s `Install Linux build
+        # deps` and `ci.yml`'s `size-budget` step.
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             build-essential clang cmake pkg-config libclang-dev \
-            libgtk-3-dev libayatana-appindicator3-dev libxdo-dev \
-            libasound2-dev
+            libxdo-dev libasound2-dev
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -146,6 +167,7 @@ jobs:
     # build matrix.
     name: Binary size & deps audit (${{ matrix.variant }})
     runs-on: ubuntu-22.04
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -253,6 +275,15 @@ jobs:
           echo "size-budget gate passed (${{ matrix.variant }}); NEEDED:"
           printf "  %s\n" ${actual_needed}
 
+      - name: Install cargo-bloat (prebuilt)
+        if: always()
+        # Pull the prebuilt binary from crates.io's GH releases instead
+        # of building from source on every run (~5–10s saved). The
+        # action caches the binary across runs.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-bloat
+
       - name: cargo-bloat top contributors (artefact)
         if: always()
         run: |
@@ -260,7 +291,6 @@ jobs:
           if [ -n "${{ matrix.features }}" ]; then
             extra="--features ${{ matrix.features }}"
           fi
-          cargo install cargo-bloat --locked --quiet || true
           cargo bloat \
             -p fono \
             --profile release-slim \
@@ -278,7 +308,7 @@ jobs:
 
       - name: Upload cargo-bloat reports
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: cargo-bloat-${{ matrix.variant }}
           path: cargo-bloat-*.txt
@@ -287,6 +317,7 @@ jobs:
   deny:
     name: License & advisory audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2

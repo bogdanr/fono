@@ -316,6 +316,63 @@ hot-swap is exercised by the test suite (`crates/fono/tests/`), so a
 real-world miss likely indicates a config-load error — check the daemon
 log around the switch.
 
+## Voice assistant (F10) doesn't trigger
+
+The assistant pipeline is independent of dictation and needs both an
+assistant chat backend and a TTS backend selected before F10 will do
+anything useful.
+
+```sh
+fono doctor
+```
+
+Look for the `assistant:` and `tts:` rows. Each should show
+`(active) reachable` or `ready`. If either says `not configured`:
+
+```sh
+fono use assistant groq           # or anthropic, cerebras, openai, ollama
+fono use tts openai               # or wyoming, piper
+```
+
+If `fono doctor` reports the backends ready but holding F10 still
+produces nothing, tail the daemon log while you press the key. You
+should see `INFO fsm event: AssistantStart` on press and
+`AssistantStop` on release. If neither appears, the F10 binding isn't
+reaching the daemon — see "Hotkey doesn't fire" above (Wayland users
+must bind F10 in the compositor and run `fono assistant press` /
+`fono assistant release`).
+
+## Voice assistant produces no audio
+
+The text reply was generated but you didn't hear it.
+
+1. Confirm `paplay` is installed — it's the default playback path on
+   the slim release build:
+
+   ```sh
+   which paplay && paplay --version
+   ```
+
+   On Debian/Ubuntu install `pulseaudio-utils`; on Arch
+   `libpulse`; on Slackware/NimbleX `pulseaudio`.
+2. If you selected `tts = openai`, confirm `OPENAI_API_KEY` is set and
+   reachable: `fono keys check`.
+3. If you selected `tts = wyoming`, confirm your Piper / Wyoming
+   server is running and reachable on the configured `host:port`. The
+   daemon logs `wyoming tts: connect <host>:<port>` on the first turn.
+4. Lower the system mixer or the per-app volume? The daemon doesn't
+   touch volume — `pactl list sink-inputs` will show the playback
+   stream while a reply is speaking.
+
+## Assistant overlay disappears before audio finishes
+
+Known follow-up tracked for v0.7.1: the thinking / speaking overlay
+returns to idle as soon as the TTS pump enqueues its last chunk, but
+`paplay` keeps playing the buffered audio for up to a second after.
+The reply is still complete and audible — only the visual cue is
+early. There's a `TODO` marker in `fono::assistant::run_assistant_turn`
+where the drain wait will land.
+
 ## "Edit config" tray entry opens Dolphin / a file manager
 
 `xdg-open` defaults vary by distro. Override in config:

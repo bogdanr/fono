@@ -177,11 +177,9 @@ impl TextToSpeech for WyomingTts {
 
         let result = timeout(SYNTHESIZE_TIMEOUT, async {
             loop {
-                let f = Frame::read_async(&mut reader)
-                    .await
-                    .with_context(|| {
-                        format!("reading from wyoming TTS server at {}", self.endpoint())
-                    })?;
+                let f = Frame::read_async(&mut reader).await.with_context(|| {
+                    format!("reading from wyoming TTS server at {}", self.endpoint())
+                })?;
                 match f.kind.as_str() {
                     AUDIO_START => {
                         let s: AudioStart = serde_json::from_value(f.data)

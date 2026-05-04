@@ -5,6 +5,14 @@ on:
     tags:
       - "v*"
 
+# Don't run two release pipelines for the same tag in parallel (e.g. if a
+# tag is force-pushed mid-flight). `cancel-in-progress: false` because
+# cancelling a release mid-upload would corrupt the draft state — let the
+# first run finish, and a re-pushed tag will queue behind it.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -24,6 +32,7 @@ jobs:
   cloud-equivalence:
     name: Cloud STT equivalence (Groq)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # The `secrets` context is not available in job-level if conditions,
     # so only the tag-suffix escape hatch is checked here. The API-key
     # presence check is handled inside the step below.
@@ -72,23 +81,68 @@ jobs:
 
       - name: Upload report (always, for debugging)
         if: ${{ always() && hashFiles('cloud-bench.json') != '' }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: cloud-bench-${{ github.ref_name }}
           path: cloud-bench.json
           retention-days: 30
 
+  cloud-assistant:
+    name: Cloud assistant smoke (Groq + Cerebras)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Same tag-suffix escape hatch as `cloud-equivalence`. Per
+    # `crates/fono/examples/smoke_assistant.rs`, the `--ci` mode
+    # exercises the two providers whose API keys are stored as
+    # GitHub Actions secrets (Groq + Cerebras) and skips the
+    # local-only ones (Anthropic + OpenAI + OpenAI TTS).
+    if: ${{ !endsWith(github.ref, '-no-cloud-gate') }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cloud-assistant
+
+      - name: Install Linux build deps
+        # The smoke binary depends transitively on fono-stt +
+        # fono-llm; clang/cmake are needed by whisper-rs-sys even
+        # though only the cloud chat path is exercised.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential clang cmake pkg-config libclang-dev libasound2-dev
+
+      - name: Run assistant smoke (Groq + Cerebras)
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GROQ_API_KEY:-}" ] && [ -z "${CEREBRAS_API_KEY:-}" ]; then
+            echo "Neither GROQ_API_KEY nor CEREBRAS_API_KEY secret set — skipping assistant smoke."
+            exit 0
+          fi
+          cargo run --release --example smoke_assistant -p fono -- --ci
+
   build:
     name: Release binary (${{ matrix.variant }}, ${{ matrix.target }})
-    needs: [cloud-equivalence]
-    # Run even when cloud-equivalence is skipped (no key, override
+    needs: [cloud-equivalence, cloud-assistant]
+    # Run even when either cloud gate is skipped (no key, override
     # tag) — `needs` defaults to "succeeded()", which fails on
-    # skipped jobs. The explicit condition allows skipped+success.
+    # skipped jobs. The explicit condition allows skipped+success
+    # for both gates independently.
     if: >-
       ${{ always()
           && (needs.cloud-equivalence.result == 'success'
-              || needs.cloud-equivalence.result == 'skipped') }}
+              || needs.cloud-equivalence.result == 'skipped')
+          && (needs.cloud-assistant.result == 'success'
+              || needs.cloud-assistant.result == 'skipped') }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -236,7 +290,7 @@ jobs:
           ls -la out-stage 2>/dev/null || true
 
       - name: Upload bare binary (release asset)
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: fono-bin-${{ matrix.variant }}-${{ matrix.target }}
           path: out-bin/*
@@ -244,7 +298,7 @@ jobs:
 
       - name: Upload internal staging tarball (package-job input)
         if: matrix.variant == 'cpu'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: fono-stage-${{ matrix.target }}
           path: out-stage/*.tar.gz
@@ -254,6 +308,7 @@ jobs:
     name: Debian package (.deb)
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
 
@@ -303,7 +358,7 @@ jobs:
           mkdir -p dist-deb
           dpkg-deb --build --root-owner-group debroot "dist-deb/fono_${version}-1_amd64.deb"
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: fono-pkg-deb
           path: dist-deb/*.deb
@@ -313,6 +368,7 @@ jobs:
     name: Arch package (.pkg.tar.zst)
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
 
@@ -366,7 +422,7 @@ jobs:
           (cd pkg && bsdtar --zstd -cf "../dist-arch/fono-${version}-1-x86_64.pkg.tar.zst" .)
           ls -la dist-arch
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: fono-pkg-arch
           path: dist-arch/*.pkg.tar.zst
@@ -376,6 +432,7 @@ jobs:
     name: Slackware package (.txz)
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     container:
       image: vbatts/slackware:15.0
     steps:
@@ -400,7 +457,7 @@ jobs:
           mkdir -p "${GITHUB_WORKSPACE}/dist-slack"
           cp "/tmp/fono-${version}-x86_64-1.txz" "${GITHUB_WORKSPACE}/dist-slack/"
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: fono-pkg-slack
           path: dist-slack/*.txz
@@ -410,6 +467,7 @@ jobs:
     name: NimbleX module (.lzm)
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
 
@@ -448,7 +506,7 @@ jobs:
             -comp xz -b 256K -noappend -no-recovery
           ls -la dist-nimblex
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: fono-pkg-nimblex
           path: dist-nimblex/*.lzm
@@ -458,6 +516,7 @@ jobs:
     name: Draft GitHub Release
     needs: [build, linux-deb, linux-arch, linux-slack, linux-nimblex]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
         with:

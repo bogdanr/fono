@@ -118,6 +118,13 @@ struct ChatReq<'a> {
     messages: Vec<Message<'a>>,
     temperature: f32,
     top_p: f32,
+    // OpenAI's gpt-5 / o-series models reject the legacy
+    // `max_tokens` field with a 400 and demand
+    // `max_completion_tokens` instead. Older OpenAI models, plus
+    // every Cerebras / Groq / OpenRouter / Ollama deployment I've
+    // tested, accept either. Sending only the new name keeps the
+    // newer OpenAI models happy without breaking anyone else.
+    #[serde(rename = "max_completion_tokens")]
     max_tokens: u32,
     stream: bool,
 }

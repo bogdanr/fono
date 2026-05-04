@@ -1,6 +1,44 @@
 # Fono — Project Status
 
-Last updated: 2026-05-03
+Last updated: 2026-05-04
+
+## 2026-05-04 — Release v0.7.0
+
+Tagged v0.7.0. Headline feature: a voice assistant alongside
+dictation.
+
+- **F10 hold-to-talk** captures audio, transcribes via the
+  existing STT backend, asks a chat-capable LLM (independent
+  backend selection from `[llm]` cleanup), streams the reply
+  sentence-by-sentence into a TTS backend, and plays the audio
+  through the speakers. First sentence starts speaking before
+  the model has finished generating.
+- **Two new crates** — `fono-tts` (Wyoming protocol client +
+  OpenAI `/v1/audio/speech` + Piper-stub) and `fono-assistant`
+  (streaming chat trait + Anthropic Messages API + the full
+  OpenAI-compatible family). `fono-audio::playback` adds a
+  paplay-based output worker on the Linux release variant.
+- **`[assistant]` / `[tts]` config blocks**, multi-turn rolling
+  history, `auto_clear_on_dictation`, cancellation (F10 again =
+  barge-in, Escape = shut up). New CLI subcommands
+  (`fono use assistant|tts`, `fono assistant {press,release,
+  stop}`), new tray entries + backend submenus, wizard step,
+  doctor coverage.
+- **Overlay** paints green during assistant recording and amber
+  during the post-release thinking phase, with per-style
+  synthetic animations (FFT scanner, symmetric bars, harmonic-
+  processing oscilloscope, neural-strands heatmap). Default
+  `[overlay].style` flipped Bars → FFT.
+- **Cloud model defaults refreshed** to current production
+  models: Cerebras `llama3.1-8b` / `qwen-3-235b-a22b-instruct-2507`, Groq
+  `openai/gpt-oss-20b` / `openai/gpt-oss-120b`, OpenAI
+  `gpt-5.4-nano` / `gpt-5.4-mini`, Anthropic
+  `claude-haiku-4-5-20251001`. OpenAI-compat client now uses
+  `max_completion_tokens` (newer OpenAI models reject the
+  legacy `max_tokens` field).
+- **Release CI** gains a `cloud-assistant` gate running the new
+  `smoke_assistant` example (`--ci` mode covers Groq + Cerebras;
+  local devs run the full 4-cloud + OpenAI-TTS pass).
 
 ## 2026-05-03 — Release v0.6.1
 
@@ -23,7 +61,7 @@ robustness:
   and dumps the last 20 journal lines + the recommended follow-up
   command when the unit fails to stay up.
 - `daemon --no-tray` flag removed (tray is already runtime-gated).
-  CLI clients try `/run/fono/fono.sock` before the per-user socket,
+  CLI clients try `/var/lib/fono/fono.sock` before the per-user socket,
   so a system-wide `fono.service` is drivable from any account.
 - `general.sound_feedback` config + tray "Start/stop chimes"
   toggle + chime playback action removed; the v0.6.0 audio-vis

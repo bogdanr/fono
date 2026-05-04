@@ -213,9 +213,7 @@ impl RecordingFsm {
             // `on_assistant_hold_press` errored after the FSM had
             // already entered AssistantRecording.
             (
-                State::AssistantRecording
-                | State::AssistantThinking
-                | State::AssistantSpeaking,
+                State::AssistantRecording | State::AssistantThinking | State::AssistantSpeaking,
                 HotkeyAction::ProcessingDone,
             ) => State::Idle,
             (_, HotkeyAction::ProcessingStarted) => State::Processing,

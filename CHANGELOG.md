@@ -5,12 +5,119 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-05-04
+
+### Added
+
+- **Voice assistant — F10 hold-to-talk, streaming chat, TTS playback.**
+  A second push-to-talk key (F10 by default) turns Fono into an
+  offline-capable voice assistant. The pipeline diverges after STT:
+  instead of cleaning the transcript and injecting it, Fono asks a
+  chat-capable LLM, streams the reply sentence-by-sentence into a TTS
+  backend, and plays the audio. First sentence starts speaking before
+  the model finishes generating, so time-to-first-audio is bounded by
+  one sentence's synth latency rather than the full reply.
+- **`[assistant]` and `[tts]` config blocks.** Independent backend
+  selection from the `[llm]` cleanup pipeline — pick a fast local 3B
+  for cleanup and a bigger cloud model for the assistant, or any
+  mix-and-match. Multi-turn rolling history with a configurable time
+  window (default 5 minutes) and max-turn cap (default 12). Pressing
+  the dictation key clears assistant context (configurable);
+  pressing F10 again mid-reply barges in with history retained;
+  Escape stops playback ("shut up") without forgetting.
+- **Cloud assistant backends.** Anthropic (Claude Haiku 4.5) and the
+  full OpenAI-compatible family — OpenAI (gpt-5.4-mini), Cerebras
+  (qwen-3-235b-a22b-instruct-2507), Groq (openai/gpt-oss-120b),
+  OpenRouter, Ollama. Each
+  ships in the default binary; one feature flag per family lets slim
+  builds drop unused providers.
+- **Cloud cleanup model defaults refreshed** to match retired and
+  newly-released models: Cerebras `llama3.1-8b`, Groq
+  `openai/gpt-oss-20b`, OpenAI `gpt-5.4-nano`, Anthropic
+  `claude-haiku-4-5-20251001`. The OpenAI-compat client now sends
+  `max_completion_tokens` (the new field name newer OpenAI models
+  require; older models still accept it).
+- **TTS backends.** Wyoming protocol client (any
+  `wyoming-piper`-style server on the LAN), the OpenAI
+  `/v1/audio/speech` API (24 kHz PCM stream), and an in-process
+  Piper stub that points users at Wyoming-piper for now (the
+  static-musl ship build can't yet pull in onnxruntime). Audio
+  playback uses `paplay` on the Linux release variant (no libasound
+  link, matches the existing parec capture path) or cpal behind the
+  `cpal-backend` feature.
+- **CLI surface.** `fono use assistant <backend>`,
+  `fono use tts <backend> [--uri tcp://host:port]`,
+  `fono assistant {press,release,stop}` for scripted end-to-end
+  testing.
+- **Tray.** New *Stop assistant* and *Forget conversation* entries;
+  *Assistant backend* and *TTS backend* submenus mirror the existing
+  STT/LLM submenus and switch backends live via Reload. Tray icon
+  flips amber while the assistant is active.
+- **Wizard.** `fono setup` ends with an opt-in assistant + TTS step;
+  reuses any cloud key already entered earlier in the flow so a
+  single OPENAI_API_KEY powers both chat and TTS without a second
+  prompt.
+- **Doctor.** `fono doctor` exercises both factories at startup so a
+  missing API key or unreachable Wyoming server surfaces in one
+  place; new `Providers (assistant)` and `Providers (TTS)` tables
+  show key/URI status per backend with an active marker.
+- **Overlay feedback for the assistant flow.** Recording paints
+  green ("ASSISTANT") with the chosen waveform style; the post-
+  release thinking + speaking phase paints amber ("THINKING") with
+  per-style synthetic animations distinct from the real-audio
+  recording shape:
+  - **FFT** — Gaussian "scanner" (σ ≈ 8 bins out of 100) sweeps
+    across the panel; per-bin breathing baseline blends in via
+    a screen composite so the bell emerges smoothly.
+  - **Bars** — symmetric centre-out, peak at midline rippling
+    outward.
+  - **Oscilloscope** — two interfering sine waves with edge taper
+    pinning x = 0 / x = 1 to the centerline; central antinode
+    reaches ±1.0 without clipping.
+  - **Heatmap** — two anti-phased Gaussian "neural strands"
+    crossing over the rolling 6 s window; transitions seamlessly
+    from recording-FFT data without clearing the cache.
+  Default `[overlay].style` flipped from Bars → FFT — most active
+  visualisation across both phases.
+- **Runtime overlay style swap.** Changing `[overlay].style` via
+  `fono use`, the tray *Waveform style* submenu, or `fono config
+  edit` now applies on the next frame instead of waiting for a
+  daemon restart.
+- **Smoke-test binary** (`cargo run --release --example
+  smoke_assistant -p fono`) exercises each cloud assistant + the
+  OpenAI TTS path end-to-end. The release CI's new
+  `cloud-assistant` job runs the `--ci` subset (Groq + Cerebras,
+  the providers whose API keys are stored as GitHub Secrets).
+
+### Fixed
+
+- **FSM stuck on a sub-300 ms F10 tap.** Brief F10 taps released
+  before `MIN_RECORDING` left the orchestrator's
+  `on_assistant_hold_release` early-returning without firing
+  `ProcessingDone`; the FSM sat in `AssistantThinking` forever and
+  silently rejected subsequent F8/F9/F10 presses. Every early-return
+  path now emits `ProcessingDone`; `AssistantRecording` also accepts
+  `ProcessingDone` as a safety net.
+- **Audio playback worker dying after every cancel.** `pb.stop()`
+  used to send `Cmd::Stop` which made the worker `break` out of its
+  loop; the next turn's enqueue then failed with "audio playback
+  worker stopped". `Cmd::Drain` now drains queued items + clears the
+  abort flag without exiting the worker, so multi-turn conversations
+  keep working across barge-ins, Forget, and dictation pivots.
+- **Frozen overlay during the post-release phase.** The level task
+  was aborted in `stop_and_drain` the moment capture ended, leaving
+  the waveform on its last pre-release frame for 4–5 s while STT +
+  LLM ran. The overlay now switches into the synthetic thinking
+  animation as soon as F10 is released, and the FFT thinking
+  visualisation gets even-spaced inter-bar gaps via integer-aligned
+  slot widths.
+
 ## [0.6.1] — 2026-05-03
 
 ### Fixed
 
 - **Robust headless / systemd startup.** Five regressions surfaced
-  when running `fono daemon` on a headless inference box (Debian 13,
+  when running `fono` under `fono.service` on a headless inference box (Debian 13,
   no `DISPLAY`, systemd) all collapsed into one pass:
   - **Vulkan probe crash on shutdown.** `ash::Entry::load()` at
     daemon start enumerates every Vulkan ICD on the host (incl.
@@ -43,9 +150,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Silent install failures.** `systemctl enable --now` returns
     success the moment `ExecStart` is spawned, so a unit that
     crashes a second later (`Restart=on-failure` loop) was invisible
-    at install time. `sudo fono install` now waits 2 s, runs
+    at install time. `sudo fono install --server` now waits 2 s, runs
     `systemctl is-active`, and on failure dumps the last 20 journal
     lines plus the recommended follow-up command.
+  - **mDNS discovery on hardened systemd installs.** The system
+    unit's `RestrictAddressFamilies=` allow-list blocked
+    `AF_NETLINK`, which `mdns-sd` needs (via `getifaddrs(3)`) to
+    enumerate network interfaces. Without it the advertiser
+    registered the service in its in-process table and logged
+    `mDNS advertising _wyoming._tcp …`, but never bound UDP/5353
+    or joined the `224.0.0.251` multicast group — so LAN clients
+    running `fono discover` saw nothing while TCP/10300 was
+    perfectly reachable. `AF_NETLINK` is now in the allow-list,
+    with a comment in `packaging/assets/fono.service` explaining
+    why removing it silently breaks discovery.
 
 ### Changed
 
@@ -53,7 +171,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tray is already runtime-gated on `is_graphical_session()`, making
   `--no-tray` redundant. CLI clients (`fono toggle`, `fono history`,
   `fono use …`, …) now try the system-wide IPC socket
-  (`/run/fono/fono.sock`) before the per-user one, so a `fono`
+  (`/var/lib/fono/fono.sock`) before the per-user one, so a `fono`
   process running under the system `fono.service` unit can be
   driven from any user account on the box without per-user setup.
   Documentation in `docs/wayland.md` and `docs/troubleshooting.md`
@@ -1238,7 +1356,12 @@ feature and ships fully wired in v0.2.
 - Local LLM cleanup (Qwen / SmolLM) is opt-in / preview.
 - Real `winit + softbuffer` overlay window is a stub (event channel only).
 
-[Unreleased]: https://github.com/bogdanr/fono/compare/v0.3.7...HEAD
+[Unreleased]: https://github.com/bogdanr/fono/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/bogdanr/fono/compare/v0.6.1...v0.7.0
+[0.6.1]: https://github.com/bogdanr/fono/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/bogdanr/fono/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/bogdanr/fono/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/bogdanr/fono/compare/v0.3.7...v0.4.0
 [0.3.7]: https://github.com/bogdanr/fono/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/bogdanr/fono/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/bogdanr/fono/compare/v0.3.4...v0.3.5

@@ -13,10 +13,10 @@ The home page is [fono.page](https://fono.page).
 
 | ![Up next](https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge) | ![On the horizon](https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge) | ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge) |
 |:---|:---|:---|
-| **[Automatic translation](#automatic-translation)**<br>Speak in any language, type in another — any pair, per-app rules, batch and live parity. | **[Hover-context injection](#hover-context-injection)** *(experimental)*<br>Terminal hovered → shell prompts. Code editor hovered → identifier casing. | **Audio-visualisation overlay**<br>Bars / oscilloscope / FFT / heatmap during batch recording, plus a right-side VU meter on the live-dictation panel. ![v0.6.0](https://img.shields.io/badge/v0.6.0-blue?style=flat-square) |
-| **[Wake-word activation](#wake-word-activation)**<br>Say the magic word — Fono wakes and starts dictating. No hotkey, no hands. | **[REST API + MCP server](#local-rest-api--mcp-server)**<br>Scripts and AI coding assistants drive Fono over HTTP. | **Hardware acceleration on tap + auto-variant update + self-installer**<br>Two release variants (CPU + Vulkan GPU); `fono update` auto-picks the right one. `fono install` puts the daemon on `$PATH` system-wide. ![v0.5.0](https://img.shields.io/badge/v0.5.0-blue?style=flat-square) |
-| | **[Better Wayland hotkeys](#better-wayland-hotkeys)**<br>Auto-register via the `GlobalShortcuts` portal when available. | **Wyoming Home Assistant interop + tray-side LAN server picker**<br>Wyoming framing matches the upstream Python library so HA treats Fono as a complete endpoint. ![v0.4.0](https://img.shields.io/badge/v0.4.0-blue?style=flat-square) |
-| | **[macOS + Windows](#macos-and-windows)**<br>Native platform integrations. | **Wyoming + mDNS foundations**<br>Wyoming STT client/server, LAN discovery, pure-Rust SNI tray, and size-budget prep. ![v0.3.7](https://img.shields.io/badge/v0.3.7-blue?style=flat-square) |
+| **[Automatic translation](#automatic-translation)**<br>Speak in any language, type in another — any pair, per-app rules, batch and live parity. | **[Hover-context injection](#hover-context-injection)** *(experimental)*<br>Terminal hovered → shell prompts. Code editor hovered → identifier casing. | **Voice assistant**<br>F10 hold-to-talk: speak a question, hear the spoken reply through your speakers. Independent backend selection from cleanup, multi-turn rolling history, streaming sentence-by-sentence into TTS for low time-to-first-audio. ![v0.7.0](https://img.shields.io/badge/v0.7.0-blue?style=flat-square) |
+| **[Wake-word activation](#wake-word-activation)**<br>Say the magic word — Fono wakes and starts dictating. No hotkey, no hands. | **[REST API + MCP server](#local-rest-api--mcp-server)**<br>Scripts and AI coding assistants drive Fono over HTTP. | **Audio-visualisation overlay**<br>Bars / oscilloscope / FFT / heatmap during batch recording, plus a right-side VU meter on the live-dictation panel. ![v0.6.0](https://img.shields.io/badge/v0.6.0-blue?style=flat-square) |
+| | **[Better Wayland hotkeys](#better-wayland-hotkeys)**<br>Auto-register via the `GlobalShortcuts` portal when available. | **Hardware acceleration on tap + auto-variant update + self-installer**<br>Two release variants (CPU + Vulkan GPU); `fono update` auto-picks the right one. `fono install` puts the daemon on `$PATH` system-wide. ![v0.5.0](https://img.shields.io/badge/v0.5.0-blue?style=flat-square) |
+| | **[macOS + Windows](#macos-and-windows)**<br>Native platform integrations. | **Wyoming Home Assistant interop + tray-side LAN server picker**<br>Wyoming framing matches the upstream Python library so HA treats Fono as a complete endpoint. ![v0.4.0](https://img.shields.io/badge/v0.4.0-blue?style=flat-square) |
 
 ---
 
@@ -89,7 +89,7 @@ system-tray app and native installer on Windows.
 
 Newest first.
 
-- ![Unreleased](https://img.shields.io/badge/Unreleased-2ea44f?style=flat-square)
+- ![v0.7.0](https://img.shields.io/badge/v0.7.0-2026--05--04-blue?style=flat-square)
   **Voice assistant.** A second push-to-talk key (F10 by default)
   turns Fono into an offline-capable voice assistant. The pipeline
   diverges after STT: instead of cleaning the transcript and
@@ -138,6 +138,11 @@ Newest first.
   The redundant `daemon --no-tray` flag is gone; CLI clients try
   the system-wide IPC socket first, so the daemon under
   `fono.service` is drivable from any user account on the box.
+  LAN discovery on the hardened systemd unit is also fixed: the
+  `RestrictAddressFamilies=` allow-list now includes `AF_NETLINK`
+  so `mdns-sd` can enumerate interfaces, bind UDP/5353, and join
+  the multicast group — `fono discover` from another host on the
+  segment now sees the server.
   The audio-visualisation overlay (`[overlay].waveform`) is now
   on by default; the legacy start/stop chime path is removed in
   favour of the visual feedback shipped in v0.6.0.
@@ -311,3 +316,8 @@ Newest first.
 [v0.3.5]: https://github.com/bogdanr/fono/releases/tag/v0.3.5
 [v0.3.6]: https://github.com/bogdanr/fono/releases/tag/v0.3.6
 [v0.3.7]: https://github.com/bogdanr/fono/releases/tag/v0.3.7
+[v0.4.0]: https://github.com/bogdanr/fono/releases/tag/v0.4.0
+[v0.5.0]: https://github.com/bogdanr/fono/releases/tag/v0.5.0
+[v0.6.0]: https://github.com/bogdanr/fono/releases/tag/v0.6.0
+[v0.6.1]: https://github.com/bogdanr/fono/releases/tag/v0.6.1
+[v0.7.0]: https://github.com/bogdanr/fono/releases/tag/v0.7.0

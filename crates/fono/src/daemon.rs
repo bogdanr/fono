@@ -406,10 +406,8 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                             (
                                 fono_core::providers::stt_backend_str(&c.stt.backend).to_string(),
                                 fono_core::providers::llm_backend_str(&c.llm.backend).to_string(),
-                                fono_core::providers::assistant_backend_str(
-                                    &c.assistant.backend,
-                                )
-                                .to_string(),
+                                fono_core::providers::assistant_backend_str(&c.assistant.backend)
+                                    .to_string(),
                                 fono_core::providers::tts_backend_str(&c.tts.backend).to_string(),
                             )
                         })
@@ -778,18 +776,19 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         // back to the same backend the user saw. Rebuilt here
         // because the active_provider closure moved the original
         // vectors when it was constructed.
-        let assistant_backends_for_dispatch: Vec<_> = fono_core::providers::all_assistant_backends()
-            .into_iter()
-            .filter(|b| {
-                let active = *b == config.assistant.backend;
-                let needs_key = fono_core::providers::assistant_requires_key(b);
-                active
-                    || !needs_key
-                    || secrets
-                        .resolve(fono_core::providers::assistant_key_env(b))
-                        .is_some()
-            })
-            .collect();
+        let assistant_backends_for_dispatch: Vec<_> =
+            fono_core::providers::all_assistant_backends()
+                .into_iter()
+                .filter(|b| {
+                    let active = *b == config.assistant.backend;
+                    let needs_key = fono_core::providers::assistant_requires_key(b);
+                    active
+                        || !needs_key
+                        || secrets
+                            .resolve(fono_core::providers::assistant_key_env(b))
+                            .is_some()
+                })
+                .collect();
         let tts_backends_for_dispatch: Vec<_> = fono_core::providers::all_tts_backends()
             .into_iter()
             .filter(|b| {
