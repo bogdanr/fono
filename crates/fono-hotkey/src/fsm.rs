@@ -208,9 +208,14 @@ impl RecordingFsm {
             }
             // The pump emits ProcessingDone when both stream and
             // queue are drained; either Thinking or Speaking returns
-            // to Idle.
+            // to Idle. AssistantRecording is also covered as a
+            // safety net for the rare case where the orchestrator's
+            // `on_assistant_hold_press` errored after the FSM had
+            // already entered AssistantRecording.
             (
-                State::AssistantThinking | State::AssistantSpeaking,
+                State::AssistantRecording
+                | State::AssistantThinking
+                | State::AssistantSpeaking,
                 HotkeyAction::ProcessingDone,
             ) => State::Idle,
             (_, HotkeyAction::ProcessingStarted) => State::Processing,

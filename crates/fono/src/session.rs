@@ -1107,9 +1107,15 @@ impl SessionOrchestrator {
     /// STT → assistant chat → SentenceSplitter → TTS → playback.
     /// Returns immediately; the pump runs on a detached tokio task.
     pub async fn on_assistant_hold_release(&self) {
+        // Every early-return path MUST emit `ProcessingDone` so the
+        // FSM doesn't get stuck in `AssistantThinking` (which would
+        // also block subsequent F8/F9 presses). The `_` binding
+        // captures cases where there's no buffered session yet (a
+        // duplicate release event) — we still kick the FSM to Idle.
         let session = self.assistant_capture.lock().await.take();
         let Some(session) = session else {
             warn!("assistant release without a matching press; ignoring");
+            let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
             return;
         };
         let (pcm, elapsed) = match tokio::task::spawn_blocking(move || session.stop_and_drain())
@@ -1118,6 +1124,7 @@ impl SessionOrchestrator {
             Ok(t) => t,
             Err(e) => {
                 warn!("assistant capture join failed: {e:#}");
+                let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
                 return;
             }
         };
@@ -1126,6 +1133,7 @@ impl SessionOrchestrator {
                 "assistant recording too short ({}ms); skipping",
                 elapsed.as_millis()
             );
+            let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
             return;
         }
         let cfg = self.current_config();
@@ -1156,6 +1164,7 @@ impl SessionOrchestrator {
                 6_000,
                 fono_core::notify::Urgency::Normal,
             );
+            let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
             return;
         };
         let notify = Arc::new(Notify::new());
