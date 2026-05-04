@@ -1162,13 +1162,15 @@ impl SessionOrchestrator {
             let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
             return;
         };
-        // Keep the overlay visible while the pump runs — it doesn't
-        // currently have a "thinking" / "speaking" assistant variant
-        // (would need a new accent shade), so we just leave the
-        // recording-shaped panel up until the spawned pump completes.
-        // The pump task hides it via the orchestrator's `overlay`
-        // handle through the closure capture below.
-        let overlay_for_task = self.overlay.read().ok().and_then(|g| g.clone());
+        // Hide the overlay now: capture is done, the level-task was
+        // aborted in `stop_and_drain`, so the waveform would just
+        // sit on a stale frame for 4-5 s while STT + LLM run. The
+        // tray icon stays green for the duration so the user knows
+        // the assistant is still active. When AudioPlayback gains a
+        // post-monitor tap we can re-show with reply-audio levels;
+        // until then the overlay is dictation-only past the recording
+        // phase.
+        self.hide_assistant_overlay();
         let notify = Arc::new(Notify::new());
         {
             let mut s = self.assistant_session.lock().await;
@@ -1204,14 +1206,8 @@ impl SessionOrchestrator {
                     }
                 }
             }
-            // Hide the overlay — the pump is done, the user has heard
-            // (or aborted) the reply.
-            if let Some(o) = overlay_for_task {
-                o.set_state(fono_overlay::OverlayState::Hidden);
-            }
-            // Tell the FSM we're idle. Harmless when the FSM's not
-            // wired (no hotkey for assistant in this slice — IPC
-            // triggers don't change FSM state).
+            // Tell the FSM we're idle. The overlay was hidden when
+            // recording ended, so there's nothing to tear down here.
             let _ = action_tx.send(HotkeyAction::ProcessingDone);
         });
     }
