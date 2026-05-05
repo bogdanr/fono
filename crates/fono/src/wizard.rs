@@ -112,21 +112,25 @@ pub async fn run(paths: &Paths) -> Result<()> {
         "\n  Configuration saved to: {}",
         paths.config_file().display()
     );
+    let mode_word = match config.hotkeys.mode {
+        fono_core::config::HotkeyMode::Toggle => "press once to start, press again to stop",
+        fono_core::config::HotkeyMode::Hold => "hold to talk, release to send",
+    };
     println!(
-        "  Default hotkeys: hold={}   toggle={}   cancel={}",
-        config.hotkeys.hold, config.hotkeys.toggle, config.hotkeys.cancel
+        "  Hotkeys: {} (dictation), {} (assistant), {} (cancel) — {}.",
+        config.hotkeys.dictation, config.hotkeys.assistant, config.hotkeys.cancel, mode_word,
     );
-    if config.assistant.enabled {
+    if config.hotkeys.assistant.eq_ignore_ascii_case("F8") {
         println!(
-            "  Voice assistant: hold {} to ask, release to hear the answer.",
-            config.hotkeys.assistant
+            "  Note: htop binds F8 to nice+ — if you live in htop, \
+             rebind `[hotkeys].assistant` to a free key."
         );
     }
     println!("  Run `fono` to start the daemon, or `fono doctor` to diagnose your setup.\n");
     Ok(())
 }
 
-/// Optional final step — set up the voice assistant (F10 hold-to-talk
+/// Optional final step — set up the voice assistant (toggle by default
 /// → STT → chat → TTS → speakers). Skips entirely if the user declines.
 /// All cloud key prompts reuse keys already present in `secrets` so a
 /// re-run is non-destructive.

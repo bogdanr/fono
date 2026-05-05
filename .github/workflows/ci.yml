@@ -167,17 +167,21 @@ jobs:
     # build matrix.
     name: Binary size & deps audit (${{ matrix.variant }})
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
           # CPU variant — the default download. Strict 4-entry allowlist,
-          # 20 MiB budget. Mirrors the canonical `fono-vX.Y.Z-x86_64`
-          # release asset.
+          # 22 MiB budget. Mirrors the canonical `fono-vX.Y.Z-x86_64`
+          # release asset. Budget grew from 20 MiB (v0.4.0 measured at
+          # 18.08 MB) to 22 MiB at v0.7.1 — multi-wave Wyoming /
+          # streaming / assistant code added enough to nudge the slim
+          # build past 20 MiB; raising the ceiling preserves a ~1 MiB
+          # headroom while still rejecting accidental dependency drift.
           - variant: cpu
             features: ""
-            budget_bytes: 20971520
+            budget_bytes: 23068672
             extra_needed: ""
           # GPU variant — Vulkan-enabled, ~60 MB. Adds `libvulkan.so.1`
           # to the NEEDED allowlist; budget is loose at 64 MiB (sanity
@@ -204,18 +208,11 @@ jobs:
             build-essential clang cmake pkg-config libclang-dev \
             libxdo-dev
           if [ "${{ matrix.variant }}" = "gpu" ]; then
-            # ggml-vulkan's CMake invokes Google shaderc's `glslc` to
-            # compile its 150+ SPIR-V shaders. `glslc` is not packaged
-            # standalone in Ubuntu 22.04's main repo (added in 24.04+);
-            # pull it from LunarG's official Vulkan SDK apt repo, which
-            # tracks Khronos releases and ships `vulkan-sdk` (loader +
-            # headers + glslc + glslangValidator + validation layers).
-            wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
-              | sudo gpg --dearmor -o /usr/share/keyrings/lunarg.gpg
-            echo "deb [signed-by=/usr/share/keyrings/lunarg.gpg] https://packages.lunarg.com/vulkan/ jammy main" \
-              | sudo tee /etc/apt/sources.list.d/lunarg-vulkan-jammy.list >/dev/null
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq vulkan-sdk
+            # ggml-vulkan's CMake invokes glslc to compile its 150+
+            # SPIR-V shaders. Use the minimal Ubuntu 22.04 packages
+            # directly instead of the full LunarG vulkan-sdk (which
+            # pulls 600+ MB and reliably times out the 20m budget).
+            sudo apt-get install -y -qq glslang-tools libvulkan-dev
           fi
 
       - uses: Swatinem/rust-cache@v2

@@ -2,17 +2,20 @@
 //! Background global-hotkey listener.
 //!
 //! Owns a [`GlobalHotKeyManager`] on a dedicated OS thread, registers the
-//! two recording hotkeys (hold / toggle) plus an optional
-//! cancel key, and translates incoming events into [`HotkeyAction`]s that
-//! are forwarded to the daemon's FSM through a tokio channel.
+//! dictation and assistant hotkeys plus an optional cancel key, and
+//! translates incoming events into [`HotkeyAction`]s that are forwarded
+//! to the daemon's FSM through a tokio channel.
 //!
-//! The cancel hotkey (default `Escape`) is only grabbed while a recording
-//! session is active so it stays available to other applications the rest
-//! of the time. The orchestrator drives this via [`HotkeyControl`] messages
-//! sent on the channel returned by [`spawn`].
+//! Both keys behave as toggle or hold per [`HotkeyBindings::mode`] —
+//! single global setting, not per-key. The cancel hotkey (default
+//! `Escape`) is only grabbed while a recording session is active so it
+//! stays available to other applications the rest of the time. The
+//! orchestrator drives this via [`HotkeyControl`] messages sent on the
+//! channel returned by [`spawn`].
 
 use anyhow::{Context, Result};
 use crossbeam_channel::{select, unbounded, Sender};
+use fono_core::config::HotkeyMode;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -24,12 +27,14 @@ use crate::parse::{parse_hotkey, ParsedHotkey};
 /// Configured hotkey strings (as they appear in `config.toml`).
 #[derive(Debug, Clone)]
 pub struct HotkeyBindings {
-    pub hold: String,
-    pub toggle: String,
+    /// Dictation key. Behavior controlled by [`HotkeyBindings::mode`].
+    pub dictation: String,
     pub cancel: String,
-    /// Voice-assistant push-to-talk key. Empty disables the assistant
-    /// hotkey path (the IPC + CLI surfaces still work).
+    /// Voice-assistant key. Empty disables the assistant hotkey path
+    /// (the IPC + CLI surfaces still work). Same `mode` applies.
     pub assistant: String,
+    /// Global toggle/hold mode applied to both dictation and assistant.
+    pub mode: HotkeyMode,
 }
 
 /// Out-of-band commands the daemon sends to the listener thread to
@@ -46,8 +51,7 @@ pub enum HotkeyControl {
 
 #[derive(Copy, Clone, Debug)]
 enum Role {
-    Hold,
-    Toggle,
+    Dictation,
     Cancel,
     Assistant,
 }
@@ -70,11 +74,8 @@ pub fn spawn(
     // turn raw `BadAccess` stderr noise into actionable tracing output.
     crate::xerror::install();
     // Pre-parse so we fail the daemon early on a bad config.
-    let hold = parse_hotkey(&bindings.hold)
-        .with_context(|| format!("parsing hotkeys.hold = {:?}", bindings.hold))?
-        .into_hotkey();
-    let toggle = parse_hotkey(&bindings.toggle)
-        .with_context(|| format!("parsing hotkeys.toggle = {:?}", bindings.toggle))?
+    let dictation = parse_hotkey(&bindings.dictation)
+        .with_context(|| format!("parsing hotkeys.dictation = {:?}", bindings.dictation))?
         .into_hotkey();
     // Cancel is parsed but NOT registered at startup; we only grab it
     // while recording so the key stays usable in other apps the rest
@@ -82,9 +83,9 @@ pub fn spawn(
     let cancel = parse_hotkey(&bindings.cancel)
         .ok()
         .map(ParsedHotkey::into_hotkey);
-    // Assistant is optional — empty disables the F10 path. A bad
-    // (non-empty) string is logged but doesn't fail daemon startup,
-    // since the user can still trigger via IPC / CLI.
+    // Assistant is optional — empty disables the assistant hotkey path.
+    // A bad (non-empty) string is logged but doesn't fail daemon
+    // startup, since the user can still trigger via IPC / CLI.
     let assistant = if bindings.assistant.trim().is_empty() {
         None
     } else {
@@ -93,7 +94,7 @@ pub fn spawn(
             Err(e) => {
                 warn!(
                     "could not parse hotkeys.assistant = {:?}: {e:#}; \
-                     F10 disabled (use `fono assistant ...` from CLI / tray)",
+                     assistant hotkey disabled (use `fono assistant ...` from CLI / tray)",
                     bindings.assistant
                 );
                 None
@@ -106,7 +107,7 @@ pub fn spawn(
     let thread = std::thread::Builder::new()
         .name("fono-hotkey".into())
         .spawn(move || {
-            if let Err(e) = run_manager(hold, toggle, cancel, assistant, tx, &bindings, ctrl_rx) {
+            if let Err(e) = run_manager(dictation, cancel, assistant, tx, &bindings, ctrl_rx) {
                 warn!("hotkey manager exited: {e:#}");
             }
         })
@@ -117,10 +118,8 @@ pub fn spawn(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_manager(
-    hold: global_hotkey::hotkey::HotKey,
-    toggle: global_hotkey::hotkey::HotKey,
+    dictation: global_hotkey::hotkey::HotKey,
     cancel: Option<global_hotkey::hotkey::HotKey>,
     assistant: Option<global_hotkey::hotkey::HotKey>,
     tx: mpsc::UnboundedSender<HotkeyAction>,
@@ -133,8 +132,13 @@ fn run_manager(
     )?;
 
     let mut roles: HashMap<u32, Role> = HashMap::new();
-    register(&manager, hold, Role::Hold, &bindings.hold, &mut roles);
-    register(&manager, toggle, Role::Toggle, &bindings.toggle, &mut roles);
+    register(
+        &manager,
+        dictation,
+        Role::Dictation,
+        &bindings.dictation,
+        &mut roles,
+    );
     if let Some(hk) = assistant {
         register(
             &manager,
@@ -165,7 +169,7 @@ fn run_manager(
                 let Some(role) = roles.get(&event.id).copied() else {
                     continue;
                 };
-                if let Some(action) = map_event(role, event.state) {
+                if let Some(action) = map_event(role, event.state, bindings.mode) {
                     tracing::debug!("hotkey {role:?} {:?} -> {action:?}", event.state);
                     if tx.send(action).is_err() {
                         info!("hotkey action channel closed; listener shutting down");
@@ -258,14 +262,30 @@ fn register(
     }
 }
 
-fn map_event(role: Role, state: HotKeyState) -> Option<HotkeyAction> {
-    match (role, state) {
-        (Role::Hold, HotKeyState::Pressed) => Some(HotkeyAction::HoldPressed),
-        (Role::Hold, HotKeyState::Released) => Some(HotkeyAction::HoldReleased),
-        (Role::Toggle, HotKeyState::Pressed) => Some(HotkeyAction::TogglePressed),
-        (Role::Cancel, HotKeyState::Pressed) => Some(HotkeyAction::CancelPressed),
-        (Role::Assistant, HotKeyState::Pressed) => Some(HotkeyAction::AssistantPressed),
-        (Role::Assistant, HotKeyState::Released) => Some(HotkeyAction::AssistantReleased),
+fn map_event(role: Role, state: HotKeyState, mode: HotkeyMode) -> Option<HotkeyAction> {
+    match (role, state, mode) {
+        // Dictation in hold mode emits press+release; toggle mode
+        // emits only on press (a second press stops the FSM).
+        (Role::Dictation, HotKeyState::Pressed, HotkeyMode::Hold) => {
+            Some(HotkeyAction::HoldPressed)
+        }
+        (Role::Dictation, HotKeyState::Released, HotkeyMode::Hold) => {
+            Some(HotkeyAction::HoldReleased)
+        }
+        (Role::Dictation, HotKeyState::Pressed, HotkeyMode::Toggle) => {
+            Some(HotkeyAction::TogglePressed)
+        }
+        // Toggle mode suppresses the released event; the FSM is driven
+        // entirely by repeated presses.
+        (Role::Dictation, HotKeyState::Released, HotkeyMode::Toggle) => None,
+        (Role::Cancel, HotKeyState::Pressed, _) => Some(HotkeyAction::CancelPressed),
+        // Assistant: press always starts (or stops, in toggle mode);
+        // release only matters in hold mode.
+        (Role::Assistant, HotKeyState::Pressed, _) => Some(HotkeyAction::AssistantPressed),
+        (Role::Assistant, HotKeyState::Released, HotkeyMode::Hold) => {
+            Some(HotkeyAction::AssistantReleased)
+        }
+        (Role::Assistant, HotKeyState::Released, HotkeyMode::Toggle) => None,
         _ => None,
     }
 }

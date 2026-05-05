@@ -168,10 +168,10 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     // meaningless on a host with no kernel input focus anyway.
     // ---------------------------------------------------------------
     let bindings = HotkeyBindings {
-        hold: config.hotkeys.hold.clone(),
-        toggle: config.hotkeys.toggle.clone(),
+        dictation: config.hotkeys.dictation.clone(),
         cancel: config.hotkeys.cancel.clone(),
         assistant: config.hotkeys.assistant.clone(),
+        mode: config.hotkeys.mode,
     };
     let cancel_ctrl: Option<HotkeyControlSender> = if crate::is_graphical_session() {
         match fono_hotkey::spawn_listener(bindings, action_tx.clone()) {
@@ -936,6 +936,15 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                         )
                         .await;
                     }
+                    TrayAction::SetInteractiveEnabled(v) => {
+                        apply_pref_via_tray(
+                            &paths,
+                            orch_for_tray.as_ref(),
+                            "interactive.enabled",
+                            move |cfg| cfg.interactive.enabled = v,
+                        )
+                        .await;
+                    }
                     TrayAction::SetAutoStopSilenceMs(ms) => {
                         apply_pref_via_tray(
                             &paths,
@@ -1117,8 +1126,11 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
         }
     );
     debug!(
-        "hotkeys      : hold={}  toggle={}  cancel={}",
-        config.hotkeys.hold, config.hotkeys.toggle, config.hotkeys.cancel
+        "hotkeys      : dictation={}  assistant={}  cancel={}  mode={:?}",
+        config.hotkeys.dictation,
+        config.hotkeys.assistant,
+        config.hotkeys.cancel,
+        config.hotkeys.mode,
     );
     debug!(
         "stt backend  : {:?}  (local model: {})",
@@ -1904,6 +1916,7 @@ fn preferences_snapshot_from_disk(config_path: &std::path::Path) -> fono_tray::P
         // backend today; treat any other non-`"off"` value as "on" so
         // future backends still light the menu correctly.
         vad_enabled: !cfg.audio.vad_backend.eq_ignore_ascii_case("off"),
+        interactive_enabled: cfg.interactive.enabled,
         auto_stop_silence_ms: cfg.audio.auto_stop_silence_ms,
         waveform_style,
         languages: cfg.general.languages.clone(),

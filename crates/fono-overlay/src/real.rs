@@ -85,6 +85,13 @@ enum OverlayCmd {
     /// in `Text` mode; the visualisation overlay only switches
     /// between waveform variants.
     SetWaveformStyle(WaveformStyle),
+    /// Swap the rendering mode at runtime. Used by `reload()` after a
+    /// `[interactive].enabled` flip so the live-dictation/text panel
+    /// and the standalone waveform panel can switch back and forth
+    /// without tearing down the winit event loop (winit forbids a
+    /// second `EventLoop` per process, so the overlay is single-shot
+    /// for the daemon's lifetime).
+    SetMode(OverlayMode),
     Shutdown,
 }
 
@@ -153,6 +160,22 @@ impl OverlayHandle {
     /// switches without a daemon restart.
     pub fn set_waveform_style(&self, style: WaveformStyle) {
         self.send(OverlayCmd::SetWaveformStyle(style));
+    }
+
+    /// Switch to the live-dictation text panel. Drops any cached
+    /// audio frames / waveform state so the new panel starts clean.
+    /// Idempotent — sending while already in text mode is a no-op.
+    pub fn enable_text_mode(&self) {
+        self.send(OverlayCmd::SetMode(OverlayMode::Text));
+    }
+
+    /// Switch to the standalone waveform-visualisation panel with
+    /// the given style. Drops any cached transcript text so the
+    /// panel doesn't briefly flash a stale line as it switches.
+    /// Idempotent — sending while already in the same mode is a
+    /// no-op.
+    pub fn enable_waveform_mode(&self, style: WaveformStyle) {
+        self.send(OverlayCmd::SetMode(OverlayMode::Waveform(style)));
     }
 
     /// Stop the overlay and join its thread. Idempotent.
@@ -239,10 +262,6 @@ const PADDING_X: f32 = 24.0;
 const PADDING_TOP: f32 = 14.0;
 const PADDING_BOT: f32 = 16.0;
 const ACCENT_WIDTH: f32 = 4.0;
-/// Right-side vertical VU meter on the live-dictation panel. Logical
-/// pixels — multiply by `scale` in renderers.
-const VU_BAR_WIDTH: f32 = 8.0;
-const VU_BAR_GAP: f32 = 6.0;
 const CORNER_RADIUS: f32 = 12.0;
 const STATUS_FONT_PX: f32 = 13.0;
 const TEXT_FONT_PX: f32 = 20.0;
@@ -250,10 +269,15 @@ const STATUS_TO_TEXT: f32 = 14.0;
 const LINE_GAP: f32 = 6.0;
 
 /// `0xAARRGGBB`. The compositor honours the alpha byte when
-/// `with_transparent(true)` is set on the window. ~93 % opaque dark
-/// charcoal — just translucent enough to feel modern, opaque enough
-/// for legibility.
-const COLOR_BG: u32 = 0xEE17_171B;
+/// `with_transparent(true)` is set on the window. 80 % opaque dark
+/// charcoal — translucent enough to read as a modern overlay,
+/// opaque enough for legibility.
+const COLOR_BG: u32 = 0xCC17_171B;
+/// `COLOR_BG` in premultiplied-alpha form. The framebuffer holds
+/// premultiplied pixels, so any path that writes the panel BG
+/// without going through [`blend`] (interior fast path of
+/// [`fill_round_rect`], heatmap cache fill / blit) must use this.
+const COLOR_BG_PRE: u32 = pre_multiply(COLOR_BG);
 const COLOR_TEXT: u32 = 0xFFEC_ECF1;
 const COLOR_TEXT_DIM: u32 = 0xCCAA_AAB2;
 
@@ -288,6 +312,17 @@ fn state_label(state: OverlayState) -> &'static str {
         OverlayState::Processing => "POLISHING",
         OverlayState::LiveDictating => "LIVE",
     }
+}
+
+/// States whose panel is fed `push_level` from the live capture pump
+/// and should render the right-side VU bar. Both surfaces use the same
+/// drain tap in `build_live_capture_pipeline`, so the panel layout
+/// (text wrap and draw) must reserve room for the bar in either state.
+fn state_has_vu_bar(state: OverlayState) -> bool {
+    matches!(
+        state,
+        OverlayState::LiveDictating | OverlayState::AssistantRecording { .. }
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -338,9 +373,28 @@ fn load_system_font() -> Option<ab_glyph::FontArc> {
 //  Pixel helpers
 // ---------------------------------------------------------------------------
 
+/// Premultiply the RGB channels of an ARGB colour by its alpha. The
+/// softbuffer / X11 framebuffer the compositor reads from expects
+/// premultiplied pixels, so any value we write directly (bypassing
+/// [`blend`]) must already be premultiplied — otherwise translucent
+/// fills end up brighter than the surrounding [`blend`]-painted
+/// pixels and read as a visible inner rectangle.
+#[inline]
+const fn pre_multiply(color: u32) -> u32 {
+    let a = (color >> 24) & 0xFF;
+    if a == 0xFF {
+        return color;
+    }
+    let r = (((color >> 16) & 0xFF) * a) / 255;
+    let g = (((color >> 8) & 0xFF) * a) / 255;
+    let b = ((color & 0xFF) * a) / 255;
+    (a << 24) | (r << 16) | (g << 8) | b
+}
+
 /// Premultiplied alpha-over composite of `fg` (ARGB) onto `bg` (ARGB).
 /// `coverage_alpha` (0..=255) further attenuates `fg`'s alpha — used
-/// for sub-pixel glyph anti-aliasing.
+/// for sub-pixel glyph anti-aliasing. `bg` is expected to be in
+/// premultiplied form (which everything in the framebuffer is).
 #[inline]
 fn blend(bg: u32, fg: u32, coverage_alpha: u8) -> u32 {
     let fa = ((fg >> 24) & 0xFF) as u16 * u16::from(coverage_alpha) / 255;
@@ -397,6 +451,14 @@ fn fill_round_rect(
     let inner_y0 = ((y0 + r).ceil() as i32).max(yi0);
     let inner_y1 = ((y1 - r).floor() as i32).min(yi1);
     let r_outer_sq = (r + 0.5) * (r + 0.5);
+    // Premultiplied form of `color` for the interior fast path. The
+    // AA edges go through `blend()` which already premultiplies; the
+    // fast path bypasses blend, so it must write the same form or
+    // translucent fills (e.g. the panel BG at α 0xCC) read as a
+    // brighter inner rectangle against the AA band's premultiplied
+    // outer ring under any compositor that honours premultiplied
+    // alpha (picom, KWin, …).
+    let pre_color = pre_multiply(color);
     for yi in yi0..yi1 {
         let in_inner_band = yi >= inner_y0 && yi < inner_y1;
         if in_inner_band && inner_x1 > inner_x0 {
@@ -404,19 +466,11 @@ fn fill_round_rect(
             for xi in xi0..inner_x0 {
                 fill_round_rect_aa_pixel(buf, stride, xi, yi, x0, y0, x1, y1, r, r_outer_sq, color);
             }
-            // Interior fast path — full coverage, no distance math
-            // and no blend. Direct assignment because either:
-            //   * the pixel was just cleared to 0 (panel BG fill),
-            //     and `blend(0, color, 255)` collapses to `color`
-            //     exactly; or
-            //   * the pixel currently holds the panel BG colour
-            //     (accent stripe), and full-coverage write is the
-            //     intended "draw stripe over background" semantic.
             let row_off = (yi as u32 * stride) as usize;
             for xi in inner_x0..inner_x1 {
                 let idx = row_off + xi as usize;
                 if let Some(slot) = buf.get_mut(idx) {
-                    *slot = color;
+                    *slot = pre_color;
                 }
             }
             // Right AA edge.
@@ -731,7 +785,9 @@ fn draw_oscilloscope(
 /// Vertical VU meter anchored to the right edge of the panel during
 /// live dictation. Filled from the bottom up; the unfilled portion
 /// stays as a faint ghost track so the bar's bounds are always
-/// visible.
+/// visible. Mirrors the left accent stripe (same width, same vertical
+/// extent), so it reads as a paired indicator rather than a separate
+/// widget.
 #[allow(clippy::too_many_arguments)]
 fn draw_vu_bar(
     buf: &mut [u32],
@@ -745,7 +801,7 @@ fn draw_vu_bar(
     scale: f32,
 ) {
     let level = level.clamp(0.0, 1.0);
-    let bar_w = VU_BAR_WIDTH * scale;
+    let bar_w = ACCENT_WIDTH * scale;
     let radius = bar_w * 0.5;
     let x0 = x_right - bar_w;
     let x1 = x_right;
@@ -878,25 +934,24 @@ fn draw_fft_gapped(
     let area_w = (x1 - x0).max(0.0);
     let area_h = (y_bot - y_top).max(0.0);
     let n = bins.len();
-    // Floor the slot to an integer pixel count and use that for
-    // every bar; any leftover area is centred so the bars sit in
-    // the middle of the content area. The gap is integer too
-    // (1 px at default DPI, scaled up for HiDPI) — clamped to at
-    // most half the slot so very dense bin counts still produce a
-    // visible bar.
-    let slot_px = (area_w / n as f32).floor().max(3.0) as i32;
-    // 2-px gap for crisper separation; clamped so dense panels
-    // never collapse to zero-pixel bars.
-    let gap_px = ((2.0 * scale).round() as i32).max(1).min(slot_px / 2);
-    let bar_px = (slot_px - gap_px).max(1);
-    let total_px = slot_px * n as i32;
-    let leftover = area_w as i32 - total_px;
-    let x_start = x0.round() as i32 + leftover.max(0) / 2;
+    let bin_count = n as f32;
+    // 2-px gap on the right edge of each slot, scaled for HiDPI.
+    // Bar widths absorb any sub-pixel slack by varying ±1 px between
+    // slots, but the gap is constant so adjacent bars never collapse
+    // into each other. Mirrors `draw_fft`'s float-rounded slot bounds
+    // so bars span the full content area (first bar at x0, last bar
+    // ends at x1) — the assistant transition from recording to
+    // thinking now keeps the same horizontal footprint.
+    let gap_px = ((2.0 * scale).round() as i32).max(1);
     for (i, &v) in bins.iter().enumerate() {
         let v = v.clamp(0.0, 1.0);
         let bar_h = (v * area_h).max(1.0 * scale);
-        let xi0 = x_start + i as i32 * slot_px;
-        let xi1 = xi0 + bar_px;
+        let bxf0 = x0 + (i as f32 / bin_count) * area_w;
+        let bxf1 = x0 + ((i + 1) as f32 / bin_count) * area_w;
+        let slot_xi0 = bxf0.round() as i32;
+        let slot_xi1 = bxf1.round() as i32;
+        let xi0 = slot_xi0;
+        let xi1 = (slot_xi1 - gap_px).max(slot_xi0 + 1);
         let yi0 = (y_bot - bar_h).round() as i32;
         let yi1 = y_bot.round() as i32;
         if xi1 <= xi0 || yi1 <= yi0 {
@@ -951,7 +1006,10 @@ fn heatmap_cache_resize(
         return false;
     }
     cache.clear();
-    cache.resize(needed, COLOR_BG);
+    // Cache pixels are blitted straight into the framebuffer, which
+    // expects premultiplied alpha — match the form `fill_round_rect`
+    // writes for the surrounding panel BG.
+    cache.resize(needed, COLOR_BG_PRE);
     *cache_dim = (cols, rows);
     true
 }
@@ -981,7 +1039,10 @@ fn heatmap_render_column(
         let v = *frame.get(bin_idx.min(bins_len - 1)).unwrap_or(&0.0);
         let color = heatmap_color(v, accent);
         let cov = (color >> 24) as u8;
-        let pre = blend(COLOR_BG, color, cov);
+        // `blend` expects bg in premultiplied form; pass the
+        // premultiplied panel BG so the cache lines up with what
+        // `fill_round_rect` paints around it.
+        let pre = blend(COLOR_BG_PRE, color, cov);
         let row_off = (ry * cols) as usize;
         for cx in col_x..(col_x + width).min(cols) {
             if let Some(slot) = cache.get_mut(row_off + cx as usize) {
@@ -1413,10 +1474,11 @@ fn run_event_loop(
                                 (self.font.as_ref(), self.text.is_empty())
                             {
                                 let mut max_w = WIN_WIDTH - PADDING_X * 2.0 - ACCENT_WIDTH;
-                                if self.volume_bar
-                                    && matches!(self.state, OverlayState::LiveDictating)
-                                {
-                                    max_w -= VU_BAR_WIDTH + VU_BAR_GAP;
+                                if self.volume_bar && state_has_vu_bar(self.state) {
+                                    // Right-side VU bar mirrors the
+                                    // left accent stripe: same width,
+                                    // flush against the panel edge.
+                                    max_w -= ACCENT_WIDTH;
                                 }
                                 wrap_text(font, &self.text, TEXT_FONT_PX, max_w)
                             } else {
@@ -1532,6 +1594,35 @@ fn run_event_loop(
                             }
                         }
                     }
+                    OverlayCmd::SetMode(mode) => {
+                        // Idempotent on no-change so reload() can
+                        // fire this unconditionally without flicker.
+                        let same =
+                            matches!((self.mode, mode), (OverlayMode::Text, OverlayMode::Text))
+                                || matches!(
+                                    (self.mode, mode),
+                                    (OverlayMode::Waveform(a), OverlayMode::Waveform(b)) if a == b
+                                );
+                        if !same {
+                            self.mode = mode;
+                            // Drop cross-mode stale data: a stale
+                            // transcript line or a frozen FFT frame
+                            // would briefly flash on the new panel
+                            // before the producer catches up.
+                            self.text.clear();
+                            self.wrapped.clear();
+                            self.levels.clear();
+                            self.osc_samples.clear();
+                            self.fft_frames.clear();
+                            self.heatmap_cache.clear();
+                            self.heatmap_cache_dim = (0, 0);
+                            if self.window.is_some() {
+                                needs_redraw = true;
+                                needs_resize = true;
+                            }
+                            tracing::debug!("overlay: mode -> {mode:?}");
+                        }
+                    }
                     OverlayCmd::SetVolumeBar(enabled) => {
                         if self.volume_bar != enabled {
                             self.volume_bar = enabled;
@@ -1540,10 +1631,11 @@ fn run_event_loop(
                             if let (Some(font), false) = (self.font.as_ref(), self.text.is_empty())
                             {
                                 let mut max_w = WIN_WIDTH - PADDING_X * 2.0 - ACCENT_WIDTH;
-                                if self.volume_bar
-                                    && matches!(self.state, OverlayState::LiveDictating)
-                                {
-                                    max_w -= VU_BAR_WIDTH + VU_BAR_GAP;
+                                if self.volume_bar && state_has_vu_bar(self.state) {
+                                    // Right-side VU bar mirrors the
+                                    // left accent stripe: same width,
+                                    // flush against the panel edge.
+                                    max_w -= ACCENT_WIDTH;
                                 }
                                 self.wrapped = wrap_text(font, &self.text, TEXT_FONT_PX, max_w);
                             }
@@ -1559,9 +1651,12 @@ fn run_event_loop(
                     }
                 }
             }
-            if needs_resize && matches!(self.mode, OverlayMode::Text) {
+            if needs_resize {
                 if let Some(w) = self.window.as_ref() {
-                    let h = target_height(self.wrapped.len());
+                    let h = match self.mode {
+                        OverlayMode::Text => target_height(self.wrapped.len()),
+                        OverlayMode::Waveform(_) => WIN_WAVEFORM_HEIGHT,
+                    };
                     let _ = w.request_inner_size(winit::dpi::LogicalSize::new(WIN_WIDTH, h));
                     // Re-position so the overlay still hugs the bottom
                     // when its height changes.
@@ -1792,18 +1887,23 @@ fn run_event_loop(
                     }
                 }
                 _ => {
-                    // VU bar on the live-dictation panel — drawn before
-                    // text so that even very long lines (clipped at the
-                    // edge) don't cover it.
+                    // VU bar on the live-dictation / assistant-recording
+                    // panel — drawn before text so that even very long
+                    // lines (clipped at the edge) don't cover it.
+                    // Mirrors the left accent stripe: same vertical
+                    // extent, flush against the right edge,
+                    // ACCENT_WIDTH wide. The drain task in
+                    // `build_live_capture_pipeline` feeds `push_level`
+                    // for both surfaces, so the same VU bar applies.
                     if matches!(app.mode, OverlayMode::Text)
-                        && matches!(app.state, OverlayState::LiveDictating)
+                        && state_has_vu_bar(app.state)
                         && app.volume_bar
                         && !app.levels.is_empty()
                     {
                         let level = app.levels.back().copied().unwrap_or(0.0);
-                        let x_right = w as f32 - PADDING_X * scale;
-                        let y_top = text_top;
-                        let y_bot = h as f32 - PADDING_BOT * scale;
+                        let x_right = w as f32;
+                        let y_top = CORNER_RADIUS * scale * 0.4;
+                        let y_bot = h as f32 - CORNER_RADIUS * scale * 0.4;
                         draw_vu_bar(&mut buf, w, h, level, x_right, y_top, y_bot, accent, scale);
                     }
                     // Transcript rows (text mode, or waveform mode in

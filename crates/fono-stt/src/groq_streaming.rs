@@ -460,46 +460,82 @@ impl StreamingStt for GroqStreaming {
                             // deterministic per input, so a "dual
                             // pass" wouldn't reduce noise — one
                             // request is the cost-correct call.
+                            //
+                            // Prefer the verbose endpoint: per-segment
+                            // `no_speech_prob` + `avg_logprob` let us
+                            // drop Whisper's silence-tail hallucinations
+                            // ("Thank you", "Bye") via
+                            // `filter_hallucinated_segments`, and the
+                            // same scores feed the language allow-list
+                            // rerun. Fall back to the non-verbose path
+                            // only when `verbose_fn` is unset (test
+                            // harness via `with_request_fn`).
                             let wav = crate::groq::encode_wav(&segment_pcm, sample_rate);
                             // Wait for any in-flight preview to settle
                             // before finalize so the per-segment tx
                             // order is preview…preview…finalize.
                             let _gate = finalize_gate.lock().await;
-                            let req = (request_fn)(wav.clone(), first_pass_lang.clone());
-                            match req.await {
-                                Ok(mut resp) => {
-                                    // Allow-list post-validation. v3.1:
-                                    // confidence-aware rerun. On
-                                    // banned detection, issue one
-                                    // verbose request per peer and
-                                    // pick the highest avg_logprob.
-                                    // No-op when verbose_fn is None
-                                    // (test-only `with_request_fn`
-                                    // construction).
-                                    if let (
-                                        LanguageSelection::AllowList(peers),
-                                        Some(detected_raw),
-                                    ) = (&selection, resp.language.as_deref())
-                                    {
-                                        let detected =
-                                            crate::lang::whisper_lang_to_code(detected_raw);
-                                        if selection.contains(&detected) {
-                                            lang_cache.record(BACKEND_KEY, &detected);
-                                        } else if cloud_rerun_on_mismatch {
-                                            tracing::info!(
-                                                "groq returned banned language {detected_raw:?} \
-                                                 (normalised {detected:?}) on finalize \
-                                                 (allow-list {peers:?}); \
-                                                 reranking by per-peer avg_logprob"
-                                            );
-                                            if let Some(vfn) = verbose_fn.as_ref() {
-                                                let mut best: Option<(f32, String, String)> = None;
+                            let finalize_err_handler = |e: anyhow::Error| {
+                                let msg = e.to_string();
+                                if msg.contains("429") {
+                                    let summary = crate::groq::summarise_429_public(&msg);
+                                    tracing::warn!(
+                                        "groq pseudo-stream: finalize rate-limited \
+                                         (429): {summary}. Suppressing preview \
+                                         requests for the next minute."
+                                    );
+                                    crate::rate_limit_notify::mark_rate_limited();
+                                    crate::rate_limit_notify::notify_once(
+                                        "groq",
+                                        "Rate-limited; preview disabled for ~60s. \
+                                         Increase interactive.streaming_interval \
+                                         (e.g. 2.0) or upgrade your Groq plan.",
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "groq pseudo-stream: finalize decode failed: {e:#}"
+                                    );
+                                }
+                            };
+
+                            if let Some(vfn) = verbose_fn.as_ref() {
+                                let req = (vfn)(wav.clone(), first_pass_lang.clone());
+                                match req.await {
+                                    Ok(mut verbose_resp) => {
+                                        // Allow-list post-validation,
+                                        // now reading the language echo
+                                        // from the verbose response
+                                        // (normalised since the verbose
+                                        // payload returns full English
+                                        // names like "english").
+                                        if let (
+                                            LanguageSelection::AllowList(peers),
+                                            Some(detected_raw),
+                                        ) = (&selection, verbose_resp.language.as_deref())
+                                        {
+                                            let detected =
+                                                crate::lang::whisper_lang_to_code(detected_raw);
+                                            if selection.contains(&detected) {
+                                                lang_cache.record(BACKEND_KEY, &detected);
+                                            } else if cloud_rerun_on_mismatch {
+                                                tracing::info!(
+                                                    "groq returned banned language \
+                                                     {detected_raw:?} (normalised \
+                                                     {detected:?}) on finalize (allow-list \
+                                                     {peers:?}); reranking by per-peer \
+                                                     avg_logprob"
+                                                );
+                                                let mut best: Option<(
+                                                    f32,
+                                                    String,
+                                                    GroqVerboseResponse,
+                                                )> = None;
                                                 for peer in peers {
                                                     let req2 =
                                                         (vfn)(wav.clone(), Some(peer.clone()));
                                                     match req2.await {
-                                                        Ok(verbose) => {
-                                                            let score = verbose.mean_logprob();
+                                                        Ok(v) => {
+                                                            let score = v.mean_logprob();
                                                             tracing::info!(
                                                                 "groq finalize rerun candidate \
                                                                  language={peer}: \
@@ -509,11 +545,8 @@ impl StreamingStt for GroqStreaming {
                                                                 .as_ref()
                                                                 .is_none_or(|(s, _, _)| score > *s)
                                                             {
-                                                                best = Some((
-                                                                    score,
-                                                                    peer.clone(),
-                                                                    verbose.text,
-                                                                ));
+                                                                best =
+                                                                    Some((score, peer.clone(), v));
                                                             }
                                                         }
                                                         Err(e) => {
@@ -524,12 +557,10 @@ impl StreamingStt for GroqStreaming {
                                                         }
                                                     }
                                                 }
-                                                if let Some((_, picked, text)) = best {
+                                                if let Some((_, picked, mut v)) = best {
                                                     lang_cache.record(BACKEND_KEY, &picked);
-                                                    resp = GroqResponse {
-                                                        text,
-                                                        language: Some(picked),
-                                                    };
+                                                    v.language = Some(picked);
+                                                    verbose_resp = v;
                                                 } else {
                                                     tracing::warn!(
                                                         "groq finalize rerun: every peer \
@@ -537,43 +568,48 @@ impl StreamingStt for GroqStreaming {
                                                          unforced response"
                                                     );
                                                 }
-                                            } else {
-                                                tracing::debug!(
-                                                    "groq finalize: verbose_fn unset (test \
-                                                     harness); skipping rerun"
-                                                );
                                             }
                                         }
+                                        let filtered = crate::groq::filter_hallucinated_segments(
+                                            &verbose_resp,
+                                        );
+                                        let upd = TranscriptUpdate::finalize(
+                                            segment_index,
+                                            filtered,
+                                            started.elapsed(),
+                                        )
+                                        .with_language(verbose_resp.language);
+                                        let _ = tx.send(upd);
                                     }
-                                    let upd = TranscriptUpdate::finalize(
-                                        segment_index,
-                                        resp.text,
-                                        started.elapsed(),
-                                    )
-                                    .with_language(resp.language);
-                                    let _ = tx.send(upd);
+                                    Err(e) => finalize_err_handler(e),
                                 }
-                                Err(e) => {
-                                    let msg = e.to_string();
-                                    if msg.contains("429") {
-                                        let summary = crate::groq::summarise_429_public(&msg);
-                                        tracing::warn!(
-                                            "groq pseudo-stream: finalize rate-limited \
-                                             (429): {summary}. Suppressing preview \
-                                             requests for the next minute."
-                                        );
-                                        crate::rate_limit_notify::mark_rate_limited();
-                                        crate::rate_limit_notify::notify_once(
-                                            "groq",
-                                            "Rate-limited; preview disabled for ~60s. \
-                                             Increase interactive.streaming_interval \
-                                             (e.g. 2.0) or upgrade your Groq plan.",
-                                        );
-                                    } else {
-                                        tracing::warn!(
-                                            "groq pseudo-stream: finalize decode failed: {e:#}"
-                                        );
+                            } else {
+                                // Test fallback: no verbose_fn, no filter,
+                                // no rerun — preserves legacy behaviour
+                                // for `with_request_fn` constructions.
+                                let req = (request_fn)(wav.clone(), first_pass_lang.clone());
+                                match req.await {
+                                    Ok(resp) => {
+                                        if let (
+                                            LanguageSelection::AllowList(_),
+                                            Some(detected_raw),
+                                        ) = (&selection, resp.language.as_deref())
+                                        {
+                                            let detected =
+                                                crate::lang::whisper_lang_to_code(detected_raw);
+                                            if selection.contains(&detected) {
+                                                lang_cache.record(BACKEND_KEY, &detected);
+                                            }
+                                        }
+                                        let upd = TranscriptUpdate::finalize(
+                                            segment_index,
+                                            resp.text,
+                                            started.elapsed(),
+                                        )
+                                        .with_language(resp.language);
+                                        let _ = tx.send(upd);
                                     }
+                                    Err(e) => finalize_err_handler(e),
                                 }
                             }
                         }
@@ -764,5 +800,72 @@ mod tests {
         );
 
         drop(tx);
+    }
+
+    /// End-to-end check that the verbose-finalize wiring drops a
+    /// hallucination-shaped segment before emitting the Finalize
+    /// `TranscriptUpdate`. Pairs a stub `GroqRequestFn` (preview) with a
+    /// stub `GroqVerboseFn` (finalize) that returns one good segment
+    /// and one silence-tail "Thank you." segment. The committed text
+    /// should contain only the good segment.
+    #[tokio::test]
+    async fn finalize_drops_hallucinated_segment_via_verbose() {
+        crate::rate_limit_notify::clear_throttle_for_tests();
+
+        let preview_fn: GroqRequestFn = Arc::new(|_wav, _lang| {
+            Box::pin(async {
+                Ok(GroqResponse {
+                    text: "send him the report".into(),
+                    language: Some("en".into()),
+                })
+            }) as GroqRequestFuture
+        });
+
+        let verbose_fn: GroqVerboseFn = Arc::new(|_wav, _lang| {
+            Box::pin(async {
+                Ok(GroqVerboseResponse {
+                    text: "Send him the report. Thank you.".into(),
+                    language: None,
+                    segments: vec![
+                        crate::groq::GroqSegment {
+                            text: " Send him the report.".into(),
+                            avg_logprob: Some(-0.30),
+                            no_speech_prob: Some(0.05),
+                        },
+                        crate::groq::GroqSegment {
+                            text: " Thank you.".into(),
+                            avg_logprob: Some(-1.45),
+                            no_speech_prob: Some(0.92),
+                        },
+                    ],
+                })
+            }) as GroqVerboseFuture
+        });
+
+        let backend = GroqStreaming::with_request_and_verbose_fn(preview_fn, verbose_fn);
+
+        let (tx, rx) = mpsc::unbounded_channel::<StreamFrame>();
+        let frames: BoxStream<'static, StreamFrame> = UnboundedReceiverStream::new(rx).boxed();
+        let stream = backend
+            .stream_transcribe(frames, 16_000, None)
+            .await
+            .unwrap();
+
+        tx.send(StreamFrame::Pcm(pcm(1.0))).unwrap();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        tx.send(StreamFrame::SegmentBoundary).unwrap();
+        tx.send(StreamFrame::Eof).unwrap();
+        drop(tx);
+
+        let updates: Vec<TranscriptUpdate> = stream.collect().await;
+        let finalizes: Vec<&TranscriptUpdate> = updates
+            .iter()
+            .filter(|u| u.lane == crate::streaming::UpdateLane::Finalize)
+            .collect();
+        assert_eq!(finalizes.len(), 1, "expected one finalize update");
+        assert_eq!(
+            finalizes[0].text, "Send him the report.",
+            "hallucination-shaped trailing segment must be filtered out",
+        );
     }
 }

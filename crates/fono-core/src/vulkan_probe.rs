@@ -20,7 +20,7 @@
 //! that get unmapped during glibc's `dl_fini` at process exit, which
 //! produces a segfault *after* the daemon has already done its job.
 //! The crash is reproducible on stock Debian 13 just by running
-//! `fono daemon` and pressing Ctrl-C.
+//! `fono` and pressing Ctrl-C.
 //!
 //! Rather than try to clean that up in-process — which is unsolvable
 //! across the matrix of distro / driver / loader versions we ship to —

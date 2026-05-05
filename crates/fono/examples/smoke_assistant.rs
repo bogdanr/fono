@@ -48,6 +48,12 @@ use futures::stream::StreamExt;
 
 const TEST_PROMPT: &str = "Say hello in five words.";
 
+/// Returns `true` when an error string looks like a 429 / rate-limit /
+/// queue-exceeded response from any cloud provider.
+fn is_429(msg: &str) -> bool {
+    msg.contains("429") || msg.contains("queue_exceeded") || msg.contains("too_many_requests")
+}
+
 struct Provider {
     backend: AssistantBackend,
     label: &'static str,
@@ -162,17 +168,54 @@ async fn main() -> Result<()> {
             ..AssistantCfg::default()
         };
 
-        match exercise_assistant(&cfg, &secrets).await {
-            Ok(reply_chars) => {
-                println!(
-                    "[ OK ] assistant/{label} ({}): replied {reply_chars} chars",
-                    p.model
-                );
+        // Retry up to 3 times with backoff on 429 / queue-full. If
+        // all attempts are 429 the provider is overloaded — log SKIP
+        // rather than FAIL so a transient Cerebras / Groq outage
+        // doesn't block the release gate.
+        let retry_delays: &[u64] = &[5, 15, 30]; // seconds
+        let mut last_err: Option<anyhow::Error> = None;
+        let mut overloaded = false;
+        for (attempt, &delay) in std::iter::once(&0u64)
+            .chain(retry_delays.iter())
+            .enumerate()
+        {
+            if delay > 0 {
+                println!("       [{label}] 429 on attempt {attempt}, retrying in {delay}s…");
+                tokio::time::sleep(Duration::from_secs(delay)).await;
             }
-            Err(e) => {
-                println!("[FAIL] assistant/{label} ({}): {e:#}", p.model);
-                failures.push(format!("assistant/{label}: {e:#}"));
+            match exercise_assistant(&cfg, &secrets).await {
+                Ok(reply_chars) => {
+                    println!(
+                        "[ OK ] assistant/{label} ({}): replied {reply_chars} chars",
+                        p.model
+                    );
+                    last_err = None;
+                    overloaded = false;
+                    break;
+                }
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    if is_429(&msg) {
+                        overloaded = true;
+                        last_err = Some(e);
+                        // try again (or exhaust retries)
+                    } else {
+                        println!("[FAIL] assistant/{label} ({}): {e:#}", p.model);
+                        failures.push(format!("assistant/{label}: {e:#}"));
+                        last_err = None;
+                        overloaded = false;
+                        break;
+                    }
+                }
             }
+        }
+        if overloaded {
+            let msg = last_err.map(|e| format!("{e:#}")).unwrap_or_default();
+            println!(
+                "[SKIP] assistant/{label} ({}): provider overloaded after all retries — {msg}",
+                p.model
+            );
+            skipped.push(format!("assistant/{label} (429 overloaded)"));
         }
     }
 

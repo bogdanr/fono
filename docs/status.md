@@ -1,6 +1,27 @@
 # Fono — Project Status
 
-Last updated: 2026-05-04
+Last updated: 2026-05-05
+
+## 2026-05-05 — Release v0.7.1
+
+Tagged v0.7.1. Patch release: default hotkeys overhauled.
+
+- **Dictation collapses to `F7`; voice assistant moves to `F8`.**
+  Old defaults (F8 hold / F9 toggle / F10 assistant) collided with
+  htop's kill / quit / nice bindings and, for F10, the GTK menubar
+  shortcut. The two dictation keys merge into one and the assistant
+  key drops down by two.
+- **One global `[hotkeys].mode = "toggle" | "hold"`** replaces the
+  two-key hold-vs-toggle split. `Toggle` (default) means press once
+  to start, press again to stop, and now applies to the assistant
+  too — no more holding a key through the multi-second STT → LLM →
+  TTS round-trip.
+- **`[hotkeys].toggle` renamed to `[hotkeys].dictation`** with a
+  serde alias so old configs continue to parse. `[hotkeys].hold`
+  field removed; push-to-talk is expressed as `mode = "hold"`.
+
+CHANGELOG.md, ROADMAP.md updated; Cargo.toml + Cargo.lock bumped
+0.7.0 → 0.7.1; packaging/slackbuild/fono/fono.info bumped.
 
 ## 2026-05-04 — Release v0.7.0
 

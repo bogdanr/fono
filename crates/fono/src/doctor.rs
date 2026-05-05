@@ -114,8 +114,8 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 writeln!(out, "  llm.local.model: {}", c.llm.local.model)?;
                 writeln!(
                     out,
-                    "  hotkeys        : hold={} toggle={}",
-                    c.hotkeys.hold, c.hotkeys.toggle
+                    "  hotkeys        : dictation={} assistant={} mode={:?}",
+                    c.hotkeys.dictation, c.hotkeys.assistant, c.hotkeys.mode,
                 )?;
                 Some(c)
             }

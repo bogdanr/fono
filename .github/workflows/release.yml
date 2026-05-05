@@ -90,7 +90,9 @@ jobs:
   cloud-assistant:
     name: Cloud assistant smoke (Groq + Cerebras)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+    # 30 min: up to 3 retry attempts with 5+15+30s back-off on 429s,
+    # plus ~5 min compile time.
     # Same tag-suffix escape hatch as `cloud-equivalence`. Per
     # `crates/fono/examples/smoke_assistant.rs`, the `--ci` mode
     # exercises the two providers whose API keys are stored as
@@ -142,7 +144,7 @@ jobs:
           && (needs.cloud-assistant.result == 'success'
               || needs.cloud-assistant.result == 'skipped') }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -197,15 +199,11 @@ jobs:
             build-essential clang cmake pkg-config libclang-dev \
             libxdo-dev
           if [ "${{ matrix.variant }}" = "gpu" ]; then
-            # See ci.yml: `glslc` (Google shaderc) is required by
-            # ggml-vulkan's CMake but not in Ubuntu 22.04's main repo.
-            # Pull from LunarG's Vulkan SDK apt repo.
-            wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
-              | sudo gpg --dearmor -o /usr/share/keyrings/lunarg.gpg
-            echo "deb [signed-by=/usr/share/keyrings/lunarg.gpg] https://packages.lunarg.com/vulkan/ jammy main" \
-              | sudo tee /etc/apt/sources.list.d/lunarg-vulkan-jammy.list >/dev/null
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq vulkan-sdk
+            # Use the minimal Ubuntu 22.04 packages instead of the full
+            # LunarG vulkan-sdk (600+ MB, reliably times out the build).
+            # glslang-tools ships glslangValidator; libvulkan-dev provides
+            # the loader headers ggml-vulkan needs at compile time.
+            sudo apt-get install -y -qq glslang-tools libvulkan-dev
           fi
 
       - name: Build (native)

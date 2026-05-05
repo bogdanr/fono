@@ -178,6 +178,13 @@ impl RecordingFsm {
                 let _ = self.tx.send(HotkeyEvent::StopAssistant);
                 State::AssistantThinking
             }
+            // Toggle-mode stop: a second AssistantPressed while
+            // recording ends capture and runs the pipeline. Mirrors the
+            // dictation `(Recording(Toggle), TogglePressed)` arm.
+            (State::AssistantRecording, HotkeyAction::AssistantPressed) => {
+                let _ = self.tx.send(HotkeyEvent::StopAssistant);
+                State::AssistantThinking
+            }
             // Cancel during recording: drop the buffer, return to Idle.
             (State::AssistantRecording, HotkeyAction::CancelPressed) => {
                 let _ = self.tx.send(HotkeyEvent::StopAssistantPlayback);
@@ -361,6 +368,31 @@ mod tests {
         );
         assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StopAssistantPlayback);
         assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StartAssistant);
+    }
+
+    /// Toggle-mode assistant flow: two `AssistantPressed` events drive
+    /// the FSM through the same Recording → Thinking → Speaking arc as
+    /// the hold-mode press/release pair, without an `AssistantReleased`.
+    #[test]
+    fn assistant_toggle_flow_two_presses() {
+        let (mut fsm, mut rx) = RecordingFsm::new();
+        assert_eq!(
+            fsm.dispatch(HotkeyAction::AssistantPressed),
+            State::AssistantRecording
+        );
+        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StartAssistant);
+        // Second press in toggle mode stops capture (no Released event
+        // is dispatched by the listener when mode = Toggle).
+        assert_eq!(
+            fsm.dispatch(HotkeyAction::AssistantPressed),
+            State::AssistantThinking
+        );
+        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StopAssistant);
+        assert_eq!(
+            fsm.dispatch(HotkeyAction::AssistantSpeakingStarted),
+            State::AssistantSpeaking
+        );
+        assert_eq!(fsm.dispatch(HotkeyAction::ProcessingDone), State::Idle);
     }
 
     #[test]

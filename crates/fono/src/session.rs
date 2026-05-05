@@ -309,6 +309,15 @@ pub struct SessionOrchestrator {
     /// recorder. Wiring fix follow-up to Slice A v7.
     #[cfg(feature = "interactive")]
     live_capture: Arc<Mutex<Option<LiveCaptureSession>>>,
+    /// Streaming-STT-backed capture for the assistant push-to-talk
+    /// path. Only used when `[interactive].enabled = true` and a
+    /// streaming-capable STT backend is loaded; otherwise the batch
+    /// path through [`Self::assistant_capture`] is used. Sharing the
+    /// `LiveCaptureSession` shape with the dictation slot keeps the
+    /// teardown logic uniform — only the press/release wrappers and
+    /// the post-stop transcript routing differ.
+    #[cfg(feature = "interactive")]
+    assistant_live_capture: Arc<Mutex<Option<LiveCaptureSession>>>,
     /// Long-lived overlay handle, spawned **once** at orchestrator
     /// construction and reused across every live-dictation and batch
     /// recording session. winit refuses to construct a second
@@ -495,6 +504,7 @@ impl SessionOrchestrator {
     /// Provider-switching plan task S11/S13.
     ///
     /// Returns a short human-readable summary (active backends).
+    #[allow(clippy::too_many_lines)]
     pub async fn reload(&self) -> Result<String> {
         let paths = self
             .paths
@@ -578,14 +588,32 @@ impl SessionOrchestrator {
             let mut s = self.assistant_session.lock().await;
             s.history = ConversationHistory::new(window, max_turns);
         }
-        // Push the (possibly changed) waveform style to the
-        // long-lived overlay handle so a `[overlay].style` edit
-        // takes effect on the next visualisation tick instead of
-        // being stuck on whatever was set at daemon startup.
-        // No-op when the overlay is in `Text` mode or when the
-        // style is unchanged.
+        // Push the (possibly changed) overlay decisions to the
+        // long-lived handle. The mode swap matters for the
+        // `[interactive].enabled` tray toggle: the overlay is
+        // spawned **once** at startup (winit forbids a second
+        // EventLoop per process) so we hot-swap between text and
+        // waveform panels via `SetMode` instead of respawning. A
+        // `[overlay].style` edit lands as a `SetWaveformStyle`
+        // afterwards so the right style is active even if we just
+        // entered waveform mode this reload. Both calls are
+        // idempotent when nothing changed.
         #[cfg(any(feature = "interactive", feature = "waveform"))]
         if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
+            #[cfg(feature = "interactive")]
+            {
+                if cfg.interactive.enabled {
+                    o.enable_text_mode();
+                } else if cfg!(feature = "waveform") && cfg.overlay.waveform {
+                    o.enable_waveform_mode(cfg.overlay.style);
+                }
+            }
+            #[cfg(all(feature = "waveform", not(feature = "interactive")))]
+            {
+                if cfg.overlay.waveform {
+                    o.enable_waveform_mode(cfg.overlay.style);
+                }
+            }
             o.set_waveform_style(cfg.overlay.style);
         }
         if let Ok(mut guard) = self.config.write() {
@@ -672,7 +700,17 @@ impl SessionOrchestrator {
         initial_state: fono_overlay::OverlayState,
         buffer: &Arc<StdMutex<RecordingBuffer>>,
     ) -> Option<tokio::task::AbortHandle> {
-        let want_waveform = cfg.overlay.waveform && !cfg.interactive.enabled;
+        // The interactive (live-dictation) gate only applies to the
+        // batch dictation overlay — when interactive mode is on, F9
+        // takes the streaming path and the dictation panel is handled
+        // by `LiveSession`. The assistant pipeline is independent and
+        // should always show its overlay regardless of interactive
+        // mode (different state, different colour, different label).
+        let is_assistant = matches!(
+            initial_state,
+            fono_overlay::OverlayState::AssistantRecording { .. }
+        );
+        let want_waveform = cfg.overlay.waveform && (is_assistant || !cfg.interactive.enabled);
         let handle = self.overlay.read().ok().and_then(|g| g.clone());
         match (want_waveform, handle) {
             (true, Some(o)) => {
@@ -816,7 +854,9 @@ impl SessionOrchestrator {
         clippy::cast_precision_loss
     )]
     fn spawn_thinking_animation_task(&self, cfg: &Config) -> Option<tokio::task::AbortHandle> {
-        let want_waveform = cfg.overlay.waveform && !cfg.interactive.enabled;
+        // Assistant-only path — independent of the dictation
+        // interactive gate (see `spawn_waveform_level_task`).
+        let want_waveform = cfg.overlay.waveform;
         let handle = self.overlay.read().ok().and_then(|g| g.clone());
         if !want_waveform {
             return None;
@@ -1070,6 +1110,8 @@ impl SessionOrchestrator {
             capture: Arc::new(Mutex::new(None)),
             #[cfg(feature = "interactive")]
             live_capture: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "interactive")]
+            assistant_live_capture: Arc::new(Mutex::new(None)),
             #[cfg(any(feature = "interactive", feature = "waveform"))]
             overlay: Arc::new(StdRwLock::new(None)),
             pipeline_in_flight: Arc::new(AtomicBool::new(false)),
@@ -1217,6 +1259,10 @@ impl SessionOrchestrator {
     }
 
     /// Cancel an active recording, dropping the audio without invoking STT.
+    /// Tears down both the batch capture slot and the live-dictation
+    /// session if either is active — ESC during F9 must stop the
+    /// streaming pipeline cleanly, not leave its threads/tasks running
+    /// in the background.
     pub async fn on_cancel(&self) {
         let taken = self.capture.lock().await.take();
         if let Some(session) = taken {
@@ -1235,6 +1281,42 @@ impl SessionOrchestrator {
             }
             info!("recording cancelled by user");
         }
+        #[cfg(feature = "interactive")]
+        {
+            let live_taken = self.live_capture.lock().await.take();
+            if let Some(mut session) = live_taken {
+                let cfg = self.current_config();
+                if cfg.general.auto_mute_system {
+                    fono_audio::mute::set_default_sink_mute(false);
+                }
+                // Same teardown order as on_stop_live_dictation, minus
+                // the transcript commit. The grace-sleep is skipped —
+                // ESC means "drop this", not "wait for trailing audio".
+                let _ = session.capture_stop_tx.send(());
+                if let Some(j) = session.capture_join.take() {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = j.join();
+                    })
+                    .await;
+                }
+                if let Some(j) = session.bridge_join.take() {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = j.join();
+                    })
+                    .await;
+                }
+                // Abort the run task instead of awaiting it — we don't
+                // care about the partial transcript.
+                session.run_join.abort();
+                let _ = session.drain_join.await;
+                let _ = session.run_join.await;
+                if let Some(o) = session.overlay.as_ref() {
+                    o.set_state(fono_overlay::OverlayState::Hidden);
+                }
+                self.pipeline_in_flight.store(false, Ordering::SeqCst);
+                info!("live-dictation cancelled by user");
+            }
+        }
         let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
     }
 
@@ -1245,18 +1327,52 @@ impl SessionOrchestrator {
     /// capture slot, skips the dictation overlay / mute path, and
     /// does not flip `pipeline_in_flight` (the assistant pipeline
     /// gates on its own cancellation `Notify`).
+    ///
+    /// When `[interactive].enabled = true` and a streaming-capable STT
+    /// backend is loaded, the press takes the streaming path: same
+    /// pipeline as F9 dictation but with the green `AssistantRecording`
+    /// panel, so the user sees realtime preview text as they speak.
+    /// On release the captured transcript is forwarded to the LLM
+    /// (skipping the batch STT step in [`run_assistant_turn`]).
     #[allow(clippy::significant_drop_tightening)]
     pub async fn on_assistant_hold_press(&self) -> Result<()> {
-        let mut slot = self.assistant_capture.lock().await;
-        if slot.is_some() {
-            warn!("assistant capture already in progress; ignoring duplicate start");
-            return Ok(());
-        }
         // If a previous turn's playback is still finishing, stop it
         // — second-press semantics: barge-in.
         {
             let mut s = self.assistant_session.lock().await;
             s.stop_current_turn();
+        }
+
+        // Streaming branch: only when interactive mode is on AND a
+        // streaming backend is loaded. Falls through to the batch
+        // path below otherwise (cloud-only configs, missing feature).
+        #[cfg(feature = "interactive")]
+        {
+            if self.current_config().interactive.enabled {
+                if let Some(streaming) = self.current_streaming_stt() {
+                    let mut slot = self.assistant_live_capture.lock().await;
+                    if slot.is_some() {
+                        warn!(
+                            "assistant live capture already in progress; ignoring duplicate start"
+                        );
+                        return Ok(());
+                    }
+                    let session = self.build_live_capture_pipeline(
+                        streaming,
+                        RecordingMode::Hold,
+                        fono_overlay::OverlayState::AssistantRecording { db: 0 },
+                    )?;
+                    *slot = Some(session);
+                    info!("assistant recording started (streaming)");
+                    return Ok(());
+                }
+            }
+        }
+
+        let mut slot = self.assistant_capture.lock().await;
+        if slot.is_some() {
+            warn!("assistant capture already in progress; ignoring duplicate start");
+            return Ok(());
         }
         let cap_cfg = self.capture_cfg.clone();
         let (started_tx, started_rx) = std::sync::mpsc::channel::<
@@ -1319,21 +1435,86 @@ impl SessionOrchestrator {
     /// Stop assistant recording and kick off the streaming pump:
     /// STT → assistant chat → SentenceSplitter → TTS → playback.
     /// Returns immediately; the pump runs on a detached tokio task.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
     pub async fn on_assistant_hold_release(&self) {
         // Every early-return path MUST emit `ProcessingDone` so the
         // FSM doesn't get stuck in `AssistantThinking` (which would
         // also block subsequent F8/F9 presses). The `_` binding
         // captures cases where there's no buffered session yet (a
         // duplicate release event) — we still kick the FSM to Idle.
-        let session = self.assistant_capture.lock().await.take();
-        let Some(session) = session else {
-            warn!("assistant release without a matching press; ignoring");
-            self.hide_assistant_overlay();
-            let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
-            return;
-        };
-        let (pcm, elapsed) =
+
+        // Streaming branch: consume the live capture, await the final
+        // transcript, and forward it as `pre_transcribed` to skip the
+        // batch STT step. Mirrors `on_stop_live_dictation`'s teardown
+        // shape but routes the transcript to the LLM rather than the
+        // text injector.
+        let mut pre_transcribed: Option<String> = None;
+        let mut elapsed: Option<Duration> = None;
+        #[cfg(feature = "interactive")]
+        {
+            let live_taken = self.assistant_live_capture.lock().await.take();
+            if let Some(mut session) = live_taken {
+                let captured_for = session.started_at.elapsed();
+                // Same trailing-word grace as the F9 path: the cpal
+                // callback may still have a few frames in flight when
+                // the user releases the key.
+                let cfg = self.current_config();
+                let grace_ms = u64::from(cfg.interactive.hold_release_grace_ms);
+                if grace_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(grace_ms)).await;
+                }
+                let _ = session.capture_stop_tx.send(());
+                if let Some(j) = session.capture_join.take() {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = j.join();
+                    })
+                    .await;
+                }
+                if let Some(j) = session.bridge_join.take() {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = j.join();
+                    })
+                    .await;
+                }
+                let _ = session.drain_join.await;
+                let transcript_res = session.run_join.await;
+                let transcript = match transcript_res {
+                    Ok(Ok(t)) => t,
+                    Ok(Err(e)) => {
+                        error!("assistant: streaming STT failed: {e:#}");
+                        self.hide_assistant_overlay();
+                        let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
+                        return;
+                    }
+                    Err(e) => {
+                        error!("assistant: streaming run task join error: {e:#}");
+                        self.hide_assistant_overlay();
+                        let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
+                        return;
+                    }
+                };
+                let raw = transcript.committed.trim().to_string();
+                if raw.is_empty() {
+                    info!("assistant streaming: empty transcript; skipping");
+                    self.hide_assistant_overlay();
+                    let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
+                    return;
+                }
+                pre_transcribed = Some(raw);
+                elapsed = Some(captured_for);
+            }
+        }
+
+        let (pcm, elapsed) = if pre_transcribed.is_some() {
+            (Vec::new(), elapsed.unwrap_or_default())
+        } else {
+            let session = self.assistant_capture.lock().await.take();
+            let Some(session) = session else {
+                warn!("assistant release without a matching press; ignoring");
+                self.hide_assistant_overlay();
+                let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
+                return;
+            };
             match tokio::task::spawn_blocking(move || session.stop_and_drain()).await {
                 Ok(t) => t,
                 Err(e) => {
@@ -1342,8 +1523,9 @@ impl SessionOrchestrator {
                     let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
                     return;
                 }
-            };
-        if elapsed < MIN_RECORDING || pcm.is_empty() {
+            }
+        };
+        if pre_transcribed.is_none() && (elapsed < MIN_RECORDING || pcm.is_empty()) {
             info!(
                 "assistant recording too short ({}ms); skipping",
                 elapsed.as_millis()
@@ -1413,6 +1595,7 @@ impl SessionOrchestrator {
             system_prompt: cfg.assistant.prompt_main.clone(),
             language: cfg.general.language_override().map(str::to_string),
             action_tx: self.action_tx.clone(),
+            pre_transcribed,
         };
         let state_for_task = self.assistant_session.clone();
         let action_tx = self.action_tx.clone();
@@ -1459,10 +1642,38 @@ impl SessionOrchestrator {
     /// to bail out and asks the playback handle to drain its queue.
     /// Conversation history is preserved so a follow-up turn carries
     /// context.
+    ///
+    /// Also tears down the streaming live-capture session if ESC was
+    /// pressed mid-recording (before the user released F10) — without
+    /// this the cpal capture thread + bridge + run task would keep
+    /// running after the FSM has already returned to Idle.
     pub async fn on_assistant_stop(&self) {
         {
             let mut s = self.assistant_session.lock().await;
             s.stop_current_turn();
+        }
+        #[cfg(feature = "interactive")]
+        {
+            let live_taken = self.assistant_live_capture.lock().await.take();
+            if let Some(mut session) = live_taken {
+                let _ = session.capture_stop_tx.send(());
+                if let Some(j) = session.capture_join.take() {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = j.join();
+                    })
+                    .await;
+                }
+                if let Some(j) = session.bridge_join.take() {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = j.join();
+                    })
+                    .await;
+                }
+                session.run_join.abort();
+                let _ = session.drain_join.await;
+                let _ = session.run_join.await;
+                info!("assistant streaming capture cancelled by user");
+            }
         }
         self.hide_assistant_overlay();
         info!("assistant stop requested");
@@ -1632,38 +1843,23 @@ impl SessionOrchestrator {
             .clone()
     }
 
-    /// Begin a live (streaming) dictation session. Same in-flight
-    /// guarantees as [`Self::on_start_recording`]: refuses if a
-    /// previous pipeline is still running.
+    /// Build a streaming-STT-backed capture pipeline with the supplied
+    /// overlay state. Shared between [`Self::on_start_live_dictation`]
+    /// (F9, `LiveDictating` panel) and [`Self::on_assistant_hold_press`]
+    /// (F10 with interactive enabled, `AssistantRecording` panel) so
+    /// both surfaces get the same realtime preview UX.
     ///
-    /// Falls back to [`Self::on_start_recording`] when no streaming
-    /// backend is available — currently true for every cloud STT in
-    /// Slice A. The fallback keeps `[interactive].enabled = true`
-    /// from breaking dictation entirely on a Groq-configured user's
-    /// machine; the daemon logs a `warn!` so the diagnosis is obvious.
-    #[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
-    pub async fn on_start_live_dictation(&self, mode: RecordingMode) -> Result<()> {
-        fono_stt::rate_limit_notify::reset_session_flag();
-        tracing::debug!("live dictation: starting capture (mode={mode:?})");
-        let Some(streaming) = self.current_streaming_stt() else {
-            warn!(
-                "live-dictation: no streaming-capable STT backend currently loaded \
-                 (set `[stt].backend = \"local\"` or wait for Slice B); \
-                 falling back to batch path"
-            );
-            return self.on_start_recording(mode).await;
-        };
-        if self.pipeline_in_flight.load(Ordering::SeqCst) {
-            warn!("live-dictation requested while previous pipeline still running; ignoring");
-            return Ok(());
-        }
-        self.maybe_clear_assistant_on_dictation().await;
-        let mut slot = self.live_capture.lock().await;
-        if slot.is_some() {
-            warn!("live-dictation already in progress; ignoring duplicate start");
-            return Ok(());
-        }
-
+    /// Spawns: the cpal capture thread, the crossbeam→tokio bridge
+    /// thread, the pump drain task, and the [`crate::live::LiveSession`]
+    /// run task. Returns a [`LiveCaptureSession`] the caller stores in
+    /// the appropriate slot.
+    #[allow(clippy::significant_drop_tightening)]
+    fn build_live_capture_pipeline(
+        &self,
+        streaming: Arc<dyn StreamingStt>,
+        mode: RecordingMode,
+        active_state: fono_overlay::OverlayState,
+    ) -> Result<LiveCaptureSession> {
         // Slice A: streaming pipeline operates at 16 kHz to keep the
         // pump's broadcast frame budget aligned with whisper. The
         // capture stage resamples for us.
@@ -1681,8 +1877,7 @@ impl SessionOrchestrator {
         // closure is owned by the cpal `Stream`; dropping the stream
         // (when capture_stop_rx fires) drops the closure and thereby
         // the `audio_tx` Sender, signalling EOF to the bridge thread
-        // downstream. Slice B1 / R10.x — replaces the prior 30 ms
-        // RecordingBuffer-poll drain.
+        // downstream.
         let (audio_tx, audio_rx) = crossbeam_channel::bounded::<Vec<f32>>(64);
         let (started_tx, started_rx) =
             std::sync::mpsc::channel::<std::result::Result<(), String>>();
@@ -1694,10 +1889,6 @@ impl SessionOrchestrator {
                 let cap = AudioCapture::new(cap_cfg_thread);
                 let forwarder_tx = audio_tx;
                 let result = cap.start_with_forwarder(move |pcm: &[f32]| {
-                    // Bounded try_send: drop on overflow (a frame
-                    // dropped on the audio thread is preferable to a
-                    // glitch caused by allocator pressure under
-                    // pump backpressure).
                     if forwarder_tx.try_send(pcm.to_vec()).is_err() {
                         warn!(
                             "live-capture: realtime SPSC full ({} samples dropped)",
@@ -1731,9 +1922,6 @@ impl SessionOrchestrator {
         }
 
         let cfg = self.current_config();
-        if cfg.general.auto_mute_system {
-            fono_audio::mute::set_default_sink_mute(true);
-        }
 
         // ---- Reuse the long-lived overlay handle -----------------
         // winit forbids a second EventLoop per process; the handle
@@ -1750,8 +1938,9 @@ impl SessionOrchestrator {
             [single] => Some(single.clone()),
             _ => None,
         };
-        let mut session =
-            crate::live::LiveSession::new(streaming, sample_rate).with_language(language);
+        let mut session = crate::live::LiveSession::new(streaming, sample_rate)
+            .with_language(language)
+            .with_overlay_active_state(active_state);
         if let Some(o) = overlay.as_ref() {
             session = session.with_overlay(o.clone());
         }
@@ -1761,11 +1950,6 @@ impl SessionOrchestrator {
         let run_join = tokio::spawn(session.run(frame_rx, quality_floor));
 
         // ---- Bridge: realtime crossbeam rx → tokio mpsc ----------
-        // A dedicated std::thread blocks on `audio_rx.recv()` and
-        // forwards into a tokio unbounded mpsc; the tokio drain task
-        // awaits that side. We avoid a `spawn_blocking` per recv
-        // (which would defeat the latency win this thread is chasing)
-        // by spending exactly one OS thread on the bridge.
         let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
         let bridge_join = std::thread::Builder::new()
             .name("fono-live-bridge".into())
@@ -1775,18 +1959,13 @@ impl SessionOrchestrator {
                         break;
                     }
                 }
-                // audio_rx returned Err(Disconnected) — capture stream
-                // has shut down; drop tokio_tx implicitly to signal
-                // EOF to the drain task.
             })
             .context("spawn live-capture bridge thread")?;
 
         // ---- Spawn the drain task (tokio mpsc -> Pump::push) -----
         // Tap RMS off each chunk to feed the right-side VU bar on the
-        // overlay panel. Cheap (one pass over already-resident PCM)
-        // and keeps the pump / broadcast channel untouched. The
-        // boolean snapshot is stable for the session — config reload
-        // doesn't retroactively change running sessions.
+        // overlay panel during F9. The assistant path uses the same
+        // tap so the same VU indicator works for both surfaces.
         let vu_overlay = if cfg.overlay.volume_bar {
             overlay.clone()
         } else {
@@ -1801,16 +1980,10 @@ impl SessionOrchestrator {
                 pump.push(&chunk);
             }
             pump.finish();
-            // Drop pump explicitly so the broadcast sender side closes.
             drop(pump);
         });
 
-        info!(
-            "live-dictation started (mode={:?} sample_rate={})",
-            mode, sample_rate
-        );
-        self.pipeline_in_flight.store(true, Ordering::SeqCst);
-        *slot = Some(LiveCaptureSession {
+        Ok(LiveCaptureSession {
             capture_stop_tx,
             capture_join: Some(capture_join),
             bridge_join: Some(bridge_join),
@@ -1819,7 +1992,55 @@ impl SessionOrchestrator {
             overlay,
             started_at: Instant::now(),
             mode,
-        });
+        })
+    }
+
+    /// Begin a live (streaming) dictation session. Same in-flight
+    /// guarantees as [`Self::on_start_recording`]: refuses if a
+    /// previous pipeline is still running.
+    ///
+    /// Falls back to [`Self::on_start_recording`] when no streaming
+    /// backend is available — currently true for every cloud STT in
+    /// Slice A. The fallback keeps `[interactive].enabled = true`
+    /// from breaking dictation entirely on a Groq-configured user's
+    /// machine; the daemon logs a `warn!` so the diagnosis is obvious.
+    #[allow(clippy::significant_drop_tightening)]
+    pub async fn on_start_live_dictation(&self, mode: RecordingMode) -> Result<()> {
+        fono_stt::rate_limit_notify::reset_session_flag();
+        tracing::debug!("live dictation: starting capture (mode={mode:?})");
+        let Some(streaming) = self.current_streaming_stt() else {
+            warn!(
+                "live-dictation: no streaming-capable STT backend currently loaded \
+                 (set `[stt].backend = \"local\"` or wait for Slice B); \
+                 falling back to batch path"
+            );
+            return self.on_start_recording(mode).await;
+        };
+        if self.pipeline_in_flight.load(Ordering::SeqCst) {
+            warn!("live-dictation requested while previous pipeline still running; ignoring");
+            return Ok(());
+        }
+        self.maybe_clear_assistant_on_dictation().await;
+        let mut slot = self.live_capture.lock().await;
+        if slot.is_some() {
+            warn!("live-dictation already in progress; ignoring duplicate start");
+            return Ok(());
+        }
+
+        let session = self.build_live_capture_pipeline(
+            streaming,
+            mode,
+            fono_overlay::OverlayState::LiveDictating,
+        )?;
+
+        let cfg = self.current_config();
+        if cfg.general.auto_mute_system {
+            fono_audio::mute::set_default_sink_mute(true);
+        }
+
+        info!("live-dictation started (mode={:?} sample_rate=16000)", mode);
+        self.pipeline_in_flight.store(true, Ordering::SeqCst);
+        *slot = Some(session);
         Ok(())
     }
 

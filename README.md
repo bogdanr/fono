@@ -39,7 +39,9 @@ fono setup    # picks local vs cloud based on your hardware, installs models
 fono          # starts the daemon (tray + hotkeys)
 ```
 
-Default hotkeys: **`F9`** to toggle recording, **`F8`** to push-to-talk (hold).
+Default hotkeys: **`F7`** for dictation, **`F8`** for the voice assistant.
+Both default to toggle (press once to start, press again to stop).
+Set `[hotkeys].mode = "hold"` in your config for push-to-talk.
 Speak. Text appears at your cursor.
 
 ## Switching providers

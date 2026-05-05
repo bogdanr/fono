@@ -5,6 +5,31 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] — 2026-05-05
+
+### Changed
+
+- **Default hotkeys: `F7` for dictation, `F8` for the voice assistant,
+  toggle mode by default.** Previous defaults — F8 (push-to-talk hold),
+  F9 (toggle), F10 (assistant push-to-talk) — collided with htop's
+  exit / kill / nice bindings and, in F10's case, the GTK menubar
+  shortcut. The two dictation keys collapse into one (`F7`) and the
+  assistant key moves down by two (to `F8`). Both keys now share a
+  single `[hotkeys].mode = "toggle" | "hold"` setting that applies
+  globally; `mode = "toggle"` (default) means press once to start,
+  press again to stop. The assistant moves to toggle by default too
+  — no more holding a key down through the multi-second STT → LLM →
+  TTS round trip.
+- **`[hotkeys].toggle` renamed to `[hotkeys].dictation`.** Old configs
+  continue to parse via a serde alias; existing user overrides keep
+  working.
+- **`[hotkeys].hold` field removed.** Push-to-talk is now expressed
+  as `[hotkeys].mode = "hold"`, which applies to both the dictation
+  and the assistant key. Old configs with `hold = "F8"` are silently
+  ignored on load. To keep push-to-talk, set `mode = "hold"` in your
+  config (the dictation and assistant keys remain whatever you have
+  bound).
+
 ## [0.7.0] — 2026-05-04
 
 ### Added
@@ -1356,7 +1381,8 @@ feature and ships fully wired in v0.2.
 - Local LLM cleanup (Qwen / SmolLM) is opt-in / preview.
 - Real `winit + softbuffer` overlay window is a stub (event channel only).
 
-[Unreleased]: https://github.com/bogdanr/fono/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/bogdanr/fono/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/bogdanr/fono/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/bogdanr/fono/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/bogdanr/fono/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/bogdanr/fono/compare/v0.5.0...v0.6.0

@@ -78,8 +78,11 @@ impl AssistantSessionState {
 /// Inputs for [`run_assistant_turn`]. Cloning is cheap (everything is
 /// `Arc`).
 pub struct AssistantTurnInputs {
+    /// Captured PCM. Ignored when `pre_transcribed` is `Some` — the
+    /// caller has already run the STT step (live-streaming F10 path).
     pub pcm: Vec<f32>,
     pub sample_rate: u32,
+    /// Batch STT backend. Unused when `pre_transcribed` is `Some`.
     pub stt: Arc<dyn SpeechToText>,
     pub assistant: Arc<dyn Assistant>,
     pub tts: Arc<dyn TextToSpeech>,
@@ -92,6 +95,12 @@ pub struct AssistantTurnInputs {
     /// also receives `ProcessingDone` from the daemon dispatcher
     /// after the turn ends (we don't fire it from here).
     pub action_tx: mpsc::UnboundedSender<HotkeyAction>,
+    /// When `Some`, skip the batch STT step entirely and treat this
+    /// string as the user's turn. Set by the live-streaming F10 path
+    /// (interactive mode + streaming-capable backend) so the same
+    /// transcription that drove the realtime overlay preview gets
+    /// forwarded to the LLM rather than re-running STT.
+    pub pre_transcribed: Option<String>,
 }
 
 /// Run one assistant turn: STT the captured PCM, push the user turn
@@ -118,33 +127,50 @@ pub async fn run_assistant_turn(
         system_prompt,
         language,
         action_tx,
+        pre_transcribed,
     } = inputs;
 
-    if pcm.is_empty() {
-        debug!(target: "fono::assistant", "skip: empty PCM");
-        return Ok(false);
-    }
-
-    // 1. STT.
-    let stt_started = std::time::Instant::now();
-    let transcription = tokio::select! {
-        biased;
-        () = notify.notified() => {
-            debug!(target: "fono::assistant", "cancelled before STT");
+    // 1. Resolve the user's text. When `pre_transcribed` is set the
+    //    caller already ran streaming STT (live-mode F10 path); we
+    //    skip the batch call entirely. Otherwise run STT on the
+    //    captured PCM.
+    let user_text = if let Some(text) = pre_transcribed {
+        let trimmed = text.trim().to_string();
+        if trimmed.is_empty() {
+            debug!(target: "fono::assistant", "skip: empty pre-transcribed text");
             return Ok(false);
         }
-        r = stt.transcribe(&pcm, sample_rate, language.as_deref()) => r?,
+        info!(
+            target: "fono::assistant",
+            "pre-transcribed: {trimmed:?}"
+        );
+        trimmed
+    } else {
+        if pcm.is_empty() {
+            debug!(target: "fono::assistant", "skip: empty PCM");
+            return Ok(false);
+        }
+        let stt_started = std::time::Instant::now();
+        let transcription = tokio::select! {
+            biased;
+            () = notify.notified() => {
+                debug!(target: "fono::assistant", "cancelled before STT");
+                return Ok(false);
+            }
+            r = stt.transcribe(&pcm, sample_rate, language.as_deref()) => r?,
+        };
+        let trimmed = transcription.text.trim().to_string();
+        if trimmed.is_empty() {
+            debug!(target: "fono::assistant", "skip: empty transcript");
+            return Ok(false);
+        }
+        info!(
+            target: "fono::assistant",
+            stt_ms = stt_started.elapsed().as_millis() as u64,
+            "STT: {trimmed:?}"
+        );
+        trimmed
     };
-    let user_text = transcription.text.trim().to_string();
-    if user_text.is_empty() {
-        debug!(target: "fono::assistant", "skip: empty transcript");
-        return Ok(false);
-    }
-    info!(
-        target: "fono::assistant",
-        stt_ms = stt_started.elapsed().as_millis() as u64,
-        "STT: {user_text:?}"
-    );
 
     // 2. Build context from history (prune-on-snapshot) + push user turn.
     let history_snapshot = {

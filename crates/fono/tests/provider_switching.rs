@@ -15,7 +15,7 @@ use fono::cli::{set_active_llm, set_active_stt};
 #[test]
 fn set_active_stt_preserves_unrelated_fields() {
     let mut cfg = Config::default();
-    cfg.hotkeys.toggle = "Ctrl+Shift+J".into();
+    cfg.hotkeys.dictation = "Ctrl+Shift+J".into();
     cfg.llm.prompt.main = "BE TERSE".into();
     cfg.history.retention_days = 99;
     cfg.stt.local.model = "medium".into();
@@ -25,7 +25,7 @@ fn set_active_stt_preserves_unrelated_fields() {
     assert_eq!(cfg.stt.backend, SttBackend::OpenAI);
     assert!(cfg.stt.cloud.is_none(), "stale cloud sub-block must clear");
     // Unrelated fields untouched.
-    assert_eq!(cfg.hotkeys.toggle, "Ctrl+Shift+J");
+    assert_eq!(cfg.hotkeys.dictation, "Ctrl+Shift+J");
     assert_eq!(cfg.llm.prompt.main, "BE TERSE");
     assert_eq!(cfg.history.retention_days, 99);
     assert_eq!(cfg.stt.local.model, "medium");
@@ -59,7 +59,7 @@ fn config_roundtrip_preserves_swapped_backend() {
     let path = tmp.path().join("config.toml");
 
     let mut cfg = Config::default();
-    cfg.hotkeys.toggle = "Ctrl+Alt+K".into();
+    cfg.hotkeys.dictation = "Ctrl+Alt+K".into();
     set_active_stt(&mut cfg, SttBackend::OpenAI);
     set_active_llm(&mut cfg, LlmBackend::Anthropic);
     cfg.save(&path).unwrap();
@@ -68,7 +68,7 @@ fn config_roundtrip_preserves_swapped_backend() {
     assert_eq!(reloaded.stt.backend, SttBackend::OpenAI);
     assert_eq!(reloaded.llm.backend, LlmBackend::Anthropic);
     assert!(reloaded.llm.enabled);
-    assert_eq!(reloaded.hotkeys.toggle, "Ctrl+Alt+K");
+    assert_eq!(reloaded.hotkeys.dictation, "Ctrl+Alt+K");
 }
 
 /// S23 — provider-string parsers and printers form a bijection over

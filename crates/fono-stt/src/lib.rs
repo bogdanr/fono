@@ -34,7 +34,10 @@ pub use registry::{ModelInfo, ModelRegistry};
 pub use traits::{SpeechToText, Transcription};
 
 #[cfg(feature = "streaming")]
-pub use streaming::{LocalAgreement, StreamFrame, StreamingStt, TranscriptUpdate, UpdateLane};
+pub use streaming::{
+    strip_trailing_hallucinations, LocalAgreement, StreamFrame, StreamingStt, TranscriptUpdate,
+    UpdateLane,
+};
 
 #[cfg(all(feature = "groq", feature = "streaming"))]
 pub use groq_streaming::{GroqRequestFn, GroqRequestFuture, GroqStreaming};

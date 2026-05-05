@@ -54,9 +54,9 @@ mod linux {
             tracing::error!(
                 "X11 hotkey grab denied (BadAccess on X_GrabKey): another application \
                  (window manager, browser, terminal, screen-recorder, etc.) already owns \
-                 one of the keys you bound. Change `[hotkeys].hold` or `[hotkeys].toggle` \
-                 in ~/.config/fono/config.toml to a different key (e.g. F11, Pause, \
-                 ScrollLock, or a Mod+letter combination)"
+                 one of the keys you bound. Change `[hotkeys].dictation` or \
+                 `[hotkeys].assistant` in ~/.config/fono/config.toml to a different key \
+                 (e.g. F11, Pause, ScrollLock, or a Mod+letter combination)"
             );
         } else {
             tracing::warn!("X11 error: request_code={request} error_code={code} (non-fatal)");

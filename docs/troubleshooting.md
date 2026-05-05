@@ -52,23 +52,28 @@ show `(active) reachable` next to your selected backend.
 
 - Another app may already own the binding. Try a different hotkey via
   `fono setup` or by editing `[hotkeys]` in config.
-- Check the keyboard layout — `F9`/`F8` should work everywhere; modifier
+- Check the keyboard layout — `F7`/`F8` should work everywhere; modifier
   combos like `Ctrl+Alt+Space` need literal Ctrl, Alt, and Space in your
   active layout.
+- **htop overlap**: htop binds F7/F8 to nice +/-. The keystroke only
+  reaches htop while it has focus, so it doesn't normally collide with
+  Fono's global hotkey. If you live inside htop and want a free key,
+  rebind `[hotkeys].dictation` / `[hotkeys].assistant` to e.g. `F11`,
+  `Pause`, or `ScrollLock`.
 
 If you see this in the log:
 
 ```
 ERROR X11 hotkey grab denied (BadAccess on X_GrabKey): another
       application … already owns one of the keys you bound. Change
-      `[hotkeys].hold` or `[hotkeys].toggle` in ~/.config/fono/config.toml
-      …
+      `[hotkeys].dictation` or `[hotkeys].assistant` in
+      ~/.config/fono/config.toml …
 ```
 
 — it means another running process (window manager, browser
 extension, screen-recorder, OBS, KDE shortcut, etc.) has grabbed the
 key first. Pick a different hotkey in `[hotkeys]` and restart Fono.
-Common conflict-free choices: `F11`, `Pause`, `ScrollLock`, or
+Common conflict-free choices: `Pause`, `ScrollLock`, `Insert`, or
 `Mod4+space` (Super+Space). Note that prior to v0.3.4 this surfaced
 as a raw `X Error of failed request: BadAccess … X_GrabKey` line on
 stderr without a tracing prefix; if you upgrade and still see the raw
@@ -84,13 +89,13 @@ your compositor's hotkey to `fono toggle` (IPC fallback):
 bindsym $mod+space exec fono toggle
 
 # KDE Plasma — System Settings → Shortcuts → Custom Shortcuts → New →
-#   Trigger: F9
+#   Trigger: F7
 #   Action:  fono toggle
 
 # GNOME — Settings → Keyboard → Custom Shortcuts → +
 #   Name:    Fono toggle
 #   Command: fono toggle
-#   Set:     F9
+#   Set:     F7
 ```
 
 ## LLM responds with a question instead of cleaning my text
@@ -104,9 +109,9 @@ This is **not provider-specific**. The failure mode shows up on every
 cleanup backend Fono supports — Cerebras, Groq, OpenAI, OpenRouter,
 Ollama, Anthropic, and the local llama.cpp path — because chat-trained
 LLMs (regardless of where they run) sometimes treat a short raw
-transcript as a conversational fragment addressed to them. F8
-push-to-talk just hits it more often because it tends to capture shorter
-utterances than F9 toggle.
+transcript as a conversational fragment addressed to them. Push-to-talk
+mode (`[hotkeys].mode = "hold"`) hits it more often than the default
+toggle mode because it tends to capture shorter utterances.
 
 Fono detects and discards these replies as of v0.2.3. The fix is
 identical for every backend: the user message is wrapped in `<<<` /
@@ -316,10 +321,10 @@ hot-swap is exercised by the test suite (`crates/fono/tests/`), so a
 real-world miss likely indicates a config-load error — check the daemon
 log around the switch.
 
-## Voice assistant (F10) doesn't trigger
+## Voice assistant (F8) doesn't trigger
 
 The assistant pipeline is independent of dictation and needs both an
-assistant chat backend and a TTS backend selected before F10 will do
+assistant chat backend and a TTS backend selected before F8 will do
 anything useful.
 
 ```sh
@@ -334,13 +339,14 @@ fono use assistant groq           # or anthropic, cerebras, openai, ollama
 fono use tts openai               # or wyoming, piper
 ```
 
-If `fono doctor` reports the backends ready but holding F10 still
+If `fono doctor` reports the backends ready but pressing F8 still
 produces nothing, tail the daemon log while you press the key. You
 should see `INFO fsm event: AssistantStart` on press and
-`AssistantStop` on release. If neither appears, the F10 binding isn't
-reaching the daemon — see "Hotkey doesn't fire" above (Wayland users
-must bind F10 in the compositor and run `fono assistant press` /
-`fono assistant release`).
+`AssistantStop` on the second press (toggle mode) or release (hold
+mode). If neither appears, the F8 binding isn't reaching the
+daemon — see "Hotkey doesn't fire" above (Wayland users must bind F8
+in the compositor and run `fono assistant press` / `fono assistant
+release`).
 
 ## Voice assistant produces no audio
 

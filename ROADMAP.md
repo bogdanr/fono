@@ -89,6 +89,20 @@ system-tray app and native installer on Windows.
 
 Newest first.
 
+- ![v0.7.1](https://img.shields.io/badge/v0.7.1-2026--05--05-blue?style=flat-square)
+  **Default hotkeys overhauled.** Dictation collapses from F8/F9
+  into a single key on `F7`; the voice assistant moves from F10 to
+  `F8`. Both default to **toggle** (press once to start, press
+  again to stop) via a single new `[hotkeys].mode = "toggle" |
+  "hold"` setting that applies globally — no more juggling separate
+  hold/toggle keys, and no more holding a key down through the
+  multi-second STT → LLM → TTS round-trip on the assistant. The old
+  F9/F10 defaults collided with htop's kill/quit bindings and, for
+  F10, the GTK menubar shortcut. `[hotkeys].toggle` was renamed to
+  `[hotkeys].dictation` (old configs continue to parse via a serde
+  alias); `[hotkeys].hold` is gone (express push-to-talk as `mode =
+  "hold"`).
+
 - ![v0.7.0](https://img.shields.io/badge/v0.7.0-2026--05--04-blue?style=flat-square)
   **Voice assistant.** A second push-to-talk key (F10 by default)
   turns Fono into an offline-capable voice assistant. The pipeline
@@ -321,3 +335,4 @@ Newest first.
 [v0.6.0]: https://github.com/bogdanr/fono/releases/tag/v0.6.0
 [v0.6.1]: https://github.com/bogdanr/fono/releases/tag/v0.6.1
 [v0.7.0]: https://github.com/bogdanr/fono/releases/tag/v0.7.0
+[v0.7.1]: https://github.com/bogdanr/fono/releases/tag/v0.7.1

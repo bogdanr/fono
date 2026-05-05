@@ -32,7 +32,9 @@ use anyhow::{anyhow, Result};
 use fono_audio::{AudioFrameStream, FrameEvent, StreamConfig, Vad, WebRtcVadStub};
 use fono_core::{BudgetController, BudgetVerdict, PriceTable, QualityFloor};
 use fono_overlay::{OverlayHandle, OverlayState};
-use fono_stt::{StreamFrame, StreamingStt, TranscriptUpdate, UpdateLane};
+use fono_stt::{
+    strip_trailing_hallucinations, StreamFrame, StreamingStt, TranscriptUpdate, UpdateLane,
+};
 use futures::stream::{BoxStream, StreamExt};
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -142,6 +144,11 @@ pub struct LiveSession {
     budget: BudgetController,
     stream_cfg: StreamConfig,
     heuristics: HeuristicConfig,
+    /// Overlay state to claim while transcription is running. Defaults
+    /// to `LiveDictating` (F9 path); the assistant push-to-talk path
+    /// passes `AssistantRecording` so the same plumbing renders the
+    /// green "ASSISTANT" panel with realtime preview text.
+    overlay_active_state: OverlayState,
 }
 
 impl LiveSession {
@@ -154,6 +161,7 @@ impl LiveSession {
             budget: BudgetController::local(),
             stream_cfg: StreamConfig::default(),
             heuristics: HeuristicConfig::default(),
+            overlay_active_state: OverlayState::LiveDictating,
         }
     }
 
@@ -184,6 +192,12 @@ impl LiveSession {
     #[must_use]
     pub fn with_heuristics(mut self, h: HeuristicConfig) -> Self {
         self.heuristics = h;
+        self
+    }
+
+    #[must_use]
+    pub fn with_overlay_active_state(mut self, s: OverlayState) -> Self {
+        self.overlay_active_state = s;
         self
     }
 
@@ -222,6 +236,7 @@ impl LiveSession {
             budget,
             stream_cfg: _,
             heuristics,
+            overlay_active_state,
         } = self;
         let budget = Arc::new(Mutex::new(budget));
 
@@ -316,10 +331,11 @@ impl LiveSession {
         let mut transcript = LiveTranscript::default();
         if let Some(o) = overlay.as_ref() {
             // Clear any text held over from a previous session BEFORE
-            // we flip to LiveDictating, so the user never sees the
-            // tail of the last dictation flash up at session start.
+            // we flip to the active state, so the user never sees the
+            // tail of the last dictation/assistant turn flash up at
+            // session start.
             o.update_text(String::new());
-            o.set_state(OverlayState::LiveDictating);
+            o.set_state(overlay_active_state);
         }
         while let Some(upd) = updates.next().await {
             apply_update(&mut transcript, &upd);
@@ -334,8 +350,15 @@ impl LiveSession {
                 upd.text.len()
             );
         }
-        if let Some(o) = overlay.as_ref() {
-            o.set_state(OverlayState::Hidden);
+        // The dictation path hides the overlay at the end of its
+        // update stream so the user gets immediate feedback that
+        // capture is done. The assistant path leaves it visible so
+        // the orchestrator can flip to `AssistantThinking` without a
+        // black flash in between.
+        if matches!(overlay_active_state, OverlayState::LiveDictating) {
+            if let Some(o) = overlay.as_ref() {
+                o.set_state(OverlayState::Hidden);
+            }
         }
 
         // R7.3a hold-on-filler: pure-functional check on the committed
@@ -470,10 +493,18 @@ fn apply_update(transcript: &mut LiveTranscript, upd: &TranscriptUpdate) {
             transcript.last_preview = Some(upd.text.clone());
         }
         UpdateLane::Finalize => {
-            if !transcript.committed.is_empty() && !upd.text.is_empty() {
+            // Strip Whisper-style trailing closer phrases ("thank you")
+            // before commit. The per-backend confidence filter handles
+            // the silence-tail signature, but Groq sometimes returns
+            // "thank you" with normal scores — this is the targeted
+            // fallback that keeps it out of the injected text.
+            // Universal: applies to every streaming provider that
+            // routes through `apply_update`.
+            let cleaned = strip_trailing_hallucinations(&upd.text);
+            if !transcript.committed.is_empty() && !cleaned.is_empty() {
                 transcript.committed.push(' ');
             }
-            transcript.committed.push_str(&upd.text);
+            transcript.committed.push_str(&cleaned);
             transcript.last_preview = None;
             transcript.segments_finalized = transcript.segments_finalized.saturating_add(1);
         }

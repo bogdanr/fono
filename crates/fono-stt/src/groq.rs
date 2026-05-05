@@ -178,15 +178,22 @@ pub struct GroqResponse {
     pub language: Option<String>,
 }
 
-/// `response_format=verbose_json` shape — used by the rerun lane to
-/// score candidate peers by mean per-segment `avg_logprob`. The outer
-/// `language` field is intentionally ignored: when we force `language=`
-/// the peer code we sent IS the code we record on a winning rerun, so
-/// the verbose echo (which is the full English name like "english",
-/// not the alpha-2 code) would only confuse `LanguageSelection::contains`.
+/// `response_format=verbose_json` shape. Used by:
+/// - the **rerun lane** to score candidate peers by mean per-segment
+///   `avg_logprob` (the `language` field on a forced rerun is moot —
+///   the peer code we sent is what we record on a winner);
+/// - the **finalize lane** to drop hallucination-shaped segments via
+///   per-segment `no_speech_prob` + `avg_logprob`.
+///
+/// The verbose `language` echo is the full English name
+/// ("english"), not the alpha-2 code, so route it through
+/// [`crate::lang::whisper_lang_to_code`] before comparing against an
+/// allow-list.
 #[derive(Deserialize, Debug, Clone)]
 pub struct GroqVerboseResponse {
     pub text: String,
+    #[serde(default)]
+    pub language: Option<String>,
     #[serde(default)]
     pub segments: Vec<GroqSegment>,
 }
@@ -194,7 +201,14 @@ pub struct GroqVerboseResponse {
 #[derive(Deserialize, Debug, Clone)]
 pub struct GroqSegment {
     #[serde(default)]
+    pub text: String,
+    #[serde(default)]
     pub avg_logprob: Option<f32>,
+    /// Whisper's per-segment "this is silence / not speech" probability.
+    /// Combined with `avg_logprob` in [`is_hallucinated_segment`] to drop
+    /// the YouTube-closer hallucinations Groq emits on silent tails.
+    #[serde(default)]
+    pub no_speech_prob: Option<f32>,
 }
 
 impl GroqVerboseResponse {
@@ -212,6 +226,55 @@ impl GroqVerboseResponse {
             scored.iter().sum::<f32>() / scored.len() as f32
         }
     }
+}
+
+/// Whisper hallucinates YouTube sign-offs ("Thank you", "Bye",
+/// "you you you") on silent tails. Both `no_speech_prob > 0.6` AND
+/// `avg_logprob < -1.0` must hold — high `no_speech_prob` alone is
+/// normal at segment edges, low `avg_logprob` alone is normal for
+/// quiet but legitimate speech. Thresholds match
+/// `whisper_local.rs` (`set_no_speech_thold(0.6)` +
+/// `set_logprob_thold(-1.0)`) so behaviour is consistent across
+/// providers. Language-agnostic by design — confidence carries the
+/// signal, no phrase matching.
+pub(crate) fn is_hallucinated_segment(seg: &GroqSegment) -> bool {
+    let Some(no_speech) = seg.no_speech_prob else {
+        return false;
+    };
+    let Some(logprob) = seg.avg_logprob else {
+        return false;
+    };
+    no_speech > 0.6 && logprob < -1.0
+}
+
+/// Build the finalize text from a verbose response, dropping
+/// hallucination-shaped segments (see [`is_hallucinated_segment`]).
+/// Empty-segments responses fall back to `resp.text` unchanged — same
+/// conservative posture as [`GroqVerboseResponse::mean_logprob`]: when
+/// the verbose parser sees nothing, we don't claim signal we don't
+/// have. Drops are logged at INFO so filter activity is visible.
+pub(crate) fn filter_hallucinated_segments(resp: &GroqVerboseResponse) -> String {
+    if resp.segments.is_empty() {
+        return resp.text.trim().to_string();
+    }
+    let mut kept: Vec<&str> = Vec::with_capacity(resp.segments.len());
+    for seg in &resp.segments {
+        if is_hallucinated_segment(seg) {
+            tracing::info!(
+                "groq finalize: dropped silence-shaped segment \
+                 (no_speech={:.2}, logprob={:.2}): {:?}",
+                seg.no_speech_prob.unwrap_or(0.0),
+                seg.avg_logprob.unwrap_or(0.0),
+                seg.text.trim(),
+            );
+            continue;
+        }
+        let trimmed = seg.text.trim();
+        if !trimmed.is_empty() {
+            kept.push(trimmed);
+        }
+    }
+    kept.join(" ")
 }
 
 /// Issue a single transcription request to Groq's batch endpoint.
@@ -480,5 +543,138 @@ mod tests {
         assert_eq!(&blob[..4], b"RIFF");
         assert_eq!(&blob[8..12], b"WAVE");
         assert_eq!(blob.len(), 44 + 32);
+    }
+
+    fn seg(text: &str, no_speech: Option<f32>, logprob: Option<f32>) -> GroqSegment {
+        GroqSegment {
+            text: text.to_string(),
+            avg_logprob: logprob,
+            no_speech_prob: no_speech,
+        }
+    }
+
+    fn vresp(text: &str, segments: Vec<GroqSegment>) -> GroqVerboseResponse {
+        GroqVerboseResponse {
+            text: text.to_string(),
+            language: None,
+            segments,
+        }
+    }
+
+    #[test]
+    fn hallucination_signature_caught() {
+        // Classic silence-tail "Thank you" — high no_speech, low logprob.
+        assert!(is_hallucinated_segment(&seg(
+            " Thank you.",
+            Some(0.95),
+            Some(-1.5),
+        )));
+    }
+
+    #[test]
+    fn normal_speech_passes() {
+        // Confident real speech — both scores look healthy.
+        assert!(!is_hallucinated_segment(&seg(
+            " Send him the report.",
+            Some(0.05),
+            Some(-0.3),
+        )));
+    }
+
+    #[test]
+    fn confident_short_utterance_after_pause_passes() {
+        // High no_speech edge case — utterance starts after a pause but
+        // is decoded confidently. logprob alone says it's real speech.
+        assert!(!is_hallucinated_segment(&seg(
+            " Yes.",
+            Some(0.9),
+            Some(-0.3),
+        )));
+    }
+
+    #[test]
+    fn quiet_legitimate_speech_passes() {
+        // Low logprob alone is normal for low-volume / accented speech;
+        // no_speech_prob says it IS speech, so we keep it.
+        assert!(!is_hallucinated_segment(&seg(
+            " mumbled but real",
+            Some(0.2),
+            Some(-1.5),
+        )));
+    }
+
+    #[test]
+    fn missing_scores_default_to_keep() {
+        // Conservative: if the verbose response is missing scores
+        // (parser drift, model variant), don't drop content.
+        assert!(!is_hallucinated_segment(&seg(" anything", None, None)));
+        assert!(!is_hallucinated_segment(&seg(
+            " anything",
+            Some(0.95),
+            None
+        )));
+        assert!(!is_hallucinated_segment(&seg(
+            " anything",
+            None,
+            Some(-2.0)
+        )));
+    }
+
+    #[test]
+    fn filter_drops_trailing_hallucination_keeps_real_speech() {
+        let resp = vresp(
+            "Send him the report. Thank you.",
+            vec![
+                seg(" Send him the report.", Some(0.05), Some(-0.3)),
+                seg(" Thank you.", Some(0.92), Some(-1.4)),
+            ],
+        );
+        assert_eq!(filter_hallucinated_segments(&resp), "Send him the report.");
+    }
+
+    #[test]
+    fn filter_falls_back_to_text_when_no_segments() {
+        // Verbose parser drift / very short clip: no segments to score.
+        // Don't strip — surface what we got.
+        let resp = vresp("  Hello there.  ", Vec::new());
+        assert_eq!(filter_hallucinated_segments(&resp), "Hello there.");
+    }
+
+    #[test]
+    fn filter_returns_empty_when_only_segment_is_hallucination() {
+        // The exact bug the user reported: silence after release →
+        // a single "Thank you" segment with hallucination scores.
+        let resp = vresp(
+            " Thank you.",
+            vec![seg(" Thank you.", Some(0.95), Some(-1.5))],
+        );
+        assert_eq!(filter_hallucinated_segments(&resp), "");
+    }
+
+    #[test]
+    fn filter_keeps_legitimate_thank_you() {
+        // User actually said it: confident scores, must survive.
+        let resp = vresp(
+            "Thank you for the report.",
+            vec![seg(" Thank you for the report.", Some(0.05), Some(-0.25))],
+        );
+        assert_eq!(
+            filter_hallucinated_segments(&resp),
+            "Thank you for the report."
+        );
+    }
+
+    #[test]
+    fn filter_keeps_legitimate_phrase_in_other_languages() {
+        // Multi-language sanity: filter is purely score-based.
+        // "Mulțumesc." (ro) and "Merci." (fr) with confident scores
+        // pass through identically to English.
+        let ro = vresp(
+            "Mulțumesc.",
+            vec![seg(" Mulțumesc.", Some(0.04), Some(-0.20))],
+        );
+        let fr = vresp("Merci.", vec![seg(" Merci.", Some(0.06), Some(-0.28))]);
+        assert_eq!(filter_hallucinated_segments(&ro), "Mulțumesc.");
+        assert_eq!(filter_hallucinated_segments(&fr), "Merci.");
     }
 }
