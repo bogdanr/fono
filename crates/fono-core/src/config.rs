@@ -177,9 +177,10 @@ impl General {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Hotkeys {
-    /// Dictation hotkey. Behaves as toggle or hold depending on
-    /// [`Hotkeys::mode`]. Renamed from `toggle` in v0.8; old configs
-    /// continue to parse via the serde alias.
+    /// Dictation hotkey. Auto-detects toggle vs push-to-talk based on
+    /// press duration: a short press (< 1 s) toggles recording, a long
+    /// press holds — release stops capture. Renamed from `toggle` in
+    /// v0.8; old configs continue to parse via the serde alias.
     #[serde(alias = "toggle")]
     pub dictation: String,
     pub cancel: String,
@@ -187,32 +188,10 @@ pub struct Hotkeys {
     /// entirely (the daemon won't register the key, the FSM never
     /// enters the assistant states). Distinct from `dictation` so the
     /// user can dictate into a focused window and ask the assistant
-    /// in the same session without changing modes.
+    /// in the same session without changing modes. Same auto short/
+    /// long-press behaviour as `dictation`.
     #[serde(default = "default_assistant_hotkey")]
     pub assistant: String,
-    /// Behavior of `dictation` and `assistant`. `Toggle` (default):
-    /// press once to start, press again to stop. `Hold`: press to
-    /// start, release to stop. Applies to both keys uniformly so
-    /// users have one mental model.
-    #[serde(default)]
-    pub mode: HotkeyMode,
-}
-
-/// Hotkey trigger style. Applies globally to both `dictation` and
-/// `assistant`; the FSM's existing per-mode transitions are reused.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum HotkeyMode {
-    /// Press once to start, press again to stop.
-    Toggle,
-    /// Press to start, release to stop (push-to-talk).
-    Hold,
-}
-
-impl Default for HotkeyMode {
-    fn default() -> Self {
-        Self::Toggle
-    }
 }
 
 fn default_assistant_hotkey() -> String {
@@ -225,7 +204,6 @@ impl Default for Hotkeys {
             dictation: "F7".into(),
             cancel: "Escape".into(),
             assistant: default_assistant_hotkey(),
-            mode: HotkeyMode::default(),
         }
     }
 }
@@ -1373,12 +1351,11 @@ mod tests {
     }
 
     #[test]
-    fn hotkeys_defaults_are_f7_f8_toggle() {
+    fn hotkeys_defaults_are_f7_f8() {
         let h = Hotkeys::default();
         assert_eq!(h.dictation, "F7");
         assert_eq!(h.assistant, "F8");
         assert_eq!(h.cancel, "Escape");
-        assert_eq!(h.mode, HotkeyMode::Toggle);
     }
 
     /// Pre-v0.8 configs called the dictation hotkey `toggle`. The
@@ -1396,39 +1373,24 @@ mod tests {
         let cfg: Config = toml::from_str(raw).expect("legacy toggle alias must parse");
         assert_eq!(cfg.hotkeys.dictation, "F9");
         assert_eq!(cfg.hotkeys.assistant, "F10");
-        // Mode defaults to Toggle when absent; old configs that didn't
-        // know about the field get the new default behavior.
-        assert_eq!(cfg.hotkeys.mode, HotkeyMode::Toggle);
     }
 
-    /// Pre-v0.8 configs also carried a separate `[hotkeys].hold` key.
-    /// The field is dropped from the schema; serde silently ignores
-    /// unknown fields so old configs keep loading. Users who want
-    /// hold-style behavior set `mode = "hold"` instead.
+    /// Pre-v0.8 configs carried a separate `[hotkeys].hold` key and a
+    /// `mode` selector. Both fields are dropped from the schema; serde
+    /// silently ignores unknown fields so old configs keep loading.
+    /// Toggle vs push-to-talk is now decided automatically per press
+    /// based on duration.
     #[test]
-    fn legacy_hold_field_silently_ignored() {
+    fn legacy_hold_and_mode_fields_silently_ignored() {
         let raw = r#"
             version = 1
             [hotkeys]
             hold = "F8"
             toggle = "F9"
-        "#;
-        let cfg: Config = toml::from_str(raw).expect("legacy hold key must be ignored");
-        assert_eq!(cfg.hotkeys.dictation, "F9");
-        assert_eq!(cfg.hotkeys.mode, HotkeyMode::Toggle);
-    }
-
-    #[test]
-    fn hotkey_mode_round_trips() {
-        let raw = r#"
-            version = 1
-            [hotkeys]
-            dictation = "F7"
-            assistant = "F8"
             mode = "hold"
         "#;
-        let cfg: Config = toml::from_str(raw).expect("mode = hold parses");
-        assert_eq!(cfg.hotkeys.mode, HotkeyMode::Hold);
+        let cfg: Config = toml::from_str(raw).expect("legacy hotkey fields must be ignored");
+        assert_eq!(cfg.hotkeys.dictation, "F9");
     }
 
     /// Pre-v0.4 configs that still carry the dropped scalar

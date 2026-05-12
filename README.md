@@ -40,8 +40,9 @@ fono          # starts the daemon (tray + hotkeys)
 ```
 
 Default hotkeys: **`F7`** for dictation, **`F8`** for the voice assistant.
-Both default to toggle (press once to start, press again to stop).
-Set `[hotkeys].mode = "hold"` in your config for push-to-talk.
+Each key auto-detects how it was pressed: a quick **tap** toggles
+recording (press once to start, again to stop); **holding** the key for
+more than a second turns it into push-to-talk — release stops capture.
 Speak. Text appears at your cursor.
 
 ## Switching providers

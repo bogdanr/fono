@@ -112,13 +112,10 @@ pub async fn run(paths: &Paths) -> Result<()> {
         "\n  Configuration saved to: {}",
         paths.config_file().display()
     );
-    let mode_word = match config.hotkeys.mode {
-        fono_core::config::HotkeyMode::Toggle => "press once to start, press again to stop",
-        fono_core::config::HotkeyMode::Hold => "hold to talk, release to send",
-    };
     println!(
-        "  Hotkeys: {} (dictation), {} (assistant), {} (cancel) — {}.",
-        config.hotkeys.dictation, config.hotkeys.assistant, config.hotkeys.cancel, mode_word,
+        "  Hotkeys: {} (dictation), {} (assistant), {} (cancel) — \
+         tap to toggle, hold for push-to-talk.",
+        config.hotkeys.dictation, config.hotkeys.assistant, config.hotkeys.cancel,
     );
     if config.hotkeys.assistant.eq_ignore_ascii_case("F8") {
         println!(

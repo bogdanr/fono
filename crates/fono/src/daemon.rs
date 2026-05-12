@@ -171,7 +171,6 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         dictation: config.hotkeys.dictation.clone(),
         cancel: config.hotkeys.cancel.clone(),
         assistant: config.hotkeys.assistant.clone(),
-        mode: config.hotkeys.mode,
     };
     let cancel_ctrl: Option<HotkeyControlSender> = if crate::is_graphical_session() {
         match fono_hotkey::spawn_listener(bindings, action_tx.clone()) {
@@ -1126,11 +1125,8 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
         }
     );
     debug!(
-        "hotkeys      : dictation={}  assistant={}  cancel={}  mode={:?}",
-        config.hotkeys.dictation,
-        config.hotkeys.assistant,
-        config.hotkeys.cancel,
-        config.hotkeys.mode,
+        "hotkeys      : dictation={}  assistant={}  cancel={}  (short=toggle, long=hold)",
+        config.hotkeys.dictation, config.hotkeys.assistant, config.hotkeys.cancel,
     );
     debug!(
         "stt backend  : {:?}  (local model: {})",

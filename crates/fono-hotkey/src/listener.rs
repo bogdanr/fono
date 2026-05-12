@@ -6,35 +6,45 @@
 //! translates incoming events into [`HotkeyAction`]s that are forwarded
 //! to the daemon's FSM through a tokio channel.
 //!
-//! Both keys behave as toggle or hold per [`HotkeyBindings::mode`] —
-//! single global setting, not per-key. The cancel hotkey (default
-//! `Escape`) is only grabbed while a recording session is active so it
-//! stays available to other applications the rest of the time. The
-//! orchestrator drives this via [`HotkeyControl`] messages sent on the
-//! channel returned by [`spawn`].
+//! Toggle-vs-hold is decided automatically per press based on how long
+//! the key is held: a **short press** (< [`LONG_PRESS_THRESHOLD`])
+//! latches recording on (toggle behaviour — release does nothing, the
+//! next short press stops it); a **long press** keeps recording while
+//! the key is held and stops on release (push-to-talk). Implementation:
+//! every press emits the toggle action immediately so the user gets
+//! instant feedback, and on release we synthesise a second toggle to
+//! stop only when the press exceeded the threshold. The cancel hotkey
+//! (default `Escape`) is only grabbed while a recording session is
+//! active so it stays available to other applications the rest of the
+//! time. The orchestrator drives this via [`HotkeyControl`] messages
+//! sent on the channel returned by [`spawn`].
 
 use anyhow::{Context, Result};
 use crossbeam_channel::{select, unbounded, Sender};
-use fono_core::config::HotkeyMode;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::fsm::HotkeyAction;
 use crate::parse::{parse_hotkey, ParsedHotkey};
 
+/// Press duration at which a press flips from "toggle" to "hold"
+/// semantics. A release before this elapses leaves recording running
+/// (next press stops it); a release after it stops recording.
+pub const LONG_PRESS_THRESHOLD: Duration = Duration::from_millis(1000);
+
 /// Configured hotkey strings (as they appear in `config.toml`).
 #[derive(Debug, Clone)]
 pub struct HotkeyBindings {
-    /// Dictation key. Behavior controlled by [`HotkeyBindings::mode`].
+    /// Dictation key. Short press toggles, long press holds.
     pub dictation: String,
     pub cancel: String,
     /// Voice-assistant key. Empty disables the assistant hotkey path
-    /// (the IPC + CLI surfaces still work). Same `mode` applies.
+    /// (the IPC + CLI surfaces still work). Same auto short/long-press
+    /// behaviour as `dictation`.
     pub assistant: String,
-    /// Global toggle/hold mode applied to both dictation and assistant.
-    pub mode: HotkeyMode,
 }
 
 /// Out-of-band commands the daemon sends to the listener thread to
@@ -49,7 +59,7 @@ pub enum HotkeyControl {
     DisableCancel,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Role {
     Dictation,
     Cancel,
@@ -157,6 +167,15 @@ fn run_manager(
     // double-register or unregister-when-not-registered (both error).
     let mut cancel_active = false;
 
+    // Per-role press timestamps. `Some(t)` means: a Pressed event fired
+    // at `t` and we have not yet reconciled the matching Released. The
+    // timestamp drives the toggle-vs-hold decision when Released
+    // arrives. Cleared on Cancel so a long-held press whose recording
+    // was already aborted does NOT synthesise a stop on release (which
+    // would otherwise re-arm the FSM in toggle mode).
+    let mut dictation_press_at: Option<Instant> = None;
+    let mut assistant_press_at: Option<Instant> = None;
+
     let event_rx = GlobalHotKeyEvent::receiver();
     info!("hotkey listener armed; waiting for events");
     loop {
@@ -169,11 +188,17 @@ fn run_manager(
                 let Some(role) = roles.get(&event.id).copied() else {
                     continue;
                 };
-                if let Some(action) = map_event(role, event.state, bindings.mode) {
+                let actions = map_event(
+                    role,
+                    event.state,
+                    &mut dictation_press_at,
+                    &mut assistant_press_at,
+                );
+                for action in actions {
                     tracing::debug!("hotkey {role:?} {:?} -> {action:?}", event.state);
                     if tx.send(action).is_err() {
                         info!("hotkey action channel closed; listener shutting down");
-                        break;
+                        return Ok(());
                     }
                 }
             }
@@ -262,30 +287,114 @@ fn register(
     }
 }
 
-fn map_event(role: Role, state: HotKeyState, mode: HotkeyMode) -> Option<HotkeyAction> {
-    match (role, state, mode) {
-        // Dictation in hold mode emits press+release; toggle mode
-        // emits only on press (a second press stops the FSM).
-        (Role::Dictation, HotKeyState::Pressed, HotkeyMode::Hold) => {
-            Some(HotkeyAction::HoldPressed)
+/// Translate a single raw `(role, state)` event into zero, one, or
+/// (very rarely) two FSM actions.
+///
+/// Dictation/assistant flow per press cycle:
+///
+/// 1. **Press** — emit `TogglePressed` / `AssistantPressed` immediately
+///    so the user sees recording start without waiting on the
+///    long-press threshold. Stash the press timestamp.
+/// 2. **Release** — if the press lasted at least
+///    [`LONG_PRESS_THRESHOLD`], emit a second `TogglePressed` /
+///    `AssistantPressed` to stop recording (push-to-talk semantics).
+///    Shorter presses leave recording latched on (toggle semantics).
+///
+/// Cancel handling: a `CancelPressed` clears both press timestamps so
+/// that the eventual key-up (which may arrive long after the user hit
+/// `Escape`) does not synthesise a spurious stop/start pair.
+fn map_event(
+    role: Role,
+    state: HotKeyState,
+    dictation_press_at: &mut Option<Instant>,
+    assistant_press_at: &mut Option<Instant>,
+) -> Vec<HotkeyAction> {
+    match (role, state) {
+        (Role::Dictation, HotKeyState::Pressed) => {
+            *dictation_press_at = Some(Instant::now());
+            vec![HotkeyAction::TogglePressed]
         }
-        (Role::Dictation, HotKeyState::Released, HotkeyMode::Hold) => {
-            Some(HotkeyAction::HoldReleased)
+        (Role::Dictation, HotKeyState::Released) => {
+            if let Some(t0) = dictation_press_at.take() {
+                if t0.elapsed() >= LONG_PRESS_THRESHOLD {
+                    return vec![HotkeyAction::TogglePressed];
+                }
+            }
+            vec![]
         }
-        (Role::Dictation, HotKeyState::Pressed, HotkeyMode::Toggle) => {
-            Some(HotkeyAction::TogglePressed)
+        (Role::Assistant, HotKeyState::Pressed) => {
+            *assistant_press_at = Some(Instant::now());
+            vec![HotkeyAction::AssistantPressed]
         }
-        // Toggle mode suppresses the released event; the FSM is driven
-        // entirely by repeated presses.
-        (Role::Dictation, HotKeyState::Released, HotkeyMode::Toggle) => None,
-        (Role::Cancel, HotKeyState::Pressed, _) => Some(HotkeyAction::CancelPressed),
-        // Assistant: press always starts (or stops, in toggle mode);
-        // release only matters in hold mode.
-        (Role::Assistant, HotKeyState::Pressed, _) => Some(HotkeyAction::AssistantPressed),
-        (Role::Assistant, HotKeyState::Released, HotkeyMode::Hold) => {
-            Some(HotkeyAction::AssistantReleased)
+        (Role::Assistant, HotKeyState::Released) => {
+            if let Some(t0) = assistant_press_at.take() {
+                if t0.elapsed() >= LONG_PRESS_THRESHOLD {
+                    return vec![HotkeyAction::AssistantPressed];
+                }
+            }
+            vec![]
         }
-        (Role::Assistant, HotKeyState::Released, HotkeyMode::Toggle) => None,
-        _ => None,
+        (Role::Cancel, HotKeyState::Pressed) => {
+            // Discard any in-flight press so the matching release does
+            // not re-arm the FSM after we've cancelled the recording.
+            *dictation_press_at = None;
+            *assistant_press_at = None;
+            vec![HotkeyAction::CancelPressed]
+        }
+        (Role::Cancel, HotKeyState::Released) => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn long_ago() -> Instant {
+        Instant::now()
+            .checked_sub(LONG_PRESS_THRESHOLD + Duration::from_millis(50))
+            .expect("clock should be far enough past epoch in tests")
+    }
+
+    #[test]
+    fn short_press_emits_toggle_only_on_press() {
+        let mut d = None;
+        let mut a = None;
+        let pressed = map_event(Role::Dictation, HotKeyState::Pressed, &mut d, &mut a);
+        assert_eq!(pressed, vec![HotkeyAction::TogglePressed]);
+        // Immediate release counts as short press; no synthetic stop.
+        let released = map_event(Role::Dictation, HotKeyState::Released, &mut d, &mut a);
+        assert!(released.is_empty(), "short release must not emit");
+        assert!(d.is_none());
+    }
+
+    #[test]
+    fn long_press_synthesises_stop_on_release() {
+        let mut d = Some(long_ago());
+        let mut a = None;
+        let released = map_event(Role::Dictation, HotKeyState::Released, &mut d, &mut a);
+        assert_eq!(released, vec![HotkeyAction::TogglePressed]);
+        assert!(d.is_none());
+    }
+
+    #[test]
+    fn assistant_long_press_synthesises_stop() {
+        let mut d = None;
+        let mut a = Some(long_ago());
+        let released = map_event(Role::Assistant, HotKeyState::Released, &mut d, &mut a);
+        assert_eq!(released, vec![HotkeyAction::AssistantPressed]);
+        assert!(a.is_none());
+    }
+
+    #[test]
+    fn cancel_clears_pending_presses() {
+        let mut d = Some(long_ago());
+        let mut a = Some(long_ago());
+        let actions = map_event(Role::Cancel, HotKeyState::Pressed, &mut d, &mut a);
+        assert_eq!(actions, vec![HotkeyAction::CancelPressed]);
+        assert!(d.is_none() && a.is_none());
+        // A subsequent late release after cancel must NOT synthesise
+        // a stop (which would re-arm the FSM in toggle semantics).
+        let released = map_event(Role::Dictation, HotKeyState::Released, &mut d, &mut a);
+        assert!(released.is_empty());
     }
 }
