@@ -5,6 +5,63 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Desktop notifications for critical pipeline failures.** Total STT
+  pipeline failures (auth errors, network errors, 5xx) and LLM-cleanup
+  auth-class failures now fire a Critical-urgency desktop notification
+  in addition to the existing `error!`/`warn!` log line, so an
+  expired API key is no longer silently buried in journalctl. Dedup
+  is per-session and per `(stage, provider, error class)`, so a stuck
+  key pops exactly once per F8/F9 press and an STT-auth + LLM-auth
+  failure in the same session each get their own surface. LLM
+  transient errors (network blips, 5xx) keep the existing silent
+  fallback to the raw STT transcript — only configuration-class
+  failures pop a notification.
+- **Critical-failure notification coverage extended (issue #8).** TTS
+  (assistant-mode reply playback), Assistant chat (both stream-open
+  and mid-stream errors), and text-injection failures now route
+  through the same `critical_notify` surface as STT/LLM, so a
+  rotated API key in any stage produces a Critical-urgency popup
+  instead of journal-only output. The LLM cleanup path also now
+  notifies on `Network`-class failures (previously `Auth`-only), so
+  an offline endpoint is visibly surfaced.
+- **Daemon-startup-failure notification.** When `fono daemon` exits
+  with an error (bad config, locked single-instance socket, hotkey
+  backend init failure), a one-shot Critical-urgency notification
+  fires before the process exits, pointing the user at
+  `journalctl --user -u fono` and `fono doctor`. This addresses the
+  systemd `--user` autostart case where stderr is invisible.
+
+### Changed
+
+- **Cascade cap on critical notifications (issue #8).** When a single
+  root cause (e.g. a rotated cloud API key) cascade-fails through
+  STT → LLM → Assistant → TTS in the same dictation session, the
+  user now sees **exactly one** notification — the first stage to
+  fail — instead of one per stage. Downstream failures still go to
+  the journal at `warn!`. The cap auto-resets at the start of each
+  new F8/F9/F10 press and after 120 s of dictation inactivity.
+  `Stage` is now `#[non_exhaustive]` so future stages can be added
+  without breaking matches.
+
+- **Hotkeys auto-detect toggle vs push-to-talk per press.** A short tap
+  (under one second) on the dictation or assistant hotkey toggles
+  recording on; pressing-and-holding for at least a second flips the
+  same key into push-to-talk and recording stops on release. The
+  global `[hotkeys].mode = "toggle" | "hold"` setting is removed —
+  there is now one consistent behaviour across both keys with no
+  configuration required.
+
+### Removed
+
+- **`[hotkeys].mode` configuration field.** Old configs that still set
+  `mode = "toggle"` or `mode = "hold"` continue to load (serde
+  silently ignores the unknown field); the value has no effect. The
+  `HotkeyMode` enum is dropped from `fono_core::config`.
+
 ## [0.7.1] — 2026-05-05
 
 ### Changed

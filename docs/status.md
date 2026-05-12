@@ -1,6 +1,66 @@
 # Fono — Project Status
 
-Last updated: 2026-05-05
+Last updated: 2026-05-12
+
+## 2026-05-12 — Issue #8: cascade-capped critical notifications
+
+Extended `fono_core::critical_notify` to cover every user-blocking
+pipeline stage and added a **global cascade cap**: at most one
+Critical-urgency desktop notification per dictation session, no
+matter how many downstream stages fail off the same root cause.
+
+- **New stages.** `Stage` gains `Tts`, `Assistant`, `Inject`
+  variants (and is now `#[non_exhaustive]`). TTS auth/network
+  failures during assistant playback, assistant chat stream-open
+  and mid-stream errors, and text-injection failures all route
+  through the same dedup surface as STT/LLM.
+  (`crates/fono-core/src/critical_notify.rs:37-69`).
+- **Cascade cap.** A new `SESSION_HAS_FIRED: Mutex<bool>` gate
+  short-circuits `notify()` after the first fire; cleared by
+  `reset_session_flag()` (already called at every recording start
+  in `crates/fono/src/session.rs:1134` and `:2011`) and by the
+  120 s `AUTO_RESET_AFTER` window.
+  (`crates/fono-core/src/critical_notify.rs:148-260`).
+- **LLM `Network` now notifies** alongside `Auth`, both batch
+  (`crates/fono/src/session.rs:2510-2526`) and live-dictation
+  (`crates/fono/src/session.rs:2206-2229`) paths.
+- **Injection failures notify** at
+  `crates/fono/src/session.rs:2533-2558`.
+- **Assistant + TTS wired** at `crates/fono/src/assistant.rs:189-220`,
+  `:255-280`, `:373-401`.
+- **Daemon startup failure** fires a one-shot notification at
+  `crates/fono/src/cli.rs:429-443` (bypasses the session cap; only
+  one daemon-startup path can fail per process).
+
+New unit tests lock the cascade cap and the post-reset re-arm
+behaviour (`crates/fono-core/src/critical_notify.rs:481-549`). All
+17 `critical_notify` tests pass; `cargo clippy --workspace
+--all-targets -- -D warnings` is clean.
+
+## 2026-05-06 — Hotkey behaviour: auto short/long-press
+
+Removed the `[hotkeys].mode = "toggle" | "hold"` configuration knob.
+The dictation and assistant hotkeys now decide their own behaviour
+per press based on duration:
+
+- **Short press** (< 1 s) — toggles recording on; the next short press
+  stops it.
+- **Long press** (≥ 1 s) — push-to-talk; recording stops on release.
+
+Implementation: `fono_hotkey::listener::map_event` records the
+press timestamp on every Pressed event and emits the corresponding
+`TogglePressed` / `AssistantPressed` action immediately so the user
+gets instant feedback. On Released it synthesises a second
+press-action only when the elapsed time crosses
+`LONG_PRESS_THRESHOLD` (1 s). `CancelPressed` clears both pending
+press timestamps so a late key-up after Escape cannot re-arm the
+FSM. The `HotkeyMode` enum, the `Hotkeys::mode` field, and the
+listener's mode-driven dispatch table are gone; old configs with
+`mode = "..."` still load (serde silently ignores unknown fields)
+but the value has no effect. `fono doctor` and the wizard summary
+no longer print a mode line. New unit tests in `listener.rs` cover
+short press, long press (both keys), and the cancel-then-late-release
+race. `cargo test -p fono-core -p fono-hotkey` is green.
 
 ## 2026-05-05 — Release v0.7.1
 
