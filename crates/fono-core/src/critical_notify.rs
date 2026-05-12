@@ -494,12 +494,7 @@ mod tests {
             ErrorClass::Auth,
             "assistant-401"
         ));
-        assert!(!notify(
-            Stage::Tts,
-            "openai",
-            ErrorClass::Auth,
-            "tts-401"
-        ));
+        assert!(!notify(Stage::Tts, "openai", ErrorClass::Auth, "tts-401"));
         assert!(!notify(
             Stage::Inject,
             "wtype",
@@ -507,11 +502,7 @@ mod tests {
             "inject-failed"
         ));
         let recorded = drain_test_recorder();
-        assert_eq!(
-            recorded.len(),
-            1,
-            "cascade cap violated: {recorded:?}"
-        );
+        assert_eq!(recorded.len(), 1, "cascade cap violated: {recorded:?}");
         assert_eq!(recorded[0].0, Stage::Stt);
     }
 
