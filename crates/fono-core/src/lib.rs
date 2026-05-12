@@ -4,6 +4,7 @@
 //! Implemented per Phase 1 of `docs/plans/2026-04-24-fono-design-v1.md`.
 
 pub mod config;
+pub mod critical_notify;
 pub mod error;
 pub mod history;
 pub mod hwcheck;

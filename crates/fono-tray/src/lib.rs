@@ -430,6 +430,23 @@ mod backend {
     const MISSING_WATCHER_NOTIFICATION_TITLE: &str = "Fono tray unavailable";
     const MISSING_WATCHER_NOTIFICATION_BODY: &str = "No StatusNotifierWatcher found. Start a tray host, e.g. Waybar tray, KDE tray, xfce4-panel, or snixembed, then restart Fono.";
 
+    /// Notification body shown when zbus can't connect to the D-Bus
+    /// session bus at all (typical symptom: "I/O error: No such file or
+    /// directory (os error 2)" out of `ksni::Tray::spawn`). This happens
+    /// when Fono is launched from a context that doesn't inherit the
+    /// graphical session env — e.g. a TTY, a system-level systemd unit,
+    /// `sudo fono`, or an autostart script that runs before the user
+    /// session bus is exported. Hotkeys / dictation continue to work,
+    /// only the tray icon goes missing.
+    const MISSING_BUS_NOTIFICATION_TITLE: &str = "Fono tray unavailable";
+    const MISSING_BUS_NOTIFICATION_BODY: &str = "Couldn't reach the D-Bus session bus, so the tray icon won't appear. Launch Fono from your graphical desktop session (not a TTY, root shell, or system service); if you use a systemd --user unit make sure DBUS_SESSION_BUS_ADDRESS is exported. Hotkeys and dictation still work.";
+
+    /// Generic fallback notification for any other tray failure. Keeps
+    /// the user informed even when we can't pinpoint the cause.
+    const GENERIC_TRAY_NOTIFICATION_TITLE: &str = "Fono tray unavailable";
+    const GENERIC_TRAY_NOTIFICATION_BODY_PREFIX: &str =
+        "The tray icon failed to start. Hotkeys and dictation still work. Details: ";
+
     /// Microphone slots in the "Microphone" submenu. Pre-allocated for
     /// the same reason as the STT/LLM lists: rebuilding causes flicker
     /// on KDE/GNOME indicator hosts. Eight covers the common case
@@ -552,7 +569,17 @@ mod backend {
                          tray icon."
                     );
                 }
+                Err(e) if is_missing_session_bus(&e) => {
+                    notify_missing_session_bus();
+                    tracing::warn!(
+                        "tray unavailable: D-Bus session bus is not reachable from this process \
+                         (DBUS_SESSION_BUS_ADDRESS unset and no fallback socket found). Launch \
+                         Fono from your graphical desktop session, or export the address into the \
+                         service/unit that starts it. Underlying error: {e:#}"
+                    );
+                }
                 Err(e) => {
+                    notify_generic_tray_error(&e);
                     tracing::warn!("tray task exited with error: {e:#}");
                 }
                 Ok(()) => {
@@ -581,9 +608,170 @@ mod backend {
         );
     }
 
+    fn notify_missing_session_bus() {
+        notify::send(
+            MISSING_BUS_NOTIFICATION_TITLE,
+            MISSING_BUS_NOTIFICATION_BODY,
+            "dialog-error",
+            MISSING_WATCHER_NOTIFICATION_TIMEOUT_MS,
+            Urgency::Critical,
+        );
+    }
+
+    fn notify_generic_tray_error(err: &anyhow::Error) {
+        // Trim to a single line so the popup stays readable.
+        let short = err
+            .to_string()
+            .lines()
+            .next()
+            .unwrap_or("unknown error")
+            .to_string();
+        let body = format!("{GENERIC_TRAY_NOTIFICATION_BODY_PREFIX}{short}");
+        notify::send(
+            GENERIC_TRAY_NOTIFICATION_TITLE,
+            &body,
+            "dialog-error",
+            MISSING_WATCHER_NOTIFICATION_TIMEOUT_MS,
+            Urgency::Critical,
+        );
+    }
+
     fn is_missing_status_notifier_watcher(err: &anyhow::Error) -> bool {
         let msg = err.to_string();
         msg.contains("org.kde.StatusNotifierWatcher") || msg.contains("StatusNotifierWatcher")
+    }
+
+    /// Detect the "can't reach the D-Bus session bus at all" failure
+    /// mode. zbus surfaces this as `D-Bus connection error: I/O error:
+    /// No such file or directory (os error 2)` when no socket path is
+    /// configured (DBUS_SESSION_BUS_ADDRESS unset and no fallback
+    /// `$XDG_RUNTIME_DIR/bus`). Match on the substring rather than
+    /// downcasting through anyhow's source chain because zbus's error
+    /// types aren't part of our public API and the wording is stable
+    /// across zbus 3.x / 4.x.
+    fn is_missing_session_bus(err: &anyhow::Error) -> bool {
+        let msg = err.to_string();
+        // "D-Bus connection error" + ENOENT is the canonical signature.
+        // Also accept the bare ENOENT phrasing in case zbus shortens it.
+        (msg.contains("D-Bus connection error") || msg.contains("connection error"))
+            && (msg.contains("No such file or directory") || msg.contains("os error 2"))
+    }
+
+    /// Best-effort discovery of the user's D-Bus session bus address.
+    ///
+    /// Sets `DBUS_SESSION_BUS_ADDRESS` in the current process env when
+    /// it's missing, so the subsequent `ksni::Tray::spawn` call (which
+    /// goes through zbus's pure-Rust connection logic) can find the
+    /// bus. This mirrors what libdbus / `dbus-launch` do in C land but
+    /// skips the autolaunch fork — we only adopt an existing bus, never
+    /// spawn a new one.
+    ///
+    /// Tried, in order:
+    /// 1. `DBUS_SESSION_BUS_ADDRESS` already set → leave it alone.
+    /// 2. `$XDG_RUNTIME_DIR/bus` socket present → use it.
+    /// 3. `/run/user/<uid>/bus` socket present → use it (covers cases
+    ///    where `XDG_RUNTIME_DIR` is unset, common with `sudo`/su
+    ///    sessions or minimal launchers).
+    /// 4. Scan `/proc/*/environ` for any same-uid process that
+    ///    inherited `DBUS_SESSION_BUS_ADDRESS` from the user's
+    ///    graphical session and copy its value. This is the trick
+    ///    that lets a daemon launched from a TTY find the desktop
+    ///    session's bus.
+    ///
+    /// Returns `true` when the env var ends up set (either it was
+    /// already, or one of the fallbacks succeeded), `false` when every
+    /// strategy failed. The caller logs/notifies on `false`.
+    fn ensure_dbus_session_bus() -> bool {
+        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some() {
+            return true;
+        }
+
+        // Strategy 2: XDG_RUNTIME_DIR/bus.
+        if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+            let path = std::path::Path::new(&dir).join("bus");
+            if path.exists() {
+                let addr = format!("unix:path={}", path.display());
+                tracing::debug!("tray: adopting session bus at {addr} (XDG_RUNTIME_DIR/bus)");
+                std::env::set_var("DBUS_SESSION_BUS_ADDRESS", addr);
+                return true;
+            }
+        }
+
+        // Strategy 3: /run/user/<uid>/bus.
+        #[cfg(target_os = "linux")]
+        {
+            let Some(uid) = current_uid() else {
+                return false;
+            };
+            let path = std::path::PathBuf::from(format!("/run/user/{uid}/bus"));
+            if path.exists() {
+                let addr = format!("unix:path={}", path.display());
+                tracing::debug!("tray: adopting session bus at {addr} (/run/user/<uid>/bus)");
+                std::env::set_var("DBUS_SESSION_BUS_ADDRESS", addr);
+                return true;
+            }
+
+            // Strategy 4: scan /proc for a same-uid process whose
+            // environ contains DBUS_SESSION_BUS_ADDRESS.
+            if let Some(addr) = scan_proc_for_session_bus(uid) {
+                tracing::debug!("tray: adopting session bus at {addr} (inherited from /proc)");
+                std::env::set_var("DBUS_SESSION_BUS_ADDRESS", addr);
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Scan `/proc/<pid>/environ` for a same-uid process exporting
+    /// `DBUS_SESSION_BUS_ADDRESS`. Returns the first value found.
+    /// Linux-only (procfs); other Unixes hit the early-return in
+    /// `ensure_dbus_session_bus`.
+    #[cfg(target_os = "linux")]
+    fn current_uid() -> Option<u32> {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata("/proc/self").ok().map(|m| m.uid())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn scan_proc_for_session_bus(uid: u32) -> Option<String> {
+        use std::os::unix::fs::MetadataExt;
+
+        let proc_dir = std::fs::read_dir("/proc").ok()?;
+        for entry in proc_dir.flatten() {
+            let name = entry.file_name();
+            let Some(name_str) = name.to_str() else {
+                continue;
+            };
+            if !name_str.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            let pid_path = entry.path();
+            // Match owner uid so we don't read another user's env (also
+            // fails the `/proc/<pid>/environ` open due to perms anyway,
+            // but checking up front avoids the syscall).
+            let Ok(meta) = std::fs::metadata(&pid_path) else {
+                continue;
+            };
+            if meta.uid() != uid {
+                continue;
+            }
+            let environ_path = pid_path.join("environ");
+            let Ok(bytes) = std::fs::read(&environ_path) else {
+                continue;
+            };
+            for entry in bytes.split(|&b| b == 0) {
+                if let Some(rest) = entry.strip_prefix(b"DBUS_SESSION_BUS_ADDRESS=") {
+                    if let Ok(s) = std::str::from_utf8(rest) {
+                        let trimmed = s.trim();
+                        if !trimmed.is_empty() {
+                            return Some(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -603,6 +791,19 @@ mod backend {
         microphones_provider: MicrophonesProvider,
         preferences_provider: PreferencesProvider,
     ) -> anyhow::Result<()> {
+        // Make sure DBUS_SESSION_BUS_ADDRESS is set before zbus tries
+        // to connect; zbus's pure-Rust discovery is stricter than
+        // libdbus's and won't probe `$XDG_RUNTIME_DIR/bus` /
+        // `/run/user/<uid>/bus` on its own.
+        if !ensure_dbus_session_bus() {
+            notify_missing_session_bus();
+            anyhow::bail!(
+                "D-Bus session bus address unknown: DBUS_SESSION_BUS_ADDRESS is unset and no \
+                 fallback socket (XDG_RUNTIME_DIR/bus, /run/user/<uid>/bus, /proc/*/environ) \
+                 was found. Launch Fono from your graphical desktop session."
+            );
+        }
+
         let model = KsniTray {
             tooltip,
             state: TrayState::Idle,

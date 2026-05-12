@@ -192,7 +192,31 @@ pub async fn run_assistant_turn(
             debug!(target: "fono::assistant", "cancelled before LLM");
             return Ok(false);
         }
-        r = assistant.reply_stream(&user_text, &ctx) => r?,
+        r = assistant.reply_stream(&user_text, &ctx) => match r {
+            Ok(d) => d,
+            Err(e) => {
+                // Assistant backend refused to even open the
+                // stream — typically auth (bad key) or network
+                // (offline endpoint). Surface once per session;
+                // the global cap keeps cascading STT/LLM popups
+                // suppressed.
+                let err_text = format!("{e:#}");
+                let class = fono_core::critical_notify::classify(&err_text);
+                if matches!(
+                    class,
+                    fono_core::critical_notify::ErrorClass::Auth
+                        | fono_core::critical_notify::ErrorClass::Network
+                ) {
+                    fono_core::critical_notify::notify(
+                        fono_core::critical_notify::Stage::Assistant,
+                        assistant.name(),
+                        class,
+                        &err_text,
+                    );
+                }
+                return Err(e);
+            }
+        },
     };
 
     // 4. Lazily ensure a playback handle exists.
@@ -234,6 +258,23 @@ pub async fn run_assistant_turn(
             Ok(d) => d,
             Err(e) => {
                 warn!(target: "fono::assistant", error = %e, "assistant stream error");
+                // Mid-stream failures usually mean the connection
+                // dropped or the backend returned a typed error
+                // after auth-handshake; surface once per session.
+                let err_text = format!("{e:#}");
+                let class = fono_core::critical_notify::classify(&err_text);
+                if matches!(
+                    class,
+                    fono_core::critical_notify::ErrorClass::Auth
+                        | fono_core::critical_notify::ErrorClass::Network
+                ) {
+                    fono_core::critical_notify::notify(
+                        fono_core::critical_notify::Stage::Assistant,
+                        assistant.name(),
+                        class,
+                        &err_text,
+                    );
+                }
                 break;
             }
         };
@@ -336,6 +377,25 @@ async fn synth_and_enqueue(
             Ok(a) => a,
             Err(e) => {
                 warn!(target: "fono::assistant", error = %e, "TTS synth failed");
+                // Surface auth/network failures once per session.
+                // Other (transient) errors stay silent — a flaky
+                // 5xx mid-reply is best handled by retry, not a
+                // popup. Global cascade cap keeps this quiet if
+                // the assistant or STT stages already notified.
+                let err_text = format!("{e:#}");
+                let class = fono_core::critical_notify::classify(&err_text);
+                if matches!(
+                    class,
+                    fono_core::critical_notify::ErrorClass::Auth
+                        | fono_core::critical_notify::ErrorClass::Network
+                ) {
+                    fono_core::critical_notify::notify(
+                        fono_core::critical_notify::Stage::Tts,
+                        tts.name(),
+                        class,
+                        &err_text,
+                    );
+                }
                 return false;
             }
         },

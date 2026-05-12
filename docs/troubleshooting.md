@@ -110,8 +110,9 @@ cleanup backend Fono supports — Cerebras, Groq, OpenAI, OpenRouter,
 Ollama, Anthropic, and the local llama.cpp path — because chat-trained
 LLMs (regardless of where they run) sometimes treat a short raw
 transcript as a conversational fragment addressed to them. Push-to-talk
-mode (`[hotkeys].mode = "hold"`) hits it more often than the default
-toggle mode because it tends to capture shorter utterances.
+captures (long-press of the dictation hotkey) hit this case more often
+than a quick toggle press because they tend to capture shorter
+utterances.
 
 Fono detects and discards these replies as of v0.2.3. The fix is
 identical for every backend: the user message is wrapped in `<<<` /
@@ -208,7 +209,16 @@ The key is stored in `~/.config/fono/secrets.toml` with mode `0600`.
 
 ### "401 Unauthorized" or "403 Forbidden"
 
-Your key is rejected by the provider. Verify it works directly:
+Your key is rejected by the provider. Since v0.7.2 the daemon also
+fires a critical desktop notification on the first auth-class failure
+of each dictation session, so you no longer need to tail journalctl to
+notice — the same notification distinguishes STT-key vs LLM-key
+failures and tells you which provider rejected the key. An LLM-key
+failure still injects the raw STT transcript so the dictation is not
+lost; an STT-key failure injects nothing and asks you to update the
+key via the tray or `fono doctor`.
+
+Verify the key works directly:
 
 ```sh
 curl -H "Authorization: Bearer $(grep GROQ ~/.config/fono/secrets.toml | cut -d'"' -f2)" \

@@ -426,7 +426,27 @@ pub async fn run(cli: Cli) -> Result<()> {
                     );
                 }
             }
-            daemon::run(&paths, cli.verbosity()).await
+            // Startup-failure notification (issue #8): on autostart
+            // via systemd --user, a failed daemon boot only writes
+            // to the journal. Surface it as a desktop notification
+            // so the user notices. This is *outside* the
+            // critical_notify session cap because no session has
+            // started yet — it's a one-shot at-most-one popup by
+            // construction (the daemon either starts or it doesn't).
+            let result = daemon::run(&paths, cli.verbosity()).await;
+            if let Err(e) = &result {
+                fono_core::notify::send(
+                    "Fono — daemon failed to start",
+                    &format!(
+                        "{e:#}. Check `journalctl --user -u fono` and run \
+                         `fono doctor` for diagnostics."
+                    ),
+                    "dialog-error",
+                    10_000,
+                    fono_core::notify::Urgency::Critical,
+                );
+            }
+            result
         }
         Some(Cmd::Setup) => Box::pin(wizard::run(&paths)).await,
         Some(Cmd::Toggle) => ipc_simple(&paths, Request::Toggle).await,

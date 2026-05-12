@@ -69,7 +69,7 @@ pub fn notify_empty_capture(capture_ms: u64) -> bool {
         "Fono — no audio captured",
         &body,
         "audio-input-microphone",
-        10_000,
+        60_000,
         fono_core::notify::Urgency::Critical,
     );
     tracing::warn!(
@@ -82,36 +82,26 @@ pub fn notify_empty_capture(capture_ms: u64) -> bool {
 
 fn build_body(capture_ms: u64, active_label: &str, candidates: &[String]) -> String {
     let secs = (capture_ms + 500) / 1000;
-    let lead =
-        format!("Recording lasted {secs}s but the {active_label} microphone produced no signal.");
+    let lead = format!("{active_label} silent for {secs}s.");
     match candidates.len() {
-        0 => format!(
-            "{lead} No alternative microphone was detected — check that the device \
-             isn't muted or unplugged."
+        0 => format!("{lead} No other mic detected — check muted/unplugged."),
+        1 => format!(
+            "{lead} Switch to '{}' via tray Microphone menu.",
+            candidates[0]
         ),
-        1 => {
-            let one = &candidates[0];
-            format!(
-                "{lead} Switch to '{one}' via the tray icon's Microphone submenu, \
-                 or use pavucontrol / your OS sound settings."
-            )
-        }
         _ => {
             let preview = candidates
                 .iter()
-                .take(3)
+                .take(2)
                 .map(|s| format!("'{s}'"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let more = if candidates.len() > 3 {
-                format!(" (+{} more)", candidates.len() - 3)
+            let more = if candidates.len() > 2 {
+                format!(" (+{} more)", candidates.len() - 2)
             } else {
                 String::new()
             };
-            format!(
-                "{lead} Choose a different microphone via the tray Microphone submenu, \
-                 or open pavucontrol / your OS sound settings. Available: {preview}{more}."
-            )
+            format!("{lead} Pick another via tray Microphone menu: {preview}{more}.")
         }
     }
 }
@@ -129,7 +119,7 @@ mod tests {
     fn body_zero_alternatives_is_actionable() {
         let body = build_body(6000, "system-default", &[]);
         assert!(body.contains("6s"), "body should round to seconds: {body}");
-        assert!(body.contains("No alternative microphone"));
+        assert!(body.contains("No other mic"));
         assert!(body.contains("muted"));
     }
 
@@ -137,8 +127,7 @@ mod tests {
     fn body_one_alternative_names_it_and_tray() {
         let body = build_body(7500, "'HDMI 1 Capture'", &["USB Headset".into()]);
         assert!(body.contains("USB Headset"));
-        assert!(body.contains("Microphone submenu"));
-        assert!(body.contains("pavucontrol"));
+        assert!(body.contains("tray Microphone"));
         // The deprecated CLI advice must be gone.
         assert!(!body.contains("fono use input"));
     }
@@ -155,12 +144,10 @@ mod tests {
                 "Mic D".into(),
             ],
         );
-        assert!(body.contains("Microphone submenu"));
+        assert!(body.contains("tray Microphone"));
         assert!(body.contains("Mic A"));
         assert!(body.contains("Mic B"));
-        assert!(body.contains("Mic C"));
-        assert!(body.contains("+1 more"));
-        assert!(body.contains("pavucontrol"));
+        assert!(body.contains("+2 more"));
     }
 
     #[test]
@@ -169,5 +156,18 @@ mod tests {
         assert!(body.contains("'Mic A'"));
         assert!(body.contains("'Mic B'"));
         assert!(!body.contains("more"));
+    }
+
+    #[test]
+    fn body_stays_short() {
+        // Soft cap so future tweaks don't bloat the toast back to two
+        // lines on the user's compositor. 160 chars covers the
+        // worst-case multi-candidate path with a typical device name.
+        let body = build_body(
+            12_345,
+            "'Some Long Device Name'",
+            &["USB Audio Device".into(), "Built-in Microphone".into()],
+        );
+        assert!(body.len() <= 160, "body too long ({}): {body}", body.len());
     }
 }

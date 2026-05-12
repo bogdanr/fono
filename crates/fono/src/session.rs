@@ -1131,6 +1131,7 @@ impl SessionOrchestrator {
     )]
     pub async fn on_start_recording(&self, mode: RecordingMode) -> Result<()> {
         fono_stt::rate_limit_notify::reset_session_flag();
+        fono_core::critical_notify::reset_session_flag();
         if self.pipeline_in_flight.load(Ordering::SeqCst) {
             warn!("recording requested while previous pipeline still running; ignoring");
             return Ok(());
@@ -2007,6 +2008,7 @@ impl SessionOrchestrator {
     #[allow(clippy::significant_drop_tightening)]
     pub async fn on_start_live_dictation(&self, mode: RecordingMode) -> Result<()> {
         fono_stt::rate_limit_notify::reset_session_flag();
+        fono_core::critical_notify::reset_session_flag();
         tracing::debug!("live dictation: starting capture (mode={mode:?})");
         let Some(streaming) = self.current_streaming_stt() else {
             warn!(
@@ -2201,6 +2203,27 @@ impl SessionOrchestrator {
                     Err(e) => {
                         llm_ms = llm_started.elapsed().as_millis() as u64;
                         warn!("live-dictation: LLM cleanup failed after {llm_ms}ms: {e:#}");
+                        // Mirror the batch path: surface auth or
+                        // network failures once per session so the
+                        // user notices the expired key / offline
+                        // endpoint. Transient `Other` errors stay
+                        // silent (raw transcript still injected).
+                        // Global cascade cap prevents piling on top
+                        // of an earlier STT notification.
+                        let err_text = format!("{e:#}");
+                        let class = fono_core::critical_notify::classify(&err_text);
+                        if matches!(
+                            class,
+                            fono_core::critical_notify::ErrorClass::Auth
+                                | fono_core::critical_notify::ErrorClass::Network
+                        ) {
+                            fono_core::critical_notify::notify(
+                                fono_core::critical_notify::Stage::Llm,
+                                llm.name(),
+                                class,
+                                &err_text,
+                            );
+                        }
                         None
                     }
                 }
@@ -2362,12 +2385,42 @@ async fn run_pipeline(
     metrics.stt_ms = stt_started.elapsed().as_millis() as u64;
     let trans = match stt_result {
         Ok(t) => t,
-        Err(e) => return PipelineOutcome::Failed(format!("STT {}: {e:#}", stt.name())),
+        Err(e) => {
+            let err_text = format!("STT {}: {e:#}", stt.name());
+            // Critical pipeline failure — also fire a desktop
+            // notification (not just `error!`). Dedup is per
+            // (stage, provider, class) so a stuck/expired API key
+            // pops once per session instead of on every hold.
+            let class = fono_core::critical_notify::classify(&err_text);
+            fono_core::critical_notify::notify(
+                fono_core::critical_notify::Stage::Stt,
+                stt.name(),
+                class,
+                &format!("{e:#}"),
+            );
+            return PipelineOutcome::Failed(err_text);
+        }
     };
-    let raw = trans.text.trim().to_string();
+    // Strip Whisper-style trailing closer phrases ("thank you", "bye",
+    // "you") before the empty-check so silence-tail hallucinations
+    // become `EmptyOrTooShort` instead of leaking into the cursor.
+    // The streaming/live pipeline already does this in
+    // `apply_update`; the batch pipeline needs the same wiring even
+    // though `whisper-rs` has hallucination guards enabled — they're
+    // probabilistic (no_speech_thold=0.6, logprob_thold=-1.0) and a
+    // moderately confident "Thank you." on a silent tail still slips
+    // through. See `crates/fono-stt/src/streaming.rs:227`.
+    let raw_pre_strip = trans.text.trim().to_string();
+    let raw = fono_stt::strip_trailing_hallucinations(&raw_pre_strip);
     metrics.raw_chars = raw.chars().count();
     if raw.is_empty() {
-        warn!("STT returned empty text — nothing to inject");
+        if raw_pre_strip.is_empty() {
+            warn!("STT returned empty text — nothing to inject");
+        } else {
+            warn!(
+                "STT output was a trailing-closer hallucination only ({raw_pre_strip:?}) — skipping injection"
+            );
+        }
         // Empty-transcript microphone recovery hook. When the user
         // held the hotkey for >= 5 s and the STT still produced
         // nothing, the most likely cause is a silent input device
@@ -2454,6 +2507,27 @@ async fn run_pipeline(
                     llm_backend.name(),
                     metrics.llm_ms
                 );
+                // Surface user-actionable failures (auth or network)
+                // once per session. Transient `Other` failures stay
+                // silent — the raw STT text is still injected below
+                // so the dictation isn't lost; a desktop popup on
+                // every flaky 5xx would just be noise. The global
+                // cascade cap in critical_notify ensures we never
+                // pile up notifications when STT already fired.
+                let err_text = format!("{e:#}");
+                let class = fono_core::critical_notify::classify(&err_text);
+                if matches!(
+                    class,
+                    fono_core::critical_notify::ErrorClass::Auth
+                        | fono_core::critical_notify::ErrorClass::Network
+                ) {
+                    fono_core::critical_notify::notify(
+                        fono_core::critical_notify::Stage::Llm,
+                        llm_backend.name(),
+                        class,
+                        &err_text,
+                    );
+                }
                 None
             }
         }
@@ -2470,6 +2544,17 @@ async fn run_pipeline(
         Ok(populated) => populated,
         Err(e) => {
             warn!("inject failed: {e:#}");
+            // Critical: the user just dictated something and now
+            // has nothing on screen. Surface this once per session
+            // (the cascade cap means it stays silent if STT/LLM
+            // already notified).
+            let err_text = format!("{e:#}");
+            fono_core::critical_notify::notify(
+                fono_core::critical_notify::Stage::Inject,
+                "injector",
+                fono_core::critical_notify::classify(&err_text),
+                &err_text,
+            );
             false
         }
     };
