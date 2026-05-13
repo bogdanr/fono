@@ -1097,6 +1097,18 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
         "vulkan probe : {}",
         fono_core::vulkan_probe::probe().summary_line()
     );
+    // Surface what the OS thinks the user's languages are so users
+    // can sanity-check the wizard's auto-selection and catch
+    // misconfigurations (e.g. `LANG=en_US` on a Romanian box). Best
+    // effort — the line is suppressed when nothing was detected so
+    // headless CI / containerised runs stay quiet. Configured
+    // `general.languages` is the source of truth at runtime; this is
+    // informational only.
+    if let Some(summary) = fono_core::locale::format_detection_summary(
+        &fono_core::locale::detect_user_languages_ranked(),
+    ) {
+        info!("languages    : {summary}");
+    }
     debug!(
         "config       : {} ({})",
         config_path.display(),

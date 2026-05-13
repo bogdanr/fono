@@ -38,7 +38,7 @@ use fono_core::config::{
     SttCloud, SttLocal, TtsBackend, TtsCloud, TtsWyoming,
 };
 use fono_core::hwcheck::{Affordability, HardwareSnapshot, LocalTier};
-use fono_core::locale::detect_os_languages;
+use fono_core::locale::detect_user_languages_ranked;
 use fono_core::{Paths, Secrets};
 use fono_stt::registry::{ModelInfo, ModelRegistry, WHISPER_MODELS};
 use std::time::Duration;
@@ -611,7 +611,22 @@ fn pick_languages(theme: &ColorfulTheme) -> Result<Vec<String>> {
     // "English" here writes the exact same `general.languages = ["en"]`
     // that the tray's checkbox writes.
     let curated: &[(&str, &str)] = fono_core::languages::CURATED_LANGUAGES;
-    let os_codes = detect_os_languages();
+    // Ranked OS detection: collects signals from POSIX env, system
+    // locale, formatting locales, keyboard layout, timezone, and
+    // platform-native APIs. Any code with score ≥ 1 is pre-checked —
+    // every signal is a real hint that the user might dictate in
+    // that language, and the user can still uncheck before confirming.
+    let ranked = detect_user_languages_ranked();
+    let os_codes: Vec<String> = ranked.iter().map(|d| d.code.clone()).collect();
+    let reasons_of = |code: &str| -> Option<String> {
+        ranked.iter().find(|d| d.code == code).map(|d| {
+            d.reasons
+                .iter()
+                .map(|k| k.label())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+    };
 
     // Build the candidate list: curated first, plus any OS code missing
     // from curated (appended with a "(detected)" label). Codes are
@@ -619,18 +634,26 @@ fn pick_languages(theme: &ColorfulTheme) -> Result<Vec<String>> {
     // MultiSelect.
     let mut entries: Vec<(String, String, bool)> = Vec::new();
     for (code, name) in curated {
-        let detected = os_codes.iter().any(|c| c == code);
-        let label = if detected {
-            format!("{name} ({code}) — detected from OS")
-        } else {
-            format!("{name} ({code})")
-        };
-        let checked = *code == "en" || detected;
+        let reasons = reasons_of(code);
+        let label = reasons.as_deref().map_or_else(
+            || format!("{name} ({code})"),
+            |r| format!("{name} ({code}) — detected ({r})"),
+        );
+        // Pre-check every detected language plus English as a sensible
+        // baseline (Fono's rerun logic works better with at least two
+        // peers — see the bottom of this function).
+        let checked = *code == "en" || reasons.is_some();
         entries.push((label, (*code).to_string(), checked));
     }
     for code in &os_codes {
         if !curated.iter().any(|(c, _)| c == code) {
-            entries.push((format!("{code} (detected from OS)"), code.clone(), true));
+            let reasons = reasons_of(code).unwrap_or_default();
+            let label = if reasons.is_empty() {
+                format!("{code} (detected)")
+            } else {
+                format!("{code} — detected ({reasons})")
+            };
+            entries.push((label, code.clone(), true));
         }
     }
 
