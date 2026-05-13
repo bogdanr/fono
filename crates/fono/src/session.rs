@@ -523,21 +523,43 @@ impl SessionOrchestrator {
         let new_llm = match fono_llm::build_llm(&cfg.llm, &secrets, &paths.llm_models_dir()) {
             Ok(opt) => opt,
             Err(e) => {
-                warn!("reload: LLM backend unavailable; continuing without cleanup: {e:#}");
+                let err_text = format!("{e:#}");
+                let provider = fono_core::providers::llm_backend_str(&cfg.llm.backend);
+                fono_core::critical_notify::notify_actionable(
+                    fono_core::critical_notify::Stage::Llm,
+                    provider,
+                    &err_text,
+                );
+                warn!("reload: LLM backend unavailable; continuing without cleanup: {err_text}");
                 None
             }
         };
         let new_tts = match fono_tts::build_tts(&cfg.tts, &secrets) {
             Ok(opt) => opt,
             Err(e) => {
-                warn!("reload: TTS unavailable; assistant replies will be silent: {e:#}");
+                let err_text = format!("{e:#}");
+                let provider = fono_core::providers::tts_backend_str(&cfg.tts.backend);
+                fono_core::critical_notify::notify_actionable(
+                    fono_core::critical_notify::Stage::Tts,
+                    provider,
+                    &err_text,
+                );
+                warn!("reload: TTS unavailable; assistant replies will be silent: {err_text}");
                 None
             }
         };
         let new_assistant = match fono_assistant::build_assistant(&cfg.assistant, &secrets) {
             Ok(opt) => opt,
             Err(e) => {
-                warn!("reload: assistant unavailable: {e:#}");
+                let err_text = format!("{e:#}");
+                let provider =
+                    fono_core::providers::assistant_backend_str(&cfg.assistant.backend);
+                fono_core::critical_notify::notify_actionable(
+                    fono_core::critical_notify::Stage::Assistant,
+                    provider,
+                    &err_text,
+                );
+                warn!("reload: assistant unavailable: {err_text}");
                 None
             }
         };

@@ -1581,18 +1581,23 @@ fn remote_wyoming_uri(peer: &fono_net::discovery::DiscoveredPeer) -> String {
     )
 }
 
-/// Render the tray TTS submenu label for a backend, using the
-/// catalogue's `display_name` plus a `(cloud, key already set)` /
-/// `(cloud, will ask for key)` / `(local)` / `(disabled)` suffix.
-/// Falls back to the canonical backend id when a backend has no
-/// catalogue entry (None / Piper / Wyoming).
+/// Render the tray TTS submenu label for a backend.
+///
+/// At v0.8 every backend in this submenu other than the local options
+/// is a cloud provider, so the redundant `(cloud, ...)` prefix is
+/// dropped from the suffix. Backends whose API key is missing are
+/// rendered with the [`crate::tray_label::DISABLED_SENTINEL`] prefix
+/// so the tray builder shows them greyed-out; the user clicks the
+/// wizard / `fono keys add` flow to enable them. Falls back to the
+/// canonical backend id when a backend has no catalogue entry
+/// (None / Piper / Wyoming).
 fn tts_menu_label(b: &fono_core::config::TtsBackend, secrets: &fono_core::Secrets) -> String {
     use fono_core::config::TtsBackend;
     let canonical = fono_core::providers::tts_backend_str(b);
-    let (display, suffix): (String, &'static str) = match b {
-        TtsBackend::None => ("Off".to_string(), "(disabled)"),
-        TtsBackend::Piper => ("Piper".to_string(), "(local — stub)"),
-        TtsBackend::Wyoming => ("Wyoming".to_string(), "(local)"),
+    match b {
+        TtsBackend::None => "Off (disabled)".to_string(),
+        TtsBackend::Piper => "Piper (local — stub)".to_string(),
+        TtsBackend::Wyoming => "Wyoming (local)".to_string(),
         TtsBackend::OpenAI
         | TtsBackend::Groq
         | TtsBackend::OpenRouter
@@ -1600,15 +1605,16 @@ fn tts_menu_label(b: &fono_core::config::TtsBackend, secrets: &fono_core::Secret
         | TtsBackend::Deepgram => {
             let display = fono_core::provider_catalog::find(canonical)
                 .map_or_else(|| canonical.to_string(), |p| p.display_name.to_string());
-            let suffix = if secrets.has_in_file(fono_core::providers::tts_key_env(b)) {
-                "(cloud, key already set)"
+            let has_key = secrets.has_in_file(fono_core::providers::tts_key_env(b));
+            if has_key {
+                display
             } else {
-                "(cloud, will ask for key)"
-            };
-            (display, suffix)
+                // Grey-out marker: the tray's submenu builder strips
+                // this prefix and sets `enabled: false` on the item.
+                format!("{}{display} (no API key)", fono_tray::DISABLED_SENTINEL)
+            }
         }
-    };
-    format!("{display} {suffix}")
+    }
 }
 
 fn local_wyoming_fullname(config: &Config) -> Option<String> {

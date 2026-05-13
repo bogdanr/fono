@@ -70,6 +70,18 @@ impl Stage {
     }
 }
 
+/// Human-readable label used in notification summaries. Distinct from
+/// the lowercase `as_str` ids that go into log lines + dedup keys.
+fn stage_user_label(stage: Stage) -> &'static str {
+    match stage {
+        Stage::Stt => "STT",
+        Stage::Llm => "LLM",
+        Stage::Tts => "TTS",
+        Stage::Assistant => "Assistant",
+        Stage::Inject => "Injection",
+    }
+}
+
 /// Classified error category. Drives both the dedup key and the
 /// user-facing notification copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -86,6 +98,13 @@ pub enum ErrorClass {
     /// on Orpheus / PlayAI). Surfaced as a one-shot notification with
     /// the acceptance URL embedded in the body.
     TermsRequired,
+    /// Required API key is not present in `secrets.toml` or the
+    /// process environment. Triggered when a backend build fails at
+    /// daemon startup or after a tray-driven reload because the user
+    /// switched to a backend whose key was never added. The render
+    /// path extracts the env var name from the error and suggests
+    /// `fono keys add <VAR>`.
+    MissingKey,
     /// Anything else (5xx, parse errors, clarification refusal, …).
     Other,
 }
@@ -118,6 +137,16 @@ pub fn classify(err_msg: &str) -> ErrorClass {
     if lower.contains("model_terms_required") || lower.contains("requires terms acceptance") {
         return ErrorClass::TermsRequired;
     }
+    // Backend build failed because the API key is missing. Both the
+    // STT and TTS factories produce strings like:
+    //   `<provider> TTS API key "<VAR>" not found in secrets.toml or environment;
+    //    run `fono keys add <VAR>` to add it`
+    // Detect either the canonical `fono keys add` hint or the bare
+    // `not found in secrets.toml` phrase so we keep firing if the
+    // factories ever reword the suffix.
+    if lower.contains("not found in secrets.toml") || lower.contains("fono keys add") {
+        return ErrorClass::MissingKey;
+    }
     if lower.contains("invalid_api_key")
         || lower.contains("expired_api_key")
         || lower.contains("authentication_error")
@@ -135,6 +164,37 @@ pub fn classify(err_msg: &str) -> ErrorClass {
         return ErrorClass::Network;
     }
     ErrorClass::Other
+}
+
+/// Pull the first `<VAR>_API_KEY`-shaped env var name out of an error
+/// message. Returns `None` if no UPPER_SNAKE_CASE token containing
+/// `API_KEY` / `_KEY` / `_TOKEN` is present.
+fn extract_env_var(msg: &str) -> Option<String> {
+    let mut best: Option<String> = None;
+    let mut current = String::new();
+    for c in msg.chars() {
+        if c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_' {
+            current.push(c);
+        } else if current.len() >= 6
+            && (current.contains("API_KEY")
+                || current.contains("_TOKEN")
+                || current.ends_with("_KEY"))
+            && best.is_none()
+        {
+            best = Some(std::mem::take(&mut current));
+        } else {
+            current.clear();
+        }
+    }
+    if best.is_none()
+        && current.len() >= 6
+        && (current.contains("API_KEY")
+            || current.contains("_TOKEN")
+            || current.ends_with("_KEY"))
+    {
+        best = Some(current);
+    }
+    best
 }
 
 /// Pull the first `https?://…` URL out of an error message, stripping
@@ -292,6 +352,31 @@ pub fn notify(stage: Stage, provider: &'static str, class: ErrorClass, details: 
     true
 }
 
+/// Convenience wrapper used by daemon reload sites: classify the error
+/// and only fire when it's a user-actionable class (Auth, Network,
+/// TermsRequired, MissingKey). Returns the classified class so the
+/// caller can decide what else to log.
+///
+/// Useful at backend-build failure sites that swallow the error and
+/// fall back to a degraded state — the desktop notification is the
+/// only feedback the user gets that their tray click did something
+/// but the daemon couldn't honour it.
+pub fn notify_actionable(
+    stage: Stage,
+    provider: &'static str,
+    details: &str,
+) -> (ErrorClass, bool) {
+    let class = classify(details);
+    let fired = matches!(
+        class,
+        ErrorClass::Auth
+            | ErrorClass::Network
+            | ErrorClass::TermsRequired
+            | ErrorClass::MissingKey
+    ) && notify(stage, provider, class, details);
+    (class, fired)
+}
+
 fn fire(stage: Stage, provider: &'static str, class: ErrorClass, details: &str) {
     let (summary, body) = render(stage, provider, class, details);
     #[cfg(test)]
@@ -426,6 +511,34 @@ fn render(
                     "{provider} refused the request because the model's terms have \
                      not been accepted by the org admin. {suffix}"
                 )
+            },
+        ),
+        (stage, ErrorClass::MissingKey) => (
+            format!(
+                "Fono — {} key missing ({provider})",
+                stage_user_label(stage)
+            ),
+            {
+                let var = extract_env_var(details);
+                let hint = var.map_or_else(
+                    || format!(
+                        "{provider}'s API key is not configured. Open the tray → Configure → \
+                         {} to add it, or run `fono keys add <VAR>`.",
+                        stage_user_label(stage),
+                    ),
+                    |v| format!(
+                        "No `{v}` in secrets.toml or environment. Run `fono keys add {v}` \
+                         (or open the tray → Configure) to add it."
+                    ),
+                );
+                let consequence = match stage {
+                    Stage::Tts => " The assistant reply was generated but could not be spoken.",
+                    Stage::Llm => " The raw transcript was injected without cleanup.",
+                    Stage::Assistant => " The assistant turn was aborted.",
+                    Stage::Stt => " Dictation was skipped; no text was injected.",
+                    Stage::Inject => "",
+                };
+                format!("{hint}{consequence}")
             },
         ),
         (Stage::Inject, _) => (
@@ -632,6 +745,60 @@ mod tests {
         }
         let _ = drain_test_recorder();
         assert!(notify(Stage::Stt, "groq", ErrorClass::Auth, "3"));
+    }
+
+    #[test]
+    fn classify_missing_key_from_tts_factory() {
+        // Verbatim error from fono_tts::build_tts when CARTESIA_API_KEY
+        // isn't set and the user picks Cartesia from the tray.
+        let msg = r#"Cartesia TTS API key "CARTESIA_API_KEY" not found in secrets.toml or environment; run `fono keys add CARTESIA_API_KEY` to add it"#;
+        assert_eq!(classify(msg), ErrorClass::MissingKey);
+    }
+
+    #[test]
+    fn extract_env_var_grabs_token_from_factory_error() {
+        let msg = r#"Cartesia TTS API key "CARTESIA_API_KEY" not found in secrets.toml or environment; run `fono keys add CARTESIA_API_KEY` to add it"#;
+        assert_eq!(extract_env_var(msg).as_deref(), Some("CARTESIA_API_KEY"));
+    }
+
+    #[test]
+    fn extract_env_var_ignores_short_words() {
+        // Bare HTTP / TOML / JSON shouldn't trip the env-var picker.
+        assert_eq!(extract_env_var("got HTTP 401 TOML"), None);
+    }
+
+    #[test]
+    fn missing_key_render_mentions_fono_keys_add() {
+        let details = r#"Cartesia TTS API key "CARTESIA_API_KEY" not found in secrets.toml or environment; run `fono keys add CARTESIA_API_KEY` to add it"#;
+        let (summary, body) = render(Stage::Tts, "cartesia", ErrorClass::MissingKey, details);
+        assert!(summary.contains("TTS key missing"));
+        assert!(summary.contains("cartesia"));
+        assert!(body.contains("fono keys add CARTESIA_API_KEY"));
+        assert!(body.contains("reply was generated but could not be spoken"));
+    }
+
+    #[test]
+    fn notify_actionable_fires_for_missing_key() {
+        let _g = fresh();
+        let details = r#"Cartesia TTS API key "CARTESIA_API_KEY" not found in secrets.toml or environment"#;
+        let (class, fired) = notify_actionable(Stage::Tts, "cartesia", details);
+        assert_eq!(class, ErrorClass::MissingKey);
+        assert!(fired);
+        let recorded = drain_test_recorder();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].2, ErrorClass::MissingKey);
+    }
+
+    #[test]
+    fn notify_actionable_skips_other_class() {
+        // A 5xx isn't user-actionable from the reload site — it
+        // should not fire a popup.
+        let _g = fresh();
+        let details = "groq STT 500 Internal Server Error: upstream blew up";
+        let (class, fired) = notify_actionable(Stage::Tts, "groq", details);
+        assert_eq!(class, ErrorClass::Other);
+        assert!(!fired);
+        assert!(drain_test_recorder().is_empty());
     }
 
     #[test]

@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Desktop notification when a configured backend's API key is
+  missing at startup or after a config reload.** Previously, a
+  rotated key or a wizard pick whose secret hadn't been added yet
+  surfaced only as a single `tracing::WARN` line (e.g. `TTS
+  unavailable; assistant replies will be silent: Cartesia TTS API
+  key "CARTESIA_API_KEY" not found in secrets.toml or environment`).
+  A new `ErrorClass::MissingKey` variant is now classified from
+  reload errors and fired as a Critical-urgency popup with copy
+  that names the env var and the `fono keys add <KEY>` command.
+  Wired through the LLM / TTS / Assistant reload paths; subject to
+  the existing session cascade cap.
+
+### Changed
+
+- **Tray TTS submenu drops the redundant `cloud,` prefix and greys
+  out unavailable backends.** Every cloud backend was annotated
+  `(cloud, will ask for key)` or `(cloud, key already set)` — but
+  clicking the entry never asked for a key, so the message was
+  misleading. The submenu now shows backends whose key is missing
+  as non-clickable (greyed-out) rows with a plain `(no key)`
+  suffix; backends with a configured key remain clickable. A new
+  `DISABLED_SENTINEL` prefix in `fono-tray` lets daemon submenus
+  opt rows out of activation without per-row plumbing.
+
 ### Fixed
 
 - **Groq TTS rejected `response_format: pcm` with HTTP 400

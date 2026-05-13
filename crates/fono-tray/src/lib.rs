@@ -44,6 +44,17 @@ use tokio::sync::mpsc;
 /// How many recent transcriptions to surface in the tray menu.
 pub const RECENT_SLOTS: usize = 10;
 
+/// Sentinel prefix that callers can prepend to a submenu label to mark
+/// it as disabled (greyed-out, non-clickable). The shared submenu
+/// builder strips the prefix before display.
+///
+/// Used by the daemon's TTS submenu to grey out cloud backends whose
+/// API key isn't present in `secrets.toml`, so the user sees the full
+/// list at a glance but only the actionable entries are clickable.
+/// Zero-width and outside the BMP-printable range so it never appears
+/// in legitimate labels.
+pub const DISABLED_SENTINEL: &str = "\u{0001}";
+
 /// Provider that returns the most recent transcription labels (newest
 /// first) for display in the tray's "Recent" submenu. Called from the
 /// tray task on a poll interval.
@@ -1516,12 +1527,30 @@ mod backend {
             .iter()
             .enumerate()
             .map(|(i, label)| {
+                // Honour the DISABLED_SENTINEL prefix exported by the
+                // crate root: when present, strip it and render the
+                // item as a non-clickable greyed-out row. Used by the
+                // daemon's TTS submenu to surface cloud backends
+                // whose API key is missing.
+                let (enabled, label) = label
+                    .strip_prefix(super::DISABLED_SENTINEL)
+                    .map_or_else(
+                        || (true, label.clone()),
+                        |stripped| (false, stripped.to_string()),
+                    );
                 let active = u8::try_from(i).is_ok_and(|i_u8| i_u8 == active_idx);
                 let prefix = if active { "● " } else { "  " };
                 let idx_u8 = u8::try_from(i).unwrap_or(u8::MAX);
                 StandardItem {
                     label: format!("{prefix}{label}"),
-                    activate: send_action(action_for(idx_u8)),
+                    enabled,
+                    activate: if enabled {
+                        send_action(action_for(idx_u8))
+                    } else {
+                        // Disabled rows shouldn't have an activate
+                        // callback wired — keep them inert.
+                        Box::new(|_: &mut KsniTray| {})
+                    },
                     ..Default::default()
                 }
                 .into()
