@@ -12,6 +12,7 @@ pub mod languages;
 pub mod locale;
 pub mod notify;
 pub mod paths;
+pub mod provider_catalog;
 pub mod providers;
 pub mod secrets;
 
@@ -25,6 +26,10 @@ pub use config::Config;
 pub use error::{Error, Result};
 pub use hwcheck::{HardwareSnapshot, LocalTier};
 pub use paths::Paths;
+pub use provider_catalog::{
+    AssistantDefaults, Badge, CloudProvider, LlmDefaults, SttDefaults, TtsDefaults, TtsEndpoint,
+    WebSearchSupport, CLOUD_PROVIDERS,
+};
 pub use secrets::Secrets;
 
 #[cfg(feature = "budget")]

@@ -226,20 +226,37 @@ pub const fn assistant_requires_key(b: &AssistantBackend) -> bool {
 
 /// Paired cloud preset for `fono use cloud <name>`. Returns `(stt, llm)`
 /// for the preset, or `None` if the name isn't a known pair.
+///
+/// Phase A reroute (issues #9/#10/#11): the resolution now consults
+/// [`crate::provider_catalog::CLOUD_PROVIDERS`] as the source of truth
+/// for which provider id offers which capabilities, and only falls
+/// back to the legacy hard-coded pairings for catalogue entries that
+/// lack a same-name STT capability (Cerebras, Anthropic, OpenRouter,
+/// AssemblyAI). The fallbacks preserve the historical behaviour
+/// exactly — Groq's whisper-turbo is the de-facto fast cloud STT
+/// today, so providers without a native STT product pair with Groq;
+/// AssemblyAI pairs with Cerebras for cleanup since AssemblyAI offers
+/// no LLM.
 #[must_use]
 pub fn cloud_pair(name: &str) -> Option<(SttBackend, LlmBackend)> {
-    match name.to_ascii_lowercase().as_str() {
-        "groq" => Some((SttBackend::Groq, LlmBackend::Groq)),
-        // Cerebras has no STT product — pair with Groq's whisper-turbo,
-        // which is the de-facto fast cloud STT today.
-        "cerebras" => Some((SttBackend::Groq, LlmBackend::Cerebras)),
-        "openai" => Some((SttBackend::OpenAI, LlmBackend::OpenAI)),
-        "anthropic" => Some((SttBackend::Groq, LlmBackend::Anthropic)),
-        "openrouter" => Some((SttBackend::Groq, LlmBackend::OpenRouter)),
-        "deepgram" => Some((SttBackend::Deepgram, LlmBackend::Cerebras)),
-        "assemblyai" => Some((SttBackend::AssemblyAI, LlmBackend::Cerebras)),
-        _ => None,
-    }
+    let id = name.to_ascii_lowercase();
+    let entry = crate::provider_catalog::find(&id)?;
+    // Resolve STT: prefer the entry's own STT capability, otherwise
+    // fall back to Groq's whisper-turbo (legacy behaviour).
+    let stt = if entry.stt.is_some() {
+        parse_stt_backend(entry.id)?
+    } else {
+        SttBackend::Groq
+    };
+    // Resolve LLM: prefer the entry's own LLM capability, otherwise
+    // fall back to Cerebras for cleanup (legacy behaviour for STT-only
+    // providers like Deepgram and AssemblyAI).
+    let llm = if entry.llm.is_some() {
+        parse_llm_backend(entry.id)?
+    } else {
+        LlmBackend::Cerebras
+    };
+    Some((stt, llm))
 }
 
 /// Iterator over every STT backend (for doctor enumeration etc.).
@@ -413,6 +430,43 @@ mod tests {
         assert!(matches!(s, SttBackend::Groq));
         assert!(matches!(l, LlmBackend::Cerebras));
         assert!(cloud_pair("nope").is_none());
+    }
+
+    /// Regression test for the Phase A `cloud_pair` reroute (issues
+    /// #9/#10/#11): every pair returned by the old hard-coded match
+    /// arm must come back unchanged from the catalogue-driven
+    /// implementation. If this fails after editing the catalogue,
+    /// the change is observable to existing users of
+    /// `fono use cloud <id>` and needs a migration note.
+    #[test]
+    fn cloud_pair_catalogue_matches_legacy_behaviour() {
+        let legacy: &[(&str, SttBackend, LlmBackend)] = &[
+            ("groq", SttBackend::Groq, LlmBackend::Groq),
+            // Cerebras has no STT product — pair with Groq's
+            // whisper-turbo, which is the de-facto fast cloud STT today.
+            ("cerebras", SttBackend::Groq, LlmBackend::Cerebras),
+            ("openai", SttBackend::OpenAI, LlmBackend::OpenAI),
+            ("anthropic", SttBackend::Groq, LlmBackend::Anthropic),
+            ("openrouter", SttBackend::Groq, LlmBackend::OpenRouter),
+            ("deepgram", SttBackend::Deepgram, LlmBackend::Cerebras),
+            ("assemblyai", SttBackend::AssemblyAI, LlmBackend::Cerebras),
+        ];
+        for (id, want_stt, want_llm) in legacy {
+            let (stt, llm) = cloud_pair(id)
+                .unwrap_or_else(|| panic!("cloud_pair({id}) returned None after reroute"));
+            assert_eq!(
+                std::mem::discriminant(&stt),
+                std::mem::discriminant(want_stt),
+                "cloud_pair({id}).stt drifted"
+            );
+            assert_eq!(
+                std::mem::discriminant(&llm),
+                std::mem::discriminant(want_llm),
+                "cloud_pair({id}).llm drifted"
+            );
+        }
+        // Unknown ids still return None.
+        assert!(cloud_pair("definitely-not-a-provider").is_none());
     }
 
     #[test]
