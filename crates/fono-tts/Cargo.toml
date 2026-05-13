@@ -16,8 +16,18 @@ workspace = true
 # Wyoming TTS client ships in default builds — no native deps, lets users
 # point at a wyoming-piper or sibling fono-server without recompiling.
 default = ["wyoming"]
-# Cloud — each behind a feature flag.
+# Cloud — each behind a feature flag. The four cloud features below
+# share the OpenAI-compatible client in `openai_compat.rs` (OpenAI,
+# Groq, OpenRouter) or a thin bespoke client (Cartesia, Deepgram);
+# all of them just need `reqwest` and the catalogue. They were split
+# into four flags so a slim build can opt in to one provider without
+# pulling the others' code through the linker — even though they all
+# transitively enable the same dep today.
 openai = ["dep:reqwest"]
+groq = ["dep:reqwest"]
+openrouter = ["dep:reqwest"]
+cartesia = ["dep:reqwest"]
+deepgram = ["dep:reqwest"]
 # LAN Wyoming TTS server.
 wyoming = ["dep:fono-net-codec"]
 # In-process Piper. Stub in v1 — see src/piper_local.rs for the rationale

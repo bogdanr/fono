@@ -16,8 +16,18 @@ pub mod factory;
 pub mod sentence_split;
 pub mod traits;
 
-#[cfg(feature = "openai")]
-pub mod openai;
+#[cfg(any(
+    feature = "openai",
+    feature = "groq",
+    feature = "openrouter",
+    feature = "cartesia",
+    feature = "deepgram"
+))]
+pub mod openai_compat;
+#[cfg(feature = "cartesia")]
+pub mod cartesia;
+#[cfg(feature = "deepgram")]
+pub mod deepgram;
 #[cfg(feature = "piper-local")]
 pub mod piper_local;
 #[cfg(feature = "wyoming")]

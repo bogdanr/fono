@@ -342,18 +342,15 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                         .is_some()
             })
             .collect();
-        let tts_backends: Vec<_> = fono_core::providers::all_tts_backends()
-            .into_iter()
-            .filter(|b| {
-                let active = *b == config.tts.backend;
-                let needs_key = fono_core::providers::tts_requires_key(b);
-                active
-                    || !needs_key
-                    || secrets
-                        .resolve(fono_core::providers::tts_key_env(b))
-                        .is_some()
-            })
-            .collect();
+        let tts_backends: Vec<_> = fono_core::providers::configured_tts_backends(
+            &secrets,
+            &config.tts.backend,
+            config
+                .tts
+                .wyoming
+                .as_ref()
+                .is_some_and(|w| !w.uri.trim().is_empty()),
+        );
         let stt_labels: Vec<String> = stt_backends
             .iter()
             .map(|b| fono_core::providers::stt_backend_str(b).to_string())
@@ -368,7 +365,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
             .collect();
         let tts_labels: Vec<String> = tts_backends
             .iter()
-            .map(|b| fono_core::providers::tts_backend_str(b).to_string())
+            .map(|b| tts_menu_label(b, &secrets))
             .collect();
 
         // Startup diagnostic for the "tray STT/LLM submenu sometimes
@@ -788,18 +785,15 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                             .is_some()
                 })
                 .collect();
-        let tts_backends_for_dispatch: Vec<_> = fono_core::providers::all_tts_backends()
-            .into_iter()
-            .filter(|b| {
-                let active = *b == config.tts.backend;
-                let needs_key = fono_core::providers::tts_requires_key(b);
-                active
-                    || !needs_key
-                    || secrets
-                        .resolve(fono_core::providers::tts_key_env(b))
-                        .is_some()
-            })
-            .collect();
+        let tts_backends_for_dispatch: Vec<_> = fono_core::providers::configured_tts_backends(
+            &secrets,
+            &config.tts.backend,
+            config
+                .tts
+                .wyoming
+                .as_ref()
+                .is_some_and(|w| !w.uri.trim().is_empty()),
+        );
         let update_status_tray = Arc::clone(&update_status);
         let discovered_registry_for_dispatch = discovery_registry.clone();
         let local_wyoming_fullname_for_dispatch = local_wyoming_fullname(&config);
@@ -1585,6 +1579,36 @@ fn remote_wyoming_uri(peer: &fono_net::discovery::DiscoveredPeer) -> String {
             std::net::IpAddr::V6(v6) => format!("tcp://[{v6}]:{}", peer.port),
         },
     )
+}
+
+/// Render the tray TTS submenu label for a backend, using the
+/// catalogue's `display_name` plus a `(cloud, key already set)` /
+/// `(cloud, will ask for key)` / `(local)` / `(disabled)` suffix.
+/// Falls back to the canonical backend id when a backend has no
+/// catalogue entry (None / Piper / Wyoming).
+fn tts_menu_label(b: &fono_core::config::TtsBackend, secrets: &fono_core::Secrets) -> String {
+    use fono_core::config::TtsBackend;
+    let canonical = fono_core::providers::tts_backend_str(b);
+    let (display, suffix): (String, &'static str) = match b {
+        TtsBackend::None => ("Off".to_string(), "(disabled)"),
+        TtsBackend::Piper => ("Piper".to_string(), "(local — stub)"),
+        TtsBackend::Wyoming => ("Wyoming".to_string(), "(local)"),
+        TtsBackend::OpenAI
+        | TtsBackend::Groq
+        | TtsBackend::OpenRouter
+        | TtsBackend::Cartesia
+        | TtsBackend::Deepgram => {
+            let display = fono_core::provider_catalog::find(canonical)
+                .map_or_else(|| canonical.to_string(), |p| p.display_name.to_string());
+            let suffix = if secrets.has_in_file(fono_core::providers::tts_key_env(b)) {
+                "(cloud, key already set)"
+            } else {
+                "(cloud, will ask for key)"
+            };
+            (display, suffix)
+        }
+    };
+    format!("{display} {suffix}")
 }
 
 fn local_wyoming_fullname(config: &Config) -> Option<String> {

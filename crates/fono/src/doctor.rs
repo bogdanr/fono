@@ -245,7 +245,11 @@ pub async fn report(paths: &Paths) -> Result<String> {
                     .as_ref()
                     .map(|w| format!("uri={}", w.uri))
                     .unwrap_or_else(|| "uri=(unset)".to_string()),
-                fono_core::config::TtsBackend::OpenAI => {
+                fono_core::config::TtsBackend::OpenAI
+                | fono_core::config::TtsBackend::Groq
+                | fono_core::config::TtsBackend::OpenRouter
+                | fono_core::config::TtsBackend::Cartesia
+                | fono_core::config::TtsBackend::Deepgram => {
                     if secrets.resolve(key_env).is_some() {
                         format!("{key_env} present")
                     } else {

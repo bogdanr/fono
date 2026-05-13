@@ -79,7 +79,7 @@ fono-stt = { path = "../fono-stt" }
 # `fono use tts openai|wyoming` both work without rebuilding. The
 # OpenAI feature only adds an HTTP client (reqwest already pulled in
 # transitively), no native deps.
-fono-tts = { path = "../fono-tts", features = ["wyoming", "openai"] }
+fono-tts = { path = "../fono-tts", features = ["wyoming", "openai", "groq", "openrouter", "cartesia", "deepgram"] }
 fono-llm = { path = "../fono-llm" }
 fono-assistant = { path = "../fono-assistant" }
 fono-hotkey = { path = "../fono-hotkey" }

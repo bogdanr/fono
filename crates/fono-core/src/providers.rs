@@ -136,6 +136,10 @@ pub const fn tts_backend_str(b: &TtsBackend) -> &'static str {
         TtsBackend::Wyoming => "wyoming",
         TtsBackend::Piper => "piper",
         TtsBackend::OpenAI => "openai",
+        TtsBackend::Groq => "groq",
+        TtsBackend::OpenRouter => "openrouter",
+        TtsBackend::Cartesia => "cartesia",
+        TtsBackend::Deepgram => "deepgram",
     }
 }
 
@@ -146,6 +150,10 @@ pub fn parse_tts_backend(s: &str) -> Option<TtsBackend> {
         "wyoming" => Some(TtsBackend::Wyoming),
         "piper" => Some(TtsBackend::Piper),
         "openai" => Some(TtsBackend::OpenAI),
+        "groq" => Some(TtsBackend::Groq),
+        "openrouter" => Some(TtsBackend::OpenRouter),
+        "cartesia" => Some(TtsBackend::Cartesia),
+        "deepgram" => Some(TtsBackend::Deepgram),
         _ => None,
     }
 }
@@ -158,12 +166,23 @@ pub const fn tts_key_env(b: &TtsBackend) -> &'static str {
     match b {
         TtsBackend::None | TtsBackend::Wyoming | TtsBackend::Piper => "",
         TtsBackend::OpenAI => "OPENAI_API_KEY",
+        TtsBackend::Groq => "GROQ_API_KEY",
+        TtsBackend::OpenRouter => "OPENROUTER_API_KEY",
+        TtsBackend::Cartesia => "CARTESIA_API_KEY",
+        TtsBackend::Deepgram => "DEEPGRAM_API_KEY",
     }
 }
 
 #[must_use]
 pub const fn tts_requires_key(b: &TtsBackend) -> bool {
-    matches!(b, TtsBackend::OpenAI)
+    matches!(
+        b,
+        TtsBackend::OpenAI
+            | TtsBackend::Groq
+            | TtsBackend::OpenRouter
+            | TtsBackend::Cartesia
+            | TtsBackend::Deepgram
+    )
 }
 
 /// Canonical lower-case identifier for an assistant chat backend.
@@ -308,12 +327,16 @@ pub fn all_assistant_backends() -> [AssistantBackend; 9] {
 }
 
 #[must_use]
-pub fn all_tts_backends() -> [TtsBackend; 4] {
+pub fn all_tts_backends() -> [TtsBackend; 8] {
     [
         TtsBackend::None,
         TtsBackend::Wyoming,
         TtsBackend::Piper,
         TtsBackend::OpenAI,
+        TtsBackend::Groq,
+        TtsBackend::OpenRouter,
+        TtsBackend::Cartesia,
+        TtsBackend::Deepgram,
     ]
 }
 
@@ -375,6 +398,62 @@ pub fn configured_llm_backends(secrets: &crate::Secrets, active: &LlmBackend) ->
             secrets.has_in_file(llm_key_env(b))
         })
         .collect()
+}
+
+/// Same idea as [`configured_stt_backends`] but for TTS backends.
+/// Order: backends whose API key is already present in `secrets.toml`
+/// come first (so the tray's "(cloud, key already set)" entries lead),
+/// followed by Wyoming if the user has configured a `[tts.wyoming]`
+/// peer (or it's the active backend), followed by every remaining
+/// cloud backend (which would prompt for a key). Always includes the
+/// currently-active backend so the tray reflects reality even if its
+/// key isn't in `secrets.toml`. Like its STT cousin, the process
+/// environment is ignored — only keys saved in `secrets.toml` count.
+///
+/// `None`, `Piper` are intentionally excluded — `None` is not a real
+/// switchable option and `Piper` is a v1 stub that returns an error
+/// from the factory.
+#[must_use]
+pub fn configured_tts_backends(
+    secrets: &crate::Secrets,
+    active: &TtsBackend,
+    has_wyoming_block: bool,
+) -> Vec<TtsBackend> {
+    let mut with_key: Vec<TtsBackend> = Vec::new();
+    let mut without_key: Vec<TtsBackend> = Vec::new();
+    let mut wyoming: Option<TtsBackend> = None;
+    for b in all_tts_backends() {
+        if matches!(b, TtsBackend::None | TtsBackend::Piper) {
+            // None is not a real entry; Piper is a v1 stub. Both are
+            // excluded from the menu unless they are the active one.
+            if std::mem::discriminant(&b) == std::mem::discriminant(active) {
+                without_key.push(b);
+            }
+            continue;
+        }
+        if matches!(b, TtsBackend::Wyoming) {
+            let active_match = std::mem::discriminant(&b) == std::mem::discriminant(active);
+            if has_wyoming_block || active_match {
+                wyoming = Some(b);
+            }
+            continue;
+        }
+        let active_match = std::mem::discriminant(&b) == std::mem::discriminant(active);
+        if tts_requires_key(&b) && secrets.has_in_file(tts_key_env(&b)) {
+            with_key.push(b);
+        } else if active_match {
+            // Active backend without a stored key — still show.
+            without_key.push(b);
+        } else {
+            without_key.push(b);
+        }
+    }
+    let mut out = with_key;
+    if let Some(w) = wyoming {
+        out.push(w);
+    }
+    out.extend(without_key);
+    out
 }
 
 #[cfg(test)]
@@ -527,5 +606,108 @@ mod tests {
             llm.iter().any(|b| matches!(b, LlmBackend::Ollama)),
             "Ollama must appear once OLLAMA_HOST is configured"
         );
+    }
+
+    /// Phase F regression: every TTS backend variant must round-trip
+    /// through `parse_tts_backend` / `tts_backend_str`.
+    #[test]
+    fn tts_roundtrip() {
+        for b in all_tts_backends() {
+            let s = tts_backend_str(&b);
+            assert_eq!(parse_tts_backend(s).unwrap(), b);
+        }
+        // New Phase F variants explicitly:
+        assert_eq!(parse_tts_backend("groq"), Some(TtsBackend::Groq));
+        assert_eq!(
+            parse_tts_backend("openrouter"),
+            Some(TtsBackend::OpenRouter)
+        );
+        assert_eq!(parse_tts_backend("cartesia"), Some(TtsBackend::Cartesia));
+        assert_eq!(parse_tts_backend("deepgram"), Some(TtsBackend::Deepgram));
+    }
+
+    /// Phase F: every new cloud TTS backend reports the canonical
+    /// env-var name. Mirrors `key_env_matches_provider` for STT/LLM.
+    #[test]
+    fn tts_key_env_matches_provider() {
+        assert_eq!(tts_key_env(&TtsBackend::Groq), "GROQ_API_KEY");
+        assert_eq!(
+            tts_key_env(&TtsBackend::OpenRouter),
+            "OPENROUTER_API_KEY"
+        );
+        assert_eq!(tts_key_env(&TtsBackend::Cartesia), "CARTESIA_API_KEY");
+        assert_eq!(tts_key_env(&TtsBackend::Deepgram), "DEEPGRAM_API_KEY");
+        assert_eq!(tts_key_env(&TtsBackend::OpenAI), "OPENAI_API_KEY");
+        assert!(tts_key_env(&TtsBackend::None).is_empty());
+        assert!(tts_key_env(&TtsBackend::Wyoming).is_empty());
+        assert!(tts_key_env(&TtsBackend::Piper).is_empty());
+    }
+
+    /// `configured_tts_backends` ordering: stored-key cloud first,
+    /// then Wyoming when the user has a `[tts.wyoming]` block, then
+    /// every remaining cloud backend (omitting `None`/`Piper`).
+    #[test]
+    fn configured_tts_ordering() {
+        let mut secrets = crate::Secrets::default();
+        secrets.insert("GROQ_API_KEY", "gsk-x");
+        secrets.insert("OPENAI_API_KEY", "sk-x");
+        let backends = configured_tts_backends(&secrets, &TtsBackend::None, true);
+        // First, every cloud backend whose key is in secrets.toml.
+        // Order is the canonical `all_tts_backends` order, which
+        // places OpenAI before Groq.
+        let cloud_present: Vec<_> = backends
+            .iter()
+            .take_while(|b| !matches!(b, TtsBackend::Wyoming))
+            .cloned()
+            .collect();
+        assert_eq!(
+            cloud_present,
+            vec![TtsBackend::OpenAI, TtsBackend::Groq],
+            "stored-key cloud backends must lead, in catalogue order"
+        );
+        // Wyoming next, because the caller asserted a [tts.wyoming]
+        // block exists.
+        assert!(
+            backends.contains(&TtsBackend::Wyoming),
+            "Wyoming must appear when has_wyoming_block = true"
+        );
+        let wyoming_pos = backends
+            .iter()
+            .position(|b| matches!(b, TtsBackend::Wyoming))
+            .expect("wyoming must be present");
+        // Every entry after wyoming is a cloud backend with no stored key
+        // (or `None`/`Piper` if they happened to be active — but in this
+        // test the active backend is `None`, which placed `None` after
+        // Wyoming as a disable affordance).
+        for b in &backends[wyoming_pos + 1..] {
+            if matches!(b, TtsBackend::None | TtsBackend::Piper) {
+                continue;
+            }
+            assert!(tts_requires_key(b));
+            assert!(!secrets.has_in_file(tts_key_env(b)));
+        }
+        // Piper is always excluded (active backend in this test is None).
+        assert!(!backends.contains(&TtsBackend::Piper));
+    }
+
+    /// Wyoming is hidden when neither `[tts.wyoming]` is configured
+    /// nor it's the active backend.
+    #[test]
+    fn configured_tts_hides_wyoming_without_block() {
+        let secrets = crate::Secrets::default();
+        let backends = configured_tts_backends(&secrets, &TtsBackend::None, false);
+        assert!(!backends.contains(&TtsBackend::Wyoming));
+        // Active is None, so None ends up in the list (only when active).
+        assert!(backends.contains(&TtsBackend::None));
+    }
+
+    /// Active backend is always present even when its key is missing
+    /// and it would otherwise be filtered out.
+    #[test]
+    fn configured_tts_always_includes_active() {
+        let secrets = crate::Secrets::default();
+        let backends =
+            configured_tts_backends(&secrets, &TtsBackend::Cartesia, false);
+        assert!(backends.contains(&TtsBackend::Cartesia));
     }
 }

@@ -387,6 +387,15 @@ pub enum TtsBackend {
     Piper,
     /// OpenAI `/v1/audio/speech` API. Configure via `[tts.cloud]`.
     OpenAI,
+    /// Groq's OpenAI-compatible `/audio/speech` endpoint (PlayAI TTS).
+    Groq,
+    /// OpenRouter's OpenAI-compatible `/audio/speech` endpoint
+    /// (defaults to Kokoro).
+    OpenRouter,
+    /// Cartesia's bespoke `/tts/bytes` endpoint (Sonic TTS).
+    Cartesia,
+    /// Deepgram's `/v1/speak` endpoint (Aura TTS).
+    Deepgram,
 }
 
 impl Default for TtsBackend {

@@ -1139,7 +1139,10 @@ async fn use_cmd(paths: &Paths, action: UseCmd) -> Result<()> {
         }
         UseCmd::Tts { backend, uri } => {
             let b = parse_tts_backend(&backend).ok_or_else(|| {
-                anyhow::anyhow!("unknown TTS backend {backend:?}; try none, wyoming, piper, openai")
+                anyhow::anyhow!(
+                    "unknown TTS backend {backend:?}; try none, wyoming, piper, openai, \
+                     groq, openrouter, cartesia, deepgram"
+                )
             })?;
             set_active_tts(&mut cfg, b.clone(), uri);
             cfg.save(&path)?;
