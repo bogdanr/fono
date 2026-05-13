@@ -206,6 +206,7 @@ pub async fn run_assistant_turn(
                     class,
                     fono_core::critical_notify::ErrorClass::Auth
                         | fono_core::critical_notify::ErrorClass::Network
+                        | fono_core::critical_notify::ErrorClass::TermsRequired
                 ) {
                     fono_core::critical_notify::notify(
                         fono_core::critical_notify::Stage::Assistant,
@@ -267,6 +268,7 @@ pub async fn run_assistant_turn(
                     class,
                     fono_core::critical_notify::ErrorClass::Auth
                         | fono_core::critical_notify::ErrorClass::Network
+                        | fono_core::critical_notify::ErrorClass::TermsRequired
                 ) {
                     fono_core::critical_notify::notify(
                         fono_core::critical_notify::Stage::Assistant,
@@ -388,6 +390,7 @@ async fn synth_and_enqueue(
                     class,
                     fono_core::critical_notify::ErrorClass::Auth
                         | fono_core::critical_notify::ErrorClass::Network
+                        | fono_core::critical_notify::ErrorClass::TermsRequired
                 ) {
                     fono_core::critical_notify::notify(
                         fono_core::critical_notify::Stage::Tts,

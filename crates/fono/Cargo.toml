@@ -69,18 +69,23 @@ waveform = ["fono-overlay/real-window"]
 # `fono_inject::type_text_with_outcome`).
 enigo = ["fono-inject/enigo-backend"]
 # Cloud meta-feature so a single flag enables all hosted providers.
-cloud-all = ["fono-stt/openai", "fono-llm/anthropic"]
+cloud-all = ["fono-stt/openai", "fono-stt/deepgram", "fono-llm/anthropic"]
 
 [dependencies]
 fono-core = { path = "../fono-core", features = ["vulkan-probe"] }
 fono-audio = { path = "../fono-audio" }
-fono-stt = { path = "../fono-stt" }
-# Default to both Wyoming (LAN) and OpenAI cloud TTS so out-of-the-box
-# `fono use tts openai|wyoming` both work without rebuilding. The
-# OpenAI feature only adds an HTTP client (reqwest already pulled in
-# transitively), no native deps.
+fono-stt = { path = "../fono-stt", features = ["groq", "openai", "deepgram", "wyoming"] }
+# Default builds ship every cloud backend wired in the catalogue —
+# fono-stt: Groq/OpenAI/Deepgram (+ Wyoming LAN); fono-llm:
+# Cerebras/OpenAI-compat/Anthropic; fono-tts: all five hosted
+# providers (+ Wyoming LAN). This means `fono use <stt|llm|tts>
+# <provider>` and the wizard's primary picker work out of the box for
+# every catalogued provider without recompiling. Each feature only
+# adds an HTTP client (reqwest is already pulled in transitively); no
+# native deps. Slim cloud-only build:
+# `cargo build --no-default-features --features tray,cloud-all`.
 fono-tts = { path = "../fono-tts", features = ["wyoming", "openai", "groq", "openrouter", "cartesia", "deepgram"] }
-fono-llm = { path = "../fono-llm" }
+fono-llm = { path = "../fono-llm", features = ["cerebras", "openai-compat", "anthropic"] }
 fono-assistant = { path = "../fono-assistant" }
 fono-hotkey = { path = "../fono-hotkey" }
 fono-inject = { path = "../fono-inject" }

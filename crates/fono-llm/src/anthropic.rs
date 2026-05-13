@@ -60,10 +60,13 @@ impl TextFormatter for AnthropicLlm {
         let user = user_prompt(raw);
         let req = Req {
             model: &self.model,
-            // Latency plan L19 — short cleanup outputs.
+            // Latency plan L19 — short cleanup outputs. Length is bounded by
+            // `max_tokens` alone; we used to also pass `stop_sequences =
+            // ["\n\n"]` as a blank-line heuristic, but Anthropic's Messages
+            // API now rejects whitespace-only stop sequences with a 400.
             max_tokens: 512,
             temperature: 0.2,
-            stop_sequences: vec!["\n\n"],
+            stop_sequences: vec![],
             system: &system,
             messages: vec![Message {
                 role: "user",
@@ -90,8 +93,7 @@ impl TextFormatter for AnthropicLlm {
             .content
             .into_iter()
             .map(|b| b.text)
-            .collect::<Vec<_>>()
-            .join("")
+            .collect::<String>()
             .trim()
             .to_string();
         if looks_like_clarification(&out) {
@@ -120,5 +122,33 @@ impl TextFormatter for AnthropicLlm {
             .context("anthropic prewarm")?;
         let _ = res.bytes().await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Messages API rejects whitespace-only `stop_sequences` entries
+    /// with a 400; the serialized request body must omit the field
+    /// entirely (it's `skip_serializing_if = "Vec::is_empty"`).
+    #[test]
+    fn request_body_omits_stop_sequences() {
+        let req = Req {
+            model: "claude-haiku-4-5-20251001",
+            max_tokens: 512,
+            temperature: 0.2,
+            stop_sequences: vec![],
+            system: "sys",
+            messages: vec![Message {
+                role: "user",
+                content: "hi",
+            }],
+        };
+        let body = serde_json::to_string(&req).expect("serialize");
+        assert!(
+            !body.contains("stop_sequences"),
+            "stop_sequences must be omitted from the wire body, got: {body}"
+        );
     }
 }

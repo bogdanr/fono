@@ -46,6 +46,11 @@ pub struct OpenAiCompatTtsClient {
     base_url: String,
     default_model: String,
     default_voice: String,
+    /// Wire value for the request's `response_format` field. Either
+    /// `"pcm"` (raw int16 LE, fastest) or `"wav"` (RIFF-wrapped — the
+    /// only format Groq's Orpheus accepts). The client strips the WAV
+    /// header transparently when this is `"wav"`.
+    response_format: &'static str,
     auth: AuthHeader,
     client: reqwest::Client,
 }
@@ -62,11 +67,27 @@ impl OpenAiCompatTtsClient {
         default_voice: impl Into<String>,
         auth: AuthHeader,
     ) -> Self {
+        Self::with_response_format(name, base_url, default_model, default_voice, "pcm", auth)
+    }
+
+    /// Like [`Self::new`] but lets the caller pin the wire-level
+    /// `response_format`. Use this for providers that reject `pcm`
+    /// (e.g. Groq's Orpheus deployment, which only accepts `wav`).
+    #[must_use]
+    pub fn with_response_format(
+        name: &'static str,
+        base_url: impl Into<String>,
+        default_model: impl Into<String>,
+        default_voice: impl Into<String>,
+        response_format: &'static str,
+        auth: AuthHeader,
+    ) -> Self {
         Self {
             name,
             base_url: base_url.into(),
             default_model: default_model.into(),
             default_voice: default_voice.into(),
+            response_format,
             auth,
             client: warm_client(),
         }
@@ -100,6 +121,12 @@ impl OpenAiCompatTtsClient {
     #[must_use]
     pub fn default_voice(&self) -> &str {
         &self.default_voice
+    }
+
+    /// Configured wire-level `response_format`. Exposed for tests.
+    #[must_use]
+    pub fn response_format(&self) -> &'static str {
+        self.response_format
     }
 
     fn apply_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -164,7 +191,7 @@ impl TextToSpeech for OpenAiCompatTtsClient {
             model: &self.default_model,
             voice: v,
             input: text,
-            response_format: "pcm",
+            response_format: self.response_format,
         };
         let resp = self
             .apply_auth(self.client.post(self.speech_url()))
@@ -188,7 +215,14 @@ impl TextToSpeech for OpenAiCompatTtsClient {
             .bytes()
             .await
             .with_context(|| format!("reading {} TTS response body", self.name))?;
-        let pcm = pcm_i16_le_to_f32(&bytes);
+        let pcm_bytes: &[u8] = if self.response_format == "wav" {
+            strip_wav_header(&bytes).with_context(|| {
+                format!("parsing {} TTS WAV response body", self.name)
+            })?
+        } else {
+            &bytes
+        };
+        let pcm = pcm_i16_le_to_f32(pcm_bytes);
         Ok(TtsAudio {
             pcm,
             sample_rate: NATIVE_RATE,
@@ -216,7 +250,7 @@ pub fn catalog_base_url(id: &str) -> Option<&'static str> {
     let entry = provider_catalog::find(id)?;
     let tts = entry.tts.as_ref()?;
     match tts.endpoint {
-        TtsEndpoint::OpenAiCompat { base_url } => Some(base_url),
+        TtsEndpoint::OpenAiCompat { base_url, .. } => Some(base_url),
         _ => None,
     }
 }
@@ -234,16 +268,17 @@ pub fn from_catalog(
 ) -> Option<OpenAiCompatTtsClient> {
     let entry = provider_catalog::find(id)?;
     let tts = entry.tts.as_ref()?;
-    let TtsEndpoint::OpenAiCompat { base_url } = tts.endpoint else {
+    let TtsEndpoint::OpenAiCompat { base_url, response_format } = tts.endpoint else {
         return None;
     };
     let model = model_override.unwrap_or_else(|| tts.model.to_string());
     let voice = voice_override.unwrap_or_else(|| tts.default_voice.to_string());
-    Some(OpenAiCompatTtsClient::new(
+    Some(OpenAiCompatTtsClient::with_response_format(
         name,
         base_url,
         model,
         voice,
+        response_format,
         AuthHeader::Bearer(api_key.into()),
     ))
 }
@@ -260,8 +295,9 @@ pub fn openai_client(
         .expect("openai catalogue entry must exist with an OpenAI-compat TTS endpoint")
 }
 
-/// Thin constructor for the Groq provider (PlayAI-TTS on Groq's
-/// OpenAI-compat endpoint).
+/// Thin constructor for the Groq provider (Canopy Labs Orpheus on
+/// Groq's OpenAI-compat endpoint). Replaces the decommissioned
+/// PlayAI family Groq retired in 2026.
 #[must_use]
 pub fn groq_client(
     api_key: impl Into<String>,
@@ -287,6 +323,39 @@ pub fn openrouter_client(
         voice_override,
     )
     .expect("openrouter catalogue entry must exist with an OpenAI-compat TTS endpoint")
+}
+
+/// Locate the `data` chunk in a RIFF/WAVE byte stream and return the
+/// PCM payload slice. Tolerates additional chunks (`LIST`, `bext`,
+/// etc.) appearing between the `fmt ` and `data` chunks, which some
+/// providers emit. Returns an error if the buffer isn't a well-formed
+/// WAVE with at least one `data` chunk.
+fn strip_wav_header(bytes: &[u8]) -> anyhow::Result<&[u8]> {
+    if bytes.len() < 20 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err(anyhow!(
+            "expected RIFF/WAVE container, got {} bytes (first 4: {:?})",
+            bytes.len(),
+            bytes.get(..4).unwrap_or(&[]),
+        ));
+    }
+    let mut cursor = 12_usize;
+    while cursor + 8 <= bytes.len() {
+        let id = &bytes[cursor..cursor + 4];
+        let size = u32::from_le_bytes([
+            bytes[cursor + 4],
+            bytes[cursor + 5],
+            bytes[cursor + 6],
+            bytes[cursor + 7],
+        ]) as usize;
+        let payload_start = cursor + 8;
+        if id == b"data" {
+            let end = payload_start.saturating_add(size).min(bytes.len());
+            return Ok(&bytes[payload_start..end]);
+        }
+        // Chunks are word-aligned: round size up to even.
+        cursor = payload_start.saturating_add(size + (size & 1));
+    }
+    Err(anyhow!("RIFF/WAVE container had no `data` chunk"))
 }
 
 fn pcm_i16_le_to_f32(bytes: &[u8]) -> Vec<f32> {
@@ -346,6 +415,67 @@ mod tests {
         assert_eq!(c.default_model(), "tts-1");
         assert_eq!(c.default_voice(), "alloy");
         assert_eq!(c.native_sample_rate(), NATIVE_RATE);
+        assert_eq!(c.response_format(), "pcm");
+    }
+
+    /// A minimal RIFF/WAVE byte stream carrying three int16 samples,
+    /// shaped like the body Groq's Orpheus deployment returns.
+    fn make_wav(samples: &[i16]) -> Vec<u8> {
+        let data_bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let data_len = u32::try_from(data_bytes.len()).unwrap();
+        let mut buf = Vec::with_capacity(44 + data_bytes.len());
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&(36u32 + data_len).to_le_bytes());
+        buf.extend_from_slice(b"WAVE");
+        buf.extend_from_slice(b"fmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+        buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        buf.extend_from_slice(&1u16.to_le_bytes()); // mono
+        buf.extend_from_slice(&NATIVE_RATE.to_le_bytes());
+        buf.extend_from_slice(&(NATIVE_RATE * 2).to_le_bytes()); // byte rate
+        buf.extend_from_slice(&2u16.to_le_bytes()); // block align
+        buf.extend_from_slice(&16u16.to_le_bytes()); // bits/sample
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&data_len.to_le_bytes());
+        buf.extend_from_slice(&data_bytes);
+        buf
+    }
+
+    #[test]
+    fn strip_wav_header_extracts_pcm_payload() {
+        let wav = make_wav(&[0, 32_767, -32_767]);
+        let pcm = strip_wav_header(&wav).expect("valid WAV");
+        assert_eq!(pcm.len(), 6, "three int16 samples = 6 bytes");
+        let decoded = pcm_i16_le_to_f32(pcm);
+        assert_eq!(decoded.len(), 3);
+        assert!((decoded[1] - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn strip_wav_header_tolerates_unknown_chunks() {
+        // Insert a `LIST` chunk between `fmt ` and `data` to mimic
+        // providers that emit metadata chunks.
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&100u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&[0u8; 16]);
+        wav.extend_from_slice(b"LIST");
+        wav.extend_from_slice(&4u32.to_le_bytes());
+        wav.extend_from_slice(&[1, 2, 3, 4]);
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&4u32.to_le_bytes());
+        wav.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let pcm = strip_wav_header(&wav).expect("valid WAV with LIST chunk");
+        assert_eq!(pcm, &[0xAA, 0xBB, 0xCC, 0xDD]);
+    }
+
+    #[test]
+    fn strip_wav_header_rejects_non_riff() {
+        let err = strip_wav_header(b"not a wav at all").unwrap_err();
+        assert!(err.to_string().contains("RIFF"));
     }
 
     #[test]
@@ -356,8 +486,11 @@ mod tests {
             c.speech_url(),
             "https://api.groq.com/openai/v1/audio/speech"
         );
-        assert_eq!(c.default_model(), "playai-tts");
-        assert_eq!(c.default_voice(), "Fritz-PlayAI");
+        assert_eq!(c.default_model(), "canopylabs/orpheus-v1-english");
+        assert_eq!(c.default_voice(), "hannah");
+        // Groq's Orpheus deployment only accepts `wav`; the client must
+        // pick that up from the catalogue.
+        assert_eq!(c.response_format(), "wav");
     }
 
     #[test]

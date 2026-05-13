@@ -128,6 +128,12 @@ pub enum TtsEndpoint {
         /// Base URL up to and including `/v1` (the client appends
         /// `/audio/speech`).
         base_url: &'static str,
+        /// Wire value for the request's `response_format` field.
+        /// OpenAI accepts `pcm` (raw 24 kHz int16 LE mono, the fastest
+        /// path); Groq's Orpheus deployment only accepts `wav` and
+        /// 400s on `pcm`. The client strips the 44-byte RIFF header
+        /// when this is `"wav"`.
+        response_format: &'static str,
     },
     /// Cartesia's bespoke `POST /v1/tts/bytes` endpoint.
     Cartesia,
@@ -178,19 +184,21 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // Mirrors fono_llm::defaults::default_cloud_model("openai").
             model: "gpt-5.4-nano",
         }),
+        // TODO: re-enable web search when fono-assistant migrates the
+        // OpenAI client to the Responses API (POST /v1/responses). The
+        // chat/completions API rejects unknown tool types.
         assistant: Some(AssistantDefaults {
             // Mirrors fono_assistant::factory::default_cloud_model("openai").
             text_model: "gpt-5.4-mini",
             // GPT-5.4 family is multimodal; reuse the assistant default.
             multimodal_model: Some("gpt-5.4-mini"),
-            web_search: WebSearchSupport::NativeTool("web_search_preview"),
+            web_search: WebSearchSupport::None,
             badges: &[
                 Badge::Stt,
                 Badge::Llm,
                 Badge::Assistant,
                 Badge::Tts,
                 Badge::Vision,
-                Badge::Search,
             ],
         }),
         tts: Some(TtsDefaults {
@@ -199,6 +207,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             default_voice: "alloy",
             endpoint: TtsEndpoint::OpenAiCompat {
                 base_url: "https://api.openai.com/v1",
+                response_format: "pcm",
             },
             runtime_probe: false,
         }),
@@ -221,21 +230,44 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         assistant: Some(AssistantDefaults {
             // Mirrors fono_assistant::factory::default_cloud_model("groq").
             text_model: "openai/gpt-oss-120b",
-            // Llama-4 Maverick is Meta's vision-capable open-weight
-            // model hosted on Groq. Llama-family licence is not OSI-
-            // approved, so it ships opt-in only (the user must pick a
-            // multimodal task before the wizard exposes it).
-            multimodal_model: Some("llama-4-maverick-17b-128e-instruct"),
+            // Groq currently exposes no vision-capable model Fono is
+            // willing to default to. `openai/gpt-oss-120b` (the text
+            // model above) is text-only; the previously catalogued
+            // `llama-4-maverick-17b-128e-instruct` was removed after
+            // Groq returned 404 `model_not_found` for it. Re-enable
+            // multimodal here only when Groq ships a hosted vision
+            // model with an OSI-compatible licence we're willing to
+            // make the default.
+            multimodal_model: None,
+            // TODO: Groq's compound-beta / compound-beta-mini models
+            // provide built-in web search via model swap. Wire as an
+            // opt-in once we have a coherent search-via-model-swap
+            // design (see docs/decisions/0024).
             web_search: WebSearchSupport::None,
             badges: &[Badge::Stt, Badge::Llm, Badge::Assistant, Badge::Tts, Badge::Fast],
         }),
         tts: Some(TtsDefaults {
-            // PlayAI on Groq — endpoint declared here for Phase A;
-            // runtime client wiring lands in Phase F1/F2.
-            model: "playai-tts",
-            default_voice: "Fritz-PlayAI",
+            // Canopy Labs Orpheus on Groq's OpenAI-compatible
+            // `/audio/speech` endpoint. Replaces the PlayAI family
+            // (the previously catalogued model now returns
+            // `model_not_found` after Groq retired it). Groq's
+            // hosted Orpheus exposes a curated six-voice set —
+            // `autumn` / `diana` / `hannah` / `austin` / `daniel` /
+            // `troy` — which is narrower than Canopy's open-source
+            // Orpheus checkpoint (tara / leah / jess / ...); sending
+            // one of those upstream-only voices returns HTTP 400
+            // from Groq's `/audio/speech` ("voice must be one of
+            // ..."). We default to `hannah` (the neutral-female
+            // option in Groq's set, also used in Groq's own JS
+            // sample for Orpheus).
+            model: "canopylabs/orpheus-v1-english",
+            default_voice: "hannah",
             endpoint: TtsEndpoint::OpenAiCompat {
                 base_url: "https://api.groq.com/openai/v1",
+                // Groq's Orpheus deployment rejects `pcm` with
+                // "response_format must be one of [wav]". The client
+                // strips the WAV header back to raw PCM transparently.
+                response_format: "wav",
             },
             runtime_probe: false,
         }),
@@ -250,10 +282,16 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         stt: None,
         llm: Some(LlmDefaults {
             // Mirrors fono_llm::defaults::default_cloud_model("anthropic").
+            // TODO: verify against Anthropic's current model list — the
+            // Groq Maverick incident (issue: 404 model_not_found)
+            // exposed that the Phase A catalogue contained at least
+            // one hallucinated model id; the Anthropic dated suffix
+            // here is the most likely remaining suspect.
             model: "claude-haiku-4-5-20251001",
         }),
         assistant: Some(AssistantDefaults {
             // Mirrors fono_assistant::factory::default_cloud_model("anthropic").
+            // TODO: verify against Anthropic's current model list.
             text_model: "claude-haiku-4-5-20251001",
             // Claude Haiku 4.5 is multimodal (image input supported).
             multimodal_model: Some("claude-haiku-4-5-20251001"),
@@ -333,6 +371,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             default_voice: "af_heart",
             endpoint: TtsEndpoint::OpenAiCompat {
                 base_url: "https://openrouter.ai/api/v1",
+                response_format: "pcm",
             },
             runtime_probe: false,
         }),
@@ -733,7 +772,11 @@ mod tests {
             (
                 "openai",
                 Some("gpt-5.4-mini"),
-                WebSearchSupport::NativeTool("web_search_preview"),
+                // Web search is intentionally None until the OpenAI
+                // client migrates to the Responses API; the
+                // chat/completions API rejects the
+                // `web_search_preview` tool descriptor.
+                WebSearchSupport::None,
             ),
             (
                 "anthropic",
@@ -745,11 +788,10 @@ mod tests {
                 Some("gemini-1.5-flash"),
                 WebSearchSupport::NativeTool("google_search"),
             ),
-            (
-                "groq",
-                Some("llama-4-maverick-17b-128e-instruct"),
-                WebSearchSupport::None,
-            ),
+            // Groq: no multimodal model in the catalogue today — the
+            // previously advertised `llama-4-maverick-17b-128e-instruct`
+            // returned 404 from Groq and was removed.
+            ("groq", None, WebSearchSupport::None),
             ("cerebras", None, WebSearchSupport::None),
             ("openrouter", None, WebSearchSupport::None),
         ];

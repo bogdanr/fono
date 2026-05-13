@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Groq TTS rejected `response_format: pcm` with HTTP 400
+  (`response_format must be one of [wav]`).** Groq's Orpheus
+  deployment only emits WAV-wrapped audio. The OpenAI-compat TTS
+  client now reads its `response_format` from the catalogue
+  (`OpenAiCompat { base_url, response_format }`) and strips the
+  RIFF/WAVE header transparently when the provider returns WAV,
+  yielding the same raw 24 kHz int16 LE PCM the playback path
+  expects. OpenAI and OpenRouter keep `pcm` (lowest latency).
+
+- **Groq TTS rejected the default voice (`tara`) with HTTP 400
+  (`voice must be one of the following voices: [autumn diana hannah
+  austin daniel troy]`).** Fono's catalogue defaulted to `tara`,
+  which is part of Canopy Labs' open-source Orpheus voice set but
+  not part of Groq's hosted six-voice subset for
+  `canopylabs/orpheus-v1-english`. The Groq TTS default voice is
+  now `hannah` (neutral female, in Groq's curated set). Users with
+  an explicit `[tts.cloud.groq].voice` override pinned to a Canopy-
+  only voice (`tara`/`leah`/`jess`/`leo`/`dan`/`mia`/`zac`/`zoe`)
+  must edit to one of `autumn`/`diana`/`hannah`/`austin`/`daniel`/
+  `troy` to get audio out of Groq.
+
+### Added
+
+- **Desktop notification when a TTS/STT/LLM/assistant model requires
+  terms acceptance.** Providers like Groq return HTTP 400 with
+  `model_terms_required` when an org admin hasn't accepted a model's
+  terms (e.g. Orpheus, PlayAI). The critical-notify classifier now
+  recognises that shape as a new `TermsRequired` class, and the
+  notification body embeds the acceptance URL extracted from the
+  provider response so the user can click straight through to the
+  console. Subject to the existing session cascade cap.
+
+## [0.8.0] — 2026-05-13
+
+### Fixed
+
+- **Anthropic LLM cleanup 400 `stop_sequences: each stop sequence must
+  contain non-whitespace`.** The client was sending
+  `stop_sequences = ["\n\n"]` which Anthropic now rejects. The
+  blank-line heuristic is dropped; cleanup output length is bounded by
+  `max_tokens = 512` alone.
+
+- **Groq assistant returned 404 (`model_not_found`)** because the
+  catalogue advertised `llama-4-maverick-17b-128e-instruct` as Groq's
+  multimodal model and the new default of `prefer_vision = true`
+  caused the runtime to swap to it. That model isn't available on
+  Groq today. Groq's `multimodal_model` is now `None`; the assistant
+  uses `openai/gpt-oss-120b` (the existing `text_model`) for every
+  Groq request.
+
+- **Groq TTS model decommissioned.** The previously catalogued
+  `playai-tts` model (voice `Fritz-PlayAI`) was retired by Groq and
+  now returns `model_not_found`. Groq's catalogue entry now points
+  at `canopylabs/orpheus-v1-english` (Canopy Labs' Orpheus, OpenAI-
+  compatible audio/speech on Groq) with default voice `tara`. The
+  endpoint URL and auth header are unchanged.
+
+- **OpenAI assistant requests rejected by chat/completions when
+  `prefer_web_search` was on (`Invalid value: 'web_search_preview'`).**
+  The `web_search_preview` tool descriptor is Responses-API-only;
+  chat/completions rejects unknown tool types with a 400. OpenAI's
+  catalogue entry now advertises `web_search = None`; the default of
+  `[assistant].prefer_web_search` has been flipped to `false`.
+  Anthropic's `web_search_20250305` (Messages API) is unaffected. A
+  future commit will re-enable OpenAI web search via the Responses
+  API migration. As a defensive belt-and-braces, the OpenAI
+  chat/completions client now drops any web-search tool descriptor
+  at request build time and emits a one-shot `tracing::warn!` so a
+  hand-edited `prefer_web_search = true` no longer surfaces a 400 to
+  the user.
+
+- **Cloud STT clients (OpenAI, Deepgram) were missing from the default
+  build.** `crates/fono/Cargo.toml` listed `fono-stt` and `fono-llm`
+  with no feature selection, so the default release shipped only the
+  per-crate `default` features (Groq + Wyoming STT, OpenAI-compat +
+  Groq LLM). A user picking OpenAI as primary in the wizard hit a
+  `STT not compiled in` warning at daemon startup. `fono-stt` is now
+  built with `groq + openai + deepgram + wyoming`; `fono-llm` is
+  built with `cerebras + openai-compat + anthropic`. The `cloud-all`
+  meta-feature is widened to match. (Cartesia / AssemblyAI STT
+  clients are not yet wired as `fono-stt` features — tracked
+  separately.)
+
 ### Added
 
 - **Cloud provider capability catalogue.** A single
@@ -60,6 +145,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   systemd `--user` autostart case where stderr is invisible.
 
 ### Changed
+
+- **Assistant extras default policy.** `prefer_vision` stays
+  default-on (no API impact — the multimodal model is the same model
+  on OpenAI/Anthropic, just with image input capability advertised).
+  `prefer_web_search` now defaults off: the only provider whose
+  chat/completions API supports it natively today is Anthropic, and
+  OpenAI's chat/completions endpoint hard-rejects the
+  `web_search_preview` descriptor. The default flips back to `true`
+  once the OpenAI client migrates to the Responses API.
+
+- **Wizard first-run UX corrections (pre-release polish).**
+  - The step-1 path picker is now a fixed-order two-column table
+    (`Local` / `Cloud` / `Customize`) instead of a tier-dependent
+    paragraph-shaped list. Column padding is computed from the
+    longest option name + 2 spaces so future variants stay aligned.
+  - The language picker is skipped entirely when the OS reports at
+    least one detected language; the picker only renders for the
+    zero-detection fallback. A one-line info trace records the
+    detected codes and points the user at the tray's Languages
+    submenu for editing.
+  - The "Enable live dictation?" question is dropped from every
+    branch — the tray's existing toggle is the editing surface, and
+    `config.interactive.enabled` already defaults to `false`.
+  - The cloud-assistant fast-path is now automatic: when the chosen
+    primary covers chat, the assistant is enabled without a Confirm.
+    Two info lines state the configuration; `pick_tts_for_assistant`
+    still runs when no TTS was set, and `prompt_assistant_extras`
+    keeps vision / web-search as explicit opt-ins. The legacy
+    `Confirm("Enable the voice assistant?")` survives only for the
+    local-LLM branch where no catalogue primary matches.
 
 - **Wizard cloud branch collapsed onto a single primary-provider
   picker (#9).** Picking OpenAI or Groq now configures STT, LLM
@@ -1480,7 +1595,8 @@ feature and ships fully wired in v0.2.
 - Local LLM cleanup (Qwen / SmolLM) is opt-in / preview.
 - Real `winit + softbuffer` overlay window is a stub (event channel only).
 
-[Unreleased]: https://github.com/bogdanr/fono/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/bogdanr/fono/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/bogdanr/fono/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/bogdanr/fono/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/bogdanr/fono/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/bogdanr/fono/compare/v0.6.0...v0.6.1

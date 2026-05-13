@@ -39,13 +39,13 @@ use fono_core::config::{
 };
 use fono_core::hwcheck::{Affordability, HardwareSnapshot, LocalTier};
 use fono_core::locale::detect_user_languages_ranked;
-use fono_core::provider_catalog::{Badge, CloudProvider, WebSearchSupport, CLOUD_PROVIDERS};
+use fono_core::provider_catalog::{CloudProvider, WebSearchSupport, CLOUD_PROVIDERS};
 use fono_core::providers::{
     configured_tts_backends, parse_assistant_backend, parse_llm_backend, parse_stt_backend,
     parse_tts_backend,
 };
 use fono_core::{Paths, Secrets};
-use fono_stt::registry::{ModelInfo, ModelRegistry, WHISPER_MODELS};
+use fono_stt::registry::{ModelInfo, WHISPER_MODELS};
 use std::time::Duration;
 
 pub async fn run(paths: &Paths) -> Result<()> {
@@ -124,12 +124,6 @@ pub async fn run(paths: &Paths) -> Result<()> {
          tap to toggle, hold for push-to-talk.",
         config.hotkeys.dictation, config.hotkeys.assistant, config.hotkeys.cancel,
     );
-    if config.hotkeys.assistant.eq_ignore_ascii_case("F8") {
-        println!(
-            "  Note: htop binds F8 to nice+ — if you live in htop, \
-             rebind `[hotkeys].assistant` to a free key."
-        );
-    }
     println!("  Run `fono` to start the daemon, or `fono doctor` to diagnose your setup.\n");
     Ok(())
 }
@@ -182,60 +176,79 @@ fn assistant_candidates() -> Vec<&'static CloudProvider> {
         .collect()
 }
 
-/// Build the capability-badge label for the primary picker, capping at
-/// 6 badges per risk #5 in the plan. Vision and Search badges are
-/// **derived from runtime state** (`multimodal_model.is_some()` and
-/// `web_search != None`) rather than read from the catalogue's static
-/// `badges` array, so a single catalogue edit keeps the wizard label,
-/// the assistant builder, and the request-tool injection in lockstep.
-fn primary_label(entry: &CloudProvider) -> String {
-    let mut badges: Vec<&'static str> = Vec::new();
-    if entry.stt.is_some() {
-        badges.push("STT");
+/// Header labels for the primary-cloud-provider picker's capability
+/// columns. Order matches the per-row capability tuple emitted by
+/// [`primary_capabilities`].
+const PRIMARY_CAP_HEADERS: [&str; 6] =
+    ["STT", "LLM", "Assistant", "TTS", "Vision", "Search"];
+
+/// Per-capability column widths for the primary picker table. All
+/// capability columns share a single uniform width = widest header
+/// label (`Assistant`) + 2 trailing spaces, so the table reads as a
+/// regular grid rather than a ragged set of columns sized to each
+/// abbreviation. Width is always > 1, i.e. wide enough for the
+/// single-character `✓`/`·` glyph.
+fn primary_cap_widths() -> [usize; 6] {
+    let max = PRIMARY_CAP_HEADERS
+        .iter()
+        .map(|h| h.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    [max; 6]
+}
+
+/// Six-tuple of capability-presence flags for a catalogue entry, in
+/// the order rendered by [`primary_header`] / [`primary_row`].
+/// Vision and Search are derived from runtime catalogue state
+/// (`multimodal_model.is_some()` and `web_search != None`) rather
+/// than from the static `badges` array, so a single catalogue edit
+/// keeps the wizard, the assistant builder, and request-tool
+/// injection in lockstep.
+fn primary_capabilities(entry: &CloudProvider) -> [bool; 6] {
+    let assistant = entry.assistant;
+    let vision = assistant.and_then(|a| a.multimodal_model).is_some();
+    let search = matches!(
+        assistant.map(|a| a.web_search),
+        Some(WebSearchSupport::NativeTool(_) | WebSearchSupport::Always)
+    );
+    [
+        entry.stt.is_some(),
+        entry.llm.is_some(),
+        assistant.is_some(),
+        entry.tts.is_some(),
+        vision,
+        search,
+    ]
+}
+
+/// Aligned header row for the primary picker table. Printed once
+/// **above** the `dialoguer::Select` so it scrolls with the prompt
+/// rather than appearing as a non-selectable cursor item.
+fn primary_header(provider_col_width: usize) -> String {
+    use std::fmt::Write as _;
+    let widths = primary_cap_widths();
+    let mut s = format!("{:<w$}", "Provider", w = provider_col_width);
+    for (i, h) in PRIMARY_CAP_HEADERS.iter().enumerate() {
+        let _ = write!(s, "{:<w$}", h, w = widths[i]);
     }
-    if entry.llm.is_some() {
-        badges.push("LLM");
+    s.trim_end().to_string()
+}
+
+/// One aligned table row for the primary picker. Columns:
+/// provider name (padded to `provider_col_width`), then one `✓`/`·`
+/// glyph per capability in `primary_capabilities` order, each padded
+/// to the header label width + 2 spaces.
+fn primary_row(entry: &CloudProvider, provider_col_width: usize) -> String {
+    use std::fmt::Write as _;
+    let widths = primary_cap_widths();
+    let caps = primary_capabilities(entry);
+    let mut s = format!("{:<w$}", entry.display_name, w = provider_col_width);
+    for (i, present) in caps.iter().enumerate() {
+        let glyph = if *present { "✓" } else { "·" };
+        let _ = write!(s, "{:<w$}", glyph, w = widths[i]);
     }
-    if entry.assistant.is_some() {
-        badges.push("Assistant");
-    }
-    if entry.tts.is_some() {
-        badges.push("TTS");
-    }
-    if let Some(adef) = entry.assistant {
-        if adef.multimodal_model.is_some() {
-            badges.push("Vision");
-        }
-        if !matches!(adef.web_search, WebSearchSupport::None) {
-            badges.push("Search");
-        }
-        // Reasoning / Fast / etc. remain catalogue-driven flavour
-        // badges — they describe the provider's positioning rather
-        // than a runtime capability the wizard or factory toggles.
-        for b in adef.badges {
-            let label = match b {
-                Badge::Reasoning => "Reasoning",
-                Badge::Fast => "Fast",
-                // Already covered above (runtime-derived or set).
-                Badge::Stt
-                | Badge::Llm
-                | Badge::Assistant
-                | Badge::Tts
-                | Badge::Vision
-                | Badge::Search => continue,
-            };
-            if !badges.contains(&label) {
-                badges.push(label);
-            }
-        }
-    }
-    let badge_str = if badges.len() > 6 {
-        let head: Vec<&str> = badges.into_iter().take(6).collect();
-        format!("{} · …", head.join(" · "))
-    } else {
-        badges.join(" · ")
-    };
-    format!("{} — {}", entry.display_name, badge_str)
+    s.trim_end().to_string()
 }
 
 /// Pre-seed the primary picker default cursor:
@@ -273,9 +286,10 @@ fn default_primary_for_seed(
         .unwrap_or(0)
 }
 
-/// Render the primary-cloud-provider picker. Lists every catalogued
-/// provider with a wired LLM factory, plus the "Customize" escape
-/// hatch. See [`PrimaryPick`].
+/// Render the primary-cloud-provider picker as an aligned table. The
+/// header row is printed once via `println!` so it scrolls with the
+/// prompt; the `dialoguer::Select` carries only data rows + the
+/// Customize escape hatch. See [`PrimaryPick`].
 fn pick_primary_cloud_provider(
     theme: &ColorfulTheme,
     secrets: &Secrets,
@@ -285,17 +299,34 @@ fn pick_primary_cloud_provider(
         .iter()
         .filter(|p| is_primary_candidate(p))
         .collect();
-    let mut labels: Vec<String> = candidates.iter().map(|p| primary_label(p)).collect();
-    labels.push("Customize per capability (advanced)".into());
+    let provider_col_width = candidates
+        .iter()
+        .map(|p| p.display_name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("Customize".len())
+        + 2;
     let default = default_primary_for_seed(&candidates, cfg, secrets);
 
     println!(
         "  Pick a primary cloud provider. One key, one walk — Fono fills in every\n  \
          capability that provider covers (STT · LLM · Assistant · TTS).\n"
     );
+    println!("  {}", primary_header(provider_col_width));
+
+    let mut rows: Vec<String> = candidates
+        .iter()
+        .map(|p| primary_row(p, provider_col_width))
+        .collect();
+    rows.push(format!(
+        "{:width$}Pick a backend per capability",
+        "Customize",
+        width = provider_col_width
+    ));
+
     let idx = Select::with_theme(theme)
         .with_prompt("Primary cloud provider")
-        .items(&labels)
+        .items(&rows)
         .default(default)
         .interact()
         .context("prompt")?;
@@ -433,15 +464,14 @@ async fn prompt_or_reuse_key(
 }
 
 /// Look up the catalogue entry whose `key_env` matches `key_env`.
-/// Used by legacy code paths (Customize flow) to recover the
-/// human-readable display name + console URL from a bare env-var
-/// name.
+/// Used by the Customize flow to recover the human-readable display
+/// name + console URL from a bare env-var name.
 fn catalogue_by_key_env(key_env: &str) -> Option<&'static CloudProvider> {
     CLOUD_PROVIDERS.iter().find(|p| p.key_env == key_env)
 }
 
-/// Convenience accessor for legacy callers that hold a `*_API_KEY`
-/// string: returns (display_name, console_url), falling back to the
+/// Convenience accessor for the Customize flow: given a `*_API_KEY`
+/// string, returns (display_name, console_url), falling back to the
 /// env-var name and an empty URL if the catalogue doesn't know it.
 fn catalogue_meta_for_key(key_env: &str) -> (&'static str, &'static str) {
     catalogue_by_key_env(key_env)
@@ -599,66 +629,49 @@ async fn pick_tts_for_assistant(
 /// `secrets.toml` lead. When the user's primary cloud provider
 /// already covers both assistant chat and a TTS backend (set by
 /// `configure_cloud`), the prompt collapses to a single Confirm.
-//
-/// Pure decision helper for Phase E3 — determine which "assistant
-/// extras" rows the wizard should render for `entry`. Returns
-/// `(show_vision, show_web_search)`.
 ///
-/// Kept side-effect free so it can be unit-tested without spinning up
-/// the dialoguer prompt machinery.
-#[must_use]
-pub(crate) fn assistant_extras_for(entry: &CloudProvider) -> (bool, bool) {
-    let Some(adef) = entry.assistant else {
-        return (false, false);
-    };
-    let vision = adef.multimodal_model.is_some();
-    let web = !matches!(adef.web_search, WebSearchSupport::None);
-    (vision, web)
-}
-
-/// Phase E3 — surface a single optional `MultiSelect` letting the
-/// user opt into the chosen provider's vision-capable model variant
-/// and/or its native web-search tool. Suppressed entirely when the
-/// provider supports neither (e.g. Cerebras, OpenRouter).
-fn prompt_assistant_extras(
-    theme: &ColorfulTheme,
-    config: &mut Config,
+/// v0.8.1 (pre-release UX polish): the prior `MultiSelect` that
+/// asked the user to opt into vision and web-search extras has been
+/// removed. For the providers that surface either capability the
+/// multimodal model is identical to the text model (zero cost) and
+/// server-side web search is the kind of thing the user who sets up
+/// an assistant in the first place almost certainly wants. Both
+/// flags default to `true` in [`fono_core::config::Assistant`] and
+/// can be flipped off in `config.toml` (`[assistant].prefer_vision
+/// = false` / `prefer_web_search = false`) or via a future tray
+/// submenu.
+//
+/// Build the "Extras:" info line shown in the assistant fast path.
+/// Reports the *enabled* extras — i.e. catalogue support **and**
+/// the corresponding `[assistant].prefer_*` flag — so the line
+/// reflects runtime behaviour rather than catalogue capabilities.
+/// Returns `None` when nothing is enabled so the caller can skip
+/// rendering an empty line.
+fn assistant_extras_summary(
     entry: &CloudProvider,
-) -> Result<()> {
-    let (show_vision, show_web) = assistant_extras_for(entry);
-    if !show_vision && !show_web {
-        return Ok(());
+    assistant_cfg: &fono_core::config::Assistant,
+) -> Option<String> {
+    let adef = entry.assistant?;
+    let mut parts: Vec<String> = Vec::new();
+    if assistant_cfg.prefer_vision && adef.multimodal_model.is_some() {
+        parts.push("vision (multimodal model)".to_string());
     }
-
-    let mut items: Vec<&str> = Vec::new();
-    let mut keys: Vec<&str> = Vec::new();
-    if show_vision {
-        items.push("Let the assistant see images on demand (vision-capable model)");
-        keys.push("vision");
-    }
-    if show_web {
-        items.push("Let the assistant search the web for fresh info");
-        keys.push("web_search");
-    }
-    // Both rows default off — opt-in only.
-    let defaults: Vec<bool> = vec![false; items.len()];
-
-    println!();
-    println!("  Optional extras for the assistant (Space to toggle, Enter to accept):");
-    let picks = MultiSelect::with_theme(theme)
-        .items(&items)
-        .defaults(&defaults)
-        .interact()
-        .context("prompt")?;
-
-    for i in picks {
-        match keys[i] {
-            "vision" => config.assistant.prefer_vision = true,
-            "web_search" => config.assistant.prefer_web_search = true,
-            _ => {}
+    if assistant_cfg.prefer_web_search {
+        match adef.web_search {
+            WebSearchSupport::NativeTool(id) => {
+                parts.push(format!("web search ({id})"));
+            }
+            WebSearchSupport::Always => {
+                parts.push("web search (always grounded)".to_string());
+            }
+            WebSearchSupport::None => {}
         }
     }
-    Ok(())
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -675,43 +688,65 @@ async fn configure_assistant(
     );
     println!("  Independent of dictation cleanup — different model, different key.");
 
-    // Fast path — if the primary cloud provider (inferred from the
-    // currently-selected LLM backend) covers assistant chat AND a TTS
-    // backend has already been chosen by `configure_cloud` (or Wyoming
-    // is configured), collapse to a single Confirm.
+    // Fast path — when the primary cloud provider (inferred from the
+    // currently-selected LLM backend) covers assistant chat, auto-enable
+    // the assistant (no Confirm). The user already committed to a cloud
+    // key that supports it in `configure_cloud`; one more prompt was
+    // redundant. Two sub-cases:
+    //   1. TTS already set     → enable + 2 info lines + extras prompt.
+    //   2. TTS not yet set     → enable + first info line, fall through
+    //                            to `pick_tts_for_assistant` so the user
+    //                            still gets `Skip — text-only assistant`
+    //                            as an explicit escape hatch.
     let primary = catalogue_for_llm_backend(&config.llm.backend);
     let tts_already_set = !matches!(config.tts.backend, TtsBackend::None);
     if let Some(entry) = primary {
         if let Some(adef) = entry.assistant {
-            if is_assistant_wired(entry) && tts_already_set {
-                let prompt = format!(
-                    "Enable the voice assistant with {} chat + {} TTS?",
-                    entry.display_name,
-                    tts_short_label(&config.tts.backend)
+            if is_assistant_wired(entry) {
+                let backend = parse_assistant_backend(entry.id)
+                    .context("catalogue assistant id should parse")?;
+                config.assistant.enabled = true;
+                config.assistant.backend = backend;
+                config.assistant.cloud = Some(AssistantCloud {
+                    provider: entry.id.into(),
+                    api_key_ref: entry.key_env.into(),
+                    model: adef.text_model.into(),
+                });
+                // Key was prompted/reused in `configure_cloud`.
+                let tts_label = if tts_already_set {
+                    tts_short_label(&config.tts.backend).to_string()
+                } else {
+                    "no TTS yet".to_string()
+                };
+                println!(
+                    "  Voice assistant enabled — {} chat + {} TTS.",
+                    entry.display_name, tts_label
                 );
-                let yes = Confirm::with_theme(theme)
-                    .with_prompt(prompt)
-                    .default(true)
-                    .interact()
-                    .unwrap_or(true);
-                if yes {
-                    let backend = parse_assistant_backend(entry.id)
-                        .context("catalogue assistant id should parse")?;
-                    config.assistant.enabled = true;
-                    config.assistant.backend = backend;
-                    config.assistant.cloud = Some(AssistantCloud {
-                        provider: entry.id.into(),
-                        api_key_ref: entry.key_env.into(),
-                        model: adef.text_model.into(),
-                    });
-                    // Key was prompted/reused in `configure_cloud`.
-                    return Ok(());
+                if let Some(extras) = assistant_extras_summary(entry, &config.assistant) {
+                    println!("  Extras: {extras}.");
                 }
-                // Decline falls through to the full picker below.
+                if tts_already_set {
+                    println!(
+                        "  Press {} to ask a question and hear the reply.",
+                        config.hotkeys.assistant
+                    );
+                }
+                // Extras (vision + web search) are default-on in
+                // [`fono_core::config::Assistant`] — see
+                // `assistant_extras_summary` above. The factory
+                // re-checks the catalogue at startup so providers
+                // without a multimodal model or native search tool
+                // gracefully degrade.
+                if !tts_already_set {
+                    pick_tts_for_assistant(theme, config, secrets).await?;
+                }
+                return Ok(());
             }
         }
     }
 
+    // Local-LLM users: no catalogue primary matches the current LLM
+    // backend. Keep the Confirm so they can decline.
     let want = Confirm::with_theme(theme)
         .with_prompt("Enable the voice assistant?")
         .default(false)
@@ -781,11 +816,8 @@ async fn configure_assistant(
         model: adef.text_model.into(),
     });
 
-    // ── Phase E3 — assistant extras (vision + web search) ────────
-    // Only render when the chosen provider's catalogue entry advertises
-    // at least one of the two. Each row appears only if its capability
-    // applies. Both default off.
-    prompt_assistant_extras(theme, config, entry)?;
+    // Extras (vision + web search) default on at the config layer
+    // — see `Assistant::default()`. No prompt here.
 
     // ── TTS picker (F7) ─ only if not already set by `configure_cloud`.
     if !tts_already_set {
@@ -801,7 +833,7 @@ enum PathChoice {
     /// Customize = pick STT and LLM backends independently. Lets users
     /// run e.g. local whisper for privacy + cloud Cerebras for fast
     /// cleanup, or cloud Groq STT + skip-LLM (raw output) on a slow-CPU
-    /// machine. Renamed from `Mixed` in the v2 catalogue rework.
+    /// machine.
     Customize,
 }
 
@@ -860,39 +892,38 @@ fn pick_path(
         return Ok(PathChoice::Cloud);
     }
 
-    // R3.3 — three top-level options. Order tracks tier:
-    // Comfortable+: local first (matches `tier.local_default()`).
-    // Minimum:      cloud first (faster on the host hardware).
-    let (items, default_idx, mapping): (&[&str; 3], usize, [PathChoice; 3]) =
-        if tier.local_default() {
-            (
-                &[
-                    "Local models (recommended for your machine — private, offline)",
-                    "Customize each capability (advanced)",
-                    "Cloud APIs (fast, needs internet, bring your own key)",
-                ],
-                0,
-                [PathChoice::Local, PathChoice::Customize, PathChoice::Cloud],
-            )
-        } else {
-            (
-                &[
-                    "Cloud APIs (faster on your machine)",
-                    "Customize each capability (advanced)",
-                    "Local models (will work but slower — ~2 s per dictation)",
-                ],
-                0,
-                [PathChoice::Cloud, PathChoice::Customize, PathChoice::Local],
-            )
-        };
+    // R3.3 — three top-level options in a fixed order, rendered as a
+    // two-column table. Order is independent of hardware tier; only
+    // the default cursor position tracks `tier.local_default()`.
+    let mapping = [PathChoice::Local, PathChoice::Cloud, PathChoice::Customize];
+    let rows = pick_path_rows();
+    let default_idx = usize::from(!tier.local_default());
 
     let idx = Select::with_theme(theme)
-        .with_prompt("How would you like to run speech-to-text and cleanup?")
-        .items(items)
+        .with_prompt("Where should Fono run speech-to-text and LLM cleanup?")
+        .items(&rows)
         .default(default_idx)
         .interact()
         .context("prompt")?;
     Ok(mapping[idx])
+}
+
+/// Rows shown by `pick_path`'s two-column Select. Each row is
+/// `"<name padded>  <description>"` where the pad width is computed
+/// from the longest name + 2 spaces so future variants (e.g. `Hybrid`)
+/// don't break alignment. Factored out for unit testing.
+fn pick_path_rows() -> [String; 3] {
+    let entries: [(&str, &str); 3] = [
+        ("Local", "Private, offline, runs on this machine"),
+        ("Cloud", "Fast, accurate, needs an API key"),
+        ("Customize", "Pick a backend per capability"),
+    ];
+    let width = entries.iter().map(|(name, _)| name.len()).max().unwrap_or(0) + 2;
+    [
+        format!("{:<width$}{}", entries[0].0, entries[0].1, width = width),
+        format!("{:<width$}{}", entries[1].0, entries[1].1, width = width),
+        format!("{:<width$}{}", entries[2].0, entries[2].1, width = width),
+    ]
 }
 
 async fn configure_local(
@@ -926,10 +957,11 @@ async fn configure_local(
         prompts: std::collections::HashMap::new(),
     };
 
-    // Step 4 — Live dictation (interactive) mode.
-    pick_interactive_mode(theme, config, snap, true, Some(stt_model));
+    // Live dictation stays off by default; users opt in later from
+    // the tray's "Live dictation" toggle (no wizard prompt — the
+    // question was confusing for first-run users).
 
-    // Step 5 — LLM cleanup choice. Default is **Skip**: dictation is
+    // Step 4 — LLM cleanup choice. Default is **Skip**: dictation is
     // valuable on its own without an LLM rewrite step, and the user
     // can opt in later via `fono settings`. Cloud comes second
     // (cheap, fast, no model download). Local comes last and is only
@@ -1070,9 +1102,8 @@ async fn configure_cloud(
     // and the now-set TTS state to collapse to a single Confirm when
     // the primary covers both.
 
-    // Language + interactive mode pickers (unchanged).
+    // Language picker (interactive-mode prompt removed — tray toggle handles it).
     config.general.languages = pick_languages(theme)?;
-    pick_interactive_mode(theme, config, snap, false, None);
     Ok(())
 }
 
@@ -1150,7 +1181,6 @@ async fn offer_secondary_stt(
 }
 
 /// R3.3 -- Customize path: ask STT and LLM independently, no coupling.
-/// Renamed from `configure_mixed` as part of the v2 wizard rework.
 async fn configure_customize(
     theme: &ColorfulTheme,
     config: &mut Config,
@@ -1171,11 +1201,7 @@ async fn configure_customize(
         .default(usize::from(!tier.local_default()))
         .interact()?;
 
-    let stt_is_local;
-    let local_model_chosen: Option<String>;
-
     if stt_idx == 0 {
-        stt_is_local = true;
         let english_only = pick_english_only(theme);
         if english_only {
             config.general.languages = vec!["en".to_string()];
@@ -1183,7 +1209,6 @@ async fn configure_customize(
             config.general.languages = pick_languages(theme)?;
         }
         let stt_model = pick_local_stt_model(theme, english_only, &config.general.languages, snap)?;
-        local_model_chosen = Some(stt_model.to_string());
         config.stt = Stt {
             backend: SttBackend::Local,
             local: SttLocal {
@@ -1195,20 +1220,12 @@ async fn configure_customize(
             prompts: std::collections::HashMap::new(),
         };
     } else {
-        stt_is_local = false;
-        local_model_chosen = None;
         configure_cloud_stt(theme, config, secrets).await?;
         config.general.languages = pick_languages(theme)?;
     }
 
-    // Interactive mode question (depends on STT backend + model).
-    pick_interactive_mode(
-        theme,
-        config,
-        snap,
-        stt_is_local,
-        local_model_chosen.as_deref(),
-    );
+    // Live dictation stays off by default; tray's "Live dictation"
+    // toggle is the editing surface post-install.
 
     // ----- LLM side -----
     // Standard ordering (Skip, Cloud, Local) with hardware-aware
@@ -1252,12 +1269,13 @@ fn pick_english_only(theme: &ColorfulTheme) -> bool {
     idx == 1
 }
 
-/// Languages-you-dictate-in picker. Plan v3 task 7. Builds a checkbox
-/// list from a curated common-language set unioned with the OS-detected
-/// locale, with `en` and any OS-detected entry pre-checked. Order in
-/// the resulting `Vec` is cosmetic — Fono treats every entry as a peer.
-/// Returning an empty `Vec` is allowed (collapses to unconstrained
-/// auto-detect at runtime).
+/// Languages-you-dictate-in picker. Plan v3 task 7. Wizard skips the
+/// picker entirely when ≥ 1 languages are reliably detected from the
+/// OS; the tray's Languages submenu remains the primary editing
+/// surface post-install. Only the zero-detection case falls back to
+/// the manual MultiSelect from a curated common-language set with
+/// `en` pre-checked. Returning an empty `Vec` is allowed (collapses
+/// to unconstrained auto-detect at runtime).
 fn pick_languages(theme: &ColorfulTheme) -> Result<Vec<String>> {
     // Single canonical curated list shared with the tray — picking
     // "English" here writes the exact same `general.languages = ["en"]`
@@ -1265,11 +1283,22 @@ fn pick_languages(theme: &ColorfulTheme) -> Result<Vec<String>> {
     let curated: &[(&str, &str)] = fono_core::languages::CURATED_LANGUAGES;
     // Ranked OS detection: collects signals from POSIX env, system
     // locale, formatting locales, keyboard layout, timezone, and
-    // platform-native APIs. Any code with score ≥ 1 is pre-checked —
-    // every signal is a real hint that the user might dictate in
-    // that language, and the user can still uncheck before confirming.
+    // platform-native APIs. Any code with score ≥ 1 is considered a
+    // real hint — the wizard skips the picker outright when the OS
+    // surfaces at least one such code.
     let ranked = detect_user_languages_ranked();
-    let os_codes: Vec<String> = ranked.iter().map(|d| d.code.clone()).collect();
+    let detected_codes: Vec<String> = ranked.iter().map(|d| d.code.clone()).collect();
+
+    if !detected_codes.is_empty() {
+        let codes = finalise_detected_languages(&detected_codes);
+        println!(
+            "  Languages detected from your OS locale: {} — change later from the tray menu.",
+            codes.join(", ")
+        );
+        return Ok(codes);
+    }
+
+    let os_codes: Vec<String> = detected_codes;
     let reasons_of = |code: &str| -> Option<String> {
         ranked.iter().find(|d| d.code == code).map(|d| {
             d.reasons
@@ -1321,29 +1350,30 @@ fn pick_languages(theme: &ColorfulTheme) -> Result<Vec<String>> {
         .defaults(&defaults)
         .interact()?;
 
-    let mut codes: Vec<String> = chosen.into_iter().map(|i| entries[i].1.clone()).collect();
+    let codes: Vec<String> = chosen.into_iter().map(|i| entries[i].1.clone()).collect();
+    Ok(finalise_detected_languages(&codes))
+}
+
+/// Pure helper: applies the shared normalisation + bilingual-English
+/// peer safety net used by both the OS-detected fast-path and the
+/// manual MultiSelect fallback. Factored out for unit testability.
+fn finalise_detected_languages(input: &[String]) -> Vec<String> {
     // Normalise via LanguageSelection so dedupe + lowercase rules apply
     // uniformly with the rest of the runtime.
-    let normalised = fono_stt::LanguageSelection::from_config(&codes);
-    codes = normalised.codes().to_vec();
-
-    // If the user selected exactly one non-English language, silently add
-    // English as a peer. Without it, a single-entry allow-list would cause
-    // the rerun mechanism to force that language on any clip that Groq
-    // auto-detects as something outside the list — including genuine English
-    // speech — producing garbled output. English as a peer is harmless for
-    // speakers who never use it (it will simply never be detected) and
-    // essential for bilingual users.
+    let normalised = fono_stt::LanguageSelection::from_config(input);
+    let mut codes: Vec<String> = normalised.codes().to_vec();
+    // If only one non-English language is present, silently add
+    // English as a peer. Without it, a single-entry allow-list would
+    // cause the rerun mechanism to force that language on any clip
+    // that Groq auto-detects as something outside the list —
+    // including genuine English speech — producing garbled output.
+    // English as a peer is harmless for speakers who never use it
+    // (it will simply never be detected) and essential for bilingual
+    // users.
     if codes.len() == 1 && codes[0] != "en" {
         codes.push("en".to_string());
-        println!(
-            "  ℹ  English added as a peer language — Fono works best with at\n\
-             \x20     least two languages. You can remove it later by editing\n\
-             \x20     general.languages in your config file."
-        );
     }
-
-    Ok(codes)
+    codes
 }
 
 // ─── Local STT model picker ────────────────────────────────────────────────
@@ -1609,81 +1639,6 @@ fn pick_local_stt_model(
     Ok(shortlist[idx].model.name)
 }
 
-// ─── Interactive (live) mode question ─────────────────────────────────────
-
-/// Ask whether to enable live dictation (streaming overlay preview while
-/// speaking). Recommendation matrix:
-///
-/// - **Cloud STT**: always recommend — the server handles the compute.
-/// - **Local STT, accelerated host (Apple Silicon)**: recommend if the
-///   model is `Comfortable` under the relaxed accel threshold.
-/// - **Local STT, CPU-only host**: recommend only when the model is
-///   `Comfortable` under the strict CPU threshold (typically tiny/base;
-///   small only on >=12 cores; turbo never on CPU-only). Borderline →
-///   default to off and explain that live mode may lag.
-/// - **Local STT, model unknown**: fall back to hardware tier.
-fn pick_interactive_mode(
-    theme: &ColorfulTheme,
-    config: &mut Config,
-    snap: &HardwareSnapshot,
-    stt_is_local: bool,
-    local_model_name: Option<&str>,
-) {
-    let (recommend, reason): (bool, String) = if stt_is_local {
-        local_model_name.and_then(ModelRegistry::get).map_or_else(
-            || {
-                (
-                    snap.tier().local_default(),
-                    "recommendation based on detected hardware".to_string(),
-                )
-            },
-            |m| match snap.affords_model(m.min_ram_mb, m.approx_mb, m.realtime_factor_cpu_avx2) {
-                Affordability::Comfortable => {
-                    let reason = if snap.accelerated() {
-                        "hardware-accelerated speech recognition keeps live preview snappy".to_string()
-                    } else {
-                        "this CPU should keep up with real-time transcription".to_string()
-                    };
-                    (true, reason)
-                }
-                Affordability::Borderline => {
-                    let reason = if snap.accelerated() {
-                        "this model is heavy even with hardware acceleration; batch dictation will feel snappier".to_string()
-                    } else {
-                        "on this CPU, live preview is not recommended".to_string()
-                    };
-                    (false, reason)
-                }
-                Affordability::Unsuitable => (
-                    false,
-                    "this hardware can't sustain live mode for the chosen model".to_string(),
-                ),
-            },
-        )
-    } else {
-        (true, "transcription will do more API calls".to_string())
-    };
-
-    println!(
-        "\n  Live dictation shows a real-time preview as you speak. It works best on\n  \
-         fast machines or with cloud transcription; otherwise batch mode (full\n  \
-         transcription appears when you release the hotkey) is smoother."
-    );
-    // Arrow-key Select defaulting to "No" per the v0.6.0 wizard
-    // overhaul — first-time users with marginal hardware are better
-    // served by batch mode (smoother) and can flip live dictation on
-    // later from `fono settings` once they know they want it. When the
-    // hardware probe says "recommended", we still default to No but
-    // the prompt suffix tells the user it's safe to pick Yes.
-    let _ = recommend;
-    let idx = Select::with_theme(theme)
-        .with_prompt(format!("Enable live dictation? — {reason}"))
-        .items(&["No", "Yes"])
-        .default(0)
-        .interact()
-        .unwrap_or(0);
-    config.interactive.enabled = idx == 1;
-}
 // ─── LLM configuration helpers ─────────────────────────────────────────────
 
 /// Tier-aware local LLM model picker. Sets `config.llm` to the chosen
@@ -2105,62 +2060,92 @@ mod tests {
     use super::*;
     use fono_core::hwcheck::{CpuFeatures, HardwareSnapshot};
     use fono_core::provider_catalog::find;
+    use fono_stt::registry::ModelRegistry;
 
     #[test]
-    fn primary_label_includes_runtime_derived_vision_search() {
-        // OpenAI: multimodal_model = Some, web_search = NativeTool → both badges.
-        let s = primary_label(find("openai").expect("openai entry"));
-        assert!(s.contains("Vision"), "{s}");
-        assert!(s.contains("Search"), "{s}");
-        // Anthropic: same.
-        let s = primary_label(find("anthropic").expect("anthropic entry"));
-        assert!(s.contains("Vision"), "{s}");
-        assert!(s.contains("Search"), "{s}");
-        // Groq: multimodal Some, web_search None → Vision yes, Search no.
-        let s = primary_label(find("groq").expect("groq entry"));
-        assert!(s.contains("Vision"), "{s}");
-        assert!(!s.contains("Search"), "{s}");
-        // Cerebras: both None → neither badge.
-        let s = primary_label(find("cerebras").expect("cerebras entry"));
-        assert!(!s.contains("Vision"), "{s}");
-        assert!(!s.contains("Search"), "{s}");
-        // OpenRouter: both None for now → neither badge.
-        let s = primary_label(find("openrouter").expect("openrouter entry"));
-        assert!(!s.contains("Vision"), "{s}");
-        assert!(!s.contains("Search"), "{s}");
+    fn primary_capabilities_match_catalogue() {
+        // OpenAI: full house except web search (catalogue advertises
+        // `WebSearchSupport::None` until the OpenAI client migrates to
+        // the Responses API).
+        assert_eq!(
+            primary_capabilities(find("openai").expect("openai entry")),
+            [true, true, true, true, true, false],
+        );
+        // Groq: STT + LLM + Assistant + TTS, no Vision, no Search.
+        // (Vision dropped after the Maverick 404 fix — Groq has no
+        // hosted vision model Fono is willing to default to today.)
+        assert_eq!(
+            primary_capabilities(find("groq").expect("groq entry")),
+            [true, true, true, true, false, false],
+        );
+        // Anthropic: LLM + Assistant + Vision + Search, no STT/TTS.
+        assert_eq!(
+            primary_capabilities(find("anthropic").expect("anthropic entry")),
+            [false, true, true, false, true, true],
+        );
+        // Cerebras: LLM + Assistant only.
+        assert_eq!(
+            primary_capabilities(find("cerebras").expect("cerebras entry")),
+            [false, true, true, false, false, false],
+        );
+        // OpenRouter: LLM + Assistant + TTS (Kokoro), no Vision/Search yet.
+        let openrouter = primary_capabilities(find("openrouter").expect("openrouter entry"));
+        assert_eq!(openrouter[..2], [false, true]);
+        assert!(openrouter[2], "OpenRouter exposes an assistant chat");
+        assert!(!openrouter[4], "no multimodal model wired for OpenRouter");
+        assert!(!openrouter[5], "no native web-search tool for OpenRouter");
     }
 
     #[test]
-    fn assistant_extras_for_matches_catalogue() {
-        assert_eq!(
-            assistant_extras_for(find("openai").unwrap()),
-            (true, true),
-            "openai supports both"
+    fn assistant_extras_summary_matches_catalogue() {
+        use fono_core::config::Assistant;
+        // Default config: prefer_vision = true, prefer_web_search = false.
+        // OpenAI now advertises web_search = None too (Responses-API
+        // migration pending), so the line should mention vision only.
+        let defaults = Assistant::default();
+        let s = assistant_extras_summary(find("openai").unwrap(), &defaults)
+            .expect("openai has vision extra");
+        assert!(s.contains("vision"), "{s}");
+        assert!(!s.contains("web search"), "{s}");
+        // Anthropic, defaults: vision only (web_search disabled by default).
+        let s = assistant_extras_summary(find("anthropic").unwrap(), &defaults)
+            .expect("anthropic has vision extra");
+        assert!(s.contains("vision"), "{s}");
+        assert!(!s.contains("web search"), "{s}");
+        // Anthropic with prefer_web_search opted in: surfaces the
+        // Messages-API tool id.
+        let opted_in = Assistant {
+            prefer_web_search: true,
+            ..Assistant::default()
+        };
+        let s = assistant_extras_summary(find("anthropic").unwrap(), &opted_in)
+            .expect("anthropic has extras when web_search opted in");
+        assert!(s.contains("vision"), "{s}");
+        assert!(s.contains("web_search_20250305"), "{s}");
+        // Even with both flags on, OpenAI advertises None today so the
+        // line shows vision only.
+        let s = assistant_extras_summary(find("openai").unwrap(), &opted_in)
+            .expect("openai has vision extra");
+        assert!(s.contains("vision"), "{s}");
+        assert!(!s.contains("web search"), "{s}");
+        // Groq: no multimodal model and web_search = None — the
+        // Extras line is absent entirely. Regression guard for the
+        // Maverick 404 fix; Groq's catalogue advertised a nonexistent
+        // multimodal model (`llama-4-maverick-17b-128e-instruct`)
+        // until that was removed.
+        assert!(
+            assistant_extras_summary(find("groq").unwrap(), &defaults).is_none(),
+            "groq must have no extras line after the Maverick removal"
         );
-        assert_eq!(
-            assistant_extras_for(find("anthropic").unwrap()),
-            (true, true),
-        );
-        assert_eq!(
-            assistant_extras_for(find("groq").unwrap()),
-            (true, false),
-            "groq supports vision but not search"
-        );
-        assert_eq!(
-            assistant_extras_for(find("cerebras").unwrap()),
-            (false, false),
-            "cerebras supports neither"
-        );
-        assert_eq!(
-            assistant_extras_for(find("openrouter").unwrap()),
-            (false, false),
-        );
-        // STT-only providers don't have an assistant entry; extras
-        // suppressed regardless.
-        assert_eq!(
-            assistant_extras_for(find("assemblyai").unwrap()),
-            (false, false),
-        );
+        // Even with prefer_web_search opted in, Groq still has no
+        // multimodal model and no native search tool — line stays
+        // absent.
+        assert!(assistant_extras_summary(find("groq").unwrap(), &opted_in).is_none());
+        // Cerebras / OpenRouter: no multimodal, no native search.
+        assert!(assistant_extras_summary(find("cerebras").unwrap(), &defaults).is_none());
+        assert!(assistant_extras_summary(find("openrouter").unwrap(), &defaults).is_none());
+        // STT-only providers have no assistant entry.
+        assert!(assistant_extras_summary(find("assemblyai").unwrap(), &defaults).is_none());
     }
 
     fn snap(cores: u32, ram_gb: u32, disk_gb: u32, avx2: bool) -> HardwareSnapshot {
@@ -2454,18 +2439,52 @@ mod tests {
     }
 
     #[test]
-    fn primary_label_caps_at_six_badges() {
-        // OpenAI has 6 native badges (STT/LLM/Assistant/TTS/Vision/Search);
-        // verify the label doesn't ellipsise. Forcing more would
-        // require a synthetic CloudProvider so we trust the cap logic
-        // via the cap path in unit form.
-        let openai = fono_core::provider_catalog::find("openai").unwrap();
-        let label = primary_label(openai);
-        assert!(label.starts_with("OpenAI — "));
-        // 6 badges joined by " · " = 5 separators → at least 5 of them.
-        assert!(label.matches('·').count() >= 5);
-        // No ellipsis when count ≤ 6.
-        assert!(!label.contains('…'));
+    fn primary_picker_renders_aligned_table() {
+        // Pin the column-aligned shape of the primary picker against
+        // a known catalogue subset (issues #9/#11, v0.8.1 polish).
+        // Provider column width = longest display_name ("OpenRouter")
+        // + 2 = 12; capability columns = header label width + 2.
+        let candidates: Vec<&'static CloudProvider> = primary_candidates_vec();
+        let provider_col_width = candidates
+            .iter()
+            .map(|p| p.display_name.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max("Customize".len())
+            + 2;
+        assert_eq!(provider_col_width, 12);
+
+        let header = primary_header(provider_col_width);
+        assert_eq!(
+            header,
+            "Provider    STT        LLM        Assistant  TTS        Vision     Search"
+        );
+
+        // Rows for the five primary candidates in catalogue order.
+        let rows: Vec<String> = candidates
+            .iter()
+            .map(|p| primary_row(p, provider_col_width))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                "OpenAI      ✓          ✓          ✓          ✓          ✓          ·".to_string(),
+                "Groq        ✓          ✓          ✓          ✓          ·          ·".to_string(),
+                "Anthropic   ·          ✓          ✓          ·          ✓          ✓".to_string(),
+                "Cerebras    ·          ✓          ✓          ·          ·          ·".to_string(),
+                "OpenRouter  ·          ✓          ✓          ✓          ·          ·".to_string(),
+            ]
+        );
+
+        // Customize escape hatch: provider column padded to the same
+        // width, then a free-form description spanning the capability
+        // columns.
+        let customize = format!(
+            "{:width$}Pick a backend per capability",
+            "Customize",
+            width = provider_col_width
+        );
+        assert_eq!(customize, "Customize   Pick a backend per capability");
     }
 
     #[test]
@@ -2479,5 +2498,58 @@ mod tests {
         for must in ["openai", "groq", "anthropic", "cerebras", "openrouter"] {
             assert!(ids.contains(&must), "{must} must be a primary candidate");
         }
+    }
+
+    /// Phase B Task B4. Pins the two-column layout of `pick_path`'s
+    /// rows: name padded to longest-name + 2 spaces, then description.
+    /// The fixed order is `Local`, `Cloud`, `Customize`.
+    #[test]
+    fn pick_path_rows_render_two_column_table() {
+        let rows = pick_path_rows();
+        assert_eq!(
+            rows,
+            [
+                "Local      Private, offline, runs on this machine".to_string(),
+                "Cloud      Fast, accurate, needs an API key".to_string(),
+                "Customize  Pick a backend per capability".to_string(),
+            ]
+        );
+        // Padding width derived from the longest name ("Customize") + 2.
+        let expected_width = "Customize".len() + 2;
+        for row in &rows {
+            // The first `expected_width` chars contain the padded name;
+            // char `expected_width - 1` is always a space (the second
+            // of the two trailing pad spaces).
+            assert_eq!(
+                row.as_bytes()[expected_width - 1],
+                b' ',
+                "row {row:?} should have pad-space at column {}",
+                expected_width - 1
+            );
+        }
+    }
+
+    /// Phase C Task C7. Pre-seed two detected language codes and
+    /// assert the pure helper returns them (normalised) without
+    /// invoking `dialoguer`. The wizard's OS-detected fast-path is
+    /// exercised by feeding the helper directly.
+    #[test]
+    fn finalise_detected_languages_preserves_multi_detect() {
+        let input = vec!["en".to_string(), "es".to_string()];
+        let out = finalise_detected_languages(&input);
+        assert!(out.contains(&"en".to_string()));
+        assert!(out.contains(&"es".to_string()));
+        assert_eq!(out.len(), 2, "no extra peer when ≥ 2 already present");
+    }
+
+    /// Phase C Task C7 (cont.). Single non-English detection auto-adds
+    /// English as a peer per the bilingual safety net.
+    #[test]
+    fn finalise_detected_languages_adds_english_peer_for_single_nonenglish() {
+        let input = vec!["es".to_string()];
+        let out = finalise_detected_languages(&input);
+        assert_eq!(out.len(), 2);
+        assert!(out.contains(&"es".to_string()));
+        assert!(out.contains(&"en".to_string()));
     }
 }

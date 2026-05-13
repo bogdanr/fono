@@ -19,7 +19,7 @@ rationale.
 | Provider       | STT | LLM cleanup | Assistant chat | Vision                       | Web search                      | TTS                       |
 |----------------|-----|-------------|----------------|------------------------------|----------------------------------|---------------------------|
 | **OpenAI**     | ✓   | ✓           | ✓              | ✓ (`gpt-5.4-mini`)          | ✓ `web_search_preview`           | ✓ `tts-1`                 |
-| **Groq**       | ✓   | ✓           | ✓              | ✓ (Llama-4 Maverick)         | —                                | ✓ PlayAI **new**          |
+| **Groq**       | ✓   | ✓           | ✓              | —                            | —                                | ✓ Orpheus **new**         |
 | **Anthropic**  | —   | ✓           | ✓              | ✓ (Claude Haiku 4.5)         | ✓ `web_search_20250305`          | —                         |
 | **Cerebras**   | —   | ✓           | ✓              | —                            | —                                | —                         |
 | **Gemini**     | —   | ✓ *(planned)* | ✓ *(planned)* | ✓ (Flash)                    | ✓ `google_search` *(planned)*    | —                         |
@@ -224,7 +224,7 @@ assistant audio works without an OpenAI key.
 |---------------|------------|---------------------|--------------------------------------------------------|------------------------------|
 | Wyoming       | local LAN  | server-side voice   | `tcp://<host>:10200`                                   | —                            |
 | OpenAI        | cloud HTTP | `tts-1`             | `https://api.openai.com/v1/audio/speech`               | `Authorization: Bearer <k>`  |
-| Groq          | cloud HTTP | `playai-tts`        | `https://api.groq.com/openai/v1/audio/speech`          | `Authorization: Bearer <k>`  |
+| Groq          | cloud HTTP | `canopylabs/orpheus-v1-english` | `https://api.groq.com/openai/v1/audio/speech`          | `Authorization: Bearer <k>`  |
 | OpenRouter    | cloud HTTP | `hexgrad/kokoro-82m`| `https://openrouter.ai/api/v1/audio/speech`            | `Authorization: Bearer <k>`  |
 | Cartesia      | cloud HTTP | `sonic-2`           | `https://api.cartesia.ai/tts/bytes`                    | `X-API-Key: <k>`             |
 | Deepgram      | cloud HTTP | `aura-2-thalia-en`  | `https://api.deepgram.com/v1/speak`                    | `Authorization: Token <k>`   |
@@ -239,17 +239,19 @@ key prompt for existing users.
 Groq exposes an OpenAI-compatible TTS endpoint at
 `https://api.groq.com/openai/v1/audio/speech`. Fono points its
 parameterised OpenAI-compat client at that base URL with model
-`playai-tts` and voice `Fritz-PlayAI` (neutral male, close to OpenAI's
-`alloy` baseline). Request/response shape is identical to OpenAI's —
-24 kHz raw PCM in the response body.
+`canopylabs/orpheus-v1-english` (Canopy Labs' Orpheus) and voice
+`hannah` (neutral female). Groq's hosted Orpheus exposes a curated
+six-voice set — `autumn`, `diana`, `hannah`, `austin`, `daniel`,
+`troy` — which is narrower than Canopy's open-source Orpheus
+checkpoint (`tara`, `leah`, `jess`, `leo`, `dan`, `mia`, `zac`,
+`zoe`); requesting one of those upstream-only voices against
+Groq returns HTTP 400 (`voice must be one of ...`).
+Request/response shape is identical to OpenAI's — 24 kHz raw PCM in
+the response body.
 
-**Note:** the PlayAI model family is currently flagged as **beta-tier**
-on Groq's plan dashboard. Rate limits are tighter than the rest of the
-Groq catalogue. If you plan to drive Fono's assistant heavily, set up
-rate-limit alerts on the Groq dashboard so a sudden 429 cascade
-surfaces explicitly. (Fono's `critical_notify` already pops a desktop
-notification on the first 429 per session, but you'll want billing-side
-visibility too.)
+Orpheus replaces the PlayAI family that previously powered Groq TTS,
+which Groq decommissioned in 2026; requests against the retired model
+ids now return `model_not_found`.
 
 ### OpenRouter TTS (Kokoro)
 
@@ -293,7 +295,7 @@ full design.
 | OpenAI     | `gpt-5.4-mini` (same as text default)   | `web_search_preview`                 |
 | Anthropic  | `claude-haiku-4-5-20251001`             | `web_search_20250305`                |
 | Gemini     | `gemini-1.5-flash`                      | `google_search` *(not yet wired)*    |
-| Groq       | `llama-4-maverick-17b-128e-instruct`    | —                                    |
+| Groq       | —                                       | —                                    |
 | Cerebras   | —                                       | —                                    |
 | OpenRouter | *(route-dependent — deferred)*          | *(route-dependent — deferred)*       |
 
@@ -316,9 +318,13 @@ Two config flags in `[assistant]` drive the runtime behaviour:
   the flag is a no-op (no tool is injected). Each invocation logs a
   one-line `info!` at target `fono.assistant` when the tool is active.
 
-Both flags default to `false` and can be toggled from the wizard's
-**Optional extras** MultiSelect after picking an assistant backend, or
-edited directly in `~/.config/fono/config.toml`:
+Both flags default to **`true`** in `[assistant]` and are no-ops for
+providers whose catalogue entry doesn't carry the matching capability
+(e.g. Cerebras gets neither). The wizard auto-enables them as part of
+the assistant fast path and reports the resulting set on a single
+`Extras:` info line; no MultiSelect prompt is shown. To disable, edit
+`~/.config/fono/config.toml` (a future tray submenu will offer the
+same toggles):
 
 ```toml
 [assistant]

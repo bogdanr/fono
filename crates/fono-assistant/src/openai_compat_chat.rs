@@ -8,6 +8,7 @@
 //! provider-specific knobs (logprobs, function calls, etc.) live one
 //! plan slice down.
 
+use std::sync::Once;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -53,12 +54,20 @@ impl OpenAiCompatChat {
         }
     }
 
-    /// Attach an OpenAI web-search tool descriptor to every request.
-    /// Pass `None` to leave the request body unchanged. The currently
-    /// recognised tool id is `"web_search_preview"` (the descriptor
-    /// shipped on OpenAI's Responses API; chat/completions accepts
-    /// the same `{"type":"<id>"}` shape and silently ignores tools
-    /// it doesn't understand). See
+    /// Attach a web-search tool descriptor to every request.
+    ///
+    /// **Currently a no-op.** OpenAI's `chat/completions` API hard-
+    /// rejects unknown tool types with a 400
+    /// (`Invalid value: 'web_search_preview'. Supported values are:
+    /// 'function' and 'custom'.`). `web_search_preview` is a
+    /// **Responses-API** descriptor (`POST /v1/responses`), not a
+    /// chat/completions one. Until the OpenAI client migrates to the
+    /// Responses API, any non-`None` tool id passed here is dropped
+    /// at request time with a one-shot `tracing::warn!`. The
+    /// catalogue entry for OpenAI already advertises
+    /// `WebSearchSupport::None`, so the only way to land here is for
+    /// a user to manually set `[assistant].prefer_web_search = true`
+    /// against the catalogue's advice. See
     /// <https://platform.openai.com/docs/guides/tools-web-search>.
     #[must_use]
     pub fn with_web_search(mut self, tool_id: Option<&'static str>) -> Self {
@@ -153,16 +162,6 @@ struct ChatReq<'a> {
     tools: Option<Vec<serde_json::Value>>,
 }
 
-/// Build the OpenAI `tools` array for a single web-search descriptor.
-/// Kept separate so the snapshot tests can exercise the exact JSON
-/// shape without a live HTTP call. Shape: `[{"type": "<tool_id>"}]`
-/// (Responses-API descriptor; chat/completions tolerates the same
-/// type-only payload). See module docs on `with_web_search`.
-#[must_use]
-pub(crate) fn build_web_search_tools(tool_id: &str) -> Vec<serde_json::Value> {
-    vec![serde_json::json!({ "type": tool_id })]
-}
-
 #[derive(Serialize)]
 struct Message<'a> {
     role: &'a str,
@@ -223,13 +222,23 @@ impl Assistant for OpenAiCompatChat {
             content: user_text,
         });
 
-        let tools = self.web_search_tool.map(build_web_search_tools);
-        if let Some(tool_id) = self.web_search_tool {
-            tracing::info!(
-                target: "fono.assistant",
-                "web search tool active: {tool_id}"
-            );
+        // Defensive: chat/completions rejects unknown tool types
+        // with a 400, so we drop the descriptor and warn once per
+        // process. The catalogue advertises
+        // `WebSearchSupport::None` for OpenAI today, so the only way
+        // to land here is a hand-edited `prefer_web_search = true`.
+        if self.web_search_tool.is_some() {
+            static WARN_ONCE: Once = Once::new();
+            WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    target: "fono.assistant",
+                    "web_search tool requested but OpenAI chat/completions \
+                     doesn't accept it; ignoring (catalogue will re-enable \
+                     after Responses API migration)"
+                );
+            });
         }
+        let tools: Option<Vec<serde_json::Value>> = None;
         let req = ChatReq {
             model: &self.model,
             messages,
@@ -386,14 +395,6 @@ mod tests {
     }
 
     #[test]
-    fn build_web_search_tools_shape() {
-        let tools = build_web_search_tools("web_search_preview");
-        assert_eq!(tools.len(), 1);
-        let json = serde_json::to_string(&tools).unwrap();
-        assert_eq!(json, r#"[{"type":"web_search_preview"}]"#);
-    }
-
-    #[test]
     fn with_web_search_omits_tools_field_when_none() {
         // Without web search, the request body must not include a
         // `tools` field at all (skip_serializing_if = "Option::is_none"
@@ -412,7 +413,13 @@ mod tests {
     }
 
     #[test]
-    fn with_web_search_serialises_tools_when_set() {
+    fn with_web_search_is_currently_ignored_on_chat_completions() {
+        // OpenAI's chat/completions hard-rejects `web_search_preview`
+        // (and every other non-`function`/`custom` tool type) with a
+        // 400. The client therefore drops the descriptor at request
+        // build time even when the field is populated. This pins
+        // that behaviour; remove the test once the Responses-API
+        // migration lands.
         let req = ChatReq {
             model: "gpt-5.4-mini",
             messages: vec![],
@@ -420,12 +427,9 @@ mod tests {
             top_p: 0.9,
             max_tokens: 512,
             stream: true,
-            tools: Some(build_web_search_tools("web_search_preview")),
+            tools: None,
         };
         let body = serde_json::to_string(&req).unwrap();
-        assert!(
-            body.contains(r#""tools":[{"type":"web_search_preview"}]"#),
-            "{body}"
-        );
+        assert!(!body.contains("\"tools\""), "{body}");
     }
 }

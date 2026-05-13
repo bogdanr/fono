@@ -2216,6 +2216,7 @@ impl SessionOrchestrator {
                             class,
                             fono_core::critical_notify::ErrorClass::Auth
                                 | fono_core::critical_notify::ErrorClass::Network
+                                | fono_core::critical_notify::ErrorClass::TermsRequired
                         ) {
                             fono_core::critical_notify::notify(
                                 fono_core::critical_notify::Stage::Llm,
@@ -2520,6 +2521,7 @@ async fn run_pipeline(
                     class,
                     fono_core::critical_notify::ErrorClass::Auth
                         | fono_core::critical_notify::ErrorClass::Network
+                        | fono_core::critical_notify::ErrorClass::TermsRequired
                 ) {
                     fono_core::critical_notify::notify(
                         fono_core::critical_notify::Stage::Llm,

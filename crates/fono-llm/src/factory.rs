@@ -195,6 +195,7 @@ fn build_oa_ollama(_: &Llm, _: String) -> Result<Arc<dyn TextFormatter>> {
 }
 
 #[cfg(feature = "anthropic")]
+#[allow(clippy::unnecessary_wraps)]
 fn build_anthropic(key: String, model: String) -> Result<Arc<dyn TextFormatter>> {
     Ok(Arc::new(crate::anthropic::AnthropicLlm::new(key, model)))
 }

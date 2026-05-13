@@ -1,6 +1,52 @@
 # Fono — Project Status
 
-Last updated: 2026-05-12
+Last updated: 2026-05-13
+
+## 2026-05-13 — Release v0.8.0
+
+Tagged-ready release wrapping six commits since v0.7.1 that together
+land the Phase A–F roadmap of
+`plans/2026-05-13-2026-05-13-wizard-catalogue-multimodal-and-multi-tts-issues-9-11-v2.md`
+(issues #9 + #11). Phase G (release engineering) is complete; the
+plan is fully executed.
+
+- **Phase A — Cloud provider capability catalogue.** New
+  `fono_core::provider_catalog::CLOUD_PROVIDERS` table is the single
+  source of truth for which cloud providers offer STT / LLM /
+  Assistant / Vision / Web search / TTS. The wizard, tray, `fono use
+  cloud`, and `fono doctor` all consume it, eliminating five
+  duplicated `match` blocks in the wizard. Recorded in
+  `docs/decisions/0025-cloud-provider-catalogue.md`.
+- **Phase B+F7 — Wizard cloud branch collapse (#9).** Picking OpenAI
+  or Groq now configures STT, LLM cleanup, the assistant, and TTS
+  from a single API-key prompt; picking Anthropic / Cerebras /
+  OpenRouter configures LLM + Assistant and prompts for follow-ons
+  only for capabilities the primary doesn't cover. Capability badges
+  (`STT · LLM · Assistant · TTS · Vision · Search`) are derived from
+  the catalogue at runtime. `PathChoice::Mixed` renamed to
+  `Customize`. Re-runs reuse `secrets.toml` keys silently via
+  `prompt_or_reuse_key`.
+- **Phase E — Optional assistant extras.** Two new `[assistant]`
+  toggles, `prefer_vision` and `prefer_web_search`, surface in the
+  wizard's *Optional extras* MultiSelect when the chosen primary
+  supports them (OpenAI / Anthropic / Groq / Gemini for vision;
+  OpenAI / Anthropic / Gemini for web search). Defaults are `false`.
+- **Phase F — Multi-provider TTS (#11).** Four new TTS backends ship
+  alongside OpenAI and Wyoming: Groq (Orpheus `canopylabs/orpheus-v1-english`),
+  OpenRouter (Kokoro `hexgrad/kokoro-82m`), Cartesia (`sonic-2`), and
+  Deepgram (`aura-2-thalia-en`). Existing `CARTESIA_API_KEY` /
+  `DEEPGRAM_API_KEY` from STT usage are reused automatically; the
+  wizard's TTS picker orders providers with stored keys first.
+- **Phases C + D — Documentation, integration tests, ADR.** Wizard
+  rework integration tests, multi-TTS integration tests, and the
+  catalogue ADR landed in commit `25c4dbc`.
+
+Phase G mechanics: workspace version bumped 0.7.1 → 0.8.0,
+`CHANGELOG.md` `[Unreleased]` renamed to `## [0.8.0] — 2026-05-13`
+with a fresh empty `[Unreleased]` above it, ROADMAP table + Shipped
+list updated. `cargo build --workspace`, `cargo test --workspace
+--lib --tests`, and `cargo clippy --workspace --all-targets --
+-D warnings` are all green. Tag/push deferred to the orchestrator.
 
 ## 2026-05-12 — Issue #8: cascade-capped critical notifications
 

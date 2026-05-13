@@ -102,3 +102,26 @@ We also want to avoid two anti-patterns:
 - Local web-search tool plumbing for non-native providers.
 - Intent-detection auto-routing — gated on a working screen-capture
   privacy story first.
+
+## 2026-05-13 update — OpenAI web_search rollback
+
+The original wiring assumed OpenAI's chat/completions endpoint would
+silently ignore tool descriptors it didn't understand. It does not:
+`POST /v1/chat/completions` with `tools: [{"type":"web_search_preview"}]`
+returns a 400 with `Invalid value: 'web_search_preview'. Supported
+values are: 'function' and 'custom'.`. `web_search_preview` is a
+**Responses-API** descriptor (`POST /v1/responses`), not a
+chat/completions one. The catalogue entry for OpenAI now reports
+`web_search: WebSearchSupport::None` and `[assistant].prefer_web_search`
+now defaults to `false`; Anthropic's `web_search_20250305` on the
+Messages API is unaffected. Concrete deferred next steps:
+
+1. Migrate the OpenAI assistant client to the Responses API so
+   `web_search_preview` can be re-enabled properly.
+2. Wire Groq's `compound-beta` / `compound-beta-mini` agentic models
+   as an opt-in (model swap, distinct from `prefer_vision` /
+   `prefer_web_search` since web search arrives via the model rather
+   than a tool descriptor).
+3. Consider a unified `WebSearchSupport::ModelSwap(&'static str)`
+   variant once a second model-swap consumer materialises, to avoid
+   piling model-swap logic into the per-provider factory branches.

@@ -179,9 +179,7 @@ impl General {
 pub struct Hotkeys {
     /// Dictation hotkey. Auto-detects toggle vs push-to-talk based on
     /// press duration: a short press (< 1 s) toggles recording, a long
-    /// press holds — release stops capture. Renamed from `toggle` in
-    /// v0.8; old configs continue to parse via the serde alias.
-    #[serde(alias = "toggle")]
+    /// press holds — release stops capture.
     pub dictation: String,
     pub cancel: String,
     /// Voice-assistant key. Empty disables the assistant hotkey
@@ -387,7 +385,7 @@ pub enum TtsBackend {
     Piper,
     /// OpenAI `/v1/audio/speech` API. Configure via `[tts.cloud]`.
     OpenAI,
-    /// Groq's OpenAI-compatible `/audio/speech` endpoint (PlayAI TTS).
+    /// Groq's OpenAI-compatible `/audio/speech` endpoint (Orpheus TTS).
     Groq,
     /// OpenRouter's OpenAI-compatible `/audio/speech` endpoint
     /// (defaults to Kokoro).
@@ -595,21 +593,20 @@ pub struct Assistant {
     /// separate intents; mixing their contexts is rarely what the user
     /// wants.
     pub auto_clear_on_dictation: bool,
-    /// Phase E (issues #9/#11). When `true`, the assistant builder
-    /// swaps the catalogue's `text_model` for `multimodal_model` if
-    /// the provider exposes one (e.g. Claude Haiku 4.5, Llama-4
-    /// Maverick on Groq). Net-new field; defaults to `false`; old
-    /// configs without it load unchanged via `#[serde(default)]` on
-    /// the struct.
-    #[serde(default)]
+    /// When `true`, the assistant builder swaps the catalogue's
+    /// `text_model` for `multimodal_model` if the provider exposes
+    /// one (e.g. Claude Haiku 4.5, Llama-4 Maverick on Groq).
+    /// Defaults to `true` via `Assistant::default()`.
     pub prefer_vision: bool,
-    /// Phase E (issues #9/#11). When `true`, the assistant's request
-    /// builder appends the provider's native web-search tool to the
-    /// `tools` field on every turn (OpenAI `web_search_preview`,
-    /// Anthropic `web_search_20250305`, Gemini `google_search`).
-    /// No-op for providers whose catalogue entry says
-    /// `WebSearchSupport::None`.
-    #[serde(default)]
+    /// When `true`, the assistant's request builder appends the
+    /// provider's native web-search tool to the `tools` field on
+    /// every turn (OpenAI `web_search_preview`, Anthropic
+    /// `web_search_20250305`, Gemini `google_search`). No-op for
+    /// providers whose catalogue entry says `WebSearchSupport::None`.
+    /// Defaults to `false` until OpenAI's chat/completions gains a
+    /// stable tool descriptor for web search (today it's a Responses
+    /// API feature). Anthropic's `web_search_20250305` tool works on
+    /// the Messages API.
     pub prefer_web_search: bool,
 }
 
@@ -624,7 +621,7 @@ impl Default for Assistant {
             history_window_minutes: 5,
             history_max_turns: 12,
             auto_clear_on_dictation: true,
-            prefer_vision: false,
+            prefer_vision: true,
             prefer_web_search: false,
         }
     }
@@ -1327,7 +1324,7 @@ mod tests {
     }
 
     #[test]
-    fn languages_round_trip_drops_legacy_field() {
+    fn languages_round_trip_serializes_plural_only() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("multi.toml");
         let mut cfg = Config::default();
@@ -1337,7 +1334,7 @@ mod tests {
         assert!(
             !raw.lines()
                 .any(|l| l.trim_start().starts_with("language =")),
-            "deprecated scalar must not be serialised: {raw}"
+            "singular scalar must not be serialised: {raw}"
         );
         assert!(raw.contains("languages = ["));
         assert!(
@@ -1351,33 +1348,6 @@ mod tests {
         );
     }
 
-    /// Plan `2026-04-29-streaming-config-collapse-v1.md` Task A5: the
-    /// two collapsed knobs `[stt.cloud].streaming` and
-    /// `[interactive].overlay` are dropped from the schema in v0.3.5+.
-    /// Existing configs that still carry them must continue to parse
-    /// (serde silently ignores unknown fields by default); pin that
-    /// behaviour so the next refactor doesn't accidentally flip on
-    /// `deny_unknown_fields`.
-    #[test]
-    fn legacy_streaming_and_overlay_keys_silently_ignored() {
-        let raw = r#"
-            version = 1
-            [interactive]
-            enabled = true
-            overlay = false
-            [stt.cloud]
-            provider = "groq"
-            api_key_ref = "GROQ_API_KEY"
-            model = "whisper-large-v3-turbo"
-            streaming = true
-        "#;
-        let cfg: Config = toml::from_str(raw).expect("legacy keys must parse");
-        assert!(cfg.interactive.enabled);
-        let cloud = cfg.stt.cloud.expect("cloud block parsed");
-        assert_eq!(cloud.provider, "groq");
-        assert_eq!(cloud.model, "whisper-large-v3-turbo");
-    }
-
     #[test]
     fn hotkeys_defaults_are_f7_f8() {
         let h = Hotkeys::default();
@@ -1386,57 +1356,20 @@ mod tests {
         assert_eq!(h.cancel, "Escape");
     }
 
-    /// Pre-v0.8 configs called the dictation hotkey `toggle`. The
-    /// rename to `dictation` ships with a serde alias so existing
-    /// configs continue to parse without manual migration.
+    /// A partial `[assistant]` block (some fields present, others
+    /// absent) must populate the missing flags from `Assistant::default()`
+    /// via the struct-level `#[serde(default)]`. `prefer_vision`
+    /// defaults to `true` (multimodal model = text model on
+    /// OpenAI/Anthropic — no API cost); `prefer_web_search` defaults
+    /// to `false` until the OpenAI client migrates to the Responses
+    /// API (chat/completions hard-rejects the `web_search_preview`
+    /// tool descriptor).
     #[test]
-    fn legacy_toggle_field_aliases_to_dictation() {
-        let raw = r#"
-            version = 1
-            [hotkeys]
-            toggle = "F9"
-            assistant = "F10"
-            cancel = "Escape"
-        "#;
-        let cfg: Config = toml::from_str(raw).expect("legacy toggle alias must parse");
-        assert_eq!(cfg.hotkeys.dictation, "F9");
-        assert_eq!(cfg.hotkeys.assistant, "F10");
-    }
-
-    /// Pre-v0.8 configs carried a separate `[hotkeys].hold` key and a
-    /// `mode` selector. Both fields are dropped from the schema; serde
-    /// silently ignores unknown fields so old configs keep loading.
-    /// Toggle vs push-to-talk is now decided automatically per press
-    /// based on duration.
-    #[test]
-    fn legacy_hold_and_mode_fields_silently_ignored() {
-        let raw = r#"
-            version = 1
-            [hotkeys]
-            hold = "F8"
-            toggle = "F9"
-            mode = "hold"
-        "#;
-        let cfg: Config = toml::from_str(raw).expect("legacy hotkey fields must be ignored");
-        assert_eq!(cfg.hotkeys.dictation, "F9");
-    }
-
-    /// Pre-v0.4 configs that still carry the dropped scalar
-    /// `[general].language` / `[stt.local].language` keys must keep
-    /// loading — serde silently ignores unknown fields by default.
-    /// This pins that behaviour so the next refactor doesn't
-    /// accidentally flip on `deny_unknown_fields`.
-    #[test]
-    fn dropped_legacy_language_scalars_silently_ignored() {
-        let raw = r#"
-            version = 1
-            [general]
-            language = "ro"
-            languages = ["en", "ro"]
-            [stt.local]
-            language = "fr"
-        "#;
-        let cfg: Config = toml::from_str(raw).expect("legacy keys must parse");
-        assert_eq!(cfg.general.languages, vec!["en", "ro"]);
+    fn partial_assistant_block_defaults_prefer_vision_only() {
+        let raw = "version = 1\n[assistant]\nenabled = true\n";
+        let cfg: Config = toml::from_str(raw).expect("partial assistant block must parse");
+        assert!(cfg.assistant.enabled);
+        assert!(cfg.assistant.prefer_vision);
+        assert!(!cfg.assistant.prefer_web_search);
     }
 }

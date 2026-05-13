@@ -13,10 +13,10 @@ The home page is [fono.page](https://fono.page).
 
 | ![Up next](https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge) | ![On the horizon](https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge) | ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge) |
 |:---|:---|:---|
-| **[Automatic translation](#automatic-translation)**<br>Speak in any language, type in another — any pair, per-app rules, batch and live parity. | **[Hover-context injection](#hover-context-injection)** *(experimental)*<br>Terminal hovered → shell prompts. Code editor hovered → identifier casing. | **Voice assistant**<br>F10 hold-to-talk: speak a question, hear the spoken reply through your speakers. Independent backend selection from cleanup, multi-turn rolling history, streaming sentence-by-sentence into TTS for low time-to-first-audio. ![v0.7.0](https://img.shields.io/badge/v0.7.0-blue?style=flat-square) |
-| **[Wake-word activation](#wake-word-activation)**<br>Say the magic word — Fono wakes and starts dictating. No hotkey, no hands. | **[REST API + MCP server](#local-rest-api--mcp-server)**<br>Scripts and AI coding assistants drive Fono over HTTP. | **Audio-visualisation overlay**<br>Bars / oscilloscope / FFT / heatmap during batch recording, plus a right-side VU meter on the live-dictation panel. ![v0.6.0](https://img.shields.io/badge/v0.6.0-blue?style=flat-square) |
-| | **[Better Wayland hotkeys](#better-wayland-hotkeys)**<br>Auto-register via the `GlobalShortcuts` portal when available. | **Hardware acceleration on tap + auto-variant update + self-installer**<br>Two release variants (CPU + Vulkan GPU); `fono update` auto-picks the right one. `fono install` puts the daemon on `$PATH` system-wide. ![v0.5.0](https://img.shields.io/badge/v0.5.0-blue?style=flat-square) |
-| | **[macOS + Windows](#macos-and-windows)**<br>Native platform integrations. | **Wyoming Home Assistant interop + tray-side LAN server picker**<br>Wyoming framing matches the upstream Python library so HA treats Fono as a complete endpoint. ![v0.4.0](https://img.shields.io/badge/v0.4.0-blue?style=flat-square) |
+| **[Automatic translation](#automatic-translation)**<br>Speak in any language, type in another — any pair, per-app rules, batch and live parity. | **[Hover-context injection](#hover-context-injection)** *(experimental)*<br>Terminal hovered → shell prompts. Code editor hovered → identifier casing. | **Wizard + multi-provider TTS rework**<br>Cloud setup collapses onto a single primary-provider picker; four new TTS backends (Groq, OpenRouter/Kokoro, Cartesia, Deepgram) plus opt-in assistant multimodal + web-search. ![v0.8.0](https://img.shields.io/badge/v0.8.0-blue?style=flat-square) |
+| **[Wake-word activation](#wake-word-activation)**<br>Say the magic word — Fono wakes and starts dictating. No hotkey, no hands. | **[REST API + MCP server](#local-rest-api--mcp-server)**<br>Scripts and AI coding assistants drive Fono over HTTP. | **Voice assistant**<br>F10 hold-to-talk: speak a question, hear the spoken reply through your speakers. Independent backend selection from cleanup, multi-turn rolling history, streaming sentence-by-sentence into TTS for low time-to-first-audio. ![v0.7.0](https://img.shields.io/badge/v0.7.0-blue?style=flat-square) |
+| | **[Better Wayland hotkeys](#better-wayland-hotkeys)**<br>Auto-register via the `GlobalShortcuts` portal when available. | **Audio-visualisation overlay**<br>Bars / oscilloscope / FFT / heatmap during batch recording, plus a right-side VU meter on the live-dictation panel. ![v0.6.0](https://img.shields.io/badge/v0.6.0-blue?style=flat-square) |
+| | **[macOS + Windows](#macos-and-windows)**<br>Native platform integrations. | **Hardware acceleration on tap + auto-variant update + self-installer**<br>Two release variants (CPU + Vulkan GPU); `fono update` auto-picks the right one. `fono install` puts the daemon on `$PATH` system-wide. ![v0.5.0](https://img.shields.io/badge/v0.5.0-blue?style=flat-square) |
 
 ---
 
@@ -88,6 +88,28 @@ system-tray app and native installer on Windows.
 ## Shipped
 
 Newest first.
+
+- ![v0.8.0](https://img.shields.io/badge/v0.8.0-2026--05--13-blue?style=flat-square)
+  **Wizard + multi-provider TTS rework.** Picking a primary cloud
+  provider (OpenAI, Groq, Anthropic, Cerebras, OpenRouter) now
+  configures STT, LLM cleanup, the voice assistant, and TTS from a
+  single API-key prompt: the wizard reads a runtime capability
+  catalogue (`fono_core::provider_catalog::CLOUD_PROVIDERS`) and only
+  asks an opt-in follow-up for capabilities the primary doesn't
+  cover. Picking OpenAI or Groq gets you the full stack from one
+  key. The wizard's *Mixed* branch is renamed *Customize each
+  capability (advanced)*; re-running it silently reuses keys already
+  in `secrets.toml` instead of re-asking. Four new TTS backends ship
+  alongside OpenAI and Wyoming — Groq (PlayAI `playai-tts`),
+  OpenRouter (Kokoro `hexgrad/kokoro-82m`), Cartesia (`sonic-2`), and
+  Deepgram (`aura-2-thalia-en`) — so users on a non-OpenAI primary
+  can run the full record → STT → LLM → TTS loop without obtaining
+  a second key. Two new opt-in assistant extras surface in the
+  wizard when supported: `prefer_vision` swaps in the provider's
+  multimodal chat model (OpenAI / Anthropic / Groq / Gemini), and
+  `prefer_web_search` attaches the provider's native web-search tool
+  to every assistant request. Closes issues #9 and #11.
+  *v0.8.0, 2026-05-13.*
 
 - ![v0.7.1](https://img.shields.io/badge/v0.7.1-2026--05--05-blue?style=flat-square)
   **Default hotkeys overhauled.** Dictation collapses from F8/F9
@@ -336,3 +358,4 @@ Newest first.
 [v0.6.1]: https://github.com/bogdanr/fono/releases/tag/v0.6.1
 [v0.7.0]: https://github.com/bogdanr/fono/releases/tag/v0.7.0
 [v0.7.1]: https://github.com/bogdanr/fono/releases/tag/v0.7.1
+[v0.8.0]: https://github.com/bogdanr/fono/releases/tag/v0.8.0

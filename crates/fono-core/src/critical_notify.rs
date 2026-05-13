@@ -81,6 +81,11 @@ pub enum ErrorClass {
     RateLimit,
     /// reqwest connect/timeout/dns failure.
     Network,
+    /// Provider requires the org admin to accept model-specific terms
+    /// before the model can be invoked (e.g. Groq's `model_terms_required`
+    /// on Orpheus / PlayAI). Surfaced as a one-shot notification with
+    /// the acceptance URL embedded in the body.
+    TermsRequired,
     /// Anything else (5xx, parse errors, clarification refusal, …).
     Other,
 }
@@ -107,6 +112,12 @@ pub fn classify(err_msg: &str) -> ErrorClass {
     // codes are caught by the 401 branch above but the typed codes
     // are also a strong signal when status got stripped.
     let lower = err_msg.to_ascii_lowercase();
+    // Groq returns 400 + `model_terms_required` when an org admin
+    // hasn't accepted a model's terms. Detect this before the generic
+    // Other bucket so the user gets actionable copy with the URL.
+    if lower.contains("model_terms_required") || lower.contains("requires terms acceptance") {
+        return ErrorClass::TermsRequired;
+    }
     if lower.contains("invalid_api_key")
         || lower.contains("expired_api_key")
         || lower.contains("authentication_error")
@@ -124,6 +135,24 @@ pub fn classify(err_msg: &str) -> ErrorClass {
         return ErrorClass::Network;
     }
     ErrorClass::Other
+}
+
+/// Pull the first `https?://…` URL out of an error message, stripping
+/// trailing punctuation that commonly clings to URLs in JSON bodies.
+fn extract_url(msg: &str) -> Option<String> {
+    let start = msg.find("http")?;
+    let tail = &msg[start..];
+    let end = tail
+        .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ')' | '>' | '`'))
+        .unwrap_or(tail.len());
+    let mut url = tail[..end].to_string();
+    while matches!(url.chars().last(), Some('.' | ',' | ';' | ':' | '!' | '?')) {
+        url.pop();
+    }
+    if url.len() < "http://a".len() {
+        return None;
+    }
+    Some(url)
 }
 
 /// Match a bare HTTP status with whitespace boundaries so we don't
@@ -274,6 +303,7 @@ fn fire(stage: Stage, provider: &'static str, class: ErrorClass, details: &str) 
     notify::send(&summary, &body, "dialog-error", 10_000, Urgency::Critical);
 }
 
+#[allow(clippy::too_many_lines)]
 fn render(
     stage: Stage,
     provider: &'static str,
@@ -340,6 +370,21 @@ fn render(
                  be spoken; switch to a local TTS backend or check your network."
             ),
         ),
+        (Stage::Tts, ErrorClass::TermsRequired) => (
+            format!("Fono — TTS model requires terms acceptance ({provider})"),
+            {
+                let url = extract_url(details);
+                let suffix = url.map_or_else(
+                    || "Open the provider console to accept the model terms, then retry.".to_string(),
+                    |u| format!("Accept the model terms at {u}, then retry."),
+                );
+                format!(
+                    "{provider} refused the request because the model's terms have \
+                     not been accepted by the org admin. The assistant reply was \
+                     generated but could not be spoken. {suffix}"
+                )
+            },
+        ),
         (Stage::Tts, ErrorClass::Other | ErrorClass::RateLimit) => (
             format!("Fono — TTS failed ({provider})"),
             format!(
@@ -368,6 +413,20 @@ fn render(
                 "Assistant turn failed: {details}. Check the journal or run \
                  `fono doctor` for details."
             ),
+        ),
+        (_, ErrorClass::TermsRequired) => (
+            format!("Fono — model requires terms acceptance ({provider})"),
+            {
+                let url = extract_url(details);
+                let suffix = url.map_or_else(
+                    || "Open the provider console to accept the model terms, then retry.".to_string(),
+                    |u| format!("Accept the model terms at {u}, then retry."),
+                );
+                format!(
+                    "{provider} refused the request because the model's terms have \
+                     not been accepted by the org admin. {suffix}"
+                )
+            },
         ),
         (Stage::Inject, _) => (
             format!("Fono — text injection failed ({provider})"),
@@ -573,6 +632,44 @@ mod tests {
         }
         let _ = drain_test_recorder();
         assert!(notify(Stage::Stt, "groq", ErrorClass::Auth, "3"));
+    }
+
+    #[test]
+    fn classify_groq_model_terms_required() {
+        // Verbatim error body from a Groq Orpheus TTS request when
+        // the org admin hasn't accepted the model terms.
+        let msg = r#"groq TTS returned 400 Bad Request: {"error":{"message":"The model `canopylabs/orpheus-v1-english` requires terms acceptance. Please have the org admin accept the terms at https://console.groq.com/playground?model=canopylabs%2Forpheus-v1-english","type":"invalid_request_error","code":"model_terms_required"}}"#;
+        assert_eq!(classify(msg), ErrorClass::TermsRequired);
+    }
+
+    #[test]
+    fn extract_url_pulls_groq_console_link() {
+        let msg = "Please have the org admin accept the terms at https://console.groq.com/playground?model=canopylabs%2Forpheus-v1-english\",\"type\":\"invalid_request_error\"";
+        let url = extract_url(msg).expect("url present");
+        assert_eq!(
+            url,
+            "https://console.groq.com/playground?model=canopylabs%2Forpheus-v1-english"
+        );
+    }
+
+    #[test]
+    fn terms_required_renders_with_acceptance_url() {
+        let details = r#"groq TTS returned 400 Bad Request: {"error":{"message":"The model `canopylabs/orpheus-v1-english` requires terms acceptance. Please have the org admin accept the terms at https://console.groq.com/playground?model=canopylabs%2Forpheus-v1-english","code":"model_terms_required"}}"#;
+        let (summary, body) = render(Stage::Tts, "groq", ErrorClass::TermsRequired, details);
+        assert!(summary.contains("terms acceptance"));
+        assert!(summary.contains("groq"));
+        assert!(body.contains("https://console.groq.com/playground"));
+    }
+
+    #[test]
+    fn terms_required_notification_fires() {
+        let _g = fresh();
+        let details = "groq TTS 400: model_terms_required at https://console.groq.com/x";
+        assert!(notify(Stage::Tts, "groq", ErrorClass::TermsRequired, details));
+        let recorded = drain_test_recorder();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].2, ErrorClass::TermsRequired);
+        assert!(recorded[0].3.contains("https://console.groq.com/x"));
     }
 
     #[test]
