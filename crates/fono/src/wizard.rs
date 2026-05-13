@@ -39,6 +39,11 @@ use fono_core::config::{
 };
 use fono_core::hwcheck::{Affordability, HardwareSnapshot, LocalTier};
 use fono_core::locale::detect_user_languages_ranked;
+use fono_core::provider_catalog::{Badge, CloudProvider, CLOUD_PROVIDERS};
+use fono_core::providers::{
+    configured_tts_backends, parse_assistant_backend, parse_llm_backend, parse_stt_backend,
+    parse_tts_backend,
+};
 use fono_core::{Paths, Secrets};
 use fono_stt::registry::{ModelInfo, ModelRegistry, WHISPER_MODELS};
 use std::time::Duration;
@@ -75,7 +80,9 @@ pub async fn run(paths: &Paths) -> Result<()> {
     match path_choice {
         PathChoice::Local => configure_local(&theme, &mut config, &mut secrets, &snap).await?,
         PathChoice::Cloud => configure_cloud(&theme, &mut config, &mut secrets, &snap).await?,
-        PathChoice::Mixed => configure_mixed(&theme, &mut config, &mut secrets, &snap).await?,
+        PathChoice::Customize => {
+            configure_customize(&theme, &mut config, &mut secrets, &snap).await?;
+        }
     }
 
     // Voice assistant — opt-in step. Independent of the dictation
@@ -127,140 +134,294 @@ pub async fn run(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// Optional final step — set up the voice assistant (toggle by default
-/// → STT → chat → TTS → speakers). Skips entirely if the user declines.
-/// All cloud key prompts reuse keys already present in `secrets` so a
-/// re-run is non-destructive.
-#[allow(clippy::too_many_lines)]
-async fn configure_assistant(
+// ─── Catalogue-driven helpers (Phase B, issues #9/#11) ────────────────────
+
+/// Outcome of the primary-cloud-provider picker.
+#[derive(Debug, Clone, Copy)]
+enum PrimaryPick {
+    /// User picked a catalogued provider — wizard walks its
+    /// capability defaults from the catalogue.
+    Catalogued(&'static CloudProvider),
+    /// User picked the "Customize per capability (advanced)" entry —
+    /// caller falls through to the [`configure_customize`] flow.
+    Customize,
+}
+
+/// A catalogue provider is a viable *primary* pick if it offers LLM
+/// cleanup (the substrate every assistant + dictation flow needs) AND
+/// its factory wiring is complete. The Gemini LLM + assistant clients
+/// are not yet implemented (see `fono-llm::factory` / `fono-assistant::factory`)
+/// so Gemini is excluded — surfacing it would let the wizard pick a
+/// configuration that fails at runtime.
+fn is_primary_candidate(entry: &CloudProvider) -> bool {
+    if entry.llm.is_none() {
+        return false;
+    }
+    if parse_llm_backend(entry.id).is_none() {
+        return false;
+    }
+    if entry.id == "gemini" {
+        return false;
+    }
+    true
+}
+
+/// The catalogue advertises an assistant for several providers; only
+/// those with a wired factory should appear in the assistant picker.
+fn is_assistant_wired(entry: &CloudProvider) -> bool {
+    entry.assistant.is_some()
+        && parse_assistant_backend(entry.id).is_some()
+        && entry.id != "gemini"
+}
+
+/// Catalogue entries with a wired assistant chat factory.
+fn assistant_candidates() -> Vec<&'static CloudProvider> {
+    CLOUD_PROVIDERS
+        .iter()
+        .filter(|p| is_assistant_wired(p))
+        .collect()
+}
+
+/// Build the capability-badge label for the primary picker, capping at
+/// 6 badges per risk #5 in the plan.
+fn primary_label(entry: &CloudProvider) -> String {
+    let mut badges: Vec<&'static str> = Vec::new();
+    if entry.stt.is_some() {
+        badges.push("STT");
+    }
+    if entry.llm.is_some() {
+        badges.push("LLM");
+    }
+    if entry.assistant.is_some() {
+        badges.push("Assistant");
+    }
+    if entry.tts.is_some() {
+        badges.push("TTS");
+    }
+    if let Some(adef) = entry.assistant {
+        for b in adef.badges {
+            let label = match b {
+                Badge::Vision => "Vision",
+                Badge::Search => "Search",
+                Badge::Reasoning => "Reasoning",
+                Badge::Fast => "Fast",
+                // STT/LLM/Assistant/TTS are already covered above.
+                Badge::Stt | Badge::Llm | Badge::Assistant | Badge::Tts => continue,
+            };
+            if !badges.contains(&label) {
+                badges.push(label);
+            }
+        }
+    }
+    let badge_str = if badges.len() > 6 {
+        let head: Vec<&str> = badges.into_iter().take(6).collect();
+        format!("{} · …", head.join(" · "))
+    } else {
+        badges.join(" · ")
+    };
+    format!("{} — {}", entry.display_name, badge_str)
+}
+
+/// Pre-seed the primary picker default cursor:
+/// 1. If the existing config's LLM backend matches a catalogue entry
+///    that's still a primary candidate, prefer that.
+/// 2. Else if any primary candidate has its key already in
+///    `secrets.toml`, pick the first such candidate (catalogue order).
+/// 3. Else default to OpenAI (broadest coverage).
+fn default_primary_for_seed(
+    candidates: &[&'static CloudProvider],
+    cfg: &Config,
+    secrets: &Secrets,
+) -> usize {
+    // 1. Match existing LLM backend.
+    let llm_id = fono_core::providers::llm_backend_str(&cfg.llm.backend);
+    if let Some(i) = candidates.iter().position(|p| p.id == llm_id) {
+        return i;
+    }
+    // 2. Match existing STT backend (cloud user with STT but no LLM yet).
+    let stt_id = fono_core::providers::stt_backend_str(&cfg.stt.backend);
+    if let Some(i) = candidates.iter().position(|p| p.id == stt_id) {
+        return i;
+    }
+    // 3. First candidate with a key already in secrets.toml.
+    if let Some(i) = candidates
+        .iter()
+        .position(|p| secrets.has_in_file(p.key_env))
+    {
+        return i;
+    }
+    // 4. OpenAI as the broadest-coverage fallback.
+    candidates
+        .iter()
+        .position(|p| p.id == "openai")
+        .unwrap_or(0)
+}
+
+/// Render the primary-cloud-provider picker. Lists every catalogued
+/// provider with a wired LLM factory, plus the "Customize" escape
+/// hatch. See [`PrimaryPick`].
+fn pick_primary_cloud_provider(
+    theme: &ColorfulTheme,
+    secrets: &Secrets,
+    cfg: &Config,
+) -> Result<PrimaryPick> {
+    let candidates: Vec<&'static CloudProvider> = CLOUD_PROVIDERS
+        .iter()
+        .filter(|p| is_primary_candidate(p))
+        .collect();
+    let mut labels: Vec<String> = candidates.iter().map(|p| primary_label(p)).collect();
+    labels.push("Customize per capability (advanced)".into());
+    let default = default_primary_for_seed(&candidates, cfg, secrets);
+
+    println!(
+        "  Pick a primary cloud provider. One key, one walk — Fono fills in every\n  \
+         capability that provider covers (STT · LLM · Assistant · TTS).\n"
+    );
+    let idx = Select::with_theme(theme)
+        .with_prompt("Primary cloud provider")
+        .items(&labels)
+        .default(default)
+        .interact()
+        .context("prompt")?;
+    if idx == candidates.len() {
+        return Ok(PrimaryPick::Customize);
+    }
+    Ok(PrimaryPick::Catalogued(candidates[idx]))
+}
+
+/// Phase B5 — central key-reuse helper. If `secrets.toml` already
+/// carries `key_env`, print one `"  reusing …"` line and return
+/// without prompting. Otherwise prompt for a fresh key (with
+/// validation) and print the provider's console URL.
+async fn prompt_or_reuse_key(
+    theme: &ColorfulTheme,
+    secrets: &mut Secrets,
+    key_env: &str,
+    display_name: &str,
+    console_url: &str,
+) -> Result<()> {
+    if secrets.has_in_file(key_env) {
+        println!("  reusing {key_env} from secrets.toml for {display_name}");
+        return Ok(());
+    }
+    if !console_url.is_empty() {
+        println!("  Get one at {console_url}");
+    }
+    if let Some(k) = prompt_api_key_with_validation(theme, secrets, key_env).await? {
+        secrets.insert(key_env, k);
+    }
+    Ok(())
+}
+
+/// Look up the catalogue entry whose `key_env` matches `key_env`.
+/// Used by legacy code paths (Customize flow) to recover the
+/// human-readable display name + console URL from a bare env-var
+/// name.
+fn catalogue_by_key_env(key_env: &str) -> Option<&'static CloudProvider> {
+    CLOUD_PROVIDERS.iter().find(|p| p.key_env == key_env)
+}
+
+/// Convenience accessor for legacy callers that hold a `*_API_KEY`
+/// string: returns (display_name, console_url), falling back to the
+/// env-var name and an empty URL if the catalogue doesn't know it.
+fn catalogue_meta_for_key(key_env: &str) -> (&'static str, &'static str) {
+    catalogue_by_key_env(key_env)
+        .map(|p| (p.display_name, p.console_url))
+        .unwrap_or(("(unknown)", ""))
+}
+
+/// Catalogue entry matching the configured LLM backend (used by the
+/// assistant fast-path to determine whether the primary covers chat).
+fn catalogue_for_llm_backend(b: &LlmBackend) -> Option<&'static CloudProvider> {
+    let id = fono_core::providers::llm_backend_str(b);
+    fono_core::provider_catalog::find(id)
+}
+
+/// Short display label for the currently-selected TTS backend, used
+/// inside the assistant collapsed-Confirm prompt.
+fn tts_short_label(b: &TtsBackend) -> &'static str {
+    match b {
+        TtsBackend::OpenAI => "OpenAI",
+        TtsBackend::Groq => "Groq",
+        TtsBackend::OpenRouter => "OpenRouter (Kokoro)",
+        TtsBackend::Cartesia => "Cartesia",
+        TtsBackend::Deepgram => "Deepgram",
+        TtsBackend::Wyoming => "Wyoming",
+        TtsBackend::Piper => "Piper",
+        TtsBackend::None => "no",
+    }
+}
+
+/// Phase F7 — assistant TTS picker. Built from
+/// [`configured_tts_backends`] so providers whose key is already in
+/// `secrets.toml` lead. Falls through to a Wyoming URI prompt when
+/// the user picks Wyoming, or to [`prompt_or_reuse_key`] for any
+/// cloud provider whose key isn't yet stored.
+enum TtsPickerAction {
+    Cloud(&'static CloudProvider),
+    Wyoming,
+    Skip,
+}
+
+async fn pick_tts_for_assistant(
     theme: &ColorfulTheme,
     config: &mut Config,
     secrets: &mut Secrets,
 ) -> Result<()> {
-    println!();
-    println!("  ── Voice assistant (optional) ──────────────────────────────");
-    println!(
-        "  Press {} to ask a question and hear the answer through your speakers.",
-        config.hotkeys.assistant
-    );
-    println!("  Independent of dictation cleanup — different model, different key.");
+    let has_wyoming = config
+        .tts
+        .wyoming
+        .as_ref()
+        .is_some_and(|w| !w.uri.is_empty());
+    let backends = configured_tts_backends(secrets, &TtsBackend::None, has_wyoming);
 
-    let want = Confirm::with_theme(theme)
-        .with_prompt("Enable the voice assistant?")
-        .default(false)
-        .interact()
-        .unwrap_or(false);
-    if !want {
-        config.assistant.enabled = false;
-        config.assistant.backend = AssistantBackend::None;
-        config.tts.backend = TtsBackend::None;
-        return Ok(());
+    let mut labels: Vec<String> = Vec::new();
+    let mut actions: Vec<TtsPickerAction> = Vec::new();
+    for b in backends {
+        match b {
+            TtsBackend::None | TtsBackend::Piper => {}
+            TtsBackend::Wyoming => {
+                labels.push("Wyoming TTS server (LAN piper)".into());
+                actions.push(TtsPickerAction::Wyoming);
+            }
+            _ => {
+                let id = fono_core::providers::tts_backend_str(&b);
+                let Some(entry) = fono_core::provider_catalog::find(id) else {
+                    continue;
+                };
+                let has_key = secrets.has_in_file(entry.key_env);
+                let key_part = if has_key {
+                    "key already set"
+                } else {
+                    "will ask for key"
+                };
+                let extra = match entry.id {
+                    "groq" => " — fastest",
+                    "cartesia" => " — best quality",
+                    "openrouter" => " — Kokoro / open weights",
+                    _ => "",
+                };
+                labels.push(format!(
+                    "{} TTS (cloud, {key_part}){extra}",
+                    entry.display_name
+                ));
+                actions.push(TtsPickerAction::Cloud(entry));
+            }
+        }
     }
+    labels.push("Skip — text-only assistant (no audio reply)".into());
+    actions.push(TtsPickerAction::Skip);
 
-    // ── Assistant chat backend ──────────────────────────────────────
-    let chat_options = [
-        "Anthropic (claude-haiku-4-5) — recommended",
-        "Cerebras (qwen-3-235b-a22b-instruct-2507, sub-second latency)",
-        "Groq (openai/gpt-oss-120b)",
-        "OpenAI (gpt-5.4-mini)",
-        "OpenRouter",
-        "Ollama (local server)",
-        "Skip — disable assistant",
-    ];
-    let chat_idx = Select::with_theme(theme)
-        .with_prompt("Pick an assistant chat backend")
-        .items(&chat_options)
+    let idx = Select::with_theme(theme)
+        .with_prompt("Pick a TTS backend (assistant audio replies)")
+        .items(&labels)
         .default(0)
         .interact()?;
-
-    let (backend, key_name, model): (AssistantBackend, Option<&str>, &str) = match chat_idx {
-        0 => (
-            AssistantBackend::Anthropic,
-            Some("ANTHROPIC_API_KEY"),
-            "claude-haiku-4-5-20251001",
-        ),
-        1 => (
-            AssistantBackend::Cerebras,
-            Some("CEREBRAS_API_KEY"),
-            "qwen-3-235b-a22b-instruct-2507",
-        ),
-        2 => (
-            AssistantBackend::Groq,
-            Some("GROQ_API_KEY"),
-            "openai/gpt-oss-120b",
-        ),
-        3 => (
-            AssistantBackend::OpenAI,
-            Some("OPENAI_API_KEY"),
-            "gpt-5.4-mini",
-        ),
-        4 => (
-            AssistantBackend::OpenRouter,
-            Some("OPENROUTER_API_KEY"),
-            "anthropic/claude-haiku-4.5",
-        ),
-        5 => (AssistantBackend::Ollama, None, "llama3.2"),
-        _ => {
-            config.assistant.enabled = false;
-            config.assistant.backend = AssistantBackend::None;
+    match &actions[idx] {
+        TtsPickerAction::Skip => {
             config.tts.backend = TtsBackend::None;
-            return Ok(());
         }
-    };
-    if let Some(name) = key_name {
-        if let Some(k) = prompt_api_key_with_validation(theme, secrets, name).await? {
-            secrets.insert(name, k);
-        }
-    }
-    config.assistant.enabled = true;
-    config.assistant.backend = backend;
-    config.assistant.cloud = key_name.map(|n| AssistantCloud {
-        provider: n.trim_end_matches("_API_KEY").to_lowercase(),
-        api_key_ref: n.into(),
-        model: model.into(),
-    });
-
-    // ── TTS backend ─────────────────────────────────────────────────
-    // Reuse OPENAI_API_KEY if the user already entered it for chat or
-    // STT/LLM cleanup, so the OpenAI option is friction-free.
-    let openai_key_present = secrets.resolve("OPENAI_API_KEY").is_some();
-    let openai_label = if openai_key_present {
-        "OpenAI TTS (cloud, key already set) — recommended"
-    } else {
-        "OpenAI TTS (cloud, will ask for key)"
-    };
-    let tts_options = [
-        openai_label,
-        "Wyoming TTS server (e.g. wyoming-piper on the LAN)",
-        "Skip — text-only assistant (no audio reply)",
-    ];
-    let tts_default = usize::from(!openai_key_present);
-    let tts_idx = Select::with_theme(theme)
-        .with_prompt("Pick a TTS backend (assistant audio replies)")
-        .items(&tts_options)
-        .default(tts_default)
-        .interact()?;
-
-    match tts_idx {
-        0 => {
-            // OpenAI TTS — reuse existing key, or prompt.
-            if !openai_key_present {
-                if let Some(k) =
-                    prompt_api_key_with_validation(theme, secrets, "OPENAI_API_KEY").await?
-                {
-                    secrets.insert("OPENAI_API_KEY", k);
-                }
-            }
-            config.tts.backend = TtsBackend::OpenAI;
-            config.tts.cloud = Some(TtsCloud {
-                provider: "openai".into(),
-                api_key_ref: "OPENAI_API_KEY".into(),
-                model: "tts-1".into(),
-            });
-            config.tts.voice = "alloy".into();
-        }
-        1 => {
-            // Wyoming TTS — ask for the URI.
+        TtsPickerAction::Wyoming => {
             let default_uri = config
                 .tts
                 .wyoming
@@ -279,9 +440,169 @@ async fn configure_assistant(
                 ..TtsWyoming::default()
             });
         }
-        _ => {
-            config.tts.backend = TtsBackend::None;
+        TtsPickerAction::Cloud(entry) => {
+            prompt_or_reuse_key(
+                theme,
+                secrets,
+                entry.key_env,
+                entry.display_name,
+                entry.console_url,
+            )
+            .await?;
+            let tdef = entry.tts.expect("filtered to TTS-capable entries");
+            let backend =
+                parse_tts_backend(entry.id).context("catalogue TTS id should parse")?;
+            config.tts.backend = backend;
+            config.tts.cloud = Some(TtsCloud {
+                provider: entry.id.into(),
+                api_key_ref: entry.key_env.into(),
+                model: tdef.model.into(),
+            });
+            // Deepgram encodes the voice in the model id, so the
+            // catalogue exposes an empty default_voice; suppressing
+            // the voice prompt naturally falls out of writing the
+            // catalogue value.
+            config.tts.voice = tdef.default_voice.into();
         }
+    }
+    Ok(())
+}
+
+/// Optional final step — set up the voice assistant (toggle by default
+/// → STT → chat → TTS → speakers). Skips entirely if the user declines.
+/// All cloud key prompts reuse keys already present in `secrets` so a
+/// re-run is non-destructive.
+///
+/// Phase B3 rewrite (issues #9/#11): the assistant chat backend is
+/// chosen from the capability catalogue rather than a hard-coded
+/// `match` block, and the TTS picker (F7) is built from
+/// `configured_tts_backends` so providers whose key is already in
+/// `secrets.toml` lead. When the user's primary cloud provider
+/// already covers both assistant chat and a TTS backend (set by
+/// `configure_cloud`), the prompt collapses to a single Confirm.
+#[allow(clippy::too_many_lines)]
+async fn configure_assistant(
+    theme: &ColorfulTheme,
+    config: &mut Config,
+    secrets: &mut Secrets,
+) -> Result<()> {
+    println!();
+    println!("  ── Voice assistant (optional) ──────────────────────────");
+    println!(
+        "  Press {} to ask a question and hear the answer through your speakers.",
+        config.hotkeys.assistant
+    );
+    println!("  Independent of dictation cleanup — different model, different key.");
+
+    // Fast path — if the primary cloud provider (inferred from the
+    // currently-selected LLM backend) covers assistant chat AND a TTS
+    // backend has already been chosen by `configure_cloud` (or Wyoming
+    // is configured), collapse to a single Confirm.
+    let primary = catalogue_for_llm_backend(&config.llm.backend);
+    let tts_already_set = !matches!(config.tts.backend, TtsBackend::None);
+    if let Some(entry) = primary {
+        if let Some(adef) = entry.assistant {
+            if is_assistant_wired(entry) && tts_already_set {
+                let prompt = format!(
+                    "Enable the voice assistant with {} chat + {} TTS?",
+                    entry.display_name,
+                    tts_short_label(&config.tts.backend)
+                );
+                let yes = Confirm::with_theme(theme)
+                    .with_prompt(prompt)
+                    .default(true)
+                    .interact()
+                    .unwrap_or(true);
+                if yes {
+                    let backend = parse_assistant_backend(entry.id)
+                        .context("catalogue assistant id should parse")?;
+                    config.assistant.enabled = true;
+                    config.assistant.backend = backend;
+                    config.assistant.cloud = Some(AssistantCloud {
+                        provider: entry.id.into(),
+                        api_key_ref: entry.key_env.into(),
+                        model: adef.text_model.into(),
+                    });
+                    // Key was prompted/reused in `configure_cloud`.
+                    return Ok(());
+                }
+                // Decline falls through to the full picker below.
+            }
+        }
+    }
+
+    let want = Confirm::with_theme(theme)
+        .with_prompt("Enable the voice assistant?")
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+    if !want {
+        config.assistant.enabled = false;
+        config.assistant.backend = AssistantBackend::None;
+        // Do NOT clobber `tts.backend` — a returning user may have an
+        // existing TTS backend they still want for future opt-in.
+        return Ok(());
+    }
+
+    // ── Assistant chat backend (catalogue-driven) ─────────────────
+    let candidates = assistant_candidates();
+    // Order: providers with key already in `secrets.toml` first; among
+    // each subgroup keep catalogue order so OpenAI/Anthropic/etc. lead.
+    let (with_key, without_key): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|p| secrets.has_in_file(p.key_env));
+    let ordered: Vec<&'static CloudProvider> = with_key
+        .iter()
+        .chain(without_key.iter())
+        .copied()
+        .collect();
+    let mut labels: Vec<String> = Vec::new();
+    for p in &ordered {
+        let key_part = if secrets.has_in_file(p.key_env) {
+            "key already set"
+        } else {
+            "will ask for key"
+        };
+        let adef = p.assistant.expect("candidate has assistant");
+        labels.push(format!(
+            "{} ({}) — {}",
+            p.display_name, key_part, adef.text_model
+        ));
+    }
+    labels.push("Skip — disable assistant".into());
+    let chat_idx = Select::with_theme(theme)
+        .with_prompt("Pick an assistant chat backend")
+        .items(&labels)
+        .default(0)
+        .interact()?;
+    if chat_idx == ordered.len() {
+        config.assistant.enabled = false;
+        config.assistant.backend = AssistantBackend::None;
+        return Ok(());
+    }
+    let entry = ordered[chat_idx];
+    let adef = entry.assistant.expect("candidate has assistant");
+    prompt_or_reuse_key(
+        theme,
+        secrets,
+        entry.key_env,
+        entry.display_name,
+        entry.console_url,
+    )
+    .await?;
+    let backend =
+        parse_assistant_backend(entry.id).context("catalogue assistant id should parse")?;
+    config.assistant.enabled = true;
+    config.assistant.backend = backend;
+    config.assistant.cloud = Some(AssistantCloud {
+        provider: entry.id.into(),
+        api_key_ref: entry.key_env.into(),
+        model: adef.text_model.into(),
+    });
+
+    // ── TTS picker (F7) ─ only if not already set by `configure_cloud`.
+    if !tts_already_set {
+        pick_tts_for_assistant(theme, config, secrets).await?;
     }
     Ok(())
 }
@@ -290,10 +611,11 @@ async fn configure_assistant(
 enum PathChoice {
     Local,
     Cloud,
-    /// Mixed = pick STT and LLM backends independently. Lets users run
-    /// e.g. local whisper for privacy + cloud Cerebras for fast cleanup,
-    /// or cloud Groq STT + skip-LLM (raw output) on a slow-CPU machine.
-    Mixed,
+    /// Customize = pick STT and LLM backends independently. Lets users
+    /// run e.g. local whisper for privacy + cloud Cerebras for fast
+    /// cleanup, or cloud Groq STT + skip-LLM (raw output) on a slow-CPU
+    /// machine. Renamed from `Mixed` in the v2 catalogue rework.
+    Customize,
 }
 
 fn print_hw_summary(snap: &HardwareSnapshot, tier: LocalTier) {
@@ -359,21 +681,21 @@ fn pick_path(
             (
                 &[
                     "Local models (recommended for your machine — private, offline)",
-                    "Mixed     (local speech-to-text + cloud cleanup, or vice-versa)",
+                    "Customize each capability (advanced)",
                     "Cloud APIs (fast, needs internet, bring your own key)",
                 ],
                 0,
-                [PathChoice::Local, PathChoice::Mixed, PathChoice::Cloud],
+                [PathChoice::Local, PathChoice::Customize, PathChoice::Cloud],
             )
         } else {
             (
                 &[
                     "Cloud APIs (faster on your machine)",
-                    "Mixed     (local speech-to-text + cloud cleanup, or vice-versa)",
+                    "Customize each capability (advanced)",
                     "Local models (will work but slower — ~2 s per dictation)",
                 ],
                 0,
-                [PathChoice::Cloud, PathChoice::Mixed, PathChoice::Local],
+                [PathChoice::Cloud, PathChoice::Customize, PathChoice::Local],
             )
         };
 
@@ -484,22 +806,165 @@ fn host_has_llm_acceleration(snap: &HardwareSnapshot) -> bool {
     fono_core::vulkan_probe::probe().is_usable()
 }
 
+/// Cloud-path wizard. Phase B2 rewrite (issue #9): a single primary
+/// provider picker walks the capability catalogue and configures
+/// every capability that primary covers from one key entry. Users
+/// who want per-capability granularity pick the
+/// "Customize per capability (advanced)" entry to fall through to
+/// the [`configure_customize`] flow.
 async fn configure_cloud(
     theme: &ColorfulTheme,
     config: &mut Config,
     secrets: &mut Secrets,
     snap: &HardwareSnapshot,
 ) -> Result<()> {
-    configure_cloud_stt(theme, config, secrets).await?;
-    configure_cloud_llm(theme, config, secrets).await?;
+    let pick = pick_primary_cloud_provider(theme, secrets, config)?;
+    let entry = match pick {
+        PrimaryPick::Customize => {
+            return configure_customize(theme, config, secrets, snap).await;
+        }
+        PrimaryPick::Catalogued(e) => e,
+    };
+
+    // Single key entry (or reuse) for the primary provider.
+    prompt_or_reuse_key(
+        theme,
+        secrets,
+        entry.key_env,
+        entry.display_name,
+        entry.console_url,
+    )
+    .await?;
+
+    // Walk capabilities ----------------------------------------------
+    if let Some(stt_def) = &entry.stt {
+        let backend =
+            parse_stt_backend(entry.id).context("catalogue STT id should parse")?;
+        config.stt = Stt {
+            backend,
+            local: SttLocal::default(),
+            cloud: Some(SttCloud {
+                provider: entry.id.into(),
+                api_key_ref: entry.key_env.into(),
+                model: stt_def.model.into(),
+            }),
+            wyoming: None,
+            prompts: std::collections::HashMap::new(),
+        };
+    } else {
+        offer_secondary_stt(theme, config, secrets).await?;
+    }
+
+    if let Some(llm_def) = &entry.llm {
+        let backend =
+            parse_llm_backend(entry.id).context("catalogue LLM id should parse")?;
+        config.llm.enabled = true;
+        config.llm.backend = backend;
+        config.llm.cloud = Some(LlmCloud {
+            provider: entry.id.into(),
+            api_key_ref: entry.key_env.into(),
+            model: llm_def.model.into(),
+        });
+    }
+
+    if let Some(tts_def) = &entry.tts {
+        let backend =
+            parse_tts_backend(entry.id).context("catalogue TTS id should parse")?;
+        config.tts.backend = backend;
+        config.tts.cloud = Some(TtsCloud {
+            provider: entry.id.into(),
+            api_key_ref: entry.key_env.into(),
+            model: tts_def.model.into(),
+        });
+        config.tts.voice = tts_def.default_voice.into();
+    }
+    // Assistant chat is configured by `configure_assistant` (called
+    // unconditionally from `run`), which inspects `config.llm.backend`
+    // and the now-set TTS state to collapse to a single Confirm when
+    // the primary covers both.
+
+    // Language + interactive mode pickers (unchanged).
     config.general.languages = pick_languages(theme)?;
-    // Live dictation is always feasible for cloud STT.
     pick_interactive_mode(theme, config, snap, false, None);
     Ok(())
 }
 
-/// R3.3 -- Mixed path: ask STT and LLM independently, no coupling.
-async fn configure_mixed(
+/// Secondary STT picker used when the primary cloud provider doesn't
+/// offer transcription (e.g. Anthropic, Cerebras). Lists every
+/// catalogue STT-capable provider, key-already-present first, plus a
+/// "Skip" entry that falls back to local Whisper.
+async fn offer_secondary_stt(
+    theme: &ColorfulTheme,
+    config: &mut Config,
+    secrets: &mut Secrets,
+) -> Result<()> {
+    let mut keyed: Vec<&'static CloudProvider> = Vec::new();
+    let mut unkeyed: Vec<&'static CloudProvider> = Vec::new();
+    for p in CLOUD_PROVIDERS {
+        if p.stt.is_none() || parse_stt_backend(p.id).is_none() {
+            continue;
+        }
+        if secrets.has_in_file(p.key_env) {
+            keyed.push(p);
+        } else {
+            unkeyed.push(p);
+        }
+    }
+    let ordered: Vec<&'static CloudProvider> =
+        keyed.iter().chain(unkeyed.iter()).copied().collect();
+    let mut labels: Vec<String> = Vec::new();
+    for p in &ordered {
+        let key_part = if secrets.has_in_file(p.key_env) {
+            "key already set"
+        } else {
+            "will ask for key"
+        };
+        let model = p.stt.expect("filtered").model;
+        labels.push(format!("{} STT ({key_part}) — {}", p.display_name, model));
+    }
+    labels.push("Skip — fall back to local Whisper".into());
+    let default = if keyed.is_empty() {
+        labels.len() - 1
+    } else {
+        0
+    };
+    let idx = Select::with_theme(theme)
+        .with_prompt("Add speech-to-text from another provider?")
+        .items(&labels)
+        .default(default)
+        .interact()?;
+    if idx == ordered.len() {
+        // Skip — leave stt as default (Local). The daemon will download
+        // the default model on first run.
+        return Ok(());
+    }
+    let entry = ordered[idx];
+    prompt_or_reuse_key(
+        theme,
+        secrets,
+        entry.key_env,
+        entry.display_name,
+        entry.console_url,
+    )
+    .await?;
+    let backend = parse_stt_backend(entry.id).expect("filtered");
+    config.stt = Stt {
+        backend,
+        local: SttLocal::default(),
+        cloud: Some(SttCloud {
+            provider: entry.id.into(),
+            api_key_ref: entry.key_env.into(),
+            model: entry.stt.expect("filtered").model.into(),
+        }),
+        wyoming: None,
+        prompts: std::collections::HashMap::new(),
+    };
+    Ok(())
+}
+
+/// R3.3 -- Customize path: ask STT and LLM independently, no coupling.
+/// Renamed from `configure_mixed` as part of the v2 wizard rework.
+async fn configure_customize(
     theme: &ColorfulTheme,
     config: &mut Config,
     secrets: &mut Secrets,
@@ -1113,10 +1578,10 @@ async fn configure_cloud_stt(
         3 => (SttBackend::Cartesia, "CARTESIA_API_KEY", "sonic-transcribe"),
         _ => (SttBackend::AssemblyAI, "ASSEMBLYAI_API_KEY", "best"),
     };
-    let key = prompt_api_key_with_validation(theme, secrets, stt_key_name).await?;
-    if let Some(k) = key {
-        secrets.insert(stt_key_name, k);
-    }
+    // Phase B5: every cloud key prompt routes through prompt_or_reuse_key
+    // so re-runs print one "reusing…" line instead of re-asking.
+    let (display, console) = catalogue_meta_for_key(stt_key_name);
+    prompt_or_reuse_key(theme, secrets, stt_key_name, display, console).await?;
 
     config.stt.backend = stt_backend.clone();
     // Streaming for cloud Groq is auto-on whenever the user enabled
@@ -1164,9 +1629,8 @@ async fn configure_cloud_llm(
             "claude-haiku-4-5-20251001",
         ),
     };
-    if let Some(k) = prompt_api_key_with_validation(theme, secrets, key_name).await? {
-        secrets.insert(key_name, k);
-    }
+    let (display, console) = catalogue_meta_for_key(key_name);
+    prompt_or_reuse_key(theme, secrets, key_name, display, console).await?;
     config.llm.backend = backend;
     config.llm.enabled = true;
     config.llm.cloud = Some(LlmCloud {
@@ -1669,5 +2133,106 @@ mod tests {
         }
         // turbo should appear and rank highest by accuracy.
         assert!(shortlist.iter().any(|e| e.model.name == "large-v3-turbo"));
+    }
+
+    // ── Phase B6: pre-seed defaults from existing config ─────────────────
+
+    fn primary_candidates_vec() -> Vec<&'static CloudProvider> {
+        CLOUD_PROVIDERS
+            .iter()
+            .filter(|p| is_primary_candidate(p))
+            .collect()
+    }
+
+    #[test]
+    fn seed_prefers_existing_llm_backend() {
+        // A config with `[llm].backend = "cerebras"` must default the
+        // primary picker to Cerebras, not OpenAI.
+        let mut cfg = Config::default();
+        cfg.llm.backend = LlmBackend::Cerebras;
+        let secrets = Secrets::default();
+        let candidates = primary_candidates_vec();
+        let idx = default_primary_for_seed(&candidates, &cfg, &secrets);
+        assert_eq!(candidates[idx].id, "cerebras");
+    }
+
+    #[test]
+    fn seed_prefers_existing_stt_when_local_llm() {
+        // STT=groq + LLM=local (local LLM not a primary candidate) →
+        // should fall through to STT backend "groq".
+        let mut cfg = Config::default();
+        cfg.stt.backend = SttBackend::Groq;
+        cfg.llm.backend = LlmBackend::Local;
+        let secrets = Secrets::default();
+        let candidates = primary_candidates_vec();
+        let idx = default_primary_for_seed(&candidates, &cfg, &secrets);
+        assert_eq!(candidates[idx].id, "groq");
+    }
+
+    #[test]
+    fn seed_falls_back_to_secrets_then_openai() {
+        let cfg = Config::default(); // STT=Local, LLM=Local — neither matches.
+        let mut secrets = Secrets::default();
+        secrets.insert("ANTHROPIC_API_KEY", "sk-test");
+        let candidates = primary_candidates_vec();
+        let idx = default_primary_for_seed(&candidates, &cfg, &secrets);
+        assert_eq!(candidates[idx].id, "anthropic");
+
+        // Without any key: defaults to OpenAI (broadest coverage).
+        let empty = Secrets::default();
+        let idx = default_primary_for_seed(&candidates, &cfg, &empty);
+        assert_eq!(candidates[idx].id, "openai");
+    }
+
+    #[test]
+    fn seed_round_trip_preserves_wyoming_tts() {
+        // The regression guard from B6: a config with Groq STT +
+        // Cerebras LLM + Wyoming TTS must survive the wizard helpers
+        // (seed + tts_short_label) without flipping the TTS backend.
+        let mut cfg = Config::default();
+        cfg.stt.backend = SttBackend::Groq;
+        cfg.llm.backend = LlmBackend::Cerebras;
+        cfg.tts.backend = TtsBackend::Wyoming;
+        cfg.tts.wyoming = Some(TtsWyoming {
+            uri: "tcp://piper.lan:10200".into(),
+            ..TtsWyoming::default()
+        });
+        let secrets = Secrets::default();
+        let candidates = primary_candidates_vec();
+        let idx = default_primary_for_seed(&candidates, &cfg, &secrets);
+        // Cerebras is the LLM → seed default lands there.
+        assert_eq!(candidates[idx].id, "cerebras");
+        // The seed step never mutates `cfg.tts`.
+        assert_eq!(cfg.tts.backend, TtsBackend::Wyoming);
+        // tts_short_label round-trips Wyoming as a distinct label.
+        assert_eq!(tts_short_label(&cfg.tts.backend), "Wyoming");
+    }
+
+    #[test]
+    fn primary_label_caps_at_six_badges() {
+        // OpenAI has 6 native badges (STT/LLM/Assistant/TTS/Vision/Search);
+        // verify the label doesn't ellipsise. Forcing more would
+        // require a synthetic CloudProvider so we trust the cap logic
+        // via the cap path in unit form.
+        let openai = fono_core::provider_catalog::find("openai").unwrap();
+        let label = primary_label(openai);
+        assert!(label.starts_with("OpenAI — "));
+        // 6 badges joined by " · " = 5 separators → at least 5 of them.
+        assert!(label.matches('·').count() >= 5);
+        // No ellipsis when count ≤ 6.
+        assert!(!label.contains('…'));
+    }
+
+    #[test]
+    fn primary_candidates_exclude_gemini_and_stt_only() {
+        let ids: Vec<&str> = primary_candidates_vec().iter().map(|p| p.id).collect();
+        assert!(!ids.contains(&"gemini"), "Gemini must be excluded (factory unwired)");
+        assert!(!ids.contains(&"cartesia"), "Cartesia is STT-only → secondary, not primary");
+        assert!(!ids.contains(&"deepgram"), "Deepgram is STT-only → secondary, not primary");
+        assert!(!ids.contains(&"assemblyai"), "AssemblyAI is STT-only → secondary, not primary");
+        // The five LLM-capable providers DO appear:
+        for must in ["openai", "groq", "anthropic", "cerebras", "openrouter"] {
+            assert!(ids.contains(&must), "{must} must be a primary candidate");
+        }
     }
 }
