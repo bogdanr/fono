@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cloud provider capability catalogue.** A single
+  `fono_core::provider_catalog::CLOUD_PROVIDERS` table is the source of
+  truth for which cloud providers offer STT / LLM cleanup / assistant
+  chat / vision / web search / TTS. The wizard, tray, `fono use cloud`,
+  and `fono doctor` all consume the catalogue, eliminating the five
+  duplicated `match` blocks the wizard used to carry. (Phase A, #9; see
+  [ADR 0025](docs/decisions/0025-cloud-provider-catalogue.md).)
+- **Multi-provider TTS for the voice assistant (#11).** The assistant
+  audio path now supports Groq (PlayAI `playai-tts`), OpenRouter
+  (Kokoro `hexgrad/kokoro-82m`), Cartesia (`sonic-2`), and Deepgram
+  (`aura-2-thalia-en`) in addition to OpenAI and Wyoming. Users on a
+  non-OpenAI primary can run the full record → STT → LLM → TTS loop
+  without obtaining a second key. `CARTESIA_API_KEY` and
+  `DEEPGRAM_API_KEY` already present in `secrets.toml` from STT usage
+  are reused automatically; the wizard's TTS picker orders providers
+  with stored keys first.
+- **Optional assistant extras.** Two new `[assistant]` toggles surface
+  in the wizard's *Optional extras* MultiSelect when the chosen primary
+  supports them: `prefer_vision` swaps the assistant chat model for the
+  provider's multimodal variant (OpenAI / Anthropic / Groq / Gemini),
+  and `prefer_web_search` attaches the provider's native web-search
+  tool to every assistant request (OpenAI's `web_search_preview`,
+  Anthropic's `web_search_20250305`; Gemini's `google_search` is
+  catalogued for forward compatibility). Both default to `false`.
 - **Desktop notifications for critical pipeline failures.** Total STT
   pipeline failures (auth errors, network errors, 5xx) and LLM-cleanup
   auth-class failures now fire a Critical-urgency desktop notification
@@ -37,6 +61,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Wizard cloud branch collapsed onto a single primary-provider
+  picker (#9).** Picking OpenAI or Groq now configures STT, LLM
+  cleanup, the voice assistant, and TTS from one API-key prompt;
+  picking Anthropic / Cerebras / OpenRouter configures LLM + Assistant
+  and asks an opt-in follow-up only for the capabilities the primary
+  doesn't cover. The wizard label list shows runtime-derived capability
+  badges (`STT · LLM · Assistant · TTS · Vision · Search`), capped at
+  six per row.
+- **`PathChoice::Mixed` renamed to `PathChoice::Customize`.** The
+  advanced wizard branch now appears in the top-level menu as
+  *"Customize each capability (advanced)"*. Legacy configs that still
+  carry `mixed` semantics continue to load — there is no on-disk
+  enum to migrate.
+- **Re-running the wizard reuses stored keys silently.** Every
+  cloud-key prompt now routes through `prompt_or_reuse_key`, which
+  prints a single `reusing <KEY> from secrets.toml` line instead of
+  re-asking. A returning user with a populated `secrets.toml` sees
+  zero key prompts on a wizard re-run.
 - **Cascade cap on critical notifications (issue #8).** When a single
   root cause (e.g. a rotated cloud API key) cascade-fails through
   STT → LLM → Assistant → TTS in the same dictation session, the

@@ -305,6 +305,109 @@ fn pick_primary_cloud_provider(
     Ok(PrimaryPick::Catalogued(candidates[idx]))
 }
 
+/// Phase D1 — pure helper that walks a catalogue entry and fills
+/// every capability the entry offers into `config`. Mirrors the
+/// outcome of [`configure_cloud`] + [`configure_assistant`]'s
+/// collapsed-Confirm path: STT, LLM, TTS, and Assistant chat all
+/// land on the primary provider when the entry supplies them.
+///
+/// Pure — no I/O, no secrets touched. Callers handle the key prompt
+/// (or reuse) via [`seed_primary_secret`] / [`prompt_or_reuse_key`].
+///
+/// Skips capabilities the entry doesn't carry (e.g. Anthropic has no
+/// `stt`) and capabilities the runtime hasn't wired yet (Gemini
+/// chat). The assistant chat is only filled when
+/// [`is_assistant_wired`] returns true for the entry — same rule the
+/// wizard uses.
+pub fn apply_primary_provider(config: &mut Config, entry: &CloudProvider) {
+    if let Some(stt_def) = &entry.stt {
+        if let Some(backend) = parse_stt_backend(entry.id) {
+            config.stt = Stt {
+                backend,
+                local: SttLocal::default(),
+                cloud: Some(SttCloud {
+                    provider: entry.id.into(),
+                    api_key_ref: entry.key_env.into(),
+                    model: stt_def.model.into(),
+                }),
+                wyoming: None,
+                prompts: std::collections::HashMap::new(),
+            };
+        }
+    }
+    if let Some(llm_def) = &entry.llm {
+        if let Some(backend) = parse_llm_backend(entry.id) {
+            config.llm.enabled = true;
+            config.llm.backend = backend;
+            config.llm.cloud = Some(LlmCloud {
+                provider: entry.id.into(),
+                api_key_ref: entry.key_env.into(),
+                model: llm_def.model.into(),
+            });
+        }
+    }
+    if let Some(tts_def) = &entry.tts {
+        if let Some(backend) = parse_tts_backend(entry.id) {
+            config.tts.backend = backend;
+            config.tts.cloud = Some(TtsCloud {
+                provider: entry.id.into(),
+                api_key_ref: entry.key_env.into(),
+                model: tts_def.model.into(),
+            });
+            config.tts.voice = tts_def.default_voice.into();
+        }
+    }
+    if let Some(adef) = entry.assistant {
+        if is_assistant_wired(entry) {
+            if let Some(backend) = parse_assistant_backend(entry.id) {
+                config.assistant.enabled = true;
+                config.assistant.backend = backend;
+                config.assistant.cloud = Some(AssistantCloud {
+                    provider: entry.id.into(),
+                    api_key_ref: entry.key_env.into(),
+                    model: adef.text_model.into(),
+                });
+            }
+        }
+    }
+}
+
+/// Phase D1 — pair to [`apply_primary_provider`]. Inserts a mocked
+/// API key into `secrets` if the entry's `key_env` is not already
+/// present, then returns whether a fresh insert happened
+/// (`true`) or the existing key was reused (`false`). The boolean is
+/// what the wizard surfaces as a `"reusing …"` notice in the real
+/// flow.
+///
+/// Pure — no prompting, no validation. Production paths still go
+/// through [`prompt_or_reuse_key`]; this helper exists for
+/// integration-test setup where the prompt would block on stdin.
+pub fn seed_primary_secret(secrets: &mut Secrets, entry: &CloudProvider, key: &str) -> bool {
+    if secrets.has_in_file(entry.key_env) {
+        return false;
+    }
+    secrets.insert(entry.key_env, key);
+    true
+}
+
+/// Phase D1 — pure TTS-secondary helper. Sets `config.tts` to the
+/// catalogue entry's defaults, leaving everything else alone. Used
+/// by tests that exercise the "primary doesn't offer TTS, user picks
+/// a secondary" scenario (e.g. Anthropic LLM + Cartesia TTS).
+pub fn apply_secondary_tts(config: &mut Config, entry: &CloudProvider) {
+    let Some(tts_def) = &entry.tts else { return };
+    let Some(backend) = parse_tts_backend(entry.id) else {
+        return;
+    };
+    config.tts.backend = backend;
+    config.tts.cloud = Some(TtsCloud {
+        provider: entry.id.into(),
+        api_key_ref: entry.key_env.into(),
+        model: tts_def.model.into(),
+    });
+    config.tts.voice = tts_def.default_voice.into();
+}
+
 /// Phase B5 — central key-reuse helper. If `secrets.toml` already
 /// carries `key_env`, print one `"  reusing …"` line and return
 /// without prompting. Otherwise prompt for a fresh key (with

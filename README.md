@@ -47,11 +47,35 @@ Speak. Text appears at your cursor.
 
 ## Switching providers
 
-Hot-swap STT, LLM, or both — no daemon restart:
+`fono setup` now collapses the cloud branch onto a single primary-provider
+picker. Pick OpenAI or Groq and one key prompt covers STT, LLM cleanup,
+the voice assistant, **and** TTS — no more juggling four separate prompts:
+
+```text
+$ fono setup
+  Pick a primary cloud provider. One key, one walk — Fono fills in every
+  capability that provider covers (STT · LLM · Assistant · TTS).
+
+  Primary cloud provider: › OpenAI — STT · LLM · Assistant · TTS · Vision · Search
+                            Groq — STT · LLM · Assistant · TTS · Vision · Fast
+                            Anthropic — LLM · Assistant · Vision · Search
+                            Cerebras — LLM · Assistant · Fast
+                            OpenRouter — LLM · Assistant · TTS
+                            Customize per capability (advanced)
+  Get one at https://platform.openai.com/api-keys
+  ? Paste your OPENAI_API_KEY (stored mode 0600, leave empty to skip)
+  …
+```
+
+Multi-provider TTS (issue #11) means the assistant now produces audio
+on Groq, OpenRouter (Kokoro), Cartesia, and Deepgram in addition to
+OpenAI — so a non-OpenAI primary no longer forces a second key just to
+hear replies. Hot-swapping after setup is still one command:
 
 ```sh
 fono use cloud groq           # paired preset (Groq STT + Groq LLM)
 fono use stt openai           # change just STT
+fono use tts cartesia         # swap to Cartesia Sonic-2 audio
 fono use local                # back to whisper-local + skip LLM
 ```
 

@@ -439,3 +439,46 @@ stale.
    ordering, focus-theft on Wayland compositors, KWin tray quirks)
    that no realistic test harness can cover. Manual QA is irreducible
    for a desktop UX product. **Rejected — both are required.**
+
+## Wizard + multi-provider TTS smoke (post v2 plan)
+
+Appended 2026-05-13 as part of the v2 wizard rework
+(`plans/2026-05-13-2026-05-13-wizard-catalogue-multimodal-and-multi-tts-issues-9-11-v2.md`,
+Phase D3). Each row is a fresh-config wizard run (`rm
+~/.config/fono/config.toml ~/.config/fono/secrets.toml; fono setup`)
+followed by one assistant invocation via the F8 hotkey:
+
+- [ ] **Primary = OpenAI.** Wizard asks for `OPENAI_API_KEY` exactly
+      once and prints no further key prompts; resulting `config.toml`
+      has `[stt].backend = "openai"`, `[llm].backend = "openai"`,
+      `[assistant].backend = "openai"`, `[tts].backend = "openai"`.
+- [ ] **Primary = Groq.** Wizard asks for `GROQ_API_KEY` exactly once;
+      resulting config sets STT/LLM/Assistant/TTS all to `"groq"`.
+      Verifies issue #11's single-key-covers-everything scenario.
+- [ ] **Primary = Anthropic.** Wizard asks for `ANTHROPIC_API_KEY`,
+      then the secondary-STT prompt (Skip → local Whisper) and the
+      assistant TTS picker (pick Cartesia if `CARTESIA_API_KEY` is
+      pre-staged, else pick Wyoming).
+- [ ] **Primary = Cerebras.** Same as Anthropic but with no vision /
+      web-search extras row — the "Optional extras" `MultiSelect` is
+      suppressed entirely because Cerebras has neither capability.
+- [ ] **Assistant audio across all five TTS backends.** With the
+      assistant enabled, hot-swap `[tts].backend` (via `fono use tts
+      <name>`) through `wyoming → openai → groq → cartesia →
+      deepgram → openrouter` and press F8 once per backend. Each
+      reply must speak audibly through the speakers with no
+      `critical_notify` notification firing.
+- [ ] **`prefer_vision` model swap.** Toggle the vision row on for
+      OpenAI / Anthropic / Groq in turn and inspect the assistant log
+      line: model id must equal the catalogue entry's
+      `multimodal_model` (e.g. `gpt-5.4-mini`,
+      `claude-haiku-4-5-20251001`, `llama-4-maverick-17b-128e-instruct`).
+- [ ] **`prefer_web_search` tool injection.** Toggle the search row on
+      for OpenAI and Anthropic and ask the assistant a
+      fresh-information question; the daemon log at INFO must contain
+      one `web_search` tool-active line per invocation. Skip on
+      Gemini until the chat client lands.
+- [ ] **Wizard re-run with full secrets.** With every cloud key
+      already in `secrets.toml`, `fono setup` should print exactly
+      one `reusing <KEY> from secrets.toml` line per capability and
+      ask zero key-paste prompts.

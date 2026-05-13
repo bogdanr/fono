@@ -6,6 +6,37 @@ and can be swapped at any time with `fono use`, `fono setup`, or by editing
 the file directly. API keys are stored in `~/.config/fono/secrets.toml`
 (mode 0600, never logged) or read from `$ENV_VAR`.
 
+## Capability matrix
+
+The wizard, tray, `fono use cloud`, and `fono doctor` all consume the
+single capability catalogue defined in
+`fono_core::provider_catalog::CLOUD_PROVIDERS`. The matrix below mirrors
+that catalogue; **new** marks TTS backends added in the v2 wizard
+rework (issue #11). See
+[ADR 0025](decisions/0025-cloud-provider-catalogue.md) for the design
+rationale.
+
+| Provider       | STT | LLM cleanup | Assistant chat | Vision                       | Web search                      | TTS                       |
+|----------------|-----|-------------|----------------|------------------------------|----------------------------------|---------------------------|
+| **OpenAI**     | ✓   | ✓           | ✓              | ✓ (`gpt-5.4-mini`)          | ✓ `web_search_preview`           | ✓ `tts-1`                 |
+| **Groq**       | ✓   | ✓           | ✓              | ✓ (Llama-4 Maverick)         | —                                | ✓ PlayAI **new**          |
+| **Anthropic**  | —   | ✓           | ✓              | ✓ (Claude Haiku 4.5)         | ✓ `web_search_20250305`          | —                         |
+| **Cerebras**   | —   | ✓           | ✓              | —                            | —                                | —                         |
+| **Gemini**     | —   | ✓ *(planned)* | ✓ *(planned)* | ✓ (Flash)                    | ✓ `google_search` *(planned)*    | —                         |
+| **OpenRouter** | —   | ✓           | ✓              | *(route-dependent)*          | *(route-dependent)*              | ✓ Kokoro **new**          |
+| **Cartesia**   | ✓   | —           | —              | —                            | —                                | ✓ Sonic-2 **new**         |
+| **Deepgram**   | ✓   | —           | —              | —                            | —                                | ✓ Aura-2 **new**          |
+| **AssemblyAI** | ✓   | —           | —              | —                            | —                                | —                         |
+
+Picking OpenAI or Groq as the primary cloud provider configures every
+capability in that row from a single key prompt; picking Anthropic or
+Cerebras configures LLM + Assistant and asks an opt-in secondary
+question for STT and/or TTS, defaulting to "key already set" providers
+when their key is in `secrets.toml`. **Five** providers can now drive
+the assistant end-to-end (OpenAI, Groq, Anthropic + any new cloud TTS,
+Cerebras + any new cloud TTS, OpenRouter) — up from OpenAI-only before
+this release.
+
 ## Switching providers (no daemon restart)
 
 The smallest valid cloud config is two lines plus one key:
@@ -181,6 +212,74 @@ Design rationale: [ADR 0017](decisions/0017-cloud-stt-language-stickiness.md).
   10-second utterance; idle RAM ~30 MB, active ~1.3 GB.
 * **Cloud default:** Groq whisper-large-v3 + Cerebras llama-3.3-70b — sub-1 s
   latency end-to-end, generous free tiers, permissive TOS.
+
+## Text-to-speech (assistant audio replies)
+
+The voice assistant streams its reply sentence-by-sentence to whichever
+TTS backend is selected in `[tts].backend`. v2 (issue #11) adds four
+cloud providers next to the existing Wyoming + OpenAI options so
+assistant audio works without an OpenAI key.
+
+| Backend       | Type       | Default model       | Endpoint                                               | Auth header                  |
+|---------------|------------|---------------------|--------------------------------------------------------|------------------------------|
+| Wyoming       | local LAN  | server-side voice   | `tcp://<host>:10200`                                   | —                            |
+| OpenAI        | cloud HTTP | `tts-1`             | `https://api.openai.com/v1/audio/speech`               | `Authorization: Bearer <k>`  |
+| Groq          | cloud HTTP | `playai-tts`        | `https://api.groq.com/openai/v1/audio/speech`          | `Authorization: Bearer <k>`  |
+| OpenRouter    | cloud HTTP | `hexgrad/kokoro-82m`| `https://openrouter.ai/api/v1/audio/speech`            | `Authorization: Bearer <k>`  |
+| Cartesia      | cloud HTTP | `sonic-2`           | `https://api.cartesia.ai/tts/bytes`                    | `X-API-Key: <k>`             |
+| Deepgram      | cloud HTTP | `aura-2-thalia-en`  | `https://api.deepgram.com/v1/speak`                    | `Authorization: Token <k>`   |
+
+`CARTESIA_API_KEY` and `DEEPGRAM_API_KEY` may already be in
+`secrets.toml` from STT usage — the assistant reuses them, so flipping
+the assistant onto Cartesia or Deepgram TTS doesn't require a fresh
+key prompt for existing users.
+
+### Groq TTS
+
+Groq exposes an OpenAI-compatible TTS endpoint at
+`https://api.groq.com/openai/v1/audio/speech`. Fono points its
+parameterised OpenAI-compat client at that base URL with model
+`playai-tts` and voice `Fritz-PlayAI` (neutral male, close to OpenAI's
+`alloy` baseline). Request/response shape is identical to OpenAI's —
+24 kHz raw PCM in the response body.
+
+**Note:** the PlayAI model family is currently flagged as **beta-tier**
+on Groq's plan dashboard. Rate limits are tighter than the rest of the
+Groq catalogue. If you plan to drive Fono's assistant heavily, set up
+rate-limit alerts on the Groq dashboard so a sudden 429 cascade
+surfaces explicitly. (Fono's `critical_notify` already pops a desktop
+notification on the first 429 per session, but you'll want billing-side
+visibility too.)
+
+### OpenRouter TTS (Kokoro)
+
+OpenRouter ships its own OpenAI-compatible TTS endpoint at
+`https://openrouter.ai/api/v1/audio/speech`. The default model is
+`hexgrad/kokoro-82m` (Kokoro, $0.62 / 1M chars at the time of writing),
+with default voice `af_heart`. Same body shape as OpenAI; the response
+is 24 kHz raw PCM. Useful for users who already route their LLM through
+OpenRouter and want a single key covering chat + audio.
+
+### Cartesia TTS (Sonic-2)
+
+Cartesia uses a native (non-OpenAI-compatible) `POST /tts/bytes`
+endpoint at `https://api.cartesia.ai/tts/bytes`. Fono pins model
+`sonic-2` and voice id `a0e99841-438c-4a64-b679-ae501e7d6091`
+(Cartesia's neutral English preset). The request asks for raw
+`pcm_s16le` @ 24 kHz to match the assistant's audio pipeline; the
+response body is contiguous PCM with no header. Auth header is
+`X-API-Key: <CARTESIA_API_KEY>`. Sonic-2 is the lowest-latency premium
+voice in the catalogue — recommended for users who want the most
+natural-sounding replies.
+
+### Deepgram TTS (Aura-2)
+
+Deepgram's `POST /v1/speak` endpoint at
+`https://api.deepgram.com/v1/speak` takes a JSON body of the shape
+`{"text": "..."}`. The voice is encoded in the model id; the default
+is `aura-2-thalia-en` (English, female, calm). Response is linear16
+PCM at 24 kHz. Auth header is `Authorization: Token <DEEPGRAM_API_KEY>`
+(the literal word `Token`, not `Bearer` — a frequent confusion).
 
 ## Assistant capabilities
 
