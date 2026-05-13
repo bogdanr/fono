@@ -25,6 +25,11 @@ pub struct OpenAiCompatChat {
     api_key: String,
     model: String,
     backend_name: &'static str,
+    /// Phase E5 — when `Some`, the request body grows a `tools`
+    /// array carrying this provider's native web-search tool. Only
+    /// OpenAI populates this in practice (the catalogue gates Groq /
+    /// Cerebras / OpenRouter / Ollama as `WebSearchSupport::None`).
+    web_search_tool: Option<&'static str>,
     client: reqwest::Client,
 }
 
@@ -43,8 +48,22 @@ impl OpenAiCompatChat {
             api_key: api_key.into(),
             model: model.into(),
             backend_name,
+            web_search_tool: None,
             client: warm_client(),
         }
+    }
+
+    /// Attach an OpenAI web-search tool descriptor to every request.
+    /// Pass `None` to leave the request body unchanged. The currently
+    /// recognised tool id is `"web_search_preview"` (the descriptor
+    /// shipped on OpenAI's Responses API; chat/completions accepts
+    /// the same `{"type":"<id>"}` shape and silently ignores tools
+    /// it doesn't understand). See
+    /// <https://platform.openai.com/docs/guides/tools-web-search>.
+    #[must_use]
+    pub fn with_web_search(mut self, tool_id: Option<&'static str>) -> Self {
+        self.web_search_tool = tool_id;
+        self
     }
 
     pub fn cerebras(api_key: impl Into<String>, model: impl Into<String>) -> Self {
@@ -127,6 +146,21 @@ struct ChatReq<'a> {
     #[serde(rename = "max_completion_tokens")]
     max_tokens: u32,
     stream: bool,
+    /// Phase E5 — web-search tool descriptor when the user opted in.
+    /// Omitted entirely when `None` so request bodies stay
+    /// byte-identical for the pre-Phase-E default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<serde_json::Value>>,
+}
+
+/// Build the OpenAI `tools` array for a single web-search descriptor.
+/// Kept separate so the snapshot tests can exercise the exact JSON
+/// shape without a live HTTP call. Shape: `[{"type": "<tool_id>"}]`
+/// (Responses-API descriptor; chat/completions tolerates the same
+/// type-only payload). See module docs on `with_web_search`.
+#[must_use]
+pub(crate) fn build_web_search_tools(tool_id: &str) -> Vec<serde_json::Value> {
+    vec![serde_json::json!({ "type": tool_id })]
 }
 
 #[derive(Serialize)]
@@ -189,6 +223,13 @@ impl Assistant for OpenAiCompatChat {
             content: user_text,
         });
 
+        let tools = self.web_search_tool.map(build_web_search_tools);
+        if let Some(tool_id) = self.web_search_tool {
+            tracing::info!(
+                target: "fono.assistant",
+                "web search tool active: {tool_id}"
+            );
+        }
         let req = ChatReq {
             model: &self.model,
             messages,
@@ -199,6 +240,7 @@ impl Assistant for OpenAiCompatChat {
             top_p: 0.9,
             max_tokens: 512,
             stream: true,
+            tools,
         };
         let mut builder = self
             .client
@@ -341,5 +383,49 @@ mod tests {
     #[test]
     fn truncate_short_strings() {
         assert_eq!(truncate("hi", 5), "hi");
+    }
+
+    #[test]
+    fn build_web_search_tools_shape() {
+        let tools = build_web_search_tools("web_search_preview");
+        assert_eq!(tools.len(), 1);
+        let json = serde_json::to_string(&tools).unwrap();
+        assert_eq!(json, r#"[{"type":"web_search_preview"}]"#);
+    }
+
+    #[test]
+    fn with_web_search_omits_tools_field_when_none() {
+        // Without web search, the request body must not include a
+        // `tools` field at all (skip_serializing_if = "Option::is_none"
+        // keeps the wire byte-identical to the pre-Phase-E default).
+        let req = ChatReq {
+            model: "gpt-5.4-mini",
+            messages: vec![],
+            temperature: 0.5,
+            top_p: 0.9,
+            max_tokens: 512,
+            stream: true,
+            tools: None,
+        };
+        let body = serde_json::to_string(&req).unwrap();
+        assert!(!body.contains("\"tools\""), "{body}");
+    }
+
+    #[test]
+    fn with_web_search_serialises_tools_when_set() {
+        let req = ChatReq {
+            model: "gpt-5.4-mini",
+            messages: vec![],
+            temperature: 0.5,
+            top_p: 0.9,
+            max_tokens: 512,
+            stream: true,
+            tools: Some(build_web_search_tools("web_search_preview")),
+        };
+        let body = serde_json::to_string(&req).unwrap();
+        assert!(
+            body.contains(r#""tools":[{"type":"web_search_preview"}]"#),
+            "{body}"
+        );
     }
 }

@@ -573,6 +573,7 @@ a term in the personal dictionary, prefer that exact spelling."
 /// wizard or `fono use assistant <backend>`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Assistant {
     pub enabled: bool,
     pub backend: AssistantBackend,
@@ -594,6 +595,22 @@ pub struct Assistant {
     /// separate intents; mixing their contexts is rarely what the user
     /// wants.
     pub auto_clear_on_dictation: bool,
+    /// Phase E (issues #9/#11). When `true`, the assistant builder
+    /// swaps the catalogue's `text_model` for `multimodal_model` if
+    /// the provider exposes one (e.g. Claude Haiku 4.5, Llama-4
+    /// Maverick on Groq). Net-new field; defaults to `false`; old
+    /// configs without it load unchanged via `#[serde(default)]` on
+    /// the struct.
+    #[serde(default)]
+    pub prefer_vision: bool,
+    /// Phase E (issues #9/#11). When `true`, the assistant's request
+    /// builder appends the provider's native web-search tool to the
+    /// `tools` field on every turn (OpenAI `web_search_preview`,
+    /// Anthropic `web_search_20250305`, Gemini `google_search`).
+    /// No-op for providers whose catalogue entry says
+    /// `WebSearchSupport::None`.
+    #[serde(default)]
+    pub prefer_web_search: bool,
 }
 
 impl Default for Assistant {
@@ -607,6 +624,8 @@ impl Default for Assistant {
             history_window_minutes: 5,
             history_max_turns: 12,
             auto_clear_on_dictation: true,
+            prefer_vision: false,
+            prefer_web_search: false,
         }
     }
 }

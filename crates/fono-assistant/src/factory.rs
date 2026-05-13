@@ -12,22 +12,44 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use fono_core::config::{Assistant as AssistantCfg, AssistantBackend};
 #[cfg(any(feature = "openai-compat", feature = "anthropic"))]
+use fono_core::provider_catalog;
+#[cfg(any(feature = "openai-compat", feature = "anthropic"))]
+use fono_core::provider_catalog::WebSearchSupport;
+#[cfg(any(feature = "openai-compat", feature = "anthropic"))]
 use fono_core::providers::assistant_key_env;
 #[allow(unused_imports)]
 use fono_core::Secrets;
 
 use crate::traits::Assistant;
 
-/// Resolve `(api_key, model)` for a cloud assistant backend, falling
-/// through to the canonical env var and the [`default_cloud_model`]
-/// when the relevant fields in `[assistant.cloud]` are blank.
+/// Resolved cloud-assistant parameters: the secret key, the chosen
+/// model (text or multimodal depending on `[assistant].prefer_vision`)
+/// and the web-search tool id to attach to every request (depending on
+/// `[assistant].prefer_web_search` + the catalogue's
+/// `WebSearchSupport`).
+#[cfg(any(feature = "openai-compat", feature = "anthropic"))]
+struct CloudResolution {
+    key: String,
+    model: String,
+    web_search_tool: Option<&'static str>,
+}
+
+/// Resolve `(api_key, model, web_search_tool)` for a cloud assistant
+/// backend, falling through to the canonical env var and the
+/// catalogue's per-provider defaults when the relevant fields in
+/// `[assistant.cloud]` are blank. When `cfg.prefer_vision` is set and
+/// the catalogue entry exposes `multimodal_model`, that variant is
+/// substituted for the text model. When `cfg.prefer_web_search` is
+/// set, the catalogue's [`WebSearchSupport::NativeTool`] id is
+/// returned so the per-provider chat client can inject it into the
+/// request payload.
 #[cfg(any(feature = "openai-compat", feature = "anthropic"))]
 fn resolve_cloud(
     cfg: &AssistantCfg,
     secrets: &Secrets,
     backend: &AssistantBackend,
     provider_name: &str,
-) -> Result<(String, String)> {
+) -> Result<CloudResolution> {
     let canonical = assistant_key_env(backend);
     let (key_ref, model_override) = cfg.cloud.as_ref().map_or_else(
         || (canonical.to_string(), None),
@@ -51,8 +73,57 @@ fn resolve_cloud(
              run `fono keys add {key_ref}` to add it"
         )
     })?;
-    let model = model_override.unwrap_or_else(|| default_cloud_model(provider_name).to_string());
-    Ok((key, model))
+    let entry = provider_catalog::find(provider_name);
+    // Phase E4 — swap to the multimodal variant when the user opted
+    // in. If they toggled vision on but the catalogue has no
+    // multimodal model for this provider (e.g. user flipped primary
+    // to Cerebras after toggling vision elsewhere), log a single
+    // warning and stay on the text model.
+    let base_model =
+        model_override.unwrap_or_else(|| default_cloud_model(provider_name).to_string());
+    let model = if cfg.prefer_vision {
+        let mm = entry.and_then(|e| e.assistant?.multimodal_model);
+        mm.map_or_else(
+            || {
+                tracing::warn!(
+                    target: "fono.assistant",
+                    "prefer_vision is on but {provider_name} has no multimodal model; \
+                     using text model {base_model}"
+                );
+                base_model.clone()
+            },
+            ToString::to_string,
+        )
+    } else {
+        base_model
+    };
+
+    // Phase E5 — surface the catalogue's web-search tool id when the
+    // user opted in. Providers whose catalogue entry says
+    // `WebSearchSupport::None` get `None` here regardless of the
+    // toggle (so the per-provider chat client never sees a tool id
+    // it doesn't know how to inject).
+    let web_search_tool = if cfg.prefer_web_search {
+        if let Some(WebSearchSupport::NativeTool(id)) =
+            entry.and_then(|e| e.assistant.map(|a| a.web_search))
+        {
+            Some(id)
+        } else {
+            // `Always` / `None` / missing entry: leave the body
+            // untouched. `Always` is reserved for Perplexity-shape
+            // providers (no toggle, always grounded) — Phase E ships
+            // no such provider.
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(CloudResolution {
+        key,
+        model,
+        web_search_tool,
+    })
 }
 
 /// Default chat model per provider. Tuned for the assistant's "1-3
@@ -109,33 +180,37 @@ pub fn build_assistant(
 
 #[cfg(feature = "openai-compat")]
 fn build_cerebras(cfg: &AssistantCfg, secrets: &Secrets) -> Result<Arc<dyn Assistant>> {
-    let (k, m) = resolve_cloud(cfg, secrets, &AssistantBackend::Cerebras, "cerebras")?;
+    let r = resolve_cloud(cfg, secrets, &AssistantBackend::Cerebras, "cerebras")?;
     Ok(Arc::new(
-        crate::openai_compat_chat::OpenAiCompatChat::cerebras(k, m),
+        crate::openai_compat_chat::OpenAiCompatChat::cerebras(r.key, r.model)
+            .with_web_search(r.web_search_tool),
     ))
 }
 
 #[cfg(feature = "openai-compat")]
 fn build_groq(cfg: &AssistantCfg, secrets: &Secrets) -> Result<Arc<dyn Assistant>> {
-    let (k, m) = resolve_cloud(cfg, secrets, &AssistantBackend::Groq, "groq")?;
-    Ok(Arc::new(crate::openai_compat_chat::OpenAiCompatChat::groq(
-        k, m,
-    )))
+    let r = resolve_cloud(cfg, secrets, &AssistantBackend::Groq, "groq")?;
+    Ok(Arc::new(
+        crate::openai_compat_chat::OpenAiCompatChat::groq(r.key, r.model)
+            .with_web_search(r.web_search_tool),
+    ))
 }
 
 #[cfg(feature = "openai-compat")]
 fn build_openai(cfg: &AssistantCfg, secrets: &Secrets) -> Result<Arc<dyn Assistant>> {
-    let (k, m) = resolve_cloud(cfg, secrets, &AssistantBackend::OpenAI, "openai")?;
+    let r = resolve_cloud(cfg, secrets, &AssistantBackend::OpenAI, "openai")?;
     Ok(Arc::new(
-        crate::openai_compat_chat::OpenAiCompatChat::openai(k, m),
+        crate::openai_compat_chat::OpenAiCompatChat::openai(r.key, r.model)
+            .with_web_search(r.web_search_tool),
     ))
 }
 
 #[cfg(feature = "openai-compat")]
 fn build_openrouter(cfg: &AssistantCfg, secrets: &Secrets) -> Result<Arc<dyn Assistant>> {
-    let (k, m) = resolve_cloud(cfg, secrets, &AssistantBackend::OpenRouter, "openrouter")?;
+    let r = resolve_cloud(cfg, secrets, &AssistantBackend::OpenRouter, "openrouter")?;
     Ok(Arc::new(
-        crate::openai_compat_chat::OpenAiCompatChat::openrouter(k, m),
+        crate::openai_compat_chat::OpenAiCompatChat::openrouter(r.key, r.model)
+            .with_web_search(r.web_search_tool),
     ))
 }
 
@@ -165,6 +240,8 @@ fn build_ollama(cfg: &AssistantCfg) -> Result<Arc<dyn Assistant>> {
         .map(|c| c.model.clone())
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| default_cloud_model("ollama").to_string());
+    // Ollama has no native web-search tool surface; ignore the
+    // toggle even when it's set on the config.
     Ok(Arc::new(
         crate::openai_compat_chat::OpenAiCompatChat::ollama(endpoint, model),
     ))
@@ -203,8 +280,11 @@ fn build_ollama(_cfg: &AssistantCfg) -> Result<Arc<dyn Assistant>> {
 
 #[cfg(feature = "anthropic")]
 fn build_anthropic(cfg: &AssistantCfg, secrets: &Secrets) -> Result<Arc<dyn Assistant>> {
-    let (k, m) = resolve_cloud(cfg, secrets, &AssistantBackend::Anthropic, "anthropic")?;
-    Ok(Arc::new(crate::anthropic_chat::AnthropicChat::new(k, m)))
+    let r = resolve_cloud(cfg, secrets, &AssistantBackend::Anthropic, "anthropic")?;
+    Ok(Arc::new(
+        crate::anthropic_chat::AnthropicChat::new(r.key, r.model)
+            .with_web_search(r.web_search_tool),
+    ))
 }
 
 #[cfg(not(feature = "anthropic"))]
@@ -330,5 +410,80 @@ mod tests {
             err.contains("Gemini") || err.contains("not implemented"),
             "{err}"
         );
+    }
+
+    // ── Phase E4 + E5: resolve_cloud unit tests ───────────────────
+    #[cfg(any(feature = "openai-compat", feature = "anthropic"))]
+    fn make_secrets(env: &str) -> Secrets {
+        let mut s = Secrets::default();
+        s.insert(env, "sk-test");
+        s
+    }
+
+    #[cfg(feature = "anthropic")]
+    #[test]
+    fn prefer_vision_swaps_to_multimodal_when_available() {
+        let cfg = AssistantCfg {
+            enabled: true,
+            backend: AssistantBackend::Anthropic,
+            prefer_vision: true,
+            ..AssistantCfg::default()
+        };
+        let secrets = make_secrets("ANTHROPIC_API_KEY");
+        let r = resolve_cloud(&cfg, &secrets, &AssistantBackend::Anthropic, "anthropic").unwrap();
+        // Anthropic catalogue entry's multimodal_model is the same as
+        // the text model (Haiku 4.5 is multimodal); the swap is still
+        // a no-op-equivalent — but we assert the field source is the
+        // catalogue's multimodal_model literal.
+        assert_eq!(r.model, "claude-haiku-4-5-20251001");
+    }
+
+    #[cfg(feature = "openai-compat")]
+    #[test]
+    fn prefer_vision_with_no_multimodal_falls_back_to_text_model() {
+        // Cerebras catalogue entry: multimodal_model = None.
+        let cfg = AssistantCfg {
+            enabled: true,
+            backend: AssistantBackend::Cerebras,
+            prefer_vision: true,
+            ..AssistantCfg::default()
+        };
+        let secrets = make_secrets("CEREBRAS_API_KEY");
+        let r = resolve_cloud(&cfg, &secrets, &AssistantBackend::Cerebras, "cerebras").unwrap();
+        // Cerebras has no multimodal model — must fall back to the
+        // text model and emit a warning (warning verified manually;
+        // tracing infra differs across test contexts).
+        assert_eq!(r.model, default_cloud_model("cerebras"));
+        assert!(r.web_search_tool.is_none());
+    }
+
+    #[cfg(feature = "anthropic")]
+    #[test]
+    fn prefer_web_search_surfaces_native_tool_id() {
+        let cfg = AssistantCfg {
+            enabled: true,
+            backend: AssistantBackend::Anthropic,
+            prefer_web_search: true,
+            ..AssistantCfg::default()
+        };
+        let secrets = make_secrets("ANTHROPIC_API_KEY");
+        let r = resolve_cloud(&cfg, &secrets, &AssistantBackend::Anthropic, "anthropic").unwrap();
+        assert_eq!(r.web_search_tool, Some("web_search_20250305"));
+    }
+
+    #[cfg(feature = "openai-compat")]
+    #[test]
+    fn prefer_web_search_is_none_for_groq() {
+        let cfg = AssistantCfg {
+            enabled: true,
+            backend: AssistantBackend::Groq,
+            prefer_web_search: true,
+            ..AssistantCfg::default()
+        };
+        let secrets = make_secrets("GROQ_API_KEY");
+        let r = resolve_cloud(&cfg, &secrets, &AssistantBackend::Groq, "groq").unwrap();
+        // Groq's catalogue entry advertises WebSearchSupport::None —
+        // toggle is a no-op there.
+        assert!(r.web_search_tool.is_none());
     }
 }

@@ -182,6 +182,51 @@ Design rationale: [ADR 0017](decisions/0017-cloud-stt-language-stickiness.md).
 * **Cloud default:** Groq whisper-large-v3 + Cerebras llama-3.3-70b — sub-1 s
   latency end-to-end, generous free tiers, permissive TOS.
 
+## Assistant capabilities
+
+The voice assistant (F8 by default) can opt into two server-side
+extras when the chosen primary provider supports them. See
+[ADR 0024](decisions/0024-assistant-multimodal-and-search.md) for the
+full design.
+
+| Provider   | Vision (multimodal model)              | Web search (native tool)            |
+|------------|-----------------------------------------|--------------------------------------|
+| OpenAI     | `gpt-5.4-mini` (same as text default)   | `web_search_preview`                 |
+| Anthropic  | `claude-haiku-4-5-20251001`             | `web_search_20250305`                |
+| Gemini     | `gemini-1.5-flash`                      | `google_search` *(not yet wired)*    |
+| Groq       | `llama-4-maverick-17b-128e-instruct`    | —                                    |
+| Cerebras   | —                                       | —                                    |
+| OpenRouter | *(route-dependent — deferred)*          | *(route-dependent — deferred)*       |
+
+Two config flags in `[assistant]` drive the runtime behaviour:
+
+* `prefer_vision = true` — the assistant builder swaps the provider's
+  `text_model` for `multimodal_model` at startup. If the chosen
+  provider has no multimodal variant (e.g. Cerebras), Fono logs a
+  warning and stays on the text model. **Screen-capture is not yet
+  implemented** — the model variant is selected but Fono does not
+  yet attach images to user turns. Manual image input via the
+  assistant remains a follow-up.
+* `prefer_web_search = true` — the assistant's per-provider chat
+  client appends the matching native tool to every request body:
+  * OpenAI: `tools: [{"type":"web_search_preview"}]`.
+  * Anthropic: `tools: [{"type":"web_search_20250305","name":"web_search","max_uses":3}]`.
+  * Gemini: `tools: [{"google_search": {}}]` *(declared but not yet
+    wired — Gemini chat client is a follow-up).*
+  For providers whose catalogue entry says `WebSearchSupport::None`,
+  the flag is a no-op (no tool is injected). Each invocation logs a
+  one-line `info!` at target `fono.assistant` when the tool is active.
+
+Both flags default to `false` and can be toggled from the wizard's
+**Optional extras** MultiSelect after picking an assistant backend, or
+edited directly in `~/.config/fono/config.toml`:
+
+```toml
+[assistant]
+prefer_vision = false
+prefer_web_search = false
+```
+
 ## Adding a new backend
 
 Implement the `fono_stt::SpeechToText` or `fono_llm::TextCleanup` async

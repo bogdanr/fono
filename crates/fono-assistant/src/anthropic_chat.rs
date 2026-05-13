@@ -25,6 +25,10 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 pub struct AnthropicChat {
     api_key: String,
     model: String,
+    /// Phase E5 — when `Some`, every `messages` request grows a
+    /// `tools` array with Anthropic's native web-search tool. The
+    /// catalogue currently emits `"web_search_20250305"`.
+    web_search_tool: Option<&'static str>,
     client: reqwest::Client,
 }
 
@@ -34,8 +38,19 @@ impl AnthropicChat {
         Self {
             api_key: api_key.into(),
             model: model.into(),
+            web_search_tool: None,
             client: warm_client(),
         }
+    }
+
+    /// Attach Anthropic's native web-search tool descriptor. The
+    /// expected tool id is `"web_search_20250305"`. Shape:
+    /// `[{"type": "<id>", "name": "web_search", "max_uses": 3}]`.
+    /// See <https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/web-search-tool>.
+    #[must_use]
+    pub fn with_web_search(mut self, tool_id: Option<&'static str>) -> Self {
+        self.web_search_tool = tool_id;
+        self
     }
 }
 
@@ -59,6 +74,22 @@ struct MessagesReq<'a> {
     system: &'a str,
     messages: Vec<Message<'a>>,
     stream: bool,
+    /// Phase E5 — Anthropic's native web-search tool when opted in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<serde_json::Value>>,
+}
+
+/// Build Anthropic's `tools` array for the web-search tool. Shape:
+/// `[{"type": "<tool_id>", "name": "web_search", "max_uses": 3}]`.
+/// `max_uses=3` is the Phase-E default — caps cost per turn while
+/// still letting Claude chain a couple of follow-up queries.
+#[must_use]
+pub(crate) fn build_web_search_tools(tool_id: &str) -> Vec<serde_json::Value> {
+    vec![serde_json::json!({
+        "type": tool_id,
+        "name": "web_search",
+        "max_uses": 3,
+    })]
 }
 
 #[derive(Serialize)]
@@ -128,6 +159,13 @@ impl Assistant for AnthropicChat {
             format!("{}\n\n{}", ctx.system_prompt, history_system_extra)
         };
 
+        let tools = self.web_search_tool.map(build_web_search_tools);
+        if let Some(tool_id) = self.web_search_tool {
+            tracing::info!(
+                target: "fono.assistant",
+                "web search tool active: {tool_id}"
+            );
+        }
         let req = MessagesReq {
             model: &self.model,
             max_tokens: 1024,
@@ -135,6 +173,7 @@ impl Assistant for AnthropicChat {
             system: &system_full,
             messages,
             stream: true,
+            tools,
         };
         let resp = self
             .client
@@ -275,5 +314,19 @@ mod tests {
     #[test]
     fn truncate_short_strings() {
         assert_eq!(truncate("hi", 5), "hi");
+    }
+
+    #[test]
+    fn build_web_search_tools_shape() {
+        let tools = build_web_search_tools("web_search_20250305");
+        let json = serde_json::to_value(&tools).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!([{
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": 3
+            }])
+        );
     }
 }

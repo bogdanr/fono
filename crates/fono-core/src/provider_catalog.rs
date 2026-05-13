@@ -722,4 +722,47 @@ mod tests {
             seen.push(p.id);
         }
     }
+
+    /// Phase E1 — pin the multimodal / web-search values per provider
+    /// so a casual catalogue edit doesn't silently flip a vision-
+    /// capable provider to text-only or vice versa. Update this test
+    /// together with the corresponding ADR (`docs/decisions/0007-…`).
+    #[test]
+    fn assistant_multimodal_and_web_search_pinned() {
+        let cases: &[(&str, Option<&str>, WebSearchSupport)] = &[
+            (
+                "openai",
+                Some("gpt-5.4-mini"),
+                WebSearchSupport::NativeTool("web_search_preview"),
+            ),
+            (
+                "anthropic",
+                Some("claude-haiku-4-5-20251001"),
+                WebSearchSupport::NativeTool("web_search_20250305"),
+            ),
+            (
+                "gemini",
+                Some("gemini-1.5-flash"),
+                WebSearchSupport::NativeTool("google_search"),
+            ),
+            (
+                "groq",
+                Some("llama-4-maverick-17b-128e-instruct"),
+                WebSearchSupport::None,
+            ),
+            ("cerebras", None, WebSearchSupport::None),
+            ("openrouter", None, WebSearchSupport::None),
+        ];
+        for (id, mm, ws) in cases {
+            let entry = find(id).unwrap_or_else(|| panic!("missing catalogue entry for {id}"));
+            let adef = entry
+                .assistant
+                .unwrap_or_else(|| panic!("{id} has no assistant defaults"));
+            assert_eq!(
+                adef.multimodal_model, *mm,
+                "multimodal_model drift for {id}"
+            );
+            assert_eq!(adef.web_search, *ws, "web_search drift for {id}");
+        }
+    }
 }

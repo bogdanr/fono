@@ -39,7 +39,7 @@ use fono_core::config::{
 };
 use fono_core::hwcheck::{Affordability, HardwareSnapshot, LocalTier};
 use fono_core::locale::detect_user_languages_ranked;
-use fono_core::provider_catalog::{Badge, CloudProvider, CLOUD_PROVIDERS};
+use fono_core::provider_catalog::{Badge, CloudProvider, WebSearchSupport, CLOUD_PROVIDERS};
 use fono_core::providers::{
     configured_tts_backends, parse_assistant_backend, parse_llm_backend, parse_stt_backend,
     parse_tts_backend,
@@ -183,7 +183,11 @@ fn assistant_candidates() -> Vec<&'static CloudProvider> {
 }
 
 /// Build the capability-badge label for the primary picker, capping at
-/// 6 badges per risk #5 in the plan.
+/// 6 badges per risk #5 in the plan. Vision and Search badges are
+/// **derived from runtime state** (`multimodal_model.is_some()` and
+/// `web_search != None`) rather than read from the catalogue's static
+/// `badges` array, so a single catalogue edit keeps the wizard label,
+/// the assistant builder, and the request-tool injection in lockstep.
 fn primary_label(entry: &CloudProvider) -> String {
     let mut badges: Vec<&'static str> = Vec::new();
     if entry.stt.is_some() {
@@ -199,14 +203,26 @@ fn primary_label(entry: &CloudProvider) -> String {
         badges.push("TTS");
     }
     if let Some(adef) = entry.assistant {
+        if adef.multimodal_model.is_some() {
+            badges.push("Vision");
+        }
+        if !matches!(adef.web_search, WebSearchSupport::None) {
+            badges.push("Search");
+        }
+        // Reasoning / Fast / etc. remain catalogue-driven flavour
+        // badges — they describe the provider's positioning rather
+        // than a runtime capability the wizard or factory toggles.
         for b in adef.badges {
             let label = match b {
-                Badge::Vision => "Vision",
-                Badge::Search => "Search",
                 Badge::Reasoning => "Reasoning",
                 Badge::Fast => "Fast",
-                // STT/LLM/Assistant/TTS are already covered above.
-                Badge::Stt | Badge::Llm | Badge::Assistant | Badge::Tts => continue,
+                // Already covered above (runtime-derived or set).
+                Badge::Stt
+                | Badge::Llm
+                | Badge::Assistant
+                | Badge::Tts
+                | Badge::Vision
+                | Badge::Search => continue,
             };
             if !badges.contains(&label) {
                 badges.push(label);
@@ -480,6 +496,68 @@ async fn pick_tts_for_assistant(
 /// `secrets.toml` lead. When the user's primary cloud provider
 /// already covers both assistant chat and a TTS backend (set by
 /// `configure_cloud`), the prompt collapses to a single Confirm.
+//
+/// Pure decision helper for Phase E3 — determine which "assistant
+/// extras" rows the wizard should render for `entry`. Returns
+/// `(show_vision, show_web_search)`.
+///
+/// Kept side-effect free so it can be unit-tested without spinning up
+/// the dialoguer prompt machinery.
+#[must_use]
+pub(crate) fn assistant_extras_for(entry: &CloudProvider) -> (bool, bool) {
+    let Some(adef) = entry.assistant else {
+        return (false, false);
+    };
+    let vision = adef.multimodal_model.is_some();
+    let web = !matches!(adef.web_search, WebSearchSupport::None);
+    (vision, web)
+}
+
+/// Phase E3 — surface a single optional `MultiSelect` letting the
+/// user opt into the chosen provider's vision-capable model variant
+/// and/or its native web-search tool. Suppressed entirely when the
+/// provider supports neither (e.g. Cerebras, OpenRouter).
+fn prompt_assistant_extras(
+    theme: &ColorfulTheme,
+    config: &mut Config,
+    entry: &CloudProvider,
+) -> Result<()> {
+    let (show_vision, show_web) = assistant_extras_for(entry);
+    if !show_vision && !show_web {
+        return Ok(());
+    }
+
+    let mut items: Vec<&str> = Vec::new();
+    let mut keys: Vec<&str> = Vec::new();
+    if show_vision {
+        items.push("Let the assistant see images on demand (vision-capable model)");
+        keys.push("vision");
+    }
+    if show_web {
+        items.push("Let the assistant search the web for fresh info");
+        keys.push("web_search");
+    }
+    // Both rows default off — opt-in only.
+    let defaults: Vec<bool> = vec![false; items.len()];
+
+    println!();
+    println!("  Optional extras for the assistant (Space to toggle, Enter to accept):");
+    let picks = MultiSelect::with_theme(theme)
+        .items(&items)
+        .defaults(&defaults)
+        .interact()
+        .context("prompt")?;
+
+    for i in picks {
+        match keys[i] {
+            "vision" => config.assistant.prefer_vision = true,
+            "web_search" => config.assistant.prefer_web_search = true,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 async fn configure_assistant(
     theme: &ColorfulTheme,
@@ -599,6 +677,12 @@ async fn configure_assistant(
         api_key_ref: entry.key_env.into(),
         model: adef.text_model.into(),
     });
+
+    // ── Phase E3 — assistant extras (vision + web search) ────────
+    // Only render when the chosen provider's catalogue entry advertises
+    // at least one of the two. Each row appears only if its capability
+    // applies. Both default off.
+    prompt_assistant_extras(theme, config, entry)?;
 
     // ── TTS picker (F7) ─ only if not already set by `configure_cloud`.
     if !tts_already_set {
@@ -1917,6 +2001,64 @@ async fn probe_local_latency(paths: &fono_core::Paths, config: &Config, tier: Lo
 mod tests {
     use super::*;
     use fono_core::hwcheck::{CpuFeatures, HardwareSnapshot};
+    use fono_core::provider_catalog::find;
+
+    #[test]
+    fn primary_label_includes_runtime_derived_vision_search() {
+        // OpenAI: multimodal_model = Some, web_search = NativeTool → both badges.
+        let s = primary_label(find("openai").expect("openai entry"));
+        assert!(s.contains("Vision"), "{s}");
+        assert!(s.contains("Search"), "{s}");
+        // Anthropic: same.
+        let s = primary_label(find("anthropic").expect("anthropic entry"));
+        assert!(s.contains("Vision"), "{s}");
+        assert!(s.contains("Search"), "{s}");
+        // Groq: multimodal Some, web_search None → Vision yes, Search no.
+        let s = primary_label(find("groq").expect("groq entry"));
+        assert!(s.contains("Vision"), "{s}");
+        assert!(!s.contains("Search"), "{s}");
+        // Cerebras: both None → neither badge.
+        let s = primary_label(find("cerebras").expect("cerebras entry"));
+        assert!(!s.contains("Vision"), "{s}");
+        assert!(!s.contains("Search"), "{s}");
+        // OpenRouter: both None for now → neither badge.
+        let s = primary_label(find("openrouter").expect("openrouter entry"));
+        assert!(!s.contains("Vision"), "{s}");
+        assert!(!s.contains("Search"), "{s}");
+    }
+
+    #[test]
+    fn assistant_extras_for_matches_catalogue() {
+        assert_eq!(
+            assistant_extras_for(find("openai").unwrap()),
+            (true, true),
+            "openai supports both"
+        );
+        assert_eq!(
+            assistant_extras_for(find("anthropic").unwrap()),
+            (true, true),
+        );
+        assert_eq!(
+            assistant_extras_for(find("groq").unwrap()),
+            (true, false),
+            "groq supports vision but not search"
+        );
+        assert_eq!(
+            assistant_extras_for(find("cerebras").unwrap()),
+            (false, false),
+            "cerebras supports neither"
+        );
+        assert_eq!(
+            assistant_extras_for(find("openrouter").unwrap()),
+            (false, false),
+        );
+        // STT-only providers don't have an assistant entry; extras
+        // suppressed regardless.
+        assert_eq!(
+            assistant_extras_for(find("assemblyai").unwrap()),
+            (false, false),
+        );
+    }
 
     fn snap(cores: u32, ram_gb: u32, disk_gb: u32, avx2: bool) -> HardwareSnapshot {
         const GB: u64 = 1024 * 1024 * 1024;
