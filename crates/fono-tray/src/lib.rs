@@ -1532,12 +1532,10 @@ mod backend {
                 // item as a non-clickable greyed-out row. Used by the
                 // daemon's TTS submenu to surface cloud backends
                 // whose API key is missing.
-                let (enabled, label) = label
-                    .strip_prefix(super::DISABLED_SENTINEL)
-                    .map_or_else(
-                        || (true, label.clone()),
-                        |stripped| (false, stripped.to_string()),
-                    );
+                let (enabled, label) = label.strip_prefix(super::DISABLED_SENTINEL).map_or_else(
+                    || (true, label.clone()),
+                    |stripped| (false, stripped.to_string()),
+                );
                 let active = u8::try_from(i).is_ok_and(|i_u8| i_u8 == active_idx);
                 let prefix = if active { "● " } else { "  " };
                 let idx_u8 = u8::try_from(i).unwrap_or(u8::MAX);

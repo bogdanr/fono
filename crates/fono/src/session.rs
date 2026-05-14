@@ -552,8 +552,7 @@ impl SessionOrchestrator {
             Ok(opt) => opt,
             Err(e) => {
                 let err_text = format!("{e:#}");
-                let provider =
-                    fono_core::providers::assistant_backend_str(&cfg.assistant.backend);
+                let provider = fono_core::providers::assistant_backend_str(&cfg.assistant.backend);
                 fono_core::critical_notify::notify_actionable(
                     fono_core::critical_notify::Stage::Assistant,
                     provider,

@@ -49,8 +49,8 @@ async fn async_main() -> Result<()> {
 /// can still re-enable them via `FONO_LOG` (e.g. `FONO_LOG=info,winit=warn`).
 fn init_tracing(verbosity: cli::Verbosity) {
     /// Third-party log lines that fire on every startup with no
-    /// actionable signal. Silenced at `error` so they only appear
-    /// when something is actually wrong.
+    /// actionable signal. Silenced so they only appear when something
+    /// is actually wrong.
     ///
     /// * `winit::platform_impl::linux::x11::xdisplay` emits
     ///   "error setting XSETTINGS; Xft options won't reload
@@ -59,7 +59,20 @@ fn init_tracing(verbosity: cli::Verbosity) {
     ///   message is misleading — Xft *static* options still load fine;
     ///   only live re-loading on theme change is affected, which is
     ///   irrelevant for fono's overlay.
-    const BASELINE_QUIET: &[&str] = &["winit::platform_impl::linux::x11::xdisplay=error"];
+    /// * `winit::platform_impl::linux::x11::window` emits an `info!`
+    ///   line on every overlay window creation reporting the scale
+    ///   factor it guessed from the cursor's current monitor (e.g.
+    ///   "Guessed window scale factor: 1.25"). winit's X11 backend
+    ///   has to guess because X11 lacks a per-window scale-factor
+    ///   protocol, and it self-corrects via `ScaleFactorChanged`
+    ///   once the window maps — so the initial guess is purely
+    ///   informational. Demoting to `warn` keeps any real warnings
+    ///   from this module visible without printing the guess on
+    ///   every daemon start.
+    const BASELINE_QUIET: &[&str] = &[
+        "winit::platform_impl::linux::x11::xdisplay=error",
+        "winit::platform_impl::linux::x11::window=warn",
+    ];
 
     let default_filter = verbosity.as_filter();
     let mut filter =

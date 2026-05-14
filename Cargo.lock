@@ -1199,6 +1199,7 @@ dependencies = [
  "fono-core",
  "fono-download",
  "fono-hotkey",
+ "fono-http",
  "fono-inject",
  "fono-ipc",
  "fono-llm",
@@ -1229,6 +1230,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "fono-core",
+ "fono-http",
  "futures",
  "reqwest",
  "serde",
@@ -1325,6 +1327,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fono-http"
+version = "0.8.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures",
+ "reqwest",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fono-inject"
 version = "0.8.0"
 dependencies = [
@@ -1356,6 +1372,7 @@ dependencies = [
  "async-trait",
  "encoding_rs",
  "fono-core",
+ "fono-http",
  "llama-cpp-2",
  "reqwest",
  "serde",
@@ -1410,7 +1427,9 @@ version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "fono-core",
+ "fono-http",
  "fono-net-codec",
  "futures",
  "reqwest",
@@ -1442,6 +1461,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "fono-core",
+ "fono-http",
  "fono-net-codec",
  "reqwest",
  "serde",

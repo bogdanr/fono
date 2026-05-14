@@ -186,9 +186,7 @@ fn is_primary_candidate(entry: &CloudProvider) -> bool {
 /// The catalogue advertises an assistant for several providers; only
 /// those with a wired factory should appear in the assistant picker.
 fn is_assistant_wired(entry: &CloudProvider) -> bool {
-    entry.assistant.is_some()
-        && parse_assistant_backend(entry.id).is_some()
-        && entry.id != "gemini"
+    entry.assistant.is_some() && parse_assistant_backend(entry.id).is_some() && entry.id != "gemini"
 }
 
 /// Catalogue entries with a wired assistant chat factory.
@@ -202,8 +200,7 @@ fn assistant_candidates() -> Vec<&'static CloudProvider> {
 /// Header labels for the primary-cloud-provider picker's capability
 /// columns. Order matches the per-row capability tuple emitted by
 /// [`primary_capabilities`].
-const PRIMARY_CAP_HEADERS: [&str; 6] =
-    ["STT", "LLM", "Assistant", "TTS", "Vision", "Search"];
+const PRIMARY_CAP_HEADERS: [&str; 6] = ["STT", "LLM", "Assistant", "TTS", "Vision", "Search"];
 
 /// Per-capability column widths for the primary picker table. All
 /// capability columns share a single uniform width = widest header
@@ -515,7 +512,7 @@ fn tts_short_label(b: &TtsBackend) -> &'static str {
     match b {
         TtsBackend::OpenAI => "OpenAI",
         TtsBackend::Groq => "Groq",
-        TtsBackend::OpenRouter => "OpenRouter (Kokoro)",
+        TtsBackend::OpenRouter => "OpenRouter (OpenAI Mini TTS)",
         TtsBackend::Cartesia => "Cartesia",
         TtsBackend::Deepgram => "Deepgram",
         TtsBackend::Wyoming => "Wyoming",
@@ -590,7 +587,7 @@ async fn pick_tts_for_assistant(
                 let extra = match entry.id {
                     "groq" => " — fastest",
                     "cartesia" => " — best quality",
-                    "openrouter" => " — Kokoro / open weights",
+                    "openrouter" => " — OpenAI Mini TTS / multilingual",
                     _ => "",
                 };
                 labels.push(format!(
@@ -642,8 +639,7 @@ async fn pick_tts_for_assistant(
             )
             .await?;
             let tdef = entry.tts.expect("filtered to TTS-capable entries");
-            let backend =
-                parse_tts_backend(entry.id).context("catalogue TTS id should parse")?;
+            let backend = parse_tts_backend(entry.id).context("catalogue TTS id should parse")?;
             config.tts.backend = backend;
             config.tts.cloud = Some(TtsCloud {
                 provider: entry.id.into(),
@@ -810,11 +806,8 @@ async fn configure_assistant(
     let (with_key, without_key): (Vec<_>, Vec<_>) = candidates
         .into_iter()
         .partition(|p| secrets.has_in_file(p.key_env));
-    let ordered: Vec<&'static CloudProvider> = with_key
-        .iter()
-        .chain(without_key.iter())
-        .copied()
-        .collect();
+    let ordered: Vec<&'static CloudProvider> =
+        with_key.iter().chain(without_key.iter()).copied().collect();
 
     // Render as an aligned three-column table (Provider | Model |
     // Key). The header is printed once via `println!` so it scrolls
@@ -908,8 +901,7 @@ fn assistant_picker_rows(
         .max(MODEL_HDR.len())
         + 2;
 
-    let mut header =
-        format!("{PROVIDER_HDR:<provider_w$}{MODEL_HDR:<model_w$}{KEY_HDR}");
+    let mut header = format!("{PROVIDER_HDR:<provider_w$}{MODEL_HDR:<model_w$}{KEY_HDR}");
     header = header.trim_end().to_string();
 
     let mut rows = Vec::with_capacity(ordered.len());
@@ -922,10 +914,7 @@ fn assistant_picker_rows(
         };
         let display = p.display_name;
         let mut row = String::new();
-        let _ = write!(
-            &mut row,
-            "{display:<provider_w$}{model:<model_w$}{key}",
-        );
+        let _ = write!(&mut row, "{display:<provider_w$}{model:<model_w$}{key}",);
         rows.push(row.trim_end().to_string());
     }
     (rows, header)
@@ -1023,7 +1012,12 @@ fn pick_path_rows() -> [String; 3] {
         ("Cloud", "Fast, accurate, needs an API key"),
         ("Customize", "Pick a backend per capability"),
     ];
-    let width = entries.iter().map(|(name, _)| name.len()).max().unwrap_or(0) + 2;
+    let width = entries
+        .iter()
+        .map(|(name, _)| name.len())
+        .max()
+        .unwrap_or(0)
+        + 2;
     [
         format!("{:<width$}{}", entries[0].0, entries[0].1, width = width),
         format!("{:<width$}{}", entries[1].0, entries[1].1, width = width),
@@ -1162,8 +1156,7 @@ async fn configure_cloud(
 
     // Walk capabilities ----------------------------------------------
     if let Some(stt_def) = &entry.stt {
-        let backend =
-            parse_stt_backend(entry.id).context("catalogue STT id should parse")?;
+        let backend = parse_stt_backend(entry.id).context("catalogue STT id should parse")?;
         config.stt = Stt {
             backend,
             local: SttLocal::default(),
@@ -1180,8 +1173,7 @@ async fn configure_cloud(
     }
 
     if let Some(llm_def) = &entry.llm {
-        let backend =
-            parse_llm_backend(entry.id).context("catalogue LLM id should parse")?;
+        let backend = parse_llm_backend(entry.id).context("catalogue LLM id should parse")?;
         config.llm.enabled = true;
         config.llm.backend = backend;
         config.llm.cloud = Some(LlmCloud {
@@ -1192,8 +1184,7 @@ async fn configure_cloud(
     }
 
     if let Some(tts_def) = &entry.tts {
-        let backend =
-            parse_tts_backend(entry.id).context("catalogue TTS id should parse")?;
+        let backend = parse_tts_backend(entry.id).context("catalogue TTS id should parse")?;
         config.tts.backend = backend;
         config.tts.cloud = Some(TtsCloud {
             provider: entry.id.into(),
@@ -1947,6 +1938,37 @@ async fn validate_cloud_key(key_name: &str, key: &str) -> Result<()> {
         "CEREBRAS_API_KEY" => client
             .get("https://api.cerebras.ai/v1/models")
             .bearer_auth(key),
+        "OPENROUTER_API_KEY" => client
+            // OpenRouter's auth-check endpoint: returns 200 with the
+            // key's tier/credit metadata when authenticated, 401 when
+            // the key is invalid. Preferred over `/v1/models` because
+            // that route is unauthenticated on OpenRouter (it lists
+            // every available model regardless of key validity), so it
+            // can't actually verify the key.
+            //
+            // Attribution headers are attached here too so the first
+            // request a fresh user makes against OpenRouter already
+            // creates Fono's public app page (per
+            // <https://openrouter.ai/docs/app-attribution>: "without
+            // [HTTP-Referer], no app page will be created").
+            .get("https://openrouter.ai/api/v1/auth/key")
+            .bearer_auth(key)
+            .header("HTTP-Referer", fono_core::openrouter_attribution::REFERER)
+            .header(
+                "X-OpenRouter-Title",
+                fono_core::openrouter_attribution::TITLE,
+            )
+            .header(
+                "X-OpenRouter-Categories",
+                fono_core::openrouter_attribution::CATEGORIES,
+            ),
+        "GEMINI_API_KEY" => client
+            // Gemini authenticates via `?key=` query parameter rather
+            // than a bearer header; the models list returns 200 for
+            // valid keys and 400/403 for invalid ones.
+            .get(format!(
+                "https://generativelanguage.googleapis.com/v1beta/models?key={key}"
+            )),
         "ANTHROPIC_API_KEY" => client
             .get("https://api.anthropic.com/v1/models")
             .header("x-api-key", key)
@@ -1971,6 +1993,19 @@ async fn validate_cloud_key(key_name: &str, key: &str) -> Result<()> {
         .await
         .with_context(|| format!("connect to {key_name} provider"))?;
     let status = resp.status();
+    let request_id = fono_http::provider_request_id(resp.headers())
+        .map(str::to_owned)
+        .unwrap_or_else(|| "<none>".to_string());
+    // Drain & discard the body so the connection returns to the pool.
+    let _ = resp.bytes().await;
+    tracing::debug!(
+        target: "fono.http",
+        stage = "wizard",
+        provider = key_name,
+        status = status.as_u16(),
+        request_id = %request_id,
+        "wizard key validation"
+    );
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
         anyhow::bail!("{status} (key rejected)");
     }
@@ -2172,7 +2207,14 @@ mod tests {
         // Spot-check the hand-curated table: every catalogue entry
         // with assistant defaults should map to a friendly label, not
         // the raw model id.
-        for id in ["openai", "anthropic", "groq", "cerebras", "gemini", "openrouter"] {
+        for id in [
+            "openai",
+            "anthropic",
+            "groq",
+            "cerebras",
+            "gemini",
+            "openrouter",
+        ] {
             let entry = find(id).expect("catalogue entry");
             let pretty = humanize_chat_model(entry);
             let raw = entry
@@ -2249,9 +2291,13 @@ mod tests {
             primary_capabilities(find("cerebras").expect("cerebras entry")),
             [false, true, true, false, false, false],
         );
-        // OpenRouter: LLM + Assistant + TTS (Kokoro), no Vision/Search yet.
+        // OpenRouter: STT (Whisper Turbo) + LLM + Assistant + TTS
+        // (OpenAI Mini TTS, swapped in from Kokoro 2026-05-14), no
+        // Vision/Search yet. STT was added in 2026-05-14 — OpenRouter
+        // proxies OpenAI-compatible /v1/audio/transcriptions to Groq's
+        // Whisper Turbo when the model id is `openai/whisper-large-v3-turbo`.
         let openrouter = primary_capabilities(find("openrouter").expect("openrouter entry"));
-        assert_eq!(openrouter[..2], [false, true]);
+        assert_eq!(openrouter[..2], [true, true]);
         assert!(openrouter[2], "OpenRouter exposes an assistant chat");
         assert!(!openrouter[4], "no multimodal model wired for OpenRouter");
         assert!(!openrouter[5], "no native web-search tool for OpenRouter");
@@ -2633,7 +2679,7 @@ mod tests {
                 "Groq        ✓          ✓          ✓          ✓          ·          ·".to_string(),
                 "Anthropic   ·          ✓          ✓          ·          ✓          ✓".to_string(),
                 "Cerebras    ·          ✓          ✓          ·          ·          ·".to_string(),
-                "OpenRouter  ·          ✓          ✓          ✓          ·          ·".to_string(),
+                "OpenRouter  ✓          ✓          ✓          ✓          ·          ·".to_string(),
             ]
         );
 
@@ -2651,10 +2697,22 @@ mod tests {
     #[test]
     fn primary_candidates_exclude_gemini_and_stt_only() {
         let ids: Vec<&str> = primary_candidates_vec().iter().map(|p| p.id).collect();
-        assert!(!ids.contains(&"gemini"), "Gemini must be excluded (factory unwired)");
-        assert!(!ids.contains(&"cartesia"), "Cartesia is STT-only → secondary, not primary");
-        assert!(!ids.contains(&"deepgram"), "Deepgram is STT-only → secondary, not primary");
-        assert!(!ids.contains(&"assemblyai"), "AssemblyAI is STT-only → secondary, not primary");
+        assert!(
+            !ids.contains(&"gemini"),
+            "Gemini must be excluded (factory unwired)"
+        );
+        assert!(
+            !ids.contains(&"cartesia"),
+            "Cartesia is STT-only → secondary, not primary"
+        );
+        assert!(
+            !ids.contains(&"deepgram"),
+            "Deepgram is STT-only → secondary, not primary"
+        );
+        assert!(
+            !ids.contains(&"assemblyai"),
+            "AssemblyAI is STT-only → secondary, not primary"
+        );
         // The five LLM-capable providers DO appear:
         for must in ["openai", "groq", "anthropic", "cerebras", "openrouter"] {
             assert!(ids.contains(&must), "{must} must be a primary candidate");

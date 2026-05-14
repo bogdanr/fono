@@ -271,6 +271,11 @@ pub enum SttBackend {
     Speechmatics,
     Google,
     Nemotron,
+    /// OpenRouter — proxies OpenAI-compatible
+    /// `POST /v1/audio/transcriptions` to upstream providers
+    /// (Groq Whisper, Google Chirp, …). Selects the route via the
+    /// `model` field, e.g. `openai/whisper-large-v3-turbo`.
+    OpenRouter,
     /// Wyoming-protocol speech-to-text server on the LAN
     /// (`wyoming-faster-whisper`, `fono serve wyoming`, Rhasspy, etc.).
     /// Configure via `[stt.wyoming]`.

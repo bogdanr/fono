@@ -23,11 +23,11 @@ default = ["wyoming"]
 # into four flags so a slim build can opt in to one provider without
 # pulling the others' code through the linker — even though they all
 # transitively enable the same dep today.
-openai = ["dep:reqwest"]
-groq = ["dep:reqwest"]
-openrouter = ["dep:reqwest"]
-cartesia = ["dep:reqwest"]
-deepgram = ["dep:reqwest"]
+openai = ["dep:reqwest", "dep:fono-http"]
+groq = ["dep:reqwest", "dep:fono-http"]
+openrouter = ["dep:reqwest", "dep:fono-http"]
+cartesia = ["dep:reqwest", "dep:fono-http"]
+deepgram = ["dep:reqwest", "dep:fono-http"]
 # LAN Wyoming TTS server.
 wyoming = ["dep:fono-net-codec"]
 # In-process Piper. Stub in v1 — see src/piper_local.rs for the rationale
@@ -45,6 +45,7 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true, optional = true }
+fono-http = { path = "../fono-http", optional = true }
 fono-net-codec = { path = "../fono-net-codec", optional = true }
 
 [dev-dependencies]

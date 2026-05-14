@@ -1,6 +1,24 @@
 # Fono — Project Status
 
-Last updated: 2026-05-13
+Last updated: 2026-05-14
+
+## 2026-05-14 — Fix: cancel hotkey leaked after natural assistant completion
+
+User reported Fono was holding a global grab on `Escape` even when no
+dictation or assistant session was active. Root cause: the dynamic
+`HotkeyControl::DisableCancel` was only sent from the FSM-event consumer
+on explicit `Stop*` / `Cancel` events, but the assistant's
+natural-completion path returns from `AssistantThinking` /
+`AssistantSpeaking` to `Idle` via `HotkeyAction::ProcessingDone` alone
+(`crates/fono-hotkey/src/fsm.rs:222-225`), which emits no `HotkeyEvent`.
+After the first assistant turn finished on its own, the Escape grab
+stayed live until the next cancel / barge-in. Fix is belt-and-braces:
+the action dispatcher in `crates/fono/src/daemon.rs:733-770` now also
+sends `DisableCancel` whenever the FSM transitions back to
+`FsmState::Idle`, so every future code path that lands in Idle releases
+the grab automatically. The existing event-driven `EnableCancel` /
+`DisableCancel` arms are unchanged; this is purely an additional
+safety-net release.
 
 ## 2026-05-13 — Release v0.8.0
 

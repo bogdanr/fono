@@ -20,6 +20,8 @@ pub mod groq;
 pub mod groq_streaming;
 #[cfg(feature = "openai")]
 pub mod openai;
+#[cfg(feature = "openrouter")]
+pub mod openrouter;
 #[cfg(feature = "whisper-local")]
 pub mod whisper_local;
 #[cfg(feature = "wyoming")]

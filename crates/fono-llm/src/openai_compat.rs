@@ -4,9 +4,19 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use fono_http::{
+    emit_http_debug, provider_request_id, read_body_with_watchdog, BodyError, Outcome,
+    RequestTimings,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::traits::{looks_like_clarification, user_prompt, FormatContext, TextFormatter};
+
+/// Inter-chunk watchdog for chat-completions JSON bodies. They're
+/// small (≤ a few KB) and arrive in one or two chunks; 30 s between
+/// chunks comfortably covers slow-but-progressing upstreams while
+/// catching true stalls long before the 30 s overall reqwest timeout.
+const LLM_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub struct OpenAiCompat {
     endpoint: String,
@@ -143,6 +153,7 @@ struct RespMessage {
 
 #[async_trait]
 impl TextFormatter for OpenAiCompat {
+    #[allow(clippy::too_many_lines)]
     async fn format(&self, raw: &str, ctx: &FormatContext) -> Result<String> {
         let system = ctx.system_prompt();
         let user = user_prompt(raw);
@@ -171,14 +182,120 @@ impl TextFormatter for OpenAiCompat {
         if !self.api_key.is_empty() {
             builder = builder.bearer_auth(&self.api_key);
         }
-        let res = builder.send().await.context("chat POST failed")?;
-        let status = res.status();
-        let body = res.text().await.unwrap_or_default();
-        if !status.is_success() {
-            anyhow::bail!("{} LLM {status}: {body}", self.backend_name);
+        if self.backend_name == "openrouter" {
+            for (name, value) in fono_core::openrouter_attribution::headers() {
+                builder = builder.header(name, value);
+            }
         }
-        let parsed: ChatResp = serde_json::from_str(&body)
-            .with_context(|| format!("parse {} response: {body}", self.backend_name))?;
+        let mut timings = RequestTimings::start();
+        let res = match builder.send().await {
+            Ok(r) => {
+                timings.mark_headers();
+                r
+            }
+            Err(e) => {
+                emit_http_debug(
+                    "llm",
+                    self.backend_name,
+                    "chat/completions",
+                    0,
+                    &timings,
+                    0,
+                    None,
+                    0,
+                    "<none>",
+                    1,
+                    Outcome::ConnectError,
+                );
+                return Err(anyhow::Error::new(e).context("chat POST failed"));
+            }
+        };
+        let status = res.status();
+        let request_id = provider_request_id(res.headers())
+            .map(str::to_owned)
+            .unwrap_or_else(|| "<none>".to_string());
+        let content_length = res.content_length();
+        let (bytes, stats) =
+            match read_body_with_watchdog(res, LLM_CHUNK_TIMEOUT, &mut timings).await {
+                Ok(b) => b,
+                Err(e) => {
+                    let outcome = match &e {
+                        BodyError::Stalled { .. } => Outcome::Stalled,
+                        BodyError::Transport { .. } => Outcome::TransportError,
+                    };
+                    emit_http_debug(
+                        "llm",
+                        self.backend_name,
+                        "chat/completions",
+                        status.as_u16(),
+                        &timings,
+                        e.partial_bytes(),
+                        content_length,
+                        e.chunks(),
+                        &request_id,
+                        1,
+                        outcome,
+                    );
+                    return Err(anyhow::Error::new(e).context(format!(
+                        "{} chat body read failed (request_id={request_id})",
+                        self.backend_name
+                    )));
+                }
+            };
+        let body = String::from_utf8_lossy(&bytes).to_string();
+        if !status.is_success() {
+            emit_http_debug(
+                "llm",
+                self.backend_name,
+                "chat/completions",
+                status.as_u16(),
+                &timings,
+                stats.bytes,
+                content_length,
+                stats.chunks,
+                &request_id,
+                1,
+                Outcome::HttpError,
+            );
+            anyhow::bail!(
+                "{} LLM {status} (request_id={request_id}): {body}",
+                self.backend_name
+            );
+        }
+        let parsed: ChatResp = match serde_json::from_str(&body) {
+            Ok(p) => p,
+            Err(e) => {
+                emit_http_debug(
+                    "llm",
+                    self.backend_name,
+                    "chat/completions",
+                    status.as_u16(),
+                    &timings,
+                    stats.bytes,
+                    content_length,
+                    stats.chunks,
+                    &request_id,
+                    1,
+                    Outcome::DecodeError,
+                );
+                return Err(anyhow::Error::new(e)
+                    .context(format!("parse {} response: {body}", self.backend_name)));
+            }
+        };
+        timings.mark_decode_done();
+        emit_http_debug(
+            "llm",
+            self.backend_name,
+            "chat/completions",
+            status.as_u16(),
+            &timings,
+            stats.bytes,
+            content_length,
+            stats.chunks,
+            &request_id,
+            1,
+            Outcome::Ok,
+        );
         let out = parsed
             .choices
             .into_iter()
@@ -215,8 +332,17 @@ impl TextFormatter for OpenAiCompat {
         if !self.api_key.is_empty() {
             req = req.bearer_auth(&self.api_key);
         }
+        if self.backend_name == "openrouter" {
+            for (name, value) in fono_core::openrouter_attribution::headers() {
+                req = req.header(name, value);
+            }
+        }
         let res = req.send().await.context("openai-compat prewarm")?;
-        let _ = res.bytes().await;
+        // Drain via the same watchdog so a slow prewarm doesn't tie
+        // up the connection for the next real request.
+        let mut timings = RequestTimings::start();
+        timings.mark_headers();
+        let _ = read_body_with_watchdog(res, LLM_CHUNK_TIMEOUT, &mut timings).await;
         Ok(())
     }
 }

@@ -10,6 +10,13 @@ pub fn default_cloud_model(provider: &str) -> &'static str {
         // Groq's distilled turbo whisper has the best latency/quality tradeoff
         // currently available; see docs/plans/2026-04-25-fono-latency-v1.md.
         "groq" => "whisper-large-v3-turbo",
+        // OpenRouter proxies OpenAI-compatible
+        // `/v1/audio/transcriptions` to upstream providers. The
+        // `openai/whisper-large-v3-turbo` model id routes to Groq's
+        // fastest Whisper. Future: `google/chirp-3` once we wire
+        // the native Google Cloud Speech client (see
+        // plans/2026-05-14-google-chirp-stt-v1.md).
+        "openrouter" => "openai/whisper-large-v3-turbo",
         "openai" => "whisper-1",
         "deepgram" => "nova-2",
         "assemblyai" => "best",

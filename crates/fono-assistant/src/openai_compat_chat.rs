@@ -13,12 +13,20 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use fono_http::{emit_http_debug, provider_request_id, Outcome, RequestTimings};
 use futures::stream::{BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::history::ChatRole;
 use crate::sse::SseBuffer;
 use crate::traits::{Assistant, AssistantContext, TokenDelta};
+
+/// Inter-chunk watchdog for streaming chat. SSE replies tick at most
+/// every few seconds even on slow providers (Cerebras / Groq deliver
+/// one chunk per token roughly every 30-50 ms); 20 s of silence
+/// between chunks is well past any normal pause and signals a stall
+/// well before users assume Fono has crashed.
+const SSE_CHUNK_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct OpenAiCompatChat {
     endpoint: String,
@@ -259,15 +267,57 @@ impl Assistant for OpenAiCompatChat {
         if !self.api_key.is_empty() {
             builder = builder.bearer_auth(&self.api_key);
         }
-        let resp = builder
-            .send()
-            .await
-            .with_context(|| format!("{} chat POST failed", self.backend_name))?;
+        if self.backend_name == "openrouter" {
+            for (name, value) in fono_core::openrouter_attribution::headers() {
+                builder = builder.header(name, value);
+            }
+        }
+        let mut timings = RequestTimings::start();
+        let resp = match builder.send().await {
+            Ok(r) => {
+                timings.mark_headers();
+                r
+            }
+            Err(e) => {
+                emit_http_debug(
+                    "assistant",
+                    self.backend_name,
+                    "chat/completions",
+                    0,
+                    &timings,
+                    0,
+                    None,
+                    0,
+                    "<none>",
+                    1,
+                    Outcome::ConnectError,
+                );
+                return Err(anyhow::Error::new(e)
+                    .context(format!("{} chat POST failed", self.backend_name)));
+            }
+        };
         let status = resp.status();
+        let request_id = provider_request_id(resp.headers())
+            .map(str::to_owned)
+            .unwrap_or_else(|| "<none>".to_string());
+        let content_length = resp.content_length();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
+            emit_http_debug(
+                "assistant",
+                self.backend_name,
+                "chat/completions",
+                status.as_u16(),
+                &timings,
+                0,
+                content_length,
+                0,
+                &request_id,
+                1,
+                Outcome::HttpError,
+            );
             return Err(anyhow!(
-                "{} chat returned {status}: {}",
+                "{} chat returned {status} (request_id={request_id}): {}",
                 self.backend_name,
                 truncate(&body, 400)
             ));
@@ -280,20 +330,44 @@ impl Assistant for OpenAiCompatChat {
         // Pump the byte stream → SSE → JSON → TokenDelta in a
         // detached task. Dropping the receiver (e.g. via cancellation)
         // closes the channel and the task exits on the next send.
+        let request_id_for_task = request_id.clone();
         tokio::spawn(async move {
             let mut bytes_stream = bytes_stream;
             let mut parser = SseBuffer::new();
             let mut done = false;
-            'outer: while let Some(chunk) = bytes_stream.next().await {
-                let chunk = match chunk {
-                    Ok(b) => b,
-                    Err(e) => {
+            let mut total_bytes: u64 = 0;
+            let mut chunk_count: u32 = 0;
+            let mut outcome = Outcome::Ok;
+            'outer: loop {
+                let next = tokio::time::timeout(SSE_CHUNK_TIMEOUT, bytes_stream.next()).await;
+                let chunk = match next {
+                    Err(_elapsed) => {
+                        outcome = Outcome::Stalled;
                         let _ = tx
-                            .send(Err(anyhow!("{backend_name} stream chunk error: {e}")))
+                            .send(Err(anyhow!(
+                                "{backend_name} stream stalled after {}ms (request_id={request_id_for_task}, {chunk_count} chunks, {total_bytes} bytes)",
+                                SSE_CHUNK_TIMEOUT.as_millis()
+                            )))
                             .await;
-                        return;
+                        break 'outer;
                     }
+                    Ok(None) => break 'outer,
+                    Ok(Some(Err(e))) => {
+                        outcome = Outcome::TransportError;
+                        let _ = tx
+                            .send(Err(anyhow!(
+                                "{backend_name} stream chunk error (request_id={request_id_for_task}): {e}"
+                            )))
+                            .await;
+                        break 'outer;
+                    }
+                    Ok(Some(Ok(b))) => b,
                 };
+                if chunk_count == 0 {
+                    timings.mark_first_byte();
+                }
+                chunk_count = chunk_count.saturating_add(1);
+                total_bytes = total_bytes.saturating_add(chunk.len() as u64);
                 parser.push(&chunk);
                 while let Some(ev) = parser.next_event() {
                     let data = ev.data.trim();
@@ -311,6 +385,21 @@ impl Assistant for OpenAiCompatChat {
                                     if !content.is_empty()
                                         && tx.send(Ok(TokenDelta { text: content })).await.is_err()
                                     {
+                                        // Receiver dropped — emit debug and exit.
+                                        timings.mark_body_done();
+                                        emit_http_debug(
+                                            "assistant",
+                                            backend_name,
+                                            "chat/completions",
+                                            status.as_u16(),
+                                            &timings,
+                                            total_bytes,
+                                            content_length,
+                                            chunk_count,
+                                            &request_id_for_task,
+                                            1,
+                                            Outcome::Ok,
+                                        );
                                         return;
                                     }
                                 }
@@ -323,17 +412,32 @@ impl Assistant for OpenAiCompatChat {
                             }
                         }
                         Err(e) => {
+                            outcome = Outcome::DecodeError;
                             let _ = tx
                                 .send(Err(anyhow!(
-                                    "{backend_name} stream chunk parse error: {e}; payload: {data}"
+                                    "{backend_name} stream chunk parse error (request_id={request_id_for_task}): {e}; payload: {data}"
                                 )))
                                 .await;
-                            return;
+                            break 'outer;
                         }
                     }
                 }
             }
+            timings.mark_body_done();
             let _ = done;
+            emit_http_debug(
+                "assistant",
+                backend_name,
+                "chat/completions",
+                status.as_u16(),
+                &timings,
+                total_bytes,
+                content_length,
+                chunk_count,
+                &request_id_for_task,
+                1,
+                outcome,
+            );
         });
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -347,6 +451,11 @@ impl Assistant for OpenAiCompatChat {
         let mut req = self.client.get(url);
         if !self.api_key.is_empty() {
             req = req.bearer_auth(&self.api_key);
+        }
+        if self.backend_name == "openrouter" {
+            for (name, value) in fono_core::openrouter_attribution::headers() {
+                req = req.header(name, value);
+            }
         }
         let res = req
             .send()

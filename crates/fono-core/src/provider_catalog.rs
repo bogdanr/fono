@@ -134,6 +134,15 @@ pub enum TtsEndpoint {
         /// 400s on `pcm`. The client strips the 44-byte RIFF header
         /// when this is `"wav"`.
         response_format: &'static str,
+        /// Optional wire value for the request's `stream_format` field.
+        /// When `Some("audio")`, the server streams raw audio bytes as
+        /// they are generated (instead of buffering the whole reply
+        /// before opening the body). Critical for LLM-based TTS models
+        /// like `gpt-4o-mini-tts` where buffer-then-deliver mode costs
+        /// ~30 s of synthesis time before the first byte arrives.
+        /// Leave `None` for providers whose `/audio/speech` proxy may
+        /// reject unknown request fields (e.g. Groq's Orpheus).
+        stream_format: Option<&'static str>,
     },
     /// Cartesia's bespoke `POST /v1/tts/bytes` endpoint.
     Cartesia,
@@ -208,6 +217,12 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             endpoint: TtsEndpoint::OpenAiCompat {
                 base_url: "https://api.openai.com/v1",
                 response_format: "pcm",
+                // `tts-1` already streams audio bytes by default, but
+                // setting this explicitly future-proofs the entry for
+                // model overrides like `gpt-4o-mini-tts` where the
+                // server otherwise buffers the entire synthesis
+                // before opening the response body.
+                stream_format: Some("audio"),
             },
             runtime_probe: false,
         }),
@@ -244,7 +259,13 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // opt-in once we have a coherent search-via-model-swap
             // design (see docs/decisions/0024).
             web_search: WebSearchSupport::None,
-            badges: &[Badge::Stt, Badge::Llm, Badge::Assistant, Badge::Tts, Badge::Fast],
+            badges: &[
+                Badge::Stt,
+                Badge::Llm,
+                Badge::Assistant,
+                Badge::Tts,
+                Badge::Fast,
+            ],
         }),
         tts: Some(TtsDefaults {
             // Canopy Labs Orpheus on Groq's OpenAI-compatible
@@ -268,6 +289,10 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
                 // "response_format must be one of [wav]". The client
                 // strips the WAV header back to raw PCM transparently.
                 response_format: "wav",
+                // Groq's Orpheus proxy is conservative about request
+                // fields; leave `stream_format` unset to preserve the
+                // wire shape that is known to work.
+                stream_format: None,
             },
             runtime_probe: false,
         }),
@@ -348,7 +373,14 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Unified gateway across hundreds of model providers.",
         console_url: "https://openrouter.ai/keys",
         key_env: "OPENROUTER_API_KEY",
-        stt: None,
+        stt: Some(SttDefaults {
+            // OpenRouter proxies OpenAI-compatible
+            // `POST /v1/audio/transcriptions` to upstream providers;
+            // `openai/whisper-large-v3-turbo` routes to Groq's fastest
+            // Whisper model. Mirrors
+            // fono_stt::defaults::default_cloud_model("openrouter").
+            model: "openai/whisper-large-v3-turbo",
+        }),
         llm: Some(LlmDefaults {
             // Mirrors fono_llm::defaults::default_cloud_model("openrouter").
             model: "openai/gpt-5.4-nano",
@@ -365,13 +397,39 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             badges: &[Badge::Llm, Badge::Assistant, Badge::Tts],
         }),
         tts: Some(TtsDefaults {
-            // Kokoro on OpenRouter — declared here for Phase A,
-            // runtime client wiring lands in Phase F.
-            model: "hexgrad/kokoro-82m",
-            default_voice: "af_heart",
+            // OpenAI classical `tts-1` via OpenRouter — single-pass
+            // (non-autoregressive) decoder, ~0.5-2 s synthesis
+            // regardless of input length, $15 / 1 M characters,
+            // OpenAI-compatible wire shape (24 kHz PCM).
+            //
+            // We previously defaulted to `openai/gpt-4o-mini-tts-…`
+            // for its higher-quality LLM-based voice, but
+            // OpenRouter's `/audio/speech` proxy was empirically
+            // unable to forward that model's streaming audio output:
+            // the proxy flushed an ~9.6 KB preamble and then buffered
+            // the rest of the body until upstream finished
+            // synthesising (~30+ s for typical replies), exceeding
+            // every reasonable client timeout. Verified via the
+            // `fono.http` instrumentation's one-shot stall hex dump —
+            // bytes were valid PCM, just never delivered. `tts-1`
+            // sidesteps the proxy-buffering problem entirely because
+            // a 200-char synthesis completes server-side in ~1 s and
+            // the whole body is forwarded in one go. Users who want
+            // the LLM-based voice can pin
+            // `openai/gpt-4o-mini-tts-2025-12-15` in `config.toml`
+            // and accept the failure mode on long replies (or switch
+            // to OpenAI direct, where streaming works correctly).
+            model: "openai/tts-1",
+            default_voice: "alloy",
             endpoint: TtsEndpoint::OpenAiCompat {
                 base_url: "https://openrouter.ai/api/v1",
                 response_format: "pcm",
+                // `tts-1` does not support SSE streaming and the
+                // OpenRouter proxy chokes on `stream_format = "audio"`
+                // for this model; omit the field entirely so the
+                // wire body is byte-identical to a plain OpenAI
+                // request.
+                stream_format: None,
             },
             runtime_probe: false,
         }),
@@ -659,7 +717,9 @@ mod tests {
             }
             let id = stt_backend_str(&b);
             assert!(
-                CLOUD_PROVIDERS.iter().any(|p| p.id == id && p.stt.is_some()),
+                CLOUD_PROVIDERS
+                    .iter()
+                    .any(|p| p.id == id && p.stt.is_some()),
                 "SttBackend::{b:?} ({id}) is not present in CLOUD_PROVIDERS",
             );
         }
@@ -669,7 +729,9 @@ mod tests {
             }
             let id = llm_backend_str(&b);
             assert!(
-                CLOUD_PROVIDERS.iter().any(|p| p.id == id && p.llm.is_some()),
+                CLOUD_PROVIDERS
+                    .iter()
+                    .any(|p| p.id == id && p.llm.is_some()),
                 "LlmBackend::{b:?} ({id}) is not present in CLOUD_PROVIDERS",
             );
         }
@@ -689,12 +751,17 @@ mod tests {
             );
         }
         for b in crate::providers::all_tts_backends() {
-            if matches!(b, TtsBackend::None | TtsBackend::Wyoming | TtsBackend::Piper) {
+            if matches!(
+                b,
+                TtsBackend::None | TtsBackend::Wyoming | TtsBackend::Piper
+            ) {
                 continue;
             }
             let id = tts_backend_str(&b);
             assert!(
-                CLOUD_PROVIDERS.iter().any(|p| p.id == id && p.tts.is_some()),
+                CLOUD_PROVIDERS
+                    .iter()
+                    .any(|p| p.id == id && p.tts.is_some()),
                 "TtsBackend::{b:?} ({id}) is not present in CLOUD_PROVIDERS",
             );
         }
@@ -718,7 +785,11 @@ mod tests {
                 count += 1;
             }
             if let Some(a) = &p.assistant {
-                assert!(!a.text_model.is_empty(), "{}: empty assistant text_model", p.id);
+                assert!(
+                    !a.text_model.is_empty(),
+                    "{}: empty assistant text_model",
+                    p.id
+                );
                 if let Some(mm) = a.multimodal_model {
                     assert!(!mm.is_empty(), "{}: empty multimodal_model literal", p.id);
                 }

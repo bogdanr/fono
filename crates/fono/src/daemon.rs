@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use fono_core::{Config, Paths, Secrets};
 use fono_hotkey::{
     HotkeyAction, HotkeyBindings, HotkeyControl, HotkeyControlSender, HotkeyEvent, RecordingFsm,
+    State as FsmState,
 };
 use fono_ipc::{read_frame, write_frame, Request, Response};
 use fono_tray::{TrayAction, TrayState};
@@ -735,6 +736,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         let tray = Arc::clone(&tray);
         let config_for_dispatch = Arc::clone(&config);
         let orch_for_dispatch = orchestrator.clone();
+        let cancel_ctrl_disp = cancel_ctrl.clone();
         tokio::spawn(async move {
             while let Some(action) = action_rx.recv().await {
                 let action = translate_for_interactive(
@@ -747,6 +749,20 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                 if matches!(action, HotkeyAction::ProcessingDone) {
                     if let Some(t) = tray.as_ref().as_ref() {
                         t.set_state(TrayState::Idle);
+                    }
+                }
+                // Belt-and-braces: any transition back to Idle releases
+                // the cancel-hotkey grab. The FSM-event consumer above
+                // already handles the common Stop*/Cancel paths, but
+                // the assistant's natural-completion path leaves
+                // Thinking/Speaking via `ProcessingDone` alone and
+                // emits no `HotkeyEvent`, so without this the Escape
+                // grab would leak until the next cancel/barge-in. Done
+                // state-based so future Idle-bound paths get the same
+                // treatment for free.
+                if new_state == FsmState::Idle {
+                    if let Some(ctrl) = cancel_ctrl_disp.as_ref() {
+                        let _ = ctrl.send(HotkeyControl::DisableCancel);
                     }
                 }
             }

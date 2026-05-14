@@ -74,7 +74,8 @@ cloud-all = ["fono-stt/openai", "fono-stt/deepgram", "fono-llm/anthropic"]
 [dependencies]
 fono-core = { path = "../fono-core", features = ["vulkan-probe"] }
 fono-audio = { path = "../fono-audio" }
-fono-stt = { path = "../fono-stt", features = ["groq", "openai", "deepgram", "wyoming"] }
+fono-http = { path = "../fono-http" }
+fono-stt = { path = "../fono-stt", features = ["groq", "openai", "openrouter", "deepgram", "wyoming"] }
 # Default builds ship every cloud backend wired in the catalogue —
 # fono-stt: Groq/OpenAI/Deepgram (+ Wyoming LAN); fono-llm:
 # Cerebras/OpenAI-compat/Anthropic; fono-tts: all five hosted

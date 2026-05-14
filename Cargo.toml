@@ -16,6 +16,7 @@ members = [
     "crates/fono-download",
     "crates/fono-update",
     "crates/fono-bench",
+    "crates/fono-http",
     "crates/fono-net-codec",
     "crates/fono-net",
 ]

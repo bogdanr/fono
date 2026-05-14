@@ -106,6 +106,7 @@ pub fn build_stt(
         SttBackend::Local => build_local(cfg, whisper_models_dir, languages, prompts),
         SttBackend::Groq => build_groq(cfg, secrets, languages, prompts, cloud_rerun),
         SttBackend::OpenAI => build_openai(cfg, secrets, languages, prompts, cloud_rerun),
+        SttBackend::OpenRouter => build_openrouter(cfg, secrets, languages, prompts, cloud_rerun),
         SttBackend::Wyoming => build_wyoming(cfg, secrets, languages),
         other => Err(anyhow!(
             "STT backend {other:?} is not yet implemented in this build; \
@@ -263,6 +264,37 @@ fn build_openai(
 ) -> Result<Arc<dyn SpeechToText>> {
     Err(anyhow!(
         "OpenAI STT not compiled in (enable the `openai` feature on `fono-stt`)"
+    ))
+}
+
+#[cfg(feature = "openrouter")]
+fn build_openrouter(
+    cfg: &Stt,
+    secrets: &Secrets,
+    languages: Vec<String>,
+    prompts: std::collections::HashMap<String, String>,
+    cloud_rerun: bool,
+) -> Result<Arc<dyn SpeechToText>> {
+    let (key, model) = resolve_cloud(cfg, secrets, &SttBackend::OpenRouter, "openrouter")?;
+    bootstrap_language_cache(&languages, crate::openrouter::BACKEND_KEY);
+    Ok(Arc::new(
+        crate::openrouter::OpenRouterStt::with_model(key, model)
+            .with_languages(languages)
+            .with_prompts(prompts)
+            .with_cloud_rerun_on_mismatch(cloud_rerun),
+    ))
+}
+
+#[cfg(not(feature = "openrouter"))]
+fn build_openrouter(
+    _: &Stt,
+    _: &Secrets,
+    _: Vec<String>,
+    _: std::collections::HashMap<String, String>,
+    _: bool,
+) -> Result<Arc<dyn SpeechToText>> {
+    Err(anyhow!(
+        "OpenRouter STT not compiled in (enable the `openrouter` feature on `fono-stt`)"
     ))
 }
 

@@ -107,10 +107,7 @@ fn build_piper(_cfg: &Tts) -> Result<Arc<dyn TextToSpeech>> {
     feature = "cartesia",
     feature = "deepgram"
 ))]
-fn resolve_cloud(
-    cfg: &Tts,
-    backend: &TtsBackend,
-) -> (String, Option<String>, Option<String>) {
+fn resolve_cloud(cfg: &Tts, backend: &TtsBackend) -> (String, Option<String>, Option<String>) {
     let canonical = tts_key_env(backend);
     cfg.cloud.as_ref().map_or_else(
         || (canonical.to_string(), None, None),
@@ -209,8 +206,7 @@ fn build_groq(_cfg: &Tts, _secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
 
 #[cfg(feature = "openrouter")]
 fn build_openrouter(cfg: &Tts, secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
-    let (key_ref, model_override, voice_override) =
-        resolve_cloud(cfg, &TtsBackend::OpenRouter);
+    let (key_ref, model_override, voice_override) = resolve_cloud(cfg, &TtsBackend::OpenRouter);
     let key = resolve_key(&key_ref, &TtsBackend::OpenRouter, secrets)?;
     let voice = resolve_voice(cfg, voice_override);
     Ok(Arc::new(crate::openai_compat::openrouter_client(
@@ -229,8 +225,7 @@ fn build_openrouter(_cfg: &Tts, _secrets: &Secrets) -> Result<Arc<dyn TextToSpee
 
 #[cfg(feature = "cartesia")]
 fn build_cartesia(cfg: &Tts, secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
-    let (key_ref, model_override, voice_override) =
-        resolve_cloud(cfg, &TtsBackend::Cartesia);
+    let (key_ref, model_override, voice_override) = resolve_cloud(cfg, &TtsBackend::Cartesia);
     let key = resolve_key(&key_ref, &TtsBackend::Cartesia, secrets)?;
     let voice = resolve_voice(cfg, voice_override);
     Ok(Arc::new(crate::cartesia::CartesiaTts::new(
@@ -249,8 +244,7 @@ fn build_cartesia(_cfg: &Tts, _secrets: &Secrets) -> Result<Arc<dyn TextToSpeech
 
 #[cfg(feature = "deepgram")]
 fn build_deepgram(cfg: &Tts, secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
-    let (key_ref, model_override, _voice_override) =
-        resolve_cloud(cfg, &TtsBackend::Deepgram);
+    let (key_ref, model_override, _voice_override) = resolve_cloud(cfg, &TtsBackend::Deepgram);
     let key = resolve_key(&key_ref, &TtsBackend::Deepgram, secrets)?;
     Ok(Arc::new(crate::deepgram::DeepgramTts::new(
         key,

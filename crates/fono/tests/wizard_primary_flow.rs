@@ -7,9 +7,7 @@
 //! driving `dialoguer` end-to-end, so they run without a TTY.
 
 use fono::wizard::{apply_primary_provider, apply_secondary_tts, seed_primary_secret};
-use fono_core::config::{
-    AssistantBackend, Config, LlmBackend, SttBackend, TtsBackend, TtsWyoming,
-};
+use fono_core::config::{AssistantBackend, Config, LlmBackend, SttBackend, TtsBackend, TtsWyoming};
 use fono_core::provider_catalog::find;
 use fono_core::Secrets;
 

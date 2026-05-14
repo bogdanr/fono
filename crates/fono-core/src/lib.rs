@@ -11,6 +11,7 @@ pub mod hwcheck;
 pub mod languages;
 pub mod locale;
 pub mod notify;
+pub mod openrouter_attribution;
 pub mod paths;
 pub mod provider_catalog;
 pub mod providers;

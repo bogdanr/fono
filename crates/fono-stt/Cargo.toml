@@ -15,9 +15,14 @@ workspace = true
 [features]
 default = ["groq", "wyoming"]
 # Cloud backends — each behind a feature flag per Phase 4 Task 4.3.
-groq = ["dep:reqwest"]
-openai = ["dep:reqwest"]
-deepgram = ["dep:reqwest", "dep:tokio-tungstenite"]
+groq = ["dep:reqwest", "dep:fono-http"]
+openai = ["dep:reqwest", "dep:fono-http"]
+# OpenRouter STT — OpenAI-compatible /v1/audio/transcriptions proxy
+# that routes to upstream providers (Groq Whisper, …) via the model
+# id. Reuses Groq's warm_client + encode_wav helpers, so the feature
+# pulls `groq` in transitively.
+openrouter = ["dep:reqwest", "dep:fono-http", "dep:base64", "groq"]
+deepgram = ["dep:reqwest", "dep:fono-http", "dep:tokio-tungstenite"]
 # Local whisper — opt-in because it vendors whisper.cpp (C++ build).
 whisper-local = ["dep:whisper-rs"]
 # Wyoming STT client — talks to wyoming-faster-whisper / fono-server /
@@ -50,6 +55,10 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true, optional = true }
+fono-http = { path = "../fono-http", optional = true }
+# OpenRouter STT requires base64-encoded audio in the JSON request
+# body (it doesn't accept multipart/form-data on /v1/audio/transcriptions).
+base64 = { version = "0.22", optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 whisper-rs = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }

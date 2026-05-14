@@ -27,6 +27,7 @@ pub const fn stt_backend_str(b: &SttBackend) -> &'static str {
         SttBackend::Speechmatics => "speechmatics",
         SttBackend::Google => "google",
         SttBackend::Nemotron => "nemotron",
+        SttBackend::OpenRouter => "openrouter",
         SttBackend::Wyoming => "wyoming",
     }
 }
@@ -46,6 +47,7 @@ pub fn parse_stt_backend(s: &str) -> Option<SttBackend> {
         "speechmatics" => Some(SttBackend::Speechmatics),
         "google" => Some(SttBackend::Google),
         "nemotron" => Some(SttBackend::Nemotron),
+        "openrouter" => Some(SttBackend::OpenRouter),
         "wyoming" => Some(SttBackend::Wyoming),
         _ => None,
     }
@@ -99,6 +101,7 @@ pub const fn stt_key_env(b: &SttBackend) -> &'static str {
         SttBackend::Speechmatics => "SPEECHMATICS_API_KEY",
         SttBackend::Google => "GOOGLE_API_KEY",
         SttBackend::Nemotron => "NEMOTRON_API_KEY",
+        SttBackend::OpenRouter => "OPENROUTER_API_KEY",
         // Wyoming v1 has no in-band auth; an optional pre-shared token
         // is configured via `[stt.wyoming].auth_token_ref` instead.
         SttBackend::Wyoming => "",
@@ -277,7 +280,7 @@ pub fn cloud_pair(name: &str) -> Option<(SttBackend, LlmBackend)> {
 
 /// Iterator over every STT backend (for doctor enumeration etc.).
 #[must_use]
-pub fn all_stt_backends() -> [SttBackend; 11] {
+pub fn all_stt_backends() -> [SttBackend; 12] {
     [
         SttBackend::Local,
         SttBackend::Groq,
@@ -289,6 +292,7 @@ pub fn all_stt_backends() -> [SttBackend; 11] {
         SttBackend::Speechmatics,
         SttBackend::Google,
         SttBackend::Nemotron,
+        SttBackend::OpenRouter,
         SttBackend::Wyoming,
     ]
 }
@@ -591,10 +595,7 @@ mod tests {
     #[test]
     fn tts_key_env_matches_provider() {
         assert_eq!(tts_key_env(&TtsBackend::Groq), "GROQ_API_KEY");
-        assert_eq!(
-            tts_key_env(&TtsBackend::OpenRouter),
-            "OPENROUTER_API_KEY"
-        );
+        assert_eq!(tts_key_env(&TtsBackend::OpenRouter), "OPENROUTER_API_KEY");
         assert_eq!(tts_key_env(&TtsBackend::Cartesia), "CARTESIA_API_KEY");
         assert_eq!(tts_key_env(&TtsBackend::Deepgram), "DEEPGRAM_API_KEY");
         assert_eq!(tts_key_env(&TtsBackend::OpenAI), "OPENAI_API_KEY");
@@ -666,8 +667,7 @@ mod tests {
     #[test]
     fn configured_tts_always_includes_active() {
         let secrets = crate::Secrets::default();
-        let backends =
-            configured_tts_backends(&secrets, &TtsBackend::Cartesia, false);
+        let backends = configured_tts_backends(&secrets, &TtsBackend::Cartesia, false);
         assert!(backends.contains(&TtsBackend::Cartesia));
     }
 }

@@ -7,7 +7,115 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **OpenRouter TTS default swapped from `openai/gpt-4o-mini-tts-…` to
+  `openai/tts-1`** (default voice `alloy`). The LLM-based
+  `gpt-4o-mini-tts` model produced higher-quality voices but its
+  streaming output was not reliably forwarded by OpenRouter's
+  `/audio/speech` proxy: the proxy flushed an ~9.6 KB preamble and
+  then buffered the rest of the synthesised body until upstream
+  finished (~30+ s for a typical 200-character reply), exceeding
+  every reasonable client timeout. Verified via the `fono.http`
+  instrumentation's one-shot stall hex dump — bytes were valid PCM,
+  just never delivered. Classical `tts-1` produces audio in
+  ~0.5-2 s regardless of length and the whole body is forwarded in
+  one go, sidestepping the proxy-buffering problem entirely. Users
+  who want the LLM-based voice can pin
+  `[tts.cloud] model = "openai/gpt-4o-mini-tts-2025-12-15"` in
+  `config.toml` and accept the failure mode on long replies, or
+  switch to OpenAI direct (where streaming works correctly).
+
+- **OpenRouter TTS second-sentence stalls eliminated** by disabling
+  HTTP/2 connection-pool reuse on the TTS client. Previously, the
+  first sentence of an assistant turn synthesised correctly but every
+  subsequent sentence stalled identically (~9.6 KB chunk arrived,
+  then 15 s of silence, then watchdog fired) — symptomatic of
+  OpenRouter's `/audio/speech` proxy mishandling multiplexed HTTP/2
+  streams. The TTS reqwest client now runs with
+  `pool_max_idle_per_host(0)` and `http1_only()`, forcing a fresh
+  TCP+TLS handshake per request (~200-400 ms overhead, negligible
+  against multi-second LLM-based synthesis). Other backends (LLM,
+  STT, assistant chat) keep their HTTP/2 pooling because no
+  equivalent stall pattern was observed there.
+
+- **TTS inter-chunk watchdog set to 20 s.** Empirically OpenRouter's
+  `/audio/speech` proxy delivers a small preamble (~9.6 KB across ~8
+  chunks) and then pauses for several seconds before resuming the
+  audio stream proper. The previous 5 s watchdog tripped during that
+  pause and produced false-stall failures on otherwise-healthy
+  synthesis; 20 s keeps headroom for that pause while still catching
+  genuinely wedged connections far faster than the overall 30 s
+  request timeout. A one-shot `warn!`-level hex dump of the partial
+  body fires on the first TTS stall per process lifetime, surfacing
+  whether the preamble bytes are SSE framing, JSON metadata, or
+  genuine PCM — diagnostic data for the next round of investigation.
+
+- **Structured-log `chunks` field now reports the truth** on stalled
+  / transport-error outcomes. Previously hardcoded to `0` in the TTS,
+  LLM, and STT consumers, which made it impossible to distinguish
+  "proxy sent one chunk then hung" from "nothing ever arrived" in
+  `fono.http=debug` logs. New `BodyError::chunks()` and
+  `BodyError::after_ms()` accessors expose the underlying watchdog
+  state to all consumers uniformly.
+
+- **OpenRouter TTS time-to-first-audio collapsed from ~30 s to ~2-4 s**
+  by sending `stream_format: "audio"` on `/audio/speech` requests for
+  models that benefit from it (OpenRouter's `gpt-4o-mini-tts` and
+  OpenAI direct). Without this field, OpenAI's LLM-based TTS models
+  buffer the entire synthesis server-side before opening the response
+  body — visible in the `fono.http` instrumentation as a ~30 s
+  `headers_ms` followed by a ~200 ms `body_ms`. With it, the upstream
+  streams raw audio bytes as they are generated and `headers_ms` drops
+  to sub-second. The catalogue gates the new field per provider:
+  enabled for OpenAI and OpenRouter, intentionally omitted for Groq's
+  Orpheus deployment (which is conservative about unknown request
+  fields). Classical models like `tts-1` are unaffected — they already
+  stream by default and accept the field as a no-op.
+
 ### Added
+
+- **Structured HTTP instrumentation across every cloud-backed
+  pipeline** (STT transcribe, LLM cleanup chat, voice-assistant
+  streaming chat, TTS `/audio/speech`, wizard key validation). A new
+  `fono-http` crate provides a single per-stage stopwatch
+  (`RequestTimings`), an inter-chunk body watchdog
+  (`read_body_with_watchdog`), and one chokepoint
+  (`emit_http_debug`) that funnels every consumer through the same
+  schema (`stage`, `provider`, `endpoint`, `status`, `headers_ms`,
+  `ttfb_ms`, `body_ms`, `decode_ms`, `total_ms`, `body_bytes`,
+  `content_length`, `chunks`, `request_id`, `attempt`, `outcome`).
+  Silent by default; opt in per session with
+  `RUST_LOG=info,fono.http=debug fono daemon`. Detects stalled
+  bodies in 15-30 s (per stage) rather than waiting for the global
+  60 s reqwest timeout, surfaces the upstream `x-request-id` /
+  `request-id` on every response (success and failure), and on TTS
+  retries once automatically when the upstream stalls mid-body
+  (typical OpenRouter proxy hiccup). The improved error surface for
+  stalled TTS now reads e.g. `openrouter TTS body read failed
+  (request_id=or-…, attempt=2)` instead of the previous bare
+  `reading openrouter TTS response body`. Per-stage chunk watchdogs:
+  TTS 15 s (overall cap reduced from 60 s to 30 s), STT 30 s, LLM
+  cleanup 30 s, assistant SSE 20 s inter-event.
+
+- **OpenRouter app attribution** is now sent on every outbound
+  request to `openrouter.ai` (STT transcribe + prewarm, LLM chat +
+  prewarm, voice-assistant chat stream + prewarm, TTS
+  `/audio/speech`, and the wizard's `validate_cloud_key` probe),
+  not just from the STT backend as before. The three static headers
+  are `HTTP-Referer: https://fono.page`,
+  `X-OpenRouter-Title: Fono`, and
+  `X-OpenRouter-Categories: personal-agent,writing-assistant` —
+  identical across every install, no per-user or per-machine
+  identifier embedded, no request body changes. Fono now appears on
+  https://openrouter.ai/rankings, in the "Apps" tab of each model
+  it routes through, and gets a public dashboard at
+  https://openrouter.ai/apps?url=https://fono.page. The previous
+  STT-only attribution used the GitHub repo URL as the Referer; the
+  switch to `fono.page` is a deliberate one-time reset onto the
+  canonical project homepage. See
+  <https://openrouter.ai/docs/app-attribution> and the new
+  `fono_core::openrouter_attribution` module.
 
 - **`fono setup` now hot-reloads the daemon when it finishes.**
   Previously, running the wizard while `fono` was already running
@@ -30,6 +138,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the existing session cascade cap.
 
 ### Changed
+
+- **OpenRouter TTS default swapped from `hexgrad/kokoro-82m` to
+  `openai/gpt-4o-mini-tts-2025-12-15`** for native multilingual output
+  (default voice `coral`, $0.60 / 1 M characters). Kokoro voices are
+  monolingual and prefixed by language code, so every non-English
+  synthesis was routed through an American-English voice; OpenAI Mini
+  TTS speaks French, German, Spanish, Romanian, Mandarin, etc.
+  natively with no per-call language argument or per-language voice
+  map needed. Existing users who prefer Kokoro can pin
+  `[tts.cloud] model = "hexgrad/kokoro-82m"` and
+  `voice = "af_heart"` in `config.toml`; full Kokoro support is
+  deferred to a future local+cloud-symmetric backend (see
+  `plans/2026-05-14-kokoro-local-and-cloud-parity-v1.md`).
 
 - **Voice assistant wizard step now renders as an aligned three-
   column table** (Provider · Model · Key). Model names are

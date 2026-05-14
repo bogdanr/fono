@@ -19,9 +19,9 @@ workspace = true
 default = ["openai-compat", "anthropic"]
 # OpenAI-compatible chat completions: covers Cerebras, Groq, OpenAI,
 # OpenRouter, Ollama. SSE streaming via reqwest's `stream` feature.
-openai-compat = ["dep:reqwest"]
+openai-compat = ["dep:reqwest", "dep:fono-http"]
 # Anthropic Messages API streaming.
-anthropic = ["dep:reqwest"]
+anthropic = ["dep:reqwest", "dep:fono-http"]
 # Local llama.cpp chat. **Stub in v1** — the cleanup path's
 # `fono-llm/llama_local` is a single-shot mutex-serialised inference;
 # threading streaming through the same lock requires plumbing we'll
@@ -40,6 +40,7 @@ futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true, optional = true }
+fono-http = { path = "../fono-http", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

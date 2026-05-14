@@ -23,7 +23,7 @@ rationale.
 | **Anthropic**  | —   | ✓           | ✓              | ✓ (Claude Haiku 4.5)         | ✓ `web_search_20250305`          | —                         |
 | **Cerebras**   | —   | ✓           | ✓              | —                            | —                                | —                         |
 | **Gemini**     | —   | ✓ *(planned)* | ✓ *(planned)* | ✓ (Flash)                    | ✓ `google_search` *(planned)*    | —                         |
-| **OpenRouter** | —   | ✓           | ✓              | *(route-dependent)*          | *(route-dependent)*              | ✓ Kokoro **new**          |
+| **OpenRouter** | ✓   | ✓           | ✓              | *(route-dependent)*          | *(route-dependent)*              | ✓ OpenAI Mini TTS **new** |
 | **Cartesia**   | ✓   | —           | —              | —                            | —                                | ✓ Sonic-2 **new**         |
 | **Deepgram**   | ✓   | —           | —              | —                            | —                                | ✓ Aura-2 **new**          |
 | **AssemblyAI** | ✓   | —           | —              | —                            | —                                | —                         |
@@ -81,6 +81,42 @@ fono keys add CEREBRAS_API_KEY
 fono keys list                   # masked listing
 fono keys check                  # reachability probe per key
 ```
+
+## Debugging slow or stalled cloud requests
+
+Every cloud-backed pipeline (STT, LLM cleanup, voice-assistant chat,
+TTS, wizard key validation) emits one structured log line per HTTP
+request under the `fono.http` tracing target. The lines are silent at
+the default `info` log level and turn on per session via the
+`RUST_LOG` env var:
+
+```
+RUST_LOG=info,fono.http=debug fono daemon
+```
+
+Schema (one line per HTTP request):
+
+| Field             | Meaning                                                |
+|-------------------|--------------------------------------------------------|
+| `stage`           | `stt` / `llm` / `assistant` / `tts` / `wizard`         |
+| `provider`        | `openrouter` / `openai` / `groq` / `cerebras` / ...    |
+| `endpoint`        | last URL segment, e.g. `audio/speech`                  |
+| `status`          | HTTP status                                            |
+| `headers_ms`      | time to response headers                               |
+| `ttfb_ms`         | time from headers to first body byte                   |
+| `body_ms`         | time from first byte to last byte                      |
+| `decode_ms`       | post-processing (WAV strip, JSON parse, ...)           |
+| `total_ms`        | request-start → decode-done                            |
+| `body_bytes`      | actual bytes read                                      |
+| `chunks`          | stream chunk count (1 for one-shot bodies)             |
+| `request_id`      | upstream `x-request-id` (paste into provider support)  |
+| `attempt`         | 1 on first try, 2 on retried                           |
+| `outcome`         | `ok` / `stalled` / `http_error` / `decode_error` / ... |
+
+Each backend uses an inter-chunk watchdog so a stalled body fails
+fast rather than waiting for the overall reqwest timeout: TTS 15 s,
+STT 30 s, LLM cleanup 30 s, assistant SSE 20 s inter-event. TTS
+retries once automatically on a stall.
 
 ## Speech-to-text
 
@@ -225,7 +261,7 @@ assistant audio works without an OpenAI key.
 | Wyoming       | local LAN  | server-side voice   | `tcp://<host>:10200`                                   | —                            |
 | OpenAI        | cloud HTTP | `tts-1`             | `https://api.openai.com/v1/audio/speech`               | `Authorization: Bearer <k>`  |
 | Groq          | cloud HTTP | `canopylabs/orpheus-v1-english` | `https://api.groq.com/openai/v1/audio/speech`          | `Authorization: Bearer <k>`  |
-| OpenRouter    | cloud HTTP | `hexgrad/kokoro-82m`| `https://openrouter.ai/api/v1/audio/speech`            | `Authorization: Bearer <k>`  |
+| OpenRouter    | cloud HTTP | `openai/tts-1`      | `https://openrouter.ai/api/v1/audio/speech`            | `Authorization: Bearer <k>`  |
 | Cartesia      | cloud HTTP | `sonic-2`           | `https://api.cartesia.ai/tts/bytes`                    | `X-API-Key: <k>`             |
 | Deepgram      | cloud HTTP | `aura-2-thalia-en`  | `https://api.deepgram.com/v1/speak`                    | `Authorization: Token <k>`   |
 
@@ -253,14 +289,90 @@ Orpheus replaces the PlayAI family that previously powered Groq TTS,
 which Groq decommissioned in 2026; requests against the retired model
 ids now return `model_not_found`.
 
-### OpenRouter TTS (Kokoro)
+### OpenRouter TTS (OpenAI `tts-1`)
 
 OpenRouter ships its own OpenAI-compatible TTS endpoint at
 `https://openrouter.ai/api/v1/audio/speech`. The default model is
-`hexgrad/kokoro-82m` (Kokoro, $0.62 / 1M chars at the time of writing),
-with default voice `af_heart`. Same body shape as OpenAI; the response
-is 24 kHz raw PCM. Useful for users who already route their LLM through
-OpenRouter and want a single key covering chat + audio.
+`openai/tts-1` (OpenAI's classical single-pass TTS, priced at
+$15 / 1 M characters at the time of writing), with default voice
+`alloy`. Same body shape as OpenAI; the response is 24 kHz raw PCM.
+Useful for users who already route their LLM through OpenRouter and
+want a single key covering chat + audio.
+
+`tts-1` produces audio in roughly 0.5-2 s regardless of input
+length, so the user hears the assistant's reply within a couple of
+seconds.
+
+The full OpenAI voice catalogue is available: `alloy`, `echo`,
+`fable`, `onyx`, `nova`, `shimmer`, `sage`, `coral`, `ash`, `verse`.
+Override the default by setting `voice` in `[tts.cloud]` of
+`config.toml`, e.g.:
+
+```toml
+[tts.cloud]
+provider = "openrouter"
+voice = "sage"
+```
+
+#### Why not `gpt-4o-mini-tts`?
+
+`openai/gpt-4o-mini-tts-2025-12-15` produces noticeably more
+expressive voices and is natively multilingual (no per-language
+voice map required), but OpenRouter's `/audio/speech` proxy was
+empirically unable to forward that model's output reliably: the
+proxy flushed an ~9.6 KB preamble immediately and then buffered
+the rest of the synthesised body until upstream finished, which
+for a typical 200-character assistant reply exceeded every
+reasonable client timeout. Verified via the `fono.http`
+instrumentation's one-shot stall hex dump — bytes were valid PCM,
+just never delivered. `tts-1` sidesteps the buffering problem
+because its synthesis is fast and single-pass; the whole body is
+forwarded in one go before any proxy buffer matters.
+
+Users who explicitly want the LLM-based voice can pin it in
+`config.toml` and accept the failure mode on long replies (or
+switch to OpenAI direct, where streaming works correctly):
+
+```toml
+[tts.cloud]
+provider = "openrouter"
+model = "openai/gpt-4o-mini-tts-2025-12-15"
+voice = "coral"
+```
+
+When/if OpenRouter fixes their proxy's streaming behaviour, the
+default may flip back.
+
+### OpenRouter app attribution
+
+Every outbound request Fono makes to `openrouter.ai` — STT, LLM
+cleanup, voice-assistant chat, TTS, and the wizard's
+`validate_cloud_key` probe — carries three static app-attribution
+headers per <https://openrouter.ai/docs/app-attribution>:
+
+| Header | Value |
+|---|---|
+| `HTTP-Referer` | `https://fono.page` |
+| `X-OpenRouter-Title` | `Fono` |
+| `X-OpenRouter-Categories` | `personal-agent,writing-assistant` |
+
+These values are baked into the binary and are identical across every
+install — no per-user or per-machine identifier is embedded, and no
+request body changes. The effect is that Fono appears on OpenRouter's
+public rankings (https://openrouter.ai/rankings), in the "Apps" tab of
+each model it routes through, and gets a public usage dashboard at
+https://openrouter.ai/apps?url=https://fono.page. The shared source
+of truth is `fono_core::openrouter_attribution`.
+
+Kokoro (`hexgrad/kokoro-82m`, voice `af_heart`) was the previous
+default. It is deferred to a future local-and-cloud-symmetric backend
+with a shared `KokoroVoiceRouter` so picking Kokoro local vs cloud
+yields the same audio output for the same `(text, lang, voice)`
+triple — see
+`plans/2026-05-14-kokoro-local-and-cloud-parity-v1.md`. Existing users
+who prefer Kokoro today can pin
+`[tts.cloud] model = "hexgrad/kokoro-82m"` and `voice = "af_heart"`
+manually.
 
 ### Cartesia TTS (Sonic-2)
 

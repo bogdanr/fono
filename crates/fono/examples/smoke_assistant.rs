@@ -439,8 +439,7 @@ async fn exercise_groq_e2e(secrets: &Secrets) -> Result<()> {
         .map_err(|e| anyhow!("build_assistant: {e:#}"))?
         .ok_or_else(|| anyhow!("build_assistant returned None"))?;
     let ctx = AssistantContext {
-        system_prompt: "You are a brief smoke-test assistant. Reply in one short sentence."
-            .into(),
+        system_prompt: "You are a brief smoke-test assistant. Reply in one short sentence.".into(),
         language: None,
         history: ConversationHistory::default().snapshot(),
     };
@@ -470,10 +469,7 @@ async fn exercise_groq_e2e(secrets: &Secrets) -> Result<()> {
     if reply_trim.is_empty() {
         return Err(anyhow!("llm returned empty reply"));
     }
-    println!(
-        "       llm ({llm_ms} ms): {:?}",
-        trunc(&reply_trim, 80)
-    );
+    println!("       llm ({llm_ms} ms): {:?}", trunc(&reply_trim, 80));
 
     // 3. TTS — Groq Orpheus on the (truncated) reply. Truncate to
     //    keep the synthesis cheap; the goal is to prove the wire

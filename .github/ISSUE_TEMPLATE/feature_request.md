@@ -11,13 +11,5 @@ labels: ["enhancement"]
 
 ## Proposed solution
 
-<!-- Sketch the feature. If it's a new STT/LLM provider, link to its docs and
-     note streaming support + authentication model. -->
+<!-- Sketch the feature. Make sure it fits with the other features. Provide links if it makes sense for this. -->
 
-## Alternatives considered
-
-## Which design-plan task does this relate to?
-
-<!-- e.g. Task 4.3 (cloud STT backends) in `docs/plans/2026-04-24-fono-design-v1.md` -->
-
-## Additional context

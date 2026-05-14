@@ -188,9 +188,7 @@ fn extract_env_var(msg: &str) -> Option<String> {
     }
     if best.is_none()
         && current.len() >= 6
-        && (current.contains("API_KEY")
-            || current.contains("_TOKEN")
-            || current.ends_with("_KEY"))
+        && (current.contains("API_KEY") || current.contains("_TOKEN") || current.ends_with("_KEY"))
     {
         best = Some(current);
     }
@@ -369,10 +367,7 @@ pub fn notify_actionable(
     let class = classify(details);
     let fired = matches!(
         class,
-        ErrorClass::Auth
-            | ErrorClass::Network
-            | ErrorClass::TermsRequired
-            | ErrorClass::MissingKey
+        ErrorClass::Auth | ErrorClass::Network | ErrorClass::TermsRequired | ErrorClass::MissingKey
     ) && notify(stage, provider, class, details);
     (class, fired)
 }
@@ -460,7 +455,10 @@ fn render(
             {
                 let url = extract_url(details);
                 let suffix = url.map_or_else(
-                    || "Open the provider console to accept the model terms, then retry.".to_string(),
+                    || {
+                        "Open the provider console to accept the model terms, then retry."
+                            .to_string()
+                    },
                     |u| format!("Accept the model terms at {u}, then retry."),
                 );
                 format!(
@@ -504,7 +502,10 @@ fn render(
             {
                 let url = extract_url(details);
                 let suffix = url.map_or_else(
-                    || "Open the provider console to accept the model terms, then retry.".to_string(),
+                    || {
+                        "Open the provider console to accept the model terms, then retry."
+                            .to_string()
+                    },
                     |u| format!("Accept the model terms at {u}, then retry."),
                 );
                 format!(
@@ -521,15 +522,19 @@ fn render(
             {
                 let var = extract_env_var(details);
                 let hint = var.map_or_else(
-                    || format!(
-                        "{provider}'s API key is not configured. Open the tray → Configure → \
+                    || {
+                        format!(
+                            "{provider}'s API key is not configured. Open the tray → Configure → \
                          {} to add it, or run `fono keys add <VAR>`.",
-                        stage_user_label(stage),
-                    ),
-                    |v| format!(
-                        "No `{v}` in secrets.toml or environment. Run `fono keys add {v}` \
+                            stage_user_label(stage),
+                        )
+                    },
+                    |v| {
+                        format!(
+                            "No `{v}` in secrets.toml or environment. Run `fono keys add {v}` \
                          (or open the tray → Configure) to add it."
-                    ),
+                        )
+                    },
                 );
                 let consequence = match stage {
                     Stage::Tts => " The assistant reply was generated but could not be spoken.",
@@ -780,7 +785,8 @@ mod tests {
     #[test]
     fn notify_actionable_fires_for_missing_key() {
         let _g = fresh();
-        let details = r#"Cartesia TTS API key "CARTESIA_API_KEY" not found in secrets.toml or environment"#;
+        let details =
+            r#"Cartesia TTS API key "CARTESIA_API_KEY" not found in secrets.toml or environment"#;
         let (class, fired) = notify_actionable(Stage::Tts, "cartesia", details);
         assert_eq!(class, ErrorClass::MissingKey);
         assert!(fired);
@@ -832,7 +838,12 @@ mod tests {
     fn terms_required_notification_fires() {
         let _g = fresh();
         let details = "groq TTS 400: model_terms_required at https://console.groq.com/x";
-        assert!(notify(Stage::Tts, "groq", ErrorClass::TermsRequired, details));
+        assert!(notify(
+            Stage::Tts,
+            "groq",
+            ErrorClass::TermsRequired,
+            details
+        ));
         let recorded = drain_test_recorder();
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].2, ErrorClass::TermsRequired);
