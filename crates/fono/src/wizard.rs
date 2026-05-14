@@ -125,6 +125,29 @@ pub async fn run(paths: &Paths) -> Result<()> {
         config.hotkeys.dictation, config.hotkeys.assistant, config.hotkeys.cancel,
     );
     println!("  Run `fono` to start the daemon, or `fono doctor` to diagnose your setup.\n");
+
+    // If a daemon is already running, hot-reload it so the changes
+    // take effect without a manual restart. Best-effort: the daemon
+    // may not be running (first-run) or the IPC socket may not be
+    // accepting connections; both surface as a friendly hint, not
+    // an error.
+    match fono_ipc::request_any(
+        &paths.client_ipc_socket_candidates(),
+        &fono_ipc::Request::Reload,
+    )
+    .await
+    {
+        Ok(fono_ipc::Response::Ok | fono_ipc::Response::Discovered(_)) => {
+            println!("  Daemon reloaded — new settings are live.");
+        }
+        Ok(fono_ipc::Response::Text(t)) => println!("  Daemon: {t}"),
+        Ok(fono_ipc::Response::Error(e)) => {
+            println!("  Daemon reload error: {e} — run `fono` to restart.");
+        }
+        Err(_) => {
+            println!("  Daemon: not running (start it with `fono`).");
+        }
+    }
     Ok(())
 }
 
@@ -501,6 +524,26 @@ fn tts_short_label(b: &TtsBackend) -> &'static str {
     }
 }
 
+/// Human-readable chat-model label for the assistant picker table.
+/// Falls back to the raw catalogue `text_model` string when an entry
+/// is not in the hand-curated table — so a new catalogue entry never
+/// produces an empty cell, only a less-pretty one.
+fn humanize_chat_model(entry: &CloudProvider) -> String {
+    let pretty = match entry.id {
+        "openai" => Some("GPT-5.4 mini"),
+        "anthropic" => Some("Claude Haiku 4.5"),
+        "groq" => Some("GPT-OSS 120B"),
+        "cerebras" => Some("Qwen 3 235B"),
+        "gemini" => Some("Gemini 1.5 Flash"),
+        "openrouter" => Some("Claude Haiku 4.5 (via OpenRouter)"),
+        _ => None,
+    };
+    pretty
+        .map(ToString::to_string)
+        .or_else(|| entry.assistant.map(|a| a.text_model.to_string()))
+        .unwrap_or_default()
+}
+
 /// Phase F7 — assistant TTS picker. Built from
 /// [`configured_tts_backends`] so providers whose key is already in
 /// `secrets.toml` lead. Falls through to a Wyoming URI prompt when
@@ -772,19 +815,15 @@ async fn configure_assistant(
         .chain(without_key.iter())
         .copied()
         .collect();
-    let mut labels: Vec<String> = Vec::new();
-    for p in &ordered {
-        let key_part = if secrets.has_in_file(p.key_env) {
-            "key already set"
-        } else {
-            "will ask for key"
-        };
-        let adef = p.assistant.expect("candidate has assistant");
-        labels.push(format!(
-            "{} ({}) — {}",
-            p.display_name, key_part, adef.text_model
-        ));
-    }
+
+    // Render as an aligned three-column table (Provider | Model |
+    // Key). The header is printed once via `println!` so it scrolls
+    // with the prompt; the `Select` items carry only the rows + the
+    // Skip escape hatch.
+    let (rows, header) = assistant_picker_rows(&ordered, secrets);
+    println!();
+    println!("  {header}");
+    let mut labels = rows;
     labels.push("Skip — disable assistant".into());
     let chat_idx = Select::with_theme(theme)
         .with_prompt("Pick an assistant chat backend")
@@ -819,11 +858,77 @@ async fn configure_assistant(
     // Extras (vision + web search) default on at the config layer
     // — see `Assistant::default()`. No prompt here.
 
-    // ── TTS picker (F7) ─ only if not already set by `configure_cloud`.
+    // ── TTS auto-pick / picker ────────────────────────────────────
+    // If the user's assistant key also covers TTS (e.g. they picked
+    // OpenAI for chat and OpenAI also offers TTS), reuse the same
+    // provider/key for the spoken reply — no second prompt. Falls
+    // through to the explicit TTS picker only when the assistant
+    // provider has no TTS capability AND configure_cloud didn't set
+    // one earlier.
     if !tts_already_set {
-        pick_tts_for_assistant(theme, config, secrets).await?;
+        if entry.tts.is_some() && parse_tts_backend(entry.id).is_some() {
+            apply_secondary_tts(config, entry);
+            println!(
+                "  TTS: {} (same key as the assistant — no extra prompt).",
+                entry.display_name
+            );
+        } else {
+            pick_tts_for_assistant(theme, config, secrets).await?;
+        }
     }
     Ok(())
+}
+
+/// Build the rendered rows + header for the slow-path assistant chat
+/// picker. Columns: provider, human-readable model name, key status.
+/// Widths are computed from the longest entry so future catalogue
+/// additions stay aligned. Factored out for unit testing.
+fn assistant_picker_rows(
+    ordered: &[&'static CloudProvider],
+    secrets: &Secrets,
+) -> (Vec<String>, String) {
+    use std::fmt::Write as _;
+
+    const PROVIDER_HDR: &str = "Provider";
+    const MODEL_HDR: &str = "Model";
+    const KEY_HDR: &str = "Key";
+
+    let provider_w = ordered
+        .iter()
+        .map(|p| p.display_name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(PROVIDER_HDR.len())
+        + 2;
+    let model_w = ordered
+        .iter()
+        .map(|p| humanize_chat_model(p).chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(MODEL_HDR.len())
+        + 2;
+
+    let mut header =
+        format!("{PROVIDER_HDR:<provider_w$}{MODEL_HDR:<model_w$}{KEY_HDR}");
+    header = header.trim_end().to_string();
+
+    let mut rows = Vec::with_capacity(ordered.len());
+    for p in ordered {
+        let model = humanize_chat_model(p);
+        let key = if secrets.has_in_file(p.key_env) {
+            "set"
+        } else {
+            "missing"
+        };
+        let display = p.display_name;
+        let mut row = String::new();
+        let _ = write!(
+            &mut row,
+            "{display:<provider_w$}{model:<model_w$}{key}",
+        );
+        rows.push(row.trim_end().to_string());
+    }
+    (rows, header)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1961,7 +2066,7 @@ fn tier_latency_budget_ms(tier: LocalTier) -> u128 {
     match tier {
         LocalTier::HighEnd => 600,
         LocalTier::Recommended => 1000,
-        LocalTier::Comfortable => 1500,
+        LocalTier::Comfortable => 2000,
         LocalTier::Minimum => 2500,
         LocalTier::Unsuitable => 4000,
     }
@@ -2061,6 +2166,62 @@ mod tests {
     use fono_core::hwcheck::{CpuFeatures, HardwareSnapshot};
     use fono_core::provider_catalog::find;
     use fono_stt::registry::ModelRegistry;
+
+    #[test]
+    fn humanize_chat_model_known_providers() {
+        // Spot-check the hand-curated table: every catalogue entry
+        // with assistant defaults should map to a friendly label, not
+        // the raw model id.
+        for id in ["openai", "anthropic", "groq", "cerebras", "gemini", "openrouter"] {
+            let entry = find(id).expect("catalogue entry");
+            let pretty = humanize_chat_model(entry);
+            let raw = entry
+                .assistant
+                .expect("entry has assistant defaults")
+                .text_model;
+            assert!(
+                pretty != raw,
+                "{id}: humanize_chat_model fell through to raw model id ({raw})"
+            );
+            assert!(!pretty.is_empty(), "{id}: humanize returned empty");
+        }
+    }
+
+    #[test]
+    fn assistant_picker_rows_align_columns() {
+        // Build with two entries of different widths and confirm the
+        // header + every row share the same starting column for the
+        // `Model` and `Key` cells.
+        let mut secrets = Secrets::default();
+        secrets.insert("OPENAI_API_KEY", "stub");
+        let openai = find("openai").expect("openai");
+        let anthropic = find("anthropic").expect("anthropic");
+        let ordered = [openai, anthropic];
+        let (rows, header) = assistant_picker_rows(&ordered, &secrets);
+        assert_eq!(rows.len(), 2);
+        let model_col = header.find("Model").expect("header has Model column");
+        // First row uses padding-aware lookup: the `Model` cell must
+        // start at the same column index as the header's `Model`.
+        let row0_model_start = rows[0]
+            .find(&humanize_chat_model(openai))
+            .expect("row 0 contains model");
+        assert_eq!(row0_model_start, model_col);
+        let row1_model_start = rows[1]
+            .find(&humanize_chat_model(anthropic))
+            .expect("row 1 contains model");
+        assert_eq!(row1_model_start, model_col);
+        // Key status reflects secrets.toml presence.
+        assert!(rows[0].ends_with("set"));
+        assert!(rows[1].ends_with("missing"));
+    }
+
+    #[test]
+    fn comfortable_tier_budget_is_two_seconds() {
+        // Regression guard for the 1500 -> 2000 ms bump (user feedback
+        // 2026-05-14): the Comfortable tier was rejecting first-run
+        // probes on borderline hardware too aggressively.
+        assert_eq!(tier_latency_budget_ms(LocalTier::Comfortable), 2000);
+    }
 
     #[test]
     fn primary_capabilities_match_catalogue() {

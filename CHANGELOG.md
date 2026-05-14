@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`fono setup` now hot-reloads the daemon when it finishes.**
+  Previously, running the wizard while `fono` was already running
+  saved the new config but the daemon kept using the old one until
+  manually restarted. The wizard now sends `Request::Reload` over
+  IPC after `config.toml` / `secrets.toml` are written, and prints
+  `Daemon reloaded — new settings are live.` (or a friendly
+  fallback hint when no daemon is running).
+
 - **Desktop notification when a configured backend's API key is
   missing at startup or after a config reload.** Previously, a
   rotated key or a wizard pick whose secret hadn't been added yet
@@ -22,6 +30,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the existing session cascade cap.
 
 ### Changed
+
+- **Voice assistant wizard step now renders as an aligned three-
+  column table** (Provider · Model · Key). Model names are
+  human-readable (`GPT-5.4 mini`, `Claude Haiku 4.5`,
+  `GPT-OSS 120B`, `Qwen 3 235B`, …) rather than raw catalogue ids,
+  and the key-status column reads `set` / `missing` instead of the
+  earlier `(key already set)` / `(will ask for key)` parenthetical.
+
+- **Assistant TTS auto-picked from the same key.** When the chosen
+  assistant chat provider also offers TTS (e.g. OpenAI for both),
+  the wizard reuses the same provider + key for the spoken reply
+  and prints `TTS: <provider> (same key as the assistant — no
+  extra prompt).` instead of running the explicit TTS picker. The
+  picker still runs when the chat provider has no TTS capability.
+
+- **Comfortable-tier first-run latency budget bumped from 1500 ms
+  to 2000 ms.** The earlier 1.5 s ceiling tripped first-dictation
+  warnings on perfectly usable mid-range hardware (laptops on
+  battery, slower SSDs). 2.0 s reflects measured p50 latency on
+  the lower end of the Comfortable tier; tiers above it (HighEnd
+  600 ms / Recommended 1000 ms) are unchanged.
 
 - **Tray TTS submenu drops the redundant `cloud,` prefix and greys
   out unavailable backends.** Every cloud backend was annotated
