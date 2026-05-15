@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`scripts/capture-overlay.sh`** — reproducible overlay screencast
+  helper for the README. Three modes: `overlay` (tight 640×≤240 crop),
+  `paste` (overlay + target-app window for "lands in a real app"
+  demos), and `gallery` (records each waveform style — bars,
+  oscilloscope, FFT, heatmap — labels them, and stitches the clips
+  via `ffmpeg -f concat` or a 2×2 `xstack` grid). Detects
+  X11 vs Wayland, resolves monitor geometry via xrandr / wlr-randr /
+  swaymsg, encodes MP4 + GIF (palette pipeline with 5 MB soft / 9.5 MB
+  hard budget auto-tiering) + animated WebP, and probes deps with
+  per-distro install hints. Dev-only; not part of the shipped binary.
+  See `docs/troubleshooting.md` → "Capturing screencasts".
+
+- **Onboarding auto-start and contextual tray left-click.** Three
+  small UX changes that turn the first-launch path into a one-command
+  experience:
+  1. `sudo fono install` (and therefore `curl -fsSL
+     https://fono.page/install | sh`) now starts `fono` in the
+     background as the invoking user — picked up from `$SUDO_USER`
+     and launched via `runuser`/`sudo` with `setsid` detachment — and
+     then runs the `fono setup` wizard interactively in the same
+     terminal (also as `$SUDO_USER`, with stdio inherited so the
+     prompts reach the user). Running the installer as bare root (no
+     `sudo` wrapper) is a fully supported path: fono spawns and the
+     wizard runs as root, writing under `/root/.config/fono/` — fono
+     is allowed to run as root if that's what you want.
+     `packaging/install.sh` re-attaches `</dev/tty` to the install
+     invocation under the `curl | sh` transport so the wizard's
+     stdin still has a real terminal when curl is piping the script
+     in. Each step now reports a precise outcome (started / setup
+     completed / skipped because headless / spawn failed) so users
+     always know exactly what happened. Skipped on headless boxes
+     (no `DISPLAY`/`WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR`) and
+     bypassable with `FONO_INSTALL_NO_START=1` for packagers and CI.
+     The XDG autostart entry still handles next-login start. The
+     server-mode install path is unchanged — systemd's
+     `systemctl enable --now` was already starting the unit.
+  2. The daemon now fires a single low-urgency desktop notification
+     on startup when no TTS backend is configured, prompting the user
+     to run `fono setup`. Once per process; suppressed once setup
+     completes (the daemon's IPC `Reload` hook refreshes the
+     onboarding snapshot atomically so no restart is required).
+  3. The tray icon's SNI left-click is now contextual: when TTS is
+     not yet configured it nudges toward `fono setup`; once configured
+     it shows the current hotkey cheat sheet (dictation / assistant /
+     cancel). The "Show last transcription" menu entry continues to
+     work for users who want it; the left-click no longer fires that
+     action.
+
+  Implemented without adding any config field — the question "is setup
+  finished?" is answered by the new `Config::tts_configured(&Secrets)`
+  helper, which folds the existing `configured_tts_backends` logic.
+  `packaging/install.sh` is now the canonical source for the
+  `https://fono.page/install` one-liner and lives next to the binary
+  it ships.
+
 ### Fixed
 
 - **OpenRouter TTS default swapped from `openai/gpt-4o-mini-tts-…` to

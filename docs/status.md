@@ -1,6 +1,16 @@
 # Fono — Project Status
 
-Last updated: 2026-05-14
+Last updated: 2026-05-15
+
+## 2026-05-15 — Added `scripts/capture-overlay.sh` for README screencasts
+
+Landed the overlay-screencast helper per
+`plans/2026-05-15-overlay-screencast-script-v2.md`: a single bash script
+that records the Fono overlay in three modes (`overlay`, `paste`,
+`gallery`), detects X11/Wayland, encodes MP4 + GIF + WebP with size-
+budget auto-tiering, and is documented under
+`docs/troubleshooting.md` → "Capturing screencasts". Dev-only tooling;
+no Rust/runtime changes.
 
 ## 2026-05-14 — Fix: cancel hotkey leaked after natural assistant completion
 
