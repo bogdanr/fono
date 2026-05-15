@@ -1039,6 +1039,13 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                             o.on_assistant_forget().await;
                         }
                     }
+                    TrayAction::ActivateLeftClick => {
+                        // Left-click on the tray icon: surface the same
+                        // contextual hint the wizard / status notification
+                        // would. No-op for now; full handling will land
+                        // alongside the onboarding plan.
+                        debug!("tray: ActivateLeftClick (no-op)");
+                    }
                 }
             }
         });
@@ -1632,7 +1639,6 @@ fn tts_menu_label(b: &fono_core::config::TtsBackend, secrets: &fono_core::Secret
     let canonical = fono_core::providers::tts_backend_str(b);
     match b {
         TtsBackend::None => "Off (disabled)".to_string(),
-        TtsBackend::Piper => "Piper (local — stub)".to_string(),
         TtsBackend::Wyoming => "Wyoming (local)".to_string(),
         TtsBackend::OpenAI
         | TtsBackend::Groq

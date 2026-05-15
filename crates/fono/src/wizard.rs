@@ -2420,14 +2420,13 @@ mod tests {
     }
 
     #[test]
-    fn english_only_recommended_pick_is_base_en_on_12_core_cpu() {
-        // Phase 0 finding: small.en (rf=3.0) lands Borderline on 12-core
-        // CPU-only (3.0 × sqrt(12/8) ≈ 3.67 < 6.0). base.en (rf=11)
-        // outranks it as the highest Comfortable English-only model.
+    fn english_only_recommended_pick_is_small_en_on_12_core_cpu() {
+        // With threshold 3.0: small.en (rf=3.0) on 12-core CPU =
+        // 3.0 × sqrt(12/8) ≈ 3.67 ≥ 3.0 → Comfortable; outranks base.en.
         let s = snap(12, 32, 200, true);
         let shortlist = build_local_stt_shortlist(true, &["en".to_string()], &s);
         assert!(!shortlist.is_empty());
-        assert_eq!(shortlist[0].model.name, "base.en");
+        assert_eq!(shortlist[0].model.name, "small.en");
         assert_eq!(shortlist[0].affordability, Affordability::Comfortable);
     }
 
@@ -2450,15 +2449,16 @@ mod tests {
     }
 
     #[test]
-    fn small_is_borderline_on_8_core_cpu_only() {
-        // The user's 12th-gen Intel scenario: small lags in live mode.
-        // Shortlist still includes small but flags it Borderline.
+    fn small_is_comfortable_on_8_core_cpu_only() {
+        // With threshold 3.0: small.en (rf=3.0) on 8-core CPU =
+        // 3.0 × 1.0 = 3.0 → Comfortable. Matches Phase 0 measurement
+        // on ultra7-258v (3.13× batch RTF).
         let s = snap(8, 16, 200, true);
         let entry = build_local_stt_shortlist(true, &["en".to_string()], &s)
             .into_iter()
             .find(|e| e.model.name == "small.en")
             .expect("small.en should be in shortlist");
-        assert_eq!(entry.affordability, Affordability::Borderline);
+        assert_eq!(entry.affordability, Affordability::Comfortable);
     }
 
     #[test]
