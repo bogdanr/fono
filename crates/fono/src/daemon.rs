@@ -77,12 +77,11 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     let config_path = paths.config_file();
     let first_run = !config_path.exists();
     let mut config = Config::load(&config_path).context("load config")?;
+    let mut config_dirty = false;
     if first_run {
         // No config on disk: pick a hardware-appropriate whisper model
-        // and auto-populate the language allow-list from OS locale
-        // signals so the daemon comes up working even when the user
-        // skipped the wizard. Persist so subsequent runs are
-        // deterministic.
+        // so the daemon comes up working even when the user skipped the
+        // wizard.
         let snap = fono_core::hwcheck::probe(&paths.cache_dir);
         let picked = fono_stt::registry::ModelRegistry::pick_default_local(&snap);
         if picked != config.stt.local.model {
@@ -91,19 +90,27 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                 picked, config.stt.local.model
             );
             config.stt.local.model = picked.into();
+            config_dirty = true;
         }
-        if config.general.languages.is_empty() {
-            let detected: Vec<String> = fono_core::locale::detect_user_languages_ranked()
-                .into_iter()
-                .map(|d| d.code)
-                .collect();
-            if !detected.is_empty() {
-                info!("first run: detected languages from OS locale: {detected:?}");
-                config.general.languages = detected;
-            }
+    }
+    if config.general.languages.is_empty() {
+        // Whenever the allow-list is empty (fresh config, or pre-existing
+        // config from a build that didn't populate it), seed from OS
+        // locale signals. The wizard fills this explicitly when run, so
+        // the only path here is "user skipped the wizard".
+        let detected: Vec<String> = fono_core::locale::detect_user_languages_ranked()
+            .into_iter()
+            .map(|d| d.code)
+            .collect();
+        if !detected.is_empty() {
+            info!("auto-populating languages from OS locale: {detected:?}");
+            config.general.languages = detected;
+            config_dirty = true;
         }
+    }
+    if config_dirty {
         if let Err(e) = config.save(&config_path) {
-            warn!("could not persist first-run config: {e:#}");
+            warn!("could not persist auto-populated config: {e:#}");
         }
     }
     let config = Arc::new(config);
