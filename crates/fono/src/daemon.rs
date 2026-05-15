@@ -79,8 +79,10 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     let mut config = Config::load(&config_path).context("load config")?;
     if first_run {
         // No config on disk: pick a hardware-appropriate whisper model
-        // so the daemon comes up working even when the user skipped the
-        // wizard. Persist so subsequent runs are deterministic.
+        // and auto-populate the language allow-list from OS locale
+        // signals so the daemon comes up working even when the user
+        // skipped the wizard. Persist so subsequent runs are
+        // deterministic.
         let snap = fono_core::hwcheck::probe(&paths.cache_dir);
         let picked = fono_stt::registry::ModelRegistry::pick_default_local(&snap);
         if picked != config.stt.local.model {
@@ -89,9 +91,19 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                 picked, config.stt.local.model
             );
             config.stt.local.model = picked.into();
-            if let Err(e) = config.save(&config_path) {
-                warn!("could not persist first-run config: {e:#}");
+        }
+        if config.general.languages.is_empty() {
+            let detected: Vec<String> = fono_core::locale::detect_user_languages_ranked()
+                .into_iter()
+                .map(|d| d.code)
+                .collect();
+            if !detected.is_empty() {
+                info!("first run: detected languages from OS locale: {detected:?}");
+                config.general.languages = detected;
             }
+        }
+        if let Err(e) = config.save(&config_path) {
+            warn!("could not persist first-run config: {e:#}");
         }
     }
     let config = Arc::new(config);
