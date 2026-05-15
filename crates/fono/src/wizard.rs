@@ -516,7 +516,6 @@ fn tts_short_label(b: &TtsBackend) -> &'static str {
         TtsBackend::Cartesia => "Cartesia",
         TtsBackend::Deepgram => "Deepgram",
         TtsBackend::Wyoming => "Wyoming",
-        TtsBackend::Piper => "Piper",
         TtsBackend::None => "no",
     }
 }
@@ -568,7 +567,7 @@ async fn pick_tts_for_assistant(
     let mut actions: Vec<TtsPickerAction> = Vec::new();
     for b in backends {
         match b {
-            TtsBackend::None | TtsBackend::Piper => {}
+            TtsBackend::None => {}
             TtsBackend::Wyoming => {
                 labels.push("Wyoming TTS server (LAN piper)".into());
                 actions.push(TtsPickerAction::Wyoming);
@@ -1554,7 +1553,6 @@ pub const SHORTLIST_MAX: usize = 3;
 /// Build an ordered shortlist of whisper models for this hardware + language
 /// scope. Excluded:
 ///
-/// - models with `wizard_visible: false` (legacy variants kept for compat),
 /// - models the hardware cannot load at all (`Affordability::Unsuitable`),
 /// - models whose accuracy is `Inaccurate` for the selected languages
 ///   (worst WER > 15%) — unless every remaining candidate is also
@@ -1576,7 +1574,6 @@ pub fn build_local_stt_shortlist(
 ) -> Vec<ShortlistEntry> {
     let candidates: Vec<ShortlistEntry> = WHISPER_MODELS
         .iter()
-        .filter(|m| m.wizard_visible)
         .filter(|m| m.multilingual != english_only)
         .filter_map(|m| {
             let aff = snap.affords_model(m.min_ram_mb, m.approx_mb, m.realtime_factor_cpu_avx2);
@@ -1648,7 +1645,6 @@ fn friendly_model_label(model: &ModelInfo) -> &'static str {
         "base" | "base.en" => "Base (fast, good for clean speech)",
         "small" | "small.en" => "Small (balanced quality)",
         "large-v3-turbo" => "Turbo (best quality, needs more memory)",
-        "medium" | "medium.en" => "Medium (legacy)",
         other => other,
     }
 }
@@ -1670,8 +1666,7 @@ fn pick_local_stt_model(
 
     if shortlist.is_empty() {
         // Edge case: every visible model is Unsuitable. Fall back to the
-        // smallest model in the correct language family (still in the
-        // registry, even if marked wizard_visible=false for medium).
+        // smallest model in the correct language family.
         let fallback = WHISPER_MODELS
             .iter()
             .filter(|m| m.multilingual != english_only)
@@ -1716,7 +1711,17 @@ fn pick_local_stt_model(
                 Affordability::Borderline => " — may lag in live mode on this machine",
                 Affordability::Unsuitable => unreachable!("filtered above"),
             };
-            let default_tag = if i == 0 { "  (recommended)" } else { "" };
+            // Only tag the top entry as (recommended) when it is
+            // genuinely Comfortable; a Borderline entry at position 0
+            // already carries a "may lag" suffix, so adding
+            // "(recommended)" alongside it would contradict itself.
+            let default_tag = if i == 0
+                && matches!(entry.affordability, Affordability::Comfortable)
+            {
+                "  (recommended)"
+            } else {
+                ""
+            };
             format!("{label}, {size} — accuracy: {acc}{warn}{default_tag}")
         })
         .collect();
@@ -2212,7 +2217,6 @@ mod tests {
             "anthropic",
             "groq",
             "cerebras",
-            "gemini",
             "openrouter",
         ] {
             let entry = find(id).expect("catalogue entry");
@@ -2416,27 +2420,14 @@ mod tests {
     }
 
     #[test]
-    fn shortlist_hides_legacy_medium_models() {
-        // Even on a beefy box that affords medium, the wizard never offers it
-        // (wizard_visible=false). Turbo replaces it.
-        let s = snap(16, 64, 500, true);
-        assert!(!build_local_stt_shortlist(true, &["en".to_string()], &s)
-            .iter()
-            .any(|e| e.model.name == "medium.en"));
-        assert!(!build_local_stt_shortlist(false, &["en".to_string()], &s)
-            .iter()
-            .any(|e| e.model.name == "medium"));
-    }
-
-    #[test]
-    fn english_only_recommended_pick_is_small_en_on_high_end_cpu() {
-        // With turbo not having a .en variant and the new realtime thresholds,
-        // small.en is the highest-quality English-only model that's
-        // Comfortable on a 12-core CPU-only machine.
+    fn english_only_recommended_pick_is_base_en_on_12_core_cpu() {
+        // Phase 0 finding: small.en (rf=3.0) lands Borderline on 12-core
+        // CPU-only (3.0 × sqrt(12/8) ≈ 3.67 < 6.0). base.en (rf=11)
+        // outranks it as the highest Comfortable English-only model.
         let s = snap(12, 32, 200, true);
         let shortlist = build_local_stt_shortlist(true, &["en".to_string()], &s);
         assert!(!shortlist.is_empty());
-        assert_eq!(shortlist[0].model.name, "small.en");
+        assert_eq!(shortlist[0].model.name, "base.en");
         assert_eq!(shortlist[0].affordability, Affordability::Comfortable);
     }
 
@@ -2489,7 +2480,6 @@ mod tests {
             .iter()
             .map(|e| e.model.name)
             .collect();
-        assert!(!names.contains(&"medium.en"), "medium.en should be hidden");
         assert!(names.contains(&"base.en"), "base.en should be in shortlist");
     }
 
@@ -2555,9 +2545,11 @@ mod tests {
 
     #[test]
     fn shortlist_drops_inaccurate_entries_when_alternatives_exist() {
-        // For Polish on a high-end machine: tiny=30% (Inaccurate), base=22%
-        // (Inaccurate), small=15% (Acceptable), turbo=10% (Good). Inaccurate
-        // entries must be filtered out.
+        // For Polish: tiny=30% (Inaccurate), base=22% (Inaccurate),
+        // small=15% (Acceptable), turbo=10% (Good). Inaccurate entries
+        // must be filtered out. On CPU-only 16-core, turbo is Unsuitable
+        // (rf=0.6 × sqrt(2) ≈ 0.85 < 1.0 batch floor) so the highest
+        // remaining is small.
         let s = snap(16, 64, 500, true);
         let shortlist = build_local_stt_shortlist(false, &["pl".to_string()], &s);
         for entry in &shortlist {
@@ -2568,8 +2560,7 @@ mod tests {
                 entry.model.name
             );
         }
-        // turbo should appear and rank highest by accuracy.
-        assert!(shortlist.iter().any(|e| e.model.name == "large-v3-turbo"));
+        assert!(shortlist.iter().any(|e| e.model.name == "small"));
     }
 
     // ── Phase B6: pre-seed defaults from existing config ─────────────────

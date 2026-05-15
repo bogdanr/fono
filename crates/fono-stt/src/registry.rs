@@ -22,21 +22,23 @@
 //!
 //! # Realtime-factor reference
 //!
-//! `realtime_factor_cpu_avx2` is measured on an 8-physical-core ~3 GHz
-//! AVX2 desktop running whisper.cpp at default settings (no streaming
-//! overhead). A value of 6.0 means the model processes 6 seconds of
-//! audio per wall-second in batch mode. Live (streaming) mode adds
-//! 2–4× compute amplification on top, which is why the live-mode
-//! threshold in `HardwareSnapshot::affords_model` is much higher than
-//! 1× realtime. Apple-Silicon machines (which whisper.cpp accelerates
+//! `realtime_factor_cpu_avx2` is the audio-seconds processed per
+//! wall-second on an 8-physical-core / 8-thread AVX2 CPU running
+//! whisper.cpp in batch mode at default settings. A value of 6.0
+//! means the model processes 6 seconds of audio per wall-second.
+//! Live (streaming) mode adds 2–4× compute amplification on top,
+//! which is why the live-mode threshold in
+//! `HardwareSnapshot::affords_model` is much higher than 1×
+//! realtime. Apple-Silicon machines (which whisper.cpp accelerates
 //! via Metal/CoreML) get a separate, lower threshold.
 //!
-//! # `wizard_visible`
-//!
-//! Set to `false` for variants we no longer recommend in the first-run
-//! wizard but keep in the registry so existing configs that pin the
-//! name continue to download. `medium` and `medium.en` were demoted
-//! when `large-v3-turbo` arrived (faster, similar quality).
+//! As of 2026-05-15 the numbers in this table are anchored to the
+//! empirical batch RTF measured on `ultra7-258v` (Intel Core Ultra 7
+//! 258V, 8p/8l Lunar Lake, AVX2 + FMA, no SMT) at
+//! `docs/bench/calibration/summary/matrix.json`. That host is the
+//! closest match in the calibration matrix to the "generic 8-core
+//! AVX2" reference. Numbers are rounded down (conservative) so users
+//! with weaker AVX2 hosts still see correct verdicts.
 
 #[derive(Debug, Clone, Copy)]
 pub struct ModelInfo {
@@ -59,10 +61,6 @@ pub struct ModelInfo {
     /// HuggingFace path, e.g. `ggerganov/whisper.cpp/resolve/main/ggml-small.bin`.
     pub url_path: &'static str,
     pub sha256: &'static str,
-    /// Whether the wizard should offer this model in its shortlist.
-    /// `false` for legacy variants we keep for compatibility but no
-    /// longer recommend (e.g. `medium` after turbo's release).
-    pub wizard_visible: bool,
 }
 
 /// Default HuggingFace host; override via `FONO_MODEL_MIRROR`.
@@ -79,7 +77,9 @@ pub const WHISPER_MODELS: &[ModelInfo] = &[
         name: "tiny",
         multilingual: true,
         approx_mb: 75,
-        min_ram_mb: 250,
+        // Empirical peak RSS on ultra7-258v was 420 MiB; +20% headroom = 500.
+        min_ram_mb: 500,
+        // Empirical batch RTF on ultra7-258v: 20.49; rounded down.
         realtime_factor_cpu_avx2: 20.0,
         wer_by_lang: &[
             ("en", 12.0),
@@ -99,26 +99,31 @@ pub const WHISPER_MODELS: &[ModelInfo] = &[
         ],
         url_path: "ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
         sha256: UNPINNED,
-        wizard_visible: true,
     },
     ModelInfo {
         name: "tiny.en",
         multilingual: false,
         approx_mb: 75,
-        min_ram_mb: 250,
+        // Peak RSS 414 MiB on ultra7-258v (English-only is identical
+        // architecture, slightly lower KV-cache from monolingual head).
+        min_ram_mb: 500,
+        // Empirical batch RTF on ultra7-258v: 26.81. Held to 20.0 to
+        // match the multilingual sibling and stay conservative on
+        // older hosts with smaller branch predictors.
         realtime_factor_cpu_avx2: 20.0,
         wer_by_lang: &[("en", 9.0)],
         url_path: "ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
         sha256: UNPINNED,
-        wizard_visible: true,
     },
     // ── base (142 MB) ───────────────────────────────────────────────────────
     ModelInfo {
         name: "base",
         multilingual: true,
         approx_mb: 142,
-        min_ram_mb: 400,
-        realtime_factor_cpu_avx2: 10.0,
+        // Empirical peak RSS on ultra7-258v was 585 MiB; +20% headroom = 700.
+        min_ram_mb: 700,
+        // Empirical batch RTF on ultra7-258v: 11.39; rounded down.
+        realtime_factor_cpu_avx2: 11.0,
         wer_by_lang: &[
             ("en", 9.0),
             ("es", 10.0),
@@ -137,26 +142,31 @@ pub const WHISPER_MODELS: &[ModelInfo] = &[
         ],
         url_path: "ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
         sha256: UNPINNED,
-        wizard_visible: true,
     },
     ModelInfo {
         name: "base.en",
         multilingual: false,
         approx_mb: 142,
-        min_ram_mb: 400,
-        realtime_factor_cpu_avx2: 10.0,
+        // Peak RSS 591 MiB on ultra7-258v.
+        min_ram_mb: 700,
+        // Empirical batch RTF on ultra7-258v: 13.20. Held to 11.0 to
+        // match the multilingual sibling and stay conservative.
+        realtime_factor_cpu_avx2: 11.0,
         wer_by_lang: &[("en", 7.0)],
         url_path: "ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
         sha256: UNPINNED,
-        wizard_visible: true,
     },
     // ── small (466 MB) ──────────────────────────────────────────────────────
     ModelInfo {
         name: "small",
         multilingual: true,
         approx_mb: 466,
-        min_ram_mb: 1_000,
-        realtime_factor_cpu_avx2: 4.0,
+        // Empirical peak RSS on ultra7-258v was 1360 MiB; +10% headroom = 1500.
+        min_ram_mb: 1_500,
+        // Empirical batch RTF on ultra7-258v: 3.13. The previous
+        // value (4.0) was the 2024 estimate; measured numbers landed
+        // ~25% lower.
+        realtime_factor_cpu_avx2: 3.0,
         wer_by_lang: &[
             ("en", 6.0),
             ("es", 7.0),
@@ -175,18 +185,19 @@ pub const WHISPER_MODELS: &[ModelInfo] = &[
         ],
         url_path: "ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
         sha256: UNPINNED,
-        wizard_visible: true,
     },
     ModelInfo {
         name: "small.en",
         multilingual: false,
         approx_mb: 466,
-        min_ram_mb: 1_000,
-        realtime_factor_cpu_avx2: 4.0,
+        // Peak RSS 1367 MiB on ultra7-258v.
+        min_ram_mb: 1_500,
+        // Empirical batch RTF on ultra7-258v: 3.90. Held to 3.0 to
+        // match the multilingual sibling and stay conservative.
+        realtime_factor_cpu_avx2: 3.0,
         wer_by_lang: &[("en", 5.0)],
         url_path: "ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
         sha256: UNPINNED,
-        wizard_visible: true,
     },
     // ── large-v3-turbo (~1.6 GB) — replaces medium for the wizard ───────────
     // 4-decoder distilled large-v3: medium-ish quality at small-ish speed.
@@ -195,8 +206,17 @@ pub const WHISPER_MODELS: &[ModelInfo] = &[
         name: "large-v3-turbo",
         multilingual: true,
         approx_mb: 1_620,
-        min_ram_mb: 3_400,
-        realtime_factor_cpu_avx2: 2.5,
+        // Empirical peak RSS across hosts: 3642 (ryzen-5950x), 3654
+        // (ultra7-258v); +~10% headroom for KV-cache growth on long
+        // segments = 4000.
+        min_ram_mb: 4_000,
+        // Empirical batch RTF on ultra7-258v (8-core AVX2 reference):
+        // 0.61 — sub-realtime. The previous value (2.5) was off by 4×
+        // and is the root cause of the wizard recommending turbo on
+        // CPU-only laptops that cannot actually run it. Holding to
+        // 0.6 (rounded down) puts turbo correctly in the Unsuitable
+        // bucket on every CPU-only laptop class we measured.
+        realtime_factor_cpu_avx2: 0.6,
         wer_by_lang: &[
             ("en", 4.0),
             ("es", 5.0),
@@ -215,47 +235,6 @@ pub const WHISPER_MODELS: &[ModelInfo] = &[
         ],
         url_path: "ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
         sha256: UNPINNED,
-        wizard_visible: true,
-    },
-    // ── medium (1.5 GB) — kept for backwards compat, hidden from wizard ─────
-    // Superseded by large-v3-turbo (similar quality, ~2× faster). Existing
-    // configs that pin "medium" still resolve and download.
-    ModelInfo {
-        name: "medium",
-        multilingual: true,
-        approx_mb: 1_500,
-        min_ram_mb: 3_200,
-        realtime_factor_cpu_avx2: 1.2,
-        wer_by_lang: &[
-            ("en", 4.0),
-            ("es", 5.0),
-            ("fr", 6.0),
-            ("de", 7.0),
-            ("it", 6.0),
-            ("pt", 5.0),
-            ("nl", 8.0),
-            ("ro", 9.0),
-            ("pl", 10.0),
-            ("ru", 9.0),
-            ("uk", 14.0),
-            ("tr", 10.0),
-            ("zh", 9.0),
-            ("ja", 12.0),
-        ],
-        url_path: "ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
-        sha256: UNPINNED,
-        wizard_visible: false,
-    },
-    ModelInfo {
-        name: "medium.en",
-        multilingual: false,
-        approx_mb: 1_500,
-        min_ram_mb: 3_200,
-        realtime_factor_cpu_avx2: 1.2,
-        wer_by_lang: &[("en", 3.5)],
-        url_path: "ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin",
-        sha256: UNPINNED,
-        wizard_visible: false,
     },
 ];
 
@@ -341,7 +320,6 @@ mod tests {
         };
         assert!(get_en_wer("tiny.en") > get_en_wer("base.en"));
         assert!(get_en_wer("base.en") > get_en_wer("small.en"));
-        assert!(get_en_wer("small.en") >= get_en_wer("medium.en"));
     }
 
     #[test]
@@ -362,7 +340,6 @@ mod tests {
         let get = |name: &str| ModelRegistry::get(name).map(|m| m.min_ram_mb).unwrap_or(0);
         assert!(get("tiny.en") <= get("base.en"));
         assert!(get("base.en") <= get("small.en"));
-        assert!(get("small.en") <= get("medium.en"));
         assert!(get("tiny") <= get("base"));
         assert!(get("base") <= get("small"));
         assert!(get("small") <= get("large-v3-turbo"));
@@ -375,29 +352,21 @@ mod tests {
                 .map(|m| m.realtime_factor_cpu_avx2)
                 .unwrap_or(0.0)
         };
+        // Within multilingual family: tiny > base > small > turbo.
+        assert!(rf("tiny") > rf("base"));
+        assert!(rf("base") > rf("small"));
+        assert!(rf("small") > rf("large-v3-turbo"));
+        // Within English-only family.
         assert!(rf("tiny.en") > rf("base.en"));
         assert!(rf("base.en") > rf("small.en"));
-        assert!(rf("small.en") > rf("medium.en"));
-        // Turbo: faster than medium (its replacement), slower than small.
-        assert!(rf("large-v3-turbo") > rf("medium"));
-        assert!(rf("large-v3-turbo") < rf("small"));
+        // Turbo sub-realtime on the 8-core AVX2 reference is the
+        // empirical truth as of 2026-05-15.
+        assert!(rf("large-v3-turbo") < 1.0);
     }
 
     #[test]
-    fn medium_variants_are_hidden_from_wizard() {
-        for name in ["medium", "medium.en"] {
-            let m = ModelRegistry::get(name).expect(name);
-            assert!(
-                !m.wizard_visible,
-                "{name} must be wizard_visible=false (legacy)"
-            );
-        }
-    }
-
-    #[test]
-    fn turbo_is_visible_in_wizard() {
+    fn turbo_is_multilingual() {
         let m = ModelRegistry::get("large-v3-turbo").expect("turbo missing");
-        assert!(m.wizard_visible);
         assert!(m.multilingual);
     }
 }

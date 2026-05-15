@@ -122,6 +122,12 @@ pub const LIVE_REALTIME_MIN_CPU: f32 = 6.0;
 /// model needs only ~1.5× batch realtime to feel snappy live.
 pub const LIVE_REALTIME_MIN_ACCEL: f32 = 1.5;
 
+/// Floor on effective batch RTF. Below this the model cannot keep up
+/// even in batch mode → hide rather than soft-warn. Calibrated against
+/// the 2026-05-15 Phase 0 sweep where every laptop landed turbo below
+/// batch RTF 1.0 on CPU.
+pub const BATCH_REALTIME_MIN: f32 = 1.0;
+
 /// Number of physical cores on the AVX2 reference machine used for the
 /// `realtime_factor_cpu_avx2` benchmark in the model registry.
 pub const REFERENCE_CORES: f32 = 8.0;
@@ -226,17 +232,33 @@ impl HardwareSnapshot {
             return Affordability::Unsuitable;
         }
 
-        // Scale the reference realtime factor by this machine's CPU capability.
-        let core_scale = (self.physical_cores as f32 / REFERENCE_CORES).clamp(0.25, 2.0);
+        // Whisper.cpp is memory-bandwidth-bound past ~6 threads, so
+        // doubling cores past the 8-core reference yields ~sqrt, not
+        // linear, throughput. Cap at 1.6 to avoid 32-core fantasy.
+        let cores = self.physical_cores as f32;
+        let core_scale = if cores <= REFERENCE_CORES {
+            (cores / REFERENCE_CORES).max(0.25)
+        } else {
+            (cores / REFERENCE_CORES).sqrt().min(1.6)
+        };
         let isa_scale = if self.cpu_features.avx2 || self.cpu_features.neon {
             1.0_f32
         } else {
             0.5 // non-vectorised path is roughly 2× slower
         };
-        let effective_rf = realtime_factor_cpu_avx2 * core_scale * isa_scale;
+        let mut effective_rf = realtime_factor_cpu_avx2 * core_scale * isa_scale;
 
-        // Apple Silicon (and future GPU/NPU paths) decode much closer to
-        // batch realtime under streaming load — use the relaxed threshold.
+        // Accelerated builds run whisper.cpp on GPU/Metal/CoreML. Phase 0
+        // measured 5-14× speedup over CPU across Iris Xe / Arc Battlemage /
+        // Apple Silicon. Apply a conservative 4× to lift the CPU-anchored
+        // rf into the right ballpark without over-promising on weak iGPUs.
+        if self.accelerated() {
+            effective_rf *= 4.0;
+        } else if effective_rf < BATCH_REALTIME_MIN {
+            // CPU-only floor: below 1× batch the model cannot keep up.
+            return Affordability::Unsuitable;
+        }
+
         let threshold = if self.accelerated() {
             LIVE_REALTIME_MIN_ACCEL
         } else {
@@ -252,14 +274,24 @@ impl HardwareSnapshot {
 
     /// Whether whisper.cpp can use a hardware accelerator on this host.
     ///
-    /// Currently true only on Apple Silicon (`macos` + `aarch64`), where
-    /// whisper.cpp ships with Metal/CoreML kernels enabled by default.
-    /// Linux/Windows GPU builds (CUDA / Vulkan) are not detected because
-    /// our default release build is CPU-only; users with custom GPU
-    /// builds can override the wizard's recommendation explicitly.
+    /// True on Apple Silicon (Metal/CoreML ships by default) or when
+    /// the build enabled an `accel-*` feature (CUDA, Vulkan, HipBLAS,
+    /// Metal, CoreML). We cannot tell GPU classes apart from `cfg!`
+    /// alone, so weak iGPUs may land `borderline` rather than
+    /// `unsuitable`; the wizard's "may lag in live mode" suffix still
+    /// warns the user.
     #[must_use]
     pub fn accelerated(&self) -> bool {
-        self.os == "macos" && self.arch == "aarch64"
+        if self.os == "macos" && self.arch == "aarch64" {
+            return true;
+        }
+        cfg!(any(
+            feature = "accel-cuda",
+            feature = "accel-vulkan",
+            feature = "accel-hipblas",
+            feature = "accel-metal",
+            feature = "accel-coreml",
+        ))
     }
 
     /// One-line, human-readable description of the speech-recognition
@@ -650,17 +682,29 @@ mod tests {
     }
 
     #[test]
-    fn affords_small_comfortable_on_12_core_cpu_only() {
-        // 12 cores: small rf=4.0 × 1.5 × 1.0 = 6.0 ≥ 6.0 → Comfortable
-        let s = snap(12, 32, 200, true);
+    fn affords_small_comfortable_on_high_core_cpu_only() {
+        // 24 cores: small rf=4.0 × sqrt(24/8) × 1.0 ≈ 6.93 ≥ 6.0 → Comfortable.
+        // Past the 8-core reference the curve is sub-linear (Phase 0
+        // calibration showed whisper.cpp doesn't scale 1:1 past ~6 threads).
+        let s = snap(24, 64, 200, true);
         assert_eq!(affords(&s, SMALL_EN), Affordability::Comfortable);
     }
 
     #[test]
     fn affords_turbo_borderline_on_cpu_only() {
-        // turbo rf=2.5 × 1.5 × 1.0 = 3.75 < 6.0 → Borderline even on 12 cores.
+        // turbo rf=2.5 × sqrt(12/8) × 1.0 ≈ 3.06 < 6.0 → Borderline.
         let s = snap(12, 32, 200, true);
         assert_eq!(affords(&s, TURBO), Affordability::Borderline);
+    }
+
+    #[test]
+    fn affords_turbo_unsuitable_on_typical_laptop_cpu() {
+        // Phase 0 finding: turbo rf=0.6 (empirical) on 8-core laptop:
+        // 0.6 × 1.0 × 1.0 = 0.6 < BATCH_REALTIME_MIN (1.0) → Unsuitable,
+        // not Borderline. Closes the original wizard over-recommendation bug.
+        let s = snap(8, 16, 200, true);
+        let turbo_empirical = (4_000_u32, 1_620_u32, 0.6_f32);
+        assert_eq!(affords(&s, turbo_empirical), Affordability::Unsuitable);
     }
 
     #[test]

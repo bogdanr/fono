@@ -38,11 +38,11 @@ streaming = ["dep:futures", "dep:tokio-stream"]
 # they require the corresponding SDK / headers at build time. See
 # `crates/fono/src/daemon.rs::hardware_acceleration_summary` for the
 # matching surfacing logic.
-accel-cuda = ["whisper-local", "whisper-rs/cuda"]
-accel-metal = ["whisper-local", "whisper-rs/metal"]
-accel-vulkan = ["whisper-local", "whisper-rs/vulkan"]
-accel-hipblas = ["whisper-local", "whisper-rs/hipblas"]
-accel-coreml = ["whisper-local", "whisper-rs/coreml"]
+accel-cuda = ["whisper-local", "whisper-rs/cuda", "fono-core/accel-cuda"]
+accel-metal = ["whisper-local", "whisper-rs/metal", "fono-core/accel-metal"]
+accel-vulkan = ["whisper-local", "whisper-rs/vulkan", "fono-core/accel-vulkan"]
+accel-hipblas = ["whisper-local", "whisper-rs/hipblas", "fono-core/accel-hipblas"]
+accel-coreml = ["whisper-local", "whisper-rs/coreml", "fono-core/accel-coreml"]
 accel-openblas = ["whisper-local", "whisper-rs/openblas"]
 
 [dependencies]
