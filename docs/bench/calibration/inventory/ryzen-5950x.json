@@ -1,0 +1,55 @@
+{
+  "host_id": "ryzen-5950x",
+  "legacy_session_ip": "192.168.0.79",
+  "released": "2020-11",
+  "cpu_tier": "high-end desktop",
+  "cpu_summary": "2020 Zen 3 16-core enthusiast desktop; AMD's flagship consumer CPU at launch, still strong in 2026.",
+  "hostname": "ai",
+  "host_fingerprint": "f4b1ba750a5a1698",
+  "fingerprint_input": "AMD Ryzen 9 5950X 16-Core Processor|16|49152|Debian GNU/Linux 13 (trixie)",
+  "cpu_model": "AMD Ryzen 9 5950X 16-Core Processor",
+  "physical_cores": 16,
+  "logical_cores": 32,
+  "mem_total_mib": 49152,
+  "mem_available_mib": 48227,
+  "disk_free_bytes": 95156936704,
+  "kernel": "Linux 7.0.0-3-pve x86_64",
+  "os_pretty_name": "Debian GNU/Linux 13 (trixie)",
+  "avx_flags": [
+    "avx",
+    "avx2",
+    "fma",
+    "sse",
+    "sse2",
+    "sse3",
+    "sse4",
+    "sse4_1",
+    "sse4_2"
+  ],
+  "chassis": "container",
+  "gpu": [
+    "0a:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD102 [GeForce RTX 4090] [10de:2684] (rev a1)"
+  ],
+  "ac_online": "unknown",
+  "battery_pct": null,
+  "power_profile": "",
+  "package_temp_c": null,
+  "whisper_rs_version": "0.16.0",
+  "toolchain": {
+    "source": "rustup (preinstalled)",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)"
+  },
+  "gpu_build": {
+    "status": "skipped",
+    "reason": "LXC without GPU passthrough; nvidia-smi blocked, only llvmpipe Vulkan device, /dev/dri absent",
+    "evidence": {
+      "lspci_vga": "0a:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD102 [GeForce RTX 4090] [10de:2684] (rev a1)",
+      "nvidia_smi": "Failed to initialize NVML: GPU access blocked by the operating system",
+      "vulkaninfo": "loader_scanned_icd_add: Could not get 'vkCreateInstance' via 'vk_icdGetInstanceProcAddr' for ICD libGLX_nvidia.so.0",
+      "dev_dri": "ls: cannot access '/dev/dri': No such file or directory"
+    }
+  },
+  "whisper_thread_cap": 16,
+  "whisper_thread_cap_reason": "32 logical threads oversubscribe whisper.cpp matmul kernels by ~20x on short clips; capped to physical core count"
+}

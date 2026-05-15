@@ -1,0 +1,47 @@
+{
+  "host_id": "i7-1255u",
+  "legacy_session_ip": "localhost",
+  "released": "2022-02",
+  "cpu_tier": "mid-range ultraportable",
+  "cpu_summary": "2022 Alder Lake-UP3 hybrid (2P+8E, 12 threads, 15 W); mainstream business ultrabook CPU; representative of typical 2022-2024 laptops.",
+  "hostname": "nimblex",
+  "host_fingerprint": "e1cfdac66901ac1a",
+  "fingerprint_input": "12th Gen Intel(R) Core(TM) i7-1255U|10|15360|NimbleX 2026",
+  "cpu_model": "12th Gen Intel(R) Core(TM) i7-1255U",
+  "physical_cores": 10,
+  "logical_cores": 12,
+  "mem_total_mib": 15686,
+  "mem_available_mib": 7151,
+  "disk_free_bytes": 9555734528,
+  "kernel": "Linux 6.19.0+ x86_64",
+  "os_pretty_name": "NimbleX 2026",
+  "avx_flags": [
+    "avx",
+    "avx2",
+    "avx_",
+    "fma",
+    "sse",
+    "sse2",
+    "sse3",
+    "sse4_1",
+    "sse4_2"
+  ],
+  "chassis": "laptop",
+  "gpu": [
+    "00:02.0 VGA compatible controller [0300]: Intel Corporation Alder Lake-UP3 GT2 [Iris Xe Graphics] [8086:46a8] (rev 0c)"
+  ],
+  "ac_online": "1",
+  "battery_pct": 97,
+  "power_profile": "--- TLP 1.1.903 --------------------------------------------",
+  "package_temp_c": 44.0,
+  "whisper_rs_version": "0.16.0",
+  "toolchain": {
+    "source": "NimbleX system package (built from source tarball)",
+    "rustc": "rustc 1.88.0 (6b00bc388 2025-06-23)",
+    "cargo": "cargo 1.88.0 (873a06493 2025-05-10)"
+  },
+  "gpu_build": {
+    "status": "not_attempted",
+    "reason": "Intel Iris Xe iGPU present; Vulkan accel build deferred \u2014 root squashfs has 8.1 GiB free which is below the cargo-target growth budget for a second feature build"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "host_id": "i7-7500u",
+  "legacy_session_ip": "192.168.0.112",
+  "released": "2016-08",
+  "cpu_tier": "legacy ultraportable (~10 years old)",
+  "cpu_summary": "2016 Kaby Lake dual-core / 4 threads, 15 W; ~10-year-old ultrabook CPU; weakest tier we expect to support.",
+  "hostname": "ThinkPad",
+  "host_fingerprint": "ed19d5feb2cbe74c",
+  "fingerprint_input": "Intel(R) Core(TM) i7-7500U CPU @ 2.70GHz|2|15360|Ubuntu 24.04.4 LTS",
+  "cpu_model": "Intel(R) Core(TM) i7-7500U CPU @ 2.70GHz",
+  "physical_cores": 2,
+  "logical_cores": 4,
+  "mem_total_mib": 15752,
+  "mem_available_mib": 14217,
+  "disk_free_bytes": 75078717440,
+  "kernel": "Linux 6.8.0-106-generic x86_64",
+  "os_pretty_name": "Ubuntu 24.04.4 LTS",
+  "avx_flags": [
+    "avx",
+    "avx2",
+    "fma",
+    "sse",
+    "sse2",
+    "sse3",
+    "sse4_1",
+    "sse4_2"
+  ],
+  "chassis": "laptop",
+  "gpu": [
+    "00:02.0 VGA compatible controller [0300]: Intel Corporation HD Graphics 620 [8086:5916] (rev 02)"
+  ],
+  "ac_online": "1",
+  "battery_pct": 39,
+  "power_profile": "balanced",
+  "package_temp_c": null,
+  "whisper_rs_version": "0.16.0",
+  "toolchain": {
+    "source": "rustup (installed this session via https://sh.rustup.rs -y --default-toolchain stable --profile minimal)",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)"
+  },
+  "gpu_build": {
+    "status": "not_attempted",
+    "reason": "Intel HD 620 iGPU present; Vulkan SDK / loader not installed and GPU build was outside Phase 0 scope for this host"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "host_id": "ultra7-258v",
+  "legacy_session_ip": "192.168.0.251",
+  "released": "2024-09",
+  "cpu_tier": "premium ultraportable (current)",
+  "cpu_summary": "2024 Lunar Lake 4P+4LP-E (no SMT); Intel's current efficiency flagship for thin-and-light laptops, with on-package LPDDR5X and Xe2 Battlemage iGPU.",
+  "hostname": "nimblex",
+  "host_fingerprint": "4c582f5db16db11f",
+  "fingerprint_input": "Intel(R) Core(TM) Ultra 7 258V|8|31744|NimbleX 2026",
+  "cpu_model": "Intel(R) Core(TM) Ultra 7 258V",
+  "physical_cores": 8,
+  "logical_cores": 8,
+  "mem_total_mib": 31572,
+  "mem_available_mib": 27633,
+  "disk_free_bytes": 32905269248,
+  "kernel": "Linux 7.0.0+ x86_64",
+  "os_pretty_name": "NimbleX 2026",
+  "avx_flags": [
+    "avx",
+    "avx2",
+    "avx_",
+    "fma",
+    "sse",
+    "sse2",
+    "sse3",
+    "sse4_1",
+    "sse4_2"
+  ],
+  "chassis": "laptop",
+  "gpu": [
+    "00:02.0 VGA compatible controller [0300]: Intel Corporation Lunar Lake [Intel Arc Graphics 130V / 140V] [8086:64a0] (rev 04)"
+  ],
+  "ac_online": "1",
+  "battery_pct": 100,
+  "power_profile": "",
+  "package_temp_c": null,
+  "whisper_rs_version": "0.16.0",
+  "toolchain": {
+    "source": "NimbleX system package (built from source tarball)",
+    "rustc": "rustc 1.88.0 (6b00bc388 2025-06-23)",
+    "cargo": "cargo 1.88.0 (873a06493 2025-05-10)"
+  },
+  "gpu_build": {
+    "status": "not_attempted",
+    "reason": "Intel Arc 130V/140V iGPU present and Vulkan ICDs load (vulkaninfo enumerates devices) but XDG_RUNTIME_DIR not set under root sshd session; Vulkan accel build deferred until a desktop session can validate it"
+  }
+}

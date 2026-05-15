@@ -1,0 +1,34 @@
+{
+  "command": [
+    "/mnt/nvme0n1p5/Work/fono/target/release/fono-bench",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "large-v3-turbo",
+    "--output",
+    "/tmp/runs-battery/i7-1255u__battery__vulkan__large-v3-turbo__iter1.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": "0",
+    "battery_pct": 74,
+    "package_temp_c": 65.0
+  },
+  "context_start": {
+    "ac_online": "0",
+    "battery_pct": 79,
+    "captured_at_utc": "2026-05-15T18:40:21.533325+00:00",
+    "hostname": "nimblex",
+    "package_temp_c": 66.0,
+    "platform": "linux",
+    "power_profile": "governor=powersave"
+  },
+  "exit_code": 0,
+  "label": "i7-1255u/battery/vulkan/large-v3-turbo/iter1",
+  "max_rss_kib": 281736,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 8.094091,
+  "user_s": 69.183908,
+  "wall_clock_s": 314.107574
+}

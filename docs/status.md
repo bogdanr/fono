@@ -2,8 +2,112 @@
 
 Last updated: 2026-05-15
 
-## 2026-05-15 — Added `scripts/capture-overlay.sh` for README screencasts
+## 2026-05-15 — Local STT affordability calibration Phase 0 (AC sweep)
 
+Phase 0 of `plans/2026-05-15-local-stt-affordability-recalibration-v4.md`
+landed. Four hosts benched on AC, renamed to stable CPU-based IDs
+spanning four CPU tiers from 2016 to 2024:
+`ryzen-5950x` (AMD Ryzen 9 5950X, 16p/32l Zen 3 desktop, **rel. 2020-11,
+high-end desktop**, 48 GiB; was `192.168.0.79`),
+`ultra7-258v` (Intel Core Ultra 7 258V, 8p/8l Lunar Lake laptop,
+**rel. 2024-09, current premium ultraportable**, 31 GiB; was
+`192.168.0.251`),
+`i7-1255u` (Intel i7-1255U, 2P+8E hybrid / 12 threads Alder Lake-UP3
+15 W laptop, **rel. 2022-02, mid-range ultraportable**, 15 GiB; was
+`localhost`),
+`i7-7500u` (Intel i7-7500U, 2p/4l Kaby Lake 15 W laptop, **rel. 2016-08,
+legacy ultraportable ~10 years old**, 15 GiB; was `192.168.0.112`).
+Three iterations of the equivalence harness
+per (host, model) cell except `large-v3-turbo` on the two slowest laptops
+where a single iteration was enough to clear the `unsuitable` verdict.
+
+Headline result: `large-v3-turbo` on CPU is `unsuitable` on every laptop
+(batch RTF 0.21–0.61), `borderline` on the 16-core desktop (1.75).
+`crates/fono-stt/src/registry.rs:194-219`'s current
+`realtime_factor_cpu_avx2 = 2.5` for turbo is therefore overstated by
+1.5–10× depending on host — the wizard's recommendation chain is built
+on an over-optimistic single number. Peak RSS for turbo lands at ~3.6
+GiB across hosts (current `min_ram_mb = 3400` is too tight).
+`small`/`small.en` is `borderline` on every laptop and `comfortable` only
+on the 16-core desktop; `base` and `tiny` are universally `comfortable`.
+
+Artefacts under `docs/bench/calibration/`: per-host inventory JSONs, raw
+per-iteration runs (with rusage sidecars), aggregated `summary/matrix.
+json` + `matrix.md`, and a methodology README. Driver scripts under
+`scripts/bench-*.{py,sh}`.
+
+GPU (Vulkan) coverage added in a follow-up sweep the same day. Vulkan
+SDK + `glslc` installed on Ubuntu host `i7-7500u` (`vulkan-tools`,
+`libvulkan-dev`, `glslang-tools`, `spirv-tools`, `glslc`); `fono-bench`
+rebuilt `--features 'accel-vulkan equivalence'` on `ultra7-258v`
+(Intel Arc 130V/140V Xe2 Battlemage, 1m48s) and `i7-1255u` (Intel
+Iris Xe Alder Lake-UP3 96 EUs, 3m54s). Headline GPU finding:
+`large-v3-turbo` on **Arc Battlemage Vulkan jumps from batch RTF 0.61
+(unsuitable) to 8.72 (comfortable)** — a 14× speedup, and the first
+`comfortable` turbo cell in the matrix. Streaming RTF 0.20 → 3.16
+(16×). On Iris Xe the same model goes 0.33 → 1.56 (5×, lifts out of
+`unsuitable` to `borderline` but not to `comfortable`). The class
+difference between two Intel iGPUs is large enough that Phase 1's
+`accelerated()` predicate must differentiate GPU classes, not collapse
+to a single boolean. Vulkan also drops host RSS by ~10× because most
+state moves to GPU memory (~300 MiB vs ~3.6 GiB on CPU for turbo).
+
+GPU coverage blockers that remain: `ryzen-5950x` RTX 4090 is **still
+not benchable**. NVIDIA driver install attempted on the Proxmox host
+(PVE 9.1.9, kernel `7.0.0-3-pve`) on 2026-05-15: Debian
+`nvidia-kernel-dkms` 550.163.01-2 plus three NVIDIA `.run` installers
+(575.57.08, 580.65.06, 580.95.05) all fail to build the kernel module.
+Root cause is that PVE 9 renumbered the kernel from Linux 6.14 to
+`7.0.0` in both the Makefile and `LINUX_VERSION_CODE` (458752 =
+7×65536). NVIDIA's source uses `LINUX_VERSION_CODE` for compile-time
+API selection; no driver recognises kernel 7.x and they all fall back
+to the oldest code path, hitting the Linux 6.11 `__assign_str` macro
+signature change and 6.14 VMA-locking changes. The host was left
+clean (Proxmox VE 9.1.9 healthy, both LXCs running, broken dkms
+registration removed, half-installed apt packages purged); build
+deps `proxmox-headers-7.0.0-3-pve`, `dkms`, `build-essential`, and
+the full CUDA 12.4 userland are retained for the next retry, and the
+`.run` installers are cached under `/root/`. A status note is at
+`/root/NVIDIA-INSTALL-STATUS.md` on the Proxmox host. LXC `ai`
+(CT 107) at `/etc/pve/lxc/107.conf` keeps its existing passthrough
+config (`/dev/nvidia*` bind-mounts + cgroup allow); the moment a
+working `nvidia.ko` lands on the host, the container will see the
+devices automatically. Retry paths: (1) wait for NVIDIA 585+ with
+explicit PVE-7.0 detection; (2) boot `pve-kernel-6.8` (Proxmox still
+publishes it); (3) apply the PVE-forum community patches to NVIDIA's
+`nv-mm.h` / `nv-tracepoint.h`.
+
+`i7-7500u` (Ubuntu, HD 620 Kaby Lake) had
+the Vulkan SDK installed cleanly but the `whisper-rs 0.16.0` Vulkan
+binding references symbols (`ggml_backend_vk_buffer_type`,
+`ggml_backend_vk_get_device_count`, …) that have been renamed in the
+current whisper.cpp upstream that `whisper-rs-sys` cmake-fetches;
+build fails. Phase 1 should either pin whisper.cpp or upgrade
+whisper-rs.
+
+Battery half of the matrix still pending — unplug the three laptops,
+Battery half of the matrix landed the same day. The two modern Intel
+laptops (`i7-1255u` Alder Lake 2022, `ultra7-258v` Lunar Lake 2024)
+were unplugged and re-benched on both CPU and Vulkan builds (1
+iteration per cell across all 7 wizard-visible models — battery
+budget too tight for 3 iter on turbo). All 26 AC↔battery cells were
+power-validated via the rusage sidecar (`ac_online` and
+`battery_pct` captured at run start and end) and confirmed
+`BATTERY`-throughout. **Result: zero verdict bucket flips between AC
+and battery on either laptop.** Batch RTF deltas are within ±10 % on
+average (in the noise range of the 15–30 % stddev measured between
+AC iterations for the same cells), and crucially Vulkan GPU
+acceleration does NOT throttle on battery — Arc Battlemage on
+`ultra7-258v` delivered turbo at 9.03 batch RTF on battery vs 8.72
+on AC. **Phase 1 implication: the proposed battery-aware
+affordability gate (plan v4 Task 1.5) can be dropped.** The
+older `i7-7500u` (2016 Kaby Lake) and the desktop `ryzen-5950x`
+were not battery-benched (no battery on the desktop; the legacy
+laptop is not the user's daily driver and would mostly confirm
+unsuitable-stays-unsuitable). Phase 1 (registry refit, predicate
+changes) follows in a separate session.
+
+## 2026-05-15 — Added `scripts/capture-overlay.sh` for README screencasts
 Landed the overlay-screencast helper per
 `plans/2026-05-15-overlay-screencast-script-v2.md`: a single bash script
 that records the Fono overlay in three modes (`overlay`, `paste`,

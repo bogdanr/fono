@@ -1,0 +1,34 @@
+{
+  "command": [
+    "/root/fono-src/target/release/fono-bench",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "base",
+    "--output",
+    "/root/runs-vulkan/192.168.0.251__ac__vulkan__base__iter1.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": "1",
+    "battery_pct": 100,
+    "package_temp_c": 44.0
+  },
+  "context_start": {
+    "ac_online": "1",
+    "battery_pct": 100,
+    "captured_at_utc": "2026-05-15T19:34:01.147769+00:00",
+    "hostname": "nimblex",
+    "package_temp_c": 39.0,
+    "platform": "linux",
+    "power_profile": "governor=powersave"
+  },
+  "exit_code": 1,
+  "label": "ultra7-258v/ac/vulkan/base/iter1",
+  "max_rss_kib": 176736,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 0.60225,
+  "user_s": 4.9928,
+  "wall_clock_s": 8.64535
+}

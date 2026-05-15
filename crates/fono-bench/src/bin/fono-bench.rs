@@ -13,7 +13,9 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::{LevelFilter, Targets};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use fono_bench::capabilities::ModelCapabilities;
 use fono_bench::equivalence::{
@@ -183,15 +185,24 @@ struct EquivalenceArgs {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_env("FONO_BENCH_LOG").unwrap_or_else(|_e| {
-                // Default: info for fono crates, warn for whisper.cpp/GGML
-                // (which is extremely chatty at info level). Override with
-                // FONO_BENCH_LOG=info to see everything.
-                EnvFilter::new("info,whisper_rs=warn")
-            }),
-        )
+    // `Targets` directive syntax — same `target=level,default_level`
+    // shape as `EnvFilter`'s level-only subset (no spans / regex /
+    // field filters). See `crates/fono/src/main.rs::init_tracing` for
+    // the rationale behind avoiding `env-filter`'s ~1 MiB regex
+    // engine dependency.
+    let directives = std::env::var("FONO_BENCH_LOG")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        // Default: info for fono crates, warn for whisper.cpp/GGML
+        // (which is extremely chatty at info level). Override with
+        // FONO_BENCH_LOG=info to see everything.
+        .unwrap_or_else(|| "info,whisper_rs=warn".to_string());
+    let targets: Targets = directives
+        .parse()
+        .unwrap_or_else(|_| Targets::new().with_default(LevelFilter::INFO));
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(targets)
         .init();
     match cli.cmd {
         Cmd::Bench(a) => run_bench(a).await,
@@ -309,7 +320,24 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
                 }
                 stt_backend_name = format!("local:{}", args.model);
                 caps = ModelCapabilities::for_local_whisper(&args.model);
-                Arc::new(fono_stt::whisper_local::WhisperLocal::new(path))
+                // Phase-0 calibration override: `FONO_WHISPER_THREADS`
+                // overrides the default `available_parallelism()` thread
+                // count so the bench reflects a sensible compute budget
+                // on hosts whose logical-core count over-subscribes
+                // whisper.cpp's matmul kernels (e.g. 32-thread Proxmox
+                // LXCs where 32 threads make tiny clips slower than 8).
+                // Production code is untouched; this affects only the
+                // bench binary.
+                let stt: Arc<dyn fono_stt::SpeechToText> = if let Some(t) = std::env::var("FONO_WHISPER_THREADS")
+                    .ok()
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .filter(|&t| t > 0)
+                {
+                    Arc::new(fono_stt::whisper_local::WhisperLocal::with_threads(path, t))
+                } else {
+                    Arc::new(fono_stt::whisper_local::WhisperLocal::new(path))
+                };
+                stt
             }
             #[cfg(not(feature = "whisper-local"))]
             {
@@ -741,8 +769,16 @@ fn build_streaming(
         if !path.exists() {
             return Ok(None);
         }
-        let s: Arc<dyn fono_stt::StreamingStt> =
-            Arc::new(fono_stt::whisper_local::WhisperLocal::new(path));
+        let s: Arc<dyn fono_stt::StreamingStt> = if let Some(t) =
+            std::env::var("FONO_WHISPER_THREADS")
+                .ok()
+                .and_then(|s| s.parse::<i32>().ok())
+                .filter(|&t| t > 0)
+        {
+            Arc::new(fono_stt::whisper_local::WhisperLocal::with_threads(path, t))
+        } else {
+            Arc::new(fono_stt::whisper_local::WhisperLocal::new(path))
+        };
         Ok(Some(Arc::new(
             fono_bench::equivalence::WhisperStreamingHandle::new(s),
         )))

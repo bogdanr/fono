@@ -1,0 +1,34 @@
+{
+  "command": [
+    "/root/fono-src/target/release/fono-bench",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "base.en",
+    "--output",
+    "/root/runs/192.168.0.112__ac__cpu__base.en__iter3.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": "1",
+    "battery_pct": 112,
+    "package_temp_c": 71.0
+  },
+  "context_start": {
+    "ac_online": "1",
+    "battery_pct": 110,
+    "captured_at_utc": "2026-05-15T14:18:47.722188+00:00",
+    "hostname": "ThinkPad",
+    "package_temp_c": 59.0,
+    "platform": "linux",
+    "power_profile": "balanced"
+  },
+  "exit_code": 1,
+  "label": "i7-7500u/ac/cpu/base.en/iter3",
+  "max_rss_kib": 603836,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 4.513096,
+  "user_s": 216.450718,
+  "wall_clock_s": 56.167102
+}
