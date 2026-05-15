@@ -110,10 +110,10 @@ pub enum Affordability {
 /// (overlapping windows, look-ahead context), so a model that decodes
 /// at 4× batch realtime is *only just* fast enough for streaming.
 ///
-/// Empirically: small (rf=4) on an 8-physical-core 12th-gen Intel
-/// (no NPU) lags noticeably; the same model on a 12-core Zen 4 keeps
-/// up. Threshold is calibrated to match that observation.
-pub const LIVE_REALTIME_MIN_CPU: f32 = 6.0;
+/// Phase 0 (2026-05-15) measured small batch RTF at 3.13× on
+/// ultra7-258v (Lunar Lake 8c) — comfortable for dictation. Threshold
+/// set to 3.0 so small lands Comfortable on modern 8+ core laptops.
+pub const LIVE_REALTIME_MIN_CPU: f32 = 3.0;
 
 /// Minimum effective batch real-time factor on machines with hardware
 /// acceleration (Apple Silicon Metal/CoreML today; future: CUDA,
@@ -673,17 +673,16 @@ mod tests {
     }
 
     #[test]
-    fn affords_small_borderline_on_8_core_cpu_only() {
-        // small rf=4.0 × 1.0 × 1.0 = 4.0 < 6.0 (CPU threshold) → Borderline.
-        // Matches the user's 12th-gen Intel observation: small lags in live
-        // mode without hardware acceleration.
+    fn affords_small_comfortable_on_8_core_cpu_only() {
+        // small rf=3.0 × 1.0 × 1.0 = 3.0 ≥ 3.0 (CPU threshold) → Comfortable.
+        // Phase 0 measured 3.13× batch RTF on ultra7-258v (Lunar Lake 8c).
         let s = snap(8, 16, 100, true);
-        assert_eq!(affords(&s, SMALL_EN), Affordability::Borderline);
+        assert_eq!(affords(&s, SMALL_EN), Affordability::Comfortable);
     }
 
     #[test]
     fn affords_small_comfortable_on_high_core_cpu_only() {
-        // 24 cores: small rf=4.0 × sqrt(24/8) × 1.0 ≈ 6.93 ≥ 6.0 → Comfortable.
+        // 24 cores: small rf=3.0 × sqrt(24/8) × 1.0 ≈ 5.20 ≥ 3.0 → Comfortable.
         // Past the 8-core reference the curve is sub-linear (Phase 0
         // calibration showed whisper.cpp doesn't scale 1:1 past ~6 threads).
         let s = snap(24, 64, 200, true);
@@ -691,10 +690,12 @@ mod tests {
     }
 
     #[test]
-    fn affords_turbo_borderline_on_cpu_only() {
-        // turbo rf=2.5 × sqrt(12/8) × 1.0 ≈ 3.06 < 6.0 → Borderline.
+    fn affords_turbo_comfortable_on_high_core_cpu_only() {
+        // Synthetic turbo rf=2.5 × sqrt(12/8) ≈ 3.06 ≥ 3.0 → Comfortable.
+        // (Real registry turbo rf=0.6 — see Unsuitable test below — but this
+        // exercises the predicate's high-core comfortable path.)
         let s = snap(12, 32, 200, true);
-        assert_eq!(affords(&s, TURBO), Affordability::Borderline);
+        assert_eq!(affords(&s, TURBO), Affordability::Comfortable);
     }
 
     #[test]

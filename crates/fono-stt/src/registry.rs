@@ -280,25 +280,16 @@ impl ModelRegistry {
     #[must_use]
     pub fn pick_default_local(snap: &fono_core::HardwareSnapshot) -> &'static str {
         use fono_core::hwcheck::Affordability;
-        // Largest → smallest so we prefer accuracy when the host allows.
-        let candidates: Vec<&ModelInfo> = WHISPER_MODELS
-            .iter()
-            .filter(|m| m.multilingual)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        let mut best_borderline: Option<&ModelInfo> = None;
-        for m in &candidates {
-            match snap.affords_model(m.min_ram_mb, m.approx_mb, m.realtime_factor_cpu_avx2) {
-                Affordability::Comfortable => return m.name,
-                Affordability::Borderline if best_borderline.is_none() => {
-                    best_borderline = Some(m);
-                }
-                _ => {}
+        // Walk largest → smallest, return the first non-Unsuitable. We
+        // prefer a larger Borderline over a smaller Comfortable because
+        // accuracy matters more than headroom for dictation.
+        for m in WHISPER_MODELS.iter().filter(|m| m.multilingual).rev() {
+            let aff = snap.affords_model(m.min_ram_mb, m.approx_mb, m.realtime_factor_cpu_avx2);
+            if aff != Affordability::Unsuitable {
+                return m.name;
             }
         }
-        best_borderline.map(|m| m.name).unwrap_or("tiny")
+        "tiny"
     }
 }
 
@@ -433,16 +424,13 @@ mod tests {
 
     #[test]
     fn pick_default_local_scales_to_hardware() {
-        // 2-core ancient laptop: small Unsuitable (0.6 < 1.0 batch floor),
-        // base rf=11 × 0.25 = 2.75 → Borderline. Picker returns the largest
-        // Borderline since none are Comfortable: base.
+        // 2-core ancient laptop: small rf=3 × 0.25 = 0.75 < 1.0 → Unsuitable.
+        // base rf=11 × 0.25 = 2.75 → Borderline. Picker returns base.
         let weak = fake_snap(2, 8, true);
         assert_eq!(ModelRegistry::pick_default_local(&weak), "base");
 
-        // 16-core desktop: small rf=3.0 × sqrt(2) ≈ 4.24 < 6.0 → still
-        // Borderline. base rf=11 × sqrt(2) ≈ 15.6 → Comfortable. Picker
-        // walks largest→smallest so returns base (first Comfortable).
+        // 16-core desktop: turbo Unsuitable on CPU, small Comfortable.
         let strong = fake_snap(16, 32, true);
-        assert_eq!(ModelRegistry::pick_default_local(&strong), "base");
+        assert_eq!(ModelRegistry::pick_default_local(&strong), "small");
     }
 }
