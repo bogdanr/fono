@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Text-to-speech trait + Wyoming, OpenAI, and (stubbed) Piper-local
+//! Text-to-speech trait + Wyoming, OpenAI, and other cloud
 //! backends. Mirrors the shape of `fono-stt`: one trait, a factory
 //! gated by feature flags, and per-backend modules that talk the
 //! provider's wire format and return mono `f32` PCM at the backend's
@@ -28,8 +28,6 @@ pub mod deepgram;
     feature = "deepgram"
 ))]
 pub mod openai_compat;
-#[cfg(feature = "piper-local")]
-pub mod piper_local;
 #[cfg(feature = "wyoming")]
 pub mod wyoming;
 

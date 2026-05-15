@@ -256,7 +256,6 @@ pub async fn report(paths: &Paths) -> Result<String> {
                         format!("{key_env} MISSING")
                     }
                 }
-                fono_core::config::TtsBackend::Piper => "stub (use Wyoming-piper)".to_string(),
                 fono_core::config::TtsBackend::None => "—".to_string(),
             };
             let _ = needs_key;

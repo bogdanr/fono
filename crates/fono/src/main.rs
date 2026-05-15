@@ -4,7 +4,9 @@
 
 use anyhow::Result;
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::{LevelFilter, Targets};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use fono::cli;
 
@@ -40,13 +42,25 @@ async fn async_main() -> Result<()> {
 /// Initialise the global `tracing` subscriber.
 ///
 /// Precedence (highest first):
-///  1. `FONO_LOG` env var (tracing-subscriber EnvFilter syntax).
+///  1. `FONO_LOG` env var (`tracing-subscriber` `Targets` syntax:
+///     comma-separated `target=level` directives, optionally with a
+///     bare default level — e.g. `info,whisper_rs=warn`).
 ///  2. `--debug` / `-v` / `-vv` CLI flags.
 ///  3. Default = `info`.
 ///
 /// Regardless of the above, a small set of noisy third-party warnings
-/// is silenced unconditionally — see `BASELINE_QUIET` below. Users
-/// can still re-enable them via `FONO_LOG` (e.g. `FONO_LOG=info,winit=warn`).
+/// is silenced unconditionally — see `BASELINE_QUIET` below. User
+/// directives are parsed *after* the baseline, so the user's own
+/// directive for the same target wins (the parser keeps the last
+/// occurrence of duplicate targets).
+///
+/// Historically this routed through `tracing-subscriber`'s
+/// `EnvFilter`, which pulls a full regex engine + DFA (`regex_automata`,
+/// `regex_syntax`, `aho_corasick`) into the binary — ~1.0 MiB of
+/// `.text` for a feature we never use (spans, regex targets,
+/// per-field filtering). `Targets` provides the directive syntax we
+/// actually rely on (`target=level`, with longest-prefix match) for
+/// almost no code.
 fn init_tracing(verbosity: cli::Verbosity) {
     /// Third-party log lines that fire on every startup with no
     /// actionable signal. Silenced so they only appear when something
@@ -74,18 +88,24 @@ fn init_tracing(verbosity: cli::Verbosity) {
         "winit::platform_impl::linux::x11::window=warn",
     ];
 
-    let default_filter = verbosity.as_filter();
-    let mut filter =
-        EnvFilter::try_from_env("FONO_LOG").unwrap_or_else(|_| EnvFilter::new(default_filter));
-    for d in BASELINE_QUIET {
-        if let Ok(dir) = d.parse() {
-            filter = filter.add_directive(dir);
-        }
-    }
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
+    let user_or_default = std::env::var("FONO_LOG")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| verbosity.as_filter().to_string());
+    // BASELINE_QUIET first so user directives (parsed after) win on
+    // exact-target collisions; for non-colliding more-specific user
+    // targets, `Targets` resolves by longest-prefix match anyway.
+    let combined = format!("{},{}", BASELINE_QUIET.join(","), user_or_default);
+    let targets: Targets = combined
+        .parse()
+        .unwrap_or_else(|_| Targets::new().with_default(LevelFilter::INFO));
+
+    let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(verbosity.is_trace())
         .with_file(verbosity.is_trace())
-        .with_line_number(verbosity.is_trace())
+        .with_line_number(verbosity.is_trace());
+    tracing_subscriber::registry()
+        .with(fmt_layer)
+        .with(targets)
         .init();
 }

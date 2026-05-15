@@ -86,16 +86,6 @@ impl LanguageSelection {
         }
     }
 
-    /// Deprecated alias for [`Self::fallback_hint`]. Kept for one
-    /// release while callers migrate; the historical name implied a
-    /// primary/secondary hierarchy that v3 of the language plan
-    /// explicitly rejected.
-    #[deprecated(note = "use fallback_hint(); see plan v3 — peers are equal, order is cosmetic")]
-    #[must_use]
-    pub fn primary(&self) -> Option<&str> {
-        self.fallback_hint()
-    }
-
     /// All codes in the selection (single-element slice for forced;
     /// empty for auto). Iteration order is the user's configured
     /// order, used by `WhisperLocal::lang_detect` masking and by the

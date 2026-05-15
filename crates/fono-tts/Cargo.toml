@@ -19,10 +19,8 @@ default = ["wyoming"]
 # Cloud — each behind a feature flag. The four cloud features below
 # share the OpenAI-compatible client in `openai_compat.rs` (OpenAI,
 # Groq, OpenRouter) or a thin bespoke client (Cartesia, Deepgram);
-# all of them just need `reqwest` and the catalogue. They were split
-# into four flags so a slim build can opt in to one provider without
-# pulling the others' code through the linker — even though they all
-# transitively enable the same dep today.
+# all of them just need `reqwest` and the catalogue. Each provider is
+# feature-gated to keep the linker output minimal.
 openai = ["dep:reqwest", "dep:fono-http"]
 groq = ["dep:reqwest", "dep:fono-http"]
 openrouter = ["dep:reqwest", "dep:fono-http"]
@@ -30,10 +28,6 @@ cartesia = ["dep:reqwest", "dep:fono-http"]
 deepgram = ["dep:reqwest", "dep:fono-http"]
 # LAN Wyoming TTS server.
 wyoming = ["dep:fono-net-codec"]
-# In-process Piper. Stub in v1 — see src/piper_local.rs for the rationale
-# (onnxruntime conflicts with the static-musl ship build). Compiles to a
-# function that returns a clear error pointing users at wyoming-piper.
-piper-local = []
 
 [dependencies]
 fono-core = { path = "../fono-core" }

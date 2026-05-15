@@ -73,3 +73,71 @@ work can be re-scoped when ONNX/runtime tooling settles.
 - Kokoro v2 / multilingual fine-tunes (no public roadmap exists today).
 - Streaming WebSocket TTS (Fono's pipeline batches per assistant turn).
 - Voice-cloning / custom voices (Kokoro doesn't expose that surface).
+
+## Absorbed notes from the closed routing plan
+
+The following content was preserved from
+`plans/closed/2026-05-14-openrouter-kokoro-multilingual-voice-routing-v1.md`
+when that plan was closed as `Status: Superseded` on 2026-05-15. The
+implementation work now lands inside this plan.
+
+### Why a router is needed (symptom diagnosis)
+
+Kokoro v1.0 voices are monolingual, prefixed by language code (per
+`huggingface.co/hexgrad/Kokoro-82M/VOICES.md`). There are 54 voices
+across 9 locales — `a` American English, `b` British English, `e`
+Spanish, `f` French, `h` Hindi, `i` Italian, `j` Japanese, `p`
+Brazilian Portuguese, `z` Mandarin. Each voice was trained on one
+language. Feeding French text into a voice whose first letter is `a`
+(American English) produces "speaking French with a heavy English
+accent" — the model phonemizes via the voice's home-language G2P. The
+OpenRouter TTS path historically hard-coded `default_voice = "af_heart"`
+and ignored the `lang` the caller passed, which is exactly this bug.
+
+### Why we are not swapping the cloud TTS model away from Kokoro
+
+Live OpenRouter listing (`/api/v1/models?output_modalities=audio`)
+confirms that `google/gemini-3.1-flash-tts-preview` and
+`openai/gpt-4o-mini-tts-2025-12-15` **do not exist** on OpenRouter.
+The closest OpenRouter offerings (`openai/gpt-audio`,
+`openai/gpt-audio-mini`, `openai/gpt-4o-audio-preview`) are
+chat-completions audio (modality `text+audio→text+audio`), not
+OpenAI-compatible `/v1/audio/speech` endpoints, so our
+`OpenAiCompatTtsClient` cannot drive them. Kokoro stays the right
+OSI-licensed default per `docs/decisions/0004-default-models.md`; an
+opt-in chat-completions audio client is tracked separately and is
+explicitly **not** a Kokoro replacement.
+
+### Router specification (lang_code → default voice)
+
+```
+a → af_heart    (American English)
+b → bf_emma     (British English)
+e → ef_dora     (Spanish)
+f → ff_siwis    (French)
+h → hf_alpha    (Hindi)
+i → if_sara     (Italian)
+j → jf_alpha    (Japanese)
+p → pf_dora     (Brazilian Portuguese)
+z → zf_xiaoxiao (Mandarin)
+```
+
+`pick_voice(lang)` canonicalises BCP-47 / ISO 639-1 inputs (`en`,
+`en-US`, `en-GB`, `es`, `es-MX`, `fr`, `fr-FR`, `pt-BR`, `pt-PT`,
+`zh`, `zh-CN`, `zh-TW`, `ja`, `hi`, `it`) to a Kokoro lang_code
+letter, with `en` → `a` and `en-GB`/`en-AU` → `b`. Used identically
+by the local ONNX backend (when it lands) and the OpenRouter
+passthrough so the same `(text, lang, voice)` triple yields the same
+audio regardless of where inference happens.
+
+### Risk notes carried over
+
+- Kokoro G2P quality varies by language; French has <11 h of training
+  data and only one voice; Spanish/Italian/Hindi have low-grade
+  voices. Surface the per-voice grade in the wizard customize step
+  and keep a multilingual-fallback follow-up ready.
+- Per-language voice overrides are a `Option<HashMap<lang, voice>>`
+  config-schema addition under `[tts.cloud]` — ship after the simple
+  `default_lang` field if needed at all.
+- OpenRouter may change Kokoro's upstream provider preference; pin
+  `provider.order` if audible regressions appear.

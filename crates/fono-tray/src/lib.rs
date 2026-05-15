@@ -222,6 +222,12 @@ pub enum TrayState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayAction {
     ShowStatus,
+    /// SNI left-click activation. Distinct from [`TrayAction::ShowStatus`]
+    /// (which is the explicit menu entry showing the last
+    /// transcription) so the daemon can give left-click a contextual
+    /// payload: a "run `fono setup`" hint when TTS is not configured,
+    /// or the current hotkey cheat sheet once setup is done.
+    ActivateLeftClick,
     ToggleRecording,
     Pause,
     /// Re-paste the i-th most recent transcription (0 = newest).
@@ -509,13 +515,13 @@ mod backend {
             vec![icon_for(self.state)]
         }
 
-        // Left-click/status activation. Tray hosts that call the SNI
-        // `Activate` method (including snixembed) show the same status
-        // notification as the explicit menu action; right-click still
-        // opens the D-Bus menu through the host's normal ContextMenu
-        // path.
+        // Left-click/status activation. Sends the dedicated
+        // [`TrayAction::ActivateLeftClick`] so the daemon can show a
+        // contextual notification (setup hint or hotkey cheat sheet);
+        // the explicit "Show last transcription" menu entry still
+        // sends [`TrayAction::ShowStatus`] and behaves as before.
         fn activate(&mut self, _x: i32, _y: i32) {
-            let _ = self.actions.send(TrayAction::ShowStatus);
+            let _ = self.actions.send(TrayAction::ActivateLeftClick);
         }
 
         fn menu(&self) -> Vec<MenuItem<Self>> {

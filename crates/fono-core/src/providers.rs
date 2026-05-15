@@ -137,7 +137,6 @@ pub const fn tts_backend_str(b: &TtsBackend) -> &'static str {
     match b {
         TtsBackend::None => "none",
         TtsBackend::Wyoming => "wyoming",
-        TtsBackend::Piper => "piper",
         TtsBackend::OpenAI => "openai",
         TtsBackend::Groq => "groq",
         TtsBackend::OpenRouter => "openrouter",
@@ -151,7 +150,6 @@ pub fn parse_tts_backend(s: &str) -> Option<TtsBackend> {
     match s.to_ascii_lowercase().as_str() {
         "none" | "off" | "skip" => Some(TtsBackend::None),
         "wyoming" => Some(TtsBackend::Wyoming),
-        "piper" => Some(TtsBackend::Piper),
         "openai" => Some(TtsBackend::OpenAI),
         "groq" => Some(TtsBackend::Groq),
         "openrouter" => Some(TtsBackend::OpenRouter),
@@ -162,12 +160,12 @@ pub fn parse_tts_backend(s: &str) -> Option<TtsBackend> {
 }
 
 /// Canonical environment-variable name for the API key of a cloud
-/// TTS backend. Returned even for `None`/`Wyoming`/`Piper` (where it's
+/// TTS backend. Returned even for `None`/`Wyoming` (where it's
 /// unused) for branch-free callers; check [`tts_requires_key`] first.
 #[must_use]
 pub const fn tts_key_env(b: &TtsBackend) -> &'static str {
     match b {
-        TtsBackend::None | TtsBackend::Wyoming | TtsBackend::Piper => "",
+        TtsBackend::None | TtsBackend::Wyoming => "",
         TtsBackend::OpenAI => "OPENAI_API_KEY",
         TtsBackend::Groq => "GROQ_API_KEY",
         TtsBackend::OpenRouter => "OPENROUTER_API_KEY",
@@ -193,10 +191,8 @@ pub const fn tts_requires_key(b: &TtsBackend) -> bool {
 pub const fn assistant_backend_str(b: &AssistantBackend) -> &'static str {
     match b {
         AssistantBackend::None => "none",
-        AssistantBackend::Local => "local",
         AssistantBackend::OpenAI => "openai",
         AssistantBackend::Anthropic => "anthropic",
-        AssistantBackend::Gemini => "gemini",
         AssistantBackend::Groq => "groq",
         AssistantBackend::Cerebras => "cerebras",
         AssistantBackend::OpenRouter => "openrouter",
@@ -208,10 +204,8 @@ pub const fn assistant_backend_str(b: &AssistantBackend) -> &'static str {
 pub fn parse_assistant_backend(s: &str) -> Option<AssistantBackend> {
     match s.to_ascii_lowercase().as_str() {
         "none" | "off" | "skip" => Some(AssistantBackend::None),
-        "local" => Some(AssistantBackend::Local),
         "openai" => Some(AssistantBackend::OpenAI),
         "anthropic" => Some(AssistantBackend::Anthropic),
-        "gemini" => Some(AssistantBackend::Gemini),
         "groq" => Some(AssistantBackend::Groq),
         "cerebras" => Some(AssistantBackend::Cerebras),
         "openrouter" => Some(AssistantBackend::OpenRouter),
@@ -228,10 +222,9 @@ pub fn parse_assistant_backend(s: &str) -> Option<AssistantBackend> {
 #[must_use]
 pub const fn assistant_key_env(b: &AssistantBackend) -> &'static str {
     match b {
-        AssistantBackend::None | AssistantBackend::Local | AssistantBackend::Ollama => "",
+        AssistantBackend::None | AssistantBackend::Ollama => "",
         AssistantBackend::OpenAI => "OPENAI_API_KEY",
         AssistantBackend::Anthropic => "ANTHROPIC_API_KEY",
-        AssistantBackend::Gemini => "GEMINI_API_KEY",
         AssistantBackend::Groq => "GROQ_API_KEY",
         AssistantBackend::Cerebras => "CEREBRAS_API_KEY",
         AssistantBackend::OpenRouter => "OPENROUTER_API_KEY",
@@ -242,7 +235,7 @@ pub const fn assistant_key_env(b: &AssistantBackend) -> &'static str {
 pub const fn assistant_requires_key(b: &AssistantBackend) -> bool {
     !matches!(
         b,
-        AssistantBackend::None | AssistantBackend::Local | AssistantBackend::Ollama
+        AssistantBackend::None | AssistantBackend::Ollama
     )
 }
 
@@ -313,26 +306,23 @@ pub fn all_llm_backends() -> [LlmBackend; 9] {
 }
 
 #[must_use]
-pub fn all_assistant_backends() -> [AssistantBackend; 9] {
+pub fn all_assistant_backends() -> [AssistantBackend; 7] {
     [
         AssistantBackend::None,
-        AssistantBackend::Local,
         AssistantBackend::Cerebras,
         AssistantBackend::Groq,
         AssistantBackend::OpenAI,
         AssistantBackend::Anthropic,
         AssistantBackend::OpenRouter,
         AssistantBackend::Ollama,
-        AssistantBackend::Gemini,
     ]
 }
 
 #[must_use]
-pub fn all_tts_backends() -> [TtsBackend; 8] {
+pub fn all_tts_backends() -> [TtsBackend; 7] {
     [
         TtsBackend::None,
         TtsBackend::Wyoming,
-        TtsBackend::Piper,
         TtsBackend::OpenAI,
         TtsBackend::Groq,
         TtsBackend::OpenRouter,
@@ -411,9 +401,11 @@ pub fn configured_llm_backends(secrets: &crate::Secrets, active: &LlmBackend) ->
 /// key isn't in `secrets.toml`. Like its STT cousin, the process
 /// environment is ignored — only keys saved in `secrets.toml` count.
 ///
-/// `None`, `Piper` are intentionally excluded — `None` is not a real
-/// switchable option and `Piper` is a v1 stub that returns an error
-/// from the factory.
+/// `None` is intentionally excluded — it is not a real switchable
+/// option. Always includes the currently-active backend so the tray
+/// reflects reality even if its key isn't in `secrets.toml`. Like its
+/// STT cousin, the process environment is ignored — only keys saved
+/// in `secrets.toml` count.
 #[must_use]
 pub fn configured_tts_backends(
     secrets: &crate::Secrets,
@@ -424,9 +416,8 @@ pub fn configured_tts_backends(
     let mut without_key: Vec<TtsBackend> = Vec::new();
     let mut wyoming: Option<TtsBackend> = None;
     for b in all_tts_backends() {
-        if matches!(b, TtsBackend::None | TtsBackend::Piper) {
-            // None is not a real entry; Piper is a v1 stub. Both are
-            // excluded from the menu unless they are the active one.
+        if matches!(b, TtsBackend::None) {
+            // None is not a real entry; only include when active.
             if std::mem::discriminant(&b) == std::mem::discriminant(active) {
                 without_key.push(b);
             }
@@ -601,12 +592,11 @@ mod tests {
         assert_eq!(tts_key_env(&TtsBackend::OpenAI), "OPENAI_API_KEY");
         assert!(tts_key_env(&TtsBackend::None).is_empty());
         assert!(tts_key_env(&TtsBackend::Wyoming).is_empty());
-        assert!(tts_key_env(&TtsBackend::Piper).is_empty());
     }
 
     /// `configured_tts_backends` ordering: stored-key cloud first,
     /// then Wyoming when the user has a `[tts.wyoming]` block, then
-    /// every remaining cloud backend (omitting `None`/`Piper`).
+    /// every remaining cloud backend (omitting `None`).
     #[test]
     fn configured_tts_ordering() {
         let mut secrets = crate::Secrets::default();
@@ -637,18 +627,16 @@ mod tests {
             .position(|b| matches!(b, TtsBackend::Wyoming))
             .expect("wyoming must be present");
         // Every entry after wyoming is a cloud backend with no stored key
-        // (or `None`/`Piper` if they happened to be active — but in this
+        // (or `None` if it happened to be active — but in this
         // test the active backend is `None`, which placed `None` after
         // Wyoming as a disable affordance).
         for b in &backends[wyoming_pos + 1..] {
-            if matches!(b, TtsBackend::None | TtsBackend::Piper) {
+            if matches!(b, TtsBackend::None) {
                 continue;
             }
             assert!(tts_requires_key(b));
             assert!(!secrets.has_in_file(tts_key_env(b)));
         }
-        // Piper is always excluded (active backend in this test is None).
-        assert!(!backends.contains(&TtsBackend::Piper));
     }
 
     /// Wyoming is hidden when neither `[tts.wyoming]` is configured

@@ -264,6 +264,42 @@ impl ModelRegistry {
     pub fn url_for(model: &ModelInfo) -> String {
         format!("{}/{}", Self::mirror(), model.url_path)
     }
+
+    /// Pick the best local STT model for this hardware without any user
+    /// input. Used on first-run startup so the daemon has a working
+    /// config even when the user hasn't gone through the wizard.
+    ///
+    /// Selection rule: walk the wizard-visible multilingual models from
+    /// largest to smallest and return the first that lands `Comfortable`.
+    /// If none are Comfortable, return the largest `Borderline` instead.
+    /// Falls back to `tiny` if even that is impossible.
+    ///
+    /// Multilingual is the safe default because the OOTB config has an
+    /// empty languages list (auto-detect). An English-only model would
+    /// silently mistranscribe non-English audio.
+    #[must_use]
+    pub fn pick_default_local(snap: &fono_core::HardwareSnapshot) -> &'static str {
+        use fono_core::hwcheck::Affordability;
+        // Largest → smallest so we prefer accuracy when the host allows.
+        let candidates: Vec<&ModelInfo> = WHISPER_MODELS
+            .iter()
+            .filter(|m| m.multilingual)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let mut best_borderline: Option<&ModelInfo> = None;
+        for m in &candidates {
+            match snap.affords_model(m.min_ram_mb, m.approx_mb, m.realtime_factor_cpu_avx2) {
+                Affordability::Comfortable => return m.name,
+                Affordability::Borderline if best_borderline.is_none() => {
+                    best_borderline = Some(m);
+                }
+                _ => {}
+            }
+        }
+        best_borderline.map(|m| m.name).unwrap_or("tiny")
+    }
 }
 
 #[cfg(test)]
@@ -368,5 +404,45 @@ mod tests {
     fn turbo_is_multilingual() {
         let m = ModelRegistry::get("large-v3-turbo").expect("turbo missing");
         assert!(m.multilingual);
+    }
+
+    fn fake_snap(cores: u32, ram_gb: u64, avx2: bool) -> fono_core::HardwareSnapshot {
+        fono_core::HardwareSnapshot {
+            physical_cores: cores,
+            logical_cores: cores * 2,
+            total_ram_bytes: ram_gb * 1024 * 1024 * 1024,
+            available_ram_bytes: ram_gb * 1024 * 1024 * 1024,
+            free_disk_bytes: 200 * 1024 * 1024 * 1024,
+            cpu_features: fono_core::hwcheck::CpuFeatures {
+                avx2,
+                ..Default::default()
+            },
+            os: "linux".into(),
+            arch: "x86_64".into(),
+        }
+    }
+
+    #[test]
+    fn pick_default_local_returns_multilingual() {
+        // Any reasonable machine should resolve to a multilingual model.
+        let snap = fake_snap(8, 16, true);
+        let picked = ModelRegistry::pick_default_local(&snap);
+        let info = ModelRegistry::get(picked).expect("picked model unknown");
+        assert!(info.multilingual, "default must be multilingual; got {picked}");
+    }
+
+    #[test]
+    fn pick_default_local_scales_to_hardware() {
+        // 2-core ancient laptop: small Unsuitable (0.6 < 1.0 batch floor),
+        // base rf=11 × 0.25 = 2.75 → Borderline. Picker returns the largest
+        // Borderline since none are Comfortable: base.
+        let weak = fake_snap(2, 8, true);
+        assert_eq!(ModelRegistry::pick_default_local(&weak), "base");
+
+        // 16-core desktop: small rf=3.0 × sqrt(2) ≈ 4.24 < 6.0 → still
+        // Borderline. base rf=11 × sqrt(2) ≈ 15.6 → Comfortable. Picker
+        // walks largest→smallest so returns base (first Comfortable).
+        let strong = fake_snap(16, 32, true);
+        assert_eq!(ModelRegistry::pick_default_local(&strong), "base");
     }
 }

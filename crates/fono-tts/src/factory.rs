@@ -41,7 +41,6 @@ pub fn build_tts(cfg: &Tts, secrets: &Secrets) -> Result<Option<Arc<dyn TextToSp
     match cfg.backend {
         TtsBackend::None => Ok(None),
         TtsBackend::Wyoming => build_wyoming(cfg).map(Some),
-        TtsBackend::Piper => build_piper(cfg).map(Some),
         TtsBackend::OpenAI => build_openai(cfg, secrets).map(Some),
         TtsBackend::Groq => build_groq(cfg, secrets).map(Some),
         TtsBackend::OpenRouter => build_openrouter(cfg, secrets).map(Some),
@@ -74,26 +73,6 @@ fn build_wyoming(cfg: &Tts) -> Result<Arc<dyn TextToSpeech>> {
 fn build_wyoming(_cfg: &Tts) -> Result<Arc<dyn TextToSpeech>> {
     Err(anyhow!(
         "Wyoming TTS not compiled in (enable the `wyoming` feature on `fono-tts`)"
-    ))
-}
-
-#[cfg(feature = "piper-local")]
-fn build_piper(_cfg: &Tts) -> Result<Arc<dyn TextToSpeech>> {
-    // Stub. See `crates/fono-tts/src/piper_local.rs` for the rationale —
-    // onnxruntime conflicts with the static-musl ship build.
-    Err(anyhow!(
-        "in-process Piper is not yet supported in this build. Run wyoming-piper \
-         instead (`docker run --rm -p 10200:10200 rhasspy/wyoming-piper`) and \
-         set `tts.backend = \"wyoming\"` with `[tts.wyoming].uri = \
-         \"tcp://localhost:10200\"`."
-    ))
-}
-
-#[cfg(not(feature = "piper-local"))]
-fn build_piper(_cfg: &Tts) -> Result<Arc<dyn TextToSpeech>> {
-    Err(anyhow!(
-        "in-process Piper not compiled in. Use the `wyoming` backend pointing \
-         at wyoming-piper instead."
     ))
 }
 

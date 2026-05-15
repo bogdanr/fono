@@ -43,21 +43,21 @@ pub const MIN_RECORDING: Duration = Duration::from_millis(300);
 /// — RMS for bars + the live-dictation VU bar, peak amplitude for the
 /// oscilloscope. 0.22 is the value that looks balanced across all
 /// three at typical speaking-voice levels.
-#[cfg(any(feature = "interactive", feature = "waveform"))]
+#[cfg(feature = "interactive")]
 const WAVEFORM_AMPLITUDE_CEILING: f32 = 0.22;
 
 /// FFT window size used by the `fft` and `heatmap` styles. 4096
 /// samples ≈ 256 ms at 16 kHz — gives ~3.9 Hz per source bin so
 /// 512 display bins across 0–3 kHz still average 1–2 source bins
 /// each.
-#[cfg(any(feature = "interactive", feature = "waveform"))]
+#[cfg(feature = "interactive")]
 const WAVEFORM_FFT_SIZE: usize = 4096;
 
 /// Upper frequency cutoff for the FFT visualisations. Most voice
 /// intelligibility (fundamentals + first three formants) sits below
 /// 3 kHz — anything higher is sibilance or background noise that
 /// clutters the view.
-#[cfg(any(feature = "interactive", feature = "waveform"))]
+#[cfg(feature = "interactive")]
 const WAVEFORM_FFT_MAX_HZ: f32 = 3000.0;
 
 /// Target display-bin count pushed to the overlay per frame. The
@@ -66,7 +66,7 @@ const WAVEFORM_FFT_MAX_HZ: f32 = 3000.0;
 /// source-to-display ratios distribute cleanly without rounding all
 /// the way down to a single source bin per display. 300 bars across
 /// the ~588 px content area lands each at ≈2 px wide.
-#[cfg(any(feature = "interactive", feature = "waveform"))]
+#[cfg(feature = "interactive")]
 const WAVEFORM_FFT_BINS: usize = 300;
 
 /// dB range mapped to `[0.0, 1.0]` on the FFT / heatmap. Bins
@@ -74,14 +74,14 @@ const WAVEFORM_FFT_BINS: usize = 300;
 /// light up the visualisation); louder than the ceiling saturate.
 /// −20 dB floor keeps room noise / breathing dark; +30 dB ceiling
 /// reserves the top of the scale for vowel peaks.
-#[cfg(any(feature = "interactive", feature = "waveform"))]
+#[cfg(feature = "interactive")]
 const WAVEFORM_FFT_DB_FLOOR: f32 = -20.0;
-#[cfg(any(feature = "interactive", feature = "waveform"))]
+#[cfg(feature = "interactive")]
 const WAVEFORM_FFT_DB_CEILING: f32 = 30.0;
 
 /// Compute RMS of an f32 slice and normalise against
 /// [`WAVEFORM_AMPLITUDE_CEILING`]. Result is clamped to `[0.0, 1.0]`.
-#[cfg(any(feature = "interactive", feature = "waveform"))]
+#[cfg(feature = "interactive")]
 fn normalised_rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return 0.0;
@@ -100,18 +100,15 @@ struct CaptureSession {
     stop_tx: std::sync::mpsc::Sender<()>,
     join: Option<JoinHandle<()>>,
     started_at: Instant,
-    #[allow(dead_code)]
-    mode: RecordingMode,
     /// AbortHandle for the audio-level ticker that feeds the standalone
-    /// waveform overlay. `None` when no overlay is attached or the
-    /// `waveform` feature is not compiled in.
-    #[cfg(any(feature = "interactive", feature = "waveform"))]
+    /// waveform overlay. `None` when no overlay is attached.
+    #[cfg(feature = "interactive")]
     level_task: Option<tokio::task::AbortHandle>,
 }
 
 impl CaptureSession {
     fn stop_and_drain(mut self) -> (Vec<f32>, Duration) {
-        #[cfg(any(feature = "interactive", feature = "waveform"))]
+        #[cfg(feature = "interactive")]
         if let Some(h) = self.level_task.take() {
             h.abort();
         }
@@ -158,8 +155,6 @@ struct LiveCaptureSession {
     /// field is just a clone for convenience.
     overlay: Option<fono_overlay::OverlayHandle>,
     started_at: Instant,
-    #[allow(dead_code)]
-    mode: RecordingMode,
 }
 
 /// Snapshot of the per-stage latencies for one dictation. Logged at
@@ -325,7 +320,7 @@ pub struct SessionOrchestrator {
     /// for the daemon's lifetime rather than spawning per session.
     /// `None` means the overlay is disabled in config or failed to
     /// spawn at startup.
-    #[cfg(any(feature = "interactive", feature = "waveform"))]
+    #[cfg(feature = "interactive")]
     overlay: Arc<StdRwLock<Option<fono_overlay::OverlayHandle>>>,
     pipeline_in_flight: Arc<AtomicBool>,
     config: Arc<StdRwLock<Arc<Config>>>,
@@ -444,30 +439,17 @@ impl SessionOrchestrator {
         //     feature is compiled in) → the standalone audio
         //     visualisation overlay used during batch recording.
         // Only one branch fires; live dictation takes precedence.
-        #[cfg(any(feature = "interactive", feature = "waveform"))]
+        #[cfg(feature = "interactive")]
         {
             let spawn_result: Option<std::io::Result<fono_overlay::OverlayHandle>> = {
-                #[cfg(feature = "interactive")]
-                {
-                    if config.interactive.enabled {
-                        Some(fono_overlay::RealOverlay::spawn())
-                    } else if cfg!(feature = "waveform") && config.overlay.waveform {
-                        Some(fono_overlay::RealOverlay::spawn_waveform(
-                            config.overlay.style,
-                        ))
-                    } else {
-                        None
-                    }
-                }
-                #[cfg(all(feature = "waveform", not(feature = "interactive")))]
-                {
-                    if config.overlay.waveform {
-                        Some(fono_overlay::RealOverlay::spawn_waveform(
-                            config.overlay.style,
-                        ))
-                    } else {
-                        None
-                    }
+                if config.interactive.enabled {
+                    Some(fono_overlay::RealOverlay::spawn())
+                } else if config.overlay.waveform {
+                    Some(fono_overlay::RealOverlay::spawn_waveform(
+                        config.overlay.style,
+                    ))
+                } else {
+                    None
                 }
             };
             match spawn_result {
@@ -619,21 +601,12 @@ impl SessionOrchestrator {
         // afterwards so the right style is active even if we just
         // entered waveform mode this reload. Both calls are
         // idempotent when nothing changed.
-        #[cfg(any(feature = "interactive", feature = "waveform"))]
+        #[cfg(feature = "interactive")]
         if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
-            #[cfg(feature = "interactive")]
-            {
-                if cfg.interactive.enabled {
-                    o.enable_text_mode();
-                } else if cfg!(feature = "waveform") && cfg.overlay.waveform {
-                    o.enable_waveform_mode(cfg.overlay.style);
-                }
-            }
-            #[cfg(all(feature = "waveform", not(feature = "interactive")))]
-            {
-                if cfg.overlay.waveform {
-                    o.enable_waveform_mode(cfg.overlay.style);
-                }
+            if cfg.interactive.enabled {
+                o.enable_text_mode();
+            } else if cfg.overlay.waveform {
+                o.enable_waveform_mode(cfg.overlay.style);
             }
             o.set_waveform_style(cfg.overlay.style);
         }
@@ -713,7 +686,7 @@ impl SessionOrchestrator {
     /// (`OverlayState::AssistantRecording`, green palette) so both
     /// pipelines get the same Bars / FFT / Heatmap / Oscilloscope
     /// visualisations the user picked in `[overlay].style`.
-    #[cfg(any(feature = "interactive", feature = "waveform"))]
+    #[cfg(feature = "interactive")]
     #[allow(clippy::too_many_lines, clippy::suboptimal_flops)]
     fn spawn_waveform_level_task(
         &self,
@@ -867,7 +840,7 @@ impl SessionOrchestrator {
     /// match the source the user audited; constants are unitless
     /// (per-millisecond rates / per-bin widths) so the same numbers
     /// behave correctly on any panel size.
-    #[cfg(any(feature = "interactive", feature = "waveform"))]
+    #[cfg(feature = "interactive")]
     #[allow(
         clippy::too_many_lines,
         clippy::suboptimal_flops,
@@ -1133,7 +1106,7 @@ impl SessionOrchestrator {
             live_capture: Arc::new(Mutex::new(None)),
             #[cfg(feature = "interactive")]
             assistant_live_capture: Arc::new(Mutex::new(None)),
-            #[cfg(any(feature = "interactive", feature = "waveform"))]
+            #[cfg(feature = "interactive")]
             overlay: Arc::new(StdRwLock::new(None)),
             pipeline_in_flight: Arc::new(AtomicBool::new(false)),
             config: Arc::new(StdRwLock::new(config)),
@@ -1215,7 +1188,7 @@ impl SessionOrchestrator {
         // fires when `[overlay].waveform = true` produced a live
         // overlay handle at orchestrator startup. Live-dictation mode
         // owns its own visibility transitions further down.
-        #[cfg(any(feature = "interactive", feature = "waveform"))]
+        #[cfg(feature = "interactive")]
         let level_task = self.spawn_waveform_level_task(
             &cfg,
             fono_overlay::OverlayState::Recording { db: 0 },
@@ -1227,8 +1200,7 @@ impl SessionOrchestrator {
             stop_tx,
             join: Some(join),
             started_at: Instant::now(),
-            mode,
-            #[cfg(any(feature = "interactive", feature = "waveform"))]
+            #[cfg(feature = "interactive")]
             level_task,
         });
         drop(slot);
@@ -1250,7 +1222,7 @@ impl SessionOrchestrator {
         // Standalone-waveform overlay: shift to amber `Processing`
         // while STT runs. Live-dictation mode owns its own state
         // transitions; only flip when this is the batch path.
-        #[cfg(any(feature = "interactive", feature = "waveform"))]
+        #[cfg(feature = "interactive")]
         if cfg.overlay.waveform && !cfg.interactive.enabled {
             if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
                 o.set_state(fono_overlay::OverlayState::Processing);
@@ -1267,7 +1239,7 @@ impl SessionOrchestrator {
 
         if elapsed < MIN_RECORDING || samples.is_empty() {
             warn!("recording too short ({capture_ms} ms); skipping STT");
-            #[cfg(any(feature = "interactive", feature = "waveform"))]
+            #[cfg(feature = "interactive")]
             if cfg.overlay.waveform && !cfg.interactive.enabled {
                 if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
                     o.set_state(fono_overlay::OverlayState::Hidden);
@@ -1295,7 +1267,7 @@ impl SessionOrchestrator {
             }
             // Standalone-waveform overlay: hide immediately on cancel
             // (no pipeline phase follows).
-            #[cfg(any(feature = "interactive", feature = "waveform"))]
+            #[cfg(feature = "interactive")]
             if cfg.overlay.waveform && !cfg.interactive.enabled {
                 if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
                     o.set_state(fono_overlay::OverlayState::Hidden);
@@ -1381,10 +1353,12 @@ impl SessionOrchestrator {
                     }
                     let session = self.build_live_capture_pipeline(
                         streaming,
-                        RecordingMode::Hold,
                         fono_overlay::OverlayState::AssistantRecording { db: 0 },
                     )?;
                     *slot = Some(session);
+                    if self.current_config().general.auto_mute_system {
+                        fono_audio::mute::set_default_sink_mute(true);
+                    }
                     info!("assistant recording started (streaming)");
                     return Ok(());
                 }
@@ -1434,7 +1408,7 @@ impl SessionOrchestrator {
         // only the panel title ("ASSISTANT") and accent colour
         // (saturated green, mirrored by the tray icon) differ.
         let cfg = self.current_config();
-        #[cfg(any(feature = "interactive", feature = "waveform"))]
+        #[cfg(feature = "interactive")]
         let level_task = self.spawn_waveform_level_task(
             &cfg,
             fono_overlay::OverlayState::AssistantRecording { db: 0 },
@@ -1445,11 +1419,13 @@ impl SessionOrchestrator {
             stop_tx,
             join: Some(join),
             started_at: Instant::now(),
-            mode: RecordingMode::Hold,
-            #[cfg(any(feature = "interactive", feature = "waveform"))]
+            #[cfg(feature = "interactive")]
             level_task,
         };
         *slot = Some(session);
+        if cfg.general.auto_mute_system {
+            fono_audio::mute::set_default_sink_mute(true);
+        }
         info!("assistant recording started");
         Ok(())
     }
@@ -1481,6 +1457,9 @@ impl SessionOrchestrator {
                 // callback may still have a few frames in flight when
                 // the user releases the key.
                 let cfg = self.current_config();
+                if cfg.general.auto_mute_system {
+                    fono_audio::mute::set_default_sink_mute(false);
+                }
                 let grace_ms = u64::from(cfg.interactive.hold_release_grace_ms);
                 if grace_ms > 0 {
                     tokio::time::sleep(Duration::from_millis(grace_ms)).await;
@@ -1537,6 +1516,9 @@ impl SessionOrchestrator {
                 let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
                 return;
             };
+            if self.current_config().general.auto_mute_system {
+                fono_audio::mute::set_default_sink_mute(false);
+            }
             match tokio::task::spawn_blocking(move || session.stop_and_drain()).await {
                 Ok(t) => t,
                 Err(e) => {
@@ -1598,9 +1580,9 @@ impl SessionOrchestrator {
         if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
             o.set_state(fono_overlay::OverlayState::AssistantThinking);
         }
-        #[cfg(any(feature = "interactive", feature = "waveform"))]
+        #[cfg(feature = "interactive")]
         let thinking_task = self.spawn_thinking_animation_task(&cfg);
-        #[cfg(not(any(feature = "interactive", feature = "waveform")))]
+        #[cfg(not(feature = "interactive"))]
         let thinking_task: Option<tokio::task::AbortHandle> = None;
         let overlay_for_task = self.overlay.read().ok().and_then(|g| g.clone());
         let notify = Arc::new(Notify::new());
@@ -1673,6 +1655,13 @@ impl SessionOrchestrator {
         {
             let mut s = self.assistant_session.lock().await;
             s.stop_current_turn();
+        }
+        // Best-effort unmute on cancel: covers both an in-flight
+        // assistant recording (live or batch) and a turn still in
+        // its STT/LLM/TTS phase where we'd already unmuted — the
+        // call is idempotent.
+        if self.current_config().general.auto_mute_system {
+            fono_audio::mute::set_default_sink_mute(false);
         }
         #[cfg(feature = "interactive")]
         {
@@ -1777,7 +1766,7 @@ impl SessionOrchestrator {
         // overlay was already shifted to `Processing` in
         // `on_stop_recording`; we just clear it back to `Hidden` on
         // every terminal outcome.
-        #[cfg(any(feature = "interactive", feature = "waveform"))]
+        #[cfg(feature = "interactive")]
         let overlay = if config.overlay.waveform && !config.interactive.enabled {
             self.overlay.read().ok().and_then(|g| g.clone())
         } else {
@@ -1821,7 +1810,7 @@ impl SessionOrchestrator {
                     error!("pipeline failed: {msg}");
                 }
             }
-            #[cfg(any(feature = "interactive", feature = "waveform"))]
+            #[cfg(feature = "interactive")]
             if let Some(o) = overlay {
                 o.set_state(fono_overlay::OverlayState::Hidden);
             }
@@ -1879,7 +1868,6 @@ impl SessionOrchestrator {
     fn build_live_capture_pipeline(
         &self,
         streaming: Arc<dyn StreamingStt>,
-        mode: RecordingMode,
         active_state: fono_overlay::OverlayState,
     ) -> Result<LiveCaptureSession> {
         // Slice A: streaming pipeline operates at 16 kHz to keep the
@@ -2013,7 +2001,6 @@ impl SessionOrchestrator {
             run_join,
             overlay,
             started_at: Instant::now(),
-            mode,
         })
     }
 
@@ -2052,7 +2039,6 @@ impl SessionOrchestrator {
 
         let session = self.build_live_capture_pipeline(
             streaming,
-            mode,
             fono_overlay::OverlayState::LiveDictating,
         )?;
 

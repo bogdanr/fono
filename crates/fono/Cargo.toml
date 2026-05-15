@@ -20,13 +20,12 @@ name = "fono"
 path = "src/main.rs"
 
 [features]
-# Default release ships a single static binary with both local STT
-# (whisper.cpp via whisper-rs) and local LLM cleanup (llama.cpp via
-# llama-cpp-2). The duplicate-ggml symbol collision is resolved at
-# link time by `-Wl,--allow-multiple-definition` set in
-# `.cargo/config.toml`. Slim cloud-only build:
-# `cargo build --no-default-features --features tray`.
-default = ["tray", "local-models", "llama-local", "interactive", "waveform"]
+# Fono always ships local whisper.cpp STT and llama.cpp LLM cleanup;
+# cloud providers are additive. The default release builds a single
+# static binary with both locals enabled. The duplicate-ggml symbol
+# collision is resolved at link time by
+# `-Wl,--allow-multiple-definition` set in `.cargo/config.toml`.
+default = ["tray", "local-models", "llama-local", "interactive"]
 tray = ["fono-tray/tray-backend"]
 local-models = ["fono-stt/whisper-local"]
 llama-local = ["fono-llm/llama-local"]
@@ -42,11 +41,11 @@ accel-vulkan = ["fono-stt/accel-vulkan", "fono-llm/accel-vulkan"]
 accel-rocm = ["fono-stt/accel-hipblas", "fono-llm/accel-rocm"]
 accel-coreml = ["fono-stt/accel-coreml"]
 accel-openblas = ["fono-stt/accel-openblas"]
-# Live-dictation streaming pipeline. Plan v6 / Slice A. Flipped into
-# the default set in v0.2.2 — the released binary now ships with the
-# streaming overlay, `record --live`, and `test-overlay`. Slim
-# cloud-only builds (`--no-default-features --features tray,cloud-all`)
-# still opt in explicitly.
+# Live-dictation streaming pipeline + the audio-visualisation overlay
+# (bars/oscilloscope/FFT/heatmap) used during batch recording and on
+# the right side of the live panel. Default-on; the released binary
+# ships with the streaming overlay, `record --live`, and
+# `test-overlay`.
 interactive = [
     "fono-stt/streaming",
     "fono-audio/streaming",
@@ -55,21 +54,12 @@ interactive = [
     "dep:futures",
     "dep:tokio-stream",
 ]
-# Standalone audio-visualisation overlay (bars/oscilloscope/pulse) for
-# batch recording, plus the right-side VU bar on the live-dictation
-# panel. Both share fono-overlay/real-window with `interactive`; having
-# both features enabled simultaneously is safe because only one spawn
-# path fires at daemon startup. GUI-only — must be absent from any
-# future server feature profile.
-waveform = ["fono-overlay/real-window"]
 # X11 key injection via enigo (libxdo). Keep opt-in: requires `libxdo`
 # at build time, which isn't installed on every Linux desktop. Users
 # without `wtype`/`ydotool` on Wayland or `enigo` on X11 still get a
 # working dictation thanks to fono-inject's clipboard fallback (see
 # `fono_inject::type_text_with_outcome`).
 enigo = ["fono-inject/enigo-backend"]
-# Cloud meta-feature so a single flag enables all hosted providers.
-cloud-all = ["fono-stt/openai", "fono-stt/deepgram", "fono-llm/anthropic"]
 
 [dependencies]
 fono-core = { path = "../fono-core", features = ["vulkan-probe"] }
@@ -83,8 +73,7 @@ fono-stt = { path = "../fono-stt", features = ["groq", "openai", "openrouter", "
 # <provider>` and the wizard's primary picker work out of the box for
 # every catalogued provider without recompiling. Each feature only
 # adds an HTTP client (reqwest is already pulled in transitively); no
-# native deps. Slim cloud-only build:
-# `cargo build --no-default-features --features tray,cloud-all`.
+# native deps.
 fono-tts = { path = "../fono-tts", features = ["wyoming", "openai", "groq", "openrouter", "cartesia", "deepgram"] }
 fono-llm = { path = "../fono-llm", features = ["cerebras", "openai-compat", "anthropic"] }
 fono-assistant = { path = "../fono-assistant" }
@@ -96,8 +85,7 @@ fono-ipc = { path = "../fono-ipc" }
 fono-download = { path = "../fono-download" }
 fono-update = { path = "../fono-update" }
 # LAN servers (Wyoming today; mDNS + Fono-native land in Slices 4–6).
-# Default-on so `fono serve wyoming` works in the standard build; can
-# be disabled by slim builds via `default-features = false`.
+# Default-on so `fono serve wyoming` works in the standard build.
 fono-net = { path = "../fono-net", features = ["discovery"] }
 mdns-sd = { workspace = true }
 

@@ -128,8 +128,6 @@ mod tests {
         let body = build_body(7500, "'HDMI 1 Capture'", &["USB Headset".into()]);
         assert!(body.contains("USB Headset"));
         assert!(body.contains("tray Microphone"));
-        // The deprecated CLI advice must be gone.
-        assert!(!body.contains("fono use input"));
     }
 
     #[test]

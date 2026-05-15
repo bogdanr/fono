@@ -15,7 +15,6 @@ workspace = true
 [features]
 # winit + softbuffer pull a large dep tree; keep the overlay opt-in.
 default = []
-overlay-backend = ["dep:winit", "dep:softbuffer", "dep:ab_glyph"]
 # Real window with text rendering — used by live dictation. Plan R5.
 # Slice A keeps the overlay in-process (winit thread); subprocess
 # refactor is deferred to Slice B per ADR 0009.

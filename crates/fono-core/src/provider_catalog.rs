@@ -7,24 +7,14 @@
 //! support) and the TTS endpoint shape. The wizard, `fono use cloud`,
 //! and `fono doctor` consume this catalogue.
 //!
-//! Phase A (issues #9/#10/#11, plan
-//! `plans/2026-05-13-2026-05-13-wizard-catalogue-multimodal-and-multi-tts-issues-9-11-v2.md`)
-//! lands the data structures and reroutes `cloud_pair` through the
-//! catalogue. The wizard rewrite, TTS client wiring, and doctor
-//! upgrades land in later phases.
-//!
-//! Model strings carry inline references to the matching `default_*`
-//! function in `fono-stt::defaults` / `fono-llm::defaults` /
-//! `fono-tts::defaults` / `fono-assistant::factory::default_cloud_model`.
-//! Because `fono-core` is upstream of those crates (they depend on it,
-//! not the other way around), the literal `&'static str` constants
-//! cannot be re-exported back into `fono-core` without inverting the
-//! dependency direction. Keeping them as literal constants here, with
-//! the consumer-crate cross-reference as a comment, was the pragmatic
-//! Phase-A trade-off; a later refactor can move the model constants
-//! into this module and have the consumer crates `pub use` them.
-//!
-//! See the plan's "deviations" section for the corresponding entry.
+//! This catalogue is the **single source of truth** for default cloud
+//! model strings, default voices, key environment variable names, and
+//! TTS endpoint shapes. The thin wrappers in `fono-stt::defaults`,
+//! `fono-llm::defaults`, and `fono-assistant::factory` (all named
+//! `default_cloud_model`) read from here at runtime — to change the
+//! default model for a provider, edit only the relevant
+//! `CloudProvider` entry below. Consumer crates do not duplicate the
+//! literal model id any more.
 //!
 //! [`CLOUD_PROVIDERS`] enumerates every cloud provider currently
 //! referenced by `crates/fono-core/src/providers.rs`. Maintainers must
@@ -37,26 +27,23 @@ use crate::providers::{parse_llm_backend, parse_stt_backend};
 /// Defaults for a provider's speech-to-text capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SttDefaults {
-    /// Default STT model identifier. Mirrors
-    /// `fono_stt::defaults::default_cloud_model(provider)` for the
-    /// catalogue id. Drift between the two is caught at runtime by
-    /// the doctor; eventually the consumer crate should `pub use`
-    /// the constant defined here.
+    /// Default STT model identifier. Consumed by
+    /// `fono_stt::defaults::default_cloud_model`.
     pub model: &'static str,
 }
 
 /// Defaults for a provider's LLM cleanup capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LlmDefaults {
-    /// Default cleanup model. Mirrors
-    /// `fono_llm::defaults::default_cloud_model(provider)`.
+    /// Default cleanup model. Consumed by
+    /// `fono_llm::defaults::default_cloud_model`.
     pub model: &'static str,
 }
 
 /// Defaults for a provider's voice-assistant capability.
 #[derive(Debug, Clone, Copy)]
 pub struct AssistantDefaults {
-    /// Default chat model. Mirrors the per-provider default in
+    /// Default chat model. Consumed by
     /// `fono_assistant::factory::default_cloud_model`.
     pub text_model: &'static str,
     /// Multimodal sibling model where the provider exposes one — used
@@ -186,18 +173,15 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://platform.openai.com/api-keys",
         key_env: "OPENAI_API_KEY",
         stt: Some(SttDefaults {
-            // Mirrors fono_stt::defaults::default_cloud_model("openai").
             model: "whisper-1",
         }),
         llm: Some(LlmDefaults {
-            // Mirrors fono_llm::defaults::default_cloud_model("openai").
             model: "gpt-5.4-nano",
         }),
         // TODO: re-enable web search when fono-assistant migrates the
         // OpenAI client to the Responses API (POST /v1/responses). The
         // chat/completions API rejects unknown tool types.
         assistant: Some(AssistantDefaults {
-            // Mirrors fono_assistant::factory::default_cloud_model("openai").
             text_model: "gpt-5.4-mini",
             // GPT-5.4 family is multimodal; reuse the assistant default.
             multimodal_model: Some("gpt-5.4-mini"),
@@ -211,7 +195,6 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             ],
         }),
         tts: Some(TtsDefaults {
-            // Mirrors fono_tts::defaults::default_cloud_model("openai").
             model: "tts-1",
             default_voice: "alloy",
             endpoint: TtsEndpoint::OpenAiCompat {
@@ -235,15 +218,12 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://console.groq.com/keys",
         key_env: "GROQ_API_KEY",
         stt: Some(SttDefaults {
-            // Mirrors fono_stt::defaults::default_cloud_model("groq").
             model: "whisper-large-v3-turbo",
         }),
         llm: Some(LlmDefaults {
-            // Mirrors fono_llm::defaults::default_cloud_model("groq").
             model: "openai/gpt-oss-20b",
         }),
         assistant: Some(AssistantDefaults {
-            // Mirrors fono_assistant::factory::default_cloud_model("groq").
             text_model: "openai/gpt-oss-120b",
             // Groq currently exposes no vision-capable model Fono is
             // willing to default to. `openai/gpt-oss-120b` (the text
@@ -306,7 +286,6 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         key_env: "ANTHROPIC_API_KEY",
         stt: None,
         llm: Some(LlmDefaults {
-            // Mirrors fono_llm::defaults::default_cloud_model("anthropic").
             // TODO: verify against Anthropic's current model list — the
             // Groq Maverick incident (issue: 404 model_not_found)
             // exposed that the Phase A catalogue contained at least
@@ -315,7 +294,6 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             model: "claude-haiku-4-5-20251001",
         }),
         assistant: Some(AssistantDefaults {
-            // Mirrors fono_assistant::factory::default_cloud_model("anthropic").
             // TODO: verify against Anthropic's current model list.
             text_model: "claude-haiku-4-5-20251001",
             // Claude Haiku 4.5 is multimodal (image input supported).
@@ -334,11 +312,9 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         key_env: "CEREBRAS_API_KEY",
         stt: None,
         llm: Some(LlmDefaults {
-            // Mirrors fono_llm::defaults::default_cloud_model("cerebras").
             model: "llama3.1-8b",
         }),
         assistant: Some(AssistantDefaults {
-            // Mirrors fono_assistant::factory::default_cloud_model("cerebras").
             text_model: "qwen-3-235b-a22b-instruct-2507",
             multimodal_model: None,
             web_search: WebSearchSupport::None,
@@ -347,23 +323,20 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tts: None,
     },
     // ----- Gemini ------------------------------------------------------
+    // Catalogue keeps the Gemini entry for the LLM cleanup path
+    // (`LlmBackend::Gemini`); assistant chat / multimodal / search are
+    // unwired (no Gemini chat client yet) so `assistant` stays `None`.
     CloudProvider {
         id: "gemini",
         display_name: "Google Gemini",
-        tagline: "Gemini Flash with native Google Search grounding.",
+        tagline: "Gemini Flash (LLM cleanup only — chat client not wired yet).",
         console_url: "https://aistudio.google.com/app/apikey",
         key_env: "GEMINI_API_KEY",
         stt: None,
         llm: Some(LlmDefaults {
-            // Mirrors fono_llm::defaults::default_cloud_model("gemini").
             model: "gemini-1.5-flash",
         }),
-        assistant: Some(AssistantDefaults {
-            text_model: "gemini-1.5-flash",
-            multimodal_model: Some("gemini-1.5-flash"),
-            web_search: WebSearchSupport::NativeTool("google_search"),
-            badges: &[Badge::Llm, Badge::Assistant, Badge::Vision, Badge::Search],
-        }),
+        assistant: None,
         tts: None,
     },
     // ----- OpenRouter --------------------------------------------------
@@ -377,16 +350,13 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // OpenRouter proxies OpenAI-compatible
             // `POST /v1/audio/transcriptions` to upstream providers;
             // `openai/whisper-large-v3-turbo` routes to Groq's fastest
-            // Whisper model. Mirrors
-            // fono_stt::defaults::default_cloud_model("openrouter").
+            // Whisper model.
             model: "openai/whisper-large-v3-turbo",
         }),
         llm: Some(LlmDefaults {
-            // Mirrors fono_llm::defaults::default_cloud_model("openrouter").
             model: "openai/gpt-5.4-nano",
         }),
         assistant: Some(AssistantDefaults {
-            // Mirrors fono_assistant::factory::default_cloud_model("openrouter").
             text_model: "anthropic/claude-haiku-4.5",
             // Multimodal is route-dependent on OpenRouter; leave None
             // until the wizard surfaces explicit per-route choices.
@@ -397,38 +367,22 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             badges: &[Badge::Llm, Badge::Assistant, Badge::Tts],
         }),
         tts: Some(TtsDefaults {
-            // OpenAI classical `tts-1` via OpenRouter — single-pass
-            // (non-autoregressive) decoder, ~0.5-2 s synthesis
-            // regardless of input length, $15 / 1 M characters,
-            // OpenAI-compatible wire shape (24 kHz PCM).
-            //
-            // We previously defaulted to `openai/gpt-4o-mini-tts-…`
-            // for its higher-quality LLM-based voice, but
-            // OpenRouter's `/audio/speech` proxy was empirically
-            // unable to forward that model's streaming audio output:
-            // the proxy flushed an ~9.6 KB preamble and then buffered
-            // the rest of the body until upstream finished
-            // synthesising (~30+ s for typical replies), exceeding
-            // every reasonable client timeout. Verified via the
-            // `fono.http` instrumentation's one-shot stall hex dump —
-            // bytes were valid PCM, just never delivered. `tts-1`
-            // sidesteps the proxy-buffering problem entirely because
-            // a 200-char synthesis completes server-side in ~1 s and
-            // the whole body is forwarded in one go. Users who want
-            // the LLM-based voice can pin
-            // `openai/gpt-4o-mini-tts-2025-12-15` in `config.toml`
-            // and accept the failure mode on long replies (or switch
-            // to OpenAI direct, where streaming works correctly).
-            model: "openai/tts-1",
-            default_voice: "alloy",
+            // xAI's `grok-voice-tts-1.0` via OpenRouter. Replaces the
+            // previous `openai/tts-1` default — the OpenAI model is
+            // not exposed on OpenRouter today, and Grok Voice TTS
+            // works correctly through OpenRouter's `/audio/speech`
+            // proxy. Users who want a different voice can pin
+            // `model = "…"` and `voice = "…"` in `[tts.openrouter]`
+            // of `config.toml`.
+            model: "x-ai/grok-voice-tts-1.0",
+            default_voice: "ara",
             endpoint: TtsEndpoint::OpenAiCompat {
                 base_url: "https://openrouter.ai/api/v1",
                 response_format: "pcm",
-                // `tts-1` does not support SSE streaming and the
-                // OpenRouter proxy chokes on `stream_format = "audio"`
-                // for this model; omit the field entirely so the
-                // wire body is byte-identical to a plain OpenAI
-                // request.
+                // OpenRouter's `/audio/speech` proxy is conservative
+                // about unknown request fields for non-OpenAI models;
+                // omit `stream_format` so the wire body matches the
+                // shape we know works.
                 stream_format: None,
             },
             runtime_probe: false,
@@ -442,7 +396,6 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://console.deepgram.com/",
         key_env: "DEEPGRAM_API_KEY",
         stt: Some(SttDefaults {
-            // Mirrors fono_stt::defaults::default_cloud_model("deepgram").
             model: "nova-2",
         }),
         llm: None,
@@ -465,7 +418,6 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://www.assemblyai.com/app/account",
         key_env: "ASSEMBLYAI_API_KEY",
         stt: Some(SttDefaults {
-            // Mirrors fono_stt::defaults::default_cloud_model("assemblyai").
             model: "best",
         }),
         llm: None,
@@ -480,7 +432,6 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://play.cartesia.ai/keys",
         key_env: "CARTESIA_API_KEY",
         stt: Some(SttDefaults {
-            // Mirrors fono_stt::defaults::default_cloud_model("cartesia").
             model: "sonic-transcribe",
         }),
         llm: None,
@@ -506,7 +457,6 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://portal.azure.com/",
         key_env: "AZURE_API_KEY",
         stt: Some(SttDefaults {
-            // Mirrors fono_stt::defaults::default_cloud_model("azure").
             model: "whisper",
         }),
         llm: None,
@@ -521,8 +471,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://portal.speechmatics.com/",
         key_env: "SPEECHMATICS_API_KEY",
         stt: Some(SttDefaults {
-            // No specific default in fono_stt::defaults yet; uses the
-            // generic Whisper fallback.
+            // No specific entry yet; generic Whisper fallback.
             model: "whisper-large-v3",
         }),
         llm: None,
@@ -537,7 +486,6 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://console.cloud.google.com/",
         key_env: "GOOGLE_API_KEY",
         stt: Some(SttDefaults {
-            // Mirrors fono_stt::defaults::default_cloud_model("google").
             model: "default",
         }),
         llm: None,
@@ -552,8 +500,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://build.nvidia.com/",
         key_env: "NEMOTRON_API_KEY",
         stt: Some(SttDefaults {
-            // No specific default in fono_stt::defaults yet; uses the
-            // generic Whisper fallback.
+            // No specific entry yet; generic Whisper fallback.
             model: "whisper-large-v3",
         }),
         llm: None,
@@ -738,7 +685,7 @@ mod tests {
         for b in crate::providers::all_assistant_backends() {
             if matches!(
                 b,
-                AssistantBackend::None | AssistantBackend::Local | AssistantBackend::Ollama
+                AssistantBackend::None | AssistantBackend::Ollama
             ) {
                 continue;
             }
@@ -753,7 +700,7 @@ mod tests {
         for b in crate::providers::all_tts_backends() {
             if matches!(
                 b,
-                TtsBackend::None | TtsBackend::Wyoming | TtsBackend::Piper
+                TtsBackend::None | TtsBackend::Wyoming
             ) {
                 continue;
             }
@@ -853,11 +800,6 @@ mod tests {
                 "anthropic",
                 Some("claude-haiku-4-5-20251001"),
                 WebSearchSupport::NativeTool("web_search_20250305"),
-            ),
-            (
-                "gemini",
-                Some("gemini-1.5-flash"),
-                WebSearchSupport::NativeTool("google_search"),
             ),
             // Groq: no multimodal model in the catalogue today — the
             // previously advertised `llama-4-maverick-17b-128e-instruct`

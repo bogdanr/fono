@@ -761,11 +761,11 @@ mod tests {
         let c = openrouter_client("sk-or-x", None, None);
         assert_eq!(c.base_url(), "https://openrouter.ai/api/v1");
         assert_eq!(c.speech_url(), "https://openrouter.ai/api/v1/audio/speech");
-        assert_eq!(c.default_model(), "openai/tts-1");
-        assert_eq!(c.default_voice(), "alloy");
-        // OpenRouter's proxy was empirically unable to forward
-        // `gpt-4o-mini-tts`'s streaming output; we default to the
-        // classical `tts-1` and omit `stream_format` entirely.
+        assert_eq!(c.default_model(), "x-ai/grok-voice-tts-1.0");
+        assert_eq!(c.default_voice(), "ara");
+        // OpenRouter's `/audio/speech` proxy is conservative about
+        // unknown request fields for non-OpenAI models; the catalogue
+        // intentionally omits `stream_format`.
         assert_eq!(c.stream_format(), None);
     }
 

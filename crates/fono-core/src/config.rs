@@ -344,10 +344,10 @@ pub struct SttWyoming {
 
 /// `[tts]` — text-to-speech for the voice-assistant path. Off by
 /// default (`backend = none`); enabling it requires either a Wyoming
-/// TTS server on the LAN, the OpenAI TTS API, or a future in-process
-/// Piper build. The TTS pipeline is fully independent of `[stt]` /
-/// `[llm]`: a user can dictate with cloud STT + local cleanup and run
-/// the assistant against a different cloud + Wyoming TTS.
+/// TTS server on the LAN or a cloud TTS API. The TTS pipeline is
+/// fully independent of `[stt]` / `[llm]`: a user can dictate with
+/// cloud STT + local cleanup and run the assistant against a
+/// different cloud + Wyoming TTS.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Tts {
@@ -384,10 +384,6 @@ pub enum TtsBackend {
     /// Wyoming-protocol TTS server on the LAN (e.g. `wyoming-piper`).
     /// Configure via `[tts.wyoming]`.
     Wyoming,
-    /// In-process Piper. **Stub in v1** — onnxruntime conflicts with
-    /// the static-musl ship build. The factory returns a clear error
-    /// pointing the user at the Wyoming backend.
-    Piper,
     /// OpenAI `/v1/audio/speech` API. Configure via `[tts.cloud]`.
     OpenAI,
     /// Groq's OpenAI-compatible `/audio/speech` endpoint (Orpheus TTS).
@@ -606,7 +602,7 @@ pub struct Assistant {
     /// When `true`, the assistant's request builder appends the
     /// provider's native web-search tool to the `tools` field on
     /// every turn (OpenAI `web_search_preview`, Anthropic
-    /// `web_search_20250305`, Gemini `google_search`). No-op for
+    /// `web_search_20250305`). No-op for
     /// providers whose catalogue entry says `WebSearchSupport::None`.
     /// Defaults to `false` until OpenAI's chat/completions gains a
     /// stable tool descriptor for web search (today it's a Responses
@@ -640,10 +636,8 @@ impl Default for Assistant {
 #[serde(rename_all = "lowercase")]
 pub enum AssistantBackend {
     None,
-    Local,
     OpenAI,
     Anthropic,
-    Gemini,
     Groq,
     Cerebras,
     OpenRouter,
@@ -1114,6 +1108,37 @@ pub fn default_dangling_words() -> Vec<String> {
 }
 
 impl Config {
+    /// Is the text-to-speech surface actually usable?
+    ///
+    /// Onboarding signal — single source of truth for both the
+    /// "you haven't configured TTS yet" startup notification and the
+    /// tray left-click branch. Returns true iff the configured backend
+    /// is something other than [`TtsBackend::None`] **and** the
+    /// matching credential / endpoint is reachable:
+    ///
+    /// * [`TtsBackend::Wyoming`] → `[tts.wyoming].uri` is non-empty.
+    /// * Cloud (OpenAI / Groq / OpenRouter / Cartesia / Deepgram) →
+    ///   the matching API key resolves from `secrets.toml`.
+    #[must_use]
+    pub fn tts_configured(&self, secrets: &crate::Secrets) -> bool {
+        match self.tts.backend {
+            TtsBackend::None => false,
+            TtsBackend::Wyoming => self
+                .tts
+                .wyoming
+                .as_ref()
+                .is_some_and(|w| !w.uri.trim().is_empty()),
+            TtsBackend::OpenAI
+            | TtsBackend::Groq
+            | TtsBackend::OpenRouter
+            | TtsBackend::Cartesia
+            | TtsBackend::Deepgram => {
+                let env = crate::providers::tts_key_env(&self.tts.backend);
+                !env.is_empty() && secrets.has_in_file(env)
+            }
+        }
+    }
+
     /// Load from disk; if the file does not exist, return defaults (caller
     /// may choose to persist them via [`Config::save`]).
     pub fn load(path: &Path) -> Result<Self> {
@@ -1376,5 +1401,65 @@ mod tests {
         assert!(cfg.assistant.enabled);
         assert!(cfg.assistant.prefer_vision);
         assert!(!cfg.assistant.prefer_web_search);
+    }
+
+    // ----- tts_configured onboarding predicate ------------------------
+
+    #[test]
+    fn tts_configured_default_is_false() {
+        let cfg = Config::default();
+        let secrets = crate::Secrets::default();
+        assert!(!cfg.tts_configured(&secrets));
+    }
+
+    #[test]
+    fn tts_configured_wyoming_requires_non_empty_uri() {
+        let mut cfg = Config::default();
+        cfg.tts.backend = TtsBackend::Wyoming;
+        let secrets = crate::Secrets::default();
+        // No wyoming block at all → not configured.
+        assert!(!cfg.tts_configured(&secrets));
+        // Block present but empty URI → not configured.
+        cfg.tts.wyoming = Some(TtsWyoming {
+            uri: String::new(),
+            auth_token_ref: String::new(),
+        });
+        assert!(!cfg.tts_configured(&secrets));
+        // Non-empty URI → configured.
+        cfg.tts.wyoming = Some(TtsWyoming {
+            uri: "tcp://10.0.0.5:10200".into(),
+            auth_token_ref: String::new(),
+        });
+        assert!(cfg.tts_configured(&secrets));
+    }
+
+    #[test]
+    fn tts_configured_cloud_requires_secret() {
+        let mut cfg = Config::default();
+        cfg.tts.backend = TtsBackend::OpenAI;
+        let mut secrets = crate::Secrets::default();
+        // Empty secrets → not configured even though the backend is
+        // selected.
+        assert!(!cfg.tts_configured(&secrets));
+        // Secret present → configured.
+        secrets.insert("OPENAI_API_KEY", "sk-test");
+        assert!(cfg.tts_configured(&secrets));
+    }
+
+    #[test]
+    fn tts_configured_ignores_env_only_keys() {
+        // The onboarding predicate must read secrets.toml only, not
+        // the process environment. A stray exported key must not flip
+        // the user's onboarding state.
+        std::env::set_var("GROQ_API_KEY", "leaky-env-value");
+        let mut cfg = Config::default();
+        cfg.tts.backend = TtsBackend::Groq;
+        let secrets = crate::Secrets::default();
+        let configured = cfg.tts_configured(&secrets);
+        std::env::remove_var("GROQ_API_KEY");
+        assert!(
+            !configured,
+            "env-only GROQ_API_KEY must not satisfy tts_configured"
+        );
     }
 }

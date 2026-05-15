@@ -126,30 +126,20 @@ fn resolve_cloud(
     })
 }
 
-/// Default chat model per provider. Tuned for the assistant's "1-3
-/// sentences, fast" contract — mid-tier where possible.
+/// Default chat model per provider. Reads from the cloud-provider
+/// catalogue (`fono_core::provider_catalog`), which is the single
+/// source of truth for default model strings. Ollama is special-cased
+/// because it has no catalogue entry (it's a self-hosted local
+/// server, not a cloud provider). Returns an empty string for
+/// unknown ids — the factory surfaces that as a config error.
 #[cfg(any(feature = "openai-compat", feature = "anthropic"))]
 fn default_cloud_model(provider: &str) -> &'static str {
-    match provider {
-        "anthropic" => "claude-haiku-4-5-20251001",
-        // OpenAI: assistant uses the larger sibling of the cleanup
-        // model so it can sustain a multi-turn conversation.
-        "openai" => "gpt-5.4-mini",
-        // Cerebras: qwen-3-235b-a22b-instruct-2507 is the default
-        // because it's available on every Cerebras tier (the
-        // alternative `gpt-oss-120b` is gated to billable / preview
-        // accounts and 404s on free-tier keys). Groq exposes OpenAI's
-        // open-weight gpt-oss-120b under an `openai/` namespace
-        // prefix and serves it without per-account gating, so it
-        // stays the Groq default.
-        "cerebras" => "qwen-3-235b-a22b-instruct-2507",
-        "groq" => "openai/gpt-oss-120b",
-        "openrouter" => "anthropic/claude-haiku-4.5",
-        // Ollama: user must configure their own — "default" model
-        // names depend on what they've pulled.
-        "ollama" => "llama3.2",
-        _ => "",
+    if provider == "ollama" {
+        return "llama3.2";
     }
+    provider_catalog::find(provider)
+        .and_then(|p| p.assistant.as_ref())
+        .map_or("", |a| a.text_model)
 }
 
 /// Construct an assistant backend from `cfg`. Returns `Ok(None)` for
@@ -170,11 +160,6 @@ pub fn build_assistant(
         AssistantBackend::OpenRouter => build_openrouter(cfg, secrets).map(Some),
         AssistantBackend::Ollama => build_ollama(cfg).map(Some),
         AssistantBackend::Anthropic => build_anthropic(cfg, secrets).map(Some),
-        AssistantBackend::Local => build_local(cfg).map(Some),
-        AssistantBackend::Gemini => Err(anyhow!(
-            "Gemini assistant backend is not implemented yet — pick anthropic, \
-             cerebras, openai, groq, openrouter, ollama, or local"
-        )),
     }
 }
 
@@ -294,18 +279,6 @@ fn build_anthropic(_cfg: &AssistantCfg, _secrets: &Secrets) -> Result<Arc<dyn As
     ))
 }
 
-fn build_local(_cfg: &AssistantCfg) -> Result<Arc<dyn Assistant>> {
-    // Stub. Streaming local llama.cpp wires through the same mutex-
-    // guarded inference context as the cleanup path; threading
-    // streaming through it is a follow-up. For now point users at a
-    // cloud backend.
-    Err(anyhow!(
-        "local llama.cpp assistant streaming is not yet implemented in this build. Pick a \
-         cloud backend (anthropic, cerebras, openai, groq, openrouter) or run an Ollama \
-         server locally and select `ollama` instead."
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,37 +352,6 @@ mod tests {
         let mut secrets = Secrets::default();
         secrets.insert("OPENAI_API_KEY", "sk-test");
         assert!(build_assistant(&cfg, &secrets).unwrap().is_some());
-    }
-
-    #[test]
-    fn local_backend_errors_with_helpful_pointer() {
-        let cfg = AssistantCfg {
-            enabled: true,
-            backend: AssistantBackend::Local,
-            ..AssistantCfg::default()
-        };
-        let err = build_assistant(&cfg, &Secrets::default())
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(err.contains("ollama") || err.contains("cloud"), "{err}");
-    }
-
-    #[test]
-    fn gemini_errors_for_unimplemented() {
-        let cfg = AssistantCfg {
-            enabled: true,
-            backend: AssistantBackend::Gemini,
-            ..AssistantCfg::default()
-        };
-        let err = build_assistant(&cfg, &Secrets::default())
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(
-            err.contains("Gemini") || err.contains("not implemented"),
-            "{err}"
-        );
     }
 
     // ── Phase E4 + E5: resolve_cloud unit tests ───────────────────

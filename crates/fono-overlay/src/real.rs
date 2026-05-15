@@ -884,8 +884,7 @@ fn draw_fft(
             }
         }
     }
-    let _ = scale; // silence unused (kept for API symmetry)
-                   // Floor line so silence still looks alive.
+    // Floor line so silence still looks alive.
     let floor_y = y_bot.round() as i32;
     if floor_y >= 0 && (floor_y as u32) < h {
         let xi0 = x0.max(0.0).round() as i32;

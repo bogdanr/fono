@@ -78,8 +78,8 @@ pub struct UpdateInfo {
     /// Release was flagged prerelease on GitHub.
     pub prerelease: bool,
     /// URL of the asset's `.sha256` sidecar, when one was published
-    /// alongside the release. `None` for legacy releases (v0.1.x /
-    /// v0.2.x) that predate per-asset sidecars.
+    /// alongside the release. `None` when the release predates the
+    /// per-asset sidecar convention or omits one.
     #[serde(default)]
     pub sha256_url: Option<String>,
     /// Pre-fetched sidecar digest (lowercase hex). Populated by
@@ -210,9 +210,6 @@ fn current_arch() -> Option<&'static str> {
 #[derive(Debug, Deserialize)]
 struct GhRelease {
     tag_name: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    name: Option<String>,
     #[serde(default)]
     body: Option<String>,
     #[serde(default)]

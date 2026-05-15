@@ -1817,3 +1817,30 @@ fn test_overlay_cmd() {
     println!("test-overlay: shutting down");
     handle.shutdown();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every directive string produced by `Verbosity::as_filter`
+    /// must round-trip through `tracing_subscriber::filter::Targets`
+    /// because that is what `init_tracing` parses at startup. This
+    /// guards against the directive-format regressions we used to
+    /// not catch — most notably `llama-cpp-2=error` (hyphenated
+    /// target name) and the bare-level default token at either end
+    /// of the comma-separated list.
+    #[test]
+    fn verbosity_filters_parse_as_targets() {
+        use tracing_subscriber::filter::Targets;
+        for v in [
+            Verbosity::Quiet,
+            Verbosity::Info,
+            Verbosity::Debug,
+            Verbosity::Trace,
+        ] {
+            let s = v.as_filter();
+            s.parse::<Targets>()
+                .unwrap_or_else(|e| panic!("Verbosity::{v:?} filter {s:?} failed to parse: {e}"));
+        }
+    }
+}

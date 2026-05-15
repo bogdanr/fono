@@ -37,6 +37,11 @@ Target users: Linux desktop (i3 / sway / KDE / GNOME, X11 and Wayland), Windows,
 ## Hard rules for agent sessions
 
 - All commits **MUST** be signed off (`git commit -s`) — DCO enforced by CI.
+- **NEVER** add a `Co-authored-by: Forge <forge@noreply.local>` trailer (or any
+  agent / assistant co-author trailer) to commit messages — not on new commits,
+  not when rewording, not when squashing. The agent is a tool, not an author.
+  When squashing history, strip any pre-existing `Co-authored-by: Forge …`
+  lines from the combined message. This rule is permanent.
 - Every Rust source file **MUST** start with `// SPDX-License-Identifier: GPL-3.0-only`
   on line 1.
 - Do **NOT** add dependencies without updating `deny.toml` and verifying the licenses

@@ -30,8 +30,6 @@ use tokio::time::timeout;
 use crate::lang::LanguageSelection;
 use crate::traits::{SpeechToText, Transcription};
 
-#[allow(dead_code)] // reserved for the LanguageCache wiring in Slice 4
-pub(crate) const BACKEND_KEY: &str = "wyoming";
 const DEFAULT_PORT: u16 = 10300;
 /// Send PCM in ~125 ms chunks (2 KiB at 16 kHz int16 mono). Small enough
 /// to keep a streaming server's pipeline busy, large enough that we
