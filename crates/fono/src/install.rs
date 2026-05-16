@@ -560,8 +560,12 @@ fn run_install_desktop() -> Result<()> {
             println!("It will also start automatically on next login via {DESKTOP_AUTOSTART}.");
         }
         AutostartOutcome::SkippedByEnv => {
-            println!("Fono installed (desktop mode). Auto-start skipped (FONO_INSTALL_NO_START=1).");
-            println!("It will start automatically on next graphical login via {DESKTOP_AUTOSTART}.");
+            println!(
+                "Fono installed (desktop mode). Auto-start skipped (FONO_INSTALL_NO_START=1)."
+            );
+            println!(
+                "It will start automatically on next graphical login via {DESKTOP_AUTOSTART}."
+            );
         }
         AutostartOutcome::Headless => {
             println!("Fono installed (desktop mode), but this session looks headless");

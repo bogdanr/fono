@@ -1229,9 +1229,7 @@ impl SessionOrchestrator {
             if cfg.overlay.waveform && !cfg.interactive.enabled {
                 let stt_local = self.current_stt().is_local();
                 let llm_local = cfg.interactive.cleanup_on_finalize
-                    && self
-                        .current_llm()
-                        .is_some_and(|l| l.is_local());
+                    && self.current_llm().is_some_and(|l| l.is_local());
                 let animate = stt_local || llm_local;
                 if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
                     o.set_state(if animate {
@@ -2074,10 +2072,8 @@ impl SessionOrchestrator {
             return Ok(());
         }
 
-        let session = self.build_live_capture_pipeline(
-            streaming,
-            fono_overlay::OverlayState::LiveDictating,
-        )?;
+        let session =
+            self.build_live_capture_pipeline(streaming, fono_overlay::OverlayState::LiveDictating)?;
 
         let cfg = self.current_config();
         if cfg.general.auto_mute_system {

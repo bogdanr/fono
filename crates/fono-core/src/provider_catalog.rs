@@ -172,9 +172,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Flagship multimodal models with native web search and TTS.",
         console_url: "https://platform.openai.com/api-keys",
         key_env: "OPENAI_API_KEY",
-        stt: Some(SttDefaults {
-            model: "whisper-1",
-        }),
+        stt: Some(SttDefaults { model: "whisper-1" }),
         llm: Some(LlmDefaults {
             model: "gpt-5.4-nano",
         }),
@@ -395,9 +393,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Real-time Nova STT and Aura voice TTS.",
         console_url: "https://console.deepgram.com/",
         key_env: "DEEPGRAM_API_KEY",
-        stt: Some(SttDefaults {
-            model: "nova-2",
-        }),
+        stt: Some(SttDefaults { model: "nova-2" }),
         llm: None,
         assistant: None,
         tts: Some(TtsDefaults {
@@ -417,9 +413,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "High-accuracy STT with rich post-processing options.",
         console_url: "https://www.assemblyai.com/app/account",
         key_env: "ASSEMBLYAI_API_KEY",
-        stt: Some(SttDefaults {
-            model: "best",
-        }),
+        stt: Some(SttDefaults { model: "best" }),
         llm: None,
         assistant: None,
         tts: None,
@@ -456,9 +450,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Azure Cognitive Services Speech-to-Text (planned).",
         console_url: "https://portal.azure.com/",
         key_env: "AZURE_API_KEY",
-        stt: Some(SttDefaults {
-            model: "whisper",
-        }),
+        stt: Some(SttDefaults { model: "whisper" }),
         llm: None,
         assistant: None,
         tts: None,
@@ -485,9 +477,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Google Cloud Speech-to-Text (planned).",
         console_url: "https://console.cloud.google.com/",
         key_env: "GOOGLE_API_KEY",
-        stt: Some(SttDefaults {
-            model: "default",
-        }),
+        stt: Some(SttDefaults { model: "default" }),
         llm: None,
         assistant: None,
         tts: None,
@@ -683,10 +673,7 @@ mod tests {
             );
         }
         for b in crate::providers::all_assistant_backends() {
-            if matches!(
-                b,
-                AssistantBackend::None | AssistantBackend::Ollama
-            ) {
+            if matches!(b, AssistantBackend::None | AssistantBackend::Ollama) {
                 continue;
             }
             let id = assistant_backend_str(&b);
@@ -698,10 +685,7 @@ mod tests {
             );
         }
         for b in crate::providers::all_tts_backends() {
-            if matches!(
-                b,
-                TtsBackend::None | TtsBackend::Wyoming
-            ) {
+            if matches!(b, TtsBackend::None | TtsBackend::Wyoming) {
                 continue;
             }
             let id = tts_backend_str(&b);

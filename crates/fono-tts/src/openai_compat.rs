@@ -409,7 +409,13 @@ impl OpenAiCompatTtsClient {
                             .join(" ");
                         let ascii: String = head
                             .iter()
-                            .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+                            .map(|&b| {
+                                if (0x20..0x7f).contains(&b) {
+                                    b as char
+                                } else {
+                                    '.'
+                                }
+                            })
                             .collect();
                         tracing::warn!(
                             target: "fono.http",

@@ -1715,8 +1715,7 @@ fn pick_local_stt_model(
             // genuinely Comfortable; a Borderline entry at position 0
             // already carries a "may lag" suffix, so adding
             // "(recommended)" alongside it would contradict itself.
-            let default_tag = if i == 0
-                && matches!(entry.affordability, Affordability::Comfortable)
+            let default_tag = if i == 0 && matches!(entry.affordability, Affordability::Comfortable)
             {
                 "  (recommended)"
             } else {
@@ -2212,13 +2211,7 @@ mod tests {
         // Spot-check the hand-curated table: every catalogue entry
         // with assistant defaults should map to a friendly label, not
         // the raw model id.
-        for id in [
-            "openai",
-            "anthropic",
-            "groq",
-            "cerebras",
-            "openrouter",
-        ] {
+        for id in ["openai", "anthropic", "groq", "cerebras", "openrouter"] {
             let entry = find(id).expect("catalogue entry");
             let pretty = humanize_chat_model(entry);
             let raw = entry

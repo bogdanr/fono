@@ -179,13 +179,7 @@ pub async fn read_body_with_watchdog(
                 timings.mark_body_done();
                 let final_bytes = Bytes::from(buf);
                 let len = final_bytes.len() as u64;
-                return Ok((
-                    final_bytes,
-                    BodyStats {
-                        bytes: len,
-                        chunks,
-                    },
-                ));
+                return Ok((final_bytes, BodyStats { bytes: len, chunks }));
             }
             Ok(Some(Err(e))) => {
                 return Err(BodyError::Transport {

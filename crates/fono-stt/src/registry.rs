@@ -419,7 +419,10 @@ mod tests {
         let snap = fake_snap(8, 16, true);
         let picked = ModelRegistry::pick_default_local(&snap);
         let info = ModelRegistry::get(picked).expect("picked model unknown");
-        assert!(info.multilingual, "default must be multilingual; got {picked}");
+        assert!(
+            info.multilingual,
+            "default must be multilingual; got {picked}"
+        );
     }
 
     #[test]

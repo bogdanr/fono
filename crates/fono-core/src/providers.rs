@@ -233,10 +233,7 @@ pub const fn assistant_key_env(b: &AssistantBackend) -> &'static str {
 
 #[must_use]
 pub const fn assistant_requires_key(b: &AssistantBackend) -> bool {
-    !matches!(
-        b,
-        AssistantBackend::None | AssistantBackend::Ollama
-    )
+    !matches!(b, AssistantBackend::None | AssistantBackend::Ollama)
 }
 
 /// Paired cloud preset for `fono use cloud <name>`. Returns `(stt, llm)`

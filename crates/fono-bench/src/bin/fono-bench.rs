@@ -328,10 +328,11 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
                 // LXCs where 32 threads make tiny clips slower than 8).
                 // Production code is untouched; this affects only the
                 // bench binary.
-                let stt: Arc<dyn fono_stt::SpeechToText> = if let Some(t) = std::env::var("FONO_WHISPER_THREADS")
-                    .ok()
-                    .and_then(|s| s.parse::<i32>().ok())
-                    .filter(|&t| t > 0)
+                let stt: Arc<dyn fono_stt::SpeechToText> = if let Some(t) =
+                    std::env::var("FONO_WHISPER_THREADS")
+                        .ok()
+                        .and_then(|s| s.parse::<i32>().ok())
+                        .filter(|&t| t > 0)
                 {
                     Arc::new(fono_stt::whisper_local::WhisperLocal::with_threads(path, t))
                 } else {
