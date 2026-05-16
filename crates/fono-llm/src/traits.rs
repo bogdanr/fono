@@ -129,6 +129,19 @@ pub trait TextFormatter: Send + Sync {
     async fn prewarm(&self) -> Result<()> {
         Ok(())
     }
+
+    /// True for backends that run entirely on the local machine
+    /// (llama.cpp, future Ollama). Cloud backends (OpenAI-compat,
+    /// Anthropic, Groq, Cerebras, OpenRouter) leave this at the
+    /// `false` default.
+    ///
+    /// Used by the orchestrator to decide whether the post-release
+    /// "polishing" overlay should run the synthetic animation:
+    /// multi-second local cleanup benefits from active feedback,
+    /// sub-second cloud cleanup would just flash.
+    fn is_local(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

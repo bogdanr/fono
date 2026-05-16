@@ -89,6 +89,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when stdout is not a TTY (pipes, redirects, CI) and when `NO_COLOR`
   is set, so scripts parsing the output remain unaffected.
 
+- **Animated "POLISHING" overlay for local STT/LLM.** The
+  standalone-waveform overlay's post-release phase used to show a
+  static "POLISHING" panel while STT (and optional LLM cleanup) ran;
+  with a local whisper.cpp backend that's a 1–3 s dead patch where
+  the user has no signal the dictation is actually progressing. The
+  overlay now reuses the assistant's per-style thinking animation
+  (FFT bell sweep, neural-strand heatmap, oscilloscope standing
+  wave, centre-out bars) during that phase whenever the active STT
+  backend reports `is_local()` — or whenever LLM cleanup is enabled
+  and the LLM is local. Cloud STT+LLM (sub-second) keep the static
+  panel so it doesn't just flash. Implemented via a new
+  `OverlayState::Polishing` variant that shares the amber accent +
+  "POLISHING" label with the existing `Processing` state but is
+  consumed by the same synthetic-frame renderer path as
+  `AssistantThinking`. New default `is_local()` method on both the
+  `SpeechToText` and `StreamingStt` traits (also `TextFormatter`),
+  overridden to `true` only in the `whisper-local` and `llama-local`
+  backends.
+
 ### Fixed
 
 - **OpenRouter TTS default swapped from `openai/gpt-4o-mini-tts-…` to

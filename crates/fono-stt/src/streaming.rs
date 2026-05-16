@@ -115,6 +115,14 @@ pub trait StreamingStt: Send + Sync {
 
     /// Backend identifier for history / logging.
     fn name(&self) -> &'static str;
+
+    /// True for backends that run entirely on the local machine.
+    /// Mirror of [`crate::SpeechToText::is_local`]; see that doc
+    /// comment for the orchestrator-side rationale (drives the
+    /// post-release "polishing" overlay animation gate).
+    fn is_local(&self) -> bool {
+        false
+    }
 }
 
 /// One element of the input stream consumed by [`StreamingStt`]. Defined

@@ -293,6 +293,10 @@ impl TextFormatter for LlamaLocal {
         "llama-local"
     }
 
+    fn is_local(&self) -> bool {
+        true
+    }
+
     async fn prewarm(&self) -> Result<()> {
         let me = self.clone_thin();
         tokio::task::spawn_blocking(move || me.ensure_loaded())

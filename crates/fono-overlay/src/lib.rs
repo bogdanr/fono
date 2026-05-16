@@ -35,6 +35,16 @@ pub enum OverlayState {
     /// glance.
     AssistantThinking,
     Processing,
+    /// Dictation post-release: STT and/or LLM cleanup is running and
+    /// is expected to take long enough (local backends) to warrant a
+    /// live animation. Same synthetic-frame contract as
+    /// [`Self::AssistantThinking`] — the orchestrator pushes
+    /// per-style time-evolving frames at 20 fps — but the renderer
+    /// paints with the amber `Processing` palette and a "POLISHING"
+    /// title so the user can tell apart from the assistant pipeline
+    /// at a glance. Cloud STT/LLM keep the static `Processing` state
+    /// because their post-release phase is sub-second.
+    Polishing,
     /// Live dictation in progress. The text is shown via
     /// [`OverlayHandle::update_text`].
     LiveDictating,

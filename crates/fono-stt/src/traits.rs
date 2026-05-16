@@ -38,4 +38,17 @@ pub trait SpeechToText: Send + Sync {
     async fn prewarm(&self) -> Result<()> {
         Ok(())
     }
+
+    /// True for backends that run entirely on the local machine
+    /// (whisper.cpp, local-only Wyoming, future Vosk). Cloud backends
+    /// (OpenAI, Groq, OpenRouter) leave this at the `false` default.
+    ///
+    /// Used by the orchestrator to decide whether the post-release
+    /// "polishing" overlay should run the synthetic thinking
+    /// animation: local backends take 1–3 s and benefit from active
+    /// feedback; cloud backends finish sub-second and would just
+    /// flash.
+    fn is_local(&self) -> bool {
+        false
+    }
 }

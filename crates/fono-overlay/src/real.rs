@@ -296,8 +296,9 @@ fn accent_color(state: OverlayState) -> u32 {
         // Matches the tray's `Processing` state so both surfaces
         // tell the same colour story.
         OverlayState::AssistantThinking => 0xFFF5_9E0B,
-        // Warm amber (processing / polishing).
-        OverlayState::Processing => 0xFFE0_A040,
+        // Warm amber (processing / polishing). `Polishing` shares
+        // the same accent — it's `Processing` plus a live animation.
+        OverlayState::Processing | OverlayState::Polishing => 0xFFE0_A040,
         // Vibrant indigo (live dictation).
         OverlayState::LiveDictating => 0xFF63_7AFF,
     }
@@ -309,7 +310,7 @@ fn state_label(state: OverlayState) -> &'static str {
         OverlayState::Recording { .. } => "RECORDING",
         OverlayState::AssistantRecording { .. } => "ASSISTANT",
         OverlayState::AssistantThinking => "THINKING",
-        OverlayState::Processing => "POLISHING",
+        OverlayState::Processing | OverlayState::Polishing => "POLISHING",
         OverlayState::LiveDictating => "LIVE",
     }
 }
@@ -1564,7 +1565,7 @@ fn run_event_loop(
                             (self.mode, self.state),
                             (
                                 OverlayMode::Waveform(WaveformStyle::Bars),
-                                OverlayState::AssistantThinking
+                                OverlayState::AssistantThinking | OverlayState::Polishing
                             )
                         );
                         if consumes_fft
@@ -1756,13 +1757,17 @@ fn run_event_loop(
                         OverlayState::Recording { .. }
                             | OverlayState::AssistantRecording { .. }
                             | OverlayState::AssistantThinking
+                            | OverlayState::Polishing
                     ) =>
                 {
                     let x0 = (PADDING_X + ACCENT_WIDTH) * scale;
                     let x1 = w as f32 - PADDING_X * scale;
                     let y_top = text_top;
                     let y_bot = h as f32 - PADDING_BOT * scale;
-                    let thinking = matches!(app.state, OverlayState::AssistantThinking);
+                    let thinking = matches!(
+                        app.state,
+                        OverlayState::AssistantThinking | OverlayState::Polishing
+                    );
                     match style {
                         // During AssistantThinking the orchestrator
                         // pushes a per-bar profile via fft_frames

@@ -1219,15 +1219,38 @@ impl SessionOrchestrator {
         if cfg.general.auto_mute_system {
             fono_audio::mute::set_default_sink_mute(false);
         }
-        // Standalone-waveform overlay: shift to amber `Processing`
-        // while STT runs. Live-dictation mode owns its own state
-        // transitions; only flip when this is the batch path.
+        // Standalone-waveform overlay: shift to amber `Polishing`
+        // (animated, when STT or LLM is local) or `Processing`
+        // (static, for cloud) while STT runs. Live-dictation mode
+        // owns its own state transitions; only flip when this is
+        // the batch path.
         #[cfg(feature = "interactive")]
-        if cfg.overlay.waveform && !cfg.interactive.enabled {
-            if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
-                o.set_state(fono_overlay::OverlayState::Processing);
+        let polish_anim: Option<tokio::task::AbortHandle> = {
+            if cfg.overlay.waveform && !cfg.interactive.enabled {
+                let stt_local = self.current_stt().is_local();
+                let llm_local = cfg.interactive.cleanup_on_finalize
+                    && self
+                        .current_llm()
+                        .is_some_and(|l| l.is_local());
+                let animate = stt_local || llm_local;
+                if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
+                    o.set_state(if animate {
+                        fono_overlay::OverlayState::Polishing
+                    } else {
+                        fono_overlay::OverlayState::Processing
+                    });
+                }
+                if animate {
+                    self.spawn_thinking_animation_task(&cfg)
+                } else {
+                    None
+                }
+            } else {
+                None
             }
-        }
+        };
+        #[cfg(not(feature = "interactive"))]
+        let polish_anim: Option<tokio::task::AbortHandle> = None;
         let (samples, elapsed) = tokio::task::spawn_blocking(move || session.stop_and_drain())
             .await
             .unwrap_or_default();
@@ -1241,6 +1264,9 @@ impl SessionOrchestrator {
             warn!("recording too short ({capture_ms} ms); skipping STT");
             #[cfg(feature = "interactive")]
             if cfg.overlay.waveform && !cfg.interactive.enabled {
+                if let Some(t) = polish_anim {
+                    t.abort();
+                }
                 if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
                     o.set_state(fono_overlay::OverlayState::Hidden);
                 }
@@ -1249,7 +1275,7 @@ impl SessionOrchestrator {
             return;
         }
 
-        self.spawn_pipeline(samples, capture_ms);
+        self.spawn_pipeline(samples, capture_ms, polish_anim);
     }
 
     /// Cancel an active recording, dropping the audio without invoking STT.
@@ -1751,7 +1777,12 @@ impl SessionOrchestrator {
         }
     }
 
-    fn spawn_pipeline(&self, pcm: Vec<f32>, capture_ms: u64) {
+    fn spawn_pipeline(
+        &self,
+        pcm: Vec<f32>,
+        capture_ms: u64,
+        polish_anim: Option<tokio::task::AbortHandle>,
+    ) {
         let stt = self.current_stt();
         let llm = self.current_llm();
         let history = Arc::clone(&self.history);
@@ -1810,6 +1841,12 @@ impl SessionOrchestrator {
                     error!("pipeline failed: {msg}");
                 }
             }
+            #[cfg(feature = "interactive")]
+            if let Some(t) = polish_anim {
+                t.abort();
+            }
+            #[cfg(not(feature = "interactive"))]
+            drop(polish_anim);
             #[cfg(feature = "interactive")]
             if let Some(o) = overlay {
                 o.set_state(fono_overlay::OverlayState::Hidden);

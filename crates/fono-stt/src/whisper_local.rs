@@ -242,6 +242,10 @@ impl SpeechToText for WhisperLocal {
         "whisper-local"
     }
 
+    fn is_local(&self) -> bool {
+        true
+    }
+
     async fn prewarm(&self) -> Result<()> {
         // mmap the model on a blocking thread so we don't park an
         // async executor for 200–600 ms (latency plan L2).
@@ -583,6 +587,10 @@ mod streaming_impl {
 
         fn name(&self) -> &'static str {
             <Self as crate::SpeechToText>::name(self)
+        }
+
+        fn is_local(&self) -> bool {
+            true
         }
     }
 
