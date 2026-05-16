@@ -197,13 +197,9 @@ async fn main() -> Result<()> {
         // (which is extremely chatty at info level). Override with
         // FONO_BENCH_LOG=info to see everything.
         .unwrap_or_else(|| "info,whisper_rs=warn".to_string());
-    let targets: Targets = directives
-        .parse()
-        .unwrap_or_else(|_| Targets::new().with_default(LevelFilter::INFO));
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .with(targets)
-        .init();
+    let targets: Targets =
+        directives.parse().unwrap_or_else(|_| Targets::new().with_default(LevelFilter::INFO));
+    tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).with(targets).init();
     match cli.cmd {
         Cmd::Bench(a) => run_bench(a).await,
         Cmd::Equivalence(a) => run_equivalence(a).await,
@@ -228,11 +224,7 @@ async fn run_bench(args: BenchArgs) -> Result<()> {
     let langs: Vec<String> = if args.languages.is_empty() {
         Vec::new()
     } else {
-        args.languages
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
+        args.languages.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
     };
 
     info!(
@@ -283,10 +275,7 @@ async fn run_bench(args: BenchArgs) -> Result<()> {
 }
 
 async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
-    let fixtures_dir = args
-        .fixtures
-        .clone()
-        .unwrap_or_else(default_equivalence_dir);
+    let fixtures_dir = args.fixtures.clone().unwrap_or_else(default_equivalence_dir);
     let manifest_path = fixtures_dir.join("manifest.toml");
     let manifest = Manifest::load(&manifest_path).with_context(|| {
         format!(
@@ -295,11 +284,7 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
             manifest_path.display()
         )
     })?;
-    info!(
-        "equivalence: {} fixtures from {}",
-        manifest.fixtures.len(),
-        fixtures_dir.display()
-    );
+    info!("equivalence: {} fixtures from {}", manifest.fixtures.len(), fixtures_dir.display());
 
     let stt_backend_name;
     let caps: ModelCapabilities;
@@ -354,10 +339,7 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
             stt_backend_name = "fake".to_string();
             // The fake STT is multilingual by construction (it returns a
             // canned string regardless of input language).
-            caps = ModelCapabilities {
-                english_only: false,
-                model_label: "fake".to_string(),
-            };
+            caps = ModelCapabilities { english_only: false, model_label: "fake".to_string() };
             Arc::new(FakeStt::new("the quick brown fox jumps over the lazy dog"))
         }
         "groq" => {
@@ -383,10 +365,7 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
                 };
                 stt_backend_name = format!("groq:{model}");
                 // Groq's Whisper is multilingual.
-                caps = ModelCapabilities {
-                    english_only: false,
-                    model_label: model.clone(),
-                };
+                caps = ModelCapabilities { english_only: false, model_label: model.clone() };
                 Arc::new(fono_stt::groq::GroqStt::with_model(key, model))
             }
             #[cfg(not(feature = "groq"))]
@@ -455,24 +434,13 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
         pb.set_message(format!("{}/{} {} — batch", fixture_num, total, fx.name));
         pb.tick();
 
-        match run_fixture(
-            fx,
-            &fixtures_dir,
-            Arc::clone(&stt),
-            streaming.clone(),
-            &caps,
-            quick,
-        )
-        .await
+        match run_fixture(fx, &fixtures_dir, Arc::clone(&stt), streaming.clone(), &caps, quick)
+            .await
         {
             Ok(r) => {
                 // run_fixture does batch + streaming internally; advance
                 // by 2 unless the fixture was skipped (no streaming pass).
-                let steps = if r.verdict == fono_bench::Verdict::Skipped {
-                    1
-                } else {
-                    2
-                };
+                let steps = if r.verdict == fono_bench::Verdict::Skipped { 1 } else { 2 };
                 pb.inc(steps);
                 report.results.push(r);
             }
@@ -613,11 +581,7 @@ fn print_table(report: &EquivalenceReport, legend: bool) {
 
         // Color the lev value: green at 0, yellow approaching threshold, red at/above.
         // Visible width must be 6 to match the header column.
-        let lev_str = fmt_lev(
-            r.metrics.stt_levenshtein_norm,
-            report.threshold_levenshtein,
-            &s,
-        );
+        let lev_str = fmt_lev(r.metrics.stt_levenshtein_norm, report.threshold_levenshtein, &s);
         let acc_str = match r.metrics.stt_accuracy_levenshtein {
             Some(a) => fmt_lev(a, report.threshold_levenshtein, &s),
             None => format!("{:>6}", "-"),
@@ -780,9 +744,7 @@ fn build_streaming(
         } else {
             Arc::new(fono_stt::whisper_local::WhisperLocal::new(path))
         };
-        Ok(Some(Arc::new(
-            fono_bench::equivalence::WhisperStreamingHandle::new(s),
-        )))
+        Ok(Some(Arc::new(fono_bench::equivalence::WhisperStreamingHandle::new(s))))
     }
     #[cfg(not(feature = "whisper-local"))]
     {
@@ -893,13 +855,11 @@ fn build_llm(
 }
 
 fn default_bench_dir() -> PathBuf {
-    let cache = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".cache"))
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-        });
+    let cache = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| {
+        std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join(".cache"))
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+    });
     cache.join("fono").join("bench")
 }
 
@@ -916,12 +876,10 @@ fn default_equivalence_dir() -> PathBuf {
 
 #[cfg(feature = "whisper-local")]
 fn default_models_dir() -> PathBuf {
-    let cache = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".cache"))
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-        });
+    let cache = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| {
+        std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join(".cache"))
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+    });
     cache.join("fono").join("models").join("whisper")
 }

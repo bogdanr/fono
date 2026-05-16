@@ -48,11 +48,7 @@ fn summarise_429(body: &str) -> String {
         // Truncate raw body for the fallback so we don't dump a multi-
         // line JSON blob into the log.
         let trimmed: String = body.chars().take(120).collect();
-        return if body.len() > 120 {
-            format!("{trimmed}…")
-        } else {
-            trimmed
-        };
+        return if body.len() > 120 { format!("{trimmed}…") } else { trimmed };
     };
     // The upstream message is itself dense but readable; trim the
     // upgrade pitch ("Need more tokens? Upgrade to Dev Tier today …")
@@ -291,9 +287,7 @@ pub(crate) async fn groq_post_wav(
     lang: Option<&str>,
     prompt: Option<&str>,
 ) -> Result<GroqResponse> {
-    let part = multipart::Part::bytes(wav.to_vec())
-        .file_name("audio.wav")
-        .mime_str("audio/wav")?;
+    let part = multipart::Part::bytes(wav.to_vec()).file_name("audio.wav").mime_str("audio/wav")?;
     let mut form = multipart::Form::new()
         .text("model", model.to_string())
         .text("response_format", "verbose_json")
@@ -336,9 +330,7 @@ pub async fn groq_post_wav_verbose(
     lang: Option<&str>,
     prompt: Option<&str>,
 ) -> Result<GroqVerboseResponse> {
-    let part = multipart::Part::bytes(wav.to_vec())
-        .file_name("audio.wav")
-        .mime_str("audio/wav")?;
+    let part = multipart::Part::bytes(wav.to_vec()).file_name("audio.wav").mime_str("audio/wav")?;
     let mut form = multipart::Form::new()
         .text("model", model.to_string())
         .text("response_format", "verbose_json")
@@ -432,11 +424,7 @@ impl SpeechToText for GroqStt {
             }
         }
 
-        Ok(Transcription {
-            text: parsed.text,
-            language: parsed.language,
-            duration_ms: None,
-        })
+        Ok(Transcription { text: parsed.text, language: parsed.language, duration_ms: None })
     }
 
     fn name(&self) -> &'static str {
@@ -546,61 +534,37 @@ mod tests {
     }
 
     fn seg(text: &str, no_speech: Option<f32>, logprob: Option<f32>) -> GroqSegment {
-        GroqSegment {
-            text: text.to_string(),
-            avg_logprob: logprob,
-            no_speech_prob: no_speech,
-        }
+        GroqSegment { text: text.to_string(), avg_logprob: logprob, no_speech_prob: no_speech }
     }
 
     fn vresp(text: &str, segments: Vec<GroqSegment>) -> GroqVerboseResponse {
-        GroqVerboseResponse {
-            text: text.to_string(),
-            language: None,
-            segments,
-        }
+        GroqVerboseResponse { text: text.to_string(), language: None, segments }
     }
 
     #[test]
     fn hallucination_signature_caught() {
         // Classic silence-tail "Thank you" — high no_speech, low logprob.
-        assert!(is_hallucinated_segment(&seg(
-            " Thank you.",
-            Some(0.95),
-            Some(-1.5),
-        )));
+        assert!(is_hallucinated_segment(&seg(" Thank you.", Some(0.95), Some(-1.5),)));
     }
 
     #[test]
     fn normal_speech_passes() {
         // Confident real speech — both scores look healthy.
-        assert!(!is_hallucinated_segment(&seg(
-            " Send him the report.",
-            Some(0.05),
-            Some(-0.3),
-        )));
+        assert!(!is_hallucinated_segment(&seg(" Send him the report.", Some(0.05), Some(-0.3),)));
     }
 
     #[test]
     fn confident_short_utterance_after_pause_passes() {
         // High no_speech edge case — utterance starts after a pause but
         // is decoded confidently. logprob alone says it's real speech.
-        assert!(!is_hallucinated_segment(&seg(
-            " Yes.",
-            Some(0.9),
-            Some(-0.3),
-        )));
+        assert!(!is_hallucinated_segment(&seg(" Yes.", Some(0.9), Some(-0.3),)));
     }
 
     #[test]
     fn quiet_legitimate_speech_passes() {
         // Low logprob alone is normal for low-volume / accented speech;
         // no_speech_prob says it IS speech, so we keep it.
-        assert!(!is_hallucinated_segment(&seg(
-            " mumbled but real",
-            Some(0.2),
-            Some(-1.5),
-        )));
+        assert!(!is_hallucinated_segment(&seg(" mumbled but real", Some(0.2), Some(-1.5),)));
     }
 
     #[test]
@@ -608,16 +572,8 @@ mod tests {
         // Conservative: if the verbose response is missing scores
         // (parser drift, model variant), don't drop content.
         assert!(!is_hallucinated_segment(&seg(" anything", None, None)));
-        assert!(!is_hallucinated_segment(&seg(
-            " anything",
-            Some(0.95),
-            None
-        )));
-        assert!(!is_hallucinated_segment(&seg(
-            " anything",
-            None,
-            Some(-2.0)
-        )));
+        assert!(!is_hallucinated_segment(&seg(" anything", Some(0.95), None)));
+        assert!(!is_hallucinated_segment(&seg(" anything", None, Some(-2.0))));
     }
 
     #[test]
@@ -644,10 +600,7 @@ mod tests {
     fn filter_returns_empty_when_only_segment_is_hallucination() {
         // The exact bug the user reported: silence after release →
         // a single "Thank you" segment with hallucination scores.
-        let resp = vresp(
-            " Thank you.",
-            vec![seg(" Thank you.", Some(0.95), Some(-1.5))],
-        );
+        let resp = vresp(" Thank you.", vec![seg(" Thank you.", Some(0.95), Some(-1.5))]);
         assert_eq!(filter_hallucinated_segments(&resp), "");
     }
 
@@ -658,10 +611,7 @@ mod tests {
             "Thank you for the report.",
             vec![seg(" Thank you for the report.", Some(0.05), Some(-0.25))],
         );
-        assert_eq!(
-            filter_hallucinated_segments(&resp),
-            "Thank you for the report."
-        );
+        assert_eq!(filter_hallucinated_segments(&resp), "Thank you for the report.");
     }
 
     #[test]
@@ -669,10 +619,7 @@ mod tests {
         // Multi-language sanity: filter is purely score-based.
         // "Mulțumesc." (ro) and "Merci." (fr) with confident scores
         // pass through identically to English.
-        let ro = vresp(
-            "Mulțumesc.",
-            vec![seg(" Mulțumesc.", Some(0.04), Some(-0.20))],
-        );
+        let ro = vresp("Mulțumesc.", vec![seg(" Mulțumesc.", Some(0.04), Some(-0.20))]);
         let fr = vresp("Merci.", vec![seg(" Merci.", Some(0.06), Some(-0.28))]);
         assert_eq!(filter_hallucinated_segments(&ro), "Mulțumesc.");
         assert_eq!(filter_hallucinated_segments(&fr), "Merci.");

@@ -42,10 +42,7 @@ fn bench_runner_no_audio_io(c: &mut Criterion) {
                 use fono_stt::traits::SpeechToText;
                 let pcm = vec![0.0f32; 16_000 * 3];
                 let trans = stt.transcribe(&pcm, 16_000, Some("en")).await.unwrap();
-                let cleaned = llm
-                    .format(&trans.text, &FormatContext::default())
-                    .await
-                    .unwrap();
+                let cleaned = llm.format(&trans.text, &FormatContext::default()).await.unwrap();
                 let _wer = fono_bench::word_error_rate(
                     "the quick brown fox jumps over the lazy dog",
                     &cleaned,
@@ -56,10 +53,7 @@ fn bench_runner_no_audio_io(c: &mut Criterion) {
 
     // Tighter loop without the LLM stage — STT-only path.
     c.bench_function("fake_stt_only_3s_clip", |b| {
-        let stt2 = Arc::new(FakeStt::with_delay(
-            "the quick brown fox",
-            Duration::from_millis(50),
-        ));
+        let stt2 = Arc::new(FakeStt::with_delay("the quick brown fox", Duration::from_millis(50)));
         b.to_async(&rt).iter(|| {
             let stt = Arc::clone(&stt2);
             async move {

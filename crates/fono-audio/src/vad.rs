@@ -35,11 +35,7 @@ impl Default for WebRtcVadStub {
 impl Vad for WebRtcVadStub {
     fn classify(&mut self, frame: &[f32]) -> Result<VadDecision> {
         let energy = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len().max(1) as f32).sqrt();
-        Ok(if energy >= self.threshold {
-            VadDecision::Speech
-        } else {
-            VadDecision::Silence
-        })
+        Ok(if energy >= self.threshold { VadDecision::Speech } else { VadDecision::Silence })
     }
 }
 

@@ -33,22 +33,17 @@ fn x11_focus() -> Result<FocusInfo> {
     let (conn, screen_num) = x11rb::connect(None)?;
     let screen = &conn.setup().roots[screen_num];
 
-    let active_atom = conn
-        .intern_atom(false, b"_NET_ACTIVE_WINDOW")?
-        .reply()?
-        .atom;
-    let reply: GetPropertyReply = conn
-        .get_property(false, screen.root, active_atom, AtomEnum::WINDOW, 0, 1)?
-        .reply()?;
+    let active_atom = conn.intern_atom(false, b"_NET_ACTIVE_WINDOW")?.reply()?.atom;
+    let reply: GetPropertyReply =
+        conn.get_property(false, screen.root, active_atom, AtomEnum::WINDOW, 0, 1)?.reply()?;
     let window = reply
         .value32()
         .and_then(|mut it| it.next())
         .ok_or_else(|| anyhow!("_NET_ACTIVE_WINDOW unset"))?;
 
     // WM_CLASS is two NUL-separated strings: instance and class.
-    let class_reply = conn
-        .get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 1024)?
-        .reply()?;
+    let class_reply =
+        conn.get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 1024)?.reply()?;
     let class_bytes = class_reply.value;
     let class = class_bytes
         .split(|&b| b == 0)
@@ -58,9 +53,7 @@ fn x11_focus() -> Result<FocusInfo> {
 
     let title_atom = conn.intern_atom(false, b"_NET_WM_NAME")?.reply()?.atom;
     let utf8_atom = conn.intern_atom(false, b"UTF8_STRING")?.reply()?.atom;
-    let title_reply = conn
-        .get_property(false, window, title_atom, utf8_atom, 0, 1024)?
-        .reply()?;
+    let title_reply = conn.get_property(false, window, title_atom, utf8_atom, 0, 1024)?.reply()?;
     let title = if title_reply.value.is_empty() {
         let fallback = conn
             .get_property(false, window, AtomEnum::WM_NAME, AtomEnum::STRING, 0, 1024)?
@@ -70,8 +63,5 @@ fn x11_focus() -> Result<FocusInfo> {
         Some(String::from_utf8_lossy(&title_reply.value).into_owned())
     };
 
-    Ok(FocusInfo {
-        window_class: class,
-        window_title: title,
-    })
+    Ok(FocusInfo { window_class: class, window_title: title })
 }

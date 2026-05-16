@@ -117,10 +117,7 @@ impl AudioFrameStream {
                 VadDecision::Speech => {
                     self.silence_run = 0;
                     self.saw_voice_in_segment = true;
-                    let _ = self.tx.send(FrameEvent::Voiced {
-                        pcm: frame,
-                        elapsed,
-                    });
+                    let _ = self.tx.send(FrameEvent::Voiced { pcm: frame, elapsed });
                 }
                 VadDecision::Silence => {
                     self.silence_run += 1;
@@ -131,10 +128,9 @@ impl AudioFrameStream {
                         self.segment_index += 1;
                         self.saw_voice_in_segment = false;
                         self.silence_run = 0;
-                        let _ = self.tx.send(FrameEvent::SegmentBoundary {
-                            segment_index: idx,
-                            elapsed,
-                        });
+                        let _ = self
+                            .tx
+                            .send(FrameEvent::SegmentBoundary { segment_index: idx, elapsed });
                     }
                 }
             }
@@ -190,10 +186,7 @@ mod tests {
         let speech = vec![0.5_f32; 32];
         stream.push(&speech, &mut vad);
         let evs = drain(&mut rx);
-        let voiced_count = evs
-            .iter()
-            .filter(|e| matches!(e, FrameEvent::Voiced { .. }))
-            .count();
+        let voiced_count = evs.iter().filter(|e| matches!(e, FrameEvent::Voiced { .. })).count();
         assert_eq!(voiced_count, 2);
     }
 
@@ -209,13 +202,9 @@ mod tests {
         stream.push(&[0.5_f32; 16], &mut vad); // 1 voiced frame
         stream.push(&[0.0_f32; 16 * 3], &mut vad); // 3 silent frames → boundary
         let evs = drain(&mut rx);
-        assert!(evs.iter().any(|e| matches!(
-            e,
-            FrameEvent::SegmentBoundary {
-                segment_index: 0,
-                ..
-            }
-        )));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, FrameEvent::SegmentBoundary { segment_index: 0, .. })));
     }
 
     #[test]

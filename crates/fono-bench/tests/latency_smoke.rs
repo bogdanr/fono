@@ -38,10 +38,7 @@ async fn orchestrator_overhead_under_50ms_p95() {
     let mut clips = Vec::with_capacity(ITERS);
     for i in 0..ITERS {
         let t = Instant::now();
-        let trans = stt
-            .transcribe(&pcm, 16_000, Some("en"))
-            .await
-            .expect("fake stt cannot fail");
+        let trans = stt.transcribe(&pcm, 16_000, Some("en")).await.expect("fake stt cannot fail");
         let total_ms = t.elapsed().as_millis() as u64;
         let wer = word_error_rate(REFERENCE_EN, &trans.text);
         clips.push(ClipReport {
@@ -59,10 +56,7 @@ async fn orchestrator_overhead_under_50ms_p95() {
     }
 
     let report = Report::build("fake-stt", None, clips);
-    let lang = report
-        .by_language
-        .get("en")
-        .expect("en language report present");
+    let lang = report.by_language.get("en").expect("en language report present");
 
     println!(
         "fake-stt orchestrator p50={} ms / p95={} ms / mean WER={:.3}",
@@ -70,10 +64,7 @@ async fn orchestrator_overhead_under_50ms_p95() {
     );
 
     // WER must be 0 for a fake-stt that returns the reference verbatim.
-    assert_eq!(
-        lang.mean_wer, 0.0,
-        "fake stt returned non-reference text — WER pipeline broken"
-    );
+    assert_eq!(lang.mean_wer, 0.0, "fake stt returned non-reference text — WER pipeline broken");
 
     // Orchestrator + dispatch overhead, on top of a fixed 20 ms fake
     // delay, must stay under 50 ms p95. If this trips, something on the
@@ -95,9 +86,6 @@ async fn wer_is_zero_for_perfect_match() {
     // Spot-check the WER metric end-to-end; cheap insurance against
     // tokenizer drift breaking the regression gate silently.
     let stt: Arc<dyn SpeechToText> = Arc::new(FakeStt::new(REFERENCE_EN));
-    let trans = stt
-        .transcribe(&[0.0f32; 16_000], 16_000, None)
-        .await
-        .unwrap();
+    let trans = stt.transcribe(&[0.0f32; 16_000], 16_000, None).await.unwrap();
     assert_eq!(word_error_rate(REFERENCE_EN, &trans.text), 0.0);
 }

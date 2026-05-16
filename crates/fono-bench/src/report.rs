@@ -47,10 +47,7 @@ impl Report {
     ) -> Self {
         let mut by_lang: BTreeMap<String, Vec<ClipReport>> = BTreeMap::new();
         for c in &clips {
-            by_lang
-                .entry(c.language.clone())
-                .or_default()
-                .push(c.clone());
+            by_lang.entry(c.language.clone()).or_default().push(c.clone());
         }
 
         let by_language = by_lang
@@ -138,10 +135,7 @@ fn percentile(sorted: &[u64], p: u8) -> u64 {
 
 fn now_rfc3339() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     // Lightweight RFC-3339 formatter; we deliberately don't pull `chrono`.
     let (y, mo, d, h, mi, s) = epoch_to_ymdhms(secs);
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
@@ -163,20 +157,8 @@ fn epoch_to_ymdhms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
         year += 1;
     }
     let leap = is_leap(year);
-    let month_days: [i64; 12] = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
+    let month_days: [i64; 12] =
+        [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let mut month = 1i64;
     for &md in &month_days {
         if days < md {

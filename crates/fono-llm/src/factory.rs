@@ -29,11 +29,7 @@ fn resolve_cloud(
             } else {
                 c.api_key_ref.clone()
             };
-            let model_override = if c.model.is_empty() {
-                None
-            } else {
-                Some(c.model.clone())
-            };
+            let model_override = if c.model.is_empty() { None } else { Some(c.model.clone()) };
             (key_ref, model_override)
         },
     );
@@ -96,9 +92,9 @@ pub fn build_llm(
             build_anthropic(k, m)
         }
         LlmBackend::Local => build_local(cfg, llm_models_dir),
-        LlmBackend::Gemini => Err(anyhow!(
-            "Gemini LLM backend not yet implemented; pick cerebras/openai/anthropic"
-        )),
+        LlmBackend::Gemini => {
+            Err(anyhow!("Gemini LLM backend not yet implemented; pick cerebras/openai/anthropic"))
+        }
         LlmBackend::None => unreachable!(),
     }
     .map(Some)
@@ -113,40 +109,30 @@ fn resolve_local_model_path(cfg: &Llm, llm_models_dir: &Path) -> std::path::Path
 #[cfg(feature = "cerebras")]
 #[allow(clippy::unnecessary_wraps)]
 fn build_cerebras(key: String, model: String) -> Result<Arc<dyn TextFormatter>> {
-    Ok(Arc::new(crate::openai_compat::OpenAiCompat::cerebras(
-        key, model,
-    )))
+    Ok(Arc::new(crate::openai_compat::OpenAiCompat::cerebras(key, model)))
 }
 
 #[cfg(not(feature = "cerebras"))]
 fn build_cerebras(_: String, _: String) -> Result<Arc<dyn TextFormatter>> {
-    Err(anyhow!(
-        "Cerebras LLM not compiled in (enable the `cerebras` feature on `fono-llm`)"
-    ))
+    Err(anyhow!("Cerebras LLM not compiled in (enable the `cerebras` feature on `fono-llm`)"))
 }
 
 #[cfg(feature = "openai-compat")]
 #[allow(clippy::unnecessary_wraps)]
 fn build_oa_groq(key: String, model: String) -> Result<Arc<dyn TextFormatter>> {
-    Ok(Arc::new(crate::openai_compat::OpenAiCompat::groq(
-        key, model,
-    )))
+    Ok(Arc::new(crate::openai_compat::OpenAiCompat::groq(key, model)))
 }
 
 #[cfg(feature = "openai-compat")]
 #[allow(clippy::unnecessary_wraps)]
 fn build_oa_openai(key: String, model: String) -> Result<Arc<dyn TextFormatter>> {
-    Ok(Arc::new(crate::openai_compat::OpenAiCompat::openai(
-        key, model,
-    )))
+    Ok(Arc::new(crate::openai_compat::OpenAiCompat::openai(key, model)))
 }
 
 #[cfg(feature = "openai-compat")]
 #[allow(clippy::unnecessary_wraps)]
 fn build_oa_openrouter(key: String, model: String) -> Result<Arc<dyn TextFormatter>> {
-    Ok(Arc::new(crate::openai_compat::OpenAiCompat::openrouter(
-        key, model,
-    )))
+    Ok(Arc::new(crate::openai_compat::OpenAiCompat::openrouter(key, model)))
 }
 
 #[cfg(feature = "openai-compat")]
@@ -161,23 +147,17 @@ fn build_oa_ollama(cfg: &Llm, model: String) -> Result<Arc<dyn TextFormatter>> {
         .map(|c| c.api_key_ref.clone())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "http://localhost:11434/v1/chat/completions".to_string());
-    Ok(Arc::new(crate::openai_compat::OpenAiCompat::ollama(
-        endpoint, model,
-    )))
+    Ok(Arc::new(crate::openai_compat::OpenAiCompat::ollama(endpoint, model)))
 }
 
 #[cfg(not(feature = "openai-compat"))]
 fn build_oa_groq(_: String, _: String) -> Result<Arc<dyn TextFormatter>> {
-    Err(anyhow!(
-        "Groq LLM not compiled in (enable the `openai-compat` feature on `fono-llm`)"
-    ))
+    Err(anyhow!("Groq LLM not compiled in (enable the `openai-compat` feature on `fono-llm`)"))
 }
 
 #[cfg(not(feature = "openai-compat"))]
 fn build_oa_openai(_: String, _: String) -> Result<Arc<dyn TextFormatter>> {
-    Err(anyhow!(
-        "OpenAI LLM not compiled in (enable the `openai-compat` feature on `fono-llm`)"
-    ))
+    Err(anyhow!("OpenAI LLM not compiled in (enable the `openai-compat` feature on `fono-llm`)"))
 }
 
 #[cfg(not(feature = "openai-compat"))]
@@ -189,9 +169,7 @@ fn build_oa_openrouter(_: String, _: String) -> Result<Arc<dyn TextFormatter>> {
 
 #[cfg(not(feature = "openai-compat"))]
 fn build_oa_ollama(_: &Llm, _: String) -> Result<Arc<dyn TextFormatter>> {
-    Err(anyhow!(
-        "Ollama LLM not compiled in (enable the `openai-compat` feature on `fono-llm`)"
-    ))
+    Err(anyhow!("Ollama LLM not compiled in (enable the `openai-compat` feature on `fono-llm`)"))
 }
 
 #[cfg(feature = "anthropic")]
@@ -202,9 +180,7 @@ fn build_anthropic(key: String, model: String) -> Result<Arc<dyn TextFormatter>>
 
 #[cfg(not(feature = "anthropic"))]
 fn build_anthropic(_: String, _: String) -> Result<Arc<dyn TextFormatter>> {
-    Err(anyhow!(
-        "Anthropic LLM not compiled in (enable the `anthropic` feature on `fono-llm`)"
-    ))
+    Err(anyhow!("Anthropic LLM not compiled in (enable the `anthropic` feature on `fono-llm`)"))
 }
 
 #[cfg(feature = "llama-local")]
@@ -232,27 +208,16 @@ mod tests {
 
     #[test]
     fn disabled_returns_none() {
-        let cfg = LlmCfg {
-            enabled: false,
-            ..LlmCfg::default()
-        };
+        let cfg = LlmCfg { enabled: false, ..LlmCfg::default() };
         let s = Secrets::default();
-        assert!(build_llm(&cfg, &s, Path::new("/nonexistent"))
-            .unwrap()
-            .is_none());
+        assert!(build_llm(&cfg, &s, Path::new("/nonexistent")).unwrap().is_none());
     }
 
     #[test]
     fn backend_none_returns_none() {
-        let cfg = LlmCfg {
-            backend: LlmBackend::None,
-            enabled: true,
-            ..LlmCfg::default()
-        };
+        let cfg = LlmCfg { backend: LlmBackend::None, enabled: true, ..LlmCfg::default() };
         let s = Secrets::default();
-        assert!(build_llm(&cfg, &s, Path::new("/nonexistent"))
-            .unwrap()
-            .is_none());
+        assert!(build_llm(&cfg, &s, Path::new("/nonexistent")).unwrap().is_none());
     }
 
     #[test]
@@ -266,9 +231,6 @@ mod tests {
         };
         let dir = Path::new("/var/lib/fono/llm");
         let p = resolve_local_model_path(&cfg, dir);
-        assert_eq!(
-            p,
-            std::path::PathBuf::from("/var/lib/fono/llm/qwen2.5-1.5b-instruct.gguf")
-        );
+        assert_eq!(p, std::path::PathBuf::from("/var/lib/fono/llm/qwen2.5-1.5b-instruct.gguf"));
     }
 }

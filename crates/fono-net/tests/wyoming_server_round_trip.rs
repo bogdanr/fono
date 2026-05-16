@@ -96,13 +96,11 @@ async fn server_serves_real_client_round_trip() {
 
     // 0.5 s of mono silence at 16 kHz = 8000 samples.
     let pcm = vec![0.0_f32; 8000];
-    let res = tokio::time::timeout(
-        Duration::from_secs(5),
-        client.transcribe(&pcm, 16_000, Some("en")),
-    )
-    .await
-    .expect("transcribe within 5 s")
-    .expect("transcribe ok");
+    let res =
+        tokio::time::timeout(Duration::from_secs(5), client.transcribe(&pcm, 16_000, Some("en")))
+            .await
+            .expect("transcribe within 5 s")
+            .expect("transcribe ok");
 
     assert_eq!(res.text, "hello from the server");
     assert_eq!(res.language.as_deref(), Some("en"));
@@ -148,38 +146,20 @@ async fn server_accepts_home_assistant_transcribe_before_audio() {
     // audio-stop. Fono must queue the request instead of transcribing an
     // empty buffer immediately.
     Frame::new(TRANSCRIBE)
-        .with_data(
-            to_value(&Transcribe {
-                name: None,
-                language: Some("ro".into()),
-            })
-            .unwrap(),
-        )
+        .with_data(to_value(&Transcribe { name: None, language: Some("ro".into()) }).unwrap())
         .write_async(&mut sock)
         .await
         .unwrap();
     Frame::new(AUDIO_START)
         .with_data(
-            to_value(&AudioStart {
-                rate: 16_000,
-                width: 2,
-                channels: 1,
-                timestamp: None,
-            })
-            .unwrap(),
+            to_value(&AudioStart { rate: 16_000, width: 2, channels: 1, timestamp: None }).unwrap(),
         )
         .write_async(&mut sock)
         .await
         .unwrap();
     Frame::new(AUDIO_CHUNK)
         .with_data(
-            to_value(&AudioChunk {
-                rate: 16_000,
-                width: 2,
-                channels: 1,
-                timestamp: None,
-            })
-            .unwrap(),
+            to_value(&AudioChunk { rate: 16_000, width: 2, channels: 1, timestamp: None }).unwrap(),
         )
         .with_payload(vec![0_u8; 320])
         .write_async(&mut sock)
@@ -213,20 +193,14 @@ async fn server_rejects_non_loopback_when_loopback_only() {
     // (Rejecting a *real* non-loopback peer is exercised by inspection
     // of `is_loopback`; staging an actual non-loopback connection in a
     // unit test is environment-dependent.)
-    let mock = Arc::new(MockStt {
-        canned_text: "ok".to_string(),
-        calls: Mutex::new(Vec::new()),
-    });
+    let mock = Arc::new(MockStt { canned_text: "ok".to_string(), calls: Mutex::new(Vec::new()) });
     let cfg = WyomingServerConfig {
         bind: "0.0.0.0".to_string(),
         port: 0,
         loopback_only: true,
         ..WyomingServerConfig::default()
     };
-    let handle = WyomingServer::with_fixed_stt(cfg, mock)
-        .start()
-        .await
-        .expect("server starts");
+    let handle = WyomingServer::with_fixed_stt(cfg, mock).start().await.expect("server starts");
     let port = handle.local_addr().port();
     let uri = format!("tcp://127.0.0.1:{port}");
 

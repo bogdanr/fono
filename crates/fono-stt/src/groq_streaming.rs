@@ -108,11 +108,7 @@ impl GroqStreaming {
     /// captures `api_key` + `model` + a warmed `reqwest::Client`
     /// (HTTP/2 keep-alive via [`crate::groq::warm_client`]).
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::with_prompts_inner(
-            api_key.into(),
-            model.into(),
-            std::collections::HashMap::new(),
-        )
+        Self::with_prompts_inner(api_key.into(), model.into(), std::collections::HashMap::new())
     }
 
     fn with_prompts_inner(
@@ -133,10 +129,7 @@ impl GroqStreaming {
                 let model = model.clone();
                 let prompts = Arc::clone(&prompts);
                 Box::pin(async move {
-                    let prompt = lang
-                        .as_deref()
-                        .and_then(|l| prompts.get(l))
-                        .map(String::as_str);
+                    let prompt = lang.as_deref().and_then(|l| prompts.get(l)).map(String::as_str);
                     groq_post_wav(&client, &api_key, &model, &wav, lang.as_deref(), prompt).await
                 }) as GroqRequestFuture
             })
@@ -151,10 +144,7 @@ impl GroqStreaming {
                 let model = model_v.clone();
                 let prompts = Arc::clone(&prompts);
                 Box::pin(async move {
-                    let prompt = lang
-                        .as_deref()
-                        .and_then(|l| prompts.get(l))
-                        .map(String::as_str);
+                    let prompt = lang.as_deref().and_then(|l| prompts.get(l)).map(String::as_str);
                     groq_post_wav_verbose(&client, &api_key, &model, &wav, lang.as_deref(), prompt)
                         .await
                 }) as GroqVerboseFuture
@@ -677,10 +667,7 @@ mod tests {
                     drop(g);
                     t
                 };
-                Ok(GroqResponse {
-                    text,
-                    language: Some("en".into()),
-                })
+                Ok(GroqResponse { text, language: Some("en".into()) })
             }) as GroqRequestFuture
         });
         (f, counter)
@@ -693,12 +680,8 @@ mod tests {
     #[tokio::test]
     async fn three_previews_promote_lcp_then_finalize_emits_full_text() {
         crate::rate_limit_notify::clear_throttle_for_tests();
-        let (req, counter) = scripted(vec![
-            "the",
-            "the quick",
-            "the quick brown",
-            "the quick brown fox",
-        ]);
+        let (req, counter) =
+            scripted(vec!["the", "the quick", "the quick brown", "the quick brown fox"]);
         let backend = GroqStreaming::with_request_fn(req);
 
         // Drive the pump synchronously: 3 PCM frames each big enough
@@ -706,10 +689,7 @@ mod tests {
         // Sleeps between PCM frames satisfy the 700 ms cadence guard.
         let (tx, rx) = mpsc::unbounded_channel::<StreamFrame>();
         let frames: BoxStream<'static, StreamFrame> = UnboundedReceiverStream::new(rx).boxed();
-        let stream = backend
-            .stream_transcribe(frames, 16_000, None)
-            .await
-            .unwrap();
+        let stream = backend.stream_transcribe(frames, 16_000, None).await.unwrap();
 
         // First chunk (~1 s): triggers preview #1 immediately.
         tx.send(StreamFrame::Pcm(pcm(1.0))).unwrap();
@@ -729,14 +709,10 @@ mod tests {
         assert_eq!(*counter.lock().unwrap(), 4, "expected exactly 4 decodes");
 
         // Three preview updates + one finalize.
-        let previews: Vec<&TranscriptUpdate> = updates
-            .iter()
-            .filter(|u| u.lane == crate::streaming::UpdateLane::Preview)
-            .collect();
-        let finalizes: Vec<&TranscriptUpdate> = updates
-            .iter()
-            .filter(|u| u.lane == crate::streaming::UpdateLane::Finalize)
-            .collect();
+        let previews: Vec<&TranscriptUpdate> =
+            updates.iter().filter(|u| u.lane == crate::streaming::UpdateLane::Preview).collect();
+        let finalizes: Vec<&TranscriptUpdate> =
+            updates.iter().filter(|u| u.lane == crate::streaming::UpdateLane::Finalize).collect();
         assert_eq!(previews.len(), 3, "got previews: {previews:?}");
         assert_eq!(finalizes.len(), 1);
         // After observation #2 ("the" + "the quick"), LocalAgreement
@@ -764,10 +740,7 @@ mod tests {
             Box::pin(async move {
                 let _g = s.lock().await;
                 tokio::time::sleep(Duration::from_millis(3000)).await;
-                Ok(GroqResponse {
-                    text: "slow".into(),
-                    language: None,
-                })
+                Ok(GroqResponse { text: "slow".into(), language: None })
             }) as GroqRequestFuture
         });
         let backend = GroqStreaming::with_request_fn(f);
@@ -775,10 +748,7 @@ mod tests {
 
         let (tx, rx) = mpsc::unbounded_channel::<StreamFrame>();
         let frames: BoxStream<'static, StreamFrame> = UnboundedReceiverStream::new(rx).boxed();
-        let _stream = backend
-            .stream_transcribe(frames, 16_000, None)
-            .await
-            .unwrap();
+        let _stream = backend.stream_transcribe(frames, 16_000, None).await.unwrap();
 
         // First chunk acquires the guard and pins the request.
         tx.send(StreamFrame::Pcm(pcm(1.0))).unwrap();
@@ -814,10 +784,7 @@ mod tests {
 
         let preview_fn: GroqRequestFn = Arc::new(|_wav, _lang| {
             Box::pin(async {
-                Ok(GroqResponse {
-                    text: "send him the report".into(),
-                    language: Some("en".into()),
-                })
+                Ok(GroqResponse { text: "send him the report".into(), language: Some("en".into()) })
             }) as GroqRequestFuture
         });
 
@@ -846,10 +813,7 @@ mod tests {
 
         let (tx, rx) = mpsc::unbounded_channel::<StreamFrame>();
         let frames: BoxStream<'static, StreamFrame> = UnboundedReceiverStream::new(rx).boxed();
-        let stream = backend
-            .stream_transcribe(frames, 16_000, None)
-            .await
-            .unwrap();
+        let stream = backend.stream_transcribe(frames, 16_000, None).await.unwrap();
 
         tx.send(StreamFrame::Pcm(pcm(1.0))).unwrap();
         tokio::time::sleep(Duration::from_millis(800)).await;
@@ -858,10 +822,8 @@ mod tests {
         drop(tx);
 
         let updates: Vec<TranscriptUpdate> = stream.collect().await;
-        let finalizes: Vec<&TranscriptUpdate> = updates
-            .iter()
-            .filter(|u| u.lane == crate::streaming::UpdateLane::Finalize)
-            .collect();
+        let finalizes: Vec<&TranscriptUpdate> =
+            updates.iter().filter(|u| u.lane == crate::streaming::UpdateLane::Finalize).collect();
         assert_eq!(finalizes.len(), 1, "expected one finalize update");
         assert_eq!(
             finalizes[0].text, "Send him the report.",

@@ -31,21 +31,14 @@ impl Secrets {
         match std::fs::metadata(path) {
             Ok(md) => {
                 check_mode(path, &md)?;
-                let raw = std::fs::read_to_string(path).map_err(|source| Error::Io {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
-                let secrets: Self = toml::from_str(&raw).map_err(|source| Error::TomlParse {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
+                let raw = std::fs::read_to_string(path)
+                    .map_err(|source| Error::Io { path: path.to_path_buf(), source })?;
+                let secrets: Self = toml::from_str(&raw)
+                    .map_err(|source| Error::TomlParse { path: path.to_path_buf(), source })?;
                 Ok(secrets)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(source) => Err(Error::Io {
-                path: path.to_path_buf(),
-                source,
-            }),
+            Err(source) => Err(Error::Io { path: path.to_path_buf(), source }),
         }
     }
 
@@ -92,9 +85,7 @@ fn check_mode(path: &Path, md: &std::fs::Metadata) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
     // Reject any group/other bits.
     if md.mode() & 0o077 != 0 {
-        return Err(Error::SecretsPermissions {
-            path: path.to_path_buf(),
-        });
+        return Err(Error::SecretsPermissions { path: path.to_path_buf() });
     }
     Ok(())
 }
@@ -116,10 +107,7 @@ mod tests {
         s.insert("GROQ_API_KEY", "sk-test-123");
         s.save(&path).unwrap();
         let loaded = Secrets::load(&path).unwrap();
-        assert_eq!(
-            loaded.resolve("GROQ_API_KEY").as_deref(),
-            Some("sk-test-123")
-        );
+        assert_eq!(loaded.resolve("GROQ_API_KEY").as_deref(), Some("sk-test-123"));
     }
 
     #[cfg(unix)]
@@ -130,10 +118,7 @@ mod tests {
         let path = tmp.path().join("secrets.toml");
         std::fs::write(&path, "[keys]\nX = \"y\"\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(matches!(
-            Secrets::load(&path),
-            Err(Error::SecretsPermissions { .. })
-        ));
+        assert!(matches!(Secrets::load(&path), Err(Error::SecretsPermissions { .. })));
     }
 
     #[test]

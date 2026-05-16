@@ -73,30 +73,15 @@ impl PriceTable {
         t.insert("local".into(), PerSecondCostUMicros::ZERO);
         t.insert("whisper-local".into(), PerSecondCostUMicros::ZERO);
         // Cloud streaming STT providers (USD per minute, list price).
-        t.insert(
-            "groq".into(),
-            PerSecondCostUMicros::from_dollars_per_minute(0.0033),
-        );
-        t.insert(
-            "openai".into(),
-            PerSecondCostUMicros::from_dollars_per_minute(0.006),
-        );
-        t.insert(
-            "deepgram".into(),
-            PerSecondCostUMicros::from_dollars_per_minute(0.0043),
-        );
-        t.insert(
-            "assemblyai".into(),
-            PerSecondCostUMicros::from_dollars_per_minute(0.0036),
-        );
+        t.insert("groq".into(), PerSecondCostUMicros::from_dollars_per_minute(0.0033));
+        t.insert("openai".into(), PerSecondCostUMicros::from_dollars_per_minute(0.006));
+        t.insert("deepgram".into(), PerSecondCostUMicros::from_dollars_per_minute(0.0043));
+        t.insert("assemblyai".into(), PerSecondCostUMicros::from_dollars_per_minute(0.0036));
         Self { entries: t }
     }
 
     pub fn get(&self, provider: &str) -> PerSecondCostUMicros {
-        self.entries
-            .get(provider)
-            .copied()
-            .unwrap_or(PerSecondCostUMicros::ZERO)
+        self.entries.get(provider).copied().unwrap_or(PerSecondCostUMicros::ZERO)
     }
 
     pub fn insert(&mut self, provider: impl Into<String>, cost: PerSecondCostUMicros) {
@@ -146,13 +131,7 @@ impl BudgetController {
         ceiling_per_minute_umicros: u64,
         floor: QualityFloor,
     ) -> Self {
-        Self {
-            cost,
-            ceiling_per_minute_umicros,
-            spent_umicros: 0,
-            streamed: Duration::ZERO,
-            floor,
-        }
+        Self { cost, ceiling_per_minute_umicros, spent_umicros: 0, streamed: Duration::ZERO, floor }
     }
 
     /// Convenience: zero-cost local backend never throttles.
@@ -234,10 +213,7 @@ mod tests {
     #[test]
     fn price_table_falls_back_to_zero_for_unknown_provider() {
         let t = PriceTable::defaults();
-        assert_eq!(
-            t.get("definitely-not-a-provider"),
-            PerSecondCostUMicros::ZERO
-        );
+        assert_eq!(t.get("definitely-not-a-provider"), PerSecondCostUMicros::ZERO);
         assert_eq!(t.get("local"), PerSecondCostUMicros::ZERO);
         assert!(t.get("openai").0 > 0);
     }

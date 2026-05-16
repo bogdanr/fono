@@ -29,9 +29,7 @@ pub enum Injector {
 impl Injector {
     /// Pick the best available injector for the current session.
     pub fn detect() -> Self {
-        let wayland = std::env::var("XDG_SESSION_TYPE")
-            .map(|v| v == "wayland")
-            .unwrap_or(false)
+        let wayland = std::env::var("XDG_SESSION_TYPE").map(|v| v == "wayland").unwrap_or(false)
             || std::env::var("WAYLAND_DISPLAY").is_ok();
 
         // X11 / XWayland: prefer xdotool subprocess (works on KDE/GNOME X11
@@ -187,9 +185,7 @@ pub fn type_text_with_outcome(text: &str) -> Result<InjectOutcome> {
 pub fn copy_to_clipboard(text: &str) -> Result<&'static str> {
     let outcomes = copy_to_clipboard_all(text);
     // Return the first tool/target pair that worked; otherwise concatenate errors.
-    if let Some((t, target)) = outcomes
-        .iter()
-        .find_map(|o| o.success.then_some((o.tool, o.target)))
+    if let Some((t, target)) = outcomes.iter().find_map(|o| o.success.then_some((o.tool, o.target)))
     {
         // Log secondary successes so users on Wayland sessions with X11 clipboard
         // managers (e.g. clipit) see that the X clipboard was also populated.
@@ -203,20 +199,14 @@ pub fn copy_to_clipboard(text: &str) -> Result<&'static str> {
         }
         return Ok(t);
     }
-    let errs: Vec<String> = outcomes
-        .into_iter()
-        .map(|o| format!("{}: {}", o.tool, o.detail))
-        .collect();
+    let errs: Vec<String> =
+        outcomes.into_iter().map(|o| format!("{}: {}", o.tool, o.detail)).collect();
     Err(anyhow!(
         "no clipboard tool worked. Diagnostics: [{}]. \
          On Wayland install `wl-clipboard` (provides wl-copy). \
          On X11 install `xclip` or `xsel`. \
          Verify DISPLAY/WAYLAND_DISPLAY are set in the daemon's environment.",
-        if errs.is_empty() {
-            "no clipboard tools installed".into()
-        } else {
-            errs.join(" | ")
-        }
+        if errs.is_empty() { "no clipboard tools installed".into() } else { errs.join(" | ") }
     ))
 }
 
@@ -249,12 +239,7 @@ pub fn copy_to_clipboard_all(text: &str) -> Vec<ClipboardAttempt> {
     // the entry regardless of which selection it watches.
     let candidates: &[(&str, &[&str], &str, &str)] = &[
         ("wl-copy", &[], "wayland", "WAYLAND_DISPLAY"),
-        (
-            "xclip",
-            &["-selection", "clipboard"],
-            "clipboard",
-            "DISPLAY",
-        ),
+        ("xclip", &["-selection", "clipboard"], "clipboard", "DISPLAY"),
         ("xsel", &["--clipboard", "--input"], "clipboard", "DISPLAY"),
         ("xclip", &["-selection", "primary"], "primary", "DISPLAY"),
         ("xsel", &["--primary", "--input"], "primary", "DISPLAY"),
@@ -428,8 +413,7 @@ fn inject_subprocess(cmd: &str, args: &[&str]) -> Result<()> {
 fn inject_enigo(text: &str) -> Result<()> {
     use enigo::{Enigo, Keyboard, Settings};
     let mut en = Enigo::new(&Settings::default()).map_err(|e| anyhow!("enigo init failed: {e}"))?;
-    en.text(text)
-        .map_err(|e| anyhow!("enigo text failed: {e}"))?;
+    en.text(text).map_err(|e| anyhow!("enigo text failed: {e}"))?;
     Ok(())
 }
 

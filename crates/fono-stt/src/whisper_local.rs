@@ -118,10 +118,7 @@ impl WhisperLocal {
     /// suffix (e.g. `ggml-small.en.bin`), indicating an English-only
     /// model.
     fn model_is_english_only(&self) -> bool {
-        self.model_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.contains(".en"))
+        self.model_path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains(".en"))
     }
 
     /// Resolve the initial prompt to send for a given language.
@@ -149,15 +146,9 @@ impl WhisperLocal {
     }
 
     fn ensure_ctx(&self) -> Result<()> {
-        let mut guard = self
-            .ctx
-            .lock()
-            .map_err(|_| anyhow!("whisper mutex poisoned"))?;
+        let mut guard = self.ctx.lock().map_err(|_| anyhow!("whisper mutex poisoned"))?;
         if guard.is_none() {
-            let path = self
-                .model_path
-                .to_str()
-                .ok_or_else(|| anyhow!("non-UTF-8 model path"))?;
+            let path = self.model_path.to_str().ok_or_else(|| anyhow!("non-UTF-8 model path"))?;
             let ctx = WhisperContext::new_with_params(path, WhisperContextParameters::default())
                 .context("load whisper model")?;
             *guard = Some(ctx);
@@ -177,10 +168,7 @@ impl SpeechToText for WhisperLocal {
         self.ensure_ctx()?;
         let selection = self.effective_selection(lang);
         let threads = self.threads;
-        let guard = self
-            .ctx
-            .lock()
-            .map_err(|_| anyhow!("whisper mutex poisoned"))?;
+        let guard = self.ctx.lock().map_err(|_| anyhow!("whisper mutex poisoned"))?;
         let ctx = guard.as_ref().expect("ensure_ctx succeeded");
 
         // Resolve the single language code we'll lock the decoder to.
@@ -231,11 +219,7 @@ impl SpeechToText for WhisperLocal {
         // either our resolved pick or, for unconstrained auto, the
         // post-hoc lang id from the state.
         let detected = resolved.or_else(|| post_hoc_lang(&state));
-        Ok(Transcription {
-            text: text.trim().to_string(),
-            language: detected,
-            duration_ms: None,
-        })
+        Ok(Transcription { text: text.trim().to_string(), language: detected, duration_ms: None })
     }
 
     fn name(&self) -> &'static str {
@@ -265,9 +249,7 @@ impl SpeechToText for WhisperLocal {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut guard = ctx.lock().map_err(|_| anyhow!("whisper mutex poisoned"))?;
             if guard.is_none() {
-                let p = path
-                    .to_str()
-                    .ok_or_else(|| anyhow!("non-UTF-8 model path"))?;
+                let p = path.to_str().ok_or_else(|| anyhow!("non-UTF-8 model path"))?;
                 let c = WhisperContext::new_with_params(p, WhisperContextParameters::default())
                     .context("load whisper model")?;
                 *guard = Some(c);
@@ -315,16 +297,12 @@ fn run_silent_decode(ctx: &WhisperContext, threads: i32) -> Result<()> {
     params.set_print_progress(false);
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
-    state
-        .full(params, &silence)
-        .context("whisper prewarm full()")?;
+    state.full(params, &silence).context("whisper prewarm full()")?;
     Ok(())
 }
 
 fn num_cpus() -> i32 {
-    std::thread::available_parallelism()
-        .map(|n| n.get() as i32)
-        .unwrap_or(4)
+    std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4)
 }
 
 // ---------------------------------------------------------------------
@@ -375,15 +353,10 @@ fn pick_from_allow_list(
     let prefix_len = pcm.len().min(LANG_DETECT_PREFIX_SAMPLES);
     let prefix = &pcm[..prefix_len];
 
-    let mut state = ctx
-        .create_state()
-        .context("create whisper state (lang_detect)")?;
-    state
-        .pcm_to_mel(prefix, threads as usize)
-        .context("whisper pcm_to_mel for lang_detect")?;
-    let (_top_id, probs) = state
-        .lang_detect(0, threads.max(1) as usize)
-        .context("whisper lang_detect")?;
+    let mut state = ctx.create_state().context("create whisper state (lang_detect)")?;
+    state.pcm_to_mel(prefix, threads as usize).context("whisper pcm_to_mel for lang_detect")?;
+    let (_top_id, probs) =
+        state.lang_detect(0, threads.max(1) as usize).context("whisper lang_detect")?;
 
     // Translate each user-supplied BCP-47 code to whisper's internal
     // language id, then argmax. Unknown codes are dropped with a warn.
@@ -635,10 +608,7 @@ mod streaming_impl {
         _sample_rate: u32,
         lang: Option<&str>,
     ) -> anyhow::Result<String> {
-        let guard = stt
-            .ctx
-            .lock()
-            .map_err(|_| anyhow!("whisper mutex poisoned"))?;
+        let guard = stt.ctx.lock().map_err(|_| anyhow!("whisper mutex poisoned"))?;
         let ctx = guard.as_ref().expect("ensure_ctx already called");
         let mut state = ctx.create_state().context("create whisper state")?;
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
@@ -730,9 +700,7 @@ mod streaming_impl {
         // Letters, spaces, and underscores only — and at least one
         // alphabetic letter. Whisper meta-tokens never contain
         // digits or sentence punctuation.
-        let valid = inner
-            .chars()
-            .all(|ch| ch.is_ascii_alphabetic() || ch == ' ' || ch == '_');
+        let valid = inner.chars().all(|ch| ch.is_ascii_alphabetic() || ch == ' ' || ch == '_');
         if !valid {
             return false;
         }
@@ -767,30 +735,21 @@ mod streaming_impl {
             assert_eq!(strip_whisper_artifacts("[BLANK_AUDIO]"), "");
             assert_eq!(strip_whisper_artifacts("[MUSIC PLAYING]"), "");
             assert_eq!(strip_whisper_artifacts("[SILENCE]"), "");
-            assert_eq!(
-                strip_whisper_artifacts("hello [BLANK_AUDIO] world"),
-                "hello world"
-            );
+            assert_eq!(strip_whisper_artifacts("hello [BLANK_AUDIO] world"), "hello world");
         }
 
         #[test]
         fn strips_lowercase_parenthetical_verbs() {
             assert_eq!(strip_whisper_artifacts("(applause)"), "");
             assert_eq!(strip_whisper_artifacts("(coughing)"), "");
-            assert_eq!(
-                strip_whisper_artifacts("hello (laughs) world"),
-                "hello world"
-            );
+            assert_eq!(strip_whisper_artifacts("hello (laughs) world"), "hello world");
         }
 
         #[test]
         fn preserves_mixed_case_user_content() {
             // Mixed case → user dictated "see Fig 3", whisper rendered it.
             assert_eq!(strip_whisper_artifacts("see (Fig 3)"), "see (Fig 3)");
-            assert_eq!(
-                strip_whisper_artifacts("note [version 2]"),
-                "note [version 2]"
-            );
+            assert_eq!(strip_whisper_artifacts("note [version 2]"), "note [version 2]");
         }
 
         #[test]
@@ -804,10 +763,7 @@ mod streaming_impl {
 
         #[test]
         fn collapses_double_spaces_after_strip() {
-            assert_eq!(
-                strip_whisper_artifacts("hello [BLANK_AUDIO]  world"),
-                "hello world"
-            );
+            assert_eq!(strip_whisper_artifacts("hello [BLANK_AUDIO]  world"), "hello world");
         }
 
         #[test]

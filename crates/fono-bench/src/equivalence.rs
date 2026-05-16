@@ -398,9 +398,7 @@ pub struct HarnessConfig {
 
 impl Default for HarnessConfig {
     fn default() -> Self {
-        Self {
-            variants: a2_variants(),
-        }
+        Self { variants: a2_variants() }
     }
 }
 
@@ -408,10 +406,7 @@ impl Default for HarnessConfig {
 /// deterministically.
 #[must_use]
 pub fn a2_variants() -> Vec<HarnessVariant> {
-    let prosody_only = BoundaryKnobs {
-        commit_use_prosody: true,
-        ..BoundaryKnobs::all_off()
-    };
+    let prosody_only = BoundaryKnobs { commit_use_prosody: true, ..BoundaryKnobs::all_off() };
     let filler_only = {
         let d = BoundaryKnobs::defaults();
         BoundaryKnobs {
@@ -438,16 +433,8 @@ pub fn a2_variants() -> Vec<HarnessVariant> {
             gating: true,
             knobs: BoundaryKnobs::defaults(),
         },
-        HarnessVariant {
-            name: "A2-prosody".into(),
-            gating: false,
-            knobs: prosody_only,
-        },
-        HarnessVariant {
-            name: "A2-filler".into(),
-            gating: false,
-            knobs: filler_only,
-        },
+        HarnessVariant { name: "A2-prosody".into(), gating: false, knobs: prosody_only },
+        HarnessVariant { name: "A2-filler".into(), gating: false, knobs: filler_only },
     ]
 }
 
@@ -565,18 +552,11 @@ pub async fn run_fixture(
         crate::wav::read(&path).with_context(|| format!("read fixture {}", path.display()))?;
     let pcm = wav.samples;
     let sample_rate = wav.sample_rate;
-    let duration_s = if sample_rate > 0 {
-        pcm.len() as f64 / sample_rate as f64
-    } else {
-        0.0
-    };
+    let duration_s = if sample_rate > 0 { pcm.len() as f64 / sample_rate as f64 } else { 0.0 };
 
     // Batch pass.
-    let lang_owned = if fixture.language.is_empty() {
-        None
-    } else {
-        Some(fixture.language.clone())
-    };
+    let lang_owned =
+        if fixture.language.is_empty() { None } else { Some(fixture.language.clone()) };
     let lang = lang_owned.as_deref();
     let t0 = Instant::now();
     let batch_tx = stt.transcribe(&pcm, sample_rate, lang).await?;
@@ -589,9 +569,7 @@ pub async fn run_fixture(
 
     // Streaming pass (only when streaming is available + compiled in).
     let (streaming, levenshtein) = if let Some(stream) = streaming_stt.as_ref() {
-        let stream_res = stream
-            .run_streaming(&pcm, sample_rate, lang_owned.clone())
-            .await?;
+        let stream_res = stream.run_streaming(&pcm, sample_rate, lang_owned.clone()).await?;
         let lev = levenshtein_norm(&stream_res.text, &batch.text);
         (Some(stream_res), lev)
     } else {
@@ -609,13 +587,9 @@ pub async fn run_fixture(
     };
 
     let ttff_ratio = streaming.as_ref().map(|s| ratio(s.ttff_ms, batch.ttff_ms));
-    let ttc_ratio = streaming
-        .as_ref()
-        .map(|s| ratio(s.elapsed_ms, batch.elapsed_ms));
+    let ttc_ratio = streaming.as_ref().map(|s| ratio(s.elapsed_ms, batch.elapsed_ms));
 
-    let equiv_threshold = fixture
-        .equivalence_threshold
-        .unwrap_or(TIER1_LEVENSHTEIN_THRESHOLD);
+    let equiv_threshold = fixture.equivalence_threshold.unwrap_or(TIER1_LEVENSHTEIN_THRESHOLD);
     // When no separate accuracy threshold is set, fall back to the
     // equivalence threshold so existing manifests preserve their
     // pre-split behaviour.
@@ -652,11 +626,8 @@ pub async fn run_fixture(
         }
     }
 
-    let skip_reason = if matches!(verdict, Verdict::Skipped) {
-        Some(SkipReason::NoStreaming)
-    } else {
-        None
-    };
+    let skip_reason =
+        if matches!(verdict, Verdict::Skipped) { Some(SkipReason::NoStreaming) } else { None };
 
     Ok(EquivalenceResult {
         fixture: fixture.name.clone(),
@@ -726,11 +697,7 @@ pub(crate) fn skipped_with_reason(
         synthetic_placeholder: fixture.synthetic_placeholder,
         duration_s: 0.0,
         modes: Modes {
-            batch: ModeResult {
-                text: String::new(),
-                elapsed_ms: 0,
-                ttff_ms: 0,
-            },
+            batch: ModeResult { text: String::new(), elapsed_ms: 0, ttff_ms: 0 },
             streaming: None,
         },
         metrics: Metrics {
@@ -809,10 +776,7 @@ mod streaming_impl {
             let frames: BoxStream<'static, StreamFrame> = UnboundedReceiverStream::new(rx).boxed();
 
             let started = Instant::now();
-            let mut updates = self
-                .stt
-                .stream_transcribe(frames, sample_rate, lang)
-                .await?;
+            let mut updates = self.stt.stream_transcribe(frames, sample_rate, lang).await?;
             let mut finalized: Vec<String> = Vec::new();
             let mut ttff: Option<u128> = None;
             while let Some(u) = updates.next().await {
@@ -875,16 +839,8 @@ mod tests {
             synthetic_placeholder: false,
             duration_s: 3.0,
             modes: Modes {
-                batch: ModeResult {
-                    text: "hi".into(),
-                    elapsed_ms: 100,
-                    ttff_ms: 100,
-                },
-                streaming: Some(ModeResult {
-                    text: "hi".into(),
-                    elapsed_ms: 110,
-                    ttff_ms: 30,
-                }),
+                batch: ModeResult { text: "hi".into(), elapsed_ms: 100, ttff_ms: 100 },
+                streaming: Some(ModeResult { text: "hi".into(), elapsed_ms: 110, ttff_ms: 30 }),
             },
             metrics: Metrics {
                 stt_levenshtein_norm: 0.0,
@@ -979,11 +935,7 @@ mod tests {
             synthetic_placeholder: false,
             duration_s: 0.0,
             modes: Modes {
-                batch: ModeResult {
-                    text: String::new(),
-                    elapsed_ms: 0,
-                    ttff_ms: 0,
-                },
+                batch: ModeResult { text: String::new(), elapsed_ms: 0, ttff_ms: 0 },
                 streaming: None,
             },
             metrics: Metrics {
@@ -1019,18 +971,11 @@ mod tests {
         let cfg = HarnessConfig::default();
         assert_eq!(cfg.variants.len(), 4);
         let names: Vec<&str> = cfg.variants.iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["A2-no-heur", "A2-default", "A2-prosody", "A2-filler"]
-        );
+        assert_eq!(names, vec!["A2-no-heur", "A2-default", "A2-prosody", "A2-filler"]);
 
         // Exactly one gating row.
-        let gating: Vec<&str> = cfg
-            .variants
-            .iter()
-            .filter(|v| v.gating)
-            .map(|v| v.name.as_str())
-            .collect();
+        let gating: Vec<&str> =
+            cfg.variants.iter().filter(|v| v.gating).map(|v| v.name.as_str()).collect();
         assert_eq!(gating, vec!["A2-default"]);
 
         // Knob sets must be pairwise distinct — otherwise the diff
@@ -1100,36 +1045,18 @@ mod tests {
         // Accuracy only, failing.
         assert_eq!(decide_verdict(None, Some(0.40), 0.20, 0.20), Verdict::Fail);
         // Both gates evaluated and pass.
-        assert_eq!(
-            decide_verdict(Some(0.02), Some(0.05), 0.20, 0.20),
-            Verdict::Pass
-        );
+        assert_eq!(decide_verdict(Some(0.02), Some(0.05), 0.20, 0.20), Verdict::Pass);
         // Equiv passes, accuracy fails → Fail (catches "tiny.en
         // hallucinates the same gibberish in both lanes").
-        assert_eq!(
-            decide_verdict(Some(0.00), Some(0.80), 0.20, 0.20),
-            Verdict::Fail
-        );
+        assert_eq!(decide_verdict(Some(0.00), Some(0.80), 0.20, 0.20), Verdict::Fail);
         // Equiv fails, accuracy passes → Fail.
-        assert_eq!(
-            decide_verdict(Some(0.50), Some(0.05), 0.20, 0.20),
-            Verdict::Fail
-        );
+        assert_eq!(decide_verdict(Some(0.50), Some(0.05), 0.20, 0.20), Verdict::Fail);
         // Boundary: exactly at threshold counts as pass on both gates.
-        assert_eq!(
-            decide_verdict(Some(0.20), Some(0.20), 0.20, 0.20),
-            Verdict::Pass
-        );
+        assert_eq!(decide_verdict(Some(0.20), Some(0.20), 0.20, 0.20), Verdict::Pass);
         // Split thresholds: equiv tight, accuracy loose.
-        assert_eq!(
-            decide_verdict(Some(0.05), Some(0.25), 0.05, 0.30),
-            Verdict::Pass
-        );
+        assert_eq!(decide_verdict(Some(0.05), Some(0.25), 0.05, 0.30), Verdict::Pass);
         // Split thresholds: equiv loose, accuracy tight — acc fails.
-        assert_eq!(
-            decide_verdict(Some(0.05), Some(0.25), 0.30, 0.05),
-            Verdict::Fail
-        );
+        assert_eq!(decide_verdict(Some(0.05), Some(0.25), 0.30, 0.05), Verdict::Fail);
     }
 
     #[test]

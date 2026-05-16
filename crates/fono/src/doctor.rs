@@ -24,27 +24,14 @@ fn paint(code: &str, s: &str) -> String {
         s.to_string()
     }
 }
-fn ok(s: &str) -> String {
-    paint("32", s)
-} // green
-fn bad(s: &str) -> String {
-    paint("31;1", s)
-} // bold red
-fn warn(s: &str) -> String {
-    paint("33", s)
-} // yellow
-fn dim(s: &str) -> String {
-    paint("2", s)
-} // dim
-fn head(s: &str) -> String {
-    paint("1;36", s)
-} // bold cyan
+#[rustfmt::skip] fn ok(s: &str) -> String { paint("32", s) } // green
+#[rustfmt::skip] fn bad(s: &str) -> String { paint("31;1", s) } // bold red
+#[rustfmt::skip] fn warn(s: &str) -> String { paint("33", s) } // yellow
+#[rustfmt::skip] fn dim(s: &str) -> String { paint("2", s) } // dim
+#[rustfmt::skip] fn head(s: &str) -> String { paint("1;36", s) } // bold cyan
+#[rustfmt::skip]
 fn star(active: bool) -> String {
-    if active {
-        paint("1;36", "*")
-    } else {
-        " ".into()
-    }
+    if active { paint("1;36", "*") } else { " ".into() }
 }
 
 #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
@@ -105,12 +92,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
         use crate::variant::{Variant, VARIANT};
         use fono_core::vulkan_probe::probe;
         writeln!(out, "{}", head("Compute backends:"))?;
-        writeln!(
-            out,
-            "  variant  : {} ({})",
-            VARIANT.label(),
-            VARIANT.description()
-        )?;
+        writeln!(out, "  variant  : {} ({})", VARIANT.label(), VARIANT.description())?;
         let outcome = probe();
         writeln!(out, "  vulkan   : {}", outcome.summary_line())?;
         if matches!(VARIANT, Variant::Cpu) && outcome.is_usable() {
@@ -132,12 +114,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
     writeln!(out, "  state  : {}", paths.state_dir.display())?;
     writeln!(out)?;
 
-    writeln!(
-        out,
-        "{} {}",
-        head("Install:"),
-        crate::install::doctor_state()
-    )?;
+    writeln!(out, "{} {}", head("Install:"), crate::install::doctor_state())?;
     writeln!(out)?;
 
     let config_exists = paths.config_file().exists();
@@ -145,11 +122,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
         out,
         "{} {}",
         head("Config :"),
-        if config_exists {
-            ok("present")
-        } else {
-            bad("MISSING (run `fono setup`)")
-        }
+        if config_exists { ok("present") } else { bad("MISSING (run `fono setup`)") }
     )?;
     let cfg = if config_exists {
         match Config::load(&paths.config_file()) {
@@ -201,11 +174,9 @@ pub async fn report(paths: &Paths) -> Result<String> {
         }
         match fono_tts::build_tts(&c.tts, &secrets) {
             Ok(Some(t)) => writeln!(out, "  tts: {} {}", t.name(), ok("ready"))?,
-            Ok(None) => writeln!(
-                out,
-                "  tts: {}",
-                warn("disabled (assistant replies will be silent)")
-            )?,
+            Ok(None) => {
+                writeln!(out, "  tts: {}", warn("disabled (assistant replies will be silent)"))?;
+            }
             Err(e) => writeln!(out, "  tts: {} {e:#}", bad("FAIL —"))?,
         }
         writeln!(out)?;
@@ -313,10 +284,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
             writeln!(out, "  {mark} {name:<14} {extra}")?;
         }
         writeln!(out)?;
-        writeln!(
-            out,
-            "(* = active. Switch with `fono use stt|llm|assistant|tts <backend>`.)"
-        )?;
+        writeln!(out, "(* = active. Switch with `fono use stt|llm|assistant|tts <backend>`.)")?;
         writeln!(out)?;
     }
 
@@ -338,12 +306,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
     )?;
     writeln!(out)?;
 
-    writeln!(
-        out,
-        "{} {:?}",
-        head("Audio stack :"),
-        fono_audio::mute::detect()
-    )?;
+    writeln!(out, "{} {:?}", head("Audio stack :"), fono_audio::mute::detect())?;
     // Input device matrix: list every device the active stack
     // (PulseAudio / PipeWire via pactl, or cpal as fallback) reports,
     // marking whichever the OS currently considers default. Fono no
@@ -400,33 +363,18 @@ pub async fn report(paths: &Paths) -> Result<String> {
             bad("NONE (install one of: wl-clipboard, xclip, xsel — without these, dictation cannot be recovered when key injection fails)")
         )?;
     } else {
-        writeln!(
-            out,
-            "{} {} {}",
-            head("Clipboard   :"),
-            clip_tools.join(", "),
-            dim("(fallback)")
-        )?;
+        writeln!(out, "{} {} {}", head("Clipboard   :"), clip_tools.join(", "), dim("(fallback)"))?;
     }
     writeln!(
         out,
         "{} {} ({})",
         head("IPC socket  :"),
         paths.ipc_socket().display(),
-        if paths.ipc_socket().exists() {
-            ok("exists")
-        } else {
-            warn("absent")
-        }
+        if paths.ipc_socket().exists() { ok("exists") } else { warn("absent") }
     )?;
 
     writeln!(out)?;
-    writeln!(
-        out,
-        "{} ({}):",
-        head("Log tail"),
-        paths.log_file().display()
-    )?;
+    writeln!(out, "{} ({}):", head("Log tail"), paths.log_file().display())?;
     match tail_log(&paths.log_file(), 10) {
         Ok(lines) if lines.is_empty() => writeln!(out, "  {}", dim("(log is empty)"))?,
         Ok(lines) => {

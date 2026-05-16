@@ -318,11 +318,7 @@ pub fn notify(stage: Stage, provider: &'static str, class: ErrorClass, details: 
         }
     }
 
-    let key = DedupKey {
-        stage,
-        provider,
-        class,
-    };
+    let key = DedupKey { stage, provider, class };
     let already = {
         let Ok(mut g) = FIRED.lock() else {
             return false;
@@ -450,9 +446,8 @@ fn render(
                  be spoken; switch to a local TTS backend or check your network."
             ),
         ),
-        (Stage::Tts, ErrorClass::TermsRequired) => (
-            format!("Fono — TTS model requires terms acceptance ({provider})"),
-            {
+        (Stage::Tts, ErrorClass::TermsRequired) => {
+            (format!("Fono — TTS model requires terms acceptance ({provider})"), {
                 let url = extract_url(details);
                 let suffix = url.map_or_else(
                     || {
@@ -466,8 +461,8 @@ fn render(
                      not been accepted by the org admin. The assistant reply was \
                      generated but could not be spoken. {suffix}"
                 )
-            },
-        ),
+            })
+        }
         (Stage::Tts, ErrorClass::Other | ErrorClass::RateLimit) => (
             format!("Fono — TTS failed ({provider})"),
             format!(
@@ -497,9 +492,8 @@ fn render(
                  `fono doctor` for details."
             ),
         ),
-        (_, ErrorClass::TermsRequired) => (
-            format!("Fono — model requires terms acceptance ({provider})"),
-            {
+        (_, ErrorClass::TermsRequired) => {
+            (format!("Fono — model requires terms acceptance ({provider})"), {
                 let url = extract_url(details);
                 let suffix = url.map_or_else(
                     || {
@@ -512,14 +506,10 @@ fn render(
                     "{provider} refused the request because the model's terms have \
                      not been accepted by the org admin. {suffix}"
                 )
-            },
-        ),
-        (stage, ErrorClass::MissingKey) => (
-            format!(
-                "Fono — {} key missing ({provider})",
-                stage_user_label(stage)
-            ),
-            {
+            })
+        }
+        (stage, ErrorClass::MissingKey) => {
+            (format!("Fono — {} key missing ({provider})", stage_user_label(stage)), {
                 let var = extract_env_var(details);
                 let hint = var.map_or_else(
                     || {
@@ -544,8 +534,8 @@ fn render(
                     Stage::Inject => "",
                 };
                 format!("{hint}{consequence}")
-            },
-        ),
+            })
+        }
         (Stage::Inject, _) => (
             format!("Fono — text injection failed ({provider})"),
             format!(
@@ -563,10 +553,7 @@ fn render(
 #[cfg(test)]
 #[doc(hidden)]
 pub fn drain_test_recorder() -> Vec<(Stage, &'static str, ErrorClass, String)> {
-    TEST_RECORDER
-        .lock()
-        .map(|mut v| std::mem::take(&mut *v))
-        .unwrap_or_default()
+    TEST_RECORDER.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -577,9 +564,7 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn fresh() -> std::sync::MutexGuard<'static, ()> {
-        let g = TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let g = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_session_flag();
         let _ = drain_test_recorder();
         g
@@ -643,12 +628,7 @@ mod tests {
         let _g = fresh();
         assert!(notify(Stage::Stt, "groq", ErrorClass::Auth, "401"));
         assert!(!notify(Stage::Stt, "groq", ErrorClass::Auth, "401 again"));
-        assert!(!notify(
-            Stage::Stt,
-            "groq",
-            ErrorClass::Auth,
-            "401 once more"
-        ));
+        assert!(!notify(Stage::Stt, "groq", ErrorClass::Auth, "401 once more"));
         let recorded = drain_test_recorder();
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].0, Stage::Stt);
@@ -665,19 +645,9 @@ mod tests {
         let _g = fresh();
         assert!(notify(Stage::Stt, "groq", ErrorClass::Auth, "stt-401"));
         assert!(!notify(Stage::Llm, "groq", ErrorClass::Auth, "llm-401"));
-        assert!(!notify(
-            Stage::Assistant,
-            "anthropic",
-            ErrorClass::Auth,
-            "assistant-401"
-        ));
+        assert!(!notify(Stage::Assistant, "anthropic", ErrorClass::Auth, "assistant-401"));
         assert!(!notify(Stage::Tts, "openai", ErrorClass::Auth, "tts-401"));
-        assert!(!notify(
-            Stage::Inject,
-            "wtype",
-            ErrorClass::Other,
-            "inject-failed"
-        ));
+        assert!(!notify(Stage::Inject, "wtype", ErrorClass::Other, "inject-failed"));
         let recorded = drain_test_recorder();
         assert_eq!(recorded.len(), 1, "cascade cap violated: {recorded:?}");
         assert_eq!(recorded[0].0, Stage::Stt);
@@ -838,12 +808,7 @@ mod tests {
     fn terms_required_notification_fires() {
         let _g = fresh();
         let details = "groq TTS 400: model_terms_required at https://console.groq.com/x";
-        assert!(notify(
-            Stage::Tts,
-            "groq",
-            ErrorClass::TermsRequired,
-            details
-        ));
+        assert!(notify(Stage::Tts, "groq", ErrorClass::TermsRequired, details));
         let recorded = drain_test_recorder();
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].2, ErrorClass::TermsRequired);

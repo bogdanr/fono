@@ -498,11 +498,7 @@ pub struct LlmLocal {
 
 impl Default for LlmLocal {
     fn default() -> Self {
-        Self {
-            model: "qwen2.5-1.5b-instruct".into(),
-            quantization: "q4_k_m".into(),
-            context: 4096,
-        }
+        Self { model: "qwen2.5-1.5b-instruct".into(), quantization: "q4_k_m".into(), context: 4096 }
     }
 }
 
@@ -662,11 +658,7 @@ impl Default for AssistantLocal {
     fn default() -> Self {
         // A 3B-class chat model is the floor for usable assistant
         // quality; 1.5B (the cleanup default) tends to ramble.
-        Self {
-            model: "qwen2.5-3b-instruct".into(),
-            quantization: "q4_k_m".into(),
-            context: 8192,
-        }
+        Self { model: "qwen2.5-3b-instruct".into(), quantization: "q4_k_m".into(), context: 8192 }
     }
 }
 
@@ -759,11 +751,7 @@ pub struct Overlay {
 
 impl Default for Overlay {
     fn default() -> Self {
-        Self {
-            waveform: true,
-            style: WaveformStyle::default(),
-            volume_bar: true,
-        }
+        Self { waveform: true, style: WaveformStyle::default(), volume_bar: true }
     }
 }
 
@@ -777,11 +765,7 @@ pub struct History {
 
 impl Default for History {
     fn default() -> Self {
-        Self {
-            enabled: true,
-            retention_days: 90,
-            redact_secrets: true,
-        }
+        Self { enabled: true, retention_days: 90, redact_secrets: true }
     }
 }
 
@@ -802,9 +786,7 @@ pub struct Inject {
 
 impl Default for Inject {
     fn default() -> Self {
-        Self {
-            paste_shortcut: "shift-insert".into(),
-        }
+        Self { paste_shortcut: "shift-insert".into() }
     }
 }
 
@@ -831,10 +813,7 @@ pub struct Update {
 
 impl Default for Update {
     fn default() -> Self {
-        Self {
-            auto_check: true,
-            channel: "stable".into(),
-        }
+        Self { auto_check: true, channel: "stable".into() }
     }
 }
 
@@ -1089,10 +1068,7 @@ impl Interactive {
 /// Centralised so the equivalence harness can reference the same list.
 #[must_use]
 pub fn default_filler_words() -> Vec<String> {
-    ["um", "uh", "er", "ah", "mm", "like", "you know"]
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect()
+    ["um", "uh", "er", "ah", "mm", "like", "you know"].iter().map(|s| (*s).to_string()).collect()
 }
 
 /// Default English syntactically-dangling-word vocabulary.
@@ -1123,11 +1099,9 @@ impl Config {
     pub fn tts_configured(&self, secrets: &crate::Secrets) -> bool {
         match self.tts.backend {
             TtsBackend::None => false,
-            TtsBackend::Wyoming => self
-                .tts
-                .wyoming
-                .as_ref()
-                .is_some_and(|w| !w.uri.trim().is_empty()),
+            TtsBackend::Wyoming => {
+                self.tts.wyoming.as_ref().is_some_and(|w| !w.uri.trim().is_empty())
+            }
             TtsBackend::OpenAI
             | TtsBackend::Groq
             | TtsBackend::OpenRouter
@@ -1144,18 +1118,13 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
             Ok(raw) => {
-                let mut cfg: Self = toml::from_str(&raw).map_err(|source| Error::TomlParse {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
+                let mut cfg: Self = toml::from_str(&raw)
+                    .map_err(|source| Error::TomlParse { path: path.to_path_buf(), source })?;
                 cfg.migrate()?;
                 Ok(cfg)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(source) => Err(Error::Io {
-                path: path.to_path_buf(),
-                source,
-            }),
+            Err(source) => Err(Error::Io { path: path.to_path_buf(), source }),
         }
     }
 
@@ -1176,10 +1145,8 @@ impl Config {
     /// Atomic write via tempfile + rename in the same directory.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|source| Error::Io {
-                path: dir.to_path_buf(),
-                source,
-            })?;
+            std::fs::create_dir_all(dir)
+                .map_err(|source| Error::Io { path: dir.to_path_buf(), source })?;
         }
         let toml_str = toml::to_string_pretty(self)?;
         atomic_write(path, toml_str.as_bytes(), 0o644)?;
@@ -1193,39 +1160,23 @@ pub(crate) fn atomic_write(path: &Path, data: &[u8], _mode: u32) -> Result<()> {
     use std::io::Write;
 
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(dir).map_err(|source| Error::Io {
-        path: dir.to_path_buf(),
-        source,
-    })?;
+    std::fs::create_dir_all(dir).map_err(|source| Error::Io { path: dir.to_path_buf(), source })?;
 
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|source| Error::Io {
-        path: dir.to_path_buf(),
-        source,
-    })?;
-    tmp.write_all(data).map_err(|source| Error::Io {
-        path: tmp.path().to_path_buf(),
-        source,
-    })?;
-    tmp.as_file_mut().sync_all().map_err(|source| Error::Io {
-        path: tmp.path().to_path_buf(),
-        source,
-    })?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)
+        .map_err(|source| Error::Io { path: dir.to_path_buf(), source })?;
+    tmp.write_all(data).map_err(|source| Error::Io { path: tmp.path().to_path_buf(), source })?;
+    tmp.as_file_mut()
+        .sync_all()
+        .map_err(|source| Error::Io { path: tmp.path().to_path_buf(), source })?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(_mode)).map_err(
-            |source| Error::Io {
-                path: tmp.path().to_path_buf(),
-                source,
-            },
-        )?;
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(_mode))
+            .map_err(|source| Error::Io { path: tmp.path().to_path_buf(), source })?;
     }
 
-    tmp.persist(path).map_err(|e| Error::Io {
-        path: PathBuf::from(path),
-        source: e.error,
-    })?;
+    tmp.persist(path).map_err(|e| Error::Io { path: PathBuf::from(path), source: e.error })?;
     Ok(())
 }
 
@@ -1241,10 +1192,7 @@ mod tests {
         cfg.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.version, CURRENT_VERSION);
-        assert!(
-            loaded.general.languages.is_empty(),
-            "default = unconstrained auto-detect"
-        );
+        assert!(loaded.general.languages.is_empty(), "default = unconstrained auto-detect");
         assert_eq!(loaded.stt.local.model, "small");
         assert_eq!(loaded.llm.local.model, "qwen2.5-1.5b-instruct");
     }
@@ -1258,14 +1206,8 @@ mod tests {
 
     #[test]
     fn future_version_rejected() {
-        let mut cfg = Config {
-            version: CURRENT_VERSION + 42,
-            ..Config::default()
-        };
-        assert!(matches!(
-            cfg.migrate(),
-            Err(Error::ConfigVersionTooNew { .. })
-        ));
+        let mut cfg = Config { version: CURRENT_VERSION + 42, ..Config::default() };
+        assert!(matches!(cfg.migrate(), Err(Error::ConfigVersionTooNew { .. })));
     }
 
     #[test]
@@ -1362,8 +1304,7 @@ mod tests {
         cfg.save(&path).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(
-            !raw.lines()
-                .any(|l| l.trim_start().starts_with("language =")),
+            !raw.lines().any(|l| l.trim_start().starts_with("language =")),
             "singular scalar must not be serialised: {raw}"
         );
         assert!(raw.contains("languages = ["));
@@ -1372,10 +1313,7 @@ mod tests {
             "default discovery settings must not be serialized as user-facing knobs: {raw}"
         );
         let reloaded = Config::load(&path).unwrap();
-        assert_eq!(
-            reloaded.general.languages,
-            vec!["en".to_string(), "ro".into(), "fr".into()]
-        );
+        assert_eq!(reloaded.general.languages, vec!["en".to_string(), "ro".into(), "fr".into()]);
     }
 
     #[test]
@@ -1420,16 +1358,11 @@ mod tests {
         // No wyoming block at all → not configured.
         assert!(!cfg.tts_configured(&secrets));
         // Block present but empty URI → not configured.
-        cfg.tts.wyoming = Some(TtsWyoming {
-            uri: String::new(),
-            auth_token_ref: String::new(),
-        });
+        cfg.tts.wyoming = Some(TtsWyoming { uri: String::new(), auth_token_ref: String::new() });
         assert!(!cfg.tts_configured(&secrets));
         // Non-empty URI → configured.
-        cfg.tts.wyoming = Some(TtsWyoming {
-            uri: "tcp://10.0.0.5:10200".into(),
-            auth_token_ref: String::new(),
-        });
+        cfg.tts.wyoming =
+            Some(TtsWyoming { uri: "tcp://10.0.0.5:10200".into(), auth_token_ref: String::new() });
         assert!(cfg.tts_configured(&secrets));
     }
 
@@ -1457,9 +1390,6 @@ mod tests {
         let secrets = crate::Secrets::default();
         let configured = cfg.tts_configured(&secrets);
         std::env::remove_var("GROQ_API_KEY");
-        assert!(
-            !configured,
-            "env-only GROQ_API_KEY must not satisfy tts_configured"
-        );
+        assert!(!configured, "env-only GROQ_API_KEY must not satisfy tts_configured");
     }
 }

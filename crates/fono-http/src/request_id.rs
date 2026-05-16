@@ -58,10 +58,7 @@ mod tests {
     #[test]
     fn returns_none_on_non_utf8() {
         let mut h = HeaderMap::new();
-        h.insert(
-            "x-request-id",
-            HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap(),
-        );
+        h.insert("x-request-id", HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap());
         assert_eq!(provider_request_id(&h), None);
     }
 }

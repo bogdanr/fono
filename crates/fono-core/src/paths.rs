@@ -50,10 +50,8 @@ impl Paths {
             &self.llm_models_dir(),
             &self.sherpa_models_dir(),
         ] {
-            std::fs::create_dir_all(dir).map_err(|source| Error::Io {
-                path: dir.clone(),
-                source,
-            })?;
+            std::fs::create_dir_all(dir)
+                .map_err(|source| Error::Io { path: dir.clone(), source })?;
         }
         Ok(())
     }

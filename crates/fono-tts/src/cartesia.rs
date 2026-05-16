@@ -77,10 +77,7 @@ impl CartesiaTts {
         serde_json::to_value(SynthesizeReq {
             model_id: &self.model,
             transcript: text,
-            voice: VoiceRef {
-                mode: "id",
-                id: &self.voice_id,
-            },
+            voice: VoiceRef { mode: "id", id: &self.voice_id },
             output_format: OutputFormat {
                 container: "raw",
                 encoding: "pcm_s16le",
@@ -131,10 +128,7 @@ impl TextToSpeech for CartesiaTts {
         _lang: Option<&str>,
     ) -> Result<TtsAudio> {
         if text.is_empty() {
-            return Ok(TtsAudio {
-                pcm: Vec::new(),
-                sample_rate: NATIVE_RATE,
-            });
+            return Ok(TtsAudio { pcm: Vec::new(), sample_rate: NATIVE_RATE });
         }
         let body = self.build_request_body(text);
         let resp = self
@@ -147,24 +141,12 @@ impl TextToSpeech for CartesiaTts {
             .context("posting to cartesia /tts/bytes")?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "<unreadable body>".to_string());
-            return Err(anyhow!(
-                "cartesia TTS returned {status}: {}",
-                truncate(&body, 400)
-            ));
+            let body = resp.text().await.unwrap_or_else(|_| "<unreadable body>".to_string());
+            return Err(anyhow!("cartesia TTS returned {status}: {}", truncate(&body, 400)));
         }
-        let bytes = resp
-            .bytes()
-            .await
-            .context("reading cartesia TTS response body")?;
+        let bytes = resp.bytes().await.context("reading cartesia TTS response body")?;
         let pcm = pcm_i16_le_to_f32(&bytes);
-        Ok(TtsAudio {
-            pcm,
-            sample_rate: NATIVE_RATE,
-        })
+        Ok(TtsAudio { pcm, sample_rate: NATIVE_RATE })
     }
 
     async fn prewarm(&self) -> Result<()> {

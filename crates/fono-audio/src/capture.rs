@@ -43,9 +43,7 @@ pub struct CaptureConfig {
 
 impl Default for CaptureConfig {
     fn default() -> Self {
-        Self {
-            target_sample_rate: TARGET_SAMPLE_RATE,
-        }
+        Self { target_sample_rate: TARGET_SAMPLE_RATE }
     }
 }
 
@@ -136,10 +134,7 @@ impl AudioCapture {
             }
         })?;
 
-        Ok(CaptureHandle {
-            _backend: backend,
-            buffer,
-        })
+        Ok(CaptureHandle { _backend: backend, buffer })
     }
 
     /// Begin capture wired to a real-time PCM forwarder. Each backend callback
@@ -153,9 +148,7 @@ impl AudioCapture {
     where
         F: FnMut(&[f32]) + Send + 'static,
     {
-        Ok(CaptureStreamHandle {
-            _backend: self.start_backend(forward)?,
-        })
+        Ok(CaptureStreamHandle { _backend: self.start_backend(forward)? })
     }
 
     #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
@@ -208,10 +201,7 @@ where
     F: FnMut(&[f32]) + Send + 'static,
 {
     let mut child = spawn_parec(target_rate)?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .context("parec did not expose stdout for PCM capture")?;
+    let mut stdout = child.stdout.take().context("parec did not expose stdout for PCM capture")?;
 
     let reader = thread::Builder::new()
         .name("fono-parec-capture".into())
@@ -242,10 +232,7 @@ where
         })
         .context("spawn parec capture reader thread")?;
 
-    Ok(ProcessCapture {
-        child,
-        reader: Some(reader),
-    })
+    Ok(ProcessCapture { child, reader: Some(reader) })
 }
 
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
@@ -292,13 +279,10 @@ where
     F: FnMut(&[f32]) + Send + 'static,
 {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| anyhow::anyhow!("no default input device"))?;
+    let device =
+        host.default_input_device().ok_or_else(|| anyhow::anyhow!("no default input device"))?;
 
-    let supported = device
-        .default_input_config()
-        .context("default_input_config failed")?;
+    let supported = device.default_input_config().context("default_input_config failed")?;
     debug!(
         "capture(cpal): device={:?} rate={} ch={} fmt={:?}",
         device.name(),
@@ -443,10 +427,7 @@ mod tests {
         let got = collected.lock().unwrap().clone();
         assert_eq!(got.len(), 400, "forwarder dropped or duplicated frames");
         for (i, v) in got.iter().enumerate() {
-            assert!(
-                (*v - i as f32).abs() < f32::EPSILON,
-                "sample {i} out of order: got {v}",
-            );
+            assert!((*v - i as f32).abs() < f32::EPSILON, "sample {i} out of order: got {v}",);
         }
     }
 }

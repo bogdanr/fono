@@ -63,11 +63,7 @@ mod graphical_session_tests {
     use super::is_graphical_session_in;
 
     fn lookup<'a>(map: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
-        move |k: &str| {
-            map.iter()
-                .find(|(name, _)| *name == k)
-                .map(|(_, v)| OsString::from(*v))
-        }
+        move |k: &str| map.iter().find(|(name, _)| *name == k).map(|(_, v)| OsString::from(*v))
     }
 
     #[test]
@@ -82,10 +78,7 @@ mod graphical_session_tests {
 
     #[test]
     fn graphical_when_wayland_display_set() {
-        assert!(is_graphical_session_in(lookup(&[(
-            "WAYLAND_DISPLAY",
-            "wayland-0"
-        )])));
+        assert!(is_graphical_session_in(lookup(&[("WAYLAND_DISPLAY", "wayland-0")])));
     }
 
     #[test]

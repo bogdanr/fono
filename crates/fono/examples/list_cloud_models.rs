@@ -15,21 +15,9 @@ use serde_json::Value;
 use std::time::Duration;
 
 const PROVIDERS: &[(&str, &str, &str)] = &[
-    (
-        "cerebras",
-        "CEREBRAS_API_KEY",
-        "https://api.cerebras.ai/v1/models",
-    ),
-    (
-        "groq",
-        "GROQ_API_KEY",
-        "https://api.groq.com/openai/v1/models",
-    ),
-    (
-        "openai",
-        "OPENAI_API_KEY",
-        "https://api.openai.com/v1/models",
-    ),
+    ("cerebras", "CEREBRAS_API_KEY", "https://api.cerebras.ai/v1/models"),
+    ("groq", "GROQ_API_KEY", "https://api.groq.com/openai/v1/models"),
+    ("openai", "OPENAI_API_KEY", "https://api.openai.com/v1/models"),
 ];
 
 #[tokio::main]
@@ -43,9 +31,7 @@ async fn main() -> Result<()> {
     let secrets = Secrets::load(&secrets_path).unwrap_or_default();
     println!("(secrets from {})\n", secrets_path.display());
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()?;
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(15)).build()?;
 
     for (label, key_env, url) in PROVIDERS {
         let Some(key) = secrets.resolve(key_env) else {

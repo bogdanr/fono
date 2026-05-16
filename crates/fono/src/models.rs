@@ -63,18 +63,13 @@ pub async fn ensure_local_stt(paths: &Paths, model_name: &str) -> Result<EnsureO
         );
         return Ok(EnsureOutcome::Unknown);
     };
-    let dest = paths
-        .whisper_models_dir()
-        .join(format!("ggml-{}.bin", info.name));
+    let dest = paths.whisper_models_dir().join(format!("ggml-{}.bin", info.name));
     if dest.exists() {
         debug!("whisper model ready: {}", dest.display());
         return Ok(EnsureOutcome::AlreadyPresent);
     }
     let url = ModelRegistry::url_for(info);
-    info!(
-        "whisper model {model_name:?} missing — downloading {} MB from {url}",
-        info.approx_mb
-    );
+    info!("whisper model {model_name:?} missing — downloading {} MB from {url}", info.approx_mb);
     fono_download::download(&url, &dest, info.sha256)
         .await
         .with_context(|| format!("downloading whisper model {model_name:?}"))?;
@@ -99,10 +94,7 @@ pub async fn ensure_local_llm(paths: &Paths, model_name: &str) -> Result<EnsureO
         return Ok(EnsureOutcome::AlreadyPresent);
     }
     let url = fono_llm::LlmRegistry::url_for(info);
-    info!(
-        "LLM model {model_name:?} missing — downloading {} MB from {url}",
-        info.approx_mb
-    );
+    info!("LLM model {model_name:?} missing — downloading {} MB from {url}", info.approx_mb);
     fono_download::download(&url, &dest, info.sha256)
         .await
         .with_context(|| format!("downloading LLM model {model_name:?}"))?;

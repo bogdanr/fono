@@ -1,6 +1,14 @@
 edition = "2021"
 max_width = 100
-imports_granularity = "Crate"
-group_imports = "StdExternalCrate"
 newline_style = "Unix"
 use_field_init_shorthand = true
+
+# Prefer compact formatting: short fn calls, struct literals, if/else, arrays,
+# and chains stay on one line whenever they fit inside `max_width`.
+use_small_heuristics = "Max"
+
+# Nightly-only knobs (silently ignored on stable rustfmt; left here for when
+# we eventually run `cargo +nightly fmt` locally). Do not re-add without
+# guarding the warnings — they spam every `cargo fmt` run on stable:
+#   imports_granularity = "Crate"
+#   group_imports       = "StdExternalCrate"

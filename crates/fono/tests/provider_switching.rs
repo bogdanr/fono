@@ -76,27 +76,11 @@ fn config_roundtrip_preserves_swapped_backend() {
 /// the documented presets.
 #[test]
 fn provider_strings_roundtrip_and_pair_correctly() {
-    for s in [
-        "local",
-        "groq",
-        "openai",
-        "deepgram",
-        "assemblyai",
-        "cartesia",
-    ] {
+    for s in ["local", "groq", "openai", "deepgram", "assemblyai", "cartesia"] {
         let b = parse_stt_backend(s).expect("known stt provider");
         assert_eq!(stt_backend_str(&b), s);
     }
-    for s in [
-        "local",
-        "none",
-        "openai",
-        "anthropic",
-        "groq",
-        "cerebras",
-        "openrouter",
-        "ollama",
-    ] {
+    for s in ["local", "none", "openai", "anthropic", "groq", "cerebras", "openrouter", "ollama"] {
         let b = parse_llm_backend(s).expect("known llm provider");
         assert_eq!(llm_backend_str(&b), s);
     }

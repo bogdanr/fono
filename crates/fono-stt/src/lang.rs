@@ -55,11 +55,8 @@ impl LanguageSelection {
     /// collapses to [`Self::Auto`].
     #[must_use]
     pub fn parse_csv(s: &str) -> Self {
-        let codes: Vec<String> = s
-            .split(',')
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .collect();
+        let codes: Vec<String> =
+            s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
         Self::from_config(&codes)
     }
 
@@ -303,10 +300,7 @@ mod tests {
     #[test]
     fn auto_alias_collapses_to_auto() {
         let codes = vec!["auto".to_string()];
-        assert!(matches!(
-            LanguageSelection::from_config(&codes),
-            LanguageSelection::Auto
-        ));
+        assert!(matches!(LanguageSelection::from_config(&codes), LanguageSelection::Auto));
     }
 
     #[test]
@@ -321,12 +315,7 @@ mod tests {
 
     #[test]
     fn multi_entry_becomes_allow_list_and_dedupes() {
-        let codes = vec![
-            "en".to_string(),
-            " RO ".to_string(),
-            "en".to_string(),
-            "fr".to_string(),
-        ];
+        let codes = vec!["en".to_string(), " RO ".to_string(), "en".to_string(), "fr".to_string()];
         let s = LanguageSelection::from_config(&codes);
         match s {
             LanguageSelection::AllowList(v) => assert_eq!(v, vec!["en", "ro", "fr"]),
@@ -340,19 +329,13 @@ mod tests {
         assert!(LanguageSelection::parse_csv("   ").is_auto());
         let s = LanguageSelection::parse_csv("en, ro , fr");
         assert!(matches!(s, LanguageSelection::AllowList(_)));
-        assert_eq!(
-            s.codes(),
-            &["en".to_string(), "ro".to_string(), "fr".to_string()]
-        );
+        assert_eq!(s.codes(), &["en".to_string(), "ro".to_string(), "fr".to_string()]);
     }
 
     #[test]
     fn fallback_hint_picks_first() {
         assert_eq!(LanguageSelection::Auto.fallback_hint(), None);
-        assert_eq!(
-            LanguageSelection::Forced("en".into()).fallback_hint(),
-            Some("en")
-        );
+        assert_eq!(LanguageSelection::Forced("en".into()).fallback_hint(), Some("en"));
         assert_eq!(
             LanguageSelection::AllowList(vec!["en".into(), "ro".into()]).fallback_hint(),
             Some("en")

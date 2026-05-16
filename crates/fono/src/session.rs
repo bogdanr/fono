@@ -117,11 +117,7 @@ impl CaptureSession {
             let _ = h.join();
         }
         let elapsed = self.started_at.elapsed();
-        let pcm = self
-            .buffer
-            .lock()
-            .map(|b| b.samples().to_vec())
-            .unwrap_or_default();
+        let pcm = self.buffer.lock().map(|b| b.samples().to_vec()).unwrap_or_default();
         (pcm, elapsed)
     }
 }
@@ -180,11 +176,7 @@ pub struct PipelineMetrics {
 #[derive(Debug, Clone)]
 pub enum PipelineOutcome {
     /// Successfully transcribed and (optionally) cleaned + injected text.
-    Completed {
-        raw: String,
-        cleaned: Option<String>,
-        metrics: PipelineMetrics,
-    },
+    Completed { raw: String, cleaned: Option<String>, metrics: PipelineMetrics },
     /// Recording was empty or shorter than [`MIN_RECORDING`]. No history
     /// row was written.
     EmptyOrTooShort { duration_ms: u64 },
@@ -344,13 +336,9 @@ impl SessionOrchestrator {
         paths: &Paths,
         action_tx: mpsc::UnboundedSender<HotkeyAction>,
     ) -> Result<Self> {
-        let stt = fono_stt::build_stt(
-            &config.stt,
-            &config.general,
-            secrets,
-            &paths.whisper_models_dir(),
-        )
-        .context("build STT backend")?;
+        let stt =
+            fono_stt::build_stt(&config.stt, &config.general, secrets, &paths.whisper_models_dir())
+                .context("build STT backend")?;
         let llm = match fono_llm::build_llm(&config.llm, secrets, &paths.llm_models_dir()) {
             Ok(opt) => opt,
             Err(e) => {
@@ -372,12 +360,9 @@ impl SessionOrchestrator {
                 None
             }
         };
-        let history = Arc::new(Mutex::new(
-            HistoryDb::open(&paths.history_db()).context("open history db")?,
-        ));
-        let capture_cfg = CaptureConfig {
-            target_sample_rate: config.audio.sample_rate,
-        };
+        let history =
+            Arc::new(Mutex::new(HistoryDb::open(&paths.history_db()).context("open history db")?));
+        let capture_cfg = CaptureConfig { target_sample_rate: config.audio.sample_rate };
         let config_for_env = Arc::clone(&config);
         let mut orch = Self::with_parts(
             stt,
@@ -445,9 +430,7 @@ impl SessionOrchestrator {
                 if config.interactive.enabled {
                     Some(fono_overlay::RealOverlay::spawn())
                 } else if config.overlay.waveform {
-                    Some(fono_overlay::RealOverlay::spawn_waveform(
-                        config.overlay.style,
-                    ))
+                    Some(fono_overlay::RealOverlay::spawn_waveform(config.overlay.style))
                 } else {
                     None
                 }
@@ -495,13 +478,9 @@ impl SessionOrchestrator {
             .clone();
         let cfg = Config::load(&paths.config_file()).context("reload: read config")?;
         let secrets = Secrets::load(&paths.secrets_file()).context("reload: read secrets")?;
-        let new_stt = fono_stt::build_stt(
-            &cfg.stt,
-            &cfg.general,
-            &secrets,
-            &paths.whisper_models_dir(),
-        )
-        .context("reload: build STT")?;
+        let new_stt =
+            fono_stt::build_stt(&cfg.stt, &cfg.general, &secrets, &paths.whisper_models_dir())
+                .context("reload: build STT")?;
         let new_llm = match fono_llm::build_llm(&cfg.llm, &secrets, &paths.llm_models_dir()) {
             Ok(opt) => opt,
             Err(e) => {
@@ -545,9 +524,8 @@ impl SessionOrchestrator {
             }
         };
         let stt_name = new_stt.name().to_string();
-        let llm_name = new_llm
-            .as_ref()
-            .map_or_else(|| "none".to_string(), |l| l.name().to_string());
+        let llm_name =
+            new_llm.as_ref().map_or_else(|| "none".to_string(), |l| l.name().to_string());
         // Lock-write order matches read order in the hot path.
         if let Ok(mut guard) = self.stt.write() {
             *guard = new_stt;
@@ -700,10 +678,8 @@ impl SessionOrchestrator {
         // by `LiveSession`. The assistant pipeline is independent and
         // should always show its overlay regardless of interactive
         // mode (different state, different colour, different label).
-        let is_assistant = matches!(
-            initial_state,
-            fono_overlay::OverlayState::AssistantRecording { .. }
-        );
+        let is_assistant =
+            matches!(initial_state, fono_overlay::OverlayState::AssistantRecording { .. });
         let want_waveform = cfg.overlay.waveform && (is_assistant || !cfg.interactive.enabled);
         let handle = self.overlay.read().ok().and_then(|g| g.clone());
         match (want_waveform, handle) {
@@ -1118,11 +1094,7 @@ impl SessionOrchestrator {
     }
 
     /// Begin recording. Refuses if a previous pipeline is still running.
-    #[allow(
-        clippy::too_many_lines,
-        clippy::suboptimal_flops,
-        clippy::many_single_char_names
-    )]
+    #[allow(clippy::too_many_lines, clippy::suboptimal_flops, clippy::many_single_char_names)]
     pub async fn on_start_recording(&self, mode: RecordingMode) -> Result<()> {
         fono_stt::rate_limit_notify::reset_session_flag();
         fono_core::critical_notify::reset_session_flag();
@@ -1167,11 +1139,7 @@ impl SessionOrchestrator {
                 let _ = join.join();
                 return Err(anyhow::anyhow!("audio capture failed to start: {e}"));
             }
-            Err(_) => {
-                return Err(anyhow::anyhow!(
-                    "capture thread died before reporting status"
-                ))
-            }
+            Err(_) => return Err(anyhow::anyhow!("capture thread died before reporting status")),
         };
         let cfg = self.current_config();
         if cfg.general.auto_mute_system {
@@ -1249,14 +1217,10 @@ impl SessionOrchestrator {
         };
         #[cfg(not(feature = "interactive"))]
         let polish_anim: Option<tokio::task::AbortHandle> = None;
-        let (samples, elapsed) = tokio::task::spawn_blocking(move || session.stop_and_drain())
-            .await
-            .unwrap_or_default();
+        let (samples, elapsed) =
+            tokio::task::spawn_blocking(move || session.stop_and_drain()).await.unwrap_or_default();
         let capture_ms = elapsed.as_millis() as u64;
-        info!(
-            "recording stopped: {capture_ms} ms / {} samples",
-            samples.len()
-        );
+        info!("recording stopped: {capture_ms} ms / {} samples", samples.len());
 
         if elapsed < MIN_RECORDING || samples.is_empty() {
             warn!("recording too short ({capture_ms} ms); skipping STT");
@@ -1554,10 +1518,7 @@ impl SessionOrchestrator {
             }
         };
         if pre_transcribed.is_none() && (elapsed < MIN_RECORDING || pcm.is_empty()) {
-            info!(
-                "assistant recording too short ({}ms); skipping",
-                elapsed.as_millis()
-            );
+            info!("assistant recording too short ({}ms); skipping", elapsed.as_millis());
             self.hide_assistant_overlay();
             let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
             return;
@@ -1727,10 +1688,7 @@ impl SessionOrchestrator {
     }
 
     fn current_assistant(&self) -> Option<Arc<dyn Assistant>> {
-        self.assistant_backend
-            .read()
-            .expect("assistant lock poisoned")
-            .clone()
+        self.assistant_backend.read().expect("assistant lock poisoned").clone()
     }
 
     fn current_tts(&self) -> Option<Arc<dyn TextToSpeech>> {
@@ -1883,10 +1841,7 @@ impl SessionOrchestrator {
     /// backend is currently loaded — the caller MUST then fall back to
     /// the batch path. Slice A wiring follow-up.
     fn current_streaming_stt(&self) -> Option<Arc<dyn StreamingStt>> {
-        self.streaming_stt
-            .read()
-            .expect("streaming_stt lock poisoned")
-            .clone()
+        self.streaming_stt.read().expect("streaming_stt lock poisoned").clone()
     }
 
     /// Build a streaming-STT-backed capture pipeline with the supplied
@@ -1909,9 +1864,7 @@ impl SessionOrchestrator {
         // pump's broadcast frame budget aligned with whisper. The
         // capture stage resamples for us.
         let sample_rate = 16_000_u32;
-        let cap_cfg = CaptureConfig {
-            target_sample_rate: sample_rate,
-        };
+        let cap_cfg = CaptureConfig { target_sample_rate: sample_rate };
 
         // ---- Spawn the capture thread ----------------------------
         // The cpal stream uses the new realtime forwarder API:
@@ -1935,10 +1888,7 @@ impl SessionOrchestrator {
                 let forwarder_tx = audio_tx;
                 let result = cap.start_with_forwarder(move |pcm: &[f32]| {
                     if forwarder_tx.try_send(pcm.to_vec()).is_err() {
-                        warn!(
-                            "live-capture: realtime SPSC full ({} samples dropped)",
-                            pcm.len()
-                        );
+                        warn!("live-capture: realtime SPSC full ({} samples dropped)", pcm.len());
                     }
                 });
                 match result {
@@ -1960,9 +1910,7 @@ impl SessionOrchestrator {
                 return Err(anyhow::anyhow!("live audio capture failed to start: {e}"));
             }
             Err(_) => {
-                return Err(anyhow::anyhow!(
-                    "live capture thread died before reporting status"
-                ))
+                return Err(anyhow::anyhow!("live capture thread died before reporting status"))
             }
         }
 
@@ -2011,11 +1959,7 @@ impl SessionOrchestrator {
         // Tap RMS off each chunk to feed the right-side VU bar on the
         // overlay panel during F9. The assistant path uses the same
         // tap so the same VU indicator works for both surfaces.
-        let vu_overlay = if cfg.overlay.volume_bar {
-            overlay.clone()
-        } else {
-            None
-        };
+        let vu_overlay = if cfg.overlay.volume_bar { overlay.clone() } else { None };
         let drain_join = tokio::spawn(async move {
             let mut pump = pump;
             while let Some(chunk) = tokio_rx.recv().await {
@@ -2380,23 +2324,14 @@ async fn run_pipeline(
     focus: &dyn FocusProbe,
 ) -> PipelineOutcome {
     if pcm.is_empty() {
-        return PipelineOutcome::EmptyOrTooShort {
-            duration_ms: capture_ms,
-        };
+        return PipelineOutcome::EmptyOrTooShort { duration_ms: capture_ms };
     }
-    let mut metrics = PipelineMetrics {
-        capture_ms,
-        samples: pcm.len(),
-        ..Default::default()
-    };
+    let mut metrics = PipelineMetrics { capture_ms, samples: pcm.len(), ..Default::default() };
 
     // ---- Trim leading/trailing silence (latency plan L11+L12) -------
     let pcm_for_stt: std::borrow::Cow<'_, [f32]> = if config.audio.trim_silence {
         let trim_started = Instant::now();
-        let trim_cfg = fono_audio::TrimConfig {
-            sample_rate,
-            ..Default::default()
-        };
+        let trim_cfg = fono_audio::TrimConfig { sample_rate, ..Default::default() };
         let (s, e) = fono_audio::trim_silence(&pcm, trim_cfg);
         metrics.trim_ms = trim_started.elapsed().as_millis() as u64;
         if s == 0 && e == pcm.len() {
@@ -2420,9 +2355,7 @@ async fn run_pipeline(
     // ---- STT ---------------------------------------------------------
     let stt_started = Instant::now();
     let lang = lang_for(config);
-    let stt_result = stt
-        .transcribe(&pcm_for_stt, sample_rate, lang.as_deref())
-        .await;
+    let stt_result = stt.transcribe(&pcm_for_stt, sample_rate, lang.as_deref()).await;
     metrics.stt_ms = stt_started.elapsed().as_millis() as u64;
     let trans = match stt_result {
         Ok(t) => t,
@@ -2470,16 +2403,9 @@ async fn run_pipeline(
         // user and point at the tray Microphone submenu / `fono use
         // input` CLI. Plan v2 Phase 1.
         crate::audio_recovery::notify_empty_capture(capture_ms);
-        return PipelineOutcome::EmptyOrTooShort {
-            duration_ms: capture_ms,
-        };
+        return PipelineOutcome::EmptyOrTooShort { duration_ms: capture_ms };
     }
-    info!(
-        "stt: {} {}ms → {} chars",
-        stt.name(),
-        metrics.stt_ms,
-        metrics.raw_chars
-    );
+    info!("stt: {} {}ms → {} chars", stt.name(), metrics.stt_ms, metrics.raw_chars);
 
     // ---- LLM cleanup (optional) -------------------------------------
     let (app_class, app_title) = focus.probe();
@@ -2521,12 +2447,7 @@ async fn run_pipeline(
                 let trimmed = c.trim().to_string();
                 let raw_chars = raw.chars().count();
                 let new_chars = trimmed.chars().count();
-                info!(
-                    "llm: {} {}ms → {} chars",
-                    llm_backend.name(),
-                    metrics.llm_ms,
-                    new_chars
-                );
+                info!("llm: {} {}ms → {} chars", llm_backend.name(), metrics.llm_ms, new_chars);
                 let diff =
                     i64::try_from(new_chars).unwrap_or(0) - i64::try_from(raw_chars).unwrap_or(0);
                 if trimmed == raw {
@@ -2543,11 +2464,7 @@ async fn run_pipeline(
             }
             Err(e) => {
                 metrics.llm_ms = llm_started.elapsed().as_millis() as u64;
-                warn!(
-                    "llm: {} failed after {}ms: {e:#}",
-                    llm_backend.name(),
-                    metrics.llm_ms
-                );
+                warn!("llm: {} failed after {}ms: {e:#}", llm_backend.name(), metrics.llm_ms);
                 // Surface user-actionable failures (auth or network)
                 // once per session. Transient `Other` failures stay
                 // silent — the raw STT text is still injected below
@@ -2645,11 +2562,7 @@ async fn run_pipeline(
         }
     }
 
-    PipelineOutcome::Completed {
-        raw,
-        cleaned,
-        metrics,
-    }
+    PipelineOutcome::Completed { raw, cleaned, metrics }
 }
 
 fn lang_for(config: &Config) -> Option<String> {
@@ -2710,16 +2623,12 @@ fn matched_rule_suffix(
 /// the simple `contains` semantics are sufficient and avoid a hot-path
 /// dependency.
 fn regex_lite_match(needle: &str, hay: &str) -> bool {
-    hay.to_ascii_lowercase()
-        .contains(&needle.to_ascii_lowercase())
+    hay.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
 }
 
 fn now_unix() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 /// Helper used by `fono record` and the integration test to construct an
@@ -2735,9 +2644,8 @@ pub fn orchestrator_for_test(
     focus: Arc<dyn FocusProbe>,
 ) -> (SessionOrchestrator, mpsc::UnboundedReceiver<HotkeyAction>) {
     let (tx, rx) = mpsc::unbounded_channel();
-    let history = Arc::new(Mutex::new(
-        HistoryDb::open(history_path).expect("open history db (test)"),
-    ));
+    let history =
+        Arc::new(Mutex::new(HistoryDb::open(history_path).expect("open history db (test)")));
     let capture_cfg = CaptureConfig::default();
     let orch = SessionOrchestrator::with_parts(
         stt,

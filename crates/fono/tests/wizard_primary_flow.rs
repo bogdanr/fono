@@ -125,10 +125,7 @@ fn rerun_with_existing_secrets_inserts_nothing() {
     assert!(!cartesia_inserted, "Cartesia key already present → reused");
     assert_eq!(secrets.keys.len(), before, "no new inserts on re-run");
     // The pre-existing values are untouched (mock keys above).
-    assert_eq!(
-        secrets.keys.get("OPENAI_API_KEY").map(String::as_str),
-        Some("pre-existing-openai")
-    );
+    assert_eq!(secrets.keys.get("OPENAI_API_KEY").map(String::as_str), Some("pre-existing-openai"));
     assert_eq!(
         secrets.keys.get("CARTESIA_API_KEY").map(String::as_str),
         Some("pre-existing-cartesia")
@@ -151,10 +148,8 @@ fn customize_groq_stt_anthropic_llm_wyoming_tts_round_trip() {
     cfg.llm.backend = LlmBackend::Anthropic;
     cfg.llm.enabled = true;
     cfg.tts.backend = TtsBackend::Wyoming;
-    cfg.tts.wyoming = Some(TtsWyoming {
-        uri: "tcp://piper.lan:10200".into(),
-        ..TtsWyoming::default()
-    });
+    cfg.tts.wyoming =
+        Some(TtsWyoming { uri: "tcp://piper.lan:10200".into(), ..TtsWyoming::default() });
 
     // TOML round-trip: serialise → parse → compare. Catches any
     // accidental `#[serde(skip)]` on the new TTS variants.
@@ -163,8 +158,5 @@ fn customize_groq_stt_anthropic_llm_wyoming_tts_round_trip() {
     assert_eq!(parsed.stt.backend, SttBackend::Groq);
     assert_eq!(parsed.llm.backend, LlmBackend::Anthropic);
     assert_eq!(parsed.tts.backend, TtsBackend::Wyoming);
-    assert_eq!(
-        parsed.tts.wyoming.as_ref().map(|w| w.uri.as_str()),
-        Some("tcp://piper.lan:10200")
-    );
+    assert_eq!(parsed.tts.wyoming.as_ref().map(|w| w.uri.as_str()), Some("tcp://piper.lan:10200"));
 }

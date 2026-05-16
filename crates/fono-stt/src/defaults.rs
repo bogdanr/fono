@@ -22,9 +22,7 @@ use fono_core::provider_catalog;
 /// unknown or has no STT capability declared.
 #[must_use]
 pub fn default_cloud_model(provider: &str) -> &'static str {
-    provider_catalog::find(provider)
-        .and_then(|p| p.stt)
-        .map_or("whisper-large-v3", |s| s.model)
+    provider_catalog::find(provider).and_then(|p| p.stt).map_or("whisper-large-v3", |s| s.model)
 }
 
 #[cfg(test)]
@@ -36,10 +34,7 @@ mod tests {
         assert_eq!(default_cloud_model("groq"), "whisper-large-v3-turbo");
         assert_eq!(default_cloud_model("openai"), "whisper-1");
         assert_eq!(default_cloud_model("deepgram"), "nova-2");
-        assert_eq!(
-            default_cloud_model("openrouter"),
-            "openai/whisper-large-v3-turbo"
-        );
+        assert_eq!(default_cloud_model("openrouter"), "openai/whisper-large-v3-turbo");
     }
 
     #[test]

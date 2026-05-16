@@ -232,12 +232,7 @@ mod tests {
 
     #[tokio::test]
     async fn audio_start_round_trip() {
-        let event = AudioStart {
-            rate: 16000,
-            width: 2,
-            channels: 1,
-            timestamp: None,
-        };
+        let event = AudioStart { rate: 16000, width: 2, channels: 1, timestamp: None };
         let f = Frame::new(AUDIO_START).with_data(to_value(&event).unwrap());
         let mut buf: Vec<u8> = Vec::new();
         f.write_async(&mut buf).await.unwrap();
@@ -310,35 +305,21 @@ mod tests {
 
     #[test]
     fn synthesize_omits_voice_when_absent() {
-        let req = Synthesize {
-            text: "hi".into(),
-            voice: None,
-        };
+        let req = Synthesize { text: "hi".into(), voice: None };
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v, json!({"text": "hi"}));
     }
 
     #[test]
     fn voice_omits_unset_fields() {
-        let v = Voice {
-            name: Some("en_US-amy-low".into()),
-            language: None,
-            speaker: None,
-        };
-        assert_eq!(
-            serde_json::to_value(&v).unwrap(),
-            json!({"name": "en_US-amy-low"})
-        );
+        let v = Voice { name: Some("en_US-amy-low".into()), language: None, speaker: None };
+        assert_eq!(serde_json::to_value(&v).unwrap(), json!({"name": "en_US-amy-low"}));
     }
 
     #[test]
     fn voice_is_empty_helper() {
         assert!(Voice::default().is_empty());
-        assert!(!Voice {
-            name: Some("x".into()),
-            ..Voice::default()
-        }
-        .is_empty());
+        assert!(!Voice { name: Some("x".into()), ..Voice::default() }.is_empty());
     }
 
     #[test]

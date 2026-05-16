@@ -241,11 +241,7 @@ impl WyomingServer {
             }
         });
 
-        Ok(WyomingServerHandle {
-            local_addr,
-            shutdown_tx: Some(shutdown_tx),
-            join: Some(join),
-        })
+        Ok(WyomingServerHandle { local_addr, shutdown_tx: Some(shutdown_tx), join: Some(join) })
     }
 }
 
@@ -286,10 +282,7 @@ async fn handle_connection(
         match frame.kind.as_str() {
             DESCRIBE => {
                 let info = build_info(&cfg);
-                Frame::new(INFO)
-                    .with_data(to_value(&info)?)
-                    .write_async(&mut write_half)
-                    .await?;
+                Frame::new(INFO).with_data(to_value(&info)?).write_async(&mut write_half).await?;
             }
             AUDIO_START => {
                 let s: AudioStart =
@@ -400,14 +393,8 @@ where
         chars = res.text.chars().count(),
         "transcription request complete"
     );
-    let resp = Transcript {
-        text: res.text,
-        language: res.language,
-    };
-    Frame::new(TRANSCRIPT)
-        .with_data(to_value(&resp)?)
-        .write_async(write_half)
-        .await?;
+    let resp = Transcript { text: res.text, language: res.language };
+    Frame::new(TRANSCRIPT).with_data(to_value(&resp)?).write_async(write_half).await?;
     pcm_f32.clear();
     Ok(())
 }
@@ -418,9 +405,7 @@ where
 /// interleaved frame.
 fn decode_pcm_le(bytes: &[u8], width: u32, channels: u32) -> Result<Vec<f32>> {
     if width != 2 {
-        return Err(anyhow!(
-            "unsupported audio width {width}; expected 2-byte PCM"
-        ));
+        return Err(anyhow!("unsupported audio width {width}; expected 2-byte PCM"));
     }
     if channels == 0 {
         return Err(anyhow!("unsupported audio channel count 0"));
@@ -469,10 +454,7 @@ fn build_info(cfg: &WyomingServerConfig) -> Info {
             installed: true,
             attribution: attribution.clone(),
             description: m.description.clone(),
-            version: m
-                .version
-                .clone()
-                .or_else(|| Some(cfg.server_version.clone())),
+            version: m.version.clone().or_else(|| Some(cfg.server_version.clone())),
         })
         .collect();
     Info {

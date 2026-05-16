@@ -274,11 +274,8 @@ pub fn strip_trailing_hallucinations(text: &str) -> String {
             if !tail.eq_ignore_ascii_case(phrase) {
                 continue;
             }
-            let preceded_by_letter = tail_start > 0
-                && s[..tail_start]
-                    .chars()
-                    .last()
-                    .is_some_and(char::is_alphabetic);
+            let preceded_by_letter =
+                tail_start > 0 && s[..tail_start].chars().last().is_some_and(char::is_alphabetic);
             if preceded_by_letter {
                 continue;
             }
@@ -395,14 +392,8 @@ mod tests {
 
     #[test]
     fn case_insensitive_match() {
-        assert_eq!(
-            strip_trailing_hallucinations("All done. THANK YOU."),
-            "All done"
-        );
-        assert_eq!(
-            strip_trailing_hallucinations("Filed it. tHaNk YoU"),
-            "Filed it"
-        );
+        assert_eq!(strip_trailing_hallucinations("All done. THANK YOU."), "All done");
+        assert_eq!(strip_trailing_hallucinations("Filed it. tHaNk YoU"), "Filed it");
     }
 
     #[test]
@@ -424,10 +415,7 @@ mod tests {
         // preceding 'a' is alphabetic, so the boundary check rejects
         // the match.
         assert_eq!(strip_trailing_hallucinations("Bayou"), "Bayou");
-        assert_eq!(
-            strip_trailing_hallucinations("On the bayou"),
-            "On the bayou"
-        );
+        assert_eq!(strip_trailing_hallucinations("On the bayou"), "On the bayou");
     }
 
     #[test]
@@ -479,30 +467,21 @@ mod tests {
     #[test]
     fn keeps_goodbye_intact() {
         // Word-boundary check: "goodbye" must not be stripped to "good".
-        assert_eq!(
-            strip_trailing_hallucinations("She said goodbye."),
-            "She said goodbye."
-        );
+        assert_eq!(strip_trailing_hallucinations("She said goodbye."), "She said goodbye.");
         assert_eq!(strip_trailing_hallucinations("goodbye"), "goodbye");
     }
 
     #[test]
     fn keeps_bye_when_not_trailing() {
         // "bye" mid-sentence must survive.
-        assert_eq!(
-            strip_trailing_hallucinations("He said bye to her"),
-            "He said bye to her"
-        );
+        assert_eq!(strip_trailing_hallucinations("He said bye to her"), "He said bye to her");
     }
 
     #[test]
     fn strip_trailing_you_after_real_speech() {
         // The "You." closer Whisper emits on silence — fallback for
         // when Groq returns it with normal-looking scores.
-        assert_eq!(
-            strip_trailing_hallucinations("So that's the plan. You."),
-            "So that's the plan"
-        );
+        assert_eq!(strip_trailing_hallucinations("So that's the plan. You."), "So that's the plan");
     }
 
     #[test]
@@ -516,23 +495,14 @@ mod tests {
     fn thank_you_wins_over_bare_you_entry() {
         // Order in TRAILING_HALLUCINATIONS matters: "thank you" must
         // strip as a whole rather than leaving a stranded "thank".
-        assert_eq!(
-            strip_trailing_hallucinations("Filed the doc. Thank you."),
-            "Filed the doc"
-        );
+        assert_eq!(strip_trailing_hallucinations("Filed the doc. Thank you."), "Filed the doc");
     }
 
     #[test]
     fn keeps_pronoun_inside_word() {
         // Word-boundary check — "your"/"young" must not be stripped.
-        assert_eq!(
-            strip_trailing_hallucinations("It's your turn"),
-            "It's your turn"
-        );
-        assert_eq!(
-            strip_trailing_hallucinations("They are young"),
-            "They are young"
-        );
+        assert_eq!(strip_trailing_hallucinations("It's your turn"), "It's your turn");
+        assert_eq!(strip_trailing_hallucinations("They are young"), "They are young");
     }
 
     #[test]
@@ -543,13 +513,7 @@ mod tests {
         // hallucination first; this entry only fires when Groq
         // returned "you" with normal scores. If false positives
         // become annoying in practice, reconsider the entry.
-        assert_eq!(
-            strip_trailing_hallucinations("I'll send it to you"),
-            "I'll send it to"
-        );
-        assert_eq!(
-            strip_trailing_hallucinations("What about you?"),
-            "What about"
-        );
+        assert_eq!(strip_trailing_hallucinations("I'll send it to you"), "I'll send it to");
+        assert_eq!(strip_trailing_hallucinations("What about you?"), "What about");
     }
 }

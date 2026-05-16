@@ -89,10 +89,7 @@ impl TextToSpeech for DeepgramTts {
         _lang: Option<&str>,
     ) -> Result<TtsAudio> {
         if text.is_empty() {
-            return Ok(TtsAudio {
-                pcm: Vec::new(),
-                sample_rate: NATIVE_RATE,
-            });
+            return Ok(TtsAudio { pcm: Vec::new(), sample_rate: NATIVE_RATE });
         }
         let body = self.build_request_body(text);
         let resp = self
@@ -105,24 +102,12 @@ impl TextToSpeech for DeepgramTts {
             .context("posting to deepgram /v1/speak")?;
         let status = resp.status();
         if !status.is_success() {
-            let body = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "<unreadable body>".to_string());
-            return Err(anyhow!(
-                "deepgram TTS returned {status}: {}",
-                truncate(&body, 400)
-            ));
+            let body = resp.text().await.unwrap_or_else(|_| "<unreadable body>".to_string());
+            return Err(anyhow!("deepgram TTS returned {status}: {}", truncate(&body, 400)));
         }
-        let bytes = resp
-            .bytes()
-            .await
-            .context("reading deepgram TTS response body")?;
+        let bytes = resp.bytes().await.context("reading deepgram TTS response body")?;
         let pcm = pcm_i16_le_to_f32(&bytes);
-        Ok(TtsAudio {
-            pcm,
-            sample_rate: NATIVE_RATE,
-        })
+        Ok(TtsAudio { pcm, sample_rate: NATIVE_RATE })
     }
 
     async fn prewarm(&self) -> Result<()> {
@@ -180,14 +165,8 @@ mod tests {
     fn auth_header_uses_token_prefix() {
         let c = DeepgramTts::new("dg-key-x", None);
         let value = format!("Token {}", c.api_key);
-        assert!(
-            value.starts_with("Token "),
-            "Deepgram auth must use the literal `Token` prefix"
-        );
-        assert!(
-            !value.starts_with("Bearer "),
-            "Deepgram auth must NOT use Bearer"
-        );
+        assert!(value.starts_with("Token "), "Deepgram auth must use the literal `Token` prefix");
+        assert!(!value.starts_with("Bearer "), "Deepgram auth must NOT use Bearer");
     }
 
     #[tokio::test]

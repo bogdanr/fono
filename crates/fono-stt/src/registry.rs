@@ -314,11 +314,7 @@ mod tests {
     fn every_model_has_english_wer() {
         for m in WHISPER_MODELS {
             let has_en = m.wer_by_lang.iter().any(|&(lang, _)| lang == "en");
-            assert!(
-                has_en,
-                "model '{}' is missing English WER in wer_by_lang",
-                m.name
-            );
+            assert!(has_en, "model '{}' is missing English WER in wer_by_lang", m.name);
         }
     }
 
@@ -375,9 +371,7 @@ mod tests {
     #[test]
     fn realtime_factor_larger_models_are_slower() {
         let rf = |name: &str| {
-            ModelRegistry::get(name)
-                .map(|m| m.realtime_factor_cpu_avx2)
-                .unwrap_or(0.0)
+            ModelRegistry::get(name).map(|m| m.realtime_factor_cpu_avx2).unwrap_or(0.0)
         };
         // Within multilingual family: tiny > base > small > turbo.
         assert!(rf("tiny") > rf("base"));
@@ -404,10 +398,7 @@ mod tests {
             total_ram_bytes: ram_gb * 1024 * 1024 * 1024,
             available_ram_bytes: ram_gb * 1024 * 1024 * 1024,
             free_disk_bytes: 200 * 1024 * 1024 * 1024,
-            cpu_features: fono_core::hwcheck::CpuFeatures {
-                avx2,
-                ..Default::default()
-            },
+            cpu_features: fono_core::hwcheck::CpuFeatures { avx2, ..Default::default() },
             os: "linux".into(),
             arch: "x86_64".into(),
         }
@@ -419,10 +410,7 @@ mod tests {
         let snap = fake_snap(8, 16, true);
         let picked = ModelRegistry::pick_default_local(&snap);
         let info = ModelRegistry::get(picked).expect("picked model unknown");
-        assert!(
-            info.multilingual,
-            "default must be multilingual; got {picked}"
-        );
+        assert!(info.multilingual, "default must be multilingual; got {picked}");
     }
 
     #[test]

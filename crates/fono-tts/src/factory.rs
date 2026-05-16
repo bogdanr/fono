@@ -71,9 +71,7 @@ fn build_wyoming(cfg: &Tts) -> Result<Arc<dyn TextToSpeech>> {
 
 #[cfg(not(feature = "wyoming"))]
 fn build_wyoming(_cfg: &Tts) -> Result<Arc<dyn TextToSpeech>> {
-    Err(anyhow!(
-        "Wyoming TTS not compiled in (enable the `wyoming` feature on `fono-tts`)"
-    ))
+    Err(anyhow!("Wyoming TTS not compiled in (enable the `wyoming` feature on `fono-tts`)"))
 }
 
 /// Resolve `(api_key_ref, model_override, voice_override)` from the
@@ -96,11 +94,7 @@ fn resolve_cloud(cfg: &Tts, backend: &TtsBackend) -> (String, Option<String>, Op
             } else {
                 c.api_key_ref.clone()
             };
-            let m = if c.model.is_empty() {
-                None
-            } else {
-                Some(c.model.clone())
-            };
+            let m = if c.model.is_empty() { None } else { Some(c.model.clone()) };
             (k, m, None)
         },
     )
@@ -150,18 +144,12 @@ fn build_openai(cfg: &Tts, secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
     let (key_ref, model_override, voice_override) = resolve_cloud(cfg, &TtsBackend::OpenAI);
     let key = resolve_key(&key_ref, &TtsBackend::OpenAI, secrets)?;
     let voice = resolve_voice(cfg, voice_override);
-    Ok(Arc::new(crate::openai_compat::openai_client(
-        key,
-        model_override,
-        voice,
-    )))
+    Ok(Arc::new(crate::openai_compat::openai_client(key, model_override, voice)))
 }
 
 #[cfg(not(feature = "openai"))]
 fn build_openai(_cfg: &Tts, _secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
-    Err(anyhow!(
-        "OpenAI TTS not compiled in (enable the `openai` feature on `fono-tts`)"
-    ))
+    Err(anyhow!("OpenAI TTS not compiled in (enable the `openai` feature on `fono-tts`)"))
 }
 
 #[cfg(feature = "groq")]
@@ -169,18 +157,12 @@ fn build_groq(cfg: &Tts, secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
     let (key_ref, model_override, voice_override) = resolve_cloud(cfg, &TtsBackend::Groq);
     let key = resolve_key(&key_ref, &TtsBackend::Groq, secrets)?;
     let voice = resolve_voice(cfg, voice_override);
-    Ok(Arc::new(crate::openai_compat::groq_client(
-        key,
-        model_override,
-        voice,
-    )))
+    Ok(Arc::new(crate::openai_compat::groq_client(key, model_override, voice)))
 }
 
 #[cfg(not(feature = "groq"))]
 fn build_groq(_cfg: &Tts, _secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
-    Err(anyhow!(
-        "Groq TTS not compiled in (enable the `groq` feature on `fono-tts`)"
-    ))
+    Err(anyhow!("Groq TTS not compiled in (enable the `groq` feature on `fono-tts`)"))
 }
 
 #[cfg(feature = "openrouter")]
@@ -188,18 +170,12 @@ fn build_openrouter(cfg: &Tts, secrets: &Secrets) -> Result<Arc<dyn TextToSpeech
     let (key_ref, model_override, voice_override) = resolve_cloud(cfg, &TtsBackend::OpenRouter);
     let key = resolve_key(&key_ref, &TtsBackend::OpenRouter, secrets)?;
     let voice = resolve_voice(cfg, voice_override);
-    Ok(Arc::new(crate::openai_compat::openrouter_client(
-        key,
-        model_override,
-        voice,
-    )))
+    Ok(Arc::new(crate::openai_compat::openrouter_client(key, model_override, voice)))
 }
 
 #[cfg(not(feature = "openrouter"))]
 fn build_openrouter(_cfg: &Tts, _secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
-    Err(anyhow!(
-        "OpenRouter TTS not compiled in (enable the `openrouter` feature on `fono-tts`)"
-    ))
+    Err(anyhow!("OpenRouter TTS not compiled in (enable the `openrouter` feature on `fono-tts`)"))
 }
 
 #[cfg(feature = "cartesia")]
@@ -207,35 +183,24 @@ fn build_cartesia(cfg: &Tts, secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>>
     let (key_ref, model_override, voice_override) = resolve_cloud(cfg, &TtsBackend::Cartesia);
     let key = resolve_key(&key_ref, &TtsBackend::Cartesia, secrets)?;
     let voice = resolve_voice(cfg, voice_override);
-    Ok(Arc::new(crate::cartesia::CartesiaTts::new(
-        key,
-        model_override,
-        voice,
-    )))
+    Ok(Arc::new(crate::cartesia::CartesiaTts::new(key, model_override, voice)))
 }
 
 #[cfg(not(feature = "cartesia"))]
 fn build_cartesia(_cfg: &Tts, _secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
-    Err(anyhow!(
-        "Cartesia TTS not compiled in (enable the `cartesia` feature on `fono-tts`)"
-    ))
+    Err(anyhow!("Cartesia TTS not compiled in (enable the `cartesia` feature on `fono-tts`)"))
 }
 
 #[cfg(feature = "deepgram")]
 fn build_deepgram(cfg: &Tts, secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
     let (key_ref, model_override, _voice_override) = resolve_cloud(cfg, &TtsBackend::Deepgram);
     let key = resolve_key(&key_ref, &TtsBackend::Deepgram, secrets)?;
-    Ok(Arc::new(crate::deepgram::DeepgramTts::new(
-        key,
-        model_override,
-    )))
+    Ok(Arc::new(crate::deepgram::DeepgramTts::new(key, model_override)))
 }
 
 #[cfg(not(feature = "deepgram"))]
 fn build_deepgram(_cfg: &Tts, _secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
-    Err(anyhow!(
-        "Deepgram TTS not compiled in (enable the `deepgram` feature on `fono-tts`)"
-    ))
+    Err(anyhow!("Deepgram TTS not compiled in (enable the `deepgram` feature on `fono-tts`)"))
 }
 
 #[cfg(test)]
@@ -245,10 +210,7 @@ mod tests {
 
     #[test]
     fn none_backend_returns_none() {
-        let cfg = TtsCfg {
-            backend: TtsBackend::None,
-            ..TtsCfg::default()
-        };
+        let cfg = TtsCfg { backend: TtsBackend::None, ..TtsCfg::default() };
         let secrets = Secrets::default();
         assert!(build_tts(&cfg, &secrets).unwrap().is_none());
     }
@@ -256,15 +218,8 @@ mod tests {
     #[cfg(feature = "wyoming")]
     #[test]
     fn wyoming_missing_block_errors_clearly() {
-        let cfg = TtsCfg {
-            backend: TtsBackend::Wyoming,
-            wyoming: None,
-            ..TtsCfg::default()
-        };
-        let err = build_tts(&cfg, &Secrets::default())
-            .err()
-            .unwrap()
-            .to_string();
+        let cfg = TtsCfg { backend: TtsBackend::Wyoming, wyoming: None, ..TtsCfg::default() };
+        let err = build_tts(&cfg, &Secrets::default()).err().unwrap().to_string();
         assert!(err.contains("[tts.wyoming]"), "{err}");
     }
 
@@ -276,10 +231,7 @@ mod tests {
             wyoming: Some(TtsWyoming::default()),
             ..TtsCfg::default()
         };
-        let err = build_tts(&cfg, &Secrets::default())
-            .err()
-            .unwrap()
-            .to_string();
+        let err = build_tts(&cfg, &Secrets::default()).err().unwrap().to_string();
         assert!(err.contains("uri"), "{err}");
     }
 
@@ -303,30 +255,17 @@ mod tests {
     fn openai_missing_key_errors_clearly() {
         let cfg = TtsCfg {
             backend: TtsBackend::OpenAI,
-            cloud: Some(TtsCloud {
-                provider: "openai".into(),
-                ..TtsCloud::default()
-            }),
+            cloud: Some(TtsCloud { provider: "openai".into(), ..TtsCloud::default() }),
             ..TtsCfg::default()
         };
-        let err = build_tts(&cfg, &Secrets::default())
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(
-            err.contains("OPENAI_API_KEY") && err.contains("fono keys add"),
-            "{err}"
-        );
+        let err = build_tts(&cfg, &Secrets::default()).err().unwrap().to_string();
+        assert!(err.contains("OPENAI_API_KEY") && err.contains("fono keys add"), "{err}");
     }
 
     #[cfg(feature = "openai")]
     #[test]
     fn openai_with_env_key_succeeds() {
-        let cfg = TtsCfg {
-            backend: TtsBackend::OpenAI,
-            cloud: None,
-            ..TtsCfg::default()
-        };
+        let cfg = TtsCfg { backend: TtsBackend::OpenAI, cloud: None, ..TtsCfg::default() };
         let mut secrets = Secrets::default();
         secrets.insert("OPENAI_API_KEY", "sk-test");
         assert!(build_tts(&cfg, &secrets).unwrap().is_some());
@@ -337,10 +276,7 @@ mod tests {
     #[cfg(feature = "groq")]
     #[test]
     fn groq_with_key_succeeds() {
-        let cfg = TtsCfg {
-            backend: TtsBackend::Groq,
-            ..TtsCfg::default()
-        };
+        let cfg = TtsCfg { backend: TtsBackend::Groq, ..TtsCfg::default() };
         let mut secrets = Secrets::default();
         secrets.insert("GROQ_API_KEY", "gsk-test");
         assert!(build_tts(&cfg, &secrets).unwrap().is_some());
@@ -349,10 +285,7 @@ mod tests {
     #[cfg(feature = "openrouter")]
     #[test]
     fn openrouter_with_key_succeeds() {
-        let cfg = TtsCfg {
-            backend: TtsBackend::OpenRouter,
-            ..TtsCfg::default()
-        };
+        let cfg = TtsCfg { backend: TtsBackend::OpenRouter, ..TtsCfg::default() };
         let mut secrets = Secrets::default();
         secrets.insert("OPENROUTER_API_KEY", "sk-or-test");
         assert!(build_tts(&cfg, &secrets).unwrap().is_some());
@@ -361,10 +294,7 @@ mod tests {
     #[cfg(feature = "cartesia")]
     #[test]
     fn cartesia_with_key_succeeds() {
-        let cfg = TtsCfg {
-            backend: TtsBackend::Cartesia,
-            ..TtsCfg::default()
-        };
+        let cfg = TtsCfg { backend: TtsBackend::Cartesia, ..TtsCfg::default() };
         let mut secrets = Secrets::default();
         secrets.insert("CARTESIA_API_KEY", "ck-test");
         assert!(build_tts(&cfg, &secrets).unwrap().is_some());
@@ -373,10 +303,7 @@ mod tests {
     #[cfg(feature = "deepgram")]
     #[test]
     fn deepgram_with_key_succeeds() {
-        let cfg = TtsCfg {
-            backend: TtsBackend::Deepgram,
-            ..TtsCfg::default()
-        };
+        let cfg = TtsCfg { backend: TtsBackend::Deepgram, ..TtsCfg::default() };
         let mut secrets = Secrets::default();
         secrets.insert("DEEPGRAM_API_KEY", "dg-test");
         assert!(build_tts(&cfg, &secrets).unwrap().is_some());
@@ -385,14 +312,8 @@ mod tests {
     #[cfg(feature = "groq")]
     #[test]
     fn groq_missing_key_errors_clearly() {
-        let cfg = TtsCfg {
-            backend: TtsBackend::Groq,
-            ..TtsCfg::default()
-        };
-        let err = build_tts(&cfg, &Secrets::default())
-            .err()
-            .unwrap()
-            .to_string();
+        let cfg = TtsCfg { backend: TtsBackend::Groq, ..TtsCfg::default() };
+        let err = build_tts(&cfg, &Secrets::default()).err().unwrap().to_string();
         assert!(err.contains("GROQ_API_KEY"), "{err}");
     }
 }

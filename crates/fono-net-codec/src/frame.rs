@@ -63,11 +63,7 @@ impl Frame {
     /// New empty frame with the given event type.
     #[must_use]
     pub fn new(kind: impl Into<String>) -> Self {
-        Self {
-            kind: kind.into(),
-            data: Value::Object(Map::new()),
-            payload: Vec::new(),
-        }
+        Self { kind: kind.into(), data: Value::Object(Map::new()), payload: Vec::new() }
     }
 
     /// Replace the data field. Non-object values are normalised to an
@@ -75,11 +71,7 @@ impl Frame {
     /// object).
     #[must_use]
     pub fn with_data(mut self, data: Value) -> Self {
-        self.data = if data.is_object() {
-            data
-        } else {
-            Value::Object(Map::new())
-        };
+        self.data = if data.is_object() { data } else { Value::Object(Map::new()) };
         self
     }
 
@@ -110,19 +102,11 @@ impl Frame {
             line.pop();
         }
         let header: Value = serde_json::from_str(&line)?;
-        let kind = header
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or(FrameError::MissingType)?
-            .to_string();
-        let data_length = header
-            .get("data_length")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as usize;
-        let payload_length = header
-            .get("payload_length")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as usize;
+        let kind =
+            header.get("type").and_then(Value::as_str).ok_or(FrameError::MissingType)?.to_string();
+        let data_length = header.get("data_length").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let payload_length =
+            header.get("payload_length").and_then(Value::as_u64).unwrap_or(0) as usize;
         if data_length > MAX_DATA_BLOCK_BYTES {
             return Err(FrameError::DataTooLong(data_length));
         }
@@ -131,10 +115,7 @@ impl Frame {
         }
 
         // Start from header.data, normalised to an object.
-        let mut data = header
-            .get("data")
-            .cloned()
-            .unwrap_or_else(|| Value::Object(Map::new()));
+        let mut data = header.get("data").cloned().unwrap_or_else(|| Value::Object(Map::new()));
         if !data.is_object() {
             data = Value::Object(Map::new());
         }
@@ -158,11 +139,7 @@ impl Frame {
             read_exact_or_truncated(reader, &mut payload, "payload").await?;
         }
 
-        Ok(Self {
-            kind,
-            data,
-            payload,
-        })
+        Ok(Self { kind, data, payload })
     }
 
     /// Serialise the frame onto `writer`. Uses the canonical Wyoming
@@ -175,10 +152,7 @@ impl Frame {
     {
         let mut header = Map::new();
         header.insert("type".to_string(), Value::String(self.kind.clone()));
-        header.insert(
-            "version".to_string(),
-            Value::String(WYOMING_VERSION.to_string()),
-        );
+        header.insert("version".to_string(), Value::String(WYOMING_VERSION.to_string()));
 
         let data_bytes = if let Value::Object(map) = &self.data {
             if map.is_empty() {
@@ -193,10 +167,7 @@ impl Frame {
             header.insert("data_length".to_string(), Value::Number(bytes.len().into()));
         }
         if !self.payload.is_empty() {
-            header.insert(
-                "payload_length".to_string(),
-                Value::Number(self.payload.len().into()),
-            );
+            header.insert("payload_length".to_string(), Value::Number(self.payload.len().into()));
         }
         let mut header_bytes = serde_json::to_vec(&Value::Object(header))?;
         header_bytes.push(b'\n');
@@ -376,10 +347,7 @@ mod tests {
         buf.extend_from_slice(&[0u8; 10]); // only 10 of 100 bytes
         let mut reader = BufReader::new(buf.as_slice());
         let err = Frame::read_async(&mut reader).await.unwrap_err();
-        assert!(
-            matches!(err, FrameError::Truncated("payload")),
-            "got {err:?}"
-        );
+        assert!(matches!(err, FrameError::Truncated("payload")), "got {err:?}");
     }
 
     #[tokio::test]
@@ -413,9 +381,6 @@ mod tests {
         let buf: Vec<u8> = Vec::new();
         let mut reader = BufReader::new(buf.as_slice());
         let err = Frame::read_async(&mut reader).await.unwrap_err();
-        assert!(
-            matches!(err, FrameError::Truncated("header line")),
-            "got {err:?}"
-        );
+        assert!(matches!(err, FrameError::Truncated("header line")), "got {err:?}");
     }
 }

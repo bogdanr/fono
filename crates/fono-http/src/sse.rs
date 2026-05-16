@@ -37,11 +37,7 @@ pub enum SseError {
     /// may already have produced partial output; the helper only
     /// detects the stall on the transport.
     #[error("sse stream stalled after {after_ms} ms ({chunks} chunks, {bytes} bytes received)")]
-    Stalled {
-        after_ms: u64,
-        chunks: u32,
-        bytes: u64,
-    },
+    Stalled { after_ms: u64, chunks: u32, bytes: u64 },
     /// Underlying transport returned an error mid-stream.
     #[error("sse transport error after {bytes} bytes: {source}")]
     Transport {
@@ -109,11 +105,7 @@ where
                 return Ok(SseStats { bytes, chunks });
             }
             Ok(Some(Err(e))) => {
-                return Err(SseError::Transport {
-                    chunks,
-                    bytes,
-                    source: e,
-                });
+                return Err(SseError::Transport { chunks, bytes, source: e });
             }
             Ok(Some(Ok(chunk))) => {
                 if chunks == 0 {

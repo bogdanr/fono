@@ -37,12 +37,7 @@ pub struct BenchRunner {
 
 impl BenchRunner {
     pub fn new(stt: Arc<dyn SpeechToText>, bench_root: impl Into<PathBuf>) -> Self {
-        Self {
-            stt,
-            llm: None,
-            bench_root: bench_root.into(),
-            strict_pin: false,
-        }
+        Self { stt, llm: None, bench_root: bench_root.into(), strict_pin: false }
     }
 
     #[must_use]
@@ -85,10 +80,7 @@ impl BenchRunner {
                 path.display()
             );
             if self.strict_pin {
-                return Err(anyhow!(
-                    "strict mode: fixture {} has unpinned sha256",
-                    fx.id
-                ));
+                return Err(anyhow!("strict mode: fixture {} has unpinned sha256", fx.id));
             }
         } else {
             let actual = sha256_of(&path).await?;
@@ -193,11 +185,8 @@ impl BenchRunner {
             }
         }
 
-        let report = Report::build(
-            self.stt.name(),
-            self.llm.as_ref().map(|l| l.name().to_string()),
-            clips,
-        );
+        let report =
+            Report::build(self.stt.name(), self.llm.as_ref().map(|l| l.name().to_string()), clips);
         Ok((report, errors))
     }
 }

@@ -157,10 +157,7 @@ impl SentenceSplitter {
                     run += 1;
                 }
                 if run >= 3 {
-                    return Event::OpenFence {
-                        prose_end: i,
-                        drop_to: i + run,
-                    };
+                    return Event::OpenFence { prose_end: i, drop_to: i + run };
                 }
                 if run == 1 {
                     in_inline_code = !in_inline_code;
@@ -277,28 +274,19 @@ mod tests {
     #[test]
     fn absorbs_abbreviation_eg() {
         let got = split_all("Use a fast model, e.g. haiku, for cleanup tasks.");
-        assert_eq!(
-            got,
-            vec!["Use a fast model, e.g. haiku, for cleanup tasks.".to_string()]
-        );
+        assert_eq!(got, vec!["Use a fast model, e.g. haiku, for cleanup tasks.".to_string()]);
     }
 
     #[test]
     fn absorbs_decimal_number() {
         let got = split_all("The value is 3.14 today rounded to two digits.");
-        assert_eq!(
-            got,
-            vec!["The value is 3.14 today rounded to two digits.".to_string()]
-        );
+        assert_eq!(got, vec!["The value is 3.14 today rounded to two digits.".to_string()]);
     }
 
     #[test]
     fn absorbs_list_bullet() {
         let got = split_all("1. first item that is reasonably long enough to emit.");
-        assert_eq!(
-            got,
-            vec!["1. first item that is reasonably long enough to emit.".to_string()]
-        );
+        assert_eq!(got, vec!["1. first item that is reasonably long enough to emit.".to_string()]);
     }
 
     #[test]
@@ -308,14 +296,8 @@ mod tests {
              ```\nlet x = 1.0;\nfn foo() {}\n```\n\
              Done reading the snippet so we move on now.",
         );
-        assert!(
-            got.iter().any(|x| x.contains("Here is some code now")),
-            "got: {got:?}"
-        );
-        assert!(
-            got.iter().any(|x| x.contains("Done reading the snippet")),
-            "got: {got:?}"
-        );
+        assert!(got.iter().any(|x| x.contains("Here is some code now")), "got: {got:?}");
+        assert!(got.iter().any(|x| x.contains("Done reading the snippet")), "got: {got:?}");
         assert!(
             !got.iter().any(|x| x.contains("let x = 1.0")),
             "code-fence content must not be emitted: {got:?}"
@@ -325,10 +307,7 @@ mod tests {
     #[test]
     fn keeps_inline_backtick_code_in_sentence() {
         let got = split_all("Run `cargo test` to verify the changes work correctly.");
-        assert_eq!(
-            got,
-            vec!["Run `cargo test` to verify the changes work correctly.".to_string()]
-        );
+        assert_eq!(got, vec!["Run `cargo test` to verify the changes work correctly.".to_string()]);
     }
 
     #[test]
@@ -357,10 +336,7 @@ mod tests {
         // is empty afterwards so flush() yields None.
         let mut s = SentenceSplitter::new();
         let pushed = s.push("Hello world this is a fine afternoon. ");
-        assert_eq!(
-            pushed,
-            vec!["Hello world this is a fine afternoon.".to_string()]
-        );
+        assert_eq!(pushed, vec!["Hello world this is a fine afternoon.".to_string()]);
         assert!(s.flush().is_none());
     }
 
@@ -369,10 +345,7 @@ mod tests {
         let mut s = SentenceSplitter::new();
         let pushed = s
             .push("First sentence is right here in front of us. And then a partial without ending");
-        assert_eq!(
-            pushed,
-            vec!["First sentence is right here in front of us.".to_string()]
-        );
+        assert_eq!(pushed, vec!["First sentence is right here in front of us.".to_string()]);
         let tail = s.flush();
         assert_eq!(tail, Some("And then a partial without ending".to_string()));
     }
@@ -398,10 +371,7 @@ mod tests {
         // listener hears one slightly-longer utterance instead of a
         // staccato "Wait, what?!" then "That can't be right."
         let got = split_all("Wait, what?! That can't be right at all.");
-        assert_eq!(
-            got,
-            vec!["Wait, what?! That can't be right at all.".to_string()]
-        );
+        assert_eq!(got, vec!["Wait, what?! That can't be right at all.".to_string()]);
     }
 
     #[test]
@@ -429,10 +399,7 @@ mod tests {
     fn unterminated_short_input_held_until_flush() {
         let mut s = SentenceSplitter::new();
         let pushed = s.push("Hi there.");
-        assert!(
-            pushed.is_empty(),
-            "too short to emit mid-stream: {pushed:?}"
-        );
+        assert!(pushed.is_empty(), "too short to emit mid-stream: {pushed:?}");
         assert_eq!(s.flush(), Some("Hi there.".to_string()));
     }
 

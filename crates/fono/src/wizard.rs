@@ -115,10 +115,7 @@ pub async fn run(paths: &Paths) -> Result<()> {
         probe_local_latency(paths, &config, tier).await;
     }
 
-    println!(
-        "\n  Configuration saved to: {}",
-        paths.config_file().display()
-    );
+    println!("\n  Configuration saved to: {}", paths.config_file().display());
     println!(
         "  Hotkeys: {} (dictation), {} (assistant), {} (cancel) — \
          tap to toggle, hold for push-to-talk.",
@@ -131,11 +128,8 @@ pub async fn run(paths: &Paths) -> Result<()> {
     // may not be running (first-run) or the IPC socket may not be
     // accepting connections; both surface as a friendly hint, not
     // an error.
-    match fono_ipc::request_any(
-        &paths.client_ipc_socket_candidates(),
-        &fono_ipc::Request::Reload,
-    )
-    .await
+    match fono_ipc::request_any(&paths.client_ipc_socket_candidates(), &fono_ipc::Request::Reload)
+        .await
     {
         Ok(fono_ipc::Response::Ok | fono_ipc::Response::Discovered(_)) => {
             println!("  Daemon reloaded — new settings are live.");
@@ -191,10 +185,7 @@ fn is_assistant_wired(entry: &CloudProvider) -> bool {
 
 /// Catalogue entries with a wired assistant chat factory.
 fn assistant_candidates() -> Vec<&'static CloudProvider> {
-    CLOUD_PROVIDERS
-        .iter()
-        .filter(|p| is_assistant_wired(p))
-        .collect()
+    CLOUD_PROVIDERS.iter().filter(|p| is_assistant_wired(p)).collect()
 }
 
 /// Header labels for the primary-cloud-provider picker's capability
@@ -209,12 +200,7 @@ const PRIMARY_CAP_HEADERS: [&str; 6] = ["STT", "LLM", "Assistant", "TTS", "Visio
 /// abbreviation. Width is always > 1, i.e. wide enough for the
 /// single-character `✓`/`·` glyph.
 fn primary_cap_widths() -> [usize; 6] {
-    let max = PRIMARY_CAP_HEADERS
-        .iter()
-        .map(|h| h.chars().count())
-        .max()
-        .unwrap_or(0)
-        + 2;
+    let max = PRIMARY_CAP_HEADERS.iter().map(|h| h.chars().count()).max().unwrap_or(0) + 2;
     [max; 6]
 }
 
@@ -293,17 +279,11 @@ fn default_primary_for_seed(
         return i;
     }
     // 3. First candidate with a key already in secrets.toml.
-    if let Some(i) = candidates
-        .iter()
-        .position(|p| secrets.has_in_file(p.key_env))
-    {
+    if let Some(i) = candidates.iter().position(|p| secrets.has_in_file(p.key_env)) {
         return i;
     }
     // 4. OpenAI as the broadest-coverage fallback.
-    candidates
-        .iter()
-        .position(|p| p.id == "openai")
-        .unwrap_or(0)
+    candidates.iter().position(|p| p.id == "openai").unwrap_or(0)
 }
 
 /// Render the primary-cloud-provider picker as an aligned table. The
@@ -315,10 +295,8 @@ fn pick_primary_cloud_provider(
     secrets: &Secrets,
     cfg: &Config,
 ) -> Result<PrimaryPick> {
-    let candidates: Vec<&'static CloudProvider> = CLOUD_PROVIDERS
-        .iter()
-        .filter(|p| is_primary_candidate(p))
-        .collect();
+    let candidates: Vec<&'static CloudProvider> =
+        CLOUD_PROVIDERS.iter().filter(|p| is_primary_candidate(p)).collect();
     let provider_col_width = candidates
         .iter()
         .map(|p| p.display_name.chars().count())
@@ -334,10 +312,8 @@ fn pick_primary_cloud_provider(
     );
     println!("  {}", primary_header(provider_col_width));
 
-    let mut rows: Vec<String> = candidates
-        .iter()
-        .map(|p| primary_row(p, provider_col_width))
-        .collect();
+    let mut rows: Vec<String> =
+        candidates.iter().map(|p| primary_row(p, provider_col_width)).collect();
     rows.push(format!(
         "{:width$}Pick a backend per capability",
         "Customize",
@@ -556,11 +532,7 @@ async fn pick_tts_for_assistant(
     config: &mut Config,
     secrets: &mut Secrets,
 ) -> Result<()> {
-    let has_wyoming = config
-        .tts
-        .wyoming
-        .as_ref()
-        .is_some_and(|w| !w.uri.is_empty());
+    let has_wyoming = config.tts.wyoming.as_ref().is_some_and(|w| !w.uri.is_empty());
     let backends = configured_tts_backends(secrets, &TtsBackend::None, has_wyoming);
 
     let mut labels: Vec<String> = Vec::new();
@@ -578,21 +550,14 @@ async fn pick_tts_for_assistant(
                     continue;
                 };
                 let has_key = secrets.has_in_file(entry.key_env);
-                let key_part = if has_key {
-                    "key already set"
-                } else {
-                    "will ask for key"
-                };
+                let key_part = if has_key { "key already set" } else { "will ask for key" };
                 let extra = match entry.id {
                     "groq" => " — fastest",
                     "cartesia" => " — best quality",
                     "openrouter" => " — OpenAI Mini TTS / multilingual",
                     _ => "",
                 };
-                labels.push(format!(
-                    "{} TTS (cloud, {key_part}){extra}",
-                    entry.display_name
-                ));
+                labels.push(format!("{} TTS (cloud, {key_part}){extra}", entry.display_name));
                 actions.push(TtsPickerAction::Cloud(entry));
             }
         }
@@ -623,10 +588,7 @@ async fn pick_tts_for_assistant(
                 .interact_text()
                 .unwrap_or_else(|_| fono_tts::defaults::DEFAULT_WYOMING_URI.into());
             config.tts.backend = TtsBackend::Wyoming;
-            config.tts.wyoming = Some(TtsWyoming {
-                uri,
-                ..TtsWyoming::default()
-            });
+            config.tts.wyoming = Some(TtsWyoming { uri, ..TtsWyoming::default() });
         }
         TtsPickerAction::Cloud(entry) => {
             prompt_or_reuse_key(
@@ -802,9 +764,8 @@ async fn configure_assistant(
     let candidates = assistant_candidates();
     // Order: providers with key already in `secrets.toml` first; among
     // each subgroup keep catalogue order so OpenAI/Anthropic/etc. lead.
-    let (with_key, without_key): (Vec<_>, Vec<_>) = candidates
-        .into_iter()
-        .partition(|p| secrets.has_in_file(p.key_env));
+    let (with_key, without_key): (Vec<_>, Vec<_>) =
+        candidates.into_iter().partition(|p| secrets.has_in_file(p.key_env));
     let ordered: Vec<&'static CloudProvider> =
         with_key.iter().chain(without_key.iter()).copied().collect();
 
@@ -829,14 +790,8 @@ async fn configure_assistant(
     }
     let entry = ordered[chat_idx];
     let adef = entry.assistant.expect("candidate has assistant");
-    prompt_or_reuse_key(
-        theme,
-        secrets,
-        entry.key_env,
-        entry.display_name,
-        entry.console_url,
-    )
-    .await?;
+    prompt_or_reuse_key(theme, secrets, entry.key_env, entry.display_name, entry.console_url)
+        .await?;
     let backend =
         parse_assistant_backend(entry.id).context("catalogue assistant id should parse")?;
     config.assistant.enabled = true;
@@ -906,11 +861,7 @@ fn assistant_picker_rows(
     let mut rows = Vec::with_capacity(ordered.len());
     for p in ordered {
         let model = humanize_chat_model(p);
-        let key = if secrets.has_in_file(p.key_env) {
-            "set"
-        } else {
-            "missing"
-        };
+        let key = if secrets.has_in_file(p.key_env) { "set" } else { "missing" };
         let display = p.display_name;
         let mut row = String::new();
         let _ = write!(&mut row, "{display:<provider_w$}{model:<model_w$}{key}",);
@@ -934,10 +885,7 @@ fn print_hw_summary(snap: &HardwareSnapshot, tier: LocalTier) {
     let ram_gb = snap.total_ram_bytes / (1024 * 1024 * 1024);
     let disk_gb = snap.free_disk_bytes / (1024 * 1024 * 1024);
     println!("  Detected hardware:");
-    println!(
-        "    cores : {} physical / {} logical",
-        snap.physical_cores, snap.logical_cores
-    );
+    println!("    cores : {} physical / {} logical", snap.physical_cores, snap.logical_cores);
     println!(
         "    ram   : {ram_gb} GB total · disk free : {disk_gb} GB · platform : {}/{}",
         snap.os, snap.arch
@@ -1011,12 +959,7 @@ fn pick_path_rows() -> [String; 3] {
         ("Cloud", "Fast, accurate, needs an API key"),
         ("Customize", "Pick a backend per capability"),
     ];
-    let width = entries
-        .iter()
-        .map(|(name, _)| name.len())
-        .max()
-        .unwrap_or(0)
-        + 2;
+    let width = entries.iter().map(|(name, _)| name.len()).max().unwrap_or(0) + 2;
     [
         format!("{:<width$}{}", entries[0].0, entries[0].1, width = width),
         format!("{:<width$}{}", entries[1].0, entries[1].1, width = width),
@@ -1046,10 +989,7 @@ async fn configure_local(
     let stt_model = pick_local_stt_model(theme, english_only, &config.general.languages, snap)?;
     config.stt = Stt {
         backend: SttBackend::Local,
-        local: SttLocal {
-            model: stt_model.into(),
-            ..Default::default()
-        },
+        local: SttLocal { model: stt_model.into(), ..Default::default() },
         cloud: None,
         wyoming: None,
         prompts: std::collections::HashMap::new(),
@@ -1144,14 +1084,8 @@ async fn configure_cloud(
     };
 
     // Single key entry (or reuse) for the primary provider.
-    prompt_or_reuse_key(
-        theme,
-        secrets,
-        entry.key_env,
-        entry.display_name,
-        entry.console_url,
-    )
-    .await?;
+    prompt_or_reuse_key(theme, secrets, entry.key_env, entry.display_name, entry.console_url)
+        .await?;
 
     // Walk capabilities ----------------------------------------------
     if let Some(stt_def) = &entry.stt {
@@ -1227,20 +1161,13 @@ async fn offer_secondary_stt(
         keyed.iter().chain(unkeyed.iter()).copied().collect();
     let mut labels: Vec<String> = Vec::new();
     for p in &ordered {
-        let key_part = if secrets.has_in_file(p.key_env) {
-            "key already set"
-        } else {
-            "will ask for key"
-        };
+        let key_part =
+            if secrets.has_in_file(p.key_env) { "key already set" } else { "will ask for key" };
         let model = p.stt.expect("filtered").model;
         labels.push(format!("{} STT ({key_part}) — {}", p.display_name, model));
     }
     labels.push("Skip — fall back to local Whisper".into());
-    let default = if keyed.is_empty() {
-        labels.len() - 1
-    } else {
-        0
-    };
+    let default = if keyed.is_empty() { labels.len() - 1 } else { 0 };
     let idx = Select::with_theme(theme)
         .with_prompt("Add speech-to-text from another provider?")
         .items(&labels)
@@ -1252,14 +1179,8 @@ async fn offer_secondary_stt(
         return Ok(());
     }
     let entry = ordered[idx];
-    prompt_or_reuse_key(
-        theme,
-        secrets,
-        entry.key_env,
-        entry.display_name,
-        entry.console_url,
-    )
-    .await?;
+    prompt_or_reuse_key(theme, secrets, entry.key_env, entry.display_name, entry.console_url)
+        .await?;
     let backend = parse_stt_backend(entry.id).expect("filtered");
     config.stt = Stt {
         backend,
@@ -1286,10 +1207,8 @@ async fn configure_customize(
     println!("  Mixed mode — pick speech-to-text and LLM cleanup independently.\n");
 
     // ----- STT side -----
-    let stt_options = &[
-        "Local whisper.cpp (private, offline)",
-        "Cloud STT  (Groq / OpenAI / Deepgram / …)",
-    ];
+    let stt_options =
+        &["Local whisper.cpp (private, offline)", "Cloud STT  (Groq / OpenAI / Deepgram / …)"];
     let stt_idx = Select::with_theme(theme)
         .with_prompt("Speech-to-text:")
         .items(stt_options)
@@ -1306,10 +1225,7 @@ async fn configure_customize(
         let stt_model = pick_local_stt_model(theme, english_only, &config.general.languages, snap)?;
         config.stt = Stt {
             backend: SttBackend::Local,
-            local: SttLocal {
-                model: stt_model.into(),
-                ..Default::default()
-            },
+            local: SttLocal { model: stt_model.into(), ..Default::default() },
             cloud: None,
             wyoming: None,
             prompts: std::collections::HashMap::new(),
@@ -1395,13 +1311,10 @@ fn pick_languages(theme: &ColorfulTheme) -> Result<Vec<String>> {
 
     let os_codes: Vec<String> = detected_codes;
     let reasons_of = |code: &str| -> Option<String> {
-        ranked.iter().find(|d| d.code == code).map(|d| {
-            d.reasons
-                .iter()
-                .map(|k| k.label())
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
+        ranked
+            .iter()
+            .find(|d| d.code == code)
+            .map(|d| d.reasons.iter().map(|k| k.label()).collect::<Vec<_>>().join(", "))
     };
 
     // Build the candidate list: curated first, plus any OS code missing
@@ -1513,21 +1426,11 @@ fn accuracy_for_langs(model: &ModelInfo, langs: &[String]) -> AccuracyBucket {
         langs
     };
     let worst = if langs.is_empty() {
-        model
-            .wer_by_lang
-            .iter()
-            .find(|(l, _)| *l == "en")
-            .map(|&(_, w)| w)
+        model.wer_by_lang.iter().find(|(l, _)| *l == "en").map(|&(_, w)| w)
     } else {
         langs
             .iter()
-            .filter_map(|lang| {
-                model
-                    .wer_by_lang
-                    .iter()
-                    .find(|(l, _)| l == lang)
-                    .map(|&(_, w)| w)
-            })
+            .filter_map(|lang| model.wer_by_lang.iter().find(|(l, _)| l == lang).map(|&(_, w)| w))
             .fold(None, |acc, w| Some(acc.map_or(w, |a: f32| a.max(w))))
     };
     match worst {
@@ -1592,14 +1495,9 @@ pub fn build_local_stt_shortlist(
     // Drop "Inaccurate" entries unless every candidate is Inaccurate
     // (keeps the wizard usable even on language combinations where no
     // model meets the 15% threshold).
-    let any_acceptable = candidates
-        .iter()
-        .any(|e| e.accuracy != AccuracyBucket::Inaccurate);
+    let any_acceptable = candidates.iter().any(|e| e.accuracy != AccuracyBucket::Inaccurate);
     let mut entries: Vec<ShortlistEntry> = if any_acceptable {
-        candidates
-            .into_iter()
-            .filter(|e| e.accuracy != AccuracyBucket::Inaccurate)
-            .collect()
+        candidates.into_iter().filter(|e| e.accuracy != AccuracyBucket::Inaccurate).collect()
     } else {
         candidates
     };
@@ -1752,11 +1650,7 @@ fn configure_local_llm(theme: &ColorfulTheme, config: &mut Config, tier: LocalTi
                 "qwen2.5-1.5b-instruct (~1.0 GB) — lighter",
                 "qwen2.5-0.5b-instruct (~350 MB) — lightest",
             ],
-            vec![
-                "qwen2.5-3b-instruct",
-                "qwen2.5-1.5b-instruct",
-                "qwen2.5-0.5b-instruct",
-            ],
+            vec!["qwen2.5-3b-instruct", "qwen2.5-1.5b-instruct", "qwen2.5-0.5b-instruct"],
             0usize,
         ),
         LocalTier::Recommended | LocalTier::Comfortable => (
@@ -1765,11 +1659,7 @@ fn configure_local_llm(theme: &ColorfulTheme, config: &mut Config, tier: LocalTi
                 "qwen2.5-0.5b-instruct (~350 MB) — lighter (faster, lower quality)",
                 "qwen2.5-3b-instruct  (~2.0 GB) — slower but higher quality",
             ],
-            vec![
-                "qwen2.5-1.5b-instruct",
-                "qwen2.5-0.5b-instruct",
-                "qwen2.5-3b-instruct",
-            ],
+            vec!["qwen2.5-1.5b-instruct", "qwen2.5-0.5b-instruct", "qwen2.5-3b-instruct"],
             0usize,
         ),
         LocalTier::Minimum | LocalTier::Unsuitable => (
@@ -1788,10 +1678,7 @@ fn configure_local_llm(theme: &ColorfulTheme, config: &mut Config, tier: LocalTi
         .interact()?;
     config.llm.backend = LlmBackend::Local;
     config.llm.enabled = true;
-    config.llm.local = LlmLocal {
-        model: models[idx].into(),
-        ..LlmLocal::default()
-    };
+    config.llm.local = LlmLocal { model: models[idx].into(), ..LlmLocal::default() };
     config.llm.cloud = None;
     Ok(())
 }
@@ -1865,11 +1752,7 @@ async fn configure_cloud_llm(
         0 => (LlmBackend::Cerebras, "CEREBRAS_API_KEY", "llama3.1-8b"),
         1 => (LlmBackend::Groq, "GROQ_API_KEY", "openai/gpt-oss-20b"),
         2 => (LlmBackend::OpenAI, "OPENAI_API_KEY", "gpt-5.4-nano"),
-        _ => (
-            LlmBackend::Anthropic,
-            "ANTHROPIC_API_KEY",
-            "claude-haiku-4-5-20251001",
-        ),
+        _ => (LlmBackend::Anthropic, "ANTHROPIC_API_KEY", "claude-haiku-4-5-20251001"),
     };
     let (display, console) = catalogue_meta_for_key(key_name);
     prompt_or_reuse_key(theme, secrets, key_name, display, console).await?;
@@ -1897,10 +1780,7 @@ async fn prompt_api_key_with_validation(
     let Some(new_key) = prompt_api_key(theme, secrets, key_name)? else {
         return Ok(None);
     };
-    print!(
-        "  received {key_name} ({} chars); validating … ",
-        new_key.chars().count()
-    );
+    print!("  received {key_name} ({} chars); validating … ", new_key.chars().count());
     let _ = std::io::Write::flush(&mut std::io::stdout());
     match validate_cloud_key(key_name, &new_key).await {
         Ok(()) => {
@@ -1933,15 +1813,9 @@ async fn validate_cloud_key(key_name: &str, key: &str) -> Result<()> {
         .build()
         .context("build http client")?;
     let req = match key_name {
-        "GROQ_API_KEY" => client
-            .get("https://api.groq.com/openai/v1/models")
-            .bearer_auth(key),
-        "OPENAI_API_KEY" => client
-            .get("https://api.openai.com/v1/models")
-            .bearer_auth(key),
-        "CEREBRAS_API_KEY" => client
-            .get("https://api.cerebras.ai/v1/models")
-            .bearer_auth(key),
+        "GROQ_API_KEY" => client.get("https://api.groq.com/openai/v1/models").bearer_auth(key),
+        "OPENAI_API_KEY" => client.get("https://api.openai.com/v1/models").bearer_auth(key),
+        "CEREBRAS_API_KEY" => client.get("https://api.cerebras.ai/v1/models").bearer_auth(key),
         "OPENROUTER_API_KEY" => client
             // OpenRouter's auth-check endpoint: returns 200 with the
             // key's tier/credit metadata when authenticated, 401 when
@@ -1958,21 +1832,13 @@ async fn validate_cloud_key(key_name: &str, key: &str) -> Result<()> {
             .get("https://openrouter.ai/api/v1/auth/key")
             .bearer_auth(key)
             .header("HTTP-Referer", fono_core::openrouter_attribution::REFERER)
-            .header(
-                "X-OpenRouter-Title",
-                fono_core::openrouter_attribution::TITLE,
-            )
-            .header(
-                "X-OpenRouter-Categories",
-                fono_core::openrouter_attribution::CATEGORIES,
-            ),
+            .header("X-OpenRouter-Title", fono_core::openrouter_attribution::TITLE)
+            .header("X-OpenRouter-Categories", fono_core::openrouter_attribution::CATEGORIES),
         "GEMINI_API_KEY" => client
             // Gemini authenticates via `?key=` query parameter rather
             // than a bearer header; the models list returns 200 for
             // valid keys and 400/403 for invalid ones.
-            .get(format!(
-                "https://generativelanguage.googleapis.com/v1beta/models?key={key}"
-            )),
+            .get(format!("https://generativelanguage.googleapis.com/v1beta/models?key={key}")),
         "ANTHROPIC_API_KEY" => client
             .get("https://api.anthropic.com/v1/models")
             .header("x-api-key", key)
@@ -1980,9 +1846,9 @@ async fn validate_cloud_key(key_name: &str, key: &str) -> Result<()> {
         "DEEPGRAM_API_KEY" => client
             .get("https://api.deepgram.com/v1/projects")
             .header("Authorization", format!("Token {key}")),
-        "ASSEMBLYAI_API_KEY" => client
-            .get("https://api.assemblyai.com/v2/transcript")
-            .header("Authorization", key),
+        "ASSEMBLYAI_API_KEY" => {
+            client.get("https://api.assemblyai.com/v2/transcript").header("Authorization", key)
+        }
         "CARTESIA_API_KEY" => client
             .get("https://api.cartesia.ai/voices")
             .header("X-API-Key", key)
@@ -1992,10 +1858,7 @@ async fn validate_cloud_key(key_name: &str, key: &str) -> Result<()> {
             anyhow::bail!("no validation endpoint configured for {other}; key not validated")
         }
     };
-    let resp = req
-        .send()
-        .await
-        .with_context(|| format!("connect to {key_name} provider"))?;
+    let resp = req.send().await.with_context(|| format!("connect to {key_name} provider"))?;
     let status = resp.status();
     let request_id = fono_http::provider_request_id(resp.headers())
         .map(str::to_owned)
@@ -2058,14 +1921,9 @@ fn prompt_api_key_force(_theme: &ColorfulTheme, key_name: &str) -> Result<Option
 /// user gets immediate confirmation that paste/input is being captured.
 fn prompt_masked_api_key(key_name: &str) -> Result<String> {
     let term = Term::stderr();
-    anyhow::ensure!(
-        term.is_term(),
-        "API key prompt requires an interactive terminal"
-    );
+    anyhow::ensure!(term.is_term(), "API key prompt requires an interactive terminal");
 
-    term.write_str(&format!(
-        "? Paste your {key_name} (stored mode 0600, leave empty to skip) "
-    ))?;
+    term.write_str(&format!("? Paste your {key_name} (stored mode 0600, leave empty to skip) "))?;
     term.flush()?;
 
     let mut key = String::new();
@@ -2149,12 +2007,7 @@ async fn probe_local_latency(paths: &fono_core::Paths, config: &Config, tier: Lo
         Secrets::default()
     };
 
-    let stt = match build_stt(
-        &config.stt,
-        &config.general,
-        &secrets,
-        &paths.whisper_models_dir(),
-    ) {
+    let stt = match build_stt(&config.stt, &config.general, &secrets, &paths.whisper_models_dir()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("  (latency probe skipped: {e:#})");
@@ -2214,10 +2067,7 @@ mod tests {
         for id in ["openai", "anthropic", "groq", "cerebras", "openrouter"] {
             let entry = find(id).expect("catalogue entry");
             let pretty = humanize_chat_model(entry);
-            let raw = entry
-                .assistant
-                .expect("entry has assistant defaults")
-                .text_model;
+            let raw = entry.assistant.expect("entry has assistant defaults").text_model;
             assert!(
                 pretty != raw,
                 "{id}: humanize_chat_model fell through to raw model id ({raw})"
@@ -2241,13 +2091,11 @@ mod tests {
         let model_col = header.find("Model").expect("header has Model column");
         // First row uses padding-aware lookup: the `Model` cell must
         // start at the same column index as the header's `Model`.
-        let row0_model_start = rows[0]
-            .find(&humanize_chat_model(openai))
-            .expect("row 0 contains model");
+        let row0_model_start =
+            rows[0].find(&humanize_chat_model(openai)).expect("row 0 contains model");
         assert_eq!(row0_model_start, model_col);
-        let row1_model_start = rows[1]
-            .find(&humanize_chat_model(anthropic))
-            .expect("row 1 contains model");
+        let row1_model_start =
+            rows[1].find(&humanize_chat_model(anthropic)).expect("row 1 contains model");
         assert_eq!(row1_model_start, model_col);
         // Key status reflects secrets.toml presence.
         assert!(rows[0].ends_with("set"));
@@ -2318,10 +2166,7 @@ mod tests {
         assert!(!s.contains("web search"), "{s}");
         // Anthropic with prefer_web_search opted in: surfaces the
         // Messages-API tool id.
-        let opted_in = Assistant {
-            prefer_web_search: true,
-            ..Assistant::default()
-        };
+        let opted_in = Assistant { prefer_web_search: true, ..Assistant::default() };
         let s = assistant_extras_summary(find("anthropic").unwrap(), &opted_in)
             .expect("anthropic has extras when web_search opted in");
         assert!(s.contains("vision"), "{s}");
@@ -2360,12 +2205,7 @@ mod tests {
             total_ram_bytes: u64::from(ram_gb) * GB,
             available_ram_bytes: u64::from(ram_gb) * GB,
             free_disk_bytes: u64::from(disk_gb) * GB,
-            cpu_features: CpuFeatures {
-                avx2,
-                avx512: false,
-                fma: false,
-                neon: false,
-            },
+            cpu_features: CpuFeatures { avx2, avx512: false, fma: false, neon: false },
             os: "linux".into(),
             arch: "x86_64".into(),
         }
@@ -2429,10 +2269,7 @@ mod tests {
         let s = HardwareSnapshot {
             os: "macos".into(),
             arch: "aarch64".into(),
-            cpu_features: CpuFeatures {
-                neon: true,
-                ..Default::default()
-            },
+            cpu_features: CpuFeatures { neon: true, ..Default::default() },
             ..snap(8, 16, 200, false)
         };
         let shortlist = build_local_stt_shortlist(false, &["en".to_string()], &s);
@@ -2462,18 +2299,14 @@ mod tests {
             total_ram_bytes: 2 * 1024 * 1024 * 1024,
             available_ram_bytes: 1024 * 1024 * 1024,
             free_disk_bytes: 200 * 1024 * 1024 * 1024,
-            cpu_features: CpuFeatures {
-                avx2: true,
-                ..Default::default()
-            },
+            cpu_features: CpuFeatures { avx2: true, ..Default::default() },
             os: "linux".into(),
             arch: "x86_64".into(),
         };
-        let names: Vec<&str> = build_local_stt_shortlist(true, &["en".to_string()], &s)
+        let has_base_en = build_local_stt_shortlist(true, &["en".to_string()], &s)
             .iter()
-            .map(|e| e.model.name)
-            .collect();
-        assert!(names.contains(&"base.en"), "base.en should be in shortlist");
+            .any(|e| e.model.name == "base.en");
+        assert!(has_base_en, "base.en should be in shortlist");
     }
 
     #[test]
@@ -2501,20 +2334,14 @@ mod tests {
     #[test]
     fn accuracy_excellent_for_small_en_on_english() {
         let m = ModelRegistry::get("small.en").unwrap();
-        assert_eq!(
-            accuracy_for_langs(m, &["en".to_string()]),
-            AccuracyBucket::Excellent
-        );
+        assert_eq!(accuracy_for_langs(m, &["en".to_string()]), AccuracyBucket::Excellent);
     }
 
     #[test]
     fn accuracy_inaccurate_for_tiny_on_polish() {
         // tiny multilingual: pl=30% → Inaccurate
         let m = ModelRegistry::get("tiny").unwrap();
-        assert_eq!(
-            accuracy_for_langs(m, &["pl".to_string()]),
-            AccuracyBucket::Inaccurate
-        );
+        assert_eq!(accuracy_for_langs(m, &["pl".to_string()]), AccuracyBucket::Inaccurate);
     }
 
     #[test]
@@ -2530,10 +2357,7 @@ mod tests {
     #[test]
     fn accuracy_unknown_for_unbenchmarked_language() {
         let m = ModelRegistry::get("small").unwrap();
-        assert_eq!(
-            accuracy_for_langs(m, &["xx".to_string()]),
-            AccuracyBucket::Unknown
-        );
+        assert_eq!(accuracy_for_langs(m, &["xx".to_string()]), AccuracyBucket::Unknown);
     }
 
     #[test]
@@ -2559,10 +2383,7 @@ mod tests {
     // ── Phase B6: pre-seed defaults from existing config ─────────────────
 
     fn primary_candidates_vec() -> Vec<&'static CloudProvider> {
-        CLOUD_PROVIDERS
-            .iter()
-            .filter(|p| is_primary_candidate(p))
-            .collect()
+        CLOUD_PROVIDERS.iter().filter(|p| is_primary_candidate(p)).collect()
     }
 
     #[test]
@@ -2614,10 +2435,8 @@ mod tests {
         cfg.stt.backend = SttBackend::Groq;
         cfg.llm.backend = LlmBackend::Cerebras;
         cfg.tts.backend = TtsBackend::Wyoming;
-        cfg.tts.wyoming = Some(TtsWyoming {
-            uri: "tcp://piper.lan:10200".into(),
-            ..TtsWyoming::default()
-        });
+        cfg.tts.wyoming =
+            Some(TtsWyoming { uri: "tcp://piper.lan:10200".into(), ..TtsWyoming::default() });
         let secrets = Secrets::default();
         let candidates = primary_candidates_vec();
         let idx = default_primary_for_seed(&candidates, &cfg, &secrets);
@@ -2652,10 +2471,8 @@ mod tests {
         );
 
         // Rows for the five primary candidates in catalogue order.
-        let rows: Vec<String> = candidates
-            .iter()
-            .map(|p| primary_row(p, provider_col_width))
-            .collect();
+        let rows: Vec<String> =
+            candidates.iter().map(|p| primary_row(p, provider_col_width)).collect();
         assert_eq!(
             rows,
             vec![
@@ -2681,22 +2498,10 @@ mod tests {
     #[test]
     fn primary_candidates_exclude_gemini_and_stt_only() {
         let ids: Vec<&str> = primary_candidates_vec().iter().map(|p| p.id).collect();
-        assert!(
-            !ids.contains(&"gemini"),
-            "Gemini must be excluded (factory unwired)"
-        );
-        assert!(
-            !ids.contains(&"cartesia"),
-            "Cartesia is STT-only → secondary, not primary"
-        );
-        assert!(
-            !ids.contains(&"deepgram"),
-            "Deepgram is STT-only → secondary, not primary"
-        );
-        assert!(
-            !ids.contains(&"assemblyai"),
-            "AssemblyAI is STT-only → secondary, not primary"
-        );
+        assert!(!ids.contains(&"gemini"), "Gemini must be excluded (factory unwired)");
+        assert!(!ids.contains(&"cartesia"), "Cartesia is STT-only → secondary, not primary");
+        assert!(!ids.contains(&"deepgram"), "Deepgram is STT-only → secondary, not primary");
+        assert!(!ids.contains(&"assemblyai"), "AssemblyAI is STT-only → secondary, not primary");
         // The five LLM-capable providers DO appear:
         for must in ["openai", "groq", "anthropic", "cerebras", "openrouter"] {
             assert!(ids.contains(&must), "{must} must be a primary candidate");

@@ -332,9 +332,7 @@ fn pick_release(
             });
         }
     }
-    Err(anyhow!(
-        "no matching release asset found on the {channel:?} channel"
-    ))
+    Err(anyhow!("no matching release asset found on the {channel:?} channel"))
 }
 
 /// Compare the latest release against `current_version` and return a
@@ -353,9 +351,7 @@ pub async fn check(
     channel: Channel,
 ) -> UpdateStatus {
     if std::env::var_os("FONO_NO_UPDATE_CHECK").is_some_and(|v| v == "1") {
-        return UpdateStatus::UpToDate {
-            current: current_version.to_string(),
-        };
+        return UpdateStatus::UpToDate { current: current_version.to_string() };
     }
     let desired_prefix = desired_asset_prefix();
     match fetch_latest(channel, desired_prefix).await {
@@ -392,9 +388,7 @@ pub async fn check(
                     },
                 }
             } else {
-                UpdateStatus::UpToDate {
-                    current: current_version.to_string(),
-                }
+                UpdateStatus::UpToDate { current: current_version.to_string() }
             }
         }
         Err(e) => UpdateStatus::CheckFailed {
@@ -427,10 +421,7 @@ pub fn save_cache(path: &Path, status: &UpdateStatus) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let entry = CachedCheck {
-        checked_at: now,
-        status: status.clone(),
-    };
+    let entry = CachedCheck { checked_at: now, status: status.clone() };
     let Ok(json) = serde_json::to_string_pretty(&entry) else {
         return;
     };
@@ -500,19 +491,13 @@ pub async fn apply_update(info: &UpdateInfo, opts: ApplyOpts) -> Result<ApplyOut
         );
     }
 
-    let dir = target
-        .parent()
-        .ok_or_else(|| anyhow!("target {} has no parent dir", target.display()))?;
+    let dir =
+        target.parent().ok_or_else(|| anyhow!("target {} has no parent dir", target.display()))?;
 
     // Writability check up-front so we fail before downloading.
-    let probe = tempfile::Builder::new()
-        .prefix(".fono-update-probe-")
-        .tempfile_in(dir);
+    let probe = tempfile::Builder::new().prefix(".fono-update-probe-").tempfile_in(dir);
     if let Err(e) = probe {
-        anyhow::bail!(
-            "cannot write to {} ({e}); try `sudo fono update`",
-            dir.display()
-        );
+        anyhow::bail!("cannot write to {} ({e}); try `sudo fono update`", dir.display());
     }
     drop(probe);
 
@@ -530,11 +515,7 @@ pub async fn apply_update(info: &UpdateInfo, opts: ApplyOpts) -> Result<ApplyOut
 
     let (bytes, sha) = stream_download(&info.asset_url, tmp.as_file_mut()).await?;
     if info.asset_size > 0 && bytes != info.asset_size {
-        anyhow::bail!(
-            "downloaded {} bytes, GitHub announced {}",
-            bytes,
-            info.asset_size
-        );
+        anyhow::bail!("downloaded {} bytes, GitHub announced {}", bytes, info.asset_size);
     }
 
     // Wave 2 Thread B — verify against the published `.sha256` sidecar
@@ -586,12 +567,7 @@ pub async fn apply_update(info: &UpdateInfo, opts: ApplyOpts) -> Result<ApplyOut
     }
 
     if opts.dry_run {
-        return Ok(ApplyOutcome {
-            installed_at: target,
-            backup_at: None,
-            bytes,
-            sha256: sha,
-        });
+        return Ok(ApplyOutcome { installed_at: target, backup_at: None, bytes, sha256: sha });
     }
 
     // Keep a `.bak` of the previous binary so the caller can roll back
@@ -610,15 +586,9 @@ pub async fn apply_update(info: &UpdateInfo, opts: ApplyOpts) -> Result<ApplyOut
     // Persist the temp file into the final path. `persist` does
     // `rename(tmp, target)` — atomic on the same filesystem because we
     // created the temp in the same dir.
-    tmp.persist(&target)
-        .map_err(|e| anyhow!("persist into {}: {}", target.display(), e.error))?;
+    tmp.persist(&target).map_err(|e| anyhow!("persist into {}: {}", target.display(), e.error))?;
 
-    Ok(ApplyOutcome {
-        installed_at: target,
-        backup_at: Some(backup),
-        bytes,
-        sha256: sha,
-    })
+    Ok(ApplyOutcome { installed_at: target, backup_at: Some(backup), bytes, sha256: sha })
 }
 
 async fn stream_download(url: &str, out: &mut std::fs::File) -> Result<(u64, String)> {
@@ -725,9 +695,8 @@ pub fn restart_in_place(target: &Path) -> Result<std::convert::Infallible> {
     use std::os::unix::ffi::OsStrExt;
 
     let exe_c = CString::new(target.as_os_str().as_bytes()).context("exe path NUL")?;
-    let args: Vec<CString> = std::env::args_os()
-        .filter_map(|a| CString::new(a.as_bytes()).ok())
-        .collect();
+    let args: Vec<CString> =
+        std::env::args_os().filter_map(|a| CString::new(a.as_bytes()).ok()).collect();
     let mut argv: Vec<*const libc::c_char> = args.iter().map(|c| c.as_ptr()).collect();
     argv.push(std::ptr::null());
 
@@ -736,11 +705,7 @@ pub fn restart_in_place(target: &Path) -> Result<std::convert::Infallible> {
     unsafe {
         libc::execv(exe_c.as_ptr(), argv.as_ptr());
     }
-    Err(anyhow!(
-        "execv {} returned: {}",
-        target.display(),
-        std::io::Error::last_os_error()
-    ))
+    Err(anyhow!("execv {} returned: {}", target.display(), std::io::Error::last_os_error()))
 }
 
 #[cfg(not(unix))]
@@ -833,9 +798,7 @@ mod tests {
     fn cache_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("update.json");
-        let st = UpdateStatus::UpToDate {
-            current: "0.2.0".into(),
-        };
+        let st = UpdateStatus::UpToDate { current: "0.2.0".into() };
         save_cache(&p, &st);
         let loaded = load_cache(&p).unwrap();
         assert_eq!(loaded.status.current(), "0.2.0");

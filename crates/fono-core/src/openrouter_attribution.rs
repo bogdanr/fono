@@ -93,16 +93,12 @@ mod tests {
         // OpenRouter, so a malformed value here would degrade
         // marketplace placement to nothing without any runtime error.
         let parts: Vec<&str> = CATEGORIES.split(',').collect();
-        assert!(
-            parts.len() <= 2,
-            "OpenRouter caps categories at 2 per request"
-        );
+        assert!(parts.len() <= 2, "OpenRouter caps categories at 2 per request");
         for part in parts {
             assert!(!part.is_empty());
             assert!(part.len() <= 30, "category {part} exceeds 30 chars");
             assert!(
-                part.chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                part.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
                 "category {part} must be lowercase + hyphens only"
             );
         }
@@ -118,23 +114,11 @@ mod tests {
 
     #[test]
     fn url_gating_picks_only_openrouter() {
-        assert!(is_openrouter_url(
-            "https://openrouter.ai/api/v1/chat/completions"
-        ));
-        assert!(is_openrouter_url(
-            "https://openrouter.ai/api/v1/audio/speech"
-        ));
-        assert!(!is_openrouter_url(
-            "https://api.openai.com/v1/chat/completions"
-        ));
-        assert!(!is_openrouter_url(
-            "https://api.groq.com/openai/v1/chat/completions"
-        ));
-        assert!(!is_openrouter_url(
-            "https://api.cerebras.ai/v1/chat/completions"
-        ));
-        assert!(!is_openrouter_url(
-            "http://localhost:11434/v1/chat/completions"
-        ));
+        assert!(is_openrouter_url("https://openrouter.ai/api/v1/chat/completions"));
+        assert!(is_openrouter_url("https://openrouter.ai/api/v1/audio/speech"));
+        assert!(!is_openrouter_url("https://api.openai.com/v1/chat/completions"));
+        assert!(!is_openrouter_url("https://api.groq.com/openai/v1/chat/completions"));
+        assert!(!is_openrouter_url("https://api.cerebras.ai/v1/chat/completions"));
+        assert!(!is_openrouter_url("http://localhost:11434/v1/chat/completions"));
     }
 }

@@ -471,12 +471,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Some(Cmd::TestInject {
-            text,
-            no_inject,
-            no_clipboard,
-            shortcut,
-        }) => {
+        Some(Cmd::TestInject { text, no_inject, no_clipboard, shortcut }) => {
             test_inject_cmd(&text, no_inject, no_clipboard, shortcut.as_deref());
             Ok(())
         }
@@ -490,35 +485,15 @@ pub async fn run(cli: Cli) -> Result<()> {
             test_overlay_cmd();
             Ok(())
         }
-        Some(Cmd::Record {
-            no_inject,
-            max_seconds,
-            stt,
-            llm,
-            live,
-        }) => {
-            record_cmd(
-                &paths,
-                no_inject,
-                max_seconds,
-                stt.as_deref(),
-                llm.as_deref(),
-                live,
-            )
-            .await
+        Some(Cmd::Record { no_inject, max_seconds, stt, llm, live }) => {
+            record_cmd(&paths, no_inject, max_seconds, stt.as_deref(), llm.as_deref(), live).await
         }
-        Some(Cmd::Transcribe {
-            path,
-            no_llm,
-            stt,
-            llm,
-        }) => transcribe_cmd(&paths, &path, no_llm, stt.as_deref(), llm.as_deref()).await,
-        Some(Cmd::History {
-            search,
-            limit,
-            json,
-            last,
-        }) => history_cmd(&paths, search.as_deref(), limit, json, last),
+        Some(Cmd::Transcribe { path, no_llm, stt, llm }) => {
+            transcribe_cmd(&paths, &path, no_llm, stt.as_deref(), llm.as_deref()).await
+        }
+        Some(Cmd::History { search, limit, json, last }) => {
+            history_cmd(&paths, search.as_deref(), limit, json, last)
+        }
         Some(Cmd::Config { action }) => config_cmd(&paths, action),
         Some(Cmd::Models { action }) => models_cmd(&paths, action).await,
         Some(Cmd::Completions { shell }) => {
@@ -527,14 +502,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Some(Cmd::Discover { json }) => discover_cmd(&paths, json).await,
-        Some(Cmd::Update {
-            check,
-            yes,
-            dry_run,
-            channel,
-            no_restart,
-            bin_dir,
-        }) => update_cmd(check, yes, dry_run, &channel, no_restart, bin_dir).await,
+        Some(Cmd::Update { check, yes, dry_run, channel, no_restart, bin_dir }) => {
+            update_cmd(check, yes, dry_run, &channel, no_restart, bin_dir).await
+        }
         Some(Cmd::Install { server, dry_run }) => crate::install::run_install(server, dry_run),
         Some(Cmd::Uninstall { dry_run }) => crate::install::run_uninstall(dry_run),
     }
@@ -683,9 +653,7 @@ fn config_cmd(paths: &Paths, action: ConfigCmd) -> Result<()> {
         }
         ConfigCmd::Edit => {
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
-            let status = std::process::Command::new(&editor)
-                .arg(paths.config_file())
-                .status()?;
+            let status = std::process::Command::new(&editor).arg(paths.config_file()).status()?;
             if !status.success() {
                 return Err(anyhow::anyhow!("{editor} exited with {status}"));
             }
@@ -700,15 +668,12 @@ async fn models_cmd(paths: &Paths, action: ModelsCmd) -> Result<()> {
     match action {
         ModelsCmd::List => {
             for m in ModelRegistry::all() {
-                let marker = if paths
-                    .whisper_models_dir()
-                    .join(format!("ggml-{}.bin", m.name))
-                    .exists()
-                {
-                    "[installed]"
-                } else {
-                    "           "
-                };
+                let marker =
+                    if paths.whisper_models_dir().join(format!("ggml-{}.bin", m.name)).exists() {
+                        "[installed]"
+                    } else {
+                        "           "
+                    };
                 println!(
                     "{marker} whisper:{:<10} {:>5} MB  multilingual={}",
                     m.name, m.approx_mb, m.multilingual
@@ -718,9 +683,7 @@ async fn models_cmd(paths: &Paths, action: ModelsCmd) -> Result<()> {
         ModelsCmd::Install { name } => {
             let m = ModelRegistry::get(&name)
                 .ok_or_else(|| anyhow::anyhow!("unknown model {name:?}"))?;
-            let dest = paths
-                .whisper_models_dir()
-                .join(format!("ggml-{}.bin", m.name));
+            let dest = paths.whisper_models_dir().join(format!("ggml-{}.bin", m.name));
             if dest.exists() {
                 println!("already installed: {}", dest.display());
                 return Ok(());
@@ -777,9 +740,7 @@ async fn record_cmd(
         return record_cmd_live(paths, &config, &secrets, max_seconds, no_inject).await;
     }
 
-    let cap_cfg = CaptureConfig {
-        target_sample_rate: config.audio.sample_rate,
-    };
+    let cap_cfg = CaptureConfig { target_sample_rate: config.audio.sample_rate };
     let cap = AudioCapture::new(cap_cfg.clone());
     let handle = cap.start().context("start audio capture")?;
     eprintln!(
@@ -809,12 +770,8 @@ async fn record_cmd(
     };
     drop(handle);
 
-    let stt = fono_stt::build_stt(
-        &config.stt,
-        &config.general,
-        &secrets,
-        &paths.whisper_models_dir(),
-    )?;
+    let stt =
+        fono_stt::build_stt(&config.stt, &config.general, &secrets, &paths.whisper_models_dir())?;
     let llm = fono_llm::build_llm(&config.llm, &secrets, &paths.llm_models_dir())?;
 
     eprintln!(
@@ -823,9 +780,7 @@ async fn record_cmd(
         elapsed.as_millis()
     );
     let lang = config.general.language_override();
-    let trans = stt
-        .transcribe(&pcm, cap_cfg.target_sample_rate, lang)
-        .await?;
+    let trans = stt.transcribe(&pcm, cap_cfg.target_sample_rate, lang).await?;
     let raw = trans.text.trim().to_string();
     if raw.is_empty() {
         eprintln!("fono record: STT returned empty text");
@@ -875,12 +830,8 @@ async fn transcribe_cmd(
     let secrets = Secrets::load(&paths.secrets_file())?;
     let (pcm, sample_rate) =
         read_wav_mono_f32(wav).with_context(|| format!("read wav {}", wav.display()))?;
-    let stt = fono_stt::build_stt(
-        &config.stt,
-        &config.general,
-        &secrets,
-        &paths.whisper_models_dir(),
-    )?;
+    let stt =
+        fono_stt::build_stt(&config.stt, &config.general, &secrets, &paths.whisper_models_dir())?;
     let llm = if no_llm {
         None
     } else {
@@ -1004,11 +955,7 @@ fn hwprobe_cmd(paths: &Paths, json: bool) {
             "ram   : {ram_gb} GB total · disk free : {disk_gb} GB · {}/{}",
             snap.os, snap.arch
         );
-        println!(
-            "tier  : {} (recommends whisper-{})",
-            tier.as_str(),
-            tier.default_whisper_model()
-        );
+        println!("tier  : {} (recommends whisper-{})", tier.as_str(), tier.default_whisper_model());
         if let Err(reason) = snap.suitability() {
             println!("note  : unsuitable for local — {reason}");
         }
@@ -1086,10 +1033,7 @@ pub fn set_active_tts(
                 .filter(|u| !u.is_empty())
                 .unwrap_or_else(|| fono_tts::defaults::DEFAULT_WYOMING_URI.to_string())
         });
-        cfg.tts.wyoming = Some(TtsWyoming {
-            uri,
-            ..TtsWyoming::default()
-        });
+        cfg.tts.wyoming = Some(TtsWyoming { uri, ..TtsWyoming::default() });
     } else {
         cfg.tts.wyoming = None;
     }
@@ -1187,11 +1131,8 @@ async fn use_cmd(paths: &Paths, action: UseCmd) -> Result<()> {
 
     // Hot-reload the running daemon (provider-switching plan S11). When
     // the daemon is not running this is a no-op with a friendly hint.
-    match fono_ipc::request_any(
-        &paths.client_ipc_socket_candidates(),
-        &fono_ipc::Request::Reload,
-    )
-    .await
+    match fono_ipc::request_any(&paths.client_ipc_socket_candidates(), &fono_ipc::Request::Reload)
+        .await
     {
         Ok(fono_ipc::Response::Text(t)) => println!("daemon: {t}"),
         Ok(fono_ipc::Response::Ok) => println!("daemon: reloaded"),
@@ -1216,18 +1157,11 @@ async fn print_show(paths: &Paths, cfg: &Config) {
     println!(
         "  assistant: {}{}",
         assistant_backend_str(&cfg.assistant.backend),
-        if cfg.assistant.enabled {
-            ""
-        } else {
-            " (disabled)"
-        }
+        if cfg.assistant.enabled { "" } else { " (disabled)" }
     );
     println!("  tts      : {}", tts_backend_str(&cfg.tts.backend));
-    match fono_ipc::request_any(
-        &paths.client_ipc_socket_candidates(),
-        &fono_ipc::Request::Status,
-    )
-    .await
+    match fono_ipc::request_any(&paths.client_ipc_socket_candidates(), &fono_ipc::Request::Status)
+        .await
     {
         Ok(fono_ipc::Response::Text(t)) => println!("daemon: {t}"),
         Ok(_) => println!("daemon: running"),
@@ -1340,14 +1274,8 @@ fn mask(value: &str) -> String {
         return "*".repeat(n);
     }
     let head: String = trimmed.chars().take(3).collect();
-    let tail: String = trimmed
-        .chars()
-        .rev()
-        .take(3)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
+    let tail: String =
+        trimmed.chars().rev().take(3).collect::<Vec<_>>().into_iter().rev().collect();
     format!("{head}…{tail}")
 }
 
@@ -1383,10 +1311,7 @@ fn test_inject_cmd(text: &str, no_inject: bool, no_clipboard: bool, shortcut: Op
     }
     println!("Fono — test-inject");
     println!("Build: v{}", env!("CARGO_PKG_VERSION"));
-    println!(
-        "Detected key-injector: {:?}",
-        fono_inject::Injector::detect()
-    );
+    println!("Detected key-injector: {:?}", fono_inject::Injector::detect());
     println!(
         "Paste shortcut       : {} (env FONO_PASTE_SHORTCUT={:?})",
         fono_inject::PasteShortcut::from_env_or_default().label(),
@@ -1403,10 +1328,7 @@ fn test_inject_cmd(text: &str, no_inject: bool, no_clipboard: bool, shortcut: Op
         let started = Instant::now();
         match fono_inject::type_text_with_outcome(text) {
             Ok(fono_inject::InjectOutcome::Typed(b)) => {
-                println!(
-                    "      ✓ typed via {b} in {}ms",
-                    started.elapsed().as_millis()
-                );
+                println!("      ✓ typed via {b} in {}ms", started.elapsed().as_millis());
             }
             Ok(fono_inject::InjectOutcome::Clipboard(t)) => {
                 println!(
@@ -1425,18 +1347,9 @@ fn test_inject_cmd(text: &str, no_inject: bool, no_clipboard: bool, shortcut: Op
         println!("[2/2] Skipping clipboard copy (--no-clipboard)");
     } else {
         println!("[2/2] Forcing clipboard copy via every available tool...");
-        println!(
-            "      DISPLAY         = {:?}",
-            std::env::var("DISPLAY").ok()
-        );
-        println!(
-            "      WAYLAND_DISPLAY = {:?}",
-            std::env::var("WAYLAND_DISPLAY").ok()
-        );
-        println!(
-            "      XDG_SESSION_TYPE= {:?}",
-            std::env::var("XDG_SESSION_TYPE").ok()
-        );
+        println!("      DISPLAY         = {:?}", std::env::var("DISPLAY").ok());
+        println!("      WAYLAND_DISPLAY = {:?}", std::env::var("WAYLAND_DISPLAY").ok());
+        println!("      XDG_SESSION_TYPE= {:?}", std::env::var("XDG_SESSION_TYPE").ok());
         let started = Instant::now();
         let attempts = fono_inject::copy_to_clipboard_all(text);
         for a in &attempts {
@@ -1563,9 +1476,7 @@ async fn update_cmd(
             }
         }
     }
-    let info = status
-        .available()
-        .ok_or_else(|| anyhow::anyhow!("no update available"))?;
+    let info = status.available().ok_or_else(|| anyhow::anyhow!("no update available"))?;
 
     if !yes {
         eprint!("Apply update now? [y/N] ");
@@ -1758,11 +1669,8 @@ async fn record_cmd_live(
             [single] => Some(single.clone()),
             _ => None,
         });
-    let session = if let Some(o) = overlay.as_ref() {
-        session.with_overlay(o.clone())
-    } else {
-        session
-    };
+    let session =
+        if let Some(o) = overlay.as_ref() { session.with_overlay(o.clone()) } else { session };
 
     let task = tokio::spawn(session.run(frame_rx, fono_core::QualityFloor::Max));
 
@@ -1839,12 +1747,7 @@ mod tests {
     #[test]
     fn verbosity_filters_parse_as_targets() {
         use tracing_subscriber::filter::Targets;
-        for v in [
-            Verbosity::Quiet,
-            Verbosity::Info,
-            Verbosity::Debug,
-            Verbosity::Trace,
-        ] {
+        for v in [Verbosity::Quiet, Verbosity::Info, Verbosity::Debug, Verbosity::Trace] {
             let s = v.as_filter();
             s.parse::<Targets>()
                 .unwrap_or_else(|e| panic!("Verbosity::{v:?} filter {s:?} failed to parse: {e}"));

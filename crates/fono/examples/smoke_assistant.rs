@@ -122,15 +122,10 @@ async fn main() -> Result<()> {
         let p = Paths::resolve()?.secrets_file();
         p.exists().then_some(p)
     };
-    let secrets = secrets_path
-        .as_ref()
-        .map(|p| Secrets::load(p).unwrap_or_default())
-        .unwrap_or_default();
+    let secrets =
+        secrets_path.as_ref().map(|p| Secrets::load(p).unwrap_or_default()).unwrap_or_default();
 
-    println!(
-        "Fono assistant smoke test ({} mode)\n",
-        if ci_mode { "ci" } else { "local" }
-    );
+    println!("Fono assistant smoke test ({} mode)\n", if ci_mode { "ci" } else { "local" });
     if let Some(p) = secrets_path.as_ref() {
         println!("secrets file: {}", p.display());
     } else {
@@ -149,10 +144,7 @@ async fn main() -> Result<()> {
         }
         let label = p.label;
         if secrets.resolve(p.key_env).is_none() {
-            println!(
-                "[SKIP] assistant/{label}: {} not in secrets/env — skipping",
-                p.key_env
-            );
+            println!("[SKIP] assistant/{label}: {} not in secrets/env — skipping", p.key_env);
             skipped.push(format!("assistant/{label}"));
             continue;
         }
@@ -176,20 +168,14 @@ async fn main() -> Result<()> {
         let retry_delays: &[u64] = &[5, 15, 30]; // seconds
         let mut last_err: Option<anyhow::Error> = None;
         let mut overloaded = false;
-        for (attempt, &delay) in std::iter::once(&0u64)
-            .chain(retry_delays.iter())
-            .enumerate()
-        {
+        for (attempt, &delay) in std::iter::once(&0u64).chain(retry_delays.iter()).enumerate() {
             if delay > 0 {
                 println!("       [{label}] 429 on attempt {attempt}, retrying in {delay}s…");
                 tokio::time::sleep(Duration::from_secs(delay)).await;
             }
             match exercise_assistant(&cfg, &secrets).await {
                 Ok(reply_chars) => {
-                    println!(
-                        "[ OK ] assistant/{label} ({}): replied {reply_chars} chars",
-                        p.model
-                    );
+                    println!("[ OK ] assistant/{label} ({}): replied {reply_chars} chars", p.model);
                     last_err = None;
                     overloaded = false;
                     break;
@@ -280,10 +266,7 @@ async fn main() -> Result<()> {
     println!();
     println!("───────────────────────────────────────────");
     if failures.is_empty() {
-        println!(
-            "All {ran} active backend(s) passed; {} skipped.",
-            skipped.len()
-        );
+        println!("All {ran} active backend(s) passed; {} skipped.", skipped.len());
         Ok(())
     } else {
         println!("FAILURES ({}):", failures.len());
@@ -313,12 +296,10 @@ async fn exercise_assistant(cfg: &AssistantCfg, secrets: &Secrets) -> Result<usi
         history: ConversationHistory::default().snapshot(),
     };
     let stream_started = Instant::now();
-    let stream = tokio::time::timeout(
-        Duration::from_secs(30),
-        assistant.reply_stream(TEST_PROMPT, &ctx),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("reply_stream open timed out"))??;
+    let stream =
+        tokio::time::timeout(Duration::from_secs(30), assistant.reply_stream(TEST_PROMPT, &ctx))
+            .await
+            .map_err(|_| anyhow::anyhow!("reply_stream open timed out"))??;
 
     let mut full = String::new();
     let mut deltas = stream;
@@ -342,11 +323,7 @@ async fn exercise_assistant(cfg: &AssistantCfg, secrets: &Secrets) -> Result<usi
     }
     println!(
         "       reply ({stream_ms} ms): {:?}",
-        if trimmed.len() > 80 {
-            format!("{}…", &trimmed[..80])
-        } else {
-            trimmed.to_string()
-        }
+        if trimmed.len() > 80 { format!("{}…", &trimmed[..80]) } else { trimmed.to_string() }
     );
     Ok(trimmed.len())
 }
@@ -365,11 +342,7 @@ async fn exercise_tts(cfg: &TtsCfg, secrets: &Secrets) -> Result<usize> {
     if audio.pcm.is_empty() {
         return Err(anyhow::anyhow!("empty PCM"));
     }
-    println!(
-        "       synth ok ({ms} ms): {} samples @ {} Hz",
-        audio.pcm.len(),
-        audio.sample_rate
-    );
+    println!("       synth ok ({ms} ms): {} samples @ {} Hz", audio.pcm.len(), audio.sample_rate);
     Ok(audio.pcm.len())
 }
 
@@ -444,13 +417,11 @@ async fn exercise_groq_e2e(secrets: &Secrets) -> Result<()> {
         history: ConversationHistory::default().snapshot(),
     };
     let started = Instant::now();
-    let mut stream = tokio::time::timeout(
-        Duration::from_secs(30),
-        assistant.reply_stream(&user_text, &ctx),
-    )
-    .await
-    .map_err(|_| anyhow!("llm reply_stream open timed out"))?
-    .map_err(|e| anyhow!("llm reply_stream open: {e:#}"))?;
+    let mut stream =
+        tokio::time::timeout(Duration::from_secs(30), assistant.reply_stream(&user_text, &ctx))
+            .await
+            .map_err(|_| anyhow!("llm reply_stream open timed out"))?
+            .map_err(|e| anyhow!("llm reply_stream open: {e:#}"))?;
     let mut reply = String::new();
     let drain = tokio::time::timeout(Duration::from_secs(30), async {
         while let Some(item) = stream.next().await {
@@ -488,22 +459,16 @@ async fn exercise_groq_e2e(secrets: &Secrets) -> Result<()> {
         .ok_or_else(|| anyhow!("build_tts returned None"))?;
     let to_speak: String = reply_trim.chars().take(200).collect();
     let started = Instant::now();
-    let audio = tokio::time::timeout(
-        Duration::from_secs(30),
-        tts.synthesize(&to_speak, None, None),
-    )
-    .await
-    .map_err(|_| anyhow!("tts synthesize timed out"))?
-    .map_err(|e| anyhow!("tts synthesize: {e:#}"))?;
+    let audio =
+        tokio::time::timeout(Duration::from_secs(30), tts.synthesize(&to_speak, None, None))
+            .await
+            .map_err(|_| anyhow!("tts synthesize timed out"))?
+            .map_err(|e| anyhow!("tts synthesize: {e:#}"))?;
     let tts_ms = started.elapsed().as_millis();
     if audio.pcm.is_empty() {
         return Err(anyhow!("tts returned empty PCM"));
     }
-    println!(
-        "       tts ({tts_ms} ms): {} samples @ {} Hz",
-        audio.pcm.len(),
-        audio.sample_rate
-    );
+    println!("       tts ({tts_ms} ms): {} samples @ {} Hz", audio.pcm.len(), audio.sample_rate);
     Ok(())
 }
 

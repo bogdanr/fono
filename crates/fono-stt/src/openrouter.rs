@@ -128,10 +128,9 @@ impl OpenRouterStt {
         match selection {
             LanguageSelection::Auto => None,
             LanguageSelection::Forced(c) => Some(c.clone()),
-            LanguageSelection::AllowList(peers) => self
-                .lang_cache
-                .get(BACKEND_KEY)
-                .filter(|cached| peers.iter().any(|p| p == cached)),
+            LanguageSelection::AllowList(peers) => {
+                self.lang_cache.get(BACKEND_KEY).filter(|cached| peers.iter().any(|p| p == cached))
+            }
         }
     }
 
@@ -139,16 +138,10 @@ impl OpenRouterStt {
     async fn do_request(&self, wav: &[u8], lang: Option<&str>) -> Result<Resp> {
         let body = Body {
             model: &self.model,
-            input_audio: InputAudio {
-                data: BASE64_STANDARD.encode(wav),
-                format: "wav",
-            },
+            input_audio: InputAudio { data: BASE64_STANDARD.encode(wav), format: "wav" },
             language: lang,
         };
-        let mut req = self
-            .client
-            .post(OPENROUTER_ENDPOINT)
-            .bearer_auth(&self.api_key);
+        let mut req = self.client.post(OPENROUTER_ENDPOINT).bearer_auth(&self.api_key);
         for (name, value) in fono_core::openrouter_attribution::headers() {
             req = req.header(name, value);
         }
@@ -319,16 +312,9 @@ impl SpeechToText for OpenRouterStt {
         }
 
         let language = pick.or_else(|| selection.fallback_hint().map(str::to_string));
-        let duration_ms = parsed
-            .usage
-            .and_then(|u| u.seconds)
-            .map(|s| (s * 1000.0) as u64);
+        let duration_ms = parsed.usage.and_then(|u| u.seconds).map(|s| (s * 1000.0) as u64);
 
-        Ok(Transcription {
-            text: parsed.text,
-            language,
-            duration_ms,
-        })
+        Ok(Transcription { text: parsed.text, language, duration_ms })
     }
 
     fn name(&self) -> &'static str {
@@ -340,10 +326,7 @@ impl SpeechToText for OpenRouterStt {
         // (the wizard uses it for `validate_cloud_key`). Cheaper than
         // POSTing a silence buffer to /audio/transcriptions, and warms
         // the same TLS connection the real request will reuse.
-        let mut req = self
-            .client
-            .get(OPENROUTER_AUTH_ENDPOINT)
-            .bearer_auth(&self.api_key);
+        let mut req = self.client.get(OPENROUTER_AUTH_ENDPOINT).bearer_auth(&self.api_key);
         for (name, value) in fono_core::openrouter_attribution::headers() {
             req = req.header(name, value);
         }

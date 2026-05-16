@@ -199,10 +199,7 @@ mod tests {
             "The details are incomplete on the form he sent over.",
         ];
         for c in cases {
-            assert!(
-                !looks_like_clarification(c),
-                "should NOT flag legitimate transcript: {c}"
-            );
+            assert!(!looks_like_clarification(c), "should NOT flag legitimate transcript: {c}");
         }
     }
 

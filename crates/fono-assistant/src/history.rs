@@ -66,12 +66,7 @@ impl ConversationHistory {
     /// `max_turns = 0` is treated as "no cap".
     #[must_use]
     pub fn new(window: Duration, max_turns: usize) -> Self {
-        Self {
-            turns: VecDeque::new(),
-            last_activity: None,
-            window,
-            max_turns,
-        }
+        Self { turns: VecDeque::new(), last_activity: None, window, max_turns }
     }
 
     /// Append a user turn.

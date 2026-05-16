@@ -52,11 +52,7 @@ pub fn set_default_sink_mute(muted: bool) {
 fn run(cmd: &str, args: &[&str]) {
     match Command::new(cmd).args(args).output() {
         Ok(o) if o.status.success() => {}
-        Ok(o) => warn!(
-            "{cmd} {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&o.stderr)
-        ),
+        Ok(o) => warn!("{cmd} {:?} failed: {}", args, String::from_utf8_lossy(&o.stderr)),
         Err(e) => warn!("spawning {cmd} failed: {e}"),
     }
 }

@@ -149,10 +149,7 @@ impl std::fmt::Display for UnsuitableReason {
                 write!(f, "only {have} physical cores; minimum is {need}")
             }
             Self::NotEnoughRam { have_gb, need_gb } => {
-                write!(
-                    f,
-                    "only {have_gb} GB RAM available; minimum is {need_gb} GB"
-                )
+                write!(f, "only {have_gb} GB RAM available; minimum is {need_gb} GB")
             }
             Self::NoVectorIsa => {
                 write!(f, "no AVX2 / NEON support detected")
@@ -259,11 +256,8 @@ impl HardwareSnapshot {
             return Affordability::Unsuitable;
         }
 
-        let threshold = if self.accelerated() {
-            LIVE_REALTIME_MIN_ACCEL
-        } else {
-            LIVE_REALTIME_MIN_CPU
-        };
+        let threshold =
+            if self.accelerated() { LIVE_REALTIME_MIN_ACCEL } else { LIVE_REALTIME_MIN_CPU };
 
         if effective_rf < threshold {
             Affordability::Borderline
@@ -335,20 +329,14 @@ impl HardwareSnapshot {
         }
         let ram_gb = u32::try_from(self.total_ram_bytes / GB).unwrap_or(u32::MAX);
         if ram_gb < MIN_RAM_GB {
-            return Err(UnsuitableReason::NotEnoughRam {
-                have_gb: ram_gb,
-                need_gb: MIN_RAM_GB,
-            });
+            return Err(UnsuitableReason::NotEnoughRam { have_gb: ram_gb, need_gb: MIN_RAM_GB });
         }
         if !self.cpu_features.avx2 && !self.cpu_features.neon {
             return Err(UnsuitableReason::NoVectorIsa);
         }
         let disk_gb = u32::try_from(self.free_disk_bytes / GB).unwrap_or(u32::MAX);
         if disk_gb < MIN_DISK_GB {
-            return Err(UnsuitableReason::NotEnoughDisk {
-                have_gb: disk_gb,
-                need_gb: MIN_DISK_GB,
-            });
+            return Err(UnsuitableReason::NotEnoughDisk { have_gb: disk_gb, need_gb: MIN_DISK_GB });
         }
         Ok(())
     }
@@ -379,12 +367,9 @@ pub const HIGH_END_RAM_GB: u32 = 32;
 /// fall back to conservative defaults so the resulting tier never
 /// over-promises.
 pub fn probe(disk_check_dir: &Path) -> HardwareSnapshot {
-    let logical = std::thread::available_parallelism()
-        .map(std::num::NonZero::get)
-        .unwrap_or(1) as u32;
-    let physical = physical_cores()
-        .unwrap_or_else(|| logical.max(1) / 2)
-        .max(1);
+    let logical =
+        std::thread::available_parallelism().map(std::num::NonZero::get).unwrap_or(1) as u32;
+    let physical = physical_cores().unwrap_or_else(|| logical.max(1) / 2).max(1);
     let (total_ram, avail_ram) = read_meminfo().unwrap_or((0, 0));
     let free_disk = free_disk_bytes(disk_check_dir).unwrap_or(0);
 
@@ -538,12 +523,7 @@ mod tests {
             total_ram_bytes: u64::from(ram_gb) * GB,
             available_ram_bytes: u64::from(ram_gb) * GB,
             free_disk_bytes: u64::from(disk_gb) * GB,
-            cpu_features: CpuFeatures {
-                avx2,
-                avx512: false,
-                fma: false,
-                neon: false,
-            },
+            cpu_features: CpuFeatures { avx2, avx512: false, fma: false, neon: false },
             os: "linux".into(),
             arch: "x86_64".into(),
         }
@@ -585,23 +565,13 @@ mod tests {
 
     #[test]
     fn comfortable_at_threshold() {
-        let s = snap(
-            COMFORTABLE_CORES,
-            COMFORTABLE_RAM_GB,
-            COMFORTABLE_DISK_GB,
-            true,
-        );
+        let s = snap(COMFORTABLE_CORES, COMFORTABLE_RAM_GB, COMFORTABLE_DISK_GB, true);
         assert_eq!(s.tier(), LocalTier::Comfortable);
     }
 
     #[test]
     fn recommended_at_threshold() {
-        let s = snap(
-            RECOMMENDED_CORES,
-            RECOMMENDED_RAM_GB,
-            RECOMMENDED_DISK_GB,
-            true,
-        );
+        let s = snap(RECOMMENDED_CORES, RECOMMENDED_RAM_GB, RECOMMENDED_DISK_GB, true);
         assert_eq!(s.tier(), LocalTier::Recommended);
     }
 
@@ -714,10 +684,7 @@ mod tests {
         let s = HardwareSnapshot {
             os: "macos".into(),
             arch: "aarch64".into(),
-            cpu_features: CpuFeatures {
-                neon: true,
-                ..Default::default()
-            },
+            cpu_features: CpuFeatures { neon: true, ..Default::default() },
             ..snap(8, 16, 100, false)
         };
         assert!(s.accelerated());
@@ -733,10 +700,7 @@ mod tests {
             total_ram_bytes: GB * 8,
             available_ram_bytes: 512 * 1024 * 1024,
             free_disk_bytes: GB * 100,
-            cpu_features: CpuFeatures {
-                avx2: true,
-                ..Default::default()
-            },
+            cpu_features: CpuFeatures { avx2: true, ..Default::default() },
             os: "linux".into(),
             arch: "x86_64".into(),
         };
@@ -752,10 +716,7 @@ mod tests {
             total_ram_bytes: GB * 16,
             available_ram_bytes: GB * 8,
             free_disk_bytes: 800 * 1024 * 1024,
-            cpu_features: CpuFeatures {
-                avx2: true,
-                ..Default::default()
-            },
+            cpu_features: CpuFeatures { avx2: true, ..Default::default() },
             os: "linux".into(),
             arch: "x86_64".into(),
         };
@@ -791,10 +752,7 @@ mod tests {
         let mac_arm = HardwareSnapshot {
             os: "macos".into(),
             arch: "aarch64".into(),
-            cpu_features: CpuFeatures {
-                neon: true,
-                ..Default::default()
-            },
+            cpu_features: CpuFeatures { neon: true, ..Default::default() },
             ..snap(8, 16, 100, false)
         };
         let s = mac_arm.acceleration_summary();

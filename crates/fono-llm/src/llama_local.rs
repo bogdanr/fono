@@ -115,10 +115,7 @@ impl LlamaLocal {
     /// Concurrent format() calls serialise on the state mutex by design —
     /// llama.cpp inference can't safely share a context across threads.
     fn ensure_loaded(&self) -> Result<()> {
-        let mut guard = self
-            .state
-            .lock()
-            .map_err(|_| anyhow!("llama-local mutex poisoned"))?;
+        let mut guard = self.state.lock().map_err(|_| anyhow!("llama-local mutex poisoned"))?;
         if guard.is_some() {
             return Ok(());
         }
@@ -139,14 +136,9 @@ impl LlamaLocal {
         // routed through `init_llama_logging()` and demoted to warn by
         // the default tracing filter so they don't crowd this line.
         let elapsed_ms = t.elapsed().as_millis() as u64;
-        let model_name = self
-            .model_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("?");
-        let size_mb = std::fs::metadata(&self.model_path)
-            .map(|m| m.len() / (1024 * 1024))
-            .unwrap_or(0);
+        let model_name = self.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+        let size_mb =
+            std::fs::metadata(&self.model_path).map(|m| m.len() / (1024 * 1024)).unwrap_or(0);
         info!(
             "LLM ready: {model_name} ({size_mb} MB, {threads} threads, ctx={ctx}) in {elapsed_ms} ms",
             threads = self.threads,
@@ -157,13 +149,8 @@ impl LlamaLocal {
     }
 
     fn run_inference(&self, prompt: &str) -> Result<String> {
-        let guard = self
-            .state
-            .lock()
-            .map_err(|_| anyhow!("llama-local mutex poisoned"))?;
-        let model = guard
-            .as_ref()
-            .ok_or_else(|| anyhow!("llama-local model not loaded"))?;
+        let guard = self.state.lock().map_err(|_| anyhow!("llama-local mutex poisoned"))?;
+        let model = guard.as_ref().ok_or_else(|| anyhow!("llama-local model not loaded"))?;
 
         let n_ctx = NonZeroU32::new(self.context_size).unwrap_or_else(|| {
             NonZeroU32::new(MIN_CTX).expect("MIN_CTX is non-zero by construction")
@@ -173,13 +160,9 @@ impl LlamaLocal {
             .with_n_batch(self.context_size)
             .with_n_threads(self.threads)
             .with_n_threads_batch(self.threads);
-        let mut ctx = model
-            .new_context(backend(), ctx_params)
-            .context("create llama context")?;
+        let mut ctx = model.new_context(backend(), ctx_params).context("create llama context")?;
 
-        let tokens = model
-            .str_to_token(prompt, AddBos::Always)
-            .context("tokenize prompt")?;
+        let tokens = model.str_to_token(prompt, AddBos::Always).context("tokenize prompt")?;
         if tokens.len() as u32 + (MAX_NEW_TOKENS as u32) >= self.context_size {
             return Err(anyhow!(
                 "prompt is {} tokens, leaving < {} for generation in a context of {}; \
@@ -224,14 +207,10 @@ impl LlamaLocal {
             // `special = false` keeps role markers like `<|im_end|>` from
             // round-tripping into user-visible output if greedy chose them
             // (we already break above; this is belt-and-braces).
-            let piece = model
-                .token_to_piece(token, &mut decoder, false, None)
-                .unwrap_or_default();
+            let piece = model.token_to_piece(token, &mut decoder, false, None).unwrap_or_default();
             out.push_str(&piece);
             batch.clear();
-            batch
-                .add(token, n_cur, &[0], true)
-                .context("decode batch.add")?;
+            batch.add(token, n_cur, &[0], true).context("decode batch.add")?;
             n_cur += 1;
             sample_idx = 0;
             ctx.decode(&mut batch).context("decode loop")?;
@@ -306,9 +285,7 @@ impl TextFormatter for LlamaLocal {
 }
 
 fn num_threads() -> i32 {
-    std::thread::available_parallelism()
-        .map(|n| i32::try_from(n.get()).unwrap_or(4))
-        .unwrap_or(4)
+    std::thread::available_parallelism().map(|n| i32::try_from(n.get()).unwrap_or(4)).unwrap_or(4)
 }
 
 #[cfg(test)]

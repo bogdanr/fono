@@ -49,10 +49,7 @@ impl Transcription {
 }
 
 fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
 /// Thin wrapper around [`rusqlite::Connection`].
@@ -64,10 +61,8 @@ impl HistoryDb {
     /// Open (or create) the DB at `path` and apply migrations.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|source| crate::error::Error::Io {
-                path: dir.to_path_buf(),
-                source,
-            })?;
+            std::fs::create_dir_all(dir)
+                .map_err(|source| crate::error::Error::Io { path: dir.to_path_buf(), source })?;
         }
         let conn = Connection::open(path)?;
         let db = Self { conn };
@@ -165,9 +160,7 @@ impl HistoryDb {
             return Ok(0);
         }
         let cutoff = now_unix() - i64::from(retention_days) * 86_400;
-        let n = self
-            .conn
-            .execute("DELETE FROM transcriptions WHERE ts < ?1", params![cutoff])?;
+        let n = self.conn.execute("DELETE FROM transcriptions WHERE ts < ?1", params![cutoff])?;
         Ok(n)
     }
 
@@ -217,9 +210,7 @@ impl HistoryDb {
     pub fn count(&self) -> Result<i64> {
         Ok(self
             .conn
-            .query_row("SELECT COUNT(*) FROM transcriptions", [], |r| {
-                r.get::<_, i64>(0)
-            })?)
+            .query_row("SELECT COUNT(*) FROM transcriptions", [], |r| r.get::<_, i64>(0))?)
     }
 }
 
@@ -257,10 +248,7 @@ mod tests {
         assert!(id > 0);
         let hits = db.search("fono", 10).unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(
-            db.last_text().unwrap().as_deref(),
-            Some("Hello, world from Fono.")
-        );
+        assert_eq!(db.last_text().unwrap().as_deref(), Some("Hello, world from Fono."));
     }
 
     #[test]

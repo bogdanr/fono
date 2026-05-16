@@ -36,6 +36,33 @@ Target users: Linux desktop (i3 / sway / KDE / GNOME, X11 and Wayland), Windows,
 
 ## Hard rules for agent sessions
 
+- **Pre-commit gate (run, in order, before EVERY `git commit` and EVERY
+  `git push`):**
+  1. `cargo fmt --all -- --check` — must exit 0. If it fails, run
+     `cargo fmt --all` and re-stage. Do **not** push fmt-dirty code; CI
+     will reject it at the `cargo fmt --check` step (see
+     `.github/workflows/ci.yml`). This caught us once on commit
+     `33e3e51` — never again.
+  2. `cargo clippy --workspace --all-targets -- -D warnings` — must
+     exit 0. Same lint set as CI; passes locally ⇒ passes there. If CI
+     stops at fmt it will *not* surface clippy errors, so always run
+     clippy locally too.
+  3. `cargo test --workspace --tests --lib` — must pass. (Skip doctests
+     locally if your toolchain lacks `rustdoc`; CI runs them.)
+
+  These three commands take under a minute on a warm target dir.
+  Running them before pushing prevents the "push → wait 10 min → red CI
+  → push fixup" loop. The agent is responsible for this gate; do not
+  rely on the human to catch it.
+
+  Style note: `rustfmt.toml` sets `use_small_heuristics = "Max"` so
+  short fn calls / struct literals / if-else expressions stay on one
+  line when they fit in `max_width = 100`. Compact code is preferred.
+  For the rare case rustfmt insists on expanding a genuinely tasteful
+  one-liner (e.g. `fn ok(s: &str) -> String { paint("32", s) }`),
+  prefix the item with `#[rustfmt::skip]` rather than fighting the
+  formatter codebase-wide.
+
 - All commits **MUST** be signed off (`git commit -s`) — DCO enforced by CI.
 - **NEVER** add a `Co-authored-by: Forge <forge@noreply.local>` trailer (or any
   agent / assistant co-author trailer) to commit messages — not on new commits,

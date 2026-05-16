@@ -137,11 +137,7 @@ impl Advertiser {
         }
         props.insert(
             KEY_AUTH.into(),
-            if spec.auth_required {
-                "token".into()
-            } else {
-                "none".into()
-            },
+            if spec.auth_required { "token".into() } else { "none".into() },
         );
         if let Some(p) = &spec.path {
             if !p.is_empty() {
@@ -163,9 +159,7 @@ impl Advertiser {
             info = info.enable_addr_auto();
         }
         let fullname = info.get_fullname().to_string();
-        self.daemon
-            .register(info)
-            .with_context(|| format!("mdns register({fullname})"))?;
+        self.daemon.register(info).with_context(|| format!("mdns register({fullname})"))?;
         debug!(
             target: "fono::discovery",
             kind = ?spec.kind,
@@ -173,10 +167,7 @@ impl Advertiser {
             port = spec.port,
             "advertiser publishing"
         );
-        Ok(AdvertiserHandle {
-            daemon: self.daemon.clone(),
-            fullname,
-        })
+        Ok(AdvertiserHandle { daemon: self.daemon.clone(), fullname })
     }
 }
 

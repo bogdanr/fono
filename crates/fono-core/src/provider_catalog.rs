@@ -173,9 +173,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://platform.openai.com/api-keys",
         key_env: "OPENAI_API_KEY",
         stt: Some(SttDefaults { model: "whisper-1" }),
-        llm: Some(LlmDefaults {
-            model: "gpt-5.4-nano",
-        }),
+        llm: Some(LlmDefaults { model: "gpt-5.4-nano" }),
         // TODO: re-enable web search when fono-assistant migrates the
         // OpenAI client to the Responses API (POST /v1/responses). The
         // chat/completions API rejects unknown tool types.
@@ -184,13 +182,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // GPT-5.4 family is multimodal; reuse the assistant default.
             multimodal_model: Some("gpt-5.4-mini"),
             web_search: WebSearchSupport::None,
-            badges: &[
-                Badge::Stt,
-                Badge::Llm,
-                Badge::Assistant,
-                Badge::Tts,
-                Badge::Vision,
-            ],
+            badges: &[Badge::Stt, Badge::Llm, Badge::Assistant, Badge::Tts, Badge::Vision],
         }),
         tts: Some(TtsDefaults {
             model: "tts-1",
@@ -215,12 +207,8 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Lowest-latency cloud STT and OpenAI-compat LLM hosting.",
         console_url: "https://console.groq.com/keys",
         key_env: "GROQ_API_KEY",
-        stt: Some(SttDefaults {
-            model: "whisper-large-v3-turbo",
-        }),
-        llm: Some(LlmDefaults {
-            model: "openai/gpt-oss-20b",
-        }),
+        stt: Some(SttDefaults { model: "whisper-large-v3-turbo" }),
+        llm: Some(LlmDefaults { model: "openai/gpt-oss-20b" }),
         assistant: Some(AssistantDefaults {
             text_model: "openai/gpt-oss-120b",
             // Groq currently exposes no vision-capable model Fono is
@@ -237,13 +225,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // opt-in once we have a coherent search-via-model-swap
             // design (see docs/decisions/0024).
             web_search: WebSearchSupport::None,
-            badges: &[
-                Badge::Stt,
-                Badge::Llm,
-                Badge::Assistant,
-                Badge::Tts,
-                Badge::Fast,
-            ],
+            badges: &[Badge::Stt, Badge::Llm, Badge::Assistant, Badge::Tts, Badge::Fast],
         }),
         tts: Some(TtsDefaults {
             // Canopy Labs Orpheus on Groq's OpenAI-compatible
@@ -309,9 +291,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://cloud.cerebras.ai/platform/keys",
         key_env: "CEREBRAS_API_KEY",
         stt: None,
-        llm: Some(LlmDefaults {
-            model: "llama3.1-8b",
-        }),
+        llm: Some(LlmDefaults { model: "llama3.1-8b" }),
         assistant: Some(AssistantDefaults {
             text_model: "qwen-3-235b-a22b-instruct-2507",
             multimodal_model: None,
@@ -331,9 +311,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://aistudio.google.com/app/apikey",
         key_env: "GEMINI_API_KEY",
         stt: None,
-        llm: Some(LlmDefaults {
-            model: "gemini-1.5-flash",
-        }),
+        llm: Some(LlmDefaults { model: "gemini-1.5-flash" }),
         assistant: None,
         tts: None,
     },
@@ -351,9 +329,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // Whisper model.
             model: "openai/whisper-large-v3-turbo",
         }),
-        llm: Some(LlmDefaults {
-            model: "openai/gpt-5.4-nano",
-        }),
+        llm: Some(LlmDefaults { model: "openai/gpt-5.4-nano" }),
         assistant: Some(AssistantDefaults {
             text_model: "anthropic/claude-haiku-4.5",
             // Multimodal is route-dependent on OpenRouter; leave None
@@ -425,9 +401,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Sonic ultra-low-latency speech models (STT + TTS).",
         console_url: "https://play.cartesia.ai/keys",
         key_env: "CARTESIA_API_KEY",
-        stt: Some(SttDefaults {
-            model: "sonic-transcribe",
-        }),
+        stt: Some(SttDefaults { model: "sonic-transcribe" }),
         llm: None,
         assistant: None,
         tts: Some(TtsDefaults {
@@ -560,11 +534,7 @@ mod tests {
                 if let Some(b) = parse_assistant_backend(p.id) {
                     let expected = assistant_key_env(&b);
                     if !expected.is_empty() {
-                        assert_eq!(
-                            p.key_env, expected,
-                            "Assistant key_env mismatch for {}",
-                            p.id
-                        );
+                        assert_eq!(p.key_env, expected, "Assistant key_env mismatch for {}", p.id);
                     }
                 }
             }
@@ -654,9 +624,7 @@ mod tests {
             }
             let id = stt_backend_str(&b);
             assert!(
-                CLOUD_PROVIDERS
-                    .iter()
-                    .any(|p| p.id == id && p.stt.is_some()),
+                CLOUD_PROVIDERS.iter().any(|p| p.id == id && p.stt.is_some()),
                 "SttBackend::{b:?} ({id}) is not present in CLOUD_PROVIDERS",
             );
         }
@@ -666,9 +634,7 @@ mod tests {
             }
             let id = llm_backend_str(&b);
             assert!(
-                CLOUD_PROVIDERS
-                    .iter()
-                    .any(|p| p.id == id && p.llm.is_some()),
+                CLOUD_PROVIDERS.iter().any(|p| p.id == id && p.llm.is_some()),
                 "LlmBackend::{b:?} ({id}) is not present in CLOUD_PROVIDERS",
             );
         }
@@ -678,9 +644,7 @@ mod tests {
             }
             let id = assistant_backend_str(&b);
             assert!(
-                CLOUD_PROVIDERS
-                    .iter()
-                    .any(|p| p.id == id && p.assistant.is_some()),
+                CLOUD_PROVIDERS.iter().any(|p| p.id == id && p.assistant.is_some()),
                 "AssistantBackend::{b:?} ({id}) is not present in CLOUD_PROVIDERS",
             );
         }
@@ -690,9 +654,7 @@ mod tests {
             }
             let id = tts_backend_str(&b);
             assert!(
-                CLOUD_PROVIDERS
-                    .iter()
-                    .any(|p| p.id == id && p.tts.is_some()),
+                CLOUD_PROVIDERS.iter().any(|p| p.id == id && p.tts.is_some()),
                 "TtsBackend::{b:?} ({id}) is not present in CLOUD_PROVIDERS",
             );
         }
@@ -716,11 +678,7 @@ mod tests {
                 count += 1;
             }
             if let Some(a) = &p.assistant {
-                assert!(
-                    !a.text_model.is_empty(),
-                    "{}: empty assistant text_model",
-                    p.id
-                );
+                assert!(!a.text_model.is_empty(), "{}: empty assistant text_model", p.id);
                 if let Some(mm) = a.multimodal_model {
                     assert!(!mm.is_empty(), "{}: empty multimodal_model literal", p.id);
                 }
@@ -755,11 +713,7 @@ mod tests {
     fn ids_are_unique() {
         let mut seen: Vec<&'static str> = Vec::new();
         for p in CLOUD_PROVIDERS {
-            assert!(
-                !seen.contains(&p.id),
-                "duplicate catalogue entry for id {}",
-                p.id
-            );
+            assert!(!seen.contains(&p.id), "duplicate catalogue entry for id {}", p.id);
             seen.push(p.id);
         }
     }
@@ -794,13 +748,8 @@ mod tests {
         ];
         for (id, mm, ws) in cases {
             let entry = find(id).unwrap_or_else(|| panic!("missing catalogue entry for {id}"));
-            let adef = entry
-                .assistant
-                .unwrap_or_else(|| panic!("{id} has no assistant defaults"));
-            assert_eq!(
-                adef.multimodal_model, *mm,
-                "multimodal_model drift for {id}"
-            );
+            let adef = entry.assistant.unwrap_or_else(|| panic!("{id} has no assistant defaults"));
+            assert_eq!(adef.multimodal_model, *mm, "multimodal_model drift for {id}");
             assert_eq!(adef.web_search, *ws, "web_search drift for {id}");
         }
     }

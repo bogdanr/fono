@@ -61,16 +61,9 @@ async fn english_only_model_skips_non_english_fixture_without_invoking_stt() {
     assert!(caps.english_only, "tiny.en must classify as english_only");
 
     let stt: Arc<dyn SpeechToText> = Arc::new(PanicStt);
-    let result = run_fixture(
-        &fixture,
-        &PathBuf::from("/nonexistent"),
-        stt,
-        None,
-        &caps,
-        None,
-    )
-    .await
-    .expect("run_fixture must succeed via capability skip");
+    let result = run_fixture(&fixture, &PathBuf::from("/nonexistent"), stt, None, &caps, None)
+        .await
+        .expect("run_fixture must succeed via capability skip");
 
     assert_eq!(result.verdict, Verdict::Skipped);
     assert_eq!(result.skip_reason, Some(SkipReason::Capability));
@@ -100,15 +93,7 @@ async fn english_only_model_runs_english_fixture() {
     // through an Err return from a spawn.
     let stt: Arc<dyn SpeechToText> = Arc::new(PanicStt);
     let handle = tokio::spawn(async move {
-        run_fixture(
-            &fixture,
-            &PathBuf::from("/nonexistent"),
-            stt,
-            None,
-            &caps,
-            None,
-        )
-        .await
+        run_fixture(&fixture, &PathBuf::from("/nonexistent"), stt, None, &caps, None).await
     });
     // The task either panics (via PanicStt) or fails reading the WAV
     // (also acceptable — proves the skip path was bypassed).
@@ -118,8 +103,5 @@ async fn english_only_model_runs_english_fixture() {
         Ok(Ok(r)) => r.verdict != Verdict::Skipped,
         Ok(Err(_)) => true,
     };
-    assert!(
-        proceeded,
-        "with requires_multilingual=false the capability gate must not fire"
-    );
+    assert!(proceeded, "with requires_multilingual=false the capability gate must not fire");
 }

@@ -49,9 +49,8 @@ fn parse_uri(uri: &str) -> Result<(String, u16)> {
     if stripped.is_empty() {
         return Err(anyhow!("wyoming TTS URI is empty"));
     }
-    if let Some(stripped_v6) = stripped
-        .strip_prefix('[')
-        .and_then(|rest| rest.find(']').map(|i| (rest, i)))
+    if let Some(stripped_v6) =
+        stripped.strip_prefix('[').and_then(|rest| rest.find(']').map(|i| (rest, i)))
     {
         let (rest, end) = stripped_v6;
         let host = &rest[..end];
@@ -91,11 +90,7 @@ pub struct WyomingTts {
 impl WyomingTts {
     pub fn from_uri(uri: &str) -> Result<Self> {
         let (host, port) = parse_uri(uri)?;
-        Ok(Self {
-            host,
-            port,
-            auth_token: None,
-        })
+        Ok(Self { host, port, auth_token: None })
     }
 
     #[must_use]
@@ -136,10 +131,7 @@ impl TextToSpeech for WyomingTts {
         lang: Option<&str>,
     ) -> Result<TtsAudio> {
         if text.is_empty() {
-            return Ok(TtsAudio {
-                pcm: Vec::new(),
-                sample_rate: NATIVE_RATE_HINT,
-            });
+            return Ok(TtsAudio { pcm: Vec::new(), sample_rate: NATIVE_RATE_HINT });
         }
         let stream = self.connect().await?;
         let (read_half, mut write_half) = stream.into_split();
@@ -161,14 +153,8 @@ impl TextToSpeech for WyomingTts {
                 }
             }
         };
-        let req = Synthesize {
-            text: text.to_string(),
-            voice: voice_obj,
-        };
-        Frame::new(SYNTHESIZE)
-            .with_data(to_value(&req)?)
-            .write_async(&mut write_half)
-            .await?;
+        let req = Synthesize { text: text.to_string(), voice: voice_obj };
+        Frame::new(SYNTHESIZE).with_data(to_value(&req)?).write_async(&mut write_half).await?;
 
         // 2. read audio-start → audio-chunk* → audio-stop, accumulating PCM.
         let mut sample_rate: u32 = NATIVE_RATE_HINT;
@@ -307,10 +293,8 @@ mod tests {
 
     #[test]
     fn pcm_i16_le_decode_round_trips() {
-        let bytes: Vec<u8> = [0_i16, 32767, -32767, 16383]
-            .iter()
-            .flat_map(|s| s.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> =
+            [0_i16, 32767, -32767, 16383].iter().flat_map(|s| s.to_le_bytes()).collect();
         let f = pcm_i16_le_to_f32(&bytes);
         assert_eq!(f.len(), 4);
         assert!((f[0]).abs() < 1e-6);
@@ -331,9 +315,8 @@ mod tests {
         // Empty `text` must short-circuit before opening a connection.
         let rt = tokio::runtime::Runtime::new().unwrap();
         let client = WyomingTts::from_uri("127.0.0.1:1").unwrap();
-        let audio = rt
-            .block_on(client.synthesize("", None, None))
-            .expect("empty text must not error");
+        let audio =
+            rt.block_on(client.synthesize("", None, None)).expect("empty text must not error");
         assert!(audio.pcm.is_empty());
     }
 }

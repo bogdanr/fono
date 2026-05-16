@@ -51,11 +51,7 @@ async fn try_download(url: &str, dest: &Path) -> Result<()> {
         .user_agent(concat!("fono/", env!("CARGO_PKG_VERSION")))
         .build()?;
 
-    let existing = tokio::fs::metadata(dest)
-        .await
-        .ok()
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let existing = tokio::fs::metadata(dest).await.ok().map(|m| m.len()).unwrap_or(0);
     let mut builder = client.get(url);
     if existing > 0 {
         builder = builder.header("Range", format!("bytes={existing}-"));
@@ -79,12 +75,8 @@ async fn try_download(url: &str, dest: &Path) -> Result<()> {
         pb.set_position(existing);
     }
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(existing > 0)
-        .write(true)
-        .open(dest)
-        .await?;
+    let mut file =
+        OpenOptions::new().create(true).append(existing > 0).write(true).open(dest).await?;
     if existing == 0 {
         file.set_len(0).await.ok();
     }

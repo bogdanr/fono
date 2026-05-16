@@ -154,13 +154,8 @@ impl Registry {
     /// `(kind, hostname, port)` for stable tray menu ordering.
     #[must_use]
     pub fn snapshot(&self) -> Vec<DiscoveredPeer> {
-        let mut out: Vec<_> = self
-            .inner
-            .read()
-            .expect("registry lock poisoned")
-            .values()
-            .cloned()
-            .collect();
+        let mut out: Vec<_> =
+            self.inner.read().expect("registry lock poisoned").values().cloned().collect();
         out.sort_by(|a, b| {
             (a.kind as u8, a.hostname.as_str(), a.port).cmp(&(b.kind as u8, &b.hostname, b.port))
         });
@@ -187,10 +182,7 @@ impl Registry {
 
     /// Remove a peer by fullname. Returns the removed entry, if any.
     pub fn remove(&self, fullname: &str) -> Option<DiscoveredPeer> {
-        self.inner
-            .write()
-            .expect("registry lock poisoned")
-            .remove(fullname)
+        self.inner.write().expect("registry lock poisoned").remove(fullname)
     }
 
     /// Evict peers whose `last_seen` is older than [`PEER_TTL`].

@@ -41,8 +41,5 @@ pub const CURATED_LANGUAGES: &[(&str, &str)] = &[
 /// disappearing).
 #[must_use]
 pub fn display_name(code: &str) -> &str {
-    CURATED_LANGUAGES
-        .iter()
-        .find(|(c, _)| *c == code)
-        .map_or(code, |(_, name)| *name)
+    CURATED_LANGUAGES.iter().find(|(c, _)| *c == code).map_or(code, |(_, name)| *name)
 }

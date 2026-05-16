@@ -81,9 +81,8 @@ impl OpenAiStt {
     }
 
     async fn do_request(&self, wav: &[u8], lang: Option<&str>) -> Result<Resp> {
-        let part = multipart::Part::bytes(wav.to_vec())
-            .file_name("audio.wav")
-            .mime_str("audio/wav")?;
+        let part =
+            multipart::Part::bytes(wav.to_vec()).file_name("audio.wav").mime_str("audio/wav")?;
         // Always request `verbose_json` so the response includes the
         // detected `language` field. whisper-1's plain `json` shape
         // does not, which means the post-validation gate would never
@@ -120,9 +119,8 @@ impl OpenAiStt {
     /// array; in that case `mean_logprob()` returns `f32::NEG_INFINITY`
     /// and the first peer in iteration order wins by default.
     async fn do_request_verbose(&self, wav: &[u8], lang: Option<&str>) -> Result<VerboseResp> {
-        let part = multipart::Part::bytes(wav.to_vec())
-            .file_name("audio.wav")
-            .mime_str("audio/wav")?;
+        let part =
+            multipart::Part::bytes(wav.to_vec()).file_name("audio.wav").mime_str("audio/wav")?;
         let mut form = multipart::Form::new()
             .text("model", self.model.clone())
             .text("response_format", "verbose_json")
@@ -263,11 +261,7 @@ impl SpeechToText for OpenAiStt {
             .or_else(|| first_pass_lang.clone())
             .or_else(|| selection.fallback_hint().map(str::to_string));
 
-        Ok(Transcription {
-            text: parsed.text,
-            language,
-            duration_ms: None,
-        })
+        Ok(Transcription { text: parsed.text, language, duration_ms: None })
     }
 
     fn name(&self) -> &'static str {

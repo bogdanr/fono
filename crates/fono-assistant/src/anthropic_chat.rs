@@ -140,17 +140,11 @@ impl Assistant for AnthropicChat {
                     history_system_extra.push_str(&turn.content);
                 }
                 ChatRole::User | ChatRole::Assistant => {
-                    messages.push(Message {
-                        role: turn.role.as_str(),
-                        content: &turn.content,
-                    });
+                    messages.push(Message { role: turn.role.as_str(), content: &turn.content });
                 }
             }
         }
-        messages.push(Message {
-            role: "user",
-            content: user_text,
-        });
+        messages.push(Message { role: "user", content: user_text });
         let system_full = if history_system_extra.is_empty() {
             ctx.system_prompt.clone()
         } else if ctx.system_prompt.is_empty() {
@@ -188,10 +182,7 @@ impl Assistant for AnthropicChat {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "anthropic chat returned {status}: {}",
-                truncate(&body, 400)
-            ));
+            return Err(anyhow!("anthropic chat returned {status}: {}", truncate(&body, 400)));
         }
 
         let bytes_stream = resp.bytes_stream();
@@ -204,9 +195,7 @@ impl Assistant for AnthropicChat {
                 let chunk = match chunk {
                     Ok(b) => b,
                     Err(e) => {
-                        let _ = tx
-                            .send(Err(anyhow!("anthropic stream chunk error: {e}")))
-                            .await;
+                        let _ = tx.send(Err(anyhow!("anthropic stream chunk error: {e}"))).await;
                         return;
                     }
                 };

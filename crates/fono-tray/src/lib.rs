@@ -81,12 +81,7 @@ impl ActiveBackends {
     /// `u8::MAX` convention.
     #[must_use]
     pub fn unknown() -> Self {
-        Self {
-            stt: u8::MAX,
-            llm: u8::MAX,
-            assistant: u8::MAX,
-            tts: u8::MAX,
-        }
+        Self { stt: u8::MAX, llm: u8::MAX, assistant: u8::MAX, tts: u8::MAX }
     }
 }
 
@@ -189,12 +184,8 @@ pub use fono_core::languages::CURATED_LANGUAGES as LANGUAGE_SHORTLIST;
 /// Waveform-style names paired with their `WaveformStyle` discriminant
 /// label as serialised into TOML. Index used by
 /// `TrayAction::SetWaveformStyle(u8)`.
-pub const WAVEFORM_STYLES: &[(&str, &str)] = &[
-    ("bars", "Bars"),
-    ("oscilloscope", "Oscilloscope"),
-    ("fft", "FFT"),
-    ("heatmap", "Heatmap"),
-];
+pub const WAVEFORM_STYLES: &[(&str, &str)] =
+    &[("bars", "Bars"), ("oscilloscope", "Oscilloscope"), ("fft", "FFT"), ("heatmap", "Heatmap")];
 
 /// Auto-stop silence presets surfaced in the tray's radio group.
 /// `0` means "Off" — the daemon's auto-stop silence timer is bypassed
@@ -404,23 +395,12 @@ pub fn spawn(
             preferences_provider,
         );
         let state_tx = if started { Some(state_tx) } else { None };
-        (
-            Tray {
-                shared_state: shared,
-                state_tx,
-            },
-            action_rx,
-        )
+        (Tray { shared_state: shared, state_tx }, action_rx)
     }
 
     #[cfg(not(feature = "tray-backend"))]
     {
-        (
-            Tray {
-                shared_state: shared,
-            },
-            action_rx,
-        )
+        (Tray { shared_state: shared }, action_rx)
     }
 }
 
@@ -637,12 +617,7 @@ mod backend {
 
     fn notify_generic_tray_error(err: &anyhow::Error) {
         // Trim to a single line so the popup stays readable.
-        let short = err
-            .to_string()
-            .lines()
-            .next()
-            .unwrap_or("unknown error")
-            .to_string();
+        let short = err.to_string().lines().next().unwrap_or("unknown error").to_string();
         let body = format!("{GENERIC_TRAY_NOTIFICATION_BODY_PREFIX}{short}");
         notify::send(
             GENERIC_TRAY_NOTIFICATION_TITLE,
@@ -843,10 +818,8 @@ mod backend {
         // On hosts without a watcher (no DISPLAY, no D-Bus session
         // bus, etc.) this errors immediately — we surface it as a
         // warn! and let the rest of the daemon run unaffected.
-        let handle: Handle<KsniTray> = model
-            .spawn()
-            .await
-            .map_err(|e| anyhow::anyhow!("ksni::Tray::spawn failed: {e}"))?;
+        let handle: Handle<KsniTray> =
+            model.spawn().await.map_err(|e| anyhow::anyhow!("ksni::Tray::spawn failed: {e}"))?;
 
         tracing::debug!("tray icon ready (SNI)");
 
@@ -1076,12 +1049,8 @@ mod backend {
             }
         }
         items.push(
-            SubMenu {
-                label: "STT backend".into(),
-                submenu: stt_items,
-                ..Default::default()
-            }
-            .into(),
+            SubMenu { label: "STT backend".into(), submenu: stt_items, ..Default::default() }
+                .into(),
         );
 
         // LLM backend submenu.
@@ -1118,12 +1087,8 @@ mod backend {
             );
         }
         items.push(
-            SubMenu {
-                label: "LLM backend".into(),
-                submenu: llm_items,
-                ..Default::default()
-            }
-            .into(),
+            SubMenu { label: "LLM backend".into(), submenu: llm_items, ..Default::default() }
+                .into(),
         );
 
         // Assistant backend submenu. Independent of the LLM cleanup
@@ -1156,12 +1121,8 @@ mod backend {
             TrayAction::UseTts,
         );
         items.push(
-            SubMenu {
-                label: "TTS backend".into(),
-                submenu: tts_items,
-                ..Default::default()
-            }
-            .into(),
+            SubMenu { label: "TTS backend".into(), submenu: tts_items, ..Default::default() }
+                .into(),
         );
 
         // Microphone submenu — only when the daemon supplied at least
@@ -1198,12 +1159,8 @@ mod backend {
                 );
             }
             items.push(
-                SubMenu {
-                    label: "Microphone".into(),
-                    submenu: mic_items,
-                    ..Default::default()
-                }
-                .into(),
+                SubMenu { label: "Microphone".into(), submenu: mic_items, ..Default::default() }
+                    .into(),
             );
         }
 
@@ -1327,10 +1284,7 @@ mod backend {
         let auto_stop_label = AUTO_STOP_PRESETS_MS
             .iter()
             .find(|(_, ms)| *ms == p.auto_stop_silence_ms)
-            .map_or_else(
-                || format!("{} ms", p.auto_stop_silence_ms),
-                |(s, _)| (*s).to_string(),
-            );
+            .map_or_else(|| format!("{} ms", p.auto_stop_silence_ms), |(s, _)| (*s).to_string());
         let auto_stop_items: Vec<MenuItem<KsniTray>> = AUTO_STOP_PRESETS_MS
             .iter()
             .map(|(label, ms)| {
@@ -1359,9 +1313,8 @@ mod backend {
             .into(),
         );
 
-        let waveform_label = WAVEFORM_STYLES
-            .get(p.waveform_style as usize)
-            .map_or("Bars", |(_, l)| *l);
+        let waveform_label =
+            WAVEFORM_STYLES.get(p.waveform_style as usize).map_or("Bars", |(_, l)| *l);
         let overlay_items: Vec<MenuItem<KsniTray>> = WAVEFORM_STYLES
             .iter()
             .enumerate()
@@ -1449,12 +1402,7 @@ mod backend {
         // terminal then errors out on an unknown subcommand. Until
         // then, "Edit config" at the top level is the escape hatch.
 
-        SubMenu {
-            label: "Preferences".into(),
-            submenu: items,
-            ..Default::default()
-        }
-        .into()
+        SubMenu { label: "Preferences".into(), submenu: items, ..Default::default() }.into()
     }
 
     /// Summary string for the `Language ▸` parent row. Tells the user
@@ -1615,10 +1563,6 @@ mod backend {
                 }
             }
         }
-        ksni::Icon {
-            width: SIZE,
-            height: SIZE,
-            data,
-        }
+        ksni::Icon { width: SIZE, height: SIZE, data }
     }
 }

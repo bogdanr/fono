@@ -48,39 +48,19 @@ impl OpenAiCompat {
 
     /// Convenience constructor for Cerebras (Phase 5 Task 5.3 — fastest latency).
     pub fn cerebras(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::new(
-            "https://api.cerebras.ai/v1/chat/completions",
-            api_key,
-            model,
-            "cerebras",
-        )
+        Self::new("https://api.cerebras.ai/v1/chat/completions", api_key, model, "cerebras")
     }
 
     pub fn groq(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::new(
-            "https://api.groq.com/openai/v1/chat/completions",
-            api_key,
-            model,
-            "groq",
-        )
+        Self::new("https://api.groq.com/openai/v1/chat/completions", api_key, model, "groq")
     }
 
     pub fn openai(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::new(
-            "https://api.openai.com/v1/chat/completions",
-            api_key,
-            model,
-            "openai",
-        )
+        Self::new("https://api.openai.com/v1/chat/completions", api_key, model, "openai")
     }
 
     pub fn openrouter(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::new(
-            "https://openrouter.ai/api/v1/chat/completions",
-            api_key,
-            model,
-            "openrouter",
-        )
+        Self::new("https://openrouter.ai/api/v1/chat/completions", api_key, model, "openrouter")
     }
 
     /// Ollama exposes an OpenAI-compatible endpoint on `/v1/chat/completions`
@@ -94,8 +74,7 @@ impl OpenAiCompat {
 /// the connection with a cheap GET. Returns `None` if the endpoint shape is
 /// unfamiliar (then prewarm becomes a no-op).
 fn derive_models_endpoint(chat: &str) -> Option<String> {
-    chat.strip_suffix("/chat/completions")
-        .map(|root| format!("{root}/models"))
+    chat.strip_suffix("/chat/completions").map(|root| format!("{root}/models"))
 }
 
 /// Warm `reqwest::Client` shared by all OpenAI-compatible backends.
@@ -160,14 +139,8 @@ impl TextFormatter for OpenAiCompat {
         let req = ChatReq {
             model: &self.model,
             messages: vec![
-                Message {
-                    role: "system",
-                    content: &system,
-                },
-                Message {
-                    role: "user",
-                    content: &user,
-                },
+                Message { role: "system", content: &system },
+                Message { role: "user", content: &user },
             ],
             // Latency plan L19 — short cleanup outputs, deterministic
             // tone. Bounded `max_tokens` is critical on cloud providers
@@ -257,10 +230,7 @@ impl TextFormatter for OpenAiCompat {
                 1,
                 Outcome::HttpError,
             );
-            anyhow::bail!(
-                "{} LLM {status} (request_id={request_id}): {body}",
-                self.backend_name
-            );
+            anyhow::bail!("{} LLM {status} (request_id={request_id}): {body}", self.backend_name);
         }
         let parsed: ChatResp = match serde_json::from_str(&body) {
             Ok(p) => p,

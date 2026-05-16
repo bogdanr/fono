@@ -53,9 +53,8 @@ fn parse_uri(uri: &str) -> Result<(String, u16)> {
         return Err(anyhow!("wyoming URI is empty"));
     }
     // Walk from the right to support IPv6 literals like `[::1]:10300`.
-    if let Some(stripped_v6) = stripped
-        .strip_prefix('[')
-        .and_then(|rest| rest.find(']').map(|i| (rest, i)))
+    if let Some(stripped_v6) =
+        stripped.strip_prefix('[').and_then(|rest| rest.find(']').map(|i| (rest, i)))
     {
         let (rest, end) = stripped_v6;
         let host = &rest[..end];
@@ -109,13 +108,7 @@ impl WyomingStt {
     /// `host:port`, or `host` with the default port).
     pub fn from_uri(uri: &str) -> Result<Self> {
         let (host, port) = parse_uri(uri)?;
-        Ok(Self {
-            host,
-            port,
-            model: None,
-            languages: Vec::new(),
-            auth_token: None,
-        })
+        Ok(Self { host, port, model: None, languages: Vec::new(), auth_token: None })
     }
 
     #[must_use]
@@ -177,26 +170,13 @@ impl SpeechToText for WyomingStt {
         let mut reader = BufReader::new(read_half);
 
         // 1. audio-start
-        let start = AudioStart {
-            rate: sample_rate,
-            width: 2,
-            channels: 1,
-            timestamp: None,
-        };
-        Frame::new(AUDIO_START)
-            .with_data(to_value(&start)?)
-            .write_async(&mut write_half)
-            .await?;
+        let start = AudioStart { rate: sample_rate, width: 2, channels: 1, timestamp: None };
+        Frame::new(AUDIO_START).with_data(to_value(&start)?).write_async(&mut write_half).await?;
 
         // 2. audio-chunk × N — int16 LE PCM in `payload`, header carries format.
         for chunk in pcm.chunks(PCM_CHUNK_SAMPLES) {
             let payload = pcm_f32_to_i16_le(chunk);
-            let header = AudioChunk {
-                rate: sample_rate,
-                width: 2,
-                channels: 1,
-                timestamp: None,
-            };
+            let header = AudioChunk { rate: sample_rate, width: 2, channels: 1, timestamp: None };
             Frame::new(AUDIO_CHUNK)
                 .with_data(to_value(&header)?)
                 .with_payload(payload)
@@ -213,14 +193,8 @@ impl SpeechToText for WyomingStt {
         // 4. transcribe — send model + language hints. Server may ignore.
         let selection = self.effective_selection(lang);
         let language = selection.fallback_hint().map(str::to_string);
-        let req = Transcribe {
-            name: self.model.clone(),
-            language,
-        };
-        Frame::new(TRANSCRIBE)
-            .with_data(to_value(&req)?)
-            .write_async(&mut write_half)
-            .await?;
+        let req = Transcribe { name: self.model.clone(), language };
+        Frame::new(TRANSCRIBE).with_data(to_value(&req)?).write_async(&mut write_half).await?;
 
         // 5. read frames until `transcript` (final). Streaming servers
         //    interleave `transcript-start`/`-chunk`/`-stop`; we collect
@@ -299,10 +273,7 @@ impl SpeechToText for WyomingStt {
         let f = timeout(Duration::from_secs(5), Frame::read_async(&mut reader))
             .await
             .with_context(|| {
-                format!(
-                    "wyoming describe to {} timed out (server unreachable?)",
-                    self.endpoint()
-                )
+                format!("wyoming describe to {} timed out (server unreachable?)", self.endpoint())
             })??;
         if f.kind == INFO {
             let info: Info = serde_json::from_value(f.data).unwrap_or_default();

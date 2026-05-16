@@ -102,13 +102,7 @@ impl RecordingFsm {
     #[must_use]
     pub fn new() -> (Self, mpsc::UnboundedReceiver<HotkeyEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (
-            Self {
-                state: State::Idle,
-                tx,
-            },
-            rx,
-        )
+        (Self { state: State::Idle, tx }, rx)
     }
 
     #[must_use]
@@ -121,15 +115,11 @@ impl RecordingFsm {
     pub fn dispatch(&mut self, action: HotkeyAction) -> State {
         let next = match (self.state, action) {
             (State::Idle, HotkeyAction::HoldPressed) => {
-                let _ = self
-                    .tx
-                    .send(HotkeyEvent::StartRecording(RecordingMode::Hold));
+                let _ = self.tx.send(HotkeyEvent::StartRecording(RecordingMode::Hold));
                 State::Recording(RecordingMode::Hold)
             }
             (State::Idle, HotkeyAction::TogglePressed) => {
-                let _ = self
-                    .tx
-                    .send(HotkeyEvent::StartRecording(RecordingMode::Toggle));
+                let _ = self.tx.send(HotkeyEvent::StartRecording(RecordingMode::Toggle));
                 State::Recording(RecordingMode::Toggle)
             }
             (State::Recording(RecordingMode::Hold), HotkeyAction::HoldReleased) => {
@@ -145,15 +135,11 @@ impl RecordingFsm {
                 State::Idle
             }
             (State::Idle, HotkeyAction::LiveHoldPressed) => {
-                let _ = self
-                    .tx
-                    .send(HotkeyEvent::StartLiveDictation(RecordingMode::Hold));
+                let _ = self.tx.send(HotkeyEvent::StartLiveDictation(RecordingMode::Hold));
                 State::LiveDictating(RecordingMode::Hold)
             }
             (State::Idle, HotkeyAction::LiveTogglePressed) => {
-                let _ = self
-                    .tx
-                    .send(HotkeyEvent::StartLiveDictation(RecordingMode::Toggle));
+                let _ = self.tx.send(HotkeyEvent::StartLiveDictation(RecordingMode::Toggle));
                 State::LiveDictating(RecordingMode::Toggle)
             }
             (State::LiveDictating(RecordingMode::Hold), HotkeyAction::LiveHoldReleased) => {
@@ -239,14 +225,8 @@ mod tests {
     #[test]
     fn hold_flow() {
         let (mut fsm, mut rx) = RecordingFsm::new();
-        assert_eq!(
-            fsm.dispatch(HotkeyAction::HoldPressed),
-            State::Recording(RecordingMode::Hold)
-        );
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            HotkeyEvent::StartRecording(RecordingMode::Hold)
-        );
+        assert_eq!(fsm.dispatch(HotkeyAction::HoldPressed), State::Recording(RecordingMode::Hold));
+        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StartRecording(RecordingMode::Hold));
         assert_eq!(fsm.dispatch(HotkeyAction::HoldReleased), State::Processing);
         assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StopRecording);
         assert_eq!(fsm.dispatch(HotkeyAction::ProcessingDone), State::Idle);
@@ -286,14 +266,8 @@ mod tests {
             fsm.dispatch(HotkeyAction::LiveHoldPressed),
             State::LiveDictating(RecordingMode::Hold)
         );
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            HotkeyEvent::StartLiveDictation(RecordingMode::Hold)
-        );
-        assert_eq!(
-            fsm.dispatch(HotkeyAction::LiveHoldReleased),
-            State::Processing
-        );
+        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StartLiveDictation(RecordingMode::Hold));
+        assert_eq!(fsm.dispatch(HotkeyAction::LiveHoldReleased), State::Processing);
         assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StopLiveDictation);
         assert_eq!(fsm.dispatch(HotkeyAction::ProcessingDone), State::Idle);
     }
@@ -312,20 +286,11 @@ mod tests {
     #[test]
     fn assistant_flow_press_release_speak_done() {
         let (mut fsm, mut rx) = RecordingFsm::new();
-        assert_eq!(
-            fsm.dispatch(HotkeyAction::AssistantPressed),
-            State::AssistantRecording
-        );
+        assert_eq!(fsm.dispatch(HotkeyAction::AssistantPressed), State::AssistantRecording);
         assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StartAssistant);
-        assert_eq!(
-            fsm.dispatch(HotkeyAction::AssistantReleased),
-            State::AssistantThinking
-        );
+        assert_eq!(fsm.dispatch(HotkeyAction::AssistantReleased), State::AssistantThinking);
         assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StopAssistant);
-        assert_eq!(
-            fsm.dispatch(HotkeyAction::AssistantSpeakingStarted),
-            State::AssistantSpeaking
-        );
+        assert_eq!(fsm.dispatch(HotkeyAction::AssistantSpeakingStarted), State::AssistantSpeaking);
         assert_eq!(fsm.dispatch(HotkeyAction::ProcessingDone), State::Idle);
         assert!(rx.try_recv().is_err()); // no extra events
     }
@@ -362,10 +327,7 @@ mod tests {
         while rx.try_recv().is_ok() {}
         // A fresh press while speaking → stop playback + start
         // recording (history preserved).
-        assert_eq!(
-            fsm.dispatch(HotkeyAction::AssistantPressed),
-            State::AssistantRecording
-        );
+        assert_eq!(fsm.dispatch(HotkeyAction::AssistantPressed), State::AssistantRecording);
         assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StopAssistantPlayback);
         assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StartAssistant);
     }
@@ -376,22 +338,13 @@ mod tests {
     #[test]
     fn assistant_toggle_flow_two_presses() {
         let (mut fsm, mut rx) = RecordingFsm::new();
-        assert_eq!(
-            fsm.dispatch(HotkeyAction::AssistantPressed),
-            State::AssistantRecording
-        );
+        assert_eq!(fsm.dispatch(HotkeyAction::AssistantPressed), State::AssistantRecording);
         assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StartAssistant);
         // Second press in toggle mode stops capture (no Released event
         // is dispatched by the listener when mode = Toggle).
-        assert_eq!(
-            fsm.dispatch(HotkeyAction::AssistantPressed),
-            State::AssistantThinking
-        );
+        assert_eq!(fsm.dispatch(HotkeyAction::AssistantPressed), State::AssistantThinking);
         assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StopAssistant);
-        assert_eq!(
-            fsm.dispatch(HotkeyAction::AssistantSpeakingStarted),
-            State::AssistantSpeaking
-        );
+        assert_eq!(fsm.dispatch(HotkeyAction::AssistantSpeakingStarted), State::AssistantSpeaking);
         assert_eq!(fsm.dispatch(HotkeyAction::ProcessingDone), State::Idle);
     }
 
@@ -411,9 +364,6 @@ mod tests {
     fn dictation_pressed_during_assistant_is_ignored() {
         let (mut fsm, _rx) = RecordingFsm::new();
         fsm.dispatch(HotkeyAction::AssistantPressed);
-        assert_eq!(
-            fsm.dispatch(HotkeyAction::HoldPressed),
-            State::AssistantRecording
-        );
+        assert_eq!(fsm.dispatch(HotkeyAction::HoldPressed), State::AssistantRecording);
     }
 }

@@ -30,12 +30,7 @@ pub struct TrimConfig {
 
 impl Default for TrimConfig {
     fn default() -> Self {
-        Self {
-            sample_rate: 16_000,
-            frame_ms: 20,
-            threshold: 0.005,
-            pad_ms: 60,
-        }
+        Self { sample_rate: 16_000, frame_ms: 20, threshold: 0.005, pad_ms: 60 }
     }
 }
 

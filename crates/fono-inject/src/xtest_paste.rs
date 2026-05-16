@@ -58,11 +58,8 @@ impl PasteShortcut {
     /// case-insensitive variants. Returns `None` for unknown strings so
     /// callers can fall back to the default and log a warning.
     pub fn parse(s: &str) -> Option<Self> {
-        let normalised: String = s
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .map(|c| c.to_ascii_lowercase())
-            .collect();
+        let normalised: String =
+            s.chars().filter(|c| !c.is_whitespace()).map(|c| c.to_ascii_lowercase()).collect();
         let normalised = normalised.replace('_', "-");
         match normalised.as_str() {
             "shift-insert" | "shiftinsert" | "shift+insert" | "s-insert" => Some(Self::ShiftInsert),
@@ -121,10 +118,7 @@ pub fn xtest_available() -> bool {
     };
     // Querying the XTEST version both confirms the extension is loaded
     // *and* warms the protocol round-trip so the first inject is faster.
-    conn.xtest_get_version(2, 2)
-        .ok()
-        .and_then(|c| c.reply().ok())
-        .is_some()
+    conn.xtest_get_version(2, 2).ok().and_then(|c| c.reply().ok()).is_some()
 }
 
 /// Synthesize the configured paste shortcut, reading
@@ -220,9 +214,7 @@ fn keysym_to_keycode(conn: &RustConnection, target: u32) -> Result<u8> {
             return Ok(min + u8::try_from(i).unwrap_or(0));
         }
     }
-    Err(anyhow!(
-        "xtest: keysym 0x{target:x} not present in the active X keymap"
-    ))
+    Err(anyhow!("xtest: keysym 0x{target:x} not present in the active X keymap"))
 }
 
 #[cfg(test)]
@@ -261,14 +253,9 @@ mod tests {
 
     #[test]
     fn parse_ctrl_shift_v_variants() {
-        for v in [
-            "ctrl-shift-v",
-            "Ctrl-Shift-V",
-            "CTRL_SHIFT_V",
-            "ctrl+shift+v",
-            "ctrlshiftv",
-            "c-s-v",
-        ] {
+        for v in
+            ["ctrl-shift-v", "Ctrl-Shift-V", "CTRL_SHIFT_V", "ctrl+shift+v", "ctrlshiftv", "c-s-v"]
+        {
             assert_eq!(
                 PasteShortcut::parse(v),
                 Some(PasteShortcut::CtrlShiftV),
@@ -293,18 +280,12 @@ mod tests {
     fn modifiers_match_label() {
         assert_eq!(PasteShortcut::ShiftInsert.modifiers(), &[XK_SHIFT_L]);
         assert_eq!(PasteShortcut::CtrlV.modifiers(), &[XK_CONTROL_L]);
-        assert_eq!(
-            PasteShortcut::CtrlShiftV.modifiers(),
-            &[XK_CONTROL_L, XK_SHIFT_L]
-        );
+        assert_eq!(PasteShortcut::CtrlShiftV.modifiers(), &[XK_CONTROL_L, XK_SHIFT_L]);
     }
 
     #[test]
     fn key_candidates_match_label() {
-        assert_eq!(
-            PasteShortcut::ShiftInsert.key_candidates(),
-            &[XK_INSERT, XK_KP_INSERT]
-        );
+        assert_eq!(PasteShortcut::ShiftInsert.key_candidates(), &[XK_INSERT, XK_KP_INSERT]);
         assert_eq!(PasteShortcut::CtrlV.key_candidates(), &[XK_V]);
         assert_eq!(PasteShortcut::CtrlShiftV.key_candidates(), &[XK_V]);
     }

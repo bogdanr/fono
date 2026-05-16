@@ -13,9 +13,5 @@ fn copy_to_clipboard_does_not_hang() {
         elapsed < Duration::from_secs(2),
         "copy_to_clipboard should return in <2s, took {elapsed:?}"
     );
-    assert!(
-        result.is_ok(),
-        "copy_to_clipboard returned error: {:?}",
-        result.err()
-    );
+    assert!(result.is_ok(), "copy_to_clipboard returned error: {:?}", result.err());
 }

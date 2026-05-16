@@ -43,11 +43,8 @@ pub fn notify_empty_capture(capture_ms: u64) -> bool {
 
     // Resolve the human-readable label of the device that produced
     // silence: whichever row enumeration flagged as the OS default.
-    let active_name = devices
-        .iter()
-        .find(|d| d.is_default)
-        .map(|d| d.display_name.clone())
-        .unwrap_or_default();
+    let active_name =
+        devices.iter().find(|d| d.is_default).map(|d| d.display_name.clone()).unwrap_or_default();
     let active_label = if active_name.is_empty() {
         "system-default".to_string()
     } else {
@@ -85,17 +82,10 @@ fn build_body(capture_ms: u64, active_label: &str, candidates: &[String]) -> Str
     let lead = format!("{active_label} silent for {secs}s.");
     match candidates.len() {
         0 => format!("{lead} No other mic detected — check muted/unplugged."),
-        1 => format!(
-            "{lead} Switch to '{}' via tray Microphone menu.",
-            candidates[0]
-        ),
+        1 => format!("{lead} Switch to '{}' via tray Microphone menu.", candidates[0]),
         _ => {
-            let preview = candidates
-                .iter()
-                .take(2)
-                .map(|s| format!("'{s}'"))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let preview =
+                candidates.iter().take(2).map(|s| format!("'{s}'")).collect::<Vec<_>>().join(", ");
             let more = if candidates.len() > 2 {
                 format!(" (+{} more)", candidates.len() - 2)
             } else {
@@ -135,12 +125,7 @@ mod tests {
         let body = build_body(
             5000,
             "system-default",
-            &[
-                "Mic A".into(),
-                "Mic B".into(),
-                "Mic C".into(),
-                "Mic D".into(),
-            ],
+            &["Mic A".into(), "Mic B".into(), "Mic C".into(), "Mic D".into()],
         );
         assert!(body.contains("tray Microphone"));
         assert!(body.contains("Mic A"));

@@ -103,13 +103,7 @@ pub fn detect_user_languages_ranked() -> Vec<DetectedLanguage> {
     if let Ok(raw) = std::env::var("LANG") {
         push_locale(&mut acc, &raw, SignalKind::SystemLang, 2);
     }
-    for var in [
-        "LC_MESSAGES",
-        "LC_TIME",
-        "LC_NUMERIC",
-        "LC_MONETARY",
-        "LC_PAPER",
-    ] {
+    for var in ["LC_MESSAGES", "LC_TIME", "LC_NUMERIC", "LC_MONETARY", "LC_PAPER"] {
         if let Ok(raw) = std::env::var(var) {
             push_locale(&mut acc, &raw, SignalKind::FormatLocale, 2);
         }
@@ -141,10 +135,7 @@ pub fn detect_user_languages_ranked() -> Vec<DetectedLanguage> {
 /// don't need scores (`fono_stt::factory`).
 #[must_use]
 pub fn detect_os_languages() -> Vec<String> {
-    detect_user_languages_ranked()
-        .into_iter()
-        .map(|d| d.code)
-        .collect()
+    detect_user_languages_ranked().into_iter().map(|d| d.code).collect()
 }
 
 /// Render the ranked detection as a single user-friendly line for the
@@ -173,11 +164,7 @@ pub fn format_detection_summary(detected: &[DetectedLanguage]) -> Option<String>
         Some(langs.join(", "))
     } else {
         let reasons: Vec<&'static str> = seen.iter().map(|k| k.label()).collect();
-        Some(format!(
-            "{} — detected from {}",
-            langs.join(", "),
-            reasons.join(", ")
-        ))
+        Some(format!("{} — detected from {}", langs.join(", "), reasons.join(", ")))
     }
 }
 
@@ -228,15 +215,8 @@ impl Accumulator {
         // Group `(code, kind)` entries by code.
         let mut by_code: HashMap<String, Vec<(SignalKind, u8, usize)>> = HashMap::new();
         for ((code, kind), weight) in &self.weights {
-            let ord = self
-                .insertion
-                .get(&(code.clone(), *kind))
-                .copied()
-                .unwrap_or(usize::MAX);
-            by_code
-                .entry(code.clone())
-                .or_default()
-                .push((*kind, *weight, ord));
+            let ord = self.insertion.get(&(code.clone(), *kind)).copied().unwrap_or(usize::MAX);
+            by_code.entry(code.clone()).or_default().push((*kind, *weight, ord));
         }
         let mut out: Vec<DetectedLanguage> = by_code
             .into_iter()
@@ -250,11 +230,7 @@ impl Accumulator {
                     .sum::<u16>()
                     .min(u16::from(u8::MAX)) as u8;
                 let reasons: Vec<SignalKind> = kinds.iter().map(|(k, _, _)| *k).collect();
-                DetectedLanguage {
-                    code,
-                    score,
-                    reasons,
-                }
+                DetectedLanguage { code, score, reasons }
             })
             .collect();
         out.sort_by_key(|d| {
@@ -439,11 +415,7 @@ fn extract_iana_zone(path: &str) -> Option<String> {
     match comps.len() {
         0 => None,
         1 => Some(comps[0].to_string()),
-        _ => Some(format!(
-            "{}/{}",
-            comps[comps.len() - 2],
-            comps[comps.len() - 1]
-        )),
+        _ => Some(format!("{}/{}", comps[comps.len() - 2], comps[comps.len() - 1])),
     }
 }
 
@@ -509,11 +481,7 @@ fn probe_runtime_keyboard_linux(acc: &mut Accumulator) {
 fn parse_setxkbmap_layouts(text: &str) -> Vec<String> {
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("layout:") {
-            return rest
-                .split([',', ' '])
-                .filter(|t| !t.is_empty())
-                .map(str::to_string)
-                .collect();
+            return rest.split([',', ' ']).filter(|t| !t.is_empty()).map(str::to_string).collect();
         }
     }
     Vec::new()
@@ -594,10 +562,7 @@ fn parse_locale_kv(text: &str) -> Vec<(String, String)> {
 
 #[cfg(target_os = "macos")]
 fn probe_macos(acc: &mut Accumulator) {
-    if let Ok(o) = Command::new("defaults")
-        .args(["read", "-g", "AppleLanguages"])
-        .output()
-    {
+    if let Ok(o) = Command::new("defaults").args(["read", "-g", "AppleLanguages"]).output() {
         if o.status.success() {
             let s = String::from_utf8_lossy(&o.stdout);
             let mut position: usize = 0;
@@ -612,10 +577,7 @@ fn probe_macos(acc: &mut Accumulator) {
             }
         }
     }
-    if let Ok(o) = Command::new("defaults")
-        .args(["read", "-g", "AppleLocale"])
-        .output()
-    {
+    if let Ok(o) = Command::new("defaults").args(["read", "-g", "AppleLocale"]).output() {
         if o.status.success() {
             let s = String::from_utf8_lossy(&o.stdout);
             push_locale(acc, s.trim(), SignalKind::SystemLang, 2);
@@ -789,10 +751,7 @@ const COUNTRY_LANGS: &[(&str, &[&str])] = &[
 
 fn country_to_langs(country_code: &str) -> &'static [&'static str] {
     let cc = country_code.to_ascii_lowercase();
-    COUNTRY_LANGS
-        .iter()
-        .find(|(c, _)| *c == cc)
-        .map_or(&[][..], |(_, langs)| *langs)
+    COUNTRY_LANGS.iter().find(|(c, _)| *c == cc).map_or(&[][..], |(_, langs)| *langs)
 }
 
 /// X11/xkb layout code → predominant language. Layout variants in
@@ -846,19 +805,11 @@ const XKB_LAYOUT_LANGS: &[(&str, &str)] = &[
 fn xkb_layout_to_lang(layout: &str) -> Option<&'static str> {
     // Strip variant parenthetical / `+`-suffix: `us(intl)` or
     // `ro+std` → `us` / `ro`.
-    let base = layout
-        .split(['(', '+'])
-        .next()
-        .unwrap_or(layout)
-        .trim()
-        .to_ascii_lowercase();
+    let base = layout.split(['(', '+']).next().unwrap_or(layout).trim().to_ascii_lowercase();
     if base.is_empty() {
         return None;
     }
-    XKB_LAYOUT_LANGS
-        .iter()
-        .find(|(k, _)| *k == base)
-        .map(|(_, v)| *v)
+    XKB_LAYOUT_LANGS.iter().find(|(k, _)| *k == base).map(|(_, v)| *v)
 }
 
 /// macOS `AppleEnabledInputSources` `KeyboardLayout Name` → language.
@@ -1058,23 +1009,14 @@ RO\t+4426+02606\tEurope/Bucharest
 US\t+340308-1181434\tAmerica/Los_Angeles\tPacific
 CH,DE,LI\t+4723+00832\tEurope/Zurich\tSwiss time
 ";
-        assert_eq!(
-            lookup_zone_in_tab(fixture, "Europe/Bucharest").as_deref(),
-            Some("RO")
-        );
+        assert_eq!(lookup_zone_in_tab(fixture, "Europe/Bucharest").as_deref(), Some("RO"));
         // Shared zone: take the first country.
-        assert_eq!(
-            lookup_zone_in_tab(fixture, "Europe/Zurich").as_deref(),
-            Some("CH")
-        );
+        assert_eq!(lookup_zone_in_tab(fixture, "Europe/Zurich").as_deref(), Some("CH"));
         // Missing zone ⇒ None, no panic.
         assert_eq!(lookup_zone_in_tab(fixture, "Mars/Olympus"), None);
         // Empty / comments-only ⇒ None.
         assert_eq!(lookup_zone_in_tab("", "Europe/Bucharest"), None);
-        assert_eq!(
-            lookup_zone_in_tab("# only comments", "Europe/Bucharest"),
-            None
-        );
+        assert_eq!(lookup_zone_in_tab("# only comments", "Europe/Bucharest"), None);
     }
 
     #[test]
@@ -1087,15 +1029,9 @@ CH,DE,LI\t+4723+00832\tEurope/Zurich\tSwiss time
             extract_iana_zone("/var/db/timezone/zoneinfo/Europe/Bucharest").as_deref(),
             Some("Europe/Bucharest")
         );
-        assert_eq!(
-            extract_iana_zone("Europe/Bucharest").as_deref(),
-            Some("Europe/Bucharest")
-        );
+        assert_eq!(extract_iana_zone("Europe/Bucharest").as_deref(), Some("Europe/Bucharest"));
         // No `zoneinfo/` segment ⇒ falls back to last 2 components.
-        assert_eq!(
-            extract_iana_zone("/etc/localtime").as_deref(),
-            Some("etc/localtime")
-        );
+        assert_eq!(extract_iana_zone("/etc/localtime").as_deref(), Some("etc/localtime"));
     }
 
     // ─── runtime keyboard parsers ───────────────────────────────
@@ -1177,11 +1113,7 @@ options:    grp:alt_shift_toggle
         assert_eq!(out[0].score, 5);
         assert_eq!(
             out[0].reasons,
-            vec![
-                SignalKind::FormatLocale,
-                SignalKind::Keyboard,
-                SignalKind::Timezone,
-            ]
+            vec![SignalKind::FormatLocale, SignalKind::Keyboard, SignalKind::Timezone,]
         );
     }
 
@@ -1230,11 +1162,7 @@ options:    grp:alt_shift_toggle
             DetectedLanguage {
                 code: "ro".into(),
                 score: 5,
-                reasons: vec![
-                    SignalKind::FormatLocale,
-                    SignalKind::Keyboard,
-                    SignalKind::Timezone,
-                ],
+                reasons: vec![SignalKind::FormatLocale, SignalKind::Keyboard, SignalKind::Timezone],
             },
             DetectedLanguage {
                 code: "en".into(),
@@ -1260,14 +1188,7 @@ options:    grp:alt_shift_toggle
         // Pathological: a code with no reasons. The function must
         // still render the language list rather than crashing or
         // emitting a dangling " — detected from " tail.
-        let detected = vec![DetectedLanguage {
-            code: "ro".into(),
-            score: 0,
-            reasons: vec![],
-        }];
-        assert_eq!(
-            format_detection_summary(&detected).as_deref(),
-            Some("Romanian (ro)")
-        );
+        let detected = vec![DetectedLanguage { code: "ro".into(), score: 0, reasons: vec![] }];
+        assert_eq!(format_detection_summary(&detected).as_deref(), Some("Romanian (ro)"));
     }
 }

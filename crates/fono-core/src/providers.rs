@@ -252,19 +252,11 @@ pub fn cloud_pair(name: &str) -> Option<(SttBackend, LlmBackend)> {
     let entry = crate::provider_catalog::find(&id)?;
     // Resolve STT: prefer the entry's own STT capability, otherwise
     // fall back to Groq's whisper-turbo.
-    let stt = if entry.stt.is_some() {
-        parse_stt_backend(entry.id)?
-    } else {
-        SttBackend::Groq
-    };
+    let stt = if entry.stt.is_some() { parse_stt_backend(entry.id)? } else { SttBackend::Groq };
     // Resolve LLM: prefer the entry's own LLM capability, otherwise
     // fall back to Cerebras for cleanup (for STT-only providers like
     // Deepgram and AssemblyAI).
-    let llm = if entry.llm.is_some() {
-        parse_llm_backend(entry.id)?
-    } else {
-        LlmBackend::Cerebras
-    };
+    let llm = if entry.llm.is_some() { parse_llm_backend(entry.id)? } else { LlmBackend::Cerebras };
     Some((stt, llm))
 }
 
@@ -512,11 +504,7 @@ mod tests {
         std::env::remove_var("OPENAI_API_KEY");
         std::env::remove_var("CEREBRAS_API_KEY");
         // Only key-free backends + the active one should be present.
-        assert_eq!(
-            stt,
-            vec![SttBackend::Local],
-            "env vars should not expand the STT menu"
-        );
+        assert_eq!(stt, vec![SttBackend::Local], "env vars should not expand the STT menu");
         assert!(
             !llm.iter().any(|b| matches!(b, LlmBackend::OpenAI)),
             "env-only OPENAI_API_KEY should not show OpenAI in the LLM menu"
@@ -570,10 +558,7 @@ mod tests {
         }
         // New Phase F variants explicitly:
         assert_eq!(parse_tts_backend("groq"), Some(TtsBackend::Groq));
-        assert_eq!(
-            parse_tts_backend("openrouter"),
-            Some(TtsBackend::OpenRouter)
-        );
+        assert_eq!(parse_tts_backend("openrouter"), Some(TtsBackend::OpenRouter));
         assert_eq!(parse_tts_backend("cartesia"), Some(TtsBackend::Cartesia));
         assert_eq!(parse_tts_backend("deepgram"), Some(TtsBackend::Deepgram));
     }
@@ -603,11 +588,8 @@ mod tests {
         // First, every cloud backend whose key is in secrets.toml.
         // Order is the canonical `all_tts_backends` order, which
         // places OpenAI before Groq.
-        let cloud_present: Vec<_> = backends
-            .iter()
-            .take_while(|b| !matches!(b, TtsBackend::Wyoming))
-            .cloned()
-            .collect();
+        let cloud_present: Vec<_> =
+            backends.iter().take_while(|b| !matches!(b, TtsBackend::Wyoming)).cloned().collect();
         assert_eq!(
             cloud_present,
             vec![TtsBackend::OpenAI, TtsBackend::Groq],

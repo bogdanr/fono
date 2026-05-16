@@ -47,10 +47,7 @@ impl SegmentScript {
         S: Into<String>,
         F: Into<String>,
     {
-        Self {
-            previews: previews.into_iter().map(Into::into).collect(),
-            finalize: finalize.into(),
-        }
+        Self { previews: previews.into_iter().map(Into::into).collect(), finalize: finalize.into() }
     }
 }
 
@@ -63,9 +60,7 @@ struct FakeStreamingStt {
 
 impl FakeStreamingStt {
     fn new(script: Vec<SegmentScript>) -> Self {
-        Self {
-            script: Mutex::new(script.into_iter()),
-        }
+        Self { script: Mutex::new(script.into_iter()) }
     }
 }
 
@@ -149,11 +144,7 @@ fn emit_segment(
 
 /// Tight test config so a handful of frames trigger boundaries quickly.
 fn test_stream_config() -> StreamConfig {
-    StreamConfig {
-        frame_samples: 16,
-        silence_frames_for_boundary: 2,
-        channel_capacity: 256,
-    }
+    StreamConfig { frame_samples: 16, silence_frames_for_boundary: 2, channel_capacity: 256 }
 }
 
 /// Frame-sized "voiced" PCM (`0.5` is well above `WebRtcVadStub`'s
@@ -270,9 +261,6 @@ async fn heuristics_are_additive_when_no_trigger_present() {
 
     let off = run_once(HeuristicConfig::all_off()).await;
     let on = run_once(HeuristicConfig::default()).await;
-    assert_eq!(
-        off, on,
-        "heuristics must be additive: same input → same committed text"
-    );
+    assert_eq!(off, on, "heuristics must be additive: same input → same committed text");
     assert_eq!(off, "hello world");
 }

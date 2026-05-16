@@ -324,9 +324,7 @@ impl LiveSession {
 
         let frames_stream: BoxStream<'static, StreamFrame> =
             UnboundedReceiverStream::new(sf_rx).boxed();
-        let mut updates = stt
-            .stream_transcribe(frames_stream, sample_rate, language)
-            .await?;
+        let mut updates = stt.stream_transcribe(frames_stream, sample_rate, language).await?;
 
         let mut transcript = LiveTranscript::default();
         if let Some(o) = overlay.as_ref() {
@@ -403,18 +401,9 @@ impl LiveSession {
 
         // R10.5: stamp the heuristic outcomes on the run span.
         let span = Span::current();
-        span.record(
-            "live.commit_extended_by_prosody_ms",
-            transcript.commit_extended_by_prosody_ms,
-        );
-        span.record(
-            "live.commit_extended_by_punct_ms",
-            transcript.commit_extended_by_punct_ms,
-        );
-        span.record(
-            "live.drain_extended_by_filler",
-            transcript.drain_extended_by_filler,
-        );
+        span.record("live.commit_extended_by_prosody_ms", transcript.commit_extended_by_prosody_ms);
+        span.record("live.commit_extended_by_punct_ms", transcript.commit_extended_by_punct_ms);
+        span.record("live.drain_extended_by_filler", transcript.drain_extended_by_filler);
         if let Some(w) = transcript.drain_extended_by_dangling.as_deref() {
             span.record("live.drain_extended_by_dangling", w);
         }
@@ -456,11 +445,7 @@ impl Pump {
     pub fn new(cfg: StreamConfig) -> Self {
         let stream = AudioFrameStream::new(cfg);
         let rx = stream.subscribe();
-        Self {
-            stream,
-            vad: Box::new(WebRtcVadStub::default()),
-            rx: Some(rx),
-        }
+        Self { stream, vad: Box::new(WebRtcVadStub::default()), rx: Some(rx) }
     }
 
     pub fn push(&mut self, pcm: &[f32]) {
@@ -474,9 +459,7 @@ impl Pump {
     /// Take the pre-subscribed primary receiver. Callable exactly once
     /// per pump; panics in debug / returns an error if called twice.
     pub fn take_receiver(&mut self) -> Result<broadcast::Receiver<FrameEvent>> {
-        self.rx
-            .take()
-            .ok_or_else(|| anyhow!("Pump::take_receiver called twice"))
+        self.rx.take().ok_or_else(|| anyhow!("Pump::take_receiver called twice"))
     }
 
     /// Subscribe an *additional* receiver. Note: any frames pushed
@@ -673,28 +656,17 @@ pub(crate) fn drain_should_extend(
     let trailing = committed.split_whitespace().next_back()?;
     // Reject anything with a terminal punctuation — the speaker
     // explicitly closed the clause.
-    if trailing
-        .chars()
-        .last()
-        .map(|c| matches!(c, '.' | '!' | '?'))
-        .unwrap_or(false)
-    {
+    if trailing.chars().last().map(|c| matches!(c, '.' | '!' | '?')).unwrap_or(false) {
         return None;
     }
     let stripped: String = trailing.trim_end_matches([',', ';', ':']).to_lowercase();
     if stripped.is_empty() {
         return None;
     }
-    if filler_words
-        .iter()
-        .any(|w| w.eq_ignore_ascii_case(&stripped))
-    {
+    if filler_words.iter().any(|w| w.eq_ignore_ascii_case(&stripped)) {
         return Some(DrainExtensionReason::Filler(stripped));
     }
-    if dangling_words
-        .iter()
-        .any(|w| w.eq_ignore_ascii_case(&stripped))
-    {
+    if dangling_words.iter().any(|w| w.eq_ignore_ascii_case(&stripped)) {
         return Some(DrainExtensionReason::Dangling(stripped));
     }
     None
@@ -735,14 +707,8 @@ mod tests {
     #[test]
     fn quality_floor_parser_falls_back_to_max() {
         assert!(matches!(parse_quality_floor("max"), QualityFloor::Max));
-        assert!(matches!(
-            parse_quality_floor("BALANCED"),
-            QualityFloor::Balanced
-        ));
-        assert!(matches!(
-            parse_quality_floor("Aggressive"),
-            QualityFloor::Aggressive
-        ));
+        assert!(matches!(parse_quality_floor("BALANCED"), QualityFloor::Balanced));
+        assert!(matches!(parse_quality_floor("Aggressive"), QualityFloor::Aggressive));
         assert!(matches!(parse_quality_floor("nonsense"), QualityFloor::Max));
     }
 
@@ -768,9 +734,7 @@ mod tests {
     fn sine_pcm(freq_hz: f32, duration_ms: u32, sample_rate: u32) -> Vec<f32> {
         let n = (sample_rate * duration_ms / 1000) as usize;
         let dt = 1.0 / sample_rate as f32;
-        (0..n)
-            .map(|i| (2.0 * std::f32::consts::PI * freq_hz * i as f32 * dt).sin() * 0.5)
-            .collect()
+        (0..n).map(|i| (2.0 * std::f32::consts::PI * freq_hz * i as f32 * dt).sin() * 0.5).collect()
     }
 
     #[test]

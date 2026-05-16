@@ -54,11 +54,7 @@ async fn advertise_then_browse_resolves_peer() {
     // Wait up to 5 s for the browser to resolve the publication.
     let deadline = Instant::now() + Duration::from_secs(5);
     let resolved = loop {
-        if let Some(p) = registry
-            .snapshot()
-            .into_iter()
-            .find(|p| p.fullname == fullname)
-        {
+        if let Some(p) = registry.snapshot().into_iter().find(|p| p.fullname == fullname) {
             break Some(p);
         }
         if Instant::now() >= deadline {

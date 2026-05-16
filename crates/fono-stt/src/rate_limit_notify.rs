@@ -144,9 +144,7 @@ mod tests {
 
     #[test]
     fn first_call_after_reset_fires_then_dedups() {
-        let _g = TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_session_flag();
         assert!(notify_once("groq", "test 1"));
         assert!(!notify_once("groq", "test 2"));
@@ -155,9 +153,7 @@ mod tests {
 
     #[test]
     fn reset_re_arms_the_flag() {
-        let _g = TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_session_flag();
         assert!(notify_once("groq", "first"));
         assert!(!notify_once("groq", "second"));
@@ -167,9 +163,7 @@ mod tests {
 
     #[test]
     fn auto_reset_after_window_re_arms() {
-        let _g = TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_session_flag();
         assert!(notify_once("groq", "first"));
         if let Ok(mut g) = LAST_NOTIFIED_AT.lock() {

@@ -23,16 +23,10 @@ pub struct FakeStt {
 
 impl FakeStt {
     pub fn new(canned: impl Into<String>) -> Self {
-        Self {
-            canned: canned.into(),
-            delay: Duration::ZERO,
-        }
+        Self { canned: canned.into(), delay: Duration::ZERO }
     }
     pub fn with_delay(canned: impl Into<String>, delay: Duration) -> Self {
-        Self {
-            canned: canned.into(),
-            delay,
-        }
+        Self { canned: canned.into(), delay }
     }
 }
 
@@ -66,9 +60,7 @@ pub struct FakeLlm {
 
 impl FakeLlm {
     pub fn new() -> Self {
-        Self {
-            delay: Duration::ZERO,
-        }
+        Self { delay: Duration::ZERO }
     }
     pub fn with_delay(delay: Duration) -> Self {
         Self { delay }

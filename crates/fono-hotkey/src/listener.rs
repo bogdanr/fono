@@ -90,9 +90,7 @@ pub fn spawn(
     // Cancel is parsed but NOT registered at startup; we only grab it
     // while recording so the key stays usable in other apps the rest
     // of the time.
-    let cancel = parse_hotkey(&bindings.cancel)
-        .ok()
-        .map(ParsedHotkey::into_hotkey);
+    let cancel = parse_hotkey(&bindings.cancel).ok().map(ParsedHotkey::into_hotkey);
     // Assistant is optional — empty disables the assistant hotkey path.
     // A bad (non-empty) string is logged but doesn't fail daemon
     // startup, since the user can still trigger via IPC / CLI.
@@ -122,10 +120,7 @@ pub fn spawn(
             }
         })
         .context("spawn hotkey thread")?;
-    Ok(ListenerHandle {
-        thread,
-        control: ctrl_tx,
-    })
+    Ok(ListenerHandle { thread, control: ctrl_tx })
 }
 
 fn run_manager(
@@ -142,21 +137,9 @@ fn run_manager(
     )?;
 
     let mut roles: HashMap<u32, Role> = HashMap::new();
-    register(
-        &manager,
-        dictation,
-        Role::Dictation,
-        &bindings.dictation,
-        &mut roles,
-    );
+    register(&manager, dictation, Role::Dictation, &bindings.dictation, &mut roles);
     if let Some(hk) = assistant {
-        register(
-            &manager,
-            hk,
-            Role::Assistant,
-            &bindings.assistant,
-            &mut roles,
-        );
+        register(&manager, hk, Role::Assistant, &bindings.assistant, &mut roles);
     }
 
     if roles.is_empty() {

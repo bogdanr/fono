@@ -33,21 +33,13 @@ pub const KEY_PATH: &str = "path";
 /// preserved so the tray menu can show a stable sequence.
 #[must_use]
 pub fn parse_caps(raw: &str) -> Vec<String> {
-    raw.split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .collect()
+    raw.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect()
 }
 
 /// Inverse of [`parse_caps`] — joins a slice for the TXT record.
 #[must_use]
 pub fn format_caps<S: AsRef<str>>(caps: &[S]) -> String {
-    caps.iter()
-        .map(|c| c.as_ref().trim())
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(",")
+    caps.iter().map(|c| c.as_ref().trim()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(",")
 }
 
 /// `auth` key normaliser: `Some(true)` for `"token"` /`"required"`,

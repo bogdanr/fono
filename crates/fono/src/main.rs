@@ -27,10 +27,7 @@ fn main() -> Result<()> {
 
     // Now build the runtime for the real entry point. Mirrors what
     // `#[tokio::main]` would have produced.
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async_main())
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(async_main())
 }
 
 async fn async_main() -> Result<()> {
@@ -96,17 +93,13 @@ fn init_tracing(verbosity: cli::Verbosity) {
     // exact-target collisions; for non-colliding more-specific user
     // targets, `Targets` resolves by longest-prefix match anyway.
     let combined = format!("{},{}", BASELINE_QUIET.join(","), user_or_default);
-    let targets: Targets = combined
-        .parse()
-        .unwrap_or_else(|_| Targets::new().with_default(LevelFilter::INFO));
+    let targets: Targets =
+        combined.parse().unwrap_or_else(|_| Targets::new().with_default(LevelFilter::INFO));
 
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_ansi(true)
         .with_target(verbosity.is_trace())
         .with_file(verbosity.is_trace())
         .with_line_number(verbosity.is_trace());
-    tracing_subscriber::registry()
-        .with(fmt_layer)
-        .with(targets)
-        .init();
+    tracing_subscriber::registry().with(fmt_layer).with(targets).init();
 }

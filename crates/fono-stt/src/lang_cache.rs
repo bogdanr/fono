@@ -28,9 +28,7 @@ pub struct LanguageCache {
 impl LanguageCache {
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            inner: RwLock::new(HashMap::new()),
-        }
+        Self { inner: RwLock::new(HashMap::new()) }
     }
 
     /// Process-wide singleton. Cloud STT factories use this so batch

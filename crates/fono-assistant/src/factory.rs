@@ -59,11 +59,7 @@ fn resolve_cloud(
             } else {
                 c.api_key_ref.clone()
             };
-            let model_override = if c.model.is_empty() {
-                None
-            } else {
-                Some(c.model.clone())
-            };
+            let model_override = if c.model.is_empty() { None } else { Some(c.model.clone()) };
             (key_ref, model_override)
         },
     );
@@ -119,11 +115,7 @@ fn resolve_cloud(
         None
     };
 
-    Ok(CloudResolution {
-        key,
-        model,
-        web_search_tool,
-    })
+    Ok(CloudResolution { key, model, web_search_tool })
 }
 
 /// Default chat model per provider. Reads from the cloud-provider
@@ -137,9 +129,7 @@ fn default_cloud_model(provider: &str) -> &'static str {
     if provider == "ollama" {
         return "llama3.2";
     }
-    provider_catalog::find(provider)
-        .and_then(|p| p.assistant.as_ref())
-        .map_or("", |a| a.text_model)
+    provider_catalog::find(provider).and_then(|p| p.assistant.as_ref()).map_or("", |a| a.text_model)
 }
 
 /// Construct an assistant backend from `cfg`. Returns `Ok(None)` for
@@ -227,9 +217,7 @@ fn build_ollama(cfg: &AssistantCfg) -> Result<Arc<dyn Assistant>> {
         .unwrap_or_else(|| default_cloud_model("ollama").to_string());
     // Ollama has no native web-search tool surface; ignore the
     // toggle even when it's set on the config.
-    Ok(Arc::new(
-        crate::openai_compat_chat::OpenAiCompatChat::ollama(endpoint, model),
-    ))
+    Ok(Arc::new(crate::openai_compat_chat::OpenAiCompatChat::ollama(endpoint, model)))
 }
 
 #[cfg(not(feature = "openai-compat"))]
@@ -302,9 +290,7 @@ mod tests {
             backend: AssistantBackend::None,
             ..AssistantCfg::default()
         };
-        assert!(build_assistant(&cfg, &Secrets::default())
-            .unwrap()
-            .is_none());
+        assert!(build_assistant(&cfg, &Secrets::default()).unwrap().is_none());
     }
 
     #[cfg(feature = "anthropic")]
@@ -316,14 +302,8 @@ mod tests {
             cloud: Some(AssistantCloud::default()),
             ..AssistantCfg::default()
         };
-        let err = build_assistant(&cfg, &Secrets::default())
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(
-            err.contains("ANTHROPIC_API_KEY") && err.contains("fono keys add"),
-            "{err}"
-        );
+        let err = build_assistant(&cfg, &Secrets::default()).err().unwrap().to_string();
+        assert!(err.contains("ANTHROPIC_API_KEY") && err.contains("fono keys add"), "{err}");
     }
 
     #[cfg(feature = "anthropic")]

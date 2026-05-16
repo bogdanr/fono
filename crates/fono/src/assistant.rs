@@ -48,11 +48,7 @@ pub struct AssistantSessionState {
 impl AssistantSessionState {
     #[must_use]
     pub fn new(history: ConversationHistory) -> Self {
-        Self {
-            history,
-            current_turn: None,
-            playback: None,
-        }
+        Self { history, current_turn: None, playback: None }
     }
 
     /// Notify the active pump to abort and ask the playback handle to
@@ -178,11 +174,7 @@ pub async fn run_assistant_turn(
         s.history.push_user(user_text.clone());
         s.history.snapshot()
     };
-    let ctx = AssistantContext {
-        system_prompt,
-        language,
-        history: history_snapshot,
-    };
+    let ctx = AssistantContext { system_prompt, language, history: history_snapshot };
 
     // 3. Open the LLM stream.
     let llm_started = std::time::Instant::now();

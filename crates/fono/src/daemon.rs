@@ -68,11 +68,7 @@ fn notify_live_first_run() {
         LIVE_FIRST_RUN_NOTIFIED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst);
 }
 
-#[allow(
-    clippy::too_many_lines,
-    clippy::cognitive_complexity,
-    clippy::if_not_else
-)]
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity, clippy::if_not_else)]
 pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     let config_path = paths.config_file();
     let first_run = !config_path.exists();
@@ -98,10 +94,8 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         // config from a build that didn't populate it), seed from OS
         // locale signals. The wizard fills this explicitly when run, so
         // the only path here is "user skipped the wizard".
-        let detected: Vec<String> = fono_core::locale::detect_user_languages_ranked()
-            .into_iter()
-            .map(|d| d.code)
-            .collect();
+        let detected: Vec<String> =
+            fono_core::locale::detect_user_languages_ranked().into_iter().map(|d| d.code).collect();
         if !detected.is_empty() {
             info!("auto-populating languages from OS locale: {detected:?}");
             config.general.languages = detected;
@@ -261,9 +255,8 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                 );
             }
         }
-        let pkg_managed = std::env::current_exe()
-            .map(|p| fono_update::is_package_managed(&p))
-            .unwrap_or(false);
+        let pkg_managed =
+            std::env::current_exe().map(|p| fono_update::is_package_managed(&p)).unwrap_or(false);
         let auto_check = config.update.auto_check
             && !pkg_managed
             && std::env::var_os("FONO_NO_UPDATE_CHECK").is_none_or(|v| v != "1");
@@ -345,11 +338,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                 return Vec::new();
             };
             db.recent(fono_tray::RECENT_SLOTS)
-                .map(|rows| {
-                    rows.into_iter()
-                        .map(|r| r.cleaned.unwrap_or(r.raw))
-                        .collect()
-                })
+                .map(|rows| rows.into_iter().map(|r| r.cleaned.unwrap_or(r.raw)).collect())
                 .unwrap_or_default()
         });
 
@@ -377,19 +366,13 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                 let needs_key = fono_core::providers::assistant_requires_key(b);
                 active
                     || !needs_key
-                    || secrets
-                        .resolve(fono_core::providers::assistant_key_env(b))
-                        .is_some()
+                    || secrets.resolve(fono_core::providers::assistant_key_env(b)).is_some()
             })
             .collect();
         let tts_backends: Vec<_> = fono_core::providers::configured_tts_backends(
             &secrets,
             &config.tts.backend,
-            config
-                .tts
-                .wyoming
-                .as_ref()
-                .is_some_and(|w| !w.uri.trim().is_empty()),
+            config.tts.wyoming.as_ref().is_some_and(|w| !w.uri.trim().is_empty()),
         );
         let stt_labels: Vec<String> = stt_backends
             .iter()
@@ -403,10 +386,8 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
             .iter()
             .map(|b| fono_core::providers::assistant_backend_str(b).to_string())
             .collect();
-        let tts_labels: Vec<String> = tts_backends
-            .iter()
-            .map(|b| tts_menu_label(b, &secrets))
-            .collect();
+        let tts_labels: Vec<String> =
+            tts_backends.iter().map(|b| tts_menu_label(b, &secrets)).collect();
 
         // Startup diagnostic for the "tray STT/LLM submenu sometimes
         // empty" intermittent — these labels are static after spawn,
@@ -416,16 +397,8 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         // KDE/GNOME mishandling LayoutUpdated). Always at info so
         // users running with default verbosity see the line in their
         // terminal when they reproduce.
-        info!(
-            "tray: configured STT backends ({}) = {:?}",
-            stt_labels.len(),
-            stt_labels
-        );
-        info!(
-            "tray: configured LLM backends ({}) = {:?}",
-            llm_labels.len(),
-            llm_labels
-        );
+        info!("tray: configured STT backends ({}) = {:?}", stt_labels.len(), stt_labels);
+        info!("tray: configured LLM backends ({}) = {:?}", llm_labels.len(), llm_labels);
 
         // Active-provider closure — tray polls this every ~2 s. Reads
         // the orchestrator's current backend pair (which already reflects
@@ -835,19 +808,13 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                     let needs_key = fono_core::providers::assistant_requires_key(b);
                     active
                         || !needs_key
-                        || secrets
-                            .resolve(fono_core::providers::assistant_key_env(b))
-                            .is_some()
+                        || secrets.resolve(fono_core::providers::assistant_key_env(b)).is_some()
                 })
                 .collect();
         let tts_backends_for_dispatch: Vec<_> = fono_core::providers::configured_tts_backends(
             &secrets,
             &config.tts.backend,
-            config
-                .tts
-                .wyoming
-                .as_ref()
-                .is_some_and(|w| !w.uri.trim().is_empty()),
+            config.tts.wyoming.as_ref().is_some_and(|w| !w.uri.trim().is_empty()),
         );
         let update_status_tray = Arc::clone(&update_status);
         let discovered_registry_for_dispatch = discovery_registry.clone();
@@ -1128,11 +1095,7 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
     {
         info!(
             "interactive  : {} (mode={})",
-            if config.interactive.enabled {
-                "enabled"
-            } else {
-                "disabled"
-            },
+            if config.interactive.enabled { "enabled" } else { "disabled" },
             config.interactive.mode,
         );
     }
@@ -1149,10 +1112,7 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
     }
     info!("variant      : {}", crate::variant::VARIANT.label());
     info!("hw accel     : {}", hardware_acceleration_summary());
-    info!(
-        "vulkan probe : {}",
-        fono_core::vulkan_probe::probe().summary_line()
-    );
+    info!("vulkan probe : {}", fono_core::vulkan_probe::probe().summary_line());
     // Surface what the OS thinks the user's languages are so users
     // can sanity-check the wizard's auto-selection and catch
     // misconfigurations (e.g. `LANG=en_US` on a Romanian box). Best
@@ -1168,11 +1128,7 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
     debug!(
         "config       : {} ({})",
         config_path.display(),
-        if config_present {
-            "loaded"
-        } else {
-            "absent — using defaults"
-        }
+        if config_present { "loaded" } else { "absent — using defaults" }
     );
     debug!("secrets      : {}", paths.secrets_file().display());
     debug!("history db   : {}", paths.history_db().display());
@@ -1196,18 +1152,9 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
         "hotkeys      : dictation={}  assistant={}  cancel={}  (short=toggle, long=hold)",
         config.hotkeys.dictation, config.hotkeys.assistant, config.hotkeys.cancel,
     );
-    debug!(
-        "stt backend  : {:?}  (local model: {})",
-        config.stt.backend, config.stt.local.model
-    );
-    debug!(
-        "llm backend  : {:?}  (enabled={})",
-        config.llm.backend, config.llm.enabled
-    );
-    debug!(
-        "inject       : also_copy_to_clipboard={}",
-        config.general.also_copy_to_clipboard
-    );
+    debug!("stt backend  : {:?}  (local model: {})", config.stt.backend, config.stt.local.model);
+    debug!("llm backend  : {:?}  (enabled={})", config.llm.backend, config.llm.enabled);
+    debug!("inject       : also_copy_to_clipboard={}", config.general.also_copy_to_clipboard);
     // Probe and print which inject + clipboard tools are detected, so
     // users immediately see whether they have a working delivery path.
     let injector = fono_inject::Injector::detect();
@@ -1389,10 +1336,7 @@ async fn handle_client(
             Response::Text("doctor via IPC not yet available; run `fono doctor` directly".into())
         }
         Request::ListDiscovered => {
-            let peers = discovery_registry
-                .as_ref()
-                .map(snapshot_discovered)
-                .unwrap_or_default();
+            let peers = discovery_registry.as_ref().map(snapshot_discovered).unwrap_or_default();
             Response::Discovered(peers)
         }
         Request::AssistantHoldPress => match orchestrator.as_ref() {
@@ -1629,13 +1573,7 @@ async fn switch_stt_via_tray(
 
 fn remote_wyoming_uri(peer: &fono_net::discovery::DiscoveredPeer) -> String {
     peer.address.map_or_else(
-        || {
-            format!(
-                "tcp://{}:{}",
-                peer.hostname.trim_end_matches('.'),
-                peer.port
-            )
-        },
+        || format!("tcp://{}:{}", peer.hostname.trim_end_matches('.'), peer.port),
         |addr| match addr {
             std::net::IpAddr::V4(v4) => format!("tcp://{v4}:{}", peer.port),
             std::net::IpAddr::V6(v6) => format!("tcp://[{v6}]:{}", peer.port),
@@ -1687,10 +1625,7 @@ fn local_wyoming_fullname(config: &Config) -> Option<String> {
     } else {
         config.network.instance_name.clone()
     };
-    Some(format!(
-        "{instance}.{}",
-        fono_net::discovery::WYOMING_SERVICE_TYPE
-    ))
+    Some(format!("{instance}.{}", fono_net::discovery::WYOMING_SERVICE_TYPE))
 }
 
 fn discovered_wyoming_peers_for_tray(
@@ -1718,10 +1653,7 @@ async fn switch_discovered_stt_via_tray(
 ) {
     let peers = discovered_wyoming_peers_for_tray(registry, local_fullname);
     let Some(peer) = peers.get(idx as usize).cloned() else {
-        warn!(
-            "tray UseDiscoveredStt({idx}): out of range (max={})",
-            peers.len()
-        );
+        warn!("tray UseDiscoveredStt({idx}): out of range (max={})", peers.len());
         return;
     };
     let label = peer.tray_label();
@@ -1841,10 +1773,7 @@ async fn switch_assistant_via_tray(
     idx: u8,
 ) {
     let Some(backend) = backends.get(idx as usize) else {
-        warn!(
-            "tray UseAssistant({idx}): out of range (max={})",
-            backends.len()
-        );
+        warn!("tray UseAssistant({idx}): out of range (max={})", backends.len());
         return;
     };
     let label = fono_core::providers::assistant_backend_str(backend);
@@ -1958,10 +1887,7 @@ async fn switch_input_device_via_tray(
         .filter(|d| matches!(d.backend, InputBackend::Pulse { .. }))
         .collect();
     let Some(dev) = devices.get(idx as usize) else {
-        warn!(
-            "tray SetInputDevice({idx}): out of range (max={})",
-            devices.len()
-        );
+        warn!("tray SetInputDevice({idx}): out of range (max={})", devices.len());
         return;
     };
     let InputBackend::Pulse { pa_name } = &dev.backend else {
@@ -2049,9 +1975,7 @@ fn waveform_style_from_idx(idx: u8) -> Option<fono_core::config::WaveformStyle> 
 /// `LANGUAGE_SHORTLIST`. Returns `None` on out-of-range so the
 /// caller can `warn!` instead of silently no-oping.
 fn language_code_from_idx(idx: u8) -> Option<&'static str> {
-    fono_tray::LANGUAGE_SHORTLIST
-        .get(idx as usize)
-        .map(|(code, _)| *code)
+    fono_tray::LANGUAGE_SHORTLIST.get(idx as usize).map(|(code, _)| *code)
 }
 
 /// Shared load → mutate → save → reload path for tray Preferences
@@ -2140,17 +2064,11 @@ fn open_settings_tui() {
         // with a single string. We pass argv-style and let the shell
         // re-quote — `fono` itself doesn't take spaces in argv0.
         let spawn = match term {
-            "konsole" => Command::new(term)
-                .args(["-e", &exe_str, "settings"])
-                .spawn(),
+            "konsole" => Command::new(term).args(["-e", &exe_str, "settings"]).spawn(),
             // gnome-terminal needs `--` to terminate its option parser
             // before forwarding.
-            "gnome-terminal" => Command::new(term)
-                .args(["--", &exe_str, "settings"])
-                .spawn(),
-            _ => Command::new(term)
-                .args(["-e", &exe_str, "settings"])
-                .spawn(),
+            "gnome-terminal" => Command::new(term).args(["--", &exe_str, "settings"]).spawn(),
+            _ => Command::new(term).args(["-e", &exe_str, "settings"]).spawn(),
         };
         if spawn.is_ok() {
             info!("tray: launched settings TUI in {term}");
@@ -2178,10 +2096,7 @@ async fn ensure_local_stt_with_notify(paths: &fono_core::Paths) -> bool {
     };
     let model = cfg.stt.local.model.clone();
     let size_hint = crate::models::local_stt_size_mb(&model);
-    let dest_exists = paths
-        .whisper_models_dir()
-        .join(format!("ggml-{model}.bin"))
-        .exists();
+    let dest_exists = paths.whisper_models_dir().join(format!("ggml-{model}.bin")).exists();
     if !dest_exists {
         let body = size_hint.map_or_else(
             || format!("Whisper model: {model}"),
@@ -2233,10 +2148,7 @@ async fn ensure_local_llm_with_notify(paths: &fono_core::Paths) -> bool {
     };
     let model = cfg.llm.local.model.clone();
     let size_hint = crate::models::local_llm_size_mb(&model);
-    let dest_exists = paths
-        .llm_models_dir()
-        .join(format!("{model}.gguf"))
-        .exists();
+    let dest_exists = paths.llm_models_dir().join(format!("{model}.gguf")).exists();
     if !dest_exists {
         let body = size_hint.map_or_else(
             || format!("LLM model: {model}"),
@@ -2304,10 +2216,7 @@ fn update_label(status: &Arc<RwLock<Option<fono_update::UpdateStatus>>>) -> Opti
 ///   entry without a pending update behaves like `fono update --check`).
 async fn apply_update_via_tray(update_status: Arc<RwLock<Option<fono_update::UpdateStatus>>>) {
     let cached = update_status.read().ok().and_then(|g| g.clone());
-    let info_opt = cached
-        .as_ref()
-        .and_then(fono_update::UpdateStatus::available)
-        .cloned();
+    let info_opt = cached.as_ref().and_then(fono_update::UpdateStatus::available).cloned();
     let info = if let Some(i) = info_opt {
         i
     } else {
@@ -2349,11 +2258,7 @@ async fn apply_update_via_tray(update_status: Arc<RwLock<Option<fono_update::Upd
 
     fono_core::notify::send(
         "Fono — downloading update",
-        &format!(
-            "Fetching {} ({} MB)…",
-            info.asset_name,
-            info.asset_size / 1_048_576
-        ),
+        &format!("Fetching {} ({} MB)…", info.asset_name, info.asset_size / 1_048_576),
         "emblem-downloads",
         4_000,
         fono_core::notify::Urgency::Normal,
@@ -2432,11 +2337,8 @@ async fn spawn_wyoming_server_if_enabled(
     };
 
     let loopback_only = cfg.bind == "127.0.0.1" || cfg.bind == "::1";
-    let auth_token = if cfg.auth_token_ref.is_empty() {
-        None
-    } else {
-        std::env::var(&cfg.auth_token_ref).ok()
-    };
+    let auth_token =
+        if cfg.auth_token_ref.is_empty() { None } else { std::env::var(&cfg.auth_token_ref).ok() };
     let model = config.stt.local.model.clone();
     let server_cfg = fono_net::wyoming::server::WyomingServerConfig {
         bind: cfg.bind.clone(),
@@ -2503,10 +2405,9 @@ async fn spawn_discovery_if_enabled(config: &Config) -> Option<DiscoveryRuntime>
     let registry = fono_net::discovery::Registry::new();
     let browser = {
         let b = fono_net::discovery::Browser::new(daemon.clone(), registry.clone());
-        match b.start(&[
-            fono_net::discovery::PeerKind::Wyoming,
-            fono_net::discovery::PeerKind::Fono,
-        ]) {
+        match b
+            .start(&[fono_net::discovery::PeerKind::Wyoming, fono_net::discovery::PeerKind::Fono])
+        {
             Ok(handle) => {
                 info!("mDNS browser started");
                 Some(handle)
@@ -2518,11 +2419,8 @@ async fn spawn_discovery_if_enabled(config: &Config) -> Option<DiscoveryRuntime>
         }
     };
 
-    let wyoming_advert = if server.wyoming.enabled {
-        spawn_wyoming_advert(&daemon, config)
-    } else {
-        None
-    };
+    let wyoming_advert =
+        if server.wyoming.enabled { spawn_wyoming_advert(&daemon, config) } else { None };
 
     // Seed the local Wyoming service directly into the registry so that
     // `fono discover` shows it immediately without waiting for the
@@ -2589,11 +2487,7 @@ fn spawn_wyoming_advert(
     let advertiser = fono_net::discovery::Advertiser::new(daemon.clone());
     match advertiser.register(spec) {
         Ok(h) => {
-            info!(
-                "mDNS advertising _wyoming._tcp on port {} as {}",
-                cfg.port,
-                h.fullname()
-            );
+            info!("mDNS advertising _wyoming._tcp on port {} as {}", cfg.port, h.fullname());
             Some((h, host))
         }
         Err(e) => {
@@ -2825,20 +2719,13 @@ mod tests {
     fn mdns_host_qualification() {
         // bare → qualified
         let bare = "kitchen";
-        let qualified = if bare.contains('.') {
-            bare.to_string()
-        } else {
-            format!("{bare}.local")
-        };
+        let qualified = if bare.contains('.') { bare.to_string() } else { format!("{bare}.local") };
         assert_eq!(qualified, "kitchen.local");
 
         // already qualified → unchanged
         let already = "kitchen.local";
-        let still_qualified = if already.contains('.') {
-            already.to_string()
-        } else {
-            format!("{already}.local")
-        };
+        let still_qualified =
+            if already.contains('.') { already.to_string() } else { format!("{already}.local") };
         assert_eq!(still_qualified, "kitchen.local");
     }
 }

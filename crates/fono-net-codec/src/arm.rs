@@ -132,12 +132,7 @@ mod tests {
 
     #[test]
     fn unknown_tags_are_rejected_by_every_arm() {
-        for arm in [
-            Arm::WyomingClient,
-            Arm::WyomingServer,
-            Arm::FonoClient,
-            Arm::FonoServer,
-        ] {
+        for arm in [Arm::WyomingClient, Arm::WyomingServer, Arm::FonoClient, Arm::FonoServer] {
             assert!(!arm.accepts("not-a-real-event"));
             assert!(!arm.accepts("fono.future-event"));
         }

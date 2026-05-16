@@ -52,11 +52,7 @@ pub fn list_pulse_sources() -> Vec<InputDevice> {
                 .map(|(_, d)| d.clone())
                 .unwrap_or_else(|| name.clone());
             let is_default = !default_name.is_empty() && name == default_name;
-            InputDevice {
-                display_name,
-                is_default,
-                backend: InputBackend::Pulse { pa_name: name },
-            }
+            InputDevice { display_name, is_default, backend: InputBackend::Pulse { pa_name: name } }
         })
         .collect()
 }
@@ -87,11 +83,7 @@ pub fn set_default_pulse_source(name: &str) -> anyhow::Result<()> {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         anyhow::bail!(
             "pactl set-default-source {name:?} failed: {}",
-            if stderr.is_empty() {
-                format!("exit {}", out.status)
-            } else {
-                stderr
-            }
+            if stderr.is_empty() { format!("exit {}", out.status) } else { stderr }
         );
     }
     Ok(())
@@ -163,10 +155,7 @@ mod tests {
     fn parse_sources_short_single_mic() {
         let raw =
             "0\talsa_input.usb-Logitech_BRIO\tmodule-alsa-card.c\ts16le 2ch 48000Hz\tSUSPENDED\n";
-        assert_eq!(
-            parse_sources_short(raw),
-            vec!["alsa_input.usb-Logitech_BRIO"]
-        );
+        assert_eq!(parse_sources_short(raw), vec!["alsa_input.usb-Logitech_BRIO"]);
     }
 
     #[test]
@@ -178,10 +167,7 @@ mod tests {
 ";
         assert_eq!(
             parse_sources_short(raw),
-            vec![
-                "alsa_input.pci-0000_00_1f.3.analog-stereo",
-                "alsa_input.usb-Logitech_BRIO",
-            ]
+            vec!["alsa_input.pci-0000_00_1f.3.analog-stereo", "alsa_input.usb-Logitech_BRIO",]
         );
     }
 
@@ -222,10 +208,7 @@ Source #1
         assert_eq!(
             map,
             vec![
-                (
-                    "alsa_input.usb-Logitech_BRIO".to_string(),
-                    "Logitech BRIO Mono".to_string()
-                ),
+                ("alsa_input.usb-Logitech_BRIO".to_string(), "Logitech BRIO Mono".to_string()),
                 (
                     "alsa_input.pci-0000_00_1f.3.analog-stereo".to_string(),
                     "Built-in Audio Analog Stereo".to_string(),

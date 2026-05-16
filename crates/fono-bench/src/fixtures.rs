@@ -187,9 +187,7 @@ impl Fixture {
     /// Filter fixtures by language tag (case-insensitive).
     pub fn by_language(lang: &str) -> impl Iterator<Item = &'static Fixture> {
         let lang_lower = lang.to_ascii_lowercase();
-        FIXTURES
-            .iter()
-            .filter(move |f| f.language.eq_ignore_ascii_case(&lang_lower))
+        FIXTURES.iter().filter(move |f| f.language.eq_ignore_ascii_case(&lang_lower))
     }
 }
 
@@ -202,10 +200,7 @@ mod tests {
         let mut langs: Vec<_> = FIXTURES.iter().map(|f| f.language).collect();
         langs.sort_unstable();
         langs.dedup();
-        assert!(
-            langs.len() >= 4,
-            "the bench plan calls for ≥ 4 languages, got {langs:?}"
-        );
+        assert!(langs.len() >= 4, "the bench plan calls for ≥ 4 languages, got {langs:?}");
     }
 
     #[test]

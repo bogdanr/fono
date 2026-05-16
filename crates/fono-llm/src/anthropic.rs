@@ -68,10 +68,7 @@ impl TextFormatter for AnthropicLlm {
             temperature: 0.2,
             stop_sequences: vec![],
             system: &system,
-            messages: vec![Message {
-                role: "user",
-                content: &user,
-            }],
+            messages: vec![Message { role: "user", content: &user }],
         };
         let res = self
             .client
@@ -89,13 +86,7 @@ impl TextFormatter for AnthropicLlm {
         }
         let parsed: Resp = serde_json::from_str(&body)
             .with_context(|| format!("parse anthropic response: {body}"))?;
-        let out = parsed
-            .content
-            .into_iter()
-            .map(|b| b.text)
-            .collect::<String>()
-            .trim()
-            .to_string();
+        let out = parsed.content.into_iter().map(|b| b.text).collect::<String>().trim().to_string();
         if looks_like_clarification(&out) {
             anyhow::bail!(
                 "anthropic LLM returned a clarification reply instead of a cleaned transcript; \
@@ -140,10 +131,7 @@ mod tests {
             temperature: 0.2,
             stop_sequences: vec![],
             system: "sys",
-            messages: vec![Message {
-                role: "user",
-                content: "hi",
-            }],
+            messages: vec![Message { role: "user", content: "hi" }],
         };
         let body = serde_json::to_string(&req).expect("serialize");
         assert!(

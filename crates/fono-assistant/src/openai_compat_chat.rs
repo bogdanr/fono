@@ -84,39 +84,19 @@ impl OpenAiCompatChat {
     }
 
     pub fn cerebras(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::new(
-            "https://api.cerebras.ai/v1/chat/completions",
-            api_key,
-            model,
-            "cerebras",
-        )
+        Self::new("https://api.cerebras.ai/v1/chat/completions", api_key, model, "cerebras")
     }
 
     pub fn groq(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::new(
-            "https://api.groq.com/openai/v1/chat/completions",
-            api_key,
-            model,
-            "groq",
-        )
+        Self::new("https://api.groq.com/openai/v1/chat/completions", api_key, model, "groq")
     }
 
     pub fn openai(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::new(
-            "https://api.openai.com/v1/chat/completions",
-            api_key,
-            model,
-            "openai",
-        )
+        Self::new("https://api.openai.com/v1/chat/completions", api_key, model, "openai")
     }
 
     pub fn openrouter(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::new(
-            "https://openrouter.ai/api/v1/chat/completions",
-            api_key,
-            model,
-            "openrouter",
-        )
+        Self::new("https://openrouter.ai/api/v1/chat/completions", api_key, model, "openrouter")
     }
 
     pub fn ollama(endpoint: impl Into<String>, model: impl Into<String>) -> Self {
@@ -125,8 +105,7 @@ impl OpenAiCompatChat {
 }
 
 fn derive_models_endpoint(chat: &str) -> Option<String> {
-    chat.strip_suffix("/chat/completions")
-        .map(|root| format!("{root}/models"))
+    chat.strip_suffix("/chat/completions").map(|root| format!("{root}/models"))
 }
 
 /// Warm reqwest client tuned for chat streaming. Longer overall
@@ -214,21 +193,12 @@ impl Assistant for OpenAiCompatChat {
     ) -> Result<BoxStream<'static, Result<TokenDelta>>> {
         let mut messages: Vec<Message> = Vec::with_capacity(ctx.history.len() + 2);
         if !ctx.system_prompt.is_empty() {
-            messages.push(Message {
-                role: ChatRole::System.as_str(),
-                content: &ctx.system_prompt,
-            });
+            messages.push(Message { role: ChatRole::System.as_str(), content: &ctx.system_prompt });
         }
         for turn in &ctx.history {
-            messages.push(Message {
-                role: turn.role.as_str(),
-                content: &turn.content,
-            });
+            messages.push(Message { role: turn.role.as_str(), content: &turn.content });
         }
-        messages.push(Message {
-            role: ChatRole::User.as_str(),
-            content: user_text,
-        });
+        messages.push(Message { role: ChatRole::User.as_str(), content: user_text });
 
         // Defensive: chat/completions rejects unknown tool types
         // with a 400, so we drop the descriptor and warn once per
@@ -259,11 +229,8 @@ impl Assistant for OpenAiCompatChat {
             stream: true,
             tools,
         };
-        let mut builder = self
-            .client
-            .post(&self.endpoint)
-            .header("accept", "text/event-stream")
-            .json(&req);
+        let mut builder =
+            self.client.post(&self.endpoint).header("accept", "text/event-stream").json(&req);
         if !self.api_key.is_empty() {
             builder = builder.bearer_auth(&self.api_key);
         }
@@ -457,10 +424,8 @@ impl Assistant for OpenAiCompatChat {
                 req = req.header(name, value);
             }
         }
-        let res = req
-            .send()
-            .await
-            .with_context(|| format!("{} chat prewarm GET", self.backend_name))?;
+        let res =
+            req.send().await.with_context(|| format!("{} chat prewarm GET", self.backend_name))?;
         let _ = res.bytes().await;
         Ok(())
     }

@@ -171,16 +171,10 @@ pub async fn connect_any(sockets: &[std::path::PathBuf]) -> Result<UnixStream> {
     let summary = if sockets.is_empty() {
         "<none>".to_string()
     } else {
-        sockets
-            .iter()
-            .map(|p| format!("{}", p.display()))
-            .collect::<Vec<_>>()
-            .join(", ")
+        sockets.iter().map(|p| format!("{}", p.display())).collect::<Vec<_>>().join(", ")
     };
-    let cause = last_err.map_or_else(
-        || "no IPC socket candidates configured".to_string(),
-        |e| format!("{e}"),
-    );
+    let cause = last_err
+        .map_or_else(|| "no IPC socket candidates configured".to_string(), |e| format!("{e}"));
     Err(anyhow::anyhow!(
         "fono: daemon not running (tried: {summary}; last error: {cause}); start it with \
          'fono' or install the autostart unit"

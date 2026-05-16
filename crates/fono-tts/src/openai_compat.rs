@@ -100,15 +100,7 @@ impl OpenAiCompatTtsClient {
         default_voice: impl Into<String>,
         auth: AuthHeader,
     ) -> Self {
-        Self::with_response_format(
-            name,
-            base_url,
-            default_model,
-            default_voice,
-            "pcm",
-            None,
-            auth,
-        )
+        Self::with_response_format(name, base_url, default_model, default_voice, "pcm", None, auth)
     }
 
     /// Like [`Self::new`] but lets the caller pin the wire-level
@@ -251,15 +243,10 @@ impl TextToSpeech for OpenAiCompatTtsClient {
         _lang: Option<&str>,
     ) -> Result<TtsAudio> {
         if text.is_empty() {
-            return Ok(TtsAudio {
-                pcm: Vec::new(),
-                sample_rate: NATIVE_RATE,
-            });
+            return Ok(TtsAudio { pcm: Vec::new(), sample_rate: NATIVE_RATE });
         }
-        let v = voice
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(self.default_voice.as_str());
+        let v =
+            voice.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(self.default_voice.as_str());
         let body = SpeechReq {
             model: &self.default_model,
             voice: v,
@@ -325,11 +312,7 @@ impl OpenAiCompatTtsClient {
         attempt: u8,
     ) -> Result<TtsAudio, SynthAttemptError> {
         let mut timings = RequestTimings::start();
-        let send_res = self
-            .apply_auth(self.client.post(self.speech_url()))
-            .json(body)
-            .send()
-            .await;
+        let send_res = self.apply_auth(self.client.post(self.speech_url())).json(body).send().await;
         let resp = match send_res {
             Ok(r) => {
                 timings.mark_headers();
@@ -374,10 +357,7 @@ impl OpenAiCompatTtsClient {
                 attempt,
                 Outcome::HttpError,
             );
-            let body_text = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "<unreadable body>".to_string());
+            let body_text = resp.text().await.unwrap_or_else(|_| "<unreadable body>".to_string());
             return Err(SynthAttemptError::Fatal(anyhow!(
                 "{} TTS returned {status} (request_id={request_id}, text_len={}): {}",
                 self.name,
@@ -402,20 +382,11 @@ impl OpenAiCompatTtsClient {
                         let bytes = e.partial();
                         let preview_len = bytes.len().min(256);
                         let head = &bytes[..preview_len];
-                        let hex: String = head
-                            .iter()
-                            .map(|b| format!("{b:02x}"))
-                            .collect::<Vec<_>>()
-                            .join(" ");
+                        let hex: String =
+                            head.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
                         let ascii: String = head
                             .iter()
-                            .map(|&b| {
-                                if (0x20..0x7f).contains(&b) {
-                                    b as char
-                                } else {
-                                    '.'
-                                }
-                            })
+                            .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
                             .collect();
                         tracing::warn!(
                             target: "fono.http",
@@ -493,10 +464,7 @@ impl OpenAiCompatTtsClient {
             attempt,
             Outcome::Ok,
         );
-        Ok(TtsAudio {
-            pcm,
-            sample_rate: NATIVE_RATE,
-        })
+        Ok(TtsAudio { pcm, sample_rate: NATIVE_RATE })
     }
 }
 
@@ -526,11 +494,7 @@ pub fn from_catalog(
 ) -> Option<OpenAiCompatTtsClient> {
     let entry = provider_catalog::find(id)?;
     let tts = entry.tts.as_ref()?;
-    let TtsEndpoint::OpenAiCompat {
-        base_url,
-        response_format,
-        stream_format,
-    } = tts.endpoint
+    let TtsEndpoint::OpenAiCompat { base_url, response_format, stream_format } = tts.endpoint
     else {
         return None;
     };
@@ -580,14 +544,8 @@ pub fn openrouter_client(
     model_override: Option<String>,
     voice_override: Option<String>,
 ) -> OpenAiCompatTtsClient {
-    from_catalog(
-        "openrouter",
-        "openrouter",
-        api_key,
-        model_override,
-        voice_override,
-    )
-    .expect("openrouter catalogue entry must exist with an OpenAI-compat TTS endpoint")
+    from_catalog("openrouter", "openrouter", api_key, model_override, voice_override)
+        .expect("openrouter catalogue entry must exist with an OpenAI-compat TTS endpoint")
 }
 
 /// Locate the `data` chunk in a RIFF/WAVE byte stream and return the
@@ -654,10 +612,7 @@ mod tests {
 
     #[test]
     fn pcm_decode_round_trip() {
-        let bytes: Vec<u8> = [0_i16, 32767, -32767]
-            .iter()
-            .flat_map(|s| s.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = [0_i16, 32767, -32767].iter().flat_map(|s| s.to_le_bytes()).collect();
         let f = pcm_i16_le_to_f32(&bytes);
         assert_eq!(f.len(), 3);
         assert!((f[1] - 1.0).abs() < 1e-3);
@@ -748,10 +703,7 @@ mod tests {
     fn groq_client_uses_catalogue_defaults() {
         let c = groq_client("gsk-x", None, None);
         assert_eq!(c.base_url(), "https://api.groq.com/openai/v1");
-        assert_eq!(
-            c.speech_url(),
-            "https://api.groq.com/openai/v1/audio/speech"
-        );
+        assert_eq!(c.speech_url(), "https://api.groq.com/openai/v1/audio/speech");
         assert_eq!(c.default_model(), "canopylabs/orpheus-v1-english");
         assert_eq!(c.default_voice(), "hannah");
         // Groq's Orpheus deployment only accepts `wav`; the client must
@@ -778,11 +730,7 @@ mod tests {
     /// Overrides win over the catalogue.
     #[test]
     fn overrides_take_precedence() {
-        let c = openai_client(
-            "sk-x",
-            Some("tts-1-hd".to_string()),
-            Some("nova".to_string()),
-        );
+        let c = openai_client("sk-x", Some("tts-1-hd".to_string()), Some("nova".to_string()));
         assert_eq!(c.default_model(), "tts-1-hd");
         assert_eq!(c.default_voice(), "nova");
     }

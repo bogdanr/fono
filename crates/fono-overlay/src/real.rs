@@ -210,13 +210,11 @@ impl RealOverlay {
         let (tx, rx) = channel::<OverlayCmd>();
         let (proxy_tx, proxy_rx) =
             std::sync::mpsc::channel::<Result<winit::event_loop::EventLoopProxy<()>, String>>();
-        let join = std::thread::Builder::new()
-            .name("fono-overlay".into())
-            .spawn(move || {
-                if let Err(e) = run_event_loop(rx, proxy_tx, mode) {
-                    tracing::warn!("overlay: event loop ended with error: {e:#}");
-                }
-            })?;
+        let join = std::thread::Builder::new().name("fono-overlay".into()).spawn(move || {
+            if let Err(e) = run_event_loop(rx, proxy_tx, mode) {
+                tracing::warn!("overlay: event loop ended with error: {e:#}");
+            }
+        })?;
         let proxy = match proxy_rx.recv_timeout(std::time::Duration::from_secs(2)) {
             Ok(Ok(proxy)) => proxy,
             Ok(Err(msg)) => {
@@ -320,10 +318,7 @@ fn state_label(state: OverlayState) -> &'static str {
 /// drain tap in `build_live_capture_pipeline`, so the panel layout
 /// (text wrap and draw) must reserve room for the bar in either state.
 fn state_has_vu_bar(state: OverlayState) -> bool {
-    matches!(
-        state,
-        OverlayState::LiveDictating | OverlayState::AssistantRecording { .. }
-    )
+    matches!(state, OverlayState::LiveDictating | OverlayState::AssistantRecording { .. })
 }
 
 // ---------------------------------------------------------------------------
@@ -621,14 +616,7 @@ fn draw_waveform_bars(
         let bx1 = bx0 + bar_w;
         let alpha = 0x33 + ((0xFF - 0x33) as f32 * v) as u32;
         let color = with_alpha(accent, alpha as u8);
-        fill_round_rect(
-            buf,
-            stride,
-            h,
-            (bx0, y_bot - bar_h, bx1, y_bot),
-            2.0 * scale,
-            color,
-        );
+        fill_round_rect(buf, stride, h, (bx0, y_bot - bar_h, bx1, y_bot), 2.0 * scale, color);
     }
     // Floor line so silence still looks alive.
     let floor_y = y_bot.round() as i32;
@@ -682,14 +670,7 @@ fn draw_waveform_bars_from_profile(
         let bx1 = bx0 + bar_w;
         let alpha = 0x33 + ((0xFF - 0x33) as f32 * v) as u32;
         let color = with_alpha(accent, alpha as u8);
-        fill_round_rect(
-            buf,
-            stride,
-            h,
-            (bx0, y_bot - bar_h, bx1, y_bot),
-            2.0 * scale,
-            color,
-        );
+        fill_round_rect(buf, stride, h, (bx0, y_bot - bar_h, bx1, y_bot), 2.0 * scale, color);
     }
     let floor_y = y_bot.round() as i32;
     if floor_y >= 0 && (floor_y as u32) < h {
@@ -764,11 +745,7 @@ fn draw_oscilloscope(
     // cycles instead of a uniform blur).
     let mut prev: Option<(f32, f32)> = None;
     for px in 0..cols {
-        let frac = if cols <= 1 {
-            0.0
-        } else {
-            px as f32 / (cols - 1) as f32
-        };
+        let frac = if cols <= 1 { 0.0 } else { px as f32 / (cols - 1) as f32 };
         let xf = x0 + frac * (x1 - x0);
         let sample_idx = (frac * (n.saturating_sub(1)) as f32) as usize;
         let amp = osc_samples[sample_idx.min(n - 1)];
@@ -1167,11 +1144,8 @@ fn draw_heatmap(
 fn wrap_text(font: &ab_glyph::FontArc, text: &str, size_px: f32, max_width: f32) -> Vec<String> {
     use ab_glyph::{Font, ScaleFont};
     let scaled = font.as_scaled(size_px);
-    let advance = |s: &str| -> f32 {
-        s.chars()
-            .map(|c| scaled.h_advance(font.glyph_id(c)))
-            .sum::<f32>()
-    };
+    let advance =
+        |s: &str| -> f32 { s.chars().map(|c| scaled.h_advance(font.glyph_id(c))).sum::<f32>() };
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
     for word in text.split_whitespace() {
@@ -1291,9 +1265,7 @@ fn run_event_loop(
                 use winit::platform::x11::EventLoopBuilderExtX11;
                 <_ as EventLoopBuilderExtX11>::with_any_thread(&mut builder, true);
             }
-            builder
-                .build()
-                .map_err(|e| format!("EventLoop::with_user_event().build(): {e}"))
+            builder.build().map_err(|e| format!("EventLoop::with_user_event().build(): {e}"))
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -1419,9 +1391,7 @@ fn run_event_loop(
                     let mon_size = monitor.size();
                     let win_size = w.outer_size();
                     let x = (mon_size.width.saturating_sub(win_size.width)) / 2;
-                    let y = mon_size
-                        .height
-                        .saturating_sub(win_size.height + BOTTOM_OFFSET);
+                    let y = mon_size.height.saturating_sub(win_size.height + BOTTOM_OFFSET);
                     w.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
                 }
                 let ctx = match softbuffer::Context::new(std::sync::Arc::clone(&w)) {
@@ -1505,10 +1475,8 @@ fn run_event_loop(
                         while self.osc_samples.len() > OSC_SAMPLES_CAP {
                             self.osc_samples.pop_front();
                         }
-                        if matches!(
-                            self.mode,
-                            OverlayMode::Waveform(WaveformStyle::Oscilloscope)
-                        ) && self.window.is_some()
+                        if matches!(self.mode, OverlayMode::Waveform(WaveformStyle::Oscilloscope))
+                            && self.window.is_some()
                             && !matches!(self.state, OverlayState::Hidden)
                         {
                             needs_redraw = true;
@@ -1664,9 +1632,7 @@ fn run_event_loop(
                         let mon_size = monitor.size();
                         let win_size = w.outer_size();
                         let x = (mon_size.width.saturating_sub(win_size.width)) / 2;
-                        let y = mon_size
-                            .height
-                            .saturating_sub(win_size.height + BOTTOM_OFFSET);
+                        let y = mon_size.height.saturating_sub(win_size.height + BOTTOM_OFFSET);
                         w.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
                     }
                 }
@@ -1963,7 +1929,5 @@ fn run_event_loop(
         heatmap_cache_dim: (0, 0),
         rx,
     };
-    event_loop
-        .run_app(&mut app)
-        .map_err(|e| format!("run_app: {e}"))
+    event_loop.run_app(&mut app).map_err(|e| format!("run_app: {e}"))
 }

@@ -159,10 +159,7 @@ impl Browser {
             }
         });
 
-        Ok(BrowserHandle {
-            shutdown_tx: Some(shutdown_tx),
-            join: Some(join),
-        })
+        Ok(BrowserHandle { shutdown_tx: Some(shutdown_tx), join: Some(join) })
     }
 }
 
@@ -192,30 +189,12 @@ fn peer_from_info(kind: PeerKind, info: &ServiceInfo) -> Option<DiscoveredPeer> 
     }
     let hostname = info.get_hostname().to_string();
     let address = info.get_addresses().iter().next().copied();
-    let proto = info
-        .get_property_val_str(KEY_PROTO)
-        .unwrap_or("")
-        .to_string();
-    let version = info
-        .get_property_val_str(KEY_VERSION)
-        .unwrap_or("")
-        .to_string();
-    let caps = info
-        .get_property_val_str(KEY_CAPS)
-        .map(parse_caps)
-        .unwrap_or_default();
-    let model = info
-        .get_property_val_str(KEY_MODEL)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-    let auth_required = info
-        .get_property_val_str(KEY_AUTH)
-        .and_then(parse_auth)
-        .unwrap_or(false);
-    let path = info
-        .get_property_val_str(KEY_PATH)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
+    let proto = info.get_property_val_str(KEY_PROTO).unwrap_or("").to_string();
+    let version = info.get_property_val_str(KEY_VERSION).unwrap_or("").to_string();
+    let caps = info.get_property_val_str(KEY_CAPS).map(parse_caps).unwrap_or_default();
+    let model = info.get_property_val_str(KEY_MODEL).filter(|s| !s.is_empty()).map(str::to_owned);
+    let auth_required = info.get_property_val_str(KEY_AUTH).and_then(parse_auth).unwrap_or(false);
+    let path = info.get_property_val_str(KEY_PATH).filter(|s| !s.is_empty()).map(str::to_owned);
     // Friendly instance name = fullname minus its `.<service-type>` tail.
     let name = info
         .get_fullname()

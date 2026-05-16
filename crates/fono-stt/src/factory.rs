@@ -25,10 +25,7 @@ fn bootstrap_language_cache(allow_list: &[String], backend_key: &'static str) {
         return; // single-language / auto: no peer set to disambiguate
     }
     let cache = LanguageCache::global();
-    let allow_lc: Vec<String> = allow_list
-        .iter()
-        .map(|c| c.trim().to_ascii_lowercase())
-        .collect();
+    let allow_lc: Vec<String> = allow_list.iter().map(|c| c.trim().to_ascii_lowercase()).collect();
     for code in detect_os_languages() {
         if allow_lc.iter().any(|c| c == &code) {
             cache.seed_if_empty(backend_key, code);
@@ -57,11 +54,7 @@ fn resolve_cloud(
             } else {
                 c.api_key_ref.clone()
             };
-            let model_override = if c.model.is_empty() {
-                None
-            } else {
-                Some(c.model.clone())
-            };
+            let model_override = if c.model.is_empty() { None } else { Some(c.model.clone()) };
             (key_ref, model_override)
         },
     );
@@ -171,9 +164,7 @@ fn build_local(
 /// English-only Whisper variant detection (e.g. `tiny.en`, `small.en-q5_1`).
 #[cfg(feature = "whisper-local")]
 fn is_english_only_model(model: &str) -> bool {
-    model
-        .split(['-', '.'])
-        .any(|part| part.eq_ignore_ascii_case("en"))
+    model.split(['-', '.']).any(|part| part.eq_ignore_ascii_case("en"))
 }
 
 /// Best-effort physical-core count. Falls back to `available_parallelism`
@@ -231,9 +222,7 @@ fn build_groq(
     _: std::collections::HashMap<String, String>,
     _: bool,
 ) -> Result<Arc<dyn SpeechToText>> {
-    Err(anyhow!(
-        "Groq STT not compiled in (enable the `groq` feature on `fono-stt`)"
-    ))
+    Err(anyhow!("Groq STT not compiled in (enable the `groq` feature on `fono-stt`)"))
 }
 
 #[cfg(feature = "openai")]
@@ -262,9 +251,7 @@ fn build_openai(
     _: std::collections::HashMap<String, String>,
     _: bool,
 ) -> Result<Arc<dyn SpeechToText>> {
-    Err(anyhow!(
-        "OpenAI STT not compiled in (enable the `openai` feature on `fono-stt`)"
-    ))
+    Err(anyhow!("OpenAI STT not compiled in (enable the `openai` feature on `fono-stt`)"))
 }
 
 #[cfg(feature = "openrouter")]
@@ -293,9 +280,7 @@ fn build_openrouter(
     _: std::collections::HashMap<String, String>,
     _: bool,
 ) -> Result<Arc<dyn SpeechToText>> {
-    Err(anyhow!(
-        "OpenRouter STT not compiled in (enable the `openrouter` feature on `fono-stt`)"
-    ))
+    Err(anyhow!("OpenRouter STT not compiled in (enable the `openrouter` feature on `fono-stt`)"))
 }
 
 #[cfg(feature = "wyoming")]
@@ -333,9 +318,7 @@ fn build_wyoming(
 
 #[cfg(not(feature = "wyoming"))]
 fn build_wyoming(_: &Stt, _: &Secrets, _: Vec<String>) -> Result<Arc<dyn SpeechToText>> {
-    Err(anyhow!(
-        "Wyoming STT not compiled in (enable the `wyoming` feature on `fono-stt`)"
-    ))
+    Err(anyhow!("Wyoming STT not compiled in (enable the `wyoming` feature on `fono-stt`)"))
 }
 
 /// Streaming-STT factory. Mirrors [`build_stt`] but returns
@@ -484,11 +467,7 @@ mod tests {
     #[cfg(feature = "groq")]
     #[test]
     fn cloud_optional_with_env_key() {
-        let cfg = SttCfg {
-            backend: SttBackend::Groq,
-            cloud: None,
-            ..SttCfg::default()
-        };
+        let cfg = SttCfg { backend: SttBackend::Groq, cloud: None, ..SttCfg::default() };
         let general = fono_core::config::General::default();
         let mut secrets = Secrets::default();
         secrets.insert("GROQ_API_KEY", "gsk-test");
@@ -500,18 +479,11 @@ mod tests {
     #[cfg(feature = "groq")]
     #[test]
     fn missing_key_yields_clear_error() {
-        let cfg = SttCfg {
-            backend: SttBackend::Groq,
-            cloud: None,
-            ..SttCfg::default()
-        };
+        let cfg = SttCfg { backend: SttBackend::Groq, cloud: None, ..SttCfg::default() };
         let general = fono_core::config::General::default();
         let secrets = Secrets::default();
         let dir = std::path::PathBuf::from("/tmp");
-        let err = build_stt(&cfg, &general, &secrets, &dir)
-            .err()
-            .unwrap()
-            .to_string();
+        let err = build_stt(&cfg, &general, &secrets, &dir).err().unwrap().to_string();
         assert!(
             err.contains("GROQ_API_KEY") && err.contains("fono keys add"),
             "error message should mention env var and remediation: {err}"
@@ -526,11 +498,7 @@ mod tests {
         // `[interactive].enabled` switch is on. With the default
         // `Interactive` (`enabled = false`), Groq must yield `None`
         // so the daemon falls back to the batch path.
-        let cfg = SttCfg {
-            backend: SttBackend::Groq,
-            cloud: None,
-            ..SttCfg::default()
-        };
+        let cfg = SttCfg { backend: SttBackend::Groq, cloud: None, ..SttCfg::default() };
         let general = fono_core::config::General::default();
         let mut secrets = Secrets::default();
         secrets.insert("GROQ_API_KEY", "gsk-test");
@@ -538,20 +506,13 @@ mod tests {
         let interactive = fono_core::config::Interactive::default();
         assert!(!interactive.enabled, "sanity");
         let got = build_streaming_stt(&cfg, &general, &interactive, &secrets, &dir).expect("ok");
-        assert!(
-            got.is_none(),
-            "interactive disabled should yield None for Groq"
-        );
+        assert!(got.is_none(), "interactive disabled should yield None for Groq");
     }
 
     #[cfg(all(feature = "streaming", feature = "groq"))]
     #[test]
     fn build_streaming_stt_returns_groq_when_interactive_enabled() {
-        let cfg = SttCfg {
-            backend: SttBackend::Groq,
-            cloud: None,
-            ..SttCfg::default()
-        };
+        let cfg = SttCfg { backend: SttBackend::Groq, cloud: None, ..SttCfg::default() };
         let general = fono_core::config::General::default();
         let mut secrets = Secrets::default();
         secrets.insert("GROQ_API_KEY", "gsk-test");
@@ -561,10 +522,7 @@ mod tests {
             ..fono_core::config::Interactive::default()
         };
         let got = build_streaming_stt(&cfg, &general, &interactive, &secrets, &dir).expect("ok");
-        assert!(
-            got.is_some(),
-            "interactive enabled should yield Some(GroqStreaming) for Groq"
-        );
+        assert!(got.is_some(), "interactive enabled should yield Some(GroqStreaming) for Groq");
     }
 
     #[cfg(all(feature = "streaming", feature = "whisper-local"))]
@@ -574,10 +532,7 @@ mod tests {
         // — the factory should surface the same explicit error
         // `build_stt` uses so the daemon can warn the user rather than
         // silently falling back.
-        let cfg = SttCfg {
-            backend: SttBackend::Local,
-            ..SttCfg::default()
-        };
+        let cfg = SttCfg { backend: SttBackend::Local, ..SttCfg::default() };
         let general = fono_core::config::General::default();
         let secrets = Secrets::default();
         let dir = std::env::temp_dir().join("fono-streaming-stt-test-empty");

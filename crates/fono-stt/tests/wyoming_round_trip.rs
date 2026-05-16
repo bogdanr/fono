@@ -81,11 +81,7 @@ async fn spawn_server(
                         "mic": [],
                         "snd": [],
                     });
-                    Frame::new(INFO)
-                        .with_data(info)
-                        .write_async(&mut wr)
-                        .await
-                        .ok();
+                    Frame::new(INFO).with_data(info).write_async(&mut wr).await.ok();
                 }
                 AUDIO_START => {
                     let _: AudioStart =
@@ -125,10 +121,8 @@ async fn spawn_server(
                             // intentionally with NO final `transcript`.
                             Frame::new(TRANSCRIPT_START)
                                 .with_data(
-                                    to_value(&TranscriptStart {
-                                        language: Some("en".into()),
-                                    })
-                                    .unwrap(),
+                                    to_value(&TranscriptStart { language: Some("en".into()) })
+                                        .unwrap(),
                                 )
                                 .write_async(&mut wr)
                                 .await
@@ -199,11 +193,7 @@ async fn one_shot_round_trip() {
     assert_eq!(res.text, "hello world");
     assert_eq!(res.language.as_deref(), Some("en"));
     let bytes = rx.await.expect("server bytes channel");
-    assert_eq!(
-        bytes,
-        pcm.len() * 2,
-        "all PCM samples must reach server as int16 LE"
-    );
+    assert_eq!(bytes, pcm.len() * 2, "all PCM samples must reach server as int16 LE");
 }
 
 #[tokio::test]

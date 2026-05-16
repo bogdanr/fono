@@ -25,11 +25,7 @@ impl Resampler {
         let chunk = 1024;
         let inner = SincFixedIn::<f32>::new(ratio, 2.0, params, chunk, 1)
             .context("build rubato resampler")?;
-        Ok(Self {
-            inner,
-            chunk,
-            leftover: Vec::new(),
-        })
+        Ok(Self { inner, chunk, leftover: Vec::new() })
     }
 
     /// Process an arbitrary-sized chunk of mono samples, buffering any

@@ -196,9 +196,7 @@ fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("mkdir -p {}", parent.display()))?;
     }
-    let dir = path
-        .parent()
-        .ok_or_else(|| anyhow!("path {} has no parent dir", path.display()))?;
+    let dir = path.parent().ok_or_else(|| anyhow!("path {} has no parent dir", path.display()))?;
     let mut tmp = tempfile::Builder::new()
         .prefix(".fono-install-")
         .tempfile_in(dir)
@@ -210,8 +208,7 @@ fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     tmp.as_file_mut().sync_all().ok();
     std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(mode))
         .with_context(|| format!("chmod {:o} {}", mode, tmp.path().display()))?;
-    tmp.persist(path)
-        .map_err(|e| anyhow!("persist into {}: {}", path.display(), e.error))?;
+    tmp.persist(path).map_err(|e| anyhow!("persist into {}: {}", path.display(), e.error))?;
     Ok(())
 }
 
@@ -247,17 +244,11 @@ fn try_run(prog: &str, args: &[&str]) -> bool {
 }
 
 fn refresh_desktop_database() {
-    let _ = try_run(
-        "update-desktop-database",
-        &["-q", "/usr/share/applications"],
-    );
+    let _ = try_run("update-desktop-database", &["-q", "/usr/share/applications"]);
 }
 
 fn refresh_icon_cache() {
-    let _ = try_run(
-        "gtk-update-icon-cache",
-        &["-q", "-t", "-f", "/usr/share/icons/hicolor"],
-    );
+    let _ = try_run("gtk-update-icon-cache", &["-q", "-t", "-f", "/usr/share/icons/hicolor"]);
 }
 
 fn systemctl_available() -> bool {
@@ -302,16 +293,11 @@ fn verify_service_running(unit: &str) {
 
     eprintln!(
         "  · {unit} is {} (expected `active`)",
-        if active.is_empty() {
-            "<unknown>"
-        } else {
-            active.as_str()
-        }
+        if active.is_empty() { "<unknown>" } else { active.as_str() }
     );
     eprintln!("    --- last 20 journal lines for {unit} ---");
-    if let Ok(out) = Command::new("journalctl")
-        .args(["-u", unit, "-n", "20", "--no-pager"])
-        .output()
+    if let Ok(out) =
+        Command::new("journalctl").args(["-u", unit, "-n", "20", "--no-pager"]).output()
     {
         let text = String::from_utf8_lossy(&out.stdout);
         for line in text.lines() {
@@ -335,13 +321,9 @@ fn verify_service_running(unit: &str) {
 /// `fono uninstall` will work on this binary.
 #[must_use]
 pub fn doctor_state() -> String {
-    let exe = std::env::current_exe()
-        .ok()
-        .and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)));
-    let exe_str = exe
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "<unknown>".into());
+    let exe = std::env::current_exe().ok().and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)));
+    let exe_str =
+        exe.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "<unknown>".into());
 
     if let Some(ref p) = exe {
         if fono_update::is_package_managed(p) {
@@ -403,10 +385,7 @@ pub fn run_uninstall(dry_run: bool) -> Result<()> {
         .ok_or_else(|| anyhow!("no install marker found at {MARKER_PATH}; nothing to uninstall"))?;
 
     if dry_run {
-        let mut plan = Plan {
-            mode: Some(marker.mode.clone()),
-            ..Plan::default()
-        };
+        let mut plan = Plan { mode: Some(marker.mode.clone()), ..Plan::default() };
         if marker.enabled_service {
             plan.step("systemctl disable --now fono.service");
         }
@@ -439,9 +418,7 @@ fn build_install_plan(server: bool) -> Plan {
     let mut plan = Plan::default();
     if server {
         plan.mode = Some(Mode::Server);
-        plan.step(format!(
-            "ensure system user `{SERVICE_USER}` exists (useradd --system)"
-        ));
+        plan.step(format!("ensure system user `{SERVICE_USER}` exists (useradd --system)"));
         plan.step(format!("install running binary -> {BIN_PATH} (mode 0755)"));
         plan.step(format!("write system unit -> {SYSTEMD_UNIT}"));
         plan.step("systemctl daemon-reload");
@@ -530,11 +507,8 @@ fn run_install_desktop() -> Result<()> {
     }
 
     let no_start = std::env::var_os("FONO_INSTALL_NO_START").is_some_and(|v| v == "1");
-    let autostart_outcome = if no_start {
-        AutostartOutcome::SkippedByEnv
-    } else {
-        try_autostart_for_sudo_user()
-    };
+    let autostart_outcome =
+        if no_start { AutostartOutcome::SkippedByEnv } else { try_autostart_for_sudo_user() };
 
     // Once the daemon is up (or we know it can't be auto-started),
     // hand control to the setup wizard for the invoking user. The
@@ -547,11 +521,8 @@ fn run_install_desktop() -> Result<()> {
     // wizard's final step sends an IPC `Reload`, which is a no-op when
     // the daemon isn't running yet but propagates the new config
     // immediately when it is.
-    let setup_outcome = if no_start {
-        SetupOutcome::SkippedByEnv
-    } else {
-        try_run_setup_for_sudo_user()
-    };
+    let setup_outcome =
+        if no_start { SetupOutcome::SkippedByEnv } else { try_run_setup_for_sudo_user() };
 
     println!();
     match autostart_outcome {
@@ -644,10 +615,7 @@ fn resolve_target_user() -> Option<String> {
 fn ensure_log_file() -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let path = fono_core::paths::LOG_FILE;
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let _ = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))
 }
 
@@ -781,11 +749,7 @@ fn run_install_server() -> Result<()> {
     eprintln!("  · {BIN_PATH}");
 
     // Systemd unit
-    write_atomic(
-        Path::new(SYSTEMD_UNIT),
-        SYSTEMD_SYSTEM_UNIT.as_bytes(),
-        0o644,
-    )?;
+    write_atomic(Path::new(SYSTEMD_UNIT), SYSTEMD_SYSTEM_UNIT.as_bytes(), 0o644)?;
     files.push(SYSTEMD_UNIT.into());
     eprintln!("  · {SYSTEMD_UNIT}");
 
@@ -885,11 +849,9 @@ fn user_exists(name: &str) -> bool {
 // ---------------------------------------------------------------------
 
 fn write_completions(bin_path: &str, files: &mut Vec<String>) {
-    for (shell, dst) in [
-        ("bash", COMPLETION_BASH),
-        ("zsh", COMPLETION_ZSH),
-        ("fish", COMPLETION_FISH),
-    ] {
+    for (shell, dst) in
+        [("bash", COMPLETION_BASH), ("zsh", COMPLETION_ZSH), ("fish", COMPLETION_FISH)]
+    {
         // Skip silently when the parent directory's grandparent (e.g.
         // /usr/share/fish) is missing — that shell isn't installed
         // system-wide and we shouldn't conjure up its skeleton.
@@ -901,11 +863,7 @@ fn write_completions(bin_path: &str, files: &mut Vec<String>) {
             continue;
         };
         if !grandparent.exists() {
-            tracing::debug!(
-                shell,
-                "skipping completion: {} missing",
-                grandparent.display()
-            );
+            tracing::debug!(shell, "skipping completion: {} missing", grandparent.display());
             continue;
         }
 
@@ -992,9 +950,7 @@ fn run_uninstall_real(marker: &Marker) {
 }
 
 fn service_state_remaining() -> bool {
-    ["/etc/fono", "/var/lib/fono", "/var/cache/fono"]
-        .iter()
-        .any(|p| Path::new(p).exists())
+    ["/etc/fono", "/var/lib/fono", "/var/cache/fono"].iter().any(|p| Path::new(p).exists())
 }
 
 // ---------------------------------------------------------------------
@@ -1010,14 +966,9 @@ mod tests {
         let plan = build_install_plan(false);
         assert_eq!(plan.mode, Some(Mode::Desktop));
         let joined = plan.steps.join("\n");
-        for t in [
-            BIN_PATH,
-            DESKTOP_MENU,
-            DESKTOP_AUTOSTART,
-            ICON_PATH,
-            COMPLETION_BASH,
-            MARKER_PATH,
-        ] {
+        for t in
+            [BIN_PATH, DESKTOP_MENU, DESKTOP_AUTOSTART, ICON_PATH, COMPLETION_BASH, MARKER_PATH]
+        {
             assert!(joined.contains(t), "desktop plan missing {t}");
         }
         assert!(!joined.contains(SYSTEMD_UNIT));
@@ -1045,10 +996,7 @@ mod tests {
             mode: Mode::Server,
             version: "9.9.9".into(),
             installed_at: "@1234".into(),
-            files: vec![
-                "/usr/local/bin/fono".into(),
-                "/lib/systemd/system/fono.service".into(),
-            ],
+            files: vec!["/usr/local/bin/fono".into(), "/lib/systemd/system/fono.service".into()],
             created_service_user: true,
             enabled_service: true,
         };

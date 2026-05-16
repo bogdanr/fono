@@ -73,12 +73,7 @@ impl AudioPlayback {
         let pending = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
 
-        spawn_worker(
-            rx,
-            pending.clone(),
-            stop.clone(),
-            device.map(str::to_string),
-        )?;
+        spawn_worker(rx, pending.clone(), stop.clone(), device.map(str::to_string))?;
 
         Ok(Self { tx, pending, stop })
     }
@@ -263,9 +258,7 @@ fn spawn_worker(
             .or_else(|| host.default_output_device()),
     }
     .context("no default cpal output device available")?;
-    let supported = device
-        .default_output_config()
-        .context("no default cpal output config")?;
+    let supported = device.default_output_config().context("no default cpal output config")?;
     let device_rate = supported.sample_rate().0;
     let channels = supported.channels();
 

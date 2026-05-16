@@ -80,10 +80,7 @@ pub fn list_input_devices() -> Vec<InputDevice> {
 #[must_use]
 fn enumerate_cpal_inputs() -> Vec<InputDevice> {
     let host = cpal::default_host();
-    let default_name = host
-        .default_input_device()
-        .and_then(|d| d.name().ok())
-        .unwrap_or_default();
+    let default_name = host.default_input_device().and_then(|d| d.name().ok()).unwrap_or_default();
     let Ok(iter) = host.input_devices() else {
         return Vec::new();
     };

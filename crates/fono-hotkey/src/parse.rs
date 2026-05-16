@@ -76,10 +76,7 @@ fn parse_code(tok: &str) -> Option<Code> {
     }
 
     // Function keys F1..F24.
-    if let Some(rest) = normalised
-        .strip_prefix('f')
-        .or_else(|| normalised.strip_prefix('F'))
-    {
+    if let Some(rest) = normalised.strip_prefix('f').or_else(|| normalised.strip_prefix('F')) {
         if rest.chars().all(|c| c.is_ascii_digit()) && !rest.is_empty() {
             return Code::from_str(&format!("F{rest}")).ok();
         }

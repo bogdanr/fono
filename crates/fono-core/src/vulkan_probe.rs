@@ -137,9 +137,7 @@ pub fn probe_in_process() -> Outcome {
     let entry = match unsafe { ash::Entry::load() } {
         Ok(entry) => entry,
         Err(err) => {
-            return Outcome::NotAvailable {
-                reason: format!("libvulkan.so.1 not loadable: {err}"),
-            };
+            return Outcome::NotAvailable { reason: format!("libvulkan.so.1 not loadable: {err}") };
         }
     };
 
@@ -158,9 +156,7 @@ pub fn probe_in_process() -> Outcome {
     let instance = match unsafe { entry.create_instance(&create_info, None) } {
         Ok(inst) => inst,
         Err(err) => {
-            return Outcome::NotAvailable {
-                reason: format!("vkCreateInstance rejected: {err}"),
-            };
+            return Outcome::NotAvailable { reason: format!("vkCreateInstance rejected: {err}") };
         }
     };
 
@@ -231,11 +227,7 @@ fn encode(outcome: &Outcome) -> String {
     match outcome {
         Outcome::Available { devices } if devices.is_empty() => "OK_EMPTY".to_string(),
         Outcome::Available { devices } => {
-            let joined = devices
-                .iter()
-                .map(|d| sanitize_field(d))
-                .collect::<Vec<_>>()
-                .join("\t");
+            let joined = devices.iter().map(|d| sanitize_field(d)).collect::<Vec<_>>().join("\t");
             format!("OK\t{joined}")
         }
         Outcome::NotAvailable { reason } => format!("ERR\t{}", sanitize_field(reason)),
@@ -253,9 +245,7 @@ fn decode(line: &str) -> Option<Outcome> {
         });
     }
     if let Some(rest) = line.strip_prefix("ERR\t") {
-        return Some(Outcome::NotAvailable {
-            reason: rest.to_string(),
-        });
+        return Some(Outcome::NotAvailable { reason: rest.to_string() });
     }
     None
 }
@@ -310,10 +300,7 @@ fn run_in_subprocess() -> Result<Outcome, String> {
     // sophisticated event loop: the helper writes one short line then
     // exits, and stdout closes on exit, so a blocking read in a thread
     // with a join-with-timeout is enough.
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "child stdout pipe missing".to_string())?;
+    let mut stdout = child.stdout.take().ok_or_else(|| "child stdout pipe missing".to_string())?;
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::with_capacity(256);
         // Cap the read so a misbehaving (non-cooperating) child that
@@ -342,9 +329,7 @@ fn run_in_subprocess() -> Result<Outcome, String> {
         }
     }
 
-    let buf = reader
-        .join()
-        .map_err(|_| "probe helper stdout reader panicked".to_string())?;
+    let buf = reader.join().map_err(|_| "probe helper stdout reader panicked".to_string())?;
     let text = String::from_utf8_lossy(&buf);
 
     // Find the first line that decodes as our wire protocol. If the
@@ -362,11 +347,7 @@ fn run_in_subprocess() -> Result<Outcome, String> {
 /// Convert a fixed-size `c_char` array (Vulkan device-name field) to a
 /// printable `String`. Stops at the first NUL or at the array boundary.
 fn device_name_from_properties(name: &[c_char]) -> String {
-    let bytes: Vec<u8> = name
-        .iter()
-        .take_while(|&&c| c != 0)
-        .map(|&c| c as u8)
-        .collect();
+    let bytes: Vec<u8> = name.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
@@ -383,15 +364,10 @@ mod tests {
         assert!(!absent.is_usable());
 
         let empty = Outcome::Available { devices: vec![] };
-        assert_eq!(
-            empty.summary_line(),
-            "Vulkan: loader present but no physical devices"
-        );
+        assert_eq!(empty.summary_line(), "Vulkan: loader present but no physical devices");
         assert!(!empty.is_usable());
 
-        let with_dev = Outcome::Available {
-            devices: vec!["Test GPU".to_string()],
-        };
+        let with_dev = Outcome::Available { devices: vec!["Test GPU".to_string()] };
         assert_eq!(with_dev.summary_line(), "Vulkan: detected (Test GPU)");
         assert!(with_dev.is_usable());
     }
@@ -400,15 +376,10 @@ mod tests {
     fn wire_protocol_roundtrips() {
         let cases = [
             Outcome::Available {
-                devices: vec![
-                    "GeForce RTX 4090".into(),
-                    "llvmpipe (LLVM 19, 256 bits)".into(),
-                ],
+                devices: vec!["GeForce RTX 4090".into(), "llvmpipe (LLVM 19, 256 bits)".into()],
             },
             Outcome::Available { devices: vec![] },
-            Outcome::Available {
-                devices: vec!["single".into()],
-            },
+            Outcome::Available { devices: vec!["single".into()] },
             Outcome::NotAvailable {
                 reason: "libvulkan.so.1 not loadable: cannot open shared object".into(),
             },

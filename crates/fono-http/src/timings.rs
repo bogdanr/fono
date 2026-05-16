@@ -70,9 +70,7 @@ impl RequestTimings {
     /// Milliseconds from `start` to `headers` (0 if unmarked).
     #[must_use]
     pub fn headers_ms(&self) -> u64 {
-        self.headers
-            .map(|h| h.duration_since(self.start).as_millis() as u64)
-            .unwrap_or(0)
+        self.headers.map(|h| h.duration_since(self.start).as_millis() as u64).unwrap_or(0)
     }
 
     /// Milliseconds from `headers` to `first_byte` (0 if either unmarked).

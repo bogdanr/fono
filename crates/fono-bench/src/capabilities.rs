@@ -59,10 +59,7 @@ impl ModelCapabilities {
                 false
             }
         };
-        Self {
-            english_only,
-            model_label: format!("{provider}:{model}"),
-        }
+        Self { english_only, model_label: format!("{provider}:{model}") }
     }
 
     /// Decide whether a fixture demands a multilingual model.
@@ -149,14 +146,7 @@ mod tests {
 
     #[test]
     fn multilingual_models_classify_correctly() {
-        for stem in [
-            "tiny",
-            "base",
-            "small",
-            "medium",
-            "large-v3",
-            "large-v3-turbo",
-        ] {
+        for stem in ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"] {
             let caps = ModelCapabilities::for_local_whisper(stem);
             assert!(!caps.english_only, "{stem} should be multilingual");
         }
@@ -216,17 +206,9 @@ mod tests {
 
     #[test]
     fn fixture_requires_multilingual_default_and_override() {
-        assert!(!ModelCapabilities::fixture_requires_multilingual(
-            "en", None
-        ));
+        assert!(!ModelCapabilities::fixture_requires_multilingual("en", None));
         assert!(ModelCapabilities::fixture_requires_multilingual("ro", None));
-        assert!(ModelCapabilities::fixture_requires_multilingual(
-            "en",
-            Some(true)
-        ));
-        assert!(!ModelCapabilities::fixture_requires_multilingual(
-            "ro",
-            Some(false)
-        ));
+        assert!(ModelCapabilities::fixture_requires_multilingual("en", Some(true)));
+        assert!(!ModelCapabilities::fixture_requires_multilingual("ro", Some(false)));
     }
 }

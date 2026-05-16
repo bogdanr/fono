@@ -71,10 +71,8 @@ async fn pipeline_produces_history_row_and_injects_cleaned_text() {
     let tmp = tempfile::tempdir().unwrap();
     let db_path = tmp.path().join("history.sqlite");
 
-    let stt: Arc<dyn SpeechToText> = Arc::new(FakeStt {
-        text: "hello world".into(),
-        lang: Some("en".into()),
-    });
+    let stt: Arc<dyn SpeechToText> =
+        Arc::new(FakeStt { text: "hello world".into(), lang: Some("en".into()) });
     let llm: Option<Arc<dyn TextFormatter>> = Some(Arc::new(FakeLlm));
     let injected = Arc::new(Mutex::new(Vec::<String>::new()));
     let injector = Arc::new(CapturingInjector(Arc::clone(&injected)));
@@ -87,25 +85,15 @@ async fn pipeline_produces_history_row_and_injects_cleaned_text() {
     cfg.llm.skip_if_words_lt = 0;
     let cfg = Arc::new(cfg);
 
-    let (orch, _action_rx) = orchestrator_for_test(
-        stt,
-        llm,
-        &db_path,
-        Arc::clone(&cfg),
-        injector,
-        Arc::new(StubFocus),
-    );
+    let (orch, _action_rx) =
+        orchestrator_for_test(stt, llm, &db_path, Arc::clone(&cfg), injector, Arc::new(StubFocus));
 
     // 1 second of silence at 16 kHz to drive the pipeline.
     let pcm = vec![0.0_f32; 16_000];
     let outcome = orch.run_oneshot(pcm, 1000).await;
 
     let metrics = match outcome {
-        PipelineOutcome::Completed {
-            raw,
-            cleaned,
-            metrics,
-        } => {
+        PipelineOutcome::Completed { raw, cleaned, metrics } => {
             assert_eq!(raw, "hello world");
             assert_eq!(cleaned.as_deref(), Some("CLEANED: hello world"));
             metrics
@@ -165,10 +153,8 @@ async fn pipeline_falls_back_to_raw_when_llm_rejects_clarification() {
 
     // Four words so it's above the new `skip_if_words_lt = 3` default
     // and the LLM is actually invoked.
-    let stt: Arc<dyn SpeechToText> = Arc::new(FakeStt {
-        text: "the response is this".into(),
-        lang: Some("en".into()),
-    });
+    let stt: Arc<dyn SpeechToText> =
+        Arc::new(FakeStt { text: "the response is this".into(), lang: Some("en".into()) });
     let llm: Option<Arc<dyn TextFormatter>> = Some(Arc::new(ClarifyingLlm));
     let injected = Arc::new(Mutex::new(Vec::<String>::new()));
     let injector = Arc::new(CapturingInjector(Arc::clone(&injected)));
@@ -178,14 +164,8 @@ async fn pipeline_falls_back_to_raw_when_llm_rejects_clarification() {
     cfg.llm.backend = LlmBackend::OpenAI;
     let cfg = Arc::new(cfg);
 
-    let (orch, _rx) = orchestrator_for_test(
-        stt,
-        llm,
-        &db_path,
-        Arc::clone(&cfg),
-        injector,
-        Arc::new(StubFocus),
-    );
+    let (orch, _rx) =
+        orchestrator_for_test(stt, llm, &db_path, Arc::clone(&cfg), injector, Arc::new(StubFocus));
 
     let outcome = orch.run_oneshot(vec![0.0_f32; 16_000], 1000).await;
     match outcome {
@@ -219,10 +199,8 @@ async fn pipeline_skips_llm_for_short_capture_under_default_threshold() {
     let tmp = tempfile::tempdir().unwrap();
     let db_path = tmp.path().join("history.sqlite");
 
-    let stt: Arc<dyn SpeechToText> = Arc::new(FakeStt {
-        text: "okay".into(),
-        lang: Some("en".into()),
-    });
+    let stt: Arc<dyn SpeechToText> =
+        Arc::new(FakeStt { text: "okay".into(), lang: Some("en".into()) });
     // If the LLM is invoked, the test fails: ClarifyingLlm bails, but
     // we'd still see `llm_skipped_short = false` in metrics.
     let llm: Option<Arc<dyn TextFormatter>> = Some(Arc::new(ClarifyingLlm));
@@ -236,28 +214,15 @@ async fn pipeline_skips_llm_for_short_capture_under_default_threshold() {
     assert!(cfg.llm.skip_if_words_lt >= 3);
     let cfg = Arc::new(cfg);
 
-    let (orch, _rx) = orchestrator_for_test(
-        stt,
-        llm,
-        &db_path,
-        Arc::clone(&cfg),
-        injector,
-        Arc::new(StubFocus),
-    );
+    let (orch, _rx) =
+        orchestrator_for_test(stt, llm, &db_path, Arc::clone(&cfg), injector, Arc::new(StubFocus));
 
     let outcome = orch.run_oneshot(vec![0.0_f32; 16_000], 1000).await;
     match outcome {
-        PipelineOutcome::Completed {
-            raw,
-            cleaned,
-            metrics,
-        } => {
+        PipelineOutcome::Completed { raw, cleaned, metrics } => {
             assert_eq!(raw, "okay");
             assert!(cleaned.is_none(), "skip path must not produce cleaned text");
-            assert!(
-                metrics.llm_skipped_short,
-                "metrics must record the short-utterance skip"
-            );
+            assert!(metrics.llm_skipped_short, "metrics must record the short-utterance skip");
         }
         other => panic!("expected Completed, got {other:?}"),
     }
@@ -269,10 +234,7 @@ async fn pipeline_skips_history_when_stt_returns_empty() {
     let tmp = tempfile::tempdir().unwrap();
     let db_path = tmp.path().join("history.sqlite");
 
-    let stt: Arc<dyn SpeechToText> = Arc::new(FakeStt {
-        text: "   ".into(),
-        lang: None,
-    });
+    let stt: Arc<dyn SpeechToText> = Arc::new(FakeStt { text: "   ".into(), lang: None });
     let injected = Arc::new(Mutex::new(Vec::<String>::new()));
     let injector = Arc::new(CapturingInjector(Arc::clone(&injected)));
 
@@ -292,10 +254,7 @@ async fn pipeline_passes_raw_through_when_no_llm() {
     let tmp = tempfile::tempdir().unwrap();
     let db_path = tmp.path().join("history.sqlite");
 
-    let stt: Arc<dyn SpeechToText> = Arc::new(FakeStt {
-        text: "uppercase me".into(),
-        lang: None,
-    });
+    let stt: Arc<dyn SpeechToText> = Arc::new(FakeStt { text: "uppercase me".into(), lang: None });
     let injected = Arc::new(Mutex::new(Vec::<String>::new()));
     let injector = Arc::new(CapturingInjector(Arc::clone(&injected)));
 
