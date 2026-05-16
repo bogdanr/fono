@@ -2,10 +2,35 @@
 //! `fono doctor` — diagnostic report.
 
 use std::fmt::Write;
+use std::io::IsTerminal;
+use std::sync::OnceLock;
 
 use anyhow::Result;
 use fono_core::hwcheck;
 use fono_core::{Config, Paths, Secrets};
+
+/// Whether to emit ANSI color escapes in the report. True iff stdout
+/// is a TTY and `NO_COLOR` is unset. Cached on first call.
+fn color_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal())
+}
+
+fn paint(code: &str, s: &str) -> String {
+    if color_enabled() {
+        format!("\x1b[{code}m{s}\x1b[0m")
+    } else {
+        s.to_string()
+    }
+}
+fn ok(s: &str) -> String { paint("32", s) }       // green
+fn bad(s: &str) -> String { paint("31;1", s) }    // bold red
+fn warn(s: &str) -> String { paint("33", s) }     // yellow
+fn dim(s: &str) -> String { paint("2", s) }       // dim
+fn head(s: &str) -> String { paint("1;36", s) }   // bold cyan
+fn star(active: bool) -> String {
+    if active { paint("1;36", "*") } else { " ".into() }
+}
 
 #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 pub async fn report(paths: &Paths) -> Result<String> {
@@ -13,7 +38,8 @@ pub async fn report(paths: &Paths) -> Result<String> {
     let variant = crate::variant::VARIANT;
     writeln!(
         out,
-        "Fono doctor — v{} ({} variant — {})",
+        "{} v{} ({} variant — {})",
+        head("Fono doctor —"),
         env!("CARGO_PKG_VERSION"),
         variant.label(),
         variant.description(),
@@ -35,7 +61,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
     } else {
         "no-vec"
     };
-    writeln!(out, "Hardware:")?;
+    writeln!(out, "{}", head("Hardware:"))?;
     writeln!(
         out,
         "  cores : {} physical / {} logical  ({isa})",
@@ -53,7 +79,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
         tier.default_whisper_model()
     )?;
     if let Err(reason) = snap.suitability() {
-        writeln!(out, "  unsuitable because: {reason}")?;
+        writeln!(out, "  {} {reason}", bad("unsuitable because:"))?;
     }
     writeln!(out)?;
 
@@ -63,7 +89,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
     {
         use crate::variant::{Variant, VARIANT};
         use fono_core::vulkan_probe::probe;
-        writeln!(out, "Compute backends:")?;
+        writeln!(out, "{}", head("Compute backends:"))?;
         writeln!(
             out,
             "  variant  : {} ({})",
@@ -84,24 +110,25 @@ pub async fn report(paths: &Paths) -> Result<String> {
         writeln!(out)?;
     }
 
-    writeln!(out, "Paths:")?;
+    writeln!(out, "{}", head("Paths:"))?;
     writeln!(out, "  config : {}", paths.config_file().display())?;
     writeln!(out, "  data   : {}", paths.data_dir.display())?;
     writeln!(out, "  cache  : {}", paths.cache_dir.display())?;
     writeln!(out, "  state  : {}", paths.state_dir.display())?;
     writeln!(out)?;
 
-    writeln!(out, "Install: {}", crate::install::doctor_state())?;
+    writeln!(out, "{} {}", head("Install:"), crate::install::doctor_state())?;
     writeln!(out)?;
 
     let config_exists = paths.config_file().exists();
     writeln!(
         out,
-        "Config : {}",
+        "{} {}",
+        head("Config :"),
         if config_exists {
-            "present"
+            ok("present")
         } else {
-            "MISSING (run `fono setup`)"
+            bad("MISSING (run `fono setup`)")
         }
     )?;
     let cfg = if config_exists {
@@ -120,7 +147,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 Some(c)
             }
             Err(e) => {
-                writeln!(out, "  FAILED TO LOAD: {e}")?;
+                writeln!(out, "  {} {e}", bad("FAILED TO LOAD:"))?;
                 None
             }
         }
@@ -137,25 +164,25 @@ pub async fn report(paths: &Paths) -> Result<String> {
     // ----------------------------------------------------------------
     let secrets = Secrets::load(&paths.secrets_file()).unwrap_or_default();
     if let Some(c) = cfg.as_ref() {
-        writeln!(out, "Backends:")?;
+        writeln!(out, "{}", head("Backends:"))?;
         match fono_stt::build_stt(&c.stt, &c.general, &secrets, &paths.whisper_models_dir()) {
-            Ok(s) => writeln!(out, "  stt: {} ready", s.name())?,
-            Err(e) => writeln!(out, "  stt: FAIL — {e:#}")?,
+            Ok(s) => writeln!(out, "  stt: {} {}", s.name(), ok("ready"))?,
+            Err(e) => writeln!(out, "  stt: {} {e:#}", bad("FAIL —"))?,
         }
         match fono_llm::build_llm(&c.llm, &secrets, &paths.llm_models_dir()) {
-            Ok(Some(l)) => writeln!(out, "  llm: {} ready", l.name())?,
-            Ok(None) => writeln!(out, "  llm: disabled (cleanup off)")?,
-            Err(e) => writeln!(out, "  llm: FAIL — {e:#}")?,
+            Ok(Some(l)) => writeln!(out, "  llm: {} {}", l.name(), ok("ready"))?,
+            Ok(None) => writeln!(out, "  llm: {}", dim("disabled (cleanup off)"))?,
+            Err(e) => writeln!(out, "  llm: {} {e:#}", bad("FAIL —"))?,
         }
         match fono_assistant::build_assistant(&c.assistant, &secrets) {
-            Ok(Some(a)) => writeln!(out, "  assistant: {} ready", a.name())?,
-            Ok(None) => writeln!(out, "  assistant: disabled (F10 will notify)")?,
-            Err(e) => writeln!(out, "  assistant: FAIL — {e:#}")?,
+            Ok(Some(a)) => writeln!(out, "  assistant: {} {}", a.name(), ok("ready"))?,
+            Ok(None) => writeln!(out, "  assistant: {}", dim("disabled"))?,
+            Err(e) => writeln!(out, "  assistant: {} {e:#}", bad("FAIL —"))?,
         }
         match fono_tts::build_tts(&c.tts, &secrets) {
-            Ok(Some(t)) => writeln!(out, "  tts: {} ready", t.name())?,
-            Ok(None) => writeln!(out, "  tts: disabled (assistant replies will be silent)")?,
-            Err(e) => writeln!(out, "  tts: FAIL — {e:#}")?,
+            Ok(Some(t)) => writeln!(out, "  tts: {} {}", t.name(), ok("ready"))?,
+            Ok(None) => writeln!(out, "  tts: {}", warn("disabled (assistant replies will be silent)"))?,
+            Err(e) => writeln!(out, "  tts: {} {e:#}", bad("FAIL —"))?,
         }
         writeln!(out)?;
 
@@ -165,42 +192,42 @@ pub async fn report(paths: &Paths) -> Result<String> {
         // so users see at a glance which providers are ready to switch
         // to via `fono use stt …` / `fono use llm …`.
         // ------------------------------------------------------------
-        writeln!(out, "Providers (STT):")?;
+        writeln!(out, "{}", head("Providers (STT):"))?;
         for b in fono_core::providers::all_stt_backends() {
             let active = b == c.stt.backend;
-            let mark = if active { "*" } else { " " };
+            let mark = star(active);
             let name = fono_core::providers::stt_backend_str(&b);
             let needs_key = fono_core::providers::stt_requires_key(&b);
             let key_env = fono_core::providers::stt_key_env(&b);
             let key_status = if !needs_key {
-                "no key needed".to_string()
+                dim("no key needed")
             } else if secrets.resolve(key_env).is_some() {
-                format!("{key_env} present")
+                ok(&format!("{key_env} present"))
             } else {
-                format!("{key_env} MISSING")
+                dim(&format!("{key_env} missing"))
             };
             let model = if needs_key {
                 fono_stt::defaults::default_cloud_model(name).to_string()
             } else {
                 c.stt.local.model.clone()
             };
-            writeln!(out, "  {mark} {name:<14} model={model:<32} {key_status}")?;
+            writeln!(out, "  {mark} {name:<14} model: {model:<32} {key_status}")?;
         }
         writeln!(out)?;
 
-        writeln!(out, "Providers (LLM):")?;
+        writeln!(out, "{}", head("Providers (LLM):"))?;
         for b in fono_core::providers::all_llm_backends() {
             let active = b == c.llm.backend;
-            let mark = if active { "*" } else { " " };
+            let mark = star(active);
             let name = fono_core::providers::llm_backend_str(&b);
             let needs_key = fono_core::providers::llm_requires_key(&b);
             let key_env = fono_core::providers::llm_key_env(&b);
             let key_status = if !needs_key {
-                "no key needed".to_string()
+                dim("no key needed")
             } else if secrets.resolve(key_env).is_some() {
-                format!("{key_env} present")
+                ok(&format!("{key_env} present"))
             } else {
-                format!("{key_env} MISSING")
+                dim(&format!("{key_env} missing"))
             };
             let model = if matches!(b, fono_core::config::LlmBackend::None) {
                 "—".to_string()
@@ -209,32 +236,32 @@ pub async fn report(paths: &Paths) -> Result<String> {
             } else {
                 c.llm.local.model.clone()
             };
-            writeln!(out, "  {mark} {name:<14} model={model:<32} {key_status}")?;
+            writeln!(out, "  {mark} {name:<14} model: {model:<32} {key_status}")?;
         }
         writeln!(out)?;
 
-        writeln!(out, "Providers (assistant):")?;
+        writeln!(out, "{}", head("Providers (assistant):"))?;
         for b in fono_core::providers::all_assistant_backends() {
             let active = b == c.assistant.backend;
-            let mark = if active { "*" } else { " " };
+            let mark = star(active);
             let name = fono_core::providers::assistant_backend_str(&b);
             let needs_key = fono_core::providers::assistant_requires_key(&b);
             let key_env = fono_core::providers::assistant_key_env(&b);
             let key_status = if !needs_key {
-                "no key needed".to_string()
+                dim("no key needed")
             } else if secrets.resolve(key_env).is_some() {
-                format!("{key_env} present")
+                ok(&format!("{key_env} present"))
             } else {
-                format!("{key_env} MISSING")
+                dim(&format!("{key_env} missing"))
             };
             writeln!(out, "  {mark} {name:<14} {key_status}")?;
         }
         writeln!(out)?;
 
-        writeln!(out, "Providers (TTS):")?;
+        writeln!(out, "{}", head("Providers (TTS):"))?;
         for b in fono_core::providers::all_tts_backends() {
             let active = b == c.tts.backend;
-            let mark = if active { "*" } else { " " };
+            let mark = star(active);
             let name = fono_core::providers::tts_backend_str(&b);
             let needs_key = fono_core::providers::tts_requires_key(&b);
             let key_env = fono_core::providers::tts_key_env(&b);
@@ -244,19 +271,19 @@ pub async fn report(paths: &Paths) -> Result<String> {
                     .wyoming
                     .as_ref()
                     .map(|w| format!("uri={}", w.uri))
-                    .unwrap_or_else(|| "uri=(unset)".to_string()),
+                    .unwrap_or_else(|| dim("uri=(unset)")),
                 fono_core::config::TtsBackend::OpenAI
                 | fono_core::config::TtsBackend::Groq
                 | fono_core::config::TtsBackend::OpenRouter
                 | fono_core::config::TtsBackend::Cartesia
                 | fono_core::config::TtsBackend::Deepgram => {
                     if secrets.resolve(key_env).is_some() {
-                        format!("{key_env} present")
+                        ok(&format!("{key_env} present"))
                     } else {
-                        format!("{key_env} MISSING")
+                        dim(&format!("{key_env} missing"))
                     }
                 }
-                fono_core::config::TtsBackend::None => "—".to_string(),
+                fono_core::config::TtsBackend::None => dim("—"),
             };
             let _ = needs_key;
             writeln!(out, "  {mark} {name:<14} {extra}")?;
@@ -269,7 +296,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
         writeln!(out)?;
     }
 
-    writeln!(out, "Session:")?;
+    writeln!(out, "{}", head("Session:"))?;
     writeln!(
         out,
         "  XDG_SESSION_TYPE : {}",
@@ -287,7 +314,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
     )?;
     writeln!(out)?;
 
-    writeln!(out, "Audio stack : {:?}", fono_audio::mute::detect())?;
+    writeln!(out, "{} {:?}", head("Audio stack :"), fono_audio::mute::detect())?;
     // Input device matrix: list every device the active stack
     // (PulseAudio / PipeWire via pactl, or cpal as fallback) reports,
     // marking whichever the OS currently considers default. Fono no
@@ -295,16 +322,16 @@ pub async fn report(paths: &Paths) -> Result<String> {
     // selection is delegated to the OS layer (pavucontrol / GNOME /
     // KDE settings on Linux, Sound preferences on macOS / Windows).
     let devices = fono_audio::devices::list_input_devices();
-    writeln!(out, "Audio inputs:")?;
+    writeln!(out, "{}", head("Audio inputs:"))?;
     if devices.is_empty() {
         writeln!(
             out,
-            "  (no input devices reported — check pactl / cpal permissions, \
-             or that your microphone is plugged in)"
+            "  {}",
+            bad("(no input devices reported — check pactl / cpal permissions, or that your microphone is plugged in)")
         )?;
     } else {
         for d in &devices {
-            let mark = if d.is_default { "*" } else { " " };
+            let mark = star(d.is_default);
             writeln!(out, "  {mark} {}", d.display_name)?;
         }
         writeln!(
@@ -314,7 +341,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
         )?;
     }
     let injector = fono_inject::inject::Injector::detect();
-    writeln!(out, "Injector    : {injector:?}")?;
+    writeln!(out, "{} {injector:?}", head("Injector    :"))?;
     // Show the configured XTEST paste shortcut so users can confirm
     // it before reporting "doesn't paste in app X".
     let shortcut_label = fono_inject::PasteShortcut::from_env_or_default().label();
@@ -325,7 +352,8 @@ pub async fn report(paths: &Paths) -> Result<String> {
     let env_value = std::env::var("FONO_PASTE_SHORTCUT").ok();
     writeln!(
         out,
-        "Paste keys  : {shortcut_label} (config={cfg_value:?} env={env_value:?})"
+        "{} {shortcut_label} (config={cfg_value:?} env={env_value:?})",
+        head("Paste keys  :"),
     )?;
     // Clipboard fallback — fono copies the cleaned text here when no
     // key-injection backend works, so the dictation is never lost.
@@ -338,24 +366,65 @@ pub async fn report(paths: &Paths) -> Result<String> {
     if clip_tools.is_empty() {
         writeln!(
             out,
-            "Clipboard   : NONE (install one of: wl-clipboard, xclip, xsel — \
-             without these, dictation cannot be recovered when key injection fails)"
+            "{} {}",
+            head("Clipboard   :"),
+            bad("NONE (install one of: wl-clipboard, xclip, xsel — without these, dictation cannot be recovered when key injection fails)")
         )?;
     } else {
-        writeln!(out, "Clipboard   : {} (fallback)", clip_tools.join(", "))?;
+        writeln!(out, "{} {} {}", head("Clipboard   :"), clip_tools.join(", "), dim("(fallback)"))?;
     }
     writeln!(
         out,
-        "IPC socket  : {} ({})",
+        "{} {} ({})",
+        head("IPC socket  :"),
         paths.ipc_socket().display(),
         if paths.ipc_socket().exists() {
-            "exists"
+            ok("exists")
         } else {
-            "absent"
+            warn("absent")
         }
     )?;
 
+    writeln!(out)?;
+    writeln!(out, "{} ({}):", head("Log tail"), paths.log_file().display())?;
+    match tail_log(&paths.log_file(), 10) {
+        Ok(lines) if lines.is_empty() => writeln!(out, "  {}", dim("(log is empty)"))?,
+        Ok(lines) => {
+            for line in lines {
+                writeln!(out, "  {line}")?;
+            }
+        }
+        Err(e) => writeln!(out, "  {} {e}", bad("(cannot read log:"))?,
+    }
+
     Ok(out)
+}
+
+/// Read up to the last `n` lines of `path`. Preserves embedded ANSI.
+fn tail_log(path: &std::path::Path, n: usize) -> std::io::Result<Vec<String>> {
+    let data = std::fs::read_to_string(path)?;
+    let lines: Vec<&str> = data.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    Ok(lines[start..].iter().map(|s| (*s).to_string()).collect())
+}
+
+/// `fono doctor -f`: stream the log file forever via `tail -f`.
+/// ANSI escapes pass through to the terminal unchanged.
+pub async fn follow_log(paths: &Paths) -> Result<()> {
+    let path = paths.log_file();
+    println!();
+    println!("Following {} (Ctrl-C to stop):", path.display());
+    let status = tokio::process::Command::new("tail")
+        .arg("-n")
+        .arg("0")
+        .arg("-F")
+        .arg(&path)
+        .status()
+        .await?;
+    if !status.success() {
+        anyhow::bail!("tail exited with {status}");
+    }
+    Ok(())
 }
 
 /// Best-effort PATH lookup; mirrors fono-inject's `which` so doctor

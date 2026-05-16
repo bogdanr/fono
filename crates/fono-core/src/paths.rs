@@ -15,6 +15,9 @@ pub const APP_NAME: &str = "fono";
 /// without needing `XDG_STATE_HOME` overrides.
 pub const SYSTEM_IPC_SOCKET: &str = "/var/lib/fono/fono.sock";
 
+/// Canonical log file. Single-user-box assumption (see `log_file()`).
+pub const LOG_FILE: &str = "/var/log/fono.log";
+
 /// Resolved absolute paths for every file Fono touches.
 #[derive(Debug, Clone)]
 pub struct Paths {
@@ -115,9 +118,12 @@ impl Paths {
         }
     }
 
+    /// Single shared log file. Single-user-box assumption: one
+    /// canonical path, world-writable so any fono process (XDG
+    /// autostart, manual `fono`, `sudo fono`) can append to it.
     #[must_use]
     pub fn log_file(&self) -> PathBuf {
-        self.state_dir.join("fono.log")
+        PathBuf::from(LOG_FILE)
     }
 
     #[must_use]

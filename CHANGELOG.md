@@ -37,14 +37,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      `packaging/install.sh` re-attaches `</dev/tty` to the install
      invocation under the `curl | sh` transport so the wizard's
      stdin still has a real terminal when curl is piping the script
-     in. Each step now reports a precise outcome (started / setup
-     completed / skipped because headless / spawn failed) so users
-     always know exactly what happened. Skipped on headless boxes
-     (no `DISPLAY`/`WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR`) and
-     bypassable with `FONO_INSTALL_NO_START=1` for packagers and CI.
-     The XDG autostart entry still handles next-login start. The
-     server-mode install path is unchanged — systemd's
-     `systemctl enable --now` was already starting the unit.
+     in. The backgrounded daemon's stdout/stderr now append to
+     `$XDG_STATE_HOME/fono/fono.log` (typically
+     `~/.local/state/fono/fono.log`, or `/root/.local/state/fono/fono.log`
+     for the bare-root install path) — matching `Paths::log_file()`
+     so `tail -f` and what fono itself considers its log path are the
+     same file. Previously the spawn redirected to `/dev/null`, which
+     made post-install troubleshooting needlessly hard. Each step now
+     reports a precise outcome (started / setup completed / skipped
+     because headless / spawn failed) so users always know exactly
+     what happened. Skipped on headless boxes (no
+     `DISPLAY`/`WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR`) and bypassable
+     with `FONO_INSTALL_NO_START=1` for packagers and CI. The XDG
+     autostart entry still handles next-login start. The server-mode
+     install path is unchanged — systemd's `systemctl enable --now`
+     was already starting the unit (logs via `journalctl -u
+     fono.service`).
   2. The daemon now fires a single low-urgency desktop notification
      on startup when no TTS backend is configured, prompting the user
      to run `fono setup`. Once per process; suppressed once setup
@@ -63,6 +71,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `packaging/install.sh` is now the canonical source for the
   `https://fono.page/install` one-liner and lives next to the binary
   it ships.
+
+- **Unified log file at `/var/log/fono.log`.** Single-user-box
+  convention: every fono process writes there (world-writable 0666,
+  pre-created by `fono install`). `Paths::log_file()` now points at
+  that path. The daemon's `tracing` formatter forces ANSI on, so the
+  file preserves colors. `fono doctor` appends the last 10 log lines
+  to its report; `fono doctor -f` (or `--follow`) streams the file in
+  real time via `tail -F`, ANSI escapes intact. The background spawn
+  in `fono install` falls back to `/dev/null` if `/var/log/fono.log`
+  is not writable, so a permissions hiccup never blocks startup.
+
+- **Colorized `fono doctor` output.** Section headers in bold cyan,
+  `ready` / `present` / `exists` in green, `FAIL` / `MISSING` /
+  `FAILED TO LOAD` / `NONE` in bold red, `disabled` / `(unset)` /
+  `(fallback)` dimmed, active-provider `*` highlighted. Auto-disabled
+  when stdout is not a TTY (pipes, redirects, CI) and when `NO_COLOR`
+  is set, so scripts parsing the output remain unaffected.
 
 ### Fixed
 

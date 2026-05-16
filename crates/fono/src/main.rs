@@ -101,6 +101,7 @@ fn init_tracing(verbosity: cli::Verbosity) {
         .unwrap_or_else(|_| Targets::new().with_default(LevelFilter::INFO));
 
     let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(true)
         .with_target(verbosity.is_trace())
         .with_file(verbosity.is_trace())
         .with_line_number(verbosity.is_trace());

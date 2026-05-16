@@ -184,7 +184,11 @@ pub enum Cmd {
     /// Re-run the first-run setup wizard.
     Setup,
     /// Print a diagnostic report (config, paths, providers, audio).
-    Doctor,
+    Doctor {
+        /// Follow the log file (like `tail -f`); colors preserved.
+        #[arg(short = 'f', long = "follow")]
+        follow: bool,
+    },
     /// Type literal text to verify the inject + clipboard pipeline.
     ///
     /// Bypasses audio, STT, and LLM. Use this to confirm text can
@@ -459,9 +463,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             };
             ipc_simple(&paths, req).await
         }
-        Some(Cmd::Doctor) => {
+        Some(Cmd::Doctor { follow }) => {
             let report = doctor::report(&paths).await?;
             println!("{report}");
+            if follow {
+                doctor::follow_log(&paths).await?;
+            }
             Ok(())
         }
         Some(Cmd::TestInject {

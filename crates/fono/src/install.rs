@@ -522,20 +522,13 @@ fn run_install_desktop() -> Result<()> {
     marker.save(Path::new(MARKER_PATH))?;
     eprintln!("  · {MARKER_PATH}");
 
-    // Best-effort auto-start so users don't have to re-login or open a
-    // terminal after `curl … | sh` (or `sudo fono install`). The
-    // XDG autostart entry above is the durable mechanism for *next*
-    // login; this just covers the current session.
-    //
-    // Constraints:
-    //   - `fono install` is invoked as root via sudo, but fono itself
-    //     must run as the user (per-user config, audio session, X11
-    //     access).
-    //   - We can only launch on a graphical session — headless boxes
-    //     that ran `fono install` (no `--server`) just get the
-    //     autostart entry and a printed hint.
-    //   - The opt-out `FONO_INSTALL_NO_START=1` lets packagers and
-    //     scripted CI install runs skip the launch.
+    // Pre-create the shared log file 0666 so any fono process (XDG
+    // autostart, manual `fono`, `sudo fono`) can append. Single-user
+    // box; failure is non-fatal.
+    if let Err(e) = ensure_log_file() {
+        tracing::warn!("could not pre-create {}: {e}", fono_core::paths::LOG_FILE);
+    }
+
     let no_start = std::env::var_os("FONO_INSTALL_NO_START").is_some_and(|v| v == "1");
     let autostart_outcome = if no_start {
         AutostartOutcome::SkippedByEnv
@@ -627,15 +620,9 @@ enum SetupOutcome {
     SpawnFailed,
 }
 
-/// Resolve the target user for the post-install daemon launch and
-/// wizard. Prefers `$SUDO_USER` (set by `sudo` to the human who
-/// invoked it) and falls back to `root` when running as bare root —
-/// the operator deliberately chose that, and fono is allowed to run
-/// as root if that's what they want.
-///
-/// Returns `None` for the (rare) non-root, non-sudo case so callers
-/// can short-circuit; `require_root()` rejects that path before we
-/// get here, so in practice this only happens in tests.
+/// Target user for the post-install spawn: `$SUDO_USER` if set,
+/// otherwise `root` when we're already root, otherwise `None`
+/// (unreachable past `require_root()`, kept for tests).
 fn resolve_target_user() -> Option<String> {
     if let Some(v) = std::env::var_os("SUDO_USER") {
         let s = v.to_string_lossy().into_owned();
@@ -649,27 +636,23 @@ fn resolve_target_user() -> Option<String> {
     None
 }
 
-/// Best-effort: launch `fono` in the background as the target user.
-///
-/// When the target is a regular user (sudo case) we use
-/// `runuser`/`sudo -u` with `setsid` detachment. When the target is
-/// `root` (bare-root install) we spawn `fono` directly with `setsid`
-/// — no privilege drop, no per-user proxy needed. Either way the
-/// child is fully detached from the install process's session so it
-/// survives `fono install` exiting.
+/// Create `/var/log/fono.log` 0666 so any user can append to it.
+fn ensure_log_file() -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = fono_core::paths::LOG_FILE;
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))
+}
+
+/// Spawn `fono` in the background as the target user. Logs append to
+/// `/var/log/fono.log` if writable, else `/dev/null`.
 fn try_autostart_for_sudo_user() -> AutostartOutcome {
     let Some(user) = resolve_target_user() else {
         return AutostartOutcome::SpawnFailed;
     };
-
-    // Some hint that this is a graphical install. Sudo strips most
-    // env vars, but `DISPLAY` and `WAYLAND_DISPLAY` are commonly
-    // preserved (or re-injected by `sudo -E`). If none of the three
-    // graphical-session env vars are set we assume the caller is on
-    // a headless box and skip the launch — that user would want
-    // `--server` mode anyway. The check is the same for the
-    // `root` target so a root user on a headless host still gets
-    // the Headless message instead of a spawned-but-useless daemon.
     let has_graphical_env = std::env::var_os("DISPLAY").is_some()
         || std::env::var_os("WAYLAND_DISPLAY").is_some()
         || std::env::var_os("XDG_RUNTIME_DIR").is_some();
@@ -677,10 +660,11 @@ fn try_autostart_for_sudo_user() -> AutostartOutcome {
         return AutostartOutcome::Headless;
     }
 
-    // `setsid fono &` detaches fono from the install process's session
-    // so it survives `sudo fono install` exiting. Wrapped in `sh -c`
-    // so the `&` is interpreted as a shell background.
-    let shell_cmd = "setsid fono </dev/null >/dev/null 2>&1 &";
+    let log = fono_core::paths::LOG_FILE;
+    let shell_cmd = format!(
+        "LOG={log}; [ -w \"$LOG\" ] || LOG=/dev/null; \
+         setsid fono </dev/null >>\"$LOG\" 2>&1 &"
+    );
     let spawn = |prog: &str, args: &[&str]| -> bool {
         Command::new(prog)
             .args(args)
@@ -691,63 +675,45 @@ fn try_autostart_for_sudo_user() -> AutostartOutcome {
             .is_ok()
     };
 
-    // Bare-root target: spawn directly — no runuser/sudo round-trip.
+    let started_msg = |who: &str| eprintln!("  · started fono as `{who}` (logs: {log})");
+
     if user == "root" {
-        if spawn("sh", &["-c", shell_cmd]) {
-            eprintln!("  · started fono as root (background)");
+        if spawn("sh", &["-c", &shell_cmd]) {
+            started_msg(&user);
             return AutostartOutcome::Started(user);
         }
         return AutostartOutcome::SpawnFailed;
     }
-
-    if which_in_path("runuser") && spawn("runuser", &["-u", &user, "--", "sh", "-c", shell_cmd]) {
-        eprintln!("  · started fono for user `{user}` (background)");
+    if which_in_path("runuser") && spawn("runuser", &["-u", &user, "--", "sh", "-c", &shell_cmd]) {
+        started_msg(&user);
         return AutostartOutcome::Started(user);
     }
-    if which_in_path("sudo") && spawn("sudo", &["-u", &user, "sh", "-c", shell_cmd]) {
-        eprintln!("  · started fono for user `{user}` (background)");
+    if which_in_path("sudo") && spawn("sudo", &["-u", &user, "sh", "-c", &shell_cmd]) {
+        started_msg(&user);
         return AutostartOutcome::Started(user);
     }
-    tracing::warn!(
-        "could not auto-start fono for user `{user}` (neither runuser nor sudo available)"
-    );
     AutostartOutcome::SpawnFailed
 }
 
-/// Best-effort: run `fono setup` as the target user, attached to the
-/// controlling TTY so its prompts actually reach the operator.
-///
-/// Two cases:
-///   - `$SUDO_USER` is set: invoke via `runuser -u $SUDO_USER -- fono
-///     setup` (or `sudo -u …` fallback). The wizard inherits parent
-///     stdio, so its prompts use the same terminal that `sudo fono
-///     install` was running in. Writes config under that user's home.
-///   - Bare root: invoke `fono setup` directly. The wizard writes
-///     under root's home (`/root/.config/fono/`), matching the
-///     deliberate "I want fono as root" choice the operator made.
-///
-/// In both cases the call is synchronous — we wait for setup to
-/// complete before returning.
+/// Run `fono setup` synchronously as the target user, inheriting stdio
+/// so the wizard prompts the user on the current terminal.
 fn try_run_setup_for_sudo_user() -> SetupOutcome {
     use std::io::IsTerminal;
 
     let Some(user) = resolve_target_user() else {
         return SetupOutcome::SpawnFailed;
     };
-
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return SetupOutcome::NotInteractive;
     }
 
     let bin = BIN_PATH;
     eprintln!();
-    eprintln!("→ launching `fono setup` for user `{user}`");
+    eprintln!("→ launching `fono setup` as `{user}`");
 
     let run_status = |prog: &str, args: &[&str]| -> Option<std::process::ExitStatus> {
         Command::new(prog)
             .args(args)
-            // Inherit stdio so the wizard's prompts reach the user's
-            // terminal and their typed answers reach the wizard.
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
@@ -755,23 +721,17 @@ fn try_run_setup_for_sudo_user() -> SetupOutcome {
             .ok()
     };
 
-    // Bare-root target: invoke setup directly in this process's TTY.
     if user == "root" {
-        if let Some(s) = run_status(bin, &["setup"]) {
-            if s.success() {
-                return SetupOutcome::Completed;
-            }
-            tracing::warn!("fono setup (as root) exited non-zero: {s}");
-        }
-        return SetupOutcome::SpawnFailed;
+        return match run_status(bin, &["setup"]) {
+            Some(s) if s.success() => SetupOutcome::Completed,
+            _ => SetupOutcome::SpawnFailed,
+        };
     }
-
     if which_in_path("runuser") {
         if let Some(s) = run_status("runuser", &["-u", &user, "--", bin, "setup"]) {
             if s.success() {
                 return SetupOutcome::Completed;
             }
-            tracing::warn!("runuser fono setup exited non-zero: {s}");
         }
     }
     if which_in_path("sudo") {
@@ -779,7 +739,6 @@ fn try_run_setup_for_sudo_user() -> SetupOutcome {
             if s.success() {
                 return SetupOutcome::Completed;
             }
-            tracing::warn!("sudo -u {user} fono setup exited non-zero: {s}");
         }
     }
     SetupOutcome::SpawnFailed
