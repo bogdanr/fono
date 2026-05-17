@@ -222,9 +222,16 @@ jobs:
             echo "deb [signed-by=/usr/share/keyrings/lunarg.gpg] https://packages.lunarg.com/vulkan jammy main" \
               | sudo tee /etc/apt/sources.list.d/lunarg-vulkan.list >/dev/null
             sudo apt-get update -qq
-            sudo apt-get install -y -qq glslang-tools libvulkan-dev shaderc
+            # LunarG splits headers out of libvulkan-dev (which on
+            # their repo is a tiny ~100 KB loader-dev stub); the actual
+            # Vulkan headers live in `vulkan-headers`. Without it,
+            # CMake's FindVulkan fails with
+            # `missing: Vulkan_INCLUDE_DIR`.
+            sudo apt-get install -y -qq \
+              vulkan-headers libvulkan-dev glslang-tools shaderc
             command -v glslc
             glslc --version | head -1
+            ls /usr/include/vulkan/vulkan.h
           fi
 
       - uses: Swatinem/rust-cache@v2
