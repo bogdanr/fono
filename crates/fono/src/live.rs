@@ -12,7 +12,7 @@
 //! emits [`fono_hotkey::HotkeyEvent::StartLiveDictation`].
 //!
 //! Slice A intentionally keeps this module thin: a daemon that wants to
-//! support both batch and live mode reads `cfg.interactive.enabled` at
+//! support both batch and live mode reads `cfg.live_preview()` at
 //! start / on `Reload`; if true *and* this module is compiled in, it
 //! routes hotkey actions to the `LiveHold*` / `LiveToggle*` variants.
 //! Otherwise the existing batch path runs unchanged. The behaviour

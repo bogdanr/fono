@@ -1601,7 +1601,7 @@ async fn record_cmd_live(
         Arc::new(fono_stt::whisper_local::WhisperLocal::new(model_path));
 
     // Open the overlay; tolerate failure gracefully (headless / hostile compositor).
-    let overlay = match RealOverlay::spawn() {
+    let overlay = match RealOverlay::spawn(fono_core::config::WaveformStyle::Transcript) {
         Ok(h) => Some(h),
         Err(e) => {
             eprintln!("fono record --live: overlay unavailable ({e:#}); continuing without it");
@@ -1712,7 +1712,7 @@ fn test_overlay_cmd() {
     use fono_overlay::{OverlayState, RealOverlay};
 
     println!("fono test-overlay: spawning real overlay window…");
-    let handle = match RealOverlay::spawn() {
+    let handle = match RealOverlay::spawn(fono_core::config::WaveformStyle::default()) {
         Ok(h) => h,
         Err(e) => {
             println!("test-overlay: overlay failed to spawn: {e:#}");

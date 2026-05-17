@@ -42,13 +42,11 @@ use fono_core::config::WaveformStyle;
 
 use crate::OverlayState;
 
-/// How the overlay window renders the `Recording` state. `Text` keeps
-/// the existing transcript-style panel; `Waveform(style)` swaps the
-/// transcript area for an audio visualisation.
-#[derive(Debug, Clone, Copy)]
-enum OverlayMode {
-    Text,
-    Waveform(WaveformStyle),
+/// True when the chosen [`WaveformStyle`] renders the transcript
+/// text panel rather than an audio visualisation. Only `Transcript`
+/// is a text-mode style; the other four are passive visualisations.
+fn is_text_style(style: WaveformStyle) -> bool {
+    style.requires_streaming()
 }
 
 /// Ring-buffer caps. 60 levels = 2 s at the 33 ms ticker cadence;
@@ -79,19 +77,15 @@ enum OverlayCmd {
     /// Toggle the right-side VU bar on the live-dictation panel.
     /// Pushed at startup once `Config.overlay.volume_bar` is known.
     SetVolumeBar(bool),
-    /// Swap the waveform style at runtime so a `[overlay].style`
-    /// config edit (or tray "Waveform style" pick) takes effect
-    /// without a daemon restart. No-op when the overlay was spawned
-    /// in `Text` mode; the visualisation overlay only switches
-    /// between waveform variants.
+    /// Swap the visualisation style at runtime so a `[overlay].style`
+    /// config edit (or tray "Style" pick) takes effect without a
+    /// daemon restart. Handles transitions between the four passive
+    /// styles AND between any passive style and `Transcript` — the
+    /// handler clears stale ring buffers / text on every direction.
+    /// winit forbids a second `EventLoop` per process so the overlay
+    /// window is single-shot for the daemon's lifetime; this command
+    /// is how `reload()` keeps the rendering in sync with config.
     SetWaveformStyle(WaveformStyle),
-    /// Swap the rendering mode at runtime. Used by `reload()` after a
-    /// `[interactive].enabled` flip so the live-dictation/text panel
-    /// and the standalone waveform panel can switch back and forth
-    /// without tearing down the winit event loop (winit forbids a
-    /// second `EventLoop` per process, so the overlay is single-shot
-    /// for the daemon's lifetime).
-    SetMode(OverlayMode),
     Shutdown,
 }
 
@@ -153,29 +147,16 @@ impl OverlayHandle {
         self.send(OverlayCmd::SetVolumeBar(enabled));
     }
 
-    /// Swap the active waveform style at runtime. No-op when the
-    /// overlay was spawned in `Text` mode (live-dictation overlay).
-    /// Pushed by the orchestrator's `reload()` after a
-    /// `[overlay].style` config change so the visualisation
-    /// switches without a daemon restart.
+    /// Swap the active visualisation style at runtime. The single
+    /// runtime control for switching between any of the five styles
+    /// (Bars / Oscilloscope / FFT / Heatmap / Transcript). Pushed by
+    /// the orchestrator's `reload()` after a `[overlay].style`
+    /// config change so the visualisation switches without a daemon
+    /// restart. Cross-style transitions clear stale state (ring
+    /// buffers when leaving a waveform; cached text when leaving
+    /// Transcript) so the next frame starts clean.
     pub fn set_waveform_style(&self, style: WaveformStyle) {
         self.send(OverlayCmd::SetWaveformStyle(style));
-    }
-
-    /// Switch to the live-dictation text panel. Drops any cached
-    /// audio frames / waveform state so the new panel starts clean.
-    /// Idempotent — sending while already in text mode is a no-op.
-    pub fn enable_text_mode(&self) {
-        self.send(OverlayCmd::SetMode(OverlayMode::Text));
-    }
-
-    /// Switch to the standalone waveform-visualisation panel with
-    /// the given style. Drops any cached transcript text so the
-    /// panel doesn't briefly flash a stale line as it switches.
-    /// Idempotent — sending while already in the same mode is a
-    /// no-op.
-    pub fn enable_waveform_mode(&self, style: WaveformStyle) {
-        self.send(OverlayCmd::SetMode(OverlayMode::Waveform(style)));
     }
 
     /// Stop the overlay and join its thread. Idempotent.
@@ -193,25 +174,17 @@ impl OverlayHandle {
 pub struct RealOverlay;
 
 impl RealOverlay {
-    /// Spawn the standard text-based overlay used by live dictation.
-    /// `Recording` state shows the existing wrapped-transcript panel.
-    pub fn spawn() -> std::io::Result<OverlayHandle> {
-        Self::spawn_with_mode(OverlayMode::Text)
-    }
-
-    /// Spawn the standalone audio-visualisation overlay used during
-    /// batch recording. `Recording` state renders the requested
-    /// waveform style instead of transcript text.
-    pub fn spawn_waveform(style: WaveformStyle) -> std::io::Result<OverlayHandle> {
-        Self::spawn_with_mode(OverlayMode::Waveform(style))
-    }
-
-    fn spawn_with_mode(mode: OverlayMode) -> std::io::Result<OverlayHandle> {
+    /// Spawn the overlay window for the given visualisation style.
+    /// `Transcript` renders the streaming text panel; the four
+    /// waveform styles render their respective audio visualisations.
+    /// Style can be swapped at runtime via
+    /// [`OverlayHandle::set_waveform_style`].
+    pub fn spawn(style: WaveformStyle) -> std::io::Result<OverlayHandle> {
         let (tx, rx) = channel::<OverlayCmd>();
         let (proxy_tx, proxy_rx) =
             std::sync::mpsc::channel::<Result<winit::event_loop::EventLoopProxy<()>, String>>();
         let join = std::thread::Builder::new().name("fono-overlay".into()).spawn(move || {
-            if let Err(e) = run_event_loop(rx, proxy_tx, mode) {
+            if let Err(e) = run_event_loop(rx, proxy_tx, style) {
                 tracing::warn!("overlay: event loop ended with error: {e:#}");
             }
         })?;
@@ -1242,7 +1215,7 @@ fn target_height(n_lines: usize) -> f32 {
 fn run_event_loop(
     rx: std::sync::mpsc::Receiver<OverlayCmd>,
     proxy_tx: std::sync::mpsc::Sender<Result<winit::event_loop::EventLoopProxy<()>, String>>,
-    mode: OverlayMode,
+    style: WaveformStyle,
 ) -> Result<(), String> {
     use std::num::NonZeroU32;
     use winit::application::ApplicationHandler;
@@ -1293,9 +1266,11 @@ fn run_event_loop(
         /// Cached wrapping for the current `text`; recomputed when
         /// text changes.
         wrapped: Vec<String>,
-        /// Whether this overlay was spawned as a standalone waveform
-        /// (and which style) or the regular text panel.
-        mode: OverlayMode,
+        /// Active visualisation style. `Transcript` renders the
+        /// streaming-text panel; the other variants render their
+        /// respective audio visualisations. Swapped at runtime via
+        /// [`OverlayCmd::SetWaveformStyle`].
+        style: WaveformStyle,
         /// Show the right-side VU bar during `LiveDictating`. Toggled
         /// at startup via `set_volume_bar`; default off so the slim
         /// path (and pre-config-load window) matches existing layout.
@@ -1330,10 +1305,8 @@ fn run_event_loop(
             if self.window.is_some() {
                 return;
             }
-            let initial_h = match self.mode {
-                OverlayMode::Text => WIN_MIN_HEIGHT,
-                OverlayMode::Waveform(_) => WIN_WAVEFORM_HEIGHT,
-            };
+            let initial_h =
+                if is_text_style(self.style) { WIN_MIN_HEIGHT } else { WIN_WAVEFORM_HEIGHT };
             let attrs = Window::default_attributes()
                 .with_title("Fono")
                 .with_decorations(false)
@@ -1475,7 +1448,7 @@ fn run_event_loop(
                         while self.osc_samples.len() > OSC_SAMPLES_CAP {
                             self.osc_samples.pop_front();
                         }
-                        if matches!(self.mode, OverlayMode::Waveform(WaveformStyle::Oscilloscope))
+                        if matches!(self.style, WaveformStyle::Oscilloscope)
                             && self.window.is_some()
                             && !matches!(self.state, OverlayState::Hidden)
                         {
@@ -1492,7 +1465,7 @@ fn run_event_loop(
                         // memcpy it straight into the framebuffer
                         // instead of re-walking `cols × rows` per
                         // frame.
-                        if matches!(self.mode, OverlayMode::Waveform(WaveformStyle::Heatmap),) {
+                        if matches!(self.style, WaveformStyle::Heatmap) {
                             if let Some(window) = self.window.as_ref() {
                                 let scale = window.scale_factor() as f32;
                                 let size = window.inner_size();
@@ -1526,16 +1499,15 @@ fn run_event_loop(
                         // fft_frames during thinking — without this
                         // arm the bars sat on a stale frame after
                         // F10 release).
-                        let consumes_fft = matches!(
-                            self.mode,
-                            OverlayMode::Waveform(WaveformStyle::Fft | WaveformStyle::Heatmap)
-                        ) || matches!(
-                            (self.mode, self.state),
-                            (
-                                OverlayMode::Waveform(WaveformStyle::Bars),
-                                OverlayState::AssistantThinking | OverlayState::Polishing
-                            )
-                        );
+                        let consumes_fft =
+                            matches!(self.style, WaveformStyle::Fft | WaveformStyle::Heatmap)
+                                || matches!(
+                                    (self.style, self.state),
+                                    (
+                                        WaveformStyle::Bars,
+                                        OverlayState::AssistantThinking | OverlayState::Polishing
+                                    )
+                                );
                         if consumes_fft
                             && self.window.is_some()
                             && !matches!(self.state, OverlayState::Hidden)
@@ -1544,36 +1516,13 @@ fn run_event_loop(
                         }
                     }
                     OverlayCmd::SetWaveformStyle(style) => {
-                        // Only swap when this overlay is in
-                        // `Waveform` mode and the style actually
-                        // differs. Don't promote a `Text` overlay
-                        // (live-dictation) into `Waveform` — the
-                        // window geometry / text wrapping was sized
-                        // for one or the other at spawn time.
-                        if let OverlayMode::Waveform(current) = self.mode {
-                            if current != style {
-                                self.mode = OverlayMode::Waveform(style);
-                                if self.window.is_some()
-                                    && !matches!(self.state, OverlayState::Hidden)
-                                {
-                                    needs_redraw = true;
-                                }
-                                tracing::debug!("overlay: waveform style -> {style:?}");
-                            }
-                        }
-                    }
-                    OverlayCmd::SetMode(mode) => {
                         // Idempotent on no-change so reload() can
                         // fire this unconditionally without flicker.
-                        let same =
-                            matches!((self.mode, mode), (OverlayMode::Text, OverlayMode::Text))
-                                || matches!(
-                                    (self.mode, mode),
-                                    (OverlayMode::Waveform(a), OverlayMode::Waveform(b)) if a == b
-                                );
-                        if !same {
-                            self.mode = mode;
-                            // Drop cross-mode stale data: a stale
+                        if self.style != style {
+                            let crossed_text_boundary =
+                                is_text_style(self.style) != is_text_style(style);
+                            self.style = style;
+                            // Drop cross-style stale data: a stale
                             // transcript line or a frozen FFT frame
                             // would briefly flash on the new panel
                             // before the producer catches up.
@@ -1584,11 +1533,17 @@ fn run_event_loop(
                             self.fft_frames.clear();
                             self.heatmap_cache.clear();
                             self.heatmap_cache_dim = (0, 0);
-                            if self.window.is_some() {
+                            if self.window.is_some() && !matches!(self.state, OverlayState::Hidden)
+                            {
                                 needs_redraw = true;
-                                needs_resize = true;
+                                // Only resize when crossing the text
+                                // ↔ waveform boundary; intra-waveform
+                                // swaps keep the same window height.
+                                if crossed_text_boundary {
+                                    needs_resize = true;
+                                }
                             }
-                            tracing::debug!("overlay: mode -> {mode:?}");
+                            tracing::debug!("overlay: style -> {style:?}");
                         }
                     }
                     OverlayCmd::SetVolumeBar(enabled) => {
@@ -1621,9 +1576,10 @@ fn run_event_loop(
             }
             if needs_resize {
                 if let Some(w) = self.window.as_ref() {
-                    let h = match self.mode {
-                        OverlayMode::Text => target_height(self.wrapped.len()),
-                        OverlayMode::Waveform(_) => WIN_WAVEFORM_HEIGHT,
+                    let h = if is_text_style(self.style) {
+                        target_height(self.wrapped.len())
+                    } else {
+                        WIN_WAVEFORM_HEIGHT
                     };
                     let _ = w.request_inner_size(winit::dpi::LogicalSize::new(WIN_WIDTH, h));
                     // Re-position so the overlay still hugs the bottom
@@ -1716,194 +1672,193 @@ fn run_event_loop(
             }
             // Content area.
             let text_top = pad_top + STATUS_FONT_PX * scale + STATUS_TO_TEXT * scale;
-            match app.mode {
-                OverlayMode::Waveform(style)
-                    if matches!(
-                        app.state,
-                        OverlayState::Recording { .. }
-                            | OverlayState::AssistantRecording { .. }
-                            | OverlayState::AssistantThinking
-                            | OverlayState::Polishing
-                    ) =>
-                {
-                    let x0 = (PADDING_X + ACCENT_WIDTH) * scale;
-                    let x1 = w as f32 - PADDING_X * scale;
-                    let y_top = text_top;
-                    let y_bot = h as f32 - PADDING_BOT * scale;
-                    let thinking = matches!(
-                        app.state,
-                        OverlayState::AssistantThinking | OverlayState::Polishing
-                    );
-                    match style {
-                        // During AssistantThinking the orchestrator
-                        // pushes a per-bar profile via fft_frames
-                        // (Symmetric Centre-Out shape); render the
-                        // latest profile directly rather than the
-                        // levels ring.
-                        WaveformStyle::Bars if thinking => {
-                            if let Some(profile) = app.fft_frames.back() {
-                                draw_waveform_bars_from_profile(
-                                    &mut buf, w, h, profile, x0, x1, y_top, y_bot, accent, scale,
-                                );
-                            }
+            let waveform_active = !is_text_style(app.style)
+                && matches!(
+                    app.state,
+                    OverlayState::Recording { .. }
+                        | OverlayState::AssistantRecording { .. }
+                        | OverlayState::AssistantThinking
+                        | OverlayState::Polishing
+                );
+            if waveform_active {
+                let x0 = (PADDING_X + ACCENT_WIDTH) * scale;
+                let x1 = w as f32 - PADDING_X * scale;
+                let y_top = text_top;
+                let y_bot = h as f32 - PADDING_BOT * scale;
+                let thinking =
+                    matches!(app.state, OverlayState::AssistantThinking | OverlayState::Polishing);
+                match app.style {
+                    // During AssistantThinking the orchestrator
+                    // pushes a per-bar profile via fft_frames
+                    // (Symmetric Centre-Out shape); render the
+                    // latest profile directly rather than the
+                    // levels ring.
+                    WaveformStyle::Bars if thinking => {
+                        if let Some(profile) = app.fft_frames.back() {
+                            draw_waveform_bars_from_profile(
+                                &mut buf, w, h, profile, x0, x1, y_top, y_bot, accent, scale,
+                            );
                         }
-                        WaveformStyle::Bars => draw_waveform_bars(
+                    }
+                    WaveformStyle::Bars => draw_waveform_bars(
+                        &mut buf,
+                        w,
+                        h,
+                        &app.levels,
+                        x0,
+                        x1,
+                        y_top,
+                        y_bot,
+                        accent,
+                        scale,
+                    ),
+                    WaveformStyle::Oscilloscope => {
+                        // Headroom: leave a small margin on
+                        // recording so loud PCM peaks don't
+                        // clip the panel edges; the thinking
+                        // generator emits samples already in
+                        // [-1, 1] so it gets the full height.
+                        let headroom = if thinking { 1.0 } else { 0.88 };
+                        draw_oscilloscope(
                             &mut buf,
                             w,
                             h,
-                            &app.levels,
+                            &app.osc_samples,
                             x0,
                             x1,
                             y_top,
                             y_bot,
                             accent,
                             scale,
-                        ),
-                        WaveformStyle::Oscilloscope => {
-                            // Headroom: leave a small margin on
-                            // recording so loud PCM peaks don't
-                            // clip the panel edges; the thinking
-                            // generator emits samples already in
-                            // [-1, 1] so it gets the full height.
-                            let headroom = if thinking { 1.0 } else { 0.88 };
-                            draw_oscilloscope(
+                            headroom,
+                        );
+                    }
+                    WaveformStyle::Fft => {
+                        if let Some(latest) = app.fft_frames.back() {
+                            if thinking {
+                                draw_fft_gapped(
+                                    &mut buf, w, h, latest, x0, x1, y_top, y_bot, accent, scale,
+                                );
+                            } else {
+                                draw_fft(
+                                    &mut buf, w, h, latest, x0, x1, y_top, y_bot, accent, scale,
+                                );
+                            }
+                        }
+                    }
+                    WaveformStyle::Heatmap => {
+                        // Fast path: blit the pre-blended cache
+                        // built incrementally by the `FftBins`
+                        // handler. The cache already has the
+                        // panel BG composited under each pixel,
+                        // so a straight `copy_from_slice` per row
+                        // matches what the full `draw_heatmap`
+                        // walk would produce. Falls back to the
+                        // full walk when the cache hasn't caught
+                        // up to the current panel size yet
+                        // (first frame after spawn / resize).
+                        let cache_cols = (x1 - x0).round() as i32;
+                        let cache_rows = (y_bot - y_top).round() as i32;
+                        let cache_ok = cache_cols > 0
+                            && cache_rows > 0
+                            && app.heatmap_cache_dim == (cache_cols as u32, cache_rows as u32)
+                            && app.heatmap_cache.len() == (cache_cols * cache_rows) as usize;
+                        if cache_ok {
+                            let cx0 = x0.round() as i32;
+                            let cy0 = y_top.round() as i32;
+                            let cols_u = cache_cols as u32;
+                            let rows_u = cache_rows as u32;
+                            for ry in 0..rows_u {
+                                let dst_y = cy0 + ry as i32;
+                                if dst_y < 0 || (dst_y as u32) >= h {
+                                    continue;
+                                }
+                                let dst_x = cx0.max(0);
+                                let skip = (dst_x - cx0).max(0) as u32;
+                                if skip >= cols_u {
+                                    continue;
+                                }
+                                let dst_off = (dst_y as u32 * w + dst_x as u32) as usize;
+                                let src_off = (ry * cols_u + skip) as usize;
+                                let avail_w = w.saturating_sub(dst_x as u32);
+                                let copy_len = (cols_u - skip).min(avail_w) as usize;
+                                if copy_len == 0 {
+                                    continue;
+                                }
+                                if dst_off + copy_len <= buf.len()
+                                    && src_off + copy_len <= app.heatmap_cache.len()
+                                {
+                                    buf[dst_off..dst_off + copy_len].copy_from_slice(
+                                        &app.heatmap_cache[src_off..src_off + copy_len],
+                                    );
+                                }
+                            }
+                        } else {
+                            draw_heatmap(
                                 &mut buf,
                                 w,
                                 h,
-                                &app.osc_samples,
+                                &app.fft_frames,
                                 x0,
                                 x1,
                                 y_top,
                                 y_bot,
                                 accent,
-                                scale,
-                                headroom,
                             );
                         }
-                        WaveformStyle::Fft => {
-                            if let Some(latest) = app.fft_frames.back() {
-                                if thinking {
-                                    draw_fft_gapped(
-                                        &mut buf, w, h, latest, x0, x1, y_top, y_bot, accent, scale,
-                                    );
-                                } else {
-                                    draw_fft(
-                                        &mut buf, w, h, latest, x0, x1, y_top, y_bot, accent, scale,
-                                    );
-                                }
-                            }
-                        }
-                        WaveformStyle::Heatmap => {
-                            // Fast path: blit the pre-blended cache
-                            // built incrementally by the `FftBins`
-                            // handler. The cache already has the
-                            // panel BG composited under each pixel,
-                            // so a straight `copy_from_slice` per row
-                            // matches what the full `draw_heatmap`
-                            // walk would produce. Falls back to the
-                            // full walk when the cache hasn't caught
-                            // up to the current panel size yet
-                            // (first frame after spawn / resize).
-                            let cache_cols = (x1 - x0).round() as i32;
-                            let cache_rows = (y_bot - y_top).round() as i32;
-                            let cache_ok = cache_cols > 0
-                                && cache_rows > 0
-                                && app.heatmap_cache_dim == (cache_cols as u32, cache_rows as u32)
-                                && app.heatmap_cache.len() == (cache_cols * cache_rows) as usize;
-                            if cache_ok {
-                                let cx0 = x0.round() as i32;
-                                let cy0 = y_top.round() as i32;
-                                let cols_u = cache_cols as u32;
-                                let rows_u = cache_rows as u32;
-                                for ry in 0..rows_u {
-                                    let dst_y = cy0 + ry as i32;
-                                    if dst_y < 0 || (dst_y as u32) >= h {
-                                        continue;
-                                    }
-                                    let dst_x = cx0.max(0);
-                                    let skip = (dst_x - cx0).max(0) as u32;
-                                    if skip >= cols_u {
-                                        continue;
-                                    }
-                                    let dst_off = (dst_y as u32 * w + dst_x as u32) as usize;
-                                    let src_off = (ry * cols_u + skip) as usize;
-                                    let avail_w = w.saturating_sub(dst_x as u32);
-                                    let copy_len = (cols_u - skip).min(avail_w) as usize;
-                                    if copy_len == 0 {
-                                        continue;
-                                    }
-                                    if dst_off + copy_len <= buf.len()
-                                        && src_off + copy_len <= app.heatmap_cache.len()
-                                    {
-                                        buf[dst_off..dst_off + copy_len].copy_from_slice(
-                                            &app.heatmap_cache[src_off..src_off + copy_len],
-                                        );
-                                    }
-                                }
-                            } else {
-                                draw_heatmap(
-                                    &mut buf,
-                                    w,
-                                    h,
-                                    &app.fft_frames,
-                                    x0,
-                                    x1,
-                                    y_top,
-                                    y_bot,
-                                    accent,
-                                );
-                            }
-                        }
                     }
+                    // Transcript is a text-mode style; the
+                    // `waveform_active` gate excludes it, but the
+                    // match must remain exhaustive.
+                    WaveformStyle::Transcript => {}
                 }
-                _ => {
-                    // VU bar on the live-dictation / assistant-recording
-                    // panel — drawn before text so that even very long
-                    // lines (clipped at the edge) don't cover it.
-                    // Mirrors the left accent stripe: same vertical
-                    // extent, flush against the right edge,
-                    // ACCENT_WIDTH wide. The drain task in
-                    // `build_live_capture_pipeline` feeds `push_level`
-                    // for both surfaces, so the same VU bar applies.
-                    if matches!(app.mode, OverlayMode::Text)
-                        && state_has_vu_bar(app.state)
-                        && app.volume_bar
-                        && !app.levels.is_empty()
-                    {
-                        let level = app.levels.back().copied().unwrap_or(0.0);
-                        let x_right = w as f32;
-                        let y_top = CORNER_RADIUS * scale * 0.4;
-                        let y_bot = h as f32 - CORNER_RADIUS * scale * 0.4;
-                        draw_vu_bar(&mut buf, w, h, level, x_right, y_top, y_bot, accent, scale);
-                    }
-                    // Transcript rows (text mode, or waveform mode in
-                    // non-Recording states which currently render
-                    // status-only).
-                    if !app.wrapped.is_empty() {
-                        let mut baseline = text_top + TEXT_FONT_PX * scale * 0.85;
-                        let max_visible_lines = ((h as f32 - text_top - PADDING_BOT * scale)
-                            / (TEXT_FONT_PX * scale + LINE_GAP * scale))
-                            as usize;
-                        let total = app.wrapped.len();
-                        // If content exceeds visible space, show the TAIL —
-                        // most recent text always visible.
-                        let skip = total.saturating_sub(max_visible_lines.max(1));
-                        for line in app.wrapped.iter().skip(skip) {
-                            draw_line(
-                                &mut buf,
-                                w,
-                                h,
-                                font,
-                                line,
-                                COLOR_TEXT,
-                                TEXT_FONT_PX * scale,
-                                pad_x,
-                                baseline,
-                            );
-                            baseline += TEXT_FONT_PX * scale + LINE_GAP * scale;
-                            if baseline > h as f32 - PADDING_BOT * scale {
-                                break;
-                            }
+            } else {
+                // VU bar on the live-dictation / assistant-recording
+                // panel — drawn before text so that even very long
+                // lines (clipped at the edge) don't cover it.
+                // Mirrors the left accent stripe: same vertical
+                // extent, flush against the right edge,
+                // ACCENT_WIDTH wide. The drain task in
+                // `build_live_capture_pipeline` feeds `push_level`
+                // for both surfaces, so the same VU bar applies.
+                if is_text_style(app.style)
+                    && state_has_vu_bar(app.state)
+                    && app.volume_bar
+                    && !app.levels.is_empty()
+                {
+                    let level = app.levels.back().copied().unwrap_or(0.0);
+                    let x_right = w as f32;
+                    let y_top = CORNER_RADIUS * scale * 0.4;
+                    let y_bot = h as f32 - CORNER_RADIUS * scale * 0.4;
+                    draw_vu_bar(&mut buf, w, h, level, x_right, y_top, y_bot, accent, scale);
+                }
+                // Transcript rows (text mode, or waveform mode in
+                // non-Recording states which currently render
+                // status-only).
+                if !app.wrapped.is_empty() {
+                    let mut baseline = text_top + TEXT_FONT_PX * scale * 0.85;
+                    let max_visible_lines = ((h as f32 - text_top - PADDING_BOT * scale)
+                        / (TEXT_FONT_PX * scale + LINE_GAP * scale))
+                        as usize;
+                    let total = app.wrapped.len();
+                    // If content exceeds visible space, show the TAIL —
+                    // most recent text always visible.
+                    let skip = total.saturating_sub(max_visible_lines.max(1));
+                    for line in app.wrapped.iter().skip(skip) {
+                        draw_line(
+                            &mut buf,
+                            w,
+                            h,
+                            font,
+                            line,
+                            COLOR_TEXT,
+                            TEXT_FONT_PX * scale,
+                            pad_x,
+                            baseline,
+                        );
+                        baseline += TEXT_FONT_PX * scale + LINE_GAP * scale;
+                        if baseline > h as f32 - PADDING_BOT * scale {
+                            break;
                         }
                     }
                 }
@@ -1920,7 +1875,7 @@ fn run_event_loop(
         state: OverlayState::Hidden,
         text: String::new(),
         wrapped: Vec::new(),
-        mode,
+        style,
         volume_bar: false,
         levels: VecDeque::with_capacity(LEVELS_CAP),
         osc_samples: VecDeque::with_capacity(OSC_SAMPLES_CAP),

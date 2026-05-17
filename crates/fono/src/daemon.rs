@@ -22,22 +22,23 @@ use crate::cli::Verbosity;
 use crate::session::SessionOrchestrator;
 
 /// Translate the standard `Hold*` / `Toggle*` actions to their `Live*`
-/// counterparts when `[interactive].enabled = true`, the binary was
-/// built with `--features interactive`, and an orchestrator is
-/// available to drive the live state. Off otherwise — the action is
-/// passed through unchanged.
+/// counterparts when `Config::live_preview()` is true (currently:
+/// `[overlay].style == "transcript"`), the binary was built with
+/// `--features interactive`, and an orchestrator is available to
+/// drive the live state. Off otherwise — the action is passed
+/// through unchanged.
 ///
 /// `CancelPressed`, `ProcessingDone`, and `ProcessingStarted` are
 /// always passed through; the FSM already routes Cancel from any
 /// state to Idle.
-fn translate_for_interactive(
+fn translate_for_live_preview(
     action: HotkeyAction,
     config: &Config,
     orchestrator_present: bool,
 ) -> HotkeyAction {
     #[cfg(feature = "interactive")]
     {
-        if orchestrator_present && config.interactive.enabled {
+        if orchestrator_present && config.live_preview() {
             return match action {
                 HotkeyAction::HoldPressed => HotkeyAction::LiveHoldPressed,
                 HotkeyAction::HoldReleased => HotkeyAction::LiveHoldReleased,
@@ -751,7 +752,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         let cancel_ctrl_disp = cancel_ctrl.clone();
         tokio::spawn(async move {
             while let Some(action) = action_rx.recv().await {
-                let action = translate_for_interactive(
+                let action = translate_for_live_preview(
                     action,
                     &config_for_dispatch,
                     orch_for_dispatch.is_some(),
@@ -951,15 +952,6 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                         )
                         .await;
                     }
-                    TrayAction::SetInteractiveEnabled(v) => {
-                        apply_pref_via_tray(
-                            &paths,
-                            orch_for_tray.as_ref(),
-                            "interactive.enabled",
-                            move |cfg| cfg.interactive.enabled = v,
-                        )
-                        .await;
-                    }
                     TrayAction::SetAutoStopSilenceMs(ms) => {
                         apply_pref_via_tray(
                             &paths,
@@ -1087,27 +1079,28 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
             "not compiled"
         }
     );
-    // [interactive] visibility — always emitted, even on slim builds
+    // [overlay] visibility — always emitted, even on slim builds
     // where the streaming pipeline is compiled out, so the user can
-    // diagnose "I set `enabled = true` and nothing happened" without
-    // turning on debug logging.
+    // diagnose "I picked Transcript style and nothing happened"
+    // without turning on debug logging.
     #[cfg(feature = "interactive")]
     {
         info!(
-            "interactive  : {} (mode={})",
-            if config.interactive.enabled { "enabled" } else { "disabled" },
+            "live preview : {} (style={:?}, mode={})",
+            if config.live_preview() { "enabled" } else { "disabled" },
+            config.overlay.style,
             config.interactive.mode,
         );
     }
     #[cfg(not(feature = "interactive"))]
     {
-        if config.interactive.enabled {
+        if config.live_preview() {
             warn!(
-                "interactive  : not compiled in (rebuild with `--features interactive`); \
-                 `[interactive].enabled = true` in config will be ignored"
+                "live preview : not compiled in (rebuild with `--features interactive`); \
+                 `[overlay].style = \"transcript\"` in config will be ignored"
             );
         }
-        // Else: silent. A slim build with `[interactive].enabled = false`
+        // Else: silent. A slim build with a passive waveform style
         // is a fully-supported configuration; no log line needed.
     }
     info!("variant      : {}", crate::variant::VARIANT.label());
@@ -1287,7 +1280,7 @@ async fn handle_client(
     let req: Request = read_frame(&mut stream).await?;
     let orch_present = orchestrator.is_some();
     let send_translated = |a: HotkeyAction| {
-        let _ = action_tx.send(translate_for_interactive(a, &config, orch_present));
+        let _ = action_tx.send(translate_for_live_preview(a, &config, orch_present));
     };
     let resp = match req {
         Request::Toggle => {
@@ -1941,7 +1934,6 @@ fn preferences_snapshot_from_disk(config_path: &std::path::Path) -> fono_tray::P
         // backend today; treat any other non-`"off"` value as "on" so
         // future backends still light the menu correctly.
         vad_enabled: !cfg.audio.vad_backend.eq_ignore_ascii_case("off"),
-        interactive_enabled: cfg.interactive.enabled,
         auto_stop_silence_ms: cfg.audio.auto_stop_silence_ms,
         waveform_style,
         languages: cfg.general.languages.clone(),
@@ -1955,6 +1947,7 @@ fn waveform_style_to_idx(style: fono_core::config::WaveformStyle) -> u8 {
         fono_core::config::WaveformStyle::Oscilloscope => 1,
         fono_core::config::WaveformStyle::Fft => 2,
         fono_core::config::WaveformStyle::Heatmap => 3,
+        fono_core::config::WaveformStyle::Transcript => 4,
     }
 }
 
@@ -1967,6 +1960,7 @@ fn waveform_style_from_idx(idx: u8) -> Option<fono_core::config::WaveformStyle> 
         1 => Some(fono_core::config::WaveformStyle::Oscilloscope),
         2 => Some(fono_core::config::WaveformStyle::Fft),
         3 => Some(fono_core::config::WaveformStyle::Heatmap),
+        4 => Some(fono_core::config::WaveformStyle::Transcript),
         _ => None,
     }
 }
@@ -2583,59 +2577,59 @@ mod tests {
     #[test]
     fn translate_passthrough_when_feature_off() {
         let mut cfg = Config::default();
-        cfg.interactive.enabled = true;
+        cfg.overlay.style = fono_core::config::WaveformStyle::Transcript;
         assert_eq!(
-            translate_for_interactive(HotkeyAction::HoldPressed, &cfg, true),
+            translate_for_live_preview(HotkeyAction::HoldPressed, &cfg, true),
             HotkeyAction::HoldPressed
         );
         assert_eq!(
-            translate_for_interactive(HotkeyAction::TogglePressed, &cfg, true),
+            translate_for_live_preview(HotkeyAction::TogglePressed, &cfg, true),
             HotkeyAction::TogglePressed
         );
     }
 
-    /// `interactive` feature on, `[interactive].enabled = true`, and an
+    /// `interactive` feature on, Transcript style picked, and an
     /// orchestrator is present → Hold/Toggle become their `Live*`
     /// variants. Cancel and processing actions pass through.
     #[cfg(feature = "interactive")]
     #[test]
     fn translate_hold_toggle_to_live_when_enabled() {
         let mut cfg = Config::default();
-        cfg.interactive.enabled = true;
+        cfg.overlay.style = fono_core::config::WaveformStyle::Transcript;
         assert_eq!(
-            translate_for_interactive(HotkeyAction::HoldPressed, &cfg, true),
+            translate_for_live_preview(HotkeyAction::HoldPressed, &cfg, true),
             HotkeyAction::LiveHoldPressed
         );
         assert_eq!(
-            translate_for_interactive(HotkeyAction::HoldReleased, &cfg, true),
+            translate_for_live_preview(HotkeyAction::HoldReleased, &cfg, true),
             HotkeyAction::LiveHoldReleased
         );
         assert_eq!(
-            translate_for_interactive(HotkeyAction::TogglePressed, &cfg, true),
+            translate_for_live_preview(HotkeyAction::TogglePressed, &cfg, true),
             HotkeyAction::LiveTogglePressed
         );
         // Cancel / Processing variants always pass through.
         assert_eq!(
-            translate_for_interactive(HotkeyAction::CancelPressed, &cfg, true),
+            translate_for_live_preview(HotkeyAction::CancelPressed, &cfg, true),
             HotkeyAction::CancelPressed
         );
         assert_eq!(
-            translate_for_interactive(HotkeyAction::ProcessingDone, &cfg, true),
+            translate_for_live_preview(HotkeyAction::ProcessingDone, &cfg, true),
             HotkeyAction::ProcessingDone
         );
         assert_eq!(
-            translate_for_interactive(HotkeyAction::ProcessingStarted, &cfg, true),
+            translate_for_live_preview(HotkeyAction::ProcessingStarted, &cfg, true),
             HotkeyAction::ProcessingStarted
         );
     }
 
-    /// `enabled = false` → no translation even with the feature on.
+    /// Non-Transcript style → no translation even with the feature on.
     #[cfg(feature = "interactive")]
     #[test]
     fn translate_passthrough_when_disabled() {
-        let cfg = Config::default(); // interactive.enabled defaults to false
+        let cfg = Config::default(); // overlay.style defaults to Fft (not Transcript)
         assert_eq!(
-            translate_for_interactive(HotkeyAction::HoldPressed, &cfg, true),
+            translate_for_live_preview(HotkeyAction::HoldPressed, &cfg, true),
             HotkeyAction::HoldPressed
         );
     }
@@ -2646,9 +2640,9 @@ mod tests {
     #[test]
     fn translate_passthrough_in_degraded_mode() {
         let mut cfg = Config::default();
-        cfg.interactive.enabled = true;
+        cfg.overlay.style = fono_core::config::WaveformStyle::Transcript;
         assert_eq!(
-            translate_for_interactive(HotkeyAction::HoldPressed, &cfg, false),
+            translate_for_live_preview(HotkeyAction::HoldPressed, &cfg, false),
             HotkeyAction::HoldPressed
         );
     }

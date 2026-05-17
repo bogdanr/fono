@@ -102,6 +102,18 @@ fn default_version() -> u32 {
     CURRENT_VERSION
 }
 
+impl Config {
+    /// True when the live streaming-preview pipeline should run for
+    /// dictation and the assistant. Single source of truth: it's on
+    /// iff the user picked the `Transcript` overlay style. The four
+    /// passive visualisation styles (Bars, Oscilloscope, FFT,
+    /// Heatmap) keep the daemon on the batch path.
+    #[must_use]
+    pub fn live_preview(&self) -> bool {
+        self.overlay.style.requires_streaming()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[allow(clippy::struct_excessive_bools)]
@@ -696,11 +708,16 @@ pub struct ContextMatch {
     pub window_title_regex: Option<String>,
 }
 
-/// Audio-visualisation style for the standalone waveform overlay.
+/// Overlay visualisation style. Drives both the standalone audio-vis
+/// overlay (Bars / Oscilloscope / FFT / Heatmap) and the live-
+/// transcript preview panel (`Transcript`). Picking `Transcript` is
+/// what enables the streaming pipeline end-to-end — there is no
+/// separate "interactive" master toggle.
 ///
-/// Selects which rendering branch drives `OverlayState::Recording`
-/// when the overlay was spawned via `RealOverlay::spawn_waveform`.
-/// Has no effect when the standalone overlay is disabled.
+/// The transcript style costs more CPU (local Whisper) or more API
+/// requests (cloud STT) than the four waveform styles, which only
+/// drive a passive level/spectrum visualisation off the recording
+/// buffer. See `docs/interactive.md` for the cost shape per backend.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum WaveformStyle {
@@ -714,38 +731,64 @@ pub enum WaveformStyle {
     /// Rolling spectrogram (frequency on Y, time on X, magnitude as
     /// colour).
     Heatmap,
+    /// Live streaming transcription preview. Renders the words the
+    /// STT backend is producing in realtime, replacing them with the
+    /// finalised text as each segment closes. Requires a streaming-
+    /// capable STT backend (local Whisper, or Groq); cloud backends
+    /// without a streaming impl (OpenAI / Anthropic / Cerebras /
+    /// OpenRouter) fall back to a one-line placeholder during
+    /// recording and the final transcript on inject.
+    ///
+    /// Heavier than the other styles: local Whisper re-decodes the
+    /// trailing audio window every `chunk_ms_steady` ms (CPU /
+    /// GPU); cloud backends re-POST the trailing window at
+    /// `streaming_interval` cadence (API tokens / requests).
+    Transcript,
 }
 
 impl Default for WaveformStyle {
     fn default() -> Self {
-        // FFT reads as the most "active" of the four during both
-        // recording (real spectrum) and assistant-thinking
-        // (sweeping bell scanner with crisp inter-bar gaps), so
-        // it makes the strongest first-run impression. Users can
-        // switch to Bars/Oscilloscope/Heatmap from the tray
-        // submenu or `[overlay].style`.
+        // FFT reads as the most "active" of the four passive styles
+        // during both recording (real spectrum) and assistant-thinking
+        // (sweeping bell scanner with crisp inter-bar gaps), so it
+        // makes the strongest first-run impression. Users can switch
+        // to Bars/Oscilloscope/Heatmap or to the heavier Transcript
+        // style from the tray submenu or `[overlay].style`.
         Self::Fft
+    }
+}
+
+impl WaveformStyle {
+    /// True when this style requires the streaming STT pipeline to
+    /// produce text in realtime. Only `Transcript` returns `true`;
+    /// the four passive visualisations only need PCM / FFT taps off
+    /// the recording buffer.
+    #[must_use]
+    pub fn requires_streaming(self) -> bool {
+        matches!(self, Self::Transcript)
     }
 }
 
 /// Overlay panel configuration.
 ///
-/// `waveform` and `style` drive the standalone bottom-centre panel
-/// shown during batch recording; `volume_bar` adds a thin vertical VU
-/// meter on the right side of the live-dictation panel. All fields
-/// are silently ignored on builds without the `real-window` /
-/// `waveform` features compiled in (server / headless).
+/// `waveform` toggles the overlay window at all; `style` selects one
+/// of five visualisations including the live `Transcript` preview;
+/// `volume_bar` adds a thin vertical VU meter on the right side of
+/// the transcript panel. All fields are silently ignored on builds
+/// without the `real-window` / `waveform` features compiled in
+/// (server / headless).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Overlay {
-    /// Enable the standalone waveform overlay during batch recording.
-    /// No effect when `[interactive].enabled = true` (live dictation
-    /// uses its own panel).
+    /// Show the overlay window during recording. When `false`, the
+    /// daemon runs headless regardless of `style`.
     pub waveform: bool,
-    /// Visualisation style for the standalone overlay.
+    /// Visualisation style. Picking `Transcript` enables the
+    /// streaming live-preview pipeline; the other four styles drive
+    /// passive audio visualisations off the recording buffer.
     pub style: WaveformStyle,
-    /// Right-side VU bar on the live-dictation panel. Default on; set
-    /// to `false` to restore the pre-VU layout.
+    /// Right-side VU bar on the transcript panel. Default on; set to
+    /// `false` to restore the pre-VU layout.
     pub volume_bar: bool,
 }
 
@@ -889,19 +932,17 @@ impl Network {
     }
 }
 
-/// Live-dictation runtime toggle and tuning knobs. Plan R7.4 / R18.21.
+/// Live-dictation streaming-pipeline tuning. Plan R7.4 / R18.21.
 ///
-/// When the cargo `interactive` feature is **not** compiled in, this
-/// block is parsed but ignored (the daemon has no streaming code to
-/// turn on). When the feature *is* compiled in, the daemon consults
-/// `enabled` at startup and on every `Reload` IPC.
+/// Whether the streaming pipeline runs at all is gated by
+/// `[overlay].style = "transcript"` (see [`WaveformStyle`]); this
+/// block only carries the per-knob tuning that applies once it is
+/// running. When the cargo `interactive` feature is **not** compiled
+/// in, the block is parsed but ignored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Interactive {
-    /// Master toggle. Default `false` everywhere in v0.2.0-alpha. Tier-
-    /// aware auto-enable is a Slice B decision (see ADR 0009).
-    pub enabled: bool,
     /// Per-minute spending ceiling, in USD micro-cents (1¢ = 10_000 µ¢).
     /// `0` disables the budget controller entirely (default — local STT
     /// is free). Cloud streaming sets a sensible default at wizard time.
@@ -1010,7 +1051,6 @@ pub struct Interactive {
 impl Default for Interactive {
     fn default() -> Self {
         Self {
-            enabled: false,
             budget_ceiling_per_minute_umicros: 0,
             quality_floor: "max".into(),
             mode: "hybrid".into(),
@@ -1215,7 +1255,6 @@ mod tests {
         let raw = r#"
             version = 1
             [interactive]
-            enabled = true
             budget_ceiling_per_minute_umicros = 1000
             quality_floor = "balanced"
             mode = "hybrid"
@@ -1237,7 +1276,6 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(raw).expect("parse");
         let i = &cfg.interactive;
-        assert!(i.enabled);
         assert_eq!(i.budget_ceiling_per_minute_umicros, 1000);
         assert_eq!(i.quality_floor, "balanced");
         assert_eq!(i.mode, "hybrid");
@@ -1264,7 +1302,6 @@ mod tests {
         let cfg: Config = toml::from_str(raw).expect("parse");
         let d = Interactive::default();
         let i = &cfg.interactive;
-        assert_eq!(i.enabled, d.enabled);
         assert_eq!(i.mode, d.mode);
         assert_eq!(i.chunk_ms_initial, d.chunk_ms_initial);
         assert_eq!(i.chunk_ms_steady, d.chunk_ms_steady);

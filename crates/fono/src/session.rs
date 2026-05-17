@@ -391,6 +391,7 @@ impl SessionOrchestrator {
             match fono_stt::build_streaming_stt(
                 &config.stt,
                 &config.general,
+                config.live_preview(),
                 &config.interactive,
                 secrets,
                 &paths.whisper_models_dir(),
@@ -416,21 +417,16 @@ impl SessionOrchestrator {
         // failure here just disables the overlay, dictation still
         // works.
         //
-        // Two branches share the same long-lived handle:
-        //   * `[interactive].enabled` → the text-rendering overlay
-        //     used by live dictation. The VU bar config flag is
-        //     pushed once the handle is up.
-        //   * else if `[overlay].waveform` (and the `waveform`
-        //     feature is compiled in) → the standalone audio
-        //     visualisation overlay used during batch recording.
-        // Only one branch fires; live dictation takes precedence.
+        // One spawn for the lifetime of the daemon, parameterised by
+        // the chosen `WaveformStyle` (Transcript renders the streaming
+        // live-preview text panel; the other four styles render their
+        // audio visualisations). Style swaps after startup are pushed
+        // via `set_waveform_style` from `reload()`.
         #[cfg(feature = "interactive")]
         {
             let spawn_result: Option<std::io::Result<fono_overlay::OverlayHandle>> = {
-                if config.interactive.enabled {
-                    Some(fono_overlay::RealOverlay::spawn())
-                } else if config.overlay.waveform {
-                    Some(fono_overlay::RealOverlay::spawn_waveform(config.overlay.style))
+                if config.overlay.waveform {
+                    Some(fono_overlay::RealOverlay::spawn(config.overlay.style))
                 } else {
                     None
                 }
@@ -535,6 +531,7 @@ impl SessionOrchestrator {
             let new_streaming = match fono_stt::build_streaming_stt(
                 &cfg.stt,
                 &cfg.general,
+                cfg.live_preview(),
                 &cfg.interactive,
                 &secrets,
                 &paths.whisper_models_dir(),
@@ -569,23 +566,14 @@ impl SessionOrchestrator {
             let mut s = self.assistant_session.lock().await;
             s.history = ConversationHistory::new(window, max_turns);
         }
-        // Push the (possibly changed) overlay decisions to the
-        // long-lived handle. The mode swap matters for the
-        // `[interactive].enabled` tray toggle: the overlay is
-        // spawned **once** at startup (winit forbids a second
-        // EventLoop per process) so we hot-swap between text and
-        // waveform panels via `SetMode` instead of respawning. A
-        // `[overlay].style` edit lands as a `SetWaveformStyle`
-        // afterwards so the right style is active even if we just
-        // entered waveform mode this reload. Both calls are
-        // idempotent when nothing changed.
+        // Push the (possibly changed) overlay style to the long-
+        // lived handle. The overlay is spawned **once** at startup
+        // (winit forbids a second EventLoop per process) so we
+        // hot-swap between Transcript / Bars / Oscilloscope / FFT /
+        // Heatmap via `SetWaveformStyle`. The call is idempotent
+        // when nothing changed.
         #[cfg(feature = "interactive")]
         if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
-            if cfg.interactive.enabled {
-                o.enable_text_mode();
-            } else if cfg.overlay.waveform {
-                o.enable_waveform_mode(cfg.overlay.style);
-            }
             o.set_waveform_style(cfg.overlay.style);
         }
         if let Ok(mut guard) = self.config.write() {
@@ -672,15 +660,15 @@ impl SessionOrchestrator {
         initial_state: fono_overlay::OverlayState,
         buffer: &Arc<StdMutex<RecordingBuffer>>,
     ) -> Option<tokio::task::AbortHandle> {
-        // The interactive (live-dictation) gate only applies to the
-        // batch dictation overlay — when interactive mode is on, F9
-        // takes the streaming path and the dictation panel is handled
-        // by `LiveSession`. The assistant pipeline is independent and
-        // should always show its overlay regardless of interactive
-        // mode (different state, different colour, different label).
+        // The live-preview gate only applies to the batch dictation
+        // overlay — when the user picks Transcript style, F9 takes
+        // the streaming path and the dictation panel is handled by
+        // `LiveSession`. The assistant pipeline is independent and
+        // should always show its overlay regardless of style
+        // (different state, different colour, different label).
         let is_assistant =
             matches!(initial_state, fono_overlay::OverlayState::AssistantRecording { .. });
-        let want_waveform = cfg.overlay.waveform && (is_assistant || !cfg.interactive.enabled);
+        let want_waveform = cfg.overlay.waveform && (is_assistant || !cfg.live_preview());
         let handle = self.overlay.read().ok().and_then(|g| g.clone());
         match (want_waveform, handle) {
             (true, Some(o)) => {
@@ -786,6 +774,12 @@ impl SessionOrchestrator {
                                 o.push_level(level);
                             }
                         }
+                        // Transcript renders the streaming-preview text
+                        // panel, not an audio visualisation. The
+                        // `want_waveform` gate excludes this branch
+                        // when style == Transcript, but the match
+                        // must remain exhaustive.
+                        fono_core::config::WaveformStyle::Transcript => {}
                     }
                 });
                 Some(task.abort_handle())
@@ -1005,6 +999,10 @@ impl SessionOrchestrator {
                         }
                         o.push_fft_bins(bins);
                     }
+                    // Transcript renders the streaming text panel, not
+                    // an animated visualisation — nothing to push from
+                    // this task. The match must remain exhaustive.
+                    fono_core::config::WaveformStyle::Transcript => {}
                 }
             }
         });
@@ -1194,7 +1192,7 @@ impl SessionOrchestrator {
         // the batch path.
         #[cfg(feature = "interactive")]
         let polish_anim: Option<tokio::task::AbortHandle> = {
-            if cfg.overlay.waveform && !cfg.interactive.enabled {
+            if cfg.overlay.waveform && !cfg.live_preview() {
                 let stt_local = self.current_stt().is_local();
                 let llm_local = cfg.interactive.cleanup_on_finalize
                     && self.current_llm().is_some_and(|l| l.is_local());
@@ -1225,7 +1223,7 @@ impl SessionOrchestrator {
         if elapsed < MIN_RECORDING || samples.is_empty() {
             warn!("recording too short ({capture_ms} ms); skipping STT");
             #[cfg(feature = "interactive")]
-            if cfg.overlay.waveform && !cfg.interactive.enabled {
+            if cfg.overlay.waveform && !cfg.live_preview() {
                 if let Some(t) = polish_anim {
                     t.abort();
                 }
@@ -1256,7 +1254,7 @@ impl SessionOrchestrator {
             // Standalone-waveform overlay: hide immediately on cancel
             // (no pipeline phase follows).
             #[cfg(feature = "interactive")]
-            if cfg.overlay.waveform && !cfg.interactive.enabled {
+            if cfg.overlay.waveform && !cfg.live_preview() {
                 if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
                     o.set_state(fono_overlay::OverlayState::Hidden);
                 }
@@ -1330,7 +1328,7 @@ impl SessionOrchestrator {
         // path below otherwise (cloud-only configs, missing feature).
         #[cfg(feature = "interactive")]
         {
-            if self.current_config().interactive.enabled {
+            if self.current_config().live_preview() {
                 if let Some(streaming) = self.current_streaming_stt() {
                     let mut slot = self.assistant_live_capture.lock().await;
                     if slot.is_some() {
@@ -1754,7 +1752,7 @@ impl SessionOrchestrator {
         // `on_stop_recording`; we just clear it back to `Hidden` on
         // every terminal outcome.
         #[cfg(feature = "interactive")]
-        let overlay = if config.overlay.waveform && !config.interactive.enabled {
+        let overlay = if config.overlay.waveform && !config.live_preview() {
             self.overlay.read().ok().and_then(|g| g.clone())
         } else {
             None

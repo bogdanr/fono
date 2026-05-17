@@ -159,10 +159,6 @@ pub struct PreferencesSnapshot {
     pub also_copy_to_clipboard: bool,
     pub startup_autostart: bool,
     pub vad_enabled: bool,
-    /// Mirrors `[interactive].enabled` — when on, the daemon swaps the
-    /// streaming STT engine in and the overlay shows the transcript
-    /// live as you talk. Off = batch (one-shot transcribe on release).
-    pub interactive_enabled: bool,
     pub auto_stop_silence_ms: u32,
     pub waveform_style: u8,
     /// Currently-allowed language codes (BCP-47), in canonical order.
@@ -183,9 +179,16 @@ pub use fono_core::languages::CURATED_LANGUAGES as LANGUAGE_SHORTLIST;
 
 /// Waveform-style names paired with their `WaveformStyle` discriminant
 /// label as serialised into TOML. Index used by
-/// `TrayAction::SetWaveformStyle(u8)`.
-pub const WAVEFORM_STYLES: &[(&str, &str)] =
-    &[("bars", "Bars"), ("oscilloscope", "Oscilloscope"), ("fft", "FFT"), ("heatmap", "Heatmap")];
+/// `TrayAction::SetWaveformStyle(u8)`. The last entry `Transcript`
+/// flips the daemon into the live streaming-preview pipeline; the
+/// four passive styles keep it on the batch path.
+pub const WAVEFORM_STYLES: &[(&str, &str)] = &[
+    ("bars", "Bars"),
+    ("oscilloscope", "Oscilloscope"),
+    ("fft", "FFT"),
+    ("heatmap", "Heatmap"),
+    ("transcript", "Transcript"),
+];
 
 /// Auto-stop silence presets surfaced in the tray's radio group.
 /// `0` means "Off" — the daemon's auto-stop silence timer is bypassed
@@ -260,10 +263,6 @@ pub enum TrayAction {
     /// and `"off"`. The tray uses a boolean for menu legibility; the
     /// daemon translates back to the string field.
     SetVadEnabled(bool),
-    /// Toggle `[interactive].enabled`. On = live streaming STT (partial
-    /// transcript appears in the overlay as you talk, costs more
-    /// tokens). Off = batch one-shot transcribe on key release.
-    SetInteractiveEnabled(bool),
     /// Set `audio.auto_stop_silence_ms` to one of the
     /// [`AUTO_STOP_PRESETS_MS`] presets. `0` disables auto-stop.
     SetAutoStopSilenceMs(u32),
@@ -1267,11 +1266,6 @@ mod backend {
             p.vad_enabled,
             TrayAction::SetVadEnabled,
         ));
-        items.push(prefs_check(
-            "Live transcript preview (uses more tokens)",
-            p.interactive_enabled,
-            TrayAction::SetInteractiveEnabled,
-        ));
 
         items.push(MenuItem::Separator);
 
@@ -1327,6 +1321,7 @@ mod backend {
                     "Oscilloscope" => "Oscilloscope (raw waveform)",
                     "FFT" => "FFT (frequency spectrum)",
                     "Heatmap" => "Heatmap (rolling spectrogram)",
+                    "Transcript" => "Transcript (live preview — more CPU / tokens)",
                     other => other,
                 };
                 StandardItem {

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Live preview is now a waveform style, not a separate toggle.** The
+  tray "Waveform style" submenu gains a fifth entry — `Transcript
+  (live preview — more CPU / tokens)` — that replaces the old
+  config-file-only `[interactive].enabled` flag. Picking Transcript
+  both swaps the overlay to streaming text **and** routes the
+  dictation hotkey through the live pipeline (this is the fix for
+  "live transcription only worked for the assistant, not for
+  dictation"). `Fft` remains the first-run default; live preview stays
+  opt-in because it costs more CPU on local STT and more tokens on
+  any cloud backend that bills per-second of streamed audio.
+  Internally `Config::live_preview()` is the single source of truth,
+  defined as `overlay.style == Transcript`. See
+  [ADR 0026](docs/decisions/0026-live-preview-as-overlay-style.md).
+
+### Removed
+
+- `[interactive].enabled` config field (Fono has no users yet, so no
+  migration is provided — the field is just gone). The rest of the
+  `[interactive]` block — boundary heuristics, drain grace,
+  `cleanup_on_finalize`, prosody/filler vocab, chunk timing — stays
+  put as streaming-pipeline tuning that applies whenever Transcript is
+  active.
+
 ### Added
 
 - **`scripts/capture-overlay.sh`** — reproducible overlay screencast

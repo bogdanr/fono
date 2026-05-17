@@ -1,6 +1,42 @@
 # Fono — Project Status
 
-Last updated: 2026-05-15
+Last updated: 2026-05-17
+
+## 2026-05-17 — Live preview folded into overlay style picker
+
+Landed `plans/2026-05-17-live-transcript-as-overlay-style-v2.md`.
+The old `[interactive].enabled` flag is gone; live preview is now the
+fifth entry in the tray's waveform-style picker (`Bars |
+Oscilloscope | Fft (default) | Heatmap | Transcript`). Picking
+Transcript both swaps the overlay renderer to streaming text and
+routes the dictation hotkey through the live pipeline — this fixes
+the reported bug where live transcription only worked for the
+assistant, not for dictation. `Fft` stays the first-run default
+because live preview costs more CPU on local STT and more tokens on
+streaming-capable cloud backends; the tray label
+(`"Transcript (live preview — more CPU / tokens)"`) makes the cost
+visible at the click site.
+
+Internally:
+
+- `WaveformStyle::Transcript` added (`crates/fono-core/src/config.rs`),
+  `Interactive::enabled` field deleted, `Config::live_preview()`
+  helper added as the single source of truth.
+- `OverlayMode` collapsed into `WaveformStyle`; `RealOverlay::spawn`
+  takes a `WaveformStyle` and the twin `spawn_waveform` /
+  `enable_text_mode` / `enable_waveform_mode` entry points are gone.
+- `translate_for_interactive` → `translate_for_live_preview`; factory
+  parameter renamed `interactive_enabled` → `live_preview`. Every
+  `cfg.interactive.enabled` reader now calls `cfg.live_preview()`.
+- Wizard's live-mode prompt removed; tray is the single control.
+  Doctor row prints `"live preview : enabled/disabled (style=…,
+  mode=…)"` so users can diagnose "I picked Transcript and nothing
+  happened" without debug logging.
+
+Pre-commit gate clean: `cargo fmt --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, `cargo test --workspace --tests --lib`
+(all suites green). ADR 0026 records the decision; CHANGELOG
+`[Unreleased]` updated.
 
 ## 2026-05-15 — Local STT affordability calibration Phase 0 (AC sweep)
 
