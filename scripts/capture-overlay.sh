@@ -49,6 +49,9 @@ BACKGROUND=""               # optional #rrggbb wallpaper override
 DETECT_WINDOW=1             # auto-locate the Fono window at capture time
 DETECT_PAD=4                # px of breathing room around the detected box
 CONVERT=""                  # if set, skip capture and convert this MP4 to GIF+WebP
+BORDER=0                    # px of border baked into encoded output (0 = none)
+BORDER_COLOR="#6e7681"      # border colour; default = GitHub muted gray
+                            # (visible on both light & dark README themes)
 
 SCRIPT_NAME="$(basename "$0")"
 
@@ -106,6 +109,16 @@ Shared options:
                                    monitor, or fono dependencies are
                                    required. Outputs land next to the
                                    input file (or in --output-dir).
+  --border <px>                    Bake a solid border N pixels wide
+                                   into every encoded artefact (mp4 /
+                                   gif / webp). Applied AFTER scale
+                                   and label, so the border thickness
+                                   is in output pixels and the canvas
+                                   grows by 2*N on each axis. Default
+                                   0 (no border).
+  --border-color <#rrggbb>         Border colour (default #6e7681 =
+                                   GitHub muted gray, visible on both
+                                   light and dark README themes).
   -h, --help                       Print this message.
 
 paste-mode options:
@@ -189,6 +202,8 @@ while [ $# -gt 0 ]; do
         --detect-window)  DETECT_WINDOW=1; shift ;;
         --detect-pad)     DETECT_PAD="${2:-}"; shift 2 ;;
         --convert)        CONVERT="${2:-}"; shift 2 ;;
+        --border)         BORDER="${2:-}"; shift 2 ;;
+        --border-color)   BORDER_COLOR="${2:-}"; shift 2 ;;
         -h|--help)        usage; exit 0 ;;
         --) shift; break ;;
         *) die "unknown argument: $1 (try --help)" ;;
@@ -794,6 +809,11 @@ build_vf() {
         local esc
         esc="$(printf '%s' "$label" | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g' -e "s/'/\\\\'/g")"
         chain="${chain},drawtext=fontfile=${DEJAVU_FONT}:text='${esc}':fontsize=22:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=8:x=16:y=16"
+    fi
+    if [ "$BORDER" -gt 0 ] 2>/dev/null; then
+        # Pad runs last so the border wraps the final composited frame
+        # (scale + label included). Thickness is in *output* pixels.
+        chain="${chain},pad=iw+2*${BORDER}:ih+2*${BORDER}:${BORDER}:${BORDER}:color=${BORDER_COLOR}"
     fi
     printf '%s' "$chain"
 }
