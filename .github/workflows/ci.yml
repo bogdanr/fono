@@ -200,19 +200,31 @@ jobs:
       - name: Install Linux build deps
         # Mirror `release.yml`'s "Install Linux build deps" step exactly
         # so the gate measures the same artefact users ship. The GPU
-        # variant adds `libvulkan-dev` + `glslang-tools` for ggml-vulkan's
-        # SPIR-V shader compilation at build time.
+        # variant adds Vulkan headers + the `shaderc` SPIR-V compiler
+        # (`glslc`) that ggml-vulkan's CMake requires to build its
+        # 150+ shaders at compile time.
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             build-essential clang cmake pkg-config libclang-dev \
             libxdo-dev
           if [ "${{ matrix.variant }}" = "gpu" ]; then
-            # ggml-vulkan's CMake invokes glslc to compile its 150+
-            # SPIR-V shaders. Use the minimal Ubuntu 22.04 packages
-            # directly instead of the full LunarG vulkan-sdk (which
-            # pulls 600+ MB and reliably times out the 20m budget).
-            sudo apt-get install -y -qq glslang-tools libvulkan-dev
+            # Ubuntu 22.04's stock repo has no `glslc` package, and
+            # `glslang-tools` only ships `glslangValidator` (different
+            # CLI; ggml-vulkan's CMake explicitly requires the
+            # `glslc` Vulkan component). Pull `shaderc` from the
+            # LunarG apt repo — a few MB only — instead of the full
+            # 600+ MB `vulkan-sdk` meta-package that would time out
+            # the build.
+            sudo install -d -m 0755 /usr/share/keyrings
+            curl -fsSL https://packages.lunarg.com/lunarg-signing-key-pub.asc \
+              | sudo gpg --dearmor -o /usr/share/keyrings/lunarg.gpg
+            echo "deb [signed-by=/usr/share/keyrings/lunarg.gpg] https://packages.lunarg.com/vulkan jammy main" \
+              | sudo tee /etc/apt/sources.list.d/lunarg-vulkan.list >/dev/null
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq glslang-tools libvulkan-dev shaderc
+            command -v glslc
+            glslc --version | head -1
           fi
 
       - uses: Swatinem/rust-cache@v2

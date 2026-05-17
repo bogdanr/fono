@@ -191,19 +191,31 @@ jobs:
           key: ${{ matrix.target }}-${{ matrix.os }}-${{ matrix.variant }}
 
       - name: Install Linux build deps
-        # GPU variant adds `libvulkan-dev` + `glslang-tools` for
-        # ggml-vulkan's SPIR-V shader compilation at build time.
+        # GPU variant adds Vulkan headers + the `shaderc` SPIR-V
+        # compiler (`glslc`) that ggml-vulkan's CMake requires to
+        # build its 150+ shaders at compile time.
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             build-essential clang cmake pkg-config libclang-dev \
             libxdo-dev
           if [ "${{ matrix.variant }}" = "gpu" ]; then
-            # Use the minimal Ubuntu 22.04 packages instead of the full
-            # LunarG vulkan-sdk (600+ MB, reliably times out the build).
-            # glslang-tools ships glslangValidator; libvulkan-dev provides
-            # the loader headers ggml-vulkan needs at compile time.
-            sudo apt-get install -y -qq glslang-tools libvulkan-dev
+            # Ubuntu 22.04's stock repo has no `glslc` package, and
+            # `glslang-tools` only ships `glslangValidator` (different
+            # CLI; ggml-vulkan's CMake explicitly requires the
+            # `glslc` Vulkan component). Pull `shaderc` from the
+            # LunarG apt repo — a few MB only — instead of the full
+            # 600+ MB `vulkan-sdk` meta-package that would time out
+            # the build.
+            sudo install -d -m 0755 /usr/share/keyrings
+            curl -fsSL https://packages.lunarg.com/lunarg-signing-key-pub.asc \
+              | sudo gpg --dearmor -o /usr/share/keyrings/lunarg.gpg
+            echo "deb [signed-by=/usr/share/keyrings/lunarg.gpg] https://packages.lunarg.com/vulkan jammy main" \
+              | sudo tee /etc/apt/sources.list.d/lunarg-vulkan.list >/dev/null
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq glslang-tools libvulkan-dev shaderc
+            command -v glslc
+            glslc --version | head -1
           fi
 
       - name: Build (native)
