@@ -89,9 +89,10 @@ system-tray app and native installer on Windows.
 
 Newest first.
 
-- ![v0.8.0](https://img.shields.io/badge/v0.8.0-2026--05--13-blue?style=flat-square)
-  **Wizard + multi-provider TTS rework.** Picking a primary cloud
-  provider (OpenAI, Groq, Anthropic, Cerebras, OpenRouter) now
+- ![v0.8.0](https://img.shields.io/badge/v0.8.0-2026--05--17-blue?style=flat-square)
+  **Wizard + multi-provider TTS rework, live preview as a waveform
+  style, and observability across the cloud stack.** Picking a primary
+  cloud provider (OpenAI, Groq, Anthropic, Cerebras, OpenRouter) now
   configures STT, LLM cleanup, the voice assistant, and TTS from a
   single API-key prompt: the wizard reads a runtime capability
   catalogue (`fono_core::provider_catalog::CLOUD_PROVIDERS`) and only
@@ -100,16 +101,57 @@ Newest first.
   key. The wizard's *Mixed* branch is renamed *Customize each
   capability (advanced)*; re-running it silently reuses keys already
   in `secrets.toml` instead of re-asking. Four new TTS backends ship
-  alongside OpenAI and Wyoming — Groq (PlayAI `playai-tts`),
-  OpenRouter (Kokoro `hexgrad/kokoro-82m`), Cartesia (`sonic-2`), and
-  Deepgram (`aura-2-thalia-en`) — so users on a non-OpenAI primary
-  can run the full record → STT → LLM → TTS loop without obtaining
-  a second key. Two new opt-in assistant extras surface in the
-  wizard when supported: `prefer_vision` swaps in the provider's
-  multimodal chat model (OpenAI / Anthropic / Groq / Gemini), and
+  alongside OpenAI and Wyoming — Groq (Orpheus
+  `canopylabs/orpheus-v1-english`), OpenRouter (OpenAI Mini TTS,
+  multilingual), Cartesia (`sonic-2`), and Deepgram
+  (`aura-2-thalia-en`) — so users on a non-OpenAI primary can run
+  the full record → STT → LLM → TTS loop without obtaining a second
+  key. Two opt-in assistant extras surface in the wizard when
+  supported: `prefer_vision` swaps in the provider's multimodal chat
+  model (OpenAI / Anthropic / Groq / Gemini), and
   `prefer_web_search` attaches the provider's native web-search tool
-  to every assistant request. Closes issues #9 and #11.
-  *v0.8.0, 2026-05-13.*
+  (Anthropic Messages today; OpenAI Responses-API migration tracked
+  separately). Hotkeys now auto-detect toggle vs push-to-talk per
+  press — a short tap toggles, holding for ≥ 1 s is push-to-talk —
+  and `[hotkeys].mode` is gone.
+
+  Live transcription is now the fifth entry in the tray's waveform-
+  style picker (`Bars | Oscilloscope | Fft (default) | Heatmap |
+  Transcript (live preview — more CPU / tokens)`); picking it both
+  swaps the overlay renderer to streaming text *and* routes the
+  dictation hotkey through the live pipeline, fixing a long-running
+  bug where the old `[interactive].enabled` flag only affected the
+  assistant. Local STT/LLM polish phases now reuse the assistant's
+  per-style thinking animations so the "POLISHING" panel is no
+  longer a 1–3 s dead patch.
+
+  Observability + onboarding: every cloud-backed pipeline (STT, LLM
+  cleanup, assistant chat, TTS, wizard key validation) is wired
+  through the new `fono-http` crate with a per-stage stopwatch,
+  inter-chunk body watchdog, and structured `fono.http=debug` schema
+  (provider, endpoint, status, headers_ms, ttfb_ms, body_ms,
+  body_bytes, chunks, request_id). Stalled bodies surface in 15-30 s
+  instead of waiting for the 60 s reqwest timeout, and TTS auto-
+  retries once on upstream proxy stalls. OpenRouter app attribution
+  (`HTTP-Referer: https://fono.page`, `X-OpenRouter-Title: Fono`)
+  fires on every outbound request so Fono appears on
+  openrouter.ai/rankings. `fono doctor` is now colorized, prints the
+  last 10 log lines, has a `--follow` tail mode, and reports
+  `live preview : enabled/disabled (style=…, mode=…)`. All fono
+  processes log to a unified `/var/log/fono.log` (world-writable,
+  pre-created by `fono install`). `fono setup` hot-reloads the
+  running daemon over IPC instead of requiring a restart. Desktop
+  notifications now fire on critical pipeline failures, missing API
+  keys, terms-acceptance prompts, and daemon-startup failures, with
+  a per-session cascade cap so a single root cause (e.g. a rotated
+  key) pops exactly one notification. `sudo fono install` (and the
+  `curl … | sh` one-liner) now starts the daemon in the background
+  as the invoking user and walks them through `fono setup` in the
+  same terminal; the tray's left-click is contextual (nudge to setup
+  vs. hotkey cheat sheet). A new `scripts/capture-overlay.sh` ships
+  for reproducible README screencasts (overlay-only, paste-into-app,
+  4-style gallery — all encoded to MP4 + GIF + WebP). Closes issues
+  #8, #9, #11. *v0.8.0, 2026-05-17.*
 
 - ![v0.7.1](https://img.shields.io/badge/v0.7.1-2026--05--05-blue?style=flat-square)
   **Default hotkeys overhauled.** Dictation collapses from F8/F9
