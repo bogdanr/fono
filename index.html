@@ -35,6 +35,9 @@
     --accent-fill:   oklch(0.555 0.205 26);
     --accent-2:      oklch(0.760 0.155 42);
     --ink-on-accent: oklch(0.970 0.012 75);
+    /* Assistant accent — green, mirrors ACCENT_ASSISTANT = #22C55E in
+       shared/fono-oscilloscope.js. Keep both in sync. */
+    --accent-assistant: oklch(0.730 0.190 145);
     --serif: 'Instrument Serif', 'Times New Roman', serif;
     --sans:  'IBM Plex Sans', -apple-system, sans-serif;
     --mono:  'IBM Plex Mono', ui-monospace, monospace;
@@ -52,6 +55,8 @@
     --accent:        oklch(0.420 0.180 25);
     --accent-fill:   oklch(0.420 0.180 25);
     --accent-2:      oklch(0.320 0.160 22);
+    /* Darker green in light theme so it still reads against cream. */
+    --accent-assistant: oklch(0.480 0.170 145);
   }
 
   body {
@@ -117,9 +122,52 @@
     margin-bottom: 28px;
   }
 
+  /* Two-column hero top: headline on the left, live demo on the right. */
+  .hero-top {
+    display: grid;
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+    gap: clamp(32px, 5vw, 64px);
+    align-items: center;
+  }
+  .hero-headline { min-width: 0; }
+  .hero-visual { min-width: 0; }
+
+  /* Oscilloscope demo — inlined into the hero. Standalone styles live in
+     assets/fono-oscilloscope-demo.html; these override the standalone
+     fixed width so the canvas flexes with its column. */
+  .fono-demo {
+    width: 100%;
+    aspect-ratio: 2 / 1;
+    position: relative;
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .fono-demo canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  .fono-demo .play-pill {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+    padding: 6px 14px;
+    border-radius: 999px;
+    background: rgba(23, 23, 27, 0.85);
+    color: #ececf1;
+    font: 600 12px/1 var(--mono);
+    letter-spacing: 0.06em;
+    border: 1px solid rgba(224, 84, 84, 0.4);
+    cursor: pointer;
+    display: none;
+  }
+  .fono-demo[data-paused="true"] .play-pill { display: inline-block; }
+
   .hero h1 {
     font-family: var(--serif);
-    font-size: clamp(56px, 13vw, 192px);
+    font-size: clamp(48px, 9vw, 144px);
     line-height: 0.86;
     letter-spacing: -0.04em;
     margin: 0 0 0;
@@ -128,6 +176,27 @@
   }
   .hero h1 .it { font-style: italic; color: var(--accent); }
   .hero h1 .small { font-size: 0.42em; vertical-align: 0.6em; font-style: italic; color: var(--ink-mute); }
+
+  /* Swap container — stacks two text variants in the same grid cell so
+     either can fade in / out without reflowing surrounding layout.
+     Used in the hero headline ("It types." ↔ "It answers.") and lede
+     ("lightweight dictation" ↔ "lightweight assistant"), both driven
+     by the `fono-demo-turn` CustomEvent emitted from
+     shared/fono-oscilloscope.js. */
+  .swap { display: inline-grid; }
+  .swap > * { grid-area: 1 / 1; transition: opacity .45s ease; }
+  .swap > [data-on="ask"]                         { opacity: 0; color: var(--accent-assistant); }
+  .swap[data-kind="ask"]    > [data-on="dictate"] { opacity: 0; }
+  .swap[data-kind="ask"]    > [data-on="ask"]     { opacity: 1; }
+  /* Block variant — used in the pipeline stages so the h4 + p of each
+     variant stacks in a single grid cell (no layout shift). The inline
+     variant above stays reserved for short word swaps. */
+  .swap--block { display: grid; }
+  .swap--block > [data-on="ask"] p     { color: var(--ink-mute); }
+  .swap--block > [data-on="ask"] h4 em { color: var(--accent-assistant); }
+  @media (prefers-reduced-motion: reduce) {
+    .swap > * { transition: none; }
+  }
 
   .hero-meta {
     display: grid;
@@ -265,7 +334,7 @@
   }
   .feat {
     background: var(--bg);
-    padding: 48px 0 48px;
+    padding: 48px clamp(24px, 3vw, 40px);
     display: grid;
     grid-template-columns: 80px 1fr;
     gap: 24px;
@@ -404,6 +473,13 @@
     display: grid; place-items: center;
     font-family: var(--mono); font-size: 13px;
     color: var(--accent);
+    transition: color .45s ease;
+  }
+  /* When a stage contains an active-ask swap, recolor its number to the
+     assistant accent so the dot stays in sync with stages 03/04 h4 em. */
+  .stage:has(.swap[data-kind="ask"]) .dot { color: var(--accent-assistant); }
+  @media (prefers-reduced-motion: reduce) {
+    .stage .dot { transition: none; }
   }
   .stage h4 {
     font-family: var(--serif); font-size: 28px;
@@ -479,6 +555,8 @@
   footer .sig { font-family: var(--serif); font-style: italic; font-size: 16px; color: var(--ink-mute); }
 
   @media (max-width: 900px) {
+    .hero-top { grid-template-columns: 1fr; gap: 40px; }
+    .hero-visual { order: 2; }
     .hero-meta { grid-template-columns: 1fr; gap: 32px; }
     .section-h { grid-template-columns: 1fr; gap: 32px; }
     .feat-grid, .pkg-mat { grid-template-columns: 1fr; }
@@ -537,12 +615,24 @@
   <!-- HERO -->
   <section class="hero">
     <div class="wrap">
-      <div class="eyebrow"><span id="eb-tag">Issue</span> · <span id="eb-date"></span> · Local-first dictation for Linux</div>
-      <h1>Speak.<br/><span class="it">It types.</span></h1>
+      <div class="hero-top">
+        <div class="hero-headline">
+          <div class="eyebrow"><span id="eb-tag">Issue</span> · <span id="eb-date"></span> · Local-first dictation for Linux</div>
+          <h1>Speak.<br/><span class="swap" id="hero-swap" data-kind="dictate" data-fono-kind-swap><span class="it" data-on="dictate">It types.</span><span data-on="ask">It answers.</span></span></h1>
+        </div>
+        <div class="hero-visual">
+          <div class="fono-demo" id="fono-demo">
+            <canvas id="fono-demo-canvas" width="1200" height="600"
+                    aria-label="Fono live oscilloscope visualisation"></canvas>
+            <button class="play-pill" type="button" aria-label="Play demo">PLAY DEMO</button>
+          </div>
+          <script src="shared/fono-oscilloscope.js"></script>
+        </div>
+      </div>
 
       <div class="hero-meta">
         <div class="hero-main">
-          <p class="hero-lede">A <em>lightweight dictation</em> system for Linux, macOS, and Windows. Local for privacy. Cloud for performance. LLM cleanup. <em>State&#8209;of&#8209;the&#8209;art</em> on whatever silicon you have.</p>
+          <p class="hero-lede">A <em class="swap" id="lede-swap" data-kind="dictate" data-fono-kind-swap><span data-on="dictate">lightweight dictation</span><span data-on="ask">lightweight assistant</span></em> system for Linux, macOS, and Windows. Local for privacy. Cloud for performance. Self-host on your LAN. <em>State&#8209;of&#8209;the&#8209;art</em> on whatever silicon you have.</p>
           <div class="hero-cta-row">
             <div class="install-pill">
               <span class="prompt">$</span>
@@ -556,7 +646,6 @@
           </div>
         </div>
         <dl class="hero-side">
-          <dt>Author</dt><dd>Bogdan Rădulescu &amp; contributors · open source</dd>
           <dt>License</dt><dd>GPL-3.0-only · audit every byte</dd>
           <dt>Runs on</dt><dd>Linux · X11 today, Wayland in progress</dd>
           <dt>Roadmap</dt><dd>macOS · Windows</dd>
@@ -571,7 +660,7 @@
     <div class="narrow">
       <div class="wave-meta" aria-hidden="true">
         <span><b>● rec</b></span>
-        <span>F9 to start, F9 to stop</span>
+        <span>F7 to start, F7 to stop</span>
       </div>
       <div class="waveform" id="wave"></div>
       <div class="typed-out" id="typed"></div>
@@ -592,9 +681,9 @@
       <div class="feat-grid">
         <div class="feat"><span class="idx">01</span><div><h3>Local <em>first</em>.</h3><p>Whisper runs on your machine. Audio never leaves the box unless you opt in. Your voice stays yours.</p></div></div>
         <div class="feat"><span class="idx">02</span><div><h3>Cloud <em>fast</em>.</h3><p>One command swaps in Groq, OpenAI, Cerebras, Anthropic, or Deepgram. Bring your own key. No daemon restart.</p></div></div>
-        <div class="feat"><span class="idx">03</span><div><h3>LLM <em>cleanup</em>.</h3><p>Optional pass strips filler, restores punctuation, fixes proper nouns. Local or cloud, your call.</p></div></div>
-        <div class="feat"><span class="idx">04</span><div><h3>Hardware <em>aware</em>.</h3><p><code>fono setup</code> probes your machine, picks the right model size, and binds the hotkeys. Two minutes flat.</p></div></div>
-        <div class="feat"><span class="idx">05</span><div><h3>Press <em>once</em>.</h3><p>F9 toggles recording, F8 is push-to-talk. Text lands in the focused window: terminal, browser, IDE, chat.</p></div></div>
+        <div class="feat"><span class="idx">03</span><div><h3>It <em>answers</em>.</h3><p>Hit F8 instead of F7 to fire the voice assistant. Ask a question, hear the reply spoken back.</p></div></div>
+        <div class="feat"><span class="idx">04</span><div><h3>Hardware <em>aware</em>.</h3><p><code>fono setup</code> probes your machine, picks the right model size, and binds the hotkeys. One minute flat.</p></div></div>
+        <div class="feat"><span class="idx">05</span><div><h3>Server <em>mode</em>.</h3><p>Run Fono in server mode on your fastest machine. Clients find it automatically — Home Assistant included.</p></div></div>
         <div class="feat"><span class="idx">06</span><div><h3>Open <em>source</em>.</h3><p>GPL-3.0-only. Single static Rust binary. No telemetry. No accounts. No upsell. Ever.</p></div></div>
       </div>
     </div>
@@ -606,7 +695,7 @@
       <div class="section-h">
         <div>
           <div class="num">№02 · Install</div>
-          <h2>Ninety <em>seconds</em>.</h2>
+          <h2>Sixty <em>seconds</em>.</h2>
         </div>
         <p class="desc">One curl, one binary, <code>/usr/local/bin</code>. Distro-native packages below if you prefer.</p>
       </div>
@@ -618,9 +707,9 @@
       </div>
 
       <div class="pkg-mat" style="margin-top: 32px;">
-        <div class="pkg-cell"><div class="name">Arch / Manjaro</div><code>sudo pacman -U fono-0.2.0-1-x86_64.pkg.tar.zst</code></div>
-        <div class="pkg-cell"><div class="name">Debian / Ubuntu</div><code>sudo apt install ./fono_0.2.0_amd64.deb</code></div>
-        <div class="pkg-cell"><div class="name">Slackware / NimbleX</div><code>installpkg fono-0.2.0-x86_64-1.txz</code></div>
+        <div class="pkg-cell"><div class="name">Arch / Manjaro</div><code>sudo pacman -U fono-<span class="pkg-ver">0.7.1</span>-1-x86_64.pkg.tar.zst</code></div>
+        <div class="pkg-cell"><div class="name">Debian / Ubuntu</div><code>sudo apt install ./fono_<span class="pkg-ver">0.7.1</span>_amd64.deb</code></div>
+        <div class="pkg-cell"><div class="name">Slackware / NimbleX</div><code>installpkg fono-<span class="pkg-ver">0.7.1</span>-x86_64-1.txz</code></div>
         <div class="pkg-cell"><div class="name">Other Linux</div><code>bare binary from <a href="https://github.com/bogdanr/fono/releases/latest" style="color:inherit">Releases</a></code></div>
         <div class="pkg-cell soon"><div class="name">macOS</div><code>planned · Linux first</code></div>
         <div class="pkg-cell soon"><div class="name">Windows</div><code>planned · Linux first</code></div>
@@ -644,14 +733,38 @@
           <div class="num">№03 · Pipeline</div>
           <h2>Four <em>small</em> pieces.</h2>
         </div>
-        <p class="desc">Each stage is swappable. Stay local end-to-end, or stream any one stage to the cloud.</p>
+        <p class="desc">Two pipelines share the first half. Each stage is swappable between local and cloud.</p>
       </div>
 
       <div class="pipeline">
         <div class="stage"><div class="dot">01</div><h4><em>Capture</em></h4><p>PipeWire, PulseAudio, or ALSA. VAD trims silence before bytes ever leave the mic.</p></div>
         <div class="stage"><div class="dot">02</div><h4><em>Transcribe</em></h4><p>whisper.cpp on-device, or Groq · OpenAI · Cerebras · Deepgram on the wire.</p></div>
-        <div class="stage"><div class="dot">03</div><h4><em>Cleanup</em></h4><p>Optional small LLM strips filler, restores punctuation, fixes names. Local or cloud.</p></div>
-        <div class="stage"><div class="dot">04</div><h4><em>Type</em></h4><p>Shift+Insert paste lands text in the focused window. Universal on X11. No clipboard hijack.</p></div>
+        <div class="stage">
+          <div class="dot">03</div>
+          <div class="swap swap--block" data-kind="dictate" data-fono-kind-swap>
+            <div data-on="dictate">
+              <h4><em>Cleanup</em></h4>
+              <p>Optional small LLM strips filler, restores punctuation, fixes names. Local or cloud.</p>
+            </div>
+            <div data-on="ask">
+              <h4><em>Think</em></h4>
+              <p>Local Ollama or cloud LLM reasons over your question, streaming tokens as they come.</p>
+            </div>
+          </div>
+        </div>
+        <div class="stage">
+          <div class="dot">04</div>
+          <div class="swap swap--block" data-kind="dictate" data-fono-kind-swap>
+            <div data-on="dictate">
+              <h4><em>Type</em></h4>
+              <p>Text lands in the focused window via paste injection. Universal on X11. No clipboard hijack, no per-app integration.</p>
+            </div>
+            <div data-on="ask">
+              <h4><em>Speak</em></h4>
+              <p>Kokoro or Piper on-device, or cloud TTS. The reply streams back through your speakers.</p>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </section>
@@ -727,6 +840,20 @@
     wv.appendChild(s);
   });
 
+  // Kind swap — listen for turn-kind changes from the oscilloscope demo
+  // and flip `data-kind` on every element tagged `data-fono-kind-swap`,
+  // driving the cross-fade defined in the `.swap` CSS rules. Currently
+  // drives the hero headline, hero lede, and pipeline stages 03 + 04.
+  const swapTargets = document.querySelectorAll('[data-fono-kind-swap]');
+  const demoEl      = document.getElementById('fono-demo');
+  if (demoEl) {
+    demoEl.addEventListener('fono-demo-turn', (e) => {
+      const kind = e.detail && e.detail.kind;
+      if (!kind) return;
+      swapTargets.forEach(el => { el.dataset.kind = kind; });
+    });
+  }
+
   // theme toggle (persists across sessions)
   const themeBtn = document.getElementById('theme-toggle');
   const stored = localStorage.getItem('fono-theme');
@@ -756,26 +883,30 @@
     ebDate.textContent = new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
   }
 
-  // latest release tag → eyebrow ("Issue v0.2.0"). Falls back to plain "Issue".
+  // latest release tag → eyebrow ("Issue v0.7.1") + package version stamps.
+  // Each <span class="pkg-ver"> in the package matrix gets rewritten to the
+  // version (tag with leading 'v' stripped). Falls back to the hardcoded
+  // version baked into the markup if the API call fails.
   fetch('https://api.github.com/repos/bogdanr/fono/releases/latest')
     .then(r => r.ok ? r.json() : null)
     .then(d => {
       if (!d || !d.tag_name) return;
       const ebTag = document.getElementById('eb-tag');
       if (ebTag) ebTag.textContent = `Issue ${d.tag_name}`;
+      const ver = d.tag_name.replace(/^v/, '');
+      document.querySelectorAll('.pkg-ver').forEach(el => { el.textContent = ver; });
     })
     .catch(() => {});
 
-  // typed quote sequence in the wave stage
+  // typed quote sequence in the wave stage — pure dictation samples
+  // Two registers: casual chat to friends, technical prompt to an AI coding assistant.
+  // Both land in the focused window via F7 — Fono never acts on the content, it just types it.
   typeSequence(document.getElementById('typed'), [
     { type: 'pause', delay: 600 },
-    { type: 'line', text: '"Remind me to email James about the deploy on Tuesday."' },
+    { type: 'line', text: '"Hey, anyone up for ramen Friday? That place near the park, 7-ish? Don\'t bringing Sam."' },
     { type: 'pause', delay: 1500 },
     { type: 'clear', delay: 200 },
-    { type: 'line', text: '"The meeting is at 3pm. Don\'t forget the invite."' },
-    { type: 'pause', delay: 1500 },
-    { type: 'clear', delay: 200 },
-    { type: 'line', text: '"git commit minus m fixed the audio backend race."' },
+    { type: 'line', text: '"Refactor the audio capture loop to use a ring buffer instead of a Vec, and keep the existing API surface intact."' },
     { type: 'pause', delay: 1500 },
     { type: 'clear', delay: 200 },
   ], { charDelay: 32, wordPause: 80, linePause: 700 });

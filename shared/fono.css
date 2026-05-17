@@ -7,4 +7,4 @@ code { font-family: var(--mono, ui-monospace, monospace); font-size: 0.95em; }
 button { font: inherit; cursor: pointer; border: 0; background: none; color: inherit; }
 :focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 4px; }
 img, svg { display: block; max-width: 100%; }
-::selection { background: currentColor; color: var(--bg); }
+::selection { background: var(--accent, #e05454); color: var(--ink-on-accent, #fff); }
