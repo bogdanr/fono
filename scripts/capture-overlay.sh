@@ -46,6 +46,9 @@ STYLE_SETTLE="1.5"
 LABEL=""                    # tri-state: empty → mode default
 LAYOUT="concat"             # concat | grid (gallery only)
 BACKGROUND=""               # optional #rrggbb wallpaper override
+DETECT_WINDOW=1             # auto-locate the Fono window at capture time
+DETECT_PAD=4                # px of breathing room around the detected box
+CONVERT=""                  # if set, skip capture and convert this MP4 to GIF+WebP
 
 SCRIPT_NAME="$(basename "$0")"
 
@@ -86,6 +89,23 @@ Shared options:
   --background <#rrggbb>           Pre-set a solid wallpaper for the
                                    take (feh on X11, swaybg on Wayland)
                                    to avoid desktop bleed-through.
+  --no-detect-window               Skip live X11/Wayland lookup of the
+                                   Fono window. Use the hard-coded
+                                   logical geometry from --height etc.
+                                   instead. Default: detection on.
+  --detect-pad <px>                Padding added around the detected
+                                   window on each side (default 4).
+                                   Useful for catching shadow / AA
+                                   pixels that fall outside the inner
+                                   frame.
+  --convert <input.mp4>            Skip capture entirely; convert an
+                                   existing MP4 to GIF + WebP (and
+                                   re-encode MP4 if --format includes
+                                   it) using the same encode pipeline
+                                   as a normal capture. No session,
+                                   monitor, or fono dependencies are
+                                   required. Outputs land next to the
+                                   input file (or in --output-dir).
   -h, --help                       Print this message.
 
 paste-mode options:
@@ -107,15 +127,17 @@ gallery-mode options:
 
 Dependencies (probed at startup):
   Required:   ffmpeg
-  X11 path:   xrandr, xdotool, wmctrl
+  X11 path:   xrandr
   Wayland:    wlr-randr (or swaymsg), grim, wf-recorder
   Optional:   gifsicle (final GIF optimisation pass)
+              xdotool + wmctrl (only for `--mode paste --target-app`
+                                under X11 — probed lazily)
 
   Slackware / NimbleX:  sbopkg / slackbuild for each above.
-  Arch:                 pacman -S ffmpeg xorg-xrandr xdotool wmctrl \
+  Arch:                 pacman -S ffmpeg xorg-xrandr \
                                   wlr-randr grim wf-recorder gifsicle
-  Debian / Ubuntu:      apt install ffmpeg x11-xserver-utils xdotool \
-                                    wmctrl wlr-randr grim wf-recorder \
+  Debian / Ubuntu:      apt install ffmpeg x11-xserver-utils \
+                                    wlr-randr grim wf-recorder \
                                     gifsicle
 
 Examples:
@@ -163,6 +185,10 @@ while [ $# -gt 0 ]; do
         --no-label)       LABEL=0; shift ;;
         --layout)         LAYOUT="${2:-}"; shift 2 ;;
         --background)     BACKGROUND="${2:-}"; shift 2 ;;
+        --no-detect-window) DETECT_WINDOW=0; shift ;;
+        --detect-window)  DETECT_WINDOW=1; shift ;;
+        --detect-pad)     DETECT_PAD="${2:-}"; shift 2 ;;
+        --convert)        CONVERT="${2:-}"; shift 2 ;;
         -h|--help)        usage; exit 0 ;;
         --) shift; break ;;
         *) die "unknown argument: $1 (try --help)" ;;
@@ -212,9 +238,11 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 if [ -z "$OUTPUT_DIR" ]; then
     OUTPUT_DIR="$REPO_ROOT/target/screencasts"
 fi
-mkdir -p "$OUTPUT_DIR/$MODE"
-RAW_DIR="$OUTPUT_DIR/raw"
-mkdir -p "$RAW_DIR"
+if [ -z "$CONVERT" ]; then
+    mkdir -p "$OUTPUT_DIR/$MODE"
+    RAW_DIR="$OUTPUT_DIR/raw"
+    mkdir -p "$RAW_DIR"
+fi
 
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 
@@ -223,16 +251,27 @@ TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 # ---------------------------------------------------------------------------
 
 SESSION_TYPE="${XDG_SESSION_TYPE:-}"
-if [ -z "$SESSION_TYPE" ]; then
-    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
-        SESSION_TYPE="wayland"
-    elif [ -n "${DISPLAY:-}" ]; then
-        SESSION_TYPE="x11"
-    fi
+if [ -n "$CONVERT" ]; then
+    # Convert mode: no graphical session needed; only ffmpeg is required.
+    SESSION_TYPE="convert"
 fi
+# XDG_SESSION_TYPE can be 'tty', 'unspecified', or simply wrong when the
+# script is launched from a TTY-attached shell or over SSH while a
+# graphical session is in fact running. Trust WAYLAND_DISPLAY / DISPLAY
+# whenever the env var isn't already x11/wayland.
 case "$SESSION_TYPE" in
-    x11|wayland) ;;
-    *) die "could not detect session type (XDG_SESSION_TYPE='$SESSION_TYPE'); set it or run under X11/Wayland" ;;
+    x11|wayland|convert) ;;
+    *)
+        if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+            SESSION_TYPE="wayland"
+        elif [ -n "${DISPLAY:-}" ]; then
+            SESSION_TYPE="x11"
+        fi
+        ;;
+esac
+case "$SESSION_TYPE" in
+    x11|wayland|convert) ;;
+    *) die "could not detect session type (XDG_SESSION_TYPE='${XDG_SESSION_TYPE:-}', WAYLAND_DISPLAY='${WAYLAND_DISPLAY:-}', DISPLAY='${DISPLAY:-}'); set XDG_SESSION_TYPE=x11 or =wayland, or run under a graphical session" ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -246,10 +285,17 @@ probe_deps() {
     local missing=""
     have ffmpeg || missing="$missing ffmpeg"
 
+    if [ "$SESSION_TYPE" = "convert" ]; then
+        have ffprobe || missing="$missing ffprobe"
+        if [ -n "$missing" ]; then
+            die "missing dependencies for --convert:$missing (install ffmpeg)"
+        fi
+        have gifsicle || warn "gifsicle not found - skipping final GIF optimisation pass"
+        return 0
+    fi
+
     if [ "$SESSION_TYPE" = "x11" ]; then
         have xrandr  || missing="$missing xrandr"
-        have xdotool || missing="$missing xdotool"
-        have wmctrl  || missing="$missing wmctrl"
     else
         # Wayland: pick a recorder.
         if have wf-recorder; then
@@ -271,10 +317,10 @@ error: missing dependencies:$missing
 
 Install via your package manager:
   Slackware / NimbleX : sbopkg / slackbuild each name above.
-  Arch                : pacman -S ffmpeg xorg-xrandr xdotool wmctrl \\
+  Arch                : pacman -S ffmpeg xorg-xrandr \\
                                   wlr-randr grim wf-recorder gifsicle
-  Debian / Ubuntu     : apt install ffmpeg x11-xserver-utils xdotool \\
-                                    wmctrl wlr-randr grim wf-recorder \\
+  Debian / Ubuntu     : apt install ffmpeg x11-xserver-utils \\
+                                    wlr-randr grim wf-recorder \\
                                     gifsicle
 EOF
         exit 1
@@ -284,6 +330,43 @@ EOF
 }
 
 probe_deps
+
+# ---------------------------------------------------------------------------
+# H.264 encoder selection
+# ---------------------------------------------------------------------------
+#
+# Distro ffmpeg builds vary in which H.264 encoder they ship: libx264 is
+# the preferred one but is patent-encumbered, so trimmed builds (e.g.
+# NimbleX) drop it. Pick the best software encoder available and fall
+# back to mpeg4-in-mp4 as a last resort. Hardware encoders (h264_vaapi,
+# h264_nvenc, h264_vulkan) are skipped intentionally because they need
+# extra hwupload filter inserts that would conflict with our crop /
+# drawtext chains.
+H264_CODEC_ARGS=""
+H264_ENCODER=""
+detect_h264_encoder() {
+    local encs
+    encs="$(ffmpeg -hide_banner -encoders 2>/dev/null)"
+    if printf '%s\n' "$encs" | grep -qE '^[[:space:]]*V[^ ]*[[:space:]]+libx264[[:space:]]'; then
+        H264_ENCODER="libx264"
+        H264_CODEC_ARGS="-c:v libx264 -preset slow -crf 23"
+    elif printf '%s\n' "$encs" | grep -qE '^[[:space:]]*V[^ ]*[[:space:]]+libopenh264[[:space:]]'; then
+        H264_ENCODER="libopenh264"
+        H264_CODEC_ARGS="-c:v libopenh264 -b:v 2M"
+        warn "ffmpeg lacks libx264; using libopenh264 (acceptable quality)"
+    elif printf '%s\n' "$encs" | grep -qE '^[[:space:]]*V[^ ]*[[:space:]]+mpeg4[[:space:]]'; then
+        H264_ENCODER="mpeg4"
+        H264_CODEC_ARGS="-c:v mpeg4 -qscale:v 3"
+        warn "ffmpeg has no libx264 or libopenh264; falling back to mpeg4 (lower quality, less GitHub-friendly). Consider building an ffmpeg with x264 support."
+    else
+        die "ffmpeg has no usable video encoder (libx264, libopenh264, mpeg4 all missing). Rebuild ffmpeg with at least one of these."
+    fi
+    info "h.264 encoder: $H264_ENCODER"
+}
+
+if [ "$FORMAT" = "mp4" ] || { [ "$FORMAT" = "all" ] && [ "$SESSION_TYPE" != "convert" ]; }; then
+    detect_h264_encoder
+fi
 
 # ---------------------------------------------------------------------------
 # Monitor geometry resolution
@@ -361,6 +444,7 @@ resolve_monitor() {
     fi
 }
 
+if [ -z "$CONVERT" ]; then
 resolve_monitor
 info "monitor: ${MON_W}x${MON_H}+${MON_X}+${MON_Y}  session=$SESSION_TYPE"
 
@@ -388,6 +472,92 @@ OV_BOTTOM="$(scale_int "$OV_LOGICAL_BOTTOM_INSET")"
 OV_X=$(( MON_X + (MON_W - OV_W) / 2 ))
 # y = monitor.y + monitor.h - bottom_inset - overlay.h
 OV_Y=$(( MON_Y + MON_H - OV_BOTTOM - OV_H ))
+
+# ---------------------------------------------------------------------------
+# Live overlay window detection
+# ---------------------------------------------------------------------------
+#
+# The hard-coded math above derives the overlay box from logical
+# constants in `crates/fono-overlay/src/real.rs` (WIN_WIDTH, the
+# WIN_*_HEIGHT family, BOTTOM_OFFSET). Those constants drift
+# whenever the overlay code changes, and they cannot capture
+# runtime sizing (e.g. waveform vs. text mode picks different
+# heights, user config may override width). So if the Fono window
+# is actually mapped right now, query the compositor for its true
+# geometry and use that instead.
+detect_overlay_window() {
+    [ "$DETECT_WINDOW" -eq 1 ] || return 1
+
+    local dx="" dy="" dw="" dh=""
+
+    if [ "$SESSION_TYPE" = "x11" ]; then
+        if ! have xwininfo; then
+            return 1
+        fi
+        local out
+        out="$(xwininfo -name Fono 2>/dev/null || true)"
+        if [ -z "$out" ]; then
+            return 1
+        fi
+        dx="$(printf '%s\n' "$out" | awk '/Absolute upper-left X/ {print $NF; exit}')"
+        dy="$(printf '%s\n' "$out" | awk '/Absolute upper-left Y/ {print $NF; exit}')"
+        dw="$(printf '%s\n' "$out" | awk '/^[[:space:]]+Width:/ {print $NF; exit}')"
+        dh="$(printf '%s\n' "$out" | awk '/^[[:space:]]+Height:/ {print $NF; exit}')"
+    else
+        # Wayland (sway only — wlr-randr doesn't enumerate windows).
+        if ! have swaymsg; then
+            return 1
+        fi
+        local json
+        json="$(swaymsg -t get_tree 2>/dev/null || true)"
+        [ -n "$json" ] || return 1
+        # Find first node whose app_id or window class is "fono" and
+        # whose name contains "Fono". Avoid jq dep.
+        local node
+        node="$(printf '%s' "$json" \
+            | tr -d '\n' \
+            | grep -oE '\{[^{}]*"(app_id|class)":"fono"[^{}]*\}' \
+            | head -n1 || true)"
+        if [ -z "$node" ]; then
+            return 1
+        fi
+        local rect
+        rect="$(printf '%s' "$node" | grep -oE '"rect":\{[^}]+\}' | head -n1)"
+        [ -n "$rect" ] || return 1
+        dx="$(printf '%s' "$rect" | grep -oE '"x":[0-9]+' | head -n1 | cut -d: -f2)"
+        dy="$(printf '%s' "$rect" | grep -oE '"y":[0-9]+' | head -n1 | cut -d: -f2)"
+        dw="$(printf '%s' "$rect" | grep -oE '"width":[0-9]+' | head -n1 | cut -d: -f2)"
+        dh="$(printf '%s' "$rect" | grep -oE '"height":[0-9]+' | head -n1 | cut -d: -f2)"
+    fi
+
+    if [ -z "$dx" ] || [ -z "$dy" ] || [ -z "$dw" ] || [ -z "$dh" ]; then
+        return 1
+    fi
+
+    # Apply --detect-pad on each side, clamped to the monitor box so
+    # ffmpeg's crop filter doesn't sample off-screen pixels.
+    local pad="$DETECT_PAD"
+    local nx=$(( dx - pad ))
+    local ny=$(( dy - pad ))
+    local nw=$(( dw + 2 * pad ))
+    local nh=$(( dh + 2 * pad ))
+    if [ "$nx" -lt "$MON_X" ]; then nw=$(( nw - (MON_X - nx) )); nx="$MON_X"; fi
+    if [ "$ny" -lt "$MON_Y" ]; then nh=$(( nh - (MON_Y - ny) )); ny="$MON_Y"; fi
+    local right_max=$(( MON_X + MON_W ))
+    local bot_max=$(( MON_Y + MON_H ))
+    if [ $(( nx + nw )) -gt "$right_max" ]; then nw=$(( right_max - nx )); fi
+    if [ $(( ny + nh )) -gt "$bot_max" ]; then nh=$(( bot_max - ny )); fi
+
+    OV_X="$nx"; OV_Y="$ny"; OV_W="$nw"; OV_H="$nh"
+    info "detected Fono window: ${dw}x${dh}+${dx}+${dy} (+${pad}px pad -> ${OV_W}x${OV_H}+${OV_X}+${OV_Y})"
+    return 0
+}
+
+if ! detect_overlay_window; then
+    if [ "$DETECT_WINDOW" -eq 1 ]; then
+        warn "could not locate Fono window (is fono running? on Wayland, only sway is supported) — falling back to logical geometry"
+    fi
+fi
 
 # Ensure even dimensions (yuv420p needs even W/H).
 even() { local v="$1"; if [ $(( v % 2 )) -ne 0 ]; then echo $(( v - 1 )); else echo "$v"; fi; }
@@ -419,6 +589,9 @@ resolve_paste_crop() {
     if [ -n "$TARGET_APP" ]; then
         local tx="" ty="" tw="" th=""
         if [ "$SESSION_TYPE" = "x11" ]; then
+            if ! have xdotool || ! have wmctrl; then
+                die "--mode paste --target-app on X11 needs xdotool + wmctrl (install via your package manager), or pass --region / --below instead"
+            fi
             local wid
             wid="$(xdotool search --limit 1 --class "$TARGET_APP" 2>/dev/null || true)"
             if [ -n "$wid" ]; then
@@ -481,6 +654,7 @@ CROP_W="$(even "$CROP_W")"
 CROP_H="$(even "$CROP_H")"
 
 info "crop: ${CROP_W}x${CROP_H}+${CROP_X}+${CROP_Y}"
+fi  # end: capture-only geometry setup
 
 # ---------------------------------------------------------------------------
 # Optional background colour wallpaper (X11=feh, Wayland=swaybg)
@@ -628,9 +802,10 @@ encode_mp4() {
     local raw="$1" out="$2" label="${3:-}"
     local vf
     vf="$(build_vf 0 "$label")"
+    # shellcheck disable=SC2086 # intentional word-splitting of $H264_CODEC_ARGS
     ffmpeg -hide_banner -loglevel error -y -i "$raw" \
         -vf "${vf},format=yuv420p" \
-        -c:v libx264 -preset slow -crf 23 \
+        $H264_CODEC_ARGS \
         -movflags +faststart \
         "$out"
 }
@@ -846,9 +1021,10 @@ run_gallery() {
             printf "file '%s'\n" "$c" >> "$list_file"
         done
         # Re-encode (codecs may differ if a clip got re-tried).
+        # shellcheck disable=SC2086
         ffmpeg -hide_banner -loglevel error -y \
             -f concat -safe 0 -i "$list_file" \
-            -c:v libx264 -preset slow -crf 23 -pix_fmt yuv420p \
+            $H264_CODEC_ARGS -pix_fmt yuv420p \
             -movflags +faststart \
             "$master"
         rm -f "$list_file"
@@ -862,9 +1038,10 @@ run_gallery() {
             for c in "${clip_paths[@]}"; do
                 printf "file '%s'\n" "$c" >> "$list_file"
             done
+            # shellcheck disable=SC2086
             ffmpeg -hide_banner -loglevel error -y \
                 -f concat -safe 0 -i "$list_file" \
-                -c:v libx264 -preset slow -crf 23 -pix_fmt yuv420p \
+                $H264_CODEC_ARGS -pix_fmt yuv420p \
                 -movflags +faststart \
                 "$master"
             rm -f "$list_file"
@@ -876,7 +1053,7 @@ run_gallery() {
                 -i "${clip_paths[3]}" \
                 -filter_complex \
                 "[0:v]scale=320:-2[a];[1:v]scale=320:-2[b];[2:v]scale=320:-2[c];[3:v]scale=320:-2[d];[a][b][c][d]xstack=inputs=4:layout=0_0|w0_0|0_h0|w0_h0,format=yuv420p[v]" \
-                -map "[v]" -c:v libx264 -preset slow -crf 23 \
+                -map "[v]" $H264_CODEC_ARGS \
                 -movflags +faststart \
                 "$master"
         fi
@@ -917,6 +1094,67 @@ run_gallery() {
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
+
+if [ -n "$CONVERT" ]; then
+    [ -r "$CONVERT" ] || die "--convert: cannot read input file: $CONVERT"
+
+    # Probe input dimensions and use them as a no-op crop so build_vf
+    # passes the frames straight through to scale/drawtext.
+    in_dims="$(ffprobe -v error -select_streams v:0 \
+        -show_entries stream=width,height \
+        -of csv=p=0:s=x "$CONVERT" 2>/dev/null)"
+    in_w="${in_dims%x*}"
+    in_h="${in_dims#*x}"
+    case "$in_w" in ''|*[!0-9]*) die "--convert: ffprobe could not read video stream from $CONVERT" ;; esac
+    case "$in_h" in ''|*[!0-9]*) die "--convert: ffprobe could not read video stream from $CONVERT" ;; esac
+    CROP_W="$in_w"; CROP_H="$in_h"; CROP_X=0; CROP_Y=0
+    info "convert: $CONVERT (${in_w}x${in_h})"
+
+    # Output basename: same dir as input unless --output-dir was set.
+    in_base="$(basename "$CONVERT")"
+    in_stem="${in_base%.*}"
+    if [ -n "${OUTPUT_DIR_OVERRIDDEN:-}" ] || [ "$OUTPUT_DIR" != "$REPO_ROOT/target/screencasts" ]; then
+        out_dir="$OUTPUT_DIR"
+    else
+        out_dir="$(cd "$(dirname "$CONVERT")" && pwd)"
+    fi
+    mkdir -p "$out_dir"
+    out_base="$out_dir/$in_stem"
+
+    label=""
+    [ "$LABEL" = "1" ] && label="$in_stem"
+
+    case "$FORMAT" in
+        mp4)
+            # Only re-encode mp4 when explicitly requested (--format mp4).
+            # 'all' deliberately skips it: the user already has the source.
+            if [ "${out_base}.mp4" = "$(cd "$(dirname "$CONVERT")" && pwd)/$in_base" ]; then
+                die "--convert --format mp4 would overwrite the input ($CONVERT); pass --output-dir <dir> to write elsewhere"
+            fi
+            info "encoding mp4..."
+            encode_mp4 "$CONVERT" "${out_base}.mp4" "$label"
+            info "  $(filesize_mb "${out_base}.mp4") MB -> ${out_base}.mp4"
+            ;;
+    esac
+    case "$FORMAT" in
+        webp|all)
+            info "encoding webp..."
+            webp_w=640
+            encode_webp "$CONVERT" "${out_base}.webp" "$label" "$webp_w"
+            info "  $(filesize_mb "${out_base}.webp") MB -> ${out_base}.webp"
+            ;;
+    esac
+    case "$FORMAT" in
+        gif|all)
+            info "encoding gif..."
+            encode_gif_with_budget "$CONVERT" "${out_base}.gif" "$label"
+            info "  $(filesize_mb "${out_base}.gif") MB -> ${out_base}.gif"
+            ;;
+    esac
+
+    info "done. artefacts: ${out_base}.{webp,gif}"
+    exit 0
+fi
 
 set_background
 start_fono_if_requested
