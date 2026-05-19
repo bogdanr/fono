@@ -239,27 +239,32 @@ where
 }
 
 /// Spawn a process-backed audio capture tool that emits raw s16le mono
-/// PCM at `target_rate` on stdout. Tries the PulseAudio `parec` client
-/// first (universally available on PulseAudio systems and on PipeWire
-/// systems that have `pulseaudio-utils` installed), then falls back to
-/// PipeWire's native `pw-cat --record` which ships in `pipewire-bin`
-/// and is preinstalled on Ubuntu 24.04 / Fedora 39+ / Debian 13+.
+/// PCM at `target_rate` on stdout. Tries PipeWire's native `pw-cat`
+/// first (preinstalled on Ubuntu 24.04, Fedora 39+, Debian 13+, and
+/// every other modern PipeWire distro via `pipewire-bin`), then falls
+/// back to the legacy PulseAudio `parec` client (works on systems with
+/// `pulseaudio-utils` installed or pure-PulseAudio setups). PulseAudio
+/// is treated as the fallback because PipeWire is now the upstream
+/// audio stack on every actively-developed distro; parec stays
+/// supported for legacy installs and will be deprecated once PulseAudio
+/// drops out of the major LTS releases.
 ///
 /// Returns the spawned child plus a short tool name used in log/error
 /// messages.
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
 fn spawn_capture_tool(target_rate: u32) -> Result<(Child, &'static str)> {
-    match spawn_parec(target_rate) {
-        Ok(c) => Ok((c, "parec")),
-        Err(parec_err) => {
-            debug!("capture: parec unavailable ({parec_err:#}); trying pw-cat");
-            match spawn_pw_cat(target_rate) {
-                Ok(c) => Ok((c, "pw-cat")),
-                Err(pw_err) => Err(anyhow::anyhow!(
+    match spawn_pw_cat(target_rate) {
+        Ok(c) => Ok((c, "pw-cat")),
+        Err(pw_err) => {
+            debug!("capture: pw-cat unavailable ({pw_err:#}); falling back to parec");
+            match spawn_parec(target_rate) {
+                Ok(c) => Ok((c, "parec")),
+                Err(parec_err) => Err(anyhow::anyhow!(
                     "audio capture failed to start: no usable capture tool found. \
-                     Tried `parec` ({parec_err}) and `pw-cat` ({pw_err}). \
-                     Install `pipewire-bin` (Ubuntu/Debian) or `pipewire-pulse` / \
-                     `pulseaudio-utils`, or rebuild Fono with \
+                     Tried `pw-cat` ({pw_err}) and `parec` ({parec_err}). \
+                     Install `pipewire-bin` (Ubuntu/Debian) or `pipewire` \
+                     (Arch/Fedora). On legacy PulseAudio systems, install \
+                     `pulseaudio-utils`. Or rebuild Fono with \
                      `--features fono-audio/cpal-backend` for direct ALSA capture."
                 )),
             }

@@ -133,39 +133,40 @@ const PAPLAY_CHUNK_BYTES: usize = 16 * 1024;
 async fn play_via_paplay(pcm: &[f32], rate: u32, stop: &AtomicBool) -> Result<()> {
     use std::io::Write;
     use std::process::{Command, Stdio};
-    let (mut child, tool) = match Command::new("paplay")
-        .arg("--raw")
-        .arg("--format=s16le")
+    let (mut child, tool) = match Command::new("pw-play")
         .arg(format!("--rate={rate}"))
         .arg("--channels=1")
+        .arg("--format=s16")
+        .arg("-")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
     {
-        Ok(c) => (c, "paplay"),
-        Err(paplay_err) => {
-            // Fall back to pw-play (ships in pipewire-bin, preinstalled
-            // on Ubuntu 24.04 / Fedora 39+). Note: pw-play has no
-            // `--raw` flag; passing `--format=s16` + filename `-`
-            // makes it read raw little-endian s16 from stdin.
-            match Command::new("pw-play")
+        Ok(c) => (c, "pw-play"),
+        Err(pw_err) => {
+            // Legacy fallback for PulseAudio-only systems. Will be
+            // deprecated once PulseAudio drops out of the major LTS
+            // releases (Ubuntu 22.04 LTS is the last one still
+            // shipping it as default).
+            match Command::new("paplay")
+                .arg("--raw")
+                .arg("--format=s16le")
                 .arg(format!("--rate={rate}"))
                 .arg("--channels=1")
-                .arg("--format=s16")
-                .arg("-")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
             {
-                Ok(c) => (c, "pw-play"),
-                Err(pw_err) => {
+                Ok(c) => (c, "paplay"),
+                Err(paplay_err) => {
                     return Err(anyhow::anyhow!(
-                        "no usable audio playback tool found. Tried `paplay` \
-                         ({paplay_err}) and `pw-play` ({pw_err}). Install \
-                         `pipewire-bin` (Ubuntu/Debian) or `pulseaudio-utils`, \
-                         or rebuild with `--features cpal-backend`."
+                        "no usable audio playback tool found. Tried `pw-play` \
+                         ({pw_err}) and `paplay` ({paplay_err}). Install \
+                         `pipewire-bin` (Ubuntu/Debian) or `pulseaudio-utils` \
+                         on legacy PulseAudio, or rebuild with \
+                         `--features cpal-backend`."
                     ));
                 }
             }

@@ -1163,19 +1163,22 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
     debug!("inject       : also_copy_to_clipboard={}", config.general.also_copy_to_clipboard);
     // Probe and print which inject + clipboard tools are detected, so
     // users immediately see whether they have a working delivery path.
+    // Note: fono-inject's native `arboard` clipboard path is always
+    // available regardless of which external CLI tools are present,
+    // so this probe is purely informational — we never fail closed.
     let injector = fono_inject::Injector::detect();
     let clipboard_tool = ["wl-copy", "xclip", "xsel"]
         .iter()
         .find(|t| which_in_path(t).is_some())
         .copied()
-        .unwrap_or("none");
+        .unwrap_or("none (using native arboard)");
     debug!("delivery     : key-injector={injector:?}  clipboard-tool={clipboard_tool}");
-    if matches!(injector, fono_inject::Injector::None) && clipboard_tool == "none" {
-        warn!(
-            "NO injection backend AND no clipboard tool detected — on X11 the built-in \
-             xtest-paste backend should work when DISPLAY is set; otherwise install one of: \
-             wtype/ydotool (Wayland), xdotool (X11/XWayland), or rebuild with \
-             --features enigo-backend; plus wl-clipboard/xclip/xsel for clipboard fallback"
+    if matches!(injector, fono_inject::Injector::None) {
+        info!(
+            "no auto-typing backend available on this session — dictation will land \
+             on the clipboard via the native (arboard) writer; press Ctrl+V or \
+             Shift+Insert to paste. Install `wtype` (Wayland wlroots/KWin) or \
+             `xdotool` (X11) to enable auto-typing instead."
         );
     }
 }
@@ -1432,13 +1435,13 @@ fn notify_last_transcription(paths: &Paths) {
 fn notify_recording_failure(err: &anyhow::Error) {
     let raw = format!("{err:#}");
     let body = if raw.contains("no usable capture tool")
-        || raw.contains("parec")
         || raw.contains("pw-cat")
+        || raw.contains("parec")
         || raw.contains("PulseAudio")
     {
-        "Audio capture tool not found. Install one with:\n\
+        "Audio capture tool not found. Install it with:\n\
          \tsudo apt install pipewire-bin\n\
-         \t(or pulseaudio-utils on PulseAudio systems)."
+         \t(or pulseaudio-utils on legacy PulseAudio systems)."
             .to_string()
     } else if raw.contains("audio capture") {
         format!(

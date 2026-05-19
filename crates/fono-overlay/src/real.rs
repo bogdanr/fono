@@ -1364,14 +1364,27 @@ fn run_event_loop(
 
     impl ApplicationHandler<()> for App {
         fn resumed(&mut self, el: &ActiveEventLoop) {
-            // On Wayland, defer window creation until the first
-            // non-Hidden state. winit's `with_visible(false)` does
-            // not unmap an xdg_toplevel cleanly on every compositor,
-            // so the safest way to guarantee no top-left ghost panel
-            // before recording starts is to not create the window at
-            // all. The SetState arm in `about_to_wait` lazy-creates
-            // it when needed.
+            // On Wayland, do not create an overlay window at all.
+            // xdg_toplevel surfaces cannot be positioned by the client
+            // (the compositor decides placement), and there is no
+            // protocol to hide a mapped toplevel without destroying
+            // the surface. The result of trying anyway is the panel
+            // appearing at compositor-default placement (typically
+            // top-left) as a dark charcoal box — which the user
+            // experiences as a "black overlay" stuck in the corner.
+            //
+            // A proper Wayland panel needs wlr-layer-shell (sway,
+            // Hyprland, KWin) or a portal — neither of which winit
+            // exposes. Until that lands, the tray + notifications +
+            // doctor cover the user-facing state surface on Wayland.
+            // The state FSM continues to run normally so STT / TTS
+            // / clipboard delivery are unaffected.
             if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+                tracing::info!(
+                    "overlay: Wayland session detected; skipping floating panel \
+                     (xdg_toplevel cannot be positioned by clients). State changes \
+                     remain visible in the tray and notifications."
+                );
                 return;
             }
             self.ensure_window(el);
@@ -1396,11 +1409,6 @@ fn run_event_loop(
                 match cmd {
                     OverlayCmd::SetState(s) => {
                         self.state = s;
-                        // Lazy-create the window on Wayland the first
-                        // time we transition to a visible state.
-                        if !matches!(s, OverlayState::Hidden) {
-                            self.ensure_window(el);
-                        }
                         if let Some(w) = self.window.as_ref() {
                             w.set_visible(!matches!(s, OverlayState::Hidden));
                             needs_redraw = true;

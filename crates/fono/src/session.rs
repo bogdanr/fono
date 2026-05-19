@@ -205,6 +205,12 @@ pub trait Injector: Send + Sync + 'static {
 /// session for `enigo` to talk to.
 pub struct RealInjector;
 
+/// One-shot guard for the "text copied to clipboard, press Ctrl+V" hint.
+/// Flipped to `true` after the first clipboard fallback so subsequent
+/// dictations don't spam the user with a notification per utterance.
+static CLIPBOARD_HINT_SHOWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 impl Injector for RealInjector {
     fn inject(&self, text: &str) -> Result<bool> {
         match fono_inject::type_text_with_outcome(text)? {
@@ -220,24 +226,35 @@ impl Injector for RealInjector {
             }
             fono_inject::InjectOutcome::Clipboard(tool) => {
                 tracing::info!("inject backend: clipboard via {tool} (no key-injection worked)");
-                let body = if tool == "arboard" {
-                    "Auto-typing isn't available in this session. The text is on \
-                     the clipboard — press Ctrl+V or Shift+Insert to paste."
-                        .to_string()
-                } else {
-                    format!(
-                        "Auto-typing isn't available. Text copied to the \
-                         clipboard via {tool} — press Ctrl+V or Shift+Insert \
-                         to paste."
-                    )
-                };
-                fono_core::notify::send(
-                    "Fono — copied to clipboard",
-                    &body,
-                    "edit-paste",
-                    6_000,
-                    fono_core::notify::Urgency::Normal,
-                );
+                // Surface the "press Ctrl+V to paste" hint only once
+                // per daemon process. On Wayland without an active
+                // virtual-keyboard / RemoteDesktop session this is
+                // the steady state (every dictation falls back to
+                // clipboard) and firing a notification on every
+                // utterance is intolerably noisy. Doctor and the
+                // tray cover the persistent-state surface.
+                if !CLIPBOARD_HINT_SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    let body = if tool == "arboard" {
+                        "Auto-typing isn't available in this session. The text is on \
+                         the clipboard — press Ctrl+V or Shift+Insert to paste. \
+                         (This hint shows once per session; subsequent dictations \
+                         go to the clipboard silently.)"
+                            .to_string()
+                    } else {
+                        format!(
+                            "Auto-typing isn't available. Text copied to the \
+                             clipboard via {tool} — press Ctrl+V or Shift+Insert \
+                             to paste. (Shown once per session.)"
+                        )
+                    };
+                    fono_core::notify::send(
+                        "Fono — copied to clipboard",
+                        &body,
+                        "edit-paste",
+                        6_000,
+                        fono_core::notify::Urgency::Normal,
+                    );
+                }
                 Ok(true)
             }
         }
