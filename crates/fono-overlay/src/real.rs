@@ -1300,8 +1300,12 @@ fn run_event_loop(
         rx: std::sync::mpsc::Receiver<OverlayCmd>,
     }
 
-    impl ApplicationHandler<()> for App {
-        fn resumed(&mut self, el: &ActiveEventLoop) {
+    impl App {
+        /// Create the overlay window + softbuffer surface. Idempotent
+        /// — returns immediately if the window already exists. Used
+        /// from `resumed()` on X11 (eager) and from the SetState
+        /// command path on Wayland (lazy on first non-Hidden state).
+        fn ensure_window(&mut self, el: &ActiveEventLoop) {
             if self.window.is_some() {
                 return;
             }
@@ -1314,37 +1318,8 @@ fn run_event_loop(
                 .with_transparent(true)
                 .with_window_level(WindowLevel::AlwaysOnTop)
                 .with_inner_size(winit::dpi::LogicalSize::new(WIN_WIDTH, initial_h))
-                // Critical: don't steal focus from the user's
-                // currently-focused window. Without this, the moment
-                // the overlay maps it grabs keyboard focus and the
-                // ensuing inject (which paste-synthesizes into the
-                // *focused* window) lands in the overlay itself.
                 .with_active(false)
                 .with_visible(false);
-            // Platform-specific focus-suppression. On X11 we use a
-            // belt-and-braces approach because window managers
-            // disagree about how aggressively to honour the hints
-            // above on subsequent map cycles (the overlay is shown
-            // and hidden once per dictation, and many WMs default to
-            // "give focus on map" on the second+ map even for
-            // notification windows):
-            //
-            //   * with_x11_window_type(Notification) — declares the
-            //     window as a notification toplevel per EWMH. WMs
-            //     should skip focus, taskbar, pager, alt-tab.
-            //   * with_override_redirect(true) — bypasses the WM
-            //     entirely. The X server never asks the WM about
-            //     focus, mapping, or stacking for this window. This
-            //     is what tooltips, dmenu, rofi all do; it makes
-            //     focus theft physically impossible on X11
-            //     regardless of WM behaviour. Trade-off: we lose
-            //     WM-managed always-on-top, but borderless
-            //     override-redirect windows naturally stack above
-            //     normal toplevels because the WM doesn't move them.
-            //
-            // On Wayland the compositor controls focus completely;
-            // a proper xdg_activation_v1 / wlr-layer-shell solution
-            // lands in Slice B's subprocess overlay refactor.
             #[cfg(all(unix, not(target_os = "macos")))]
             let attrs = {
                 use winit::platform::x11::{WindowAttributesExtX11, WindowType};
@@ -1385,6 +1360,22 @@ fn run_event_loop(
                 self.surface = Some(surface);
             }
         }
+    }
+
+    impl ApplicationHandler<()> for App {
+        fn resumed(&mut self, el: &ActiveEventLoop) {
+            // On Wayland, defer window creation until the first
+            // non-Hidden state. winit's `with_visible(false)` does
+            // not unmap an xdg_toplevel cleanly on every compositor,
+            // so the safest way to guarantee no top-left ghost panel
+            // before recording starts is to not create the window at
+            // all. The SetState arm in `about_to_wait` lazy-creates
+            // it when needed.
+            if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+                return;
+            }
+            self.ensure_window(el);
+        }
 
         fn user_event(&mut self, _el: &ActiveEventLoop, _ev: ()) {}
 
@@ -1405,6 +1396,11 @@ fn run_event_loop(
                 match cmd {
                     OverlayCmd::SetState(s) => {
                         self.state = s;
+                        // Lazy-create the window on Wayland the first
+                        // time we transition to a visible state.
+                        if !matches!(s, OverlayState::Hidden) {
+                            self.ensure_window(el);
+                        }
                         if let Some(w) = self.window.as_ref() {
                             w.set_visible(!matches!(s, OverlayState::Hidden));
                             needs_redraw = true;

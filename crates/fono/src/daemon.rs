@@ -207,7 +207,11 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         cancel: config.hotkeys.cancel.clone(),
         assistant: config.hotkeys.assistant.clone(),
     };
-    let backend_choice = fono_hotkey::HotkeyBackendChoice::parse(&config.hotkeys.backend);
+    let backend_choice = std::env::var("FONO_HOTKEY_BACKEND")
+        .ok()
+        .map_or(fono_hotkey::HotkeyBackendChoice::Auto, |v| {
+            fono_hotkey::HotkeyBackendChoice::parse(&v)
+        });
     let cancel_ctrl: Option<HotkeyControlSender> = if crate::is_graphical_session() {
         match fono_hotkey::spawn_with_backend(backend_choice, bindings, action_tx.clone()) {
             Ok(Some(handle)) => {
@@ -629,6 +633,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                     HotkeyEvent::StartRecording(mode) => {
                         if let Err(err) = o.on_start_recording(mode).await {
                             warn!("start_recording failed: {err:#}");
+                            notify_recording_failure(&err);
                             if let Some(t) = tray.as_ref().as_ref() {
                                 t.set_state(TrayState::Idle);
                             }
@@ -668,6 +673,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                             );
                             if let Err(err2) = o.on_start_recording(mode).await {
                                 warn!("start_recording fallback also failed: {err2:#}");
+                                notify_recording_failure(&err2);
                                 if let Some(t) = tray.as_ref().as_ref() {
                                     t.set_state(TrayState::Idle);
                                 }
@@ -693,6 +699,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                         );
                         if let Err(err) = o.on_start_recording(mode).await {
                             warn!("start_recording failed: {err:#}");
+                            notify_recording_failure(&err);
                             if let Some(t) = tray.as_ref().as_ref() {
                                 t.set_state(TrayState::Idle);
                             }
@@ -1415,6 +1422,34 @@ fn notify_last_transcription(paths: &Paths) {
     // Always log the transcription too so it's recoverable from logs
     // when notifications are unavailable.
     debug!("last transcription notify body:\n{body}");
+}
+
+/// Surface a desktop notification when starting the recording
+/// pipeline fails. The most common cause on stock Ubuntu Wayland is
+/// missing `parec` (provided by `pulseaudio-utils`); detect that and
+/// give the user a one-line apt invocation. For any other failure,
+/// fall back to surfacing the underlying error text.
+fn notify_recording_failure(err: &anyhow::Error) {
+    let raw = format!("{err:#}");
+    let body = if raw.contains("parec") || raw.contains("PulseAudio") {
+        "Audio capture tool `parec` not found. Install it with:\n\
+         \tsudo apt install pulseaudio-utils\n\
+         (or the equivalent package on your distro)."
+            .to_string()
+    } else if raw.contains("audio capture") {
+        format!(
+            "Audio capture failed to start. Check your microphone input device.\n\nDetails: {raw}"
+        )
+    } else {
+        format!("Recording could not start.\n\n{raw}")
+    };
+    fono_core::notify::send(
+        "Fono — recording failed",
+        &body,
+        "microphone-sensitivity-muted",
+        15_000,
+        fono_core::notify::Urgency::Critical,
+    );
 }
 
 fn open_path(path: &std::path::Path) {

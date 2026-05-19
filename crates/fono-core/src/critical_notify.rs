@@ -390,9 +390,8 @@ fn render(
         (Stage::Stt, ErrorClass::Auth) => (
             format!("Fono — STT key rejected ({provider})"),
             format!(
-                "{provider} rejected the API key (401/403). Dictation failed; no text \
-                 was injected. Open the tray → Configure → STT to update the key, or \
-                 run `fono doctor`."
+                "{provider} rejected the STT key (401/403). No text injected. Run \
+                 `fono setup` in a terminal to update the key."
             ),
         ),
         (Stage::Stt, ErrorClass::Network) => (
@@ -412,9 +411,9 @@ fn render(
         (Stage::Polish, ErrorClass::Auth) => (
             format!("Fono — Polish key rejected ({provider})"),
             format!(
-                "{provider} rejected the API key (401/403). The raw transcript was \
-                 injected without cleanup. Update the LLM key in the tray, or disable \
-                 polish."
+                "{provider} rejected the LLM key (401/403). Raw transcript injected \
+                 without cleanup. Run `fono setup` to update the key, or disable \
+                 polish in the tray."
             ),
         ),
         (Stage::Polish, ErrorClass::Network) => (
@@ -434,9 +433,9 @@ fn render(
         (Stage::Tts, ErrorClass::Auth) => (
             format!("Fono — TTS key rejected ({provider})"),
             format!(
-                "{provider} rejected the API key (401/403). The assistant reply was \
-                 generated but could not be spoken. Update the TTS key in the tray, \
-                 or switch to a local TTS backend."
+                "{provider} rejected the TTS key (401/403). Reply not spoken. Run \
+                 `fono setup` to update the key, or switch to a local TTS backend \
+                 in the tray."
             ),
         ),
         (Stage::Tts, ErrorClass::Network) => (
@@ -450,16 +449,12 @@ fn render(
             (format!("Fono — TTS model requires terms acceptance ({provider})"), {
                 let url = extract_url(details);
                 let suffix = url.map_or_else(
-                    || {
-                        "Open the provider console to accept the model terms, then retry."
-                            .to_string()
-                    },
-                    |u| format!("Accept the model terms at {u}, then retry."),
+                    || "Accept the model terms in the provider console and retry.".to_string(),
+                    |u| format!("Accept terms at {u} and retry."),
                 );
                 format!(
-                    "{provider} refused the request because the model's terms have \
-                     not been accepted by the org admin. The assistant reply was \
-                     generated but could not be spoken. {suffix}"
+                    "{provider} model terms not accepted by the org admin. Reply not \
+                     spoken. {suffix}"
                 )
             })
         }
@@ -473,9 +468,8 @@ fn render(
         (Stage::Assistant, ErrorClass::Auth) => (
             format!("Fono — Assistant key rejected ({provider})"),
             format!(
-                "{provider} rejected the API key (401/403). The assistant turn was \
-                 aborted. Update the assistant key in the tray → Configure, or run \
-                 `fono doctor`."
+                "{provider} rejected the assistant key (401/403). Assistant turn \
+                 aborted. Run `fono setup` to update the key."
             ),
         ),
         (Stage::Assistant, ErrorClass::Network) => (
@@ -496,16 +490,10 @@ fn render(
             (format!("Fono — model requires terms acceptance ({provider})"), {
                 let url = extract_url(details);
                 let suffix = url.map_or_else(
-                    || {
-                        "Open the provider console to accept the model terms, then retry."
-                            .to_string()
-                    },
-                    |u| format!("Accept the model terms at {u}, then retry."),
+                    || "Accept the model terms in the provider console and retry.".to_string(),
+                    |u| format!("Accept terms at {u} and retry."),
                 );
-                format!(
-                    "{provider} refused the request because the model's terms have \
-                     not been accepted by the org admin. {suffix}"
-                )
+                format!("{provider} model terms not accepted by the org admin. {suffix}")
             })
         }
         (stage, ErrorClass::MissingKey) => {
@@ -514,23 +502,22 @@ fn render(
                 let hint = var.map_or_else(
                     || {
                         format!(
-                            "{provider}'s API key is not configured. Open the tray → Configure → \
-                         {} to add it, or run `fono keys add <VAR>`.",
-                            stage_user_label(stage),
+                            "{provider}'s API key is not configured. Run `fono setup`, or \
+                         `fono keys add <VAR>` to add it."
                         )
                     },
                     |v| {
                         format!(
-                            "No `{v}` in secrets.toml or environment. Run `fono keys add {v}` \
-                         (or open the tray → Configure) to add it."
+                            "`{v}` missing from secrets.toml. Run `fono setup`, or \
+                         `fono keys add {v}` to add it."
                         )
                     },
                 );
                 let consequence = match stage {
-                    Stage::Tts => " The assistant reply was generated but could not be spoken.",
-                    Stage::Polish => " The raw transcript was injected without cleanup.",
-                    Stage::Assistant => " The assistant turn was aborted.",
-                    Stage::Stt => " Dictation was skipped; no text was injected.",
+                    Stage::Tts => " Reply not spoken.",
+                    Stage::Polish => " Raw transcript injected without cleanup.",
+                    Stage::Assistant => " Assistant turn aborted.",
+                    Stage::Stt => " Dictation skipped.",
                     Stage::Inject => "",
                 };
                 format!("{hint}{consequence}")
@@ -749,7 +736,7 @@ mod tests {
         assert!(summary.contains("TTS key missing"));
         assert!(summary.contains("cartesia"));
         assert!(body.contains("fono keys add CARTESIA_API_KEY"));
-        assert!(body.contains("reply was generated but could not be spoken"));
+        assert!(body.contains("Reply not spoken"));
     }
 
     #[test]

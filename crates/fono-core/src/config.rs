@@ -202,20 +202,10 @@ pub struct Hotkeys {
     /// long-press behaviour as `dictation`.
     #[serde(default = "default_assistant_hotkey")]
     pub assistant: String,
-    /// Hotkey backend selection. One of `auto` (default), `portal`
-    /// (Wayland `xdg-desktop-portal.GlobalShortcuts`), `x11`
-    /// (`global-hotkey` / XGrabKey), or `disabled`. `auto` picks the
-    /// portal on Wayland sessions and X11 on Xorg / Xwayland-only.
-    #[serde(default = "default_hotkey_backend")]
-    pub backend: String,
 }
 
 fn default_assistant_hotkey() -> String {
     "F8".into()
-}
-
-fn default_hotkey_backend() -> String {
-    "auto".into()
 }
 
 impl Default for Hotkeys {
@@ -224,7 +214,6 @@ impl Default for Hotkeys {
             dictation: "F7".into(),
             cancel: "Escape".into(),
             assistant: default_assistant_hotkey(),
-            backend: default_hotkey_backend(),
         }
     }
 }
