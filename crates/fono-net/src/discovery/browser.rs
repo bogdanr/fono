@@ -26,6 +26,15 @@ use super::{DiscoveredPeer, PeerKind, Registry};
 /// (peers whose `last_seen` is older than [`super::PEER_TTL`]).
 const EVICTION_TICK: Duration = Duration::from_secs(15);
 
+/// Cadence at which the browser re-issues `daemon.browse(ty)` for
+/// each active service type. This forces a fresh PTR query, resets
+/// `mdns-sd`'s exponential retransmission backoff, and replays the
+/// daemon's cache to a new listener — defending against responses
+/// that get load-balanced away from Fono's socket by `SO_REUSEPORT`
+/// when another mDNS responder (e.g. `avahi-daemon`) is also bound
+/// to UDP 5353.
+pub(super) const REBROWSE_TICK: Duration = Duration::from_secs(60);
+
 /// Handle returned by [`Browser::start`]. Drop or call
 /// [`BrowserHandle::shutdown`] to stop the browse loop.
 pub struct BrowserHandle {
@@ -84,11 +93,17 @@ impl Browser {
             receivers.push((*kind, rx));
         }
         let registry = self.registry;
+        let daemon = self.daemon;
         let join = tokio::spawn(async move {
             let mut eviction_tick = tokio::time::interval(EVICTION_TICK);
-            // Skip the immediate first tick — registry is empty at startup.
+            let mut rebrowse_tick = tokio::time::interval(REBROWSE_TICK);
+            // Skip the immediate first tick — registry is empty at startup
+            // and the initial `browse()` calls above already queried.
             eviction_tick.tick().await;
+            rebrowse_tick.tick().await;
             loop {
+                let snapshot: Vec<(PeerKind, mdns_sd::Receiver<ServiceEvent>)> =
+                    receivers.iter().map(|(k, r)| (*k, r.clone())).collect();
                 tokio::select! {
                     biased;
                     _ = &mut shutdown_rx => {
@@ -104,7 +119,20 @@ impl Browser {
                             );
                         }
                     }
-                    res = recv_first(&receivers) => {
+                    _ = rebrowse_tick.tick() => {
+                        for (kind, rx) in &mut receivers {
+                            match daemon.browse(kind.service_type()) {
+                                Ok(new_rx) => *rx = new_rx,
+                                Err(e) => warn!(
+                                    target: "fono::discovery",
+                                    service_type = kind.service_type(),
+                                    "rebrowse failed: {e:#}"
+                                ),
+                            }
+                        }
+                        trace!(target: "fono::discovery", "rebrowse cycle issued");
+                    }
+                    res = recv_first(snapshot) => {
                         match res {
                             Some((kind, ServiceEvent::ServiceResolved(info))) => {
                                 if let Some(peer) = peer_from_info(kind, &info) {
@@ -164,19 +192,19 @@ impl Browser {
 }
 
 /// Receive the next event from any of the per-kind browse channels.
-/// Returns `None` when every channel is closed.
+/// Returns `None` when every channel is closed. Takes ownership of
+/// the snapshot so the canonical `receivers` Vec in the caller can
+/// be mutated by other `select!` arms without borrow conflicts.
 async fn recv_first(
-    receivers: &[(PeerKind, mdns_sd::Receiver<ServiceEvent>)],
+    receivers: Vec<(PeerKind, mdns_sd::Receiver<ServiceEvent>)>,
 ) -> Option<(PeerKind, ServiceEvent)> {
-    let mut futs = Vec::with_capacity(receivers.len());
-    for (kind, rx) in receivers {
-        let kind = *kind;
-        let rx = rx.clone();
-        futs.push(async move { rx.recv_async().await.ok().map(|ev| (kind, ev)) }.boxed());
-    }
-    if futs.is_empty() {
+    if receivers.is_empty() {
         return None;
     }
+    let futs: Vec<_> = receivers
+        .into_iter()
+        .map(|(kind, rx)| async move { rx.recv_async().await.ok().map(|ev| (kind, ev)) }.boxed())
+        .collect();
     let (winner, _idx, _rest) = futures::future::select_all(futs).await;
     winner
 }

@@ -38,11 +38,11 @@ pub const WYOMING_SERVICE_TYPE: &str = "_wyoming._tcp.local.";
 pub const FONO_SERVICE_TYPE: &str = "_fono._tcp.local.";
 
 /// Peers older than this are evicted from the registry on every
-/// browser tick. Real mDNS daemons send periodic refreshes well
-/// inside this window; the eviction is defence-in-depth for hosts
-/// that vanish without a goodbye packet (suspended laptop, killed
-/// container).
-pub const PEER_TTL: Duration = Duration::from_secs(120);
+/// browser tick. Sized to comfortably exceed several browser
+/// re-query cycles (see `browser::REBROWSE_TICK`) so a co-resident
+/// mDNS responder stealing some of our replies via `SO_REUSEPORT`
+/// cannot drain the registry. Goodbye packets still evict instantly.
+pub const PEER_TTL: Duration = Duration::from_secs(300);
 
 /// Which Fono protocol family a discovered peer speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -100,7 +100,7 @@ pub struct DiscoveredPeer {
     pub proto: String,
     /// `version` TXT key — server version string for diagnostics.
     pub version: String,
-    /// `caps` TXT key, comma-split. E.g. `["stt"]`, `["stt","llm"]`.
+    /// `caps` TXT key, comma-split. E.g. `["stt"]`, `["stt","polish"]`.
     pub caps: Vec<String>,
     /// `model` TXT key — a primary model hint (Wyoming only). The
     /// browser pre-caches this so the tray menu can render
