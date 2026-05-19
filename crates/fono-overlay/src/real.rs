@@ -1335,12 +1335,21 @@ fn run_event_loop(
                 |w| Some(std::sync::Arc::new(w)),
             );
             if let Some(w) = win {
-                if let Some(monitor) = w.current_monitor().or_else(|| el.primary_monitor()) {
-                    let mon_size = monitor.size();
-                    let win_size = w.outer_size();
-                    let x = (mon_size.width.saturating_sub(win_size.width)) / 2;
-                    let y = mon_size.height.saturating_sub(win_size.height + BOTTOM_OFFSET);
-                    w.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+                // Position is only meaningful on X11 — Wayland
+                // compositors decide placement and `set_outer_position`
+                // is a no-op there. We ask for bottom-center on X11;
+                // on Wayland we let the compositor choose (Mutter and
+                // KWin both center small undecorated toplevels, which
+                // is acceptable for a transient recording indicator).
+                let is_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+                if !is_wayland {
+                    if let Some(monitor) = w.current_monitor().or_else(|| el.primary_monitor()) {
+                        let mon_size = monitor.size();
+                        let win_size = w.outer_size();
+                        let x = (mon_size.width.saturating_sub(win_size.width)) / 2;
+                        let y = mon_size.height.saturating_sub(win_size.height + BOTTOM_OFFSET);
+                        w.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+                    }
                 }
                 let ctx = match softbuffer::Context::new(std::sync::Arc::clone(&w)) {
                     Ok(c) => c,
@@ -1364,27 +1373,18 @@ fn run_event_loop(
 
     impl ApplicationHandler<()> for App {
         fn resumed(&mut self, el: &ActiveEventLoop) {
-            // On Wayland, do not create an overlay window at all.
-            // xdg_toplevel surfaces cannot be positioned by the client
-            // (the compositor decides placement), and there is no
-            // protocol to hide a mapped toplevel without destroying
-            // the surface. The result of trying anyway is the panel
-            // appearing at compositor-default placement (typically
-            // top-left) as a dark charcoal box — which the user
-            // experiences as a "black overlay" stuck in the corner.
+            // On Wayland we defer window creation until the first
+            // non-Hidden SetState — `set_visible(false)` is a no-op
+            // there (xdg_toplevel has no client-side unmap), so an
+            // eager window would map at compositor-default placement
+            // before recording even starts. The SetState handler in
+            // `about_to_wait` calls `ensure_window` lazily on
+            // Wayland's first visible transition.
             //
-            // A proper Wayland panel needs wlr-layer-shell (sway,
-            // Hyprland, KWin) or a portal — neither of which winit
-            // exposes. Until that lands, the tray + notifications +
-            // doctor cover the user-facing state surface on Wayland.
-            // The state FSM continues to run normally so STT / TTS
-            // / clipboard delivery are unaffected.
+            // On X11 we create eagerly because `with_visible(false)`
+            // combined with override-redirect actually keeps the
+            // window unmapped until `set_visible(true)` flips it on.
             if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-                tracing::info!(
-                    "overlay: Wayland session detected; skipping floating panel \
-                     (xdg_toplevel cannot be positioned by clients). State changes \
-                     remain visible in the tray and notifications."
-                );
                 return;
             }
             self.ensure_window(el);
@@ -1409,9 +1409,25 @@ fn run_event_loop(
                 match cmd {
                     OverlayCmd::SetState(s) => {
                         self.state = s;
-                        if let Some(w) = self.window.as_ref() {
-                            w.set_visible(!matches!(s, OverlayState::Hidden));
-                            needs_redraw = true;
+                        let is_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+                        if matches!(s, OverlayState::Hidden) {
+                            if is_wayland {
+                                // Wayland: `set_visible(false)` is a
+                                // no-op on xdg_toplevel — the only
+                                // way to actually unmap is to drop
+                                // the surface. We re-create on the
+                                // next non-Hidden transition.
+                                self.surface = None;
+                                self.window = None;
+                            } else if let Some(w) = self.window.as_ref() {
+                                w.set_visible(false);
+                            }
+                        } else {
+                            self.ensure_window(el);
+                            if let Some(w) = self.window.as_ref() {
+                                w.set_visible(true);
+                                needs_redraw = true;
+                            }
                         }
                     }
                     OverlayCmd::UpdateText(t) => {
