@@ -262,9 +262,8 @@ fn spawn_capture_tool(target_rate: u32) -> Result<(Child, &'static str)> {
                 Err(parec_err) => Err(anyhow::anyhow!(
                     "audio capture failed to start: no usable capture tool found. \
                      Tried `pw-cat` ({pw_err}) and `parec` ({parec_err}). \
-                     Install `pipewire-bin` (Ubuntu/Debian) or `pipewire` \
-                     (Arch/Fedora). On legacy PulseAudio systems, install \
-                     `pulseaudio-utils`. Or rebuild Fono with \
+                     Install your distro's PipeWire client tools (commonly \
+                     `pipewire-bin` or `pipewire`), or rebuild Fono with \
                      `--features fono-audio/cpal-backend` for direct ALSA capture."
                 )),
             }

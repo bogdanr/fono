@@ -234,24 +234,12 @@ impl Injector for RealInjector {
                 // utterance is intolerably noisy. Doctor and the
                 // tray cover the persistent-state surface.
                 if !CLIPBOARD_HINT_SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    let body = if tool == "arboard" {
-                        "Auto-typing isn't available in this session. The text is on \
-                         the clipboard — press Ctrl+V or Shift+Insert to paste. \
-                         (This hint shows once per session; subsequent dictations \
-                         go to the clipboard silently.)"
-                            .to_string()
-                    } else {
-                        format!(
-                            "Auto-typing isn't available. Text copied to the \
-                             clipboard via {tool} — press Ctrl+V or Shift+Insert \
-                             to paste. (Shown once per session.)"
-                        )
-                    };
+                    let _ = tool;
                     fono_core::notify::send(
-                        "Fono — copied to clipboard",
-                        &body,
+                        "Fono — text copied",
+                        "Press Ctrl+V or Shift+Insert to paste.",
                         "edit-paste",
-                        6_000,
+                        4_000,
                         fono_core::notify::Urgency::Normal,
                     );
                 }

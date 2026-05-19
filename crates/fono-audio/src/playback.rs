@@ -163,10 +163,9 @@ async fn play_via_paplay(pcm: &[f32], rate: u32, stop: &AtomicBool) -> Result<()
                 Err(paplay_err) => {
                     return Err(anyhow::anyhow!(
                         "no usable audio playback tool found. Tried `pw-play` \
-                         ({pw_err}) and `paplay` ({paplay_err}). Install \
-                         `pipewire-bin` (Ubuntu/Debian) or `pulseaudio-utils` \
-                         on legacy PulseAudio, or rebuild with \
-                         `--features cpal-backend`."
+                         ({pw_err}) and `paplay` ({paplay_err}). Install your \
+                         distro's PipeWire client tools (commonly `pipewire-bin` \
+                         or `pipewire`), or rebuild with `--features cpal-backend`."
                     ));
                 }
             }

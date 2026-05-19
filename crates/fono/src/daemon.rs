@@ -112,12 +112,27 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     let secrets = Secrets::load(&paths.secrets_file()).context("load secrets")?;
     print_banner(paths, &config, verbosity);
 
-    // Single-instance guard via the IPC socket. If another daemon is
-    // already running it answers `connect()`; bail before we duplicate
-    // hotkey grabs, audio captures, and model loads. A stale socket
-    // file from a crashed previous run yields ConnectionRefused (or
-    // ENOENT) and the bind below replaces it cleanly.
+    // Single-instance guard. Two-layer check:
+    //
+    // 1. PID file (`fono.pid`) — if a process with that PID is alive
+    //    and its `/proc/PID/comm` (or argv[0] on non-Linux) ends in
+    //    "fono", a fono daemon is already running. This catches the
+    //    case where a previous instance is bound to its own socket
+    //    fd but the on-disk socket file got unlinked (manually or by
+    //    a stale cleanup), so the connect() probe below would
+    //    spuriously succeed in creating a new bind.
+    //
+    // 2. Live socket probe — if the socket file exists and answers
+    //    `connect()`, refuse. Stale sockets (ConnectionRefused /
+    //    ENOENT) are silently cleaned up before bind.
     let socket_path = paths.ipc_socket();
+    if let Some(running_pid) = running_daemon_pid(paths) {
+        anyhow::bail!(
+            "another fono daemon is already running (pid {running_pid}). \
+             Stop it before starting a new instance \
+             (e.g. `kill {running_pid}` or `pkill fono`)."
+        );
+    }
     if socket_path.exists() {
         match tokio::net::UnixStream::connect(&socket_path).await {
             Ok(_) => anyhow::bail!(
@@ -1428,10 +1443,10 @@ fn notify_last_transcription(paths: &Paths) {
 }
 
 /// Surface a desktop notification when starting the recording
-/// pipeline fails. The most common cause on stock Ubuntu Wayland is
-/// missing `parec` (provided by `pulseaudio-utils`); detect that and
-/// give the user a one-line apt invocation. For any other failure,
-/// fall back to surfacing the underlying error text.
+/// pipeline fails. The most common cause on a modern Linux desktop is
+/// the PipeWire client tools not being installed; detect that and tell
+/// the user to install them via their distro's package manager. For
+/// any other failure, fall back to surfacing the underlying error text.
 fn notify_recording_failure(err: &anyhow::Error) {
     let raw = format!("{err:#}");
     let body = if raw.contains("no usable capture tool")
@@ -1439,9 +1454,8 @@ fn notify_recording_failure(err: &anyhow::Error) {
         || raw.contains("parec")
         || raw.contains("PulseAudio")
     {
-        "Audio capture tool not found. Install it with:\n\
-         \tsudo apt install pipewire-bin\n\
-         \t(or pulseaudio-utils on legacy PulseAudio systems)."
+        "No audio capture tool found. Install your distro's PipeWire \
+         client tools (commonly `pipewire-bin` or `pipewire`)."
             .to_string()
     } else if raw.contains("audio capture") {
         format!(
@@ -1489,6 +1503,42 @@ fn write_pid(paths: &Paths) -> Result<()> {
     }
     std::fs::write(paths.pid_file(), std::process::id().to_string())?;
     Ok(())
+}
+
+/// Inspect the on-disk PID file; if it contains a valid PID whose
+/// process exists and whose comm name ends in `fono`, return that PID.
+/// Returns `None` if the PID file is missing, malformed, points at a
+/// dead process, or points at a process that isn't a fono daemon
+/// (stale PID file from before a crash + reboot).
+fn running_daemon_pid(paths: &Paths) -> Option<u32> {
+    let raw = std::fs::read_to_string(paths.pid_file()).ok()?;
+    let pid: u32 = raw.trim().parse().ok()?;
+    if pid == std::process::id() {
+        return None;
+    }
+    // Linux: read /proc/PID/comm — kernel-truncated to 15 chars,
+    // matches `fono` for our binary regardless of argv[0].
+    #[cfg(target_os = "linux")]
+    {
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+        if comm.trim() == "fono" {
+            return Some(pid);
+        }
+        None
+    }
+    // Fallback: probe with kill(0). Doesn't verify the process is
+    // *fono* (could be a PID reused by an unrelated program), so
+    // only block as a soft hint and let the socket probe make the
+    // final call on non-Linux.
+    #[cfg(not(target_os = "linux"))]
+    {
+        unsafe {
+            if libc::kill(pid as i32, 0) == 0 {
+                return Some(pid);
+            }
+        }
+        None
+    }
 }
 
 /// Re-paste the i-th most recent transcription (0 = newest) via the
