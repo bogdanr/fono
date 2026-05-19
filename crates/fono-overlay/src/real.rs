@@ -1644,11 +1644,28 @@ fn run_event_loop(
         let Ok(mut buf) = surface.buffer_mut() else {
             return;
         };
-        // Clear to fully transparent — compositor lets the desktop
-        // show through outside our rounded panel. `slice::fill`
-        // compiles to memset (or its SIMD equivalent), several × the
-        // throughput of the explicit per-pixel loop we used before.
-        buf.fill(0x0000_0000);
+        // Clear to the panel BG colour rather than transparent: softbuffer
+        // 0.4.8 (the version currently on crates.io) creates Wayland
+        // `wl_shm` buffers with `WL_SHM_FORMAT_XRGB8888` hard-coded
+        // (`backends/wayland/buffer.rs:102, 142`), so the alpha byte is
+        // dropped at composite time on Wayland regardless of
+        // `with_transparent(true)` and the buffer fill value. If we
+        // clear to 0x00000000 (the X11 path) the "transparent" corners
+        // of the rounded panel show up as opaque BLACK on Wayland —
+        // the exact "black overlay, no rounded corners" symptom the
+        // user reports. Clearing to the opaque BG colour first paints
+        // the corners with the panel tint instead, so the visible
+        // result is a clean opaque dark rectangle: still not the
+        // floating rounded-corner look we get on X11, but no longer a
+        // jarring black box.
+        //
+        // The X11 backend supports alpha (XRender ARGB8888 visuals),
+        // so on X11 the corners remain truly transparent. When
+        // softbuffer gains ARGB support on Wayland we can drop this
+        // branch and have rounded corners universally.
+        let is_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let clear = if is_wayland { COLOR_BG_PRE | 0xFF00_0000 } else { 0x0000_0000 };
+        buf.fill(clear);
 
         // When the overlay is logically hidden, present a fully
         // transparent frame and bail out. On X11 the override-redirect
