@@ -14,6 +14,8 @@
 
 pub mod focus;
 pub mod inject;
+#[cfg(target_os = "linux")]
+pub mod wayland_probe;
 #[cfg(feature = "x11-paste")]
 pub mod xtest_paste;
 
@@ -22,5 +24,7 @@ pub use inject::{
     copy_to_clipboard, copy_to_clipboard_all, type_text, type_text_with_outcome, warm_backend,
     ClipboardAttempt, InjectOutcome, Injector,
 };
+#[cfg(target_os = "linux")]
+pub use wayland_probe::compositor_supports_virtual_keyboard;
 #[cfg(feature = "x11-paste")]
 pub use xtest_paste::PasteShortcut;

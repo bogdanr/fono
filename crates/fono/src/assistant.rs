@@ -324,28 +324,58 @@ pub async fn run_assistant_turn(
         "assistant turn done"
     );
 
-    // FOLLOW-UP — playback-drain wait. This function returns the
-    // moment the LLM stream ends and the last sentence has been
-    // enqueued, but the `AudioPlayback` worker still has several
-    // seconds of audio in its queue. The caller's cleanup closure
-    // (see `SessionOrchestrator::on_assistant_hold_release`) then
-    // immediately aborts the thinking-animation task, hides the
-    // overlay, flips the tray back to Idle, and emits
-    // `ProcessingDone` — so visually the assistant looks "done"
-    // while the user is still hearing the reply.
+    // Cooperative playback-drain wait. The LLM stream is done and
+    // every sentence is enqueued, but the `AudioPlayback` worker may
+    // still have several seconds of audio in its queue. Block here
+    // until the queue actually drains so the caller's cleanup
+    // closure (hide overlay, tray → Idle, emit `ProcessingDone`,
+    // release the cancel hotkey grab) runs at the moment the user
+    // actually stops hearing audio.
     //
-    // The fix is a cooperative drain poll right here: loop on
-    // `state.lock().await.playback.as_ref().map(|p| p.is_idle())`
-    // (with the same `notify` select-arm so Escape / barge-in still
-    // wins), break when idle. `AudioPlayback::is_idle()` already
-    // exists for exactly this purpose; we just never wired it in.
+    // The `notify` select-arm preserves Escape / barge-in: a cancel
+    // press triggers `stop_current_turn` which calls `playback.stop()`
+    // (drains the queue) AND `notify.notify_waiters()`, so either
+    // path wakes this loop.
     //
-    // Deferred because the existing UX is acceptable enough to
-    // ship the assistant in v1 — the visual cues just lead the
-    // audio by a few seconds. Implement when adding the
-    // post-monitor tap that would let the overlay show real
-    // playback levels (the same drain wait would be the natural
-    // home for either feature).
+    // 60 s belt-and-braces timeout in case `is_idle()` reports a
+    // wedged playback handle — warn and fall through rather than
+    // soft-locking the FSM in `AssistantSpeaking` forever.
+    let playback_handle = {
+        let s = state.lock().await;
+        s.playback.clone()
+    };
+    if let Some(pb) = playback_handle {
+        if !pb.is_idle() {
+            let drain_started = std::time::Instant::now();
+            let timeout = std::time::Duration::from_secs(60);
+            loop {
+                tokio::select! {
+                    biased;
+                    () = notify.notified() => {
+                        debug!(target: "fono::assistant", "drain-poll: cancelled");
+                        break;
+                    }
+                    () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                        if pb.is_idle() {
+                            debug!(
+                                target: "fono::assistant",
+                                ms = drain_started.elapsed().as_millis() as u64,
+                                "drain-poll: playback idle"
+                            );
+                            break;
+                        }
+                        if drain_started.elapsed() >= timeout {
+                            warn!(
+                                target: "fono::assistant",
+                                "drain-poll exceeded 60 s; forcing ProcessingDone (wedged playback handle?)"
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
     Ok(any_audio)
 }
 

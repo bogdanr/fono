@@ -207,11 +207,16 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         cancel: config.hotkeys.cancel.clone(),
         assistant: config.hotkeys.assistant.clone(),
     };
+    let backend_choice = fono_hotkey::HotkeyBackendChoice::parse(&config.hotkeys.backend);
     let cancel_ctrl: Option<HotkeyControlSender> = if crate::is_graphical_session() {
-        match fono_hotkey::spawn_listener(bindings, action_tx.clone()) {
-            Ok(handle) => {
+        match fono_hotkey::spawn_with_backend(backend_choice, bindings, action_tx.clone()) {
+            Ok(Some(handle)) => {
                 debug!("global hotkeys registered");
                 Some(handle.control)
+            }
+            Ok(None) => {
+                debug!("hotkey listener disabled by backend choice");
+                None
             }
             Err(e) => {
                 warn!(

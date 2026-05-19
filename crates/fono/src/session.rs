@@ -220,12 +220,20 @@ impl Injector for RealInjector {
             }
             fono_inject::InjectOutcome::Clipboard(tool) => {
                 tracing::info!("inject backend: clipboard via {tool} (no key-injection worked)");
+                let body = if tool == "arboard" {
+                    "Auto-typing isn't available in this session. The text is on \
+                     the clipboard — press Ctrl+V or Shift+Insert to paste."
+                        .to_string()
+                } else {
+                    format!(
+                        "Auto-typing isn't available. Text copied to the \
+                         clipboard via {tool} — press Ctrl+V or Shift+Insert \
+                         to paste."
+                    )
+                };
                 fono_core::notify::send(
                     "Fono — copied to clipboard",
-                    &format!(
-                        "No key-injection backend was available. The cleaned text \
-                         is on the clipboard (via {tool}); press Ctrl+V to paste."
-                    ),
+                    &body,
                     "edit-paste",
                     6_000,
                     fono_core::notify::Urgency::Normal,

@@ -1630,6 +1630,24 @@ fn run_event_loop(
         // throughput of the explicit per-pixel loop we used before.
         buf.fill(0x0000_0000);
 
+        // When the overlay is logically hidden, present a fully
+        // transparent frame and bail out. On X11 the override-redirect
+        // + WindowType::Notification path means `set_visible(false)`
+        // actually unmaps the window, so this branch is academic. On
+        // Wayland, `Window::set_visible(false)` is a no-op in winit
+        // (the compositor controls window mapping and there is no
+        // protocol to hide a mapped xdg_toplevel without destroying
+        // the surface), so a normally-painted panel would otherwise
+        // sit pinned in the top-left as the compositor's default
+        // placement for an undecorated 640×80 toplevel — the user's
+        // reported "overlay always visible" symptom on GNOME-Wayland.
+        // A transparent buffer is invisible to the user regardless of
+        // whether the compositor maps the surface.
+        if matches!(app.state, OverlayState::Hidden) {
+            let _ = buf.present();
+            return;
+        }
+
         // Convert logical coords to physical using the window's scale.
         let scale = window.scale_factor() as f32;
         let panel = (0.0, 0.0, w as f32, h as f32);

@@ -60,6 +60,18 @@ impl Injector {
             }
         }
 
+        // wtype only works on compositors that implement
+        // zwp_virtual_keyboard_manager_v1 (KWin, wlroots). On
+        // GNOME-Wayland (Mutter) the protocol is absent and wtype
+        // exits 0 silently while typing nothing. Probe the registry
+        // before selecting it; on unsupported compositors fall through
+        // to ydotool / xdotool / clipboard-paste.
+        #[cfg(target_os = "linux")]
+        if which("wtype").is_some() && crate::wayland_probe::compositor_supports_virtual_keyboard()
+        {
+            return Self::Wtype;
+        }
+        #[cfg(not(target_os = "linux"))]
         if which("wtype").is_some() {
             return Self::Wtype;
         }
@@ -179,10 +191,35 @@ pub fn type_text_with_outcome(text: &str) -> Result<InjectOutcome> {
     }
 }
 
-/// Best-effort clipboard copy via subprocess. Probes wl-copy, xclip,
-/// then xsel in that order and returns the tool name that worked.
-/// Fails only when none of them are available.
+/// Best-effort clipboard copy. Prefers the in-process native backend
+/// (`arboard`, which speaks `wl_data_control_manager_v1` /
+/// `zwlr_data_control_manager_v1` on Wayland and XCB on X11) so the
+/// user does not need `wl-clipboard` / `xclip` / `xsel` installed.
+/// Falls back to subprocess probing only if the native handle cannot
+/// be initialised (e.g. exotic compositor without data-control).
+///
+/// Returns the backend name that worked: `"arboard"` for native, or
+/// the subprocess tool name (`"wl-copy"` etc.).
 pub fn copy_to_clipboard(text: &str) -> Result<&'static str> {
+    // First: native, no external dependencies, works on any modern
+    // Wayland compositor and any X11 server.
+    match copy_to_clipboard_native(text) {
+        Ok(()) => {
+            tracing::debug!(
+                target: "fono::inject::clipboard",
+                bytes = text.len(),
+                "clipboard set via arboard (native)"
+            );
+            return Ok("arboard");
+        }
+        Err(e) => {
+            tracing::debug!(
+                target: "fono::inject::clipboard",
+                error = %e,
+                "native arboard clipboard failed; falling back to subprocess probe"
+            );
+        }
+    }
     let outcomes = copy_to_clipboard_all(text);
     // Return the first tool/target pair that worked; otherwise concatenate errors.
     if let Some((t, target)) = outcomes.iter().find_map(|o| o.success.then_some((o.tool, o.target)))
@@ -202,12 +239,24 @@ pub fn copy_to_clipboard(text: &str) -> Result<&'static str> {
     let errs: Vec<String> =
         outcomes.into_iter().map(|o| format!("{}: {}", o.tool, o.detail)).collect();
     Err(anyhow!(
-        "no clipboard tool worked. Diagnostics: [{}]. \
-         On Wayland install `wl-clipboard` (provides wl-copy). \
-         On X11 install `xclip` or `xsel`. \
-         Verify DISPLAY/WAYLAND_DISPLAY are set in the daemon's environment.",
+        "no clipboard backend worked. The native (arboard) backend failed and \
+         no fallback tool succeeded either. Diagnostics: [{}]. \
+         Native arboard requires either `wl_data_control_manager_v1` / \
+         `zwlr_data_control_manager_v1` (Wayland) or a reachable X server. \
+         If you must rely on a subprocess tool, install `wl-clipboard`, \
+         `xclip`, or `xsel`.",
         if errs.is_empty() { "no clipboard tools installed".into() } else { errs.join(" | ") }
     ))
+}
+
+/// Native clipboard write via the in-process `arboard` crate. Works on
+/// any Wayland compositor that implements `wl_data_control_manager_v1`
+/// or `zwlr_data_control_manager_v1` (GNOME 42+, KDE Plasma 5.27+,
+/// wlroots, Hyprland) and on any X11 server. No external tools needed.
+fn copy_to_clipboard_native(text: &str) -> Result<()> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| anyhow!("arboard init failed: {e}"))?;
+    cb.set_text(text.to_owned()).map_err(|e| anyhow!("arboard set_text failed: {e}"))?;
+    Ok(())
 }
 
 /// One attempt's result for diagnostic surfacing.

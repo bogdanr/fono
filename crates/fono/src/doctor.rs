@@ -356,14 +356,15 @@ pub async fn report(paths: &Paths) -> Result<String> {
         }
     }
     if clip_tools.is_empty() {
+        writeln!(out, "{} {}", head("Clipboard   :"), ok("native (arboard)"))?;
+    } else {
         writeln!(
             out,
-            "{} {}",
+            "{} {} {}",
             head("Clipboard   :"),
-            bad("NONE (install one of: wl-clipboard, xclip, xsel — without these, dictation cannot be recovered when key injection fails)")
+            clip_tools.join(", "),
+            dim("(native arboard preferred)")
         )?;
-    } else {
-        writeln!(out, "{} {} {}", head("Clipboard   :"), clip_tools.join(", "), dim("(fallback)"))?;
     }
     writeln!(
         out,

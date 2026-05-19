@@ -30,3 +30,15 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 enigo = { workspace = true, optional = true }
 x11rb = { workspace = true, optional = true }
+# Native clipboard access (X11 + Wayland) so Fono does not require
+# `wl-clipboard` / `xclip` / `xsel` to be installed. arboard speaks
+# `wl_data_control_manager_v1` / `zwlr_data_control_manager_v1` directly
+# on Wayland and XCB on X11. Dual MIT/Apache-2.0, GPL-3.0 compatible.
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Direct Wayland registry probe so we can detect compositor support for
+# `zwp_virtual_keyboard_manager_v1` before selecting the `wtype` injector
+# (Mutter / GNOME-Wayland does not implement this protocol as of GNOME 46,
+# so a `which("wtype")` check is not enough — wtype silently no-ops there).
+wayland-client = "0.31"
