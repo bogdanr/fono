@@ -1431,10 +1431,14 @@ fn notify_last_transcription(paths: &Paths) {
 /// fall back to surfacing the underlying error text.
 fn notify_recording_failure(err: &anyhow::Error) {
     let raw = format!("{err:#}");
-    let body = if raw.contains("parec") || raw.contains("PulseAudio") {
-        "Audio capture tool `parec` not found. Install it with:\n\
-         \tsudo apt install pulseaudio-utils\n\
-         (or the equivalent package on your distro)."
+    let body = if raw.contains("no usable capture tool")
+        || raw.contains("parec")
+        || raw.contains("pw-cat")
+        || raw.contains("PulseAudio")
+    {
+        "Audio capture tool not found. Install one with:\n\
+         \tsudo apt install pipewire-bin\n\
+         \t(or pulseaudio-utils on PulseAudio systems)."
             .to_string()
     } else if raw.contains("audio capture") {
         format!(

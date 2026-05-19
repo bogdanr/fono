@@ -133,7 +133,7 @@ const PAPLAY_CHUNK_BYTES: usize = 16 * 1024;
 async fn play_via_paplay(pcm: &[f32], rate: u32, stop: &AtomicBool) -> Result<()> {
     use std::io::Write;
     use std::process::{Command, Stdio};
-    let mut child = Command::new("paplay")
+    let (mut child, tool) = match Command::new("paplay")
         .arg("--raw")
         .arg("--format=s16le")
         .arg(format!("--rate={rate}"))
@@ -142,11 +142,36 @@ async fn play_via_paplay(pcm: &[f32], rate: u32, stop: &AtomicBool) -> Result<()
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .context(
-            "spawning `paplay` — install pulseaudio-utils or pipewire-pulse, \
-             or rebuild with `--features cpal-backend`",
-        )?;
-    let mut stdin = child.stdin.take().context("paplay stdin")?;
+    {
+        Ok(c) => (c, "paplay"),
+        Err(paplay_err) => {
+            // Fall back to pw-play (ships in pipewire-bin, preinstalled
+            // on Ubuntu 24.04 / Fedora 39+). Note: pw-play has no
+            // `--raw` flag; passing `--format=s16` + filename `-`
+            // makes it read raw little-endian s16 from stdin.
+            match Command::new("pw-play")
+                .arg(format!("--rate={rate}"))
+                .arg("--channels=1")
+                .arg("--format=s16")
+                .arg("-")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(c) => (c, "pw-play"),
+                Err(pw_err) => {
+                    return Err(anyhow::anyhow!(
+                        "no usable audio playback tool found. Tried `paplay` \
+                         ({paplay_err}) and `pw-play` ({pw_err}). Install \
+                         `pipewire-bin` (Ubuntu/Debian) or `pulseaudio-utils`, \
+                         or rebuild with `--features cpal-backend`."
+                    ));
+                }
+            }
+        }
+    };
+    let mut stdin = child.stdin.take().with_context(|| format!("{tool} stdin"))?;
     let bytes: Vec<u8> = pcm
         .iter()
         .flat_map(|s| {
@@ -165,16 +190,17 @@ async fn play_via_paplay(pcm: &[f32], rate: u32, stop: &AtomicBool) -> Result<()
         }
         if let Err(e) = stdin.write_all(slice) {
             let _ = child.kill();
-            return Err(e).context("writing PCM to paplay");
+            return Err(e).with_context(|| format!("writing PCM to {tool}"));
         }
     }
     drop(stdin);
-    let status = child.wait().context("waiting on paplay")?;
+    let status = child.wait().with_context(|| format!("waiting on {tool}"))?;
     if !status.success() {
         warn!(
             target: "fono::audio::playback",
             code = ?status.code(),
-            "paplay exited non-zero"
+            tool,
+            "{tool} exited non-zero"
         );
     }
     Ok(())

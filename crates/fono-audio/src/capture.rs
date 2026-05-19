@@ -200,11 +200,14 @@ fn start_process_capture<F>(target_rate: u32, mut forward: F) -> Result<ProcessC
 where
     F: FnMut(&[f32]) + Send + 'static,
 {
-    let mut child = spawn_parec(target_rate)?;
-    let mut stdout = child.stdout.take().context("parec did not expose stdout for PCM capture")?;
+    let (mut child, tool) = spawn_capture_tool(target_rate)?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .with_context(|| format!("{tool} did not expose stdout for PCM capture"))?;
 
     let reader = thread::Builder::new()
-        .name("fono-parec-capture".into())
+        .name(format!("fono-{tool}-capture"))
         .spawn(move || {
             let mut buf = [0_u8; 8192];
             let mut pending = Vec::<u8>::new();
@@ -224,15 +227,44 @@ where
                         }
                     }
                     Err(e) => {
-                        warn!("parec capture read failed: {e}");
+                        warn!("{tool} capture read failed: {e}");
                         break;
                     }
                 }
             }
         })
-        .context("spawn parec capture reader thread")?;
+        .with_context(|| format!("spawn {tool} capture reader thread"))?;
 
     Ok(ProcessCapture { child, reader: Some(reader) })
+}
+
+/// Spawn a process-backed audio capture tool that emits raw s16le mono
+/// PCM at `target_rate` on stdout. Tries the PulseAudio `parec` client
+/// first (universally available on PulseAudio systems and on PipeWire
+/// systems that have `pulseaudio-utils` installed), then falls back to
+/// PipeWire's native `pw-cat --record` which ships in `pipewire-bin`
+/// and is preinstalled on Ubuntu 24.04 / Fedora 39+ / Debian 13+.
+///
+/// Returns the spawned child plus a short tool name used in log/error
+/// messages.
+#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+fn spawn_capture_tool(target_rate: u32) -> Result<(Child, &'static str)> {
+    match spawn_parec(target_rate) {
+        Ok(c) => Ok((c, "parec")),
+        Err(parec_err) => {
+            debug!("capture: parec unavailable ({parec_err:#}); trying pw-cat");
+            match spawn_pw_cat(target_rate) {
+                Ok(c) => Ok((c, "pw-cat")),
+                Err(pw_err) => Err(anyhow::anyhow!(
+                    "audio capture failed to start: no usable capture tool found. \
+                     Tried `parec` ({parec_err}) and `pw-cat` ({pw_err}). \
+                     Install `pipewire-bin` (Ubuntu/Debian) or `pipewire-pulse` / \
+                     `pulseaudio-utils`, or rebuild Fono with \
+                     `--features fono-audio/cpal-backend` for direct ALSA capture."
+                )),
+            }
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
@@ -259,10 +291,34 @@ fn spawn_parec(target_rate: u32) -> Result<Child> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .with_context(|| {
-            "spawn parec for PulseAudio/PipeWire capture failed; install PulseAudio/PipeWire \
-             client tools or build with fono-audio/cpal-backend for bare ALSA"
-        })
+        .context("spawn parec")
+}
+
+/// PipeWire-native fallback. `pw-cat --record` ships in `pipewire-bin`
+/// which is preinstalled on Ubuntu 24.04 and other modern distros.
+/// Output format syntax differs from parec: no `--raw` flag, and the
+/// trailing `-` filename means "write to stdout"; the explicit
+/// `--format=s16` makes it emit raw little-endian 16-bit PCM.
+#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+fn spawn_pw_cat(target_rate: u32) -> Result<Child> {
+    debug!("capture: spawning pw-cat raw s16 mono at {target_rate} Hz");
+    Command::new("pw-cat")
+        .args([
+            "--record",
+            "--format=s16",
+            "--channels=1",
+            &format!("--rate={target_rate}"),
+            // 20 ms latency — matches the parec configuration so the
+            // waveform overlay and VAD timing behave identically
+            // regardless of which backend ends up serving capture.
+            "--latency=20ms",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("spawn pw-cat")
 }
 
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
