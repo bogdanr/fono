@@ -112,32 +112,16 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     let secrets = Secrets::load(&paths.secrets_file()).context("load secrets")?;
     print_banner(paths, &config, verbosity);
 
-    // Single-instance guard. Two-layer check:
-    //
-    // 1. PID file (`fono.pid`) — if a process with that PID is alive
-    //    and its `/proc/PID/comm` (or argv[0] on non-Linux) ends in
-    //    "fono", a fono daemon is already running. This catches the
-    //    case where a previous instance is bound to its own socket
-    //    fd but the on-disk socket file got unlinked (manually or by
-    //    a stale cleanup), so the connect() probe below would
-    //    spuriously succeed in creating a new bind.
-    //
-    // 2. Live socket probe — if the socket file exists and answers
-    //    `connect()`, refuse. Stale sockets (ConnectionRefused /
-    //    ENOENT) are silently cleaned up before bind.
+    // Single-instance guard: probe the IPC socket. If a previous
+    // daemon is alive it answers `connect()`; bail before we
+    // duplicate it. Stale sockets (ConnectionRefused / ENOENT) and
+    // the bind below replaces them cleanly.
     let socket_path = paths.ipc_socket();
-    if let Some(running_pid) = running_daemon_pid(paths) {
-        anyhow::bail!(
-            "another fono daemon is already running (pid {running_pid}). \
-             Stop it before starting a new instance \
-             (e.g. `kill {running_pid}` or `pkill fono`)."
-        );
-    }
     if socket_path.exists() {
         match tokio::net::UnixStream::connect(&socket_path).await {
             Ok(_) => anyhow::bail!(
                 "another fono daemon is already running (IPC socket {} is live). \
-                 Stop it before starting a new instance.",
+                 Stop it before starting a new instance (e.g. `pkill fono`).",
                 socket_path.display()
             ),
             Err(_) => {
@@ -148,8 +132,6 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
             }
         }
     }
-
-    write_pid(paths)?;
 
     // Ensure referenced models are on disk before we wire the orchestrator.
     if let Err(e) = crate::models::ensure_models(paths, &config).await {
@@ -858,7 +840,6 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                     }
                     TrayAction::Quit => {
                         let _ = std::fs::remove_file(paths.ipc_socket());
-                        let _ = std::fs::remove_file(paths.pid_file());
                         std::process::exit(0);
                     }
                     TrayAction::ShowStatus => notify_last_transcription(&paths),
@@ -1085,7 +1066,6 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     }
 
     let _ = std::fs::remove_file(paths.ipc_socket());
-    let _ = std::fs::remove_file(paths.pid_file());
     Ok(())
 }
 
@@ -1494,50 +1474,6 @@ fn truncate(s: &str, max: usize) -> String {
         let mut out: String = s.chars().take(max).collect();
         out.push('…');
         out
-    }
-}
-
-fn write_pid(paths: &Paths) -> Result<()> {
-    if let Some(dir) = paths.pid_file().parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(paths.pid_file(), std::process::id().to_string())?;
-    Ok(())
-}
-
-/// Inspect the on-disk PID file; if it contains a valid PID whose
-/// process exists and whose comm name ends in `fono`, return that PID.
-/// Returns `None` if the PID file is missing, malformed, points at a
-/// dead process, or points at a process that isn't a fono daemon
-/// (stale PID file from before a crash + reboot).
-fn running_daemon_pid(paths: &Paths) -> Option<u32> {
-    let raw = std::fs::read_to_string(paths.pid_file()).ok()?;
-    let pid: u32 = raw.trim().parse().ok()?;
-    if pid == std::process::id() {
-        return None;
-    }
-    // Linux: read /proc/PID/comm — kernel-truncated to 15 chars,
-    // matches `fono` for our binary regardless of argv[0].
-    #[cfg(target_os = "linux")]
-    {
-        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
-        if comm.trim() == "fono" {
-            return Some(pid);
-        }
-        None
-    }
-    // Fallback: probe with kill(0). Doesn't verify the process is
-    // *fono* (could be a PID reused by an unrelated program), so
-    // only block as a soft hint and let the socket probe make the
-    // final call on non-Linux.
-    #[cfg(not(target_os = "linux"))]
-    {
-        unsafe {
-            if libc::kill(pid as i32, 0) == 0 {
-                return Some(pid);
-            }
-        }
-        None
     }
 }
 
