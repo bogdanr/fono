@@ -1,64 +1,189 @@
-#!/usr/bin/env sh
-# Fono installer — fono.page
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Fono one-liner installer — published at https://fono.page/install.
 #
 # Usage:
-#   curl -L https://fono.page/install | sh
-#   curl -L https://fono.page/install | BIN_DIR=$HOME/.local/bin sh
+#     curl -fsSL https://fono.page/install | sh
 #
-# Inspect before piping to sh:
-#   curl -L https://fono.page/install
+# What it does:
+#   1. Detects host architecture and the latest Fono release on GitHub.
+#   2. Downloads the matching prebuilt binary into a temp dir.
+#   3. Runs `sudo fono install` (desktop mode) or `sudo fono install
+#      --server` (headless mode), letting the self-installer place the
+#      binary, write the desktop / systemd entries, and start fono.
+#
+# Environment knobs:
+#   FONO_VERSION=vX.Y.Z       pin to a specific release tag
+#   FONO_VARIANT=cpu|gpu      override variant detection (default: cpu)
+#   FONO_MODE=desktop|server  override mode detection
+#   FONO_INSTALL_NO_START=1   skip the post-install fono launch
+#   BIN_DIR=/path             legacy: bypass `fono install` and just
+#                             drop the binary in BIN_DIR. The
+#                             self-installer path is preferred because
+#                             it also writes the desktop entry,
+#                             autostart hook, and starts the daemon.
+#
+# Exit codes: 0 success, non-zero on any pre-install error. Errors
+# from `sudo fono install` itself propagate verbatim.
+
 set -eu
 
 REPO="bogdanr/fono"
-BIN_DIR="${BIN_DIR:-/usr/local/bin}"
+TMPDIR="${TMPDIR:-/tmp}"
+WORKDIR=$(mktemp -d "$TMPDIR/fono-install.XXXXXX")
+trap 'rm -rf "$WORKDIR"' EXIT INT TERM
 
-err() { printf '%s\n' "fono: $*" >&2; }
+log()  { printf '  · %s\n' "$*" >&2; }
+err()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-uname_s=$(uname -s)
-uname_m=$(uname -m)
+need() {
+    command -v "$1" >/dev/null 2>&1 || err "required command not found: $1"
+}
 
-case "$uname_s" in
-  Linux) : ;;
-  *) err "Linux-only today (you're on $uname_s). macOS and Windows are on the roadmap."; exit 1 ;;
-esac
-
-case "$uname_m" in
-  x86_64|amd64) arch=x86_64 ;;
-  *) err "unsupported architecture: $uname_m. open an issue at https://github.com/$REPO/issues"; exit 1 ;;
-esac
-
-need() { command -v "$1" >/dev/null 2>&1 || { err "missing dependency: $1"; exit 1; }; }
-need curl
-
-tag=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-  | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-  | head -n1)
-if [ -z "${tag:-}" ]; then
-  err "could not resolve the latest release tag from GitHub. is the network up?"
-  exit 1
-fi
-
-asset="fono-${tag}-${arch}"
-url="https://github.com/$REPO/releases/download/${tag}/${asset}"
-
-printf '==> downloading %s\n' "$asset"
-tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
-curl -fL --progress-bar "$url" -o "$tmp"
-
-printf '==> installing to %s/fono\n' "$BIN_DIR"
-if [ -w "$BIN_DIR" ]; then
-  install -m755 "$tmp" "$BIN_DIR/fono"
+need uname
+need mktemp
+# One of curl / wget is enough for the download.
+if command -v curl >/dev/null 2>&1; then
+    DL="curl -fsSL -o"
+elif command -v wget >/dev/null 2>&1; then
+    DL="wget -qO"
 else
-  if command -v sudo >/dev/null 2>&1; then
-    sudo install -m755 "$tmp" "$BIN_DIR/fono"
-  else
-    err "no write access to $BIN_DIR and sudo not found. set BIN_DIR to a writable path:"
-    err "  curl -L https://fono.page/install | BIN_DIR=\$HOME/.local/bin sh"
-    exit 1
-  fi
+    err "need either curl or wget on PATH"
 fi
 
-printf '\n  fono %s installed.\n' "$tag"
-printf '  next:  fono setup     # picks local vs cloud, installs models\n'
-printf '         fono            # starts the daemon (F9 toggle, F8 push-to-talk)\n\n'
+# ---------------------------------------------------------------------
+# Architecture
+# ---------------------------------------------------------------------
+arch=$(uname -m)
+case "$arch" in
+    x86_64|amd64)   ARCH=x86_64 ;;
+    aarch64|arm64)  ARCH=aarch64 ;;
+    *) err "unsupported architecture: $arch (Fono ships x86_64 and aarch64)" ;;
+esac
+
+# ---------------------------------------------------------------------
+# Mode detection
+#
+# Desktop = some indication of a graphical session in the env.
+# Server  = anything else (no DISPLAY, no WAYLAND_DISPLAY, no
+#           XDG_RUNTIME_DIR pointing at a logind-managed runtime).
+#
+# Operators can override with FONO_MODE=desktop|server.
+# ---------------------------------------------------------------------
+if [ -n "${FONO_MODE:-}" ]; then
+    MODE="$FONO_MODE"
+elif [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    MODE=desktop
+else
+    MODE=server
+fi
+case "$MODE" in
+    desktop|server) ;;
+    *) err "FONO_MODE must be 'desktop' or 'server' (got '$MODE')" ;;
+esac
+
+# ---------------------------------------------------------------------
+# Variant — CPU is the default; users on Vulkan-capable GPUs can opt
+# into the GPU build by setting FONO_VARIANT=gpu. The desktop fono
+# binary will also offer to switch on first run via the update path.
+# ---------------------------------------------------------------------
+VARIANT="${FONO_VARIANT:-cpu}"
+case "$VARIANT" in
+    cpu)  ASSET_PREFIX="fono" ;;
+    gpu)  ASSET_PREFIX="fono-gpu" ;;
+    *) err "FONO_VARIANT must be 'cpu' or 'gpu' (got '$VARIANT')" ;;
+esac
+
+# ---------------------------------------------------------------------
+# Resolve release tag
+# ---------------------------------------------------------------------
+if [ -n "${FONO_VERSION:-}" ]; then
+    TAG="$FONO_VERSION"
+else
+    TAG_URL="https://api.github.com/repos/$REPO/releases/latest"
+    # We don't strictly need jq for a single-field lookup.
+    if command -v curl >/dev/null 2>&1; then
+        TAG=$(curl -fsSL "$TAG_URL" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)
+    else
+        TAG=$(wget -qO- "$TAG_URL" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)
+    fi
+    [ -n "$TAG" ] || err "could not resolve latest release from $TAG_URL"
+fi
+
+ASSET="${ASSET_PREFIX}-${TAG}-${ARCH}"
+URL="https://github.com/$REPO/releases/download/${TAG}/${ASSET}"
+
+log "host:    $ARCH"
+log "mode:    $MODE"
+log "variant: $VARIANT"
+log "release: $TAG"
+log "asset:   $ASSET"
+
+# ---------------------------------------------------------------------
+# Download
+# ---------------------------------------------------------------------
+BIN="$WORKDIR/fono"
+log "downloading $URL"
+$DL "$BIN" "$URL" || err "download failed: $URL"
+chmod +x "$BIN"
+
+# ---------------------------------------------------------------------
+# Legacy BIN_DIR path — drop the binary in place and stop. Kept for
+# users who pin to the older script behaviour. The self-installer
+# path below is preferred because it also wires desktop / systemd
+# integration and starts the daemon.
+# ---------------------------------------------------------------------
+if [ -n "${BIN_DIR:-}" ]; then
+    dest="$BIN_DIR/fono"
+    log "BIN_DIR set; copying binary to $dest (no systemd / autostart wiring)"
+    if [ -w "$BIN_DIR" ]; then
+        mv "$BIN" "$dest"
+    else
+        sudo mv "$BIN" "$dest"
+    fi
+    printf '\nfono is now on your PATH at %s.\n' "$dest" >&2
+    printf 'For desktop / systemd integration run `sudo fono install` (or `--server`).\n' >&2
+    exit 0
+fi
+
+# ---------------------------------------------------------------------
+# Self-installer path
+#
+# `fono install` (run as root) handles binary placement, desktop /
+# systemd entries, completions, and — in our new code — best-effort
+# launches fono in the background for the invoking user via
+# `$SUDO_USER`. We honour `FONO_INSTALL_NO_START` by passing it through.
+# ---------------------------------------------------------------------
+if [ "$(id -u)" -ne 0 ]; then
+    need sudo
+    SUDO="sudo -E"
+else
+    SUDO=""
+fi
+
+# Preserve FONO_INSTALL_NO_START across the sudo boundary if set.
+INSTALL_ENV=""
+if [ -n "${FONO_INSTALL_NO_START:-}" ]; then
+    INSTALL_ENV="FONO_INSTALL_NO_START=$FONO_INSTALL_NO_START"
+fi
+
+if [ "$MODE" = "server" ]; then
+    # shellcheck disable=SC2086
+    $SUDO $INSTALL_ENV "$BIN" install --server
+else
+    # `curl … | sh` makes the script's stdin be the curl output, so by
+    # the time `fono install` runs there is no real TTY on stdin — the
+    # setup wizard launched at the end of install would see
+    # `!is_terminal()` and fall back to the "run setup manually" hint.
+    # Re-attach /dev/tty (the user's controlling terminal) so the
+    # wizard can prompt them, but only when /dev/tty is actually
+    # available (it isn't on a fully non-interactive box, e.g. CI).
+    if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+        # shellcheck disable=SC2086
+        $SUDO $INSTALL_ENV "$BIN" install </dev/tty
+    else
+        # shellcheck disable=SC2086
+        $SUDO $INSTALL_ENV "$BIN" install
+    fi
+fi
