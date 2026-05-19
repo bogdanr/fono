@@ -3,7 +3,7 @@
 //!
 //! Returns `Ok(None)` when the assistant is disabled in config, so
 //! callers can treat "no assistant" without matching on the enum.
-//! Otherwise mirrors [`fono_llm::factory::build_llm`] with chat
+//! Otherwise mirrors [`fono_polish::factory::build_polish`] with chat
 //! invariants (different default models, different prompt usage).
 
 #[allow(unused_imports)]
@@ -196,7 +196,7 @@ fn build_openrouter(cfg: &AssistantCfg, secrets: &Secrets) -> Result<Arc<dyn Ass
 fn build_ollama(cfg: &AssistantCfg) -> Result<Arc<dyn Assistant>> {
     // Ollama needs an explicit endpoint; we lift it from cfg.cloud.api_key_ref
     // when provided (interpreted as a URL placeholder), else default to
-    // localhost. Same convention as fono-llm.
+    // localhost. Same convention as fono-polish.
     let endpoint = cfg
         .cloud
         .as_ref()

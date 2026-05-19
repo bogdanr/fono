@@ -26,7 +26,7 @@ After `StopRecording` you should see lines like:
 ```
 INFO recording stopped: 2300 ms / 36800 samples
 INFO stt: groq 540ms → 42 chars
-INFO llm: groq 310ms → 45 chars
+INFO polish: groq 310ms → 45 chars
 INFO inject backend: typed via xtest-paste in 11ms
 INFO clipboard: also wrote via xsel [primary]
 INFO pipeline ok: capture=2300ms trim=4ms ...
@@ -35,13 +35,13 @@ INFO pipeline ok: capture=2300ms trim=4ms ...
 If the pipeline ran but text didn't land, jump to "Pipeline ran but
 nothing pasted".
 
-### Step 4 — confirm STT and LLM are reachable
+### Step 4 — confirm STT and polish are reachable
 
 ```sh
 fono doctor
 ```
 
-Look for the Providers (STT) and Providers (LLM) sections. Each should
+Look for the Providers (STT) and Providers (Polish) sections. Each should
 show `(active) reachable` next to your selected backend.
 
 ## Hotkey doesn't fire
@@ -98,7 +98,7 @@ bindsym $mod+space exec fono toggle
 #   Set:     F7
 ```
 
-## LLM responds with a question instead of cleaning my text
+## Polish responds with a question instead of cleaning my text
 
 Symptom: instead of the cleaned transcript, the injected text reads
 something like *"It seems like you're describing a situation, but the
@@ -122,14 +122,14 @@ raw STT text is injected instead. If you still see clarification-shaped
 output:
 
 - Confirm you're on v0.2.3 or newer (`fono --version`).
-- Check the daemon log for `LLM returned a clarification reply instead
+- Check the daemon log for `polish returned a clarification reply instead
   of a cleaned transcript; falling back to raw text.` — that line means
   the detector fired and the fallback worked, on whichever backend was
   active.
-- Raise `[llm].skip_if_words_lt` (default `3`) in `config.toml` to skip
-  the LLM for longer utterances, on cloud or local backends alike.
+- Raise `[polish].skip_if_words_lt` (default `3`) in `config.toml` to skip
+  the polish step for longer utterances, on cloud or local backends alike.
 - If a specific provider is producing borderline replies the heuristic
-  doesn't catch, switch backends with `fono use llm <name>` — the fix
+  doesn't catch, switch backends with `fono use polish <name>` — the fix
   applies to every option, but different chat fine-tunes have different
   refusal personalities and one may suit your dictation style better.
 
@@ -212,8 +212,8 @@ The key is stored in `~/.config/fono/secrets.toml` with mode `0600`.
 Your key is rejected by the provider. Since v0.7.2 the daemon also
 fires a critical desktop notification on the first auth-class failure
 of each dictation session, so you no longer need to tail journalctl to
-notice — the same notification distinguishes STT-key vs LLM-key
-failures and tells you which provider rejected the key. An LLM-key
+notice — the same notification distinguishes STT-key vs polish-key
+failures and tells you which provider rejected the key. A polish-key
 failure still injects the raw STT transcript so the dictation is not
 lost; an STT-key failure injects nothing and asks you to update the
 key via the tray or `fono doctor`.
@@ -247,7 +247,7 @@ fono use local
 ### Cloud providers
 
 - Switch to Groq (typically the fastest): `fono use cloud groq`.
-- Disable LLM cleanup if you don't need it: `fono use llm none`.
+- Disable polish if you don't need it: `fono use polish none`.
 - Check your network round-trip: `curl -w '%{time_total}\n' -o /dev/null -s https://api.groq.com`.
 
 ### Local models
@@ -324,7 +324,7 @@ doesn't seem to apply:
 1. Confirm the daemon is running: `pgrep -fa /fono$`.
 2. Confirm `fono use show` reports the new selection.
 3. Trigger one dictation; the next `fono history --limit 1` row should
-   show the new `stt_backend` / `llm_backend`.
+   show the new `stt_backend` / `polish_backend`.
 
 If it still uses the old backend, restart the daemon. The orchestrator's
 hot-swap is exercised by the test suite (`crates/fono/tests/`), so a

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Streaming chat assistant trait + cloud and (stubbed) local
-//! backends. Mirrors the shape of `fono-llm` but with a different
+//! backends. Mirrors the shape of `fono-polish` but with a different
 //! invariant: the assistant *expects* chat-style replies (the cleanup
 //! path explicitly rejects them via the `looks_like_clarification`
 //! heuristic), maintains rolling conversation history, and streams

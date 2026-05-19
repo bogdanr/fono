@@ -70,13 +70,13 @@ impl Verbosity {
             }
             Self::Debug => {
                 "fono=debug,fono_core=debug,fono_hotkey=debug,fono_tray=debug,\
-                fono_audio=debug,fono_stt=debug,fono_llm=debug,fono_inject=debug,\
+                fono_audio=debug,fono_stt=debug,fono_polish=debug,fono_inject=debug,\
                 fono_ipc=debug,fono_download=debug,whisper_rs::ggml_logging_hook=warn,\
                 whisper_rs::whisper_logging_hook=warn,llama-cpp-2=warn,info"
             }
             Self::Trace => {
                 "fono=trace,fono_core=trace,fono_hotkey=trace,fono_tray=trace,\
-                fono_audio=trace,fono_stt=trace,fono_llm=trace,fono_inject=trace,\
+                fono_audio=trace,fono_stt=trace,fono_polish=trace,fono_inject=trace,\
                 fono_ipc=trace,fono_download=trace,whisper_rs::ggml_logging_hook=warn,\
                 whisper_rs::whisper_logging_hook=warn,llama-cpp-2=info,debug"
             }
@@ -109,7 +109,7 @@ pub enum Cmd {
     /// Record once from the mic, transcribe, inject, exit.
     ///
     /// Captures audio until silence, Ctrl-C, or the `--max-seconds`
-    /// timeout, then runs the configured STT (and LLM cleanup) and
+    /// timeout, then runs the configured STT (and polish) and
     /// types the result into the focused window.
     Record {
         /// Print the cleaned text to stdout instead of typing it.
@@ -121,9 +121,9 @@ pub enum Cmd {
         /// One-shot STT backend override (e.g. `local`, `groq`).
         #[arg(long)]
         stt: Option<String>,
-        /// One-shot LLM backend override (`none` to skip cleanup).
+        /// One-shot polish backend override (`none` to skip cleanup).
         #[arg(long)]
-        llm: Option<String>,
+        polish: Option<String>,
         /// Use live streaming mode (requires the `interactive` feature).
         #[arg(long)]
         live: bool,
@@ -135,15 +135,15 @@ pub enum Cmd {
     Transcribe {
         /// Path to a WAV file.
         path: std::path::PathBuf,
-        /// Skip the LLM cleanup step.
+        /// Skip the polish step.
         #[arg(long)]
-        no_llm: bool,
+        no_polish: bool,
         /// One-shot STT backend override.
         #[arg(long)]
         stt: Option<String>,
-        /// One-shot LLM backend override.
+        /// One-shot polish backend override.
         #[arg(long)]
-        llm: Option<String>,
+        polish: Option<String>,
     },
     /// Re-type the last cleaned transcription.
     PasteLast,
@@ -217,7 +217,7 @@ pub enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Switch the active STT / LLM backend (no daemon restart needed).
+    /// Switch the active STT / polish backend (no daemon restart needed).
     Use {
         #[command(subcommand)]
         action: UseCmd,
@@ -301,13 +301,13 @@ pub enum UseCmd {
         /// local | groq | openai | deepgram | assemblyai | cartesia | azure | speechmatics | google | nemotron
         backend: String,
     },
-    /// Switch the active LLM backend.
-    Llm {
+    /// Switch the active polish backend.
+    Polish {
         /// none | local | cerebras | groq | openai | anthropic | openrouter | ollama | gemini
         backend: String,
     },
     /// Switch the active voice-assistant chat backend. Independent of
-    /// the LLM cleanup pipeline (`fono use llm`).
+    /// the polish pipeline (`fono use polish`).
     Assistant {
         /// none | local | cerebras | groq | openai | anthropic | openrouter | ollama | gemini
         backend: String,
@@ -326,7 +326,7 @@ pub enum UseCmd {
         /// groq | cerebras | openai | anthropic | openrouter | deepgram | assemblyai
         provider: String,
     },
-    /// Switch to local STT (whisper) and disable LLM cleanup.
+    /// Switch to local STT (whisper) and disable polish.
     Local,
     /// Print the active STT/LLM and the running daemon's view.
     Show,
@@ -378,12 +378,18 @@ pub enum AssistantCmd {
 pub enum ModelsCmd {
     /// List available Whisper models and which are installed.
     List,
-    /// Download and install a Whisper model (e.g. `base`, `small`).
+    /// Download and install a Whisper model (e.g. `small`, `large-v3-turbo`).
     Install {
         /// Model name (see `fono models list`).
         name: String,
+        /// Quantization to install. `auto` (default) picks the
+        /// registry default for the model. Use `fp16`, `q5_1`, or
+        /// `q8_0` to pin a specific variant.
+        #[arg(long, default_value = "auto")]
+        quantization: String,
     },
-    /// Remove a previously installed Whisper model.
+    /// Remove a previously installed Whisper model. Removes every
+    /// quantization variant of the named model.
     Remove {
         /// Model name to remove.
         name: String,
@@ -426,7 +432,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                         cfg_path.display()
                     );
                     eprintln!(
-                        "fono: re-run `fono setup` from a terminal to configure STT/LLM backends."
+                        "fono: re-run `fono setup` from a terminal to configure STT/polish backends."
                     );
                 }
             }
@@ -485,11 +491,12 @@ pub async fn run(cli: Cli) -> Result<()> {
             test_overlay_cmd();
             Ok(())
         }
-        Some(Cmd::Record { no_inject, max_seconds, stt, llm, live }) => {
-            record_cmd(&paths, no_inject, max_seconds, stt.as_deref(), llm.as_deref(), live).await
+        Some(Cmd::Record { no_inject, max_seconds, stt, polish, live }) => {
+            record_cmd(&paths, no_inject, max_seconds, stt.as_deref(), polish.as_deref(), live)
+                .await
         }
-        Some(Cmd::Transcribe { path, no_llm, stt, llm }) => {
-            transcribe_cmd(&paths, &path, no_llm, stt.as_deref(), llm.as_deref()).await
+        Some(Cmd::Transcribe { path, no_polish, stt, polish }) => {
+            transcribe_cmd(&paths, &path, no_polish, stt.as_deref(), polish.as_deref()).await
         }
         Some(Cmd::History { search, limit, json, last }) => {
             history_cmd(&paths, search.as_deref(), limit, json, last)
@@ -594,7 +601,7 @@ fn history_cmd(
                 "app_class": t.app_class,
                 "app_title": t.app_title,
                 "stt_backend": t.stt_backend,
-                "llm_backend": t.llm_backend,
+                "polish_backend": t.polish_backend,
                 "language": t.language,
             });
             println!("{}", serde_json::to_string_pretty(&v)?);
@@ -606,12 +613,9 @@ fn history_cmd(
             println!("app_class    : {:?}", t.app_class);
             println!("app_title    : {:?}", t.app_title);
             println!("stt_backend  : {:?}", t.stt_backend);
-            println!("llm_backend  : {:?}", t.llm_backend);
+            println!("polish_backend  : {:?}", t.polish_backend);
             println!("raw          : {}", t.raw);
-            println!(
-                "cleaned      : {}",
-                t.cleaned.as_deref().unwrap_or("(none — no LLM cleanup)")
-            );
+            println!("cleaned      : {}", t.cleaned.as_deref().unwrap_or("(none — no polish)"));
         }
         return Ok(());
     }
@@ -626,7 +630,7 @@ fn history_cmd(
                     "cleaned": t.cleaned,
                     "language": t.language,
                     "stt_backend": t.stt_backend,
-                    "llm_backend": t.llm_backend,
+                    "polish_backend": t.polish_backend,
                 })
             })
             .collect();
@@ -664,46 +668,93 @@ fn config_cmd(paths: &Paths, action: ConfigCmd) -> Result<()> {
 }
 
 async fn models_cmd(paths: &Paths, action: ModelsCmd) -> Result<()> {
-    use fono_stt::ModelRegistry;
+    use fono_stt::{ModelRegistry, Quantization, QuantizationPref};
     match action {
         ModelsCmd::List => {
             for m in ModelRegistry::all() {
-                let marker =
-                    if paths.whisper_models_dir().join(format!("ggml-{}.bin", m.name)).exists() {
-                        "[installed]"
-                    } else {
-                        "           "
-                    };
+                let default_quant = m.default_quantization;
+                let dest =
+                    paths.whisper_models_dir().join(ModelRegistry::filename(m.name, default_quant));
+                let marker = if dest.exists() { "[installed]" } else { "           " };
+                let kind = if m.multilingual { "multilingual" } else { "english-only" };
                 println!(
-                    "{marker} whisper:{:<10} {:>5} MB  multilingual={}",
-                    m.name, m.approx_mb, m.multilingual
+                    "{marker} whisper:{:<15} default={:<5} {:>5} MB  {kind}",
+                    m.name,
+                    default_quant.as_str(),
+                    m.approx_mb,
                 );
+                // List alternative quantizations (skip the default itself).
+                for v in m.quantizations {
+                    if v.quantization == default_quant {
+                        continue;
+                    }
+                    let alt = paths
+                        .whisper_models_dir()
+                        .join(ModelRegistry::filename(m.name, v.quantization));
+                    let alt_marker = if alt.exists() { "[installed]" } else { "           " };
+                    println!(
+                        "{alt_marker}   └─ {:<5} {:>5} MB  (install with \
+                         `fono models install {} --quantization {}`)",
+                        v.quantization.as_str(),
+                        v.approx_mb,
+                        m.name,
+                        v.quantization.as_str(),
+                    );
+                }
             }
         }
-        ModelsCmd::Install { name } => {
+        ModelsCmd::Install { name, quantization } => {
             let m = ModelRegistry::get(&name)
                 .ok_or_else(|| anyhow::anyhow!("unknown model {name:?}"))?;
-            let dest = paths.whisper_models_dir().join(format!("ggml-{}.bin", m.name));
+            let pref = QuantizationPref::parse(&quantization).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invalid --quantization {quantization:?} — expected \
+                     `auto`, `fp16`, `q5_1`, or `q8_0`"
+                )
+            })?;
+            let quant = ModelRegistry::resolve_quantization(m, pref).map_err(anyhow::Error::msg)?;
+            let variant = ModelRegistry::variant_for(m, quant)
+                .expect("resolve_quantization guarantees the variant exists");
+            let dest = paths.whisper_models_dir().join(ModelRegistry::filename(m.name, quant));
             if dest.exists() {
                 println!("already installed: {}", dest.display());
                 return Ok(());
             }
-            let url = ModelRegistry::url_for(m);
+            let url = ModelRegistry::url_for(m, quant)
+                .expect("variant lookup succeeded so URL must resolve");
             println!(
-                "Downloading {} ({} MB)\n  from {url}\n  to   {}",
+                "Downloading {} ({}) — {} MB\n  from {url}\n  to   {}",
                 m.name,
-                m.approx_mb,
+                quant,
+                variant.approx_mb,
                 dest.display()
             );
-            fono_download::download(&url, &dest, m.sha256).await?;
+            fono_download::download(&url, &dest, variant.sha256).await?;
             println!("Installed: {}", dest.display());
         }
         ModelsCmd::Remove { name } => {
-            let path = paths.whisper_models_dir().join(format!("ggml-{name}.bin"));
-            if path.exists() {
-                std::fs::remove_file(&path)?;
-                println!("removed {}", path.display());
+            // Remove every quantization variant of the model (so users
+            // don't have to remember which one was on disk). Unknown
+            // model names fall through to a single best-effort attempt.
+            let mut removed = 0usize;
+            if let Some(m) = ModelRegistry::get(&name) {
+                for q in [Quantization::Fp16, Quantization::Q5_1, Quantization::Q8_0] {
+                    let path = paths.whisper_models_dir().join(ModelRegistry::filename(m.name, q));
+                    if path.exists() {
+                        std::fs::remove_file(&path)?;
+                        println!("removed {}", path.display());
+                        removed += 1;
+                    }
+                }
             } else {
+                let path = paths.whisper_models_dir().join(format!("ggml-{name}.bin"));
+                if path.exists() {
+                    std::fs::remove_file(&path)?;
+                    println!("removed {}", path.display());
+                    removed += 1;
+                }
+            }
+            if removed == 0 {
                 println!("not installed: {name}");
             }
         }
@@ -772,7 +823,7 @@ async fn record_cmd(
 
     let stt =
         fono_stt::build_stt(&config.stt, &config.general, &secrets, &paths.whisper_models_dir())?;
-    let llm = fono_llm::build_llm(&config.llm, &secrets, &paths.llm_models_dir())?;
+    let polish = fono_polish::build_polish(&config.polish, &secrets, &paths.polish_models_dir())?;
 
     eprintln!(
         "fono record: captured {} samples ({} ms); running STT…",
@@ -786,18 +837,18 @@ async fn record_cmd(
         eprintln!("fono record: STT returned empty text");
         return Ok(());
     }
-    let final_text = if let Some(l) = llm.as_ref() {
-        let ctx = fono_llm::FormatContext {
-            main_prompt: config.llm.prompt.main.clone(),
-            advanced_prompt: config.llm.prompt.advanced.clone(),
-            dictionary: config.llm.prompt.dictionary.clone(),
+    let final_text = if let Some(l) = polish.as_ref() {
+        let ctx = fono_polish::FormatContext {
+            main_prompt: config.polish.prompt.main.clone(),
+            advanced_prompt: config.polish.prompt.advanced.clone(),
+            dictionary: config.polish.prompt.dictionary.clone(),
             language: trans.language.clone(),
             ..Default::default()
         };
         match l.format(&raw, &ctx).await {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("fono record: LLM cleanup failed ({e:#}); using raw transcript");
+                eprintln!("fono record: polish failed ({e:#}); using raw transcript");
                 raw.clone()
             }
         }
@@ -819,7 +870,7 @@ async fn record_cmd(
 async fn transcribe_cmd(
     paths: &Paths,
     wav: &std::path::Path,
-    no_llm: bool,
+    no_polish: bool,
     stt_override: Option<&str>,
     llm_override: Option<&str>,
 ) -> Result<()> {
@@ -832,25 +883,25 @@ async fn transcribe_cmd(
         read_wav_mono_f32(wav).with_context(|| format!("read wav {}", wav.display()))?;
     let stt =
         fono_stt::build_stt(&config.stt, &config.general, &secrets, &paths.whisper_models_dir())?;
-    let llm = if no_llm {
+    let polish = if no_polish {
         None
     } else {
-        fono_llm::build_llm(&config.llm, &secrets, &paths.llm_models_dir())?
+        fono_polish::build_polish(&config.polish, &secrets, &paths.polish_models_dir())?
     };
     let trans = stt.transcribe(&pcm, sample_rate, None).await?;
     let raw = trans.text.trim().to_string();
-    if let Some(l) = llm.as_ref() {
-        let ctx = fono_llm::FormatContext {
-            main_prompt: config.llm.prompt.main.clone(),
-            advanced_prompt: config.llm.prompt.advanced.clone(),
-            dictionary: config.llm.prompt.dictionary.clone(),
+    if let Some(l) = polish.as_ref() {
+        let ctx = fono_polish::FormatContext {
+            main_prompt: config.polish.prompt.main.clone(),
+            advanced_prompt: config.polish.prompt.advanced.clone(),
+            dictionary: config.polish.prompt.dictionary.clone(),
             language: trans.language.clone(),
             ..Default::default()
         };
         match l.format(&raw, &ctx).await {
             Ok(c) => println!("{c}"),
             Err(e) => {
-                eprintln!("LLM cleanup failed ({e:#}); raw transcript follows:");
+                eprintln!("polish failed ({e:#}); raw transcript follows:");
                 println!("{raw}");
             }
         }
@@ -966,12 +1017,16 @@ fn hwprobe_cmd(paths: &Paths, json: bool) {
 // `fono use …` — switch active STT / LLM (provider-switching plan S4).
 // ---------------------------------------------------------------------
 
-/// Mutate `config` so that future `build_stt` / `build_llm` calls pick
+/// Mutate `config` so that future `build_stt` / `build_polish` calls pick
 /// up the requested backend. Used both by `fono use` (persisted) and
-/// the per-call `--stt` / `--llm` overrides on `record` / `transcribe`
+/// the per-call `--stt` / `--polish` overrides on `record` / `transcribe`
 /// (provider-switching plan task S6).
-fn apply_backend_overrides(cfg: &mut Config, stt: Option<&str>, llm: Option<&str>) -> Result<()> {
-    use fono_core::providers::{parse_llm_backend, parse_stt_backend};
+fn apply_backend_overrides(
+    cfg: &mut Config,
+    stt: Option<&str>,
+    polish: Option<&str>,
+) -> Result<()> {
+    use fono_core::providers::{parse_polish_backend, parse_stt_backend};
     if let Some(s) = stt {
         let backend = parse_stt_backend(s).ok_or_else(|| {
             anyhow::anyhow!(
@@ -981,10 +1036,10 @@ fn apply_backend_overrides(cfg: &mut Config, stt: Option<&str>, llm: Option<&str
         })?;
         set_active_stt(cfg, backend);
     }
-    if let Some(l) = llm {
-        let backend = parse_llm_backend(l).ok_or_else(|| {
+    if let Some(l) = polish {
+        let backend = parse_polish_backend(l).ok_or_else(|| {
             anyhow::anyhow!(
-                "unknown LLM backend {l:?}; valid: none, local, cerebras, groq, \
+                "unknown polish backend {l:?}; valid: none, local, cerebras, groq, \
                  openai, anthropic, openrouter, ollama, gemini"
             )
         })?;
@@ -1039,21 +1094,21 @@ pub fn set_active_tts(
     }
 }
 
-/// Atomically swap the active LLM backend. Enables/disables cleanup as
+/// Atomically swap the active polish backend. Enables/disables cleanup as
 /// appropriate (None → disabled, anything else → enabled).
-pub fn set_active_llm(cfg: &mut Config, backend: fono_core::config::LlmBackend) {
-    use fono_core::config::LlmBackend;
-    let none = matches!(backend, LlmBackend::None);
-    cfg.llm.backend = backend;
-    cfg.llm.enabled = !none;
-    cfg.llm.cloud = None;
+pub fn set_active_llm(cfg: &mut Config, backend: fono_core::config::PolishBackend) {
+    use fono_core::config::PolishBackend;
+    let none = matches!(backend, PolishBackend::None);
+    cfg.polish.backend = backend;
+    cfg.polish.enabled = !none;
+    cfg.polish.cloud = None;
 }
 
 async fn use_cmd(paths: &Paths, action: UseCmd) -> Result<()> {
-    use fono_core::config::{LlmBackend, SttBackend};
+    use fono_core::config::{PolishBackend, SttBackend};
     use fono_core::providers::{
-        assistant_backend_str, cloud_pair, llm_backend_str, parse_assistant_backend,
-        parse_llm_backend, parse_stt_backend, parse_tts_backend, stt_backend_str, tts_backend_str,
+        assistant_backend_str, cloud_pair, parse_assistant_backend, parse_polish_backend,
+        parse_stt_backend, parse_tts_backend, polish_backend_str, stt_backend_str, tts_backend_str,
     };
 
     let path = paths.config_file();
@@ -1067,15 +1122,15 @@ async fn use_cmd(paths: &Paths, action: UseCmd) -> Result<()> {
             cfg.save(&path)?;
             format!("stt = {}", stt_backend_str(&b))
         }
-        UseCmd::Llm { backend } => {
-            let b = parse_llm_backend(&backend).ok_or_else(|| {
+        UseCmd::Polish { backend } => {
+            let b = parse_polish_backend(&backend).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "unknown LLM backend {backend:?}; try none, cerebras, groq, openai, …"
+                    "unknown polish backend {backend:?}; try none, cerebras, groq, openai, …"
                 )
             })?;
             set_active_llm(&mut cfg, b.clone());
             cfg.save(&path)?;
-            format!("llm = {}", llm_backend_str(&b))
+            format!("polish = {}", polish_backend_str(&b))
         }
         UseCmd::Assistant { backend } => {
             let b = parse_assistant_backend(&backend).ok_or_else(|| {
@@ -1110,16 +1165,16 @@ async fn use_cmd(paths: &Paths, action: UseCmd) -> Result<()> {
             set_active_llm(&mut cfg, l.clone());
             cfg.save(&path)?;
             format!(
-                "cloud preset {provider}: stt = {}, llm = {}",
+                "cloud preset {provider}: stt = {}, polish = {}",
                 stt_backend_str(&s),
-                llm_backend_str(&l),
+                polish_backend_str(&l),
             )
         }
         UseCmd::Local => {
             set_active_stt(&mut cfg, SttBackend::Local);
-            set_active_llm(&mut cfg, LlmBackend::None);
+            set_active_llm(&mut cfg, PolishBackend::None);
             cfg.save(&path)?;
-            "local: stt = local (whisper), llm = none".to_string()
+            "local: stt = local (whisper), polish = none".to_string()
         }
         UseCmd::Show => {
             print_show(paths, &cfg).await;
@@ -1145,14 +1200,14 @@ async fn use_cmd(paths: &Paths, action: UseCmd) -> Result<()> {
 
 async fn print_show(paths: &Paths, cfg: &Config) {
     use fono_core::providers::{
-        assistant_backend_str, llm_backend_str, stt_backend_str, tts_backend_str,
+        assistant_backend_str, polish_backend_str, stt_backend_str, tts_backend_str,
     };
     println!("config: {}", paths.config_file().display());
     println!("  stt      : {}", stt_backend_str(&cfg.stt.backend));
     println!(
-        "  llm      : {}{}",
-        llm_backend_str(&cfg.llm.backend),
-        if cfg.llm.enabled { "" } else { " (disabled)" }
+        "  polish      : {}{}",
+        polish_backend_str(&cfg.polish.backend),
+        if cfg.polish.enabled { "" } else { " (disabled)" }
     );
     println!(
         "  assistant: {}{}",
@@ -1223,7 +1278,7 @@ async fn keys_cmd(paths: &Paths, action: KeysCmd) -> Result<()> {
 
 fn print_keys_list(secrets: &Secrets) {
     use fono_core::providers::{
-        all_llm_backends, all_stt_backends, llm_key_env, llm_requires_key, stt_key_env,
+        all_polish_backends, all_stt_backends, polish_key_env, polish_requires_key, stt_key_env,
         stt_requires_key,
     };
     println!("api keys (config + environment):");
@@ -1234,11 +1289,11 @@ fn print_keys_list(secrets: &Secrets) {
         }
         seen.insert(stt_key_env(&b).to_string());
     }
-    for b in all_llm_backends() {
-        if !llm_requires_key(&b) {
+    for b in all_polish_backends() {
+        if !polish_requires_key(&b) {
             continue;
         }
-        seen.insert(llm_key_env(&b).to_string());
+        seen.insert(polish_key_env(&b).to_string());
     }
     for name in seen {
         let from_secrets = secrets.keys.get(&name).cloned();
@@ -1259,9 +1314,11 @@ fn print_keys_list(secrets: &Secrets) {
 }
 
 fn is_canonical_key(name: &str) -> bool {
-    use fono_core::providers::{all_llm_backends, all_stt_backends, llm_key_env, stt_key_env};
+    use fono_core::providers::{
+        all_polish_backends, all_stt_backends, polish_key_env, stt_key_env,
+    };
     all_stt_backends().iter().any(|b| stt_key_env(b) == name)
-        || all_llm_backends().iter().any(|b| llm_key_env(b) == name)
+        || all_polish_backends().iter().any(|b| polish_key_env(b) == name)
 }
 
 fn mask(value: &str) -> String {
@@ -1589,10 +1646,18 @@ async fn record_cmd_live(
     // (the generic `build_stt` factory returns `Arc<dyn SpeechToText>`,
     // which doesn't expose the streaming method).
     let model = &config.stt.local.model;
-    let model_path = paths.whisper_models_dir().join(format!("ggml-{model}.bin"));
+    let (info, quant) = crate::models::resolve_local_stt(model, &config.stt.local.quantization)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "local whisper model {model:?} is not in the registry — run \
+                 `fono models list` to see available names"
+            )
+        })?;
+    let model_path =
+        paths.whisper_models_dir().join(fono_stt::ModelRegistry::filename(info.name, quant));
     if !model_path.exists() {
         return Err(anyhow::anyhow!(
-            "local whisper model {model:?} not found at {} — \
+            "local whisper model {model:?} ({quant}) not found at {} — \
              run `fono models install {model}`",
             model_path.display()
         ));

@@ -130,8 +130,8 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 writeln!(out, "  version        : {}", c.version)?;
                 writeln!(out, "  stt.backend    : {:?}", c.stt.backend)?;
                 writeln!(out, "  stt.local.model: {}", c.stt.local.model)?;
-                writeln!(out, "  llm.backend    : {:?}", c.llm.backend)?;
-                writeln!(out, "  llm.local.model: {}", c.llm.local.model)?;
+                writeln!(out, "  polish.backend    : {:?}", c.polish.backend)?;
+                writeln!(out, "  polish.local.model: {}", c.polish.local.model)?;
                 writeln!(
                     out,
                     "  hotkeys        : dictation={} assistant={} (short=toggle, long=hold)",
@@ -162,10 +162,10 @@ pub async fn report(paths: &Paths) -> Result<String> {
             Ok(s) => writeln!(out, "  stt: {} {}", s.name(), ok("ready"))?,
             Err(e) => writeln!(out, "  stt: {} {e:#}", bad("FAIL —"))?,
         }
-        match fono_llm::build_llm(&c.llm, &secrets, &paths.llm_models_dir()) {
-            Ok(Some(l)) => writeln!(out, "  llm: {} {}", l.name(), ok("ready"))?,
-            Ok(None) => writeln!(out, "  llm: {}", dim("disabled (cleanup off)"))?,
-            Err(e) => writeln!(out, "  llm: {} {e:#}", bad("FAIL —"))?,
+        match fono_polish::build_polish(&c.polish, &secrets, &paths.polish_models_dir()) {
+            Ok(Some(l)) => writeln!(out, "  polish: {} {}", l.name(), ok("ready"))?,
+            Ok(None) => writeln!(out, "  polish: {}", dim("disabled (cleanup off)"))?,
+            Err(e) => writeln!(out, "  polish: {} {e:#}", bad("FAIL —"))?,
         }
         match fono_assistant::build_assistant(&c.assistant, &secrets) {
             Ok(Some(a)) => writeln!(out, "  assistant: {} {}", a.name(), ok("ready"))?,
@@ -185,7 +185,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
         // Per-provider key + reachability matrix (provider-switching
         // plan task S18). One line per known backend with active marker
         // so users see at a glance which providers are ready to switch
-        // to via `fono use stt …` / `fono use llm …`.
+        // to via `fono use stt …` / `fono use polish …`.
         // ------------------------------------------------------------
         writeln!(out, "{}", head("Providers (STT):"))?;
         for b in fono_core::providers::all_stt_backends() {
@@ -211,12 +211,12 @@ pub async fn report(paths: &Paths) -> Result<String> {
         writeln!(out)?;
 
         writeln!(out, "{}", head("Providers (LLM):"))?;
-        for b in fono_core::providers::all_llm_backends() {
-            let active = b == c.llm.backend;
+        for b in fono_core::providers::all_polish_backends() {
+            let active = b == c.polish.backend;
             let mark = star(active);
-            let name = fono_core::providers::llm_backend_str(&b);
-            let needs_key = fono_core::providers::llm_requires_key(&b);
-            let key_env = fono_core::providers::llm_key_env(&b);
+            let name = fono_core::providers::polish_backend_str(&b);
+            let needs_key = fono_core::providers::polish_requires_key(&b);
+            let key_env = fono_core::providers::polish_key_env(&b);
             let key_status = if !needs_key {
                 dim("no key needed")
             } else if secrets.resolve(key_env).is_some() {
@@ -224,12 +224,12 @@ pub async fn report(paths: &Paths) -> Result<String> {
             } else {
                 dim(&format!("{key_env} missing"))
             };
-            let model = if matches!(b, fono_core::config::LlmBackend::None) {
+            let model = if matches!(b, fono_core::config::PolishBackend::None) {
                 "—".to_string()
-            } else if needs_key || matches!(b, fono_core::config::LlmBackend::Ollama) {
-                fono_llm::defaults::default_cloud_model(name).to_string()
+            } else if needs_key || matches!(b, fono_core::config::PolishBackend::Ollama) {
+                fono_polish::defaults::default_cloud_model(name).to_string()
             } else {
-                c.llm.local.model.clone()
+                c.polish.local.model.clone()
             };
             writeln!(out, "  {mark} {name:<14} model: {model:<32} {key_status}")?;
         }
@@ -284,7 +284,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
             writeln!(out, "  {mark} {name:<14} {extra}")?;
         }
         writeln!(out)?;
-        writeln!(out, "(* = active. Switch with `fono use stt|llm|assistant|tts <backend>`.)")?;
+        writeln!(out, "(* = active. Switch with `fono use stt|polish|assistant|tts <backend>`.)")?;
         writeln!(out)?;
     }
 

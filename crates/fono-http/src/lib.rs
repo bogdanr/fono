@@ -28,7 +28,7 @@
 //!
 //! | Field             | Type    | Meaning                                                |
 //! |-------------------|---------|--------------------------------------------------------|
-//! | `stage`           | str     | `stt` / `llm` / `assistant` / `tts` / `wizard`         |
+//! | `stage`           | str     | `stt` / `polish` / `assistant` / `tts` / `wizard`         |
 //! | `provider`        | str     | `openrouter` / `openai` / `groq` / `cerebras` / ...    |
 //! | `endpoint`        | str     | last URL segment, e.g. `audio/speech`                  |
 //! | `status`          | u16     | HTTP status                                            |

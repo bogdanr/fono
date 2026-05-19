@@ -6,7 +6,7 @@ members = [
     "crates/fono-audio",
     "crates/fono-stt",
     "crates/fono-tts",
-    "crates/fono-llm",
+    "crates/fono-polish",
     "crates/fono-assistant",
     "crates/fono-hotkey",
     "crates/fono-inject",
@@ -30,7 +30,7 @@ authors = ["Bogdan Rădulescu <bogdan@nimblex.net>"]
 homepage = "https://github.com/bogdanr/fono"
 repository = "https://github.com/bogdanr/fono"
 readme = "README.md"
-keywords = ["voice", "dictation", "stt", "whisper", "llm"]
+keywords = ["voice", "dictation", "stt", "whisper", "polish"]
 categories = ["command-line-utilities", "multimedia::audio"]
 
 # Shared dependency pins. Member crates opt in via `dep = { workspace = true }`.

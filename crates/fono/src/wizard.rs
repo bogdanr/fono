@@ -7,8 +7,8 @@
 //! Roadmap-v2 R3.2 + R3.3: cloud keys are validated against the provider's
 //! `/v1/models` endpoint before persisting (so the user catches a typo
 //! immediately, not on the first dictation), and the top-level path picker
-//! offers a "Mixed" option that asks for STT and LLM backends independently
-//! (e.g. local STT + cloud LLM cleanup).
+//! offers a "Mixed" option that asks for STT and polish backends independently
+//! (e.g. local STT + cloud polish).
 //!
 //! Wizard local-model plan: `plans/2026-04-28-wizard-local-model-selection-v1.md`.
 //! The model picker is now data-driven from `WHISPER_MODELS`:
@@ -34,14 +34,14 @@ use anyhow::{Context, Result};
 use dialoguer::console::{Key, Term};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, MultiSelect, Select};
 use fono_core::config::{
-    AssistantBackend, AssistantCloud, Config, LlmBackend, LlmCloud, LlmLocal, Stt, SttBackend,
-    SttCloud, SttLocal, TtsBackend, TtsCloud, TtsWyoming,
+    AssistantBackend, AssistantCloud, Config, PolishBackend, PolishCloud, PolishLocal, Stt,
+    SttBackend, SttCloud, SttLocal, TtsBackend, TtsCloud, TtsWyoming,
 };
 use fono_core::hwcheck::{Affordability, HardwareSnapshot, LocalTier};
 use fono_core::locale::detect_user_languages_ranked;
 use fono_core::provider_catalog::{CloudProvider, WebSearchSupport, CLOUD_PROVIDERS};
 use fono_core::providers::{
-    configured_tts_backends, parse_assistant_backend, parse_llm_backend, parse_stt_backend,
+    configured_tts_backends, parse_assistant_backend, parse_polish_backend, parse_stt_backend,
     parse_tts_backend,
 };
 use fono_core::{Paths, Secrets};
@@ -102,7 +102,7 @@ pub async fn run(paths: &Paths) -> Result<()> {
     // If the user chose any local backend (STT or LLM), download the
     // model(s) now (silently — re-checked on every daemon start).
     // Failures are non-fatal: the daemon will retry on next launch.
-    if config.stt.backend == SttBackend::Local || config.llm.backend == LlmBackend::Local {
+    if config.stt.backend == SttBackend::Local || config.polish.backend == PolishBackend::Local {
         if let Err(e) = crate::models::ensure_models(paths, &config).await {
             eprintln!("  (model download failed: {e:#} — the daemon will retry on next start)");
         }
@@ -161,14 +161,14 @@ enum PrimaryPick {
 /// A catalogue provider is a viable *primary* pick if it offers LLM
 /// cleanup (the substrate every assistant + dictation flow needs) AND
 /// its factory wiring is complete. The Gemini LLM + assistant clients
-/// are not yet implemented (see `fono-llm::factory` / `fono-assistant::factory`)
+/// are not yet implemented (see `fono-polish::factory` / `fono-assistant::factory`)
 /// so Gemini is excluded — surfacing it would let the wizard pick a
 /// configuration that fails at runtime.
 fn is_primary_candidate(entry: &CloudProvider) -> bool {
-    if entry.llm.is_none() {
+    if entry.polish.is_none() {
         return false;
     }
-    if parse_llm_backend(entry.id).is_none() {
+    if parse_polish_backend(entry.id).is_none() {
         return false;
     }
     if entry.id == "gemini" {
@@ -220,7 +220,7 @@ fn primary_capabilities(entry: &CloudProvider) -> [bool; 6] {
     );
     [
         entry.stt.is_some(),
-        entry.llm.is_some(),
+        entry.polish.is_some(),
         assistant.is_some(),
         entry.tts.is_some(),
         vision,
@@ -258,7 +258,7 @@ fn primary_row(entry: &CloudProvider, provider_col_width: usize) -> String {
 }
 
 /// Pre-seed the primary picker default cursor:
-/// 1. If the existing config's LLM backend matches a catalogue entry
+/// 1. If the existing config's polish backend matches a catalogue entry
 ///    that's still a primary candidate, prefer that.
 /// 2. Else if any primary candidate has its key already in
 ///    `secrets.toml`, pick the first such candidate (catalogue order).
@@ -268,9 +268,9 @@ fn default_primary_for_seed(
     cfg: &Config,
     secrets: &Secrets,
 ) -> usize {
-    // 1. Match existing LLM backend.
-    let llm_id = fono_core::providers::llm_backend_str(&cfg.llm.backend);
-    if let Some(i) = candidates.iter().position(|p| p.id == llm_id) {
+    // 1. Match existing polish backend.
+    let polish_id = fono_core::providers::polish_backend_str(&cfg.polish.backend);
+    if let Some(i) = candidates.iter().position(|p| p.id == polish_id) {
         return i;
     }
     // 2. Match existing STT backend (cloud user with STT but no LLM yet).
@@ -362,14 +362,14 @@ pub fn apply_primary_provider(config: &mut Config, entry: &CloudProvider) {
             };
         }
     }
-    if let Some(llm_def) = &entry.llm {
-        if let Some(backend) = parse_llm_backend(entry.id) {
-            config.llm.enabled = true;
-            config.llm.backend = backend;
-            config.llm.cloud = Some(LlmCloud {
+    if let Some(polish_def) = &entry.polish {
+        if let Some(backend) = parse_polish_backend(entry.id) {
+            config.polish.enabled = true;
+            config.polish.backend = backend;
+            config.polish.cloud = Some(PolishCloud {
                 provider: entry.id.into(),
                 api_key_ref: entry.key_env.into(),
-                model: llm_def.model.into(),
+                model: polish_def.model.into(),
             });
         }
     }
@@ -475,10 +475,10 @@ fn catalogue_meta_for_key(key_env: &str) -> (&'static str, &'static str) {
         .unwrap_or(("(unknown)", ""))
 }
 
-/// Catalogue entry matching the configured LLM backend (used by the
+/// Catalogue entry matching the configured polish backend (used by the
 /// assistant fast-path to determine whether the primary covers chat).
-fn catalogue_for_llm_backend(b: &LlmBackend) -> Option<&'static CloudProvider> {
-    let id = fono_core::providers::llm_backend_str(b);
+fn catalogue_for_llm_backend(b: &PolishBackend) -> Option<&'static CloudProvider> {
+    let id = fono_core::providers::polish_backend_str(b);
     fono_core::provider_catalog::find(id)
 }
 
@@ -689,7 +689,7 @@ async fn configure_assistant(
     println!("  Independent of dictation cleanup — different model, different key.");
 
     // Fast path — when the primary cloud provider (inferred from the
-    // currently-selected LLM backend) covers assistant chat, auto-enable
+    // currently-selected polish backend) covers assistant chat, auto-enable
     // the assistant (no Confirm). The user already committed to a cloud
     // key that supports it in `configure_cloud`; one more prompt was
     // redundant. Two sub-cases:
@@ -698,7 +698,7 @@ async fn configure_assistant(
     //                            to `pick_tts_for_assistant` so the user
     //                            still gets `Skip — text-only assistant`
     //                            as an explicit escape hatch.
-    let primary = catalogue_for_llm_backend(&config.llm.backend);
+    let primary = catalogue_for_llm_backend(&config.polish.backend);
     let tts_already_set = !matches!(config.tts.backend, TtsBackend::None);
     if let Some(entry) = primary {
         if let Some(adef) = entry.assistant {
@@ -874,7 +874,7 @@ fn assistant_picker_rows(
 enum PathChoice {
     Local,
     Cloud,
-    /// Customize = pick STT and LLM backends independently. Lets users
+    /// Customize = pick STT and polish backends independently. Lets users
     /// run e.g. local whisper for privacy + cloud Cerebras for fast
     /// cleanup, or cloud Groq STT + skip-LLM (raw output) on a slow-CPU
     /// machine.
@@ -941,7 +941,7 @@ fn pick_path(
     let default_idx = usize::from(!tier.local_default());
 
     let idx = Select::with_theme(theme)
-        .with_prompt("Where should Fono run speech-to-text and LLM cleanup?")
+        .with_prompt("Where should Fono run speech-to-text and polish?")
         .items(&rows)
         .default(default_idx)
         .interact()
@@ -999,26 +999,26 @@ async fn configure_local(
     // the tray's "Live dictation" toggle (no wizard prompt — the
     // question was confusing for first-run users).
 
-    // Step 4 — LLM cleanup choice. Default is **Skip**: dictation is
+    // Step 4 — polish choice. Default is **Skip**: dictation is
     // valuable on its own without an LLM rewrite step, and the user
     // can opt in later via `fono settings`. Cloud comes second
     // (cheap, fast, no model download). Local comes last and is only
     // marked "recommended" when the host has real LLM acceleration —
     // CPU-only inference on a 1.5 GB Qwen model is a frustrating
     // first-run experience.
-    let llm_options = build_llm_options(snap);
+    let polish_options = build_polish_options(snap);
     let llm_choice = Select::with_theme(theme)
-        .with_prompt("Apply LLM cleanup (filler-removal, capitalization, punctuation)?")
-        .items(&llm_options)
+        .with_prompt("Apply polish (filler-removal, capitalization, punctuation)?")
+        .items(&polish_options)
         .default(0)
         .interact()?;
 
     match llm_choice {
-        // Order matches `build_llm_options`: 0=Skip, 1=Cloud, 2=Local.
+        // Order matches `build_polish_options`: 0=Skip, 1=Cloud, 2=Local.
         0 => {
-            config.llm.backend = LlmBackend::None;
-            config.llm.enabled = false;
-            config.llm.local = LlmLocal::default();
+            config.polish.backend = PolishBackend::None;
+            config.polish.enabled = false;
+            config.polish.local = PolishLocal::default();
         }
         1 => configure_cloud_llm(theme, config, secrets).await?,
         _ => configure_local_llm(theme, config, tier)?,
@@ -1033,27 +1033,27 @@ async fn configure_local(
 /// acceleration that makes local inference comfortable; otherwise
 /// Cloud picks up the suffix. Skip never carries the suffix —
 /// it's the safe default but not "the wizard's pick".
-fn build_llm_options(snap: &HardwareSnapshot) -> Vec<String> {
+fn build_polish_options(snap: &HardwareSnapshot) -> Vec<String> {
     let local_accelerated = host_has_llm_acceleration(snap);
     let local_label = if local_accelerated {
-        "Local LLM cleanup (qwen2.5, private, offline) — recommended"
+        "Local polish (qwen2.5, private, offline) — recommended"
     } else {
-        "Local LLM cleanup (qwen2.5, private, offline) — slow without GPU/Apple Silicon"
+        "Local polish (qwen2.5, private, offline) — slow without GPU/Apple Silicon"
     };
     let cloud_label = if local_accelerated {
-        "Cloud LLM cleanup (Cerebras / Groq / OpenAI / Anthropic — needs key)"
+        "Cloud polish (Cerebras / Groq / OpenAI / Anthropic — needs key)"
     } else {
-        "Cloud LLM cleanup (Cerebras / Groq / OpenAI / Anthropic — needs key) — recommended"
+        "Cloud polish (Cerebras / Groq / OpenAI / Anthropic — needs key) — recommended"
     };
     vec![
-        "Skip LLM cleanup (raw whisper output)".to_string(),
+        "Skip polish (raw whisper output)".to_string(),
         cloud_label.to_string(),
         local_label.to_string(),
     ]
 }
 
 /// Whether this host has the kind of acceleration that makes local
-/// LLM cleanup comfortable enough to recommend to a first-time user.
+/// polish comfortable enough to recommend to a first-time user.
 /// Today: Apple Silicon (Metal/CoreML) or a Vulkan-capable GPU.
 /// CUDA / ROCm / NPU detection lands when those backends are wired.
 fn host_has_llm_acceleration(snap: &HardwareSnapshot) -> bool {
@@ -1105,14 +1105,14 @@ async fn configure_cloud(
         offer_secondary_stt(theme, config, secrets).await?;
     }
 
-    if let Some(llm_def) = &entry.llm {
-        let backend = parse_llm_backend(entry.id).context("catalogue LLM id should parse")?;
-        config.llm.enabled = true;
-        config.llm.backend = backend;
-        config.llm.cloud = Some(LlmCloud {
+    if let Some(polish_def) = &entry.polish {
+        let backend = parse_polish_backend(entry.id).context("catalogue LLM id should parse")?;
+        config.polish.enabled = true;
+        config.polish.backend = backend;
+        config.polish.cloud = Some(PolishCloud {
             provider: entry.id.into(),
             api_key_ref: entry.key_env.into(),
-            model: llm_def.model.into(),
+            model: polish_def.model.into(),
         });
     }
 
@@ -1127,7 +1127,7 @@ async fn configure_cloud(
         config.tts.voice = tts_def.default_voice.into();
     }
     // Assistant chat is configured by `configure_assistant` (called
-    // unconditionally from `run`), which inspects `config.llm.backend`
+    // unconditionally from `run`), which inspects `config.polish.backend`
     // and the now-set TTS state to collapse to a single Confirm when
     // the primary covers both.
 
@@ -1204,7 +1204,7 @@ async fn configure_customize(
     snap: &HardwareSnapshot,
 ) -> Result<()> {
     let tier = snap.tier();
-    println!("  Mixed mode — pick speech-to-text and LLM cleanup independently.\n");
+    println!("  Mixed mode — pick speech-to-text and polish independently.\n");
 
     // ----- STT side -----
     let stt_options =
@@ -1240,17 +1240,17 @@ async fn configure_customize(
 
     // ----- LLM side -----
     // Standard ordering (Skip, Cloud, Local) with hardware-aware
-    // recommendation marker — see `build_llm_options` for the policy.
-    let llm_options = build_llm_options(snap);
+    // recommendation marker — see `build_polish_options` for the policy.
+    let polish_options = build_polish_options(snap);
     let llm_idx = Select::with_theme(theme)
-        .with_prompt("LLM cleanup:")
-        .items(&llm_options)
+        .with_prompt("polish:")
+        .items(&polish_options)
         .default(0)
         .interact()?;
     match llm_idx {
         0 => {
-            config.llm.backend = LlmBackend::None;
-            config.llm.enabled = false;
+            config.polish.backend = PolishBackend::None;
+            config.polish.enabled = false;
         }
         1 => configure_cloud_llm(theme, config, secrets).await?,
         _ => configure_local_llm(theme, config, tier)?,
@@ -1540,7 +1540,6 @@ fn size_label(approx_mb: u32) -> String {
 fn friendly_model_label(model: &ModelInfo) -> &'static str {
     match model.name {
         "tiny" | "tiny.en" => "Tiny (fastest, lowest quality)",
-        "base" | "base.en" => "Base (fast, good for clean speech)",
         "small" | "small.en" => "Small (balanced quality)",
         "large-v3-turbo" => "Turbo (best quality, needs more memory)",
         other => other,
@@ -1639,8 +1638,8 @@ fn pick_local_stt_model(
 
 // ─── LLM configuration helpers ─────────────────────────────────────────────
 
-/// Tier-aware local LLM model picker. Sets `config.llm` to the chosen
-/// `LlmBackend::Local` + matching `LlmLocal` defaults. The model file
+/// Tier-aware local LLM model picker. Sets `config.polish` to the chosen
+/// `PolishBackend::Local` + matching `PolishLocal` defaults. The model file
 /// is downloaded later by `ensure_models` once the wizard finishes.
 fn configure_local_llm(theme: &ColorfulTheme, config: &mut Config, tier: LocalTier) -> Result<()> {
     let (items, models, default_idx) = match tier {
@@ -1676,10 +1675,10 @@ fn configure_local_llm(theme: &ColorfulTheme, config: &mut Config, tier: LocalTi
         .items(&items)
         .default(default_idx)
         .interact()?;
-    config.llm.backend = LlmBackend::Local;
-    config.llm.enabled = true;
-    config.llm.local = LlmLocal { model: models[idx].into(), ..LlmLocal::default() };
-    config.llm.cloud = None;
+    config.polish.backend = PolishBackend::Local;
+    config.polish.enabled = true;
+    config.polish.local = PolishLocal { model: models[idx].into(), ..PolishLocal::default() };
+    config.polish.cloud = None;
     Ok(())
 }
 
@@ -1735,7 +1734,7 @@ async fn configure_cloud_llm(
         "Groq (openai/gpt-oss-20b)",
         "OpenAI (gpt-5.4-nano)",
         "Anthropic (claude-haiku-4-5)",
-        "Skip LLM cleanup",
+        "Skip polish",
     ];
     let llm_idx = Select::with_theme(theme)
         .with_prompt("Pick a cloud LLM for cleanup")
@@ -1744,21 +1743,21 @@ async fn configure_cloud_llm(
         .interact()?;
 
     if llm_idx == 4 {
-        config.llm.backend = LlmBackend::None;
-        config.llm.enabled = false;
+        config.polish.backend = PolishBackend::None;
+        config.polish.enabled = false;
         return Ok(());
     }
     let (backend, key_name, model) = match llm_idx {
-        0 => (LlmBackend::Cerebras, "CEREBRAS_API_KEY", "llama3.1-8b"),
-        1 => (LlmBackend::Groq, "GROQ_API_KEY", "openai/gpt-oss-20b"),
-        2 => (LlmBackend::OpenAI, "OPENAI_API_KEY", "gpt-5.4-nano"),
-        _ => (LlmBackend::Anthropic, "ANTHROPIC_API_KEY", "claude-haiku-4-5-20251001"),
+        0 => (PolishBackend::Cerebras, "CEREBRAS_API_KEY", "llama3.1-8b"),
+        1 => (PolishBackend::Groq, "GROQ_API_KEY", "openai/gpt-oss-20b"),
+        2 => (PolishBackend::OpenAI, "OPENAI_API_KEY", "gpt-5.4-nano"),
+        _ => (PolishBackend::Anthropic, "ANTHROPIC_API_KEY", "claude-haiku-4-5-20251001"),
     };
     let (display, console) = catalogue_meta_for_key(key_name);
     prompt_or_reuse_key(theme, secrets, key_name, display, console).await?;
-    config.llm.backend = backend;
-    config.llm.enabled = true;
-    config.llm.cloud = Some(LlmCloud {
+    config.polish.backend = backend;
+    config.polish.enabled = true;
+    config.polish.cloud = Some(PolishCloud {
         provider: key_name.trim_end_matches("_API_KEY").to_lowercase(),
         api_key_ref: key_name.into(),
         model: model.into(),
@@ -2303,10 +2302,10 @@ mod tests {
             os: "linux".into(),
             arch: "x86_64".into(),
         };
-        let has_base_en = build_local_stt_shortlist(true, &["en".to_string()], &s)
+        let has_tiny_en = build_local_stt_shortlist(true, &["en".to_string()], &s)
             .iter()
-            .any(|e| e.model.name == "base.en");
-        assert!(has_base_en, "base.en should be in shortlist");
+            .any(|e| e.model.name == "tiny.en");
+        assert!(has_tiny_en, "tiny.en should be in shortlist on a 1 GiB-available machine");
     }
 
     #[test]
@@ -2388,10 +2387,10 @@ mod tests {
 
     #[test]
     fn seed_prefers_existing_llm_backend() {
-        // A config with `[llm].backend = "cerebras"` must default the
+        // A config with `[polish].backend = "cerebras"` must default the
         // primary picker to Cerebras, not OpenAI.
         let mut cfg = Config::default();
-        cfg.llm.backend = LlmBackend::Cerebras;
+        cfg.polish.backend = PolishBackend::Cerebras;
         let secrets = Secrets::default();
         let candidates = primary_candidates_vec();
         let idx = default_primary_for_seed(&candidates, &cfg, &secrets);
@@ -2404,7 +2403,7 @@ mod tests {
         // should fall through to STT backend "groq".
         let mut cfg = Config::default();
         cfg.stt.backend = SttBackend::Groq;
-        cfg.llm.backend = LlmBackend::Local;
+        cfg.polish.backend = PolishBackend::Local;
         let secrets = Secrets::default();
         let candidates = primary_candidates_vec();
         let idx = default_primary_for_seed(&candidates, &cfg, &secrets);
@@ -2433,7 +2432,7 @@ mod tests {
         // (seed + tts_short_label) without flipping the TTS backend.
         let mut cfg = Config::default();
         cfg.stt.backend = SttBackend::Groq;
-        cfg.llm.backend = LlmBackend::Cerebras;
+        cfg.polish.backend = PolishBackend::Cerebras;
         cfg.tts.backend = TtsBackend::Wyoming;
         cfg.tts.wyoming =
             Some(TtsWyoming { uri: "tcp://piper.lan:10200".into(), ..TtsWyoming::default() });

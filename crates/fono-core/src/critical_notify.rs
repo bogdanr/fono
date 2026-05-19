@@ -6,7 +6,7 @@
 //! Cascade rule (issue #8): **at most one** critical notification per
 //! dictation session, no matter how many downstream stages cascade-fail
 //! off the same root cause. Example: when the user's API key expires,
-//! the STT stage 401s → notification fires → the LLM cleanup stage
+//! the STT stage 401s → notification fires → the polish stage
 //! also 401s and the assistant-mode TTS would 401 too, but those are
 //! swallowed silently until [`reset_session_flag`] is called at the
 //! start of the next dictation. This is intentional: one popup with a
@@ -48,8 +48,8 @@ const AUTO_RESET_AFTER: Duration = Duration::from_secs(120);
 pub enum Stage {
     /// Speech-to-text (cloud or local backend).
     Stt,
-    /// LLM cleanup of dictation transcripts.
-    Llm,
+    /// polish of dictation transcripts.
+    Polish,
     /// Text-to-speech (assistant-mode reply playback).
     Tts,
     /// Conversational assistant chat backend.
@@ -62,7 +62,7 @@ impl Stage {
     fn as_str(self) -> &'static str {
         match self {
             Self::Stt => "stt",
-            Self::Llm => "llm",
+            Self::Polish => "polish",
             Self::Tts => "tts",
             Self::Assistant => "assistant",
             Self::Inject => "inject",
@@ -75,7 +75,7 @@ impl Stage {
 fn stage_user_label(stage: Stage) -> &'static str {
     match stage {
         Stage::Stt => "STT",
-        Stage::Llm => "LLM",
+        Stage::Polish => "Polish",
         Stage::Tts => "TTS",
         Stage::Assistant => "Assistant",
         Stage::Inject => "Injection",
@@ -303,7 +303,7 @@ pub fn notify(stage: Stage, provider: &'static str, class: ErrorClass, details: 
     }
 
     // Cascade cap: a single root cause (e.g. a rotated API key) will
-    // make STT auth-fail, then LLM cleanup auth-fail, then assistant
+    // make STT auth-fail, then polish auth-fail, then assistant
     // chat auth-fail, then assistant TTS auth-fail — all inside the
     // same dictation session. The user only needs to see *one*
     // notification; subsequent failures stay in the journal.
@@ -409,25 +409,25 @@ fn render(
                  journal for the full error."
             ),
         ),
-        (Stage::Llm, ErrorClass::Auth) => (
-            format!("Fono — LLM key rejected ({provider})"),
+        (Stage::Polish, ErrorClass::Auth) => (
+            format!("Fono — Polish key rejected ({provider})"),
             format!(
                 "{provider} rejected the API key (401/403). The raw transcript was \
                  injected without cleanup. Update the LLM key in the tray, or disable \
-                 LLM cleanup."
+                 polish."
             ),
         ),
-        (Stage::Llm, ErrorClass::Network) => (
-            format!("Fono — LLM unreachable ({provider})"),
+        (Stage::Polish, ErrorClass::Network) => (
+            format!("Fono — Polish unreachable ({provider})"),
             format!(
                 "Could not reach {provider}: {details}. Raw transcript was injected \
                  without cleanup."
             ),
         ),
-        (Stage::Llm, ErrorClass::Other | ErrorClass::RateLimit) => (
-            format!("Fono — LLM cleanup failed ({provider})"),
+        (Stage::Polish, ErrorClass::Other | ErrorClass::RateLimit) => (
+            format!("Fono — polish failed ({provider})"),
             format!(
-                "LLM cleanup failed: {details}. Raw transcript was injected without \
+                "polish failed: {details}. Raw transcript was injected without \
                  cleanup."
             ),
         ),
@@ -528,7 +528,7 @@ fn render(
                 );
                 let consequence = match stage {
                     Stage::Tts => " The assistant reply was generated but could not be spoken.",
-                    Stage::Llm => " The raw transcript was injected without cleanup.",
+                    Stage::Polish => " The raw transcript was injected without cleanup.",
                     Stage::Assistant => " The assistant turn was aborted.",
                     Stage::Stt => " Dictation was skipped; no text was injected.",
                     Stage::Inject => "",
@@ -644,7 +644,7 @@ mod tests {
         // is called at the start of the next dictation.
         let _g = fresh();
         assert!(notify(Stage::Stt, "groq", ErrorClass::Auth, "stt-401"));
-        assert!(!notify(Stage::Llm, "groq", ErrorClass::Auth, "llm-401"));
+        assert!(!notify(Stage::Polish, "groq", ErrorClass::Auth, "polish-401"));
         assert!(!notify(Stage::Assistant, "anthropic", ErrorClass::Auth, "assistant-401"));
         assert!(!notify(Stage::Tts, "openai", ErrorClass::Auth, "tts-401"));
         assert!(!notify(Stage::Inject, "wtype", ErrorClass::Other, "inject-failed"));
@@ -659,11 +659,11 @@ mod tests {
         // opportunity — the cap is per-session, not lifetime.
         let _g = fresh();
         assert!(notify(Stage::Stt, "groq", ErrorClass::Auth, "1"));
-        assert!(!notify(Stage::Llm, "groq", ErrorClass::Auth, "2"));
+        assert!(!notify(Stage::Polish, "groq", ErrorClass::Auth, "2"));
         reset_session_flag();
         let _ = drain_test_recorder();
         // Different stage, fresh session → fires again.
-        assert!(notify(Stage::Llm, "groq", ErrorClass::Auth, "3"));
+        assert!(notify(Stage::Polish, "groq", ErrorClass::Auth, "3"));
         assert_eq!(drain_test_recorder().len(), 1);
     }
 
@@ -674,7 +674,7 @@ mod tests {
         // semantics in place against regression.
         let _g = fresh();
         assert!(notify(Stage::Stt, "groq", ErrorClass::Auth, "stt-401"));
-        assert!(!notify(Stage::Llm, "groq", ErrorClass::Auth, "llm-401"));
+        assert!(!notify(Stage::Polish, "groq", ErrorClass::Auth, "polish-401"));
         assert_eq!(drain_test_recorder().len(), 1);
     }
 
@@ -683,8 +683,8 @@ mod tests {
         // Even across providers, the cap holds — a user with two
         // mis-configured backends sees one popup, not two.
         let _g = fresh();
-        assert!(notify(Stage::Llm, "groq", ErrorClass::Auth, "g"));
-        assert!(!notify(Stage::Llm, "openai", ErrorClass::Auth, "o"));
+        assert!(notify(Stage::Polish, "groq", ErrorClass::Auth, "g"));
+        assert!(!notify(Stage::Polish, "openai", ErrorClass::Auth, "o"));
         assert_eq!(drain_test_recorder().len(), 1);
     }
 

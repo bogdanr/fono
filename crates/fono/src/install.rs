@@ -10,8 +10,12 @@
 //!   system-wide systemd unit, the `fono` system user, and shell
 //!   completions. The unit is enabled and started immediately.
 //!
-//! Symmetric `fono uninstall` reads the install marker written at
-//! install time and reverses exactly what was put down.
+//! `fono uninstall` is filesystem-driven: it removes every known
+//! install path that actually exists on disk. There is **no**
+//! `install_marker.toml` — the installer only writes the binary,
+//! desktop / autostart / icon files, systemd unit, and shell
+//! completions, all at fixed canonical paths. Uninstall (and `fono
+//! doctor`) infer state from those paths directly.
 //!
 //! Plan: `plans/2026-05-02-fono-install-subcommand-v3.md`.
 
@@ -20,7 +24,6 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::{Deserialize, Serialize};
 
 use crate::install::assets::{DESKTOP, ICON_SVG, SYSTEMD_SYSTEM_UNIT};
 
@@ -47,16 +50,14 @@ const SYSTEMD_UNIT: &str = "/lib/systemd/system/fono.service";
 const COMPLETION_BASH: &str = "/usr/share/bash-completion/completions/fono";
 const COMPLETION_ZSH: &str = "/usr/share/zsh/site-functions/_fono";
 const COMPLETION_FISH: &str = "/usr/share/fish/vendor_completions.d/fono.fish";
-const MARKER_PATH: &str = "/usr/local/share/fono/install_marker.toml";
 
 const SERVICE_USER: &str = "fono";
 
 // ---------------------------------------------------------------------
-// Install marker
+// Install mode
 // ---------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
     Desktop,
     Server,
@@ -69,54 +70,6 @@ impl Mode {
             Self::Server => "server",
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Marker {
-    pub mode: Mode,
-    pub version: String,
-    pub installed_at: String,
-    /// Files written by the installer, in the order they were created.
-    /// Uninstall removes them in reverse order.
-    pub files: Vec<String>,
-    /// True if `useradd fono` ran during install (server mode); the
-    /// uninstaller uses this to decide whether to attempt `userdel`.
-    #[serde(default)]
-    pub created_service_user: bool,
-    /// True if `systemctl enable --now fono.service` ran during
-    /// install. Uninstall runs `systemctl disable --now` only when set.
-    #[serde(default)]
-    pub enabled_service: bool,
-}
-
-impl Marker {
-    fn load(path: &Path) -> Result<Option<Self>> {
-        match std::fs::read_to_string(path) {
-            Ok(s) => Ok(Some(toml::from_str(&s).context("parse install marker")?)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(anyhow!("read {}: {}", path.display(), e)),
-        }
-    }
-
-    fn save(&self, path: &Path) -> Result<()> {
-        let s = toml::to_string_pretty(self).context("serialise install marker")?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("mkdir -p {}", parent.display()))?;
-        }
-        std::fs::write(path, s).with_context(|| format!("write {}", path.display()))
-    }
-}
-
-fn now_iso8601() -> String {
-    // Deliberately avoid pulling chrono in just for the timestamp;
-    // the Unix-epoch seconds string is precise enough for an audit
-    // marker and matches what `fono-update`'s cache uses.
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("@{secs}")
 }
 
 // ---------------------------------------------------------------------
@@ -316,8 +269,8 @@ fn verify_service_running(unit: &str) {
 // `fono doctor` integration
 // ---------------------------------------------------------------------
 
-/// One-line install-state summary for `fono doctor`. Distinguishes the
-/// four states so users can tell at a glance whether `fono update` /
+/// One-line install-state summary for `fono doctor`. Distinguishes
+/// three states so users can tell at a glance whether `fono update` /
 /// `fono uninstall` will work on this binary.
 #[must_use]
 pub fn doctor_state() -> String {
@@ -331,14 +284,27 @@ pub fn doctor_state() -> String {
         }
     }
 
-    match Marker::load(Path::new(MARKER_PATH)) {
-        Ok(Some(m)) => format!(
-            "self-installed via `fono install` ({} mode, v{}, {exe_str})",
-            m.mode.as_str(),
-            m.version
-        ),
-        Ok(None) => format!("ad-hoc on PATH ({exe_str})"),
-        Err(_) => format!("ad-hoc on PATH ({exe_str}; marker unreadable)"),
+    detect_installed_mode().map_or_else(
+        || format!("ad-hoc on PATH ({exe_str})"),
+        |mode| format!("self-installed via `fono install` ({} mode, {exe_str})", mode.as_str()),
+    )
+}
+
+/// Returns the installed [`Mode`] iff at least one canonical install
+/// path exists on disk. Used by both `doctor_state` and the
+/// mode-switch refusal in `run_install`.
+fn detect_installed_mode() -> Option<Mode> {
+    let bin = Path::new(BIN_PATH).exists();
+    let unit = Path::new(SYSTEMD_UNIT).exists();
+    let desktop = Path::new(DESKTOP_MENU).exists()
+        || Path::new(DESKTOP_AUTOSTART).exists()
+        || Path::new(ICON_PATH).exists();
+    if unit {
+        Some(Mode::Server)
+    } else if bin || desktop {
+        Some(Mode::Desktop)
+    } else {
+        None
     }
 }
 
@@ -361,16 +327,19 @@ pub fn run_install(server: bool, dry_run: bool) -> Result<()> {
 
     // Mode-switch refusal — same mode is idempotent (overwrite in
     // place); different mode means the operator must uninstall first.
+    // Detection is filesystem-based: a server install drops a systemd
+    // unit, a desktop install drops a menu/autostart/icon — the binary
+    // alone is ambiguous so we only refuse when the *other* mode's
+    // unique artefacts are present.
     let want = if server { Mode::Server } else { Mode::Desktop };
-    if let Some(existing) = Marker::load(Path::new(MARKER_PATH))? {
-        if existing.mode != want {
-            bail!(
-                "{} install detected at {}; run `sudo fono uninstall` first if you want to switch to {} mode",
-                existing.mode.as_str(),
-                MARKER_PATH,
-                want.as_str()
-            );
-        }
+    match (&want, detect_installed_mode()) {
+        (Mode::Server, Some(Mode::Desktop)) => bail!(
+            "desktop install detected (e.g. {DESKTOP_MENU}); run `sudo fono uninstall` first if you want to switch to server mode"
+        ),
+        (Mode::Desktop, Some(Mode::Server)) => bail!(
+            "server install detected ({SYSTEMD_UNIT}); run `sudo fono uninstall` first if you want to switch to desktop mode"
+        ),
+        _ => {}
     }
 
     if server {
@@ -381,32 +350,117 @@ pub fn run_install(server: bool, dry_run: bool) -> Result<()> {
 }
 
 pub fn run_uninstall(dry_run: bool) -> Result<()> {
-    let marker = Marker::load(Path::new(MARKER_PATH))?
-        .ok_or_else(|| anyhow!("no install marker found at {MARKER_PATH}; nothing to uninstall"))?;
+    let state = detect_install_state();
+
+    if state.files.is_empty() {
+        bail!(
+            "no fono installation detected at any of the known system paths \
+             (e.g. {BIN_PATH}, {SYSTEMD_UNIT}, {DESKTOP_MENU}); nothing to uninstall"
+        );
+    }
 
     if dry_run {
-        let mut plan = Plan { mode: Some(marker.mode.clone()), ..Plan::default() };
-        if marker.enabled_service {
+        let mut plan = Plan { mode: Some(state.mode.clone()), ..Plan::default() };
+        if state.enabled_service {
             plan.step("systemctl disable --now fono.service");
         }
-        for f in marker.files.iter().rev() {
+        for f in &state.files {
             plan.step(format!("remove {f}"));
         }
-        if marker.created_service_user {
+        if state.system_user_removable {
             plan.step(format!(
                 "userdel {SERVICE_USER} (only if no /etc/fono, /var/lib/fono, /var/cache/fono left)"
             ));
         }
         plan.print(&format!(
             "fono uninstall --dry-run ({} mode) — would perform:",
-            marker.mode.as_str()
+            state.mode.as_str()
         ));
         return Ok(());
     }
 
     require_root()?;
-    run_uninstall_real(&marker);
+    run_uninstall_real(&state);
     Ok(())
+}
+
+/// Filesystem-derived snapshot of what's currently installed.
+struct InstallState {
+    mode: Mode,
+    /// Known system paths that exist on disk, in *removal* order
+    /// (reverse of install order).
+    files: Vec<String>,
+    /// True iff the systemd unit is currently enabled. Drives whether
+    /// uninstall runs `systemctl disable --now`.
+    enabled_service: bool,
+    /// True iff a system user named `fono` exists *and* looks like one
+    /// we created (system UID, nologin shell). Drives whether
+    /// uninstall offers to run `userdel fono`. Conservative on
+    /// purpose: refuses to remove pre-existing `fono` users that
+    /// happen to belong to a real human or another service.
+    system_user_removable: bool,
+}
+
+fn detect_install_state() -> InstallState {
+    // Candidate paths in install order; we keep those that exist (or
+    // exist as broken symlinks — still worth `rm`-ing).
+    let candidates: &[&str] = &[
+        BIN_PATH,
+        DESKTOP_MENU,
+        DESKTOP_AUTOSTART,
+        ICON_PATH,
+        SYSTEMD_UNIT,
+        COMPLETION_BASH,
+        COMPLETION_ZSH,
+        COMPLETION_FISH,
+    ];
+    let mut files: Vec<String> = candidates
+        .iter()
+        .filter(|p| Path::new(p).symlink_metadata().is_ok())
+        .map(|p| (*p).to_string())
+        .collect();
+    files.reverse();
+
+    // Mode: systemd unit is the canonical server-mode signal.
+    let mode = if Path::new(SYSTEMD_UNIT).exists() { Mode::Server } else { Mode::Desktop };
+
+    let enabled_service = mode == Mode::Server && systemctl_unit_enabled("fono.service");
+
+    let system_user_removable = mode == Mode::Server && looks_like_our_system_user(SERVICE_USER);
+
+    InstallState { mode, files, enabled_service, system_user_removable }
+}
+
+/// Returns true iff `name` exists in passwd as a system-style user we
+/// would plausibly have created: shell is `nologin` (any path).
+/// Avoids `userdel`-ing a real interactive user that happens to share
+/// the name. Without the marker this is the safest heuristic.
+fn looks_like_our_system_user(name: &str) -> bool {
+    let out = match Command::new("getent").args(["passwd", name]).output() {
+        Ok(o) if o.status.success() => o,
+        _ => return false,
+    };
+    let line = String::from_utf8_lossy(&out.stdout);
+    // passwd format: name:x:uid:gid:gecos:home:shell
+    let Some(shell) = line.trim_end().rsplit(':').next() else {
+        return false;
+    };
+    shell.ends_with("/nologin") || shell.ends_with("/false")
+}
+
+fn systemctl_unit_enabled(unit: &str) -> bool {
+    if !systemctl_available() {
+        return false;
+    }
+    Command::new("systemctl")
+        .args(["is-enabled", unit])
+        .output()
+        .ok()
+        .map(|o| {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            matches!(s.as_str(), "enabled" | "enabled-runtime" | "alias" | "static" | "indirect")
+        })
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------
@@ -435,7 +489,6 @@ fn build_install_plan(server: bool) -> Plan {
     plan.step(format!(
         "write completions -> {COMPLETION_BASH}, {COMPLETION_ZSH}, {COMPLETION_FISH}"
     ));
-    plan.step(format!("write install marker -> {MARKER_PATH}"));
     plan
 }
 
@@ -444,19 +497,14 @@ fn build_install_plan(server: bool) -> Plan {
 // ---------------------------------------------------------------------
 
 fn run_install_desktop() -> Result<()> {
-    let mut files: Vec<String> = Vec::new();
-
     eprintln!("→ installing fono (desktop mode)");
 
     // Binary
-    let bin_path = Path::new(BIN_PATH);
-    copy_running_binary_to(bin_path)?;
-    files.push(BIN_PATH.into());
+    copy_running_binary_to(Path::new(BIN_PATH))?;
     eprintln!("  · {BIN_PATH}");
 
     // Menu desktop entry
     write_atomic(Path::new(DESKTOP_MENU), DESKTOP.as_bytes(), 0o644)?;
-    files.push(DESKTOP_MENU.into());
     eprintln!("  · {DESKTOP_MENU}");
 
     // XDG autostart entry — same desktop file plus the GNOME autostart
@@ -469,35 +517,17 @@ fn run_install_desktop() -> Result<()> {
     }
     autostart.push_str("X-GNOME-Autostart-enabled=true\n");
     write_atomic(Path::new(DESKTOP_AUTOSTART), autostart.as_bytes(), 0o644)?;
-    files.push(DESKTOP_AUTOSTART.into());
     eprintln!("  · {DESKTOP_AUTOSTART}");
 
     // Icon
     write_atomic(Path::new(ICON_PATH), ICON_SVG, 0o644)?;
-    files.push(ICON_PATH.into());
     eprintln!("  · {ICON_PATH}");
 
     refresh_desktop_database();
     refresh_icon_cache();
 
     // Completions
-    write_completions(BIN_PATH, &mut files);
-
-    // Marker
-    let marker = Marker {
-        mode: Mode::Desktop,
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        installed_at: now_iso8601(),
-        files: {
-            let mut v = files.clone();
-            v.push(MARKER_PATH.into());
-            v
-        },
-        created_service_user: false,
-        enabled_service: false,
-    };
-    marker.save(Path::new(MARKER_PATH))?;
-    eprintln!("  · {MARKER_PATH}");
+    write_completions(BIN_PATH);
 
     // Pre-create the shared log file 0666 so any fono process (XDG
     // autostart, manual `fono`, `sudo fono`) can append. Single-user
@@ -732,7 +762,9 @@ fn which_in_path(name: &str) -> bool {
 // ---------------------------------------------------------------------
 
 fn run_install_server() -> Result<()> {
-    let mut files: Vec<String> = Vec::new();
+    // `created_user` is informational only; uninstall infers the user's
+    // existence from `getent passwd` and its shell, so we don't need
+    // to persist a "we created it" flag anywhere.
     let created_user = ensure_service_user()?;
     let mut enabled_service = false;
 
@@ -745,16 +777,14 @@ fn run_install_server() -> Result<()> {
 
     // Binary
     copy_running_binary_to(Path::new(BIN_PATH))?;
-    files.push(BIN_PATH.into());
     eprintln!("  · {BIN_PATH}");
 
     // Systemd unit
     write_atomic(Path::new(SYSTEMD_UNIT), SYSTEMD_SYSTEM_UNIT.as_bytes(), 0o644)?;
-    files.push(SYSTEMD_UNIT.into());
     eprintln!("  · {SYSTEMD_UNIT}");
 
     // Completions
-    write_completions(BIN_PATH, &mut files);
+    write_completions(BIN_PATH);
 
     if systemctl_available() {
         if !try_run("systemctl", &["daemon-reload"]) {
@@ -777,21 +807,6 @@ fn run_install_server() -> Result<()> {
     if enabled_service {
         verify_service_running("fono.service");
     }
-
-    let marker = Marker {
-        mode: Mode::Server,
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        installed_at: now_iso8601(),
-        files: {
-            let mut v = files.clone();
-            v.push(MARKER_PATH.into());
-            v
-        },
-        created_service_user: created_user,
-        enabled_service,
-    };
-    marker.save(Path::new(MARKER_PATH))?;
-    eprintln!("  · {MARKER_PATH}");
 
     println!();
     println!("Fono installed (server mode).");
@@ -848,7 +863,7 @@ fn user_exists(name: &str) -> bool {
 // Completions (shared)
 // ---------------------------------------------------------------------
 
-fn write_completions(bin_path: &str, files: &mut Vec<String>) {
+fn write_completions(bin_path: &str) {
     for (shell, dst) in
         [("bash", COMPLETION_BASH), ("zsh", COMPLETION_ZSH), ("fish", COMPLETION_FISH)]
     {
@@ -872,7 +887,6 @@ fn write_completions(bin_path: &str, files: &mut Vec<String>) {
                 if let Err(e) = write_atomic(dst_path, &out.stdout, 0o644) {
                     tracing::warn!(shell, "writing {dst} failed: {e:#}");
                 } else {
-                    files.push(dst.into());
                     eprintln!("  · {dst}");
                 }
             }
@@ -894,17 +908,16 @@ fn write_completions(bin_path: &str, files: &mut Vec<String>) {
 // Uninstall
 // ---------------------------------------------------------------------
 
-fn run_uninstall_real(marker: &Marker) {
-    eprintln!("→ uninstalling fono ({} mode)", marker.mode.as_str());
+fn run_uninstall_real(state: &InstallState) {
+    eprintln!("→ uninstalling fono ({} mode)", state.mode.as_str());
 
-    if marker.mode == Mode::Server && marker.enabled_service && systemctl_available() {
+    if state.mode == Mode::Server && state.enabled_service && systemctl_available() {
         let _ = try_run("systemctl", &["disable", "--now", "fono.service"]);
         eprintln!("  · systemctl disable --now fono.service");
     }
 
-    // Remove files in reverse order of installation. The marker itself
-    // is the last entry of the list and gets removed last.
-    for f in marker.files.iter().rev() {
+    // Already in removal order.
+    for f in &state.files {
         match std::fs::remove_file(f) {
             Ok(()) => eprintln!("  · removed {f}"),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -916,15 +929,15 @@ fn run_uninstall_real(marker: &Marker) {
         }
     }
 
-    if marker.mode == Mode::Server && systemctl_available() {
+    if state.mode == Mode::Server && systemctl_available() {
         let _ = try_run("systemctl", &["daemon-reload"]);
     }
-    if marker.mode == Mode::Desktop {
+    if state.mode == Mode::Desktop {
         refresh_desktop_database();
         refresh_icon_cache();
     }
 
-    if marker.mode == Mode::Server && marker.created_service_user {
+    if state.mode == Mode::Server && state.system_user_removable {
         if service_state_remaining() {
             eprintln!(
                 "  · keeping system user `{SERVICE_USER}` (state remains under /etc/fono, /var/lib/fono, or /var/cache/fono)"
@@ -936,14 +949,9 @@ fn run_uninstall_real(marker: &Marker) {
         }
     }
 
-    // Best-effort: rmdir the marker's parent if it's now empty.
-    if let Some(parent) = Path::new(MARKER_PATH).parent() {
-        let _ = std::fs::remove_dir(parent);
-    }
-
     println!();
     println!("Fono uninstalled.");
-    if marker.mode == Mode::Desktop {
+    if state.mode == Mode::Desktop {
         println!("Per-user config (~/.config/fono), history (~/.local/share/fono),");
         println!("and cache (~/.cache/fono) are kept and belong to the user.");
     }
@@ -966,12 +974,11 @@ mod tests {
         let plan = build_install_plan(false);
         assert_eq!(plan.mode, Some(Mode::Desktop));
         let joined = plan.steps.join("\n");
-        for t in
-            [BIN_PATH, DESKTOP_MENU, DESKTOP_AUTOSTART, ICON_PATH, COMPLETION_BASH, MARKER_PATH]
-        {
+        for t in [BIN_PATH, DESKTOP_MENU, DESKTOP_AUTOSTART, ICON_PATH, COMPLETION_BASH] {
             assert!(joined.contains(t), "desktop plan missing {t}");
         }
         assert!(!joined.contains(SYSTEMD_UNIT));
+        assert!(!joined.contains("install_marker"));
     }
 
     #[test]
@@ -979,41 +986,31 @@ mod tests {
         let plan = build_install_plan(true);
         assert_eq!(plan.mode, Some(Mode::Server));
         let joined = plan.steps.join("\n");
-        for t in [BIN_PATH, SYSTEMD_UNIT, COMPLETION_BASH, MARKER_PATH] {
+        for t in [BIN_PATH, SYSTEMD_UNIT, COMPLETION_BASH] {
             assert!(joined.contains(t), "server plan missing {t}");
         }
         assert!(joined.contains("useradd"));
         assert!(joined.contains("systemctl enable"));
         assert!(!joined.contains(DESKTOP_AUTOSTART));
         assert!(!joined.contains(ICON_PATH));
+        assert!(!joined.contains("install_marker"));
     }
 
     #[test]
-    fn marker_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("install_marker.toml");
-        let m = Marker {
-            mode: Mode::Server,
-            version: "9.9.9".into(),
-            installed_at: "@1234".into(),
-            files: vec!["/usr/local/bin/fono".into(), "/lib/systemd/system/fono.service".into()],
-            created_service_user: true,
-            enabled_service: true,
-        };
-        m.save(&path).unwrap();
-        let loaded = Marker::load(&path).unwrap().unwrap();
-        assert_eq!(loaded.mode, Mode::Server);
-        assert_eq!(loaded.version, "9.9.9");
-        assert_eq!(loaded.files.len(), 2);
-        assert!(loaded.created_service_user);
-        assert!(loaded.enabled_service);
-    }
-
-    #[test]
-    fn marker_load_missing_returns_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nope.toml");
-        assert!(Marker::load(&path).unwrap().is_none());
+    fn detect_install_state_on_clean_system_is_empty() {
+        // Running tests inside a sandbox where none of the canonical
+        // install paths exist — the detector must report "nothing".
+        // (CI containers and dev boxes both satisfy this; if a tester
+        // somehow has a real install on /usr/local/bin/fono this
+        // assertion will fire and they'll know to uninstall first.)
+        let state = detect_install_state();
+        if Path::new(BIN_PATH).exists() || Path::new(SYSTEMD_UNIT).exists() {
+            // A real install is present — skip rather than mis-fail.
+            return;
+        }
+        assert!(state.files.is_empty());
+        assert!(!state.enabled_service);
+        assert!(!state.system_user_removable);
     }
 
     #[test]

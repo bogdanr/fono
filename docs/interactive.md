@@ -20,8 +20,7 @@ two kinds of `TranscriptUpdate`:
   Committed to history, never overwritten.
 
 The full transcript the user sees is the concatenation of every
-`Finalize` update, in segment order. The cleaned-up version (LLM
-cleanup) runs once at end on the assembled text and is what gets
+`Finalize` update, in segment order. The cleaned-up version (polish) runs once at end on the assembled text and is what gets
 typed into the focused window.
 
 ## Slice A limitations (read this before you file a bug)
@@ -44,7 +43,7 @@ typed into the focused window.
 - **Local STT only.** Slice A wires whisper.cpp's streaming lane.
   Cloud streaming (Groq, OpenAI realtime, Deepgram, AssemblyAI) lands
   in Slice B alongside the equivalence harness's cloud rows.
-- **LLM cleanup is not streamed.** It runs once on the full
+- **polish is not streamed.** It runs once on the full
   transcript after the hotkey releases. This is a deliberate design
   decision — see ADR 0009 §4.
 
@@ -178,7 +177,7 @@ All keys live under `[interactive]` in `~/.config/fono/config.toml`.
 | `mode`                           | `"hybrid"`                     | Pipeline mode. `"hybrid"` is the only Slice A value — reserved for Slice B variants.                                  |
 | `chunk_ms_initial`               | `600`                          | Window the streaming decoder waits before the first preview pass. Smaller = lower TTFF, noisier early text.            |
 | `chunk_ms_steady`                | `1500`                         | Steady-state window between preview passes after the first.                                                           |
-| `cleanup_on_finalize`            | `true`                         | Run the LLM cleanup pass once on the assembled transcript after the hotkey releases. Off = raw STT output is injected. |
+| `cleanup_on_finalize`            | `true`                         | Run the polish pass once on the assembled transcript after the hotkey releases. Off = raw STT output is injected. |
 | `max_session_seconds`            | `120`                          | Hard ceiling on a single live session, in seconds.                                                                    |
 | `max_session_cost_usd`           | unset                          | Optional hard cost cap for cloud-streaming sessions.                                                                  |
 | `commit_use_prosody`             | `false`                        | Engage the prosody-aware boundary delay. Flip to `true` if you find segments cut off mid-thought during slow speech.   |

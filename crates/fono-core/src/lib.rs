@@ -28,7 +28,7 @@ pub use error::{Error, Result};
 pub use hwcheck::{HardwareSnapshot, LocalTier};
 pub use paths::Paths;
 pub use provider_catalog::{
-    AssistantDefaults, Badge, CloudProvider, LlmDefaults, SttDefaults, TtsDefaults, TtsEndpoint,
+    AssistantDefaults, Badge, CloudProvider, PolishDefaults, SttDefaults, TtsDefaults, TtsEndpoint,
     WebSearchSupport, CLOUD_PROVIDERS,
 };
 pub use secrets::Secrets;

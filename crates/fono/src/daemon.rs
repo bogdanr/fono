@@ -332,7 +332,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     } else {
         // Tray menu's "Recent transcriptions" submenu reads from the
         // history DB on a 2-second poll. Provide a closure that returns
-        // the cleaned text (or raw if no LLM cleanup) of the last 10 rows.
+        // the cleaned text (or raw if no polish) of the last 10 rows.
         let history_db_path = paths.history_db();
         let recent_provider: fono_tray::RecentProvider = Arc::new(move || {
             let Ok(db) = fono_core::history::HistoryDb::open(&history_db_path) else {
@@ -352,8 +352,8 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         // to see it appear in the menu (v0.1 trade-off).
         let stt_backends: Vec<_> =
             fono_core::providers::configured_stt_backends(&secrets, &config.stt.backend);
-        let llm_backends: Vec<_> =
-            fono_core::providers::configured_llm_backends(&secrets, &config.llm.backend);
+        let polish_backends: Vec<_> =
+            fono_core::providers::configured_polish_backends(&secrets, &config.polish.backend);
         // Assistant + TTS submenus mirror the STT/LLM ones. We show
         // every "configured" backend (key present in secrets, plus
         // None / Local / Wyoming which never need a key) and the
@@ -379,9 +379,9 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
             .iter()
             .map(|b| fono_core::providers::stt_backend_str(b).to_string())
             .collect();
-        let llm_labels: Vec<String> = llm_backends
+        let polish_labels: Vec<String> = polish_backends
             .iter()
-            .map(|b| fono_core::providers::llm_backend_str(b).to_string())
+            .map(|b| fono_core::providers::polish_backend_str(b).to_string())
             .collect();
         let assistant_labels: Vec<String> = assistant_backends
             .iter()
@@ -399,7 +399,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         // users running with default verbosity see the line in their
         // terminal when they reproduce.
         info!("tray: configured STT backends ({}) = {:?}", stt_labels.len(), stt_labels);
-        info!("tray: configured LLM backends ({}) = {:?}", llm_labels.len(), llm_labels);
+        info!("tray: configured polish backends ({}) = {:?}", polish_labels.len(), polish_labels);
 
         // Active-provider closure — tray polls this every ~2 s. Reads
         // the orchestrator's current backend pair (which already reflects
@@ -409,13 +409,14 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         let orch_for_tray = orchestrator.clone();
         let config_path = paths.config_file();
         let active_provider: fono_tray::ActiveProvider = Arc::new(move || {
-            let (stt_str, llm_str, assistant_str, tts_str) = orch_for_tray.as_ref().map_or_else(
+            let (stt_str, polish_str, assistant_str, tts_str) = orch_for_tray.as_ref().map_or_else(
                 || {
                     fono_core::Config::load(&config_path)
                         .map(|c| {
                             (
                                 fono_core::providers::stt_backend_str(&c.stt.backend).to_string(),
-                                fono_core::providers::llm_backend_str(&c.llm.backend).to_string(),
+                                fono_core::providers::polish_backend_str(&c.polish.backend)
+                                    .to_string(),
                                 fono_core::providers::assistant_backend_str(&c.assistant.backend)
                                     .to_string(),
                                 fono_core::providers::tts_backend_str(&c.tts.backend).to_string(),
@@ -432,9 +433,9 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                 .position(|b| fono_core::providers::stt_backend_str(b) == stt_str)
                 .and_then(|i| u8::try_from(i).ok())
                 .unwrap_or(u8::MAX);
-            let llm_idx = llm_backends
+            let llm_idx = polish_backends
                 .iter()
-                .position(|b| fono_core::providers::llm_backend_str(b) == llm_str)
+                .position(|b| fono_core::providers::polish_backend_str(b) == polish_str)
                 .and_then(|i| u8::try_from(i).ok())
                 .unwrap_or(u8::MAX);
             let assistant_idx = assistant_backends
@@ -449,7 +450,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                 .unwrap_or(u8::MAX);
             fono_tray::ActiveBackends {
                 stt: stt_idx,
-                llm: llm_idx,
+                polish: llm_idx,
                 assistant: assistant_idx,
                 tts: tts_idx,
             }
@@ -483,7 +484,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
             "Fono — voice dictation",
             recent_provider,
             stt_labels,
-            llm_labels,
+            polish_labels,
             assistant_labels,
             tts_labels,
             active_provider,
@@ -790,12 +791,12 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         let paths = paths.clone();
         let orch_for_tray = orchestrator.clone();
         // Snapshot the filtered backend lists for the tray dispatcher
-        // so `UseStt(idx)` / `UseLlm(idx)` resolve to the same item the
+        // so `UseStt(idx)` / `UsePolish(idx)` resolve to the same item the
         // user clicked (the indices come from the filtered submenu).
         let stt_backends_for_dispatch: Vec<_> =
             fono_core::providers::configured_stt_backends(&secrets, &config.stt.backend);
         let llm_backends_for_dispatch: Vec<_> =
-            fono_core::providers::configured_llm_backends(&secrets, &config.llm.backend);
+            fono_core::providers::configured_polish_backends(&secrets, &config.polish.backend);
         // Assistant + TTS dispatch lists mirror the tray's filter
         // (active + key-present + no-key-needed) so a click resolves
         // back to the same backend the user saw. Rebuilt here
@@ -858,7 +859,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                         )
                         .await;
                     }
-                    TrayAction::UseLlm(idx) => {
+                    TrayAction::UsePolish(idx) => {
                         switch_llm_via_tray(
                             &paths,
                             orch_for_tray.as_ref(),
@@ -1067,10 +1068,10 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
     let config_present = config_path.exists();
     let graphical = crate::is_graphical_session();
     info!(
-        "Fono v{} starting — stt={:?} llm={:?} tray={}",
+        "Fono v{} starting — stt={:?} polish={:?} tray={}",
         env!("CARGO_PKG_VERSION"),
         config.stt.backend,
-        config.llm.backend,
+        config.polish.backend,
         if !graphical {
             "headless"
         } else if cfg!(feature = "tray") {
@@ -1126,7 +1127,7 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
     debug!("secrets      : {}", paths.secrets_file().display());
     debug!("history db   : {}", paths.history_db().display());
     debug!("models/whisper: {}", paths.whisper_models_dir().display());
-    debug!("models/llm   : {}", paths.llm_models_dir().display());
+    debug!("models/polish   : {}", paths.polish_models_dir().display());
     debug!("cache        : {}", paths.cache_dir.display());
     debug!("state        : {}", paths.state_dir.display());
     debug!("ipc socket   : {}", paths.ipc_socket().display());
@@ -1146,7 +1147,7 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
         config.hotkeys.dictation, config.hotkeys.assistant, config.hotkeys.cancel,
     );
     debug!("stt backend  : {:?}  (local model: {})", config.stt.backend, config.stt.local.model);
-    debug!("llm backend  : {:?}  (enabled={})", config.llm.backend, config.llm.enabled);
+    debug!("polish backend  : {:?}  (enabled={})", config.polish.backend, config.polish.enabled);
     debug!("inject       : also_copy_to_clipboard={}", config.general.also_copy_to_clipboard);
     // Probe and print which inject + clipboard tools are detected, so
     // users immediately see whether they have a working delivery path.
@@ -1188,7 +1189,7 @@ fn which_in_path(tool: &str) -> Option<std::path::PathBuf> {
 /// accelerator backends are compiled into either crate are therefore
 /// exercised by both engines. Today the default ship build is CPU-only
 /// — the line is `CPU AVX2+FMA+F16C` on a typical x86_64 laptop. When
-/// GPU accelerator features land in `fono-stt`/`fono-llm` the matching
+/// GPU accelerator features land in `fono-stt`/`fono-polish` the matching
 /// `cfg(feature = …)` blocks below light up, e.g. `CUDA + CPU AVX2`.
 fn hardware_acceleration_summary() -> String {
     // `mut` is required when any of the cfg(feature = "accel-*") arms
@@ -1198,7 +1199,7 @@ fn hardware_acceleration_summary() -> String {
     let mut accels: Vec<&'static str> = Vec::new();
 
     // GPU / accelerator backends — pulled in via opt-in cargo features
-    // on `fono-stt` / `fono-llm`. Both crates consume the same ggml,
+    // on `fono-stt` / `fono-polish`. Both crates consume the same ggml,
     // so a single compile-time feature flag enables the backend for
     // STT + LLM in lockstep. The cfg blocks here mirror the feature
     // graph and are no-ops on the default CPU-only build.
@@ -1307,7 +1308,7 @@ async fn handle_client(
                 || "(degraded — no orchestrator)".to_string(),
                 |o| {
                     let (s, l) = o.active_backends();
-                    format!("stt={s} llm={l}")
+                    format!("stt={s} polish={l}")
                 },
             );
             Response::Text(format!("fono daemon running; fsm={state:?}; {active}"))
@@ -1389,13 +1390,13 @@ fn notify_last_transcription(paths: &Paths) {
     let body = rows.first().map_or_else(
         || "(no transcriptions yet)".to_string(),
         |t| {
-            let cleaned = t.cleaned.as_deref().unwrap_or("(no LLM cleanup)");
+            let cleaned = t.cleaned.as_deref().unwrap_or("(no polish)");
             format!(
-                "raw    : {}\ncleaned: {}\nstt={}  llm={}",
+                "raw    : {}\ncleaned: {}\nstt={}  polish={}",
                 truncate(&t.raw, 240),
                 truncate(cleaned, 240),
                 t.stt_backend.as_deref().unwrap_or("?"),
-                t.llm_backend.as_deref().unwrap_or("none"),
+                t.polish_backend.as_deref().unwrap_or("none"),
             )
         },
     );
@@ -1697,19 +1698,19 @@ async fn switch_discovered_stt_via_tray(
     }
 }
 
-/// Switch the active LLM backend from the tray submenu and trigger a
-/// hot-reload of the orchestrator. Same code path as `fono use llm …`.
+/// Switch the active polish backend from the tray submenu and trigger a
+/// hot-reload of the orchestrator. Same code path as `fono use polish …`.
 async fn switch_llm_via_tray(
     paths: &fono_core::Paths,
     orch: Option<&Arc<crate::session::SessionOrchestrator>>,
-    backends: &[fono_core::config::LlmBackend],
+    backends: &[fono_core::config::PolishBackend],
     idx: u8,
 ) {
     let Some(backend) = backends.get(idx as usize) else {
-        warn!("tray UseLlm({idx}): out of range (max={})", backends.len());
+        warn!("tray UsePolish({idx}): out of range (max={})", backends.len());
         return;
     };
-    let label = fono_core::providers::llm_backend_str(backend);
+    let label = fono_core::providers::polish_backend_str(backend);
     let config_path = paths.config_file();
     let backend_clone = backend.clone();
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -1722,8 +1723,8 @@ async fn switch_llm_via_tray(
     match result {
         Ok(Ok(())) => {
             info!("tray: switched LLM to {label}");
-            if matches!(backend, fono_core::config::LlmBackend::Local)
-                && !ensure_local_llm_with_notify(paths).await
+            if matches!(backend, fono_core::config::PolishBackend::Local)
+                && !ensure_local_polish_with_notify(paths).await
             {
                 return;
             }
@@ -2089,8 +2090,13 @@ async fn ensure_local_stt_with_notify(paths: &fono_core::Paths) -> bool {
         }
     };
     let model = cfg.stt.local.model.clone();
-    let size_hint = crate::models::local_stt_size_mb(&model);
-    let dest_exists = paths.whisper_models_dir().join(format!("ggml-{model}.bin")).exists();
+    let quantization = cfg.stt.local.quantization.clone();
+    let size_hint = crate::models::local_stt_size_mb(&model, &quantization);
+    let resolved_path = crate::models::resolve_local_stt(&model, &quantization)
+        .ok()
+        .flatten()
+        .map(|(info, q)| crate::models::whisper_dest(paths, info.name, q));
+    let dest_exists = resolved_path.as_ref().is_some_and(|p| p.exists());
     if !dest_exists {
         let body = size_hint.map_or_else(
             || format!("Whisper model: {model}"),
@@ -2104,7 +2110,7 @@ async fn ensure_local_stt_with_notify(paths: &fono_core::Paths) -> bool {
             fono_core::notify::Urgency::Normal,
         );
     }
-    match crate::models::ensure_local_stt(paths, &model).await {
+    match crate::models::ensure_local_stt(paths, &model, &quantization).await {
         Ok(crate::models::EnsureOutcome::Downloaded) => {
             fono_core::notify::send(
                 "Fono — speech model ready",
@@ -2132,17 +2138,17 @@ async fn ensure_local_stt_with_notify(paths: &fono_core::Paths) -> bool {
 
 /// LLM counterpart to [`ensure_local_stt_with_notify`]. Same contract:
 /// returns `true` when the GGUF is ready to load, `false` on failure.
-async fn ensure_local_llm_with_notify(paths: &fono_core::Paths) -> bool {
+async fn ensure_local_polish_with_notify(paths: &fono_core::Paths) -> bool {
     let cfg = match fono_core::Config::load(&paths.config_file()) {
         Ok(c) => c,
         Err(e) => {
-            warn!("ensure_local_llm: config load failed: {e:#}");
+            warn!("ensure_local_polish: config load failed: {e:#}");
             return false;
         }
     };
-    let model = cfg.llm.local.model.clone();
+    let model = cfg.polish.local.model.clone();
     let size_hint = crate::models::local_llm_size_mb(&model);
-    let dest_exists = paths.llm_models_dir().join(format!("{model}.gguf")).exists();
+    let dest_exists = paths.polish_models_dir().join(format!("{model}.gguf")).exists();
     if !dest_exists {
         let body = size_hint.map_or_else(
             || format!("LLM model: {model}"),
@@ -2156,7 +2162,7 @@ async fn ensure_local_llm_with_notify(paths: &fono_core::Paths) -> bool {
             fono_core::notify::Urgency::Normal,
         );
     }
-    match crate::models::ensure_local_llm(paths, &model).await {
+    match crate::models::ensure_local_polish(paths, &model).await {
         Ok(crate::models::EnsureOutcome::Downloaded) => {
             fono_core::notify::send(
                 "Fono — cleanup model ready",
@@ -2169,7 +2175,7 @@ async fn ensure_local_llm_with_notify(paths: &fono_core::Paths) -> bool {
         }
         Ok(_) => true,
         Err(e) => {
-            warn!("ensure_local_llm: download failed: {e:#}");
+            warn!("ensure_local_polish: download failed: {e:#}");
             fono_core::notify::send(
                 "Fono — cleanup model download failed",
                 &format!("{e}"),

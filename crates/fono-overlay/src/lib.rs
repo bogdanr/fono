@@ -35,7 +35,7 @@ pub enum OverlayState {
     /// glance.
     AssistantThinking,
     Processing,
-    /// Dictation post-release: STT and/or LLM cleanup is running and
+    /// Dictation post-release: STT and/or polish is running and
     /// is expected to take long enough (local backends) to warrant a
     /// live animation. Same synthetic-frame contract as
     /// [`Self::AssistantThinking`] — the orchestrator pushes

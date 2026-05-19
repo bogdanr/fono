@@ -32,7 +32,7 @@ pub struct Config {
     pub tts: Tts,
 
     #[serde(default)]
-    pub llm: Llm,
+    pub polish: Polish,
 
     #[serde(default)]
     pub assistant: Assistant,
@@ -84,7 +84,7 @@ impl Default for Config {
             audio: Audio::default(),
             stt: Stt::default(),
             tts: Tts::default(),
-            llm: Llm::default(),
+            polish: Polish::default(),
             assistant: Assistant::default(),
             context_rules: Vec::new(),
             overlay: Overlay::default(),
@@ -320,7 +320,7 @@ impl Default for SttLocal {
     fn default() -> Self {
         Self {
             model: "small".into(),
-            quantization: "q5_1".into(),
+            quantization: "auto".into(),
             languages: Vec::new(),
             threads: 0,
         }
@@ -357,7 +357,7 @@ pub struct SttWyoming {
 /// `[tts]` — text-to-speech for the voice-assistant path. Off by
 /// default (`backend = none`); enabling it requires either a Wyoming
 /// TTS server on the LAN or a cloud TTS API. The TTS pipeline is
-/// fully independent of `[stt]` / `[llm]`: a user can dictate with
+/// fully independent of `[stt]` / `[polish]`: a user can dictate with
 /// cloud STT + local cleanup and run the assistant against a
 /// different cloud + Wyoming TTS.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -444,13 +444,13 @@ pub struct TtsWyoming {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Llm {
+pub struct Polish {
     pub enabled: bool,
-    pub backend: LlmBackend,
-    pub local: LlmLocal,
-    pub cloud: Option<LlmCloud>,
+    pub backend: PolishBackend,
+    pub local: PolishLocal,
+    pub cloud: Option<PolishCloud>,
     pub prompt: Prompt,
-    /// Skip the LLM cleanup roundtrip when the raw STT output has
+    /// Skip the polish roundtrip when the raw STT output has
     /// fewer than this many words (whitespace-split). 0 = never skip.
     /// Latency plan L9 — for short utterances (chat, search bars,
     /// quick push-to-talk taps) the LLM costs more than it cleans, and
@@ -463,7 +463,7 @@ pub struct Llm {
     pub skip_if_words_lt: u32,
 }
 
-impl Default for Llm {
+impl Default for Polish {
     fn default() -> Self {
         Self {
             // Disabled by default until the user opts into a cloud
@@ -471,8 +471,8 @@ impl Default for Llm {
             // and configures a model. Avoids "first dictation crashes
             // because LlamaLocal is a stub" trap.
             enabled: false,
-            backend: LlmBackend::None,
-            local: LlmLocal::default(),
+            backend: PolishBackend::None,
+            local: PolishLocal::default(),
             cloud: None,
             prompt: Prompt::default(),
             skip_if_words_lt: 3,
@@ -482,7 +482,7 @@ impl Default for Llm {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum LlmBackend {
+pub enum PolishBackend {
     Local,
     None,
     OpenAI,
@@ -494,7 +494,7 @@ pub enum LlmBackend {
     Ollama,
 }
 
-impl Default for LlmBackend {
+impl Default for PolishBackend {
     fn default() -> Self {
         Self::Local
     }
@@ -502,20 +502,20 @@ impl Default for LlmBackend {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct LlmLocal {
+pub struct PolishLocal {
     pub model: String,
     pub quantization: String,
     pub context: u32,
 }
 
-impl Default for LlmLocal {
+impl Default for PolishLocal {
     fn default() -> Self {
         Self { model: "qwen2.5-1.5b-instruct".into(), quantization: "q4_k_m".into(), context: 4096 }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmCloud {
+pub struct PolishCloud {
     pub provider: String,
     pub api_key_ref: String,
     pub model: String,
@@ -549,7 +549,7 @@ impl Default for Prompt {
 /// of chat fine-tuning, not of any specific provider, so this prompt is
 /// applied identically across every `TextFormatter` impl. Tested
 /// against the bug report in
-/// `plans/2026-04-28-llm-cleanup-clarification-refusal-fix-v1.md`.
+/// `plans/2026-04-28-polish-cleanup-clarification-refusal-fix-v1.md`.
 pub const fn default_prompt_main() -> &'static str {
     "You are a transcription cleanup post-processor, not a chat assistant. The user message \
 between the <<< and >>> markers is a raw speech-to-text transcript. Your only job is to \
@@ -573,7 +573,7 @@ correction and drop the discarded fragment. If the speaker dictates a list (\"fi
 a term in the personal dictionary, prefer that exact spelling."
 }
 
-/// `[assistant]` — voice-assistant chat config. Distinct from `[llm]`
+/// `[assistant]` — voice-assistant chat config. Distinct from `[polish]`
 /// (the dictation cleanup pipeline) so a user can run a fast local
 /// model for cleanup and a bigger cloud model for the assistant
 /// (or vice versa). Off by default until the user opts in via the
@@ -586,7 +586,7 @@ pub struct Assistant {
     pub backend: AssistantBackend,
     pub local: AssistantLocal,
     pub cloud: Option<AssistantCloud>,
-    /// System prompt sent on every turn. Distinct from `[llm].prompt`
+    /// System prompt sent on every turn. Distinct from `[polish].prompt`
     /// — the cleanup prompt forbids chat-style replies, this one
     /// invites them, capped to 1-3 sentences for low TTS latency.
     pub prompt_main: String,
@@ -637,7 +637,7 @@ impl Default for Assistant {
 }
 
 /// Backend selector for the assistant. Same provider set as
-/// [`LlmBackend`] minus a shape change: assistant defaults to `None`
+/// [`PolishBackend`] minus a shape change: assistant defaults to `None`
 /// (off) rather than `Local`, because turning on the assistant
 /// without picking a backend would be a footgun.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -963,7 +963,7 @@ pub struct Interactive {
     /// Steady-state chunk window between preview passes, in
     /// milliseconds.
     pub chunk_ms_steady: u32,
-    /// When `true`, run the LLM cleanup pass once on the assembled
+    /// When `true`, run the polish pass once on the assembled
     /// transcript after the user releases the hotkey. Default `true`.
     pub cleanup_on_finalize: bool,
     /// Hard ceiling on a single live session, in seconds. The daemon
@@ -1234,7 +1234,7 @@ mod tests {
         assert_eq!(loaded.version, CURRENT_VERSION);
         assert!(loaded.general.languages.is_empty(), "default = unconstrained auto-detect");
         assert_eq!(loaded.stt.local.model, "small");
-        assert_eq!(loaded.llm.local.model, "qwen2.5-1.5b-instruct");
+        assert_eq!(loaded.polish.local.model, "qwen2.5-1.5b-instruct");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! Capability catalogue for cloud providers.
 //!
 //! This is the single source of truth for which cloud providers cover
-//! which capabilities (STT, LLM cleanup, assistant chat, TTS), plus
+//! which capabilities (STT, polish, assistant chat, TTS), plus
 //! future-facing assistant extras (multimodal model id, web-search
 //! support) and the TTS endpoint shape. The wizard, `fono use cloud`,
 //! and `fono doctor` consume this catalogue.
@@ -10,7 +10,7 @@
 //! This catalogue is the **single source of truth** for default cloud
 //! model strings, default voices, key environment variable names, and
 //! TTS endpoint shapes. The thin wrappers in `fono-stt::defaults`,
-//! `fono-llm::defaults`, and `fono-assistant::factory` (all named
+//! `fono-polish::defaults`, and `fono-assistant::factory` (all named
 //! `default_cloud_model`) read from here at runtime — to change the
 //! default model for a provider, edit only the relevant
 //! `CloudProvider` entry below. Consumer crates do not duplicate the
@@ -21,8 +21,8 @@
 //! keep the two in lockstep — the unit tests in this module fail if a
 //! cloud `*Backend` variant ever lacks a catalogue entry.
 
-use crate::config::{LlmBackend, SttBackend};
-use crate::providers::{parse_llm_backend, parse_stt_backend};
+use crate::config::{PolishBackend, SttBackend};
+use crate::providers::{parse_polish_backend, parse_stt_backend};
 
 /// Defaults for a provider's speech-to-text capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,11 +32,11 @@ pub struct SttDefaults {
     pub model: &'static str,
 }
 
-/// Defaults for a provider's LLM cleanup capability.
+/// Defaults for a provider's polish capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LlmDefaults {
+pub struct PolishDefaults {
     /// Default cleanup model. Consumed by
-    /// `fono_llm::defaults::default_cloud_model`.
+    /// `fono_polish::defaults::default_cloud_model`.
     pub model: &'static str,
 }
 
@@ -75,8 +75,8 @@ pub enum WebSearchSupport {
 pub enum Badge {
     /// Provider offers speech-to-text.
     Stt,
-    /// Provider offers LLM cleanup.
-    Llm,
+    /// Provider offers polish.
+    Polish,
     /// Provider offers voice-assistant chat.
     Assistant,
     /// Provider offers text-to-speech.
@@ -154,8 +154,8 @@ pub struct CloudProvider {
     pub key_env: &'static str,
     /// STT capability if the provider offers transcription.
     pub stt: Option<SttDefaults>,
-    /// LLM cleanup capability.
-    pub llm: Option<LlmDefaults>,
+    /// polish capability.
+    pub polish: Option<PolishDefaults>,
     /// Voice-assistant chat capability.
     pub assistant: Option<AssistantDefaults>,
     /// TTS capability.
@@ -173,7 +173,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://platform.openai.com/api-keys",
         key_env: "OPENAI_API_KEY",
         stt: Some(SttDefaults { model: "whisper-1" }),
-        llm: Some(LlmDefaults { model: "gpt-5.4-nano" }),
+        polish: Some(PolishDefaults { model: "gpt-5.4-nano" }),
         // TODO: re-enable web search when fono-assistant migrates the
         // OpenAI client to the Responses API (POST /v1/responses). The
         // chat/completions API rejects unknown tool types.
@@ -182,7 +182,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // GPT-5.4 family is multimodal; reuse the assistant default.
             multimodal_model: Some("gpt-5.4-mini"),
             web_search: WebSearchSupport::None,
-            badges: &[Badge::Stt, Badge::Llm, Badge::Assistant, Badge::Tts, Badge::Vision],
+            badges: &[Badge::Stt, Badge::Polish, Badge::Assistant, Badge::Tts, Badge::Vision],
         }),
         tts: Some(TtsDefaults {
             model: "tts-1",
@@ -208,7 +208,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://console.groq.com/keys",
         key_env: "GROQ_API_KEY",
         stt: Some(SttDefaults { model: "whisper-large-v3-turbo" }),
-        llm: Some(LlmDefaults { model: "openai/gpt-oss-20b" }),
+        polish: Some(PolishDefaults { model: "openai/gpt-oss-20b" }),
         assistant: Some(AssistantDefaults {
             text_model: "openai/gpt-oss-120b",
             // Groq currently exposes no vision-capable model Fono is
@@ -225,7 +225,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // opt-in once we have a coherent search-via-model-swap
             // design (see docs/decisions/0024).
             web_search: WebSearchSupport::None,
-            badges: &[Badge::Stt, Badge::Llm, Badge::Assistant, Badge::Tts, Badge::Fast],
+            badges: &[Badge::Stt, Badge::Polish, Badge::Assistant, Badge::Tts, Badge::Fast],
         }),
         tts: Some(TtsDefaults {
             // Canopy Labs Orpheus on Groq's OpenAI-compatible
@@ -265,7 +265,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://console.anthropic.com/settings/keys",
         key_env: "ANTHROPIC_API_KEY",
         stt: None,
-        llm: Some(LlmDefaults {
+        polish: Some(PolishDefaults {
             // TODO: verify against Anthropic's current model list — the
             // Groq Maverick incident (issue: 404 model_not_found)
             // exposed that the Phase A catalogue contained at least
@@ -279,7 +279,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // Claude Haiku 4.5 is multimodal (image input supported).
             multimodal_model: Some("claude-haiku-4-5-20251001"),
             web_search: WebSearchSupport::NativeTool("web_search_20250305"),
-            badges: &[Badge::Llm, Badge::Assistant, Badge::Vision, Badge::Search],
+            badges: &[Badge::Polish, Badge::Assistant, Badge::Vision, Badge::Search],
         }),
         tts: None,
     },
@@ -287,31 +287,31 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
     CloudProvider {
         id: "cerebras",
         display_name: "Cerebras",
-        tagline: "Wafer-scale inference for the lowest-latency LLM cleanup.",
+        tagline: "Wafer-scale inference for the lowest-latency polish.",
         console_url: "https://cloud.cerebras.ai/platform/keys",
         key_env: "CEREBRAS_API_KEY",
         stt: None,
-        llm: Some(LlmDefaults { model: "llama3.1-8b" }),
+        polish: Some(PolishDefaults { model: "llama3.1-8b" }),
         assistant: Some(AssistantDefaults {
             text_model: "qwen-3-235b-a22b-instruct-2507",
             multimodal_model: None,
             web_search: WebSearchSupport::None,
-            badges: &[Badge::Llm, Badge::Assistant, Badge::Fast],
+            badges: &[Badge::Polish, Badge::Assistant, Badge::Fast],
         }),
         tts: None,
     },
     // ----- Gemini ------------------------------------------------------
-    // Catalogue keeps the Gemini entry for the LLM cleanup path
-    // (`LlmBackend::Gemini`); assistant chat / multimodal / search are
+    // Catalogue keeps the Gemini entry for the polish path
+    // (`PolishBackend::Gemini`); assistant chat / multimodal / search are
     // unwired (no Gemini chat client yet) so `assistant` stays `None`.
     CloudProvider {
         id: "gemini",
         display_name: "Google Gemini",
-        tagline: "Gemini Flash (LLM cleanup only — chat client not wired yet).",
+        tagline: "Gemini Flash (polish only — chat client not wired yet).",
         console_url: "https://aistudio.google.com/app/apikey",
         key_env: "GEMINI_API_KEY",
         stt: None,
-        llm: Some(LlmDefaults { model: "gemini-1.5-flash" }),
+        polish: Some(PolishDefaults { model: "gemini-1.5-flash" }),
         assistant: None,
         tts: None,
     },
@@ -329,7 +329,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // Whisper model.
             model: "openai/whisper-large-v3-turbo",
         }),
-        llm: Some(LlmDefaults { model: "openai/gpt-5.4-nano" }),
+        polish: Some(PolishDefaults { model: "openai/gpt-5.4-nano" }),
         assistant: Some(AssistantDefaults {
             text_model: "anthropic/claude-haiku-4.5",
             // Multimodal is route-dependent on OpenRouter; leave None
@@ -338,7 +338,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // Web-search support is route-dependent; default to None
             // and let later phases enable per-route overrides.
             web_search: WebSearchSupport::None,
-            badges: &[Badge::Llm, Badge::Assistant, Badge::Tts],
+            badges: &[Badge::Polish, Badge::Assistant, Badge::Tts],
         }),
         tts: Some(TtsDefaults {
             // xAI's `grok-voice-tts-1.0` via OpenRouter. Replaces the
@@ -370,7 +370,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://console.deepgram.com/",
         key_env: "DEEPGRAM_API_KEY",
         stt: Some(SttDefaults { model: "nova-2" }),
-        llm: None,
+        polish: None,
         assistant: None,
         tts: Some(TtsDefaults {
             model: "aura-2-thalia-en",
@@ -390,7 +390,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://www.assemblyai.com/app/account",
         key_env: "ASSEMBLYAI_API_KEY",
         stt: Some(SttDefaults { model: "best" }),
-        llm: None,
+        polish: None,
         assistant: None,
         tts: None,
     },
@@ -402,7 +402,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://play.cartesia.ai/keys",
         key_env: "CARTESIA_API_KEY",
         stt: Some(SttDefaults { model: "sonic-transcribe" }),
-        llm: None,
+        polish: None,
         assistant: None,
         tts: Some(TtsDefaults {
             model: "sonic-2",
@@ -425,7 +425,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://portal.azure.com/",
         key_env: "AZURE_API_KEY",
         stt: Some(SttDefaults { model: "whisper" }),
-        llm: None,
+        polish: None,
         assistant: None,
         tts: None,
     },
@@ -440,7 +440,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // No specific entry yet; generic Whisper fallback.
             model: "whisper-large-v3",
         }),
-        llm: None,
+        polish: None,
         assistant: None,
         tts: None,
     },
@@ -452,7 +452,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://console.cloud.google.com/",
         key_env: "GOOGLE_API_KEY",
         stt: Some(SttDefaults { model: "default" }),
-        llm: None,
+        polish: None,
         assistant: None,
         tts: None,
     },
@@ -467,7 +467,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // No specific entry yet; generic Whisper fallback.
             model: "whisper-large-v3",
         }),
-        llm: None,
+        polish: None,
         assistant: None,
         tts: None,
     },
@@ -480,19 +480,19 @@ pub fn find(id: &str) -> Option<&'static CloudProvider> {
     CLOUD_PROVIDERS.iter().find(|p| p.id == id)
 }
 
-/// Construct a `(stt, llm)` pair from a catalogue entry, mapping the
+/// Construct a `(stt, polish)` pair from a catalogue entry, mapping the
 /// entry id back through [`parse_stt_backend`] /
-/// [`parse_llm_backend`]. Returns `None` if the entry lacks either
+/// [`parse_polish_backend`]. Returns `None` if the entry lacks either
 /// capability or the id doesn't round-trip through the parsers.
 #[must_use]
-pub fn cloud_pair_from_catalog(id: &str) -> Option<(SttBackend, LlmBackend)> {
+pub fn cloud_pair_from_catalog(id: &str) -> Option<(SttBackend, PolishBackend)> {
     let entry = find(id)?;
-    if entry.stt.is_none() || entry.llm.is_none() {
+    if entry.stt.is_none() || entry.polish.is_none() {
         return None;
     }
     let stt_backend = parse_stt_backend(entry.id)?;
-    let llm_backend = parse_llm_backend(entry.id)?;
-    Some((stt_backend, llm_backend))
+    let polish_backend = parse_polish_backend(entry.id)?;
+    Some((stt_backend, polish_backend))
 }
 
 #[cfg(test)]
@@ -500,8 +500,8 @@ mod tests {
     use super::*;
     use crate::config::{AssistantBackend, TtsBackend};
     use crate::providers::{
-        assistant_backend_str, assistant_key_env, llm_backend_str, llm_key_env,
-        parse_assistant_backend, parse_tts_backend, stt_backend_str, stt_key_env, tts_backend_str,
+        assistant_backend_str, assistant_key_env, parse_assistant_backend, parse_tts_backend,
+        polish_backend_str, polish_key_env, stt_backend_str, stt_key_env, tts_backend_str,
         tts_key_env,
     };
 
@@ -522,9 +522,9 @@ mod tests {
                     }
                 }
             }
-            if p.llm.is_some() {
-                if let Some(b) = parse_llm_backend(p.id) {
-                    let expected = llm_key_env(&b);
+            if p.polish.is_some() {
+                if let Some(b) = parse_polish_backend(p.id) {
+                    let expected = polish_key_env(&b);
                     if !expected.is_empty() {
                         assert_eq!(p.key_env, expected, "LLM key_env mismatch for {}", p.id);
                     }
@@ -565,10 +565,10 @@ mod tests {
                     p.id
                 );
             }
-            if p.llm.is_some() {
+            if p.polish.is_some() {
                 assert!(
-                    parse_llm_backend(p.id).is_some(),
-                    "{} claims LLM but parse_llm_backend rejects its id",
+                    parse_polish_backend(p.id).is_some(),
+                    "{} claims LLM but parse_polish_backend rejects its id",
                     p.id
                 );
             }
@@ -599,8 +599,8 @@ mod tests {
             if let Some(b) = parse_stt_backend(p.id) {
                 assert_eq!(stt_backend_str(&b), p.id);
             }
-            if let Some(b) = parse_llm_backend(p.id) {
-                assert_eq!(llm_backend_str(&b), p.id);
+            if let Some(b) = parse_polish_backend(p.id) {
+                assert_eq!(polish_backend_str(&b), p.id);
             }
             if let Some(b) = parse_assistant_backend(p.id) {
                 assert_eq!(assistant_backend_str(&b), p.id);
@@ -612,7 +612,7 @@ mod tests {
     }
 
     /// Test 4 — no orphan cloud backend variants. Every variant of
-    /// `SttBackend` / `LlmBackend` / `AssistantBackend` / `TtsBackend`
+    /// `SttBackend` / `PolishBackend` / `AssistantBackend` / `TtsBackend`
     /// that represents a *cloud* provider must appear in at least one
     /// catalogue entry. "Cloud" excludes local, none, ollama, wyoming,
     /// piper, and the model-host-agnostic Whisper local backend.
@@ -628,14 +628,14 @@ mod tests {
                 "SttBackend::{b:?} ({id}) is not present in CLOUD_PROVIDERS",
             );
         }
-        for b in crate::providers::all_llm_backends() {
-            if matches!(b, LlmBackend::Local | LlmBackend::None | LlmBackend::Ollama) {
+        for b in crate::providers::all_polish_backends() {
+            if matches!(b, PolishBackend::Local | PolishBackend::None | PolishBackend::Ollama) {
                 continue;
             }
-            let id = llm_backend_str(&b);
+            let id = polish_backend_str(&b);
             assert!(
-                CLOUD_PROVIDERS.iter().any(|p| p.id == id && p.llm.is_some()),
-                "LlmBackend::{b:?} ({id}) is not present in CLOUD_PROVIDERS",
+                CLOUD_PROVIDERS.iter().any(|p| p.id == id && p.polish.is_some()),
+                "PolishBackend::{b:?} ({id}) is not present in CLOUD_PROVIDERS",
             );
         }
         for b in crate::providers::all_assistant_backends() {
@@ -673,7 +673,7 @@ mod tests {
                 assert!(!s.model.is_empty(), "{}: empty STT model", p.id);
                 count += 1;
             }
-            if let Some(l) = &p.llm {
+            if let Some(l) = &p.polish {
                 assert!(!l.model.is_empty(), "{}: empty LLM model", p.id);
                 count += 1;
             }
@@ -700,7 +700,7 @@ mod tests {
     fn every_entry_has_a_capability() {
         for p in CLOUD_PROVIDERS {
             assert!(
-                p.stt.is_some() || p.llm.is_some() || p.assistant.is_some() || p.tts.is_some(),
+                p.stt.is_some() || p.polish.is_some() || p.assistant.is_some() || p.tts.is_some(),
                 "{} declares no capability",
                 p.id
             );

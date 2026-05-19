@@ -11,12 +11,12 @@
 //!
 //! Slice A scope (this module):
 //!
-//! * Tier-1 (whisper-only) comparison — `--llm none`.
+//! * Tier-1 (whisper-only) comparison — `--polish none`.
 //! * Two curated fixtures (real audio when available, otherwise
 //!   synthetic-tone placeholders flagged in the manifest).
 //! * `--quick` flag for fast smoke runs.
 //!
-//! Tier-2 (with-LLM cleanup), the remaining 10 fixtures, and the
+//! Tier-2 (with-polish), the remaining 10 fixtures, and the
 //! cloud-streaming rows of R18 land in Slice B.
 
 use std::path::Path;

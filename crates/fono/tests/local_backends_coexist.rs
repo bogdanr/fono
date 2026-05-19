@@ -20,7 +20,7 @@
 
 #![cfg(all(feature = "local-models", feature = "llama-local"))]
 
-use fono_llm::llama_local::LlamaLocal;
+use fono_polish::llama_local::LlamaLocal;
 use fono_stt::whisper_local::WhisperLocal;
 
 #[test]

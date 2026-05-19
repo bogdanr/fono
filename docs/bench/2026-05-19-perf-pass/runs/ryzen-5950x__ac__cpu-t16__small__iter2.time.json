@@ -1,0 +1,34 @@
+{
+  "command": [
+    "target/release/fono-bench",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "small",
+    "--output",
+    "docs/bench/calibration/runs/ryzen-5950x__ac__cpu-t16__small__iter2.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": null,
+    "battery_pct": null,
+    "package_temp_c": 63.0
+  },
+  "context_start": {
+    "ac_online": null,
+    "battery_pct": null,
+    "captured_at_utc": "2026-05-19T04:37:19.236652+00:00",
+    "hostname": "ai",
+    "package_temp_c": 44.5,
+    "platform": "linux",
+    "power_profile": "governor=powersave"
+  },
+  "exit_code": 0,
+  "label": "ryzen-5950x/ac/cpu-t16/small/iter2",
+  "max_rss_kib": 1393740,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 83.082051,
+  "user_s": 902.37453,
+  "wall_clock_s": 64.879778
+}

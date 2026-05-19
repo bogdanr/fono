@@ -1,6 +1,135 @@
 # Fono — Project Status
 
-Last updated: 2026-05-17
+Last updated: 2026-05-19
+
+## 2026-05-19 — Rename: `LlmBackend` → `PolishBackend`
+
+The post-STT cleanup role was previously called "LLM backend", which
+collided with the equally LLM-powered `AssistantBackend`. Both roles
+are now named after what they do, not what's under the hood:
+`AssistantBackend` (chat) and `PolishBackend` (post-STT cleanup). The
+overlay already said `"Polishing…"` for this stage, so the rename
+aligns code, config, and UI on the same word.
+
+Mechanical sweep across the workspace (no behaviour changes):
+
+- Crate `fono-llm` → `fono-polish`.
+- Types: `Llm` → `Polish`, `LlmBackend` → `PolishBackend`,
+  `LlmLocal/LlmCloud/LlmRegistry/LlmModelInfo/LlmDefaults` and
+  `LLM_MODELS` follow suit.
+- Functions: `build_llm`, `llm_backend_str`, `parse_llm_backend`,
+  `configured_llm_backends`, `all_llm_backends`, `llm_key_env`,
+  `llm_requires_key`, `ensure_local_llm` → `polish_*` /
+  `build_polish` / `ensure_local_polish`.
+- Config: `[llm]` / `[llm.local]` / `[llm.cloud]` / `[llm.prompt]`
+  TOML sections become `[polish.*]`. Cache path
+  `~/.cache/fono/models/llm/` → `~/.cache/fono/models/polish/`.
+- CLI: `fono use llm <name>` → `fono use polish <name>`;
+  `--llm` / `--no-llm` → `--polish` / `--no-polish`.
+- Tray: `TrayAction::UseLlm` → `UsePolish`; submenu label
+  `"LLM backend"` → `"Polish backend"`.
+- Notifications: `Stage::Polish` now displays as `"Polish"` instead
+  of `"LLM"`; `"Fono — LLM key rejected/unreachable/cleanup failed"`
+  → `"Polish key rejected/unreachable/failed"`.
+- Docs sweep: `README`, `ROADMAP`, `AGENTS.md`, `docs/architecture.md`,
+  `docs/providers.md`, `docs/troubleshooting.md`, `docs/privacy.md`,
+  `docs/inject.md`, `docs/interactive.md`,
+  `.github/ISSUE_TEMPLATE/bug_report.md`. References to LLM as the
+  *role* renamed; references to LLM as the *underlying technology*
+  ("a small LLM", "chat-trained LLMs", "Groq LLM offering") left
+  intact. Closed plans (`plans/closed/`), historical design plans
+  (`docs/plans/`), ADRs (`docs/decisions/`), and `CHANGELOG.md`
+  untouched as historical record.
+
+Breaking config change accepted (no users yet per ADR 0026 pre-1.0
+posture): existing `config.toml` files with `[llm]` sections and
+GGUFs under `models/llm/` will silently re-resolve to defaults on
+the next launch.
+
+Gate: `cargo fmt --all`, `cargo clippy --workspace --all-targets
+-- -D warnings`, `cargo test --workspace --tests --lib` all green
+(576 tests passed, 0 failed).
+
+## 2026-05-19 — STT quantization ladder (ADR 0027)
+
+Landed Phases 1–5 of
+`plans/2026-05-19-stt-perf-pass-v1.md`. Two days of perf-pass
+sweeps on four reference hosts (i7-7500u, i7-1255U, ultra7-258v,
+ryzen-5950x; AC; CPU + Vulkan where applicable) drove the design
+of a 3-rung quantization ladder selected per ADR 0027. Pre-release
+so no compat shim was needed.
+
+Highlights:
+
+- **`set_audio_ctx()`** on clips < 30 s gives +70–160 % CPU batch
+  RTF with no measurable quality regression. Hard-coded on in
+  `crates/fono-stt/src/whisper_local.rs`; debug-only env override
+  retained for ablation runs.
+- **Thread default** switched from logical-CPU count to physical
+  cores parsed out of `/proc/cpuinfo`, clamped 1..=16. 5950X data
+  showed `small` running at half the speed at `t=32` vs `t=16`
+  because SMT siblings contend on the 256-bit FMA unit.
+- **Registry rewrite** (`crates/fono-stt/src/registry.rs`): new
+  `Quantization` / `QuantizationPref` types, `ModelInfo` carries
+  `default_quantization` + `&[QuantVariant]`. Five user-facing
+  names ship (T1 `tiny`/`tiny.en`, T2 `small`/`small.en`, T3
+  `large-v3-turbo`); `base` / `base.en` removed entirely as
+  dominated by T2. `large-v3-turbo` defaults to `q8_0`; `q5_0`
+  variants dropped (catastrophic on `en-conversational`).
+- **Config** (`crates/fono-core/src/config.rs`):
+  `[stt.local].quantization = "auto"` is the new default and
+  resolves through the registry. `auto | fp16 | q8_0 | q5_1`.
+- **Wizard / CLI**: `fono models list` shows defaults +
+  installable alternatives; `fono models install <name>
+  --quantization <q>` resolves through the registry; `fono models
+  remove <name>` deletes all variants of the named family. The
+  existing `AccuracyBucket::Inaccurate` filter handles the `tiny`
+  multilingual caveat (unusable for Romanian / Chinese / Japanese)
+  via `wer_by_lang` thresholds — no new gating.
+- **`scripts/bench-accuracy.py`** rewritten to surface per-language
+  Δ accuracy. The non-English-fixture floor previously masked the
+  `base-q8_0` regression on `en-narrative-pause` (0.114 → 0.513).
+  Future sweeps catch this class of regression automatically.
+
+Worst-case install footprint per language mode: ~1.1 GB English /
+~1.3 GB multilingual (down from ~3 GB if a user previously fetched
+several fp16 variants).
+
+Pre-commit gate clean. Custom-quantized `large-v3-turbo-q5_1`
+(would slot at ~548 MB between T2 and T3) deferred to the roadmap
+as a research item.
+
+## 2026-05-19 — mDNS browser robust against co-resident responder
+
+Fixed a registry-drain bug surfaced after ~24 h of uptime on hosts
+where `avahi-daemon` also listens on UDP 5353. Linux `SO_REUSEPORT`
+load-balances incoming multicast across all listeners, so Fono's
+`mdns-sd` browser misses roughly half of all responses; combined
+with `mdns-sd`'s exponential retransmission backoff (1 s → 2 s →
+…up to 1 h), peers age out of the registry under the 120 s TTL and
+never come back until daemon restart.
+
+Two changes in `crates/fono-net/src/discovery/`:
+
+- `browser.rs`: added a 60 s `REBROWSE_TICK` that re-invokes
+  `daemon.browse(ty)` for each active service type. This forces a
+  fresh PTR query, resets the retransmission backoff, and replays
+  the cache to a new listener — so even with REUSEPORT eating half
+  the replies, ~5 attempts per `PEER_TTL` window keeps the registry
+  populated indefinitely. Refactored `recv_first` to take an owned
+  cloned snapshot of the receiver Vec so the canonical Vec can be
+  mutated by the new select arm without borrow conflicts.
+- `mod.rs`: `PEER_TTL` bumped from 120 s to 300 s for defence in
+  depth.
+
+No public API change; existing integration test
+`tests/discovery_round_trip.rs` continues to pass. Live LAN verified:
+both `fono-ai` (Whisper STT) and `piper-ai` (Piper TTS) remain in
+`fono discover` indefinitely on a host where `avahi-daemon` is also
+running.
+
+Pre-commit gate clean: `cargo fmt`, `cargo clippy --workspace
+--all-targets -- -D warnings`, `cargo test --workspace --tests --lib`.
 
 ## 2026-05-17 — Live preview folded into overlay style picker
 

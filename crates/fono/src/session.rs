@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! End-to-end dictation orchestrator.
 //!
-//! Owns the active capture stream, the STT/LLM backends, and the
+//! Owns the active capture stream, the STT/polish backends, and the
 //! history-DB handle. Plumbs the FSM events from `fono-hotkey` through
 //! the pipeline and emits `ProcessingDone` once the pipeline task has
 //! finished (or failed).
@@ -23,7 +23,7 @@ use fono_core::config::{Config, ContextRule};
 use fono_core::history::{HistoryDb, Transcription as HistoryRow};
 use fono_core::{Paths, Secrets};
 use fono_hotkey::{HotkeyAction, RecordingMode};
-use fono_llm::{FormatContext, TextFormatter};
+use fono_polish::{FormatContext, TextFormatter};
 use fono_stt::SpeechToText;
 #[cfg(feature = "interactive")]
 use fono_stt::StreamingStt;
@@ -167,7 +167,7 @@ pub struct PipelineMetrics {
     pub raw_chars: usize,
     pub final_chars: usize,
     /// True if the LLM was skipped because the raw transcript was below
-    /// `Llm.skip_if_words_lt` words. Latency plan L9.
+    /// `Polish.skip_if_words_lt` words. Latency plan L9.
     pub llm_skipped_short: bool,
 }
 
@@ -256,7 +256,7 @@ impl FocusProbe for RealFocusProbe {
 
 /// The orchestrator. One per running daemon.
 ///
-/// `stt`, `llm`, and `config` live behind `RwLock<Arc<…>>` so the
+/// `stt`, `polish`, and `config` live behind `RwLock<Arc<…>>` so the
 /// daemon can hot-swap them when the user runs `fono use …` or
 /// `fono keys …` without a restart. The recording hot path takes a
 /// single `read()` on each lock and clones the inner `Arc`, so the
@@ -270,7 +270,7 @@ pub struct SessionOrchestrator {
     /// must gracefully fall back to the batch path.
     #[cfg(feature = "interactive")]
     streaming_stt: Arc<StdRwLock<Option<Arc<dyn StreamingStt>>>>,
-    llm: Arc<StdRwLock<Option<Arc<dyn TextFormatter>>>>,
+    polish: Arc<StdRwLock<Option<Arc<dyn TextFormatter>>>>,
     /// TTS backend for the assistant's audio reply path. `None` when
     /// `[tts].backend = none` or the factory failed.
     tts: Arc<StdRwLock<Option<Arc<dyn TextToSpeech>>>>,
@@ -339,13 +339,14 @@ impl SessionOrchestrator {
         let stt =
             fono_stt::build_stt(&config.stt, &config.general, secrets, &paths.whisper_models_dir())
                 .context("build STT backend")?;
-        let llm = match fono_llm::build_llm(&config.llm, secrets, &paths.llm_models_dir()) {
-            Ok(opt) => opt,
-            Err(e) => {
-                warn!("LLM backend unavailable; continuing without cleanup: {e:#}");
-                None
-            }
-        };
+        let polish =
+            match fono_polish::build_polish(&config.polish, secrets, &paths.polish_models_dir()) {
+                Ok(opt) => opt,
+                Err(e) => {
+                    warn!("polish backend unavailable; continuing without cleanup: {e:#}");
+                    None
+                }
+            };
         let tts = match fono_tts::build_tts(&config.tts, secrets) {
             Ok(opt) => opt,
             Err(e) => {
@@ -366,7 +367,7 @@ impl SessionOrchestrator {
         let config_for_env = Arc::clone(&config);
         let mut orch = Self::with_parts(
             stt,
-            llm,
+            polish,
             history,
             capture_cfg,
             Arc::clone(&config),
@@ -477,17 +478,21 @@ impl SessionOrchestrator {
         let new_stt =
             fono_stt::build_stt(&cfg.stt, &cfg.general, &secrets, &paths.whisper_models_dir())
                 .context("reload: build STT")?;
-        let new_llm = match fono_llm::build_llm(&cfg.llm, &secrets, &paths.llm_models_dir()) {
+        let new_polish = match fono_polish::build_polish(
+            &cfg.polish,
+            &secrets,
+            &paths.polish_models_dir(),
+        ) {
             Ok(opt) => opt,
             Err(e) => {
                 let err_text = format!("{e:#}");
-                let provider = fono_core::providers::llm_backend_str(&cfg.llm.backend);
+                let provider = fono_core::providers::polish_backend_str(&cfg.polish.backend);
                 fono_core::critical_notify::notify_actionable(
-                    fono_core::critical_notify::Stage::Llm,
+                    fono_core::critical_notify::Stage::Polish,
                     provider,
                     &err_text,
                 );
-                warn!("reload: LLM backend unavailable; continuing without cleanup: {err_text}");
+                warn!("reload: polish backend unavailable; continuing without cleanup: {err_text}");
                 None
             }
         };
@@ -521,7 +526,7 @@ impl SessionOrchestrator {
         };
         let stt_name = new_stt.name().to_string();
         let llm_name =
-            new_llm.as_ref().map_or_else(|| "none".to_string(), |l| l.name().to_string());
+            new_polish.as_ref().map_or_else(|| "none".to_string(), |l| l.name().to_string());
         // Lock-write order matches read order in the hot path.
         if let Ok(mut guard) = self.stt.write() {
             *guard = new_stt;
@@ -549,8 +554,8 @@ impl SessionOrchestrator {
                 *guard = new_streaming;
             }
         }
-        if let Ok(mut guard) = self.llm.write() {
-            *guard = new_llm;
+        if let Ok(mut guard) = self.polish.write() {
+            *guard = new_polish;
         }
         if let Ok(mut guard) = self.tts.write() {
             *guard = new_tts;
@@ -585,14 +590,14 @@ impl SessionOrchestrator {
         // Re-prewarm the new backends so the first post-switch
         // dictation isn't cold (latency plan L3 still applies).
         self.spawn_warmups();
-        info!("reloaded: stt={stt_name} llm={llm_name}");
-        Ok(format!("active: stt={stt_name} llm={llm_name}"))
+        info!("reloaded: stt={stt_name} polish={llm_name}");
+        Ok(format!("active: stt={stt_name} polish={llm_name}"))
     }
 
     /// Read-only snapshot of the active backend names. Returns the
     /// **canonical** lowercase identifier from
     /// [`fono_core::providers::stt_backend_str`] /
-    /// [`fono_core::providers::llm_backend_str`] (e.g. `"local"`,
+    /// [`fono_core::providers::polish_backend_str`] (e.g. `"local"`,
     /// `"groq"`, `"none"`) so the tray's active-marker comparison and
     /// the doctor / status output stay in sync. The trait `name()`s
     /// (e.g. `"whisper-local"`, `"llama-local"`) are intentionally
@@ -601,8 +606,8 @@ impl SessionOrchestrator {
     pub fn active_backends(&self) -> (String, String) {
         let cfg = self.current_config();
         let stt = fono_core::providers::stt_backend_str(&cfg.stt.backend).to_string();
-        let llm = fono_core::providers::llm_backend_str(&cfg.llm.backend).to_string();
-        (stt, llm)
+        let polish = fono_core::providers::polish_backend_str(&cfg.polish.backend).to_string();
+        (stt, polish)
     }
 
     /// Same as [`Self::active_backends`] but also reports the
@@ -612,11 +617,11 @@ impl SessionOrchestrator {
     pub fn active_backends_full(&self) -> (String, String, String, String) {
         let cfg = self.current_config();
         let stt = fono_core::providers::stt_backend_str(&cfg.stt.backend).to_string();
-        let llm = fono_core::providers::llm_backend_str(&cfg.llm.backend).to_string();
+        let polish = fono_core::providers::polish_backend_str(&cfg.polish.backend).to_string();
         let assistant =
             fono_core::providers::assistant_backend_str(&cfg.assistant.backend).to_string();
         let tts = fono_core::providers::tts_backend_str(&cfg.tts.backend).to_string();
-        (stt, llm, assistant, tts)
+        (stt, polish, assistant, tts)
     }
 
     fn current_stt(&self) -> Arc<dyn SpeechToText> {
@@ -633,7 +638,7 @@ impl SessionOrchestrator {
     }
 
     fn current_llm(&self) -> Option<Arc<dyn TextFormatter>> {
-        self.llm.read().expect("llm lock poisoned").clone()
+        self.polish.read().expect("polish lock poisoned").clone()
     }
 
     fn current_config(&self) -> Arc<Config> {
@@ -1025,16 +1030,16 @@ impl SessionOrchestrator {
                 Err(e) => debug!("warmup: stt {} prewarm skipped: {e:#}", stt.name()),
             }
         });
-        if let Some(llm) = self.current_llm() {
+        if let Some(polish) = self.current_llm() {
             tokio::spawn(async move {
                 let started = Instant::now();
-                match llm.prewarm().await {
+                match polish.prewarm().await {
                     Ok(()) => debug!(
-                        "warmup: llm {} ready in {}ms",
-                        llm.name(),
+                        "warmup: polish {} ready in {}ms",
+                        polish.name(),
                         started.elapsed().as_millis()
                     ),
-                    Err(e) => debug!("warmup: llm {} prewarm skipped: {e:#}", llm.name()),
+                    Err(e) => debug!("warmup: polish {} prewarm skipped: {e:#}", polish.name()),
                 }
             });
         }
@@ -1051,7 +1056,7 @@ impl SessionOrchestrator {
     #[allow(clippy::too_many_arguments)]
     pub fn with_parts(
         stt: Arc<dyn SpeechToText>,
-        llm: Option<Arc<dyn TextFormatter>>,
+        polish: Option<Arc<dyn TextFormatter>>,
         history: Arc<Mutex<HistoryDb>>,
         capture_cfg: CaptureConfig,
         config: Arc<Config>,
@@ -1066,7 +1071,7 @@ impl SessionOrchestrator {
             stt: Arc::new(StdRwLock::new(stt)),
             #[cfg(feature = "interactive")]
             streaming_stt: Arc::new(StdRwLock::new(None)),
-            llm: Arc::new(StdRwLock::new(llm)),
+            polish: Arc::new(StdRwLock::new(polish)),
             tts: Arc::new(StdRwLock::new(None)),
             assistant_backend: Arc::new(StdRwLock::new(None)),
             assistant_session: Arc::new(Mutex::new(AssistantSessionState::new(
@@ -1738,7 +1743,7 @@ impl SessionOrchestrator {
         polish_anim: Option<tokio::task::AbortHandle>,
     ) {
         let stt = self.current_stt();
-        let llm = self.current_llm();
+        let polish = self.current_llm();
         let history = Arc::clone(&self.history);
         let action_tx = self.action_tx.clone();
         let in_flight = Arc::clone(&self.pipeline_in_flight);
@@ -1765,7 +1770,7 @@ impl SessionOrchestrator {
                 sample_rate,
                 capture_ms,
                 stt.as_ref(),
-                llm.as_deref(),
+                polish.as_deref(),
                 &history,
                 &config,
                 injector.as_ref(),
@@ -1775,7 +1780,7 @@ impl SessionOrchestrator {
             match &outcome {
                 PipelineOutcome::Completed { metrics, .. } => {
                     info!(
-                        "pipeline ok: capture={}ms trim={}ms ({}→{} samples) stt={}ms llm={}ms{} inject={}ms ({} → {} chars)",
+                        "pipeline ok: capture={}ms trim={}ms ({}→{} samples) stt={}ms polish={}ms{} inject={}ms ({} → {} chars)",
                         metrics.capture_ms,
                         metrics.trim_ms,
                         metrics.samples,
@@ -1815,14 +1820,14 @@ impl SessionOrchestrator {
     /// orchestrator's STT/LLM/inject/history.
     pub async fn run_oneshot(&self, pcm: Vec<f32>, capture_ms: u64) -> PipelineOutcome {
         let stt = self.current_stt();
-        let llm = self.current_llm();
+        let polish = self.current_llm();
         let config = self.current_config();
         run_pipeline(
             pcm,
             self.capture_cfg.target_sample_rate,
             capture_ms,
             stt.as_ref(),
-            llm.as_deref(),
+            polish.as_deref(),
             &self.history,
             &config,
             self.injector.as_ref(),
@@ -2087,7 +2092,7 @@ impl SessionOrchestrator {
         // we hear about the final transcript.
         let transcript_res = session.run_join.await;
         // Keep the overlay visible — we'll switch it to Processing
-        // during LLM cleanup and back to LiveDictating with the final
+        // during polish and back to LiveDictating with the final
         // text just before injection so the user can actually read
         // what's about to be typed.
         let transcript = match transcript_res {
@@ -2137,7 +2142,7 @@ impl SessionOrchestrator {
         // Slice A simplification (documented inline): we do NOT pipe
         // the live-committed text through the full `run_pipeline`
         // function — that path expects raw PCM and runs the batch STT
-        // a second time. Instead we run an optional LLM cleanup pass
+        // a second time. Instead we run an optional polish pass
         // and inject directly. History gets the raw + cleaned pair so
         // `fono history` and the tray's "Recent transcriptions" menu
         // surface live dictations identically to batch ones. The
@@ -2148,7 +2153,7 @@ impl SessionOrchestrator {
         let mut llm_ms: u64 = 0;
         let mut llm_label_for_log: Option<String> = None;
         let cleaned = if cfg.interactive.cleanup_on_finalize {
-            if let Some(llm) = self.current_llm() {
+            if let Some(polish) = self.current_llm() {
                 // Show "polishing…" so the user knows we haven't
                 // hung after the streaming ended.
                 if let Some(o) = session.overlay.as_ref() {
@@ -2158,8 +2163,8 @@ impl SessionOrchestrator {
                 let (app_class, app_title) = self.focus.probe();
                 let ctx =
                     build_format_context(&cfg, app_class.as_deref(), app_title.as_deref(), None);
-                llm_label_for_log = Some(llm.name().to_string());
-                match llm.format(&raw, &ctx).await {
+                llm_label_for_log = Some(polish.name().to_string());
+                match polish.format(&raw, &ctx).await {
                     Ok(c) => {
                         llm_ms = llm_started.elapsed().as_millis() as u64;
                         let trimmed = c.trim().to_string();
@@ -2168,13 +2173,15 @@ impl SessionOrchestrator {
                         // Mirror the batch pipeline's INFO logs at
                         // `session.rs:1253-1265` so live and batch produce
                         // structurally-identical operator output.
-                        info!("llm: {} {}ms → {} chars", llm.name(), llm_ms, new_chars);
+                        info!("polish: {} {}ms → {} chars", polish.name(), llm_ms, new_chars);
                         let diff = i64::try_from(new_chars).unwrap_or(0)
                             - i64::try_from(raw_chars).unwrap_or(0);
                         if trimmed == raw {
-                            info!("llm: cleanup no-op (input unchanged, {raw_chars} chars)");
+                            info!("polish: cleanup no-op (input unchanged, {raw_chars} chars)");
                         } else {
-                            info!("llm: cleanup diff {raw_chars} → {new_chars} chars ({diff:+})");
+                            info!(
+                                "polish: cleanup diff {raw_chars} → {new_chars} chars ({diff:+})"
+                            );
                         }
                         if trimmed.is_empty() {
                             None
@@ -2184,7 +2191,7 @@ impl SessionOrchestrator {
                     }
                     Err(e) => {
                         llm_ms = llm_started.elapsed().as_millis() as u64;
-                        warn!("live-dictation: LLM cleanup failed after {llm_ms}ms: {e:#}");
+                        warn!("live-dictation: polish failed after {llm_ms}ms: {e:#}");
                         // Mirror the batch path: surface auth or
                         // network failures once per session so the
                         // user notices the expired key / offline
@@ -2201,8 +2208,8 @@ impl SessionOrchestrator {
                                 | fono_core::critical_notify::ErrorClass::TermsRequired
                         ) {
                             fono_core::critical_notify::notify(
-                                fono_core::critical_notify::Stage::Llm,
-                                llm.name(),
+                                fono_core::critical_notify::Stage::Polish,
+                                polish.name(),
                                 class,
                                 &err_text,
                             );
@@ -2255,7 +2262,7 @@ impl SessionOrchestrator {
         let final_chars = final_text.chars().count();
         let llm_label = llm_label_for_log.as_deref().unwrap_or("none");
         info!(
-            "pipeline ok (live): capture={}ms stt=streaming({} segments) llm={} {}ms inject={}ms ({} → {} chars)",
+            "pipeline ok (live): capture={}ms stt=streaming({} segments) polish={} {}ms inject={}ms ({} → {} chars)",
             capture_ms,
             transcript.segments_finalized,
             llm_label,
@@ -2283,7 +2290,7 @@ impl SessionOrchestrator {
                 app_class,
                 app_title,
                 stt_backend: Some(stt_label),
-                llm_backend: llm_label,
+                polish_backend: llm_label,
                 language: None,
             };
             let redact = cfg.history.redact_secrets;
@@ -2315,7 +2322,7 @@ async fn run_pipeline(
     sample_rate: u32,
     capture_ms: u64,
     stt: &dyn SpeechToText,
-    llm: Option<&dyn TextFormatter>,
+    polish: Option<&dyn TextFormatter>,
     history: &Arc<Mutex<HistoryDb>>,
     config: &Config,
     injector: &dyn Injector,
@@ -2405,7 +2412,7 @@ async fn run_pipeline(
     }
     info!("stt: {} {}ms → {} chars", stt.name(), metrics.stt_ms, metrics.raw_chars);
 
-    // ---- LLM cleanup (optional) -------------------------------------
+    // ---- polish (optional) -------------------------------------
     let (app_class, app_title) = focus.probe();
     tracing::debug!(
         target: "fono::pipeline",
@@ -2413,19 +2420,20 @@ async fn run_pipeline(
         trans.language, app_class, app_title,
     );
     let word_count = raw.split_whitespace().count() as u32;
-    let skip_short = config.llm.skip_if_words_lt > 0 && word_count < config.llm.skip_if_words_lt;
+    let skip_short =
+        config.polish.skip_if_words_lt > 0 && word_count < config.polish.skip_if_words_lt;
     let cleaned = if skip_short {
         // Latency plan L9 — short utterances rarely need cleanup;
         // skipping the LLM saves 150–800 ms.
-        if llm.is_some() {
+        if polish.is_some() {
             info!(
-                "llm: skipped (short utterance: {} word(s) < {})",
-                word_count, config.llm.skip_if_words_lt
+                "polish: skipped (short utterance: {} word(s) < {})",
+                word_count, config.polish.skip_if_words_lt
             );
             metrics.llm_skipped_short = true;
         }
         None
-    } else if let Some(llm_backend) = llm {
+    } else if let Some(polish_backend) = polish {
         let ctx = build_format_context(
             config,
             app_class.as_deref(),
@@ -2434,26 +2442,31 @@ async fn run_pipeline(
         );
         tracing::debug!(
             target: "fono::pipeline",
-            "llm.prompt main={:?} advanced={:?} dictionary={:?}",
+            "polish.prompt main={:?} advanced={:?} dictionary={:?}",
             ctx.main_prompt, ctx.advanced_prompt, ctx.dictionary,
         );
-        tracing::debug!(target: "fono::pipeline", "llm.input: {raw:?}");
+        tracing::debug!(target: "fono::pipeline", "polish.input: {raw:?}");
         let llm_started = Instant::now();
-        match llm_backend.format(&raw, &ctx).await {
+        match polish_backend.format(&raw, &ctx).await {
             Ok(c) => {
                 metrics.llm_ms = llm_started.elapsed().as_millis() as u64;
                 let trimmed = c.trim().to_string();
                 let raw_chars = raw.chars().count();
                 let new_chars = trimmed.chars().count();
-                info!("llm: {} {}ms → {} chars", llm_backend.name(), metrics.llm_ms, new_chars);
+                info!(
+                    "polish: {} {}ms → {} chars",
+                    polish_backend.name(),
+                    metrics.llm_ms,
+                    new_chars
+                );
                 let diff =
                     i64::try_from(new_chars).unwrap_or(0) - i64::try_from(raw_chars).unwrap_or(0);
                 if trimmed == raw {
-                    info!("llm: cleanup no-op (input unchanged, {raw_chars} chars)");
+                    info!("polish: cleanup no-op (input unchanged, {raw_chars} chars)");
                 } else {
-                    info!("llm: cleanup diff {raw_chars} → {new_chars} chars ({diff:+})");
+                    info!("polish: cleanup diff {raw_chars} → {new_chars} chars ({diff:+})");
                 }
-                tracing::debug!(target: "fono::pipeline", "llm.output: {trimmed:?}");
+                tracing::debug!(target: "fono::pipeline", "polish.output: {trimmed:?}");
                 if trimmed.is_empty() {
                     None
                 } else {
@@ -2462,7 +2475,7 @@ async fn run_pipeline(
             }
             Err(e) => {
                 metrics.llm_ms = llm_started.elapsed().as_millis() as u64;
-                warn!("llm: {} failed after {}ms: {e:#}", llm_backend.name(), metrics.llm_ms);
+                warn!("polish: {} failed after {}ms: {e:#}", polish_backend.name(), metrics.llm_ms);
                 // Surface user-actionable failures (auth or network)
                 // once per session. Transient `Other` failures stay
                 // silent — the raw STT text is still injected below
@@ -2479,8 +2492,8 @@ async fn run_pipeline(
                         | fono_core::critical_notify::ErrorClass::TermsRequired
                 ) {
                     fono_core::critical_notify::notify(
-                        fono_core::critical_notify::Stage::Llm,
-                        llm_backend.name(),
+                        fono_core::critical_notify::Stage::Polish,
+                        polish_backend.name(),
                         class,
                         &err_text,
                     );
@@ -2550,7 +2563,7 @@ async fn run_pipeline(
             app_class,
             app_title,
             stt_backend: Some(stt.name().to_string()),
-            llm_backend: llm.map(|l| l.name().to_string()),
+            polish_backend: polish.map(|l| l.name().to_string()),
             language: trans.language.clone(),
         };
         let redact = config.history.redact_secrets;
@@ -2578,9 +2591,9 @@ fn build_format_context(
     language: Option<&str>,
 ) -> FormatContext {
     let mut ctx = FormatContext {
-        main_prompt: config.llm.prompt.main.clone(),
-        advanced_prompt: config.llm.prompt.advanced.clone(),
-        dictionary: config.llm.prompt.dictionary.clone(),
+        main_prompt: config.polish.prompt.main.clone(),
+        advanced_prompt: config.polish.prompt.advanced.clone(),
+        dictionary: config.polish.prompt.dictionary.clone(),
         rule_suffix: matched_rule_suffix(&config.context_rules, app_class, app_title),
         app_class: app_class.map(str::to_string),
         app_title: app_title.map(str::to_string),
@@ -2635,7 +2648,7 @@ fn now_unix() -> i64 {
 #[must_use]
 pub fn orchestrator_for_test(
     stt: Arc<dyn SpeechToText>,
-    llm: Option<Arc<dyn TextFormatter>>,
+    polish: Option<Arc<dyn TextFormatter>>,
     history_path: &Path,
     config: Arc<Config>,
     injector: Arc<dyn Injector>,
@@ -2647,7 +2660,7 @@ pub fn orchestrator_for_test(
     let capture_cfg = CaptureConfig::default();
     let orch = SessionOrchestrator::with_parts(
         stt,
-        llm,
+        polish,
         history,
         capture_cfg,
         config,

@@ -26,7 +26,7 @@
 //!   [`TrayAction::PasteHistory`] with the slot index (0 = newest); the
 //!   daemon then re-injects/copies that text. This is the clipit-style
 //!   workflow users asked for.
-//! - **STT / LLM backend submenus** — switch the active provider on
+//! - **STT / polish backend submenus** — switch the active provider on
 //!   the fly; the active backend wears a leading "● " marker. The STT
 //!   menu also includes live mDNS-discovered Wyoming servers, which the
 //!   daemon writes to config and hot-reloads when selected.
@@ -61,8 +61,8 @@ pub const DISABLED_SENTINEL: &str = "\u{0001}";
 pub type RecentProvider = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 
 /// Provider that returns `(stt_idx, llm_idx)` — indices into
-/// `stt_labels` / `llm_labels` (the slices passed to [`spawn`]) for
-/// the currently-active STT and LLM backends. Polled every ~2 s; the
+/// `stt_labels` / `polish_labels` (the slices passed to [`spawn`]) for
+/// the currently-active STT and polish backends. Polled every ~2 s; the
 /// tray repaints the active marker (`●`) when the indices change.
 ///
 /// `u8::MAX` for any index means "unknown / not in the list" and
@@ -71,7 +71,7 @@ pub type RecentProvider = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ActiveBackends {
     pub stt: u8,
-    pub llm: u8,
+    pub polish: u8,
     pub assistant: u8,
     pub tts: u8,
 }
@@ -81,7 +81,7 @@ impl ActiveBackends {
     /// `u8::MAX` convention.
     #[must_use]
     pub fn unknown() -> Self {
-        Self { stt: u8::MAX, llm: u8::MAX, assistant: u8::MAX, tts: u8::MAX }
+        Self { stt: u8::MAX, polish: u8::MAX, assistant: u8::MAX, tts: u8::MAX }
     }
 }
 
@@ -232,9 +232,9 @@ pub enum TrayAction {
     /// Switch to the i-th mDNS-discovered Wyoming server shown in the
     /// tray's "STT backend" submenu.
     UseDiscoveredStt(u8),
-    /// Switch the active LLM backend. Index into the `llm_labels`
+    /// Switch the active polish backend. Index into the `polish_labels`
     /// slice passed to [`spawn`].
-    UseLlm(u8),
+    UsePolish(u8),
     /// User clicked the "Update to vX" entry. The daemon handles
     /// this by running a check and applying the update via
     /// `fono-update::apply_update`.
@@ -290,7 +290,7 @@ pub enum TrayAction {
     AssistantForget,
     /// Switch the active assistant chat backend. Index into the
     /// `assistant_labels` slice passed to [`spawn`]. Mirrors
-    /// [`Self::UseLlm`] but persists into `[assistant].backend`.
+    /// [`Self::UsePolish`] but persists into `[assistant].backend`.
     UseAssistant(u8),
     /// Switch the active TTS backend. Index into `tts_labels`.
     UseTts(u8),
@@ -337,9 +337,9 @@ impl Tray {
 /// Submenu inputs:
 /// * `recent_provider` — invoked every ~2 s for the "Recent
 ///   transcriptions" submenu. Pass a noop (`|| Vec::new()`) to disable.
-/// * `stt_labels` / `llm_labels` — display strings for each STT / LLM
+/// * `stt_labels` / `polish_labels` — display strings for each STT / LLM
 ///   backend, in canonical order (the order the daemon also iterates
-///   when decoding indices back to `SttBackend` / `LlmBackend`).
+///   when decoding indices back to `SttBackend` / `PolishBackend`).
 /// * `active_provider` — invoked on the same poll; returns the indices
 ///   of the currently-active STT and LLM in the slices above. Used to
 ///   paint the active-marker (`●`) and migrate it on `Reload`.
@@ -361,7 +361,7 @@ pub fn spawn(
     tooltip: &str,
     recent_provider: RecentProvider,
     stt_labels: Vec<String>,
-    llm_labels: Vec<String>,
+    polish_labels: Vec<String>,
     assistant_labels: Vec<String>,
     tts_labels: Vec<String>,
     active_provider: ActiveProvider,
@@ -383,7 +383,7 @@ pub fn spawn(
             state_rx,
             recent_provider,
             stt_labels,
-            llm_labels,
+            polish_labels,
             assistant_labels,
             tts_labels,
             active_provider,
@@ -459,7 +459,7 @@ mod backend {
         state: TrayState,
         recent: Vec<String>,
         stt_labels: Vec<String>,
-        llm_labels: Vec<String>,
+        polish_labels: Vec<String>,
         assistant_labels: Vec<String>,
         tts_labels: Vec<String>,
         active: ActiveBackends,
@@ -520,7 +520,7 @@ mod backend {
         state_rx: mpsc::UnboundedReceiver<TrayState>,
         recent_provider: RecentProvider,
         stt_labels: Vec<String>,
-        llm_labels: Vec<String>,
+        polish_labels: Vec<String>,
         assistant_labels: Vec<String>,
         tts_labels: Vec<String>,
         active_provider: ActiveProvider,
@@ -544,7 +544,7 @@ mod backend {
                 state_rx,
                 recent_provider,
                 stt_labels,
-                llm_labels,
+                polish_labels,
                 assistant_labels,
                 tts_labels,
                 active_provider,
@@ -772,7 +772,7 @@ mod backend {
         mut state_rx: mpsc::UnboundedReceiver<TrayState>,
         recent_provider: RecentProvider,
         stt_labels: Vec<String>,
-        llm_labels: Vec<String>,
+        polish_labels: Vec<String>,
         assistant_labels: Vec<String>,
         tts_labels: Vec<String>,
         active_provider: ActiveProvider,
@@ -800,7 +800,7 @@ mod backend {
             state: TrayState::Idle,
             recent: Vec::new(),
             stt_labels,
-            llm_labels,
+            polish_labels,
             assistant_labels,
             tts_labels,
             active: ActiveBackends::unknown(),
@@ -1052,31 +1052,31 @@ mod backend {
                 .into(),
         );
 
-        // LLM backend submenu.
-        if t.llm_labels.is_empty() {
+        // polish backend submenu.
+        if t.polish_labels.is_empty() {
             tracing::warn!(
-                "tray: llm_labels is empty during build_menu — \
+                "tray: polish_labels is empty during build_menu — \
                  daemon should have populated at least the active backend"
             );
         }
-        let mut llm_items: Vec<MenuItem<KsniTray>> = t
-            .llm_labels
+        let mut polish_items: Vec<MenuItem<KsniTray>> = t
+            .polish_labels
             .iter()
             .enumerate()
             .map(|(i, label)| {
-                let active = u8::try_from(i).is_ok_and(|i_u8| i_u8 == t.active.llm);
+                let active = u8::try_from(i).is_ok_and(|i_u8| i_u8 == t.active.polish);
                 let prefix = if active { "● " } else { "  " };
                 let idx_u8 = u8::try_from(i).unwrap_or(u8::MAX);
                 StandardItem {
                     label: format!("{prefix}{label}"),
-                    activate: send_action(TrayAction::UseLlm(idx_u8)),
+                    activate: send_action(TrayAction::UsePolish(idx_u8)),
                     ..Default::default()
                 }
                 .into()
             })
             .collect();
-        if llm_items.is_empty() {
-            llm_items.push(
+        if polish_items.is_empty() {
+            polish_items.push(
                 StandardItem {
                     label: "(no backends configured — `fono keys add …`)".into(),
                     enabled: false,
@@ -1086,11 +1086,11 @@ mod backend {
             );
         }
         items.push(
-            SubMenu { label: "LLM backend".into(), submenu: llm_items, ..Default::default() }
+            SubMenu { label: "Polish backend".into(), submenu: polish_items, ..Default::default() }
                 .into(),
         );
 
-        // Assistant backend submenu. Independent of the LLM cleanup
+        // Assistant backend submenu. Independent of the polish
         // pipeline above — this drives `[assistant].backend`. Empty
         // when the user hasn't enabled the assistant or hasn't
         // configured any keys.

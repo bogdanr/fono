@@ -21,8 +21,8 @@ Fono is designed so that audio and transcripts leave your machine
 |----------------------------------------|------------------------------------|------------------------------|
 | `stt.backend` = local                  | nothing                            | —                            |
 | `stt.backend` = Groq / OpenAI / etc.   | recorded audio (WAV)               | configured STT endpoint      |
-| `llm.backend` = local                  | nothing                            | —                            |
-| `llm.backend` = Cerebras / OpenAI / … | raw transcript text + prompt      | configured LLM endpoint      |
+| `polish.backend` = local                  | nothing                            | —                            |
+| `polish.backend` = Cerebras / OpenAI / … | raw transcript text + prompt      | configured LLM endpoint      |
 | Model download (`fono models install`) | HTTP GET (no auth, no identifiers) | `https://huggingface.co` or `FONO_MODEL_MIRROR` |
 
 Cloud providers' retention and training policies are **their** policies,

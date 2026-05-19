@@ -2,15 +2,15 @@
 //! Canonical provider metadata: enum-string mapping + default API-key
 //! environment-variable name. Single source of truth shared by:
 //!
-//! * `fono-stt` / `fono-llm` factories (resolving `cloud=None`),
+//! * `fono-stt` / `fono-polish` factories (resolving `cloud=None`),
 //! * `fono` CLI (`fono use`, `fono keys`),
 //! * `fono` wizard (key prompts, multi-provider opt-in),
 //! * `fono` doctor (per-provider reachability).
 //!
 //! Provider-switching plan S2 — keep changes here in sync with the
-//! `defaults` modules in `fono-stt` / `fono-llm` for model strings.
+//! `defaults` modules in `fono-stt` / `fono-polish` for model strings.
 
-use crate::config::{AssistantBackend, LlmBackend, SttBackend, TtsBackend};
+use crate::config::{AssistantBackend, PolishBackend, SttBackend, TtsBackend};
 
 /// Canonical lower-case identifier for a STT backend (matches serde
 /// rename and what users type on the CLI: `fono use stt groq`).
@@ -53,34 +53,34 @@ pub fn parse_stt_backend(s: &str) -> Option<SttBackend> {
     }
 }
 
-/// Canonical lower-case identifier for a LLM backend.
+/// Canonical lower-case identifier for a polish backend.
 #[must_use]
-pub const fn llm_backend_str(b: &LlmBackend) -> &'static str {
+pub const fn polish_backend_str(b: &PolishBackend) -> &'static str {
     match b {
-        LlmBackend::Local => "local",
-        LlmBackend::None => "none",
-        LlmBackend::OpenAI => "openai",
-        LlmBackend::Anthropic => "anthropic",
-        LlmBackend::Gemini => "gemini",
-        LlmBackend::Groq => "groq",
-        LlmBackend::Cerebras => "cerebras",
-        LlmBackend::OpenRouter => "openrouter",
-        LlmBackend::Ollama => "ollama",
+        PolishBackend::Local => "local",
+        PolishBackend::None => "none",
+        PolishBackend::OpenAI => "openai",
+        PolishBackend::Anthropic => "anthropic",
+        PolishBackend::Gemini => "gemini",
+        PolishBackend::Groq => "groq",
+        PolishBackend::Cerebras => "cerebras",
+        PolishBackend::OpenRouter => "openrouter",
+        PolishBackend::Ollama => "ollama",
     }
 }
 
 #[must_use]
-pub fn parse_llm_backend(s: &str) -> Option<LlmBackend> {
+pub fn parse_polish_backend(s: &str) -> Option<PolishBackend> {
     match s.to_ascii_lowercase().as_str() {
-        "local" => Some(LlmBackend::Local),
-        "none" | "off" | "skip" => Some(LlmBackend::None),
-        "openai" => Some(LlmBackend::OpenAI),
-        "anthropic" => Some(LlmBackend::Anthropic),
-        "gemini" => Some(LlmBackend::Gemini),
-        "groq" => Some(LlmBackend::Groq),
-        "cerebras" => Some(LlmBackend::Cerebras),
-        "openrouter" => Some(LlmBackend::OpenRouter),
-        "ollama" => Some(LlmBackend::Ollama),
+        "local" => Some(PolishBackend::Local),
+        "none" | "off" | "skip" => Some(PolishBackend::None),
+        "openai" => Some(PolishBackend::OpenAI),
+        "anthropic" => Some(PolishBackend::Anthropic),
+        "gemini" => Some(PolishBackend::Gemini),
+        "groq" => Some(PolishBackend::Groq),
+        "cerebras" => Some(PolishBackend::Cerebras),
+        "openrouter" => Some(PolishBackend::OpenRouter),
+        "ollama" => Some(PolishBackend::Ollama),
         _ => None,
     }
 }
@@ -109,15 +109,15 @@ pub const fn stt_key_env(b: &SttBackend) -> &'static str {
 }
 
 #[must_use]
-pub const fn llm_key_env(b: &LlmBackend) -> &'static str {
+pub const fn polish_key_env(b: &PolishBackend) -> &'static str {
     match b {
-        LlmBackend::Local | LlmBackend::None | LlmBackend::Ollama => "",
-        LlmBackend::OpenAI => "OPENAI_API_KEY",
-        LlmBackend::Anthropic => "ANTHROPIC_API_KEY",
-        LlmBackend::Gemini => "GEMINI_API_KEY",
-        LlmBackend::Groq => "GROQ_API_KEY",
-        LlmBackend::Cerebras => "CEREBRAS_API_KEY",
-        LlmBackend::OpenRouter => "OPENROUTER_API_KEY",
+        PolishBackend::Local | PolishBackend::None | PolishBackend::Ollama => "",
+        PolishBackend::OpenAI => "OPENAI_API_KEY",
+        PolishBackend::Anthropic => "ANTHROPIC_API_KEY",
+        PolishBackend::Gemini => "GEMINI_API_KEY",
+        PolishBackend::Groq => "GROQ_API_KEY",
+        PolishBackend::Cerebras => "CEREBRAS_API_KEY",
+        PolishBackend::OpenRouter => "OPENROUTER_API_KEY",
     }
 }
 
@@ -127,8 +127,8 @@ pub const fn stt_requires_key(b: &SttBackend) -> bool {
 }
 
 #[must_use]
-pub const fn llm_requires_key(b: &LlmBackend) -> bool {
-    !matches!(b, LlmBackend::Local | LlmBackend::None | LlmBackend::Ollama)
+pub const fn polish_requires_key(b: &PolishBackend) -> bool {
+    !matches!(b, PolishBackend::Local | PolishBackend::None | PolishBackend::Ollama)
 }
 
 /// Canonical lower-case identifier for a TTS backend.
@@ -215,7 +215,7 @@ pub fn parse_assistant_backend(s: &str) -> Option<AssistantBackend> {
 }
 
 /// Canonical environment-variable name for the API key of a cloud
-/// assistant backend. Reuses the same env vars as the LLM cleanup
+/// assistant backend. Reuses the same env vars as the polish
 /// path (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.), so a single
 /// stored key serves both consumers without duplicate prompts in
 /// the wizard.
@@ -236,7 +236,7 @@ pub const fn assistant_requires_key(b: &AssistantBackend) -> bool {
     !matches!(b, AssistantBackend::None | AssistantBackend::Ollama)
 }
 
-/// Paired cloud preset for `fono use cloud <name>`. Returns `(stt, llm)`
+/// Paired cloud preset for `fono use cloud <name>`. Returns `(stt, polish)`
 /// for the preset, or `None` if the name isn't a known pair.
 ///
 /// Looks up [`crate::provider_catalog::CLOUD_PROVIDERS`] as the source of
@@ -247,7 +247,7 @@ pub const fn assistant_requires_key(b: &AssistantBackend) -> bool {
 /// capability (Deepgram, AssemblyAI), the pair falls back to Cerebras
 /// for cleanup.
 #[must_use]
-pub fn cloud_pair(name: &str) -> Option<(SttBackend, LlmBackend)> {
+pub fn cloud_pair(name: &str) -> Option<(SttBackend, PolishBackend)> {
     let id = name.to_ascii_lowercase();
     let entry = crate::provider_catalog::find(&id)?;
     // Resolve STT: prefer the entry's own STT capability, otherwise
@@ -256,8 +256,12 @@ pub fn cloud_pair(name: &str) -> Option<(SttBackend, LlmBackend)> {
     // Resolve LLM: prefer the entry's own LLM capability, otherwise
     // fall back to Cerebras for cleanup (for STT-only providers like
     // Deepgram and AssemblyAI).
-    let llm = if entry.llm.is_some() { parse_llm_backend(entry.id)? } else { LlmBackend::Cerebras };
-    Some((stt, llm))
+    let polish = if entry.polish.is_some() {
+        parse_polish_backend(entry.id)?
+    } else {
+        PolishBackend::Cerebras
+    };
+    Some((stt, polish))
 }
 
 /// Iterator over every STT backend (for doctor enumeration etc.).
@@ -280,17 +284,17 @@ pub fn all_stt_backends() -> [SttBackend; 12] {
 }
 
 #[must_use]
-pub fn all_llm_backends() -> [LlmBackend; 9] {
+pub fn all_polish_backends() -> [PolishBackend; 9] {
     [
-        LlmBackend::None,
-        LlmBackend::Local,
-        LlmBackend::Cerebras,
-        LlmBackend::Groq,
-        LlmBackend::OpenAI,
-        LlmBackend::Anthropic,
-        LlmBackend::OpenRouter,
-        LlmBackend::Ollama,
-        LlmBackend::Gemini,
+        PolishBackend::None,
+        PolishBackend::Local,
+        PolishBackend::Cerebras,
+        PolishBackend::Groq,
+        PolishBackend::OpenAI,
+        PolishBackend::Anthropic,
+        PolishBackend::OpenRouter,
+        PolishBackend::Ollama,
+        PolishBackend::Gemini,
     ]
 }
 
@@ -351,15 +355,18 @@ pub fn configured_stt_backends(secrets: &crate::Secrets, active: &SttBackend) ->
         .collect()
 }
 
-/// Same idea as [`configured_stt_backends`] but for LLM backends.
+/// Same idea as [`configured_stt_backends`] but for polish backends.
 /// Always includes `None` and `Local` (no key required). Ollama is
 /// included only if `OLLAMA_HOST` appears in `secrets.toml` (or it's
 /// the active backend), so users without a local Ollama server don't
 /// see it in the tray menu. Like its STT cousin, the process
 /// environment is ignored — only keys saved in `secrets.toml` count.
 #[must_use]
-pub fn configured_llm_backends(secrets: &crate::Secrets, active: &LlmBackend) -> Vec<LlmBackend> {
-    all_llm_backends()
+pub fn configured_polish_backends(
+    secrets: &crate::Secrets,
+    active: &PolishBackend,
+) -> Vec<PolishBackend> {
+    all_polish_backends()
         .into_iter()
         .filter(|b| {
             if std::mem::discriminant(b) == std::mem::discriminant(active) {
@@ -369,13 +376,13 @@ pub fn configured_llm_backends(secrets: &crate::Secrets, active: &LlmBackend) ->
             // opt-in so users without an Ollama server don't see it in
             // the tray menu. Treat OLLAMA_HOST in secrets.toml as the
             // opt-in marker.
-            if matches!(b, LlmBackend::Ollama) {
+            if matches!(b, PolishBackend::Ollama) {
                 return secrets.has_in_file("OLLAMA_HOST");
             }
-            if !llm_requires_key(b) {
+            if !polish_requires_key(b) {
                 return true;
             }
-            secrets.has_in_file(llm_key_env(b))
+            secrets.has_in_file(polish_key_env(b))
         })
         .collect()
 }
@@ -451,44 +458,44 @@ mod tests {
 
     #[test]
     fn llm_roundtrip() {
-        for b in all_llm_backends() {
-            let s = llm_backend_str(&b);
-            assert_eq!(parse_llm_backend(s).unwrap(), b);
+        for b in all_polish_backends() {
+            let s = polish_backend_str(&b);
+            assert_eq!(parse_polish_backend(s).unwrap(), b);
         }
     }
 
     #[test]
     fn unknown_returns_none() {
         assert!(parse_stt_backend("nope").is_none());
-        assert!(parse_llm_backend("nope").is_none());
+        assert!(parse_polish_backend("nope").is_none());
     }
 
     #[test]
     fn key_env_matches_provider() {
         assert_eq!(stt_key_env(&SttBackend::Groq), "GROQ_API_KEY");
-        assert_eq!(llm_key_env(&LlmBackend::Cerebras), "CEREBRAS_API_KEY");
+        assert_eq!(polish_key_env(&PolishBackend::Cerebras), "CEREBRAS_API_KEY");
         assert!(stt_key_env(&SttBackend::Local).is_empty());
-        assert!(llm_key_env(&LlmBackend::None).is_empty());
+        assert!(polish_key_env(&PolishBackend::None).is_empty());
     }
 
     #[test]
     fn requires_key_flags() {
         assert!(!stt_requires_key(&SttBackend::Local));
         assert!(stt_requires_key(&SttBackend::Groq));
-        assert!(!llm_requires_key(&LlmBackend::None));
-        assert!(!llm_requires_key(&LlmBackend::Local));
-        assert!(!llm_requires_key(&LlmBackend::Ollama));
-        assert!(llm_requires_key(&LlmBackend::Cerebras));
+        assert!(!polish_requires_key(&PolishBackend::None));
+        assert!(!polish_requires_key(&PolishBackend::Local));
+        assert!(!polish_requires_key(&PolishBackend::Ollama));
+        assert!(polish_requires_key(&PolishBackend::Cerebras));
     }
 
     #[test]
     fn cloud_pairs() {
         let (s, l) = cloud_pair("groq").unwrap();
         assert!(matches!(s, SttBackend::Groq));
-        assert!(matches!(l, LlmBackend::Groq));
+        assert!(matches!(l, PolishBackend::Groq));
         let (s, l) = cloud_pair("cerebras").unwrap();
         assert!(matches!(s, SttBackend::Groq));
-        assert!(matches!(l, LlmBackend::Cerebras));
+        assert!(matches!(l, PolishBackend::Cerebras));
         assert!(cloud_pair("nope").is_none());
     }
 
@@ -500,17 +507,17 @@ mod tests {
         std::env::set_var("CEREBRAS_API_KEY", "leaky-env-value");
         let secrets = crate::Secrets::default(); // empty file
         let stt = configured_stt_backends(&secrets, &SttBackend::Local);
-        let llm = configured_llm_backends(&secrets, &LlmBackend::None);
+        let polish = configured_polish_backends(&secrets, &PolishBackend::None);
         std::env::remove_var("OPENAI_API_KEY");
         std::env::remove_var("CEREBRAS_API_KEY");
         // Only key-free backends + the active one should be present.
         assert_eq!(stt, vec![SttBackend::Local], "env vars should not expand the STT menu");
         assert!(
-            !llm.iter().any(|b| matches!(b, LlmBackend::OpenAI)),
+            !polish.iter().any(|b| matches!(b, PolishBackend::OpenAI)),
             "env-only OPENAI_API_KEY should not show OpenAI in the LLM menu"
         );
         assert!(
-            !llm.iter().any(|b| matches!(b, LlmBackend::Cerebras)),
+            !polish.iter().any(|b| matches!(b, PolishBackend::Cerebras)),
             "env-only CEREBRAS_API_KEY should not show Cerebras in the LLM menu"
         );
     }
@@ -521,29 +528,29 @@ mod tests {
         secrets.insert("GROQ_API_KEY", "gsk-explicit");
         secrets.insert("CEREBRAS_API_KEY", "cs-explicit");
         let stt = configured_stt_backends(&secrets, &SttBackend::Local);
-        let llm = configured_llm_backends(&secrets, &LlmBackend::None);
+        let polish = configured_polish_backends(&secrets, &PolishBackend::None);
         assert!(stt.iter().any(|b| matches!(b, SttBackend::Groq)));
-        assert!(llm.iter().any(|b| matches!(b, LlmBackend::Cerebras)));
+        assert!(polish.iter().any(|b| matches!(b, PolishBackend::Cerebras)));
         // Backends without explicit keys must remain hidden.
         assert!(!stt.iter().any(|b| matches!(b, SttBackend::OpenAI)));
-        assert!(!llm.iter().any(|b| matches!(b, LlmBackend::Anthropic)));
+        assert!(!polish.iter().any(|b| matches!(b, PolishBackend::Anthropic)));
     }
 
     #[test]
     fn configured_filter_hides_ollama_without_host() {
         // Ollama has no API key but must still be opt-in via OLLAMA_HOST.
         let secrets = crate::Secrets::default();
-        let llm = configured_llm_backends(&secrets, &LlmBackend::None);
+        let polish = configured_polish_backends(&secrets, &PolishBackend::None);
         assert!(
-            !llm.iter().any(|b| matches!(b, LlmBackend::Ollama)),
+            !polish.iter().any(|b| matches!(b, PolishBackend::Ollama)),
             "Ollama must be hidden until OLLAMA_HOST is configured"
         );
 
         let mut with_host = crate::Secrets::default();
         with_host.insert("OLLAMA_HOST", "http://localhost:11434");
-        let llm = configured_llm_backends(&with_host, &LlmBackend::None);
+        let polish = configured_polish_backends(&with_host, &PolishBackend::None);
         assert!(
-            llm.iter().any(|b| matches!(b, LlmBackend::Ollama)),
+            polish.iter().any(|b| matches!(b, PolishBackend::Ollama)),
             "Ollama must appear once OLLAMA_HOST is configured"
         );
     }

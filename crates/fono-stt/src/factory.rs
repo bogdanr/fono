@@ -126,14 +126,7 @@ fn build_local(
     mut prompts: std::collections::HashMap<String, String>,
 ) -> Result<Arc<dyn SpeechToText>> {
     let model = &cfg.local.model;
-    let path = dir.join(format!("ggml-{model}.bin"));
-    if !path.exists() {
-        return Err(anyhow!(
-            "local whisper model {model:?} not found at {} — \
-             run `fono models install {model}`",
-            path.display()
-        ));
-    }
+    let path = resolve_local_model_path(dir, model, &cfg.local.quantization)?;
     // Latency plan L18 — `0` means auto-detect physical cores so we
     // don't oversubscribe SMT siblings. `with_threads` clamps the
     // value into the i32 range whisper-rs expects.
@@ -159,6 +152,40 @@ fn build_local(
             .with_languages(languages)
             .with_prompts(prompts),
     ))
+}
+
+/// Resolve `<dir>/<ggml-name-quant.bin>` for the given user-facing
+/// model name and `[stt.local].quantization` preference. Returns a
+/// clear `models install` hint when the file is missing.
+#[cfg(feature = "whisper-local")]
+fn resolve_local_model_path(
+    dir: &Path,
+    model: &str,
+    quantization: &str,
+) -> Result<std::path::PathBuf> {
+    use crate::registry::{ModelRegistry, QuantizationPref};
+    let info = ModelRegistry::get(model).ok_or_else(|| {
+        anyhow!(
+            "local whisper model {model:?} is not in the registry — \
+             run `fono models list` to see available names"
+        )
+    })?;
+    let pref = QuantizationPref::parse(quantization).ok_or_else(|| {
+        anyhow!(
+            "invalid `[stt.local].quantization = {quantization:?}` — \
+             expected `auto`, `fp16`, `q5_1`, or `q8_0`"
+        )
+    })?;
+    let quant = ModelRegistry::resolve_quantization(info, pref).map_err(anyhow::Error::msg)?;
+    let path = dir.join(ModelRegistry::filename(info.name, quant));
+    if !path.exists() {
+        return Err(anyhow!(
+            "local whisper model {model:?} ({quant}) not found at {} — \
+             run `fono models install {model}`",
+            path.display()
+        ));
+    }
+    Ok(path)
 }
 
 /// English-only Whisper variant detection (e.g. `tiny.en`, `small.en-q5_1`).
@@ -421,14 +448,7 @@ fn build_local_streaming(
     mut prompts: std::collections::HashMap<String, String>,
 ) -> Result<Arc<dyn crate::streaming::StreamingStt>> {
     let model = &cfg.local.model;
-    let path = dir.join(format!("ggml-{model}.bin"));
-    if !path.exists() {
-        return Err(anyhow!(
-            "local whisper model {model:?} not found at {} — \
-             run `fono models install {model}`",
-            path.display()
-        ));
-    }
+    let path = resolve_local_model_path(dir, model, &cfg.local.quantization)?;
     let threads: i32 = match cfg.local.threads {
         0 => i32::try_from(detect_physical_cores()).unwrap_or(4),
         n => i32::try_from(n).unwrap_or(i32::MAX),

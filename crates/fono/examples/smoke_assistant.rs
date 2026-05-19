@@ -216,7 +216,7 @@ async fn main() -> Result<()> {
     if secrets.resolve("GROQ_API_KEY").is_some() {
         ran += 1;
         match exercise_groq_e2e(&secrets).await {
-            Ok(()) => println!("[ OK ] e2e/groq: stt → llm → tts completed"),
+            Ok(()) => println!("[ OK ] e2e/groq: stt → polish → tts completed"),
             Err(e) => {
                 let msg = format!("{e:#}");
                 if is_429(&msg) {
@@ -420,27 +420,27 @@ async fn exercise_groq_e2e(secrets: &Secrets) -> Result<()> {
     let mut stream =
         tokio::time::timeout(Duration::from_secs(30), assistant.reply_stream(&user_text, &ctx))
             .await
-            .map_err(|_| anyhow!("llm reply_stream open timed out"))?
-            .map_err(|e| anyhow!("llm reply_stream open: {e:#}"))?;
+            .map_err(|_| anyhow!("polish reply_stream open timed out"))?
+            .map_err(|e| anyhow!("polish reply_stream open: {e:#}"))?;
     let mut reply = String::new();
     let drain = tokio::time::timeout(Duration::from_secs(30), async {
         while let Some(item) = stream.next().await {
             match item {
                 Ok(d) => reply.push_str(&d.text),
-                Err(e) => return Err::<(), anyhow::Error>(anyhow!("llm delta: {e:#}")),
+                Err(e) => return Err::<(), anyhow::Error>(anyhow!("polish delta: {e:#}")),
             }
         }
         Ok(())
     })
     .await
-    .map_err(|_| anyhow!("llm reply_stream drain timed out"))?;
+    .map_err(|_| anyhow!("polish reply_stream drain timed out"))?;
     drain?;
     let llm_ms = started.elapsed().as_millis();
     let reply_trim = reply.trim().to_string();
     if reply_trim.is_empty() {
-        return Err(anyhow!("llm returned empty reply"));
+        return Err(anyhow!("polish returned empty reply"));
     }
-    println!("       llm ({llm_ms} ms): {:?}", trunc(&reply_trim, 80));
+    println!("       polish ({llm_ms} ms): {:?}", trunc(&reply_trim, 80));
 
     // 3. TTS — Groq Orpheus on the (truncated) reply. Truncate to
     //    keep the synthesis cheap; the goal is to prove the wire

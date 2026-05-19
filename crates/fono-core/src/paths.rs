@@ -47,7 +47,7 @@ impl Paths {
             &self.cache_dir,
             &self.state_dir,
             &self.whisper_models_dir(),
-            &self.llm_models_dir(),
+            &self.polish_models_dir(),
             &self.sherpa_models_dir(),
         ] {
             std::fs::create_dir_all(dir)
@@ -82,8 +82,8 @@ impl Paths {
     }
 
     #[must_use]
-    pub fn llm_models_dir(&self) -> PathBuf {
-        self.cache_dir.join("models").join("llm")
+    pub fn polish_models_dir(&self) -> PathBuf {
+        self.cache_dir.join("models").join("polish")
     }
 
     #[must_use]

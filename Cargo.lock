@@ -1202,9 +1202,9 @@ dependencies = [
  "fono-http",
  "fono-inject",
  "fono-ipc",
- "fono-llm",
  "fono-net",
  "fono-overlay",
+ "fono-polish",
  "fono-stt",
  "fono-tray",
  "fono-tts",
@@ -1263,7 +1263,7 @@ dependencies = [
  "clap",
  "criterion",
  "fono-download",
- "fono-llm",
+ "fono-polish",
  "fono-stt",
  "futures",
  "hex",
@@ -1365,24 +1365,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fono-llm"
-version = "0.8.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "encoding_rs",
- "fono-core",
- "fono-http",
- "llama-cpp-2",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "fono-net"
 version = "0.8.0"
 dependencies = [
@@ -1419,6 +1401,24 @@ dependencies = [
  "softbuffer",
  "tracing",
  "winit",
+]
+
+[[package]]
+name = "fono-polish"
+version = "0.8.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "encoding_rs",
+ "fono-core",
+ "fono-http",
+ "llama-cpp-2",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -17,7 +17,7 @@ labels: ["bug"]
 - Session type (X11 / Wayland):
 - Audio backend (PulseAudio / PipeWire / ALSA):
 - STT backend + model:
-- LLM backend + model:
+- polish backend + model:
 
 ## Steps to reproduce
 

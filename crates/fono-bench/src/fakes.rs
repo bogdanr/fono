@@ -11,7 +11,7 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use fono_llm::traits::{FormatContext, TextFormatter};
+use fono_polish::traits::{FormatContext, TextFormatter};
 use fono_stt::traits::{SpeechToText, Transcription};
 
 /// STT that returns a canned transcript after an optional fixed delay.
@@ -54,11 +54,11 @@ impl SpeechToText for FakeStt {
 
 /// LLM that echoes the raw text after an optional delay (zero-edit
 /// cleanup — useful for bounding orchestrator overhead).
-pub struct FakeLlm {
+pub struct FakePolish {
     pub delay: Duration,
 }
 
-impl FakeLlm {
+impl FakePolish {
     pub fn new() -> Self {
         Self { delay: Duration::ZERO }
     }
@@ -67,14 +67,14 @@ impl FakeLlm {
     }
 }
 
-impl Default for FakeLlm {
+impl Default for FakePolish {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl TextFormatter for FakeLlm {
+impl TextFormatter for FakePolish {
     async fn format(&self, raw: &str, _ctx: &FormatContext) -> Result<String> {
         if !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;
@@ -82,6 +82,6 @@ impl TextFormatter for FakeLlm {
         Ok(raw.trim().to_string())
     }
     fn name(&self) -> &'static str {
-        "fake-llm"
+        "fake-polish"
     }
 }

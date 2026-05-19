@@ -32,7 +32,7 @@ pub use factory::build_streaming_stt;
 pub use factory::build_stt;
 pub use lang::LanguageSelection;
 pub use lang_cache::LanguageCache;
-pub use registry::{ModelInfo, ModelRegistry};
+pub use registry::{ModelInfo, ModelRegistry, QuantVariant, Quantization, QuantizationPref};
 pub use traits::{SpeechToText, Transcription};
 
 #[cfg(feature = "streaming")]

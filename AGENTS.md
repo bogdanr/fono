@@ -6,7 +6,7 @@ Fono is a GPL-3.0 Rust single-binary voice dictation tool for the desktop. It re
 [Tambourine](https://github.com/kstonekuan/tambourine-voice) (Tauri + Python) and
 [OpenWhispr](https://github.com/OpenWhispr/openwhispr) (Electron) with a lighter native
 stack — no WebKit, no Node, no Python — while unioning their feature sets (global hotkey
-push-to-talk, local + cloud STT, optional LLM cleanup, text injection, tray UI, history).
+push-to-talk, local + cloud STT, optional polish, text injection, tray UI, history).
 Target users: Linux desktop (i3 / sway / KDE / GNOME, X11 and Wayland), Windows, and macOS.
 
 ## Orientation: read in this order

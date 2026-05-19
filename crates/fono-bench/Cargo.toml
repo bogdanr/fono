@@ -30,7 +30,7 @@ tracing-subscriber = { workspace = true }
 # we wrap the cleanup stage so latency reports still mean something even
 # when the user benchmarks STT-only.
 fono-stt = { path = "../fono-stt", default-features = false }
-fono-llm = { path = "../fono-llm" }
+fono-polish = { path = "../fono-polish" }
 fono-download = { path = "../fono-download" }
 toml = { workspace = true }
 futures = { workspace = true, optional = true }

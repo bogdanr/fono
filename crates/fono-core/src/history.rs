@@ -26,7 +26,7 @@ pub struct Transcription {
     pub app_class: Option<String>,
     pub app_title: Option<String>,
     pub stt_backend: Option<String>,
-    pub llm_backend: Option<String>,
+    pub polish_backend: Option<String>,
     pub language: Option<String>,
 }
 
@@ -42,7 +42,7 @@ impl Transcription {
             app_class: None,
             app_title: None,
             stt_backend: None,
-            llm_backend: None,
+            polish_backend: None,
             language: None,
         }
     }
@@ -93,7 +93,7 @@ impl HistoryDb {
                 app_class     TEXT,
                 app_title     TEXT,
                 stt_backend   TEXT,
-                llm_backend   TEXT,
+                polish_backend   TEXT,
                 language      TEXT
             );
 
@@ -137,7 +137,7 @@ impl HistoryDb {
         };
         self.conn.execute(
             "INSERT INTO transcriptions
-             (ts, duration_ms, raw, cleaned, app_class, app_title, stt_backend, llm_backend, language)
+             (ts, duration_ms, raw, cleaned, app_class, app_title, stt_backend, polish_backend, language)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 t.ts,
@@ -147,7 +147,7 @@ impl HistoryDb {
                 t.app_class,
                 t.app_title,
                 t.stt_backend,
-                t.llm_backend,
+                t.polish_backend,
                 t.language,
             ],
         )?;
@@ -181,7 +181,7 @@ impl HistoryDb {
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Transcription>> {
         let mut stmt = self.conn.prepare(
             "SELECT t.id, t.ts, t.duration_ms, t.raw, t.cleaned, t.app_class, t.app_title,
-                    t.stt_backend, t.llm_backend, t.language
+                    t.stt_backend, t.polish_backend, t.language
              FROM transcriptions t
              JOIN transcriptions_fts fts ON fts.rowid = t.id
              WHERE transcriptions_fts MATCH ?1
@@ -198,7 +198,7 @@ impl HistoryDb {
     pub fn recent(&self, limit: usize) -> Result<Vec<Transcription>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, ts, duration_ms, raw, cleaned, app_class, app_title,
-                    stt_backend, llm_backend, language
+                    stt_backend, polish_backend, language
              FROM transcriptions ORDER BY ts DESC LIMIT ?1",
         )?;
         let rows = stmt
@@ -224,7 +224,7 @@ fn row_to_transcription(r: &rusqlite::Row<'_>) -> rusqlite::Result<Transcription
         app_class: r.get(5)?,
         app_title: r.get(6)?,
         stt_backend: r.get(7)?,
-        llm_backend: r.get(8)?,
+        polish_backend: r.get(8)?,
         language: r.get(9)?,
     })
 }

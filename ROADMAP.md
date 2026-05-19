@@ -83,6 +83,19 @@ setup.
 Native integrations for both platforms: menu-bar app and signed `.dmg` on macOS;
 system-tray app and native installer on Windows.
 
+### Custom-quantized `large-v3-turbo`
+
+*(research)* Investigate producing our own `ggml-large-v3-turbo-q5_1.bin` via
+whisper.cpp's `quantize` tool to slot between the current T2 (`small-q5_1`,
+~182 MB) and T3 (`large-v3-turbo-q8_0`, ~834 MB) rungs of the model ladder.
+The upstream `ggerganov/whisper.cpp` repository only publishes q8_0 and q5_0
+quantizations of turbo; q5_0 has been measured to break English fixtures
+catastrophically and q8_0 is the smallest currently-safe turbo variant.
+A self-built q5_1 would land near ~548 MB if it preserves quality, narrowing
+the T2→T3 gap for users on mid-range hardware. Deferred until either the
+upstream publishes it or a user-facing complaint motivates the build-and-host
+work (signing, CI, mirror).
+
 ---
 
 ## Shipped
@@ -93,7 +106,7 @@ Newest first.
   **Wizard + multi-provider TTS rework, live preview as a waveform
   style, and observability across the cloud stack.** Picking a primary
   cloud provider (OpenAI, Groq, Anthropic, Cerebras, OpenRouter) now
-  configures STT, LLM cleanup, the voice assistant, and TTS from a
+  configures STT, polish, the voice assistant, and TTS from a
   single API-key prompt: the wizard reads a runtime capability
   catalogue (`fono_core::provider_catalog::CLOUD_PROVIDERS`) and only
   asks an opt-in follow-up for capabilities the primary doesn't
@@ -105,7 +118,7 @@ Newest first.
   `canopylabs/orpheus-v1-english`), OpenRouter (OpenAI Mini TTS,
   multilingual), Cartesia (`sonic-2`), and Deepgram
   (`aura-2-thalia-en`) — so users on a non-OpenAI primary can run
-  the full record → STT → LLM → TTS loop without obtaining a second
+  the full record → STT → polish → TTS loop without obtaining a second
   key. Two opt-in assistant extras surface in the wizard when
   supported: `prefer_vision` swaps in the provider's multimodal chat
   model (OpenAI / Anthropic / Groq / Gemini), and
@@ -121,11 +134,11 @@ Newest first.
   swaps the overlay renderer to streaming text *and* routes the
   dictation hotkey through the live pipeline, fixing a long-running
   bug where the old `[interactive].enabled` flag only affected the
-  assistant. Local STT/LLM polish phases now reuse the assistant's
+  assistant. Local STT/polish polish phases now reuse the assistant's
   per-style thinking animations so the "POLISHING" panel is no
   longer a 1–3 s dead patch.
 
-  Observability + onboarding: every cloud-backed pipeline (STT, LLM
+  Observability + onboarding: every cloud-backed pipeline (STT, polish
   cleanup, assistant chat, TTS, wizard key validation) is wired
   through the new `fono-http` crate with a per-stage stopwatch,
   inter-chunk body watchdog, and structured `fono.http=debug` schema
@@ -160,7 +173,7 @@ Newest first.
   again to stop) via a single new `[hotkeys].mode = "toggle" |
   "hold"` setting that applies globally — no more juggling separate
   hold/toggle keys, and no more holding a key down through the
-  multi-second STT → LLM → TTS round-trip on the assistant. The old
+  multi-second STT → polish → TTS round-trip on the assistant. The old
   F9/F10 defaults collided with htop's kill/quit bindings and, for
   F10, the GTK menubar shortcut. `[hotkeys].toggle` was renamed to
   `[hotkeys].dictation` (old configs continue to parse via a serde
@@ -179,7 +192,7 @@ Newest first.
   rather than the full reply.
 
   The assistant runs on its own `[assistant]` block with a
-  separate model selection from `[llm]` — pick a fast local 3B
+  separate model selection from `[polish]` — pick a fast local 3B
   for cleanup and a bigger cloud model for the assistant, or any
   mix-and-match. Multi-turn rolling history is preserved within
   a configurable time window (default 5 minutes). Pressing the

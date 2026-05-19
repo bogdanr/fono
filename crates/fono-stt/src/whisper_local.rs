@@ -184,6 +184,30 @@ impl SpeechToText for WhisperLocal {
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(threads);
         params.set_translate(false);
+        // Audio-context sizing: whisper.cpp encodes a fixed 30 s window
+        // (1500 mel frames = 50 fps) regardless of clip duration. For
+        // shorter clips we tell the encoder to only attend to the
+        // first ceil((duration + 1 s) * 50) frames, which roughly
+        // halves encoder time on a 10–15 s dictation. The +1 s padding
+        // is a safety margin; below ~200 frames quality degrades, so
+        // we clamp the minimum and skip entirely for clips ≥ 30 s.
+        // Validated by the 2026-05-19 perf-pass sweeps: +70–160 %
+        // batch RTF on CPU with no measurable accuracy regression.
+        // Always on in production; the bench harness keeps the
+        // undocumented `FONO_WHISPER_AUDIO_CTX=0` escape hatch behind
+        // `cfg(debug_assertions)` for ablation runs only.
+        let audio_ctx_enabled = if cfg!(debug_assertions) {
+            std::env::var("FONO_WHISPER_AUDIO_CTX").map(|v| v != "0").unwrap_or(true)
+        } else {
+            true
+        };
+        if audio_ctx_enabled {
+            let duration_s = pcm.len() as f32 / 16_000.0;
+            if duration_s > 0.0 && duration_s < 30.0 {
+                let frames = (((duration_s + 1.0) * 50.0).ceil() as i32).clamp(200, 1500);
+                params.set_audio_ctx(frames);
+            }
+        }
         if let Some(code) = resolved.as_deref() {
             params.set_language(Some(code));
         }
@@ -302,7 +326,63 @@ fn run_silent_decode(ctx: &WhisperContext, threads: i32) -> Result<()> {
 }
 
 fn num_cpus() -> i32 {
-    std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4)
+    // Default thread count for whisper.cpp. Use physical cores (not
+    // logical / SMT siblings) clamped to 1..=16.
+    //
+    // Rationale (validated by 2026-05-19 perf-pass on ryzen-5950x):
+    //   * whisper.cpp's GEMM kernels are FMA-bound. Each x86 physical
+    //     core has one 256-bit FMA unit shared between its SMT
+    //     siblings, so a second hyperthread cannot issue while the
+    //     primary is computing. Running N=logical halves throughput on
+    //     a SMT-on CPU (small batch RTF: 11.0 @ t=16 vs 5.77 @ t=32).
+    //   * Beyond 16 threads the gains flatten and NUMA / cross-CCD
+    //     traffic on Threadripper / Epyc actively hurts. The bench
+    //     harness has used a hard cap of 16 since the Phase-0
+    //     calibration.
+    //   * Power users can override with `FONO_WHISPER_THREADS`; the
+    //     bench binary already honours that env knob and this default
+    //     keeps parity.
+    let physical = physical_cores_or_logical();
+    physical.clamp(1, 16) as i32
+}
+
+/// Best-effort physical core count. Linux: parse
+/// `/proc/cpuinfo` for unique `(physical id, core id)` pairs. Other
+/// platforms or unparseable cpuinfo: fall back to logical/2 when
+/// logical is even and ≥ 2 (assumes SMT on; correct for nearly all
+/// x86 desktops/laptops since ~2008) and to logical otherwise (Apple
+/// Silicon, single-core VMs, etc.).
+fn physical_cores_or_logical() -> usize {
+    let logical = std::thread::available_parallelism().map(std::num::NonZero::get).unwrap_or(4);
+    if let Ok(s) = std::fs::read_to_string("/proc/cpuinfo") {
+        let mut pairs = std::collections::HashSet::new();
+        let mut phys = None;
+        let mut core = None;
+        for line in s.lines() {
+            if let Some(v) = line.strip_prefix("physical id\t: ") {
+                phys = v.trim().parse::<u32>().ok();
+            } else if let Some(v) = line.strip_prefix("core id\t: ") {
+                core = v.trim().parse::<u32>().ok();
+            } else if line.is_empty() {
+                if let (Some(p), Some(c)) = (phys, core) {
+                    pairs.insert((p, c));
+                }
+                phys = None;
+                core = None;
+            }
+        }
+        if !pairs.is_empty() {
+            return pairs.len();
+        }
+    }
+    // Fallback heuristic: assume SMT-on when logical is even and ≥ 2.
+    // Wrong on Apple Silicon (no SMT, even logical count) — but Linux
+    // is Fono's primary target and that branch is the cpuinfo path.
+    if logical >= 2 && logical % 2 == 0 {
+        logical / 2
+    } else {
+        logical
+    }
 }
 
 // ---------------------------------------------------------------------

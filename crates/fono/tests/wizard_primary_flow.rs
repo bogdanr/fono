@@ -7,7 +7,9 @@
 //! driving `dialoguer` end-to-end, so they run without a TTY.
 
 use fono::wizard::{apply_primary_provider, apply_secondary_tts, seed_primary_secret};
-use fono_core::config::{AssistantBackend, Config, LlmBackend, SttBackend, TtsBackend, TtsWyoming};
+use fono_core::config::{
+    AssistantBackend, Config, PolishBackend, SttBackend, TtsBackend, TtsWyoming,
+};
 use fono_core::provider_catalog::find;
 use fono_core::Secrets;
 
@@ -24,8 +26,8 @@ fn primary_openai_covers_full_stack_with_one_key() {
     apply_primary_provider(&mut cfg, entry);
 
     assert_eq!(cfg.stt.backend, SttBackend::OpenAI);
-    assert_eq!(cfg.llm.backend, LlmBackend::OpenAI);
-    assert!(cfg.llm.enabled);
+    assert_eq!(cfg.polish.backend, PolishBackend::OpenAI);
+    assert!(cfg.polish.enabled);
     assert_eq!(cfg.assistant.backend, AssistantBackend::OpenAI);
     assert!(cfg.assistant.enabled);
     assert_eq!(cfg.tts.backend, TtsBackend::OpenAI);
@@ -37,7 +39,7 @@ fn primary_openai_covers_full_stack_with_one_key() {
     // Every capability points at the same provider/key_env.
     for ref_env in [
         cfg.stt.cloud.as_ref().map(|c| c.api_key_ref.as_str()),
-        cfg.llm.cloud.as_ref().map(|c| c.api_key_ref.as_str()),
+        cfg.polish.cloud.as_ref().map(|c| c.api_key_ref.as_str()),
         cfg.assistant.cloud.as_ref().map(|c| c.api_key_ref.as_str()),
         cfg.tts.cloud.as_ref().map(|c| c.api_key_ref.as_str()),
     ] {
@@ -58,7 +60,7 @@ fn primary_groq_covers_full_stack_with_one_key() {
     apply_primary_provider(&mut cfg, entry);
 
     assert_eq!(cfg.stt.backend, SttBackend::Groq);
-    assert_eq!(cfg.llm.backend, LlmBackend::Groq);
+    assert_eq!(cfg.polish.backend, PolishBackend::Groq);
     assert_eq!(cfg.assistant.backend, AssistantBackend::Groq);
     assert!(cfg.assistant.enabled);
     assert_eq!(cfg.tts.backend, TtsBackend::Groq);
@@ -83,7 +85,7 @@ fn primary_anthropic_secondary_cartesia_tts() {
 
     // Anthropic doesn't ship STT or TTS — those slots stay at default.
     assert_eq!(cfg.stt.backend, SttBackend::Local);
-    assert_eq!(cfg.llm.backend, LlmBackend::Anthropic);
+    assert_eq!(cfg.polish.backend, PolishBackend::Anthropic);
     assert_eq!(cfg.assistant.backend, AssistantBackend::Anthropic);
     assert_eq!(cfg.tts.backend, TtsBackend::None);
 
@@ -135,7 +137,7 @@ fn rerun_with_existing_secrets_inserts_nothing() {
 }
 
 /// D2 — Customize-flow regression guard. A config carrying
-/// `[stt].backend = "groq"`, `[llm].backend = "anthropic"`, and
+/// `[stt].backend = "groq"`, `[polish].backend = "anthropic"`, and
 /// `[tts].backend = "wyoming"` must survive (de)serialisation and
 /// the catalogue helpers without anything flipping the TTS backend
 /// to OpenAI/Groq/whatever. Phase B already added a seed
@@ -145,8 +147,8 @@ fn rerun_with_existing_secrets_inserts_nothing() {
 fn customize_groq_stt_anthropic_llm_wyoming_tts_round_trip() {
     let mut cfg = Config::default();
     cfg.stt.backend = SttBackend::Groq;
-    cfg.llm.backend = LlmBackend::Anthropic;
-    cfg.llm.enabled = true;
+    cfg.polish.backend = PolishBackend::Anthropic;
+    cfg.polish.enabled = true;
     cfg.tts.backend = TtsBackend::Wyoming;
     cfg.tts.wyoming =
         Some(TtsWyoming { uri: "tcp://piper.lan:10200".into(), ..TtsWyoming::default() });
@@ -156,7 +158,7 @@ fn customize_groq_stt_anthropic_llm_wyoming_tts_round_trip() {
     let toml = toml::to_string(&cfg).expect("serialise customise mix");
     let parsed: Config = toml::from_str(&toml).expect("parse back");
     assert_eq!(parsed.stt.backend, SttBackend::Groq);
-    assert_eq!(parsed.llm.backend, LlmBackend::Anthropic);
+    assert_eq!(parsed.polish.backend, PolishBackend::Anthropic);
     assert_eq!(parsed.tts.backend, TtsBackend::Wyoming);
     assert_eq!(parsed.tts.wyoming.as_ref().map(|w| w.uri.as_str()), Some("tcp://piper.lan:10200"));
 }

@@ -11,7 +11,7 @@ use std::time::Instant;
 use anyhow::{anyhow, Context, Result};
 use tracing::{info, warn};
 
-use fono_llm::traits::{FormatContext, TextFormatter};
+use fono_polish::traits::{FormatContext, TextFormatter};
 use fono_stt::traits::SpeechToText;
 
 use crate::fixtures::{Fixture, UNPINNED};
@@ -26,7 +26,7 @@ pub struct BenchOutcome {
 
 pub struct BenchRunner {
     pub stt: Arc<dyn SpeechToText>,
-    pub llm: Option<Arc<dyn TextFormatter>>,
+    pub polish: Option<Arc<dyn TextFormatter>>,
     pub bench_root: PathBuf,
     /// When `true`, abort on a fixture whose on-disk SHA-256 doesn't
     /// match the pin. CI sets this to `true`; the binary keeps it
@@ -37,12 +37,12 @@ pub struct BenchRunner {
 
 impl BenchRunner {
     pub fn new(stt: Arc<dyn SpeechToText>, bench_root: impl Into<PathBuf>) -> Self {
-        Self { stt, llm: None, bench_root: bench_root.into(), strict_pin: false }
+        Self { stt, polish: None, bench_root: bench_root.into(), strict_pin: false }
     }
 
     #[must_use]
-    pub fn with_llm(mut self, llm: Arc<dyn TextFormatter>) -> Self {
-        self.llm = Some(llm);
+    pub fn with_llm(mut self, polish: Arc<dyn TextFormatter>) -> Self {
+        self.polish = Some(polish);
         self
     }
 
@@ -117,13 +117,13 @@ impl BenchRunner {
             .with_context(|| format!("STT failed on {}", fx.id))?;
         let stt_ms = stt_t.elapsed().as_millis() as u64;
 
-        let (final_text, llm_ms) = if let Some(llm) = &self.llm {
+        let (final_text, llm_ms) = if let Some(polish) = &self.polish {
             let ctx = FormatContext {
                 language: Some(fx.language.to_string()),
                 ..FormatContext::default()
             };
             let llm_t = Instant::now();
-            let cleaned = llm
+            let cleaned = polish
                 .format(&trans.text, &ctx)
                 .await
                 .with_context(|| format!("LLM failed on {}", fx.id))?;
@@ -136,7 +136,7 @@ impl BenchRunner {
 
         let wer = word_error_rate(fx.transcript, &final_text);
         info!(
-            "fixture {} [{}]: stt={stt_ms}ms llm={:?}ms total={total_ms}ms wer={:.3}",
+            "fixture {} [{}]: stt={stt_ms}ms polish={:?}ms total={total_ms}ms wer={:.3}",
             fx.id, fx.language, llm_ms, wer
         );
 
@@ -185,8 +185,11 @@ impl BenchRunner {
             }
         }
 
-        let report =
-            Report::build(self.stt.name(), self.llm.as_ref().map(|l| l.name().to_string()), clips);
+        let report = Report::build(
+            self.stt.name(),
+            self.polish.as_ref().map(|l| l.name().to_string()),
+            clips,
+        );
         Ok((report, errors))
     }
 }

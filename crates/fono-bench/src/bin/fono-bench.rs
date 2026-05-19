@@ -21,7 +21,7 @@ use fono_bench::capabilities::ModelCapabilities;
 use fono_bench::equivalence::{
     run_fixture, EquivalenceReport, Manifest, TIER1_LEVENSHTEIN_THRESHOLD,
 };
-use fono_bench::fakes::{FakeLlm, FakeStt};
+use fono_bench::fakes::{FakePolish, FakeStt};
 use fono_bench::fixtures::Fixture;
 use fono_bench::report::Report;
 use fono_bench::runner::BenchRunner;
@@ -75,9 +75,9 @@ struct BenchArgs {
     #[arg(long, value_enum, default_value_t = Provider::Fake)]
     provider: Provider,
 
-    /// Optional LLM cleanup stage. `none` runs STT-only.
+    /// Optional polish stage. `none` runs STT-only.
     #[arg(long, value_enum, default_value_t = LlmProvider::None)]
-    llm: LlmProvider,
+    polish: LlmProvider,
 
     /// STT model name (provider-specific). Default = provider's recommended.
     #[arg(long)]
@@ -85,7 +85,7 @@ struct BenchArgs {
 
     /// LLM model name (provider-specific).
     #[arg(long)]
-    llm_model: Option<String>,
+    polish_model: Option<String>,
 
     /// Comma-separated list of language tags to run (`en,es,fr,de`).
     /// Empty = all fixtures.
@@ -211,10 +211,10 @@ async fn run_bench(args: BenchArgs) -> Result<()> {
     info!("bench root: {}", bench_root.display());
 
     let stt = build_stt(args.provider, args.model.as_deref())?;
-    let llm = build_llm(args.llm, args.llm_model.as_deref())?;
+    let polish = build_polish(args.polish, args.polish_model.as_deref())?;
 
     let mut runner = BenchRunner::new(stt, &bench_root);
-    if let Some(l) = llm {
+    if let Some(l) = polish {
         runner = runner.with_llm(l);
     }
     if args.strict {
@@ -828,14 +828,14 @@ fn build_stt(p: Provider, model: Option<&str>) -> Result<Arc<dyn fono_stt::Speec
     })
 }
 
-fn build_llm(
+fn build_polish(
     p: LlmProvider,
     model: Option<&str>,
-) -> Result<Option<Arc<dyn fono_llm::traits::TextFormatter>>> {
-    use fono_llm::openai_compat::OpenAiCompat;
+) -> Result<Option<Arc<dyn fono_polish::traits::TextFormatter>>> {
+    use fono_polish::openai_compat::OpenAiCompat;
     Ok(match p {
         LlmProvider::None => None,
-        LlmProvider::Fake => Some(Arc::new(FakeLlm::new())),
+        LlmProvider::Fake => Some(Arc::new(FakePolish::new())),
         LlmProvider::Cerebras => {
             let key = std::env::var("CEREBRAS_API_KEY").context("CEREBRAS_API_KEY not set")?;
             let m = model.unwrap_or("llama3.1-70b").to_string();

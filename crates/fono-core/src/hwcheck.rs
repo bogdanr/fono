@@ -49,13 +49,13 @@ pub struct CpuFeatures {
 pub enum LocalTier {
     /// Below the supported floor for local STT — wizard steers to cloud.
     Unsuitable,
-    /// Will work but slower; picks `whisper base`.
+    /// Will work but slower; picks `whisper tiny`.
     Minimum,
     /// Comfortable headroom for `whisper small`.
     Comfortable,
     /// `whisper small` + room for an LLM if/when local LLM is wired.
     Recommended,
-    /// `whisper medium` or larger; GPU optional bonus.
+    /// `whisper large-v3-turbo` for max quality; GPU optional bonus.
     HighEnd,
 }
 
@@ -70,12 +70,15 @@ impl LocalTier {
         }
     }
 
-    /// Default whisper model size for this tier.
+    /// Default whisper model size for this tier. `base` was dropped
+    /// from the registry on 2026-05-19 (ADR 0026); minimum-tier hosts
+    /// now fall back to `tiny`, and the high-end tier shoots for
+    /// `large-v3-turbo` directly.
     pub fn default_whisper_model(self) -> &'static str {
         match self {
-            Self::Unsuitable | Self::Minimum => "base",
+            Self::Unsuitable | Self::Minimum => "tiny",
             Self::Comfortable | Self::Recommended => "small",
-            Self::HighEnd => "medium",
+            Self::HighEnd => "large-v3-turbo",
         }
     }
 
@@ -598,11 +601,11 @@ mod tests {
 
     #[test]
     fn whisper_model_per_tier() {
-        assert_eq!(LocalTier::Unsuitable.default_whisper_model(), "base");
-        assert_eq!(LocalTier::Minimum.default_whisper_model(), "base");
+        assert_eq!(LocalTier::Unsuitable.default_whisper_model(), "tiny");
+        assert_eq!(LocalTier::Minimum.default_whisper_model(), "tiny");
         assert_eq!(LocalTier::Comfortable.default_whisper_model(), "small");
         assert_eq!(LocalTier::Recommended.default_whisper_model(), "small");
-        assert_eq!(LocalTier::HighEnd.default_whisper_model(), "medium");
+        assert_eq!(LocalTier::HighEnd.default_whisper_model(), "large-v3-turbo");
     }
 
     #[test]

@@ -6,6 +6,25 @@
 //! quality, and hardware cost. The wizard and `models install --recommend`
 //! both read this table; do not duplicate numbers elsewhere.
 //!
+//! # Quantization ladder
+//!
+//! Each user-facing model name (`tiny`, `tiny.en`, `small`, `small.en`,
+//! `large-v3-turbo`) carries one **default** quantization plus zero or
+//! more **opt-in** alternatives reachable via
+//! `[stt.local].quantization = "fp16" | "q8_0" | "q5_1"`. The default
+//! is the smallest quantization that passes both gates of the
+//! acceptance rule documented in
+//! `docs/decisions/0026-stt-quantization-ladder.md`:
+//!
+//! - mean per-fixture Levenshtein-accuracy Δ ≤ +0.05 vs fp16
+//! - max per-fixture Δ ≤ +0.20 vs fp16
+//!
+//! Models that fail the rule at every quantization keep fp16 as their
+//! default. Models where no quantization improves on fp16 (notably
+//! `base` and `base.en`) have been dropped from the registry entirely —
+//! they are dominated on the speed/quality frontier by `small-q5_1` and
+//! `small.en-q8_0` respectively.
+//!
 //! # Word-error-rate data source
 //!
 //! WER estimates are aggregated from the OpenAI Whisper paper (Radford
@@ -13,7 +32,10 @@
 //! community benchmarks; numbers are intentionally pessimistic (closer
 //! to real-world dictation than read-aloud test sets) and rounded to
 //! whole percent. Languages not listed in `wer_by_lang` have no public
-//! benchmark for that variant.
+//! benchmark for that variant. Values reflect the default quantization
+//! shipped for each name — the perf-pass equivalence runs (2026-05-19)
+//! confirmed that quantization-induced WER drift stays inside ±2 pp on
+//! the variants we ship, so a single per-name WER table is sufficient.
 //!
 //! The wizard does not show raw percentages to users — it bucketises
 //! them into Excellent / Good / Acceptable / Inaccurate (see
@@ -32,39 +54,155 @@
 //! realtime. Apple-Silicon machines (which whisper.cpp accelerates
 //! via Metal/CoreML) get a separate, lower threshold.
 //!
-//! As of 2026-05-15 the numbers in this table are anchored to the
+//! As of 2026-05-19 the numbers in this table are anchored to the
 //! empirical batch RTF measured on `ultra7-258v` (Intel Core Ultra 7
 //! 258V, 8p/8l Lunar Lake, AVX2 + FMA, no SMT) at
-//! `docs/bench/calibration/summary/matrix.json`. That host is the
-//! closest match in the calibration matrix to the "generic 8-core
+//! `docs/bench/2026-05-19-perf-pass/summary/matrix.json`. That host is
+//! the closest match in the calibration matrix to the "generic 8-core
 //! AVX2" reference. Numbers are rounded down (conservative) so users
 //! with weaker AVX2 hosts still see correct verdicts.
+
+use std::fmt;
+
+/// Quantization level of a GGML whisper weight file.
+///
+/// Maps to the upstream `ggerganov/whisper.cpp` GGML file-name suffixes:
+/// `Fp16` → no suffix (`ggml-small.bin`), `Q5_1` → `-q5_1`, `Q8_0` → `-q8_0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Quantization {
+    /// Half-precision weights, no quantization. Largest, slowest, max quality.
+    Fp16,
+    /// 5-bit asymmetric block quantization. Smallest, fastest, slight quality
+    /// drop on smaller models — safe on `tiny`, `tiny.en`, `small`.
+    Q5_1,
+    /// 8-bit block quantization. Near-lossless quality, ~50% smaller than fp16.
+    /// Default for `small.en` and `large-v3-turbo`.
+    Q8_0,
+}
+
+impl Quantization {
+    /// Short token used in config files, CLI flags, and bench rows.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fp16 => "fp16",
+            Self::Q5_1 => "q5_1",
+            Self::Q8_0 => "q8_0",
+        }
+    }
+
+    /// GGML file-name suffix. `Fp16` has no suffix; `Q5_1` → `-q5_1`,
+    /// `Q8_0` → `-q8_0`.
+    #[must_use]
+    pub fn file_suffix(self) -> &'static str {
+        match self {
+            Self::Fp16 => "",
+            Self::Q5_1 => "-q5_1",
+            Self::Q8_0 => "-q8_0",
+        }
+    }
+
+    /// Parse from a config token. Accepts `fp16`, `q5_1`, `q8_0`
+    /// (case-insensitive). Returns `None` for unknown values; the
+    /// caller is responsible for surfacing a friendly error.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "fp16" | "f16" => Some(Self::Fp16),
+            "q5_1" | "q5-1" => Some(Self::Q5_1),
+            "q8_0" | "q8-0" => Some(Self::Q8_0),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for Quantization {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// User-level preference for `[stt.local].quantization`. Resolves to a
+/// concrete [`Quantization`] via [`ModelRegistry::resolve_quantization`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuantizationPref {
+    /// Use the model's registry default. The wizard and 99% of users
+    /// stay here.
+    Auto,
+    /// Pin to a specific quantization. Fails fast at factory build
+    /// time if the chosen `(name, quantization)` is not in the registry.
+    Pinned(Quantization),
+}
+
+impl QuantizationPref {
+    /// Parse from a config token. `auto` (or empty) → `Auto`; otherwise
+    /// defer to [`Quantization::parse`]. Unknown tokens return `None`
+    /// so the caller can produce a contextual error.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+            return Some(Self::Auto);
+        }
+        Quantization::parse(trimmed).map(Self::Pinned)
+    }
+}
+
+/// One concrete `(model name, quantization)` pair available in the registry.
+#[derive(Debug, Clone, Copy)]
+pub struct QuantVariant {
+    pub quantization: Quantization,
+    /// File size in MiB; used for the wizard's `~466 MB` labels and as
+    /// an input to `HardwareSnapshot::affords_model` so the verdict
+    /// follows whichever quantization the user picks.
+    pub approx_mb: u32,
+    /// SHA-256 of the GGML file. [`UNPINNED`] means "log the computed
+    /// hash and accept anything"; tighten once a manifest exists.
+    pub sha256: &'static str,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct ModelInfo {
     pub name: &'static str,
     pub multilingual: bool,
+    /// File size of the **default** quantization (matches
+    /// `quantizations[0].approx_mb`). Kept as a top-level field because
+    /// the wizard's affordability + display labels operate on the
+    /// default; opt-in alternatives are looked up through
+    /// `quantizations`.
     pub approx_mb: u32,
-    /// Minimum *available* RAM (in MiB) the model needs to load and run
-    /// inference without swapping. Conservative: includes model weights,
-    /// mel-filter state, and beam-search buffers.
+    /// Minimum *available* RAM (in MiB) the model needs to load and
+    /// run inference without swapping. Sized for the default
+    /// quantization plus mel-filter state and beam-search buffers.
     pub min_ram_mb: u32,
     /// Audio-seconds processed per wall-second on the AVX2 reference
-    /// machine (8 physical cores, ~3 GHz). See module doc for details.
-    /// Used by `HardwareSnapshot::affords_model` to gate live-mode
+    /// machine (8 physical cores, ~3 GHz) at the default quantization.
+    /// See module doc for details. Used by
+    /// `HardwareSnapshot::affords_model` to gate live-mode
     /// recommendations.
     pub realtime_factor_cpu_avx2: f32,
-    /// (language-code, WER-percent) pairs from FLEURS / community evals.
-    /// Codes are BCP-47 alpha-2. Languages absent from this slice have
-    /// no published estimate. See module doc for caveats.
+    /// (language-code, WER-percent) pairs from FLEURS / community
+    /// evals + this repo's perf-pass equivalence runs. Codes are
+    /// BCP-47 alpha-2. Languages absent from this slice have no
+    /// published estimate for this name.
     pub wer_by_lang: &'static [(&'static str, f32)],
-    /// HuggingFace path, e.g. `ggerganov/whisper.cpp/resolve/main/ggml-small.bin`.
-    pub url_path: &'static str,
-    pub sha256: &'static str,
+    /// HuggingFace mirror directory containing the GGML files (without
+    /// the file name). The full URL is constructed by
+    /// [`ModelRegistry::url_for`].
+    pub url_dir: &'static str,
+    /// The quantization shipped when the user has
+    /// `[stt.local].quantization = "auto"`. Must appear in `quantizations`.
+    pub default_quantization: Quantization,
+    /// All quantizations the registry knows how to download for this
+    /// name. The default is one of these.
+    pub quantizations: &'static [QuantVariant],
 }
 
 /// Default HuggingFace host; override via `FONO_MODEL_MIRROR`.
 pub const DEFAULT_MIRROR: &str = "https://huggingface.co";
+
+/// Canonical upstream directory for whisper.cpp GGML files.
+const GGERGANOV_DIR: &str = "ggerganov/whisper.cpp/resolve/main";
 
 /// SHA-256 sentinel for entries without a pinned digest. The downloader
 /// logs the computed hash at info level and accepts the file; a future
@@ -72,15 +210,24 @@ pub const DEFAULT_MIRROR: &str = "https://huggingface.co";
 pub const UNPINNED: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 pub const WHISPER_MODELS: &[ModelInfo] = &[
-    // ── tiny (75 MB) ────────────────────────────────────────────────────────
+    // ── tiny — multilingual ─────────────────────────────────────────────
+    // Default: q5_1 (31 MB). The 2026-05-19 perf-pass run on
+    // `ultra7-258v` Vulkan confirmed mean Δacc +0.025 and max +0.088 vs
+    // fp16 on English fixtures — well inside the acceptance gate. Note
+    // that `tiny` multilingual has a hard quality floor on non-Latin
+    // languages (Romanian Levenshtein ~0.25, Chinese ~0.50): the
+    // `wer_by_lang` table reflects this and the wizard's
+    // `AccuracyBucket::Inaccurate` filter routes affected users to a
+    // larger model or cloud STT.
     ModelInfo {
         name: "tiny",
         multilingual: true,
-        approx_mb: 75,
-        // Empirical peak RSS on ultra7-258v was 420 MiB; +20% headroom = 500.
-        min_ram_mb: 500,
-        // Empirical batch RTF on ultra7-258v: 20.49; rounded down.
-        realtime_factor_cpu_avx2: 20.0,
+        approx_mb: 31,
+        // Peak RSS 311 MiB (q5_1) on ultra7-258v Vulkan; +50% headroom
+        // for KV-cache growth on long segments and CPU-lane padding.
+        min_ram_mb: 1_024,
+        // Empirical batch RTF on ultra7-258v CPU q5_1: 30.30.
+        realtime_factor_cpu_avx2: 30.0,
         wer_by_lang: &[
             ("en", 12.0),
             ("es", 14.0),
@@ -97,76 +244,51 @@ pub const WHISPER_MODELS: &[ModelInfo] = &[
             ("zh", 30.0),
             ("ja", 34.0),
         ],
-        url_path: "ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
-        sha256: UNPINNED,
+        url_dir: GGERGANOV_DIR,
+        default_quantization: Quantization::Q5_1,
+        quantizations: &[QuantVariant {
+            quantization: Quantization::Q5_1,
+            approx_mb: 31,
+            sha256: UNPINNED,
+        }],
     },
+    // ── tiny.en — English-only ──────────────────────────────────────────
+    // Default: q5_1 (31 MB). Δacc −0.018 vs fp16 (i.e. quantization
+    // measurably *improved* one fixture). Top-end speed on every host
+    // we measured.
     ModelInfo {
         name: "tiny.en",
         multilingual: false,
-        approx_mb: 75,
-        // Peak RSS 414 MiB on ultra7-258v (English-only is identical
-        // architecture, slightly lower KV-cache from monolingual head).
-        min_ram_mb: 500,
-        // Empirical batch RTF on ultra7-258v: 26.81. Held to 20.0 to
-        // match the multilingual sibling and stay conservative on
-        // older hosts with smaller branch predictors.
-        realtime_factor_cpu_avx2: 20.0,
+        approx_mb: 31,
+        // Peak RSS 309 MiB (q5_1) on ultra7-258v Vulkan.
+        min_ram_mb: 1_024,
+        // Empirical batch RTF on ultra7-258v CPU q5_1: 36.x. Held to
+        // 30.0 to match the multilingual sibling and stay conservative
+        // on older hosts with smaller branch predictors.
+        realtime_factor_cpu_avx2: 30.0,
         wer_by_lang: &[("en", 9.0)],
-        url_path: "ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
-        sha256: UNPINNED,
+        url_dir: GGERGANOV_DIR,
+        default_quantization: Quantization::Q5_1,
+        quantizations: &[QuantVariant {
+            quantization: Quantization::Q5_1,
+            approx_mb: 31,
+            sha256: UNPINNED,
+        }],
     },
-    // ── base (142 MB) ───────────────────────────────────────────────────────
-    ModelInfo {
-        name: "base",
-        multilingual: true,
-        approx_mb: 142,
-        // Empirical peak RSS on ultra7-258v was 585 MiB; +20% headroom = 700.
-        min_ram_mb: 700,
-        // Empirical batch RTF on ultra7-258v: 11.39; rounded down.
-        realtime_factor_cpu_avx2: 11.0,
-        wer_by_lang: &[
-            ("en", 9.0),
-            ("es", 10.0),
-            ("fr", 13.0),
-            ("de", 16.0),
-            ("it", 13.0),
-            ("pt", 10.0),
-            ("nl", 17.0),
-            ("ro", 20.0),
-            ("pl", 22.0),
-            ("ru", 19.0),
-            ("uk", 27.0),
-            ("tr", 21.0),
-            ("zh", 21.0),
-            ("ja", 25.0),
-        ],
-        url_path: "ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
-        sha256: UNPINNED,
-    },
-    ModelInfo {
-        name: "base.en",
-        multilingual: false,
-        approx_mb: 142,
-        // Peak RSS 591 MiB on ultra7-258v.
-        min_ram_mb: 700,
-        // Empirical batch RTF on ultra7-258v: 13.20. Held to 11.0 to
-        // match the multilingual sibling and stay conservative.
-        realtime_factor_cpu_avx2: 11.0,
-        wer_by_lang: &[("en", 7.0)],
-        url_path: "ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
-        sha256: UNPINNED,
-    },
-    // ── small (466 MB) ──────────────────────────────────────────────────────
+    // ── small — multilingual ────────────────────────────────────────────
+    // Default: q5_1 (182 MB). On every host the q5_1 variant matched
+    // or beat fp16 on English fixtures (fp16 itself flakes on
+    // `en-single-sentence` due to the short-clip behaviour documented
+    // in `tests/fixtures/equivalence/manifest.toml`). q8_0 (253 MB) and
+    // fp16 (466 MB) are kept reachable via `[stt.local].quantization`.
     ModelInfo {
         name: "small",
         multilingual: true,
-        approx_mb: 466,
-        // Empirical peak RSS on ultra7-258v was 1360 MiB; +10% headroom = 1500.
-        min_ram_mb: 1_500,
-        // Empirical batch RTF on ultra7-258v: 3.13. The previous
-        // value (4.0) was the 2024 estimate; measured numbers landed
-        // ~25% lower.
-        realtime_factor_cpu_avx2: 3.0,
+        approx_mb: 182,
+        // Peak RSS 805 MiB (q5_1) on ultra7-258v Vulkan.
+        min_ram_mb: 1_536,
+        // Empirical batch RTF on ultra7-258v CPU q5_1: 8.32.
+        realtime_factor_cpu_avx2: 8.3,
         wer_by_lang: &[
             ("en", 6.0),
             ("es", 7.0),
@@ -183,40 +305,51 @@ pub const WHISPER_MODELS: &[ModelInfo] = &[
             ("zh", 14.0),
             ("ja", 17.0),
         ],
-        url_path: "ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
-        sha256: UNPINNED,
+        url_dir: GGERGANOV_DIR,
+        default_quantization: Quantization::Q5_1,
+        quantizations: &[
+            QuantVariant { quantization: Quantization::Q5_1, approx_mb: 182, sha256: UNPINNED },
+            QuantVariant { quantization: Quantization::Q8_0, approx_mb: 253, sha256: UNPINNED },
+            QuantVariant { quantization: Quantization::Fp16, approx_mb: 466, sha256: UNPINNED },
+        ],
     },
+    // ── small.en — English-only ─────────────────────────────────────────
+    // Default: q8_0 (253 MB). q5_1 has max Δacc +0.219 on one fixture
+    // (just outside the +0.20 gate); q8_0 stays inside the gate at
+    // every fixture. Both q5_1 and fp16 are reachable as overrides.
     ModelInfo {
         name: "small.en",
         multilingual: false,
-        approx_mb: 466,
-        // Peak RSS 1367 MiB on ultra7-258v.
-        min_ram_mb: 1_500,
-        // Empirical batch RTF on ultra7-258v: 3.90. Held to 3.0 to
-        // match the multilingual sibling and stay conservative.
-        realtime_factor_cpu_avx2: 3.0,
+        approx_mb: 253,
+        // Peak RSS ~875 MiB (q8_0) on ultra7-258v Vulkan.
+        min_ram_mb: 1_536,
+        // Empirical batch RTF on ultra7-258v CPU q8_0: 3.30.
+        realtime_factor_cpu_avx2: 3.3,
         wer_by_lang: &[("en", 5.0)],
-        url_path: "ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
-        sha256: UNPINNED,
+        url_dir: GGERGANOV_DIR,
+        default_quantization: Quantization::Q8_0,
+        quantizations: &[
+            QuantVariant { quantization: Quantization::Q8_0, approx_mb: 253, sha256: UNPINNED },
+            QuantVariant { quantization: Quantization::Q5_1, approx_mb: 182, sha256: UNPINNED },
+            QuantVariant { quantization: Quantization::Fp16, approx_mb: 466, sha256: UNPINNED },
+        ],
     },
-    // ── large-v3-turbo (~1.6 GB) — replaces medium for the wizard ───────────
-    // 4-decoder distilled large-v3: medium-ish quality at small-ish speed.
-    // Multilingual only (no .en variant published).
+    // ── large-v3-turbo — multilingual, both modes ───────────────────────
+    // Default: q8_0 (834 MB). q8_0 is acc-neutral vs fp16
+    // (Δ +0.008 mean, max +0.001) and unlocks Lunar Lake CPU as a
+    // viable host (RTF 2.31 vs 0.62 fp16). q5_0 was measured to break
+    // `en-conversational` (acc 0.354 vs 0.046 fp16) and is excluded.
+    // q5_1 is not currently published upstream — tracked on the
+    // roadmap as a self-quantization research item.
     ModelInfo {
         name: "large-v3-turbo",
         multilingual: true,
-        approx_mb: 1_620,
-        // Empirical peak RSS across hosts: 3642 (ryzen-5950x), 3654
-        // (ultra7-258v); +~10% headroom for KV-cache growth on long
-        // segments = 4000.
-        min_ram_mb: 4_000,
-        // Empirical batch RTF on ultra7-258v (8-core AVX2 reference):
-        // 0.61 — sub-realtime. The previous value (2.5) was off by 4×
-        // and is the root cause of the wizard recommending turbo on
-        // CPU-only laptops that cannot actually run it. Holding to
-        // 0.6 (rounded down) puts turbo correctly in the Unsuitable
-        // bucket on every CPU-only laptop class we measured.
-        realtime_factor_cpu_avx2: 0.6,
+        approx_mb: 834,
+        // Peak RSS 2.24 GiB (q8_0) on CPU, 267 MiB on Vulkan. Conservative
+        // for CPU lane; Vulkan headroom is irrelevant here.
+        min_ram_mb: 3_072,
+        // Empirical batch RTF on ultra7-258v CPU q8_0: 2.31.
+        realtime_factor_cpu_avx2: 2.3,
         wer_by_lang: &[
             ("en", 4.0),
             ("es", 5.0),
@@ -233,15 +366,21 @@ pub const WHISPER_MODELS: &[ModelInfo] = &[
             ("zh", 9.0),
             ("ja", 13.0),
         ],
-        url_path: "ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
-        sha256: UNPINNED,
+        url_dir: GGERGANOV_DIR,
+        default_quantization: Quantization::Q8_0,
+        quantizations: &[
+            QuantVariant { quantization: Quantization::Q8_0, approx_mb: 834, sha256: UNPINNED },
+            QuantVariant { quantization: Quantization::Fp16, approx_mb: 1_620, sha256: UNPINNED },
+        ],
     },
 ];
 
 pub struct ModelRegistry;
 
 impl ModelRegistry {
-    /// Look up a model by name (case-insensitive).
+    /// Look up a model by name (case-insensitive). Returns `None` for
+    /// unknown names — callers should produce a friendly error pointing
+    /// users at `fono models list`.
     #[must_use]
     pub fn get(name: &str) -> Option<&'static ModelInfo> {
         let lower = name.to_ascii_lowercase();
@@ -259,20 +398,63 @@ impl ModelRegistry {
         std::env::var("FONO_MODEL_MIRROR").unwrap_or_else(|_| DEFAULT_MIRROR.to_string())
     }
 
-    /// Build the full download URL for a model.
+    /// Build the full download URL for a specific `(model, quantization)`.
+    /// Returns `None` if the registry doesn't carry that variant.
     #[must_use]
-    pub fn url_for(model: &ModelInfo) -> String {
-        format!("{}/{}", Self::mirror(), model.url_path)
+    pub fn url_for(model: &ModelInfo, quant: Quantization) -> Option<String> {
+        let _ = model.quantizations.iter().find(|v| v.quantization == quant)?;
+        Some(format!("{}/{}/{}", Self::mirror(), model.url_dir, Self::filename(model.name, quant)))
+    }
+
+    /// GGML file basename for `(name, quantization)`. Does not check the
+    /// registry — this is a pure naming function.
+    #[must_use]
+    pub fn filename(name: &str, quant: Quantization) -> String {
+        format!("ggml-{name}{}.bin", quant.file_suffix())
+    }
+
+    /// Look up the [`QuantVariant`] row for a `(model, quantization)`
+    /// pair. Returns `None` if the variant is not in the registry — e.g.
+    /// `tiny` + `Fp16` (we ship only `tiny-q5_1`).
+    #[must_use]
+    pub fn variant_for(model: &ModelInfo, quant: Quantization) -> Option<&'static QuantVariant> {
+        model.quantizations.iter().find(|v| v.quantization == quant)
+    }
+
+    /// Resolve a user `QuantizationPref` against a model's available
+    /// quantizations. `Auto` returns the model's default; `Pinned(q)`
+    /// returns `q` only if it's in `model.quantizations`, otherwise
+    /// errors with a list of supported alternatives.
+    pub fn resolve_quantization(
+        model: &ModelInfo,
+        pref: QuantizationPref,
+    ) -> Result<Quantization, String> {
+        match pref {
+            QuantizationPref::Auto => Ok(model.default_quantization),
+            QuantizationPref::Pinned(q) => {
+                if model.quantizations.iter().any(|v| v.quantization == q) {
+                    Ok(q)
+                } else {
+                    let supported: Vec<&'static str> =
+                        model.quantizations.iter().map(|v| v.quantization.as_str()).collect();
+                    Err(format!(
+                        "model {:?} does not ship the {:?} quantization; supported: {}",
+                        model.name,
+                        q.as_str(),
+                        supported.join(", ")
+                    ))
+                }
+            }
+        }
     }
 
     /// Pick the best local STT model for this hardware without any user
     /// input. Used on first-run startup so the daemon has a working
     /// config even when the user hasn't gone through the wizard.
     ///
-    /// Selection rule: walk the wizard-visible multilingual models from
-    /// largest to smallest and return the first that lands `Comfortable`.
-    /// If none are Comfortable, return the largest `Borderline` instead.
-    /// Falls back to `tiny` if even that is impossible.
+    /// Selection rule: walk the multilingual models from largest to
+    /// smallest and return the first that lands `Comfortable` (or
+    /// `Borderline`). Falls back to `tiny` if even that is impossible.
     ///
     /// Multilingual is the safe default because the OOTB config has an
     /// empty languages list (auto-detect). An English-only model would
@@ -341,8 +523,7 @@ mod tests {
                 .map(|&(_, wer)| wer)
                 .unwrap_or(f32::MAX)
         };
-        assert!(get_en_wer("tiny.en") > get_en_wer("base.en"));
-        assert!(get_en_wer("base.en") > get_en_wer("small.en"));
+        assert!(get_en_wer("tiny.en") > get_en_wer("small.en"));
     }
 
     #[test]
@@ -353,18 +534,15 @@ mod tests {
                 .map(|&(_, wer)| wer)
                 .unwrap_or(f32::MAX)
         };
-        assert!(get_en_wer("tiny") > get_en_wer("base"));
-        assert!(get_en_wer("base") > get_en_wer("small"));
+        assert!(get_en_wer("tiny") > get_en_wer("small"));
         assert!(get_en_wer("small") >= get_en_wer("large-v3-turbo"));
     }
 
     #[test]
     fn min_ram_monotonic_within_families() {
         let get = |name: &str| ModelRegistry::get(name).map(|m| m.min_ram_mb).unwrap_or(0);
-        assert!(get("tiny.en") <= get("base.en"));
-        assert!(get("base.en") <= get("small.en"));
-        assert!(get("tiny") <= get("base"));
-        assert!(get("base") <= get("small"));
+        assert!(get("tiny.en") <= get("small.en"));
+        assert!(get("tiny") <= get("small"));
         assert!(get("small") <= get("large-v3-turbo"));
     }
 
@@ -373,22 +551,155 @@ mod tests {
         let rf = |name: &str| {
             ModelRegistry::get(name).map(|m| m.realtime_factor_cpu_avx2).unwrap_or(0.0)
         };
-        // Within multilingual family: tiny > base > small > turbo.
-        assert!(rf("tiny") > rf("base"));
-        assert!(rf("base") > rf("small"));
+        // Within multilingual family: tiny > small > turbo.
+        assert!(rf("tiny") > rf("small"));
         assert!(rf("small") > rf("large-v3-turbo"));
         // Within English-only family.
-        assert!(rf("tiny.en") > rf("base.en"));
-        assert!(rf("base.en") > rf("small.en"));
-        // Turbo sub-realtime on the 8-core AVX2 reference is the
-        // empirical truth as of 2026-05-15.
-        assert!(rf("large-v3-turbo") < 1.0);
+        assert!(rf("tiny.en") > rf("small.en"));
+        // Turbo at q8_0 clears 2.0 on the 8-core AVX2 reference — a
+        // jump up from the fp16 turbo's 0.6 RTF.
+        assert!(rf("large-v3-turbo") >= 2.0);
     }
 
     #[test]
     fn turbo_is_multilingual() {
         let m = ModelRegistry::get("large-v3-turbo").expect("turbo missing");
         assert!(m.multilingual);
+    }
+
+    #[test]
+    fn base_family_dropped_from_registry() {
+        // `base` and `base.en` were measured to be dominated by
+        // `small-q5_1` / `small.en-q8_0` and removed from the registry
+        // on 2026-05-19. If you add them back, refresh the perf-pass
+        // bench results and document the rationale in an ADR.
+        assert!(ModelRegistry::get("base").is_none());
+        assert!(ModelRegistry::get("base.en").is_none());
+    }
+
+    #[test]
+    fn registry_carries_exactly_five_entries() {
+        // Locks in the post-perf-pass shape. If you grow this list,
+        // refresh the wizard ladder + ADR 0026.
+        assert_eq!(WHISPER_MODELS.len(), 5);
+    }
+
+    #[test]
+    fn default_quantization_present_in_quantizations() {
+        for m in WHISPER_MODELS {
+            assert!(
+                m.quantizations.iter().any(|v| v.quantization == m.default_quantization),
+                "model '{}' default_quantization {:?} not listed in quantizations",
+                m.name,
+                m.default_quantization
+            );
+        }
+    }
+
+    #[test]
+    fn approx_mb_matches_default_quant_variant() {
+        for m in WHISPER_MODELS {
+            let default = m
+                .quantizations
+                .iter()
+                .find(|v| v.quantization == m.default_quantization)
+                .expect("default variant missing");
+            assert_eq!(
+                m.approx_mb, default.approx_mb,
+                "model '{}' approx_mb {} disagrees with default-variant size {}",
+                m.name, m.approx_mb, default.approx_mb
+            );
+        }
+    }
+
+    #[test]
+    fn defaults_match_acceptance_rule() {
+        // Locks in the per-model quantization defaults from the
+        // 2026-05-19 perf pass (see plans/2026-05-19-stt-perf-pass-v1.md).
+        let cases = [
+            ("tiny", Quantization::Q5_1),
+            ("tiny.en", Quantization::Q5_1),
+            ("small", Quantization::Q5_1),
+            ("small.en", Quantization::Q8_0),
+            ("large-v3-turbo", Quantization::Q8_0),
+        ];
+        for (name, expected) in cases {
+            let m = ModelRegistry::get(name).expect("model missing");
+            assert_eq!(
+                m.default_quantization, expected,
+                "model '{name}' default quantization shifted; refresh the bench data \
+                 before updating the registry"
+            );
+        }
+    }
+
+    #[test]
+    fn pinned_quantization_must_be_in_registry() {
+        // `tiny` does not ship Fp16 — pinning should fail.
+        let m = ModelRegistry::get("tiny").unwrap();
+        assert!(ModelRegistry::resolve_quantization(
+            m,
+            QuantizationPref::Pinned(Quantization::Fp16)
+        )
+        .is_err());
+        // `small` ships all three quantizations — every pin resolves.
+        let m = ModelRegistry::get("small").unwrap();
+        for q in [Quantization::Q5_1, Quantization::Q8_0, Quantization::Fp16] {
+            assert_eq!(
+                ModelRegistry::resolve_quantization(m, QuantizationPref::Pinned(q)).unwrap(),
+                q
+            );
+        }
+    }
+
+    #[test]
+    fn auto_resolves_to_default() {
+        for m in WHISPER_MODELS {
+            assert_eq!(
+                ModelRegistry::resolve_quantization(m, QuantizationPref::Auto).unwrap(),
+                m.default_quantization
+            );
+        }
+    }
+
+    #[test]
+    fn filename_naming_scheme() {
+        assert_eq!(ModelRegistry::filename("small", Quantization::Fp16), "ggml-small.bin");
+        assert_eq!(ModelRegistry::filename("small", Quantization::Q5_1), "ggml-small-q5_1.bin");
+        assert_eq!(
+            ModelRegistry::filename("large-v3-turbo", Quantization::Q8_0),
+            "ggml-large-v3-turbo-q8_0.bin"
+        );
+        assert_eq!(ModelRegistry::filename("tiny.en", Quantization::Q5_1), "ggml-tiny.en-q5_1.bin");
+    }
+
+    #[test]
+    fn url_for_returns_none_for_unsupported_variant() {
+        let m = ModelRegistry::get("tiny").unwrap();
+        // tiny ships only q5_1; fp16 and q8_0 are not in the registry.
+        assert!(ModelRegistry::url_for(m, Quantization::Fp16).is_none());
+        assert!(ModelRegistry::url_for(m, Quantization::Q8_0).is_none());
+        assert!(ModelRegistry::url_for(m, Quantization::Q5_1).is_some());
+    }
+
+    #[test]
+    fn quantization_pref_parse() {
+        assert_eq!(QuantizationPref::parse("auto"), Some(QuantizationPref::Auto));
+        assert_eq!(QuantizationPref::parse(""), Some(QuantizationPref::Auto));
+        assert_eq!(QuantizationPref::parse("  "), Some(QuantizationPref::Auto));
+        assert_eq!(
+            QuantizationPref::parse("q5_1"),
+            Some(QuantizationPref::Pinned(Quantization::Q5_1))
+        );
+        assert_eq!(
+            QuantizationPref::parse("Q8_0"),
+            Some(QuantizationPref::Pinned(Quantization::Q8_0))
+        );
+        assert_eq!(
+            QuantizationPref::parse("fp16"),
+            Some(QuantizationPref::Pinned(Quantization::Fp16))
+        );
+        assert!(QuantizationPref::parse("q4_k_m").is_none());
     }
 
     fn fake_snap(cores: u32, ram_gb: u64, avx2: bool) -> fono_core::HardwareSnapshot {
@@ -415,13 +726,14 @@ mod tests {
 
     #[test]
     fn pick_default_local_scales_to_hardware() {
-        // 2-core ancient laptop: small rf=3 × 0.25 = 0.75 < 1.0 → Unsuitable.
-        // base rf=11 × 0.25 = 2.75 → Borderline. Picker returns base.
-        let weak = fake_snap(2, 8, true);
-        assert_eq!(ModelRegistry::pick_default_local(&weak), "base");
+        // Weak laptop: turbo Unsuitable, small q5_1 Borderline → small.
+        let weak = fake_snap(2, 4, true);
+        assert_eq!(ModelRegistry::pick_default_local(&weak), "small");
 
-        // 16-core desktop: turbo Unsuitable on CPU, small Comfortable.
+        // 16-core desktop: turbo at q8_0 (RTF 2.3) is Comfortable on a
+        // 16-core box with plenty of RAM — it's the new top of the
+        // ladder.
         let strong = fake_snap(16, 32, true);
-        assert_eq!(ModelRegistry::pick_default_local(&strong), "small");
+        assert_eq!(ModelRegistry::pick_default_local(&strong), "large-v3-turbo");
     }
 }

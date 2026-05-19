@@ -9,7 +9,7 @@
 //!   Assistant ecosystem.
 //! - **Fono-native** — same `Frame` body, but carried over WebSocket
 //!   binary messages so a browser tab can be a first-class client.
-//!   Covers LLM cleanup, history mirror, and app-context routing —
+//!   Covers polish, history mirror, and app-context routing —
 //!   the parts Wyoming has no event types for.
 //!
 //! This crate is transport-agnostic: it knows how to serialise and

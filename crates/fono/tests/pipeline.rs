@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use fono_core::config::{Config, LlmBackend};
+use fono_core::config::{Config, PolishBackend};
 use fono_core::history::HistoryDb;
-use fono_llm::{FormatContext, TextFormatter};
+use fono_polish::{FormatContext, TextFormatter};
 use fono_stt::{SpeechToText, Transcription};
 
 use fono::session::{orchestrator_for_test, FocusProbe, Injector, PipelineOutcome};
@@ -37,15 +37,15 @@ impl SpeechToText for FakeStt {
     }
 }
 
-struct FakeLlm;
+struct FakePolish;
 
 #[async_trait]
-impl TextFormatter for FakeLlm {
+impl TextFormatter for FakePolish {
     async fn format(&self, raw: &str, _ctx: &FormatContext) -> Result<String> {
         Ok(format!("CLEANED: {}", raw.trim()))
     }
     fn name(&self) -> &'static str {
-        "fake-llm"
+        "fake-polish"
     }
 }
 
@@ -73,20 +73,26 @@ async fn pipeline_produces_history_row_and_injects_cleaned_text() {
 
     let stt: Arc<dyn SpeechToText> =
         Arc::new(FakeStt { text: "hello world".into(), lang: Some("en".into()) });
-    let llm: Option<Arc<dyn TextFormatter>> = Some(Arc::new(FakeLlm));
+    let polish: Option<Arc<dyn TextFormatter>> = Some(Arc::new(FakePolish));
     let injected = Arc::new(Mutex::new(Vec::<String>::new()));
     let injector = Arc::new(CapturingInjector(Arc::clone(&injected)));
 
     let mut cfg = Config::default();
-    cfg.llm.enabled = true;
-    cfg.llm.backend = LlmBackend::OpenAI; // anything non-None
-                                          // Force the LLM to run regardless of the default short-utterance
-                                          // skip threshold; this test covers the cleaned-output path.
-    cfg.llm.skip_if_words_lt = 0;
+    cfg.polish.enabled = true;
+    cfg.polish.backend = PolishBackend::OpenAI; // anything non-None
+                                                // Force the LLM to run regardless of the default short-utterance
+                                                // skip threshold; this test covers the cleaned-output path.
+    cfg.polish.skip_if_words_lt = 0;
     let cfg = Arc::new(cfg);
 
-    let (orch, _action_rx) =
-        orchestrator_for_test(stt, llm, &db_path, Arc::clone(&cfg), injector, Arc::new(StubFocus));
+    let (orch, _action_rx) = orchestrator_for_test(
+        stt,
+        polish,
+        &db_path,
+        Arc::clone(&cfg),
+        injector,
+        Arc::new(StubFocus),
+    );
 
     // 1 second of silence at 16 kHz to drive the pipeline.
     let pcm = vec![0.0_f32; 16_000];
@@ -115,15 +121,15 @@ async fn pipeline_produces_history_row_and_injects_cleaned_text() {
     assert_eq!(row.raw, "hello world");
     assert_eq!(row.cleaned.as_deref(), Some("CLEANED: hello world"));
     assert_eq!(row.stt_backend.as_deref(), Some("fake-stt"));
-    assert_eq!(row.llm_backend.as_deref(), Some("fake-llm"));
+    assert_eq!(row.polish_backend.as_deref(), Some("fake-polish"));
     assert_eq!(row.app_class.as_deref(), Some("Slack"));
     assert_eq!(row.language.as_deref(), Some("en"));
 }
 
-struct ClarifyingLlm;
+struct ClarifyingPolish;
 
 #[async_trait]
-impl TextFormatter for ClarifyingLlm {
+impl TextFormatter for ClarifyingPolish {
     async fn format(&self, _raw: &str, _ctx: &FormatContext) -> Result<String> {
         // Mirror the exact failure mode the bug report captured: a
         // chat-tuned model responding with a clarification question
@@ -139,11 +145,11 @@ impl TextFormatter for ClarifyingLlm {
         )
     }
     fn name(&self) -> &'static str {
-        "fake-clarifying-llm"
+        "fake-clarifying-polish"
     }
 }
 
-/// Plan task 6 — when the LLM backend rejects a clarification reply
+/// Plan task 6 — when the polish backend rejects a clarification reply
 /// (the F8 push-to-talk failure mode), the pipeline must inject the
 /// raw STT text rather than the meta-question.
 #[tokio::test]
@@ -155,17 +161,23 @@ async fn pipeline_falls_back_to_raw_when_llm_rejects_clarification() {
     // and the LLM is actually invoked.
     let stt: Arc<dyn SpeechToText> =
         Arc::new(FakeStt { text: "the response is this".into(), lang: Some("en".into()) });
-    let llm: Option<Arc<dyn TextFormatter>> = Some(Arc::new(ClarifyingLlm));
+    let polish: Option<Arc<dyn TextFormatter>> = Some(Arc::new(ClarifyingPolish));
     let injected = Arc::new(Mutex::new(Vec::<String>::new()));
     let injector = Arc::new(CapturingInjector(Arc::clone(&injected)));
 
     let mut cfg = Config::default();
-    cfg.llm.enabled = true;
-    cfg.llm.backend = LlmBackend::OpenAI;
+    cfg.polish.enabled = true;
+    cfg.polish.backend = PolishBackend::OpenAI;
     let cfg = Arc::new(cfg);
 
-    let (orch, _rx) =
-        orchestrator_for_test(stt, llm, &db_path, Arc::clone(&cfg), injector, Arc::new(StubFocus));
+    let (orch, _rx) = orchestrator_for_test(
+        stt,
+        polish,
+        &db_path,
+        Arc::clone(&cfg),
+        injector,
+        Arc::new(StubFocus),
+    );
 
     let outcome = orch.run_oneshot(vec![0.0_f32; 16_000], 1000).await;
     match outcome {
@@ -201,21 +213,27 @@ async fn pipeline_skips_llm_for_short_capture_under_default_threshold() {
 
     let stt: Arc<dyn SpeechToText> =
         Arc::new(FakeStt { text: "okay".into(), lang: Some("en".into()) });
-    // If the LLM is invoked, the test fails: ClarifyingLlm bails, but
+    // If the LLM is invoked, the test fails: ClarifyingPolish bails, but
     // we'd still see `llm_skipped_short = false` in metrics.
-    let llm: Option<Arc<dyn TextFormatter>> = Some(Arc::new(ClarifyingLlm));
+    let polish: Option<Arc<dyn TextFormatter>> = Some(Arc::new(ClarifyingPolish));
     let injected = Arc::new(Mutex::new(Vec::<String>::new()));
     let injector = Arc::new(CapturingInjector(Arc::clone(&injected)));
 
     let mut cfg = Config::default();
-    cfg.llm.enabled = true;
-    cfg.llm.backend = LlmBackend::OpenAI;
+    cfg.polish.enabled = true;
+    cfg.polish.backend = PolishBackend::OpenAI;
     // Sanity-check the new default rather than hard-coding it.
-    assert!(cfg.llm.skip_if_words_lt >= 3);
+    assert!(cfg.polish.skip_if_words_lt >= 3);
     let cfg = Arc::new(cfg);
 
-    let (orch, _rx) =
-        orchestrator_for_test(stt, llm, &db_path, Arc::clone(&cfg), injector, Arc::new(StubFocus));
+    let (orch, _rx) = orchestrator_for_test(
+        stt,
+        polish,
+        &db_path,
+        Arc::clone(&cfg),
+        injector,
+        Arc::new(StubFocus),
+    );
 
     let outcome = orch.run_oneshot(vec![0.0_f32; 16_000], 1000).await;
     match outcome {
@@ -268,5 +286,5 @@ async fn pipeline_passes_raw_through_when_no_llm() {
     let db = HistoryDb::open(&db_path).unwrap();
     let rows = db.recent(1).unwrap();
     assert_eq!(rows.len(), 1);
-    assert!(rows[0].llm_backend.is_none());
+    assert!(rows[0].polish_backend.is_none());
 }

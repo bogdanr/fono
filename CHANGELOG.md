@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Local STT model selection now routes through a quantization
+  ladder.** Per [ADR 0027](docs/decisions/0027-stt-quantization-ladder.md),
+  each user-facing model name resolves to one defaulted GGML
+  variant chosen by an accuracy-based acceptance rule
+  (English-only mean Δ ≤ +0.05 and max per-fixture Δ ≤ +0.20 vs
+  fp16, smallest passing wins). Defaults: `tiny`/`tiny.en` →
+  `q5_1` (31 MB), `small` → `q5_1` (182 MB), `small.en` → `q8_0`
+  (253 MB), `large-v3-turbo` → `q8_0` (834 MB).
+- **`[stt.local].quantization`** is a new config key:
+  `auto | fp16 | q8_0 | q5_1`. `auto` (default) honours the
+  registry default for the configured `model`; pinned values force
+  a specific quantization where the model ships it.
+- **`set_audio_ctx()`** is hard-coded on for clips < 30 s (+70–160 %
+  CPU batch RTF, no measurable quality regression). The
+  `FONO_WHISPER_AUDIO_CTX` env override now only works in debug
+  builds for ablation runs.
+- **Local STT thread default** switched to physical-core count
+  parsed from `/proc/cpuinfo`, clamped 1..=16. `FONO_WHISPER_THREADS`
+  override unchanged. Fixes ~2× throughput regression on Zen 3 /
+  Zen 4 SMT systems where the previous default used logical
+  threads.
+- **`fono models list`** now shows the default quantization per
+  model plus the installable alternatives inline; `install` /
+  `remove` operate on quantization variants.
+- **`docs/providers.md`** Whisper section rewritten around the new
+  3-rung ladder.
+
+### Removed
+
+- `base` and `base.en` model entries — dominated by T2 (`small-q5_1`
+  / `small.en-q8_0`) on every reference host: strictly better
+  English-fixture accuracy at similar RTF for ~40 MB more disk.
+- `*-q5_0` variants — `large-v3-turbo-q5_0` broke
+  `en-conversational` (acc 0 → 0.354); `q5_1` is strictly better
+  whenever published.
+- `tiny-q8_0`, `tiny.en-q8_0`, `small-q8_0` (multilingual) — equal
+  quality to the kept variants at larger size.
+- No migration is provided: Fono is pre-release with no users to
+  break.
+
+### Added
+
+- **ADR 0027** records the acceptance rule, the ladder, and the
+  process change in `scripts/bench-accuracy.py` that surfaces
+  per-language Δ accuracy so multilingual regressions don't hide
+  behind the all-language mean.
+- **`plans/2026-05-19-stt-perf-pass-v1.md`** captures the tracked
+  work this entry implements.
+
 ## [0.8.0] — 2026-05-17
 
 ### Changed

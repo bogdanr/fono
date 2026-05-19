@@ -33,7 +33,7 @@ pub struct LangReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Report {
     pub provider_stt: String,
-    pub provider_llm: Option<String>,
+    pub provider_polish: Option<String>,
     pub ran_at: String,
     pub by_language: BTreeMap<String, LangReport>,
     pub by_clip: Vec<ClipReport>,
@@ -42,7 +42,7 @@ pub struct Report {
 impl Report {
     pub fn build(
         provider_stt: impl Into<String>,
-        provider_llm: Option<String>,
+        provider_polish: Option<String>,
         clips: Vec<ClipReport>,
     ) -> Self {
         let mut by_lang: BTreeMap<String, Vec<ClipReport>> = BTreeMap::new();
@@ -73,7 +73,7 @@ impl Report {
 
         Self {
             provider_stt: provider_stt.into(),
-            provider_llm,
+            provider_polish,
             ran_at: now_rfc3339(),
             by_language,
             by_clip: clips,

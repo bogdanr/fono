@@ -20,7 +20,7 @@ name = "fono"
 path = "src/main.rs"
 
 [features]
-# Fono always ships local whisper.cpp STT and llama.cpp LLM cleanup;
+# Fono always ships local whisper.cpp STT and llama.cpp polish;
 # cloud providers are additive. The default release builds a single
 # static binary with both locals enabled. The duplicate-ggml symbol
 # collision is resolved at link time by
@@ -28,17 +28,17 @@ path = "src/main.rs"
 default = ["tray", "local-models", "llama-local", "interactive"]
 tray = ["fono-tray/tray-backend"]
 local-models = ["fono-stt/whisper-local"]
-llama-local = ["fono-llm/llama-local"]
+llama-local = ["fono-polish/llama-local"]
 # Hardware acceleration features — fan out to the matching opt-in
-# features on `fono-stt` and `fono-llm`, which themselves forward to
+# features on `fono-stt` and `fono-polish`, which themselves forward to
 # `whisper-rs`/`llama-cpp-2`. Off by default because they require the
 # corresponding SDK at build time (CUDA toolkit, Vulkan SDK, etc.);
 # devs / packaging matrices opt in. Surfaced at runtime via
 # `daemon::hardware_acceleration_summary`.
-accel-cuda = ["fono-stt/accel-cuda", "fono-llm/accel-cuda"]
-accel-metal = ["fono-stt/accel-metal", "fono-llm/accel-metal"]
-accel-vulkan = ["fono-stt/accel-vulkan", "fono-llm/accel-vulkan"]
-accel-rocm = ["fono-stt/accel-hipblas", "fono-llm/accel-rocm"]
+accel-cuda = ["fono-stt/accel-cuda", "fono-polish/accel-cuda"]
+accel-metal = ["fono-stt/accel-metal", "fono-polish/accel-metal"]
+accel-vulkan = ["fono-stt/accel-vulkan", "fono-polish/accel-vulkan"]
+accel-rocm = ["fono-stt/accel-hipblas", "fono-polish/accel-rocm"]
 accel-coreml = ["fono-stt/accel-coreml"]
 accel-openblas = ["fono-stt/accel-openblas"]
 # Live-dictation streaming pipeline + the audio-visualisation overlay
@@ -67,15 +67,15 @@ fono-audio = { path = "../fono-audio" }
 fono-http = { path = "../fono-http" }
 fono-stt = { path = "../fono-stt", features = ["groq", "openai", "openrouter", "deepgram", "wyoming"] }
 # Default builds ship every cloud backend wired in the catalogue —
-# fono-stt: Groq/OpenAI/Deepgram (+ Wyoming LAN); fono-llm:
+# fono-stt: Groq/OpenAI/Deepgram (+ Wyoming LAN); fono-polish:
 # Cerebras/OpenAI-compat/Anthropic; fono-tts: all five hosted
-# providers (+ Wyoming LAN). This means `fono use <stt|llm|tts>
+# providers (+ Wyoming LAN). This means `fono use <stt|polish|tts>
 # <provider>` and the wizard's primary picker work out of the box for
 # every catalogued provider without recompiling. Each feature only
 # adds an HTTP client (reqwest is already pulled in transitively); no
 # native deps.
 fono-tts = { path = "../fono-tts", features = ["wyoming", "openai", "groq", "openrouter", "cartesia", "deepgram"] }
-fono-llm = { path = "../fono-llm", features = ["cerebras", "openai-compat", "anthropic"] }
+fono-polish = { path = "../fono-polish", features = ["cerebras", "openai-compat", "anthropic"] }
 fono-assistant = { path = "../fono-assistant" }
 fono-hotkey = { path = "../fono-hotkey" }
 fono-inject = { path = "../fono-inject" }

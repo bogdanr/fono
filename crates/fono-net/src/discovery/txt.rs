@@ -9,7 +9,7 @@
 //! |-----------|------------------|-----------------------------------------|
 //! | `proto`   | `wyoming/1`      | protocol family + revision              |
 //! | `version` | `0.4.0`          | server software version (diagnostic)    |
-//! | `caps`    | `stt,llm`        | comma-separated capability tags         |
+//! | `caps`    | `stt,polish`        | comma-separated capability tags         |
 //! | `model`   | `whisper-small`  | primary model hint (Wyoming only)       |
 //! | `auth`    | `token` / `none` | does the server require a bearer?       |
 //! | `path`    | `/fono/v1`       | WebSocket path (Fono-native only)       |
@@ -59,15 +59,15 @@ mod tests {
 
     #[test]
     fn caps_round_trip() {
-        let caps = vec!["stt", "llm", "history"];
+        let caps = vec!["stt", "polish", "history"];
         let raw = format_caps(&caps);
-        assert_eq!(raw, "stt,llm,history");
+        assert_eq!(raw, "stt,polish,history");
         assert_eq!(parse_caps(&raw), caps);
     }
 
     #[test]
     fn caps_tolerates_whitespace_and_empty() {
-        assert_eq!(parse_caps(" stt , , llm "), vec!["stt", "llm"]);
+        assert_eq!(parse_caps(" stt , , polish "), vec!["stt", "polish"]);
         assert!(parse_caps("").is_empty());
     }
 

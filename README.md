@@ -59,7 +59,7 @@ The setup wizard hot-reloads the running daemon when it finishes, so you don't n
 fono use cloud groq           # paired preset (Groq STT + Groq LLM)
 fono use stt openai           # change just STT
 fono use tts cartesia         # swap TTS backend
-fono use local                # back to whisper-local + skip LLM
+fono use local                # back to whisper-local + skip polish
 ```
 
 Keys live in `~/.config/fono/secrets.toml`:
@@ -83,7 +83,7 @@ Local-first. Nothing leaves your machine unless you pick a cloud provider.
 ## Documentation
 
 - [Roadmap](ROADMAP.md) — in progress, planned, and shipped.
-- [Provider matrix](docs/providers.md) — STT, LLM, and TTS endpoints, env vars, default models.
+- [Provider matrix](docs/providers.md) — STT, polish, and TTS endpoints, env vars, default models.
 - [Live (streaming) dictation](docs/interactive.md) — overlay, latency budget, configuration.
 - [Text injection](docs/inject.md) — Shift+Insert, per-app overrides.
 - [Wayland notes](docs/wayland.md) — compositor binding.

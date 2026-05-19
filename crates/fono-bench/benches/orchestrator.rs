@@ -15,7 +15,7 @@ use std::time::Duration;
 use criterion::{criterion_group, criterion_main, Criterion};
 use tokio::runtime::Runtime;
 
-use fono_bench::fakes::{FakeLlm, FakeStt};
+use fono_bench::fakes::{FakePolish, FakeStt};
 use fono_bench::runner::BenchRunner;
 
 fn bench_runner_no_audio_io(c: &mut Criterion) {
@@ -31,18 +31,18 @@ fn bench_runner_no_audio_io(c: &mut Criterion) {
         "the quick brown fox jumps over the lazy dog",
         Duration::from_millis(100),
     ));
-    let llm = Arc::new(FakeLlm::with_delay(Duration::from_millis(50)));
+    let polish = Arc::new(FakePolish::with_delay(Duration::from_millis(50)));
 
     c.bench_function("fake_pipeline_3s_clip", |b| {
         b.to_async(&rt).iter(|| {
             let stt = Arc::clone(&stt);
-            let llm = Arc::clone(&llm);
+            let polish = Arc::clone(&polish);
             async move {
-                use fono_llm::traits::{FormatContext, TextFormatter};
+                use fono_polish::traits::{FormatContext, TextFormatter};
                 use fono_stt::traits::SpeechToText;
                 let pcm = vec![0.0f32; 16_000 * 3];
                 let trans = stt.transcribe(&pcm, 16_000, Some("en")).await.unwrap();
-                let cleaned = llm.format(&trans.text, &FormatContext::default()).await.unwrap();
+                let cleaned = polish.format(&trans.text, &FormatContext::default()).await.unwrap();
                 let _wer = fono_bench::word_error_rate(
                     "the quick brown fox jumps over the lazy dog",
                     &cleaned,

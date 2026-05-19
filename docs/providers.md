@@ -1,6 +1,6 @@
 # Fono provider matrix
 
-Fono ships with one **speech-to-text (STT)** engine and one **LLM cleanup**
+Fono ships with one **speech-to-text (STT)** engine and one **polish**
 engine active at a time. Both are selected in `~/.config/fono/config.toml`
 and can be swapped at any time with `fono use`, `fono setup`, or by editing
 the file directly. API keys are stored in `~/.config/fono/secrets.toml`
@@ -16,7 +16,7 @@ rework (issue #11). See
 [ADR 0025](decisions/0025-cloud-provider-catalogue.md) for the design
 rationale.
 
-| Provider       | STT | LLM cleanup | Assistant chat | Vision                       | Web search                      | TTS                       |
+| Provider       | STT | polish | Assistant chat | Vision                       | Web search                      | TTS                       |
 |----------------|-----|-------------|----------------|------------------------------|----------------------------------|---------------------------|
 | **OpenAI**     | ✓   | ✓           | ✓              | ✓ (`gpt-5.4-mini`)          | ✓ `web_search_preview`           | ✓ `tts-1`                 |
 | **Groq**       | ✓   | ✓           | ✓              | —                            | —                                | ✓ Orpheus **new**         |
@@ -30,7 +30,7 @@ rationale.
 
 Picking OpenAI or Groq as the primary cloud provider configures every
 capability in that row from a single key prompt; picking Anthropic or
-Cerebras configures LLM + Assistant and asks an opt-in secondary
+Cerebras configures polish + Assistant and asks an opt-in secondary
 question for STT and/or TTS, defaulting to "key already set" providers
 when their key is in `secrets.toml`. **Five** providers can now drive
 the assistant end-to-end (OpenAI, Groq, Anthropic + any new cloud TTS,
@@ -44,23 +44,23 @@ The smallest valid cloud config is two lines plus one key:
 ```toml
 [stt]
 backend = "groq"     # or openai, deepgram, …
-[llm]
+[polish]
 backend = "cerebras" # or none, openai, anthropic, groq, openrouter, ollama, local
 enabled = true
 ```
 
 …and `GROQ_API_KEY` + `CEREBRAS_API_KEY` either in `secrets.toml` or
 exported in the environment. The factories fall through to the canonical
-env-var name when the optional `[stt.cloud]` / `[llm.cloud]` sub-block is
+env-var name when the optional `[stt.cloud]` / `[polish.cloud]` sub-block is
 absent — there is no need to repeat the provider name twice.
 
 Once that is in place, switching providers is one command:
 
 ```sh
 fono use stt groq         # flip STT only
-fono use llm cerebras     # flip LLM only
-fono use cloud cerebras   # paired preset (STT=Groq + LLM=Cerebras)
-fono use local            # whisper-local + skip LLM
+fono use polish cerebras     # flip polish only
+fono use cloud cerebras   # paired preset (STT=Groq + Polish=Cerebras)
+fono use local            # whisper-local + skip polish
 fono use show             # print active selection + key refs
 ```
 
@@ -69,8 +69,8 @@ to any running daemon (no restart, no lost state). Per-call overrides
 without persisting use the same backend names:
 
 ```sh
-fono record --stt openai --llm anthropic
-fono transcribe sample.wav --stt groq --llm none
+fono record --stt openai --polish anthropic
+fono transcribe sample.wav --stt groq --polish none
 ```
 
 API keys for as many providers as you like coexist in `secrets.toml`:
@@ -84,7 +84,7 @@ fono keys check                  # reachability probe per key
 
 ## Debugging slow or stalled cloud requests
 
-Every cloud-backed pipeline (STT, LLM cleanup, voice-assistant chat,
+Every cloud-backed pipeline (STT, polish, voice-assistant chat,
 TTS, wizard key validation) emits one structured log line per HTTP
 request under the `fono.http` tracing target. The lines are silent at
 the default `info` log level and turn on per session via the
@@ -98,7 +98,7 @@ Schema (one line per HTTP request):
 
 | Field             | Meaning                                                |
 |-------------------|--------------------------------------------------------|
-| `stage`           | `stt` / `llm` / `assistant` / `tts` / `wizard`         |
+| `stage`           | `stt` / `polish` / `assistant` / `tts` / `wizard`         |
 | `provider`        | `openrouter` / `openai` / `groq` / `cerebras` / ...    |
 | `endpoint`        | last URL segment, e.g. `audio/speech`                  |
 | `status`          | HTTP status                                            |
@@ -115,21 +115,38 @@ Schema (one line per HTTP request):
 
 Each backend uses an inter-chunk watchdog so a stalled body fails
 fast rather than waiting for the overall reqwest timeout: TTS 15 s,
-STT 30 s, LLM cleanup 30 s, assistant SSE 20 s inter-event. TTS
+STT 30 s, polish 30 s, assistant SSE 20 s inter-event. TTS
 retries once automatically on a stall.
 
 ## Speech-to-text
 
 | Backend       | Type       | Model(s)                               | API key env var       | Streaming |
 |---------------|------------|----------------------------------------|-----------------------|-----------|
-| Whisper local | local      | ggml tiny · tiny.en · base · base.en · small · small.en · medium · large-v3 | — | no |
+| Whisper local | local      | ggml `tiny` · `tiny.en` · `small` · `small.en` · `large-v3-turbo` (per ADR 0027) | — | no |
 | Groq          | cloud HTTP | `whisper-large-v3`, `whisper-large-v3-turbo` | `GROQ_API_KEY`        | yes (pseudo-stream, opt-in) |
 | OpenAI        | cloud HTTP | `whisper-1`, `gpt-4o-transcribe`       | `OPENAI_API_KEY`      | no |
 | Deepgram      | cloud WS   | `nova-2`, `nova-3`                     | `DEEPGRAM_API_KEY`    | yes |
 | Cartesia      | cloud HTTP | `sonic-transcribe`                     | `CARTESIA_API_KEY`    | yes |
 | AssemblyAI    | cloud HTTP | `best`, `nano`                         | `ASSEMBLYAI_API_KEY`  | yes |
 
-Whisper model files land in `~/.cache/fono/models/whisper/ggml-<name>.bin`.
+Whisper model files land in `~/.cache/fono/models/whisper/ggml-<name><suffix>.bin`
+where `<suffix>` is empty for fp16 or `-q5_1` / `-q8_0` for the
+shipped quantizations. The pick per model is driven by the
+acceptance rule in [ADR 0027](decisions/0027-stt-quantization-ladder.md):
+
+| Rung | Multilingual | English-only | Default file | Approx size |
+|---|---|---|---|---:|
+| T1 minimal | `tiny` | `tiny.en` | `ggml-<name>-q5_1.bin` | 31 MB |
+| T2 sweet spot | `small` | `small.en` | `ggml-small-q5_1.bin` / `ggml-small.en-q8_0.bin` | 182 / 253 MB |
+| T3 quality | `large-v3-turbo` | `large-v3-turbo` | `ggml-large-v3-turbo-q8_0.bin` | 834 MB |
+
+Users override the picked quantization with `[stt.local].quantization`
+(`auto` | `fp16` | `q8_0` | `q5_1`). `auto` is the default and resolves
+to the table above. `base` / `base.en` are intentionally absent: the
+perf-pass found them dominated by T2 on every reference host
+(strictly better English-fixture accuracy at similar RTF for ~40 MB
+more disk).
+
 Override the download host with `FONO_MODEL_MIRROR=https://your.mirror`.
 
 > **Note for CI / forks.** `GROQ_API_KEY` is also consumed by the
@@ -175,7 +192,7 @@ set `interactive.budget_ceiling_per_minute_umicros` to a hard cap.
 
 Design + cost rationale: [ADR 0020](decisions/0020-groq-pseudo-stream.md).
 
-## LLM cleanup
+## polish
 
 | Backend            | Type         | Default model                 | API key env var        |
 |--------------------|--------------|-------------------------------|------------------------|
@@ -185,8 +202,8 @@ Design + cost rationale: [ADR 0020](decisions/0020-groq-pseudo-stream.md).
 | OpenAI-compatible  | cloud HTTP   | `gpt-4o-mini` (configurable)  | `OPENAI_API_KEY`       |
 | Anthropic          | cloud HTTP   | `claude-3-5-haiku-latest`     | `ANTHROPIC_API_KEY`    |
 
-GGUF model files land in `~/.cache/fono/models/llm/`. The `enabled` flag in
-`[llm]` can be set to `false` to skip cleanup entirely — in which case Fono
+GGUF model files land in `~/.cache/fono/models/polish/`. The `enabled` flag in
+`[polish]` can be set to `false` to skip cleanup entirely — in which case Fono
 types the raw STT output verbatim.
 
 ### Short-utterance handling and clarification refusals
@@ -199,14 +216,14 @@ OpenRouter, Ollama, Anthropic, and the local llama.cpp backend; not a
 provider-specific quirk. Fono mitigates this uniformly across every
 backend in three ways:
 
-- `[llm].skip_if_words_lt` (default `3`) bypasses the LLM entirely for
+- `[polish].skip_if_words_lt` (default `3`) bypasses the polish step entirely for
   one- and two-word captures, regardless of which backend is active.
 - The default cleanup prompt explicitly forbids clarification questions
   and wraps the user message in `<<<` / `>>>` delimiters so the
   transcript cannot be mistaken for a chat message. Same prompt for
   all backends.
 - Clarification-shaped replies are detected post-hoc and rejected; the
-  raw STT text is injected instead and the daemon logs `LLM returned a
+  raw STT text is injected instead and the daemon logs `polish returned a
   clarification reply… falling back to raw text.` Same detector for
   all backends.
 
@@ -243,9 +260,11 @@ Design rationale: [ADR 0017](decisions/0017-cloud-stt-language-stickiness.md).
 
 ## Default picks (rationale)
 
-* **Local default:** `whisper small` (466 MB, multilingual) + `Qwen2.5-1.5B-Instruct`
-  (1.0 GB, Apache-2.0). Runs on any 4-core x86_64 at ~2 s latency for a
-  10-second utterance; idle RAM ~30 MB, active ~1.3 GB.
+* **Local default:** `whisper small` (resolves to `small-q5_1`, 182 MB, multilingual)
+  + `Qwen2.5-1.5B-Instruct` (1.0 GB, Apache-2.0). Runs on any 4-core x86_64 at
+  ~2 s latency for a 10-second utterance; idle RAM ~30 MB, active ~800 MB
+  (down from ~1.3 GB on fp16). Per-model quantization picks are recorded
+  in [ADR 0027](decisions/0027-stt-quantization-ladder.md).
 * **Cloud default:** Groq whisper-large-v3 + Cerebras llama-3.3-70b — sub-1 s
   latency end-to-end, generous free tiers, permissive TOS.
 
@@ -345,7 +364,7 @@ default may flip back.
 
 ### OpenRouter app attribution
 
-Every outbound request Fono makes to `openrouter.ai` — STT, LLM
+Every outbound request Fono makes to `openrouter.ai` — STT, polish
 cleanup, voice-assistant chat, TTS, and the wizard's
 `validate_cloud_key` probe — carries three static app-attribution
 headers per <https://openrouter.ai/docs/app-attribution>:
@@ -446,7 +465,7 @@ prefer_web_search = false
 
 ## Adding a new backend
 
-Implement the `fono_stt::SpeechToText` or `fono_llm::TextCleanup` async
-trait, register the factory in `crates/fono-{stt,llm}/src/registry.rs`,
-then expose the new variant in `fono_core::config::{SttBackend,LlmBackend}`.
+Implement the `fono_stt::SpeechToText` or `fono_polish::TextCleanup` async
+trait, register the factory in `crates/fono-{stt,polish}/src/registry.rs`,
+then expose the new variant in `fono_core::config::{SttBackend,PolishBackend}`.
 See `CONTRIBUTING.md` for full coding guidelines.
