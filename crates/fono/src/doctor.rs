@@ -374,6 +374,47 @@ pub async fn report(paths: &Paths) -> Result<String> {
         if paths.ipc_socket().exists() { ok("exists") } else { warn("absent") }
     )?;
 
+    // Overlay backend probe. Uses `fono_overlay::backend::probe_selection`
+    // which only reads env vars + walks the candidate list — it does
+    // not actually connect to Wayland or open a window, so doctor stays
+    // cheap and side-effect-free.
+    {
+        use fono_overlay::{BackendCapabilities, BackendId};
+        let (id, reason) = fono_overlay::backend::probe_selection();
+        let caps = match id {
+            BackendId::WlrLayerShell | BackendId::X11OverrideRedirect => BackendCapabilities {
+                transparency: true,
+                client_positioning: true,
+                focus_passthrough: true,
+                click_passthrough: true,
+            },
+            BackendId::Noop => BackendCapabilities {
+                transparency: false,
+                client_positioning: false,
+                focus_passthrough: true,
+                click_passthrough: true,
+            },
+        };
+        writeln!(out, "{} {} ({}) — {reason}", head("Overlay     :"), id.as_str(), caps.summary(),)?;
+        // Wayland session without layer-shell and without Xwayland
+        // — we have no graphical overlay path. Tell the user how
+        // to fix it.
+        if matches!(id, BackendId::Noop)
+            && std::env::var_os("WAYLAND_DISPLAY").is_some()
+            && std::env::var_os("DISPLAY").is_none()
+        {
+            writeln!(
+                out,
+                "  {}",
+                warn(
+                    "hint: Wayland session without Xwayland or layer-shell. Install \
+                     your distro's xwayland package (e.g. `sudo apt install xwayland`) \
+                     to enable the overlay."
+                )
+            )?;
+        }
+    }
+
     writeln!(out)?;
     writeln!(out, "{} ({}):", head("Log tail"), paths.log_file().display())?;
     match tail_log(&paths.log_file(), 10) {

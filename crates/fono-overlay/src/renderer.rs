@@ -1,0 +1,1260 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//! Pure software-rasterised drawing for the overlay.
+//!
+//! Everything in this module operates on a `&mut [u32]` ARGB
+//! premultiplied framebuffer plus a `RendererState`. It is intentionally
+//! decoupled from windowing — no `winit`, no `softbuffer`, no
+//! `wayland-client`. Each backend in [`crate::backends`] hands the
+//! renderer a framebuffer and gets a fully painted frame back.
+//!
+//! Extracted from the original `real.rs` event-loop file as part of
+//! the 2026-05-19 overlay backend split. No drawing logic changed in
+//! the move — the per-style branches, the heatmap cache, the
+//! `fill_round_rect` AA path, the wrap-and-tail text rendering, all
+//! preserved verbatim.
+
+#![allow(
+    clippy::suboptimal_flops,
+    clippy::branches_sharing_code,
+    clippy::cognitive_complexity,
+    clippy::many_single_char_names,
+    clippy::too_many_arguments
+)]
+
+use std::collections::VecDeque;
+
+use fono_core::config::WaveformStyle;
+
+use crate::OverlayState;
+
+/// True when the chosen [`WaveformStyle`] renders the transcript
+/// text panel rather than an audio visualisation. Only `Transcript`
+/// is a text-mode style; the other four are passive visualisations.
+pub fn is_text_style(style: WaveformStyle) -> bool {
+    style.requires_streaming()
+}
+
+/// Ring-buffer caps. 60 levels = 2 s at the 33 ms ticker cadence;
+/// 5000 samples ≈ 312 ms at 16 kHz — wide enough for the oscilloscope
+/// to scroll slowly across the panel, so individual voice cycles are
+/// visible rather than blurring into a uniform band. 120 FFT frames
+/// at 30 fps ≈ 4 s of spectrogram history.
+pub const LEVELS_CAP: usize = 60;
+pub const OSC_SAMPLES_CAP: usize = 5000;
+pub const FFT_FRAMES_CAP: usize = 120;
+
+// ---------------------------------------------------------------------------
+//  Layout constants — tuned by eye against a 1080p display.
+// ---------------------------------------------------------------------------
+
+/// Logical pixels.
+pub const WIN_WIDTH: f32 = 640.0;
+/// Minimum and maximum logical heights. Min fits status row + one line
+/// of text; max prevents the overlay from dominating the screen.
+pub const WIN_MIN_HEIGHT: f32 = 80.0;
+pub const WIN_MAX_HEIGHT: f32 = 240.0;
+/// Fixed height for the standalone waveform overlay. Status row + a
+/// roomy ~56 px visualisation area; smaller than the live-dictation
+/// max so the panel doesn't dominate the screen during batch
+/// recording.
+pub const WIN_WAVEFORM_HEIGHT: f32 = 100.0;
+/// Inset from the bottom edge.
+pub const BOTTOM_OFFSET: u32 = 48;
+
+pub const PADDING_X: f32 = 24.0;
+pub const PADDING_TOP: f32 = 14.0;
+pub const PADDING_BOT: f32 = 16.0;
+pub const ACCENT_WIDTH: f32 = 4.0;
+pub const CORNER_RADIUS: f32 = 12.0;
+pub const STATUS_FONT_PX: f32 = 13.0;
+pub const TEXT_FONT_PX: f32 = 20.0;
+pub const STATUS_TO_TEXT: f32 = 14.0;
+pub const LINE_GAP: f32 = 6.0;
+
+/// `0xAARRGGBB`. The compositor honours the alpha byte when the
+/// surface is created with an ARGB format. 80 % opaque dark
+/// charcoal — translucent enough to read as a modern overlay,
+/// opaque enough for legibility.
+pub const COLOR_BG: u32 = 0xCC17_171B;
+/// `COLOR_BG` in premultiplied-alpha form. The framebuffer holds
+/// premultiplied pixels, so any path that writes the panel BG
+/// without going through [`blend`] (interior fast path of
+/// [`fill_round_rect`], heatmap cache fill / blit) must use this.
+pub const COLOR_BG_PRE: u32 = pre_multiply(COLOR_BG);
+pub const COLOR_TEXT: u32 = 0xFFEC_ECF1;
+pub const COLOR_TEXT_DIM: u32 = 0xCCAA_AAB2;
+
+/// Accent stripe colour per state. Mirrored by the tray icon so the
+/// user sees the same colour story in both places.
+pub fn accent_color(state: OverlayState) -> u32 {
+    match state {
+        OverlayState::Hidden => 0x0000_0000,
+        OverlayState::Recording { .. } => 0xFFE0_5454,
+        OverlayState::AssistantRecording { .. } => 0xFF22_C55E,
+        OverlayState::AssistantThinking => 0xFFF5_9E0B,
+        OverlayState::Processing | OverlayState::Polishing => 0xFFE0_A040,
+        OverlayState::LiveDictating => 0xFF63_7AFF,
+    }
+}
+
+pub fn state_label(state: OverlayState) -> &'static str {
+    match state {
+        OverlayState::Hidden => "",
+        OverlayState::Recording { .. } => "RECORDING",
+        OverlayState::AssistantRecording { .. } => "ASSISTANT",
+        OverlayState::AssistantThinking => "THINKING",
+        OverlayState::Processing | OverlayState::Polishing => "POLISHING",
+        OverlayState::LiveDictating => "LIVE",
+    }
+}
+
+/// States whose panel is fed `push_level` from the live capture pump
+/// and should render the right-side VU bar.
+pub fn state_has_vu_bar(state: OverlayState) -> bool {
+    matches!(state, OverlayState::LiveDictating | OverlayState::AssistantRecording { .. })
+}
+
+// ---------------------------------------------------------------------------
+//  Font discovery
+// ---------------------------------------------------------------------------
+
+pub fn load_system_font() -> Option<ab_glyph::FontArc> {
+    const CANDIDATES: &[&str] = &[
+        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/NotoSans-Bold.ttf",
+        "/usr/share/fonts/TTF/NotoSans-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/TTF/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/TTF/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/liberation-sans/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/System/Library/Fonts/Helvetica.ttc",
+        "/Library/Fonts/Arial.ttf",
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+    ];
+    for p in CANDIDATES {
+        let Ok(bytes) = std::fs::read(p) else {
+            continue;
+        };
+        if let Ok(f) = ab_glyph::FontArc::try_from_vec(bytes) {
+            tracing::debug!("overlay: loaded font from {p}");
+            return Some(f);
+        }
+    }
+    tracing::warn!(
+        "overlay: no system font found; install dejavu / noto / liberation \
+         fonts to enable text rendering"
+    );
+    None
+}
+
+// ---------------------------------------------------------------------------
+//  Pixel helpers
+// ---------------------------------------------------------------------------
+
+/// Premultiply the RGB channels of an ARGB colour by its alpha.
+#[inline]
+pub const fn pre_multiply(color: u32) -> u32 {
+    let a = (color >> 24) & 0xFF;
+    if a == 0xFF {
+        return color;
+    }
+    let r = (((color >> 16) & 0xFF) * a) / 255;
+    let g = (((color >> 8) & 0xFF) * a) / 255;
+    let b = ((color & 0xFF) * a) / 255;
+    (a << 24) | (r << 16) | (g << 8) | b
+}
+
+/// Premultiplied alpha-over composite of `fg` (ARGB) onto `bg` (ARGB).
+#[inline]
+pub fn blend(bg: u32, fg: u32, coverage_alpha: u8) -> u32 {
+    let fa = ((fg >> 24) & 0xFF) as u16 * u16::from(coverage_alpha) / 255;
+    if fa == 0 {
+        return bg;
+    }
+    let fa = fa as u32;
+    let inv = 255 - fa;
+    let fr = (fg >> 16) & 0xFF;
+    let fg_g = (fg >> 8) & 0xFF;
+    let fb = fg & 0xFF;
+    let ba = (bg >> 24) & 0xFF;
+    let br = (bg >> 16) & 0xFF;
+    let bg_g = (bg >> 8) & 0xFF;
+    let bb = bg & 0xFF;
+    let out_a = (fa * 255 + ba * inv) / 255;
+    let out_r = (fr * fa + br * inv) / 255;
+    let out_g = (fg_g * fa + bg_g * inv) / 255;
+    let out_b = (fb * fa + bb * inv) / 255;
+    (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b
+}
+
+/// Draw a filled rounded rectangle with anti-aliased corners.
+pub fn fill_round_rect(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    rect: (f32, f32, f32, f32),
+    radius: f32,
+    color: u32,
+) {
+    let (x0, y0, x1, y1) = rect;
+    let r = radius.min((x1 - x0) / 2.0).min((y1 - y0) / 2.0);
+    let yi0 = y0.max(0.0) as i32;
+    let yi1 = (y1.min(h as f32) as i32).max(yi0);
+    let xi0 = x0.max(0.0) as i32;
+    let xi1 = (x1.min(stride as f32) as i32).max(xi0);
+    if yi1 <= yi0 || xi1 <= xi0 {
+        return;
+    }
+    let inner_x0 = ((x0 + r).ceil() as i32).max(xi0);
+    let inner_x1 = ((x1 - r).floor() as i32).min(xi1);
+    let inner_y0 = ((y0 + r).ceil() as i32).max(yi0);
+    let inner_y1 = ((y1 - r).floor() as i32).min(yi1);
+    let r_outer_sq = (r + 0.5) * (r + 0.5);
+    let pre_color = pre_multiply(color);
+    for yi in yi0..yi1 {
+        let in_inner_band = yi >= inner_y0 && yi < inner_y1;
+        if in_inner_band && inner_x1 > inner_x0 {
+            for xi in xi0..inner_x0 {
+                fill_round_rect_aa_pixel(buf, stride, xi, yi, x0, y0, x1, y1, r, r_outer_sq, color);
+            }
+            let row_off = (yi as u32 * stride) as usize;
+            for xi in inner_x0..inner_x1 {
+                let idx = row_off + xi as usize;
+                if let Some(slot) = buf.get_mut(idx) {
+                    *slot = pre_color;
+                }
+            }
+            for xi in inner_x1..xi1 {
+                fill_round_rect_aa_pixel(buf, stride, xi, yi, x0, y0, x1, y1, r, r_outer_sq, color);
+            }
+        } else {
+            for xi in xi0..xi1 {
+                fill_round_rect_aa_pixel(buf, stride, xi, yi, x0, y0, x1, y1, r, r_outer_sq, color);
+            }
+        }
+    }
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn fill_round_rect_aa_pixel(
+    buf: &mut [u32],
+    stride: u32,
+    xi: i32,
+    yi: i32,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    r: f32,
+    r_outer_sq: f32,
+    color: u32,
+) {
+    let xf = xi as f32 + 0.5;
+    let yf = yi as f32 + 0.5;
+    let dx = if xf < x0 + r {
+        x0 + r - xf
+    } else if xf > x1 - r {
+        xf - (x1 - r)
+    } else {
+        0.0
+    };
+    let dy = if yf < y0 + r {
+        y0 + r - yf
+    } else if yf > y1 - r {
+        yf - (y1 - r)
+    } else {
+        0.0
+    };
+    let coverage = if dx == 0.0 && dy == 0.0 {
+        255u8
+    } else {
+        let d2 = dx * dx + dy * dy;
+        if d2 >= r_outer_sq {
+            return;
+        }
+        let d = d2.sqrt();
+        let cov = (r + 0.5 - d).clamp(0.0, 1.0);
+        (cov * 255.0) as u8
+    };
+    let idx = (yi as u32 * stride + xi as u32) as usize;
+    if let Some(slot) = buf.get_mut(idx) {
+        *slot = blend(*slot, color, coverage);
+    }
+}
+
+/// Replace the alpha byte of an ARGB colour.
+#[inline]
+pub fn with_alpha(color: u32, alpha: u8) -> u32 {
+    (u32::from(alpha) << 24) | (color & 0x00FF_FFFF)
+}
+
+#[allow(clippy::cast_possible_wrap)]
+pub fn draw_line_segment(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    color: u32,
+    coverage_alpha: u8,
+) {
+    let mut x0 = x0.round() as i32;
+    let mut y0 = y0.round() as i32;
+    let x1 = x1.round() as i32;
+    let y1 = y1.round() as i32;
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    loop {
+        if x0 >= 0 && y0 >= 0 && (x0 as u32) < stride && (y0 as u32) < h {
+            let idx = (y0 as u32 * stride + x0 as u32) as usize;
+            if let Some(slot) = buf.get_mut(idx) {
+                *slot = blend(*slot, color, coverage_alpha);
+            }
+        }
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x0 += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+pub fn draw_waveform_bars(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    levels: &VecDeque<f32>,
+    x0: f32,
+    x1: f32,
+    y_top: f32,
+    y_bot: f32,
+    accent: u32,
+    scale: f32,
+) {
+    let n = levels.len();
+    if n == 0 {
+        return;
+    }
+    let area_w = (x1 - x0).max(0.0);
+    let slot_w = area_w / n as f32;
+    let bar_w = (slot_w - 1.0 * scale).max(1.0);
+    let area_h = (y_bot - y_top).max(0.0);
+    for (i, &v) in levels.iter().enumerate() {
+        let v = v.clamp(0.0, 1.0);
+        let bar_h = (v * area_h).max(1.0 * scale);
+        let bx0 = x0 + i as f32 * slot_w;
+        let bx1 = bx0 + bar_w;
+        let alpha = 0x33 + ((0xFF - 0x33) as f32 * v) as u32;
+        let color = with_alpha(accent, alpha as u8);
+        fill_round_rect(buf, stride, h, (bx0, y_bot - bar_h, bx1, y_bot), 2.0 * scale, color);
+    }
+    let floor_y = y_bot.round() as i32;
+    if floor_y >= 0 && (floor_y as u32) < h {
+        let xi0 = x0.max(0.0).round() as i32;
+        let xi1 = (x1.min(stride as f32)).round() as i32;
+        for xi in xi0..xi1 {
+            if xi < 0 {
+                continue;
+            }
+            let idx = (floor_y as u32 * stride + xi as u32) as usize;
+            if let Some(slot) = buf.get_mut(idx) {
+                *slot = blend(*slot, COLOR_TEXT_DIM, 0x33);
+            }
+        }
+    }
+}
+
+pub fn draw_waveform_bars_from_profile(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    profile: &[f32],
+    x0: f32,
+    x1: f32,
+    y_top: f32,
+    y_bot: f32,
+    accent: u32,
+    scale: f32,
+) {
+    let n = profile.len();
+    if n == 0 {
+        return;
+    }
+    let area_w = (x1 - x0).max(0.0);
+    let slot_w = area_w / n as f32;
+    let bar_w = (slot_w - 1.0 * scale).max(1.0);
+    let area_h = (y_bot - y_top).max(0.0);
+    for (i, &v) in profile.iter().enumerate() {
+        let v = v.clamp(0.0, 1.0);
+        let bar_h = (v * area_h).max(1.0 * scale);
+        let bx0 = x0 + i as f32 * slot_w;
+        let bx1 = bx0 + bar_w;
+        let alpha = 0x33 + ((0xFF - 0x33) as f32 * v) as u32;
+        let color = with_alpha(accent, alpha as u8);
+        fill_round_rect(buf, stride, h, (bx0, y_bot - bar_h, bx1, y_bot), 2.0 * scale, color);
+    }
+    let floor_y = y_bot.round() as i32;
+    if floor_y >= 0 && (floor_y as u32) < h {
+        let xi0 = x0.max(0.0).round() as i32;
+        let xi1 = (x1.min(stride as f32)).round() as i32;
+        for xi in xi0..xi1 {
+            if xi < 0 {
+                continue;
+            }
+            let idx = (floor_y as u32 * stride + xi as u32) as usize;
+            if let Some(slot) = buf.get_mut(idx) {
+                *slot = blend(*slot, COLOR_TEXT_DIM, 0x33);
+            }
+        }
+    }
+}
+
+pub fn draw_oscilloscope(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    osc_samples: &VecDeque<f32>,
+    x0: f32,
+    x1: f32,
+    y_top: f32,
+    y_bot: f32,
+    accent: u32,
+    scale: f32,
+    headroom: f32,
+) {
+    let cols = ((x1 - x0).max(1.0) as usize).max(1);
+    let n = osc_samples.len();
+    let y_mid = (y_top + y_bot) * 0.5;
+    let half_h = (y_bot - y_top) * 0.5 * headroom;
+    let guide_y = y_mid.round() as i32;
+    if guide_y >= 0 && (guide_y as u32) < h {
+        let xi0 = x0.max(0.0).round() as i32;
+        let xi1 = (x1.min(stride as f32)).round() as i32;
+        for xi in xi0..xi1 {
+            if xi < 0 {
+                continue;
+            }
+            let idx = (guide_y as u32 * stride + xi as u32) as usize;
+            if let Some(slot) = buf.get_mut(idx) {
+                *slot = blend(*slot, COLOR_TEXT_DIM, 0x22);
+            }
+        }
+    }
+    if n == 0 {
+        return;
+    }
+    let map_y = |amp: f32| -> f32 {
+        let amp = amp.clamp(-1.0, 1.0);
+        (y_mid - amp * half_h).clamp(y_top, y_bot)
+    };
+    let mut prev: Option<(f32, f32)> = None;
+    for px in 0..cols {
+        let frac = if cols <= 1 { 0.0 } else { px as f32 / (cols - 1) as f32 };
+        let xf = x0 + frac * (x1 - x0);
+        let sample_idx = (frac * (n.saturating_sub(1)) as f32) as usize;
+        let amp = osc_samples[sample_idx.min(n - 1)];
+        let yf = map_y(amp);
+        if let Some((px0, py0)) = prev {
+            draw_line_segment(buf, stride, h, px0, py0, xf, yf, accent, 0xFF);
+            let off = scale.max(1.0);
+            draw_line_segment(buf, stride, h, px0, py0 + off, xf, yf + off, accent, 0x80);
+        }
+        prev = Some((xf, yf));
+    }
+}
+
+pub fn draw_vu_bar(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    level: f32,
+    x_right: f32,
+    y_top: f32,
+    y_bot: f32,
+    accent: u32,
+    scale: f32,
+) {
+    let level = level.clamp(0.0, 1.0);
+    let bar_w = ACCENT_WIDTH * scale;
+    let radius = bar_w * 0.5;
+    let x0 = x_right - bar_w;
+    let x1 = x_right;
+    if x0 >= x1 || y_top >= y_bot {
+        return;
+    }
+    let ghost = with_alpha(accent, 0x22);
+    fill_round_rect(buf, stride, h, (x0, y_top, x1, y_bot), radius, ghost);
+    let fill_h = level * (y_bot - y_top);
+    if fill_h > 0.0 {
+        fill_round_rect(
+            buf,
+            stride,
+            h,
+            (x0, y_bot - fill_h, x1, y_bot),
+            radius,
+            with_alpha(accent, 0xFF),
+        );
+    }
+}
+
+pub fn draw_fft(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    bins: &[f32],
+    x0: f32,
+    x1: f32,
+    y_top: f32,
+    y_bot: f32,
+    accent: u32,
+    scale: f32,
+) {
+    if bins.is_empty() {
+        return;
+    }
+    let area_w = (x1 - x0).max(0.0);
+    let area_h = (y_bot - y_top).max(0.0);
+    let bin_count = bins.len() as f32;
+    for (i, &v) in bins.iter().enumerate() {
+        let v = v.clamp(0.0, 1.0);
+        let bar_h = (v * area_h).max(1.0 * scale);
+        let bxf0 = x0 + (i as f32 / bin_count) * area_w;
+        let bxf1 = x0 + ((i + 1) as f32 / bin_count) * area_w;
+        let xi0 = bxf0.round() as i32;
+        let xi1 = bxf1.round() as i32;
+        let yi0 = (y_bot - bar_h).round() as i32;
+        let yi1 = y_bot.round() as i32;
+        if xi1 <= xi0 || yi1 <= yi0 {
+            continue;
+        }
+        let alpha = 0x33 + ((0xFF - 0x33) as f32 * v) as u32;
+        let color = with_alpha(accent, alpha as u8);
+        let cov = (color >> 24) as u8;
+        for yi in yi0..yi1 {
+            if yi < 0 || (yi as u32) >= h {
+                continue;
+            }
+            for xi in xi0..xi1 {
+                if xi < 0 || (xi as u32) >= stride {
+                    continue;
+                }
+                let idx = (yi as u32 * stride + xi as u32) as usize;
+                if let Some(slot) = buf.get_mut(idx) {
+                    *slot = blend(*slot, color, cov);
+                }
+            }
+        }
+    }
+    let floor_y = y_bot.round() as i32;
+    if floor_y >= 0 && (floor_y as u32) < h {
+        let xi0 = x0.max(0.0).round() as i32;
+        let xi1 = (x1.min(stride as f32)).round() as i32;
+        for xi in xi0..xi1 {
+            if xi < 0 {
+                continue;
+            }
+            let idx = (floor_y as u32 * stride + xi as u32) as usize;
+            if let Some(slot) = buf.get_mut(idx) {
+                *slot = blend(*slot, COLOR_TEXT_DIM, 0x33);
+            }
+        }
+    }
+}
+
+pub fn draw_fft_gapped(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    bins: &[f32],
+    x0: f32,
+    x1: f32,
+    y_top: f32,
+    y_bot: f32,
+    accent: u32,
+    scale: f32,
+) {
+    if bins.is_empty() {
+        return;
+    }
+    let area_w = (x1 - x0).max(0.0);
+    let area_h = (y_bot - y_top).max(0.0);
+    let n = bins.len();
+    let bin_count = n as f32;
+    let gap_px = ((2.0 * scale).round() as i32).max(1);
+    for (i, &v) in bins.iter().enumerate() {
+        let v = v.clamp(0.0, 1.0);
+        let bar_h = (v * area_h).max(1.0 * scale);
+        let bxf0 = x0 + (i as f32 / bin_count) * area_w;
+        let bxf1 = x0 + ((i + 1) as f32 / bin_count) * area_w;
+        let slot_xi0 = bxf0.round() as i32;
+        let slot_xi1 = bxf1.round() as i32;
+        let xi0 = slot_xi0;
+        let xi1 = (slot_xi1 - gap_px).max(slot_xi0 + 1);
+        let yi0 = (y_bot - bar_h).round() as i32;
+        let yi1 = y_bot.round() as i32;
+        if xi1 <= xi0 || yi1 <= yi0 {
+            continue;
+        }
+        let alpha = 0x33 + ((0xFF - 0x33) as f32 * v) as u32;
+        let color = with_alpha(accent, alpha as u8);
+        let cov = (color >> 24) as u8;
+        for yi in yi0..yi1 {
+            if yi < 0 || (yi as u32) >= h {
+                continue;
+            }
+            for xi in xi0..xi1 {
+                if xi < 0 || (xi as u32) >= stride {
+                    continue;
+                }
+                let idx = (yi as u32 * stride + xi as u32) as usize;
+                if let Some(slot) = buf.get_mut(idx) {
+                    *slot = blend(*slot, color, cov);
+                }
+            }
+        }
+    }
+    let floor_y = y_bot.round() as i32;
+    if floor_y >= 0 && (floor_y as u32) < h {
+        let xi0 = x0.max(0.0).round() as i32;
+        let xi1 = (x1.min(stride as f32)).round() as i32;
+        for xi in xi0..xi1 {
+            if xi < 0 {
+                continue;
+            }
+            let idx = (floor_y as u32 * stride + xi as u32) as usize;
+            if let Some(slot) = buf.get_mut(idx) {
+                *slot = blend(*slot, COLOR_TEXT_DIM, 0x33);
+            }
+        }
+    }
+}
+
+pub fn heatmap_cache_resize(
+    cache: &mut Vec<u32>,
+    cache_dim: &mut (u32, u32),
+    cols: u32,
+    rows: u32,
+) -> bool {
+    let needed = (cols as usize) * (rows as usize);
+    if *cache_dim == (cols, rows) && cache.len() == needed {
+        return false;
+    }
+    cache.clear();
+    cache.resize(needed, COLOR_BG_PRE);
+    *cache_dim = (cols, rows);
+    true
+}
+
+pub fn heatmap_render_column(
+    cache: &mut [u32],
+    cols: u32,
+    rows: u32,
+    col_x: u32,
+    width: u32,
+    frame: &[f32],
+    accent: u32,
+) {
+    if frame.is_empty() || width == 0 || rows == 0 {
+        return;
+    }
+    let bins_len = frame.len();
+    let row_span = rows.saturating_sub(1).max(1);
+    for ry in 0..rows {
+        let bin_frac = 1.0 - (ry as f32 / row_span as f32);
+        let bin_idx = (bin_frac * (bins_len - 1) as f32).round() as usize;
+        let v = *frame.get(bin_idx.min(bins_len - 1)).unwrap_or(&0.0);
+        let color = heatmap_color(v, accent);
+        let cov = (color >> 24) as u8;
+        let pre = blend(COLOR_BG_PRE, color, cov);
+        let row_off = (ry * cols) as usize;
+        for cx in col_x..(col_x + width).min(cols) {
+            if let Some(slot) = cache.get_mut(row_off + cx as usize) {
+                *slot = pre;
+            }
+        }
+    }
+}
+
+pub fn heatmap_cache_push(
+    cache: &mut Vec<u32>,
+    cache_dim: &mut (u32, u32),
+    cols: u32,
+    rows: u32,
+    frame: &[f32],
+    accent: u32,
+) {
+    let was_resized = heatmap_cache_resize(cache, cache_dim, cols, rows);
+    if cols == 0 || rows == 0 {
+        return;
+    }
+    let step = (cols / FFT_FRAMES_CAP as u32).max(1);
+    if !was_resized && cols > step {
+        let shift = step as usize;
+        let span = cols as usize;
+        for ry in 0..rows {
+            let row_start = (ry * cols) as usize;
+            cache.copy_within(row_start + shift..row_start + span, row_start);
+        }
+    }
+    let new_col_x = cols.saturating_sub(step);
+    heatmap_render_column(cache, cols, rows, new_col_x, step, frame, accent);
+}
+
+#[inline]
+pub fn heatmap_color(v: f32, accent: u32) -> u32 {
+    let v = v.clamp(0.0, 1.0);
+    if v < 0.5 {
+        let t = v * 2.0;
+        let alpha = (t * 255.0) as u8;
+        with_alpha(accent, alpha)
+    } else {
+        let t = (v - 0.5) * 2.0;
+        let lerp = |c: u32, target: u32| -> u32 {
+            let cf = c as f32;
+            let tf = target as f32;
+            (cf + (tf - cf) * t).round() as u32
+        };
+        let r = lerp((accent >> 16) & 0xFF, 0xFF);
+        let g = lerp((accent >> 8) & 0xFF, 0xFF);
+        let b = lerp(accent & 0xFF, 0xFF);
+        0xFF00_0000 | (r << 16) | (g << 8) | b
+    }
+}
+
+pub fn draw_heatmap(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    frames: &VecDeque<Vec<f32>>,
+    x0: f32,
+    x1: f32,
+    y_top: f32,
+    y_bot: f32,
+    accent: u32,
+) {
+    if frames.is_empty() {
+        return;
+    }
+    let frame_count = frames.len();
+    let cols = ((x1 - x0).max(1.0) as i32).max(1);
+    let rows = ((y_bot - y_top).max(1.0) as i32).max(1);
+    let bins_len = frames.iter().map(Vec::len).max().unwrap_or(0).max(1);
+    let xi0 = x0.round() as i32;
+    let yi0 = y_top.round() as i32;
+    for cx in 0..cols {
+        let frame_frac = cx as f32 / (cols.max(1) - 1).max(1) as f32;
+        let frame_idx = (frame_frac * (frame_count - 1) as f32).round() as usize;
+        let frame = &frames[frame_idx.min(frame_count - 1)];
+        if frame.is_empty() {
+            continue;
+        }
+        for ry in 0..rows {
+            let bin_frac = 1.0 - (ry as f32 / (rows.max(1) - 1).max(1) as f32);
+            let bin_idx = (bin_frac * (bins_len - 1) as f32).round() as usize;
+            let v = *frame.get(bin_idx.min(frame.len() - 1)).unwrap_or(&0.0);
+            let color = heatmap_color(v, accent);
+            let px = xi0 + cx;
+            let py = yi0 + ry;
+            if px < 0 || py < 0 || (px as u32) >= stride || (py as u32) >= h {
+                continue;
+            }
+            let idx = (py as u32 * stride + px as u32) as usize;
+            if let Some(slot) = buf.get_mut(idx) {
+                *slot = blend(*slot, color, (color >> 24) as u8);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Word wrapping
+// ---------------------------------------------------------------------------
+
+pub fn wrap_text(
+    font: &ab_glyph::FontArc,
+    text: &str,
+    size_px: f32,
+    max_width: f32,
+) -> Vec<String> {
+    use ab_glyph::{Font, ScaleFont};
+    let scaled = font.as_scaled(size_px);
+    let advance =
+        |s: &str| -> f32 { s.chars().map(|c| scaled.h_advance(font.glyph_id(c))).sum::<f32>() };
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        if current.is_empty() {
+            current.push_str(word);
+            continue;
+        }
+        let candidate_width =
+            advance(&current) + scaled.h_advance(font.glyph_id(' ')) + advance(word);
+        if candidate_width <= max_width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current.push_str(word);
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    for line in &mut lines {
+        if advance(line) > max_width {
+            while !line.is_empty()
+                && advance(line) + scaled.h_advance(font.glyph_id('…')) > max_width
+            {
+                line.pop();
+            }
+            line.push('…');
+        }
+    }
+    lines
+}
+
+pub fn draw_line(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    font: &ab_glyph::FontArc,
+    text: &str,
+    color: u32,
+    size_px: f32,
+    x_origin: f32,
+    baseline_y: f32,
+) {
+    use ab_glyph::{Font, ScaleFont};
+    let scaled = font.as_scaled(size_px);
+    let mut x = x_origin;
+    for ch in text.chars() {
+        let glyph_id = font.glyph_id(ch);
+        let glyph = glyph_id.with_scale_and_position(size_px, ab_glyph::point(x, baseline_y));
+        if let Some(outlined) = font.outline_glyph(glyph) {
+            let bounds = outlined.px_bounds();
+            outlined.draw(|gx, gy, coverage| {
+                let px = bounds.min.x as i32 + gx as i32;
+                let py = bounds.min.y as i32 + gy as i32;
+                if px < 0 || py < 0 {
+                    return;
+                }
+                let (px, py) = (px as u32, py as u32);
+                if px >= stride || py >= h {
+                    return;
+                }
+                let idx = (py * stride + px) as usize;
+                let Some(slot) = buf.get_mut(idx) else { return };
+                let alpha = (coverage.clamp(0.0, 1.0) * 255.0) as u8;
+                *slot = blend(*slot, color, alpha);
+            });
+        }
+        x += scaled.h_advance(glyph_id);
+    }
+}
+
+/// Compute target window height (logical px) that fits `n_lines` of
+/// transcript text at `TEXT_FONT_PX`, clamped to [`WIN_MIN_HEIGHT`,
+/// `WIN_MAX_HEIGHT`].
+pub fn target_height(n_lines: usize) -> f32 {
+    let n = n_lines.max(1) as f32;
+    let lines_h = TEXT_FONT_PX * n + LINE_GAP * (n - 1.0).max(0.0);
+    (PADDING_TOP + STATUS_FONT_PX + STATUS_TO_TEXT + lines_h + PADDING_BOT)
+        .clamp(WIN_MIN_HEIGHT, WIN_MAX_HEIGHT)
+}
+
+// ---------------------------------------------------------------------------
+//  RendererState — pure data + redraw entry point
+// ---------------------------------------------------------------------------
+
+/// Mutable renderer state shared by every backend. Holds the loaded
+/// system font, the latest overlay state, the wrapped transcript
+/// text, and the ring buffers feeding the four passive
+/// visualisations. Backends own one of these and drive it via the
+/// `set_*` / `push_*` methods + the [`Self::redraw`] entry point.
+pub struct RendererState {
+    pub font: Option<ab_glyph::FontArc>,
+    pub state: OverlayState,
+    pub text: String,
+    pub wrapped: Vec<String>,
+    pub style: WaveformStyle,
+    pub volume_bar: bool,
+    pub levels: VecDeque<f32>,
+    pub osc_samples: VecDeque<f32>,
+    pub fft_frames: VecDeque<Vec<f32>>,
+    pub heatmap_cache: Vec<u32>,
+    pub heatmap_cache_dim: (u32, u32),
+}
+
+impl RendererState {
+    pub fn new(style: WaveformStyle) -> Self {
+        Self {
+            font: load_system_font(),
+            state: OverlayState::Hidden,
+            text: String::new(),
+            wrapped: Vec::new(),
+            style,
+            volume_bar: false,
+            levels: VecDeque::with_capacity(LEVELS_CAP),
+            osc_samples: VecDeque::with_capacity(OSC_SAMPLES_CAP),
+            fft_frames: VecDeque::with_capacity(FFT_FRAMES_CAP),
+            heatmap_cache: Vec::new(),
+            heatmap_cache_dim: (0, 0),
+        }
+    }
+
+    /// Recompute wrapped lines for the current text based on the
+    /// current style + volume-bar configuration. No-op when no font
+    /// is loaded or text is empty.
+    pub fn rewrap(&mut self) {
+        self.wrapped = if let (Some(font), false) = (self.font.as_ref(), self.text.is_empty()) {
+            let mut max_w = WIN_WIDTH - PADDING_X * 2.0 - ACCENT_WIDTH;
+            if self.volume_bar && state_has_vu_bar(self.state) {
+                max_w -= ACCENT_WIDTH;
+            }
+            wrap_text(font, &self.text, TEXT_FONT_PX, max_w)
+        } else {
+            Vec::new()
+        };
+    }
+
+    pub fn set_state(&mut self, state: OverlayState) {
+        self.state = state;
+    }
+
+    /// Update transcript text. Returns true if the text changed
+    /// (caller may use this to schedule a redraw / resize).
+    pub fn update_text(&mut self, text: String) -> bool {
+        if text == self.text {
+            return false;
+        }
+        self.text = text;
+        self.rewrap();
+        true
+    }
+
+    pub fn push_level(&mut self, v: f32) {
+        let v = v.clamp(0.0, 1.0);
+        if self.levels.len() == LEVELS_CAP {
+            self.levels.pop_front();
+        }
+        self.levels.push_back(v);
+    }
+
+    pub fn push_samples(&mut self, s: Vec<f32>) {
+        self.osc_samples.extend(s);
+        while self.osc_samples.len() > OSC_SAMPLES_CAP {
+            self.osc_samples.pop_front();
+        }
+    }
+
+    pub fn push_fft_bins(&mut self, bins: Vec<f32>) {
+        if self.fft_frames.len() == FFT_FRAMES_CAP {
+            self.fft_frames.pop_front();
+        }
+        self.fft_frames.push_back(bins);
+    }
+
+    /// Idempotent style swap. Returns `(changed, crossed_text_boundary)`.
+    /// Caller clears ring buffers / text via [`Self::clear_for_style_swap`]
+    /// when changed.
+    pub fn set_waveform_style(&mut self, style: WaveformStyle) -> (bool, bool) {
+        if self.style == style {
+            return (false, false);
+        }
+        let crossed = is_text_style(self.style) != is_text_style(style);
+        self.style = style;
+        (true, crossed)
+    }
+
+    /// Drop cross-style stale data so a swap doesn't briefly flash
+    /// stale content from the previous style.
+    pub fn clear_for_style_swap(&mut self) {
+        self.text.clear();
+        self.wrapped.clear();
+        self.levels.clear();
+        self.osc_samples.clear();
+        self.fft_frames.clear();
+        self.heatmap_cache.clear();
+        self.heatmap_cache_dim = (0, 0);
+    }
+
+    pub fn set_volume_bar(&mut self, enabled: bool) -> bool {
+        if self.volume_bar == enabled {
+            return false;
+        }
+        self.volume_bar = enabled;
+        self.rewrap();
+        true
+    }
+
+    /// Window height target for the current state (logical px).
+    /// Text-mode panels grow to fit the wrapped transcript; waveform
+    /// panels use a fixed height.
+    pub fn target_logical_height(&self) -> f32 {
+        if is_text_style(self.style) {
+            target_height(self.wrapped.len())
+        } else {
+            WIN_WAVEFORM_HEIGHT
+        }
+    }
+
+    /// Apply an FFT push to the heatmap cache when in
+    /// `WaveformStyle::Heatmap` and the panel size is known.
+    /// `(cx0, cx1, cy0, cy1)` are physical-pixel bounds of the
+    /// panel content area. Backends compute these from their current
+    /// surface size + scale and call this from the FFT push path.
+    pub fn update_heatmap_cache(&mut self, cx0: i32, cx1: i32, cy0: i32, cy1: i32) {
+        if !matches!(self.style, WaveformStyle::Heatmap) {
+            return;
+        }
+        let cols = (cx1 - cx0).max(0) as u32;
+        let rows = (cy1 - cy0).max(0) as u32;
+        if let Some(latest) = self.fft_frames.back() {
+            let accent = accent_color(self.state);
+            heatmap_cache_push(
+                &mut self.heatmap_cache,
+                &mut self.heatmap_cache_dim,
+                cols,
+                rows,
+                latest,
+                accent,
+            );
+        }
+    }
+
+    /// Whether the renderer should currently be drawing at all. A
+    /// `Hidden` state means the backend should present an empty /
+    /// transparent frame.
+    pub fn is_visible(&self) -> bool {
+        !matches!(self.state, OverlayState::Hidden)
+    }
+
+    /// Whether the latest FFT push should trigger a redraw given the
+    /// current style + state. Bars also consumes FFT during the
+    /// assistant-thinking / polishing phases (the orchestrator
+    /// pushes per-bar profiles via `push_fft_bins`).
+    pub fn fft_push_needs_redraw(&self) -> bool {
+        matches!(self.style, WaveformStyle::Fft | WaveformStyle::Heatmap)
+            || matches!(
+                (self.style, self.state),
+                (WaveformStyle::Bars, OverlayState::AssistantThinking | OverlayState::Polishing)
+            )
+    }
+
+    /// Whether a fresh PCM sample push should trigger a redraw.
+    pub fn samples_push_needs_redraw(&self) -> bool {
+        matches!(self.style, WaveformStyle::Oscilloscope)
+    }
+
+    /// Synchronous full-frame redraw into `buf` at `(w, h)` physical
+    /// pixels with HiDPI `scale`. `buf.len()` must be `>= w * h`.
+    /// Caller is responsible for clearing the buffer first (different
+    /// backends have different opacity requirements for the
+    /// "transparent" pixels around the rounded panel).
+    #[allow(clippy::too_many_lines)]
+    pub fn redraw(&self, buf: &mut [u32], w: u32, h: u32, scale: f32) {
+        if matches!(self.state, OverlayState::Hidden) {
+            return;
+        }
+        let panel = (0.0, 0.0, w as f32, h as f32);
+        fill_round_rect(buf, w, h, panel, CORNER_RADIUS * scale, COLOR_BG);
+        let accent = accent_color(self.state);
+        if (accent >> 24) & 0xFF != 0 {
+            let stripe = (
+                0.0,
+                CORNER_RADIUS * scale * 0.4,
+                ACCENT_WIDTH * scale,
+                h as f32 - CORNER_RADIUS * scale * 0.4,
+            );
+            fill_round_rect(buf, w, h, stripe, ACCENT_WIDTH * scale * 0.5, accent);
+        }
+        let Some(font) = self.font.as_ref() else {
+            return;
+        };
+        let pad_x = (PADDING_X + ACCENT_WIDTH) * scale;
+        let pad_top = PADDING_TOP * scale;
+        let label = state_label(self.state);
+        if !label.is_empty() {
+            let status_baseline = pad_top + STATUS_FONT_PX * scale * 0.85;
+            draw_line(
+                buf,
+                w,
+                h,
+                font,
+                label,
+                COLOR_TEXT_DIM,
+                STATUS_FONT_PX * scale,
+                pad_x,
+                status_baseline,
+            );
+        }
+        let text_top = pad_top + STATUS_FONT_PX * scale + STATUS_TO_TEXT * scale;
+        let waveform_active = !is_text_style(self.style)
+            && matches!(
+                self.state,
+                OverlayState::Recording { .. }
+                    | OverlayState::AssistantRecording { .. }
+                    | OverlayState::AssistantThinking
+                    | OverlayState::Polishing
+            );
+        if waveform_active {
+            let x0 = (PADDING_X + ACCENT_WIDTH) * scale;
+            let x1 = w as f32 - PADDING_X * scale;
+            let y_top = text_top;
+            let y_bot = h as f32 - PADDING_BOT * scale;
+            let thinking =
+                matches!(self.state, OverlayState::AssistantThinking | OverlayState::Polishing);
+            match self.style {
+                WaveformStyle::Bars if thinking => {
+                    if let Some(profile) = self.fft_frames.back() {
+                        draw_waveform_bars_from_profile(
+                            buf, w, h, profile, x0, x1, y_top, y_bot, accent, scale,
+                        );
+                    }
+                }
+                WaveformStyle::Bars => {
+                    draw_waveform_bars(
+                        buf,
+                        w,
+                        h,
+                        &self.levels,
+                        x0,
+                        x1,
+                        y_top,
+                        y_bot,
+                        accent,
+                        scale,
+                    );
+                }
+                WaveformStyle::Oscilloscope => {
+                    let headroom = if thinking { 1.0 } else { 0.88 };
+                    draw_oscilloscope(
+                        buf,
+                        w,
+                        h,
+                        &self.osc_samples,
+                        x0,
+                        x1,
+                        y_top,
+                        y_bot,
+                        accent,
+                        scale,
+                        headroom,
+                    );
+                }
+                WaveformStyle::Fft => {
+                    if let Some(latest) = self.fft_frames.back() {
+                        if thinking {
+                            draw_fft_gapped(buf, w, h, latest, x0, x1, y_top, y_bot, accent, scale);
+                        } else {
+                            draw_fft(buf, w, h, latest, x0, x1, y_top, y_bot, accent, scale);
+                        }
+                    }
+                }
+                WaveformStyle::Heatmap => {
+                    let cache_cols = (x1 - x0).round() as i32;
+                    let cache_rows = (y_bot - y_top).round() as i32;
+                    let cache_ok = cache_cols > 0
+                        && cache_rows > 0
+                        && self.heatmap_cache_dim == (cache_cols as u32, cache_rows as u32)
+                        && self.heatmap_cache.len() == (cache_cols * cache_rows) as usize;
+                    if cache_ok {
+                        let cx0 = x0.round() as i32;
+                        let cy0 = y_top.round() as i32;
+                        let cols_u = cache_cols as u32;
+                        let rows_u = cache_rows as u32;
+                        for ry in 0..rows_u {
+                            let dst_y = cy0 + ry as i32;
+                            if dst_y < 0 || (dst_y as u32) >= h {
+                                continue;
+                            }
+                            let dst_x = cx0.max(0);
+                            let skip = (dst_x - cx0).max(0) as u32;
+                            if skip >= cols_u {
+                                continue;
+                            }
+                            let dst_off = (dst_y as u32 * w + dst_x as u32) as usize;
+                            let src_off = (ry * cols_u + skip) as usize;
+                            let avail_w = w.saturating_sub(dst_x as u32);
+                            let copy_len = (cols_u - skip).min(avail_w) as usize;
+                            if copy_len == 0 {
+                                continue;
+                            }
+                            if dst_off + copy_len <= buf.len()
+                                && src_off + copy_len <= self.heatmap_cache.len()
+                            {
+                                buf[dst_off..dst_off + copy_len].copy_from_slice(
+                                    &self.heatmap_cache[src_off..src_off + copy_len],
+                                );
+                            }
+                        }
+                    } else {
+                        draw_heatmap(buf, w, h, &self.fft_frames, x0, x1, y_top, y_bot, accent);
+                    }
+                }
+                WaveformStyle::Transcript => {}
+            }
+        } else {
+            if is_text_style(self.style)
+                && state_has_vu_bar(self.state)
+                && self.volume_bar
+                && !self.levels.is_empty()
+            {
+                let level = self.levels.back().copied().unwrap_or(0.0);
+                let x_right = w as f32;
+                let y_top = CORNER_RADIUS * scale * 0.4;
+                let y_bot = h as f32 - CORNER_RADIUS * scale * 0.4;
+                draw_vu_bar(buf, w, h, level, x_right, y_top, y_bot, accent, scale);
+            }
+            if !self.wrapped.is_empty() {
+                let mut baseline = text_top + TEXT_FONT_PX * scale * 0.85;
+                let max_visible_lines = ((h as f32 - text_top - PADDING_BOT * scale)
+                    / (TEXT_FONT_PX * scale + LINE_GAP * scale))
+                    as usize;
+                let total = self.wrapped.len();
+                let skip = total.saturating_sub(max_visible_lines.max(1));
+                for line in self.wrapped.iter().skip(skip) {
+                    draw_line(
+                        buf,
+                        w,
+                        h,
+                        font,
+                        line,
+                        COLOR_TEXT,
+                        TEXT_FONT_PX * scale,
+                        pad_x,
+                        baseline,
+                    );
+                    baseline += TEXT_FONT_PX * scale + LINE_GAP * scale;
+                    if baseline > h as f32 - PADDING_BOT * scale {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}

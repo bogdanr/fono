@@ -13,21 +13,60 @@ repository.workspace = true
 workspace = true
 
 [features]
-# winit + softbuffer pull a large dep tree; keep the overlay opt-in.
+# Default build is the slim, no-graphics-deps headless stub. The
+# desktop daemon ships with `real-window` enabled (which in turn
+# enables every available backend); the static / server build keeps
+# the default for minimal binary size + no display-server deps.
 default = []
-# Real window with text rendering — used by live dictation. Plan R5.
-# Slice A keeps the overlay in-process (winit thread); subprocess
-# refactor is deferred to Slice B per ADR 0009.
-real-window = ["dep:winit", "dep:softbuffer", "dep:ab_glyph"]
+
+# Real overlay surface(s). Pulls the renderer module + every
+# graphical backend. Each backend can also be enabled independently,
+# e.g. for size-budget experiments that drop one of them.
+real-window = [
+    "dep:ab_glyph",
+    "backend-x11",
+    "backend-wlr",
+]
+
+# X11 + winit + softbuffer backend (the original carryover path).
+# Linux X11 sessions only; on Wayland-only hosts the runtime probe
+# falls through to the wlr / xdg backends.
+backend-x11 = ["dep:winit", "dep:softbuffer", "dep:ab_glyph"]
+
+# wlr-layer-shell backend (sway, hyprland, river, KDE, COSMIC,
+# Wayfire, niri, labwc). On Wayland sessions without layer-shell
+# (notably GNOME / Mutter) selection falls through to `backend-x11`
+# via Xwayland; there is no native xdg_toplevel fallback because
+# `xdg_toplevel` cannot deliver a usable panel UX on Mutter
+# (placement is compositor-chosen, surface appears in Alt+Tab).
+backend-wlr = [
+    "dep:ab_glyph",
+    "dep:smithay-client-toolkit",
+    "dep:wayland-client",
+    "dep:wayland-protocols",
+    "dep:wayland-protocols-wlr",
+    "dep:rustix",
+]
 
 [dependencies]
 fono-core = { path = "../fono-core" }
 tracing = { workspace = true }
 winit = { workspace = true, optional = true }
 softbuffer = { workspace = true, optional = true }
-# ab_glyph is pulled in transitively via sctk-adwaita on Linux already;
-# adding it as a direct dep gives us pixel-glyph rendering for the
-# overlay text (Slice A scope upgrade — was originally deferred to
-# Slice B per ADR 0009 but moved forward in response to user feedback
-# that the colour-only overlay isn't useful).
+# ab_glyph drives software glyph rendering for the renderer; required
+# by every backend that actually paints pixels (every backend except
+# noop).
 ab_glyph = { version = "0.2", optional = true }
+# Wayland-native backends. Pinned to SCTK 0.19 to match what winit
+# 0.30 already brings in transitively — keeps the lockfile graph
+# unified. wayland-protocols-wlr is direct only behind backend-wlr.
+smithay-client-toolkit = { version = "0.19", optional = true }
+wayland-client = { version = "0.31", optional = true }
+wayland-protocols = { version = "0.32", optional = true, features = ["client", "staging", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", optional = true, features = ["client"] }
+# rustix is used by the Wayland backends to poll() the wayland socket
+# fd with a timeout so the command-channel drain and the wayland
+# event dispatch share a single thread without busy-waiting. Already
+# in the lockfile via every transitive consumer (calloop, polling,
+# tempfile, …) so we pay no fresh dep tree.
+rustix = { version = "0.38", default-features = false, features = ["event", "std"], optional = true }

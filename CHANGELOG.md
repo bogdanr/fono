@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Wayland overlay no longer steals focus, displays as an opaque
+  rectangle, or lands top-left** on Mutter / GNOME (Ubuntu 24.04).
+  Root cause: the previous `winit` + `softbuffer` path hard-coded
+  `WL_SHM_FORMAT_XRGB8888` (so the compositor dropped the alpha
+  channel), drove the surface through `xdg_toplevel` with no
+  client-positioning hooks, and Mutter treats `xdg_toplevel`
+  surfaces as ordinary application windows (Alt+Tab, no
+  always-on-top, compositor-chosen placement). Replaced with a
+  pluggable backend layer (see below).
+
+### Changed
+
+- **Overlay rewritten around a pluggable backend layer.** The
+  renderer (FFT / oscilloscope / heatmap / transcript / VU bar) is
+  unchanged but now hands pixels to one of three windowing backends
+  selected at runtime from `WAYLAND_DISPLAY` / `DISPLAY`:
+  * **`wlr-layer-shell`** — native panel protocol via
+    `smithay-client-toolkit`. Used on every wlroots-based compositor
+    plus KDE Plasma 5.27+, COSMIC, Wayfire, niri, labwc.
+    Bottom-centre anchored, ARGB transparency, empty input region
+    (clicks pass through), `keyboard_interactivity = None` (no focus
+    theft).
+  * **`x11-override-redirect`** — the original winit + softbuffer
+    path. Used on native X11 sessions and on Wayland sessions via
+    Xwayland (the GNOME / KDE-Wayland default), where Mutter honours
+    override-redirect placement and excludes the surface from
+    Alt+Tab.
+  * **`noop`** — silent terminal fallback so the daemon never aborts
+    on a missing display server.
+
+  On GNOME / Mutter the runtime selection picks the X11 backend
+  through Xwayland because Mutter does not implement
+  `zwlr_layer_shell_v1` and `xdg_toplevel` cannot deliver a usable
+  panel UX. Fractional HiDPI scaling renders cleanly via Xwayland.
+  Force a specific backend with
+  `FONO_OVERLAY_BACKEND={wlr,x11,noop}`; `fono doctor` reports the
+  selected backend + its capability summary.
+- **`winit` reduced to X11-only on Linux.** Workspace dep is now
+  `winit = { default-features = false, features = ["x11", "rwh_06"] }`;
+  winit's Wayland event-loop, SCTK transitive deps, and softbuffer's
+  Wayland buffers are no longer compiled into the binary. The native
+  Wayland backend uses `smithay-client-toolkit 0.19` +
+  `wayland-protocols-wlr 0.3` as direct deps of `fono-overlay`,
+  gated behind the `backend-wlr` cargo feature.
+
 ### Changed
 
 - **Local STT model selection now routes through a quantization

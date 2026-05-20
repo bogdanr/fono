@@ -108,7 +108,19 @@ ksni = { version = "0.3", default-features = false, features = ["tokio"] }
 global-hotkey = "0.6"
 crossbeam-channel = "0.5"
 enigo = "0.2"
-winit = "0.30"
+# winit is X11-only on Linux for Fono. We deliberately disable its
+# Wayland feature set (`default-features = false` strips `wayland`,
+# `wayland-csd-adwaita`, etc.) because the Wayland brokenness around
+# `xdg_toplevel` placement and softbuffer's hardcoded XRGB8888 buffer
+# format made the winit-on-Wayland path unusable for our overlay use
+# case. The Wayland-native wlr-layer-shell backend in
+# `fono-overlay/src/backends/wayland_layer_shell.rs` drives Wayland
+# directly via smithay-client-toolkit on the compositors that support
+# it; everywhere else (notably GNOME / Mutter) selection falls
+# through to this X11 backend via Xwayland. The `rwh_06` feature is
+# what softbuffer 0.4.x requires from winit's raw-window-handle
+# integration.
+winit = { version = "0.30", default-features = false, features = ["x11", "rwh_06"] }
 softbuffer = "0.4"
 notify-rust = "4.11"
 

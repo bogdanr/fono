@@ -1,6 +1,124 @@
 # Fono — Project Status
 
-Last updated: 2026-05-19
+Last updated: 2026-05-20
+
+## 2026-05-20 — Wayland overlay: pluggable backend layer, GNOME via Xwayland
+
+Phase 0 + Phase 1 of
+`plans/2026-05-19-overlay-backend-architecture-v1.md` plus the
+GNOME placement follow-up
+`plans/2026-05-20-overlay-gnome-prefer-xwayland-v1.md`. The user
+reported on Ubuntu 24.04 GNOME that the existing
+`winit + softbuffer` Wayland path produced an opaque charcoal
+rectangle in the top-left corner that stole focus, and an interim
+`xdg_toplevel` fix only resolved the transparency: Mutter still
+treated the surface as a normal app window (Alt+Tab, no
+always-on-top, compositor-chosen placement). Root cause is
+protocol-level — `xdg_toplevel` is the protocol for "application
+toplevels" and there is no client-side hint that overrides
+Mutter's treatment. Reworked the overlay into a pluggable backend
+layer with runtime selection driven by `WAYLAND_DISPLAY` /
+`DISPLAY`.
+
+### Architecture
+
+`crates/fono-overlay/src/` now has two cleanly separated layers:
+
+- **`renderer.rs`** — pure software-rasterised drawing into an
+  ARGB premultiplied `&mut [u32]` framebuffer. No `winit`, no
+  `softbuffer`, no `wayland-client`. Unit-testable. Owns the
+  FFT / oscilloscope / heatmap / transcript / VU bar visualisations
+  unchanged from the previous implementation.
+- **`backend.rs`** + **`backends/`** — `BackendId`, `OverlayCmd`,
+  `OverlayHandle`, and three windowing implementations:
+  * **`backends/wayland_layer_shell.rs`** — `zwlr_layer_shell_v1`
+    primary path via `smithay-client-toolkit 0.19` +
+    `wayland-protocols-wlr 0.3`. `Layer::Top`, `Anchor::BOTTOM`,
+    640 × dynamic-height surface anchored 48 px above the bottom
+    edge. ARGB8888 `wl_shm` via SCTK's `SlotPool` (double-buffered),
+    `keyboard_interactivity = None`, empty `wl_region` input
+    region. Used on every wlroots-based compositor plus KDE Plasma
+    5.27+, COSMIC, Wayfire, niri, labwc.
+  * **`backends/winit_x11.rs`** — the original winit + softbuffer
+    path, now X11-only after the winit Wayland strip. Override-
+    redirect + `_NET_WM_WINDOW_TYPE_NOTIFICATION` so the window
+    manager bypasses placement, stacking, and Alt+Tab handling.
+    Also used on Wayland sessions via Xwayland (the GNOME /
+    KDE-Wayland default).
+  * **`backends/noop.rs`** — terminal sink. `spawn_overlay`
+    always returns `Ok` so the daemon never aborts on a missing
+    graphics environment.
+  * **`backends/wayland_shm.rs`** — shared `SlotPool` framebuffer
+    plumbing + self-pipe waker + `rustix::event::poll`-based
+    event-loop multiplexer used by the Wayland backend.
+
+### Selection table
+
+`crates/fono-overlay/src/backend.rs::candidate_list_with` is the
+single source of truth. Driven by env-var presence (the actual
+protocol probe happens at each backend's `try_spawn` time):
+
+| `WAYLAND_DISPLAY` | `DISPLAY` | Candidate order |
+|---|---|---|
+| set | set | `wlr-layer-shell` → `x11-override-redirect` → `noop` |
+| set | unset | `wlr-layer-shell` → `noop` |
+| unset | set | `x11-override-redirect` → `noop` |
+| unset | unset | `noop` |
+
+On GNOME the layer-shell `try_spawn` returns `NotAvailable` because
+Mutter doesn't implement `zwlr_layer_shell_v1`, and selection falls
+through to the X11 backend running under Xwayland. Mutter respects
+Xwayland override-redirect: the overlay is client-positioned, stays
+above normal windows, and is excluded from Alt+Tab and the
+taskbar — same UX as on a native X11 session. Fractional HiDPI
+scaling renders cleanly via Xwayland (live-verified on Ubuntu 24.04
+GNOME / `192.168.0.112`). The `wayland-xdg-fallback` that briefly
+existed in the design space is deliberately omitted from the
+shipped backend set: `xdg_toplevel` cannot deliver a panel UX on
+Mutter, and the rare Wayland-only-no-Xwayland case is better served
+by `noop` + a `fono doctor` hint than by a degraded surface.
+
+### `FONO_OVERLAY_BACKEND` override
+
+Operator escape hatch with values `wlr` / `x11` / `noop` (case-
+insensitive, plus a few aliases). Forced selection still falls
+through to `noop` on failure so the daemon never aborts. Unknown
+values fall through to automatic selection with a warning logged.
+
+### `fono doctor` integration
+
+`crates/fono/src/doctor.rs` reports the selected backend on the
+`Overlay     :` line with its `BackendCapabilities` summary
+(`transparency`, `positioning`, `focus-passthrough`,
+`click-passthrough`). On a Wayland session that ends up on the
+`noop` backend (no layer-shell, no Xwayland) doctor prints a hint
+to install the distro's `xwayland` package.
+
+### Test surface
+
+`crates/fono-overlay/src/lib.rs::tests` exercises the candidate-
+list logic under mocked env-var presence via
+`backend::pick_backend_with`. Five unit tests cover the selection
+table rows plus the forced-override + unknown-value behaviour.
+
+### Win on dep graph
+
+`Cargo.toml` workspace `winit` is now
+`{ default-features = false, features = ["x11", "rwh_06"] }` —
+winit's Wayland event-loop, the SCTK transitive deps it pulled, and
+softbuffer's Wayland buffers are no longer compiled into the
+binary. The Wayland-native protocol surface is now a direct
+dependency of `fono-overlay` only, gated behind the `backend-wlr`
+cargo feature. `cargo tree -p winit | grep -iE 'wayland|sctk|smithay'`
+returns empty.
+
+### Gate
+
+`cargo fmt --all -- --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, `cargo test --workspace --tests
+--lib` — all green. `cargo build --profile release-slim -p fono`
+≈ 21.24 MiB, under the 22 MiB CPU `size-budget` CI gate (see
+`.github/workflows/ci.yml:184`).
 
 ## 2026-05-19 — Rename: `LlmBackend` → `PolishBackend`
 
