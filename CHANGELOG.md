@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **History DB now rebuilds itself when the schema is incompatible**
+  (e.g. carries the pre-rename `llm_backend` column). The
+  CREATE TABLE IF NOT EXISTS path silently skipped existing tables,
+  so users with a `history.sqlite` predating `ef557af` (the
+  `LlmBackend` -> `PolishBackend` rename, 2026-05-19) were hitting
+  `WARN history insert failed: sqlite error: table transcriptions
+  has no column named polish_backend` on every dictation.
+  `HistoryDb::migrate` now drops any pre-existing `transcriptions`
+  table that lacks `polish_backend` before recreating the schema.
+  Pre-release: no row-level migration; legacy rows are wiped.
 - **Wayland overlay no longer steals focus, displays as an opaque
   rectangle, or lands top-left** on Mutter / GNOME (Ubuntu 24.04).
   Root cause: the previous `winit` + `softbuffer` path hard-coded

@@ -79,6 +79,17 @@ impl HistoryDb {
     }
 
     fn migrate(&self) -> Result<()> {
+        // Pre-release: any pre-existing `transcriptions` table without the
+        // current `polish_backend` column is treated as an incompatible
+        // schema and dropped. No data preservation across schema breaks.
+        let needs_rebuild = self.table_exists("transcriptions")?
+            && !self.column_exists("transcriptions", "polish_backend")?;
+        if needs_rebuild {
+            self.conn.execute_batch(
+                "DROP TABLE IF EXISTS transcriptions_fts;
+                 DROP TABLE IF EXISTS transcriptions;",
+            )?;
+        }
         self.conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
@@ -125,6 +136,24 @@ impl HistoryDb {
             ",
         )?;
         Ok(())
+    }
+
+    fn table_exists(&self, table: &str) -> Result<bool> {
+        let mut stmt =
+            self.conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?;
+        Ok(stmt.exists([table])?)
+    }
+
+    fn column_exists(&self, table: &str, column: &str) -> Result<bool> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Insert a transcription, applying `redact_secrets` if requested. Returns
@@ -271,6 +300,37 @@ mod tests {
         db.insert(&fresh, false).unwrap();
         let n = db.purge_older_than(30).unwrap();
         assert_eq!(n, 1);
+        assert_eq!(db.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn drops_legacy_schema_without_polish_backend() {
+        // Simulate a pre-rename DB: build the schema with the old column
+        // name and a row, then open it through HistoryDb. The legacy
+        // table is treated as incompatible and dropped; new inserts work.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE transcriptions(
+                id            INTEGER PRIMARY KEY,
+                ts            INTEGER NOT NULL,
+                duration_ms   INTEGER,
+                raw           TEXT NOT NULL,
+                cleaned       TEXT,
+                app_class     TEXT,
+                app_title     TEXT,
+                stt_backend   TEXT,
+                llm_backend   TEXT,
+                language      TEXT
+             );
+             INSERT INTO transcriptions(ts, raw, llm_backend) VALUES (1, 'legacy', 'groq');",
+        )
+        .unwrap();
+        let db = HistoryDb { conn };
+        db.migrate().unwrap();
+        assert_eq!(db.count().unwrap(), 0, "legacy rows must be wiped");
+        let mut fresh = Transcription::new("after-rebuild");
+        fresh.polish_backend = Some("local".into());
+        db.insert(&fresh, false).unwrap();
         assert_eq!(db.count().unwrap(), 1);
     }
 }
