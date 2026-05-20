@@ -13,9 +13,7 @@ pub mod parse;
 pub mod portal;
 pub mod xerror;
 
-pub use detect::{
-    detect_backend, spawn as spawn_with_backend, HotkeyBackendChoice, ResolvedBackend,
-};
+pub use detect::{detect_backend, spawn as spawn_with_backend, HotkeyBackend};
 pub use fsm::{HotkeyAction, HotkeyEvent, RecordingFsm, RecordingMode, State};
 pub use listener::{spawn as spawn_listener, HotkeyBindings, HotkeyControl, ListenerHandle};
 pub use parse::{parse_hotkey, ParsedHotkey};

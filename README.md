@@ -34,7 +34,7 @@ While you're speaking, a small overlay shows what the microphone is hearing. Fou
 ## What Fono does
 
 - **Dictation, push-to-talk or toggle.** Tap `F7` to toggle recording; hold `F7` for push-to-talk. The same key works either way — the press duration decides.
-- **Lands in any X11 window.** Fono pastes with `Shift+Insert` after copying the text to the clipboard. Wayland works once you bind `fono toggle` in your compositor's keyboard settings (KDE, GNOME, sway); portal-based auto-binding is on the roadmap.
+- **Lands in any X11 or Wayland window.** Fono pastes with `Shift+Insert` after copying the text to the clipboard. On Wayland sessions Fono auto-registers its hotkeys via the `xdg-desktop-portal` GlobalShortcuts interface — one consent dialog at first run, no compositor config required (KDE Plasma 6, Hyprland, sway with `xdg-desktop-portal-wlr`, GNOME 47+). On GNOME 46 / Ubuntu 24.04 (whose portal lacks GlobalShortcuts) Fono falls back to installing gsettings custom-keybindings automatically. X11 / Xwayland sessions keep the native global-hotkey path.
 - **Local or cloud speech-to-text.** Whisper runs on your machine by default. Or switch to Groq, OpenAI, or Deepgram with one command (`fono use stt …`).
 - **Optional cleanup pass.** A small LLM can tidy up the transcript before it's injected — locally with `llama.cpp`, or via Cerebras / Groq / OpenAI / OpenRouter / Anthropic / Ollama.
 - **Voice assistant on `F8`** *(cloud-only for now)*. Talk to OpenAI, Anthropic, Groq, Cerebras, or OpenRouter; the reply is streamed sentence-by-sentence into TTS so audio starts before the model has finished thinking.

@@ -111,18 +111,17 @@ below.
 
 ## Known issues
 
-- **Overlay may not paint on hostile compositors.** Some Wayland
-  compositors (sway with strict layer-shell policies, custom KWin
-  setups with `Force black background` rules) refuse to honour the
-  overlay's window-type hint. The overlay daemon falls back to
-  *no overlay* when winit reports a window-creation error; you'll
-  still see the dictated text on stdout / in the focused app. Slice
-  B's sub-process overlay refactor will improve crash isolation here.
-- **Wayland may steal focus on first overlay creation.** On a small
-  number of compositors the overlay-show transient takes input focus
-  for ~1 frame, dropping the first keystroke or two from a
-  simultaneously-typed key. Mitigation: avoid typing during the first
-  100 ms of `fono record --live`. This is on the Slice B fix list.
+- **Overlay rendering depends on the display server.** On Wayland
+  compositors that implement `zwlr_layer_shell_v1` (sway, hyprland,
+  KDE Plasma 5.27+, COSMIC, Wayfire, niri, labwc) the overlay
+  anchors bottom-centre with transparency and no focus theft. On
+  GNOME / Mutter (no layer-shell) Fono falls through to its X11
+  backend via Xwayland — same bottom-centre / always-on-top
+  behaviour. On pure X11 the native override-redirect path is
+  used. Headless or otherwise unusable display servers fall back
+  to a `noop` backend (no window, daemon still runs); `fono
+  doctor` prints which backend was selected and `FONO_OVERLAY_BACKEND`
+  can force a specific one. Full table in [`docs/wayland.md`](wayland.md).
 - **Synthetic-tone equivalence-harness fixtures.** The two committed
   fixtures under `tests/fixtures/equivalence/` are synthesized 440 Hz
   tones, not real speech, so the equivalence-harness Tier-1

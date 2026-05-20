@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Audio playback via `pw-play` now passes `--raw`.** Without it,
+  `pw-play` (a symlink to `pw-cat`) tries to parse stdin through
+  libsndfile, fails on our headerless int16 PCM stream, exits
+  early, and the assistant playback warned `paplay failed
+  error=writing PCM to pw-play` (EPIPE) on every utterance for
+  users on PipeWire systems. `paplay` (the legacy fallback)
+  already received `--raw`; the `pw-play` arm now matches.
 - **History DB now rebuilds itself when the schema is incompatible**
   (e.g. carries the pre-rename `llm_backend` column). The
   CREATE TABLE IF NOT EXISTS path silently skipped existing tables,
@@ -31,6 +38,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Wayland hotkeys now self-bind via the `xdg-desktop-portal`
+  GlobalShortcuts interface** — one consent dialog at first launch,
+  no compositor configuration required on KDE Plasma 5.27+ / 6.x,
+  Hyprland, sway with `xdg-desktop-portal-wlr`, or GNOME 47+. On
+  **GNOME 46** (Ubuntu 24.04's default, whose `xdg-desktop-portal-gnome`
+  doesn't yet expose GlobalShortcuts) Fono automatically installs
+  gsettings custom-keybindings as a fallback (no long-press push-to-talk
+  on that path, but the toggle behaviour works). X11 / Xwayland sessions
+  keep the native `global-hotkey` listener. Set
+  `FONO_HOTKEY_BACKEND=portal|x11|disabled` to override the
+  auto-detection for diagnostics. `fono doctor` reports which
+  backend resolved and why.
 - **Overlay rewritten around a pluggable backend layer.** The
   renderer (FFT / oscilloscope / heatmap / transcript / VU bar) is
   unchanged but now hands pixels to one of three windowing backends

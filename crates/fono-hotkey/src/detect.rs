@@ -4,6 +4,12 @@
 //! Picks between the X11 (`global-hotkey`) listener and the
 //! Wayland-portal (`xdg-desktop-portal.GlobalShortcuts`) listener at
 //! daemon startup, based on the session environment.
+//!
+//! Auto-detection is the only path users ever hit. The
+//! `FONO_HOTKEY_BACKEND={portal,x11,disabled}` env var is a diagnostic
+//! escape hatch — unknown values fall through to auto-detection with a
+//! warning, matching the `FONO_OVERLAY_BACKEND` selector in
+//! `fono-overlay`.
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -12,85 +18,74 @@ use tracing::info;
 use crate::fsm::HotkeyAction;
 use crate::listener::{HotkeyBindings, ListenerHandle};
 
-/// User-facing backend preference. Read from `[hotkeys].backend` in
-/// `config.toml`; defaults to [`Self::Auto`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum HotkeyBackendChoice {
-    /// Auto-detect: portal on Wayland (if available), X11 otherwise.
-    #[default]
-    Auto,
-    /// Force the portal backend (Wayland-only; errors elsewhere).
+/// Forced backend override, parsed from `FONO_HOTKEY_BACKEND`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeyBackend {
+    /// `xdg-desktop-portal.GlobalShortcuts` (Wayland sessions).
     Portal,
-    /// Force the legacy X11 / Xwayland `global-hotkey` listener.
+    /// The X11 / Xwayland `global-hotkey` listener.
     X11,
-    /// Skip the hotkey listener entirely. Useful for headless / SSH
-    /// sessions and CI runners.
+    /// Skip the listener entirely (headless / SSH / CI runners).
     Disabled,
 }
 
-impl HotkeyBackendChoice {
-    /// Parse from config string. Tolerant of case and minor spellings.
+impl HotkeyBackend {
+    /// Parse the value of `FONO_HOTKEY_BACKEND` into a forced backend
+    /// selection. Returns `None` for empty / unknown input so the
+    /// caller falls back to auto-detection.
     #[must_use]
-    pub fn parse(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "" | "auto" | "default" => Self::Auto,
-            "portal" | "wayland" | "wayland-portal" | "xdp" => Self::Portal,
-            "x11" | "xorg" | "xwayland" | "legacy" => Self::X11,
-            "disabled" | "off" | "none" => Self::Disabled,
-            other => {
-                tracing::warn!("unknown [hotkeys].backend = {other:?}; falling back to auto");
-                Self::Auto
-            }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "portal" => Some(Self::Portal),
+            "x11" => Some(Self::X11),
+            "disabled" => Some(Self::Disabled),
+            _ => None,
         }
     }
 }
 
-/// Resolved backend after auto-detection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolvedBackend {
-    Portal,
-    X11,
-    Disabled,
-}
-
-/// Detect the best backend for the current session.
+/// Resolve a backend for the current session. `forced` is the parsed
+/// `FONO_HOTKEY_BACKEND` value (`None` = auto-detect).
 ///
-/// Decision matrix:
-/// - `WAYLAND_DISPLAY` set → `Portal` (the portal listener will itself
-///   fall back gracefully if `xdg-desktop-portal-*` is not running).
+/// Auto-detect matrix:
+/// - `WAYLAND_DISPLAY` set → `Portal` (the portal listener falls
+///   back gracefully at spawn time if `xdg-desktop-portal-*` isn't
+///   running).
 /// - `DISPLAY` set, no `WAYLAND_DISPLAY` → `X11`.
 /// - Neither set → `Disabled`.
 #[must_use]
-pub fn detect_backend(choice: HotkeyBackendChoice) -> ResolvedBackend {
-    match choice {
-        HotkeyBackendChoice::Portal => ResolvedBackend::Portal,
-        HotkeyBackendChoice::X11 => ResolvedBackend::X11,
-        HotkeyBackendChoice::Disabled => ResolvedBackend::Disabled,
-        HotkeyBackendChoice::Auto => {
-            let has_wayland =
-                std::env::var_os("WAYLAND_DISPLAY").map(|v| !v.is_empty()).unwrap_or(false);
-            let has_x11 = std::env::var_os("DISPLAY").map(|v| !v.is_empty()).unwrap_or(false);
-            if has_wayland {
-                ResolvedBackend::Portal
-            } else if has_x11 {
-                ResolvedBackend::X11
-            } else {
-                ResolvedBackend::Disabled
-            }
-        }
+pub fn detect_backend(forced: Option<HotkeyBackend>) -> HotkeyBackend {
+    detect_backend_with(forced, |k| std::env::var_os(k).is_some_and(|v| !v.is_empty()))
+}
+
+/// Test seam for [`detect_backend`] with an injectable env-lookup.
+#[doc(hidden)]
+pub fn detect_backend_with(
+    forced: Option<HotkeyBackend>,
+    env_present: impl Fn(&str) -> bool,
+) -> HotkeyBackend {
+    if let Some(b) = forced {
+        return b;
+    }
+    if env_present("WAYLAND_DISPLAY") {
+        HotkeyBackend::Portal
+    } else if env_present("DISPLAY") {
+        HotkeyBackend::X11
+    } else {
+        HotkeyBackend::Disabled
     }
 }
 
 /// Top-level orchestrator: detect, dispatch, return a unified handle.
 pub fn spawn(
-    choice: HotkeyBackendChoice,
+    forced: Option<HotkeyBackend>,
     bindings: HotkeyBindings,
     tx: mpsc::UnboundedSender<HotkeyAction>,
 ) -> Result<Option<ListenerHandle>> {
-    let backend = detect_backend(choice);
-    info!("hotkey backend resolved: {backend:?} (choice: {choice:?})");
+    let backend = detect_backend(forced);
+    info!("hotkey backend resolved: {backend:?} (forced: {forced:?})");
     match backend {
-        ResolvedBackend::Portal => {
+        HotkeyBackend::Portal => {
             #[cfg(target_os = "linux")]
             {
                 match crate::portal::spawn(bindings.clone(), tx.clone()) {
@@ -138,8 +133,8 @@ pub fn spawn(
                 anyhow::bail!("portal hotkey backend is Linux-only");
             }
         }
-        ResolvedBackend::X11 => crate::listener::spawn(bindings, tx).map(Some),
-        ResolvedBackend::Disabled => {
+        HotkeyBackend::X11 => crate::listener::spawn(bindings, tx).map(Some),
+        HotkeyBackend::Disabled => {
             info!("hotkey listener disabled (headless session)");
             Ok(None)
         }
@@ -151,13 +146,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn choice_parse_aliases() {
-        assert_eq!(HotkeyBackendChoice::parse(""), HotkeyBackendChoice::Auto);
-        assert_eq!(HotkeyBackendChoice::parse("auto"), HotkeyBackendChoice::Auto);
-        assert_eq!(HotkeyBackendChoice::parse("Portal"), HotkeyBackendChoice::Portal);
-        assert_eq!(HotkeyBackendChoice::parse("wayland"), HotkeyBackendChoice::Portal);
-        assert_eq!(HotkeyBackendChoice::parse("X11"), HotkeyBackendChoice::X11);
-        assert_eq!(HotkeyBackendChoice::parse("disabled"), HotkeyBackendChoice::Disabled);
-        assert_eq!(HotkeyBackendChoice::parse("bogus"), HotkeyBackendChoice::Auto);
+    fn parse_canonical_names() {
+        assert_eq!(HotkeyBackend::parse("portal"), Some(HotkeyBackend::Portal));
+        assert_eq!(HotkeyBackend::parse("Portal"), Some(HotkeyBackend::Portal));
+        assert_eq!(HotkeyBackend::parse("x11"), Some(HotkeyBackend::X11));
+        assert_eq!(HotkeyBackend::parse("disabled"), Some(HotkeyBackend::Disabled));
+    }
+
+    #[test]
+    fn parse_unknown_returns_none() {
+        assert_eq!(HotkeyBackend::parse(""), None);
+        assert_eq!(HotkeyBackend::parse("auto"), None);
+        assert_eq!(HotkeyBackend::parse("wayland"), None);
+        assert_eq!(HotkeyBackend::parse("bogus"), None);
+    }
+
+    #[test]
+    fn auto_detect_picks_portal_on_wayland() {
+        let b = detect_backend_with(None, |k| k == "WAYLAND_DISPLAY");
+        assert_eq!(b, HotkeyBackend::Portal);
+    }
+
+    #[test]
+    fn auto_detect_picks_x11_on_xorg() {
+        let b = detect_backend_with(None, |k| k == "DISPLAY");
+        assert_eq!(b, HotkeyBackend::X11);
+    }
+
+    #[test]
+    fn auto_detect_disabled_when_headless() {
+        let b = detect_backend_with(None, |_| false);
+        assert_eq!(b, HotkeyBackend::Disabled);
+    }
+
+    #[test]
+    fn forced_override_wins() {
+        // Forced X11 wins even with WAYLAND_DISPLAY set.
+        let b = detect_backend_with(Some(HotkeyBackend::X11), |_| true);
+        assert_eq!(b, HotkeyBackend::X11);
     }
 }

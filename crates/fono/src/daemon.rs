@@ -204,13 +204,15 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         cancel: config.hotkeys.cancel.clone(),
         assistant: config.hotkeys.assistant.clone(),
     };
-    let backend_choice = std::env::var("FONO_HOTKEY_BACKEND")
-        .ok()
-        .map_or(fono_hotkey::HotkeyBackendChoice::Auto, |v| {
-            fono_hotkey::HotkeyBackendChoice::parse(&v)
-        });
+    let forced_backend = std::env::var("FONO_HOTKEY_BACKEND").ok().and_then(|v| {
+        let parsed = fono_hotkey::HotkeyBackend::parse(&v);
+        if parsed.is_none() && !v.trim().is_empty() {
+            warn!("unknown FONO_HOTKEY_BACKEND={v:?}; falling back to auto-detection");
+        }
+        parsed
+    });
     let cancel_ctrl: Option<HotkeyControlSender> = if crate::is_graphical_session() {
-        match fono_hotkey::spawn_with_backend(backend_choice, bindings, action_tx.clone()) {
+        match fono_hotkey::spawn_with_backend(forced_backend, bindings, action_tx.clone()) {
             Ok(Some(handle)) => {
                 debug!("global hotkeys registered");
                 Some(handle.control)

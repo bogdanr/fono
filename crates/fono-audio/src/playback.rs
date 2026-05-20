@@ -134,6 +134,7 @@ async fn play_via_paplay(pcm: &[f32], rate: u32, stop: &AtomicBool) -> Result<()
     use std::io::Write;
     use std::process::{Command, Stdio};
     let (mut child, tool) = match Command::new("pw-play")
+        .arg("--raw")
         .arg(format!("--rate={rate}"))
         .arg("--channels=1")
         .arg("--format=s16")

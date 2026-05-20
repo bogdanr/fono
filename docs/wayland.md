@@ -80,16 +80,40 @@ your distro's `xwayland` package.
 
 ## Global hotkeys
 
-Wayland compositors don't expose X11's `XGrabKey` global-hotkey API. Fono
-falls back to the `global-hotkey` crate's best-effort path; when that
-doesn't work (some bare wlroots setups) you can always use the **CLI
-fallback**, binding your compositor's own key handler to `fono toggle`.
+Wayland compositors don't expose X11's `XGrabKey` API, so Fono uses
+a three-tier resolver picked automatically based on what the session
+advertises (set `FONO_HOTKEY_BACKEND=portal|x11|disabled` to
+override for diagnostics):
 
-### Per-compositor notes
+1. **`xdg-desktop-portal.GlobalShortcuts`** — preferred on every
+   Wayland session that ships it. One consent dialog at first launch
+   binds both the dictation and assistant keys for the lifetime of
+   the install; subsequent launches reuse the cached approval
+   silently. Works out-of-the-box on:
+   * KDE Plasma 5.27+ / 6.x (`xdg-desktop-portal-kde`)
+   * Hyprland (`xdg-desktop-portal-hyprland`)
+   * sway / wlroots with `xdg-desktop-portal-wlr`
+   * GNOME 47+ (`xdg-desktop-portal-gnome` 47 added GlobalShortcuts)
 
-#### sway / hyprland / river (wlroots-based)
+2. **gsettings custom-keybindings** — automatic fallback for
+   **GNOME 46** (the default on Ubuntu 24.04, whose
+   `xdg-desktop-portal-gnome` 46 doesn't yet expose GlobalShortcuts).
+   Fono writes the `dictation` and `assistant` bindings into
+   `org.gnome.settings-daemon.plugins.media-keys.custom-keybindings`
+   pointing at `fono toggle` and `fono assistant`; the CLI then
+   routes the action through IPC to the running daemon. Press /
+   release semantics are lost on this path (no long-press
+   push-to-talk), but the toggle behaviour works.
 
-Global hotkeys generally work. If they don't, bind the compositor shortcut:
+3. **X11 / Xwayland listener** — the X11-only `global-hotkey` crate
+   path, used when neither portal nor gsettings is available
+   (typically bare wlroots setups without `xdg-desktop-portal-wlr`,
+   or sessions where Xwayland is reachable but the Wayland portal
+   isn't).
+
+`fono doctor` reports which backend was selected and why. If the
+portal binding dialog never appears or the keys don't fire, you can
+always **fall back to a manual compositor binding** as a last resort:
 
 ```
 # sway (~/.config/sway/config)
@@ -99,7 +123,13 @@ bindsym Ctrl+Alt+space exec fono toggle
 bind = CTRL ALT, space, exec, fono toggle
 ```
 
-Text injection requires `wtype` (preferred) or `ydotool`:
+For **KDE**: System Settings → Shortcuts → Custom Shortcuts → Edit →
+New → Global Shortcut → Command/URL → `fono toggle`. For **GNOME**:
+Settings → Keyboard → View and Customize Shortcuts → Custom Shortcut.
+
+### Text injection helpers (per compositor)
+
+sway / hyprland / river require `wtype` (preferred) or `ydotool`:
 
 ```
 sudo apt install wtype     # Debian/Ubuntu
@@ -107,18 +137,8 @@ doas pkg_add  wtype        # OpenBSD
 # NimbleX / Slackware:  slapt-get --install wtype  (builds from SBo)
 ```
 
-#### GNOME (Mutter) / KDE (KWin)
-
-Neither compositor implements the `org.freedesktop.portal.GlobalShortcuts`
-portal as of 2026-04. Bind a compositor-level shortcut to `fono toggle`:
-
-* **GNOME:** Settings → Keyboard → View and Customize Shortcuts → Custom
-  Shortcut → `F9` → `fono toggle`.
-* **KDE:** System Settings → Shortcuts → Custom Shortcuts → Edit → New →
-  Global Shortcut → Command/URL → `fono toggle`.
-
-Injection uses `ydotool` on Mutter/KWin; ensure the daemon runs with a
-user in the `input` group:
+KDE Plasma Wayland and GNOME use `ydotool`; ensure your user is in
+the `input` group and the user-level daemon is running:
 
 ```
 sudo gpasswd -a "$USER" input

@@ -191,7 +191,7 @@ async fn run_portal_inner(
                 anyhow::bail!(
                     "portal BindShortcuts rejected by the user or backend: {e}. \
                      Re-launch fono and approve the consent dialog, or set \
-                     `[hotkeys].backend = \"x11\"` to skip the portal."
+                     `FONO_HOTKEY_BACKEND=x11` to skip the portal."
                 );
             }
         }

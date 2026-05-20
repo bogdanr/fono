@@ -52,6 +52,7 @@ allow = [
     "CC0-1.0",
     "Zlib",
     "0BSD",
+    "BSL-1.0",              # Boost Software License; OSI + FSF approved, GPL-compat. Pulled in by clipboard-win / error-code (Windows clipboard via arboard).
     "Unlicense",            # often dual-licensed: MIT OR Unlicense
     "CDLA-Permissive-2.0",  # webpki-roots license; permissive, GPL-compat
 ]

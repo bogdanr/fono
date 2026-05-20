@@ -19,7 +19,11 @@ fono-tts         async TextToSpeech  trait + Wyoming + OpenAI + Piper-stub
 fono-assistant   streaming chat (Anthropic + OpenAI-compat) + rolling history
 fono-inject      enigo typing + clipboard-paste fallback, focus detection
 fono-tray        tray-icon lifecycle + menu
-fono-overlay     winit/softbuffer recording + thinking-animation overlay
+fono-overlay     pluggable overlay: software renderer (FFT / oscilloscope /
+                 heatmap / bars / VU / transcript) + backend layer with
+                 `wlr-layer-shell`, X11 override-redirect (winit + softbuffer,
+                 used natively on Xorg and via Xwayland on GNOME / Mutter),
+                 and a `noop` fallback. See `docs/wayland.md`.
 fono-ipc         Unix-socket single-instance protocol (length-prefixed JSON)
 fono-download    streaming HTTPS with SHA-256 verify + range resume
 ```

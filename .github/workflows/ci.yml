@@ -68,7 +68,8 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             build-essential clang cmake pkg-config libclang-dev \
-            libxdo-dev libasound2-dev
+            libxdo-dev libasound2-dev \
+            libxkbcommon-dev libwayland-dev
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -146,11 +147,15 @@ jobs:
     # Builds the canonical ship artefact (`x86_64-unknown-linux-gnu`,
     # `release-slim`, default features — same target+profile as
     # `release.yml`) and asserts:
-    #   - size ≤ 20 MiB (20 971 520 bytes)
+    #   - size ≤ 22 MiB (23 068 672 bytes) — see matrix value below
     #   - `NEEDED` set is exactly the universal glibc + libgcc_s ABI
     #     present on every desktop Linux ≥ ~2018. Anything else
     #     (libgtk*, libstdc++, libgomp, libayatana, libxdo, libasound,
-    #     libxkbcommon, libwayland-*) fails the gate. ADR 0018's
+    #     libxkbcommon, libwayland-*) fails the gate. The native
+    #     Wayland overlay backend (`fono-overlay/backend-wlr`) links
+    #     `xkbcommon`/`wayland-client` via dlopen / unreferenced-symbol
+    #     paths, so `-Wl,--as-needed` strips both from the final
+    #     `NEEDED` set — the gate stays tight. ADR 0018's
     #     `--allow-multiple-definition` keeps a single ggml copy at
     #     link time; that invariant is enforced by the link itself, not
     #     a post-strip nm grep (release-slim sets `strip = "symbols"`).
@@ -207,7 +212,8 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             build-essential clang cmake pkg-config libclang-dev \
-            libxdo-dev
+            libxdo-dev \
+            libxkbcommon-dev libwayland-dev
           if [ "${{ matrix.variant }}" = "gpu" ]; then
             # Ubuntu 22.04's stock repo has no `glslc` package, and
             # `glslang-tools` only ships `glslangValidator` (different
