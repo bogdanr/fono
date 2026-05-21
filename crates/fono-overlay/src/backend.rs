@@ -332,31 +332,31 @@ pub fn spawn_overlay(style: WaveformStyle) -> std::io::Result<OverlayHandle> {
         let parsed = BackendId::parse(&raw);
         if parsed.is_none() {
             tracing::warn!(
-                "overlay: FONO_OVERLAY_BACKEND={raw:?} not recognised; \
-                 using automatic selection"
+                "overlay: ignoring FONO_OVERLAY_BACKEND={raw:?} (not a known value); \
+                 picking the best backend automatically"
             );
         }
         parsed
     });
 
     let candidates: Vec<BackendId> = forced.map_or_else(candidate_list, |b| {
-        tracing::info!("overlay: FONO_OVERLAY_BACKEND forces backend={}", b.as_str());
+        tracing::info!("overlay: using `{}` backend (FONO_OVERLAY_BACKEND override)", b.as_str());
         vec![b, BackendId::Noop]
     });
 
     for id in candidates {
-        tracing::info!("overlay: trying backend={}", id.as_str());
+        tracing::info!("overlay: trying `{}`...", id.as_str());
         match try_spawn(id, style) {
             Ok(spawned) => {
                 tracing::info!(
-                    "overlay: backend={} selected ({})",
+                    "overlay: using `{}` ({})",
                     spawned.id.as_str(),
                     spawned.capabilities.summary()
                 );
                 return Ok(OverlayHandle::from_spawned(spawned));
             }
             Err(e) => {
-                tracing::info!("overlay: backend={} {e}", id.as_str());
+                tracing::info!("overlay: `{}` skipped — {e}", id.as_str());
             }
         }
     }

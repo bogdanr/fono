@@ -319,7 +319,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
         writeln!(
             out,
             "  {}",
-            bad("(no input devices reported — check pactl / cpal permissions, or that your microphone is plugged in)")
+            bad("(no input devices reported — install `wireplumber` (wpctl) or `pulseaudio-utils` (pactl), or check that your microphone is plugged in)")
         )?;
     } else {
         for d in &devices {

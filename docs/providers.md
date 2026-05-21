@@ -91,7 +91,7 @@ the default `info` log level and turn on per session via the
 `RUST_LOG` env var:
 
 ```
-RUST_LOG=info,fono.http=debug fono daemon
+RUST_LOG=info,fono.http=debug fono
 ```
 
 Schema (one line per HTTP request):

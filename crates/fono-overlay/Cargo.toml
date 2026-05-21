@@ -31,7 +31,7 @@ real-window = [
 # X11 + winit + softbuffer backend (the original carryover path).
 # Linux X11 sessions only; on Wayland-only hosts the runtime probe
 # falls through to the wlr / xdg backends.
-backend-x11 = ["dep:winit", "dep:softbuffer", "dep:ab_glyph"]
+backend-x11 = ["dep:winit", "dep:softbuffer", "dep:ab_glyph", "dep:libloading"]
 
 # wlr-layer-shell backend (sway, hyprland, river, KDE, COSMIC,
 # Wayfire, niri, labwc). On Wayland sessions without layer-shell
@@ -70,3 +70,11 @@ wayland-protocols-wlr = { version = "0.3", optional = true, features = ["client"
 # in the lockfile via every transitive consumer (calloop, polling,
 # tempfile, …) so we pay no fresh dep tree.
 rustix = { version = "0.38", default-features = false, features = ["event", "std"], optional = true }
+# libloading is used by the X11 backend to preflight `libxkbcommon-x11.so.0`
+# before winit's event loop dlopens it; on systems without the package
+# (notably Ubuntu 26.04 GNOME-Wayland defaults, which ship only the core
+# `libxkbcommon.so.0`) winit/xkbcommon-dl panics the overlay thread. We
+# catch the missing-library case ourselves and return `NotAvailable` so
+# the backend selector falls through cleanly with an actionable message.
+# Already in the dep graph via winit's transitive `ash`/wgpu paths.
+libloading = { version = "0.8", optional = true }

@@ -547,6 +547,30 @@ fn run_install_desktop() -> Result<()> {
     }
 
     let no_start = std::env::var_os("FONO_INSTALL_NO_START").is_some_and(|v| v == "1");
+
+    // Offer to install the runtime packages Fono needs on this
+    // session BEFORE we start the daemon. winit can only construct
+    // one EventLoop per process, so the overlay backend selected at
+    // daemon startup sticks for the process's lifetime. Installing
+    // the libs first means the daemon we spawn next picks the real
+    // X11 / wlr-layer-shell backend on the first try and the user
+    // never has to restart it manually.
+    if !no_start {
+        offer_install_missing_packages();
+    }
+
+    // If a daemon is already running (e.g. from a previous login's
+    // XDG autostart, or a `fono` started manually in a terminal),
+    // ask it to exit before we autostart a fresh one. Without this
+    // the new daemon would steal the IPC socket while the old
+    // process kept running its hotkey + capture threads — and, more
+    // importantly, the old process would still be the one with the
+    // pre-libxkbcommon-x11 noop overlay, defeating the whole point
+    // of reordering above. Best-effort; failure is non-fatal.
+    if !no_start {
+        shutdown_existing_daemon();
+    }
+
     let autostart_outcome =
         if no_start { AutostartOutcome::SkippedByEnv } else { try_autostart_for_sudo_user() };
 
@@ -693,6 +717,73 @@ fn ensure_log_file() -> std::io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))
 }
 
+/// Ask any already-running fono daemon to exit, so the autostart that
+/// follows starts a clean process. Tries the system service socket
+/// (`/var/lib/fono/fono.sock`) and the target user's per-user XDG
+/// socket (`~/.local/state/fono/fono.sock`, or `$XDG_STATE_HOME/fono/fono.sock`
+/// when set). Best-effort: missing sockets, unreachable daemons, and
+/// IPC errors are all silently ignored — there's nothing to do in
+/// those cases and the user shouldn't see scary lines.
+fn shutdown_existing_daemon() {
+    let sockets = candidate_daemon_sockets_for_target_user();
+    if sockets.is_empty() {
+        return;
+    }
+    let any_present = sockets.iter().any(|p| p.exists());
+    if !any_present {
+        return;
+    }
+    // Spin a tiny current-thread tokio runtime just for this one
+    // request. install.rs is otherwise sync; pulling in a runtime
+    // here is cheap and self-contained.
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+        return;
+    };
+    let sent = rt.block_on(async {
+        // 1 s connect/read budget — the daemon either replies fast
+        // or it's wedged and we shouldn't block install on it.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            fono_ipc::request_any(&sockets, &fono_ipc::Request::Shutdown),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .is_some()
+    });
+    if sent {
+        eprintln!("  · asked existing fono daemon to exit");
+        // Give the old daemon a moment to release the socket file
+        // and tear down its hotkey grabs before the next autostart
+        // races for them. Empirically 300 ms is enough on a quiet
+        // box; we cap at 1.5 s.
+        for _ in 0..15 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if !sockets.iter().any(|p| p.exists()) {
+                break;
+            }
+        }
+    }
+}
+
+/// Candidate IPC sockets to probe when shutting down a previously-
+/// running daemon. Mirrors `Paths::client_ipc_socket_candidates` but
+/// resolves the per-user path against `$SUDO_USER`'s home rather than
+/// root's, since `sudo` typically scrubs `$XDG_STATE_HOME`.
+fn candidate_daemon_sockets_for_target_user() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    out.push(PathBuf::from(fono_core::paths::SYSTEM_IPC_SOCKET));
+    if let Some(home) = caller_home_dir() {
+        // $XDG_STATE_HOME if set and absolute, else $HOME/.local/state
+        let state_root = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home.join(".local/state"));
+        out.push(state_root.join("fono").join("fono.sock"));
+    }
+    out
+}
+
 /// Spawn `fono` in the background as the target user. Logs append to
 /// `/var/log/fono.log` if writable, else `/dev/null`.
 fn try_autostart_for_sudo_user() -> AutostartOutcome {
@@ -799,6 +890,381 @@ fn which_in_path(name: &str) -> bool {
         .status()
         .map(|s| s.success() || s.code().is_some())
         .unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------
+// Session-aware missing-packages prompt
+// ---------------------------------------------------------------------
+
+/// Coarse session classification used to pick which runtime packages
+/// Fono recommends. Detected from environment variables — the same
+/// inputs the runtime injector / overlay backends consult — so the
+/// recommendation always matches what the daemon will actually do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Session {
+    /// Native Wayland session under GNOME / Mutter. Mutter doesn't
+    /// implement `zwp_virtual_keyboard_manager_v1` (so `wtype` types
+    /// silently into the void) nor `zwlr_layer_shell_v1` (so the
+    /// overlay falls through to Xwayland). Both Fono surfaces end up
+    /// using the Xwayland path here — recommend `xdotool` +
+    /// `libxkbcommon-x11`.
+    GnomeWayland,
+    /// Native Wayland session under a wlroots compositor (sway,
+    /// hyprland, river, Wayfire, …). Both layer-shell and
+    /// virtual-keyboard are implemented natively — recommend `wtype`
+    /// only.
+    WlrootsWayland,
+    /// Native Wayland session under KDE Plasma's KWin. KWin
+    /// implements both protocols Fono needs (Plasma 5.27+).
+    KdeWayland,
+    /// Pure X11 session (no `WAYLAND_DISPLAY`). Recommend `xdotool`
+    /// + `libxkbcommon-x11`.
+    X11,
+    /// Couldn't classify (no DISPLAY, no WAYLAND_DISPLAY, or an
+    /// unrecognised desktop). Default to the X11/Xwayland-leaning
+    /// recommendation since it's the broadest one that works.
+    Unknown,
+}
+
+impl Session {
+    pub(crate) fn detect() -> Self {
+        Self::detect_with(|k| std::env::var_os(k).map(|v| v.to_string_lossy().into_owned()))
+    }
+
+    /// Test seam: injectable env lookup.
+    fn detect_with(env: impl Fn(&str) -> Option<String>) -> Self {
+        let wayland = env("WAYLAND_DISPLAY").is_some()
+            || env("XDG_SESSION_TYPE").as_deref() == Some("wayland");
+        let x11 = env("DISPLAY").is_some();
+        if !wayland && !x11 {
+            return Self::Unknown;
+        }
+        if !wayland {
+            return Self::X11;
+        }
+        let current = env("XDG_CURRENT_DESKTOP").unwrap_or_default().to_ascii_lowercase();
+        let session = env("XDG_SESSION_DESKTOP").unwrap_or_default().to_ascii_lowercase();
+        let hyprland = env("HYPRLAND_INSTANCE_SIGNATURE").is_some();
+        let sway = env("SWAYSOCK").is_some();
+        let needle = |s: &str| current.split(':').any(|p| p == s) || session == s;
+        if hyprland
+            || sway
+            || needle("sway")
+            || needle("hyprland")
+            || needle("river")
+            || needle("wayfire")
+            || needle("niri")
+            || needle("cosmic")
+            || needle("labwc")
+        {
+            return Self::WlrootsWayland;
+        }
+        if needle("kde") || needle("plasma") {
+            return Self::KdeWayland;
+        }
+        if needle("gnome") || needle("ubuntu") || needle("ubuntu:gnome") {
+            return Self::GnomeWayland;
+        }
+        // Wayland but unrecognised compositor — be conservative and
+        // recommend the Xwayland-leaning set so the user at least
+        // gets typing through XWayland.
+        Self::Unknown
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::GnomeWayland => "GNOME-Wayland",
+            Self::WlrootsWayland => "wlroots Wayland",
+            Self::KdeWayland => "KDE-Wayland",
+            Self::X11 => "X11",
+            Self::Unknown => "this session",
+        }
+    }
+
+    /// Packages Fono recommends installing on this session, in the
+    /// order they'll be presented to the user.
+    fn desired_packages(self) -> Vec<Pkg> {
+        match self {
+            // On GNOME-Wayland Fono defaults to clipboard delivery
+            // (Ctrl+V to paste) — see `crates/fono-inject/src/inject.rs`
+            // `detect_auto`. The overlay still rides Xwayland so we
+            // recommend `libxkbcommon-x11`, but we deliberately do
+            // NOT recommend `xdotool` here: that would trigger GNOME's
+            // "Allow input emulation" permission dialog on the first
+            // dictation, which is alarming for users who installed the
+            // tool ten seconds earlier. Users who want one-key paste
+            // run `fono use inject xdotool` to opt in.
+            Self::GnomeWayland => vec![Pkg::LibxkbcommonX11],
+            // Pure X11 / unknown desktops: no scary permission dialog,
+            // so the auto-typing pair is fair game.
+            Self::X11 | Self::Unknown => vec![Pkg::LibxkbcommonX11, Pkg::Xdotool],
+            // Native Wayland with both protocols — layer-shell
+            // overlay + virtual-keyboard typing work directly. No
+            // Xwayland dependency on the hot path.
+            Self::WlrootsWayland | Self::KdeWayland => vec![Pkg::Wtype],
+        }
+    }
+
+    /// Human-readable recommendation for which keystroke-injection
+    /// tool to install on this session. Used by the daemon WARN line
+    /// when no injector is detected; mirrors the desired_packages
+    /// rationale.
+    pub(crate) fn recommend_injector(self) -> &'static str {
+        match self {
+            Self::GnomeWayland => {
+                "Fono defaults to clipboard delivery on GNOME-Wayland to avoid \
+                 GNOME's input-emulation permission dialog. Press Ctrl+V to paste. \
+                 To enable one-key auto-typing (which will trigger that GNOME prompt \
+                 once), run `fono use inject xdotool`."
+            }
+            Self::X11 | Self::Unknown => {
+                "Install `xdotool` to enable auto-typing (Fono uses it via XWayland \
+                 on this session). `ydotool` also works on any Wayland session but \
+                 requires a uinput daemon you set up yourself."
+            }
+            Self::WlrootsWayland | Self::KdeWayland => {
+                "Install `wtype` to enable auto-typing on this Wayland session. \
+                 `ydotool` is a universal alternative but requires a uinput daemon \
+                 you set up yourself."
+            }
+        }
+    }
+}
+
+/// Runtime packages Fono knows how to detect + offer to install.
+/// Deliberately a closed set: `ydotool` is intentionally excluded
+/// (the binary alone isn't enough — it needs a running daemon with
+/// uinput permissions, which an installer can't safely automate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pkg {
+    /// `libxkbcommon-x11.so.0` — winit's X11 / Xwayland overlay
+    /// backend dlopens it at runtime.
+    LibxkbcommonX11,
+    /// `xdotool` — Fono's key-injection backend on X11 + the
+    /// XWayland fallback on every Wayland session.
+    Xdotool,
+    /// `wtype` — Fono's key-injection backend on Wayland
+    /// compositors that implement `zwp_virtual_keyboard_manager_v1`
+    /// (wlroots family + KWin).
+    Wtype,
+}
+
+impl Pkg {
+    fn human(self) -> &'static str {
+        match self {
+            Self::LibxkbcommonX11 => "libxkbcommon-x11",
+            Self::Xdotool => "xdotool",
+            Self::Wtype => "wtype",
+        }
+    }
+
+    fn purpose(self) -> &'static str {
+        match self {
+            Self::LibxkbcommonX11 => "on-screen recording overlay (X11 / Xwayland backend)",
+            Self::Xdotool => "auto-typing into XWayland windows",
+            Self::Wtype => "auto-typing on Wayland compositors that support virtual-keyboard",
+        }
+    }
+
+    /// True iff this package's runtime is already available on the
+    /// host. Libraries are probed via `dlopen` (so non-standard
+    /// prefixes / Nix / snap LD_LIBRARY_PATH overlays read as
+    /// installed); binaries are probed via PATH lookup.
+    fn present(self) -> bool {
+        match self {
+            Self::LibxkbcommonX11 => libxkbcommon_x11_loadable(),
+            Self::Xdotool => which_in_path("xdotool"),
+            Self::Wtype => which_in_path("wtype"),
+        }
+    }
+
+    /// Per-PM package name for this runtime. Every known
+    /// (Pkg, PkgManager) pair currently resolves; if we ever add a
+    /// PM that genuinely doesn't carry one, switch this back to
+    /// `Option<&'static str>` and have the caller drop the entry.
+    fn package_name_on(self, pm: PkgManager) -> &'static str {
+        match (self, pm) {
+            (Self::LibxkbcommonX11, PkgManager::Apt | PkgManager::Zypper) => "libxkbcommon-x11-0",
+            (Self::LibxkbcommonX11, PkgManager::Dnf | PkgManager::ApkAlpine) => "libxkbcommon-x11",
+            // pacman: ships in `libxkbcommon`; user normally has it
+            // already (it's a Hyprland / Sway dep) so the prompt is
+            // a no-op when present. We still offer it for parity.
+            (Self::LibxkbcommonX11, PkgManager::Pacman) => "libxkbcommon",
+            (Self::Xdotool, _) => "xdotool",
+            (Self::Wtype, _) => "wtype",
+        }
+    }
+}
+
+/// Distros where Fono knows how to drive the package manager. Slackware
+/// is deliberately not included: `libxkbcommon-x11` ships inside the
+/// core `libxkbcommon` package there, `xdotool` / `wtype` live in
+/// SBo, and pulling SBo's build chain on every NimbleX user is the
+/// wrong tradeoff. Slackware users are documented in
+/// `packaging/slackbuild/fono/README` instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PkgManager {
+    Apt,
+    Dnf,
+    Pacman,
+    Zypper,
+    ApkAlpine,
+}
+
+impl PkgManager {
+    /// Build an install command for the supplied set of packages.
+    /// Order in `pkgs` is preserved on the command line so the
+    /// presented order matches the printed prompt.
+    fn install_command(self, pkgs: &[&'static str]) -> (&'static str, Vec<String>) {
+        let mut args: Vec<String> = match self {
+            Self::Apt => vec!["install".into(), "-y".into()],
+            Self::Dnf => vec!["install".into(), "-y".into()],
+            Self::Pacman => vec!["-S".into(), "--noconfirm".into(), "--needed".into()],
+            Self::Zypper => vec!["--non-interactive".into(), "install".into()],
+            Self::ApkAlpine => vec!["add".into()],
+        };
+        for p in pkgs {
+            args.push((*p).into());
+        }
+        let prog = match self {
+            Self::Apt => "apt-get",
+            Self::Dnf => "dnf",
+            Self::Pacman => "pacman",
+            Self::Zypper => "zypper",
+            Self::ApkAlpine => "apk",
+        };
+        (prog, args)
+    }
+}
+
+/// Probe for `libxkbcommon-x11.so.0` via `dlopen`. We test the loader
+/// rather than scanning `/usr/lib/**`, so non-standard prefixes (Nix,
+/// snap LD_LIBRARY_PATH overlays) read as installed.
+fn libxkbcommon_x11_loadable() -> bool {
+    // SAFETY: Library::new is sound; the handle drops immediately.
+    unsafe {
+        libloading::Library::new("libxkbcommon-x11.so.0").is_ok()
+            || libloading::Library::new("libxkbcommon-x11.so").is_ok()
+    }
+}
+
+/// Detect Slackware (which bundles libxkbcommon-x11 inside the core
+/// `libxkbcommon` package and tracks xdotool / wtype via SBo). On
+/// those systems Fono should not second-guess the distro's packaging.
+fn is_slackware() -> bool {
+    Path::new("/etc/slackware-version").exists()
+}
+
+/// Pick the first recognised package manager on the host.
+fn detect_pkg_manager() -> Option<PkgManager> {
+    if which_in_path("apt-get") {
+        Some(PkgManager::Apt)
+    } else if which_in_path("dnf") {
+        Some(PkgManager::Dnf)
+    } else if which_in_path("pacman") {
+        Some(PkgManager::Pacman)
+    } else if which_in_path("zypper") {
+        Some(PkgManager::Zypper)
+    } else if which_in_path("apk") {
+        Some(PkgManager::ApkAlpine)
+    } else {
+        None
+    }
+}
+
+/// Format an install command as a single shell-quotable string for
+/// printing. `prog` is never user-controlled (one of five known PM
+/// binaries) so the quoting can be trivial.
+fn format_install_cmd(prog: &str, args: &[String]) -> String {
+    let joined = args.join(" ");
+    format!("sudo {prog} {joined}")
+}
+
+/// Session-aware preflight that offers to install the runtime
+/// packages Fono needs on the detected session. Stays silent when
+/// nothing is missing, when running on Slackware, or when the
+/// package manager isn't one we know how to drive. Honours the
+/// stdin/stdout TTY gate (non-interactive shells get a hint line
+/// instead of a prompt).
+fn offer_install_missing_packages() {
+    use std::io::{BufRead, IsTerminal};
+
+    if is_slackware() {
+        return;
+    }
+    let session = Session::detect();
+    let desired = session.desired_packages();
+    let missing: Vec<Pkg> = desired.into_iter().filter(|p| !p.present()).collect();
+    if missing.is_empty() {
+        return;
+    }
+
+    let Some(pm) = detect_pkg_manager() else {
+        eprintln!();
+        eprintln!("Note: Fono recommends installing the following on {}:", session.label());
+        for p in &missing {
+            eprintln!("  · {} — {}", p.human(), p.purpose());
+        }
+        eprintln!("  (no recognised package manager on this host; install via your distro)");
+        return;
+    };
+
+    // Resolve PM-specific names; drop anything the PM doesn't carry.
+    let names: Vec<&'static str> = missing.iter().map(|p| p.package_name_on(pm)).collect();
+    let (prog, args) = pm.install_command(&names);
+    let cmd = format_install_cmd(prog, &args);
+
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        eprintln!();
+        eprintln!("Note: Fono recommends installing the following on {}:", session.label());
+        for p in &missing {
+            eprintln!("  · {} — {}", p.human(), p.purpose());
+        }
+        eprintln!("Install later with: {cmd}");
+        return;
+    }
+
+    eprintln!();
+    eprintln!("Fono detected a {} session and recommends installing:", session.label());
+    for p in &missing {
+        eprintln!("  · {} — {}", p.human(), p.purpose());
+    }
+    eprintln!("Dictation still works without these, but auto-typing and/or the on-screen");
+    eprintln!("overlay will be degraded.");
+    eprint!("Install now via `{cmd}`? [Y/n] ");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+
+    let mut line = String::new();
+    let stdin = std::io::stdin();
+    if stdin.lock().read_line(&mut line).is_err() {
+        eprintln!("(could not read answer — skipping)");
+        return;
+    }
+    let answer = line.trim().to_ascii_lowercase();
+    if !(answer.is_empty() || answer == "y" || answer == "yes") {
+        eprintln!("Skipping. You can install them later with: {cmd}");
+        return;
+    }
+
+    eprintln!("→ running: {prog} {}", args.join(" "));
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let status = Command::new(prog).args(&arg_refs).stdin(std::process::Stdio::null()).status();
+    match status {
+        Ok(s) if s.success() => {
+            for p in &missing {
+                eprintln!("  · installed {}", p.human());
+            }
+        }
+        Ok(s) => {
+            eprintln!(
+                "  · {prog} exited with status {} — install the packages manually if you want full functionality",
+                s.code().map_or_else(|| "<signal>".into(), |c| c.to_string())
+            );
+        }
+        Err(e) => {
+            eprintln!("  · failed to spawn {prog}: {e}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1089,5 +1555,110 @@ mod tests {
         // SVG must contain the SVG opening tag (catches accidental
         // truncation; can't use is_empty since the slice is a const).
         assert!(std::str::from_utf8(ICON_SVG).unwrap_or("").contains("<svg"));
+    }
+
+    fn env_from<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| pairs.iter().find(|(p, _)| *p == k).map(|(_, v)| (*v).to_owned())
+    }
+
+    #[test]
+    fn session_detects_gnome_wayland_from_ubuntu_default() {
+        // Ubuntu 24.04 GNOME-Wayland surface — exactly the case that
+        // motivated this work.
+        let s = Session::detect_with(env_from(&[
+            ("WAYLAND_DISPLAY", "wayland-0"),
+            ("DISPLAY", ":0"),
+            ("XDG_SESSION_TYPE", "wayland"),
+            ("XDG_CURRENT_DESKTOP", "ubuntu:GNOME"),
+            ("XDG_SESSION_DESKTOP", "ubuntu"),
+        ]));
+        assert_eq!(s, Session::GnomeWayland);
+        // GNOME-Wayland intentionally does NOT auto-offer xdotool: typing
+        // via XTEST triggers GNOME's "Allow input emulation" permission
+        // dialog, which scares evaluators who didn't ask for it. Users
+        // who want auto-typing opt in via `fono use inject xdotool`.
+        assert_eq!(s.desired_packages(), vec![Pkg::LibxkbcommonX11]);
+    }
+
+    #[test]
+    fn session_detects_wlroots_from_sway_socket() {
+        let s = Session::detect_with(env_from(&[
+            ("WAYLAND_DISPLAY", "wayland-1"),
+            ("SWAYSOCK", "/run/user/1000/sway-ipc.1000.42.sock"),
+            ("XDG_CURRENT_DESKTOP", "sway"),
+        ]));
+        assert_eq!(s, Session::WlrootsWayland);
+        assert_eq!(s.desired_packages(), vec![Pkg::Wtype]);
+    }
+
+    #[test]
+    fn session_detects_wlroots_from_hyprland_signature() {
+        let s = Session::detect_with(env_from(&[
+            ("WAYLAND_DISPLAY", "wayland-1"),
+            ("HYPRLAND_INSTANCE_SIGNATURE", "deadbeef"),
+        ]));
+        assert_eq!(s, Session::WlrootsWayland);
+    }
+
+    #[test]
+    fn session_detects_kde_wayland() {
+        let s = Session::detect_with(env_from(&[
+            ("WAYLAND_DISPLAY", "wayland-0"),
+            ("XDG_CURRENT_DESKTOP", "KDE"),
+            ("XDG_SESSION_TYPE", "wayland"),
+        ]));
+        assert_eq!(s, Session::KdeWayland);
+        assert_eq!(s.desired_packages(), vec![Pkg::Wtype]);
+    }
+
+    #[test]
+    fn session_detects_pure_x11() {
+        let s = Session::detect_with(env_from(&[("DISPLAY", ":0")]));
+        assert_eq!(s, Session::X11);
+        assert_eq!(s.desired_packages(), vec![Pkg::LibxkbcommonX11, Pkg::Xdotool]);
+    }
+
+    #[test]
+    fn session_unknown_when_no_display_vars() {
+        let s = Session::detect_with(env_from(&[]));
+        assert_eq!(s, Session::Unknown);
+    }
+
+    #[test]
+    fn pkg_names_per_manager() {
+        // Apt / Zypper carry the dash-zero suffixed lib name.
+        assert_eq!(Pkg::LibxkbcommonX11.package_name_on(PkgManager::Apt), "libxkbcommon-x11-0");
+        assert_eq!(Pkg::LibxkbcommonX11.package_name_on(PkgManager::Zypper), "libxkbcommon-x11-0");
+        // DNF / Alpine use the unsuffixed name.
+        assert_eq!(Pkg::LibxkbcommonX11.package_name_on(PkgManager::Dnf), "libxkbcommon-x11");
+        assert_eq!(Pkg::LibxkbcommonX11.package_name_on(PkgManager::ApkAlpine), "libxkbcommon-x11");
+        // Pacman ships it inside libxkbcommon.
+        assert_eq!(Pkg::LibxkbcommonX11.package_name_on(PkgManager::Pacman), "libxkbcommon");
+        // Binaries have the same upstream name everywhere.
+        for pm in [
+            PkgManager::Apt,
+            PkgManager::Dnf,
+            PkgManager::Pacman,
+            PkgManager::Zypper,
+            PkgManager::ApkAlpine,
+        ] {
+            assert_eq!(Pkg::Xdotool.package_name_on(pm), "xdotool");
+            assert_eq!(Pkg::Wtype.package_name_on(pm), "wtype");
+        }
+    }
+
+    #[test]
+    fn install_command_quotes_packages_in_order() {
+        let (prog, args) = PkgManager::Apt.install_command(&["libxkbcommon-x11-0", "xdotool"]);
+        assert_eq!(prog, "apt-get");
+        assert_eq!(args, vec!["install", "-y", "libxkbcommon-x11-0", "xdotool"]);
+    }
+
+    #[test]
+    fn recommend_injector_mentions_xdotool_on_gnome_wayland() {
+        assert!(Session::GnomeWayland.recommend_injector().contains("xdotool"));
+        assert!(Session::X11.recommend_injector().contains("xdotool"));
+        assert!(Session::WlrootsWayland.recommend_injector().contains("wtype"));
+        assert!(Session::KdeWayland.recommend_injector().contains("wtype"));
     }
 }

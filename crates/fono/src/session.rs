@@ -368,7 +368,7 @@ impl SessionOrchestrator {
         let assistant_backend = match fono_assistant::build_assistant(&config.assistant, secrets) {
             Ok(opt) => opt,
             Err(e) => {
-                warn!("Assistant backend unavailable; F10 will notify but not respond: {e:#}");
+                warn!("Assistant backend unavailable; F8 will notify but not respond: {e:#}");
                 None
             }
         };
@@ -387,7 +387,7 @@ impl SessionOrchestrator {
         );
         orch.paths = Some(Arc::new(paths.clone()));
         // Populate the assistant-side slots. Both are optional —
-        // F10 surfaces a notification when either is missing.
+        // F8 surfaces a notification when either is missing.
         if let Ok(mut g) = orch.tts.write() {
             *g = tts;
         }
@@ -445,6 +445,35 @@ impl SessionOrchestrator {
             match spawn_result {
                 Some(Ok(h)) => {
                     h.set_volume_bar(config.overlay.volume_bar);
+                    // Surface a clear notification + WARN when the
+                    // overlay landed on the noop terminal sink in a
+                    // graphical session — the user asked for an
+                    // on-screen indicator but won't see one. Common
+                    // cause on Ubuntu/X11/Xwayland is a missing
+                    // `libxkbcommon-x11`; `fono install` offers to
+                    // install it.
+                    if h.backend_id() == fono_overlay::BackendId::Noop
+                        && (std::env::var_os("DISPLAY").is_some()
+                            || std::env::var_os("WAYLAND_DISPLAY").is_some())
+                    {
+                        warn!(
+                            "overlay: no usable backend on this graphical session — \
+                             on-screen recording indicator will not be shown. On X11 / \
+                             Xwayland this usually means `libxkbcommon-x11` is missing; \
+                             on Wayland it means the compositor doesn't speak \
+                             `wlr-layer-shell`. Run `fono install` (it offers to install \
+                             `libxkbcommon-x11`), or run `fono doctor` for details."
+                        );
+                        fono_core::notify::send(
+                            "Fono — overlay disabled",
+                            "No on-screen recording indicator available on this session. \
+                             Install libxkbcommon-x11 (X11/Xwayland) or use a wlr-layer-shell \
+                             Wayland compositor. Dictation still works.",
+                            "dialog-warning",
+                            6_000,
+                            fono_core::notify::Urgency::Normal,
+                        );
+                    }
                     if let Ok(mut g) = orch.overlay.write() {
                         *g = Some(h);
                     }
@@ -481,6 +510,10 @@ impl SessionOrchestrator {
             .clone();
         let cfg = Config::load(&paths.config_file()).context("reload: read config")?;
         let secrets = Secrets::load(&paths.secrets_file()).context("reload: read secrets")?;
+        // Re-apply `[inject].backend` so `fono use inject …` takes
+        // effect without a daemon restart. Idempotent on the `"auto"`
+        // default path; see `daemon::apply_inject_backend_env`.
+        crate::daemon::apply_inject_backend_env(&cfg.inject);
         let new_stt =
             fono_stt::build_stt(&cfg.stt, &cfg.general, &secrets, &paths.whisper_models_dir())
                 .context("reload: build STT")?;
@@ -669,7 +702,7 @@ impl SessionOrchestrator {
         buffer: &Arc<StdMutex<RecordingBuffer>>,
     ) -> Option<tokio::task::AbortHandle> {
         // The live-preview gate only applies to the batch dictation
-        // overlay — when the user picks Transcript style, F9 takes
+        // overlay — when the user picks Transcript style, F7 takes
         // the streaming path and the dictation panel is handled by
         // `LiveSession`. The assistant pipeline is independent and
         // should always show its overlay regardless of style
@@ -1248,7 +1281,7 @@ impl SessionOrchestrator {
 
     /// Cancel an active recording, dropping the audio without invoking STT.
     /// Tears down both the batch capture slot and the live-dictation
-    /// session if either is active — ESC during F9 must stop the
+    /// session if either is active — ESC during F7 must stop the
     /// streaming pipeline cleanly, not leave its threads/tasks running
     /// in the background.
     pub async fn on_cancel(&self) {
@@ -1318,7 +1351,7 @@ impl SessionOrchestrator {
     ///
     /// When `[interactive].enabled = true` and a streaming-capable STT
     /// backend is loaded, the press takes the streaming path: same
-    /// pipeline as F9 dictation but with the green `AssistantRecording`
+    /// pipeline as F7 dictation but with the green `AssistantRecording`
     /// panel, so the user sees realtime preview text as they speak.
     /// On release the captured transcript is forwarded to the LLM
     /// (skipping the batch STT step in [`run_assistant_turn`]).
@@ -1431,7 +1464,7 @@ impl SessionOrchestrator {
     pub async fn on_assistant_hold_release(&self) {
         // Every early-return path MUST emit `ProcessingDone` so the
         // FSM doesn't get stuck in `AssistantThinking` (which would
-        // also block subsequent F8/F9 presses). The `_` binding
+        // also block subsequent F7/F8 presses). The `_` binding
         // captures cases where there's no buffered session yet (a
         // duplicate release event) — we still kick the FSM to Idle.
 
@@ -1447,7 +1480,7 @@ impl SessionOrchestrator {
             let live_taken = self.assistant_live_capture.lock().await.take();
             if let Some(mut session) = live_taken {
                 let captured_for = session.started_at.elapsed();
-                // Same trailing-word grace as the F9 path: the cpal
+                // Same trailing-word grace as the F7 path: the cpal
                 // callback may still have a few frames in flight when
                 // the user releases the key.
                 let cfg = self.current_config();
@@ -1644,7 +1677,7 @@ impl SessionOrchestrator {
     /// context.
     ///
     /// Also tears down the streaming live-capture session if ESC was
-    /// pressed mid-recording (before the user released F10) — without
+    /// pressed mid-recording (before the user released F8) — without
     /// this the cpal capture thread + bridge + run task would keep
     /// running after the FSM has already returned to Idle.
     pub async fn on_assistant_stop(&self) {
@@ -1857,8 +1890,8 @@ impl SessionOrchestrator {
 
     /// Build a streaming-STT-backed capture pipeline with the supplied
     /// overlay state. Shared between [`Self::on_start_live_dictation`]
-    /// (F9, `LiveDictating` panel) and [`Self::on_assistant_hold_press`]
-    /// (F10 with interactive enabled, `AssistantRecording` panel) so
+    /// (F7, `LiveDictating` panel) and [`Self::on_assistant_hold_press`]
+    /// (F8 with interactive enabled, `AssistantRecording` panel) so
     /// both surfaces get the same realtime preview UX.
     ///
     /// Spawns: the cpal capture thread, the crossbeam→tokio bridge
@@ -1968,7 +2001,7 @@ impl SessionOrchestrator {
 
         // ---- Spawn the drain task (tokio mpsc -> Pump::push) -----
         // Tap RMS off each chunk to feed the right-side VU bar on the
-        // overlay panel during F9. The assistant path uses the same
+        // overlay panel during F7. The assistant path uses the same
         // tap so the same VU indicator works for both surfaces.
         let vu_overlay = if cfg.overlay.volume_bar { overlay.clone() } else { None };
         let drain_join = tokio::spawn(async move {
@@ -2064,7 +2097,7 @@ impl SessionOrchestrator {
 
         // Realtime push teardown order:
         //  0. Sleep `hold_release_grace_ms` so cpal's pending callback
-        //     samples reach the audio bridge — without this, F8 release
+        //     samples reach the audio bridge — without this, F7 release
         //     mid-pause drops the trailing word.
         //  1. Stop cpal capture — drops the forwarder closure (owned
         //     by the Stream), which drops the realtime SPSC `Sender`,

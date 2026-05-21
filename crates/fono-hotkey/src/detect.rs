@@ -88,40 +88,51 @@ pub fn spawn(
         HotkeyBackend::Portal => {
             #[cfg(target_os = "linux")]
             {
+                // GNOME-Wayland short-circuit. On any version of
+                // xdg-desktop-portal-gnome the portal path is a
+                // dead-end for unsandboxed Fono builds:
+                //
+                // * v46 (Ubuntu 24.04) — the `GlobalShortcuts`
+                //   interface isn't implemented at all.
+                // * v47+ — `CreateSession` rejects unsandboxed
+                //   callers with
+                //   `org.freedesktop.portal.Error.NotAllowed: An
+                //   app id is required`.
+                //
+                // Both surface as scary warns in the log even though
+                // the gsettings shim already handles them. Skip the
+                // portal preflight entirely on GNOME-Wayland and go
+                // straight to the deterministic happy path. The
+                // portal is still attempted on non-GNOME Wayland
+                // compositors (sway, Hyprland, KDE) where it works.
+                if crate::gnome_gsettings::is_gnome_session() {
+                    match crate::gnome_gsettings::install(&bindings.dictation, &bindings.assistant)
+                    {
+                        Ok(exe) => {
+                            info!(
+                                "GNOME-Wayland: registered gsettings custom-keybindings \
+                                 {} → {} toggle, {} → {} assistant",
+                                bindings.dictation,
+                                exe.display(),
+                                bindings.assistant,
+                                exe.display()
+                            );
+                            return Ok(None);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "GNOME gsettings install failed: {e:#}; \
+                                 trying portal then X11"
+                            );
+                            // Fall through to the portal attempt
+                            // below — last-resort safety net.
+                        }
+                    }
+                }
                 match crate::portal::spawn(bindings.clone(), tx.clone()) {
                     Ok(h) => Ok(Some(h)),
                     Err(e) => {
                         tracing::warn!("portal hotkey backend unavailable: {e:#}");
-                        // GNOME-Wayland 46 (Ubuntu 24.04) ships
-                        // xdg-desktop-portal-gnome without
-                        // GlobalShortcuts. Fall back to gsettings
-                        // custom-keybindings — these route F7 / F8 to
-                        // the Fono CLI which talks to this daemon via
-                        // IPC. No long-press, but it works today.
-                        if crate::gnome_gsettings::is_gnome_session() {
-                            match crate::gnome_gsettings::install(
-                                &bindings.dictation,
-                                &bindings.assistant,
-                            ) {
-                                Ok(exe) => {
-                                    tracing::info!(
-                                        "GNOME-Wayland fallback: registered gsettings \
-                                         custom-keybindings {} → {} toggle, {} → {} assistant",
-                                        bindings.dictation,
-                                        exe.display(),
-                                        bindings.assistant,
-                                        exe.display()
-                                    );
-                                    return Ok(None);
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "GNOME gsettings fallback also failed: {e:#}; \
-                                         trying X11 listener"
-                                    );
-                                }
-                            }
-                        }
                         tracing::warn!("falling back to X11 listener (Xwayland-only events)");
                         crate::listener::spawn(bindings, tx).map(Some)
                     }

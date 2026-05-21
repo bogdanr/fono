@@ -15,6 +15,7 @@ pub mod pulse;
 pub mod resample;
 pub mod trim;
 pub mod vad;
+pub mod wpctl;
 
 #[cfg(feature = "streaming")]
 pub mod stream;

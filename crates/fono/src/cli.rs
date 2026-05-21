@@ -148,10 +148,10 @@ pub enum Cmd {
     /// Re-type the last cleaned transcription.
     PasteLast,
     /// Voice-assistant push-to-talk control. Subcommands match the
-    /// IPC contract used by the future F10 hotkey: `press` starts
-    /// audio capture, `release` runs the streaming pump, `stop`
-    /// aborts an in-flight reply. Useful for end-to-end smoke tests
-    /// before the hotkey lands.
+    /// IPC contract used by the F8 hotkey: `press` starts audio
+    /// capture, `release` runs the streaming pump, `stop` aborts an
+    /// in-flight reply. Useful for end-to-end smoke tests and for
+    /// scripted invocations.
     Assistant {
         #[command(subcommand)]
         action: AssistantCmd,
@@ -326,6 +326,16 @@ pub enum UseCmd {
         /// groq | cerebras | openai | anthropic | openrouter | deepgram | assemblyai
         provider: String,
     },
+    /// Switch the text-injection backend. On GNOME-Wayland Fono
+    /// defaults to `clipboard` to avoid GNOME's "Allow input emulation"
+    /// permission dialog; users who want one-key paste can opt in to
+    /// `xdotool` (which will trigger that GNOME prompt the first time
+    /// it types). Every other session keeps its session-appropriate
+    /// auto-detected backend unless overridden here.
+    Inject {
+        /// auto | clipboard | xdotool | wtype | ydotool | xtest | none
+        backend: String,
+    },
     /// Switch to local STT (whisper) and disable polish.
     Local,
     /// Print the active STT/LLM and the running daemon's view.
@@ -365,10 +375,10 @@ pub enum ConfigCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum AssistantCmd {
-    /// Start assistant audio capture. Mirrors holding F10.
+    /// Start assistant audio capture. Mirrors holding F8.
     Press,
     /// End capture and run the streaming reply (STT → chat → TTS).
-    /// Mirrors releasing F10.
+    /// Mirrors releasing F8.
     Release,
     /// Stop an in-flight assistant reply (drain audio, abort pump).
     Stop,
@@ -1115,6 +1125,7 @@ pub fn set_active_llm(cfg: &mut Config, backend: fono_core::config::PolishBacken
     cfg.polish.cloud = None;
 }
 
+#[allow(clippy::too_many_lines)]
 async fn use_cmd(paths: &Paths, action: UseCmd) -> Result<()> {
     use fono_core::config::{PolishBackend, SttBackend};
     use fono_core::providers::{
@@ -1164,6 +1175,32 @@ async fn use_cmd(paths: &Paths, action: UseCmd) -> Result<()> {
             set_active_tts(&mut cfg, b.clone(), uri);
             cfg.save(&path)?;
             format!("tts = {}", tts_backend_str(&b))
+        }
+        UseCmd::Inject { backend } => {
+            // Accepted values mirror `fono_inject::Injector::detect()`'s
+            // env-override parser. We validate up front so a typo prints
+            // a sensible error instead of silently routing to clipboard.
+            let normalized = backend.trim().to_ascii_lowercase();
+            let accepted =
+                ["auto", "clipboard", "none", "xdotool", "wtype", "ydotool", "xtest", "enigo"];
+            if !accepted.contains(&normalized.as_str()) {
+                anyhow::bail!(
+                    "unknown inject backend {backend:?}; try one of: \
+                     auto, clipboard, xdotool, wtype, ydotool, xtest, enigo, none"
+                );
+            }
+            cfg.inject.backend.clone_from(&normalized);
+            cfg.save(&path)?;
+            // Friendly footer for the GNOME-Wayland xdotool opt-in.
+            if normalized == "xdotool" {
+                eprintln!(
+                    "Note: on GNOME-Wayland, the next dictation will trigger GNOME's \
+                     \"Allow input emulation\" permission dialog once. \
+                     This is GNOME's security gate for keystroke synthesis (not a network \
+                     feature, not Fono-specific) — click Allow if you trust us."
+                );
+            }
+            format!("inject = {normalized}")
         }
         UseCmd::Cloud { provider } => {
             let (s, l) = cloud_pair(&provider).ok_or_else(|| {

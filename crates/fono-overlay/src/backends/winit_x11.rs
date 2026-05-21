@@ -25,9 +25,39 @@ use crate::renderer::{
 };
 use crate::OverlayState;
 
+/// Returns `true` iff `libxkbcommon-x11.so.0` (or the unversioned
+/// alias `libxkbcommon-x11.so`) can be dlopen'd from the dynamic
+/// loader's search path. Used as a preflight to avoid winit's
+/// hard-panic on missing helper.
+fn libxkbcommon_x11_loadable() -> bool {
+    // SAFETY: `Library::new` is sound; we drop the handle immediately
+    // so no symbols are resolved into our address space beyond the
+    // load probe itself.
+    unsafe {
+        libloading::Library::new("libxkbcommon-x11.so.0").is_ok()
+            || libloading::Library::new("libxkbcommon-x11.so").is_ok()
+    }
+}
+
 pub fn try_spawn(style: WaveformStyle) -> Result<SpawnedBackend, BackendError> {
     if std::env::var_os("DISPLAY").is_none() {
         return Err(BackendError::NotAvailable("DISPLAY unset (X11 backend requires Xorg)".into()));
+    }
+    // Preflight libxkbcommon-x11. winit's X11 backend dlopens it
+    // deep inside `EventLoop::build()` via `xkbcommon-dl`, and the
+    // failure path there is a hard `panic!` that kills the overlay
+    // thread (visible to users as a 2 s spawn-timeout + stderr noise).
+    // The stock Ubuntu 26.04 Wayland live image ships only the core
+    // `libxkbcommon.so.0`, not the X11 helper — and any minimal
+    // Wayland-only install can hit the same wall. Probe ourselves
+    // and surface a clean, actionable NotAvailable instead.
+    if !libxkbcommon_x11_loadable() {
+        return Err(BackendError::NotAvailable(
+            "libxkbcommon-x11 not installed — install your distro's package \
+             (`libxkbcommon-x11-0` on Debian/Ubuntu, `libxkbcommon-x11` on \
+             Fedora/RHEL/Alpine, `libxkbcommon` on Arch)"
+                .into(),
+        ));
     }
     let (tx, rx) = channel::<OverlayCmd>();
     let (proxy_tx, proxy_rx) =

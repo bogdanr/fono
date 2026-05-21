@@ -47,7 +47,7 @@
 //! Reading those values out of a log file:
 //!
 //! ```text
-//! RUST_LOG=info,fono.http=debug fono daemon 2>&1 \
+//! RUST_LOG=info,fono.http=debug fono 2>&1 \
 //!   | grep 'fono.http' \
 //!   | awk '{ for (i=1;i<=NF;i++) if ($i ~ /^total_ms=/) print $i }'
 //! ```

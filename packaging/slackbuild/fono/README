@@ -33,3 +33,25 @@ The resulting package installs:
 
 Config, models, and history live under the invoking user's XDG dirs;
 `removepkg fono` does **not** touch them — that data is user state.
+
+Optional runtime dependencies
+-----------------------------
+
+Fono works out of the box on Slackware — `libxkbcommon-x11` is bundled
+inside the core `libxkbcommon` package, so the on-screen overlay's
+X11 / Xwayland backend works without extra installs. For auto-typing
+into other applications, install ONE of the following from SBo (none
+are required; without them Fono still delivers dictation via the
+clipboard):
+
+* `xdotool`   — auto-typing on X11 and XWayland (works on GNOME-Wayland
+                and any other Wayland session via XWayland)
+* `wtype`     — auto-typing on native Wayland (wlroots family: sway,
+                hyprland, river, wayfire; and KDE Plasma's KWin)
+* `ydotool`   — universal Wayland injector, needs you to run
+                `ydotoold` with `/dev/uinput` access; not auto-driven
+                by `fono install`
+
+`fono` detects which one is available at startup and uses it; the
+package is not declared in `REQUIRES=` so SBo's build chain is not
+forced on users who don't need it.

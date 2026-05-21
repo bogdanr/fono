@@ -2,26 +2,27 @@
 //! PulseAudio (and PipeWire-via-Pulse-compat) microphone enumeration via
 //! `pactl`.
 //!
-//! We delegate the "what microphones do you have, and which one is the
-//! default?" question entirely to the audio server through its own
-//! shell-out tool (`pactl`). This is a deliberate parse-and-delegate
-//! design rather than re-implementing the question against ALSA's
-//! cpal host:
+//! Role in the dispatch hierarchy:
 //!
-//! * The audio server already knows what's a real source vs. a sink
-//!   monitor; we just drop names ending in `.monitor`.
-//! * The server already exposes friendly `Description:` strings (e.g.
-//!   "Built-in Audio Analog Stereo") that tools like `pavucontrol`
-//!   surface, so users see the same labels everywhere.
-//! * Selection is delegated back to the server via
-//!   `pactl set-default-source` so the choice applies system-wide and
-//!   survives reboots — no Fono-specific config write.
+//! * On the **`PulseAudio`** audio stack this module is the native
+//!   path — `pactl` talks directly to the PulseAudio daemon.
+//! * On the **`PipeWire`** audio stack this module is the
+//!   **fallback** behind [`crate::wpctl`]: `wpctl` is the native
+//!   WirePlumber control surface and is used first; `pactl` only
+//!   engages when `wpctl` is missing from `PATH` or its output is
+//!   unparseable (e.g. setups without `wireplumber`). Stock Ubuntu
+//!   24.04 installs ship `wireplumber` (so `wpctl`) but not
+//!   `pulseaudio-utils` (so no `pactl`), which is the case this
+//!   ordering fixes.
 //!
-//! There is intentionally no `wpctl` branch even on PipeWire systems:
-//! PipeWire ships with the Pulse compat layer enabled by default, so
-//! `pactl` is universally available and a single parser is half the
-//! maintenance of two. If a real user reports a PipeWire system where
-//! `pactl` doesn't work we'll add a `wpctl` fallback then.
+//! The parse-and-delegate model is otherwise unchanged: the audio
+//! server is the authority on what's a real source vs. a sink
+//! monitor (we drop `.monitor` names), it exposes friendly
+//! `Description:` strings, and selection is delegated back via
+//! `pactl set-default-source`. On the PipeWire branch
+//! [`set_default_pulse_source`] auto-detects numeric node ids
+//! (produced by [`crate::wpctl::list_wpctl_sources`]) and dispatches
+//! to `wpctl set-default` instead.
 //!
 //! All helpers degrade gracefully: missing `pactl` on `PATH`, a spawn
 //! failure, or a non-zero exit collapse to `None` / empty / a clear
@@ -71,10 +72,22 @@ pub fn pulse_default_source_name() -> Option<String> {
     }
 }
 
-/// Tell the audio server to use `name` as the default source. Errors
-/// when `pactl` is missing or returns non-zero (typically: stale
-/// source name after a hot-unplug).
+/// Tell the audio server to use `name` as the default source.
+///
+/// Dispatch:
+///
+/// * An all-ASCII-digits `name` is a WirePlumber node id (produced
+///   by [`crate::wpctl::list_wpctl_sources`] on the PipeWire branch)
+///   and is forwarded to [`crate::wpctl::set_default_wpctl_source`].
+/// * Anything else is treated as a PA source `Name:` and forwarded
+///   to `pactl set-default-source`.
+///
+/// Errors when the chosen backend is missing or returns non-zero
+/// (typically: stale identifier after a hot-unplug).
 pub fn set_default_pulse_source(name: &str) -> anyhow::Result<()> {
+    if !name.is_empty() && name.chars().all(|c| c.is_ascii_digit()) {
+        return crate::wpctl::set_default_wpctl_source(name);
+    }
     let out = Command::new("pactl")
         .args(["set-default-source", name])
         .output()

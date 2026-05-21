@@ -56,17 +56,38 @@ pub struct InputDevice {
 
 /// Enumerate input devices, dispatching on the active audio stack:
 ///
-/// * `PulseAudio` / `PipeWire` → [`crate::pulse::list_pulse_sources`].
+/// * `PipeWire` → [`crate::wpctl::list_wpctl_sources`] first (the
+///   native control surface), falling back to
+///   [`crate::pulse::list_pulse_sources`] via the `pipewire-pulse`
+///   compat layer, then cpal as a last resort.
+/// * `PulseAudio` → [`crate::pulse::list_pulse_sources`] (native on
+///   legacy Pulse-only systems), falling back to cpal.
 /// * `Unknown` → cpal's default host enumeration (macOS, Windows,
-///   pure-ALSA Linux).
+///   pure-ALSA Linux without any user-session audio server).
 ///
 /// Failures collapse to an empty `Vec` — the caller treats "no devices"
 /// identically to a probe failure.
 #[must_use]
 pub fn list_input_devices() -> Vec<InputDevice> {
     match crate::mute::detect() {
-        crate::mute::AudioStack::PulseAudio | crate::mute::AudioStack::PipeWire => {
-            crate::pulse::list_pulse_sources()
+        crate::mute::AudioStack::PipeWire => {
+            let v = crate::wpctl::list_wpctl_sources();
+            if !v.is_empty() {
+                return v;
+            }
+            let v = crate::pulse::list_pulse_sources();
+            if !v.is_empty() {
+                return v;
+            }
+            enumerate_cpal_inputs()
+        }
+        crate::mute::AudioStack::PulseAudio => {
+            let v = crate::pulse::list_pulse_sources();
+            if v.is_empty() {
+                enumerate_cpal_inputs()
+            } else {
+                v
+            }
         }
         crate::mute::AudioStack::Unknown => enumerate_cpal_inputs(),
     }

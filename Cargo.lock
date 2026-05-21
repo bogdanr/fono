@@ -1262,6 +1262,7 @@ dependencies = [
  "fono-tts",
  "fono-update",
  "futures",
+ "libloading",
  "mdns-sd",
  "realfft",
  "reqwest",
@@ -1457,6 +1458,7 @@ version = "0.8.0"
 dependencies = [
  "ab_glyph",
  "fono-core",
+ "libloading",
  "rustix 0.38.44",
  "smithay-client-toolkit",
  "softbuffer",

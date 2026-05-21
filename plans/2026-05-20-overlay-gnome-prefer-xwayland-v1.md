@@ -107,13 +107,13 @@ sessions with Xwayland disabled (rare).
 - All three pre-commit gate commands exit 0; `cargo test -p fono-overlay
   --lib selection_` reports `0 failed`.
 - On Ubuntu 24.04 GNOME (`192.168.0.112`) after `git pull && cargo build
-  --release -p fono && fono daemon`: `fono doctor` reports
+  --release -p fono && fono`: `fono doctor` reports
   `Overlay : x11-override-redirect (transparency=yes positioning=client
   focus-passthrough=yes click-passthrough=yes)`. Overlay anchors
   bottom-centre. Overlay does NOT appear in Alt+Tab. Overlay stays
   above other windows. Typing into the previously-focused app during
   dictation continues to land in that app.
-- `FONO_OVERLAY_BACKEND=xdg fono daemon` still works (regression check
+- `FONO_OVERLAY_BACKEND=xdg fono` still works (regression check
   for the fallback path on a Wayland session).
 
 ## Potential Risks and Mitigations

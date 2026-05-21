@@ -430,8 +430,7 @@ redact_secrets = true                # scrub obvious key patterns
   Both branches offer ≥ 2 options (requirement from user feedback).
 
 - [ ] Task 8.3. CLI subcommands (via `clap`):
-  - `fono` — start daemon + tray.
-  - `fono daemon --no-tray` — headless daemon (for TTY-only users).
+  - `fono` — start daemon + tray (tray is runtime-gated; no `--no-tray` flag needed).
   - `fono toggle` — IPC → daemon toggle recording.
   - `fono record` — one-shot: record until silence/Esc, STT+clean+paste, exit.
   - `fono paste-last` — re-type last cleaned transcription.
@@ -475,7 +474,7 @@ redact_secrets = true                # scrub obvious key patterns
   After=default.target
   [Service]
   Type=simple
-  ExecStart=/usr/bin/fono daemon
+  ExecStart=/usr/bin/fono
   Restart=on-failure
   [Install]
   WantedBy=default.target

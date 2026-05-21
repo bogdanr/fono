@@ -109,6 +109,10 @@ tokio-stream = { workspace = true, optional = true }
 # (no_std-capable) and cheap; only invoked from the level-ticker task
 # when the standalone waveform overlay is active.
 realfft = "3"
+# Used by the desktop installer to dlopen-probe `libxkbcommon-x11.so.0`
+# before offering to install it via the host package manager. Already
+# in the dep graph via fono-overlay.
+libloading = "0.8"
 
 [dev-dependencies]
 async-trait = { workspace = true }

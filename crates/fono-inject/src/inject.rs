@@ -32,12 +32,9 @@ pub enum Injector {
 impl Injector {
     /// Pick the best available injector for the current session.
     pub fn detect() -> Self {
-        let wayland = std::env::var("XDG_SESSION_TYPE").map(|v| v == "wayland").unwrap_or(false)
-            || std::env::var("WAYLAND_DISPLAY").is_ok();
-
-        // X11 / XWayland: prefer xdotool subprocess (works on KDE/GNOME X11
-        // and via XWayland on most Wayland sessions). Honour
-        // FONO_INJECT_BACKEND=xdotool|wtype|ydotool|enigo|xtest|none for forced override.
+        // Forced override via env. This is honoured first because it's
+        // both a debug knob and the channel through which fono's
+        // config (`[inject].backend`) propagates to this crate.
         if let Ok(forced) = std::env::var("FONO_INJECT_BACKEND") {
             return match forced.to_ascii_lowercase().as_str() {
                 "xdotool" => Self::Xdotool,
@@ -47,9 +44,34 @@ impl Injector {
                 "enigo" => Self::Enigo,
                 #[cfg(feature = "x11-paste")]
                 "xtest" | "xtesttype" | "type" => Self::XtestType,
-                "none" => Self::None,
+                // "clipboard" is a first-class alias of "none": both
+                // route to clipboard fallback. Kept distinct from
+                // "none" in user-visible UX (config + `fono use inject`)
+                // so the intent reads naturally.
+                "clipboard" | "none" => Self::None,
+                "auto" => Self::detect_auto(),
                 _ => Self::None,
             };
+        }
+        Self::detect_auto()
+    }
+
+    /// Auto-selection logic (the previous body of `detect()` minus
+    /// the env-override branch), with a GNOME-Wayland clipboard-first
+    /// default. GNOME-Wayland's `Allow input emulation` permission
+    /// dialog is alarming for first-time users (it looks like a remote-
+    /// access prompt), so the safe default on that session is to never
+    /// synthesize keystrokes — dictations land on the clipboard and the
+    /// user pastes with Ctrl+V. Power users opt in via
+    /// `fono use inject xdotool`. Every other session (KDE-Wayland,
+    /// wlroots, X11) keeps the previous behaviour.
+    fn detect_auto() -> Self {
+        let wayland = std::env::var("XDG_SESSION_TYPE").map(|v| v == "wayland").unwrap_or(false)
+            || std::env::var("WAYLAND_DISPLAY").is_ok();
+
+        if wayland && is_gnome_wayland_session() {
+            // Clipboard-first: caller falls through to `copy_to_clipboard`.
+            return Self::None;
         }
 
         if !wayland {
@@ -122,6 +144,18 @@ impl Injector {
             )),
         }
     }
+}
+
+/// Returns true iff the current session is GNOME on Wayland (Mutter).
+/// Used to gate the clipboard-first default in [`Injector::detect_auto`].
+/// Matches the same desktop tokens as `crates/fono/src/install.rs` so
+/// the installer's session-aware package recommendation and the
+/// runtime injector default stay in sync.
+fn is_gnome_wayland_session() -> bool {
+    let cur = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_ascii_lowercase();
+    let sess = std::env::var("XDG_SESSION_DESKTOP").unwrap_or_default().to_ascii_lowercase();
+    let needle = |s: &str| cur.split(':').any(|p| p == s) || sess == s;
+    needle("gnome") || needle("ubuntu") || needle("ubuntu:gnome")
 }
 
 /// Convenience: detect and inject in one call. When no key-injection

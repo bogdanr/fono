@@ -108,6 +108,13 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
             warn!("could not persist auto-populated config: {e:#}");
         }
     }
+
+    // Propagate `[inject].backend` to fono-inject via env so every
+    // call site (daemon, CLI subcommands, doctor) sees the same
+    // effective backend without each one having to thread the config
+    // through `Injector::detect()`. Leave the env untouched on the
+    // `"auto"` default so debug overrides via the shell still win.
+    apply_inject_backend_env(&config.inject);
     let config = Arc::new(config);
     let secrets = Secrets::load(&paths.secrets_file()).context("load secrets")?;
     print_banner(paths, &config, verbosity);
@@ -1171,13 +1178,44 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
         .unwrap_or("none (using native arboard)");
     debug!("delivery     : key-injector={injector:?}  clipboard-tool={clipboard_tool}");
     if matches!(injector, fono_inject::Injector::None) {
-        info!(
-            "no auto-typing backend available on this session — dictation will land \
-             on the clipboard via the native (arboard) writer; press Ctrl+V or \
-             Shift+Insert to paste. Install `wtype` (Wayland wlroots/KWin) or \
-             `xdotool` (X11) to enable auto-typing instead."
-        );
+        let session = crate::install::Session::detect();
+        let recommendation = session.recommend_injector();
+        // On GNOME-Wayland, clipboard-only is the *intended* default
+        // (see crates/fono-inject/src/inject.rs `detect_auto`). It's
+        // not a degraded mode; log it calmly. On every other session
+        // a missing injector is genuinely something to flag.
+        if matches!(session, crate::install::Session::GnomeWayland) {
+            tracing::info!(
+                "inject       : clipboard delivery (GNOME-Wayland default). {recommendation}"
+            );
+        } else {
+            warn!(
+                "no auto-typing backend available on this session — dictation will land \
+                 on the clipboard; press Ctrl+V or Shift+Insert to paste. {recommendation}"
+            );
+        }
     }
+}
+
+/// Apply the user's `[inject].backend` config setting as a process-
+/// wide `FONO_INJECT_BACKEND` env var, so `fono_inject::Injector::detect()`
+/// observes the override. Leaves the env untouched when the value is
+/// `"auto"` (or empty), preserving any shell-side debug override.
+/// This is called once at daemon startup and again after every config
+/// reload so `fono use inject …` takes effect without a restart.
+pub(crate) fn apply_inject_backend_env(inject: &fono_core::config::Inject) {
+    let v = inject.backend.trim();
+    if v.is_empty() || v.eq_ignore_ascii_case("auto") {
+        // Leave whatever the user set in their shell (if anything)
+        // alone — that's the documented debug-override channel.
+        return;
+    }
+    // SAFETY: setting process env from a single-threaded startup path.
+    // The daemon binary calls this before spawning any worker threads
+    // that read inject env, and again on reload from a single tokio
+    // task. fono-inject reads the env at each `Injector::detect()`,
+    // so no thread-vs-env races exist.
+    std::env::set_var("FONO_INJECT_BACKEND", v);
 }
 
 fn which_in_path(tool: &str) -> Option<std::path::PathBuf> {

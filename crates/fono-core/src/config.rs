@@ -812,14 +812,32 @@ impl Default for History {
     }
 }
 
-/// `[inject]` — text-injection tuning. Currently empty after the
-/// removal of the X11 `xtest-paste` backend (which had a configurable
-/// paste shortcut). Retained as a stable section header so future
-/// per-app paste rules and backend overrides can land here without
-/// breaking existing config files.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// `[inject]` — text-injection tuning.
+///
+/// `backend` controls which keystroke-injection path Fono uses. The
+/// default `"auto"` picks per session: on GNOME-Wayland the chosen
+/// default is `"clipboard"` (because GNOME's `Allow input emulation`
+/// permission dialog is jarring for first-time users); on every other
+/// session the auto-detector picks the best available real keystroke
+/// backend. Users who want one-key paste on GNOME-Wayland can run
+/// `fono use inject xdotool` (and accept the GNOME prompt) to opt in.
+///
+/// Recognised values: `"auto"`, `"clipboard"`, `"xdotool"`, `"wtype"`,
+/// `"ydotool"`, `"xtest"`, `"enigo"`, `"none"` (alias of clipboard).
+/// Anything else falls back to `"auto"`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Inject {}
+pub struct Inject {
+    /// Force a specific keystroke-injection backend. See the struct
+    /// doc-comment for the full list of accepted values.
+    pub backend: String,
+}
+
+impl Default for Inject {
+    fn default() -> Self {
+        Self { backend: "auto".into() }
+    }
+}
 
 /// Background update-check settings. The daemon spawns a worker that
 /// hits the GitHub Releases API on the configured cadence and surfaces
