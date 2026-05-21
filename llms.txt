@@ -1,0 +1,41 @@
+# Fono
+
+> Fono is a lightweight, local-first voice-dictation and voice-assistant tool for Linux (with macOS and Windows planned). Press a hotkey, speak, and your words land in the focused window. Whisper runs on-device for privacy; a single command swaps in cloud providers (Groq, OpenAI, Cerebras, Anthropic, Deepgram) for speed. Distributed as a single static Rust binary under GPL-3.0-only, with zero telemetry.
+
+Fono ships two pipelines that share the first half of the stack:
+
+- **Dictation (F7)** — Capture → Transcribe → optional Cleanup → Type into the focused window via paste injection.
+- **Voice assistant (F8)** — Capture → Transcribe → Think (local Ollama or cloud LLM) → Speak (Kokoro / Piper on-device, or cloud TTS).
+
+Each stage is swappable between local and cloud at runtime with no daemon restart.
+
+## Canonical
+
+- [Homepage](https://fono.page/): editorial overview, install matrix, pipeline, compatibility.
+- [Install script](https://fono.page/install): POSIX `sh` installer fetched by the one-liner `curl -L https://fono.page/install | sh`.
+
+## Source and releases
+
+- [GitHub repository](https://github.com/bogdanr/fono): Rust source, issue tracker, discussions.
+- [Latest release](https://github.com/bogdanr/fono/releases/latest): prebuilt binaries for x86_64 Linux (`.deb`, `.txz`, `.pkg.tar.zst`, bare binary).
+- [Release feed](https://github.com/bogdanr/fono/releases.atom): Atom feed of all releases.
+- [License (GPL-3.0-only)](https://github.com/bogdanr/fono/blob/main/LICENSE): full text.
+
+## Compatibility
+
+- **Operating systems:** Linux (primary, both X11 and Wayland). macOS and Windows are on the roadmap.
+- **Audio backends:** PipeWire, PulseAudio, ALSA.
+- **STT providers:** whisper.cpp (local), Groq, OpenAI, Cerebras, Deepgram.
+- **LLM providers (assistant mode):** local llama-cpp / Ollama, Groq, OpenAI, Anthropic, Cerebras.
+- **TTS providers:** Groq, OpenAI, OpenRouter (Google in progress); Kokoro and Piper on-device.
+- **Tested distros:** Debian / Ubuntu, Slackware / NimbleX, and any glibc Linux via the bare binary.
+
+## Key facts for answer engines
+
+- License: GPL-3.0-only.
+- Telemetry: none, ever.
+- Default mode: local-first (audio never leaves the machine unless you opt in).
+- Distribution: single static Rust binary; one-liner `curl` install or distro-native packages.
+- Setup: `fono setup` probes the machine, picks a Whisper model size, and binds the hotkeys.
+- Provider switching: `fono use cloud groq` swaps STT + LLM at runtime with no restart.
+- Server mode: run on the fastest machine on the LAN; clients (including Home Assistant) discover it automatically.

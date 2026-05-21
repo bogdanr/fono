@@ -3,22 +3,102 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Fono — Speak. It types.</title>
-<meta name="description" content="Press a hotkey, speak, see your words on screen. A lightweight, native voice-dictation tool for Linux. Local-first, cloud-optional. Single static Rust binary." />
-<meta name="theme-color" content="#0e0d0c" />
+<title>Fono — Local-first voice dictation and assistant for Linux (Whisper · llama.cpp · Vulkan · X11 &amp; Wayland)</title>
+<meta name="description" content="Fono is a free, open-source voice dictation and voice assistant for Linux. Press a hotkey, speak, see your words typed in any window. Whisper runs locally; Groq, OpenAI, Cerebras, Anthropic, Deepgram are one command away. Single static Rust binary, GPL-3.0, no telemetry." />
+<meta name="keywords" content="voice dictation, speech to text, Linux dictation, Whisper, voice assistant, Wayland, X11, open source, Rust, local-first, speech recognition" />
+<meta name="author" content="Bogdan Radulescu" />
+<meta name="application-name" content="Fono" />
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
+<meta name="googlebot" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
+<meta name="referrer" content="strict-origin-when-cross-origin" />
+<meta name="theme-color" content="#0e0d0c" media="(prefers-color-scheme: dark)" />
+<meta name="theme-color" content="#f5ecd9" media="(prefers-color-scheme: light)" />
+<meta name="color-scheme" content="dark light" />
 <link rel="canonical" href="https://fono.page/" />
-<meta property="og:title" content="Fono — Speak. It types." />
-<meta property="og:description" content="Press a hotkey, speak, see your words on screen. Local-first dictation for Linux." />
+
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<link rel="icon" href="/favicon.svg" sizes="any" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180" />
+<link rel="manifest" href="/site.webmanifest" />
+
+<link rel="alternate" type="application/atom+xml" title="Fono releases" href="https://github.com/bogdanr/fono/releases.atom" />
+
+<meta property="og:title" content="Fono — Speak. It types — or answers." />
+<meta property="og:description" content="Local-first voice dictation and voice assistant for Linux. Press F7 to dictate into any window, F8 to ask a question and hear the answer. Single static Rust binary, GPL-3.0." />
 <meta property="og:url" content="https://fono.page/" />
 <meta property="og:type" content="website" />
+<meta property="og:site_name" content="Fono" />
+<meta property="og:locale" content="en_US" />
+<meta property="og:image" content="https://fono.page/assets/og.png" />
+<meta property="og:image:secure_url" content="https://fono.page/assets/og.png" />
+<meta property="og:image:type" content="image/png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:alt" content="Fono — local-first voice dictation and assistant for Linux. Sepia card with the Fono wordmark and an oxblood waveform." />
+
 <meta name="twitter:card" content="summary_large_image" />
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="shared/fono.css" />
+<meta name="twitter:title" content="Fono — Speak. It types — or answers." />
+<meta name="twitter:description" content="Local-first voice dictation and voice assistant for Linux. Press F7 to dictate into any window, F8 to ask a question and hear the answer. Single static Rust binary, GPL-3.0." />
+<meta name="twitter:image" content="https://fono.page/assets/og.png" />
+<meta name="twitter:image:alt" content="Fono — local-first voice dictation and assistant for Linux. Sepia card with the Fono wordmark and an oxblood waveform." />
+
+<link rel="preload" as="font" type="font/woff2" crossorigin
+      href="/assets/fonts/instrument-serif-400-normal-latin.woff2" />
+
 <style>
+
+  @font-face { font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 400; font-display: swap;
+    src: url(/assets/fonts/ibm-plex-mono-400-normal-latin-ext.woff2) format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+
+  @font-face { font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 400; font-display: swap;
+    src: url(/assets/fonts/ibm-plex-mono-400-normal-latin.woff2) format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+
+  @font-face { font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 500; font-display: swap;
+    src: url(/assets/fonts/ibm-plex-mono-500-normal-latin-ext.woff2) format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+
+  @font-face { font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 500; font-display: swap;
+    src: url(/assets/fonts/ibm-plex-mono-500-normal-latin.woff2) format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+
+  @font-face { font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 600; font-display: swap;
+    src: url(/assets/fonts/ibm-plex-mono-600-normal-latin-ext.woff2) format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+
+  @font-face { font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 600; font-display: swap;
+    src: url(/assets/fonts/ibm-plex-mono-600-normal-latin.woff2) format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+
+  @font-face { font-family: 'Instrument Serif'; font-style: italic; font-weight: 400; font-display: swap;
+    src: url(/assets/fonts/instrument-serif-400-italic-latin-ext.woff2) format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+
+  @font-face { font-family: 'Instrument Serif'; font-style: italic; font-weight: 400; font-display: swap;
+    src: url(/assets/fonts/instrument-serif-400-italic-latin.woff2) format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+
+  @font-face { font-family: 'Instrument Serif'; font-style: normal; font-weight: 400; font-display: swap;
+    src: url(/assets/fonts/instrument-serif-400-normal-latin-ext.woff2) format('woff2');
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+
+  @font-face { font-family: 'Instrument Serif'; font-style: normal; font-weight: 400; font-display: swap;
+    src: url(/assets/fonts/instrument-serif-400-normal-latin.woff2) format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
+  a { color: inherit; }
+  code { font-family: var(--mono, ui-monospace, monospace); font-size: 0.95em; }
+  button { font: inherit; cursor: pointer; border: 0; background: none; color: inherit; }
+  :focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 4px; }
+  img, svg { display: block; max-width: 100%; }
+  ::selection { background: var(--accent, #e05454); color: var(--ink-on-accent, #fff); }
+
   :root {
-    /* Sepia neutrals tinted toward warm yellow-orange (h≈70°). */
+
     --bg:            oklch(0.135 0.005 70);
     --bg-2:          oklch(0.160 0.008 70);
     --bg-3:          oklch(0.200 0.009 70);
@@ -27,19 +107,16 @@
     --ink:           oklch(0.950 0.016 75);
     --ink-mute:      oklch(0.760 0.020 75);
     --ink-dim:       oklch(0.585 0.020 75);
-    /* Oxblood accent split into two roles so each one passes WCAG AA in its job:
-       --accent      : foreground colour (eyebrows, italic emphasis, prompts) — text on bg
-       --accent-fill : surface colour    (button backgrounds) — pairs with --ink-on-accent
-       --accent-2    : hover surface     — paired with --bg as text on hover */
+
     --accent:        oklch(0.660 0.190 28);
     --accent-fill:   oklch(0.555 0.205 26);
     --accent-2:      oklch(0.760 0.155 42);
     --ink-on-accent: oklch(0.970 0.012 75);
-    /* Assistant accent — green, mirrors ACCENT_ASSISTANT = #22C55E in
-       shared/fono-oscilloscope.js. Keep both in sync. */
+
     --accent-assistant: oklch(0.730 0.190 145);
     --serif: 'Instrument Serif', 'Times New Roman', serif;
-    --sans:  'IBM Plex Sans', -apple-system, sans-serif;
+
+    --sans:  -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, system-ui, sans-serif;
     --mono:  'IBM Plex Mono', ui-monospace, monospace;
   }
   [data-theme="light"] {
@@ -51,11 +128,11 @@
     --ink:           oklch(0.180 0.012 60);
     --ink-mute:      oklch(0.420 0.018 65);
     --ink-dim:       oklch(0.490 0.022 70);
-    /* Light theme accent is dark enough to serve both roles from a single value. */
+
     --accent:        oklch(0.420 0.180 25);
     --accent-fill:   oklch(0.420 0.180 25);
     --accent-2:      oklch(0.320 0.160 22);
-    /* Darker green in light theme so it still reads against cream. */
+
     --accent-assistant: oklch(0.480 0.170 145);
   }
 
@@ -70,7 +147,48 @@
   .wrap { max-width: 1280px; margin: 0 auto; padding: 0 clamp(20px, 4vw, 40px); }
   .narrow { max-width: 980px; margin: 0 auto; padding: 0 clamp(20px, 4vw, 40px); }
 
-  /* nav */
+  .sr-only {
+    position: absolute !important;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0,0,0,0);
+    white-space: nowrap; border: 0;
+  }
+
+  .faq { padding: clamp(64px, 10vw, 120px) 0; border-top: 1px solid var(--line); }
+  .faq-list { margin-top: 40px; border-top: 1px solid var(--line); }
+  .faq-item { border-bottom: 1px solid var(--line); padding: 24px 0; }
+  .faq-item summary {
+    font-family: var(--serif); font-size: 24px;
+    line-height: 1.3; letter-spacing: -0.015em;
+    cursor: pointer; list-style: none;
+    display: flex; justify-content: space-between; align-items: baseline; gap: 24px;
+    color: var(--ink);
+  }
+  .faq-item summary::-webkit-details-marker { display: none; }
+  .faq-item summary::after {
+    content: '+';
+    font-family: var(--mono); font-size: 22px;
+    color: var(--accent); font-style: normal;
+    transition: transform .2s ease;
+  }
+  .faq-item[open] summary::after { content: '−'; }
+  .faq-item .phi {
+
+    font-family: var(--serif);
+    font-style: italic;
+    font-weight: 400;
+    color: var(--accent);
+    font-size: 1.05em;
+    display: inline-block;
+    transform: translateY(-0.02em);
+  }
+  .faq-item p {
+    margin: 14px 0 0; padding-right: 48px;
+    font-size: 15.5px; line-height: 1.65; color: var(--ink-mute);
+    max-width: 720px; text-wrap: pretty;
+  }
+
   nav {
     border-bottom: 1px solid var(--line);
     position: sticky; top: 0; z-index: 50;
@@ -98,7 +216,6 @@
   .btn-cta:active { transform: translateY(1px); }
   .btn-cta .star { width: 14px; height: 14px; fill: currentColor; }
 
-  /* hero star CTA: same shape as install pill, no glow */
   .btn-star-hero {
     display: inline-flex; align-items: center; gap: 10px;
     padding: 14px 22px;
@@ -113,7 +230,6 @@
   .btn-star-hero:active { transform: translateY(1px); }
   .btn-star-hero .star { width: 16px; height: 16px; fill: currentColor; }
 
-  /* HERO — editorial */
   .hero { padding: clamp(48px, 8vw, 80px) 0 clamp(20px, 3vw, 32px); position: relative; overflow: hidden; }
   .eyebrow {
     font-family: var(--mono); font-size: 11px;
@@ -122,7 +238,6 @@
     margin-bottom: 28px;
   }
 
-  /* Two-column hero top: headline on the left, live demo on the right. */
   .hero-top {
     display: grid;
     grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
@@ -132,9 +247,6 @@
   .hero-headline { min-width: 0; }
   .hero-visual { min-width: 0; }
 
-  /* Oscilloscope demo — inlined into the hero. Standalone styles live in
-     assets/fono-oscilloscope-demo.html; these override the standalone
-     fixed width so the canvas flexes with its column. */
   .fono-demo {
     width: 100%;
     aspect-ratio: 2 / 1;
@@ -177,23 +289,15 @@
   .hero h1 .it { font-style: italic; color: var(--accent); }
   .hero h1 .small { font-size: 0.42em; vertical-align: 0.6em; font-style: italic; color: var(--ink-mute); }
 
-  /* Swap container — stacks two text variants in the same grid cell so
-     either can fade in / out without reflowing surrounding layout.
-     Used in the hero headline ("It types." ↔ "It answers.") and lede
-     ("lightweight dictation" ↔ "lightweight assistant"), both driven
-     by the `fono-demo-turn` CustomEvent emitted from
-     shared/fono-oscilloscope.js. */
   .swap { display: inline-grid; }
   .swap > * { grid-area: 1 / 1; transition: opacity .45s ease; }
   .swap > [data-on="ask"]                         { opacity: 0; color: var(--accent-assistant); }
   .swap[data-kind="ask"]    > [data-on="dictate"] { opacity: 0; }
   .swap[data-kind="ask"]    > [data-on="ask"]     { opacity: 1; }
-  /* Block variant — used in the pipeline stages so the h4 + p of each
-     variant stacks in a single grid cell (no layout shift). The inline
-     variant above stays reserved for short word swaps. */
+
   .swap--block { display: grid; }
   .swap--block > [data-on="ask"] p     { color: var(--ink-mute); }
-  .swap--block > [data-on="ask"] h4 em { color: var(--accent-assistant); }
+  .swap--block > [data-on="ask"] h3 em { color: var(--accent-assistant); }
   @media (prefers-reduced-motion: reduce) {
     .swap > * { transition: none; }
   }
@@ -253,7 +357,6 @@
   }
   .install-pill button.copied { background: var(--accent-2); color: var(--bg); }
 
-  /* WAVEFORM HERO VISUAL */
   .wave-stage {
     margin-top: clamp(48px, 8vw, 80px);
     padding: clamp(32px, 6vw, 56px) 0 clamp(40px, 7vw, 64px);
@@ -298,7 +401,6 @@
   }
   .typed-out .tt-caret { color: var(--accent); font-style: normal; }
 
-  /* FEATURES */
   .features { padding: clamp(64px, 10vw, 120px) 0; }
   .section-h {
     display: grid;
@@ -360,7 +462,6 @@
     text-wrap: pretty;
   }
 
-  /* INSTALL */
   .install-section {
     background: var(--bg-2);
     padding: clamp(64px, 10vw, 120px) 0;
@@ -418,7 +519,6 @@
   .pkg-cell.soon .name { color: var(--ink-mute); }
   .pkg-cell.soon code { background: transparent; border: 1px dashed var(--line-2); color: var(--ink-dim); }
 
-  /* SWITCH PROVIDERS callout */
   .switch-callout {
     margin-top: 32px;
     padding: 28px 32px;
@@ -443,7 +543,6 @@
   .switch-callout pre .pr { color: var(--accent); }
   .switch-callout pre .cm { color: var(--ink-dim); }
 
-  /* HOW IT WORKS */
   .how { padding: clamp(64px, 10vw, 120px) 0; }
   .pipeline {
     display: grid;
@@ -475,21 +574,19 @@
     color: var(--accent);
     transition: color .45s ease;
   }
-  /* When a stage contains an active-ask swap, recolor its number to the
-     assistant accent so the dot stays in sync with stages 03/04 h4 em. */
+
   .stage:has(.swap[data-kind="ask"]) .dot { color: var(--accent-assistant); }
   @media (prefers-reduced-motion: reduce) {
     .stage .dot { transition: none; }
   }
-  .stage h4 {
+  .stage h3 {
     font-family: var(--serif); font-size: 28px;
     margin: 0 0 8px; font-weight: 400; letter-spacing: -0.02em;
     text-wrap: balance;
   }
-  .stage h4 em { font-style: italic; color: var(--accent); }
+  .stage h3 em { font-style: italic; color: var(--accent); }
   .stage p { font-size: 13.5px; color: var(--ink-mute); margin: 0; line-height: 1.55; text-wrap: pretty; }
 
-  /* COMPATIBILITY */
   .compat-section {
     background: var(--bg-2);
     padding: clamp(64px, 10vw, 120px) 0;
@@ -523,7 +620,6 @@
   .compat-list dd .pending { color: var(--ink-mute); }
   .compat-list dd .pending::before { content: '·'; color: var(--ink-dim); margin-right: 6px; font-weight: 900; font-style: normal; }
 
-  /* FINAL CTA */
   .final { padding: clamp(72px, 12vw, 140px) 0; text-align: center; }
   .final h2 {
     font-family: var(--serif);
@@ -598,13 +694,14 @@
       <li><a href="#install">Install</a></li>
       <li><a href="#how">Pipeline</a></li>
       <li><a href="#compat">Runs on</a></li>
+      <li><a href="#faq">FAQ</a></li>
     </ul>
     <div class="nav-right">
-      <button class="theme-tog" id="theme-toggle" aria-label="Toggle theme">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+      <button class="theme-tog" id="theme-toggle" aria-label="Toggle theme" type="button">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
       </button>
       <a href="https://github.com/bogdanr/fono" class="btn-cta" aria-label="Star on GitHub">
-        <svg class="star" viewBox="0 0 24 24"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.6-1.4-1.4-1.8-1.4-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.9 1.2 1.9 1.2 1.1 1.9 2.9 1.4 3.6 1 .1-.8.4-1.4.8-1.7-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3"/></svg>
+        <svg class="star" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.6-1.4-1.4-1.8-1.4-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.9 1.2 1.9 1.2 1.1 1.9 2.9 1.4 3.6 1 .1-.8.4-1.4.8-1.7-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3"/></svg>
         Star
       </a>
     </div>
@@ -612,21 +709,22 @@
 </nav>
 
 <main>
-  <!-- HERO -->
+
   <section class="hero">
     <div class="wrap">
       <div class="hero-top">
         <div class="hero-headline">
           <div class="eyebrow"><span id="eb-tag">Issue</span> · <span id="eb-date"></span> · Local-first dictation for Linux</div>
           <h1>Speak.<br/><span class="swap" id="hero-swap" data-kind="dictate" data-fono-kind-swap><span class="it" data-on="dictate">It types.</span><span data-on="ask">It answers.</span></span></h1>
+          <p class="sr-only">Fono is a free, open-source voice dictation and voice assistant for Linux. Press a hotkey, speak, and your words appear in the focused window. Whisper runs locally for privacy; Groq, OpenAI, Cerebras, Anthropic, and Deepgram are one command away for speed. Distributed as a single static Rust binary under GPL-3.0 with zero telemetry.</p>
         </div>
         <div class="hero-visual">
           <div class="fono-demo" id="fono-demo">
-            <canvas id="fono-demo-canvas" width="1200" height="600"
+            <canvas id="fono-demo-canvas" width="600" height="300"
                     aria-label="Fono live oscilloscope visualisation"></canvas>
             <button class="play-pill" type="button" aria-label="Play demo">PLAY DEMO</button>
           </div>
-          <script src="shared/fono-oscilloscope.js"></script>
+          <script src="shared/fono-oscilloscope.js" defer></script>
         </div>
       </div>
 
@@ -640,14 +738,14 @@
               <button data-copy="curl -L https://fono.page/install | sh">copy</button>
             </div>
             <a href="https://github.com/bogdanr/fono" class="btn-star-hero" aria-label="Star on GitHub">
-              <svg class="star" viewBox="0 0 24 24"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.6-1.4-1.4-1.8-1.4-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.9 1.2 1.9 1.2 1.1 1.9 2.9 1.4 3.6 1 .1-.8.4-1.4.8-1.7-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3"/></svg>
+              <svg class="star" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.6-1.4-1.4-1.8-1.4-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.9 1.2 1.9 1.2 1.1 1.9 2.9 1.4 3.6 1 .1-.8.4-1.4.8-1.7-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3"/></svg>
               Star on GitHub
             </a>
           </div>
         </div>
         <dl class="hero-side">
           <dt>License</dt><dd>GPL-3.0-only · audit every byte</dd>
-          <dt>Runs on</dt><dd>Linux · X11 today, Wayland in progress</dd>
+          <dt>Runs on</dt><dd>Linux · X11 , Wayland</dd>
           <dt>Roadmap</dt><dd>macOS · Windows</dd>
           <dt>Telemetry</dt><dd>None. Ever.</dd>
         </dl>
@@ -655,19 +753,17 @@
     </div>
   </section>
 
-  <!-- WAVEFORM STAGE -->
   <section class="wave-stage">
     <div class="narrow">
       <div class="wave-meta" aria-hidden="true">
         <span><b>● rec</b></span>
         <span>F7 to start, F7 to stop</span>
       </div>
-      <div class="waveform" id="wave"></div>
+      <div class="waveform" id="wave" aria-hidden="true"></div>
       <div class="typed-out" id="typed"></div>
     </div>
   </section>
 
-  <!-- FEATURES -->
   <section class="features" id="features">
     <div class="wrap">
       <div class="section-h">
@@ -689,7 +785,6 @@
     </div>
   </section>
 
-  <!-- INSTALL -->
   <section class="install-section" id="install">
     <div class="wrap">
       <div class="section-h">
@@ -707,9 +802,9 @@
       </div>
 
       <div class="pkg-mat" style="margin-top: 32px;">
-        <div class="pkg-cell"><div class="name">Arch / Manjaro</div><code>sudo pacman -U fono-<span class="pkg-ver">0.7.1</span>-1-x86_64.pkg.tar.zst</code></div>
         <div class="pkg-cell"><div class="name">Debian / Ubuntu</div><code>sudo apt install ./fono_<span class="pkg-ver">0.7.1</span>_amd64.deb</code></div>
         <div class="pkg-cell"><div class="name">Slackware / NimbleX</div><code>installpkg fono-<span class="pkg-ver">0.7.1</span>-x86_64-1.txz</code></div>
+        <div class="pkg-cell"><div class="name">Arch / Manjaro</div><code>sudo pacman -U fono-<span class="pkg-ver">0.7.1</span>-1-x86_64.pkg.tar.zst</code></div>
         <div class="pkg-cell"><div class="name">Other Linux</div><code>bare binary from <a href="https://github.com/bogdanr/fono/releases/latest" style="color:inherit">Releases</a></code></div>
         <div class="pkg-cell soon"><div class="name">macOS</div><code>planned · Linux first</code></div>
         <div class="pkg-cell soon"><div class="name">Windows</div><code>planned · Linux first</code></div>
@@ -725,7 +820,6 @@
     </div>
   </section>
 
-  <!-- HOW -->
   <section class="how" id="how">
     <div class="wrap">
       <div class="section-h">
@@ -737,17 +831,17 @@
       </div>
 
       <div class="pipeline">
-        <div class="stage"><div class="dot">01</div><h4><em>Capture</em></h4><p>PipeWire, PulseAudio, or ALSA. VAD trims silence before bytes ever leave the mic.</p></div>
-        <div class="stage"><div class="dot">02</div><h4><em>Transcribe</em></h4><p>whisper.cpp on-device, or Groq · OpenAI · Cerebras · Deepgram on the wire.</p></div>
+        <div class="stage"><div class="dot">01</div><h3><em>Capture</em></h3><p>PipeWire, PulseAudio, or ALSA. VAD trims silence before bytes ever leave the mic.</p></div>
+        <div class="stage"><div class="dot">02</div><h3><em>Transcribe</em></h3><p>whisper.cpp on-device, or Groq · OpenAI · Cerebras · Deepgram on the wire.</p></div>
         <div class="stage">
           <div class="dot">03</div>
           <div class="swap swap--block" data-kind="dictate" data-fono-kind-swap>
             <div data-on="dictate">
-              <h4><em>Cleanup</em></h4>
+              <h3><em>Cleanup</em></h3>
               <p>Optional small LLM strips filler, restores punctuation, fixes names. Local or cloud.</p>
             </div>
             <div data-on="ask">
-              <h4><em>Think</em></h4>
+              <h3><em>Think</em></h3>
               <p>Local Ollama or cloud LLM reasons over your question, streaming tokens as they come.</p>
             </div>
           </div>
@@ -756,11 +850,11 @@
           <div class="dot">04</div>
           <div class="swap swap--block" data-kind="dictate" data-fono-kind-swap>
             <div data-on="dictate">
-              <h4><em>Type</em></h4>
+              <h3><em>Type</em></h3>
               <p>Text lands in the focused window via paste injection. Universal on X11. No clipboard hijack, no per-app integration.</p>
             </div>
             <div data-on="ask">
-              <h4><em>Speak</em></h4>
+              <h3><em>Speak</em></h3>
               <p>Kokoro or Piper on-device, or cloud TTS. The reply streams back through your speakers.</p>
             </div>
           </div>
@@ -769,7 +863,6 @@
     </div>
   </section>
 
-  <!-- COMPAT -->
   <section class="compat-section" id="compat">
     <div class="wrap">
       <div class="section-h">
@@ -782,20 +875,75 @@
 
       <dl class="compat-list">
         <dt>Display server</dt>
-        <dd><span class="y">X11</span><span class="pending">Wayland (in progress)</span></dd>
+        <dd><span class="y">X11</span><span class="y">Wayland</span></dd>
         <dt>Audio backend</dt>
         <dd><span class="y">PipeWire</span><span class="y">PulseAudio</span><span class="y">ALSA</span></dd>
         <dt>STT providers</dt>
         <dd><span class="y">whisper.cpp (local)</span><span class="y">Groq</span><span class="y">OpenAI</span><span class="y">Cerebras</span><span class="y">Deepgram</span></dd>
         <dt>LLM providers</dt>
         <dd><span class="y">Local (llama-cpp)</span><span class="y">Groq</span><span class="y">OpenAI</span><span class="y">Anthropic</span><span class="y">Cerebras</span></dd>
+        <dt>TTS providers</dt>
+        <dd><span class="y">Groq</span><span class="y">OpenAI</span><span class="y">OpenRouter</span><span class="pending">Google (in progress)</span></dd>
         <dt>Tested distros</dt>
-        <dd><span class="y">Arch</span><span class="y">Debian / Ubuntu</span><span class="y">Slackware / NimbleX</span><span class="y">any glibc Linux (bare binary)</span></dd>
+        <dd><span class="y">Debian / Ubuntu</span><span class="y">Slackware / NimbleX</span><span class="y">any glibc Linux (bare binary)</span></dd>
       </dl>
     </div>
   </section>
 
-  <!-- FINAL -->
+  <section class="faq" id="faq" aria-labelledby="faq-h">
+    <div class="narrow">
+      <div class="section-h">
+        <div>
+          <div class="num">№ 05 · Questions</div>
+          <h2 id="faq-h">Things <em>people ask</em>.</h2>
+        </div>
+        <p class="desc">Short, honest answers. If yours isn’t here, open an issue on GitHub.</p>
+      </div>
+      <div class="faq-list">
+        <details class="faq-item">
+          <summary>Does Fono work offline?</summary>
+          <p>Yes. The default configuration runs whisper.cpp on your machine. Audio never leaves the box unless you explicitly opt into a cloud provider.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Can Fono answer questions, or is it dictation-only?</summary>
+          <p>Both. <code>F7</code> is dictation — your words land in the focused window. <code>F8</code> is the voice assistant — Fono transcribes your question, runs it through a local Ollama model or a cloud LLM (Groq, OpenAI, Anthropic, Cerebras), and speaks the reply back through Kokoro or Piper on-device, or a cloud TTS. Same daemon, same hotkey muscle memory, different brain.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Does Fono work on Wayland?</summary>
+          <p>Yes. Both X11 and Wayland are supported as first-class targets. Paste injection is universal on X11; on Wayland Fono uses the standard portals.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Which Linux distributions are supported?</summary>
+          <p>Any glibc Linux. Native packages exist for Debian/Ubuntu, Slackware/NimbleX, and Arch/Manjaro. Everything else uses the bare static binary from GitHub Releases.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Is there telemetry or analytics?</summary>
+          <p>No. None. The daemon makes no analytics calls. The only outbound traffic is to the cloud STT, LLM, or TTS provider that you explicitly configured.</p>
+        </details>
+        <details class="faq-item">
+          <summary>How do I switch from local Whisper to a cloud provider?</summary>
+          <p>Run <code>fono use cloud groq</code> (or <code>openai</code>, <code>cerebras</code>, <code>anthropic</code>, <code>deepgram</code>). Add your API key with <code>fono keys add PROVIDER_API_KEY</code>. No daemon restart needed.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Are macOS and Windows supported?</summary>
+          <p>They are on the roadmap. Linux is the primary target and ships first; macOS and Windows builds follow.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Can I self-host Fono on my LAN?</summary>
+          <p>Yes. Run Fono in server mode on the fastest machine on your network. Other clients, including Home Assistant, discover the server automatically over mDNS.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Does Fono use the GPU?</summary>
+          <p>Fono provides a GPU build that uses Vulkan to run Whisper on your GPU, making it incredibly fast. With a mid-range graphics card, it can transcribe your speech almost instantly. This works on nearly all Nvidia, AMD, and Intel GPUs made in the last few years. This is especially usefull when running larger models.</p>
+        </details>
+        <details class="faq-item">
+          <summary><span>What’s the <span class="phi">φ</span> in the favicon?</span></summary>
+          <p>The Greek letter phi. “Fono” comes from the Greek root <em>φων-</em> meaning <em>voice</em> or <em>sound</em> — the same root in <em>phonetics</em>, <em>phonograph</em>, <em>telephone</em>, and <em>symphony</em>.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
   <section class="final">
     <div class="narrow">
       <h2>Stop typing.<br/><em>Start saying.</em></h2>
@@ -807,7 +955,7 @@
           <button data-copy="curl -L https://fono.page/install | sh">copy</button>
         </div>
         <a href="https://github.com/bogdanr/fono" class="btn-star-hero" aria-label="Star on GitHub">
-          <svg class="star" viewBox="0 0 24 24"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.6-1.4-1.4-1.8-1.4-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.9 1.2 1.9 1.2 1.1 1.9 2.9 1.4 3.6 1 .1-.8.4-1.4.8-1.7-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3"/></svg>
+          <svg class="star" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.6-1.4-1.4-1.8-1.4-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.9 1.2 1.9 1.2 1.1 1.9 2.9 1.4 3.6 1 .1-.8.4-1.4.8-1.7-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3"/></svg>
           Star on GitHub
         </a>
       </div>
@@ -818,18 +966,19 @@
     <div class="wrap row">
       <div class="sig">Fono · an open-source affair</div>
       <div class="links">
-        <a href="https://github.com/bogdanr/fono">GitHub</a>
+        <a href="https://github.com/bogdanr/fono" rel="me noopener">GitHub</a>
         <a href="https://github.com/bogdanr/fono/issues">Issues</a>
         <a href="https://github.com/bogdanr/fono/blob/main/LICENSE">GPL-3.0</a>
         <a href="#install">Install</a>
+        <a href="#faq">FAQ</a>
       </div>
     </div>
   </footer>
 </main>
 
-<script src="shared/typed-terminal.js"></script>
-<script>
-  // generate waveform bars with random heights
+<script src="shared/typed-terminal.js" defer></script>
+<script defer>
+
   const wv = document.getElementById('wave');
   const heights = [22, 38, 65, 48, 80, 92, 55, 70, 88, 45, 60, 95, 72, 50, 38, 68, 84, 58, 42, 76, 90, 48, 62, 35, 80, 92, 65, 48, 70, 55, 82, 38, 60, 88, 50, 72, 95, 58, 42, 65];
   heights.forEach((h, i) => {
@@ -840,10 +989,6 @@
     wv.appendChild(s);
   });
 
-  // Kind swap — listen for turn-kind changes from the oscilloscope demo
-  // and flip `data-kind` on every element tagged `data-fono-kind-swap`,
-  // driving the cross-fade defined in the `.swap` CSS rules. Currently
-  // drives the hero headline, hero lede, and pipeline stages 03 + 04.
   const swapTargets = document.querySelectorAll('[data-fono-kind-swap]');
   const demoEl      = document.getElementById('fono-demo');
   if (demoEl) {
@@ -854,7 +999,6 @@
     });
   }
 
-  // theme toggle (persists across sessions)
   const themeBtn = document.getElementById('theme-toggle');
   const stored = localStorage.getItem('fono-theme');
   if (stored === 'light' || stored === 'dark') {
@@ -867,7 +1011,6 @@
     try { localStorage.setItem('fono-theme', next); } catch (_) {}
   });
 
-  // copy buttons
   document.querySelectorAll('[data-copy]').forEach(b => {
     b.addEventListener('click', () => {
       navigator.clipboard.writeText(b.dataset.copy).catch(() => {});
@@ -877,39 +1020,217 @@
     });
   });
 
-  // dynamic eyebrow date — always current month, e.g. "April 2026"
   const ebDate = document.getElementById('eb-date');
   if (ebDate) {
     ebDate.textContent = new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
   }
 
-  // latest release tag → eyebrow ("Issue v0.7.1") + package version stamps.
-  // Each <span class="pkg-ver"> in the package matrix gets rewritten to the
-  // version (tag with leading 'v' stripped). Falls back to the hardcoded
-  // version baked into the markup if the API call fails.
-  fetch('https://api.github.com/repos/bogdanr/fono/releases/latest')
-    .then(r => r.ok ? r.json() : null)
-    .then(d => {
-      if (!d || !d.tag_name) return;
+  (function () {
+    const KEY = 'fono-latest-tag';
+    const TTL = 86_400_000; 
+    const apply = (tag) => {
+      if (!tag) return;
       const ebTag = document.getElementById('eb-tag');
-      if (ebTag) ebTag.textContent = `Issue ${d.tag_name}`;
-      const ver = d.tag_name.replace(/^v/, '');
+      if (ebTag) ebTag.textContent = `Issue ${tag}`;
+      const ver = tag.replace(/^v/, '');
       document.querySelectorAll('.pkg-ver').forEach(el => { el.textContent = ver; });
-    })
-    .catch(() => {});
+    };
+    try {
+      const cached = JSON.parse(localStorage.getItem(KEY) || 'null');
+      if (cached && Date.now() - cached.t < TTL) { apply(cached.v); return; }
+    } catch (_) {}
+    const fire = () => {
+      fetch('https://api.github.com/repos/bogdanr/fono/releases/latest')
+        .then(r => r.ok ? r.json() : null)
+        .then(d => {
+          if (!d || !d.tag_name) return;
+          apply(d.tag_name);
+          try { localStorage.setItem(KEY, JSON.stringify({ v: d.tag_name, t: Date.now() })); } catch (_) {}
+        })
+        .catch(() => {});
+    };
+    const schedule = () => {
+      if ('requestIdleCallback' in window) requestIdleCallback(fire, { timeout: 3000 });
+      else setTimeout(fire, 0);
+    };
+    if (document.readyState === 'complete') schedule();
+    else window.addEventListener('load', schedule, { once: true });
+  })();
 
-  // typed quote sequence in the wave stage — pure dictation samples
-  // Two registers: casual chat to friends, technical prompt to an AI coding assistant.
-  // Both land in the focused window via F7 — Fono never acts on the content, it just types it.
-  typeSequence(document.getElementById('typed'), [
-    { type: 'pause', delay: 600 },
-    { type: 'line', text: '"Hey, anyone up for ramen Friday? That place near the park, 7-ish? Don\'t bringing Sam."' },
-    { type: 'pause', delay: 1500 },
-    { type: 'clear', delay: 200 },
-    { type: 'line', text: '"Refactor the audio capture loop to use a ring buffer instead of a Vec, and keep the existing API surface intact."' },
-    { type: 'pause', delay: 1500 },
-    { type: 'clear', delay: 200 },
-  ], { charDelay: 32, wordPause: 80, linePause: 700 });
+  document.addEventListener('DOMContentLoaded', () => {
+    window.typeSequence(document.getElementById('typed'), [
+      { type: 'pause', delay: 600 },
+      { type: 'line', text: '"Hey, anyone up for ramen Friday? That place near the park, 7-ish? Don\'t bringing Sam."' },
+      { type: 'pause', delay: 1500 },
+      { type: 'clear', delay: 200 },
+      { type: 'line', text: '"Refactor the audio capture loop to use a ring buffer instead of a Vec, and keep the existing API surface intact."' },
+      { type: 'pause', delay: 1500 },
+      { type: 'clear', delay: 200 },
+    ], { charDelay: 32, wordPause: 80, linePause: 700 });
+  });
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://fono.page/#software",
+      "name": "Fono",
+      "alternateName": "fono",
+      "description": "Local-first voice dictation and voice assistant for Linux. Press a hotkey, speak, see your words typed in any window. Whisper runs locally; cloud providers (Groq, OpenAI, Cerebras, Anthropic, Deepgram) are one command away.",
+      "url": "https://fono.page/",
+      "applicationCategory": ["UtilitiesApplication", "DeveloperApplication", "CommunicationApplication"],
+      "applicationSubCategory": ["Voice Dictation", "Voice Assistant"],
+      "operatingSystem": "Linux (X11, Wayland)",
+      "downloadUrl": "https://github.com/bogdanr/fono/releases/latest",
+      "installUrl": "https://fono.page/install",
+      "softwareVersion": "0.7.1",
+      "releaseNotes": "https://github.com/bogdanr/fono/releases",
+      "license": "https://www.gnu.org/licenses/gpl-3.0.en.html",
+      "isAccessibleForFree": true,
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "programmingLanguage": "Rust",
+      "keywords": "voice dictation, speech to text, Linux, Whisper, voice assistant, Wayland, X11, local-first, open source",
+      "featureList": [
+        "Local Whisper transcription (whisper.cpp)",
+        "Cloud STT: Groq, OpenAI, Cerebras, Deepgram",
+        "Voice assistant mode with local or cloud LLM",
+        "On-device TTS via Kokoro or Piper",
+        "X11 and Wayland support",
+        "PipeWire, PulseAudio, ALSA audio backends",
+        "LAN server mode with mDNS discovery",
+        "Home Assistant integration",
+        "Zero telemetry"
+      ],
+      "author": { "@id": "https://fono.page/#author" },
+      "publisher": { "@id": "https://fono.page/#author" },
+      "sameAs": [
+        "https://github.com/bogdanr/fono"
+      ],
+      "codeRepository": "https://github.com/bogdanr/fono"
+    },
+    {
+      "@type": "Person",
+      "@id": "https://fono.page/#author",
+      "name": "Bogdan Radulescu",
+      "url": "https://github.com/bogdanr",
+      "sameAs": ["https://github.com/bogdanr"]
+    },
+    {
+      "@type": "WebSite",
+      "@id": "https://fono.page/#website",
+      "url": "https://fono.page/",
+      "name": "Fono",
+      "description": "Local-first voice dictation and voice assistant for Linux.",
+      "publisher": { "@id": "https://fono.page/#author" },
+      "inLanguage": "en"
+    },
+    {
+      "@type": "WebPage",
+      "@id": "https://fono.page/#webpage",
+      "url": "https://fono.page/",
+      "name": "Fono — Local-first voice dictation and assistant for Linux",
+      "isPartOf": { "@id": "https://fono.page/#website" },
+      "about": { "@id": "https://fono.page/#software" },
+      "primaryImageOfPage": "https://fono.page/assets/og.png",
+      "inLanguage": "en"
+    }
+  ]
+}
+</script>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Does Fono work offline?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. The default configuration runs whisper.cpp on your machine. Audio never leaves the box unless you explicitly opt into a cloud provider."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can Fono answer questions, or is it dictation-only?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Both. F7 is dictation — your words land in the focused window. F8 is the voice assistant — Fono transcribes your question, runs it through a local Ollama model or a cloud LLM (Groq, OpenAI, Anthropic, Cerebras), and speaks the reply back through Kokoro or Piper on-device, or a cloud TTS. Same daemon, same hotkey muscle memory, different brain."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does Fono work on Wayland?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Both X11 and Wayland are supported as first-class targets. Paste injection is universal on X11; on Wayland Fono uses the standard portals."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Which Linux distributions are supported?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Any glibc Linux. Native packages exist for Debian/Ubuntu, Slackware/NimbleX, and Arch/Manjaro. Everything else uses the bare static binary from GitHub Releases."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Is there telemetry or analytics?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. None. The daemon makes no analytics calls. The only outbound traffic is to the cloud STT, LLM, or TTS provider that you explicitly configured."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How do I switch from local Whisper to a cloud provider?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Run 'fono use cloud groq' (or openai, cerebras, anthropic, deepgram). Add your API key with 'fono keys add PROVIDER_API_KEY'. No daemon restart needed."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Are macOS and Windows supported?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "They are on the roadmap. Linux is the primary target and ships first; macOS and Windows builds follow."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I self-host Fono on my LAN?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Run Fono in server mode on the fastest machine on your network. Other clients, including Home Assistant, discover the server automatically over mDNS."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does Fono use the GPU?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Fono provides a GPU build that uses Vulkan to run Whisper on your GPU, making it incredibly fast. With a mid-range graphics card, it can transcribe your speech almost instantly. This works on nearly all Nvidia, AMD, and Intel GPUs made in the last few years. This is especially usefull when running larger models."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What's the φ in the favicon?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "The Greek letter phi (φ). 'Fono' comes from the Greek root φων- meaning voice or sound — the same root in phonetics, phonograph, telephone, and symphony."
+      }
+    }
+  ]
+}
 </script>
 </body>
 </html>

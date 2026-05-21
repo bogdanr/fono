@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="14 26 36 36" role="img" aria-label="Fono">
+  <title>Fono</title>
+  <!-- Lowercase phi (φ), Fono red, transparent background.
+       'Fono' comes from the Greek root φων- for voice/sound.
+       Serif stack is intentional: the traditional lowercase phi
+       has its bowl on the baseline and a single stem descending
+       below — this form is what serif fonts render. Sans-serif
+       fonts often substitute the open/symmetric mathematical
+       variant which reads as uppercase. -->
+  <text x="32" y="35"
+        text-anchor="middle"
+        dominant-baseline="central"
+        font-family="'Noto Serif','DejaVu Serif','Liberation Serif',Georgia,serif"
+        font-weight="400"
+        font-size="48"
+        fill="#c4533a">&#x03C6;</text>
+</svg>

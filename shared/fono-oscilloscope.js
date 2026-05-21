@@ -1,26 +1,8 @@
-// SPDX-License-Identifier: GPL-3.0-only
-//
-// Fono website OSCILLOSCOPE demo — combined dictation + assistant.
-//
-// Self-contained IIFE that animates a 600x300 canvas to simulate the
-// Fono overlay's `WaveformStyle::Oscilloscope` rendering across both
-// product modes (dictation + assistant Q&A). Mounts onto:
-//   #fono-demo            (wrapper)
-//   #fono-demo-canvas     (canvas)
-//   .play-pill inside #fono-demo (reduced-motion play button)
-//
-// Algorithms mirrored from the real product:
-//   * crates/fono/src/session.rs:49-80        — sample pipeline
-//   * crates/fono/src/session.rs:941-977      — thinking standing-wave
-//   * crates/fono-overlay/src/real.rs:53      — 5000-sample buffer
-//   * crates/fono-overlay/src/real.rs:218-287 — panel palette
-//   * crates/fono-overlay/src/real.rs:669-734 — draw_oscilloscope
-//   * crates/fono-overlay/src/real.rs:1715-1735 — headroom selection
+
 
 (() => {
   'use strict';
 
-  // ── Constants mirrored from the Rust source ─────────────────────────────
   const SAMPLE_RATE     = 16000;
   const PRODUCER_SPEED  = 0.6;
   const OSC_BUFFER      = 2200;
@@ -43,23 +25,31 @@
   const OSC_HEADROOM_REC   = 0.88;
   const OSC_HEADROOM_THINK = 1.00;
 
-  // ── Canvas / sizing ─────────────────────────────────────────────────────
   const wrap   = document.getElementById('fono-demo');
   if (!wrap) return;
   const canvas = document.getElementById('fono-demo-canvas');
   const pill   = wrap.querySelector('.play-pill');
   const ctx    = canvas.getContext('2d');
+
   const W_CSS = 600, H_CSS = 300;
   function resizeBacking() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width  = W_CSS * dpr;
-    canvas.height = H_CSS * dpr;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const rect = wrap.getBoundingClientRect();
+    const cssW = Math.max(1, rect.width);
+    const cssH = Math.max(1, rect.height);
+    canvas.width  = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+
+    ctx.setTransform((cssW / W_CSS) * dpr, 0, 0, (cssH / H_CSS) * dpr, 0, 0);
   }
   resizeBacking();
-  window.addEventListener('resize', resizeBacking);
 
-  // ── Seeded PRNG ─────────────────────────────────────────────────────────
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(resizeBacking).observe(wrap);
+  } else {
+    window.addEventListener('resize', resizeBacking);
+  }
+
   function mulberry32(seed) {
     let s = seed >>> 0;
     return () => {
@@ -72,7 +62,6 @@
   }
   const rng = mulberry32(0x05C111E7 >>> 0);
 
-  // ── Synthetic voice generator ───────────────────────────────────────────
   const FORMANT_SETS = [
     [ 730, 1090, 2440], [ 530, 1840, 2480], [ 270, 2290, 3010],
     [ 570,  840, 2410], [ 300,  870, 2240], [ 500, 1500, 2500],
@@ -164,7 +153,6 @@
     }
   }
 
-  // ── Synthetic standing-wave (THINKING + POLISHING) ──────────────────────
   const POLISH_PANEL_W = 588.0;
   const POLISH_F1_EFF  = 0.015 * POLISH_PANEL_W / (OSC_BUFFER - 1);
   const POLISH_F2_EFF  = 0.010 * POLISH_PANEL_W / (OSC_BUFFER - 1);
@@ -187,7 +175,6 @@
     }
   }
 
-  // ── Script content ──────────────────────────────────────────────────────
   const TURNS = [
     { kind: 'dictate',  text: "Push to talk. Speak naturally." },
     { kind: 'dictate',  text: "Fono types it for you." },
@@ -203,7 +190,6 @@
       a: "Press Escape, then type :q and Enter." },
   ];
 
-  // ── State machine ───────────────────────────────────────────────────────
   let turnIdx     = 0;
   let qChar       = 0;
   let aChar       = 0;
@@ -240,7 +226,6 @@
         || p === 'a-think'  || p === 'a-dwell' || p === 'a-clear';
   }
 
-  // ── Drawing helpers ─────────────────────────────────────────────────────
   function rgba(rgb, a) {
     return 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',' + a + ')';
   }
@@ -373,7 +358,6 @@
     ctx.fillRect(x0 + w + 2, baselineY - TEXT_FONT_PX * 0.85, 2, TEXT_FONT_PX);
   }
 
-  // ── Main loop ───────────────────────────────────────────────────────────
   let virtualMs = 0;
   let lastSampleMs = 0;
   let lastRaf = 0;
@@ -401,9 +385,6 @@
     emitTurn(next.kind);
   }
 
-  // Broadcast turn-kind changes so the page can react (e.g. swap the
-  // hero headline between "It types." / "It answers." and recolor the
-  // matching word in the lede). Fires once per kind transition.
   let lastEmittedKind = null;
   function emitTurn(kind) {
     if (kind === lastEmittedKind) return;
@@ -517,7 +498,6 @@
     drawPanel(10, 160, W_CSS - 20, 130, 'text', state);
   }
 
-  // ── prefers-reduced-motion / pause-on-hidden / play pill ────────────────
   let rafHandle = 0;
   function start() {
     paused = false;

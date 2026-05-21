@@ -1,5 +1,3 @@
-// Lightweight typewriter that simulates dictation transcription.
-// Words "appear" with occasional re-corrections (LLM cleanup vibe).
 (function () {
   function typeSequence(el, sequence, opts) {
     opts = opts || {};
