@@ -88,8 +88,12 @@ pub enum HotkeyAction {
     AssistantPressed,
     /// Voice-assistant push-to-talk released.
     AssistantReleased,
-    /// Orchestrator signals the first TTS audio chunk has been queued
-    /// for playback. Drives `AssistantThinking → AssistantSpeaking`.
+    /// Orchestrator signals that the first LLM delta has arrived (not
+    /// the first synthesised audio chunk — TTS roundtrip can add
+    /// hundreds of ms on top of LLM TTFB, and the overlay/tray should
+    /// reflect "the model has started replying" as soon as the model
+    /// has actually started replying). Drives `AssistantThinking →
+    /// AssistantSpeaking`.
     AssistantSpeakingStarted,
 }
 

@@ -812,26 +812,14 @@ impl Default for History {
     }
 }
 
-/// Text-injection tuning. Currently a single knob for the X11 XTEST
-/// paste shortcut; reserved as the home of future per-app paste rules
-/// and inject backend overrides.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `[inject]` — text-injection tuning. Currently empty after the
+/// removal of the X11 `xtest-paste` backend (which had a configurable
+/// paste shortcut). Retained as a stable section header so future
+/// per-app paste rules and backend overrides can land here without
+/// breaking existing config files.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Inject {
-    /// Which keystroke combo `Injector::XtestPaste` synthesizes after
-    /// writing the system clipboard. Accepted values: `"shift-insert"`
-    /// (default — universal X11 paste, works in terminals + GUI),
-    /// `"ctrl-v"` (GUI-only — captured by shells/tmux/vim),
-    /// `"ctrl-shift-v"` (modern terminal "official" paste).
-    /// Override at runtime with `FONO_PASTE_SHORTCUT=...`.
-    pub paste_shortcut: String,
-}
-
-impl Default for Inject {
-    fn default() -> Self {
-        Self { paste_shortcut: "shift-insert".into() }
-    }
-}
+pub struct Inject {}
 
 /// Background update-check settings. The daemon spawns a worker that
 /// hits the GitHub Releases API on the configured cadence and surfaces

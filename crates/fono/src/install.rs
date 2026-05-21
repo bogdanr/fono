@@ -20,7 +20,7 @@
 //! Plan: `plans/2026-05-02-fono-install-subcommand-v3.md`.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -367,6 +367,16 @@ pub fn run_uninstall(dry_run: bool) -> Result<()> {
         for f in &state.files {
             plan.step(format!("remove {f}"));
         }
+        if state.mode == Mode::Desktop {
+            if let Some(cache) = caller_cache_dir() {
+                if cache.exists() {
+                    plan.step(format!(
+                        "remove {} (reproducible model / hwcheck cache)",
+                        cache.display()
+                    ));
+                }
+            }
+        }
         if state.system_user_removable {
             plan.step(format!(
                 "userdel {SERVICE_USER} (only if no /etc/fono, /var/lib/fono, /var/cache/fono left)"
@@ -623,6 +633,40 @@ enum SetupOutcome {
     SkippedByEnv,
     NotInteractive,
     SpawnFailed,
+}
+
+/// Used by desktop-mode uninstall to wipe the per-user `~/.cache/fono`
+fn caller_home_dir() -> Option<PathBuf> {
+    let user = resolve_target_user()?;
+    // passwd format: name:x:uid:gid:gecos:home:shell
+    let out = Command::new("getent").args(["passwd", &user]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&out.stdout);
+    let fields: Vec<&str> = line.trim_end().split(':').collect();
+    if fields.len() < 7 {
+        return None;
+    }
+    let home = fields[5];
+    if home.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(home))
+}
+
+/// Per-user XDG cache dir Fono writes to. Mirrors
+/// `fono_core::paths::Paths::resolve()` for the desktop case: honours
+/// `XDG_CACHE_HOME` if it points at an absolute path (rare under
+/// `sudo`, which usually scrubs the env), otherwise falls back to
+/// `$HOME/.cache/fono`.
+fn caller_cache_dir() -> Option<PathBuf> {
+    let home = caller_home_dir()?;
+    let root = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home.join(".cache"));
+    Some(root.join(fono_core::paths::APP_NAME))
 }
 
 /// Target user for the post-install spawn: `$SUDO_USER` if set,
@@ -935,6 +979,29 @@ fn run_uninstall_real(state: &InstallState) {
     if state.mode == Mode::Desktop {
         refresh_desktop_database();
         refresh_icon_cache();
+        // Reproducible per-user cache: Whisper / Sherpa / polish model
+        // weights, hwcheck JSON, downloaded archives. Safe to wipe —
+        // re-downloaded on next `fono setup` — and removing it here
+        // avoids leaving multi-GB orphans under the user's home after
+        // `sudo fono uninstall`. Honour the original feedback:
+        // "uninstall should also remove .cache/fono".
+        if let Some(cache) = caller_cache_dir() {
+            if cache.exists() {
+                match std::fs::remove_dir_all(&cache) {
+                    Ok(()) => eprintln!("  · removed {}", cache.display()),
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %cache.display(),
+                            "remove_dir_all failed: {e:#}"
+                        );
+                        eprintln!(
+                            "  · could not remove {} ({e}); delete manually if no longer needed",
+                            cache.display()
+                        );
+                    }
+                }
+            }
+        }
     }
 
     if state.mode == Mode::Server && state.system_user_removable {
@@ -952,8 +1019,9 @@ fn run_uninstall_real(state: &InstallState) {
     println!();
     println!("Fono uninstalled.");
     if state.mode == Mode::Desktop {
-        println!("Per-user config (~/.config/fono), history (~/.local/share/fono),");
-        println!("and cache (~/.cache/fono) are kept and belong to the user.");
+        println!("Per-user config (~/.config/fono) and history (~/.local/share/fono)");
+        println!("are kept and belong to the user. The reproducible cache");
+        println!("(~/.cache/fono) was removed.");
     }
 }
 

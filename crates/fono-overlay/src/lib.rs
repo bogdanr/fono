@@ -44,6 +44,26 @@ pub enum OverlayState {
     /// the user can tell apart from real-audio recording at a
     /// glance.
     AssistantThinking,
+    /// Voice-assistant has started receiving LLM tokens but the
+    /// first TTS audio chunk hasn't reached the playback queue yet
+    /// — i.e. the model is generating, the [`SentenceSplitter`] is
+    /// buffering until a full sentence emerges, and the TTS HTTP
+    /// roundtrip is in flight. The user hears silence during this
+    /// stretch, so we lump it in with "thinking" visually (same
+    /// amber palette, same synthetic animation) and only swap the
+    /// label to "SYNTHESISING" so it's still distinguishable in
+    /// logs / screenshots / bug reports. The FSM stays in
+    /// `AssistantThinking` for this phase; only the overlay flips.
+    AssistantSynthesising,
+    /// Voice-assistant TTS audio is actually playing back. Visually
+    /// the same shape as [`Self::AssistantThinking`] /
+    /// [`Self::AssistantSynthesising`] but with a sky-blue palette
+    /// and a "SPEAKING" title so the user sees the pipeline has
+    /// moved on from "preparing the reply" to "saying the reply".
+    /// Driven by the orchestrator the moment the first synthesised
+    /// audio chunk is enqueued, in lockstep with the FSM
+    /// `AssistantThinking → AssistantSpeaking` transition.
+    AssistantSpeaking,
     Processing,
     /// Dictation post-release: STT and/or polish is running and is
     /// expected to take long enough (local backends) to warrant a

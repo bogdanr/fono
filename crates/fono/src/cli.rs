@@ -202,9 +202,6 @@ pub enum Cmd {
         /// Skip clipboard copy (only key-injection).
         #[arg(long)]
         no_clipboard: bool,
-        /// Paste shortcut: shift-insert | ctrl-v | ctrl-shift-v.
-        #[arg(long, value_name = "SHORTCUT")]
-        shortcut: Option<String>,
     },
     /// Open the live-dictation overlay for a few seconds (smoke test).
     ///
@@ -284,9 +281,12 @@ pub enum Cmd {
     },
     /// Uninstall fono. Reverses a previous `fono install`.
     ///
-    /// Reads the install marker and removes exactly the files it
-    /// recorded. User data under `~/.config/fono`,
-    /// `~/.local/share/fono`, and `~/.cache/fono` is never touched.
+    /// Removes every system path the installer wrote (binary, desktop
+    /// entries, icon, systemd unit, completions) and — in desktop mode
+    /// — also wipes the per-user `~/.cache/fono` (model weights,
+    /// downloaded archives, hwcheck JSON), which is fully reproducible
+    /// on next `fono setup`. User data under `~/.config/fono` and
+    /// `~/.local/share/fono` is never touched.
     Uninstall {
         /// Print what would be done without removing anything.
         #[arg(long)]
@@ -477,8 +477,8 @@ pub async fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Some(Cmd::TestInject { text, no_inject, no_clipboard, shortcut }) => {
-            test_inject_cmd(&text, no_inject, no_clipboard, shortcut.as_deref());
+        Some(Cmd::TestInject { text, no_inject, no_clipboard }) => {
+            test_inject_cmd(&text, no_inject, no_clipboard);
             Ok(())
         }
         Some(Cmd::Hwprobe { json }) => {
@@ -1077,8 +1077,19 @@ pub fn set_active_tts(
     wyoming_uri: Option<String>,
 ) {
     use fono_core::config::{TtsBackend, TtsWyoming};
+    use fono_core::providers::tts_backend_str;
     cfg.tts.backend = backend.clone();
     cfg.tts.cloud = None;
+    // Reset `voice` to the new backend's catalogue default so a voice ID
+    // valid for the previous provider (e.g. a Cartesia UUID, or an
+    // OpenAI "alloy") doesn't leak into the next one and trigger a 400
+    // ("voice must be one of ..."). Wyoming and None have no catalogue
+    // entry — clear to empty so the server / factory picks its own
+    // default. Mirrors `wizard::apply_primary_provider`.
+    cfg.tts.voice = fono_core::provider_catalog::find(tts_backend_str(&backend))
+        .and_then(|entry| entry.tts.as_ref())
+        .map(|tts_def| tts_def.default_voice.to_string())
+        .unwrap_or_default();
     if matches!(backend, TtsBackend::Wyoming) {
         let uri = wyoming_uri.unwrap_or_else(|| {
             cfg.tts
@@ -1352,28 +1363,11 @@ fn prompt_for_secret(name: &str) -> Result<String> {
 /// Smoke-test the inject + clipboard delivery path. Bypasses STT/LLM
 /// so users can quickly verify whether text can actually reach their
 /// focused window or clipboard.
-fn test_inject_cmd(text: &str, no_inject: bool, no_clipboard: bool, shortcut: Option<&str>) {
+fn test_inject_cmd(text: &str, no_inject: bool, no_clipboard: bool) {
     use std::time::Instant;
-    // Apply --shortcut override before any inject path runs so the
-    // xtest-paste backend reads the right value when it next
-    // synthesizes a key sequence.
-    if let Some(s) = shortcut {
-        if fono_inject::PasteShortcut::parse(s).is_none() {
-            println!(
-                "warning: --shortcut={s:?} is not recognised; \
-                 xtest-paste will fall back to Shift+Insert"
-            );
-        }
-        std::env::set_var("FONO_PASTE_SHORTCUT", s);
-    }
     println!("Fono — test-inject");
     println!("Build: v{}", env!("CARGO_PKG_VERSION"));
     println!("Detected key-injector: {:?}", fono_inject::Injector::detect());
-    println!(
-        "Paste shortcut       : {} (env FONO_PASTE_SHORTCUT={:?})",
-        fono_inject::PasteShortcut::from_env_or_default().label(),
-        std::env::var("FONO_PASTE_SHORTCUT").ok()
-    );
     println!("Text ({} chars): {text:?}", text.chars().count());
     println!();
 
@@ -1809,6 +1803,34 @@ mod tests {
     /// not catch — most notably `llama-cpp-2=error` (hyphenated
     /// target name) and the bare-level default token at either end
     /// of the comma-separated list.
+    /// Regression: switching the TTS backend used to leave
+    /// `cfg.tts.voice` untouched, so a Cartesia UUID or an OpenAI
+    /// "alloy" leaked into Groq and produced a 400 ("voice must be one
+    /// of [autumn diana hannah …]"). The switch now resets the voice
+    /// to the new backend's catalogue default (or empty for Wyoming /
+    /// None) so each provider gets a voice it actually accepts.
+    #[test]
+    fn set_active_tts_resets_voice_to_new_backend_default() {
+        use fono_core::config::TtsBackend;
+
+        // Start on Cartesia with its default UUID voice.
+        let mut cfg = Config::default();
+        set_active_tts(&mut cfg, TtsBackend::Cartesia, None);
+        let cartesia_voice = cfg.tts.voice.clone();
+        assert!(!cartesia_voice.is_empty(), "Cartesia catalogue must define a default voice");
+
+        // Switching to Groq must drop the Cartesia UUID and pick up a
+        // Groq-valid voice from the catalogue.
+        set_active_tts(&mut cfg, TtsBackend::Groq, None);
+        assert_ne!(cfg.tts.voice, cartesia_voice, "voice from previous provider must not leak");
+        assert!(!cfg.tts.voice.is_empty(), "Groq catalogue must define a default voice");
+
+        // Switching to Wyoming has no catalogue entry — clear so the
+        // server picks its own default.
+        set_active_tts(&mut cfg, TtsBackend::Wyoming, None);
+        assert!(cfg.tts.voice.is_empty(), "Wyoming switch must clear stale cloud voice");
+    }
+
     #[test]
     fn verbosity_filters_parse_as_targets() {
         use tracing_subscriber::filter::Targets;

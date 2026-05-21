@@ -85,12 +85,24 @@ pub struct AssistantTurnInputs {
     pub system_prompt: String,
     pub language: Option<String>,
     /// Channel back into the FSM. The pump sends
-    /// [`HotkeyAction::AssistantSpeakingStarted`] once the first
-    /// sentence's audio is queued for playback so the FSM transitions
+    /// [`HotkeyAction::AssistantSpeakingStarted`] the moment the
+    /// first synthesised audio chunk is enqueued for playback — i.e.
+    /// when the user actually starts hearing the reply. The earlier
+    /// "first LLM delta" milestone is reflected on the *overlay*
+    /// (THINKING → SYNTHESISING) but not on the FSM: the user
+    /// considers the silent synth phase part of "thinking" for
+    /// cancel / tray / barge-in purposes. Drives
     /// `AssistantThinking → AssistantSpeaking`. The same channel
     /// also receives `ProcessingDone` from the daemon dispatcher
     /// after the turn ends (we don't fire it from here).
     pub action_tx: mpsc::UnboundedSender<HotkeyAction>,
+    /// Optional overlay handle. When present the pump flips it from
+    /// `AssistantThinking` → `AssistantSynthesising` (first LLM
+    /// delta) → `AssistantSpeaking` (first audio queued) so the user
+    /// can read at a glance which sub-phase of the reply is current.
+    /// `None` covers test paths and headless / `noop` overlay
+    /// backends.
+    pub overlay: Option<fono_overlay::OverlayHandle>,
     /// When `Some`, skip the batch STT step entirely and treat this
     /// string as the user's turn. Set by the live-streaming F10 path
     /// (interactive mode + streaming-capable backend) so the same
@@ -123,6 +135,7 @@ pub async fn run_assistant_turn(
         system_prompt,
         language,
         action_tx,
+        overlay,
         pre_transcribed,
     } = inputs;
 
@@ -234,6 +247,8 @@ pub async fn run_assistant_turn(
     let mut full_reply = String::new();
     let mut any_audio = false;
     let mut first_audio_at: Option<std::time::Instant> = None;
+    let mut speaking_announced = false;
+    let mut synthesising_announced = false;
 
     loop {
         let next = tokio::select! {
@@ -272,6 +287,25 @@ pub async fn run_assistant_turn(
                 break;
             }
         };
+        // First LLM delta — model is generating but the
+        // `SentenceSplitter` is still buffering until a full
+        // sentence emerges and the TTS HTTP roundtrip hasn't even
+        // started yet, so the user will hear silence for a stretch.
+        // Reflect that on the overlay (THINKING → SYNTHESISING) only;
+        // the FSM stays in `AssistantThinking` because cancel /
+        // barge-in / tray semantics treat this silent stretch as
+        // part of "thinking".
+        if !synthesising_announced {
+            synthesising_announced = true;
+            info!(
+                target: "fono::assistant",
+                llm_ttfb_ms = llm_started.elapsed().as_millis() as u64,
+                "first LLM delta — overlay: THINKING → SYNTHESISING"
+            );
+            if let Some(o) = overlay.as_ref() {
+                o.set_state(fono_overlay::OverlayState::AssistantSynthesising);
+            }
+        }
         full_reply.push_str(&delta.text);
         for sentence in splitter.push(&delta.text) {
             if synth_and_enqueue(&state, &tts, &sentence, &notify).await {
@@ -283,10 +317,17 @@ pub async fn run_assistant_turn(
                         ttfa_ms = llm_started.elapsed().as_millis() as u64,
                         "first audio queued"
                     );
-                    // Drive FSM `Thinking → Speaking`. Best-effort —
-                    // a closed channel just means the daemon has gone
-                    // away.
-                    let _ = action_tx.send(HotkeyAction::AssistantSpeakingStarted);
+                    // FSM `AssistantThinking → AssistantSpeaking` +
+                    // overlay SYNTHESISING → SPEAKING. This is the
+                    // moment the user actually starts hearing the
+                    // reply.
+                    if !speaking_announced {
+                        speaking_announced = true;
+                        let _ = action_tx.send(HotkeyAction::AssistantSpeakingStarted);
+                        if let Some(o) = overlay.as_ref() {
+                            o.set_state(fono_overlay::OverlayState::AssistantSpeaking);
+                        }
+                    }
                 }
             }
             if notify_triggered(&notify) {
@@ -302,8 +343,18 @@ pub async fn run_assistant_turn(
         if let Some(tail) = splitter.flush() {
             if synth_and_enqueue(&state, &tts, &tail, &notify).await {
                 any_audio = true;
-                if first_audio_at.is_none() {
+                // Belt-and-braces: a tail flush that arrives without
+                // any preceding delta is impossible (the splitter is
+                // empty until `push`ed), but if a future refactor
+                // ever ends up here without having announced
+                // SPEAKING, we still want the FSM/overlay flipped
+                // before audio actually plays. We're past the delta
+                // loop, so no need to flip `speaking_announced` itself.
+                if !speaking_announced {
                     let _ = action_tx.send(HotkeyAction::AssistantSpeakingStarted);
+                    if let Some(o) = overlay.as_ref() {
+                        o.set_state(fono_overlay::OverlayState::AssistantSpeaking);
+                    }
                 }
             }
         }
@@ -420,6 +471,21 @@ async fn synth_and_enqueue(
                         class,
                         &err_text,
                     );
+                } else if matches!(class, fono_core::critical_notify::ErrorClass::RateLimit) {
+                    // Cloud TTS 429s (e.g. Groq Orpheus TPD cap) — surface
+                    // via the shared rate-limit notifier so the user sees
+                    // exactly one popup per session even if the assistant
+                    // emits multiple sentences. critical_notify itself is
+                    // a no-op for RateLimit by design (see its module
+                    // docs), so we route through rate_limit_notify here.
+                    //
+                    // The raw error text includes the request id, JSON
+                    // envelope, and upsell copy — far too long for a
+                    // desktop notification. Extract just the human
+                    // `message` field when present.
+                    let body = extract_json_message(&err_text)
+                        .unwrap_or_else(|| truncate(&err_text, 240).to_string());
+                    fono_stt::rate_limit_notify::notify_once(tts.name(), &body);
                 }
                 return false;
             }
@@ -448,6 +514,49 @@ async fn synth_and_enqueue(
     true
 }
 
+/// Pull the human-readable `message` out of a provider error blob
+/// that wraps a JSON envelope like `{"error":{"message":"...", ...}}`.
+///
+/// Handles plain unescaped messages (Groq + OpenAI shape) and JSON
+/// strings containing escaped quotes. Returns `None` when no
+/// `"message":"..."` substring is present so the caller can fall back
+/// to the raw text. Output is trimmed to 240 chars to keep desktop
+/// notifications readable on every DE — `notify-send` on KDE truncates
+/// silently past that, GNOME wraps but loses focus quickly.
+fn extract_json_message(blob: &str) -> Option<String> {
+    let key = "\"message\":\"";
+    let start = blob.find(key)? + key.len();
+    let tail = &blob[start..];
+    // Scan for the terminating unescaped quote.
+    let mut end = 0;
+    let mut prev_backslash = false;
+    for (i, c) in tail.char_indices() {
+        if c == '"' && !prev_backslash {
+            end = i;
+            break;
+        }
+        prev_backslash = c == '\\' && !prev_backslash;
+    }
+    if end == 0 {
+        return None;
+    }
+    let raw = &tail[..end];
+    // Unescape the minimal JSON sequences we care about.
+    let unescaped = raw.replace("\\\"", "\"").replace("\\n", " ").replace("\\\\", "\\");
+    Some(truncate(&unescaped, 240).to_string())
+}
+
+/// Clip a string to at most `max` chars on a char boundary, appending
+/// an ellipsis if anything was dropped. Borrowed style mirrors the
+/// helper in `fono-tts::openai_compat` so call-sites read alike.
+fn truncate(s: &str, max: usize) -> std::borrow::Cow<'_, str> {
+    if s.chars().count() <= max {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+    std::borrow::Cow::Owned(format!("{cut}…"))
+}
+
 /// Non-blocking probe — returns true if the pump should bail. Uses
 /// `now_or_never` on a `notified()` future so we don't await.
 fn notify_triggered(_notify: &Arc<Notify>) -> bool {
@@ -458,4 +567,48 @@ fn notify_triggered(_notify: &Arc<Notify>) -> bool {
     // future swap to `CancellationToken` (which has `is_cancelled`)
     // a one-line change.
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_json_message, truncate};
+
+    #[test]
+    fn extract_json_message_pulls_groq_429_body() {
+        // Verbatim shape from the user's Groq TTS 429 report.
+        let blob = "groq TTS returned 429 Too Many Requests (request_id=req_01ks4jx1, \
+                    text_len=121): {\"error\":{\"message\":\"Rate limit reached for model \
+                    `canopylabs/orpheus-v1-english` in organization `org_x` service tier \
+                    `on_demand` on tokens per day (TPD): Limit 3600, Used 3571, Requested \
+                    121. Please try again in 36m48s.\",\"type\":\"tokens\",\"code\":\
+                    \"rate_limit_exceeded\"}}";
+        let msg = extract_json_message(blob).expect("message present");
+        assert!(msg.starts_with("Rate limit reached for model"), "got: {msg}");
+        assert!(msg.contains("try again in 36m48s"));
+        // The request_id / code / type fields must not leak in.
+        assert!(!msg.contains("request_id"));
+        assert!(!msg.contains("rate_limit_exceeded"));
+    }
+
+    #[test]
+    fn extract_json_message_returns_none_without_envelope() {
+        assert!(extract_json_message("just a transport error").is_none());
+    }
+
+    #[test]
+    fn extract_json_message_handles_escaped_quotes() {
+        let blob = r#"{"error":{"message":"key \"X\" was rejected","code":"x"}}"#;
+        assert_eq!(extract_json_message(blob).as_deref(), Some(r#"key "X" was rejected"#));
+    }
+
+    #[test]
+    fn truncate_keeps_short_strings_intact() {
+        assert_eq!(truncate("hi", 10), "hi");
+    }
+
+    #[test]
+    fn truncate_appends_ellipsis_on_overflow() {
+        let out = truncate("abcdefghij", 5);
+        assert_eq!(out, "abcd…");
+    }
 }

@@ -91,7 +91,8 @@ pub fn accent_color(state: OverlayState) -> u32 {
         OverlayState::Hidden => 0x0000_0000,
         OverlayState::Recording { .. } => 0xFFE0_5454,
         OverlayState::AssistantRecording { .. } => 0xFF22_C55E,
-        OverlayState::AssistantThinking => 0xFFF5_9E0B,
+        OverlayState::AssistantThinking | OverlayState::AssistantSynthesising => 0xFFF5_9E0B,
+        OverlayState::AssistantSpeaking => 0xFF38_BDF8,
         OverlayState::Processing | OverlayState::Polishing => 0xFFE0_A040,
         OverlayState::LiveDictating => 0xFF63_7AFF,
     }
@@ -103,6 +104,8 @@ pub fn state_label(state: OverlayState) -> &'static str {
         OverlayState::Recording { .. } => "RECORDING",
         OverlayState::AssistantRecording { .. } => "ASSISTANT",
         OverlayState::AssistantThinking => "THINKING",
+        OverlayState::AssistantSynthesising => "SYNTHESISING",
+        OverlayState::AssistantSpeaking => "SPEAKING",
         OverlayState::Processing | OverlayState::Polishing => "POLISHING",
         OverlayState::LiveDictating => "LIVE",
     }
@@ -1061,7 +1064,13 @@ impl RendererState {
         matches!(self.style, WaveformStyle::Fft | WaveformStyle::Heatmap)
             || matches!(
                 (self.style, self.state),
-                (WaveformStyle::Bars, OverlayState::AssistantThinking | OverlayState::Polishing)
+                (
+                    WaveformStyle::Bars,
+                    OverlayState::AssistantThinking
+                        | OverlayState::AssistantSynthesising
+                        | OverlayState::AssistantSpeaking
+                        | OverlayState::Polishing,
+                )
             )
     }
 
@@ -1119,6 +1128,8 @@ impl RendererState {
                 OverlayState::Recording { .. }
                     | OverlayState::AssistantRecording { .. }
                     | OverlayState::AssistantThinking
+                    | OverlayState::AssistantSynthesising
+                    | OverlayState::AssistantSpeaking
                     | OverlayState::Polishing
             );
         if waveform_active {
@@ -1126,8 +1137,21 @@ impl RendererState {
             let x1 = w as f32 - PADDING_X * scale;
             let y_top = text_top;
             let y_bot = h as f32 - PADDING_BOT * scale;
-            let thinking =
-                matches!(self.state, OverlayState::AssistantThinking | OverlayState::Polishing);
+            // Treat AssistantSpeaking the same way as AssistantThinking
+            // and Polishing for the renderer: synthetic animation
+            // frames pushed by the orchestrator at 20 fps via
+            // `push_fft_bins` / `push_samples`. The only visible
+            // difference between Thinking and Speaking is the title
+            // label + accent stripe; everything else stays put so the
+            // animation continues seamlessly when the LLM starts
+            // streaming.
+            let thinking = matches!(
+                self.state,
+                OverlayState::AssistantThinking
+                    | OverlayState::AssistantSynthesising
+                    | OverlayState::AssistantSpeaking
+                    | OverlayState::Polishing
+            );
             match self.style {
                 WaveformStyle::Bars if thinking => {
                     if let Some(profile) = self.fft_frames.back() {

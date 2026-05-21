@@ -188,8 +188,8 @@ pub enum PipelineOutcome {
 /// substitute a buffer-collector and skip the real keyboard backend.
 ///
 /// Returns `true` when the inject path itself has already populated the
-/// system clipboard with the final text (e.g. the X11 `xtest-paste`
-/// backend, or the clipboard fallback). The orchestrator uses that
+/// system clipboard with the final text (e.g. the clipboard fallback
+/// path when no key-injector worked). The orchestrator uses that
 /// signal to skip the redundant belt‑and‑suspenders copy in
 /// `run_pipeline`, which otherwise duplicates clipboard writes (and
 /// log lines) on every dictation.
@@ -216,13 +216,11 @@ impl Injector for RealInjector {
         match fono_inject::type_text_with_outcome(text)? {
             fono_inject::InjectOutcome::Typed(backend) => {
                 tracing::info!("inject backend: typed via {backend}");
-                // `xtest-paste` pastes by populating the X CLIPBOARD
-                // and synthesising Shift+Insert, so the clipboard
-                // already holds `text` — no belt-and-suspenders copy
-                // needed afterwards. All other typed backends
-                // (`wtype`/`ydotool`/`xdotool`/`enigo`) inject keys
-                // directly and leave the clipboard untouched.
-                Ok(backend == "xtest-paste")
+                // All current key-injection backends (wtype/ydotool/
+                // xdotool/enigo/xtest-type) deliver keystrokes directly
+                // and leave the clipboard untouched, so the orchestrator
+                // should still run `also_copy_to_clipboard` if enabled.
+                Ok(false)
             }
             fono_inject::InjectOutcome::Clipboard(tool) => {
                 tracing::info!("inject backend: clipboard via {tool} (no key-injection worked)");
@@ -377,7 +375,6 @@ impl SessionOrchestrator {
         let history =
             Arc::new(Mutex::new(HistoryDb::open(&paths.history_db()).context("open history db")?));
         let capture_cfg = CaptureConfig { target_sample_rate: config.audio.sample_rate };
-        let config_for_env = Arc::clone(&config);
         let mut orch = Self::with_parts(
             stt,
             polish,
@@ -461,10 +458,6 @@ impl SessionOrchestrator {
                 None => {}
             }
         }
-        // Apply [inject].paste_shortcut to the FONO_PASTE_SHORTCUT env
-        // var so xtest-paste picks up the configured combo without
-        // plumbing it through the Injector trait.
-        apply_paste_shortcut_env(&config_for_env);
         // Latency plan L2/L3/L5 — pay TLS handshake, mmap, and inject
         // backend page-cache costs at daemon startup so the first
         // dictation is fast. Failures are logged but non-fatal.
@@ -596,9 +589,6 @@ impl SessionOrchestrator {
         }
         if let Ok(mut guard) = self.config.write() {
             *guard = Arc::new(cfg);
-        }
-        if let Ok(guard) = self.config.read() {
-            apply_paste_shortcut_env(&guard);
         }
         // Re-prewarm the new backends so the first post-switch
         // dictation isn't cold (latency plan L3 still applies).
@@ -1600,6 +1590,11 @@ impl SessionOrchestrator {
             system_prompt: cfg.assistant.prompt_main.clone(),
             language: cfg.general.language_override().map(str::to_string),
             action_tx: self.action_tx.clone(),
+            // Hand the pump a clone of the live overlay handle so it
+            // can flip THINKING → SPEAKING the moment the first LLM
+            // delta arrives (see `assistant.rs`). Cheap (Arc-wrapped),
+            // None when no graphical session is attached.
+            overlay: self.overlay.read().ok().and_then(|g| g.clone()),
             pre_transcribed,
         };
         let state_for_task = self.assistant_session.clone();
@@ -2553,7 +2548,7 @@ async fn run_pipeline(
     // when the inject silently no-op'd. Best-effort; never fatal.
     //
     // Skipped when the inject path itself already populated the
-    // clipboard (`xtest-paste` backend, or the clipboard fallback) —
+    // clipboard (the clipboard fallback when no key-injector worked) —
     // re-copying the same text would just duplicate log lines and
     // clipboard-manager history entries on every dictation.
     if config.general.also_copy_to_clipboard && !clipboard_already_populated {
@@ -2682,29 +2677,6 @@ pub fn orchestrator_for_test(
         focus,
     );
     (orch, rx)
-}
-
-/// Translate `[inject].paste_shortcut` into the `FONO_PASTE_SHORTCUT`
-/// env var that `fono_inject::xtest_paste` reads at inject time. Logged
-/// at `debug`; invalid configured shortcuts still warn loudly.
-fn apply_paste_shortcut_env(config: &Config) {
-    let raw = config.inject.paste_shortcut.trim();
-    if raw.is_empty() {
-        std::env::remove_var("FONO_PASTE_SHORTCUT");
-        debug!("inject paste shortcut: default (Shift+Insert)");
-        return;
-    }
-    // Validate so a typo surfaces as a warning instead of silently
-    // falling back. `PasteShortcut` is re-exported from `fono-inject`
-    // when its `x11-paste` feature is on (default).
-    if fono_inject::PasteShortcut::parse(raw).is_none() {
-        warn!(
-            "[inject].paste_shortcut={raw:?} is not recognised; \
-             xtest-paste will fall back to Shift+Insert"
-        );
-    }
-    std::env::set_var("FONO_PASTE_SHORTCUT", raw);
-    debug!("inject paste shortcut: {raw}");
 }
 
 #[cfg(test)]

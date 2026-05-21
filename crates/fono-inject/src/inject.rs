@@ -16,12 +16,15 @@ pub enum Injector {
     /// `xdotool type --delay 0 -- <text>` subprocess (X11 / XWayland).
     /// Independent of the `enigo-backend` feature (no libxdo C dep).
     Xdotool,
-    /// Pure-Rust XTEST `Ctrl+V` after a clipboard write. No system tools
-    /// needed; only requires that the focused app honours Ctrl+V as paste
-    /// (every text input on every desktop does). Compiled when
+    /// Pure-Rust XTEST per-character typing. Synthesises each character
+    /// of the dictation as `KeyPress`/`KeyRelease` events, remapping a
+    /// spare keycode on the fly for characters not present in the active
+    /// layout. **No clipboard involvement** — works regardless of
+    /// clipboard-manager state or whether the user has disabled clipboard
+    /// synchronisation. Universal X11 fallback. Compiled when the
     /// `x11-paste` feature is on (default).
     #[cfg(feature = "x11-paste")]
-    XtestPaste,
+    XtestType,
     /// No working injection available — caller should fall back to clipboard.
     None,
 }
@@ -43,7 +46,7 @@ impl Injector {
                 #[cfg(feature = "enigo-backend")]
                 "enigo" => Self::Enigo,
                 #[cfg(feature = "x11-paste")]
-                "xtest" | "xtestpaste" | "paste" => Self::XtestPaste,
+                "xtest" | "xtesttype" | "type" => Self::XtestType,
                 "none" => Self::None,
                 _ => Self::None,
             };
@@ -83,12 +86,13 @@ impl Injector {
         if which("xdotool").is_some() {
             return Self::Xdotool;
         }
-        // Pure-Rust XTEST keystroke (Ctrl+V) against an already-populated
-        // clipboard. Last resort before declaring None — works on any X11
-        // session even without xdotool/wtype/enigo installed.
+        // Pure-Rust XTEST per-character typing. Universal X11 fallback —
+        // works on any X11 session even without xdotool/wtype/enigo
+        // installed, and does not depend on the clipboard so it cannot
+        // accidentally paste a stale clipboard entry.
         #[cfg(feature = "x11-paste")]
-        if !wayland && crate::xtest_paste::xtest_available() {
-            return Self::XtestPaste;
+        if !wayland && crate::xtest_type::xtest_type_available() {
+            return Self::XtestType;
         }
         #[cfg(feature = "enigo-backend")]
         {
@@ -110,19 +114,10 @@ impl Injector {
             Self::Ydotool => inject_subprocess("ydotool", &["type", text]),
             Self::Xdotool => inject_subprocess("xdotool", &["type", "--delay", "0", "--", text]),
             #[cfg(feature = "x11-paste")]
-            Self::XtestPaste => {
-                // Two-step: populate the X CLIPBOARD via the standard
-                // helper, then synthesize Ctrl+V via XTEST. Robust against
-                // Unicode and per-app keymaps because the actual character
-                // bytes flow through the clipboard, not through synthetic
-                // per-key events.
-                copy_to_clipboard(text)
-                    .map_err(|e| anyhow!("xtest-paste: clipboard prep failed: {e}"))?;
-                crate::xtest_paste::paste_via_xtest_default()
-            }
+            Self::XtestType => crate::xtest_type::type_via_xtest(text),
             Self::None => Err(anyhow!(
                 "no text-injection backend available; on X11 set DISPLAY so the built-in \
-                 xtest-paste backend can connect, or install wtype/ydotool/xdotool, \
+                 xtest-type backend can connect, or install wtype/ydotool/xdotool, \
                  or enable the enigo-backend feature"
             )),
         }
@@ -176,7 +171,7 @@ pub fn type_text_with_outcome(text: &str) -> Result<InjectOutcome> {
             Injector::Ydotool => "ydotool",
             Injector::Xdotool => "xdotool",
             #[cfg(feature = "x11-paste")]
-            Injector::XtestPaste => "xtest-paste",
+            Injector::XtestType => "xtest-type",
             Injector::None => "none",
         })),
         Err(key_err) => match copy_to_clipboard(text) {
@@ -184,7 +179,7 @@ pub fn type_text_with_outcome(text: &str) -> Result<InjectOutcome> {
             Err(clip_err) => Err(anyhow!(
                 "key injection failed ({key_err}) and clipboard fallback \
                  failed ({clip_err}); on X11 ensure DISPLAY is exported so \
-                 xtest-paste can connect, or install wtype/ydotool/xclip/wl-clipboard \
+                 xtest-type can connect, or install wtype/ydotool/xclip/wl-clipboard \
                  or enable the enigo-backend feature"
             )),
         },
@@ -249,13 +244,50 @@ pub fn copy_to_clipboard(text: &str) -> Result<&'static str> {
     ))
 }
 
-/// Native clipboard write via the in-process `arboard` crate. Works on
-/// any Wayland compositor that implements `wl_data_control_manager_v1`
-/// or `zwlr_data_control_manager_v1` (GNOME 42+, KDE Plasma 5.27+,
-/// wlroots, Hyprland) and on any X11 server. No external tools needed.
+/// Native clipboard write via the in-process `arboard` crate.
+///
+/// We hold **one** `arboard::Clipboard` handle for the lifetime of the
+/// process in a static `Mutex<Option<Clipboard>>`. This matters: on
+/// X11, the clipboard contents are served by a worker thread inside
+/// the `Clipboard` struct, and that thread exits when the handle is
+/// dropped. The pre-existing code created a fresh `Clipboard` per
+/// call and dropped it before returning, which released ownership of
+/// the X `CLIPBOARD` selection within microseconds. Hosts *without* an
+/// ICCCM clipboard manager (`CLIPBOARD_MANAGER` selection unowned —
+/// i3/sway/dwm with no clipit/parcellite/klipper running) then lost
+/// the dictation entirely, because no one else was around to take the
+/// contents over via `SAVE_TARGETS`. Hosts *with* a manager logged a
+/// `"Could not hand the clipboard contents over to the clipboard
+/// manager. The request timed out."` warning from arboard's `Drop`,
+/// and the manager's cached copy was racy too. The previous
+/// `XtestType` backend needs clipboard contents to *persist* past the
+/// `copy_to_clipboard` call.
+///
+/// Keeping a single handle alive sidesteps all of that: the worker
+/// thread serves every `ConvertSelection` request the focused app
+/// sends, for as long as fono runs, on every X server / Wayland
+/// compositor that arboard supports. Worker re-creation on set-text
+/// failure (e.g. X server restart) is automatic.
 fn copy_to_clipboard_native(text: &str) -> Result<()> {
-    let mut cb = arboard::Clipboard::new().map_err(|e| anyhow!("arboard init failed: {e}"))?;
-    cb.set_text(text.to_owned()).map_err(|e| anyhow!("arboard set_text failed: {e}"))?;
+    use std::sync::{Mutex, OnceLock};
+    static HANDLE: OnceLock<Mutex<Option<arboard::Clipboard>>> = OnceLock::new();
+    let slot = HANDLE.get_or_init(|| Mutex::new(None));
+    let mut guard = slot.lock().map_err(|_| anyhow!("arboard mutex poisoned"))?;
+    if guard.is_none() {
+        *guard = Some(arboard::Clipboard::new().map_err(|e| anyhow!("arboard init failed: {e}"))?);
+    }
+    // Unwrap is safe: we just set it if it was None.
+    let cb = guard.as_mut().expect("arboard handle just initialised");
+    let set_result = cb.set_text(text.to_owned());
+    if let Err(e) = set_result {
+        // Drop the stale handle so the next call recreates the X / Wayland
+        // connection cleanly (e.g. after the X server restarts or the
+        // Wayland compositor reconnects).
+        *guard = None;
+        drop(guard);
+        return Err(anyhow!("arboard set_text failed: {e}"));
+    }
+    drop(guard);
     Ok(())
 }
 
@@ -432,14 +464,14 @@ pub fn warm_backend() -> Result<&'static str> {
             Ok("xdotool")
         }
         #[cfg(feature = "x11-paste")]
-        Injector::XtestPaste => {
+        Injector::XtestType => {
             // Pre-warm the X connection so the first dictation doesn't
             // pay TCP/Unix-socket setup + XTEST QueryVersion roundtrip.
-            let _ = crate::xtest_paste::xtest_available();
-            Ok("xtest-paste")
+            let _ = crate::xtest_type::xtest_type_available();
+            Ok("xtest-type")
         }
         Injector::None => Err(anyhow!(
-            "no text-injection backend available — on X11 the built-in xtest-paste \
+            "no text-injection backend available — on X11 the built-in xtest-type \
              backend should work when DISPLAY is set; otherwise install \
              `wtype`/`ydotool`/`xdotool` on Linux, or enable the enigo-backend feature"
         )),

@@ -334,19 +334,6 @@ pub async fn report(paths: &Paths) -> Result<String> {
     }
     let injector = fono_inject::inject::Injector::detect();
     writeln!(out, "{} {injector:?}", head("Injector    :"))?;
-    // Show the configured XTEST paste shortcut so users can confirm
-    // it before reporting "doesn't paste in app X".
-    let shortcut_label = fono_inject::PasteShortcut::from_env_or_default().label();
-    let cfg_value = cfg
-        .as_ref()
-        .map(|c| c.inject.paste_shortcut.clone())
-        .unwrap_or_else(|| "shift-insert".into());
-    let env_value = std::env::var("FONO_PASTE_SHORTCUT").ok();
-    writeln!(
-        out,
-        "{} {shortcut_label} (config={cfg_value:?} env={env_value:?})",
-        head("Paste keys  :"),
-    )?;
     // Clipboard fallback — fono copies the cleaned text here when no
     // key-injection backend works, so the dictation is never lost.
     let mut clip_tools = Vec::new();
@@ -365,6 +352,42 @@ pub async fn report(paths: &Paths) -> Result<String> {
             clip_tools.join(", "),
             dim("(native arboard preferred)")
         )?;
+    }
+    // Probe for a clipboard manager. We check both the ICCCM
+    // `CLIPBOARD_MANAGER` selection owner *and* the running process
+    // list (clipit, parcellite, xfce4-clipman, klipper, copyq, gpaste,
+    // greenclip, diodon, clipmenud, cliphist) because not every
+    // manager implements the ICCCM handoff — clipit, for example, is
+    // a polling manager that watches the CLIPBOARD selection on a
+    // timer.
+    {
+        use fono_inject::ClipboardManager;
+        match fono_inject::detect_clipboard_manager() {
+            ClipboardManager::Icccm => writeln!(
+                out,
+                "{} {}",
+                head("Clip manager:"),
+                ok("present (owns CLIPBOARD_MANAGER selection)")
+            )?,
+            ClipboardManager::Polling(name) => writeln!(
+                out,
+                "{} {}",
+                head("Clip manager:"),
+                ok(&format!("present ({name}, polling — no CLIPBOARD_MANAGER selection)"))
+            )?,
+            ClipboardManager::None => writeln!(
+                out,
+                "{} {}\n  {}",
+                head("Clip manager:"),
+                dim("none detected"),
+                dim("Typing is unaffected — fono types directly via XTEST and never \
+                     touches the clipboard. The optional `also_copy_to_clipboard` path \
+                     keeps working while fono runs because the daemon holds one \
+                     persistent arboard handle. Clipboard contents are lost when fono \
+                     exits unless a manager (clipit / parcellite / xfce4-clipman / \
+                     klipper / copyq / gpaste / greenclip) is running.")
+            )?,
+        }
     }
     writeln!(
         out,
