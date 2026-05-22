@@ -101,10 +101,11 @@ pub fn build_stt(
         SttBackend::OpenAI => build_openai(cfg, secrets, languages, prompts, cloud_rerun),
         SttBackend::OpenRouter => build_openrouter(cfg, secrets, languages, prompts, cloud_rerun),
         SttBackend::Cartesia => build_cartesia(cfg, secrets, languages, prompts, cloud_rerun),
+        SttBackend::Deepgram => build_deepgram(cfg, secrets, languages, prompts, cloud_rerun),
         SttBackend::Wyoming => build_wyoming(cfg, secrets, languages),
         other => Err(anyhow!(
             "STT backend {other:?} is not yet implemented in this build; \
-             pick `groq`, `openai`, `openrouter`, `cartesia`, `wyoming`, or `local` \
+             pick `groq`, `openai`, `openrouter`, `cartesia`, `deepgram`, `wyoming`, or `local` \
              (rebuild with `--features whisper-local` for `local`)"
         )),
     }
@@ -340,6 +341,35 @@ fn build_cartesia(
     Err(anyhow!("Cartesia STT not compiled in (enable the `cartesia` feature on `fono-stt`)"))
 }
 
+#[cfg(feature = "deepgram")]
+fn build_deepgram(
+    cfg: &Stt,
+    secrets: &Secrets,
+    languages: Vec<String>,
+    prompts: std::collections::HashMap<String, String>,
+    cloud_rerun: bool,
+) -> Result<Arc<dyn SpeechToText>> {
+    let (key, model) = resolve_cloud(cfg, secrets, &SttBackend::Deepgram, "deepgram")?;
+    bootstrap_language_cache(&languages, crate::deepgram::BACKEND_KEY);
+    Ok(Arc::new(
+        crate::deepgram::DeepgramStt::with_model(key, model)
+            .with_languages(languages)
+            .with_prompts(prompts)
+            .with_cloud_rerun_on_mismatch(cloud_rerun),
+    ))
+}
+
+#[cfg(not(feature = "deepgram"))]
+fn build_deepgram(
+    _: &Stt,
+    _: &Secrets,
+    _: Vec<String>,
+    _: std::collections::HashMap<String, String>,
+    _: bool,
+) -> Result<Arc<dyn SpeechToText>> {
+    Err(anyhow!("Deepgram STT not compiled in (enable the `deepgram` feature on `fono-stt`)"))
+}
+
 #[cfg(feature = "wyoming")]
 fn build_wyoming(
     cfg: &Stt,
@@ -412,6 +442,10 @@ pub fn build_streaming_stt(
             let languages = effective_languages(cfg, general);
             build_groq_streaming(cfg, secrets, languages, prompts, cloud_rerun, cadence).map(Some)
         }
+        SttBackend::Deepgram if cloud_streaming => {
+            let languages = effective_languages(cfg, general);
+            build_deepgram_streaming(cfg, secrets, languages, cloud_rerun, cadence).map(Some)
+        }
         other => {
             // When live preview is off the user explicitly asked for
             // batch mode; calling that "a fallback" is misleading.
@@ -467,6 +501,44 @@ fn build_groq_streaming(
     Err(anyhow!(
         "Groq streaming STT requested but this binary was built without \
          the `groq` feature on `fono-stt`"
+    ))
+}
+
+#[cfg(all(feature = "streaming", feature = "deepgram"))]
+fn build_deepgram_streaming(
+    cfg: &Stt,
+    secrets: &Secrets,
+    languages: Vec<String>,
+    cloud_rerun: bool,
+    cadence: fono_core::config::PreviewCadence,
+) -> Result<Arc<dyn crate::streaming::StreamingStt>> {
+    let (key, model) = resolve_cloud(cfg, secrets, &SttBackend::Deepgram, "deepgram")?;
+    bootstrap_language_cache(&languages, crate::deepgram::BACKEND_KEY);
+    let cadence_opt = match cadence {
+        fono_core::config::PreviewCadence::Interval(ms) => {
+            Some(std::time::Duration::from_millis(u64::from(ms)))
+        }
+        fono_core::config::PreviewCadence::DisabledFinalizeOnly => None,
+    };
+    Ok(Arc::new(
+        crate::deepgram_streaming::DeepgramStreaming::new(key, model)
+            .with_languages(languages)
+            .with_cloud_rerun_on_mismatch(cloud_rerun)
+            .with_preview_cadence(cadence_opt),
+    ))
+}
+
+#[cfg(all(feature = "streaming", not(feature = "deepgram")))]
+fn build_deepgram_streaming(
+    _cfg: &Stt,
+    _secrets: &Secrets,
+    _languages: Vec<String>,
+    _cloud_rerun: bool,
+    _cadence: fono_core::config::PreviewCadence,
+) -> Result<Arc<dyn crate::streaming::StreamingStt>> {
+    Err(anyhow!(
+        "Deepgram streaming STT requested but this binary was built without \
+         the `deepgram` feature on `fono-stt`"
     ))
 }
 
@@ -571,6 +643,32 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "deepgram")]
+    #[test]
+    fn deepgram_cloud_optional_with_env_key() {
+        let cfg = SttCfg { backend: SttBackend::Deepgram, cloud: None, ..SttCfg::default() };
+        let general = fono_core::config::General::default();
+        let mut secrets = Secrets::default();
+        secrets.insert("DEEPGRAM_API_KEY", "dg-test");
+        let dir = std::path::PathBuf::from("/tmp");
+        let stt = build_stt(&cfg, &general, &secrets, &dir).expect("deepgram factory ok");
+        assert_eq!(stt.name(), "deepgram");
+    }
+
+    #[cfg(feature = "deepgram")]
+    #[test]
+    fn deepgram_missing_key_yields_clear_error() {
+        let cfg = SttCfg { backend: SttBackend::Deepgram, cloud: None, ..SttCfg::default() };
+        let general = fono_core::config::General::default();
+        let secrets = Secrets::default();
+        let dir = std::path::PathBuf::from("/tmp");
+        let err = build_stt(&cfg, &general, &secrets, &dir).err().unwrap().to_string();
+        assert!(
+            err.contains("DEEPGRAM_API_KEY") && err.contains("fono keys add"),
+            "error should mention env var and remediation: {err}"
+        );
+    }
+
     #[cfg(all(feature = "streaming", feature = "groq"))]
     #[test]
     fn build_streaming_stt_returns_none_when_live_preview_off() {
@@ -601,6 +699,21 @@ mod tests {
         let got =
             build_streaming_stt(&cfg, &general, true, &interactive, &secrets, &dir).expect("ok");
         assert!(got.is_some(), "live_preview=true should yield Some(GroqStreaming) for Groq");
+    }
+
+    #[cfg(all(feature = "streaming", feature = "deepgram"))]
+    #[test]
+    fn build_streaming_stt_returns_deepgram_when_live_preview_on() {
+        let cfg = SttCfg { backend: SttBackend::Deepgram, cloud: None, ..SttCfg::default() };
+        let general = fono_core::config::General::default();
+        let mut secrets = Secrets::default();
+        secrets.insert("DEEPGRAM_API_KEY", "dg-test");
+        let dir = std::path::PathBuf::from("/tmp");
+        let interactive = fono_core::config::Interactive::default();
+        let got =
+            build_streaming_stt(&cfg, &general, true, &interactive, &secrets, &dir).expect("ok");
+        assert!(got.is_some(), "live_preview=true should yield Some(DeepgramStreaming)");
+        assert_eq!(got.unwrap().name(), "deepgram");
     }
 
     #[cfg(all(feature = "streaming", feature = "whisper-local"))]

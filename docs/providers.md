@@ -182,6 +182,65 @@ fire on VAD boundaries, previews are disabled.
 
 Design + cost rationale: [ADR 0020](decisions/0020-groq-pseudo-stream.md).
 
+### Deepgram STT (Nova-3)
+
+Deepgram's `POST /v1/listen` endpoint at
+`https://api.deepgram.com/v1/listen` takes the raw audio as the
+request body (no multipart form). Fono uploads WAV — the same encoder
+shared with the Groq path — so the sample rate and channel count
+travel with the audio and we don't have to thread them through query
+parameters. Per-request settings (`model`, `language` or
+`language=multi`, `smart_format`, `punctuate`) go on the URL.
+
+```toml
+[stt]
+backend = "deepgram"
+
+[stt.cloud]
+provider = "deepgram"
+api_key_ref = "DEEPGRAM_API_KEY"
+model = "nova-3"   # or "nova-2" for broader multilingual coverage
+```
+
+Auth header gotcha: Deepgram uses `Authorization: Token <key>` —
+literally the word `Token`, **not** `Bearer`. A copy-paste from
+Groq / OpenAI will return 401 with no hint that the prefix is wrong.
+
+Language stickiness behaviour is the same as Groq: forced
+(`general.languages = ["en"]`) sends `language=en`; auto / allow-list
+sends `language=multi` and Fono post-validates the returned
+alpha-2 code against the allow-list. On a mismatch with
+`cloud_rerun_on_language_mismatch = true` (default), Fono runs one
+forced request per peer and picks the response with the highest
+top-alternative `confidence` (Deepgram's batch endpoint doesn't
+expose per-segment `avg_logprob`, so confidence is the tiebreak signal).
+
+Model menu:
+
+* `nova-3` (default) — production-default Deepgram model. Lowest
+  latency, best English WER. Multilingual matrix is smaller than
+  `nova-2`.
+* `nova-2` — broader multilingual coverage. Pin
+  `[stt.cloud].model = "nova-2"` when `general.languages` lists a
+  code Nova-3 doesn't cover at full quality.
+
+### Deepgram streaming dictation (WebSocket)
+
+Unlike Groq, Deepgram has a first-class realtime endpoint. With
+`[overlay].style = "transcript"` Fono opens a single
+`wss://api.deepgram.com/v1/listen` WebSocket per session and streams
+16 kHz s16le mono PCM as binary frames. Partial transcripts (`Results`
+with `is_final: false`) paint into the overlay at ~150 ms cadence;
+`is_final: true` finalize frames commit a segment. Deepgram's
+`UtteranceEnd` VAD event drives the same `SegmentBoundary` signal the
+local Whisper streaming path emits, so the overlay's "Pondering…" +
+auto-stop hook works without backend-specific code.
+
+Cost note: Deepgram bills by audio seconds processed, **not** per
+request. That makes the streaming path *cheaper* than Groq's
+pseudo-stream (which re-uploads the trailing window on every cadence
+tick) — opt in freely.
+
 ## polish
 
 | Backend            | Type         | Default model                 | API key env var        |

@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Deepgram STT.** `fono use stt deepgram` (or picking Deepgram in
+  `fono setup`) now wires both the batch `POST /v1/listen` endpoint
+  and a native WebSocket streaming client against
+  `wss://api.deepgram.com/v1/listen`. Before this slice the
+  catalogue, wizard, and secrets layer had advertised Deepgram STT
+  since v0.8.0 but the factory bailed out with "not yet implemented"
+  at runtime — picking Deepgram in the wizard silently configured the
+  user toward a daemon-startup failure. Default model is now
+  `nova-3` (was `nova-2`); `nova-2` remains available as an override
+  for users on a Nova-3-untrained language. The streaming path
+  paints partial transcripts at ~150 ms cadence when
+  `[overlay].style = "transcript"` is set; unlike Groq's
+  pseudo-stream this is a real WebSocket, so it bills by audio
+  seconds and is cheaper than Groq for the live-dictation flow. See
+  `plans/2026-05-23-deepgram-stt-nova-3-v1.md`.
+
 - **Cartesia STT.** `fono use stt cartesia` (or picking Cartesia in
   `fono setup`) now wires the batch transcription endpoint
   (`POST https://api.cartesia.ai/stt`) end-to-end; before this slice

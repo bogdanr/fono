@@ -16,6 +16,10 @@ pub mod streaming;
 
 #[cfg(feature = "cartesia")]
 pub mod cartesia;
+#[cfg(feature = "deepgram")]
+pub mod deepgram;
+#[cfg(all(feature = "deepgram", feature = "streaming"))]
+pub mod deepgram_streaming;
 #[cfg(feature = "groq")]
 pub mod groq;
 #[cfg(all(feature = "groq", feature = "streaming"))]

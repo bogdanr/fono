@@ -369,7 +369,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Real-time Nova STT and Aura voice TTS.",
         console_url: "https://console.deepgram.com/",
         key_env: "DEEPGRAM_API_KEY",
-        stt: Some(SttDefaults { model: "nova-2" }),
+        stt: Some(SttDefaults { model: "nova-3" }),
         polish: None,
         assistant: None,
         tts: Some(TtsDefaults {

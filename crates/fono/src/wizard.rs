@@ -1702,7 +1702,7 @@ async fn configure_cloud_stt(
     let (stt_backend, stt_key_name, stt_default_model) = match stt_idx {
         0 => (SttBackend::Groq, "GROQ_API_KEY", "whisper-large-v3-turbo"),
         1 => (SttBackend::OpenAI, "OPENAI_API_KEY", "whisper-1"),
-        2 => (SttBackend::Deepgram, "DEEPGRAM_API_KEY", "nova-2"),
+        2 => (SttBackend::Deepgram, "DEEPGRAM_API_KEY", "nova-3"),
         3 => (SttBackend::Cartesia, "CARTESIA_API_KEY", "ink-whisper"),
         _ => (SttBackend::AssemblyAI, "ASSEMBLYAI_API_KEY", "best"),
     };
