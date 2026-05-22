@@ -7,412 +7,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [0.8.1] — 2026-05-23
 
-- **Deepgram STT.** `fono use stt deepgram` (or picking Deepgram in
-  `fono setup`) now wires both the batch `POST /v1/listen` endpoint
-  and a native WebSocket streaming client against
-  `wss://api.deepgram.com/v1/listen`. Before this slice the
-  catalogue, wizard, and secrets layer had advertised Deepgram STT
-  since v0.8.0 but the factory bailed out with "not yet implemented"
-  at runtime — picking Deepgram in the wizard silently configured the
-  user toward a daemon-startup failure. Default model is now
-  `nova-3` (was `nova-2`); `nova-2` remains available as an override
-  for users on a Nova-3-untrained language. The streaming path
-  paints partial transcripts at ~150 ms cadence when
-  `[overlay].style = "transcript"` is set; unlike Groq's
-  pseudo-stream this is a real WebSocket, so it bills by audio
-  seconds and is cheaper than Groq for the live-dictation flow. See
-  `plans/2026-05-23-deepgram-stt-nova-3-v1.md`.
-
-- **Cartesia STT.** `fono use stt cartesia` (or picking Cartesia in
-  `fono setup`) now wires the batch transcription endpoint
-  (`POST https://api.cartesia.ai/stt`) end-to-end; before this slice
-  the catalogue and the wizard already routed to a `SttBackend::Cartesia`
-  but the factory bailed out with "not yet implemented" at runtime.
-  Phase 1 covers the `ink-whisper` family only — Cartesia's batch
-  endpoint refuses `ink-2` (`Must be in the ink-whisper family of
-  models`). Realtime `ink-2` over the turn-based WebSocket
-  (`wss://api.cartesia.ai/stt/turns/websocket`) is the Phase 2
-  streaming slice and will land separately. The catalogue's stale
-  default model id `sonic-transcribe` has been corrected to
-  `ink-whisper`; configs with an explicit `[stt.cloud].model` are
-  untouched. `cloud_rerun_on_language_mismatch` is captured but not
-  enforced — Cartesia returns no per-segment `avg_logprob` /
-  `no_speech_prob`, so the Whisper-style rerun and the silence-
-  hallucination filter are skipped and a one-shot warning is logged
-  on banned-language detections. See
-  `plans/2026-05-23-cartesia-stt-support-v2.md`.
-- **Cartesia TTS per-language voice routing.** The Cartesia TTS client
-  now resolves a native voice per configured language via
-  `GET /voices?language=<code>&limit=1`, cached for the process
-  lifetime. A Romanian utterance is read by a Romanian voice with
-  `language = "ro"` on the wire; an English utterance from the same
-  multilingual user gets a separate English voice — both sound native
-  rather than one voice forced across languages. Default model bumped
-  from `sonic-2` to `sonic-3.5`; pinning `tts.voice` in config still
-  wins over routing. Any lookup failure silently falls back to the
-  English catalogue voice so TTS never errors *because of* voice
-  routing. The required `Cartesia-Version` header is now pinned to
-  `2026-03-01` in both the synth client and the wizard's key-validation
-  probe.
-
-### Changed
-
-- **Pondering now follows auto-stop and works in live transcripts.**
-  Turning off "Auto-stop after pause" now also turns off the Pondering
-  overlay, and the Pondering label / auto-stop commit now fire during
-  live (streaming) dictation, not just the batch path.
-
-- **Pondering parity for the F8 assistant flow.** A long pause during
-  an assistant turn now shows the same "PONDERING" walking-letter
-  highlight (in the green assistant palette) and triggers the same
-  auto-stop commit as F7 dictation. Hold-to-talk users keep their
-  current behaviour: a new `KeyHeldFlags` pair in `fono-hotkey`
-  tracks the live press state of each role and the silence watch
-  suppresses both the visual flip and the commit while the key is
-  physically held. The fix also covers a latent F7 bug where holding
-  the dictation key while pausing would still flip the overlay to
-  PONDERING (and, with auto-stop on, end the session early) — the
-  hotkey listener emits `TogglePressed` immediately on every press
-  and the hold-vs-toggle distinction is decided retroactively at
-  release time, so `RecordingMode::Hold` was effectively dead code
-  on the keyboard path. Plan file:
-  `plans/2026-05-22-assistant-pondering-parity-v1.md`.
-
-### Removed
-
-- **Config simplification: 14 inert keys dropped.** The following
-  fields were never consumed at runtime and have been removed from the
-  schema: `general.always_warm_mic` (latency-plan L1 was never wired
-  in `fono-audio`), and all of `interactive.commit_use_prosody`,
-  `commit_prosody_extend_ms`, `commit_use_punctuation_hint`,
-  `commit_punct_extend_ms`, `commit_hold_on_filler`,
-  `commit_filler_words`, `commit_dangling_words`,
-  `eou_drain_extended_ms`, `eou_adaptive`, `resume_grace_ms`,
-  `budget_ceiling_per_minute_umicros`, `max_session_seconds`,
-  `max_session_cost_usd`. The boundary-heuristic defaults now live
-  exclusively in `crates/fono/src/live.rs` (`HeuristicConfig::default`)
-  with identical values, so runtime behaviour is unchanged. The
-  `Keep microphone always-on` tray-preferences checkbox is gone
-  alongside the field. The orphan `fono::live::budget_for` helper
-  was deleted with the budget knob.
+A quality-of-life release: two more cloud providers, polish on the
+"Pondering" pause UI, headless servers install themselves, and a handful
+of papercuts gone.
 
 ### Added
 
-- **`fono install --server` now auto-enables the Wyoming STT listener.**
-  Server-mode install previously left `[server.wyoming].enabled =
-  false` (the in-code default), so the daemon came up healthy but
-  port 10300 had nothing on it and LAN peers could not discover it.
-  The installer now seeds `/etc/fono/config.toml` (only when no
-  config exists) with `[server.wyoming] enabled = true, bind =
-  "0.0.0.0", port = 10300`, chowns it `root:fono 0640`, and
-  post-start probes `127.0.0.1:10300` via TCP to confirm the
-  listener actually bound. Existing operator configs are preserved
-  byte-for-byte. The install summary prints the bound address, a
-  security caveat ("Wyoming v1 has no in-band auth; bind = 0.0.0.0
-  exposes inference to the LAN"), and a hint to install a Whisper
-  model if `/var/lib/fono/models/` is empty. The dry-run preview
-  lists the new step. **`fono uninstall` in server mode now also
-  wipes `/var/cache/fono`** (reproducible model / hwcheck cache,
-  re-downloaded on next use), matching the desktop branch's
-  `~/.cache/fono` cleanup so multi-GB blobs don't linger after an
-  explicit uninstall.
-
-- **`fono install` auto-detects headless hosts.** Running `sudo fono
-  install` on a server (no graphical session, no display-manager unit,
-  no X11 / Wayland socket on disk, and either `systemctl get-default
-  = multi-user.target` or systemd absent entirely) now picks server
-  mode automatically and prints a one-line banner naming the trigger.
-  Workstations keep today's silent desktop default. A new `--desktop`
-  flag (mutually exclusive with `--server`) forces the desktop lane
-  on hosts that look headless; `--server` still forces the systemd
-  lane unconditionally. The `packaging/install.sh` curl-pipe wrapper
-  now passes `--desktop` explicitly when its own DISPLAY heuristic
-  fires, so the two layers never disagree.
-
-- **Auto-stop on silence is wired up.** When `[audio]
-  auto_stop_silence_ms > 0` and dictation is in toggle mode, the
-  silence-watch state machine now fires an actual stop after the
-  configured silence run length (5 s or 10 s via the tray preset).
-  The stop is observationally identical to the user pressing the
-  hotkey — same `HotkeyAction::TogglePressed` path, same overlay
-  transitions (`Pondering → Processing → Polishing`), same pipeline.
-  Hold-to-talk and assistant-hold paths are exempt by construction
-  (the silence-watch task only spawns in toggle mode). Commit
-  requires a speech preamble (state machine cannot fire from
-  `Armed`); silence alone never auto-stops a session that had no
-  speech.
+- **Deepgram speech-to-text now actually works.** Picking Deepgram in
+  `fono setup` (or running `fono use stt deepgram`) had been broken
+  since v0.8.0 — it offered the option but failed at startup. The full
+  pipeline is now wired: both the batch endpoint and a real WebSocket
+  for live dictation, with the newer **Nova-3** model as the default
+  (Nova-2 is still selectable for languages Nova-3 doesn't cover yet).
+- **Cartesia speech-to-text.** Same story — was advertised, now
+  delivered. Batch transcription via the `ink-whisper` family;
+  realtime `ink-2` will follow in a future release.
+- **Cartesia text-to-speech now picks a native voice per language.**
+  Speak Romanian, hear a Romanian voice; switch to English in the
+  same session, hear an English voice. No more one-voice-fits-all.
+- **Auto-stop on silence is now wired end-to-end.** If you enable
+  "Auto-stop after pause" in the tray, dictation actually stops once
+  you've been quiet for the configured time — previously the
+  PONDERING label appeared but nothing committed.
+- **`sudo fono install` is friendlier on servers.** Headless boxes
+  (no graphical session, multi-user systemd target) are now detected
+  and the systemd lane runs by default — no `--server` flag needed.
+  A new `--desktop` flag forces the desktop lane on hosts that just
+  *look* headless.
+- **Server installs auto-enable LAN sharing.** `fono install --server`
+  now turns on the Wyoming STT listener on port 10300 out of the box,
+  probes that it actually bound, and prints the address so other
+  machines on the LAN can discover it immediately. `fono uninstall`
+  on a server also cleans up `/var/cache/fono` (multi-GB model
+  blobs).
+- **A diagnostic VU bar.** `[overlay].volume_bar = "advanced"` paints
+  a dBFS-axis meter with reference ticks for your speaking level and
+  the silence threshold — useful for tuning auto-stop without
+  guesswork. The default simple bar is unchanged.
 
 ### Changed
 
-- **Tray auto-stop presets**: `Off / 0.8 s / 1.5 s / 3 s` →
-  `Off / 3 s / 5 s`. The old values were copied from chat-app
-  push-to-talk semantics and are wrong for prose dictation. The
-  new values came out of slice-2/3 dogfooding: 3 s is the tightest
-  realistic setting (just past sentence-end pauses), 5 s is the
-  comfortable default. Default stays `Off`; users opt in via the
-  tray submenu or
-  `~/.config/fono/config.toml`.
-- **`volume_bar = "advanced"`: dropped the white instantaneous-RMS dot.**
-  It was redundant — sitting at exactly the top of the moving fill bar,
-  conveying nothing the bar wasn't already showing. The two reference
-  ticks remain (green = voiced RMS reference, amber = silence threshold
-  at `voiced − 12 dB`).
-- **`volume_bar = "advanced"`: bar now reaches all the way to the top at
-  0 dBFS.** Previously the producer clamped values to
-  `WAVEFORM_AMPLITUDE_CEILING = 0.22` (≈ -13 dBFS), which capped the bar
-  at ~80 % of its height regardless of how loud the speaker. The
-  `OverlayCmd::GateMetrics` channel now carries raw linear RMS values
-  (renamed `inst_rms / voiced_rms / silence_rms`); the renderer maps
-  them through a fixed -60..0 dBFS log axis.
-- **`PONDERING` no longer flickers on single noisy frames during a
-  pause.** The state machine's `Pondering → Speaking` transition now
-  requires `speech_confirm_resume_ms` (default **200 ms** = 10 audio
-  frames) of contiguous voiced frames, matching the existing
-  `speech_confirm_arm_ms` gate on `Armed → Speaking`. A single breath,
-  chair creak, or mouse click during a real pause no longer snaps the
-  label back to `RECORDING` — typical impulse durations clear the
-  silence threshold for only ~80–120 ms, well below the new gate,
-  while real short words like "OK" sustain voiced energy for
-  ~250–350 ms (vowel tail) and resume cleanly.
-- **`voiced_rms` (the green reference tick) now uses an asymmetric
-  EMA: 200 ms attack, 3000 ms release.** Previously a symmetric
-  500 ms EMA caused the green tick to drift down toward the moving
-  fill within a couple of seconds of silence, which collapsed the
-  12 dB gap above the amber silence threshold and made `PONDERING`
-  flip back to `RECORDING` almost immediately. Asymmetric tracking
-  means the reference still catches up to your voice within a
-  syllable (200 ms attack) but holds across multi-second pauses
-  (3 s release tail), so the silence threshold stays anchored to
-  your real speaking level for the duration of a natural pause.
-
-### Breaking
-
-- **`[overlay] volume_bar` default changed from `Simple` to `Off`.** Fresh
-  configs (post-wizard or `Config::default()`) no longer enable the VU bar.
-  The tray's visualization switch now toggles it on automatically only for
-  the `Transcript` style; in every other style the bar starts hidden until
-  the user enables it manually in `config.toml`. Users who relied on the
-  previous default need `volume_bar = "simple"` in `~/.config/fono/config.toml`.
-
-- **`[overlay] volume_bar` changed from `bool` to enum
-  `"off" | "simple" | "advanced"`.** No migration shim. Existing
-  configs need a one-line edit:
-  - `volume_bar = true`  → `volume_bar = "simple"`
-  - `volume_bar = false` → `volume_bar = "off"`
-  `"advanced"` is a new diagnostic mode, only reachable by editing
-  `config.toml` (no tray surface). Slice 3 of
-  `plans/2026-05-22-fono-auto-stop-silence-v1.md`.
-
-### Changed
-
-- **`volume_bar = "advanced"` is now a true dBFS-axis meter.** Both the
-  level fill and the three annotation ticks map onto a fixed -60..0 dBFS
-  range (log scale) instead of the linear 0..1 fraction the simple bar
-  uses. Voiced speech (-15..-25 dBFS) lands in the top third; inter-word
-  silence (-45..-55 dBFS) lands in the bottom third — the instantaneous
-  white dot, the green voiced tick, and the amber silence tick are now
-  visually separated instead of clustered near the top. Ticks are also
-  drawn 2 px thick. Simple mode unchanged.
-- **`PONDERING` label.** The silence-watch indicator was rendered as
-  `Pondering...`; now `PONDERING` to match the all-caps `RECORDING`
-  baseline. The walking-letter highlight still traverses the 9 letters.
-- **Tray-driven visualization switch now live-applies `volume_bar`.** The
-  reload path was already pushing `set_waveform_style` to the running
-  overlay but had no matching `set_volume_bar` call, so the bar stuck
-  around on screen until the next process restart even after the tray
-  had written `Off` to disk. Fixed in `crates/fono/src/session.rs`.
-- **VU bar (`overlay.volume_bar`) now actually renders in every
-  visualisation style.** The renderer change alone wasn't enough —
-  the level pump in `crates/fono/src/session.rs::spawn_waveform_level_task`
-  only pushed levels in the `bars` branch. `oscilloscope`, `fft` and
-  `heatmap` now also push the windowed RMS, so `volume_bar = "simple"`
-  / `"advanced"` are honoured in every style. Transcript style is
-  unchanged — the live-streaming path was already pushing levels at
-  `session.rs:2193`.
-- **Tray "Visualization" submenu now also flips `[overlay] volume_bar`
-  to a sensible default.** Switching **to** `Transcript` sets
-  `volume_bar = "simple"`; switching to any other style sets
-  `volume_bar = "off"`. This is only the tray-driven default — a
-  manual `config.toml` edit (`volume_bar = "simple"` or
-  `"advanced"` with any visualisation) overrides it on next load.
-
-### Added
-
-- **`volume_bar = "advanced"` — diagnostic VU-bar flavour.** When
-  enabled, the right-side VU bar gains three live annotations from
-  the silence-watch envelope follower: a green tick at the recent
-  voiced-RMS reference, an amber tick at the silence threshold
-  (`voiced_rms − 12 dB`, i.e. the line the watchdog uses to decide
-  "silence has begun"), and a small white dot at the instantaneous
-  RMS. All three positions are computed on the same linear scale as
-  the bar fill, so they line up pixel-perfect with where the bar
-  would sit at each level. Pure visualisation: no behavioural
-  effect on capture / pondering / commit. Intended for tuning the
-  state machine while slice 4 (the actual auto-stop commit) is
-  still being designed.
-
-- **VU bar now paints during plain `Recording` and `Pondering`
-  overlay states** — previously gated to `LiveDictating` and the
-  assistant push-to-talk. The bar is still only drawn in text-style
-  overlay panels (transcript view); the waveform / oscilloscope /
-  heatmap / FFT panels are unchanged. Slice 3 of the same plan.
-
-- **"Pondering…" overlay state during long pauses (toggle dictation).**
-  A new `SilenceWatch` state machine in `fono-audio` follows the
-  envelope follower's `inst_rms` against `voiced_rms` (voice-relative,
-  not absolute dBFS) and flips the overlay from `Recording` to
-  `Pondering` after ~1 s of silence. The status label changes from
-  "RECORDING" to "Pondering…" with a single-letter highlight that
-  walks left-to-right across the word as the configured
-  `auto_stop_silence_ms` timer would tick down — after a 1 s plain
-  grace, the cursor moves through 9 letters until commit (or until
-  the user resumes speaking, which snaps the label back instantly).
-  Visual feedback only: the state machine does *not* auto-stop the
-  recording in this slice; the commit lands in slice 4. Hold-to-talk
-  and the assistant push-to-talk path are unaffected. Slice 2 of
-  `plans/2026-05-22-fono-auto-stop-silence-v1.md`.
+- **The "PONDERING" pause indicator is consistent everywhere.**
+  - It now shows up on the assistant flow (F8) too, in the green
+    assistant palette, with the same auto-stop behaviour as
+    dictation.
+  - It only appears when you've actually enabled auto-stop — no
+    more PONDERING under your finger if you've opted out.
+  - It works in live (streaming) dictation, not just batch.
+  - It doesn't flicker on a single breath, chair creak, or mouse
+    click during a real pause.
+- **Tray "Auto-stop after pause" presets** reworked from
+  `Off / 0.8 s / 1.5 s / 3 s` (chat-app numbers) to `Off / 3 s / 5 s`
+  (prose-dictation numbers). Default stays Off.
+- **Tray "Visualization" picker** now turns the VU bar on automatically
+  for the Transcript style and off for the others — sensible default,
+  still overridable from `config.toml`.
+- **`fono hwprobe` matches what the setup wizard actually picks.**
+  The recommendation table used to promise `large-v3-turbo` on
+  CPU-only boxes that the wizard would then quietly downgrade. Now
+  the report and the wizard agree.
+- **Hotkey reliability on Wayland.** Switching the overlay style from
+  the tray now takes effect on the very next hotkey press (no
+  restart). GNOME 47's portal hotkey rejection is detected upfront so
+  Fono falls back to gsettings/X11 instead of silently dropping
+  presses.
+- **Local Whisper picks better defaults out of the box.** Model names
+  now resolve through a quality-tested quantization ladder
+  (`tiny → q5_1`, `small → q5_1`, `small.en → q8_0`,
+  `large-v3-turbo → q8_0`); CPU threads default to the physical core
+  count, which doubles throughput on Zen 3 / Zen 4 SMT systems where
+  the previous default over-subscribed logical threads.
 
 ### Fixed
 
-- **mDNS-discovered Wyoming peers no longer pick IPv6 link-local
-  addresses.** The discovery browser previously took
-  `info.get_addresses().iter().next()` (a `HashSet<IpAddr>`,
-  non-deterministic order), so a server advertising both `192.168.0.74`
-  and `fe80::…` could surface the link-local address in the tray menu.
-  The Wyoming client then formatted it as `fe80::…:10300` without
-  brackets and `TcpStream::connect` returned `EINVAL (os error 22)`,
-  blocking dictation against any LAN peer that exposes a link-local
-  v6 alongside its routable v4. The discovery browser now prefers
-  IPv4 → non-link-local IPv6 → link-local IPv6 (last resort), and
-  the Wyoming client bracket-wraps IPv6 literals in `host:port`
-  strings before passing them to `to_socket_addrs`.
-
-- **Audio playback via `pw-play` now passes `--raw`.** Without it,
-  `pw-play` (a symlink to `pw-cat`) tries to parse stdin through
-  libsndfile, fails on our headerless int16 PCM stream, exits
-  early, and the assistant playback warned `paplay failed
-  error=writing PCM to pw-play` (EPIPE) on every utterance for
-  users on PipeWire systems. `paplay` (the legacy fallback)
-  already received `--raw`; the `pw-play` arm now matches.
-- **History DB now rebuilds itself when the schema is incompatible**
-  (e.g. carries the pre-rename `llm_backend` column). The
-  CREATE TABLE IF NOT EXISTS path silently skipped existing tables,
-  so users with a `history.sqlite` predating `ef557af` (the
-  `LlmBackend` -> `PolishBackend` rename, 2026-05-19) were hitting
-  `WARN history insert failed: sqlite error: table transcriptions
-  has no column named polish_backend` on every dictation.
-  `HistoryDb::migrate` now drops any pre-existing `transcriptions`
-  table that lacks `polish_backend` before recreating the schema.
-  Pre-release: no row-level migration; legacy rows are wiped.
-- **Wayland overlay no longer steals focus, displays as an opaque
-  rectangle, or lands top-left** on Mutter / GNOME (Ubuntu 24.04).
-  Root cause: the previous `winit` + `softbuffer` path hard-coded
-  `WL_SHM_FORMAT_XRGB8888` (so the compositor dropped the alpha
-  channel), drove the surface through `xdg_toplevel` with no
-  client-positioning hooks, and Mutter treats `xdg_toplevel`
-  surfaces as ordinary application windows (Alt+Tab, no
-  always-on-top, compositor-chosen placement). Replaced with a
-  pluggable backend layer (see below).
-
-### Changed
-
-- **Wayland hotkeys now self-bind via the `xdg-desktop-portal`
-  GlobalShortcuts interface** — one consent dialog at first launch,
-  no compositor configuration required on KDE Plasma 5.27+ / 6.x,
-  Hyprland, sway with `xdg-desktop-portal-wlr`, or GNOME 47+. On
-  **GNOME 46** (Ubuntu 24.04's default, whose `xdg-desktop-portal-gnome`
-  doesn't yet expose GlobalShortcuts) Fono automatically installs
-  gsettings custom-keybindings as a fallback (no long-press push-to-talk
-  on that path, but the toggle behaviour works). X11 / Xwayland sessions
-  keep the native `global-hotkey` listener. Set
-  `FONO_HOTKEY_BACKEND=portal|x11|disabled` to override the
-  auto-detection for diagnostics. `fono doctor` reports which
-  backend resolved and why.
-- **Overlay rewritten around a pluggable backend layer.** The
-  renderer (FFT / oscilloscope / heatmap / transcript / VU bar) is
-  unchanged but now hands pixels to one of three windowing backends
-  selected at runtime from `WAYLAND_DISPLAY` / `DISPLAY`:
-  * **`wlr-layer-shell`** — native panel protocol via
-    `smithay-client-toolkit`. Used on every wlroots-based compositor
-    plus KDE Plasma 5.27+, COSMIC, Wayfire, niri, labwc.
-    Bottom-centre anchored, ARGB transparency, empty input region
-    (clicks pass through), `keyboard_interactivity = None` (no focus
-    theft).
-  * **`x11-override-redirect`** — the original winit + softbuffer
-    path. Used on native X11 sessions and on Wayland sessions via
-    Xwayland (the GNOME / KDE-Wayland default), where Mutter honours
-    override-redirect placement and excludes the surface from
-    Alt+Tab.
-  * **`noop`** — silent terminal fallback so the daemon never aborts
-    on a missing display server.
-
-  On GNOME / Mutter the runtime selection picks the X11 backend
-  through Xwayland because Mutter does not implement
-  `zwlr_layer_shell_v1` and `xdg_toplevel` cannot deliver a usable
-  panel UX. Fractional HiDPI scaling renders cleanly via Xwayland.
-  Force a specific backend with
-  `FONO_OVERLAY_BACKEND={wlr,x11,noop}`; `fono doctor` reports the
-  selected backend + its capability summary.
-- **`winit` reduced to X11-only on Linux.** Workspace dep is now
-  `winit = { default-features = false, features = ["x11", "rwh_06"] }`;
-  winit's Wayland event-loop, SCTK transitive deps, and softbuffer's
-  Wayland buffers are no longer compiled into the binary. The native
-  Wayland backend uses `smithay-client-toolkit 0.19` +
-  `wayland-protocols-wlr 0.3` as direct deps of `fono-overlay`,
-  gated behind the `backend-wlr` cargo feature.
-
-### Changed
-
-- **Local STT model selection now routes through a quantization
-  ladder.** Per [ADR 0027](docs/decisions/0027-stt-quantization-ladder.md),
-  each user-facing model name resolves to one defaulted GGML
-  variant chosen by an accuracy-based acceptance rule
-  (English-only mean Δ ≤ +0.05 and max per-fixture Δ ≤ +0.20 vs
-  fp16, smallest passing wins). Defaults: `tiny`/`tiny.en` →
-  `q5_1` (31 MB), `small` → `q5_1` (182 MB), `small.en` → `q8_0`
-  (253 MB), `large-v3-turbo` → `q8_0` (834 MB).
-- **`[stt.local].quantization`** is a new config key:
-  `auto | fp16 | q8_0 | q5_1`. `auto` (default) honours the
-  registry default for the configured `model`; pinned values force
-  a specific quantization where the model ships it.
-- **`set_audio_ctx()`** is hard-coded on for clips < 30 s (+70–160 %
-  CPU batch RTF, no measurable quality regression). The
-  `FONO_WHISPER_AUDIO_CTX` env override now only works in debug
-  builds for ablation runs.
-- **Local STT thread default** switched to physical-core count
-  parsed from `/proc/cpuinfo`, clamped 1..=16. `FONO_WHISPER_THREADS`
-  override unchanged. Fixes ~2× throughput regression on Zen 3 /
-  Zen 4 SMT systems where the previous default used logical
-  threads.
-- **`fono models list`** now shows the default quantization per
-  model plus the installable alternatives inline; `install` /
-  `remove` operate on quantization variants.
-- **`docs/providers.md`** Whisper section rewritten around the new
-  3-rung ladder.
+- **Wayland overlay** no longer steals keyboard focus, paints as an
+  opaque rectangle, or lands top-left on GNOME / Mutter. The overlay
+  now runs through a pluggable backend layer: native
+  `wlr-layer-shell` on KDE / wlroots / COSMIC / Hyprland; X11 via
+  Xwayland on GNOME (which doesn't implement layer-shell). Set
+  `FONO_OVERLAY_BACKEND=…` to force a specific backend.
+- **PipeWire audio playback** (`pw-play`) no longer fails on every
+  assistant reply — the `--raw` flag was missing.
+- **LAN dictation against a Wyoming peer that advertises IPv6** no
+  longer fails with `EINVAL` when the peer's first-listed address is
+  a link-local. Discovery now prefers routable IPv4 / IPv6.
+- **History database** rebuilds itself when it carries an older
+  schema, instead of warning on every dictation.
+- **The dictation key held down** while pausing no longer flips the
+  overlay into PONDERING and (with auto-stop on) no longer ends the
+  session out from under you.
 
 ### Removed
 
-- `base` and `base.en` model entries — dominated by T2 (`small-q5_1`
-  / `small.en-q8_0`) on every reference host: strictly better
-  English-fixture accuracy at similar RTF for ~40 MB more disk.
-- `*-q5_0` variants — `large-v3-turbo-q5_0` broke
-  `en-conversational` (acc 0 → 0.354); `q5_1` is strictly better
-  whenever published.
-- `tiny-q8_0`, `tiny.en-q8_0`, `small-q8_0` (multilingual) — equal
-  quality to the kept variants at larger size.
-- No migration is provided: Fono is pre-release with no users to
-  break.
+- 14 inert config keys (the always-warm-mic flag, eight commit-tuning
+  knobs, three session-budget knobs, and two more) — all of them
+  were silently ignored at runtime. Defaults are unchanged.
 
-### Added
+### Breaking
 
-- **ADR 0027** records the acceptance rule, the ladder, and the
-  process change in `scripts/bench-accuracy.py` that surfaces
-  per-language Δ accuracy so multilingual regressions don't hide
-  behind the all-language mean.
-- **`plans/2026-05-19-stt-perf-pass-v1.md`** captures the tracked
-  work this entry implements.
+- **`[overlay].volume_bar` is now `"off" | "simple" | "advanced"`**
+  instead of a boolean, and defaults to `"off"`. Existing configs
+  need a one-line edit: `volume_bar = true` → `"simple"`,
+  `volume_bar = false` → `"off"`. The tray picker handles new
+  installs automatically.
 
 ## [0.8.0] — 2026-05-17
 
@@ -2304,7 +2003,8 @@ feature and ships fully wired in v0.2.
 - Local LLM cleanup (Qwen / SmolLM) is opt-in / preview.
 - Real `winit + softbuffer` overlay window is a stub (event channel only).
 
-[Unreleased]: https://github.com/bogdanr/fono/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/bogdanr/fono/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/bogdanr/fono/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/bogdanr/fono/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/bogdanr/fono/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/bogdanr/fono/compare/v0.6.1...v0.7.0

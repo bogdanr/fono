@@ -13,10 +13,10 @@ The home page is [fono.page](https://fono.page).
 
 | ![Up next](https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge) | ![On the horizon](https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge) | ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge) |
 |:---|:---|:---|
-| **[Automatic translation](#automatic-translation)**<br>Speak in any language, type in another — any pair, per-app rules, batch and live parity. | **[Hover-context injection](#hover-context-injection)** *(experimental)*<br>Terminal hovered → shell prompts. Code editor hovered → identifier casing. | **Wizard + multi-provider TTS rework**<br>Cloud setup collapses onto a single primary-provider picker; four new TTS backends (Groq, OpenRouter/Kokoro, Cartesia, Deepgram) plus opt-in assistant multimodal + web-search. ![v0.8.0](https://img.shields.io/badge/v0.8.0-blue?style=flat-square) |
-| **[Wake-word activation](#wake-word-activation)**<br>Say the magic word — Fono wakes and starts dictating. No hotkey, no hands. | **[REST API + MCP server](#local-rest-api--mcp-server)**<br>Scripts and AI coding assistants drive Fono over HTTP. | **Voice assistant**<br>F8 hold-to-talk: speak a question, hear the spoken reply through your speakers. Independent backend selection from cleanup, multi-turn rolling history, streaming sentence-by-sentence into TTS for low time-to-first-audio. ![v0.7.0](https://img.shields.io/badge/v0.7.0-blue?style=flat-square) |
-| | **[Better Wayland hotkeys](#better-wayland-hotkeys)**<br>Auto-register via the `GlobalShortcuts` portal when available. | **Audio-visualisation overlay**<br>Bars / oscilloscope / FFT / heatmap during batch recording, plus a right-side VU meter on the live-dictation panel. ![v0.6.0](https://img.shields.io/badge/v0.6.0-blue?style=flat-square) |
-| | **[macOS + Windows](#macos-and-windows)**<br>Native platform integrations. | **Hardware acceleration on tap + auto-variant update + self-installer**<br>Two release variants (CPU + Vulkan GPU); `fono update` auto-picks the right one. `fono install` puts the daemon on `$PATH` system-wide. ![v0.5.0](https://img.shields.io/badge/v0.5.0-blue?style=flat-square) |
+| **[Automatic translation](#automatic-translation)**<br>Speak in any language, type in another — any pair, per-app rules, batch and live parity. | **[Hover-context injection](#hover-context-injection)** *(experimental)*<br>Terminal hovered → shell prompts. Code editor hovered → identifier casing. | **Two more cloud providers, friendlier installs, polished pause UI**<br>Deepgram + Cartesia STT working end-to-end, Cartesia TTS speaks each language in a native voice, headless servers install themselves, and the PONDERING pause indicator is consistent everywhere. ![v0.8.1](https://img.shields.io/badge/v0.8.1-blue?style=flat-square) |
+| **[Wake-word activation](#wake-word-activation)**<br>Say the magic word — Fono wakes and starts dictating. No hotkey, no hands. | **[REST API + MCP server](#local-rest-api--mcp-server)**<br>Scripts and AI coding assistants drive Fono over HTTP. | **One-key cloud setup + live preview as a waveform style**<br>Pick a primary provider once and the wizard wires STT, polish, assistant, and TTS from a single key. Four new TTS backends; live transcription is now a tray-picker style. ![v0.8.0](https://img.shields.io/badge/v0.8.0-blue?style=flat-square) |
+| | **[Better Wayland hotkeys](#better-wayland-hotkeys)**<br>Auto-register via the `GlobalShortcuts` portal when available. | **Voice assistant**<br>Press F8, ask a question, hear the answer through your speakers. Multi-turn history, streaming sentence-by-sentence into TTS for fast first audio. ![v0.7.0](https://img.shields.io/badge/v0.7.0-blue?style=flat-square) |
+| | **[macOS + Windows](#macos-and-windows)**<br>Native platform integrations. | **Audio-visualisation overlay**<br>Bars, oscilloscope, FFT, or heatmap during recording, plus a right-side VU meter for live dictation. ![v0.6.0](https://img.shields.io/badge/v0.6.0-blue?style=flat-square) |
 
 ---
 
@@ -102,69 +102,75 @@ work (signing, CI, mirror).
 
 Newest first.
 
+- ![v0.8.1](https://img.shields.io/badge/v0.8.1-2026--05--23-blue?style=flat-square)
+  **Two more cloud providers, friendlier installs, and a polished
+  pause UI.** Deepgram and Cartesia speech-to-text are wired
+  end-to-end (both were advertised in v0.8.0 but failed at startup
+  if picked); Deepgram defaults to the newer Nova-3 model and streams
+  over a real WebSocket for live dictation. Cartesia text-to-speech
+  now picks a native voice per language — Romanian text reads in a
+  Romanian voice, English in an English one, automatically.
+
+  `sudo fono install` auto-detects headless servers (no graphical
+  session, multi-user systemd target) and picks the systemd lane
+  without `--server`; server installs also turn on the Wyoming STT
+  listener on port 10300 out of the box so other machines on the LAN
+  can use the box for dictation immediately. A new `--desktop` flag
+  forces the desktop lane on hosts that just *look* headless.
+
+  The PONDERING pause indicator is now consistent everywhere: it
+  shows up on the assistant flow (F8) in the assistant palette, it
+  works in live (streaming) dictation, it stays off if you've
+  disabled auto-stop, and it no longer flickers on a single breath
+  or mouse click. Auto-stop on silence now actually commits when the
+  timer expires (previously it only painted the label). The tray
+  presets moved from chat-app numbers (0.8 / 1.5 / 3 s) to
+  prose-dictation ones (3 / 5 s).
+
+  Smaller fixes: Wayland overlay no longer steals focus or paints
+  opaque on GNOME (now backed by a pluggable layer with native
+  `wlr-layer-shell` on KDE / wlroots / COSMIC / Hyprland);
+  PipeWire audio playback works on every assistant reply;
+  LAN dictation against IPv6-advertising Wyoming peers no longer
+  fails with `EINVAL`; the history database rebuilds itself if it
+  carries an older schema; `fono hwprobe` recommends the same model
+  the setup wizard would actually pick. Local Whisper picks better
+  defaults out of the box (quality-tested quantization ladder per
+  ADR 0027; CPU threads default to physical core count, doubling
+  throughput on Zen 3/4 SMT systems). 14 inert config keys were
+  removed. One small breaking change: `[overlay].volume_bar` is now
+  `"off" | "simple" | "advanced"` instead of a boolean.
+  *v0.8.1, 2026-05-23.*
+
 - ![v0.8.0](https://img.shields.io/badge/v0.8.0-2026--05--17-blue?style=flat-square)
-  **Wizard + multi-provider TTS rework, live preview as a waveform
-  style, and observability across the cloud stack.** Picking a primary
-  cloud provider (OpenAI, Groq, Anthropic, Cerebras, OpenRouter) now
-  configures STT, polish, the voice assistant, and TTS from a
-  single API-key prompt: the wizard reads a runtime capability
-  catalogue (`fono_core::provider_catalog::CLOUD_PROVIDERS`) and only
-  asks an opt-in follow-up for capabilities the primary doesn't
-  cover. Picking OpenAI or Groq gets you the full stack from one
-  key. The wizard's *Mixed* branch is renamed *Customize each
-  capability (advanced)*; re-running it silently reuses keys already
-  in `secrets.toml` instead of re-asking. Four new TTS backends ship
-  alongside OpenAI and Wyoming — Groq (Orpheus
-  `canopylabs/orpheus-v1-english`), OpenRouter (OpenAI Mini TTS,
-  multilingual), Cartesia (`sonic-2`), and Deepgram
-  (`aura-2-thalia-en`) — so users on a non-OpenAI primary can run
-  the full record → STT → polish → TTS loop without obtaining a second
-  key. Two opt-in assistant extras surface in the wizard when
-  supported: `prefer_vision` swaps in the provider's multimodal chat
-  model (OpenAI / Anthropic / Groq / Gemini), and
-  `prefer_web_search` attaches the provider's native web-search tool
-  (Anthropic Messages today; OpenAI Responses-API migration tracked
-  separately). Hotkeys now auto-detect toggle vs push-to-talk per
-  press — a short tap toggles, holding for ≥ 1 s is push-to-talk —
-  and `[hotkeys].mode` is gone.
+  **One-key cloud setup, live preview as a waveform style, and full
+  observability across cloud pipelines.** Picking a primary provider
+  (OpenAI, Groq, Anthropic, Cerebras, OpenRouter) wires STT, polish,
+  assistant, and TTS from a single API-key prompt — the wizard only
+  asks for extra keys when the primary doesn't cover something. Four
+  new TTS backends (Groq Orpheus, OpenRouter Mini TTS, Cartesia,
+  Deepgram) join OpenAI and Wyoming, so users on a non-OpenAI primary
+  can run the whole record → STT → polish → TTS loop with one key.
+  Opt-in assistant extras in the wizard: vision-capable chat models
+  and native web-search where the provider supports it.
 
-  Live transcription is now the fifth entry in the tray's waveform-
-  style picker (`Bars | Oscilloscope | Fft (default) | Heatmap |
-  Transcript (live preview — more CPU / tokens)`); picking it both
-  swaps the overlay renderer to streaming text *and* routes the
-  dictation hotkey through the live pipeline, fixing a long-running
-  bug where the old `[interactive].enabled` flag only affected the
-  assistant. Local STT/polish polish phases now reuse the assistant's
-  per-style thinking animations so the "POLISHING" panel is no
-  longer a 1–3 s dead patch.
+  Live transcription becomes the fifth entry in the tray's
+  Visualization picker (`Bars | Oscilloscope | Fft | Heatmap |
+  Transcript`); picking it both swaps the overlay to streaming text
+  *and* routes the dictation hotkey through the live pipeline,
+  fixing a long-running bug where live preview only worked for the
+  assistant. Hotkeys auto-detect toggle vs push-to-talk per press —
+  short tap toggles, hold for 1 s is push-to-talk.
 
-  Observability + onboarding: every cloud-backed pipeline (STT, polish
-  cleanup, assistant chat, TTS, wizard key validation) is wired
-  through the new `fono-http` crate with a per-stage stopwatch,
-  inter-chunk body watchdog, and structured `fono.http=debug` schema
-  (provider, endpoint, status, headers_ms, ttfb_ms, body_ms,
-  body_bytes, chunks, request_id). Stalled bodies surface in 15-30 s
-  instead of waiting for the 60 s reqwest timeout, and TTS auto-
-  retries once on upstream proxy stalls. OpenRouter app attribution
-  (`HTTP-Referer: https://fono.page`, `X-OpenRouter-Title: Fono`)
-  fires on every outbound request so Fono appears on
-  openrouter.ai/rankings. `fono doctor` is now colorized, prints the
-  last 10 log lines, has a `--follow` tail mode, and reports
-  `live preview : enabled/disabled (style=…, mode=…)`. All fono
-  processes log to a unified `/var/log/fono.log` (world-writable,
-  pre-created by `fono install`). `fono setup` hot-reloads the
-  running daemon over IPC instead of requiring a restart. Desktop
-  notifications now fire on critical pipeline failures, missing API
-  keys, terms-acceptance prompts, and daemon-startup failures, with
-  a per-session cascade cap so a single root cause (e.g. a rotated
-  key) pops exactly one notification. `sudo fono install` (and the
-  `curl … | sh` one-liner) now starts the daemon in the background
-  as the invoking user and walks them through `fono setup` in the
-  same terminal; the tray's left-click is contextual (nudge to setup
-  vs. hotkey cheat sheet). A new `scripts/capture-overlay.sh` ships
-  for reproducible README screencasts (overlay-only, paste-into-app,
-  4-style gallery — all encoded to MP4 + GIF + WebP). Closes issues
-  #8, #9, #11. *v0.8.0, 2026-05-17.*
+  Every cloud request now flows through a new HTTP layer with a
+  per-stage stopwatch and stall watchdog, so a hung TTS upload
+  surfaces in 15–30 s instead of waiting for a 60 s timeout. `fono
+  doctor` is colorized with a tail mode; `sudo fono install` (and
+  the `curl … | sh` one-liner) now walks the user through `fono
+  setup` in the same terminal. Desktop notifications cover the
+  important failure modes (missing key, daemon crash) with a
+  per-session cap so one root cause doesn't spam you. Closes
+  issues #8, #9, #11. *v0.8.0, 2026-05-17.*
 
 - ![v0.7.1](https://img.shields.io/badge/v0.7.1-2026--05--05-blue?style=flat-square)
   **Default hotkeys overhauled.** Dictation collapses from F8/F9
@@ -181,62 +187,43 @@ Newest first.
   "hold"`).
 
 - ![v0.7.0](https://img.shields.io/badge/v0.7.0-2026--05--04-blue?style=flat-square)
-  **Voice assistant.** A second push-to-talk key (F10 by default)
-  turns Fono into an offline-capable voice assistant. The pipeline
-  diverges after STT: instead of cleaning the transcript and
-  injecting it into the focused window, Fono asks a chat-capable
-  LLM, streams the reply sentence-by-sentence into a TTS backend,
-  and plays the audio through the speakers — first sentence
-  starts speaking before the model finishes generating, so
-  time-to-first-audio is bounded by one sentence's synth latency
-  rather than the full reply.
+  **Voice assistant.** A second hotkey turns Fono into a voice
+  assistant: speak a question, hear the answer through your speakers.
+  Fono streams the reply sentence-by-sentence into the text-to-speech
+  backend, so the first sentence starts speaking before the model
+  finishes generating — you don't wait for the full reply.
 
-  The assistant runs on its own `[assistant]` block with a
-  separate model selection from `[polish]` — pick a fast local 3B
-  for cleanup and a bigger cloud model for the assistant, or any
-  mix-and-match. Multi-turn rolling history is preserved within
-  a configurable time window (default 5 minutes). Pressing the
-  dictation key clears the assistant context (configurable);
-  pressing F10 again mid-reply barges in with history retained;
-  Escape stops playback ("shut up") without forgetting.
+  Multi-turn rolling history is preserved across questions (default
+  5-minute window). Pressing the dictation key clears the assistant's
+  memory; pressing the assistant key again mid-reply barges in with
+  history retained; Escape stops playback without forgetting. The
+  assistant runs on its own configuration block with independent
+  model selection from cleanup — mix a fast local 3B for cleanup with
+  a bigger cloud model for the assistant, or any other combination.
 
-  TTS supports Wyoming protocol (any `wyoming-piper` server on
-  the LAN), the OpenAI `/v1/audio/speech` API, and an in-process
-  Piper stub that points users at Wyoming-piper for now (the
-  static-musl ship build can't yet pull in onnxruntime). Chat
-  supports Anthropic and the full OpenAI-compatible family
-  (OpenAI, Cerebras, Groq, OpenRouter, Ollama). Audio playback
-  on Linux release uses `paplay` (no libasound link), or cpal
-  behind the existing `cpal-backend` feature.
-
-  CLI: `fono use assistant <backend>`, `fono use tts <backend>
-  [--uri ...]`, and `fono assistant {press,release,stop}` for
-  scripted end-to-end testing. The tray gains *Stop assistant*
-  and *Forget conversation* entries; `fono doctor` exercises
-  both factories at startup so a missing API key or unreachable
-  Wyoming server surfaces in one place.
+  Text-to-speech supports the Wyoming protocol (any
+  `wyoming-piper` server on the LAN) and the OpenAI
+  `/v1/audio/speech` API. Chat supports Anthropic and the full
+  OpenAI-compatible family (OpenAI, Cerebras, Groq, OpenRouter,
+  Ollama). Audio playback on Linux uses `paplay`. `fono doctor`
+  exercises both factories at startup so a missing API key or
+  unreachable Wyoming server surfaces in one place.
 
 - ![v0.6.1](https://img.shields.io/badge/v0.6.1-2026--05--03-blue?style=flat-square)
-  **Headless / systemd robustness.** Fono now starts cleanly on a
-  headless inference box with no `DISPLAY` and no TTY: the Vulkan
-  probe runs in a disposable subprocess (so a broken ICD can't
-  segfault the daemon on shutdown), the global-hotkey listener is
-  skipped when no graphical session is present, and the implicit
-  first-run wizard falls back to `Config::default()` instead of
-  crash-looping under systemd. `sudo fono install` verifies the
-  unit actually came up and dumps the last 20 journal lines on
-  failure, so a misconfigured install no longer fails silently.
-  The redundant `daemon --no-tray` flag is gone; CLI clients try
-  the system-wide IPC socket first, so the daemon under
-  `fono.service` is drivable from any user account on the box.
-  LAN discovery on the hardened systemd unit is also fixed: the
-  `RestrictAddressFamilies=` allow-list now includes `AF_NETLINK`
-  so `mdns-sd` can enumerate interfaces, bind UDP/5353, and join
-  the multicast group — `fono discover` from another host on the
-  segment now sees the server.
-  The audio-visualisation overlay (`[overlay].waveform`) is now
-  on by default; the legacy start/stop chime path is removed in
-  favour of the visual feedback shipped in v0.6.0.
+  **Headless and systemd robustness.** Fono now starts cleanly on a
+  headless inference box with no display and no terminal: the GPU
+  probe runs in a subprocess so a broken graphics driver can't take
+  the daemon down, the hotkey listener is skipped when there's no
+  graphical session, and the first-run wizard falls back to safe
+  defaults instead of crash-looping under systemd. `sudo fono
+  install` verifies the unit actually came up and prints recent logs
+  on failure, so a misconfigured install no longer fails silently.
+  CLI clients prefer the system-wide socket first, so the daemon
+  installed under `fono.service` is reachable from any user on the
+  box. LAN discovery on the hardened systemd unit is fixed (the
+  service was previously blocking mDNS at the syscall layer). The
+  audio-visualisation overlay is on by default; the old start/stop
+  chime is gone in favour of the visual feedback shipped in v0.6.0.
 
 - ![v0.6.0](https://img.shields.io/badge/v0.6.0-2026--05--03-blue?style=flat-square)
   **Audio-visualisation overlay + live-dictation VU bar.** A new
@@ -413,4 +400,5 @@ Newest first.
 [v0.6.1]: https://github.com/bogdanr/fono/releases/tag/v0.6.1
 [v0.7.0]: https://github.com/bogdanr/fono/releases/tag/v0.7.0
 [v0.7.1]: https://github.com/bogdanr/fono/releases/tag/v0.7.1
+[v0.8.1]: https://github.com/bogdanr/fono/releases/tag/v0.8.1
 [v0.8.0]: https://github.com/bogdanr/fono/releases/tag/v0.8.0
