@@ -249,6 +249,46 @@
       "skip_reason": "capability",
       "synthetic_placeholder": false,
       "verdict": "skipped"
+    },
+    {
+      "fixture": "ro-bogdan-10s",
+      "language": "ro",
+      "metrics": {
+        "stt_accuracy_levenshtein": null,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": ""
+        },
+        "streaming": null
+      },
+      "note": "model local:tiny.en is English-only; fixture language is ro",
+      "skip_reason": "capability",
+      "synthetic_placeholder": false,
+      "verdict": "skipped"
+    },
+    {
+      "fixture": "ro-bogdan-30s",
+      "language": "ro",
+      "metrics": {
+        "stt_accuracy_levenshtein": null,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": ""
+        },
+        "streaming": null
+      },
+      "note": "model local:tiny.en is English-only; fixture language is ro",
+      "skip_reason": "capability",
+      "synthetic_placeholder": false,
+      "verdict": "skipped"
     }
   ],
   "stt_backend": "local:tiny.en",

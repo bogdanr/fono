@@ -1001,44 +1001,140 @@ fn read_wav_mono_f32(path: &std::path::Path) -> Result<(Vec<f32>, u32)> {
 // ---------------------------------------------------------------------
 // `fono hwprobe` — print the hardware snapshot + recommended local tier.
 // ---------------------------------------------------------------------
+
+/// Recommendation surfaced by `fono hwprobe`. Computed by replaying the
+/// wizard's shortlist logic (`build_local_stt_shortlist`) against this
+/// host's snapshot so the report agrees with the model the wizard would
+/// actually pick — not the static tier→model lookup table, which doesn't
+/// know about per-model affordability.
+struct HwprobeRecommendation {
+    model: &'static str,
+    affordability: fono_core::hwcheck::Affordability,
+    accuracy: crate::wizard::AccuracyBucket,
+}
+
+fn compute_hwprobe_recommendation(
+    paths: &Paths,
+    snap: &fono_core::HardwareSnapshot,
+) -> Option<HwprobeRecommendation> {
+    // Pull configured languages if a config exists so the recommendation
+    // matches the wizard's accuracy ranking for this user's selection.
+    // Fall back to OS-detected locales, then to an empty list (which
+    // makes `accuracy_for_langs` score against English WERs).
+    let langs: Vec<String> = Config::load(&paths.config_file())
+        .ok()
+        .map(|c| c.general.languages)
+        .filter(|l| !l.is_empty())
+        .unwrap_or_else(|| {
+            fono_core::locale::detect_user_languages_ranked().into_iter().map(|d| d.code).collect()
+        });
+    let english_only = !langs.is_empty() && langs.iter().all(|l| l == "en");
+    let shortlist = crate::wizard::build_local_stt_shortlist(english_only, &langs, snap);
+    shortlist.into_iter().next().map(|e| HwprobeRecommendation {
+        model: e.model.name,
+        affordability: e.affordability,
+        accuracy: e.accuracy,
+    })
+}
+
+fn affordability_label(aff: fono_core::hwcheck::Affordability) -> &'static str {
+    use fono_core::hwcheck::Affordability;
+    match aff {
+        Affordability::Comfortable => "comfortable",
+        Affordability::Borderline => "borderline (live mode may lag)",
+        Affordability::Unsuitable => "unsuitable",
+    }
+}
+
+fn accuracy_label(acc: crate::wizard::AccuracyBucket) -> &'static str {
+    use crate::wizard::AccuracyBucket;
+    match acc {
+        AccuracyBucket::Excellent => "excellent",
+        AccuracyBucket::Good => "good",
+        AccuracyBucket::Acceptable => "acceptable",
+        AccuracyBucket::Inaccurate => "inaccurate",
+        AccuracyBucket::Unknown => "untested",
+    }
+}
+
 fn hwprobe_cmd(paths: &Paths, json: bool) {
-    use fono_core::hwcheck;
+    use fono_core::{hwcheck, vulkan_probe};
     let snap = hwcheck::probe(&paths.cache_dir);
     let tier = snap.tier();
+    let rec = compute_hwprobe_recommendation(paths, &snap);
+    // Reuse the same Vulkan probe the update / tray flow does (loads
+    // libvulkan.so.1 in a subprocess and enumerates physical devices).
+    // The result is cached for the lifetime of the process, so calling
+    // it here costs nothing if the daemon already probed at startup.
+    let vulkan = vulkan_probe::probe();
+    let vulkan_usable = vulkan.is_usable();
+    // Suggest an accelerated build only when (a) this is the CPU-only
+    // ship and (b) the host has a usable Vulkan device. Matches the
+    // logic that lights up the tray's "Update for GPU acceleration"
+    // entry (`fono_update::desired_asset_prefix`).
+    let suggest_vulkan_upgrade =
+        crate::variant::VARIANT == crate::variant::Variant::Cpu && vulkan_usable;
     if json {
+        let vulkan_devices = match &vulkan {
+            vulkan_probe::Outcome::Available { devices } => devices.clone(),
+            vulkan_probe::Outcome::NotAvailable { .. } => Vec::new(),
+        };
         let v = serde_json::json!({
             "snapshot": snap,
             "tier": tier.as_str(),
-            "default_whisper_model": tier.default_whisper_model(),
+            "default_whisper_model": rec.as_ref().map_or(tier.default_whisper_model(), |r| r.model),
+            "recommendation": rec.as_ref().map(|r| serde_json::json!({
+                "model": r.model,
+                "affordability": affordability_label(r.affordability),
+                "accuracy": accuracy_label(r.accuracy),
+            })),
             "local_default": tier.local_default(),
+            "variant": crate::variant::VARIANT.label(),
+            "accelerated": snap.accelerated(),
+            "vulkan_available": vulkan_usable,
+            "vulkan_devices": vulkan_devices,
+            "suggest_vulkan_upgrade": suggest_vulkan_upgrade,
             "suitability": match snap.suitability() {
                 Ok(()) => serde_json::Value::Null,
                 Err(reason) => serde_json::Value::String(reason.to_string()),
             },
         });
         println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+        return;
+    }
+    let ram_gb = snap.total_ram_bytes / (1024 * 1024 * 1024);
+    let disk_gb = snap.free_disk_bytes / (1024 * 1024 * 1024);
+    let isa = if snap.cpu_features.avx2 {
+        "AVX2"
+    } else if snap.cpu_features.neon {
+        "NEON"
     } else {
-        let ram_gb = snap.total_ram_bytes / (1024 * 1024 * 1024);
-        let disk_gb = snap.free_disk_bytes / (1024 * 1024 * 1024);
-        let isa = if snap.cpu_features.avx2 {
-            "AVX2"
-        } else if snap.cpu_features.neon {
-            "NEON"
-        } else {
-            "no-vec"
-        };
+        "no-vec"
+    };
+    println!("cores : {} physical / {} logical  ({isa})", snap.physical_cores, snap.logical_cores);
+    println!("ram   : {ram_gb} GB total · disk free : {disk_gb} GB · {}/{}", snap.os, snap.arch);
+    match &rec {
+        Some(r) => println!(
+            "tier  : {} (recommends whisper-{} — {}, accuracy: {})",
+            tier.as_str(),
+            r.model,
+            affordability_label(r.affordability),
+            accuracy_label(r.accuracy),
+        ),
+        None => println!(
+            "tier  : {} (no local model fits this host — cloud STT recommended)",
+            tier.as_str(),
+        ),
+    }
+    println!("build : {} ({})", crate::variant::VARIANT.label(), vulkan.summary_line());
+    if let Err(reason) = snap.suitability() {
+        println!("note  : unsuitable for local — {reason}");
+    }
+    if suggest_vulkan_upgrade {
         println!(
-            "cores : {} physical / {} logical  ({isa})",
-            snap.physical_cores, snap.logical_cores
+            "accel : GPU detected but this is the CPU-only build. \
+             Run `fono update` to switch to the GPU fono build."
         );
-        println!(
-            "ram   : {ram_gb} GB total · disk free : {disk_gb} GB · {}/{}",
-            snap.os, snap.arch
-        );
-        println!("tier  : {} (recommends whisper-{})", tier.as_str(), tier.default_whisper_model());
-        if let Err(reason) = snap.suitability() {
-            println!("note  : unsuitable for local — {reason}");
-        }
     }
 }
 
