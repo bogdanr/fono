@@ -1,5 +1,7 @@
 # Make live transcript preview the 5th overlay visualisation style
 
+## Status: Completed
+
 ## Objective
 
 Add `Transcript` to `WaveformStyle` so the overlay style picker has

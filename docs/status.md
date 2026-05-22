@@ -2,6 +2,50 @@
 
 Last updated: 2026-05-22
 
+## 2026-05-22 — Assistant Pondering parity + key-held suppression
+
+Brought the F7 Pondering UX to the F8 assistant flow so a long pause
+during an assistant turn now shows the same "PONDERING" walking-letter
+highlight (in the green assistant palette) and triggers the same
+auto-stop commit as dictation. Hold-to-talk users are unaffected: the
+silence-watch task consults a new `KeyHeldFlags` pair in
+`fono-hotkey` and suppresses both the overlay flip and the auto-stop
+emit while the key is physically held. This also fixes a latent bug
+where F7 hold-and-pause showed PONDERING and committed because the
+listener always emits `TogglePressed` on press (hold-vs-toggle is
+decided retroactively on release) — the FSM's `RecordingMode::Hold`
+was effectively dead code on the keyboard path. Plan file:
+`plans/2026-05-22-assistant-pondering-parity-v1.md`.
+
+### What landed
+
+- **`KeyHeldFlags { dictation, assistant }`** in
+  `crates/fono-hotkey/src/lib.rs` — pair of `Arc<AtomicBool>` flipped
+  inside the listener's `map_event` (and the portal backend) on every
+  `Pressed`/`Released`/`CancelPressed`. Re-exported from the crate
+  root and threaded into `SessionOrchestrator` via `daemon.rs`.
+- **`SilenceWatchFlavor { Dictation, Assistant { auto_stop_commit } }`**
+  inside `crates/fono/src/session.rs` parameterises the existing
+  `spawn_silence_watch_task` so the dictation call stays a one-line
+  wrapper while the assistant paths get their own overlay-state
+  constructor (`AssistantPondering`), their own held-flag, and an
+  optional `HotkeyAction::AssistantPressed` on commit.
+- **`OverlayState::AssistantPondering { db, walk_progress }`** in
+  `crates/fono-overlay/src/lib.rs` plus matching dispatch in
+  `renderer.rs` (`accent_color`, `state_label`, `state_has_vu_bar`,
+  walking-letter draw, waveform draw) — green palette + "PONDERING"
+  label so the user keeps the dictation-vs-assistant colour contract.
+- **Shadow `RecordingBuffer` for the streaming assistant path** in
+  `build_live_capture_pipeline`: the drain task now feeds a small
+  shared buffer that the silence watch consumes, mirroring the batch
+  path's data flow. `LiveCaptureSession` gained a `silence_task`
+  field aborted in all four teardown sites.
+- **Auto-stop commits in both assistant paths** (batch +
+  streaming) with `auto_stop_commit: true`. The held-flag gate is the
+  single source of truth for "is the user still holding F8?", so
+  hold-to-talk releases run as before while quick-tap toggle
+  sessions get the same "stop when you stop talking" behaviour as F7.
+
 ## 2026-05-22 — Config simplification: 14 inert keys removed
 
 A workspace-wide audit of `fono_core::config` found that 14 fields

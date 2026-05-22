@@ -1,11 +1,14 @@
 # Live (interactive) dictation
 
-> **Status:** Slice A — record-then-replay. The streaming decoder, the
-> two-lane preview/finalize architecture, the live overlay, and the
-> equivalence harness all land in Slice A. The realtime cpal-callback
-> push (so the overlay paints text **while** you speak) lands in
-> Slice B. See `docs/decisions/0009-interactive-live-dictation.md` for
-> the full design rationale.
+> **Status:** Shipped in the default build. Realtime push, the
+> two-lane preview/finalize pipeline, the live overlay, and the
+> equivalence harness are all in place; the preview pane paints
+> *while* you speak. A handful of internal quality knobs
+> (punctuation-extend wiring, adaptive end-of-utterance drain) remain
+> informational-only today — they are detected and reported on the
+> tracing span but don't yet feed back into capture timing. See
+> `docs/decisions/0009-interactive-live-dictation.md` for the full
+> design rationale.
 
 ## What live mode is
 
@@ -20,60 +23,55 @@ two kinds of `TranscriptUpdate`:
   Committed to history, never overwritten.
 
 The full transcript the user sees is the concatenation of every
-`Finalize` update, in segment order. The cleaned-up version (polish) runs once at end on the assembled text and is what gets
-typed into the focused window.
+`Finalize` update, in segment order. After the hotkey releases, the
+polish pass runs once on the assembled text and the cleaned result is
+what gets typed into the focused window.
 
-## Slice A limitations (read this before you file a bug)
+## Known limitations
 
-- **Record-then-replay.** Live mode currently captures all PCM first,
-  then replays it through the streaming pipeline. The preview pane
-  paints *after* you release the hotkey, not while you speak. Slice
-  B turns on the realtime push.
-- **Slim builds need a rebuild.** Live code is gated behind the
-  `interactive` cargo feature so the default slim build stays slim
-  (no streaming code, no broadcast channels, no extra deps). To use
-  live mode you currently need a build with the feature compiled in:
-
-  ```bash
-  cargo build --release --features tray,interactive
-  ```
-
-  A future release will ship `interactive` in the default feature set
-  once the realtime push lands.
-- **Local STT only.** Slice A wires whisper.cpp's streaming lane.
-  Cloud streaming (Groq, OpenAI realtime, Deepgram, AssemblyAI) lands
-  in Slice B alongside the equivalence harness's cloud rows.
-- **polish is not streamed.** It runs once on the full
-  transcript after the hotkey releases. This is a deliberate design
-  decision — see ADR 0009 §4.
+- **Polish is not streamed.** It runs once on the full transcript
+  after the hotkey releases — a deliberate design decision (ADR 0009
+  §4). The cleaned text is what gets injected; previews shown during
+  speech are raw STT.
+- **Punctuation-extend and adaptive-EOU drain are informational.**
+  The heuristics are computed and reported on the run's tracing span
+  (`live.commit_extended_by_punct_ms`, `live.drain_extended_by_filler`,
+  `live.drain_extended_by_dangling`) but do not currently feed back
+  into capture timing. `crates/fono/src/live.rs` carries the relevant
+  TODO markers; the prosody-extend hint is fully wired.
 
 ## Enabling live mode
 
-Two switches:
+Live mode ships in the default build (`interactive` is in the default
+cargo features). It is toggled by picking the **Transcript** overlay
+style — either through the tray (*Preferences → Waveform style →
+Transcript*) or by editing `~/.config/fono/config.toml`:
 
-1. Build with the feature compiled in:
-   ```bash
-   cargo build --release --features tray,interactive
-   ```
-2. Toggle the runtime flag in `~/.config/fono/config.toml`:
-   ```toml
-   [interactive]
-   enabled = true
-   # Quality floor under budget pressure: "max" | "balanced" | "aggressive".
-   quality_floor = "max"
-   ```
+```toml
+[overlay]
+style = "transcript"     # bars | oscilloscope | fft | heatmap | transcript
+```
 
-   The live-dictation overlay is shown unconditionally when
-   `enabled = true` — it's the only feedback surface for live
-   previews, so there is no separate toggle. The `[overlay].enabled`
-   flag controls only the passive recording indicator used in batch
-   mode (when `[interactive].enabled = false`).
+`fono_core::Config::live_preview()` is `true` iff `overlay.style ==
+"transcript"`; that single flag flips the daemon between the batch and
+streaming code paths. The four passive visualisations
+(`bars` / `oscilloscope` / `fft` / `heatmap`) keep the daemon on the
+batch path; only `transcript` triggers the streaming STT pipeline.
 
-The runtime toggle is read at daemon startup *and* on every `Reload`
-IPC (so `fono use stt local` or any other config-rewrite triggers a
-hot pick-up). When the cargo `interactive` feature is *not* compiled
-in, the toggle is parsed from disk but ignored — the daemon has no
-streaming code to turn on.
+Once live mode is on, the `[interactive]` block tunes the streaming
+behaviour. Most users never need to touch it; see the
+*Tuning boundary behaviour* table below for the surviving knobs.
+
+```toml
+[interactive]
+quality_floor = "max"    # max | balanced | aggressive — budget-pressure floor
+```
+
+The overlay style is re-read on every `Reload` IPC, so editing the file
+or running any `fono use` command applies immediately — no daemon
+restart. Custom builds that compile without `--features interactive`
+ignore the streaming code path even with `style = "transcript"` (the
+overlay falls back to a static "live preview unavailable" indicator).
 
 ## CLI
 
@@ -89,9 +87,9 @@ fono record --live --no-inject     # print the text, don't inject
 ```
 
 Captures from the configured input device, paints the overlay, runs
-the streaming pipeline once (in record-then-replay mode for Slice A),
-and prints the final cleaned text. Press Ctrl+C to stop early. The
-default cap is 30 s; `--max-seconds 0` disables the cap entirely.
+the streaming pipeline live, and prints the final cleaned text. Press
+Ctrl+C to stop early. The default cap is 30 s; `--max-seconds 0`
+disables the cap entirely.
 
 ### `fono test-overlay`
 
@@ -119,12 +117,10 @@ below.
   to a `noop` backend (no window, daemon still runs); `fono
   doctor` prints which backend was selected and `FONO_OVERLAY_BACKEND`
   can force a specific one. Full table in [`docs/wayland.md`](wayland.md).
-- **Synthetic-tone equivalence-harness fixtures.** The two committed
-  fixtures under `tests/fixtures/equivalence/` are synthesized 440 Hz
-  tones, not real speech, so the equivalence-harness Tier-1
-  Levenshtein threshold is currently loosened to `≤ 0.05`. Real CC0
-  speech fixtures land in Slice B; the threshold tightens back to the
-  v6 plan's strict `≤ 0.01` at the same time.
+- **Equivalence-harness fixtures.** Check `tests/fixtures/equivalence/`
+  for the current corpus and the harness's `verdict` thresholds — the
+  Tier-1 Levenshtein bar moves as real speech fixtures replace earlier
+  synthetic tones. ADR 0009 §7 documents the path to the strict bar.
 
 ## Equivalence harness (developer-facing)
 
@@ -148,9 +144,8 @@ cargo run -p fono-bench --features equivalence,whisper-local -- \
 The harness compares each fixture's *batch-lane* `transcribe()` text
 against the *streaming-lane* concatenated finalize text and emits a
 JSON report (`stt_levenshtein_norm`, `ttff_ratio`, `ttc_ratio`,
-per-fixture `verdict`). Tier-1 PASS threshold is `≤ 0.05` for
-Slice A; see ADR 0009 §7 for the rationale and the path to the strict
-bar.
+per-fixture `verdict`). See ADR 0009 §7 for the current Tier-1
+threshold and the path to the strict bar.
 
 If the local whisper model isn't installed, the harness exits with
 status 2 and prints `run \`fono models install <name>\`` rather than
@@ -159,21 +154,20 @@ exit 2 as "skip this row, not failure".
 
 ## Tuning boundary behaviour
 
-Slice A v7 introduces a small set of additive heuristics that delay
-segment boundaries and flag end-of-utterance dangling words. The
-heuristics ship with built-in defaults; the matching user-facing config
-keys (`commit_*`, `eou_*`, `resume_grace_ms`, the budget / session-cap
-knobs) were removed in the 2026-05-22 schema simplification because
-they were never plumbed from `[interactive]` into the live session.
-See `docs/decisions/0015-boundary-heuristics.md` for the design
-rationale and `crates/fono/src/live.rs` (`HeuristicConfig::default`)
-for the current values.
+A small set of additive heuristics delay segment boundaries and flag
+end-of-utterance dangling words. The heuristics ship with built-in
+defaults baked into `HeuristicConfig::default` in
+`crates/fono/src/live.rs`; the matching `commit_*` / `eou_*` /
+`resume_grace_ms` config keys (and the budget / session-cap knobs)
+were removed in the 2026-05-22 schema simplification because they were
+never plumbed from `[interactive]` into the live session. See
+`docs/decisions/0015-boundary-heuristics.md` for the rationale.
 
 The surviving user-tunable knobs under `[interactive]`:
 
 | Key                              | Default                        | What it does                                                                                                          |
 | -------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
-| `mode`                           | `"hybrid"`                     | Pipeline mode. `"hybrid"` is the only Slice A value — reserved for Slice B variants.                                  |
+| `mode`                           | `"hybrid"`                     | Pipeline mode. `"hybrid"` is the only value wired today; the field is kept so future variants can land without a config break. |
 | `chunk_ms_initial`               | `600`                          | Window the streaming decoder waits before the first preview pass. Smaller = lower TTFF, noisier early text.            |
 | `chunk_ms_steady`                | `1500`                         | Steady-state window between preview passes after the first.                                                           |
 | `cleanup_on_finalize`            | `true`                         | Run the polish pass once on the assembled transcript after the hotkey releases. Off = raw STT output is injected. |

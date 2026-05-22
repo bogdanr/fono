@@ -1,5 +1,7 @@
 # Config Simplification — Prune Inert `[interactive]` Knobs and `always_warm_mic`
 
+## Status: Completed
+
 ## Objective
 
 Reduce `fono_core::config` surface area by removing nine fields that are either

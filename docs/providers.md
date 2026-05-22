@@ -11,31 +11,29 @@ the file directly. API keys are stored in `~/.config/fono/secrets.toml`
 The wizard, tray, `fono use cloud`, and `fono doctor` all consume the
 single capability catalogue defined in
 `fono_core::provider_catalog::CLOUD_PROVIDERS`. The matrix below mirrors
-that catalogue; **new** marks TTS backends added in the v2 wizard
-rework (issue #11). See
+that catalogue. See
 [ADR 0025](decisions/0025-cloud-provider-catalogue.md) for the design
 rationale.
 
 | Provider       | STT | polish | Assistant chat | Vision                       | Web search                      | TTS                       |
 |----------------|-----|-------------|----------------|------------------------------|----------------------------------|---------------------------|
 | **OpenAI**     | ✓   | ✓           | ✓              | ✓ (`gpt-5.4-mini`)          | ✓ `web_search_preview`           | ✓ `tts-1`                 |
-| **Groq**       | ✓   | ✓           | ✓              | —                            | —                                | ✓ Orpheus **new**         |
+| **Groq**       | ✓   | ✓           | ✓              | —                            | —                                | ✓ Orpheus                 |
 | **Anthropic**  | —   | ✓           | ✓              | ✓ (Claude Haiku 4.5)         | ✓ `web_search_20250305`          | —                         |
 | **Cerebras**   | —   | ✓           | ✓              | —                            | —                                | —                         |
-| **Gemini**     | —   | ✓ *(planned)* | ✓ *(planned)* | ✓ (Flash)                    | ✓ `google_search` *(planned)*    | —                         |
-| **OpenRouter** | ✓   | ✓           | ✓              | *(route-dependent)*          | *(route-dependent)*              | ✓ OpenAI Mini TTS **new** |
-| **Cartesia**   | ✓   | —           | —              | —                            | —                                | ✓ Sonic-2 **new**         |
-| **Deepgram**   | ✓   | —           | —              | —                            | —                                | ✓ Aura-2 **new**          |
+| **Gemini**     | —   | ✓           | — *(planned)*  | — *(planned)*                | — *(planned)*                    | —                         |
+| **OpenRouter** | ✓   | ✓           | ✓              | *(route-dependent)*          | *(route-dependent)*              | ✓ OpenAI Mini TTS         |
+| **Cartesia**   | ✓   | —           | —              | —                            | —                                | ✓ Sonic-3.5               |
+| **Deepgram**   | ✓   | —           | —              | —                            | —                                | ✓ Aura-2                  |
 | **AssemblyAI** | ✓   | —           | —              | —                            | —                                | —                         |
 
 Picking OpenAI or Groq as the primary cloud provider configures every
 capability in that row from a single key prompt; picking Anthropic or
 Cerebras configures polish + Assistant and asks an opt-in secondary
-question for STT and/or TTS, defaulting to "key already set" providers
-when their key is in `secrets.toml`. **Five** providers can now drive
-the assistant end-to-end (OpenAI, Groq, Anthropic + any new cloud TTS,
-Cerebras + any new cloud TTS, OpenRouter) — up from OpenAI-only before
-this release.
+question for STT and/or TTS, defaulting to providers whose keys are
+already in `secrets.toml`. Five providers can drive the assistant
+end-to-end today: OpenAI, Groq, Anthropic + any cloud TTS, Cerebras +
+any cloud TTS, and OpenRouter.
 
 ## Switching providers (no daemon restart)
 
@@ -149,14 +147,6 @@ more disk).
 
 Override the download host with `FONO_MODEL_MIRROR=https://your.mirror`.
 
-> **Note for CI / forks.** `GROQ_API_KEY` is also consumed by the
-> release-time cloud equivalence gate (`.github/workflows/release.yml`'s
-> `cloud-equivalence` job). The job is auto-skipped on tags pushed
-> from forks (where the secret is not exposed) and on tags carrying
-> the `-no-cloud-gate` suffix. End users do not need to set this for
-> normal Fono usage; it's only consumed by your own CI when *you*
-> tag a release. See `docs/dev/release-checklist.md`.
-
 ### Groq streaming dictation (pseudo-stream)
 
 Groq has no native streaming endpoint today. Fono ships an opt-in
@@ -175,8 +165,8 @@ plan, opt in deliberately.
 Enable with the master live-dictation switch:
 
 ```toml
-[interactive]
-enabled = true
+[overlay]
+style = "transcript"
 
 [stt.cloud]
 provider = "groq"
@@ -184,11 +174,11 @@ api_key_ref = "GROQ_API_KEY"
 model = "whisper-large-v3-turbo"
 ```
 
-The wizard sets this automatically when you pick Groq and answer
-"yes" to live mode — there is no separate streaming opt-in. To
-bound cost, set `interactive.streaming_interval` above `3.0` (only
-finalize requests fire on VAD boundaries; previews are disabled) or
-set `interactive.budget_ceiling_per_minute_umicros` to a hard cap.
+Pick the Transcript overlay style (tray *Preferences → Waveform style →
+Transcript*, or set `[overlay].style = "transcript"` by hand) and Fono
+auto-routes the Groq STT through the pseudo-stream lane. To bound cost,
+set `interactive.streaming_interval` above `3.0`: only finalize requests
+fire on VAD boundaries, previews are disabled.
 
 Design + cost rationale: [ADR 0020](decisions/0020-groq-pseudo-stream.md).
 
@@ -210,53 +200,31 @@ types the raw STT output verbatim.
 
 Any chat-trained LLM — cloud or local — can occasionally interpret a
 very short capture as a conversational fragment and reply with a
-clarification question (*"Could you provide the full text…"*) instead
-of a cleaned transcript. Observed across Cerebras, Groq, OpenAI,
-OpenRouter, Ollama, Anthropic, and the local llama.cpp backend; not a
-provider-specific quirk. Fono mitigates this uniformly across every
-backend in three ways:
-
-- `[polish].skip_if_words_lt` (default `3`) bypasses the polish step entirely for
-  one- and two-word captures, regardless of which backend is active.
-- The default cleanup prompt explicitly forbids clarification questions
-  and wraps the user message in `<<<` / `>>>` delimiters so the
-  transcript cannot be mistaken for a chat message. Same prompt for
-  all backends.
-- Clarification-shaped replies are detected post-hoc and rejected; the
-  raw STT text is injected instead and the daemon logs `polish returned a
-  clarification reply… falling back to raw text.` Same detector for
-  all backends.
+clarification question instead of a cleaned transcript. Fono mitigates
+this uniformly across every backend: `[polish].skip_if_words_lt`
+(default `3`) bypasses the polish step for one- and two-word captures,
+the default prompt forbids clarification questions and delimits the
+transcript with `<<<` / `>>>`, and clarification-shaped replies are
+detected post-hoc and replaced with the raw STT text. See
+[the troubleshooting recipe](troubleshooting.md#polish-responds-with-a-question-instead-of-cleaning-my-text)
+for the user-facing symptoms and tuning options.
 
 ### Multilingual STT and language stickiness
 
 Fono treats every entry of `general.languages` as an equal peer — there is
 no primary/secondary distinction. Cloud STT calls go out **without** a
 forced `language=` so the provider's auto-detect handles language switching
-(e.g. dictating Romanian, then English, then Romanian again) for free.
+for free. When the provider returns a banned (out-of-allow-list) detection
+Fono re-issues the same audio once with `language=<cached>` from a tiny
+in-memory per-backend cache of recently-correct detections — a self-healing
+rerun that recovers from one Turbo misfire per occurrence. Knob:
+`[stt.cloud].cloud_rerun_on_language_mismatch` (default `true`); tray
+submenu: **Languages** → checkbox per peer + "Clear language memory".
 
-Some providers (notably Groq's `whisper-large-v3-turbo` for non-native
-English speakers) occasionally misdetect — e.g. flagging accented English
-as Russian. Fono's defence is a tiny in-memory cache of the most recently
-correctly-detected language per backend:
-
-- On every successful in-allow-list detection, the cache records the code.
-- When the provider returns a *banned* (out-of-allow-list) detection and
-  the cache holds a peer code for that backend, Fono re-issues the same
-  audio once with `language=<cached>` — a self-healing rerun that recovers
-  from one Turbo misfire per occurrence.
-- Order of `general.languages` is **not** consulted. The cache reflects
-  what was actually heard; the config is just an unordered set.
-
-The cache is in-memory only (no file I/O). On daemon start the OS locale's
-alpha-2 code is used to seed the cache *if* it appears in the configured
-allow-list; otherwise the cache stays empty and the first banned
-detection is accepted as-is, with the cache populating from the next
-correctly-detected utterance.
-
-Knob: `[stt.cloud].cloud_rerun_on_language_mismatch` (default `true`).
-Tray submenu: **Languages** → checkbox per peer + "Clear language memory".
-
-Design rationale: [ADR 0017](decisions/0017-cloud-stt-language-stickiness.md).
+Design rationale:
+[ADR 0017](decisions/0017-cloud-stt-language-stickiness.md); the
+user-facing recipe lives in
+[troubleshooting.md](troubleshooting.md#cloud-stt-keeps-detecting-the-wrong-language).
 
 ## Default picks (rationale)
 
@@ -265,8 +233,11 @@ Design rationale: [ADR 0017](decisions/0017-cloud-stt-language-stickiness.md).
   ~2 s latency for a 10-second utterance; idle RAM ~30 MB, active ~800 MB
   (down from ~1.3 GB on fp16). Per-model quantization picks are recorded
   in [ADR 0027](decisions/0027-stt-quantization-ladder.md).
-* **Cloud default:** Groq whisper-large-v3 + Cerebras llama-3.3-70b — sub-1 s
-  latency end-to-end, generous free tiers, permissive TOS.
+* **Cloud presets:** `fono use cloud groq` pairs Groq whisper-large-v3-turbo
+  with Groq llama-3.3-70b-versatile (single key, sub-1 s end-to-end).
+  `fono use cloud cerebras` pairs Groq STT with Cerebras llama-3.3-70b
+  (Cerebras has no STT, so STT falls back to Groq). Both have generous
+  free tiers and permissive TOS. `fono use show` prints the active pair.
 
 ## Text-to-speech (assistant audio replies)
 
@@ -281,7 +252,7 @@ assistant audio works without an OpenAI key.
 | OpenAI        | cloud HTTP | `tts-1`             | `https://api.openai.com/v1/audio/speech`               | `Authorization: Bearer <k>`  |
 | Groq          | cloud HTTP | `canopylabs/orpheus-v1-english` | `https://api.groq.com/openai/v1/audio/speech`          | `Authorization: Bearer <k>`  |
 | OpenRouter    | cloud HTTP | `openai/tts-1`      | `https://openrouter.ai/api/v1/audio/speech`            | `Authorization: Bearer <k>`  |
-| Cartesia      | cloud HTTP | `sonic-2`           | `https://api.cartesia.ai/tts/bytes`                    | `X-API-Key: <k>`             |
+| Cartesia      | cloud HTTP | `sonic-3.5`         | `https://api.cartesia.ai/tts/bytes`                    | `X-API-Key: <k>`             |
 | Deepgram      | cloud HTTP | `aura-2-thalia-en`  | `https://api.deepgram.com/v1/speak`                    | `Authorization: Token <k>`   |
 
 `CARTESIA_API_KEY` and `DEEPGRAM_API_KEY` may already be in
@@ -393,17 +364,35 @@ who prefer Kokoro today can pin
 `[tts.cloud] model = "hexgrad/kokoro-82m"` and `voice = "af_heart"`
 manually.
 
-### Cartesia TTS (Sonic-2)
+### Cartesia TTS (Sonic-3.5)
 
 Cartesia uses a native (non-OpenAI-compatible) `POST /tts/bytes`
 endpoint at `https://api.cartesia.ai/tts/bytes`. Fono pins model
-`sonic-2` and voice id `a0e99841-438c-4a64-b679-ae501e7d6091`
-(Cartesia's neutral English preset). The request asks for raw
-`pcm_s16le` @ 24 kHz to match the assistant's audio pipeline; the
-response body is contiguous PCM with no header. Auth header is
-`X-API-Key: <CARTESIA_API_KEY>`. Sonic-2 is the lowest-latency premium
-voice in the catalogue — recommended for users who want the most
-natural-sounding replies.
+`sonic-3.5` and voice id `a0e99841-438c-4a64-b679-ae501e7d6091`
+(Cartesia's neutral English preset) as the fallback voice. The
+request asks for raw `pcm_s16le` @ 24 kHz to match the assistant's
+audio pipeline; the response body is contiguous PCM with no header.
+Auth headers are `X-API-Key: <CARTESIA_API_KEY>` and
+`Cartesia-Version: 2026-03-01` (the version pin is required — the
+API 400s without it). Sonic-3.5 is the latest premium voice in the
+catalogue with broad multilingual support — recommended for users
+who want natural-sounding replies in any language.
+
+**Per-language voice selection.** Each non-English code in
+`general.languages` (and each language STT detects at runtime) gets
+its own native voice, fetched lazily via
+`GET /voices?language=<code>&limit=1` the first time we need to
+synthesise in that language and cached for the process lifetime. A
+multilingual user dictating in Romanian plays through a Romanian
+voice with `language = "ro"` on the wire; the same user dictating
+in English plays through the catalogue's dedicated English voice
+with `language = "en"` — both native, not a single voice forced to
+bilingual duty. Resolution order: explicit `tts.voice` config pin
+wins; else the language STT detected on the current utterance; else
+the first non-English entry in `general.languages`; else the English
+fallback. Any failure (offline, auth, no voices for that language,
+or a language code the model itself rejects) silently falls back to
+the English voice — TTS never errors out *because of* voice routing.
 
 ### Deepgram TTS (Aura-2)
 
@@ -463,44 +452,15 @@ prefer_vision = false
 prefer_web_search = false
 ```
 
-## Hosting a Wyoming STT server with `fono install --server`
+## Hosting a Wyoming STT server
 
-When you install Fono in server mode with `sudo fono install --server`,
-the installer seeds `/etc/fono/config.toml` (only if no config exists
-yet) with the Wyoming STT listener already enabled on `0.0.0.0:10300`.
-Other Fono / Home Assistant / Rhasspy clients on the LAN can then
-auto-discover the server via mDNS and route transcription through it.
-
-The seeded block looks like:
-
-```toml
-[server.wyoming]
-enabled = true
-bind = "0.0.0.0"
-port = 10300
-```
-
-**Security.** Wyoming v1 has no in-band authentication. Binding to
-`0.0.0.0` exposes inference to every host that can route to TCP/10300
-on this machine. To restrict exposure, either:
-
-- change `bind` to `"127.0.0.1"` for loopback-only,
-- change `bind` to a specific NIC address (e.g. `"192.168.1.5"`),
-- or block port 10300 at your firewall (iptables / nftables / ufw /
-  firewalld).
-
-After any edit: `sudo systemctl restart fono.service`.
-
-Re-running `sudo fono install --server` is idempotent — an existing
-`/etc/fono/config.toml` is preserved byte-for-byte. The installer
-verifies the listener actually bound by probing `127.0.0.1:10300`
-post-start and prints the result in its summary.
-
-The server lane requires an STT backend to actually transcribe.
-With the default `[stt].backend = "local"` you need at least one
-Whisper model under `/var/lib/fono/models/`; install one with
-`sudo -u fono fono models install small` (or `large-v3-turbo` for
-the strongest local quality).
+`sudo fono install --server` sets up a hardened systemd unit that
+exposes Whisper over the Wyoming protocol on TCP/10300 so other Fono
+clients, Home Assistant, and Rhasspy can route transcription through
+this host (auto-discovery via mDNS). The installer seeds a minimal
+`/etc/fono/config.toml` and verifies the listener bound. See
+[install.md → Server mode](install.md#server-mode-wyoming-stt-host) for
+the install, security, and key-management story.
 
 ## Adding a new backend
 

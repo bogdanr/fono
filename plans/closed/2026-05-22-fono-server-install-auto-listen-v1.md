@@ -1,5 +1,7 @@
 # Server-mode install: auto-enable Wyoming listener
 
+## Status: Completed
+
 ## Objective
 
 Make `sudo fono install --server` produce a daemon that **is actually

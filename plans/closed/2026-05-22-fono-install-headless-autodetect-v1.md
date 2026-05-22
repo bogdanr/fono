@@ -1,5 +1,7 @@
 # Auto-detect headless hosts in `fono install`
 
+## Status: Completed
+
 ## Objective
 
 Make `sudo fono install` (and the `curl … | sh` one-liner that wraps it)

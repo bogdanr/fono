@@ -391,14 +391,9 @@ where the drain wait will land.
 
 ## "Edit config" tray entry opens Dolphin / a file manager
 
-`xdg-open` defaults vary by distro. Override in config:
-
-```toml
-[general]
-config_editor = "nvim"      # or "code", "kate", "gedit"
-```
-
-(Planned for v0.1.x — meanwhile, edit `~/.config/fono/config.toml` directly.)
+`xdg-open` defaults vary by distro. There is no in-app override today; edit
+`~/.config/fono/config.toml` directly, or change the system default for
+`text/plain` via `xdg-mime default <editor>.desktop text/plain`.
 
 ## Capturing screencasts
 

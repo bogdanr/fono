@@ -1,5 +1,7 @@
 # Auto-Stop on Silence — v1
 
+## Status: Completed
+
 ## Objective
 
 Make `audio.auto_stop_silence_ms` actually do something. Today the

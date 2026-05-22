@@ -34,7 +34,7 @@ While you're speaking, a small overlay shows what the microphone is hearing. Fou
 ## What Fono does
 
 - **Dictation, push-to-talk or toggle.** Tap `F7` to toggle recording; hold `F7` for push-to-talk. The same key works either way — the press duration decides.
-- **Lands in any X11 or Wayland window.** Fono pastes with `Shift+Insert` after copying the text to the clipboard. On Wayland sessions Fono auto-registers its hotkeys via the `xdg-desktop-portal` GlobalShortcuts interface — one consent dialog at first run, no compositor config required (KDE Plasma 6, Hyprland, sway with `xdg-desktop-portal-wlr`, GNOME 47+). On GNOME 46 / Ubuntu 24.04 (whose portal lacks GlobalShortcuts) Fono falls back to installing gsettings custom-keybindings automatically. X11 / Xwayland sessions keep the native global-hotkey path.
+- **Lands in any X11 or Wayland window.** Fono types straight into the focused window and mirrors to the clipboard as a safety net. Hotkeys register through the Wayland portal where it's available, with automatic fallbacks for GNOME 46 and X11 — see [docs/wayland.md](docs/wayland.md) for the per-compositor story.
 - **Local or cloud speech-to-text.** Whisper runs on your machine by default. Or switch to Groq, OpenAI, or Deepgram with one command (`fono use stt …`).
 - **Optional cleanup pass.** A small LLM can tidy up the transcript before it's injected — locally with `llama.cpp`, or via Cerebras / Groq / OpenAI / OpenRouter / Anthropic / Ollama.
 - **Voice assistant on `F8`** *(cloud-only for now)*. Talk to OpenAI, Anthropic, Groq, Cerebras, or OpenRouter; the reply is streamed sentence-by-sentence into TTS so audio starts before the model has finished thinking.
@@ -45,7 +45,7 @@ While you're speaking, a small overlay shows what the microphone is hearing. Fou
 
 ## First run
 
-`sudo fono install` - installs the files and starts the setup wizzard
+`sudo fono install` installs the files and starts the setup wizard.
 
 Default hotkeys are `F7` (dictation) and `F8` (voice assistant). Both keys auto-detect how you press them: a quick tap toggles recording on (tap again to stop); holding for more than a second turns the key into push-to-talk and recording ends on release. `Escape` cancels a recording or shuts up an assistant reply.
 
@@ -82,12 +82,14 @@ Local-first. Nothing leaves your machine unless you pick a cloud provider.
 
 ## Documentation
 
-- [Roadmap](ROADMAP.md) — in progress, planned, and shipped.
-- [Provider matrix](docs/providers.md) — STT, polish, and TTS endpoints, env vars, default models.
-- [Live (streaming) dictation](docs/interactive.md) — overlay, latency budget, configuration.
-- [Text injection](docs/inject.md) — Shift+Insert, per-app overrides.
-- [Wayland notes](docs/wayland.md) — compositor binding.
+- [Documentation index](docs/index.md) — the full map.
+- [Install](docs/install.md) — one-liner, manual install, server mode, updating.
+- [Quickstart](docs/quickstart.md) — first dictation, common follow-ups.
+- [Configuration](docs/configuration.md) — every key in `config.toml`.
+- [Provider matrix](docs/providers.md) — STT, polish, assistant, and TTS endpoints.
+- [Live dictation](docs/interactive.md) — streaming overlay, latency budget.
 - [Troubleshooting](docs/troubleshooting.md) — symptom-first recipes.
+- [Roadmap](ROADMAP.md) — in progress, planned, shipped.
 - Homepage: [fono.page](https://fono.page).
 
 ## Status

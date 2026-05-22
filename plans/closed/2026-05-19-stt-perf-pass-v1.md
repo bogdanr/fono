@@ -1,5 +1,7 @@
 # Local STT Performance Pass — v1
 
+## Status: Completed
+
 ## Objective
 
 Cut the local STT footprint by ~50% and make the **best model the user's

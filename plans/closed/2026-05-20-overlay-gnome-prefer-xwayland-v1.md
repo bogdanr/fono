@@ -1,5 +1,7 @@
 # Wayland Overlay: Prefer Xwayland Over xdg Fallback on GNOME
 
+## Status: Completed
+
 ## Objective
 
 Fix the user-reported behaviour on Ubuntu 24.04 GNOME where the Fono overlay

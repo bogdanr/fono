@@ -11,21 +11,34 @@ fono (bin)
   └─ models       ensure configured models exist on disk
 
 fono-core        paths (XDG), Config/Secrets (atomic TOML), SQLite+FTS5 history
-fono-audio       cpal capture → ring buffer, resampler, VAD stub, auto-mute
-fono-hotkey      accelerator parser, FSM, global-hotkey listener thread
-fono-stt         async SpeechToText trait + registry + backends
-fono-polish         async TextCleanup   trait + registry + backends
-fono-tts         async TextToSpeech  trait + Wyoming + OpenAI + Piper-stub
-fono-assistant   streaming chat (Anthropic + OpenAI-compat) + rolling history
-fono-inject      enigo typing + clipboard-paste fallback, focus detection
-fono-tray        tray-icon lifecycle + menu
-fono-overlay     pluggable overlay: software renderer (FFT / oscilloscope /
-                 heatmap / bars / VU / transcript) + backend layer with
-                 `wlr-layer-shell`, X11 override-redirect (winit + softbuffer,
-                 used natively on Xorg and via Xwayland on GNOME / Mutter),
-                 and a `noop` fallback. See `docs/wayland.md`.
+fono-audio       cpal capture → broadcast frame stream, VAD, envelope follower,
+                 silence watch, trim, playback worker
+fono-hotkey      accelerator parser, FSM, global-hotkey listener thread,
+                 xdg-desktop-portal GlobalShortcuts + gsettings fallbacks
+fono-stt         async SpeechToText + StreamingStt traits + registry + backends
+fono-polish      async TextCleanup trait + registry + backends
+fono-tts         async TextToSpeech trait + Wyoming + OpenAI-compat + native
+                 (Cartesia, Deepgram) backends
+fono-assistant   streaming chat (Anthropic + OpenAI-compat + native) +
+                 rolling history, sentence splitter for TTS hand-off
+fono-inject      wtype / ydotool / xdotool / xtest-paste + clipboard-paste
+                 fallback, focus detection
+fono-tray        tray-icon lifecycle + menu, StatusNotifierItem
+fono-overlay     pluggable overlay backends — `wlr-layer-shell` (sway,
+                 Hyprland, KDE Plasma, COSMIC, niri, …), X11 override-redirect
+                 (winit + softbuffer; native on Xorg, also covers GNOME via
+                 Xwayland), and a `noop` fallback. Software renderer paints
+                 bars / FFT / oscilloscope / heatmap / VU / transcript styles.
+                 See `docs/wayland.md`.
 fono-ipc         Unix-socket single-instance protocol (length-prefixed JSON)
 fono-download    streaming HTTPS with SHA-256 verify + range resume
+fono-http        shared HTTP instrumentation, body watchdog, upstream
+                 request-id helpers for every cloud backend
+fono-net         Wyoming-protocol server + mDNS LAN peer discovery
+fono-net-codec   length-prefixed JSON framing shared by Wyoming and the
+                 fono-internal IPC protocols
+fono-update      self-update: GitHub Releases poll, archive download,
+                 SHA-256 verify, in-place atomic replace + re-exec
 ```
 
 The dictation pipeline goes **STT → polish → text injection**.
@@ -62,11 +75,16 @@ HotkeyAction::StartRecording
 
 ## State machine
 
-`fono_hotkey::fsm::State` — `Idle`, `Recording(Hold | Toggle)`, `Processing`.
-Hold mode transitions on Pressed/Released; toggle transitions on each
-press. `Processing` only returns to `Idle` on `ProcessingDone`, which the
-daemon emits when the pipeline finishes (or, today, via a 150 ms shim
-until the STT wiring lands).
+`fono_hotkey::fsm::State` — `Idle`, `Recording(RecordingMode)`,
+`LiveDictating(RecordingMode)`, `Processing`, plus the assistant trio
+`AssistantRecording` / `AssistantThinking` / `AssistantSpeaking`.
+`RecordingMode` is `Hold` or `Toggle`; hold mode transitions on
+Pressed/Released, toggle transitions on each press. `Processing` returns
+to `Idle` on `ProcessingDone` from the orchestrator when STT + optional
+polish + inject completes. The orchestrator dispatches `LiveHold*` /
+`LiveToggle*` action variants instead of the plain `Hold*` / `Toggle*`
+ones when `[interactive].enabled = true`, routing capture through
+`crates/fono/src/live.rs::LiveSession`.
 
 ## On-disk layout
 
@@ -80,10 +98,3 @@ until the STT wiring lands).
 | IPC socket + PID     | `~/.local/state/fono/fono.sock`, `fono.pid`                |
 
 All paths honour `XDG_*_HOME` overrides.
-
-## Deferred (pre-v0.1)
-
-* Real audio → STT → polish → inject pipeline (Phases 4–6 integration).
-* `whisper-rs` + `llama-cpp-2` local engines (stubs in place, feature-gated).
-* Silero-VAD ONNX end-of-speech detection.
-* `winit` overlay window.
