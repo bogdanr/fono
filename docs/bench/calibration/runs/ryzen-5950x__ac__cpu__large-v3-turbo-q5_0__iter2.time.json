@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/root/fono-src/target/release/fono-bench",
+    "equivalence",
+    "--fixtures",
+    "/root/work/tests/fixtures/equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "large-v3-turbo-q5_0",
+    "--output",
+    "/root/runs/ryzen-5950x__ac__cpu__large-v3-turbo-q5_0__iter2.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": null,
+    "battery_pct": null,
+    "package_temp_c": 62.75
+  },
+  "context_start": {
+    "ac_online": null,
+    "battery_pct": null,
+    "captured_at_utc": "2026-05-21T23:27:10.816802+00:00",
+    "hostname": "proxmox4",
+    "package_temp_c": 49.625,
+    "platform": "linux",
+    "power_profile": "governor=powersave"
+  },
+  "exit_code": 0,
+  "label": "ryzen-5950x/ac/cpu/large-v3-turbo-q5_0/iter2",
+  "max_rss_kib": 1694388,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 98.567332,
+  "user_s": 3148.085308,
+  "wall_clock_s": 205.045712
+}

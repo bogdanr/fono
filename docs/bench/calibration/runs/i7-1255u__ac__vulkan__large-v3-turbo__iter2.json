@@ -11,21 +11,21 @@
       "duration_s": 5.0,
       "modes": {
         "batch": {
-          "text": "neglected. The art of war, then, is governed by five constant factors:",
-          "elapsed_ms": 6909,
-          "ttff_ms": 6909
+          "text": "The art of war, then, is governed by five constant factors, and the art of war is governed by five constant factors.",
+          "elapsed_ms": 2925,
+          "ttff_ms": 2925
         },
         "streaming": {
           "text": "neglected. The art of war, then, is governed by five constant factors:",
-          "elapsed_ms": 17636,
-          "ttff_ms": 6462
+          "elapsed_ms": 17489,
+          "ttff_ms": 6442
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.0,
-        "stt_accuracy_levenshtein": 0.042857144,
-        "ttff_ratio": 0.9353018,
-        "ttc_ratio": 2.5526125
+        "stt_levenshtein_norm": 0.5344828,
+        "stt_accuracy_levenshtein": 0.5258621,
+        "ttff_ratio": 2.202393,
+        "ttc_ratio": 5.9791455
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -39,20 +39,20 @@
       "modes": {
         "batch": {
           "text": "be neglected the art of war then is governed by five constant factors to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field these are one the moral law two heaven three earth",
-          "elapsed_ms": 5833,
-          "ttff_ms": 5833
+          "elapsed_ms": 3950,
+          "ttff_ms": 3950
         },
         "streaming": {
           "text": "be neglected the art of war then is governed by five constant factors to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field these are one the moral law two heaven three earth",
-          "elapsed_ms": 20811,
-          "ttff_ms": 5444
+          "elapsed_ms": 19237,
+          "ttff_ms": 5401
         }
       },
       "metrics": {
         "stt_levenshtein_norm": 0.0,
         "stt_accuracy_levenshtein": 0.046413504,
-        "ttff_ratio": 0.93331045,
-        "ttc_ratio": 3.5678039
+        "ttff_ratio": 1.3673418,
+        "ttc_ratio": 4.8701267
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -66,20 +66,20 @@
       "modes": {
         "batch": {
           "text": "that Jane was yielding to the preference which she had begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general,",
-          "elapsed_ms": 8532,
-          "ttff_ms": 8532
+          "elapsed_ms": 3759,
+          "ttff_ms": 3759
         },
         "streaming": {
           "text": "that Jane was yielding to the preference which she had begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general,",
-          "elapsed_ms": 22146,
-          "ttff_ms": 7973
+          "elapsed_ms": 24603,
+          "ttff_ms": 7843
         }
       },
       "metrics": {
         "stt_levenshtein_norm": 0.0,
         "stt_accuracy_levenshtein": 0.016877636,
-        "ttff_ratio": 0.934482,
-        "ttc_ratio": 2.59564
+        "ttff_ratio": 2.0864592,
+        "ttc_ratio": 6.5450916
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -92,21 +92,21 @@
       "duration_s": 10.0,
       "modes": {
         "batch": {
-          "text": "encouragement. In nine cases out of ten, a woman had better show more affection than she feels. Bingley likes your sister undoubtedly, but he may never do more than",
-          "elapsed_ms": 5928,
-          "ttff_ms": 5928
+          "text": "encouragement. In nine cases out of ten, a woman had better show more affection than she feels. Bingley likes your sister undoubtedly, but he may never do more than she feels. Bingley likes your",
+          "elapsed_ms": 3025,
+          "ttff_ms": 3025
         },
         "streaming": {
           "text": "encouragement. In nine cases out of ten, a woman had better show more affection than she feels. Bingley likes your sister undoubtedly, but he may never do more than",
-          "elapsed_ms": 22345,
-          "ttff_ms": 5574
+          "elapsed_ms": 20783,
+          "ttff_ms": 7689
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.0,
-        "stt_accuracy_levenshtein": 0.0,
-        "ttff_ratio": 0.9402834,
-        "ttc_ratio": 3.7693994
+        "stt_levenshtein_norm": 0.15463917,
+        "stt_accuracy_levenshtein": 0.15463917,
+        "ttff_ratio": 2.5418181,
+        "ttc_ratio": 6.8704133
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -120,20 +120,20 @@
       "modes": {
         "batch": {
           "text": "tocando viene por un anfibio sendero de cristales y laureles el silencio sin estrellas huyendo del sonsonete",
-          "elapsed_ms": 8177,
-          "ttff_ms": 8177
+          "elapsed_ms": 2022,
+          "ttff_ms": 2022
         },
         "streaming": {
           "text": "tocando viene por un anfibio sendero de cristales y laureles el silencio sin estrellas huyendo del sonsonete",
-          "elapsed_ms": 19815,
-          "ttff_ms": 7866
+          "elapsed_ms": 21515,
+          "ttff_ms": 5550
         }
       },
       "metrics": {
         "stt_levenshtein_norm": 0.0,
         "stt_accuracy_levenshtein": 0.035714287,
-        "ttff_ratio": 0.9619665,
-        "ttc_ratio": 2.4232605
+        "ttff_ratio": 2.744807,
+        "ttc_ratio": 10.640455
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -147,20 +147,20 @@
       "modes": {
         "batch": {
           "text": "à gertrude j'avais dû apprendre moi-même l'alphabet des aveugles mais bientôt elle devint beaucoup plus habile que moi à lire cette écriture où j'avais assez de peine à me",
-          "elapsed_ms": 5997,
-          "ttff_ms": 5997
+          "elapsed_ms": 3055,
+          "ttff_ms": 3055
         },
         "streaming": {
           "text": "Ã gertrude j'avais dÃ» apprendre moi-mÃªme l'alphabet des aveugles mais bientÃ´t elle devint beaucoup plus habile que moi Ã lire cette Ã©criture oÃ¹ j'avais assez de peine Ã me",
-          "elapsed_ms": 21581,
-          "ttff_ms": 5602
+          "elapsed_ms": 24042,
+          "ttff_ms": 7696
         }
       },
       "metrics": {
         "stt_levenshtein_norm": 0.07386363,
         "stt_accuracy_levenshtein": 0.0952381,
-        "ttff_ratio": 0.9341337,
-        "ttc_ratio": 3.5986326
+        "ttff_ratio": 2.5191488,
+        "ttc_ratio": 7.869722
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -173,21 +173,21 @@
       "duration_s": 10.0,
       "modes": {
         "batch": {
-          "text": "劳君远道来世然依早遇赴某地后补义应大笑出示日记二侧未可见当日病状",
-          "elapsed_ms": 8456,
-          "ttff_ms": 8456
+          "text": "劳君远道来事然依早遇赴某地后补矣应大孝出示日记二侧未可见当日病状",
+          "elapsed_ms": 2982,
+          "ttff_ms": 2982
         },
         "streaming": {
-          "text": "å³åè¿éæ¥ä¸ç¶ä¾æ©éèµ´æå°åè¡¥ä¹åºå¤§ç¬åºç¤ºæ¥è®°äºä¾§æªå¯è§å½æ¥ç ç¶",
-          "elapsed_ms": 23783,
-          "ttff_ms": 7997
+          "text": "å³åè¿éæ¥ä¸ç¶ä¾æ©éèµ´æå°åè¡¥ä¹åºå¤§ç¬åºç¤ºæ¥è®°äºåæªå¯è§å½æ¥ç ç¶",
+          "elapsed_ms": 18693,
+          "ttff_ms": 6867
         }
       },
       "metrics": {
         "stt_levenshtein_norm": 1.0,
         "stt_accuracy_levenshtein": 0.57894737,
-        "ttff_ratio": 0.945719,
-        "ttc_ratio": 2.8125591
+        "ttff_ratio": 2.3028169,
+        "ttc_ratio": 6.268612
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -200,21 +200,21 @@
       "duration_s": 10.0,
       "modes": {
         "batch": {
-          "text": "I-a urmat lui Saul, cel lepădat de la Dumnezeu și urât, așa și Hristul, după ce s-a lipsit Adam de împărăția și domnia pe care o avea asupra tuturor,",
-          "elapsed_ms": 6106,
-          "ttff_ms": 6106
+          "text": "I-a urmat lui Saul, cel lepădat de la Dumnezeu și urât, așa și Hristul, după ce s-a lipsit, Adam de împărăția și domnia pe care o avea asupra tuturor și a luat său.",
+          "elapsed_ms": 8759,
+          "ttff_ms": 8759
         },
         "streaming": {
           "text": "I-a urmat lui Saul, cel lepÄdat de la Dumnezeu Èi urÃ¢t, aÈa Èi Hristul, dupÄ ce s-a lipsit Adam de Ã®mpÄrÄÈia Èi domnia pe care o avea asupra tuturor,",
-          "elapsed_ms": 19169,
-          "ttff_ms": 5634
+          "elapsed_ms": 24621,
+          "ttff_ms": 7793
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.1375,
-        "stt_accuracy_levenshtein": 0.22818792,
-        "ttff_ratio": 0.922699,
-        "ttc_ratio": 3.1393712
+        "stt_levenshtein_norm": 0.23170732,
+        "stt_accuracy_levenshtein": 0.21341464,
+        "ttff_ratio": 0.88971347,
+        "ttc_ratio": 2.8109374
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -228,20 +228,20 @@
       "modes": {
         "batch": {
           "text": "La învățământul de zi, durata normală a studiilor universitare de licență este de 3-4 ani și corespunde unui număr de 60 de credite de studii transferabile pentru un an de studiu.",
-          "elapsed_ms": 8692,
-          "ttff_ms": 8692
+          "elapsed_ms": 3759,
+          "ttff_ms": 3759
         },
         "streaming": {
           "text": "La Ã®nvÄÈÄmÃ¢ntul de zi, durata normalÄ a studiilor universitare de licenÈÄ este de 3-4 ani Èi corespunde unui numÄr de 60 de credite de studii transferabile pentru un an de studiu.",
-          "elapsed_ms": 24953,
-          "ttff_ms": 7945
+          "elapsed_ms": 24321,
+          "ttff_ms": 7679
         }
       },
       "metrics": {
         "stt_levenshtein_norm": 0.105820104,
         "stt_accuracy_levenshtein": 0.105820104,
-        "ttff_ratio": 0.9140589,
-        "ttc_ratio": 2.8708007
+        "ttff_ratio": 2.0428305,
+        "ttc_ratio": 6.470072
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -254,21 +254,21 @@
       "duration_s": 11.76,
       "modes": {
         "batch": {
-          "text": "Ea a subliniat cât de periculoasă este de fapt situația, într-un cât un număr atât de restrâns de persoane are la degetul mic o asemenea putere economică și nu numai",
-          "elapsed_ms": 6090,
-          "ttff_ms": 6090
+          "text": "Ea a subliniat cât de periculoasă este de fapt situația, îndruncât un număr atât de restrâns de persoane are la degetul mic o asemenea putere economică și nu numai.",
+          "elapsed_ms": 3486,
+          "ttff_ms": 3486
         },
         "streaming": {
           "text": "Ea a subliniat cÃ¢t de periculoasÄ este de fapt situaÈia, Ã®ntr-un cÃ¢t un numÄr atÃ¢t de restrÃ¢ns de persoane are la degetul mic o asemenea putere economicÄ Èi nu numai",
-          "elapsed_ms": 21241,
-          "ttff_ms": 5699
+          "elapsed_ms": 20143,
+          "ttff_ms": 7741
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.114285715,
-        "stt_accuracy_levenshtein": 0.024242423,
-        "ttff_ratio": 0.9357964,
-        "ttc_ratio": 3.487849
+        "stt_levenshtein_norm": 0.13714285,
+        "stt_accuracy_levenshtein": 0.024390243,
+        "ttff_ratio": 2.2205968,
+        "ttc_ratio": 5.778256
       },
       "verdict": "pass",
       "skip_reason": null,

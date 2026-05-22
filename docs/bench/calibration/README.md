@@ -9,17 +9,31 @@ fits inside 10 minutes per host). Downstream Phase 1 tasks read from
 
 ## Host roster
 
-The four reference hosts are identified by short, stable CPU-based
-slugs. Each `inventory/<host_id>.json` records the IP / hostname from
-the session it was benched in as `legacy_session_ip` for traceability
-only; the canonical key is `host_id`.
+The reference hosts are identified by short, stable CPU-based slugs.
+Each `inventory/<host_id>.json` records the IP / hostname from the
+session it was benched in as `legacy_session_ip` for traceability only;
+the canonical key is `host_id`.
 
 | host_id | role | CPU | released | tier | RAM | GPU build | session IP |
 |---|---|---|---|---|---:|---|---|
-| `ryzen-5950x` | desktop | AMD Ryzen 9 5950X (16p/32l, Zen 3) | 2020-11 | high-end desktop (2020 flagship, still strong in 2026) | 48 GiB | blocked (RTX 4090, see below) | 192.168.0.79 |
+| `ryzen-5950x` | desktop | AMD Ryzen 9 5950X (16p/32l, Zen 3) | 2020-11 | high-end desktop (2020 flagship, still strong in 2026) | 48 GiB | ✓ Vulkan (RTX 4090, run from PVE host) | 192.168.0.79 (CPU baseline, LXC) / 192.168.0.74 (Vulkan + CPU quants, PVE host) |
 | `ultra7-258v` | laptop | Intel Core Ultra 7 258V (8p/8l, Lunar Lake) | 2024-09 | premium ultraportable (current Intel flagship for thin-and-light) | 31 GiB | ✓ Vulkan (Arc 130V/140V Xe2 Battlemage) | 192.168.0.251 |
 | `i7-1255u` | laptop | Intel i7-1255U (10p hybrid 2P+8E / 12l, Alder Lake-UP3, 15 W) | 2022-02 | mid-range ultraportable (mainstream business ultrabook) | 15 GiB | ✓ Vulkan (Iris Xe 96 EUs) | localhost (session-relative) |
+| `i7-8550u` | laptop | Intel i7-8550U (4p/8l, Kaby Lake-R, 15 W) | 2017-08 | legacy ultraportable (mid-decade quad-core ULV; ThinkPad X1 Carbon Gen 6) | 15 GiB | not attempted (UHD 620, same class as `i7-7500u` where Vulkan build failed) | 192.168.0.127 |
 | `i7-7500u` | laptop | Intel i7-7500U (2p/4l, Kaby Lake, 15 W) | 2016-08 | legacy ultraportable (~10 years old; weakest tier we expect to support) | 15 GiB | build failed (see below) | 192.168.0.112 |
+
+> **`i7-8550u` partial sweep (2026-05-21):** CPU AC sweep ran for
+> `tiny`, `tiny.en`, `base`, `base.en`, `small`, `small.en` (3 iters
+> each, all `iters 3/3` in `matrix.json`). The `large-v3-turbo` cell
+> never completed — the live Ubuntu 26.04 session ran out of memory
+> mid-sweep, `sshd` was OOM-killed, and the host had to be rebooted.
+> Recovered run files were copied from `/root/runs/` post-recovery.
+> Re-running just the turbo cell needs ~10 minutes once `fono-bench`
+> is back on the box; based on every other CPU laptop in the matrix
+> (`i7-7500u` 0.21, `i7-1255u` 0.33, `ultra7-258v` 0.61, even the
+> 16-core `ryzen-5950x` only 1.75) it will land **`unsuitable`**
+> with batch RTF in the 0.4–0.6 range — no plausible 4P/8T Kaby
+> Lake-R configuration moves that into `borderline` territory.
 
 ## Headline findings (AC sweep)
 
@@ -29,7 +43,12 @@ The summary that motivated the recalibration:
   four hosts. Even the Ryzen 9 5950X 16-core desktop reaches only
   batch RTF 1.75 / stream 0.60 = `borderline`. Every laptop is
   `unsuitable`: batch RTF 0.61 (`ultra7-258v`), 0.33 (`i7-1255u`),
-  0.21 (`i7-7500u`).
+  0.21 (`i7-7500u`). CPU **quants do not rescue turbo** either —
+  even on the 16-core desktop the best quant (turbo-q8_0) only
+  reaches batch RTF 5.71 / stream 0.74 = `borderline`, and on every
+  laptop the same picture holds (quant kernel class doesn't matter:
+  the `avx2-fallback` 16-core desktop and the `vnni` 4-core laptop
+  both plateau at stream RTF < 1).
 * The registry's current `realtime_factor_cpu_avx2 = 2.5` for turbo is
   therefore wrong by **roughly 1.5–10×** depending on the host. The
   Phase 1 refit will replace it with ~1.0 and add the `BATCH_REALTIME_MIN`
@@ -45,7 +64,18 @@ The summary that motivated the recalibration:
 
 ### GPU acceleration (Vulkan) findings
 
-The Vulkan sweep changes the picture for two of four hosts:
+The Vulkan sweep changes the picture for three of four hosts:
+
+* **NVIDIA RTX 4090 (run from the bare-metal Proxmox host `proxmox4`,
+  not the LXC container that produced the CPU baseline):**
+  `large-v3-turbo` jumps from batch RTF 1.75 (`borderline`) to
+  **76.00 (`comfortable`)** — a **~43× speedup**, the largest in the
+  matrix. Streaming RTF goes 0.60 → 29.73 (50×). The quant variants
+  see no further uplift over fp16 (turbo-q8_0 at 86.93 vs fp16 76.00
+  is bandwidth-noise, not kernel speedup), confirming that on a
+  high-end discrete GPU the bottleneck is no longer model-weight
+  bandwidth.
+
 
 * **Intel Arc 130V/140V (Xe2 Battlemage iGPU on the Core Ultra 7 258V):**
   `large-v3-turbo` jumps from batch RTF 0.61 (`unsuitable`) to **8.72
@@ -187,7 +217,7 @@ calibration/
 
 | host_id | toolchain | CPU build | GPU build | notes |
 |---|---|---|---|---|
-| `ryzen-5950x` | rustc 1.95.0 (rustup) | ✓ | **blocked** | RTX 4090 present on PCI on Proxmox host (`192.168.0.74`, PVE 9.1.9, kernel `7.0.0-3-pve`). NVIDIA driver install attempted 2026-05-15 (Debian `nvidia-kernel-dkms` 550.163.01-2 + NVIDIA `.run` installers 575.57.08, 580.65.06, 580.95.05); all four failed to build the kernel module because the PVE 9 kernel is renumbered as Linux `7.0.0` in both its `Makefile` (`VERSION=7, PATCHLEVEL=0, SUBLEVEL=0`) and `LINUX_VERSION_CODE = 458752`. NVIDIA's source uses `LINUX_VERSION_CODE` for compile-time API detection; no NVIDIA driver recognises kernel 7.x and they all fall back to the oldest code path, hitting the Linux 6.11 `__assign_str(dst, src)` 2-arg → 1-arg macro break and the 6.14 VMA-locking changes (`VMA_LOCK_OFFSET`, `vm_refcnt`, `__is_vma_write_locked`). LXC `ai` (CT 107) already has passthrough config in `/etc/pve/lxc/107.conf` — `/dev/nvidia*` will appear inside the container automatically as soon as the host kernel module loads. Build deps left in place on the host (`proxmox-headers-7.0.0-3-pve`, `dkms`, `build-essential`, full CUDA 12.4 userland) for the next retry. Status file at `/root/NVIDIA-INSTALL-STATUS.md` on the host. Retry path: wait for NVIDIA 585+ with PVE-7.0 detection, or boot a `pve-kernel-6.8` kernel, or apply community patches to NVIDIA's `nv-mm.h`/`nv-tracepoint.h`. |
+| `ryzen-5950x` | rustc 1.88.0 (rustup, 2026-05-21 PVE host) for the Vulkan + CPU-quant re-run; original CPU fp16 baseline was rustc 1.95.0 (rustup) in the LXC | ✓ | ✓ Vulkan | RTX 4090 unblocked once the PVE host was upgraded to kernel `6.17.13-9-pve` and NVIDIA driver `595.71.05` landed (Debian trixie). The Vulkan sweep + the CPU-quant sweep were both run from the bare-metal Proxmox host `proxmox4` (`192.168.0.74`), not from the LXC container `ai` that produced the original CPU fp16 baseline. The CPU-quant binary is a separate `fono-bench` built `--no-default-features --features whisper-local,equivalence` (no `accel-vulkan`) so the kernels actually execute on CPU; the originally-attempted "CPU" cells were discarded because the unified Vulkan-linked binary was auto-dispatching to the 4090. |
 | `ultra7-258v` | rustc 1.88.0 (system) | ✓ | ✓ Vulkan | Intel Arc 130V/140V (Xe2 Battlemage iGPU). Built in 1m48s using cached whisper.cpp from prior session; runs with `XDG_RUNTIME_DIR=/run/user/0` to work around root sshd lacking a logind session. |
 | `i7-1255u` | rustc 1.88.0 (system) | ✓ | ✓ Vulkan | Iris Xe Graphics (Alder Lake-UP3 GT2, gen 12 Xe-LP, 96 EUs). Built `--features accel-vulkan equivalence` in 3m54s. |
 | `i7-7500u` | rustc 1.95.0 (rustup) | ✓ | **build failed** | Vulkan SDK installed (`vulkan-tools`, `libvulkan-dev`, `glslang-tools`, `spirv-tools`, `glslc`) but `whisper-rs 0.16.0` references symbols (`ggml_backend_vk_buffer_type`, `ggml_backend_vk_get_device_count`, …) that have been renamed/removed in the current whisper.cpp upstream that `whisper-rs-sys` cmake-fetches. `ultra7-258v` built successfully only because it had a stale whisper.cpp checkout cached in `target/`. Needs either a pinned whisper.cpp version or a whisper-rs API update — both out of Phase 0 scope. HD 620 (Kaby Lake) was always the lowest-value GPU bench in this matrix. |

@@ -1,0 +1,48 @@
+{
+  "host_id": "i7-8550u",
+  "legacy_session_ip": "192.168.0.127",
+  "released": "2017-08",
+  "cpu_tier": "legacy ultraportable",
+  "cpu_summary": "2017 Kaby Lake-R quad-core / 8 threads, 15 W; first ULV quad-core generation; ThinkPad X1 Carbon Gen 6 (20KH) class; bridges the 2016 i7-7500u and the 2022 i7-1255u in our laptop roster.",
+  "hostname": "ubuntu",
+  "cpu_model": "Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz",
+  "physical_cores": 4,
+  "logical_cores": 8,
+  "mem_total_mib": 15750,
+  "mem_available_mib": 11612,
+  "disk_free_bytes": 7179583488,
+  "kernel": "Linux 7.0.0-14-generic x86_64",
+  "os_pretty_name": "Ubuntu 26.04 LTS",
+  "avx_flags": [
+    "avx",
+    "avx2",
+    "f16c",
+    "fma",
+    "sse2",
+    "sse4_1",
+    "sse4_2"
+  ],
+  "has_avx_vnni": false,
+  "has_avx512_vnni": false,
+  "quant_kernel_class": "avx2-fallback",
+  "quant_kernel_note": "No AVX-VNNI: ggml int8 dot products use the AVX2 fallback. Quantisation produces zero throughput gain over fp16 on this host (sometimes uses slightly more user-time CPU than fp16); only RSS reductions are real. Build also requires GGML_NATIVE=OFF GGML_AVX_VNNI=OFF when cross-compiled from a VNNI-capable host to avoid SIGILL.",
+  "chassis": "laptop",
+  "chassis_product": "ThinkPad X1 Carbon Gen 6 (20KH007VRI)",
+  "gpu": [
+    "00:02.0 VGA compatible controller [0300]: Intel Corporation Kaby Lake-R GT2 [UHD Graphics 620] (rev 07)"
+  ],
+  "ac_online": "1",
+  "battery_pct": 94,
+  "power_profile": "default Ubuntu 26.04 governor (no TLP); AC, balanced",
+  "package_temp_c": 31.0,
+  "whisper_rs_version": "0.16.0",
+  "toolchain": {
+    "source": "cross-shipped from i7-1255u dev host (glibc 2.42); runs against Ubuntu 26.04 glibc 2.43",
+    "rustc": "rustc 1.88.0 (6b00bc388 2025-06-23)",
+    "cargo": "cargo 1.88.0 (873a06493 2025-05-10)"
+  },
+  "gpu_build": {
+    "status": "not_attempted",
+    "reason": "Intel UHD 620 (gen 9.5 Kaby Lake GT2). Same GPU family as the i7-7500u host where whisper-rs 0.16.0 + current whisper.cpp upstream failed at link time (missing ggml_backend_vk_* symbols). No remote rust toolchain present and the live-system rootfs has ~6.7 GiB free, which would not accommodate a from-scratch toolchain + whisper.cpp build."
+  }
+}

@@ -1,34 +1,36 @@
 {
   "command": [
-    "/root/fono-src/target/release/fono-bench",
+    "/root/fono-bench-rig/fono-bench",
     "equivalence",
     "--stt",
     "local",
     "--model",
     "tiny",
     "--output",
-    "/root/runs-vulkan/192.168.0.251__ac__vulkan__tiny__iter1.json",
+    "/root/fono-bench-rig/runs/ultra7-258v__ac__vulkan__tiny__iter1.json",
+    "--fixtures",
+    "/root/fono-bench-rig/fixtures/equivalence",
     "--no-legend"
   ],
   "context_end": {
     "ac_online": "1",
-    "battery_pct": 100,
-    "package_temp_c": 44.0
+    "battery_pct": 98,
+    "package_temp_c": 38.0
   },
   "context_start": {
     "ac_online": "1",
-    "battery_pct": 100,
-    "captured_at_utc": "2026-05-15T19:31:33.988138+00:00",
+    "battery_pct": 98,
+    "captured_at_utc": "2026-05-21T19:34:58.920936+00:00",
     "hostname": "nimblex",
-    "package_temp_c": 41.0,
+    "package_temp_c": 37.0,
     "platform": "linux",
     "power_profile": "governor=powersave"
   },
   "exit_code": 1,
   "label": "ultra7-258v/ac/vulkan/tiny/iter1",
-  "max_rss_kib": 185152,
+  "max_rss_kib": 170460,
   "schema": "fono-bench.rusage/1",
-  "sys_s": 0.437285,
-  "user_s": 4.791918,
-  "wall_clock_s": 6.751491
+  "sys_s": 0.425446,
+  "user_s": 3.859594,
+  "wall_clock_s": 6.350866
 }

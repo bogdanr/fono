@@ -18,7 +18,8 @@
   "avx_flags": [
     "avx",
     "avx2",
-    "avx_",
+    "avx_vnni",
+    "f16c",
     "fma",
     "sse",
     "sse2",
@@ -26,6 +27,10 @@
     "sse4_1",
     "sse4_2"
   ],
+  "has_avx_vnni": true,
+  "has_avx512_vnni": false,
+  "quant_kernel_class": "vnni",
+  "quant_kernel_note": "AVX-VNNI (vpdpbusd) available: int8 dot products run in 1 instruction per packed pair, giving the textbook 1.5-3x quant speedup over fp16 FMA.",
   "chassis": "laptop",
   "gpu": [
     "00:02.0 VGA compatible controller [0300]: Intel Corporation Alder Lake-UP3 GT2 [Iris Xe Graphics] [8086:46a8] (rev 0c)"

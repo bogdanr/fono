@@ -7,28 +7,28 @@
     "--model",
     "small",
     "--output",
-    "/tmp/runs-vulkan/localhost__ac__vulkan__small__iter2.json",
+    "/tmp/fono-bench-runs/i7-1255u__ac__vulkan__small__iter2.json",
     "--no-legend"
   ],
   "context_end": {
     "ac_online": "1",
-    "battery_pct": 100,
+    "battery_pct": 99,
     "package_temp_c": 60.0
   },
   "context_start": {
     "ac_online": "1",
-    "battery_pct": 100,
-    "captured_at_utc": "2026-05-15T16:39:28.252003+00:00",
+    "battery_pct": 99,
+    "captured_at_utc": "2026-05-21T16:42:05.982033+00:00",
     "hostname": "nimblex",
-    "package_temp_c": 73.0,
+    "package_temp_c": 64.0,
     "platform": "linux",
     "power_profile": "governor=powersave"
   },
   "exit_code": 0,
   "label": "i7-1255u/ac/vulkan/small/iter2",
-  "max_rss_kib": 203820,
+  "max_rss_kib": 206000,
   "schema": "fono-bench.rusage/1",
-  "sys_s": 3.200923,
-  "user_s": 22.134812,
-  "wall_clock_s": 72.852164
+  "sys_s": 3.041559,
+  "user_s": 20.889709,
+  "wall_clock_s": 66.029225
 }

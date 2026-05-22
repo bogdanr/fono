@@ -214,6 +214,16 @@ def _markdown(cells: list[dict], inv: dict[str, dict]) -> str:
         "`borderline` (batch ≥ 1.0); `unsuitable` (batch < 1.0 OR RSS > 90% host RAM)."
     )
     out.append("")
+    out.append(
+        "**Quant kernel class** (per-host header): `vnni` = the CPU has "
+        "AVX-VNNI (`vpdpbusd`); int8 dot products run in 1 instruction per "
+        "packed pair, giving the textbook 1.5-3× quant speedup over fp16. "
+        "`avx2-fallback` = no AVX-VNNI; ggml emits a multi-instruction "
+        "AVX2 chain whose per-op cost is comparable to fp16 FMA, so "
+        "quantisation saves RSS / weight bandwidth but not throughput on "
+        "these hosts."
+    )
+    out.append("")
     # Group by host
     by_host: dict[str, list[dict]] = defaultdict(list)
     for c in cells:
@@ -229,6 +239,10 @@ def _markdown(cells: list[dict], inv: dict[str, dict]) -> str:
         released = meta.get("released")
         tier = meta.get("cpu_tier")
         summary = meta.get("cpu_summary")
+        quant_class = meta.get("quant_kernel_class")
+        quant_note = meta.get("quant_kernel_note")
+        has_vnni = meta.get("has_avx_vnni")
+        has_avx512_vnni = meta.get("has_avx512_vnni")
         header_extra = ""
         if released or tier:
             bits = []
@@ -241,6 +255,17 @@ def _markdown(cells: list[dict], inv: dict[str, dict]) -> str:
         if summary:
             out.append("")
             out.append(f"_{summary}_")
+        if quant_class is not None or has_vnni is not None:
+            out.append("")
+            vnni_str = (
+                "AVX-512-VNNI"
+                if has_avx512_vnni
+                else ("AVX-VNNI" if has_vnni else "no AVX-VNNI")
+            )
+            line = f"**Quant kernel class:** `{quant_class or '?'}` ({vnni_str})."
+            if quant_note:
+                line += f" {quant_note}"
+            out.append(line)
         out.append("")
         out.append(
             "| model | power | build | iters | batch RTF | b-σ% | stream RTF | "

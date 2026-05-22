@@ -18,6 +18,7 @@
   "avx_flags": [
     "avx",
     "avx2",
+    "f16c",
     "fma",
     "sse",
     "sse2",
@@ -26,6 +27,10 @@
     "sse4_1",
     "sse4_2"
   ],
+  "has_avx_vnni": false,
+  "has_avx512_vnni": false,
+  "quant_kernel_class": "avx2-fallback",
+  "quant_kernel_note": "Zen 3 (2020): no AVX-VNNI (added in Zen 4, 2022). ggml int8 path uses the AVX2 fallback. Quant speedup vs fp16 is bandwidth-only here; on 16 fast cores + dual-channel DDR4 the headroom is large enough that quant still wins, but not by the VNNI multiplier.",
   "chassis": "container",
   "gpu": [
     "0a:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD102 [GeForce RTX 4090] [10de:2684] (rev a1)"
@@ -41,13 +46,15 @@
     "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)"
   },
   "gpu_build": {
-    "status": "skipped",
-    "reason": "LXC without GPU passthrough; nvidia-smi blocked, only llvmpipe Vulkan device, /dev/dri absent",
+    "status": "available",
+    "reason": "Vulkan sweep run from the Proxmox host (proxmox4, 192.168.0.74, PVE kernel 6.17.13-9-pve) where the RTX 4090 is visible via NVIDIA driver 595.71.05 and exposed to Vulkan as PHYSICAL_DEVICE_TYPE_DISCRETE_GPU. Prior 'skipped' state was inside the LXC container `ai` (192.168.0.79) which never received GPU passthrough; same silicon, different OS namespace. CPU-only quant sweep was re-run on the same host with a separately-built fono-bench compiled without the accel-vulkan feature so the kernels actually execute on CPU.",
     "evidence": {
-      "lspci_vga": "0a:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD102 [GeForce RTX 4090] [10de:2684] (rev a1)",
-      "nvidia_smi": "Failed to initialize NVML: GPU access blocked by the operating system",
-      "vulkaninfo": "loader_scanned_icd_add: Could not get 'vkCreateInstance' via 'vk_icdGetInstanceProcAddr' for ICD libGLX_nvidia.so.0",
-      "dev_dri": "ls: cannot access '/dev/dri': No such file or directory"
+      "host": "proxmox4 (192.168.0.74)",
+      "kernel": "Linux 6.17.13-9-pve",
+      "nvidia_smi": "GPU 0: NVIDIA GeForce RTX 4090",
+      "nvidia_driver": "595.71.05",
+      "vulkan_device_type": "PHYSICAL_DEVICE_TYPE_DISCRETE_GPU",
+      "vulkan_device_name": "NVIDIA GeForce RTX 4090"
     }
   },
   "whisper_thread_cap": 16,

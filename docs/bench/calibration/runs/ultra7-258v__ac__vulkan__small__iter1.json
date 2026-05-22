@@ -11,21 +11,21 @@
       "duration_s": 5.0,
       "modes": {
         "batch": {
-          "text": "neglected.",
-          "elapsed_ms": 584,
-          "ttff_ms": 584
+          "text": "neglected. The art of war then is governed by five constant faculty.",
+          "elapsed_ms": 467,
+          "ttff_ms": 467
         },
         "streaming": {
           "text": "neglected.",
-          "elapsed_ms": 995,
-          "ttff_ms": 494
+          "elapsed_ms": 870,
+          "ttff_ms": 381
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.0,
-        "stt_accuracy_levenshtein": 0.85294116,
-        "ttff_ratio": 0.8458904,
-        "ttc_ratio": 1.7037672
+        "stt_levenshtein_norm": 0.85294116,
+        "stt_accuracy_levenshtein": 0.05882353,
+        "ttff_ratio": 0.81584585,
+        "ttc_ratio": 1.862955
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -38,21 +38,21 @@
       "duration_s": 20.0,
       "modes": {
         "batch": {
-          "text": "neglected. The art of war, then, is governed by five constant factors, to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field. These are, one, the moral law; two, heaven; three, earth; three, earth; and four, heaven.",
-          "elapsed_ms": 661,
-          "ttff_ms": 661
+          "text": "neglected. The art of war, then, is governed by five constant factors, to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field. These are, one, the moral law; two, heaven; three, earth; three, earth; three,",
+          "elapsed_ms": 563,
+          "ttff_ms": 563
         },
         "streaming": {
           "text": "neglected. The art of war, then, is governed by five constant factors, to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field. These are, one, the moral law; two, heaven; three, earth; three, earth; and four, heaven.",
-          "elapsed_ms": 1592,
-          "ttff_ms": 241
+          "elapsed_ms": 1576,
+          "ttff_ms": 239
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.0,
-        "stt_accuracy_levenshtein": 0.13553114,
-        "ttff_ratio": 0.36459908,
-        "ttc_ratio": 2.408472
+        "stt_levenshtein_norm": 0.051282052,
+        "stt_accuracy_levenshtein": 0.099236645,
+        "ttff_ratio": 0.42451155,
+        "ttc_ratio": 2.7992895
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -65,21 +65,21 @@
       "duration_s": 12.0,
       "modes": {
         "batch": {
-          "text": "that Jane was yielding to the preference which she had begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general, so she was very much in love with him.",
-          "elapsed_ms": 642,
-          "ttff_ms": 642
+          "text": "that Jane was yielding to the preference which she'd begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general, so she was very much",
+          "elapsed_ms": 454,
+          "ttff_ms": 454
         },
         "streaming": {
           "text": "that Jane was yielding to the preference which she had begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general, so she was very much in love with him.",
-          "elapsed_ms": 1570,
-          "ttff_ms": 263
+          "elapsed_ms": 1541,
+          "ttff_ms": 261
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.0,
-        "stt_accuracy_levenshtein": 0.1521739,
-        "ttff_ratio": 0.40965733,
-        "ttc_ratio": 2.445483
+        "stt_levenshtein_norm": 0.07608695,
+        "stt_accuracy_levenshtein": 0.0859375,
+        "ttff_ratio": 0.57488984,
+        "ttc_ratio": 3.394273
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -93,20 +93,20 @@
       "modes": {
         "batch": {
           "text": "encouragement. In nine cases out of ten, a woman had better show more affection than she feels. Bingley likes your sister undoubtedly, but he may never do more than",
-          "elapsed_ms": 464,
-          "ttff_ms": 464
+          "elapsed_ms": 305,
+          "ttff_ms": 305
         },
         "streaming": {
           "text": "encouragement. In nine cases out of ten, a woman had better show more affection than she feels. Bingley likes your sister undoubtedly, but he may never do more than",
-          "elapsed_ms": 1141,
-          "ttff_ms": 241
+          "elapsed_ms": 1136,
+          "ttff_ms": 236
         }
       },
       "metrics": {
         "stt_levenshtein_norm": 0.0,
         "stt_accuracy_levenshtein": 0.0,
-        "ttff_ratio": 0.51939654,
-        "ttc_ratio": 2.4590516
+        "ttff_ratio": 0.7737705,
+        "ttc_ratio": 3.72459
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -120,20 +120,20 @@
       "modes": {
         "batch": {
           "text": "tocando bien, por un anfibio sendero de cristales y laureles. El silencio sin estrellas, huyendo del son sonete,",
-          "elapsed_ms": 456,
-          "ttff_ms": 456
+          "elapsed_ms": 297,
+          "ttff_ms": 297
         },
         "streaming": {
           "text": "tocando bien, por un anfibio sendero de cristales y laureles. El silencio sin estrellas, huyendo del son sonete,",
-          "elapsed_ms": 1167,
-          "ttff_ms": 242
+          "elapsed_ms": 1166,
+          "ttff_ms": 246
         }
       },
       "metrics": {
         "stt_levenshtein_norm": 0.0,
         "stt_accuracy_levenshtein": 0.035714287,
-        "ttff_ratio": 0.53070176,
-        "ttc_ratio": 2.5592105
+        "ttff_ratio": 0.82828283,
+        "ttc_ratio": 3.925926
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -146,21 +146,21 @@
       "duration_s": 10.0,
       "modes": {
         "batch": {
-          "text": "et à Gertrud, j'avais dû apprendre moi-même l'alphabet des aveugles. Mais bientôt, elle devint beaucoup plus habile que moi à lire cette écriture, où j'avais assez de peine à me rassurer.",
-          "elapsed_ms": 587,
-          "ttff_ms": 587
+          "text": "et à Gertrud, j'avais dû apprendre moi-même l'alphabet des avocats. Mais bientôt, elle devint beaucoup plus habile que moi à lire cette écriture, où j'avais assez de peine à me rassurer.",
+          "elapsed_ms": 402,
+          "ttff_ms": 402
         },
         "streaming": {
           "text": "et Ã Gertrud, j'avais dÃ» apprendre moi-mÃªme l'alphabet des aveugles. Mais bientÃ´t, elle devint beaucoup plus habile que moi Ã lire cette Ã©criture, oÃ¹ j'avais assez de peine Ã me rassurer.",
-          "elapsed_ms": 1412,
-          "ttff_ms": 260
+          "elapsed_ms": 1409,
+          "ttff_ms": 259
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.067708336,
-        "stt_accuracy_levenshtein": 0.031746034,
-        "ttff_ratio": 0.44293016,
-        "ttc_ratio": 2.4054515
+        "stt_levenshtein_norm": 0.09375,
+        "stt_accuracy_levenshtein": 0.05820106,
+        "ttff_ratio": 0.6442786,
+        "ttc_ratio": 3.504975
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -173,21 +173,21 @@
       "duration_s": 10.0,
       "modes": {
         "batch": {
-          "text": "勞軍遠到來時,然以早遇,赴某地候補一。迎大校,出示日記二冊,為可見當日病狀。",
-          "elapsed_ms": 522,
-          "ttff_ms": 522
+          "text": "勞軍遠到來時,然以早遇,夫某地候補意。迎大校,出示日記二冊,為可見當日病狀。",
+          "elapsed_ms": 354,
+          "ttff_ms": 354
         },
         "streaming": {
           "text": "åè»é å°ä¾æ,ç¶ä»¥æ©é,èµ´æå°åè£ä¸ãè¿å¤§æ ¡,åºç¤ºæ¥è¨äºå,çºå¯è¦ç¶æ¥ç çã",
-          "elapsed_ms": 1323,
+          "elapsed_ms": 1326,
           "ttff_ms": 282
         }
       },
       "metrics": {
         "stt_levenshtein_norm": 0.9622642,
-        "stt_accuracy_levenshtein": 0.34210527,
-        "ttff_ratio": 0.54022986,
-        "ttc_ratio": 2.5344827
+        "stt_accuracy_levenshtein": 0.36842105,
+        "ttff_ratio": 0.7966102,
+        "ttc_ratio": 3.7457628
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -200,21 +200,21 @@
       "duration_s": 10.0,
       "modes": {
         "batch": {
-          "text": "Ia urmat Lui Saul, cel le pădat de la Dumnezeu și urât, așa și Hristol, tupă ce s-a lipsit, a dam de împărăția și domnia pe care o avea supra câturor și a fost unul.",
-          "elapsed_ms": 679,
-          "ttff_ms": 679
+          "text": "Ia urmat Lui Saul, cel le pădat le la Dumnezeu și urât, așa și Hristol, tupă ce s-a lipsit, a dam de împărăția și domniate care o avea sub capăturor și a fost un urat.",
+          "elapsed_ms": 495,
+          "ttff_ms": 495
         },
         "streaming": {
-          "text": "Ia urmat Lui Saul, cel le pÄdat de la Dumnezeu Èi urÃ¢t, aÈa Èi Hristol, tupÄ ce s-a lipsit, a dam de Ã®mpÄrÄÈia Èi domnia pe care o avea supra cÃ¢turor Èi a fost unul.",
-          "elapsed_ms": 1702,
+          "text": "Ia urmat lui Saul, cel le pÄdat de la Dumnezeu Èi urÃ¢t, aÈa Èi Hristol, tupÄ ce s-a lipsit, a dam de Ã®mpÄrÄÈia Èi domnia pe care o avea supra cÃ¢turor Èi a fost un uc.",
+          "elapsed_ms": 1691,
           "ttff_ms": 337
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.14606741,
-        "stt_accuracy_levenshtein": 0.21212122,
-        "ttff_ratio": 0.4963181,
-        "ttc_ratio": 2.5066273
+        "stt_levenshtein_norm": 0.20111732,
+        "stt_accuracy_levenshtein": 0.23952095,
+        "ttff_ratio": 0.68080807,
+        "ttc_ratio": 3.4161615
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -228,20 +228,20 @@
       "modes": {
         "batch": {
           "text": "La învățământul de zi, durata normala studiilor universitare de licență este de 3-4 ani și corresponde unui număr de 60 de credite de studiți transferabile pentru un an de studiu.",
-          "elapsed_ms": 617,
-          "ttff_ms": 617
+          "elapsed_ms": 460,
+          "ttff_ms": 460
         },
         "streaming": {
           "text": "La Ã®nvÄÈÄmÃ¢ntul de zi, durata normala studiilor universitare de licenÈÄ este de 3-4 ani Èi corresponde unui numÄr de 60 de credite de studiÈi transferabile pentru un an de studiu.",
-          "elapsed_ms": 1575,
-          "ttff_ms": 339
+          "elapsed_ms": 1560,
+          "ttff_ms": 340
         }
       },
       "metrics": {
         "stt_levenshtein_norm": 0.105820104,
         "stt_accuracy_levenshtein": 0.13227513,
-        "ttff_ratio": 0.54943275,
-        "ttc_ratio": 2.5526743
+        "ttff_ratio": 0.73913044,
+        "ttc_ratio": 3.3913043
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -254,21 +254,21 @@
       "duration_s": 11.76,
       "modes": {
         "batch": {
-          "text": "Ia a subliniat cât de periculoasă este de fapt situația, îndrungat unumă atât de restrâns de persoane are la degetul mic o asemenea putere economică și nu numai.",
-          "elapsed_ms": 610,
-          "ttff_ms": 610
+          "text": "Ia a subliniat cât de periculoasă este de fapt situația îndrungât unumă atât de restrăns de persoane are la degetul mic o asemenea putere economică și nu numai.",
+          "elapsed_ms": 442,
+          "ttff_ms": 442
         },
         "streaming": {
           "text": "Ia a subliniat cÃ¢t de periculoasÄ este de fapt situaÈia, Ã®ndrungat unumÄ atÃ¢t de restrÃ¢ns de persoane are la degetul mic o asemenea putere economicÄ Èi nu numai.",
-          "elapsed_ms": 1538,
-          "ttff_ms": 309
+          "elapsed_ms": 1531,
+          "ttff_ms": 306
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.105882354,
-        "stt_accuracy_levenshtein": 0.062111802,
-        "ttff_ratio": 0.5065574,
-        "ttc_ratio": 2.5213115
+        "stt_levenshtein_norm": 0.11764706,
+        "stt_accuracy_levenshtein": 0.055900622,
+        "ttff_ratio": 0.6923077,
+        "ttc_ratio": 3.463801
       },
       "verdict": "pass",
       "skip_reason": null,

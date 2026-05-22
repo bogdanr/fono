@@ -18,6 +18,7 @@
   "avx_flags": [
     "avx",
     "avx2",
+    "f16c",
     "fma",
     "sse",
     "sse2",
@@ -25,6 +26,10 @@
     "sse4_1",
     "sse4_2"
   ],
+  "has_avx_vnni": false,
+  "has_avx512_vnni": false,
+  "quant_kernel_class": "avx2-fallback",
+  "quant_kernel_note": "No AVX-VNNI: ggml int8 dot products use the AVX2 fallback (vpmaddubsw + vpmaddwd + vpaddd + dequantise shifts). Per-op cost is similar to fp16 FMA; quant's benefits collapse to RSS and weight bandwidth on this host. See 2026-05-21 diagnostic in summary/quant-anomaly.md.",
   "chassis": "laptop",
   "gpu": [
     "00:02.0 VGA compatible controller [0300]: Intel Corporation HD Graphics 620 [8086:5916] (rev 02)"

@@ -18,7 +18,8 @@
   "avx_flags": [
     "avx",
     "avx2",
-    "avx_",
+    "avx_vnni",
+    "f16c",
     "fma",
     "sse",
     "sse2",
@@ -26,6 +27,10 @@
     "sse4_1",
     "sse4_2"
   ],
+  "has_avx_vnni": true,
+  "has_avx512_vnni": false,
+  "quant_kernel_class": "vnni",
+  "quant_kernel_note": "Lunar Lake Lion Cove P-cores have AVX-VNNI (no AVX-512; Intel removed it from consumer Core Ultra). Int8 dot products use vpdpbusd; quant gives the full 1.5-3x throughput uplift over fp16, plus small.en-q8_0 promotes from borderline to comfortable for live streaming.",
   "chassis": "laptop",
   "gpu": [
     "00:02.0 VGA compatible controller [0300]: Intel Corporation Lunar Lake [Intel Arc Graphics 130V / 140V] [8086:64a0] (rev 04)"
