@@ -23,6 +23,8 @@ _2022 Alder Lake-UP3 hybrid (2P+8E, 12 threads, 15 W); mainstream business ultra
 | base.en-q5_1 | ac | cpu | 2/2 | 25.76 | 0.0 | 9.44 | 0.3 | 0.29 | 185 | comfortable |  |
 | base.en-q8_0 | ac | cpu | 2/2 | 22.08 | 0.6 | 8.65 | 0.9 | 0.31 | 194 | comfortable |  |
 | large-v3-turbo | ac | cpu | 1/1 | 0.33 | — | 0.10 | — | 36.63 | 3649 | unsuitable |  |
+| large-v3-turbo-q5_0 | ac | cpu | 2/2 | 4.51 | 16.2 | 0.84 | 3.5 | 4.40 | 212 | borderline | batch_rtf spread 16.2% > 15% |
+| large-v3-turbo-q8_0 | ac | cpu | 2/2 | 4.43 | 4.8 | 0.81 | 2.4 | 4.57 | 211 | borderline |  |
 | small | ac | cpu | 3/3 | 1.62 | 1.3 | 0.56 | 9.2 | 6.07 | 1356 | borderline |  |
 | small-q5_1 | ac | cpu | 2/2 | 15.72 | 1.4 | 3.33 | 1.1 | 1.00 | 198 | comfortable |  |
 | small-q8_0 | ac | cpu | 2/2 | 13.91 | 0.6 | 3.11 | 0.4 | 1.07 | 178 | comfortable |  |
