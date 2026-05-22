@@ -59,6 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Pondering now follows auto-stop and works in live transcripts.**
+  Turning off "Auto-stop after pause" now also turns off the Pondering
+  overlay, and the Pondering label / auto-stop commit now fire during
+  live (streaming) dictation, not just the batch path.
+
 - **Pondering parity for the F8 assistant flow.** A long pause during
   an assistant turn now shows the same "PONDERING" walking-letter
   highlight (in the green assistant palette) and triggers the same

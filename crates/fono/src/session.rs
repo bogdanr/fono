@@ -973,22 +973,24 @@ impl SessionOrchestrator {
         let buf = Arc::clone(buffer);
         let sample_rate = self.capture_cfg.target_sample_rate;
         let auto_stop_ms = cfg.audio.auto_stop_silence_ms;
+        // Auto-stop off ⇒ Pondering off. The Pondering overlay
+        // state, walking-letter highlight, and any auto-stop
+        // commit only make sense when the user has actually
+        // opted into the silence-driven boundary. With
+        // `audio.auto_stop_silence_ms = 0` (the shipping default)
+        // the user owns the boundary by keypress; surfacing
+        // "PONDERING" under their finger only confuses things.
+        // Skip spawning the watch entirely so it costs nothing.
+        if auto_stop_ms == 0 {
+            return None;
+        }
         let envelope_cfg = EnvelopeConfig { sample_rate, ..EnvelopeConfig::default() };
-        // Slice 4: wire the commit timer. Zero means "no auto-stop";
-        // the watch still drives the Pondering label so the user
-        // sees the state machine even with the feature off, which
-        // is what dogfooding from slice 2 already depended on.
         let watch_cfg = SilenceWatchConfig {
-            auto_stop_silence_ms: if auto_stop_ms > 0 { Some(auto_stop_ms) } else { None },
+            auto_stop_silence_ms: Some(auto_stop_ms),
             ..SilenceWatchConfig::default()
         };
         let pondering_visual_ms = watch_cfg.pondering_visual_ms;
-        // Slice 2 visual default: when the user has auto-stop off
-        // (the shipping default), still walk the highlight across
-        // a 5 s "what auto-stop *would* feel like" window so the
-        // dogfooding signal is meaningful. When auto-stop is set
-        // the walk matches the real timer.
-        let walk_total_ms = if auto_stop_ms > 0 { auto_stop_ms } else { 5_000 };
+        let walk_total_ms = auto_stop_ms;
         let action_tx = self.action_tx.clone();
         // Push-to-talk suppression: while the user is physically
         // holding the relevant key down, the `Pondering` overlay
@@ -2480,10 +2482,18 @@ impl SessionOrchestrator {
             return Ok(());
         }
 
+        // Pondering parity for live dictation: mirror the batch
+        // toggle path and spawn the silence watch when the user
+        // pressed (rather than held) the dictation key, so the
+        // "PONDERING" overlay + auto-stop commit work on the
+        // streaming pipeline too. Hold-to-talk owns its own
+        // boundary, same as the batch path.
+        let silence_flavor =
+            matches!(mode, RecordingMode::Toggle).then_some(SilenceWatchFlavor::Dictation);
         let session = self.build_live_capture_pipeline(
             streaming,
             fono_overlay::OverlayState::LiveDictating,
-            None,
+            silence_flavor,
         )?;
 
         let cfg = self.current_config();
