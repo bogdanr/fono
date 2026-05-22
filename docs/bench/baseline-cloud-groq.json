@@ -241,6 +241,46 @@
       "skip_reason": null,
       "synthetic_placeholder": false,
       "verdict": "pass"
+    },
+    {
+      "fixture": "ro-bogdan-30s",
+      "language": "ro",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.04658384993672371,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": " Vreau să facem și o înregistrare mai lungă cu radio-ul care rulează pe fundal și cu mine care mă gândesc mai mult la ce vreau să zic, ca să vedem dacă modelul se descurcă bine și în situația asta, când o să avem un fișier de peste 20 de secunde, care să conțină o dictare sau ceva, care vrei sa vorbesc cu asistentul"
+        },
+        "streaming": null
+      },
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.5",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    },
+    {
+      "fixture": "ro-bogdan-10s",
+      "language": "ro",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.09774436056613922,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": " Si acum facem o registrare cu muzica pe fundal, sa vedem daca modelele pot sa detecteze dictarea, in timp ce e niste zgomi de fundal."
+        },
+        "streaming": null
+      },
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.5",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
     }
   ],
   "stt_backend": "groq:whisper-large-v3-turbo",
