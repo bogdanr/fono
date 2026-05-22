@@ -681,6 +681,19 @@ impl SessionOrchestrator {
         Arc::clone(&self.config.read().expect("config lock poisoned"))
     }
 
+    /// Snapshot of the post-reload [`Config::live_preview`] flag. The
+    /// daemon's hotkey dispatcher and IPC client handler read this on
+    /// every action so a tray-triggered switch into Transcript style
+    /// (which calls `reload()` and updates `self.config`) takes effect
+    /// on the very next F7 press — without this, those paths captured
+    /// the startup `Arc<Config>` and kept routing to the batch
+    /// pipeline even after the user picked Transcript, suppressing
+    /// the live overlay.
+    #[must_use]
+    pub fn live_preview(&self) -> bool {
+        self.current_config().live_preview()
+    }
+
     /// Spawn the standalone-waveform overlay's level ticker, set the
     /// overlay state to `initial_state`, and return an
     /// [`tokio::task::AbortHandle`] the caller stows in its

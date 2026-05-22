@@ -283,7 +283,7 @@ impl TextToSpeech for OpenAiCompatTtsClient {
 
     async fn prewarm(&self) -> Result<()> {
         // Cheap GET to `/models` pays the TLS handshake before the
-        // user's first F8/F10 press. Auth header is required; we don't
+        // user's first F7/F8 press. Auth header is required; we don't
         // care about the response.
         let _ = self
             .apply_auth(self.client.get(self.models_url()))

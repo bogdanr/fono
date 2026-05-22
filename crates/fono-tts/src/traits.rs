@@ -38,7 +38,7 @@ pub trait TextToSpeech: Send + Sync {
     fn native_sample_rate(&self) -> u32;
 
     /// Optional best-effort warmup — pay TCP+TLS+DNS or model load off
-    /// the hot path before the user's first F10 press. Errors are
+    /// the hot path before the user's first F8 press. Errors are
     /// non-fatal; the caller should log + continue.
     async fn prewarm(&self) -> Result<()> {
         Ok(())

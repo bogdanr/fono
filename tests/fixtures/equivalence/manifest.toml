@@ -195,3 +195,40 @@ synthetic_placeholder = false
 duration_estimate_s = 12.0
 equivalence_threshold = 0.30
 accuracy_threshold = 0.30
+
+[[fixtures]]
+name = "ro-bogdan-30s"
+path = "ro-bogdan-30s.wav"
+sha256 = "b0d801d3e8440356d37c6146682273b7c7395e7a7197b5b63bfc168d49b26520"
+source_url = "user-contributed (project author, male voice — Bogdan, long-form with radio on in background and natural hesitations)"
+license = "CC0 1.0 (project-author release)"
+reference = "vreau să facem și o înregistrare mai lungă, cu radio-ul care rulează pe fundal și cu mine care mă gândesc mai mult la ce vreau să zic, ca să vedem dacă modelul se descurcă bine și în situația asta, când o să avem un fișier de peste douăzeci de secunde care să conțină o dictare sau ceva care vrei să vorbești cu asistentul"
+language = "ro"
+synthetic_placeholder = false
+duration_estimate_s = 30.0
+# Long-form noisy fixture: ~30 s of spontaneous-style dictation with a
+# radio playing in the background and natural thinking pauses. Tests
+# segmentation, VAD-style robustness, and background-noise tolerance
+# together. Equivalence (streaming↔batch consistency) stays tight; the
+# accuracy gate is loosened because noise + hesitations + the numeral
+# "douăzeci"/"20" emission drift add up.
+equivalence_threshold = 0.30
+accuracy_threshold = 0.50
+
+[[fixtures]]
+name = "ro-bogdan-10s"
+path = "ro-bogdan-10s.wav"
+sha256 = "efd7ac11eaf1499363a77fa1970faa7609fdc8628ca1b4a099d04d68777afc7e"
+source_url = "user-contributed (project author, male voice — Bogdan, with background music)"
+license = "CC0 1.0 (project-author release)"
+reference = "și acum facem înregistrare cu muzică pe fundal să vedem dacă modelele pot sa detecteze dictarea în timp ce e niște zgomot de fundal"
+language = "ro"
+synthetic_placeholder = false
+duration_estimate_s = 10.0
+# Same diacritic / streaming-mojibake caveats as the other ro-* fixtures,
+# plus an extra accuracy budget for background-music interference. The
+# point of this fixture is robustness-to-noise, not absolute WER, so the
+# equivalence gate (streaming↔batch consistency) stays the tight one and
+# accuracy is loosened.
+equivalence_threshold = 0.30
+accuracy_threshold = 0.50

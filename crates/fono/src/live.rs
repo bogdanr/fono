@@ -145,7 +145,7 @@ pub struct LiveSession {
     stream_cfg: StreamConfig,
     heuristics: HeuristicConfig,
     /// Overlay state to claim while transcription is running. Defaults
-    /// to `LiveDictating` (F9 path); the assistant push-to-talk path
+    /// to `LiveDictating` (F7 path); the assistant push-to-talk path
     /// passes `AssistantRecording` so the same plumbing renders the
     /// green "ASSISTANT" panel with realtime preview text.
     overlay_active_state: OverlayState,

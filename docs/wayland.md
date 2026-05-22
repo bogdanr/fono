@@ -72,7 +72,19 @@ your distro's `xwayland` package.
    runs inside your graphical session, not a stale terminal
    multiplexer), **or** your session has neither `zwlr_layer_shell_v1`
    nor Xwayland — install your distro's `xwayland` package (e.g.
-   `sudo apt install xwayland`) to enable the overlay.
+   `sudo apt install xwayland`) to enable the overlay. **Or** your
+   distro is missing `libxkbcommon-x11` — Fono's X11 / Xwayland
+   overlay backend dlopens `libxkbcommon-x11.so.0` and falls back to
+   `noop` when the helper isn't installed. Stock Ubuntu 26.04 GNOME-
+   Wayland live images hit this. Install the helper:
+   - Debian / Ubuntu: `sudo apt install libxkbcommon-x11-0`
+   - Fedora / RHEL / Alpine: `sudo dnf install libxkbcommon-x11` (or `apk add`)
+   - Arch: `sudo pacman -S libxkbcommon` (bundles the X11 helper)
+   - Slackware: nothing to install — the base `libxkbcommon` package
+     already bundles both.
+
+   `sudo fono install` also offers to pull this in interactively when
+   it detects the helper is missing.
 2. **Overlay is invisible / pure black.** You're probably on a build
    without ARGB8888 support in the compositor. Try
    `FONO_OVERLAY_BACKEND=noop` so dictation still works, and file a

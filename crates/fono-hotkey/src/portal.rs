@@ -80,23 +80,39 @@ pub fn spawn(
                 }
             };
             rt.block_on(async move {
-                // Synchronous preflight: open the proxy. If this fails
-                // the GlobalShortcuts interface is not available and we
-                // bail before the caller commits to the portal backend.
-                match GlobalShortcuts::new().await {
-                    Ok(proxy) => {
-                        let _ = preflight_tx.send(Ok(()));
-                        if let Err(e) =
-                            run_portal_with_proxy(proxy, bindings_run, tx_run, ctrl_rx).await
-                        {
-                            warn!("portal listener exited: {e:#}");
-                        }
-                    }
+                // Synchronous preflight: open the proxy AND create a
+                // session. The CreateSession call is what xdg-desktop-
+                // portal-gnome >= 47 rejects on unsandboxed callers
+                // with `org.freedesktop.portal.Error.NotAllowed: An
+                // app id is required` — if we only checked
+                // `GlobalShortcuts::new()` (which succeeds because the
+                // interface is advertised), the failure would surface
+                // asynchronously after `spawn()` had already returned
+                // Ok, and the detect.rs gsettings/X11 fallback chain
+                // would never engage. Eat the round-trip up front so
+                // the caller can fall back deterministically.
+                let proxy = match GlobalShortcuts::new().await {
+                    Ok(p) => p,
                     Err(e) => {
                         let _ = preflight_tx.send(Err(anyhow::anyhow!(
                             "GlobalShortcuts portal not available: {e}"
                         )));
+                        return;
                     }
+                };
+                let session = match proxy.create_session().await {
+                    Ok(s) => Arc::new(s),
+                    Err(e) => {
+                        let _ = preflight_tx
+                            .send(Err(anyhow::anyhow!("portal CreateSession failed: {e}")));
+                        return;
+                    }
+                };
+                let _ = preflight_tx.send(Ok(()));
+                if let Err(e) =
+                    run_portal_with_proxy(proxy, session, bindings_run, tx_run, ctrl_rx).await
+                {
+                    warn!("portal listener exited: {e:#}");
                 }
             });
         })
@@ -113,21 +129,22 @@ pub fn spawn(
 
 async fn run_portal_with_proxy(
     proxy: GlobalShortcuts<'_>,
+    session: Arc<ashpd::desktop::Session<'_, GlobalShortcuts<'_>>>,
     bindings: HotkeyBindings,
     tx: mpsc::UnboundedSender<HotkeyAction>,
     ctrl_rx: crossbeam_channel::Receiver<HotkeyControl>,
 ) -> Result<()> {
-    run_portal_inner(proxy, bindings, tx, ctrl_rx).await
+    run_portal_inner(proxy, session, bindings, tx, ctrl_rx).await
 }
 
 #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 async fn run_portal_inner(
     proxy: GlobalShortcuts<'_>,
+    session: Arc<ashpd::desktop::Session<'_, GlobalShortcuts<'_>>>,
     bindings: HotkeyBindings,
     tx: mpsc::UnboundedSender<HotkeyAction>,
     ctrl_rx: crossbeam_channel::Receiver<HotkeyControl>,
 ) -> Result<()> {
-    let session = Arc::new(proxy.create_session().await.context("portal CreateSession failed")?);
     debug!("portal session created");
 
     // Build the NewShortcut requests from config strings. The portal's

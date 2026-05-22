@@ -249,7 +249,7 @@ static TEST_RECORDER: Mutex<Vec<(Stage, &'static str, ErrorClass, String)>> =
 
 /// Clear the per-session dedup set **and** the global single-shot
 /// gate. Call from every entry point that starts a new dictation
-/// session so each F8/F9/F10 press gets one fresh notification
+/// session so each F7/F8 press gets one fresh notification
 /// opportunity.
 pub fn reset_session_flag() {
     if let Ok(mut g) = FIRED.lock() {

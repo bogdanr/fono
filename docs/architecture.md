@@ -29,7 +29,7 @@ fono-download    streaming HTTPS with SHA-256 verify + range resume
 ```
 
 The dictation pipeline goes **STT → polish → text injection**.
-The voice-assistant pipeline (F10 hold-to-talk) diverges after STT:
+The voice-assistant pipeline (F8 hold-to-talk) diverges after STT:
 **STT → assistant chat → SentenceSplitter → TTS → AudioPlayback**,
 with no text injection. `fono::assistant` orchestrates the pump and
 hosts the rolling conversation history; `fono-audio::playback` is

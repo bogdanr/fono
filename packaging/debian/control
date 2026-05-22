@@ -9,7 +9,7 @@ Rules-Requires-Root: no
 
 Package: fono
 Architecture: linux-any
-Depends: ${misc:Depends}, ${shlibs:Depends}
+Depends: ${misc:Depends}, ${shlibs:Depends}, libxkbcommon-x11-0
 Recommends: pipewire | pulseaudio, wtype | ydotool | xdotool
 Description: Lightweight native voice dictation
  Fono is a single-binary Rust voice dictation tool: press a hotkey,

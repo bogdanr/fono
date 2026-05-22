@@ -226,7 +226,7 @@ impl TextToSpeech for WyomingTts {
     async fn prewarm(&self) -> Result<()> {
         // Open a connection, send `describe`, read `info`, drop. Pays
         // TCP handshake + first JSON parse before the user's first
-        // F10 press.
+        // F8 press.
         let stream = self.connect().await?;
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);

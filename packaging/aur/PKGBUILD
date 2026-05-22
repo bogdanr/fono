@@ -6,7 +6,7 @@ pkgdesc="Lightweight native voice dictation — press a hotkey, speak, text appe
 arch=('x86_64' 'aarch64')
 url="https://github.com/bogdanr/fono"
 license=('GPL-3.0-only')
-depends=('gcc-libs')
+depends=('gcc-libs' 'libxkbcommon')
 optdepends=(
   'libappindicator-gtk3: system tray icon on X11/XEmbed-based panels'
   'wtype: keystroke injection on wlroots Wayland compositors'

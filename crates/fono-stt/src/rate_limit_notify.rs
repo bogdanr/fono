@@ -4,7 +4,7 @@
 //!
 //! When a cloud provider returns HTTP 429, we want to surface this to
 //! the user as a desktop notification — but exactly **once per
-//! dictation session** (per F8/F9 press), not once per request. The
+//! dictation session** (per F7 press), not once per request. The
 //! session orchestrator calls [`reset_session_flag`] at the start of
 //! every recording / live-dictation session; the cloud STT backend
 //! calls [`notify_once`] from each 429 site and the static
@@ -41,7 +41,7 @@ pub const THROTTLE_WINDOW: Duration = Duration::from_secs(60);
 
 /// Clear the dedup flag. Call this from `SessionOrchestrator::on_start_*`
 /// at every new dictation session so the user gets one fresh
-/// notification opportunity per F8/F9 press.
+/// notification opportunity per F7 press.
 pub fn reset_session_flag() {
     NOTIFIED_THIS_SESSION.store(false, Ordering::SeqCst);
     if let Ok(mut g) = LAST_NOTIFIED_AT.lock() {

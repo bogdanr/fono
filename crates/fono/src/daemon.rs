@@ -31,14 +31,10 @@ use crate::session::SessionOrchestrator;
 /// `CancelPressed`, `ProcessingDone`, and `ProcessingStarted` are
 /// always passed through; the FSM already routes Cancel from any
 /// state to Idle.
-fn translate_for_live_preview(
-    action: HotkeyAction,
-    config: &Config,
-    orchestrator_present: bool,
-) -> HotkeyAction {
+fn translate_for_live_preview(action: HotkeyAction, live_preview_enabled: bool) -> HotkeyAction {
     #[cfg(feature = "interactive")]
     {
-        if orchestrator_present && config.live_preview() {
+        if live_preview_enabled {
             return match action {
                 HotkeyAction::HoldPressed => HotkeyAction::LiveHoldPressed,
                 HotkeyAction::HoldReleased => HotkeyAction::LiveHoldReleased,
@@ -49,7 +45,7 @@ fn translate_for_live_preview(
     }
     #[cfg(not(feature = "interactive"))]
     {
-        let _ = (config, orchestrator_present);
+        let _ = live_preview_enabled;
     }
     action
 }
@@ -766,16 +762,20 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     {
         let fsm = Arc::clone(&fsm);
         let tray = Arc::clone(&tray);
-        let config_for_dispatch = Arc::clone(&config);
         let orch_for_dispatch = orchestrator.clone();
         let cancel_ctrl_disp = cancel_ctrl.clone();
         tokio::spawn(async move {
             while let Some(action) = action_rx.recv().await {
-                let action = translate_for_live_preview(
-                    action,
-                    &config_for_dispatch,
-                    orch_for_dispatch.is_some(),
-                );
+                // Read `live_preview` straight from the orchestrator's
+                // post-reload config so a tray-triggered switch into
+                // Transcript style routes the very next hotkey press
+                // through the live pipeline (and shows the overlay).
+                // Capturing a startup `Arc<Config>` here would freeze
+                // the routing decision and suppress the Transcript
+                // overlay until a daemon restart.
+                let live_preview_enabled =
+                    orch_for_dispatch.as_ref().is_some_and(|o| o.live_preview());
+                let action = translate_for_live_preview(action, live_preview_enabled);
                 let new_state = fsm.lock().await.dispatch(action);
                 tracing::debug!("hotkey: {action:?} -> {new_state:?}");
                 if matches!(action, HotkeyAction::ProcessingDone) {
@@ -1063,10 +1063,9 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                 let fsm = Arc::clone(&fsm);
                 let action_tx = action_tx.clone();
                 let orch = orchestrator.clone();
-                let config = Arc::clone(&config);
                 let registry = discovery_registry.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, fsm, action_tx, orch, config, registry).await {
+                    if let Err(e) = handle_client(stream, fsm, action_tx, orch, registry).await {
                         warn!("client error: {e}");
                     }
                 });
@@ -1325,13 +1324,17 @@ async fn handle_client(
     fsm: Arc<Mutex<RecordingFsm>>,
     action_tx: mpsc::UnboundedSender<HotkeyAction>,
     orchestrator: Option<Arc<SessionOrchestrator>>,
-    config: Arc<Config>,
     discovery_registry: Option<fono_net::discovery::Registry>,
 ) -> Result<()> {
     let req: Request = read_frame(&mut stream).await?;
-    let orch_present = orchestrator.is_some();
+    // Read live-preview from the orchestrator's post-reload config
+    // snapshot (rather than a startup-time `Arc<Config>` capture) so
+    // a tray-triggered switch into Transcript style takes effect on
+    // the very next IPC press — see the action dispatcher above for
+    // the same rationale.
+    let live_preview_enabled = orchestrator.as_ref().is_some_and(|o| o.live_preview());
     let send_translated = |a: HotkeyAction| {
-        let _ = action_tx.send(translate_for_live_preview(a, &config, orch_present));
+        let _ = action_tx.send(translate_for_live_preview(a, live_preview_enabled));
     };
     let resp = match req {
         Request::Toggle => {
@@ -2657,12 +2660,13 @@ mod tests {
     fn translate_passthrough_when_feature_off() {
         let mut cfg = Config::default();
         cfg.overlay.style = fono_core::config::WaveformStyle::Transcript;
+        let live = cfg.live_preview();
         assert_eq!(
-            translate_for_live_preview(HotkeyAction::HoldPressed, &cfg, true),
+            translate_for_live_preview(HotkeyAction::HoldPressed, live),
             HotkeyAction::HoldPressed
         );
         assert_eq!(
-            translate_for_live_preview(HotkeyAction::TogglePressed, &cfg, true),
+            translate_for_live_preview(HotkeyAction::TogglePressed, live),
             HotkeyAction::TogglePressed
         );
     }
@@ -2675,29 +2679,30 @@ mod tests {
     fn translate_hold_toggle_to_live_when_enabled() {
         let mut cfg = Config::default();
         cfg.overlay.style = fono_core::config::WaveformStyle::Transcript;
+        let live = cfg.live_preview();
         assert_eq!(
-            translate_for_live_preview(HotkeyAction::HoldPressed, &cfg, true),
+            translate_for_live_preview(HotkeyAction::HoldPressed, live),
             HotkeyAction::LiveHoldPressed
         );
         assert_eq!(
-            translate_for_live_preview(HotkeyAction::HoldReleased, &cfg, true),
+            translate_for_live_preview(HotkeyAction::HoldReleased, live),
             HotkeyAction::LiveHoldReleased
         );
         assert_eq!(
-            translate_for_live_preview(HotkeyAction::TogglePressed, &cfg, true),
+            translate_for_live_preview(HotkeyAction::TogglePressed, live),
             HotkeyAction::LiveTogglePressed
         );
         // Cancel / Processing variants always pass through.
         assert_eq!(
-            translate_for_live_preview(HotkeyAction::CancelPressed, &cfg, true),
+            translate_for_live_preview(HotkeyAction::CancelPressed, live),
             HotkeyAction::CancelPressed
         );
         assert_eq!(
-            translate_for_live_preview(HotkeyAction::ProcessingDone, &cfg, true),
+            translate_for_live_preview(HotkeyAction::ProcessingDone, live),
             HotkeyAction::ProcessingDone
         );
         assert_eq!(
-            translate_for_live_preview(HotkeyAction::ProcessingStarted, &cfg, true),
+            translate_for_live_preview(HotkeyAction::ProcessingStarted, live),
             HotkeyAction::ProcessingStarted
         );
     }
@@ -2708,7 +2713,7 @@ mod tests {
     fn translate_passthrough_when_disabled() {
         let cfg = Config::default(); // overlay.style defaults to Fft (not Transcript)
         assert_eq!(
-            translate_for_live_preview(HotkeyAction::HoldPressed, &cfg, true),
+            translate_for_live_preview(HotkeyAction::HoldPressed, cfg.live_preview()),
             HotkeyAction::HoldPressed
         );
     }
@@ -2720,8 +2725,11 @@ mod tests {
     fn translate_passthrough_in_degraded_mode() {
         let mut cfg = Config::default();
         cfg.overlay.style = fono_core::config::WaveformStyle::Transcript;
+        // Degraded mode = no orchestrator, so the runtime caller
+        // passes `false` regardless of the config value.
+        let _ = cfg.live_preview();
         assert_eq!(
-            translate_for_live_preview(HotkeyAction::HoldPressed, &cfg, false),
+            translate_for_live_preview(HotkeyAction::HoldPressed, false),
             HotkeyAction::HoldPressed
         );
     }

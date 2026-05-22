@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Voice-assistant pipeline. Orchestrates the F10 (or IPC-triggered)
+//! Voice-assistant pipeline. Orchestrates the F8 (or IPC-triggered)
 //! assistant turn:
 //!
 //! ```text
@@ -35,7 +35,7 @@ use tracing::{debug, info, warn};
 /// truth.
 ///
 /// `playback` is created lazily on first use (so a daemon that never
-/// hits F10 doesn't open an audio output stream / spawn paplay) and
+/// hits F8 doesn't open an audio output stream / spawn paplay) and
 /// reused across turns. `current_turn` is `Some(_)` while a pump
 /// task is running; calling [`Self::stop_current_turn`] notifies the
 /// pump to abort and drains the audio queue.
@@ -75,7 +75,7 @@ impl AssistantSessionState {
 /// `Arc`).
 pub struct AssistantTurnInputs {
     /// Captured PCM. Ignored when `pre_transcribed` is `Some` — the
-    /// caller has already run the STT step (live-streaming F10 path).
+    /// caller has already run the STT step (live-streaming F8 path).
     pub pcm: Vec<f32>,
     pub sample_rate: u32,
     /// Batch STT backend. Unused when `pre_transcribed` is `Some`.
@@ -104,7 +104,7 @@ pub struct AssistantTurnInputs {
     /// backends.
     pub overlay: Option<fono_overlay::OverlayHandle>,
     /// When `Some`, skip the batch STT step entirely and treat this
-    /// string as the user's turn. Set by the live-streaming F10 path
+    /// string as the user's turn. Set by the live-streaming F8 path
     /// (interactive mode + streaming-capable backend) so the same
     /// transcription that drove the realtime overlay preview gets
     /// forwarded to the LLM rather than re-running STT.
@@ -140,7 +140,7 @@ pub async fn run_assistant_turn(
     } = inputs;
 
     // 1. Resolve the user's text. When `pre_transcribed` is set the
-    //    caller already ran streaming STT (live-mode F10 path); we
+    //    caller already ran streaming STT (live-mode F8 path); we
     //    skip the batch call entirely. Otherwise run STT on the
     //    captured PCM.
     let user_text = if let Some(text) = pre_transcribed {

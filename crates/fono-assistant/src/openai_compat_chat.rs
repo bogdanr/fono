@@ -222,7 +222,7 @@ impl Assistant for OpenAiCompatChat {
             messages,
             // Voice-assistant defaults: short, conversational, low
             // randomness. `max_tokens` is generous because the user
-            // can interrupt with another F10 press at any time.
+            // can interrupt with another F8 press at any time.
             temperature: 0.5,
             top_p: 0.9,
             max_tokens: 512,
