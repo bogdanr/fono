@@ -211,12 +211,26 @@ _2024 Lunar Lake 4P+4LP-E (no SMT); Intel's current efficiency flagship for thin
 | model | power | build | iters | batch RTF | b-σ% | stream RTF | s-σ% | TTFF s | RSS MiB | verdict | notes |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|
 | base | ac | cpu | 3/3 | 11.39 | 2.4 | 4.23 | 3.2 | 0.68 | 585 | comfortable |  |
+| base-q5_1 | ac | cpu | 2/2 | 19.96 | 0.2 | 3.86 | 0.8 | 0.87 | 458 | comfortable |  |
+| base-q8_0 | ac | cpu | 2/2 | 27.17 | 0.6 | 5.21 | 1.1 | 0.72 | 477 | comfortable |  |
 | base.en | ac | cpu | 3/3 | 13.20 | 0.8 | 5.14 | 4.1 | 0.57 | 591 | comfortable |  |
+| base.en-q5_1 | ac | cpu | 2/2 | 19.58 | 0.3 | 4.93 | 0.2 | 0.74 | 437 | comfortable |  |
+| base.en-q8_0 | ac | cpu | 2/2 | 22.54 | 0.3 | 4.98 | 0.2 | 0.63 | 480 | comfortable |  |
 | large-v3-turbo | ac | cpu | 3/3 | 0.61 | 0.6 | 0.20 | 0.1 | 18.49 | 3654 | unsuitable |  |
+| large-v3-turbo-q5_0 | ac | cpu | 2/2 | 1.21 | 0.0 | 0.19 | 0.1 | 20.74 | 1672 | borderline |  |
+| large-v3-turbo-q8_0 | ac | cpu | 2/2 | 1.46 | 0.1 | 0.23 | 0.1 | 16.93 | 2242 | borderline |  |
 | small | ac | cpu | 3/3 | 3.13 | 1.5 | 0.72 | 30.6 | 3.39 | 1360 | borderline | stream_rtf spread 30.6% > 15% |
+| small-q5_1 | ac | cpu | 2/2 | 6.81 | 0.3 | 1.01 | 0.0 | 3.98 | 804 | borderline |  |
+| small-q8_0 | ac | cpu | 2/2 | 8.66 | 0.7 | 1.29 | 0.7 | 3.00 | 944 | borderline |  |
 | small.en | ac | cpu | 3/3 | 3.90 | 3.0 | 1.23 | 1.7 | 3.01 | 1367 | borderline |  |
+| small.en-q5_1 | ac | cpu | 2/2 | 6.10 | 2.0 | 1.09 | 0.9 | 3.32 | 806 | borderline |  |
+| small.en-q8_0 | ac | cpu | 2/2 | 10.98 | 0.2 | 1.45 | 0.0 | 2.55 | 952 | borderline |  |
 | tiny | ac | cpu | 3/3 | 20.49 | 1.7 | 7.83 | 8.9 | 0.41 | 420 | comfortable |  |
+| tiny-q5_1 | ac | cpu | 2/2 | 50.17 | 0.5 | 9.56 | 0.3 | 0.42 | 331 | comfortable |  |
+| tiny-q8_0 | ac | cpu | 2/2 | 51.52 | 0.2 | 10.85 | 0.3 | 0.33 | 350 | comfortable |  |
 | tiny.en | ac | cpu | 3/3 | 26.81 | 17.3 | 10.78 | 1.1 | 0.28 | 414 | comfortable | batch_rtf spread 17.3% > 15% |
+| tiny.en-q5_1 | ac | cpu | 2/2 | 57.50 | 1.3 | 10.14 | 0.1 | 0.36 | 301 | comfortable |  |
+| tiny.en-q8_0 | ac | cpu | 2/2 | 64.92 | 0.6 | 11.58 | 0.1 | 0.30 | 334 | comfortable |  |
 | base | ac | vulkan | 3/3 | 49.30 | 7.5 | 18.36 | 1.2 | 0.13 | 172 | comfortable |  |
 | base-q5_1 | ac | vulkan | 2/2 | 46.81 | 1.6 | 19.81 | 0.7 | 0.12 | 182 | comfortable |  |
 | base-q8_0 | ac | vulkan | 2/2 | 50.76 | 0.0 | 19.81 | 1.6 | 0.12 | 191 | comfortable |  |
