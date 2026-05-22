@@ -81,24 +81,47 @@ _2016 Kaby Lake dual-core / 4 threads, 15 W; ~10-year-old ultrabook CPU; weakest
 | model | power | build | iters | batch RTF | b-σ% | stream RTF | s-σ% | TTFF s | RSS MiB | verdict | notes |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|
 | base | ac | cpu | 3/3 | 1.70 | 73.1 | 1.16 | 10.6 | 3.44 | 585 | borderline | batch_rtf spread 73.1% > 15% |
+| base-q5_1 | ac | cpu | 2/2 | 5.93 | 0.4 | 1.06 | 0.3 | 3.45 | 455 | borderline |  |
+| base-q8_0 | ac | cpu | 2/2 | 8.51 | 0.8 | 1.42 | 0.6 | 2.78 | 476 | borderline |  |
 | base.en | ac | cpu | 3/3 | 3.15 | 0.3 | 1.14 | 0.3 | 2.81 | 590 | borderline |  |
+| base.en-q5_1 | ac | cpu | 2/2 | 4.96 | 0.3 | 1.10 | 0.2 | 3.41 | 433 | borderline |  |
+| base.en-q8_0 | ac | cpu | 2/2 | 6.29 | 0.1 | 1.17 | 0.4 | 2.73 | 477 | borderline |  |
 | large-v3-turbo | ac | cpu | 1/1 | 0.21 | — | — | — | — | 1959 | unsuitable |  |
+| large-v3-turbo-q5_0 | ac | cpu | 2/2 | 0.39 | 0.4 | 0.06 | 0.2 | 65.76 | 1662 | unsuitable |  |
+| large-v3-turbo-q8_0 | ac | cpu | 2/2 | 0.51 | 0.3 | 0.08 | 0.4 | 50.76 | 2234 | unsuitable |  |
 | small | ac | cpu | 3/3 | 0.99 | 0.4 | 0.33 | 0.5 | 10.87 | 1356 | unsuitable |  |
+| small-q5_1 | ac | cpu | 2/2 | 2.27 | 0.1 | 0.32 | 0.0 | 12.76 | 798 | borderline |  |
+| small-q8_0 | ac | cpu | 2/2 | 2.98 | 0.3 | 0.42 | 0.3 | 9.60 | 944 | borderline |  |
 | small.en | ac | cpu | 3/3 | 1.08 | 14.8 | 0.32 | 17.2 | 12.23 | 1362 | borderline | stream_rtf spread 17.2% > 15% |
+| small.en-q5_1 | ac | cpu | 2/2 | 1.61 | 0.2 | 0.30 | 0.1 | 12.54 | 796 | borderline |  |
+| small.en-q8_0 | ac | cpu | 2/2 | 3.01 | 0.1 | 0.39 | 0.1 | 9.66 | 938 | borderline |  |
 | tiny | ac | cpu | 3/3 | 7.29 | 1.7 | 2.52 | 1.5 | 1.33 | 419 | comfortable |  |
+| tiny-q5_1 | ac | cpu | 2/2 | 14.42 | 0.2 | 2.34 | 0.3 | 1.75 | 328 | comfortable |  |
+| tiny-q8_0 | ac | cpu | 2/2 | 16.16 | 0.1 | 2.74 | 0.4 | 1.36 | 352 | comfortable |  |
 | tiny.en | ac | cpu | 3/3 | 8.60 | 0.3 | 2.97 | 0.3 | 1.24 | 400 | comfortable |  |
+| tiny.en-q5_1 | ac | cpu | 2/2 | 17.09 | 0.1 | 2.43 | 0.1 | 1.54 | 292 | comfortable |  |
+| tiny.en-q8_0 | ac | cpu | 2/2 | 20.94 | 0.1 | 2.94 | 0.5 | 1.25 | 333 | comfortable |  |
 | base | ac | vulkan | 2/2 | 9.44 | 0.3 | 2.01 | 0.4 | 1.59 | 187 | comfortable |  |
 | base-q5_1 | ac | vulkan | 2/2 | 8.71 | 0.2 | 1.96 | 0.1 | 1.62 | 195 | comfortable |  |
 | base-q8_0 | ac | vulkan | 2/2 | 8.31 | 0.2 | 1.87 | 0.1 | 1.69 | 204 | comfortable |  |
+| base.en | ac | vulkan | 2/2 | 8.85 | 0.1 | 1.95 | 0.3 | 1.56 | 191 | comfortable |  |
+| base.en-q5_1 | ac | vulkan | 2/2 | 7.32 | 0.5 | 1.91 | 0.1 | 1.63 | 201 | comfortable |  |
+| base.en-q8_0 | ac | vulkan | 2/2 | 8.27 | 0.7 | 1.85 | 0.1 | 1.62 | 210 | comfortable |  |
 | large-v3-turbo | ac | vulkan | 2/2 | 0.96 | 0.3 | 0.13 | 0.2 | 27.04 | 279 | unsuitable |  |
 | large-v3-turbo-q5_0 | ac | vulkan | 2/2 | 1.00 | 0.2 | 0.13 | 1.4 | 28.27 | 260 | borderline |  |
 | large-v3-turbo-q8_0 | ac | vulkan | 2/2 | 0.81 | 0.8 | 0.13 | 0.7 | 28.23 | 226 | unsuitable |  |
 | small | ac | vulkan | 2/2 | 3.63 | 0.7 | 0.62 | 0.2 | 5.29 | 207 | borderline |  |
 | small-q5_1 | ac | vulkan | 2/2 | 3.66 | 0.4 | 0.58 | 0.3 | 6.03 | 211 | borderline |  |
 | small-q8_0 | ac | vulkan | 2/2 | 3.32 | 0.6 | 0.56 | 0.0 | 6.22 | 194 | borderline |  |
+| small.en | ac | vulkan | 2/2 | 1.99 | 0.2 | 0.69 | 0.3 | 5.39 | 207 | borderline |  |
+| small.en-q5_1 | ac | vulkan | 2/2 | 2.89 | 0.1 | 0.67 | 0.1 | 5.51 | 218 | borderline |  |
+| small.en-q8_0 | ac | vulkan | 2/2 | 1.45 | 1.0 | 0.65 | 0.1 | 5.67 | 195 | borderline |  |
 | tiny | ac | vulkan | 2/2 | 15.26 | 3.8 | 3.40 | 2.1 | 0.95 | 180 | comfortable |  |
 | tiny-q5_1 | ac | vulkan | 2/2 | 12.38 | 23.1 | 2.95 | 1.7 | 1.40 | 224 | comfortable | batch_rtf spread 23.1% > 15% |
 | tiny-q8_0 | ac | vulkan | 2/2 | 13.23 | 5.6 | 3.36 | 0.5 | 0.84 | 222 | comfortable |  |
+| tiny.en | ac | vulkan | 2/2 | 17.43 | 1.4 | 4.08 | 1.7 | 0.82 | 185 | comfortable |  |
+| tiny.en-q5_1 | ac | vulkan | 2/2 | 15.63 | 11.4 | 3.97 | 1.3 | 0.86 | 193 | comfortable |  |
+| tiny.en-q8_0 | ac | vulkan | 2/2 | 16.54 | 2.1 | 3.91 | 0.2 | 0.83 | 195 | comfortable |  |
 
 ## i7-8550u — Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz (4p/8l, 15750 MiB, laptop) — released 2017-08, legacy ultraportable
 
