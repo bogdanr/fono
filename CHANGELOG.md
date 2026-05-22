@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Cartesia STT.** `fono use stt cartesia` (or picking Cartesia in
+  `fono setup`) now wires the batch transcription endpoint
+  (`POST https://api.cartesia.ai/stt`) end-to-end; before this slice
+  the catalogue and the wizard already routed to a `SttBackend::Cartesia`
+  but the factory bailed out with "not yet implemented" at runtime.
+  Phase 1 covers the `ink-whisper` family only — Cartesia's batch
+  endpoint refuses `ink-2` (`Must be in the ink-whisper family of
+  models`). Realtime `ink-2` over the turn-based WebSocket
+  (`wss://api.cartesia.ai/stt/turns/websocket`) is the Phase 2
+  streaming slice and will land separately. The catalogue's stale
+  default model id `sonic-transcribe` has been corrected to
+  `ink-whisper`; configs with an explicit `[stt.cloud].model` are
+  untouched. `cloud_rerun_on_language_mismatch` is captured but not
+  enforced — Cartesia returns no per-segment `avg_logprob` /
+  `no_speech_prob`, so the Whisper-style rerun and the silence-
+  hallucination filter are skipped and a one-shot warning is logged
+  on banned-language detections. See
+  `plans/2026-05-23-cartesia-stt-support-v2.md`.
+- **Cartesia TTS per-language voice routing.** The Cartesia TTS client
+  now resolves a native voice per configured language via
+  `GET /voices?language=<code>&limit=1`, cached for the process
+  lifetime. A Romanian utterance is read by a Romanian voice with
+  `language = "ro"` on the wire; an English utterance from the same
+  multilingual user gets a separate English voice — both sound native
+  rather than one voice forced across languages. Default model bumped
+  from `sonic-2` to `sonic-3.5`; pinning `tts.voice` in config still
+  wins over routing. Any lookup failure silently falls back to the
+  English catalogue voice so TTS never errors *because of* voice
+  routing. The required `Cartesia-Version` header is now pinned to
+  `2026-03-01` in both the synth client and the wizard's key-validation
+  probe.
+
 ### Changed
 
 - **Pondering parity for the F8 assistant flow.** A long pause during

@@ -1,3 +1,86 @@
+# Cartesia per-language native-voice cache
+
+## Objective
+
+Each language the user listed in `general.languages` (and each language STT detects at runtime) gets its **own native Cartesia voice**, looked up once via `GET /voices?language=<code>&limit=1` and cached for the process lifetime. A Romanian utterance plays through a Romanian voice; an English utterance through the catalogue's English voice; a Hindi utterance through a Hindi voice — all from the same daemon, picked per-sentence based on STT detection. No new config knobs.
+
+## Implementation Plan
+
+- [ ] Task 1. Replace the entire body of `crates/fono-tts/src/cartesia.rs` with the file content in **Appendix A** below. Key changes vs. today: `preferred_language: String` + `OnceCell<(String, String)>` are replaced by `user_languages: Vec<String>` + `Mutex<HashMap<String, Option<String>>>`; `resolve_voice` becomes `resolve_for_lang(lang: Option<&str>)`; `prewarm` iterates *every* non-English user language; nine new unit tests cover positive/negative caching, English-on-multilingual, pinned-voice, and normalisation helpers.
+
+- [ ] Task 2. Update `crates/fono-tts/src/factory.rs:185-201` (`build_cartesia`) to pass the raw slice directly — no more `pick_preferred_language` indirection:
+
+  ```rust
+  #[cfg(feature = "cartesia")]
+  fn build_cartesia(
+      cfg: &Tts,
+      secrets: &Secrets,
+      languages: &[String],
+  ) -> Result<Arc<dyn TextToSpeech>> {
+      let (key_ref, model_override, voice_override) = resolve_cloud(cfg, &TtsBackend::Cartesia);
+      let key = resolve_key(&key_ref, &TtsBackend::Cartesia, secrets)?;
+      let voice = resolve_voice(cfg, voice_override);
+      Ok(Arc::new(crate::cartesia::CartesiaTts::new(key, model_override, voice, languages)))
+  }
+  ```
+
+- [ ] Task 3. Update `docs/providers.md:381-395` — the "Language-aware voice selection" paragraph. Replace the single-language framing with: "Each non-English code in `general.languages` (and each language STT detects at runtime) gets its own native voice, fetched lazily and cached per-language for the process lifetime. A Romanian utterance plays through a Romanian voice; the same multilingual user's English utterance plays through the catalogue's English voice; both sound native."
+
+- [ ] Task 4. Pre-commit gate:
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace --tests --lib`
+
+  All must exit 0. Per `AGENTS.md`, run all three before pushing.
+
+- [ ] Task 5. Commit with sign-off. Suggested message:
+
+  ```
+  fono-tts(cartesia): per-language native-voice cache
+
+  Replace the single-preferred-language voice slot with a per-language
+  HashMap cache keyed on the lower-cased BCP-47 alpha-2 code. Every
+  non-English language the user configured (plus any language STT
+  detects at runtime) gets its own native voice, fetched once via
+  GET /voices?language=<code>&limit=1 and cached for the process
+  lifetime. A multilingual user dictating in Romanian now hears a
+  Romanian voice; the same user dictating in English hears the
+  catalogue's English voice — both native, not a single voice forced
+  to bilingual duty.
+  ```
+
+## Verification Criteria
+
+- A user with `general.languages = ["en", "ro"]` who dictates in Romanian hears `(romanian_voice, language="ro")` on the wire; same user dictating in English hears `(english_fallback_voice, language="en")`. Both pay one `/voices` lookup ever per language across the daemon's lifetime.
+- A user with `tts.voice` pinned hears the pinned voice for every utterance regardless of language; wire `language` echoes the STT-detected code.
+- A user with no `general.languages` and no `tts.voice` hears the English catalogue voice with `language = "en"` — no `/voices` HTTP fired at all.
+- All 14+ Cartesia unit tests pass; clippy clean; fmt clean.
+- The `language_not_supported` retry path still trips and self-heals on the rare case the model rejects a voice's catalogue-advertised language.
+
+## Potential Risks and Mitigations
+
+1. **`/voices` API latency on first-use of an unexpected language.** Prewarm already covers every language in `general.languages`. The cold-cache cost only hits languages STT *detects* that the user didn't configure — rare, and the cost is one parallel HTTP roundtrip before the synth POST.
+   Mitigation: keep prewarm; document the rare cold-path case in the file's module doc (already done in Appendix A).
+
+2. **Cache grows unbounded if STT keeps detecting new languages.** Real-world cap is ~100 entries (every BCP-47 alpha-2 code) — well under any memory concern.
+   Mitigation: none needed.
+
+3. **Negative cache traps a transient failure.** A one-off network blip during the first lookup permanently routes that language to English for this process.
+   Mitigation: acceptable — `language_not_supported` retry still catches mid-session model rejections; users restart the daemon rarely enough that a re-attempt on next launch is fine. If this proves annoying, add a TTL to negative entries (out of scope).
+
+## Alternative Approaches
+
+1. **Detect text language inside `cartesia.rs` via `whatlang` or `lingua-rs`.** Removes the dependency on STT plumbing but adds a Rust dep and language-detection accuracy concerns on short text. Rejected: STT detection is free, ground-truthed by the user's voice, and already plumbed.
+
+2. **Bake a static BCP-47 → voice-UUID table.** No `/voices` HTTP at all, predictable behaviour. Rejected: requires manual upkeep when Cartesia rotates voices and locks us into specific voice personas the user can't override.
+
+3. **Fetch *all* voices in one call at startup.** Single HTTP up front, no cold cache. Rejected: response is large, most languages never used, and the lazy pattern is one extra HTTP per language ever — negligible.
+
+---
+
+## Appendix A — Full content for `crates/fono-tts/src/cartesia.rs`
+
+```rust
 // SPDX-License-Identifier: GPL-3.0-only
 //! Cartesia `/tts/bytes` client.
 //!
@@ -27,7 +110,7 @@
 //! `fono/src/assistant.rs`). We honour that hint: a Romanian utterance
 //! gets a Romanian voice with `language = "ro"` on the wire (native
 //! quality); an English utterance from the same multilingual user
-//! gets a *separate*, English voice with `language = "en"` (also
+//! gets a separate, English voice with `language = "en"` (also
 //! native — Cartesia's catalogue has dedicated English voices that
 //! sound better than a Romanian voice forced to read English).
 //!
@@ -108,12 +191,11 @@ impl CartesiaTts {
             .and_then(|p| p.tts.as_ref())
             .expect("cartesia catalogue entry must exist with a TTS capability");
         let voice_pinned = voice_override.is_some();
-        let normalised = normalise_languages(languages);
         Self {
             api_key: api_key.into(),
             model: model_override.unwrap_or_else(|| entry.model.to_string()),
             fallback_voice_id: voice_override.unwrap_or_else(|| entry.default_voice.to_string()),
-            user_languages: normalised,
+            user_languages: normalise_languages(languages),
             voice_pinned,
             voice_cache: Mutex::new(HashMap::new()),
             sonic_rejected_language: AtomicBool::new(false),
@@ -121,39 +203,26 @@ impl CartesiaTts {
         }
     }
 
-    /// Configured model id. Exposed for tests.
     #[must_use]
     pub fn model(&self) -> &str {
         &self.model
     }
 
-    /// Fallback voice id (English / user pin). Exposed for tests.
     #[must_use]
     pub fn fallback_voice_id(&self) -> &str {
         &self.fallback_voice_id
     }
 
-    /// Normalised non-English user languages. Exposed for tests.
     #[must_use]
     pub fn user_languages(&self) -> &[String] {
         &self.user_languages
     }
 
-    /// Whether `tts.voice` was set to a non-default value (disables
-    /// per-language routing). Exposed for tests.
-    #[must_use]
-    pub const fn voice_pinned(&self) -> bool {
-        self.voice_pinned
-    }
-
-    /// Endpoint URL. Exposed for tests.
     #[must_use]
     pub const fn endpoint(&self) -> &'static str {
         ENDPOINT
     }
 
-    /// Build the JSON request body. Exposed for tests so request-shape
-    /// assertions stay in pure Rust.
     #[must_use]
     pub fn build_request_body(
         &self,
@@ -175,48 +244,34 @@ impl CartesiaTts {
         .expect("serialising static-shape Cartesia request must not fail")
     }
 
-    /// Resolve `(voice_id, wire_language)` for the given per-call
-    /// language hint. The cache makes the second and subsequent calls
-    /// in any given language a no-op. Falls back to the English
-    /// catalogue voice on any failure so TTS never errors out *because
-    /// of* voice routing.
     async fn resolve_for_lang(&self, lang: Option<&str>) -> (String, String) {
-        // Explicit `tts.voice` pin beats language routing entirely.
-        // Echo the caller's lang on the wire so sonic-3.5 pronounces
-        // correctly with whatever voice the user pinned.
         if self.voice_pinned {
             let wire = effective_lang(lang, &self.user_languages);
             let wire = if wire.is_empty() { "en".to_string() } else { wire };
             return (self.fallback_voice_id.clone(), wire);
         }
-        // Model already told us our language is unsupported — bail
-        // to English for the rest of the process lifetime.
         if self.sonic_rejected_language.load(Ordering::Relaxed) {
             return (self.fallback_voice_id.clone(), "en".to_string());
         }
         let target = effective_lang(lang, &self.user_languages);
-        // English / unknown → use the catalogue's English voice.
         if target.is_empty() || target == "en" {
             return (self.fallback_voice_id.clone(), "en".to_string());
         }
-        // Cache lookup.
         {
             let cache = self.voice_cache.lock().await;
             if let Some(slot) = cache.get(&target) {
-                return slot.as_ref().map_or_else(
-                    || (self.fallback_voice_id.clone(), "en".to_string()),
-                    |id| (id.clone(), target.clone()),
-                );
+                return match slot {
+                    Some(id) => (id.clone(), target),
+                    None => (self.fallback_voice_id.clone(), "en".to_string()),
+                };
             }
         }
-        // Miss — fetch and populate.
         let fetched = match self.fetch_voice_for_language(&target).await {
-            Ok(Some((id, name))) => {
-                tracing::info!(
+            Ok(Some(id)) => {
+                tracing::debug!(
                     target: "fono::tts::cartesia",
                     language = %target,
                     voice_id = %id,
-                    voice_name = %name,
                     "resolved Cartesia voice for language"
                 );
                 Some(id)
@@ -239,25 +294,21 @@ impl CartesiaTts {
                 None
             }
         };
-        self.voice_cache.lock().await.insert(target.clone(), fetched.clone());
-        fetched
-            .map_or_else(|| (self.fallback_voice_id.clone(), "en".to_string()), |id| (id, target))
+        let mut cache = self.voice_cache.lock().await;
+        cache.insert(target.clone(), fetched.clone());
+        match fetched {
+            Some(id) => (id, target),
+            None => (self.fallback_voice_id.clone(), "en".to_string()),
+        }
     }
 
-    /// One-shot `GET /voices?language=<lang>&limit=20`. Returns
-    /// `Ok(Some((id, name)))` when Cartesia has a public voice for
-    /// that language, `Ok(None)` when the catalogue is empty for the
-    /// language, `Err(_)` for network / auth / parse failures. The
-    /// `name` is surfaced so the caller can log which catalogue voice
-    /// won the ranker — useful when a user reports "it doesn't sound
-    /// native" and we need to confirm what got picked.
-    async fn fetch_voice_for_language(&self, lang: &str) -> Result<Option<(String, String)>> {
+    async fn fetch_voice_for_language(&self, lang: &str) -> Result<Option<String>> {
         let resp = self
             .client
             .get(VOICES_ENDPOINT)
             .header("X-Api-Key", &self.api_key)
             .header("Cartesia-Version", API_VERSION)
-            .query(&[("language", lang), ("limit", "20")])
+            .query(&[("language", lang), ("limit", "1")])
             .send()
             .await
             .context("GET cartesia /voices")?;
@@ -267,12 +318,9 @@ impl CartesiaTts {
             return Err(anyhow!("cartesia /voices returned {status}: {}", truncate(&body, 200)));
         }
         let parsed: VoicesPage = resp.json().await.context("decoding cartesia /voices JSON")?;
-        Ok(pick_native_voice(lang, &parsed.data))
+        Ok(parsed.data.into_iter().next().map(|v| v.id))
     }
 
-    /// POST one synth request and decode the PCM body. Factored out
-    /// so the retry path for `language_not_supported` can reuse the
-    /// exact same wire shape.
     async fn post_synthesize(
         &self,
         text: &str,
@@ -300,8 +348,6 @@ impl CartesiaTts {
     }
 }
 
-/// Normalise a raw `general.languages` slice into the bare-code,
-/// non-English, deduped list the Cartesia client uses internally.
 fn normalise_languages(input: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for code in input {
@@ -320,10 +366,6 @@ fn normalise_languages(input: &[String]) -> Vec<String> {
     out
 }
 
-/// Pick the language we should ask Cartesia to render. Prefer the
-/// caller's per-call `lang` hint (normalised); else the first
-/// configured non-English language; else `""` (which the resolver
-/// treats as "English / unknown").
 fn effective_lang(lang: Option<&str>, user_languages: &[String]) -> String {
     if let Some(raw) = lang {
         let lower = raw.trim().to_lowercase();
@@ -367,105 +409,6 @@ struct VoicesPage {
 #[derive(Deserialize)]
 struct VoiceSummary {
     id: String,
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    is_owner: bool,
-}
-
-/// Map an ISO-639-1 language code to its English name. Used to rank
-/// `/voices` results: Cartesia's catalogue convention is to put the
-/// language name in the display name of native voices ("Romanian
-/// Female", "Hindi Adventure", "Mandarin Chinese Woman"), while the
-/// multilingual Sonic voices are named after a persona ("Sonic
-/// English Female", "Sarah"). Preferring a name match steers us to
-/// native voices.
-fn lang_english_name(code: &str) -> Option<&'static str> {
-    Some(match code {
-        "es" => "Spanish",
-        "fr" => "French",
-        "de" => "German",
-        "pt" => "Portuguese",
-        "it" => "Italian",
-        "nl" => "Dutch",
-        "pl" => "Polish",
-        "ru" => "Russian",
-        "tr" => "Turkish",
-        "zh" => "Chinese",
-        "ja" => "Japanese",
-        "ko" => "Korean",
-        "hi" => "Hindi",
-        "ar" => "Arabic",
-        "ro" => "Romanian",
-        "no" => "Norwegian",
-        "sv" => "Swedish",
-        "da" => "Danish",
-        "fi" => "Finnish",
-        "cs" => "Czech",
-        "hu" => "Hungarian",
-        "el" => "Greek",
-        "he" => "Hebrew",
-        "id" => "Indonesian",
-        "th" => "Thai",
-        "vi" => "Vietnamese",
-        "uk" => "Ukrainian",
-        "bg" => "Bulgarian",
-        "ca" => "Catalan",
-        "hr" => "Croatian",
-        "sk" => "Slovak",
-        "sl" => "Slovenian",
-        "ms" => "Malay",
-        "ta" => "Tamil",
-        "te" => "Telugu",
-        _ => return None,
-    })
-}
-
-/// Rank `/voices` results to prefer a true native voice over a
-/// multilingual catch-all. Cartesia returns voices that *can* speak
-/// the requested language, which includes their multilingual Sonic
-/// voices (essentially English voices with a polyglot model). Those
-/// sound like "an English voice that can also speak X". We score:
-///
-/// - `+10` if the voice display name contains the English language
-///   name (e.g. "Romanian Female") — strongest signal Cartesia
-///   catalogued it as a native voice.
-/// - `+5` if the description mentions the language.
-/// - `+1` if `is_owner == false` (Cartesia-curated, not user-uploaded).
-///
-/// Tie-break by original Cartesia ordering. If we have no English name
-/// for the language (i.e. it isn't in our static table), fall back to
-/// the first result — the catalogue might still return something
-/// usable.
-fn pick_native_voice(lang: &str, voices: &[VoiceSummary]) -> Option<(String, String)> {
-    if voices.is_empty() {
-        return None;
-    }
-    let Some(lang_name) = lang_english_name(lang) else {
-        return voices.first().map(|v| (v.id.clone(), v.name.clone()));
-    };
-    let needle = lang_name.to_lowercase();
-    let (mut best_idx, mut best_score) = (0usize, i32::MIN);
-    for (idx, v) in voices.iter().enumerate() {
-        let mut score: i32 = 0;
-        if v.name.to_lowercase().contains(&needle) {
-            score += 10;
-        }
-        if v.description.to_lowercase().contains(&needle) {
-            score += 5;
-        }
-        if !v.is_owner {
-            score += 1;
-        }
-        if score > best_score {
-            best_score = score;
-            best_idx = idx;
-        }
-    }
-    let chosen = &voices[best_idx];
-    Some((chosen.id.clone(), chosen.name.clone()))
 }
 
 #[async_trait]
@@ -487,8 +430,6 @@ impl TextToSpeech for CartesiaTts {
         if text.is_empty() {
             return Ok(TtsAudio { pcm: Vec::new(), sample_rate: NATIVE_RATE });
         }
-        // Per-call voice override wins; otherwise consult the
-        // per-language cache.
         let (voice_id, language) = if let Some(v) = voice {
             let wire = effective_lang(lang, &self.user_languages);
             let wire = if wire.is_empty() { "en".to_string() } else { wire };
@@ -499,13 +440,6 @@ impl TextToSpeech for CartesiaTts {
         match self.post_synthesize(text, &voice_id, &language).await {
             Ok(audio) => Ok(audio),
             Err(e) => {
-                // Sonic-3.5 supports a broad but finite set of
-                // languages; if Cartesia's voice catalogue drifts
-                // ahead and returns a voice in a language the model
-                // itself doesn't accept, retry once with the English
-                // fallback and remember the rejection so future calls
-                // don't re-pay the failed round-trip. Any other
-                // 4xx/5xx bubbles up unchanged.
                 let already_english = voice_id == self.fallback_voice_id && language == "en";
                 if !already_english && is_language_not_supported(&e) {
                     tracing::warn!(
@@ -523,17 +457,6 @@ impl TextToSpeech for CartesiaTts {
     }
 
     async fn prewarm(&self) -> Result<()> {
-        // Pre-resolve a native voice for every non-English language
-        // the user has configured. Off the hot path; errors are
-        // non-fatal — `resolve_for_lang` records a negative cache
-        // entry on failure so the first synth in that language
-        // doesn't re-fire the failed lookup.
-        tracing::info!(
-            target: "fono::tts::cartesia",
-            languages = ?self.user_languages,
-            voice_pinned = self.voice_pinned,
-            "Cartesia TTS prewarm starting"
-        );
         if !self.voice_pinned {
             for lang in &self.user_languages {
                 let _ = self.resolve_for_lang(Some(lang)).await;
@@ -543,12 +466,6 @@ impl TextToSpeech for CartesiaTts {
     }
 }
 
-/// Cartesia returns 400 with body `{"error_code":"language_not_supported",
-/// "message":"The language is not supported by this model.", …}` when
-/// the model is paired with a language outside its supported set. We
-/// pattern-match on the `error_code` field rather than the
-/// human-facing message so a wording change doesn't silently turn the
-/// retry path off.
 fn is_language_not_supported(err: &anyhow::Error) -> bool {
     let s = format!("{err:#}");
     s.contains("language_not_supported")
@@ -585,8 +502,6 @@ mod tests {
         assert_eq!(c.native_sample_rate(), NATIVE_RATE);
     }
 
-    /// Inspect the JSON body without making a live request. Locks in
-    /// the exact wire shape required by `/tts/bytes`.
     #[test]
     fn request_body_shape_matches_spec() {
         let c = CartesiaTts::new("ck-test", None, None, &[]);
@@ -610,8 +525,6 @@ mod tests {
         assert_eq!(audio.sample_rate, NATIVE_RATE);
     }
 
-    /// English-only / empty preference → no live lookup; the resolver
-    /// returns the catalogue default voice with `"en"`.
     #[tokio::test]
     async fn resolve_english_skips_network() {
         let c = CartesiaTts::new("ck-test", None, None, &[]);
@@ -623,10 +536,6 @@ mod tests {
         assert_eq!(lang2, "en");
     }
 
-    /// Explicit `tts.voice` config pin beats per-language routing —
-    /// the pinned voice is used and no network lookup fires. Wire
-    /// `language` echoes the caller's hint so sonic-3.5 pronounces
-    /// correctly with that voice.
     #[tokio::test]
     async fn pinned_voice_skips_language_lookup() {
         let c =
@@ -636,9 +545,6 @@ mod tests {
         assert_eq!(lang, "ro");
     }
 
-    /// Once the model has rejected the language for this session,
-    /// `resolve_for_lang` short-circuits to English without firing
-    /// another `/voices` lookup.
     #[tokio::test]
     async fn resolve_short_circuits_after_model_rejection() {
         let c = CartesiaTts::new("ck-test", None, None, &["ro".to_string()]);
@@ -648,9 +554,6 @@ mod tests {
         assert_eq!(lang, "en");
     }
 
-    /// Negative cache: a prior failed lookup short-circuits to the
-    /// English fallback on the next call rather than re-firing the
-    /// failed HTTP.
     #[tokio::test]
     async fn negative_cache_short_circuits_subsequent_lookups() {
         let c = CartesiaTts::new("ck-test", None, None, &["xx".to_string()]);
@@ -660,43 +563,41 @@ mod tests {
         assert_eq!(lang, "en");
     }
 
-    /// Positive cache: a prior successful lookup short-circuits to
-    /// the cached voice on the next call.
     #[tokio::test]
     async fn positive_cache_returns_cached_voice() {
         let c = CartesiaTts::new("ck-test", None, None, &["ro".to_string()]);
-        c.voice_cache.lock().await.insert("ro".to_string(), Some("ro-voice-uuid".to_string()));
+        c.voice_cache
+            .lock()
+            .await
+            .insert("ro".to_string(), Some("ro-voice-uuid".to_string()));
         let (voice, lang) = c.resolve_for_lang(Some("ro")).await;
         assert_eq!(voice, "ro-voice-uuid");
         assert_eq!(lang, "ro");
     }
 
-    /// English caller on a multilingual user → catalogue English
-    /// voice + `"en"` wire (not the cached Romanian voice). This is
-    /// the central change: a multilingual user dictating in English
-    /// now hears the dedicated English voice, not a Romanian voice
-    /// reading English.
     #[tokio::test]
     async fn english_call_on_multilingual_user_uses_english_voice() {
         let c = CartesiaTts::new("ck-test", None, None, &["en".to_string(), "ro".to_string()]);
-        c.voice_cache.lock().await.insert("ro".to_string(), Some("ro-voice-uuid".to_string()));
+        c.voice_cache
+            .lock()
+            .await
+            .insert("ro".to_string(), Some("ro-voice-uuid".to_string()));
         let (voice, lang) = c.resolve_for_lang(Some("en")).await;
         assert_eq!(voice, "a0e99841-438c-4a64-b679-ae501e7d6091");
         assert_eq!(lang, "en");
     }
 
-    /// No per-call lang hint + multilingual config → use the first
-    /// non-English language as the default.
     #[tokio::test]
     async fn none_lang_uses_first_user_language() {
         let c = CartesiaTts::new("ck-test", None, None, &["en".to_string(), "ro".to_string()]);
-        c.voice_cache.lock().await.insert("ro".to_string(), Some("ro-voice-uuid".to_string()));
+        c.voice_cache
+            .lock()
+            .await
+            .insert("ro".to_string(), Some("ro-voice-uuid".to_string()));
         let (voice, lang) = c.resolve_for_lang(None).await;
         assert_eq!(voice, "ro-voice-uuid");
         assert_eq!(lang, "ro");
     }
-
-    // ---- is_language_not_supported ---------------------------------
 
     #[test]
     fn detects_language_not_supported_error() {
@@ -714,8 +615,6 @@ mod tests {
         assert!(!is_language_not_supported(&err));
     }
 
-    // ---- normalise_languages ---------------------------------------
-
     #[test]
     fn normalise_drops_english_and_dedupes() {
         let langs = vec![
@@ -725,7 +624,7 @@ mod tests {
             "ro".to_string(),
             "RO".to_string(),
             "pt-BR".to_string(),
-            String::new(),
+            "".to_string(),
             "ro".to_string(),
         ];
         assert_eq!(normalise_languages(&langs), vec!["ro".to_string(), "pt".to_string()]);
@@ -735,8 +634,6 @@ mod tests {
     fn normalise_empty_returns_empty() {
         assert!(normalise_languages(&[]).is_empty());
     }
-
-    // ---- effective_lang --------------------------------------------
 
     #[test]
     fn effective_prefers_call_hint() {
@@ -755,78 +652,7 @@ mod tests {
 
     #[test]
     fn effective_empty_when_no_signal() {
-        assert_eq!(effective_lang(None, &[]), String::new());
-    }
-
-    // ---- pick_native_voice -----------------------------------------
-
-    fn v(id: &str, name: &str, description: &str, is_owner: bool) -> VoiceSummary {
-        VoiceSummary {
-            id: id.to_string(),
-            name: name.to_string(),
-            description: description.to_string(),
-            is_owner,
-        }
-    }
-
-    /// Name match beats catalogue ordering: when Cartesia returns a
-    /// multilingual "Sonic English Female" voice first and a named
-    /// "Romanian Female" voice further down, prefer the named one.
-    /// This is the central fix for "sounds like an English voice that
-    /// can also speak Romanian".
-    #[test]
-    fn picks_named_native_over_multilingual() {
-        let voices = vec![
-            v("sonic-en", "Sonic English Female", "Multilingual default voice", false),
-            v("ro-fem", "Romanian Female", "Native Romanian speaker", false),
-            v("ro-male", "Romanian Male", "Native Romanian speaker", false),
-        ];
-        assert_eq!(pick_native_voice("ro", &voices).unwrap().0, "ro-fem");
-    }
-
-    /// Description match (no name match) still wins over a totally
-    /// unrelated multilingual voice.
-    #[test]
-    fn picks_description_match_when_no_name_match() {
-        let voices = vec![
-            v("sonic-en", "Sarah", "A friendly American voice", false),
-            v("custom", "MyVoice", "Native Hindi speaker with warm tone", false),
-        ];
-        assert_eq!(pick_native_voice("hi", &voices).unwrap().0, "custom");
-    }
-
-    /// Cartesia-curated voices (is_owner=false) edge out user-uploaded
-    /// ones when neither has a stronger signal.
-    #[test]
-    fn prefers_curated_over_user_uploaded() {
-        let voices = vec![
-            v("user-up", "MyVoice", "tagged ro", true),
-            v("curated", "OtherVoice", "tagged ro", false),
-        ];
-        assert_eq!(pick_native_voice("ro", &voices).unwrap().0, "curated");
-    }
-
-    /// Unknown language (not in our static name table) falls back to
-    /// Cartesia's first result — we have no signal to rank on.
-    #[test]
-    fn unknown_language_returns_first() {
-        let voices = vec![v("a", "First", "", false), v("b", "Second", "", false)];
-        assert_eq!(pick_native_voice("xx", &voices).unwrap().0, "a");
-    }
-
-    /// Empty input → `None`.
-    #[test]
-    fn empty_voices_returns_none() {
-        assert!(pick_native_voice("ro", &[]).is_none());
-    }
-
-    /// Name match is case-insensitive (catalogue uses Title Case).
-    #[test]
-    fn name_match_is_case_insensitive() {
-        let voices = vec![
-            v("sonic-en", "Sonic Multilingual", "", false),
-            v("ja-fem", "japanese woman", "", false),
-        ];
-        assert_eq!(pick_native_voice("ja", &voices).unwrap().0, "ja-fem");
+        assert_eq!(effective_lang(None, &[]), "");
     }
 }
+```

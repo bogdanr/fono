@@ -124,7 +124,7 @@ retries once automatically on a stall.
 | Groq          | cloud HTTP | `whisper-large-v3`, `whisper-large-v3-turbo` | `GROQ_API_KEY`        | yes (pseudo-stream, opt-in) |
 | OpenAI        | cloud HTTP | `whisper-1`, `gpt-4o-transcribe`       | `OPENAI_API_KEY`      | no |
 | Deepgram      | cloud WS   | `nova-2`, `nova-3`                     | `DEEPGRAM_API_KEY`    | yes |
-| Cartesia      | cloud HTTP | `sonic-transcribe`                     | `CARTESIA_API_KEY`    | yes |
+| Cartesia      | cloud HTTP | `ink-whisper` (batch only; `ink-2` is realtime-only and arrives in a Phase 2 streaming slice) | `CARTESIA_API_KEY`    | no  |
 | AssemblyAI    | cloud HTTP | `best`, `nano`                         | `ASSEMBLYAI_API_KEY`  | yes |
 
 Whisper model files land in `~/.cache/fono/models/whisper/ggml-<name><suffix>.bin`

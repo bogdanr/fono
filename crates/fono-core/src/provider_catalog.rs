@@ -401,11 +401,17 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Sonic ultra-low-latency speech models (STT + TTS).",
         console_url: "https://play.cartesia.ai/keys",
         key_env: "CARTESIA_API_KEY",
-        stt: Some(SttDefaults { model: "sonic-transcribe" }),
+        // Cartesia's batch endpoint (`POST /stt`) requires the
+        // `ink-whisper` family of models; `ink-2` is reachable only
+        // via the realtime WebSocket endpoint
+        // (`wss://api.cartesia.ai/stt/turns/websocket`) which is the
+        // Phase 2 streaming work — see
+        // `plans/2026-05-23-cartesia-stt-support-v2.md`.
+        stt: Some(SttDefaults { model: "ink-whisper" }),
         polish: None,
         assistant: None,
         tts: Some(TtsDefaults {
-            model: "sonic-2",
+            model: "sonic-3.5",
             // Cartesia's "Sonic English Female" preset voice id.
             default_voice: "a0e99841-438c-4a64-b679-ae501e7d6091",
             endpoint: TtsEndpoint::Cartesia,

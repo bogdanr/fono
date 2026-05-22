@@ -329,7 +329,7 @@ async fn exercise_assistant(cfg: &AssistantCfg, secrets: &Secrets) -> Result<usi
 }
 
 async fn exercise_tts(cfg: &TtsCfg, secrets: &Secrets) -> Result<usize> {
-    let tts = fono_tts::build_tts(cfg, secrets)?
+    let tts = fono_tts::build_tts(cfg, secrets, &[])?
         .ok_or_else(|| anyhow::anyhow!("build_tts returned None"))?;
     let started = Instant::now();
     let audio = tokio::time::timeout(
@@ -454,7 +454,7 @@ async fn exercise_groq_e2e(secrets: &Secrets) -> Result<()> {
         }),
         ..TtsCfg::default()
     };
-    let tts = fono_tts::build_tts(&tts_cfg, secrets)
+    let tts = fono_tts::build_tts(&tts_cfg, secrets, &[])
         .map_err(|e| anyhow!("build_tts: {e:#}"))?
         .ok_or_else(|| anyhow!("build_tts returned None"))?;
     let to_speak: String = reply_trim.chars().take(200).collect();

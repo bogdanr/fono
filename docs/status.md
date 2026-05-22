@@ -1,6 +1,121 @@
 # Fono — Project Status
 
-Last updated: 2026-05-22
+Last updated: 2026-05-23
+
+## 2026-05-23 — Deepgram STT (Nova-3) batch + WebSocket streaming
+
+`fono use stt deepgram` now works end-to-end. The catalogue, wizard,
+secrets layer and `SttBackend::Deepgram` config variant have
+advertised Deepgram STT since v0.8.0, but the factory dropped
+through to the catch-all "not yet implemented" arm — picking
+Deepgram in `fono setup` silently configured the user toward a
+daemon-startup failure. This work landed both slices of
+`plans/2026-05-23-deepgram-stt-nova-3-v1.md` in one session: the
+batch REST backend (Slice 1) and the native WebSocket streaming
+backend (Slice 2).
+
+### What landed
+
+- **`crates/fono-stt/src/deepgram.rs`** — batch client. Uploads WAV
+  to `POST https://api.deepgram.com/v1/listen` with the literal
+  `Authorization: Token <k>` header (pinned in a unit test — this
+  is the historical footgun of the Deepgram TTS client too).
+  Per-request settings (`model`, `language` or `detect_language`,
+  `smart_format`, `punctuate`) go on the URL; response is parsed
+  into a minimal `DeepgramListenResponse` with every field
+  `serde(default)` for forward compat. Language allow-list rerun
+  uses Deepgram's top-alternative `confidence` (Deepgram doesn't
+  expose per-segment `avg_logprob`, so confidence is the
+  Whisper-style tiebreak signal). `prewarm` does a cheap authed
+  `GET /v1/projects` so the TCP+TLS handshake is paid off the hot
+  path.
+- **`crates/fono-stt/src/deepgram_streaming.rs`** — real WebSocket
+  client against `wss://api.deepgram.com/v1/listen`. Streams 16 kHz
+  s16le mono PCM as binary frames; maps `Results` with
+  `is_final: false` → `Preview` and `is_final: true` → `Finalize`;
+  routes `UtteranceEnd` VAD events into segment-index advancement
+  so the overlay's pondering + auto-stop hook works without
+  backend-specific code. Sends `{"type":"Finalize"}` on local
+  `SegmentBoundary` (nudges Deepgram to flush) and
+  `{"type":"CloseStream"}` on EOF.
+- **Factory wiring** — `build_stt` Deepgram arm at
+  `crates/fono-stt/src/factory.rs:104` constructs `DeepgramStt`;
+  `build_streaming_stt` Deepgram arm at
+  `crates/fono-stt/src/factory.rs:445` constructs
+  `DeepgramStreaming` when `live_preview` is on
+  (`[overlay].style = "transcript"`). New factory tests cover the
+  env-key fallthrough, missing-key remediation, and live-preview
+  routing — same shape as the Groq/Cartesia tests.
+- **Catalogue default bumped** — `crates/fono-core/src/provider_catalog.rs`
+  Deepgram STT default model changed from `nova-2` to `nova-3`.
+  Wizard literal at `crates/fono/src/wizard.rs:1705` and the
+  defaults-test assertion at `crates/fono-stt/src/defaults.rs:36`
+  flipped to match. `nova-2` remains available as an override and
+  is documented as the multilingual-fallback escape hatch in
+  `docs/providers.md`.
+- **Docs.** `docs/providers.md` STT table row already advertised
+  streaming; new *Deepgram STT (Nova-3)* and *Deepgram streaming
+  dictation (WebSocket)* subsections describe the wire format,
+  auth-header gotcha, language stickiness behaviour, model menu,
+  and the cost note that Deepgram bills by audio seconds (so the
+  streaming path is *cheaper* than Groq's pseudo-stream, not the
+  reverse). `CHANGELOG.md` `[Unreleased]` Added section entry.
+
+### Pre-commit gate
+
+All three steps green: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace --tests --lib`. 27 Deepgram unit tests
+(13 batch + 14 streaming) plus the new factory routing test pass
+under `--features 'deepgram streaming groq cartesia openai
+openrouter wyoming whisper-local'`.
+
+## 2026-05-23 — Cartesia STT (Phase 1, batch)
+
+`fono use stt cartesia` now works end-to-end. Until this slice the
+catalogue, the wizard picker, the doctor, the tray submenu, the
+`stt_key_env` lookup and the `SttBackend::Cartesia` config variant
+were all already in place — the runtime failed at the factory's
+explicit "not yet implemented" fallthrough. This slice adds the
+client, wires the factory branch, and corrects a stale catalogue
+default. Realtime `ink-2` over the turn-based WebSocket
+(`wss://api.cartesia.ai/stt/turns/websocket`) is a Phase 2 streaming
+slice — Cartesia's batch endpoint refuses anything outside the
+`ink-whisper` family. Plan file:
+`plans/2026-05-23-cartesia-stt-support-v2.md`.
+
+### What landed
+
+- **`crates/fono-stt/src/cartesia.rs`** — batch client modeled on
+  `groq.rs`: multipart `POST https://api.cartesia.ai/stt`,
+  `X-Api-Key` + `Cartesia-Version: 2026-03-01` headers (matches the
+  existing TTS client at `crates/fono-tts/src/cartesia.rs:258`),
+  language goes as a **query parameter** (not a form field) per the
+  documented endpoint shape, response shape `{ text, language?,
+  duration? }`. Uses `crate::groq::warm_client + encode_wav` so the
+  feature pulls `groq` in transitively (same trick as `openrouter`).
+- **Factory branch + `build_cartesia` helper** at
+  `crates/fono-stt/src/factory.rs:103` — same `resolve_cloud`
+  plumbing every cloud backend uses, including language-cache
+  bootstrap.
+- **Catalogue correction** — `SttDefaults { model: "sonic-transcribe" }`
+  was stale (`ink-2` is realtime-only and the batch endpoint
+  explicitly rejects it); changed to `"ink-whisper"` at
+  `crates/fono-core/src/provider_catalog.rs:410`. The wizard's
+  parallel literal at `crates/fono/src/wizard.rs:1706` was updated
+  to match.
+- **`cargo feature cartesia`** declared on `fono-stt` and enabled in
+  the `fono` binary's default feature set.
+- **Wizard validator auth header** — the `X-API-Key` outlier at
+  `crates/fono/src/wizard.rs:1853` was unified to `X-Api-Key` so
+  the wizard validator, the STT client and the TTS client all use
+  the same spelling (HTTP header names are case-insensitive per
+  RFC 7230 §3.2 so this is cosmetic but reduces diff noise).
+- **Known limitation documented**: Cartesia's batch response carries
+  no per-segment `avg_logprob` / `no_speech_prob`, so the Whisper-
+  style language-mismatch rerun and the silence-hallucination filter
+  are skipped. `cloud_rerun_on_language_mismatch = true` produces
+  one warning per process and otherwise no-ops.
 
 ## 2026-05-22 — Assistant Pondering parity + key-held suppression
 

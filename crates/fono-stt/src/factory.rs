@@ -100,11 +100,12 @@ pub fn build_stt(
         SttBackend::Groq => build_groq(cfg, secrets, languages, prompts, cloud_rerun),
         SttBackend::OpenAI => build_openai(cfg, secrets, languages, prompts, cloud_rerun),
         SttBackend::OpenRouter => build_openrouter(cfg, secrets, languages, prompts, cloud_rerun),
+        SttBackend::Cartesia => build_cartesia(cfg, secrets, languages, prompts, cloud_rerun),
         SttBackend::Wyoming => build_wyoming(cfg, secrets, languages),
         other => Err(anyhow!(
             "STT backend {other:?} is not yet implemented in this build; \
-             pick `groq`, `openai`, `wyoming`, or `local` (rebuild with `--features whisper-local` \
-             for `local`)"
+             pick `groq`, `openai`, `openrouter`, `cartesia`, `wyoming`, or `local` \
+             (rebuild with `--features whisper-local` for `local`)"
         )),
     }
 }
@@ -310,6 +311,35 @@ fn build_openrouter(
     Err(anyhow!("OpenRouter STT not compiled in (enable the `openrouter` feature on `fono-stt`)"))
 }
 
+#[cfg(feature = "cartesia")]
+fn build_cartesia(
+    cfg: &Stt,
+    secrets: &Secrets,
+    languages: Vec<String>,
+    prompts: std::collections::HashMap<String, String>,
+    cloud_rerun: bool,
+) -> Result<Arc<dyn SpeechToText>> {
+    let (key, model) = resolve_cloud(cfg, secrets, &SttBackend::Cartesia, "cartesia")?;
+    bootstrap_language_cache(&languages, crate::cartesia::BACKEND_KEY);
+    Ok(Arc::new(
+        crate::cartesia::CartesiaStt::with_model(key, model)
+            .with_languages(languages)
+            .with_prompts(prompts)
+            .with_cloud_rerun_on_mismatch(cloud_rerun),
+    ))
+}
+
+#[cfg(not(feature = "cartesia"))]
+fn build_cartesia(
+    _: &Stt,
+    _: &Secrets,
+    _: Vec<String>,
+    _: std::collections::HashMap<String, String>,
+    _: bool,
+) -> Result<Arc<dyn SpeechToText>> {
+    Err(anyhow!("Cartesia STT not compiled in (enable the `cartesia` feature on `fono-stt`)"))
+}
+
 #[cfg(feature = "wyoming")]
 fn build_wyoming(
     cfg: &Stt,
@@ -508,6 +538,36 @@ mod tests {
         assert!(
             err.contains("GROQ_API_KEY") && err.contains("fono keys add"),
             "error message should mention env var and remediation: {err}"
+        );
+    }
+
+    #[cfg(feature = "cartesia")]
+    #[test]
+    fn cartesia_cloud_optional_with_env_key() {
+        // Same shape as the Groq test: omitting `[stt.cloud]` must
+        // fall through to `CARTESIA_API_KEY` in secrets without
+        // surfacing a "not yet implemented" error (the bug that
+        // shipped before this slice landed).
+        let cfg = SttCfg { backend: SttBackend::Cartesia, cloud: None, ..SttCfg::default() };
+        let general = fono_core::config::General::default();
+        let mut secrets = Secrets::default();
+        secrets.insert("CARTESIA_API_KEY", "cart-test");
+        let dir = std::path::PathBuf::from("/tmp");
+        let stt = build_stt(&cfg, &general, &secrets, &dir).expect("cartesia factory ok");
+        assert_eq!(stt.name(), "cartesia");
+    }
+
+    #[cfg(feature = "cartesia")]
+    #[test]
+    fn cartesia_missing_key_yields_clear_error() {
+        let cfg = SttCfg { backend: SttBackend::Cartesia, cloud: None, ..SttCfg::default() };
+        let general = fono_core::config::General::default();
+        let secrets = Secrets::default();
+        let dir = std::path::PathBuf::from("/tmp");
+        let err = build_stt(&cfg, &general, &secrets, &dir).err().unwrap().to_string();
+        assert!(
+            err.contains("CARTESIA_API_KEY") && err.contains("fono keys add"),
+            "error should mention env var and remediation: {err}"
         );
     }
 

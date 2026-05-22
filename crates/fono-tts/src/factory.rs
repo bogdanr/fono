@@ -37,14 +37,18 @@ use crate::traits::TextToSpeech;
     )),
     allow(unused_variables)
 )]
-pub fn build_tts(cfg: &Tts, secrets: &Secrets) -> Result<Option<Arc<dyn TextToSpeech>>> {
+pub fn build_tts(
+    cfg: &Tts,
+    secrets: &Secrets,
+    languages: &[String],
+) -> Result<Option<Arc<dyn TextToSpeech>>> {
     match cfg.backend {
         TtsBackend::None => Ok(None),
         TtsBackend::Wyoming => build_wyoming(cfg).map(Some),
         TtsBackend::OpenAI => build_openai(cfg, secrets).map(Some),
         TtsBackend::Groq => build_groq(cfg, secrets).map(Some),
         TtsBackend::OpenRouter => build_openrouter(cfg, secrets).map(Some),
-        TtsBackend::Cartesia => build_cartesia(cfg, secrets).map(Some),
+        TtsBackend::Cartesia => build_cartesia(cfg, secrets, languages).map(Some),
         TtsBackend::Deepgram => build_deepgram(cfg, secrets).map(Some),
     }
 }
@@ -179,15 +183,51 @@ fn build_openrouter(_cfg: &Tts, _secrets: &Secrets) -> Result<Arc<dyn TextToSpee
 }
 
 #[cfg(feature = "cartesia")]
-fn build_cartesia(cfg: &Tts, secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
+fn build_cartesia(
+    cfg: &Tts,
+    secrets: &Secrets,
+    languages: &[String],
+) -> Result<Arc<dyn TextToSpeech>> {
     let (key_ref, model_override, voice_override) = resolve_cloud(cfg, &TtsBackend::Cartesia);
     let key = resolve_key(&key_ref, &TtsBackend::Cartesia, secrets)?;
     let voice = resolve_voice(cfg, voice_override);
-    Ok(Arc::new(crate::cartesia::CartesiaTts::new(key, model_override, voice)))
+    // The wizard writes the catalogue's `default_voice` UUID into
+    // `cfg.tts.voice` every time the user picks Cartesia, which would
+    // otherwise look like a hard voice pin to the Cartesia client and
+    // disable per-language voice routing. Strip the override when it
+    // matches the catalogue default so only a *genuinely customised*
+    // voice (a different UUID the user typed in by hand) disables the
+    // per-language cache.
+    let voice = strip_cartesia_default_voice(voice);
+    // The Cartesia client maintains a per-language voice cache and
+    // looks up a native voice the first time we need to synthesise
+    // in each language. Pass the raw `general.languages` slice
+    // straight through; the client normalises it internally.
+    Ok(Arc::new(crate::cartesia::CartesiaTts::new(key, model_override, voice, languages)))
+}
+
+/// Treat a `cfg.tts.voice` value that matches the Cartesia catalogue
+/// default as "no override". The wizard persists that UUID on every
+/// pick of the Cartesia backend, so without this filter the client
+/// would think the user pinned a voice and disable per-language
+/// routing. Exposed for tests.
+#[cfg(feature = "cartesia")]
+fn strip_cartesia_default_voice(voice: Option<String>) -> Option<String> {
+    let default = fono_core::provider_catalog::find("cartesia")
+        .and_then(|p| p.tts.as_ref())
+        .map(|t| t.default_voice);
+    match (voice.as_deref(), default) {
+        (Some(v), Some(d)) if v == d => None,
+        _ => voice,
+    }
 }
 
 #[cfg(not(feature = "cartesia"))]
-fn build_cartesia(_cfg: &Tts, _secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
+fn build_cartesia(
+    _cfg: &Tts,
+    _secrets: &Secrets,
+    _languages: &[String],
+) -> Result<Arc<dyn TextToSpeech>> {
     Err(anyhow!("Cartesia TTS not compiled in (enable the `cartesia` feature on `fono-tts`)"))
 }
 
@@ -212,14 +252,14 @@ mod tests {
     fn none_backend_returns_none() {
         let cfg = TtsCfg { backend: TtsBackend::None, ..TtsCfg::default() };
         let secrets = Secrets::default();
-        assert!(build_tts(&cfg, &secrets).unwrap().is_none());
+        assert!(build_tts(&cfg, &secrets, &[]).unwrap().is_none());
     }
 
     #[cfg(feature = "wyoming")]
     #[test]
     fn wyoming_missing_block_errors_clearly() {
         let cfg = TtsCfg { backend: TtsBackend::Wyoming, wyoming: None, ..TtsCfg::default() };
-        let err = build_tts(&cfg, &Secrets::default()).err().unwrap().to_string();
+        let err = build_tts(&cfg, &Secrets::default(), &[]).err().unwrap().to_string();
         assert!(err.contains("[tts.wyoming]"), "{err}");
     }
 
@@ -231,7 +271,7 @@ mod tests {
             wyoming: Some(TtsWyoming::default()),
             ..TtsCfg::default()
         };
-        let err = build_tts(&cfg, &Secrets::default()).err().unwrap().to_string();
+        let err = build_tts(&cfg, &Secrets::default(), &[]).err().unwrap().to_string();
         assert!(err.contains("uri"), "{err}");
     }
 
@@ -246,7 +286,7 @@ mod tests {
             }),
             ..TtsCfg::default()
         };
-        let got = build_tts(&cfg, &Secrets::default()).unwrap();
+        let got = build_tts(&cfg, &Secrets::default(), &[]).unwrap();
         assert!(got.is_some());
     }
 
@@ -258,7 +298,7 @@ mod tests {
             cloud: Some(TtsCloud { provider: "openai".into(), ..TtsCloud::default() }),
             ..TtsCfg::default()
         };
-        let err = build_tts(&cfg, &Secrets::default()).err().unwrap().to_string();
+        let err = build_tts(&cfg, &Secrets::default(), &[]).err().unwrap().to_string();
         assert!(err.contains("OPENAI_API_KEY") && err.contains("fono keys add"), "{err}");
     }
 
@@ -268,7 +308,7 @@ mod tests {
         let cfg = TtsCfg { backend: TtsBackend::OpenAI, cloud: None, ..TtsCfg::default() };
         let mut secrets = Secrets::default();
         secrets.insert("OPENAI_API_KEY", "sk-test");
-        assert!(build_tts(&cfg, &secrets).unwrap().is_some());
+        assert!(build_tts(&cfg, &secrets, &[]).unwrap().is_some());
     }
 
     /// Phase F: every new cloud backend errors clearly when the key
@@ -279,7 +319,7 @@ mod tests {
         let cfg = TtsCfg { backend: TtsBackend::Groq, ..TtsCfg::default() };
         let mut secrets = Secrets::default();
         secrets.insert("GROQ_API_KEY", "gsk-test");
-        assert!(build_tts(&cfg, &secrets).unwrap().is_some());
+        assert!(build_tts(&cfg, &secrets, &[]).unwrap().is_some());
     }
 
     #[cfg(feature = "openrouter")]
@@ -288,7 +328,7 @@ mod tests {
         let cfg = TtsCfg { backend: TtsBackend::OpenRouter, ..TtsCfg::default() };
         let mut secrets = Secrets::default();
         secrets.insert("OPENROUTER_API_KEY", "sk-or-test");
-        assert!(build_tts(&cfg, &secrets).unwrap().is_some());
+        assert!(build_tts(&cfg, &secrets, &[]).unwrap().is_some());
     }
 
     #[cfg(feature = "cartesia")]
@@ -297,7 +337,7 @@ mod tests {
         let cfg = TtsCfg { backend: TtsBackend::Cartesia, ..TtsCfg::default() };
         let mut secrets = Secrets::default();
         secrets.insert("CARTESIA_API_KEY", "ck-test");
-        assert!(build_tts(&cfg, &secrets).unwrap().is_some());
+        assert!(build_tts(&cfg, &secrets, &[]).unwrap().is_some());
     }
 
     #[cfg(feature = "deepgram")]
@@ -306,14 +346,67 @@ mod tests {
         let cfg = TtsCfg { backend: TtsBackend::Deepgram, ..TtsCfg::default() };
         let mut secrets = Secrets::default();
         secrets.insert("DEEPGRAM_API_KEY", "dg-test");
-        assert!(build_tts(&cfg, &secrets).unwrap().is_some());
+        assert!(build_tts(&cfg, &secrets, &[]).unwrap().is_some());
     }
 
     #[cfg(feature = "groq")]
     #[test]
     fn groq_missing_key_errors_clearly() {
         let cfg = TtsCfg { backend: TtsBackend::Groq, ..TtsCfg::default() };
-        let err = build_tts(&cfg, &Secrets::default()).err().unwrap().to_string();
+        let err = build_tts(&cfg, &Secrets::default(), &[]).err().unwrap().to_string();
         assert!(err.contains("GROQ_API_KEY"), "{err}");
+    }
+
+    #[cfg(feature = "cartesia")]
+    #[test]
+    fn strip_cartesia_default_voice_returns_none_for_catalogue_uuid() {
+        let default = fono_core::provider_catalog::find("cartesia")
+            .and_then(|p| p.tts.as_ref())
+            .map(|t| t.default_voice.to_string())
+            .expect("cartesia catalogue must define a default voice");
+        assert!(strip_cartesia_default_voice(Some(default)).is_none());
+    }
+
+    #[cfg(feature = "cartesia")]
+    #[test]
+    fn strip_cartesia_default_voice_preserves_custom_voice() {
+        let custom = "deadbeef-dead-beef-dead-beefdeadbeef".to_string();
+        assert_eq!(strip_cartesia_default_voice(Some(custom.clone())), Some(custom));
+    }
+
+    #[cfg(feature = "cartesia")]
+    #[test]
+    fn strip_cartesia_default_voice_preserves_none() {
+        assert!(strip_cartesia_default_voice(None).is_none());
+    }
+
+    /// Wizard round-trip regression: a config that contains the
+    /// catalogue's default voice (the wizard's behaviour every time
+    /// the user picks Cartesia) must NOT disable per-language voice
+    /// routing. We verify the helper instead of the constructed
+    /// trait-object so the test stays cheap; the constructor wiring
+    /// is covered by the `voice_pinned` cartesia.rs unit test.
+    #[cfg(feature = "cartesia")]
+    #[test]
+    fn cartesia_wizard_default_voice_does_not_pin() {
+        let default = fono_core::provider_catalog::find("cartesia")
+            .and_then(|p| p.tts.as_ref())
+            .map(|t| t.default_voice.to_string())
+            .unwrap();
+        let cfg =
+            TtsCfg { backend: TtsBackend::Cartesia, voice: default.clone(), ..TtsCfg::default() };
+        let (_key, _model, override_voice) = resolve_cloud(&cfg, &TtsBackend::Cartesia);
+        let voice = resolve_voice(&cfg, override_voice);
+        assert_eq!(
+            voice,
+            Some(default),
+            "factory's resolve_voice must surface the configured UUID"
+        );
+        // The crucial bit: `build_cartesia` then strips the catalogue
+        // default so the Cartesia client doesn't see a pin.
+        assert!(
+            strip_cartesia_default_voice(voice).is_none(),
+            "catalogue default UUID must NOT pin the voice"
+        );
     }
 }

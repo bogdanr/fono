@@ -65,7 +65,7 @@ enigo = ["fono-inject/enigo-backend"]
 fono-core = { path = "../fono-core", features = ["vulkan-probe"] }
 fono-audio = { path = "../fono-audio" }
 fono-http = { path = "../fono-http" }
-fono-stt = { path = "../fono-stt", features = ["groq", "openai", "openrouter", "deepgram", "wyoming"] }
+fono-stt = { path = "../fono-stt", features = ["groq", "openai", "openrouter", "deepgram", "cartesia", "wyoming"] }
 # Default builds ship every cloud backend wired in the catalogue —
 # fono-stt: Groq/OpenAI/Deepgram (+ Wyoming LAN); fono-polish:
 # Cerebras/OpenAI-compat/Anthropic; fono-tts: all five hosted

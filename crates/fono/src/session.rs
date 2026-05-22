@@ -1412,6 +1412,25 @@ impl SessionOrchestrator {
                 }
             });
         }
+        // TTS prewarm matters for Cartesia: it pre-resolves a native
+        // voice per non-English configured language via `/voices?…`
+        // and caches them, so the first synth doesn't pay the HTTP
+        // round-trip. Other TTS backends do their own startup probes
+        // here too (Deepgram, Wyoming, OpenAI-compat). Errors are
+        // non-fatal; the per-call code paths self-heal.
+        if let Some(tts) = self.current_tts() {
+            tokio::spawn(async move {
+                let started = Instant::now();
+                match tts.prewarm().await {
+                    Ok(()) => debug!(
+                        "warmup: tts {} ready in {}ms",
+                        tts.name(),
+                        started.elapsed().as_millis()
+                    ),
+                    Err(e) => warn!("warmup: tts {} prewarm failed: {e:#}", tts.name()),
+                }
+            });
+        }
         // Inject backend warmup runs on a blocking thread because the
         // probe shells out to `wtype --version` / `ydotool --version`.
         tokio::task::spawn_blocking(|| match fono_inject::warm_backend() {

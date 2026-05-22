@@ -119,9 +119,11 @@ in-module unit tests catch the rest.
 Items the catalogue *can* describe today but Fono doesn't yet
 runtime-wire:
 
-- **Cartesia STT.** Already a wired STT provider; catalogued under
-  `stt: Some(SttDefaults { model: "sonic-transcribe" })`. No further
-  action.
+- **Cartesia STT.** Wired in `crates/fono-stt/src/cartesia.rs`
+  (batch `POST /stt`) per
+  `plans/2026-05-23-cartesia-stt-support-v2.md`; catalogued under
+  `stt: Some(SttDefaults { model: "ink-whisper" })`. `ink-2` is
+  realtime-only and arrives in a Phase 2 streaming slice.
 - **Cartesia TTS.** Wired in Phase F (`fono-tts::cartesia`); the
   catalogue entry is the source of truth for the voice id and the
   Sonic-2 model.

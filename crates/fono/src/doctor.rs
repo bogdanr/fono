@@ -172,7 +172,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
             Ok(None) => writeln!(out, "  assistant: {}", dim("disabled"))?,
             Err(e) => writeln!(out, "  assistant: {} {e:#}", bad("FAIL —"))?,
         }
-        match fono_tts::build_tts(&c.tts, &secrets) {
+        match fono_tts::build_tts(&c.tts, &secrets, &c.general.languages) {
             Ok(Some(t)) => writeln!(out, "  tts: {} {}", t.name(), ok("ready"))?,
             Ok(None) => {
                 writeln!(out, "  tts: {}", warn("disabled (assistant replies will be silent)"))?;

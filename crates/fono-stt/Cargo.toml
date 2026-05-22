@@ -23,6 +23,12 @@ openai = ["dep:reqwest", "dep:fono-http"]
 # pulls `groq` in transitively.
 openrouter = ["dep:reqwest", "dep:fono-http", "dep:base64", "groq"]
 deepgram = ["dep:reqwest", "dep:fono-http", "dep:tokio-tungstenite"]
+# Cartesia STT — batch `POST /stt` against `ink-whisper`. Realtime
+# `ink-2` over the turn-based WebSocket lands in a Phase 2 streaming
+# slice; see `plans/2026-05-23-cartesia-stt-support-v2.md`. Reuses
+# Groq's `warm_client` + `encode_wav` helpers, so the feature pulls
+# `groq` in transitively (matches `openrouter`).
+cartesia = ["dep:reqwest", "dep:fono-http", "groq"]
 # Local whisper — opt-in because it vendors whisper.cpp (C++ build).
 whisper-local = ["dep:whisper-rs"]
 # Wyoming STT client — talks to wyoming-faster-whisper / fono-server /

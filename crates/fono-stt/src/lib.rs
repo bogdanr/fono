@@ -14,6 +14,8 @@ pub mod traits;
 #[cfg(feature = "streaming")]
 pub mod streaming;
 
+#[cfg(feature = "cartesia")]
+pub mod cartesia;
 #[cfg(feature = "groq")]
 pub mod groq;
 #[cfg(all(feature = "groq", feature = "streaming"))]

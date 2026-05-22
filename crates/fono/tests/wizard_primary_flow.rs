@@ -95,7 +95,7 @@ fn primary_anthropic_secondary_cartesia_tts() {
     assert_eq!(cfg.tts.backend, TtsBackend::Cartesia);
     let cloud = cfg.tts.cloud.as_ref().expect("cartesia tts.cloud set");
     assert_eq!(cloud.api_key_ref, "CARTESIA_API_KEY");
-    assert_eq!(cloud.model, "sonic-2");
+    assert_eq!(cloud.model, "sonic-3.5");
 
     // Two distinct key entries — the assistant chat and the TTS each
     // contribute one.
@@ -134,6 +134,43 @@ fn rerun_with_existing_secrets_inserts_nothing() {
     );
     // Cartesia TTS was still applied — the catalogue walk is idempotent.
     assert_eq!(cfg.tts.backend, TtsBackend::Cartesia);
+}
+
+/// 5. Primary = Cartesia → STT + TTS land on Cartesia from the single
+///    `CARTESIA_API_KEY`. Cartesia ships no polish / assistant
+///    capability, so those slots stay at default (local /
+///    disabled). Guards against the catalogue's STT model id
+///    drifting back to the legacy `sonic-transcribe` literal (the
+///    catalogue is the single source of truth for the wizard).
+#[test]
+fn primary_cartesia_covers_stt_and_tts_with_one_key() {
+    let entry = find("cartesia").expect("cartesia catalogue entry");
+    let mut cfg = Config::default();
+    let mut secrets = Secrets::default();
+
+    assert!(seed_primary_secret(&mut secrets, entry, "cart-test"));
+    apply_primary_provider(&mut cfg, entry);
+
+    // STT — Cartesia batch (`POST /stt`) only accepts the
+    // `ink-whisper` family; `ink-2` is realtime-only and lives
+    // behind a Phase 2 WebSocket slice. If this assertion fails,
+    // `crates/fono-core/src/provider_catalog.rs` has drifted.
+    assert_eq!(cfg.stt.backend, SttBackend::Cartesia);
+    let stt_cloud = cfg.stt.cloud.as_ref().expect("cartesia stt.cloud set");
+    assert_eq!(stt_cloud.api_key_ref, "CARTESIA_API_KEY");
+    assert_eq!(stt_cloud.model, "ink-whisper");
+
+    // TTS comes from the same catalogue entry — one secret covers both.
+    assert_eq!(cfg.tts.backend, TtsBackend::Cartesia);
+    let tts_cloud = cfg.tts.cloud.as_ref().expect("cartesia tts.cloud set");
+    assert_eq!(tts_cloud.api_key_ref, "CARTESIA_API_KEY");
+
+    // Cartesia ships neither polish nor assistant; defaults preserved.
+    assert!(!cfg.polish.enabled);
+    assert!(!cfg.assistant.enabled);
+
+    assert_eq!(secrets.keys.len(), 1);
+    assert!(secrets.has_in_file("CARTESIA_API_KEY"));
 }
 
 /// D2 — Customize-flow regression guard. A config carrying

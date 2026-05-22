@@ -1703,7 +1703,7 @@ async fn configure_cloud_stt(
         0 => (SttBackend::Groq, "GROQ_API_KEY", "whisper-large-v3-turbo"),
         1 => (SttBackend::OpenAI, "OPENAI_API_KEY", "whisper-1"),
         2 => (SttBackend::Deepgram, "DEEPGRAM_API_KEY", "nova-2"),
-        3 => (SttBackend::Cartesia, "CARTESIA_API_KEY", "sonic-transcribe"),
+        3 => (SttBackend::Cartesia, "CARTESIA_API_KEY", "ink-whisper"),
         _ => (SttBackend::AssemblyAI, "ASSEMBLYAI_API_KEY", "best"),
     };
     // Phase B5: every cloud key prompt routes through prompt_or_reuse_key
@@ -1850,8 +1850,8 @@ async fn validate_cloud_key(key_name: &str, key: &str) -> Result<()> {
         }
         "CARTESIA_API_KEY" => client
             .get("https://api.cartesia.ai/voices")
-            .header("X-API-Key", key)
-            .header("Cartesia-Version", "2024-06-10"),
+            .header("X-Api-Key", key)
+            .header("Cartesia-Version", "2026-03-01"),
         other => {
             // Unknown provider — skip validation.
             anyhow::bail!("no validation endpoint configured for {other}; key not validated")
