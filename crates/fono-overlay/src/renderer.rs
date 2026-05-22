@@ -89,7 +89,7 @@ pub const COLOR_TEXT_DIM: u32 = 0xCCAA_AAB2;
 pub fn accent_color(state: OverlayState) -> u32 {
     match state {
         OverlayState::Hidden => 0x0000_0000,
-        OverlayState::Recording { .. } => 0xFFE0_5454,
+        OverlayState::Recording { .. } | OverlayState::Pondering { .. } => 0xFFE0_5454,
         OverlayState::AssistantRecording { .. } => 0xFF22_C55E,
         OverlayState::AssistantThinking | OverlayState::AssistantSynthesising => 0xFFF5_9E0B,
         OverlayState::AssistantSpeaking => 0xFF38_BDF8,
@@ -102,6 +102,7 @@ pub fn state_label(state: OverlayState) -> &'static str {
     match state {
         OverlayState::Hidden => "",
         OverlayState::Recording { .. } => "RECORDING",
+        OverlayState::Pondering { .. } => "PONDERING",
         OverlayState::AssistantRecording { .. } => "ASSISTANT",
         OverlayState::AssistantThinking => "THINKING",
         OverlayState::AssistantSynthesising => "SYNTHESISING",
@@ -112,9 +113,19 @@ pub fn state_label(state: OverlayState) -> &'static str {
 }
 
 /// States whose panel is fed `push_level` from the live capture pump
-/// and should render the right-side VU bar.
+/// and should render the right-side VU bar. Slice 3 expansion
+/// (2026-05-22): `Recording` and `Pondering` join `LiveDictating` /
+/// `AssistantRecording` so the VU bar is visible during plain
+/// toggle / push-to-talk dictation, not only during the live-
+/// transcript style.
 pub fn state_has_vu_bar(state: OverlayState) -> bool {
-    matches!(state, OverlayState::LiveDictating | OverlayState::AssistantRecording { .. })
+    matches!(
+        state,
+        OverlayState::LiveDictating
+            | OverlayState::AssistantRecording { .. }
+            | OverlayState::Recording { .. }
+            | OverlayState::Pondering { .. }
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -524,6 +535,92 @@ pub fn draw_vu_bar(
     }
 }
 
+/// Snapshot of the silence-watch envelope follower used by the
+/// `Advanced` VU-bar flavour to overlay reference ticks. Stored as
+/// raw linear RMS values (0..1, i.e. the same units the envelope
+/// follower produces) — the renderer converts them to dBFS for its
+/// log-scaled axis.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GateMetrics {
+    pub inst_rms: f32,
+    pub voiced_rms: f32,
+    pub silence_rms: f32,
+}
+
+const VOICED_TICK_COLOR: u32 = 0xFF7C_FF7C; // soft green
+const SILENCE_TICK_COLOR: u32 = 0xFFFF_AA33; // amber
+
+/// dBFS range covered by the `Advanced` bar's vertical axis. The
+/// top is 0 dBFS (full-scale digital max), the bottom is -60 dBFS.
+const ADV_DBFS_TOP: f32 = 0.0;
+const ADV_DBFS_BOT: f32 = -60.0;
+
+/// Map a linear RMS value (0..1) onto the 0..1 vertical position on
+/// the `Advanced` bar's dBFS axis.
+fn adv_rms_to_pos(rms: f32) -> f32 {
+    if rms <= 1.0e-7 {
+        return 0.0;
+    }
+    let dbfs = 20.0 * rms.log10();
+    ((dbfs - ADV_DBFS_BOT) / (ADV_DBFS_TOP - ADV_DBFS_BOT)).clamp(0.0, 1.0)
+}
+
+/// `Advanced`-mode bar: log-scaled dBFS fill plus two annotation
+/// ticks (green = voiced reference, amber = silence threshold).
+/// Unlike `draw_vu_bar` (linear), the level fill here uses the same
+/// dBFS mapping as the ticks so they live on the same axis. Ticks
+/// are drawn 2 px thick.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_vu_bar_advanced(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    _level: f32,
+    x_right: f32,
+    y_top: f32,
+    y_bot: f32,
+    accent: u32,
+    scale: f32,
+    metrics: GateMetrics,
+) {
+    let bar_w = ACCENT_WIDTH * scale;
+    let radius = bar_w * 0.5;
+    let x0 = x_right - bar_w;
+    let x1 = x_right;
+    if x0 >= x1 || y_top >= y_bot {
+        return;
+    }
+    let ghost = with_alpha(accent, 0x22);
+    fill_round_rect(buf, stride, h, (x0, y_top, x1, y_bot), radius, ghost);
+    let band_h = y_bot - y_top;
+    let y_for = |rms: f32| -> f32 { y_bot - adv_rms_to_pos(rms) * band_h };
+    let inst_pos = adv_rms_to_pos(metrics.inst_rms);
+    if inst_pos > 0.0 {
+        let fill_h = inst_pos * band_h;
+        fill_round_rect(
+            buf,
+            stride,
+            h,
+            (x0, y_bot - fill_h, x1, y_bot),
+            radius,
+            with_alpha(accent, 0xFF),
+        );
+    }
+    let tick_pad = 3.0 * scale;
+    let xl = x0 - tick_pad;
+    let xr = x1 + tick_pad;
+    let draw_thick = |buf: &mut [u32], y: f32, color: u32| {
+        draw_line_segment(buf, stride, h, xl, y, xr, y, color, 0xFF);
+        draw_line_segment(buf, stride, h, xl, y + 1.0, xr, y + 1.0, color, 0xFF);
+    };
+    if metrics.silence_rms > 0.0 {
+        draw_thick(buf, y_for(metrics.silence_rms), SILENCE_TICK_COLOR);
+    }
+    if metrics.voiced_rms > 0.0 {
+        draw_thick(buf, y_for(metrics.voiced_rms), VOICED_TICK_COLOR);
+    }
+}
+
 pub fn draw_fft(
     buf: &mut [u32],
     stride: u32,
@@ -879,6 +976,74 @@ pub fn draw_line(
     }
 }
 
+/// `draw_line` variant that paints one character (`highlight_char_idx`)
+/// in `highlight_color` instead of `base_color`. Used for the
+/// walking-letter highlight on the "Pondering…" status label —
+/// see `OverlayState::Pondering` in `crates/fono-overlay/src/lib.rs`.
+/// Pass `None` to render the whole string in `base_color` (identical
+/// to `draw_line`).
+pub fn draw_line_with_highlight(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    font: &ab_glyph::FontArc,
+    text: &str,
+    base_color: u32,
+    highlight_color: u32,
+    highlight_char_idx: Option<usize>,
+    size_px: f32,
+    x_origin: f32,
+    baseline_y: f32,
+) {
+    use ab_glyph::{Font, ScaleFont};
+    let scaled = font.as_scaled(size_px);
+    let mut x = x_origin;
+    for (i, ch) in text.chars().enumerate() {
+        let color = if Some(i) == highlight_char_idx { highlight_color } else { base_color };
+        let glyph_id = font.glyph_id(ch);
+        let glyph = glyph_id.with_scale_and_position(size_px, ab_glyph::point(x, baseline_y));
+        if let Some(outlined) = font.outline_glyph(glyph) {
+            let bounds = outlined.px_bounds();
+            outlined.draw(|gx, gy, coverage| {
+                let px = bounds.min.x as i32 + gx as i32;
+                let py = bounds.min.y as i32 + gy as i32;
+                if px < 0 || py < 0 {
+                    return;
+                }
+                let (px, py) = (px as u32, py as u32);
+                if px >= stride || py >= h {
+                    return;
+                }
+                let idx = (py * stride + px) as usize;
+                let Some(slot) = buf.get_mut(idx) else { return };
+                let alpha = (coverage.clamp(0.0, 1.0) * 255.0) as u8;
+                *slot = blend(*slot, color, alpha);
+            });
+        }
+        x += scaled.h_advance(glyph_id);
+    }
+}
+
+/// Pondering label highlight color: warm peach/amber, distinct from
+/// the polishing accent so the two states stay visually separable.
+/// Locked at `+45° hue shift` per
+/// `plans/2026-05-22-fono-auto-stop-silence-v1.md`.
+pub const COLOR_PONDER_HIGHLIGHT: u32 = 0xCCE6_B073;
+
+/// Convert an `OverlayState::Pondering { walk_progress }` value into
+/// the character index of "Pondering" (the 9-letter prefix of
+/// "Pondering...") that should be drawn in the highlight color.
+/// Returns `None` when `walk_progress == 0` — the 1-second plain
+/// grace before the walk begins.
+#[must_use]
+pub fn pondering_highlight_idx(walk_progress: u16) -> Option<usize> {
+    if walk_progress == 0 {
+        return None;
+    }
+    let p = u32::from(walk_progress).saturating_sub(1);
+    Some(((p * 9) / 10_000).min(8) as usize)
+}
+
 /// Compute target window height (logical px) that fits `n_lines` of
 /// transcript text at `TEXT_FONT_PX`, clamped to [`WIN_MIN_HEIGHT`,
 /// `WIN_MAX_HEIGHT`].
@@ -904,7 +1069,8 @@ pub struct RendererState {
     pub text: String,
     pub wrapped: Vec<String>,
     pub style: WaveformStyle,
-    pub volume_bar: bool,
+    pub volume_bar: fono_core::config::VolumeBarMode,
+    pub gate_metrics: GateMetrics,
     pub levels: VecDeque<f32>,
     pub osc_samples: VecDeque<f32>,
     pub fft_frames: VecDeque<Vec<f32>>,
@@ -920,7 +1086,8 @@ impl RendererState {
             text: String::new(),
             wrapped: Vec::new(),
             style,
-            volume_bar: false,
+            volume_bar: fono_core::config::VolumeBarMode::Off,
+            gate_metrics: GateMetrics::default(),
             levels: VecDeque::with_capacity(LEVELS_CAP),
             osc_samples: VecDeque::with_capacity(OSC_SAMPLES_CAP),
             fft_frames: VecDeque::with_capacity(FFT_FRAMES_CAP),
@@ -935,7 +1102,7 @@ impl RendererState {
     pub fn rewrap(&mut self) {
         self.wrapped = if let (Some(font), false) = (self.font.as_ref(), self.text.is_empty()) {
             let mut max_w = WIN_WIDTH - PADDING_X * 2.0 - ACCENT_WIDTH;
-            if self.volume_bar && state_has_vu_bar(self.state) {
+            if self.volume_bar.is_on() && state_has_vu_bar(self.state) {
                 max_w -= ACCENT_WIDTH;
             }
             wrap_text(font, &self.text, TEXT_FONT_PX, max_w)
@@ -1005,13 +1172,17 @@ impl RendererState {
         self.heatmap_cache_dim = (0, 0);
     }
 
-    pub fn set_volume_bar(&mut self, enabled: bool) -> bool {
-        if self.volume_bar == enabled {
+    pub fn set_volume_bar(&mut self, mode: fono_core::config::VolumeBarMode) -> bool {
+        if self.volume_bar == mode {
             return false;
         }
-        self.volume_bar = enabled;
+        self.volume_bar = mode;
         self.rewrap();
         true
+    }
+
+    pub fn set_gate_metrics(&mut self, metrics: GateMetrics) {
+        self.gate_metrics = metrics;
     }
 
     /// Window height target for the current state (logical px).
@@ -1109,23 +1280,40 @@ impl RendererState {
         let label = state_label(self.state);
         if !label.is_empty() {
             let status_baseline = pad_top + STATUS_FONT_PX * scale * 0.85;
-            draw_line(
-                buf,
-                w,
-                h,
-                font,
-                label,
-                COLOR_TEXT_DIM,
-                STATUS_FONT_PX * scale,
-                pad_x,
-                status_baseline,
-            );
+            if let OverlayState::Pondering { walk_progress, .. } = self.state {
+                draw_line_with_highlight(
+                    buf,
+                    w,
+                    h,
+                    font,
+                    label,
+                    COLOR_TEXT_DIM,
+                    COLOR_PONDER_HIGHLIGHT,
+                    pondering_highlight_idx(walk_progress),
+                    STATUS_FONT_PX * scale,
+                    pad_x,
+                    status_baseline,
+                );
+            } else {
+                draw_line(
+                    buf,
+                    w,
+                    h,
+                    font,
+                    label,
+                    COLOR_TEXT_DIM,
+                    STATUS_FONT_PX * scale,
+                    pad_x,
+                    status_baseline,
+                );
+            }
         }
         let text_top = pad_top + STATUS_FONT_PX * scale + STATUS_TO_TEXT * scale;
         let waveform_active = !is_text_style(self.style)
             && matches!(
                 self.state,
                 OverlayState::Recording { .. }
+                    | OverlayState::Pondering { .. }
                     | OverlayState::AssistantRecording { .. }
                     | OverlayState::AssistantThinking
                     | OverlayState::AssistantSynthesising
@@ -1242,43 +1430,117 @@ impl RendererState {
                 }
                 WaveformStyle::Transcript => {}
             }
-        } else {
-            if is_text_style(self.style)
-                && state_has_vu_bar(self.state)
-                && self.volume_bar
-                && !self.levels.is_empty()
-            {
-                let level = self.levels.back().copied().unwrap_or(0.0);
-                let x_right = w as f32;
-                let y_top = CORNER_RADIUS * scale * 0.4;
-                let y_bot = h as f32 - CORNER_RADIUS * scale * 0.4;
-                draw_vu_bar(buf, w, h, level, x_right, y_top, y_bot, accent, scale);
-            }
-            if !self.wrapped.is_empty() {
-                let mut baseline = text_top + TEXT_FONT_PX * scale * 0.85;
-                let max_visible_lines = ((h as f32 - text_top - PADDING_BOT * scale)
-                    / (TEXT_FONT_PX * scale + LINE_GAP * scale))
-                    as usize;
-                let total = self.wrapped.len();
-                let skip = total.saturating_sub(max_visible_lines.max(1));
-                for line in self.wrapped.iter().skip(skip) {
-                    draw_line(
-                        buf,
-                        w,
-                        h,
-                        font,
-                        line,
-                        COLOR_TEXT,
-                        TEXT_FONT_PX * scale,
-                        pad_x,
-                        baseline,
-                    );
-                    baseline += TEXT_FONT_PX * scale + LINE_GAP * scale;
-                    if baseline > h as f32 - PADDING_BOT * scale {
-                        break;
-                    }
+        } else if !self.wrapped.is_empty() {
+            let mut baseline = text_top + TEXT_FONT_PX * scale * 0.85;
+            let max_visible_lines = ((h as f32 - text_top - PADDING_BOT * scale)
+                / (TEXT_FONT_PX * scale + LINE_GAP * scale))
+                as usize;
+            let total = self.wrapped.len();
+            let skip = total.saturating_sub(max_visible_lines.max(1));
+            for line in self.wrapped.iter().skip(skip) {
+                draw_line(buf, w, h, font, line, COLOR_TEXT, TEXT_FONT_PX * scale, pad_x, baseline);
+                baseline += TEXT_FONT_PX * scale + LINE_GAP * scale;
+                if baseline > h as f32 - PADDING_BOT * scale {
+                    break;
                 }
             }
         }
+        // VU bar draws on top of either waveform or text content. The
+        // bar lives in the panel's right margin (between the waveform
+        // area's right edge and the panel edge) so it never visually
+        // overlaps either branch. Defaults pair `volume_bar` with the
+        // visualisation style via the tray, but a manual config edit
+        // (`volume_bar = "simple" | "advanced"` with any waveform
+        // style) is honoured here.
+        if state_has_vu_bar(self.state) && self.volume_bar.is_on() && !self.levels.is_empty() {
+            let level = self.levels.back().copied().unwrap_or(0.0);
+            let x_right = w as f32;
+            let y_top = CORNER_RADIUS * scale * 0.4;
+            let y_bot = h as f32 - CORNER_RADIUS * scale * 0.4;
+            if matches!(self.volume_bar, fono_core::config::VolumeBarMode::Advanced) {
+                draw_vu_bar_advanced(
+                    buf,
+                    w,
+                    h,
+                    level,
+                    x_right,
+                    y_top,
+                    y_bot,
+                    accent,
+                    scale,
+                    self.gate_metrics,
+                );
+            } else {
+                draw_vu_bar(buf, w, h, level, x_right, y_top, y_bot, accent, scale);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn highlight_idx_zero_is_none() {
+        assert_eq!(pondering_highlight_idx(0), None);
+    }
+
+    #[test]
+    fn highlight_idx_one_is_first_letter() {
+        assert_eq!(pondering_highlight_idx(1), Some(0));
+    }
+
+    #[test]
+    fn highlight_idx_max_is_last_letter() {
+        assert_eq!(pondering_highlight_idx(10_000), Some(8));
+    }
+
+    #[test]
+    fn highlight_idx_is_monotone() {
+        let mut last = 0;
+        for p in (1..=10_000).step_by(100) {
+            let idx = pondering_highlight_idx(p).unwrap();
+            assert!(idx >= last);
+            assert!(idx < 9);
+            last = idx;
+        }
+    }
+
+    #[test]
+    fn pondering_state_label_is_walkable() {
+        let lbl = state_label(OverlayState::Pondering { db: 0, walk_progress: 0 });
+        assert_eq!(lbl, "PONDERING");
+        assert_eq!(lbl.chars().take(9).count(), 9);
+    }
+
+    #[test]
+    fn state_has_vu_bar_covers_live_audio_states() {
+        assert!(state_has_vu_bar(OverlayState::LiveDictating));
+        assert!(state_has_vu_bar(OverlayState::AssistantRecording { db: 0 }));
+        assert!(state_has_vu_bar(OverlayState::Recording { db: 0 }));
+        assert!(state_has_vu_bar(OverlayState::Pondering { db: 0, walk_progress: 0 }));
+        assert!(!state_has_vu_bar(OverlayState::Hidden));
+        assert!(!state_has_vu_bar(OverlayState::Processing));
+        assert!(!state_has_vu_bar(OverlayState::Polishing));
+        assert!(!state_has_vu_bar(OverlayState::AssistantThinking));
+    }
+
+    #[test]
+    fn set_volume_bar_returns_change_flag() {
+        use fono_core::config::VolumeBarMode;
+        let mut s = RendererState::new(fono_core::config::WaveformStyle::default());
+        assert_eq!(s.volume_bar, VolumeBarMode::Off);
+        assert!(s.set_volume_bar(VolumeBarMode::Simple));
+        assert!(!s.set_volume_bar(VolumeBarMode::Simple));
+        assert!(s.set_volume_bar(VolumeBarMode::Advanced));
+    }
+
+    #[test]
+    fn gate_metrics_default_is_zero() {
+        let m = GateMetrics::default();
+        assert!(m.inst_rms.abs() < f32::EPSILON);
+        assert!(m.voiced_rms.abs() < f32::EPSILON);
+        assert!(m.silence_rms.abs() < f32::EPSILON);
     }
 }

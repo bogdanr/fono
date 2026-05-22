@@ -1,6 +1,336 @@
 # Fono — Project Status
 
-Last updated: 2026-05-20
+Last updated: 2026-05-22
+
+## 2026-05-22 — Auto-stop on silence, slice 4 (commit wired)
+
+Slice 4 of `plans/2026-05-22-fono-auto-stop-silence-v1.md` is in.
+The `audio.auto_stop_silence_ms` config knob is now wired all the
+way through: when the user sets it to a non-zero value, the
+silence-watch state machine fires an actual stop after the
+configured silence window.
+
+### What landed
+
+- **`SilenceWatchConfig::auto_stop_silence_ms: Option<u32>`** and
+  the new **`SilenceEvent::Committed`** variant. Commit fires from
+  `Pondering` after `silence_ms` (genuinely-silent frames only,
+  voiced impulses don't accrue) clears the configured total. On
+  commit the watch resets to `Armed` so it's single-shot per
+  recording session. Five new unit tests pin the semantics:
+  `commit_fires_after_total_silence_window`,
+  `commit_resets_to_armed_single_shot`,
+  `silence_only_never_commits`,
+  `impulse_during_pondering_does_not_cancel_commit`,
+  `auto_stop_none_disables_commit`.
+- **`spawn_silence_watch_task` consumes `Committed`** by sending
+  `HotkeyAction::TogglePressed` through the orchestrator's
+  existing `action_tx`. The daemon's central loop translates this
+  the same way as a real hotkey press (including
+  `live_preview_enabled` mapping to `LiveTogglePressed`), so
+  auto-stop is observationally identical to manual stop — same
+  FSM transition, same `on_stop_recording` call, same overlay
+  transitions to Processing → Polishing. No parallel code path.
+- **Tray presets renamed**: `Off / 0.8 s / 1.5 s / 3 s` →
+  `Off / 3 s / 5 s`. The old chat-app-derived values were wrong
+  for prose dictation cadence.
+- **Config doc-comment rewritten** at `crates/fono-core/src/config.rs:230`
+  to describe the semantics: toggle-only, voice-relative threshold,
+  speech preamble required by construction, no noise-floor estimator.
+
+### Honest scope cuts
+
+- **No integration test** in `crates/fono/tests/live_pipeline.rs`.
+  The wiring is a single `action_tx.send` call; the unit-test
+  matrix already covers every commit-event semantics with
+  deterministic frame inputs. An integration test would require
+  ~200 lines of orchestrator + overlay-stub + capture-pump
+  scaffolding to assert one line of glue. Deferred unless dogfooding
+  surfaces a wiring bug.
+- **No `audio.debug.write_pcm`** PCM-dump-on-cutoff feature. The
+  persistent debug config section was killed in slice 1; if we
+  want post-mortem PCM dumps later they belong behind a CLI flag
+  like `fono debug levels`, not in `config.toml`.
+- **No `audio.debug.log_pondering`** transition-log knob, same
+  reason. Slice 4 logs `INFO fono::auto_stop "auto-stop committed
+  after N ms"` unconditionally — single line per commit, cheap.
+
+### Verification protocol
+
+Manual today (the only way to test the full wiring):
+
+1. `~/.config/fono/config.toml` → `[audio] auto_stop_silence_ms = 5000`.
+2. Restart fono.
+3. Quick-tap the dictation hotkey (toggle mode).
+4. Speak a sentence. Watch the bar's amber tick — the silence
+   threshold.
+5. Stop talking. After 1 s the overlay flips to `PONDERING`. After
+   5 s total silence the recording stops, processing runs, text
+   gets injected.
+6. With `auto_stop_silence_ms = 10000`, same flow but the wait is
+   longer; the walking-letter highlight is slower.
+7. With `auto_stop_silence_ms = 0` (Off), no auto-stop — manual
+   stop required (current default behaviour, regression check).
+
+---
+
+## 2026-05-22 — Auto-stop on silence, slice 3 (VU-bar enum + Advanced annotations)
+
+Slice 3 of `plans/2026-05-22-fono-auto-stop-silence-v1.md` is in.
+No new audio decisions; this slice repurposes the existing right-
+side VU bar so the silence-watch envelope's reference signals are
+**observable** while the actual auto-stop commit (slice 4) is
+still being designed.
+
+### What landed
+
+- **`[overlay] volume_bar` is now an enum.** Breaking schema
+  change, no migration shim:
+  - `volume_bar = "off"`      — no bar (was `false`).
+  - `volume_bar = "simple"`   — current linear-fill bar (was `true`).
+  - `volume_bar = "advanced"` — new diagnostic flavour.
+- **Bar paints during `Recording` and `Pondering` overlay states**,
+  not only `LiveDictating` / `AssistantRecording`. `state_has_vu_bar`
+  expanded; the bar's text-style gate (transcript panels only) is
+  preserved so the waveform / oscilloscope / heatmap / FFT panels
+  are untouched.
+- **`Advanced` flavour** overlays three live ticks on the existing
+  bar:
+  - **Green tick** at the recent voiced-RMS reference
+    (`EnvelopeSnapshot::voiced_rms` from slice 1's follower).
+  - **Amber tick** at the silence threshold = `voiced_rms − 12 dB`,
+    i.e. the line the slice-2 `SilenceWatch` uses to decide a frame
+    is silent.
+  - **White dot** at the instantaneous RMS.
+  All three positions use the same `level / WAVEFORM_AMPLITUDE_CEILING`
+  scaling as the bar fill, so the annotations align pixel-perfect.
+- **`OverlayHandle::push_gate_metrics(inst, voiced, silence)`** is
+  the new producer-side API. Pushed at 10 Hz from
+  `spawn_silence_watch_task` in `crates/fono/src/session.rs`, which
+  already runs the envelope follower. Renderer stores them
+  unconditionally but only forces a redraw when the bar is in
+  Advanced mode — `Off` / `Simple` users pay nothing.
+- **Backends updated**: `winit_x11` + `wayland_shm` handle the new
+  `OverlayCmd::GateMetrics` variant; `noop` silently drops it.
+
+### What was deferred
+
+- **Tray submenu for `volume_bar`** (plan 3.3). Folded into the
+  slice-4 tray work where the auto-stop presets land. `Advanced` is
+  config-file-only on purpose: end users shouldn't see it.
+- **Snapshot tests** (plan 3.4 in the original form). Replaced
+  with smaller renderer unit tests on `state_has_vu_bar`,
+  `set_volume_bar` change detection, and `GateMetrics` default.
+
+### Pre-commit gate
+
+| Step | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cargo test --workspace --tests --lib` | green |
+
+### How to dogfood
+
+Edit `~/.config/fono/config.toml`:
+
+```toml
+[overlay]
+volume_bar = "advanced"
+```
+
+Run a dictation session. During recording, the bar to the right of
+the transcript will show the green voiced-RMS line climbing into
+your speech range, the amber silence-threshold line ~12 dB below
+it, and a white dot tracking your instantaneous level. As you
+pause, the dot drops below the amber line; if the pause continues,
+`Pondering…` engages (slice 2). The annotations make it visible
+that the threshold *adapts* to how loud you happen to be speaking
+in this session.
+
+### Next slice
+
+**Slice 4** — actually wire `auto_stop_silence_ms` into the
+recording loop. Tray preset rename + bump (0 / 3 s / 5 s). State-
+machine `Committed` → synthetic stop-recording. Gate rules
+(toggle-mode only, speech-preamble required). PCM dump on commit.
+
+---
+
+## 2026-05-22 — Auto-stop on silence, slice 2 (Pondering state machine, visual only)
+
+Slice 2 of `plans/2026-05-22-fono-auto-stop-silence-v1.md` is in.
+The state machine now drives a visible `Pondering…` overlay state
+during long pauses in dictation. **No auto-stop fires yet** — that
+stays in slice 4. This slice exists so we can dogfood the
+transition heuristics for as long as we like before committing the
+recording loop to an automated stop.
+
+### What landed
+
+- **`crates/fono-audio/src/envelope.rs`** — re-added `voiced_rms`
+  (medium EMA, ~500 ms) gated on `inst_rms_dbfs > -55 dBFS` so it
+  only tracks above-noise content. The slice-1 rollback removed it
+  along with the floor; slice 2 needs it as the reference signal
+  for relative silence detection. 6 unit tests, all green.
+- **`crates/fono-audio/src/silence_watch.rs`** — new state machine:
+  - States: `Armed → Speaking → Pondering` (and back; no `Committed`
+    emitted yet).
+  - `Armed → Speaking` after ≥ `speech_confirm_arm_ms = 100 ms`
+    of contiguous frames whose `inst_rms_dbfs ≥ voiced_rms_dbfs −
+    silence_gap_db (12)`. Rejects coughs/clicks/key-presses.
+  - `Speaking → Pondering` after ≥ `pondering_visual_ms = 1000 ms`
+    of contiguous "quiet" frames (same `silence_gap_db` test,
+    inverted). Sentence-end pauses (~800 ms) never trigger.
+  - `Pondering → Speaking` on a single qualifying voiced frame —
+    snap restore, no resume confirmation. The asymmetry is
+    deliberate: thinkers must not feel UI lag when resuming.
+  - Pure function over `EnvelopeSnapshot`; no audio API
+    dependencies; 5 unit tests covering each transition direction
+    and the cough-rejection case.
+- **`crates/fono-overlay/src/lib.rs`** — new `OverlayState::Pondering
+  { db }`. Mirrors `Recording { db }` everywhere it appears
+  (state machine, IPC, renderer match arms).
+- **`crates/fono-overlay/src/renderer.rs`** — when the overlay is
+  in `Pondering`:
+  - Label text becomes `"Pondering…"`.
+  - 1 s plain-text grace after the transition.
+  - Then a single-letter highlight walks left-to-right across the
+    9 letters of `"Pondering"` (the `…` stays static). Highlight
+    = `+45°` hue shift in HSV with a `+15%` saturation bump and
+    value held constant — visible but not alarming.
+  - Letter cadence is `(auto_stop_silence_ms − 2000) / 9` ms; at
+    the 5 s preset that's ~333 ms/letter, at 10 s ~889 ms/letter.
+  - If the walk window collapses to ≤ 0 (i.e. user manually set
+    `auto_stop_silence_ms ≤ 2000 ms` in config.toml), the walk is
+    skipped and the label stays plain "Pondering…".
+- **`crates/fono/src/session.rs`** — `spawn_silence_watch_task`
+  runs alongside `spawn_waveform_level_task`. It feeds capture
+  frames through `EnvelopeFollower` → `SilenceWatch::observe()`
+  → overlay state transitions. **Only armed when**:
+  - Recording mode is toggle (not hold-to-talk).
+  - `audio.auto_stop_silence_ms > 0`.
+  - The dictation flow path is the user-text path (not assistant
+    hold-release, which has explicit boundaries).
+
+### What did NOT land in slice 2
+
+- **Auto-stop commit.** `SilenceWatch` returns its state but never
+  asks the session to stop. That's slice 4's job, gated on
+  dogfooding data from this slice.
+- **Floor-too-high notification.** Dropped; the slice-1 rollback
+  removed the floor estimator we'd have compared against. Will be
+  revisited in slice 4 if/when the floor returns.
+- **`live_pipeline.rs` integration test.** Deferred; the
+  per-module unit tests cover the same transitions deterministically.
+
+### Pre-commit gate
+
+| Step | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cargo test --workspace --tests --lib` | green |
+
+### How to validate
+
+Set `auto_stop_silence_ms = 5000` in `~/.config/fono/config.toml`
+(or pick `3 s` from the tray submenu), then dictate something with
+a deliberate ≥ 2 s pause. You should see the overlay label change
+from `Recording` to `Pondering…`, then after 1 s the first letter
+of `Pondering` tint warm/amber and the highlight walk one letter
+to the right at the cadence shown above. Resuming speech snaps
+the label back to `Recording` in one frame.
+
+### Next slice
+
+**Slice 3** — `volume_bar` config bool → enum `Off | Simple |
+Advanced` (breaking schema change, no shim), plus the vertical
+dBFS meter widget in Advanced mode. Per-overlay visibility keys.
+
+---
+
+## 2026-05-22 — Auto-stop on silence, slice 1 (envelope follower)
+
+Slice 1 of `plans/2026-05-22-fono-auto-stop-silence-v1.md` is in.
+Pure-measurement layer, no behaviour change in the recording loop
+yet. Lands the audio envelope follower and a one-shot CLI to
+inspect it against a live mic.
+
+### What landed
+
+- **`crates/fono-audio/src/envelope.rs`** — three-channel envelope
+  follower:
+  - `inst_rms`   — fast EMA (~30 ms) of frame RMS.
+  - `voiced_rms` — medium EMA (~500 ms) over frames above the open
+    gate.
+  - `floor_rms`  — 20th-percentile of frame RMS over a 3 s sliding
+    window (NOT a plain EMA — a plain EMA tracks voice as much as
+    silence and would lift on every utterance).
+  - Hysteresis built-in: open gate at `floor + 11 dB`, close gate
+    at `floor + 6 dB`. 5 dB hysteresis band prevents thrash on
+    signals hovering near threshold.
+  - Adaptive: thresholds are derived from the floor, so a noisier
+    room produces a higher gate automatically.
+  - O(N + W) per frame with N = frame length, W = floor window
+    (~150 frames). Cheap enough for the capture thread.
+  - 6 unit tests covering pure silence, speech burst, hysteresis
+    ordering, floor warm-up, dBFS clamp, alpha monotonicity.
+- **`fono debug levels [--seconds N]`** (hidden CLI subcommand).
+  Captures `N` seconds (default 10) from the default input device,
+  feeds it through the follower, and prints a noise-gate-engineer-
+  flavoured summary:
+  ```
+  Floor RMS           :  -52.0 dBFS  (p20= -51.4, p50= -50.2, p80= -49.0)
+  Voiced RMS          :  -53.5 dBFS  (EMA over frames above the gate)
+  Speech gate (open)  :  -41.0 dBFS  (floor + 11.0 dB)
+  Silence gate (close):  -46.0 dBFS  (floor + 6.0 dB)
+  Auto-stop verdict   : OK — floor below -25.0 dBFS noise ceiling
+  ```
+- CHANGELOG `## Added` entry under `[Unreleased]`.
+
+### Design decisions worth recording
+
+- **No `[audio.debug]` config section.** Earlier draft had three
+  persistent toggles for envelope log / pondering log / PCM dump.
+  Dropped on review — the data is a one-shot diagnostic, not a
+  durable preference. Slice 2's transition logs and slice 4's PCM
+  dump will route through ad-hoc CLI flags or tracing targets
+  (`RUST_LOG=fono::silence_watch=info`) rather than config, keeping
+  the on-disk schema free of debug knobs.
+- **Slice 1.2 (wire envelope into capture thread) deferred to
+  slice 2.** Nothing inside the daemon consumes the follower yet,
+  so wiring it through `session.rs` before `SilenceWatch` exists
+  would be dead code. The standalone CLI is sufficient for slice 1.
+
+### Verification
+
+Manual:
+```
+$ cargo run -q --bin fono -- debug levels --seconds 3
+fono debug levels: capturing 3s @ 16000 Hz mono ...
+... done.
+
+Frames observed     : 141 (2.82 s @ 20 ms/frame)
+Voiced frames       : 32 (above the open gate)
+Floor RMS           :  -52.0 dBFS  (p20= -51.4, p50= -50.2, p80= -49.0)
+...
+Auto-stop verdict   : OK — floor below -25.0 dBFS noise ceiling
+```
+
+Automated: pre-commit gate clean — `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace --tests --lib` (all 6 new envelope tests
+plus the existing suite pass).
+
+### Next
+
+Slice 2 of the same plan: `SilenceWatch` state machine (`Armed →
+Speaking → Pondering → (Committed)`) with the **only** observable
+effect being the overlay "Pondering…" label + state pill. No
+auto-stop yet — that's slice 4, after slice 2 has been dogfooded.
+
+---
 
 ## 2026-05-20 — Wayland overlay: pluggable backend layer, GNOME via Xwayland
 

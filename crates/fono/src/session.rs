@@ -18,7 +18,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use fono_assistant::{Assistant, ConversationHistory};
-use fono_audio::{AudioCapture, CaptureConfig, RecordingBuffer};
+use fono_audio::{
+    AudioCapture, CaptureConfig, EnvelopeConfig, EnvelopeFollower, RecordingBuffer, SilenceEvent,
+    SilenceWatch, SilenceWatchConfig,
+};
 use fono_core::config::{Config, ContextRule};
 use fono_core::history::{HistoryDb, Transcription as HistoryRow};
 use fono_core::{Paths, Secrets};
@@ -45,6 +48,13 @@ pub const MIN_RECORDING: Duration = Duration::from_millis(300);
 /// three at typical speaking-voice levels.
 #[cfg(feature = "interactive")]
 const WAVEFORM_AMPLITUDE_CEILING: f32 = 0.22;
+
+/// Pre-computed `10^(-12 dB / 20) ≈ 0.2512`. Used by
+/// `spawn_silence_watch_task` to derive the silence-threshold tick
+/// (Advanced VU bar) from the envelope's `voiced_rms`. Mirrors
+/// `SilenceWatchConfig::default().silence_gap_db = 12`.
+#[cfg(feature = "interactive")]
+const SILENCE_GAIN: f32 = 0.251_188_64;
 
 /// FFT window size used by the `fft` and `heatmap` styles. 4096
 /// samples ≈ 256 ms at 16 kHz — gives ~3.9 Hz per source bin so
@@ -104,12 +114,23 @@ struct CaptureSession {
     /// waveform overlay. `None` when no overlay is attached.
     #[cfg(feature = "interactive")]
     level_task: Option<tokio::task::AbortHandle>,
+    /// AbortHandle for the silence-watch task driving the
+    /// `Recording ↔ Pondering` overlay transitions. Only spawned in
+    /// toggle dictation mode (slice 2 of the auto-stop plan). `None`
+    /// in hold-to-talk mode, when no overlay is attached, or when
+    /// the waveform overlay is disabled.
+    #[cfg(feature = "interactive")]
+    silence_task: Option<tokio::task::AbortHandle>,
 }
 
 impl CaptureSession {
     fn stop_and_drain(mut self) -> (Vec<f32>, Duration) {
         #[cfg(feature = "interactive")]
         if let Some(h) = self.level_task.take() {
+            h.abort();
+        }
+        #[cfg(feature = "interactive")]
+        if let Some(h) = self.silence_task.take() {
             h.abort();
         }
         let _ = self.stop_tx.send(());
@@ -619,6 +640,7 @@ impl SessionOrchestrator {
         #[cfg(feature = "interactive")]
         if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
             o.set_waveform_style(cfg.overlay.style);
+            o.set_volume_bar(cfg.overlay.volume_bar);
         }
         if let Ok(mut guard) = self.config.write() {
             *guard = Arc::new(cfg);
@@ -749,6 +771,21 @@ impl SessionOrchestrator {
                                     })
                                     .unwrap_or_default();
                                 if !snap.is_empty() {
+                                    // Push raw RMS (pre-gain) for the VU bar.
+                                    // `push_samples` above is *gained* for the
+                                    // oscilloscope display; the bar wants the
+                                    // true amplitude so its normalisation
+                                    // against `WAVEFORM_AMPLITUDE_CEILING` is
+                                    // consistent across styles.
+                                    let inv_gain = 1.0 / gain;
+                                    let rms = {
+                                        let sum_sq: f32 =
+                                            snap.iter().map(|v| (v * inv_gain).powi(2)).sum();
+                                        (sum_sq / snap.len() as f32).sqrt()
+                                    };
+                                    o.push_level(
+                                        (rms / WAVEFORM_AMPLITUDE_CEILING).clamp(0.0, 1.0),
+                                    );
                                     o.push_samples(snap);
                                 }
                             }
@@ -810,6 +847,23 @@ impl SessionOrchestrator {
                                     *slot =
                                         ((db - WAVEFORM_FFT_DB_FLOOR) / db_span).clamp(0.0, 1.0);
                                 }
+                                // Also push a level for the VU bar, derived
+                                // from the same windowed samples the FFT
+                                // consumed. Reuses the windowed `input_buf`
+                                // (already populated above with the last
+                                // `take` samples * Hann window), un-windowing
+                                // would be expensive so we accept the slight
+                                // Hann-energy bias (≈3 dB low) — the bar is
+                                // an indicator, not a measurement.
+                                let win_len = (sample_rate as usize / 1000) * 50;
+                                let level = buf
+                                    .lock()
+                                    .map(|b| {
+                                        let s = b.samples();
+                                        normalised_rms(&s[s.len().saturating_sub(win_len)..])
+                                    })
+                                    .unwrap_or(0.0);
+                                o.push_level(level);
                                 o.push_fft_bins(bins);
                             }
                         }
@@ -840,6 +894,157 @@ impl SessionOrchestrator {
             }
             _ => None,
         }
+    }
+
+    /// Drive the silence-watch state machine from the live capture
+    /// buffer. Pushes overlay state transitions
+    /// `Recording ↔ Pondering` and updates `walk_progress` so the
+    /// "Pondering…" label's walking-letter highlight advances in
+    /// step with the configured `auto_stop_silence_ms`.
+    ///
+    /// Slice 2 of `plans/2026-05-22-fono-auto-stop-silence-v1.md` —
+    /// visual feedback only; the auto-stop *commit* lands in slice 4.
+    /// Returns `None` when the overlay is disabled / failed to
+    /// spawn — the silence watchdog has nothing to drive without an
+    /// overlay handle (slice 4 will revisit this when the commit
+    /// path lands).
+    #[cfg(feature = "interactive")]
+    #[allow(clippy::too_many_lines)]
+    fn spawn_silence_watch_task(
+        &self,
+        cfg: &Config,
+        buffer: &Arc<StdMutex<RecordingBuffer>>,
+    ) -> Option<tokio::task::AbortHandle> {
+        let overlay = self.overlay.read().ok().and_then(|g| g.clone())?;
+        let buf = Arc::clone(buffer);
+        let sample_rate = self.capture_cfg.target_sample_rate;
+        let auto_stop_ms = cfg.audio.auto_stop_silence_ms;
+        let envelope_cfg = EnvelopeConfig { sample_rate, ..EnvelopeConfig::default() };
+        // Slice 4: wire the commit timer. Zero means "no auto-stop";
+        // the watch still drives the Pondering label so the user
+        // sees the state machine even with the feature off, which
+        // is what dogfooding from slice 2 already depended on.
+        let watch_cfg = SilenceWatchConfig {
+            auto_stop_silence_ms: if auto_stop_ms > 0 { Some(auto_stop_ms) } else { None },
+            ..SilenceWatchConfig::default()
+        };
+        let pondering_visual_ms = watch_cfg.pondering_visual_ms;
+        // Slice 2 visual default: when the user has auto-stop off
+        // (the shipping default), still walk the highlight across
+        // a 5 s "what auto-stop *would* feel like" window so the
+        // dogfooding signal is meaningful. When auto-stop is set
+        // the walk matches the real timer.
+        let walk_total_ms = if auto_stop_ms > 0 { auto_stop_ms } else { 5_000 };
+        let action_tx = self.action_tx.clone();
+        let task = tokio::spawn(async move {
+            let mut envelope = EnvelopeFollower::new(envelope_cfg);
+            let mut watch = SilenceWatch::new(watch_cfg);
+            let frame_samples = (sample_rate as usize / 1000) * 20;
+            if frame_samples == 0 {
+                return;
+            }
+            let frame_ms = 20.0_f32;
+            let mut last_pos: usize = 0;
+            let mut tick = tokio::time::interval(Duration::from_millis(20));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut in_pondering = false;
+            let mut last_walk_progress: u16 = 0;
+            // Pre-computed for the Advanced VU bar's silence-threshold
+            // tick: voiced_rms × 10^(-12 dB / 20) ≈ voiced_rms × 0.2512.
+            // Slice-2 `SilenceWatchConfig::default().silence_gap_db` is
+            // 12 dB; if that changes here, mirror it.
+            let mut metrics_tick_ms: f32 = 0.0;
+            loop {
+                tick.tick().await;
+                let new_samples: Vec<f32> = match buf.lock() {
+                    Ok(g) => {
+                        let s = g.samples();
+                        if s.len() <= last_pos {
+                            Vec::new()
+                        } else {
+                            s[last_pos..].to_vec()
+                        }
+                    }
+                    Err(_) => continue,
+                };
+                let mut consumed = 0;
+                while consumed + frame_samples <= new_samples.len() {
+                    envelope.push_frame(&new_samples[consumed..consumed + frame_samples]);
+                    let snap = envelope.snapshot();
+                    let event = watch.push(snap, frame_ms);
+                    match event {
+                        SilenceEvent::EnteredPondering => {
+                            in_pondering = true;
+                            last_walk_progress = 0;
+                            overlay.set_state(fono_overlay::OverlayState::Pondering {
+                                db: 0,
+                                walk_progress: 0,
+                            });
+                        }
+                        SilenceEvent::ResumedFromPondering => {
+                            in_pondering = false;
+                            last_walk_progress = 0;
+                            overlay.set_state(fono_overlay::OverlayState::Recording { db: 0 });
+                        }
+                        SilenceEvent::Committed => {
+                            // Auto-stop fires. Emit a synthetic toggle so
+                            // the stop is observationally identical to
+                            // the user pressing the dictation hotkey:
+                            // same FSM transition, same on_stop_recording
+                            // call, same overlay transitions. The daemon's
+                            // central loop translates TogglePressed to
+                            // LiveTogglePressed when live preview is on.
+                            tracing::info!(
+                                target: "fono::auto_stop",
+                                "auto-stop committed after {} ms of silence",
+                                watch_cfg.auto_stop_silence_ms.unwrap_or(0)
+                            );
+                            let _ = action_tx.send(HotkeyAction::TogglePressed);
+                            return;
+                        }
+                        _ => {}
+                    }
+                    consumed += frame_samples;
+                }
+                last_pos += consumed;
+                if in_pondering {
+                    let elapsed = watch.pondering_elapsed_ms();
+                    // 1 s plain grace, then ramp walk_progress 1..=10_000
+                    // over (walk_total_ms - pondering_visual_ms - 1000).
+                    let grace_ms = 1000.0_f32;
+                    let walk_window_ms =
+                        (walk_total_ms.saturating_sub(pondering_visual_ms)) as f32 - grace_ms;
+                    let new_progress: u16 = if elapsed < grace_ms || walk_window_ms <= 0.0 {
+                        0
+                    } else {
+                        let frac = ((elapsed - grace_ms) / walk_window_ms).clamp(0.0, 1.0);
+                        let p = (frac * 10_000.0) as u32 + 1;
+                        p.min(10_000) as u16
+                    };
+                    // 100-step quantisation keeps overlay set_state
+                    // traffic to ~100 transitions across the walk
+                    // — plenty smooth, much cheaper than per-frame.
+                    if new_progress.abs_diff(last_walk_progress) >= 100 || new_progress == 10_000 {
+                        last_walk_progress = new_progress;
+                        overlay.set_state(fono_overlay::OverlayState::Pondering {
+                            db: 0,
+                            walk_progress: new_progress,
+                        });
+                    }
+                }
+                // Push gate metrics for the `Advanced` VU-bar at ~10 Hz.
+                // Skipped silently by the renderer in `Off` / `Simple`
+                // modes (cheap message; redraw is gated server-side).
+                metrics_tick_ms += 20.0;
+                if metrics_tick_ms >= 100.0 {
+                    metrics_tick_ms = 0.0;
+                    let snap = envelope.snapshot();
+                    let silence_rms = snap.voiced_rms * SILENCE_GAIN;
+                    overlay.push_gate_metrics(snap.inst_rms, snap.voiced_rms, silence_rms);
+                }
+            }
+        });
+        Some(task.abort_handle())
     }
 
     /// Spawn the assistant-thinking animation: a per-style synthetic
@@ -1215,6 +1420,18 @@ impl SessionOrchestrator {
             &buffer,
         );
 
+        // Silence-watch: drives the Recording ↔ Pondering overlay
+        // transition + walking-letter highlight. Toggle-mode dictation
+        // only; hold-to-talk owns its own boundary. Slice 2 of the
+        // auto-stop plan — visual feedback only, no auto-stop commit
+        // yet.
+        #[cfg(feature = "interactive")]
+        let silence_task = if matches!(mode, RecordingMode::Toggle) {
+            self.spawn_silence_watch_task(&cfg, &buffer)
+        } else {
+            None
+        };
+
         *slot = Some(CaptureSession {
             buffer,
             stop_tx,
@@ -1222,6 +1439,8 @@ impl SessionOrchestrator {
             started_at: Instant::now(),
             #[cfg(feature = "interactive")]
             level_task,
+            #[cfg(feature = "interactive")]
+            silence_task,
         });
         drop(slot);
         Ok(())
@@ -1461,6 +1680,11 @@ impl SessionOrchestrator {
             started_at: Instant::now(),
             #[cfg(feature = "interactive")]
             level_task,
+            // Assistant push-to-talk owns its own boundary — no
+            // silence watchdog. (Slice 2 of the auto-stop plan
+            // limits the feature to toggle dictation.)
+            #[cfg(feature = "interactive")]
+            silence_task: None,
         };
         *slot = Some(session);
         if cfg.general.auto_mute_system {
@@ -2016,7 +2240,7 @@ impl SessionOrchestrator {
         // Tap RMS off each chunk to feed the right-side VU bar on the
         // overlay panel during F7. The assistant path uses the same
         // tap so the same VU indicator works for both surfaces.
-        let vu_overlay = if cfg.overlay.volume_bar { overlay.clone() } else { None };
+        let vu_overlay = if cfg.overlay.volume_bar.is_on() { overlay.clone() } else { None };
         let drain_join = tokio::spawn(async move {
             let mut pump = pump;
             while let Some(chunk) = tokio_rx.recv().await {

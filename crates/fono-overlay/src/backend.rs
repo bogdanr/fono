@@ -33,7 +33,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use fono_core::config::WaveformStyle;
+use fono_core::config::{VolumeBarMode, WaveformStyle};
 
 use crate::OverlayState;
 
@@ -132,7 +132,16 @@ pub enum OverlayCmd {
     AudioLevel(f32),
     AudioSamples(Vec<f32>),
     FftBins(Vec<f32>),
-    SetVolumeBar(bool),
+    SetVolumeBar(VolumeBarMode),
+    /// Raw linear RMS values (0..1, same units the envelope follower
+    /// produces) for `inst`, `voiced`, and the silence threshold
+    /// (`voiced_rms × 10^(-12/20)`). Consumed by the `Advanced`
+    /// VU-bar; ignored in `Simple` / `Off`.
+    GateMetrics {
+        inst_rms: f32,
+        voiced_rms: f32,
+        silence_rms: f32,
+    },
     SetWaveformStyle(WaveformStyle),
     Shutdown,
 }
@@ -233,8 +242,15 @@ impl OverlayHandle {
         self.send(OverlayCmd::FftBins(bins));
     }
 
-    pub fn set_volume_bar(&self, enabled: bool) {
-        self.send(OverlayCmd::SetVolumeBar(enabled));
+    pub fn set_volume_bar(&self, mode: VolumeBarMode) {
+        self.send(OverlayCmd::SetVolumeBar(mode));
+    }
+
+    /// Push the latest gate metrics for the `Advanced` VU-bar.
+    /// All three values are raw linear RMS (0..1). A no-op when the
+    /// bar is `Off` or `Simple`.
+    pub fn push_gate_metrics(&self, inst_rms: f32, voiced_rms: f32, silence_rms: f32) {
+        self.send(OverlayCmd::GateMetrics { inst_rms, voiced_rms, silence_rms });
     }
 
     pub fn set_waveform_style(&self, style: WaveformStyle) {

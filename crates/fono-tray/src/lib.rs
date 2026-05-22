@@ -193,8 +193,7 @@ pub const WAVEFORM_STYLES: &[(&str, &str)] = &[
 /// Auto-stop silence presets surfaced in the tray's radio group.
 /// `0` means "Off" — the daemon's auto-stop silence timer is bypassed
 /// when the value is zero. Indices map to `TrayAction::SetAutoStopSilenceMs(u32)`.
-pub const AUTO_STOP_PRESETS_MS: &[(&str, u32)] =
-    &[("Off", 0), ("0.8 s", 800), ("1.5 s", 1500), ("3 s", 3000)];
+pub const AUTO_STOP_PRESETS_MS: &[(&str, u32)] = &[("Off", 0), ("3 s", 3_000), ("5 s", 5_000)];
 
 /// FSM-aligned tray state used to tint the icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

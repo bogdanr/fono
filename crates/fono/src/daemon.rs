@@ -984,11 +984,28 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                             warn!("tray SetWaveformStyle({idx}): out of range");
                             continue;
                         };
+                        // The VU bar only renders in the Transcript style
+                        // (`renderer.rs::redraw` gates it on
+                        // `is_text_style(style)`). Pair the two settings so
+                        // the tray switch leaves a coherent overlay:
+                        // non-Transcript styles silently turn the bar off;
+                        // Transcript revives it at `Simple` (the default).
+                        // Users who want `Advanced` set it manually in
+                        // `config.toml` after switching to Transcript.
+                        let paired_bar =
+                            if matches!(style, fono_core::config::WaveformStyle::Transcript) {
+                                fono_core::config::VolumeBarMode::Simple
+                            } else {
+                                fono_core::config::VolumeBarMode::Off
+                            };
                         apply_pref_via_tray(
                             &paths,
                             orch_for_tray.as_ref(),
                             "overlay.style",
-                            move |cfg| cfg.overlay.style = style,
+                            move |cfg| {
+                                cfg.overlay.style = style;
+                                cfg.overlay.volume_bar = paired_bar;
+                            },
                         )
                         .await;
                     }

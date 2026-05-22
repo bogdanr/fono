@@ -9,10 +9,12 @@
 
 pub mod capture;
 pub mod devices;
+pub mod envelope;
 pub mod mute;
 pub mod playback;
 pub mod pulse;
 pub mod resample;
+pub mod silence_watch;
 pub mod trim;
 pub mod vad;
 pub mod wpctl;
@@ -23,7 +25,9 @@ pub mod stream;
 pub use capture::{
     AudioCapture, CaptureConfig, CaptureHandle, CaptureStreamHandle, RecordingBuffer,
 };
+pub use envelope::{dbfs_to_rms, rms_to_dbfs, EnvelopeConfig, EnvelopeFollower, EnvelopeSnapshot};
 pub use playback::{AudioPlayback, PlaybackError};
+pub use silence_watch::{SilenceEvent, SilenceState, SilenceWatch, SilenceWatchConfig};
 pub use trim::{trim_silence, TrimConfig};
 pub use vad::{SileroVad, Vad, VadDecision, WebRtcVadStub};
 

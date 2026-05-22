@@ -311,10 +311,26 @@ fn run_event_loop(
                             tracing::debug!("overlay(x11): style -> {style:?}");
                         }
                     }
-                    OverlayCmd::SetVolumeBar(enabled) => {
-                        if self.renderer.set_volume_bar(enabled) && self.window.is_some() {
+                    OverlayCmd::SetVolumeBar(mode) => {
+                        if self.renderer.set_volume_bar(mode) && self.window.is_some() {
                             needs_redraw = true;
                             needs_resize = true;
+                        }
+                    }
+                    OverlayCmd::GateMetrics { inst_rms, voiced_rms, silence_rms } => {
+                        self.renderer.set_gate_metrics(crate::renderer::GateMetrics {
+                            inst_rms,
+                            voiced_rms,
+                            silence_rms,
+                        });
+                        if self.window.is_some()
+                            && self.renderer.is_visible()
+                            && matches!(
+                                self.renderer.volume_bar,
+                                fono_core::config::VolumeBarMode::Advanced
+                            )
+                        {
+                            needs_redraw = true;
                         }
                     }
                     OverlayCmd::Shutdown => {

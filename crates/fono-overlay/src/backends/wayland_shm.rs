@@ -211,10 +211,22 @@ pub fn drain_commands(rx: &Receiver<OverlayCmd>, renderer: &mut RendererState) -
                     }
                 }
             }
-            Ok(OverlayCmd::SetVolumeBar(enabled)) => {
-                if renderer.set_volume_bar(enabled) {
+            Ok(OverlayCmd::SetVolumeBar(mode)) => {
+                if renderer.set_volume_bar(mode) {
                     needs_redraw = true;
                     needs_resize = true;
+                }
+            }
+            Ok(OverlayCmd::GateMetrics { inst_rms, voiced_rms, silence_rms }) => {
+                renderer.set_gate_metrics(crate::renderer::GateMetrics {
+                    inst_rms,
+                    voiced_rms,
+                    silence_rms,
+                });
+                if renderer.is_visible()
+                    && matches!(renderer.volume_bar, fono_core::config::VolumeBarMode::Advanced)
+                {
+                    needs_redraw = true;
                 }
             }
             Ok(OverlayCmd::Shutdown) => {

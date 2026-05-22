@@ -27,6 +27,20 @@ pub enum OverlayState {
     Recording {
         db: i8,
     },
+    /// Dictation recording paused: user has stopped speaking long
+    /// enough that the silence-watch state machine flipped from
+    /// `Speaking` to `Pondering`. Same waveform shape as
+    /// [`Self::Recording`] but the renderer paints the status label
+    /// as "Pondering…" with a walking-letter highlight whose
+    /// position is driven by `walk_progress` (0..=10_000, fixed-point
+    /// `0.0..=1.0` mapped over `auto_stop_silence_ms` — or a default
+    /// visual window when auto-stop is off). Slice 2 of
+    /// `plans/2026-05-22-fono-auto-stop-silence-v1.md`: visual only,
+    /// no auto-stop commit yet.
+    Pondering {
+        db: i8,
+        walk_progress: u16,
+    },
     /// Voice-assistant recording (F8 hold-to-talk). Same waveform
     /// shapes as [`Self::Recording`], but the renderer uses a green
     /// palette + "Assistant" title so the user can see at a glance
@@ -108,7 +122,8 @@ impl Overlay {
     pub fn push_level(&self, _amplitude: f32) {}
     pub fn push_samples(&self, _samples: Vec<f32>) {}
     pub fn push_fft_bins(&self, _bins: Vec<f32>) {}
-    pub fn set_volume_bar(&self, _enabled: bool) {}
+    pub fn set_volume_bar(&self, _mode: fono_core::config::VolumeBarMode) {}
+    pub fn push_gate_metrics(&self, _inst: f32, _voiced: f32, _silence: f32) {}
     pub fn set_waveform_style(&self, _style: fono_core::config::WaveformStyle) {}
 
     #[must_use]

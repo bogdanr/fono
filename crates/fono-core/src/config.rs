@@ -227,9 +227,27 @@ pub struct Audio {
     /// Latency plan L11/L12 — whisper compute scales linearly with
     /// audio length so this saves real wall-clock time.
     pub trim_silence: bool,
-    /// In toggle mode, fire StopRecording automatically when this many
-    /// milliseconds of contiguous silence are detected. `0` disables.
-    /// Latency plan L13.
+    /// Auto-stop dictation after this many milliseconds of contiguous
+    /// silence. `0` disables; tray presets are `Off / 3 s / 5 s`.
+    ///
+    /// Only fires in **toggle** mode. Hold-to-talk and assistant-hold
+    /// paths always honour the explicit user boundary.
+    ///
+    /// Silence is measured relative to the user's own voice envelope
+    /// (12 dB below the rolling voiced-RMS reference), so the timer
+    /// self-calibrates across mic gain, room noise, and natural
+    /// speaking level without needing an absolute dBFS threshold or
+    /// a noise-floor estimator. A `PONDERING` indicator on the
+    /// overlay shows the timer is running; a confirmed resume of
+    /// speech (≥ `speech_confirm_resume_ms`) cancels it.
+    ///
+    /// Commit is gated on a speech preamble — the state machine
+    /// must have observed at least `speech_confirm_arm_ms = 100 ms`
+    /// of contiguous voiced speech in the session before it can
+    /// fire. This is enforced by construction (commit only fires
+    /// from the `Pondering` state, which can only be entered from
+    /// `Speaking`, which requires the preamble), so pressing the
+    /// hotkey and walking away never triggers auto-stop on its own.
     pub auto_stop_silence_ms: u32,
 }
 
@@ -787,14 +805,53 @@ pub struct Overlay {
     /// streaming live-preview pipeline; the other four styles drive
     /// passive audio visualisations off the recording buffer.
     pub style: WaveformStyle,
-    /// Right-side VU bar on the transcript panel. Default on; set to
-    /// `false` to restore the pre-VU layout.
-    pub volume_bar: bool,
+    /// Right-side VU bar on the transcript panel. `Simple` shows the
+    /// classic linear bar; `Advanced` overlays the silence-watch
+    /// reference signals (voiced level, silence threshold, current
+    /// instantaneous level) on top so the dynamic auto-stop
+    /// thresholds are observable. `Advanced` is debug-grade UI and
+    /// is only reachable by editing `config.toml`.
+    ///
+    /// Breaking change (slice 3 of the 2026-05-22 auto-stop-silence
+    /// plan): this field was a `bool` until 2026-05-22. Migrate
+    /// `volume_bar = true` to `volume_bar = "simple"` and
+    /// `volume_bar = false` to `volume_bar = "off"`.
+    pub volume_bar: VolumeBarMode,
+}
+
+/// VU-bar rendering flavour. See [`Overlay::volume_bar`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum VolumeBarMode {
+    /// No VU bar. Default; the tray's visualization switch only
+    /// turns it on automatically for the `Transcript` style.
+    #[default]
+    Off,
+    /// Linear 0..1 fill against `WAVEFORM_RMS_CEILING`.
+    Simple,
+    /// Same fill as [`Self::Simple`] plus three annotations driven
+    /// by the silence-watch follower: a green tick at the recent
+    /// voiced RMS, an orange tick at the silence threshold
+    /// (`voiced_rms − 12 dB`), and a white dot at the instantaneous
+    /// RMS. Diagnostic overlay; only enabled by hand-editing
+    /// `config.toml`.
+    Advanced,
+}
+
+impl VolumeBarMode {
+    #[must_use]
+    pub fn is_on(self) -> bool {
+        !matches!(self, Self::Off)
+    }
 }
 
 impl Default for Overlay {
     fn default() -> Self {
-        Self { waveform: true, style: WaveformStyle::default(), volume_bar: true }
+        Self {
+            waveform: true,
+            style: WaveformStyle::default(),
+            volume_bar: VolumeBarMode::default(),
+        }
     }
 }
 

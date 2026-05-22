@@ -7,6 +7,151 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Auto-stop on silence is wired up.** When `[audio]
+  auto_stop_silence_ms > 0` and dictation is in toggle mode, the
+  silence-watch state machine now fires an actual stop after the
+  configured silence run length (5 s or 10 s via the tray preset).
+  The stop is observationally identical to the user pressing the
+  hotkey — same `HotkeyAction::TogglePressed` path, same overlay
+  transitions (`Pondering → Processing → Polishing`), same pipeline.
+  Hold-to-talk and assistant-hold paths are exempt by construction
+  (the silence-watch task only spawns in toggle mode). Commit
+  requires a speech preamble (state machine cannot fire from
+  `Armed`); silence alone never auto-stops a session that had no
+  speech.
+
+### Changed
+
+- **Tray auto-stop presets**: `Off / 0.8 s / 1.5 s / 3 s` →
+  `Off / 3 s / 5 s`. The old values were copied from chat-app
+  push-to-talk semantics and are wrong for prose dictation. The
+  new values came out of slice-2/3 dogfooding: 3 s is the tightest
+  realistic setting (just past sentence-end pauses), 5 s is the
+  comfortable default. Default stays `Off`; users opt in via the
+  tray submenu or
+  `~/.config/fono/config.toml`.
+- **`volume_bar = "advanced"`: dropped the white instantaneous-RMS dot.**
+  It was redundant — sitting at exactly the top of the moving fill bar,
+  conveying nothing the bar wasn't already showing. The two reference
+  ticks remain (green = voiced RMS reference, amber = silence threshold
+  at `voiced − 12 dB`).
+- **`volume_bar = "advanced"`: bar now reaches all the way to the top at
+  0 dBFS.** Previously the producer clamped values to
+  `WAVEFORM_AMPLITUDE_CEILING = 0.22` (≈ -13 dBFS), which capped the bar
+  at ~80 % of its height regardless of how loud the speaker. The
+  `OverlayCmd::GateMetrics` channel now carries raw linear RMS values
+  (renamed `inst_rms / voiced_rms / silence_rms`); the renderer maps
+  them through a fixed -60..0 dBFS log axis.
+- **`PONDERING` no longer flickers on single noisy frames during a
+  pause.** The state machine's `Pondering → Speaking` transition now
+  requires `speech_confirm_resume_ms` (default **200 ms** = 10 audio
+  frames) of contiguous voiced frames, matching the existing
+  `speech_confirm_arm_ms` gate on `Armed → Speaking`. A single breath,
+  chair creak, or mouse click during a real pause no longer snaps the
+  label back to `RECORDING` — typical impulse durations clear the
+  silence threshold for only ~80–120 ms, well below the new gate,
+  while real short words like "OK" sustain voiced energy for
+  ~250–350 ms (vowel tail) and resume cleanly.
+- **`voiced_rms` (the green reference tick) now uses an asymmetric
+  EMA: 200 ms attack, 3000 ms release.** Previously a symmetric
+  500 ms EMA caused the green tick to drift down toward the moving
+  fill within a couple of seconds of silence, which collapsed the
+  12 dB gap above the amber silence threshold and made `PONDERING`
+  flip back to `RECORDING` almost immediately. Asymmetric tracking
+  means the reference still catches up to your voice within a
+  syllable (200 ms attack) but holds across multi-second pauses
+  (3 s release tail), so the silence threshold stays anchored to
+  your real speaking level for the duration of a natural pause.
+
+### Breaking
+
+- **`[overlay] volume_bar` default changed from `Simple` to `Off`.** Fresh
+  configs (post-wizard or `Config::default()`) no longer enable the VU bar.
+  The tray's visualization switch now toggles it on automatically only for
+  the `Transcript` style; in every other style the bar starts hidden until
+  the user enables it manually in `config.toml`. Users who relied on the
+  previous default need `volume_bar = "simple"` in `~/.config/fono/config.toml`.
+
+- **`[overlay] volume_bar` changed from `bool` to enum
+  `"off" | "simple" | "advanced"`.** No migration shim. Existing
+  configs need a one-line edit:
+  - `volume_bar = true`  → `volume_bar = "simple"`
+  - `volume_bar = false` → `volume_bar = "off"`
+  `"advanced"` is a new diagnostic mode, only reachable by editing
+  `config.toml` (no tray surface). Slice 3 of
+  `plans/2026-05-22-fono-auto-stop-silence-v1.md`.
+
+### Changed
+
+- **`volume_bar = "advanced"` is now a true dBFS-axis meter.** Both the
+  level fill and the three annotation ticks map onto a fixed -60..0 dBFS
+  range (log scale) instead of the linear 0..1 fraction the simple bar
+  uses. Voiced speech (-15..-25 dBFS) lands in the top third; inter-word
+  silence (-45..-55 dBFS) lands in the bottom third — the instantaneous
+  white dot, the green voiced tick, and the amber silence tick are now
+  visually separated instead of clustered near the top. Ticks are also
+  drawn 2 px thick. Simple mode unchanged.
+- **`PONDERING` label.** The silence-watch indicator was rendered as
+  `Pondering...`; now `PONDERING` to match the all-caps `RECORDING`
+  baseline. The walking-letter highlight still traverses the 9 letters.
+- **Tray-driven visualization switch now live-applies `volume_bar`.** The
+  reload path was already pushing `set_waveform_style` to the running
+  overlay but had no matching `set_volume_bar` call, so the bar stuck
+  around on screen until the next process restart even after the tray
+  had written `Off` to disk. Fixed in `crates/fono/src/session.rs`.
+- **VU bar (`overlay.volume_bar`) now actually renders in every
+  visualisation style.** The renderer change alone wasn't enough —
+  the level pump in `crates/fono/src/session.rs::spawn_waveform_level_task`
+  only pushed levels in the `bars` branch. `oscilloscope`, `fft` and
+  `heatmap` now also push the windowed RMS, so `volume_bar = "simple"`
+  / `"advanced"` are honoured in every style. Transcript style is
+  unchanged — the live-streaming path was already pushing levels at
+  `session.rs:2193`.
+- **Tray "Visualization" submenu now also flips `[overlay] volume_bar`
+  to a sensible default.** Switching **to** `Transcript` sets
+  `volume_bar = "simple"`; switching to any other style sets
+  `volume_bar = "off"`. This is only the tray-driven default — a
+  manual `config.toml` edit (`volume_bar = "simple"` or
+  `"advanced"` with any visualisation) overrides it on next load.
+
+### Added
+
+- **`volume_bar = "advanced"` — diagnostic VU-bar flavour.** When
+  enabled, the right-side VU bar gains three live annotations from
+  the silence-watch envelope follower: a green tick at the recent
+  voiced-RMS reference, an amber tick at the silence threshold
+  (`voiced_rms − 12 dB`, i.e. the line the watchdog uses to decide
+  "silence has begun"), and a small white dot at the instantaneous
+  RMS. All three positions are computed on the same linear scale as
+  the bar fill, so they line up pixel-perfect with where the bar
+  would sit at each level. Pure visualisation: no behavioural
+  effect on capture / pondering / commit. Intended for tuning the
+  state machine while slice 4 (the actual auto-stop commit) is
+  still being designed.
+
+- **VU bar now paints during plain `Recording` and `Pondering`
+  overlay states** — previously gated to `LiveDictating` and the
+  assistant push-to-talk. The bar is still only drawn in text-style
+  overlay panels (transcript view); the waveform / oscilloscope /
+  heatmap / FFT panels are unchanged. Slice 3 of the same plan.
+
+- **"Pondering…" overlay state during long pauses (toggle dictation).**
+  A new `SilenceWatch` state machine in `fono-audio` follows the
+  envelope follower's `inst_rms` against `voiced_rms` (voice-relative,
+  not absolute dBFS) and flips the overlay from `Recording` to
+  `Pondering` after ~1 s of silence. The status label changes from
+  "RECORDING" to "Pondering…" with a single-letter highlight that
+  walks left-to-right across the word as the configured
+  `auto_stop_silence_ms` timer would tick down — after a 1 s plain
+  grace, the cursor moves through 9 letters until commit (or until
+  the user resumes speaking, which snaps the label back instantly).
+  Visual feedback only: the state machine does *not* auto-stop the
+  recording in this slice; the commit lands in slice 4. Hold-to-talk
+  and the assistant push-to-talk path are unaffected. Slice 2 of
+  `plans/2026-05-22-fono-auto-stop-silence-v1.md`.
+
 ### Fixed
 
 - **Audio playback via `pw-play` now passes `--raw`.** Without it,
