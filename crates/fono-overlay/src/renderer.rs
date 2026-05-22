@@ -90,7 +90,9 @@ pub fn accent_color(state: OverlayState) -> u32 {
     match state {
         OverlayState::Hidden => 0x0000_0000,
         OverlayState::Recording { .. } | OverlayState::Pondering { .. } => 0xFFE0_5454,
-        OverlayState::AssistantRecording { .. } => 0xFF22_C55E,
+        OverlayState::AssistantRecording { .. } | OverlayState::AssistantPondering { .. } => {
+            0xFF22_C55E
+        }
         OverlayState::AssistantThinking | OverlayState::AssistantSynthesising => 0xFFF5_9E0B,
         OverlayState::AssistantSpeaking => 0xFF38_BDF8,
         OverlayState::Processing | OverlayState::Polishing => 0xFFE0_A040,
@@ -104,6 +106,7 @@ pub fn state_label(state: OverlayState) -> &'static str {
         OverlayState::Recording { .. } => "RECORDING",
         OverlayState::Pondering { .. } => "PONDERING",
         OverlayState::AssistantRecording { .. } => "ASSISTANT",
+        OverlayState::AssistantPondering { .. } => "PONDERING",
         OverlayState::AssistantThinking => "THINKING",
         OverlayState::AssistantSynthesising => "SYNTHESISING",
         OverlayState::AssistantSpeaking => "SPEAKING",
@@ -123,6 +126,7 @@ pub fn state_has_vu_bar(state: OverlayState) -> bool {
         state,
         OverlayState::LiveDictating
             | OverlayState::AssistantRecording { .. }
+            | OverlayState::AssistantPondering { .. }
             | OverlayState::Recording { .. }
             | OverlayState::Pondering { .. }
     )
@@ -1280,7 +1284,9 @@ impl RendererState {
         let label = state_label(self.state);
         if !label.is_empty() {
             let status_baseline = pad_top + STATUS_FONT_PX * scale * 0.85;
-            if let OverlayState::Pondering { walk_progress, .. } = self.state {
+            if let OverlayState::Pondering { walk_progress, .. }
+            | OverlayState::AssistantPondering { walk_progress, .. } = self.state
+            {
                 draw_line_with_highlight(
                     buf,
                     w,
@@ -1315,6 +1321,7 @@ impl RendererState {
                 OverlayState::Recording { .. }
                     | OverlayState::Pondering { .. }
                     | OverlayState::AssistantRecording { .. }
+                    | OverlayState::AssistantPondering { .. }
                     | OverlayState::AssistantThinking
                     | OverlayState::AssistantSynthesising
                     | OverlayState::AssistantSpeaking

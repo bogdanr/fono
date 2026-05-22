@@ -148,21 +148,33 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     let fsm = Arc::new(Mutex::new(fsm));
     let (action_tx, mut action_rx) = mpsc::unbounded_channel::<HotkeyAction>();
 
+    // Shared "is the key physically held down?" flags. Constructed
+    // here so the same `Arc<AtomicBool>`s are seen by both the
+    // hotkey listener (writer) and the orchestrator's silence-watch
+    // task (reader). See `fono_hotkey::KeyHeldFlags` for the
+    // motivation.
+    let held_flags = fono_hotkey::KeyHeldFlags::new();
+
     // ---------------------------------------------------------------
     // Build the orchestrator. STT failure → degraded mode (hotkeys
     // still register but recording emits a warning instead of audio).
     // ---------------------------------------------------------------
-    let orchestrator: Option<Arc<SessionOrchestrator>> =
-        match SessionOrchestrator::new(Arc::clone(&config), &secrets, paths, action_tx.clone()) {
-            Ok(o) => Some(Arc::new(o)),
-            Err(e) => {
-                warn!(
-                    "STT backend unavailable; daemon running in DEGRADED mode \
+    let orchestrator: Option<Arc<SessionOrchestrator>> = match SessionOrchestrator::new(
+        Arc::clone(&config),
+        &secrets,
+        paths,
+        action_tx.clone(),
+        held_flags.clone(),
+    ) {
+        Ok(o) => Some(Arc::new(o)),
+        Err(e) => {
+            warn!(
+                "STT backend unavailable; daemon running in DEGRADED mode \
                  (hotkeys are live but recording will be skipped): {e:#}"
-                );
-                None
-            }
-        };
+            );
+            None
+        }
+    };
 
     // ---------------------------------------------------------------
     // LAN Wyoming server (Slice 3 of the network plan). Off by default;
@@ -215,7 +227,12 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         parsed
     });
     let cancel_ctrl: Option<HotkeyControlSender> = if crate::is_graphical_session() {
-        match fono_hotkey::spawn_with_backend(forced_backend, bindings, action_tx.clone()) {
+        match fono_hotkey::spawn_with_backend(
+            forced_backend,
+            bindings,
+            action_tx.clone(),
+            held_flags.clone(),
+        ) {
             Ok(Some(handle)) => {
                 debug!("global hotkeys registered");
                 Some(handle.control)

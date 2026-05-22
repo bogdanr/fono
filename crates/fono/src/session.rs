@@ -49,6 +49,27 @@ pub const MIN_RECORDING: Duration = Duration::from_millis(300);
 #[cfg(feature = "interactive")]
 const WAVEFORM_AMPLITUDE_CEILING: f32 = 0.22;
 
+/// Which capture pipeline the silence-watch task is driving. Changes
+/// the overlay states it emits, which hold-flag it consults, and
+/// which (if any) [`HotkeyAction`] it fires on `Committed`.
+#[cfg(feature = "interactive")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SilenceWatchFlavor {
+    /// F7 / dictation: red `Recording` ↔ `Pondering` overlay states,
+    /// dictation hold-flag, `TogglePressed` on commit.
+    Dictation,
+    /// F8 / assistant: green `AssistantRecording` ↔
+    /// `AssistantPondering` overlay states, assistant hold-flag,
+    /// `AssistantPressed` on commit (only when triggered by toggle
+    /// — hold-to-talk gets the visual but not the commit).
+    Assistant {
+        /// `true` when the assistant session was started by a
+        /// toggle press; the auto-stop commit is gated on this so
+        /// hold-to-talk users own the release boundary themselves.
+        auto_stop_commit: bool,
+    },
+}
+
 /// Pre-computed `10^(-12 dB / 20) ≈ 0.2512`. Used by
 /// `spawn_silence_watch_task` to derive the silence-threshold tick
 /// (Advanced VU bar) from the envelope's `voiced_rms`. Mirrors
@@ -166,6 +187,11 @@ struct LiveCaptureSession {
     drain_join: tokio::task::JoinHandle<()>,
     /// JoinHandle for the [`crate::live::LiveSession::run`] task.
     run_join: tokio::task::JoinHandle<anyhow::Result<crate::live::LiveTranscript>>,
+    /// Silence-watch task driving Pondering overlay transitions (and,
+    /// for assistant toggle sessions, the auto-stop commit). `None`
+    /// when the overlay is disabled. See
+    /// `plans/2026-05-22-assistant-pondering-parity-v1.md`.
+    silence_task: Option<tokio::task::AbortHandle>,
     /// Overlay handle (clone of [`SessionOrchestrator::overlay`]) — kept
     /// so we can hide the window when the session ends. The handle is
     /// owned by the orchestrator and reused across sessions; this
@@ -354,6 +380,14 @@ pub struct SessionOrchestrator {
     action_tx: mpsc::UnboundedSender<HotkeyAction>,
     injector: Arc<dyn Injector>,
     focus: Arc<dyn FocusProbe>,
+    /// Per-role key-held flags shared with the hotkey listener. The
+    /// silence-watch task reads `dictation` / `assistant` to suppress
+    /// the `Pondering` overlay flip (and any auto-stop commit) while
+    /// the user is physically holding the dictation/assistant key down
+    /// — see `fono_hotkey::KeyHeldFlags`. Populated by [`Self::new`]
+    /// from the value passed by `daemon::run`; [`Self::with_parts`]
+    /// leaves it at `KeyHeldFlags::default()` for IPC / test callers.
+    held_flags: fono_hotkey::KeyHeldFlags,
 }
 
 impl SessionOrchestrator {
@@ -367,6 +401,7 @@ impl SessionOrchestrator {
         secrets: &Secrets,
         paths: &Paths,
         action_tx: mpsc::UnboundedSender<HotkeyAction>,
+        held_flags: fono_hotkey::KeyHeldFlags,
     ) -> Result<Self> {
         let stt =
             fono_stt::build_stt(&config.stt, &config.general, secrets, &paths.whisper_models_dir())
@@ -379,7 +414,7 @@ impl SessionOrchestrator {
                     None
                 }
             };
-        let tts = match fono_tts::build_tts(&config.tts, secrets) {
+        let tts = match fono_tts::build_tts(&config.tts, secrets, &config.general.languages) {
             Ok(opt) => opt,
             Err(e) => {
                 warn!("TTS backend unavailable; assistant replies will be silent: {e:#}");
@@ -407,6 +442,7 @@ impl SessionOrchestrator {
             Arc::new(RealFocusProbe),
         );
         orch.paths = Some(Arc::new(paths.clone()));
+        orch.held_flags = held_flags;
         // Populate the assistant-side slots. Both are optional —
         // F8 surfaces a notification when either is missing.
         if let Ok(mut g) = orch.tts.write() {
@@ -556,7 +592,7 @@ impl SessionOrchestrator {
                 None
             }
         };
-        let new_tts = match fono_tts::build_tts(&cfg.tts, &secrets) {
+        let new_tts = match fono_tts::build_tts(&cfg.tts, &secrets, &cfg.general.languages) {
             Ok(opt) => opt,
             Err(e) => {
                 let err_text = format!("{e:#}");
@@ -909,11 +945,29 @@ impl SessionOrchestrator {
     /// overlay handle (slice 4 will revisit this when the commit
     /// path lands).
     #[cfg(feature = "interactive")]
-    #[allow(clippy::too_many_lines)]
     fn spawn_silence_watch_task(
         &self,
         cfg: &Config,
         buffer: &Arc<StdMutex<RecordingBuffer>>,
+    ) -> Option<tokio::task::AbortHandle> {
+        self.spawn_silence_watch_task_for(cfg, buffer, SilenceWatchFlavor::Dictation)
+    }
+
+    /// Flavoured variant of [`Self::spawn_silence_watch_task`] —
+    /// drives the silence watch for either the dictation pipeline
+    /// (red `Recording`/`Pondering` overlay states, dictation
+    /// hold-flag, optional `TogglePressed` auto-stop) or the
+    /// assistant pipeline (green `AssistantRecording`/
+    /// `AssistantPondering` states, assistant hold-flag, optional
+    /// `AssistantPressed` auto-stop). See
+    /// `plans/2026-05-22-assistant-pondering-parity-v1.md`.
+    #[cfg(feature = "interactive")]
+    #[allow(clippy::too_many_lines)]
+    fn spawn_silence_watch_task_for(
+        &self,
+        cfg: &Config,
+        buffer: &Arc<StdMutex<RecordingBuffer>>,
+        flavor: SilenceWatchFlavor,
     ) -> Option<tokio::task::AbortHandle> {
         let overlay = self.overlay.read().ok().and_then(|g| g.clone())?;
         let buf = Arc::clone(buffer);
@@ -936,6 +990,39 @@ impl SessionOrchestrator {
         // the walk matches the real timer.
         let walk_total_ms = if auto_stop_ms > 0 { auto_stop_ms } else { 5_000 };
         let action_tx = self.action_tx.clone();
+        // Push-to-talk suppression: while the user is physically
+        // holding the relevant key down, the `Pondering` overlay
+        // flip and any auto-stop commit are skipped. The hotkey
+        // listener collapses hold-vs-toggle into `RecordingMode::Toggle`
+        // at action-emit time (every keyboard press enters Toggle and
+        // a long release synthesises a second `TogglePressed`), so the
+        // mode argument can't be trusted here — this flag is the only
+        // authoritative source of "is the key currently held?". See
+        // `fono_hotkey::KeyHeldFlags` and `plans/2026-05-22-assistant-pondering-parity-v1.md`.
+        let key_held = match flavor {
+            SilenceWatchFlavor::Dictation => Arc::clone(&self.held_flags.dictation),
+            SilenceWatchFlavor::Assistant { .. } => Arc::clone(&self.held_flags.assistant),
+        };
+        let recording_state = match flavor {
+            SilenceWatchFlavor::Dictation => fono_overlay::OverlayState::Recording { db: 0 },
+            SilenceWatchFlavor::Assistant { .. } => {
+                fono_overlay::OverlayState::AssistantRecording { db: 0 }
+            }
+        };
+        let make_pondering_state = move |walk_progress: u16| match flavor {
+            SilenceWatchFlavor::Dictation => {
+                fono_overlay::OverlayState::Pondering { db: 0, walk_progress }
+            }
+            SilenceWatchFlavor::Assistant { .. } => {
+                fono_overlay::OverlayState::AssistantPondering { db: 0, walk_progress }
+            }
+        };
+        let commit_action: Option<HotkeyAction> = match flavor {
+            SilenceWatchFlavor::Dictation => Some(HotkeyAction::TogglePressed),
+            SilenceWatchFlavor::Assistant { auto_stop_commit } => {
+                auto_stop_commit.then_some(HotkeyAction::AssistantPressed)
+            }
+        };
         let task = tokio::spawn(async move {
             let mut envelope = EnvelopeFollower::new(envelope_cfg);
             let mut watch = SilenceWatch::new(watch_cfg);
@@ -968,46 +1055,77 @@ impl SessionOrchestrator {
                     Err(_) => continue,
                 };
                 let mut consumed = 0;
+                // Push-to-talk gate: while the dictation key is
+                // physically held down, suppress the `Pondering`
+                // overlay flip and any auto-stop commit. We still
+                // advance the envelope follower so the live VU bar
+                // keeps animating; we just skip feeding
+                // `SilenceWatch`, which freezes its internal state
+                // at the moment of the press. On release the watch
+                // resumes from where it left off; the daemon will
+                // shortly route the long-release synthetic
+                // `TogglePressed` into `on_stop_recording`, which
+                // aborts this task before any post-release silence
+                // accumulation could matter.
+                let held = key_held.load(Ordering::Relaxed);
+                if held && in_pondering {
+                    // The user pressed the key while we were already
+                    // in Pondering (rare: a previous toggle session
+                    // sitting paused, the user grabs the key again
+                    // — but the FSM treats that as a toggle-off, so
+                    // by the time this branch fires the task is
+                    // usually already aborted). Snap the overlay
+                    // back to Recording so the held state never
+                    // shows the Pondering label.
+                    in_pondering = false;
+                    last_walk_progress = 0;
+                    overlay.set_state(recording_state);
+                }
                 while consumed + frame_samples <= new_samples.len() {
                     envelope.push_frame(&new_samples[consumed..consumed + frame_samples]);
-                    let snap = envelope.snapshot();
-                    let event = watch.push(snap, frame_ms);
-                    match event {
-                        SilenceEvent::EnteredPondering => {
-                            in_pondering = true;
-                            last_walk_progress = 0;
-                            overlay.set_state(fono_overlay::OverlayState::Pondering {
-                                db: 0,
-                                walk_progress: 0,
-                            });
+                    if !held {
+                        let snap = envelope.snapshot();
+                        let event = watch.push(snap, frame_ms);
+                        match event {
+                            SilenceEvent::EnteredPondering => {
+                                in_pondering = true;
+                                last_walk_progress = 0;
+                                overlay.set_state(make_pondering_state(0));
+                            }
+                            SilenceEvent::ResumedFromPondering => {
+                                in_pondering = false;
+                                last_walk_progress = 0;
+                                overlay.set_state(recording_state);
+                            }
+                            SilenceEvent::Committed => {
+                                // Auto-stop fires. Emit a synthetic toggle so
+                                // the stop is observationally identical to
+                                // the user pressing the hotkey: same FSM
+                                // transition, same on_stop_recording /
+                                // on_stop_live call, same overlay
+                                // transitions. For the assistant flavour,
+                                // `commit_action` may be `None` (hold-to-
+                                // talk path) in which case we keep the
+                                // visual Pondering label but defer to the
+                                // user to release the key.
+                                if let Some(action) = commit_action {
+                                    tracing::info!(
+                                        target: "fono::auto_stop",
+                                        "auto-stop committed after {} ms of silence (flavor={:?})",
+                                        watch_cfg.auto_stop_silence_ms.unwrap_or(0),
+                                        flavor,
+                                    );
+                                    let _ = action_tx.send(action);
+                                    return;
+                                }
+                            }
+                            _ => {}
                         }
-                        SilenceEvent::ResumedFromPondering => {
-                            in_pondering = false;
-                            last_walk_progress = 0;
-                            overlay.set_state(fono_overlay::OverlayState::Recording { db: 0 });
-                        }
-                        SilenceEvent::Committed => {
-                            // Auto-stop fires. Emit a synthetic toggle so
-                            // the stop is observationally identical to
-                            // the user pressing the dictation hotkey:
-                            // same FSM transition, same on_stop_recording
-                            // call, same overlay transitions. The daemon's
-                            // central loop translates TogglePressed to
-                            // LiveTogglePressed when live preview is on.
-                            tracing::info!(
-                                target: "fono::auto_stop",
-                                "auto-stop committed after {} ms of silence",
-                                watch_cfg.auto_stop_silence_ms.unwrap_or(0)
-                            );
-                            let _ = action_tx.send(HotkeyAction::TogglePressed);
-                            return;
-                        }
-                        _ => {}
                     }
                     consumed += frame_samples;
                 }
                 last_pos += consumed;
-                if in_pondering {
+                if in_pondering && !held {
                     let elapsed = watch.pondering_elapsed_ms();
                     // 1 s plain grace, then ramp walk_progress 1..=10_000
                     // over (walk_total_ms - pondering_visual_ms - 1000).
@@ -1026,10 +1144,7 @@ impl SessionOrchestrator {
                     // — plenty smooth, much cheaper than per-frame.
                     if new_progress.abs_diff(last_walk_progress) >= 100 || new_progress == 10_000 {
                         last_walk_progress = new_progress;
-                        overlay.set_state(fono_overlay::OverlayState::Pondering {
-                            db: 0,
-                            walk_progress: new_progress,
-                        });
+                        overlay.set_state(make_pondering_state(new_progress));
                     }
                 }
                 // Push gate metrics for the `Advanced` VU-bar at ~10 Hz.
@@ -1347,6 +1462,7 @@ impl SessionOrchestrator {
             action_tx,
             injector,
             focus,
+            held_flags: fono_hotkey::KeyHeldFlags::default(),
         }
     }
 
@@ -1545,6 +1661,9 @@ impl SessionOrchestrator {
                 // Same teardown order as on_stop_live_dictation, minus
                 // the transcript commit. The grace-sleep is skipped —
                 // ESC means "drop this", not "wait for trailing audio".
+                if let Some(h) = session.silence_task.take() {
+                    h.abort();
+                }
                 let _ = session.capture_stop_tx.send(());
                 if let Some(j) = session.capture_join.take() {
                     let _ = tokio::task::spawn_blocking(move || {
@@ -1613,6 +1732,7 @@ impl SessionOrchestrator {
                     let session = self.build_live_capture_pipeline(
                         streaming,
                         fono_overlay::OverlayState::AssistantRecording { db: 0 },
+                        Some(SilenceWatchFlavor::Assistant { auto_stop_commit: true }),
                     )?;
                     *slot = Some(session);
                     if self.current_config().general.auto_mute_system {
@@ -1673,6 +1793,22 @@ impl SessionOrchestrator {
             fono_overlay::OverlayState::AssistantRecording { db: 0 },
             &buffer,
         );
+        // Pondering parity with dictation: drive the silence-watch
+        // state machine so the assistant overlay flips
+        // `AssistantRecording → AssistantPondering` on long pauses.
+        // The hold-flag inside the watch task suppresses both the
+        // flip and the commit while F8 is physically held — see
+        // `plans/2026-05-22-assistant-pondering-parity-v1.md`.
+        // Auto-stop commits whenever the held flag is false (toggle
+        // / quick-tap sessions); hold-to-talk users own the release
+        // boundary themselves and the held flag keeps them out of
+        // the commit path.
+        #[cfg(feature = "interactive")]
+        let silence_task = self.spawn_silence_watch_task_for(
+            &cfg,
+            &buffer,
+            SilenceWatchFlavor::Assistant { auto_stop_commit: true },
+        );
         let session = CaptureSession {
             buffer,
             stop_tx,
@@ -1680,11 +1816,8 @@ impl SessionOrchestrator {
             started_at: Instant::now(),
             #[cfg(feature = "interactive")]
             level_task,
-            // Assistant push-to-talk owns its own boundary — no
-            // silence watchdog. (Slice 2 of the auto-stop plan
-            // limits the feature to toggle dictation.)
             #[cfg(feature = "interactive")]
-            silence_task: None,
+            silence_task,
         };
         *slot = Some(session);
         if cfg.general.auto_mute_system {
@@ -1727,6 +1860,9 @@ impl SessionOrchestrator {
                 let grace_ms = u64::from(cfg.interactive.hold_release_grace_ms);
                 if grace_ms > 0 {
                     tokio::time::sleep(Duration::from_millis(grace_ms)).await;
+                }
+                if let Some(h) = session.silence_task.take() {
+                    h.abort();
                 }
                 let _ = session.capture_stop_tx.send(());
                 if let Some(j) = session.capture_join.take() {
@@ -1933,6 +2069,9 @@ impl SessionOrchestrator {
         {
             let live_taken = self.assistant_live_capture.lock().await.take();
             if let Some(mut session) = live_taken {
+                if let Some(h) = session.silence_task.take() {
+                    h.abort();
+                }
                 let _ = session.capture_stop_tx.send(());
                 if let Some(j) = session.capture_join.take() {
                     let _ = tokio::task::spawn_blocking(move || {
@@ -2135,11 +2274,12 @@ impl SessionOrchestrator {
     /// thread, the pump drain task, and the [`crate::live::LiveSession`]
     /// run task. Returns a [`LiveCaptureSession`] the caller stores in
     /// the appropriate slot.
-    #[allow(clippy::significant_drop_tightening)]
+    #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
     fn build_live_capture_pipeline(
         &self,
         streaming: Arc<dyn StreamingStt>,
         active_state: fono_overlay::OverlayState,
+        silence_flavor: Option<SilenceWatchFlavor>,
     ) -> Result<LiveCaptureSession> {
         // Slice A: streaming pipeline operates at 16 kHz to keep the
         // pump's broadcast frame budget aligned with whisper. The
@@ -2240,6 +2380,16 @@ impl SessionOrchestrator {
         // Tap RMS off each chunk to feed the right-side VU bar on the
         // overlay panel during F7. The assistant path uses the same
         // tap so the same VU indicator works for both surfaces.
+        // Shadow PCM buffer fed by the drain task in lockstep with
+        // the pump. Used by `spawn_silence_watch_task_for` to read
+        // recent samples for the envelope follower. Only allocated
+        // when a silence flavour is requested — the live-dictation
+        // path passes `None` to keep memory flat.
+        let shadow_buffer: Option<Arc<StdMutex<RecordingBuffer>>> =
+            silence_flavor.map(|_| Arc::new(StdMutex::new(RecordingBuffer::default())));
+        let drain_shadow = shadow_buffer.clone();
+        let shadow_cap_samples =
+            (fono_audio::capture::HARD_CAP.as_secs() as usize) * (sample_rate as usize);
         let vu_overlay = if cfg.overlay.volume_bar.is_on() { overlay.clone() } else { None };
         let drain_join = tokio::spawn(async move {
             let mut pump = pump;
@@ -2247,11 +2397,24 @@ impl SessionOrchestrator {
                 if let Some(o) = vu_overlay.as_ref() {
                     o.push_level(normalised_rms(&chunk));
                 }
+                if let Some(sb) = drain_shadow.as_ref() {
+                    if let Ok(mut b) = sb.lock() {
+                        b.push_slice(&chunk, shadow_cap_samples);
+                    }
+                }
                 pump.push(&chunk);
             }
             pump.finish();
             drop(pump);
         });
+
+        // Drive the silence-watch task off the shadow buffer (Slice 1
+        // of `plans/2026-05-22-assistant-pondering-parity-v1.md` for
+        // the assistant streaming path; live dictation passes `None`).
+        let silence_task = match (silence_flavor, shadow_buffer.as_ref()) {
+            (Some(flavor), Some(sb)) => self.spawn_silence_watch_task_for(&cfg, sb, flavor),
+            _ => None,
+        };
 
         Ok(LiveCaptureSession {
             capture_stop_tx,
@@ -2259,6 +2422,7 @@ impl SessionOrchestrator {
             bridge_join: Some(bridge_join),
             drain_join,
             run_join,
+            silence_task,
             overlay,
             started_at: Instant::now(),
         })
@@ -2297,8 +2461,11 @@ impl SessionOrchestrator {
             return Ok(());
         }
 
-        let session =
-            self.build_live_capture_pipeline(streaming, fono_overlay::OverlayState::LiveDictating)?;
+        let session = self.build_live_capture_pipeline(
+            streaming,
+            fono_overlay::OverlayState::LiveDictating,
+            None,
+        )?;
 
         let cfg = self.current_config();
         if cfg.general.auto_mute_system {

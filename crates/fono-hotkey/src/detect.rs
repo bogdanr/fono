@@ -17,6 +17,7 @@ use tracing::info;
 
 use crate::fsm::HotkeyAction;
 use crate::listener::{HotkeyBindings, ListenerHandle};
+use crate::KeyHeldFlags;
 
 /// Forced backend override, parsed from `FONO_HOTKEY_BACKEND`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +82,7 @@ pub fn spawn(
     forced: Option<HotkeyBackend>,
     bindings: HotkeyBindings,
     tx: mpsc::UnboundedSender<HotkeyAction>,
+    held_flags: KeyHeldFlags,
 ) -> Result<Option<ListenerHandle>> {
     let backend = detect_backend(forced);
     info!("hotkey backend resolved: {backend:?} (forced: {forced:?})");
@@ -129,22 +131,22 @@ pub fn spawn(
                         }
                     }
                 }
-                match crate::portal::spawn(bindings.clone(), tx.clone()) {
+                match crate::portal::spawn(bindings.clone(), tx.clone(), held_flags.clone()) {
                     Ok(h) => Ok(Some(h)),
                     Err(e) => {
                         tracing::warn!("portal hotkey backend unavailable: {e:#}");
                         tracing::warn!("falling back to X11 listener (Xwayland-only events)");
-                        crate::listener::spawn(bindings, tx).map(Some)
+                        crate::listener::spawn(bindings, tx, held_flags).map(Some)
                     }
                 }
             }
             #[cfg(not(target_os = "linux"))]
             {
-                let _ = (bindings, tx);
+                let _ = (bindings, tx, held_flags);
                 anyhow::bail!("portal hotkey backend is Linux-only");
             }
         }
-        HotkeyBackend::X11 => crate::listener::spawn(bindings, tx).map(Some),
+        HotkeyBackend::X11 => crate::listener::spawn(bindings, tx, held_flags).map(Some),
         HotkeyBackend::Disabled => {
             info!("hotkey listener disabled (headless session)");
             Ok(None)

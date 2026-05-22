@@ -23,12 +23,14 @@ use anyhow::{Context, Result};
 use crossbeam_channel::{select, unbounded, Sender};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::fsm::HotkeyAction;
 use crate::parse::{parse_hotkey, ParsedHotkey};
+use crate::KeyHeldFlags;
 
 /// Press duration at which a press flips from "toggle" to "hold"
 /// semantics. A release before this elapses leaves recording running
@@ -75,10 +77,13 @@ pub struct ListenerHandle {
 }
 
 /// Spawn a background thread that registers the hotkeys and forwards
-/// [`HotkeyAction`]s into `tx`.
+/// [`HotkeyAction`]s into `tx`. `held_flags` is mutated from the
+/// listener thread on every press/release so audio-side consumers
+/// (the silence watchdog) can self-suppress while a key is held.
 pub fn spawn(
     bindings: HotkeyBindings,
     tx: mpsc::UnboundedSender<HotkeyAction>,
+    held_flags: KeyHeldFlags,
 ) -> Result<ListenerHandle> {
     // Install our X11 error handler before any XGrabKey call so we can
     // turn raw `BadAccess` stderr noise into actionable tracing output.
@@ -115,7 +120,9 @@ pub fn spawn(
     let thread = std::thread::Builder::new()
         .name("fono-hotkey".into())
         .spawn(move || {
-            if let Err(e) = run_manager(dictation, cancel, assistant, tx, &bindings, ctrl_rx) {
+            if let Err(e) =
+                run_manager(dictation, cancel, assistant, tx, &bindings, ctrl_rx, held_flags)
+            {
                 warn!("hotkey manager exited: {e:#}");
             }
         })
@@ -130,6 +137,7 @@ fn run_manager(
     tx: mpsc::UnboundedSender<HotkeyAction>,
     bindings: &HotkeyBindings,
     ctrl_rx: crossbeam_channel::Receiver<HotkeyControl>,
+    held_flags: KeyHeldFlags,
 ) -> Result<()> {
     let manager = GlobalHotKeyManager::new().context(
         "GlobalHotKeyManager::new() failed (Wayland compositors without the \
@@ -176,6 +184,7 @@ fn run_manager(
                     event.state,
                     &mut dictation_press_at,
                     &mut assistant_press_at,
+                    &held_flags,
                 );
                 for action in actions {
                     tracing::debug!("hotkey {role:?} {:?} -> {action:?}", event.state);
@@ -291,13 +300,16 @@ fn map_event(
     state: HotKeyState,
     dictation_press_at: &mut Option<Instant>,
     assistant_press_at: &mut Option<Instant>,
+    held_flags: &KeyHeldFlags,
 ) -> Vec<HotkeyAction> {
     match (role, state) {
         (Role::Dictation, HotKeyState::Pressed) => {
             *dictation_press_at = Some(Instant::now());
+            held_flags.dictation.store(true, Ordering::Relaxed);
             vec![HotkeyAction::TogglePressed]
         }
         (Role::Dictation, HotKeyState::Released) => {
+            held_flags.dictation.store(false, Ordering::Relaxed);
             if let Some(t0) = dictation_press_at.take() {
                 if t0.elapsed() >= LONG_PRESS_THRESHOLD {
                     return vec![HotkeyAction::TogglePressed];
@@ -307,9 +319,11 @@ fn map_event(
         }
         (Role::Assistant, HotKeyState::Pressed) => {
             *assistant_press_at = Some(Instant::now());
+            held_flags.assistant.store(true, Ordering::Relaxed);
             vec![HotkeyAction::AssistantPressed]
         }
         (Role::Assistant, HotKeyState::Released) => {
+            held_flags.assistant.store(false, Ordering::Relaxed);
             if let Some(t0) = assistant_press_at.take() {
                 if t0.elapsed() >= LONG_PRESS_THRESHOLD {
                     return vec![HotkeyAction::AssistantPressed];
@@ -320,8 +334,14 @@ fn map_event(
         (Role::Cancel, HotKeyState::Pressed) => {
             // Discard any in-flight press so the matching release does
             // not re-arm the FSM after we've cancelled the recording.
+            // Also clear the held flags — Cancel doesn't deliver a key-up
+            // event for the dictation/assistant key, and a stale
+            // "still held" flag would suppress pondering on the next
+            // recording session.
             *dictation_press_at = None;
             *assistant_press_at = None;
+            held_flags.dictation.store(false, Ordering::Relaxed);
+            held_flags.assistant.store(false, Ordering::Relaxed);
             vec![HotkeyAction::CancelPressed]
         }
         (Role::Cancel, HotKeyState::Released) => vec![],
@@ -342,42 +362,73 @@ mod tests {
     fn short_press_emits_toggle_only_on_press() {
         let mut d = None;
         let mut a = None;
-        let pressed = map_event(Role::Dictation, HotKeyState::Pressed, &mut d, &mut a);
+        let flags = KeyHeldFlags::new();
+        let pressed = map_event(Role::Dictation, HotKeyState::Pressed, &mut d, &mut a, &flags);
         assert_eq!(pressed, vec![HotkeyAction::TogglePressed]);
+        assert!(flags.dictation.load(Ordering::Relaxed));
         // Immediate release counts as short press; no synthetic stop.
-        let released = map_event(Role::Dictation, HotKeyState::Released, &mut d, &mut a);
+        let released = map_event(Role::Dictation, HotKeyState::Released, &mut d, &mut a, &flags);
         assert!(released.is_empty(), "short release must not emit");
         assert!(d.is_none());
+        assert!(!flags.dictation.load(Ordering::Relaxed));
     }
 
     #[test]
     fn long_press_synthesises_stop_on_release() {
         let mut d = Some(long_ago());
         let mut a = None;
-        let released = map_event(Role::Dictation, HotKeyState::Released, &mut d, &mut a);
+        let flags = KeyHeldFlags::new();
+        flags.dictation.store(true, Ordering::Relaxed);
+        let released = map_event(Role::Dictation, HotKeyState::Released, &mut d, &mut a, &flags);
         assert_eq!(released, vec![HotkeyAction::TogglePressed]);
         assert!(d.is_none());
+        assert!(!flags.dictation.load(Ordering::Relaxed));
     }
 
     #[test]
     fn assistant_long_press_synthesises_stop() {
         let mut d = None;
         let mut a = Some(long_ago());
-        let released = map_event(Role::Assistant, HotKeyState::Released, &mut d, &mut a);
+        let flags = KeyHeldFlags::new();
+        flags.assistant.store(true, Ordering::Relaxed);
+        let released = map_event(Role::Assistant, HotKeyState::Released, &mut d, &mut a, &flags);
         assert_eq!(released, vec![HotkeyAction::AssistantPressed]);
         assert!(a.is_none());
+        assert!(!flags.assistant.load(Ordering::Relaxed));
     }
 
     #[test]
     fn cancel_clears_pending_presses() {
         let mut d = Some(long_ago());
         let mut a = Some(long_ago());
-        let actions = map_event(Role::Cancel, HotKeyState::Pressed, &mut d, &mut a);
+        let flags = KeyHeldFlags::new();
+        flags.dictation.store(true, Ordering::Relaxed);
+        flags.assistant.store(true, Ordering::Relaxed);
+        let actions = map_event(Role::Cancel, HotKeyState::Pressed, &mut d, &mut a, &flags);
         assert_eq!(actions, vec![HotkeyAction::CancelPressed]);
         assert!(d.is_none() && a.is_none());
+        // Held flags must reset so the next recording session isn't
+        // started with a stale "key still held" state.
+        assert!(!flags.dictation.load(Ordering::Relaxed));
+        assert!(!flags.assistant.load(Ordering::Relaxed));
         // A subsequent late release after cancel must NOT synthesise
         // a stop (which would re-arm the FSM in toggle semantics).
-        let released = map_event(Role::Dictation, HotKeyState::Released, &mut d, &mut a);
+        let released = map_event(Role::Dictation, HotKeyState::Released, &mut d, &mut a, &flags);
         assert!(released.is_empty());
+    }
+
+    /// Pondering suppression hinges on `held` reading `true` for the
+    /// entire span between Pressed and Released. Verify the two
+    /// transitions track the underlying physical state.
+    #[test]
+    fn held_flag_tracks_press_and_release_for_dictation() {
+        let mut d = None;
+        let mut a = None;
+        let flags = KeyHeldFlags::new();
+        assert!(!flags.dictation.load(Ordering::Relaxed));
+        map_event(Role::Dictation, HotKeyState::Pressed, &mut d, &mut a, &flags);
+        assert!(flags.dictation.load(Ordering::Relaxed));
+        map_event(Role::Dictation, HotKeyState::Released, &mut d, &mut a, &flags);
+        assert!(!flags.dictation.load(Ordering::Relaxed));
     }
 }

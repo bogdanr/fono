@@ -49,6 +49,16 @@ pub enum OverlayState {
     AssistantRecording {
         db: i8,
     },
+    /// Voice-assistant recording paused: mirrors [`Self::Pondering`]
+    /// for the assistant pipeline (F8 toggle). Renderer keeps the
+    /// green assistant palette + waveform shape but swaps the label
+    /// to "PONDERING" with the same walking-letter highlight driven
+    /// by `walk_progress` (0..=10_000). See
+    /// `plans/2026-05-22-assistant-pondering-parity-v1.md`.
+    AssistantPondering {
+        db: i8,
+        walk_progress: u16,
+    },
     /// Voice-assistant post-release: STT + LLM streaming + first
     /// TTS synthesis. The orchestrator pushes synthetic
     /// time-evolving frames at 20 fps; each waveform style gets a

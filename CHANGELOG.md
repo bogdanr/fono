@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Pondering parity for the F8 assistant flow.** A long pause during
+  an assistant turn now shows the same "PONDERING" walking-letter
+  highlight (in the green assistant palette) and triggers the same
+  auto-stop commit as F7 dictation. Hold-to-talk users keep their
+  current behaviour: a new `KeyHeldFlags` pair in `fono-hotkey`
+  tracks the live press state of each role and the silence watch
+  suppresses both the visual flip and the commit while the key is
+  physically held. The fix also covers a latent F7 bug where holding
+  the dictation key while pausing would still flip the overlay to
+  PONDERING (and, with auto-stop on, end the session early) — the
+  hotkey listener emits `TogglePressed` immediately on every press
+  and the hold-vs-toggle distinction is decided retroactively at
+  release time, so `RecordingMode::Hold` was effectively dead code
+  on the keyboard path. Plan file:
+  `plans/2026-05-22-assistant-pondering-parity-v1.md`.
+
 ### Removed
 
 - **Config simplification: 14 inert keys dropped.** The following

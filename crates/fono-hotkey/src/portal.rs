@@ -31,6 +31,7 @@
 //! millisecond timestamps from the compositor, so the same logic
 //! applies verbatim — see [`map_event`].
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -44,6 +45,7 @@ use tracing::{debug, info, warn};
 
 use crate::fsm::HotkeyAction;
 use crate::listener::{HotkeyBindings, HotkeyControl, ListenerHandle, LONG_PRESS_THRESHOLD};
+use crate::KeyHeldFlags;
 
 const SHORTCUT_DICTATION: &str = "dictation";
 const SHORTCUT_ASSISTANT: &str = "assistant";
@@ -54,6 +56,7 @@ const SHORTCUT_ASSISTANT: &str = "assistant";
 pub fn spawn(
     bindings: HotkeyBindings,
     tx: mpsc::UnboundedSender<HotkeyAction>,
+    held_flags: KeyHeldFlags,
 ) -> Result<ListenerHandle> {
     let (ctrl_tx, ctrl_rx) = unbounded::<HotkeyControl>();
 
@@ -110,7 +113,8 @@ pub fn spawn(
                 };
                 let _ = preflight_tx.send(Ok(()));
                 if let Err(e) =
-                    run_portal_with_proxy(proxy, session, bindings_run, tx_run, ctrl_rx).await
+                    run_portal_with_proxy(proxy, session, bindings_run, tx_run, ctrl_rx, held_flags)
+                        .await
                 {
                     warn!("portal listener exited: {e:#}");
                 }
@@ -133,8 +137,9 @@ async fn run_portal_with_proxy(
     bindings: HotkeyBindings,
     tx: mpsc::UnboundedSender<HotkeyAction>,
     ctrl_rx: crossbeam_channel::Receiver<HotkeyControl>,
+    held_flags: KeyHeldFlags,
 ) -> Result<()> {
-    run_portal_inner(proxy, session, bindings, tx, ctrl_rx).await
+    run_portal_inner(proxy, session, bindings, tx, ctrl_rx, held_flags).await
 }
 
 #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
@@ -144,6 +149,7 @@ async fn run_portal_inner(
     bindings: HotkeyBindings,
     tx: mpsc::UnboundedSender<HotkeyAction>,
     ctrl_rx: crossbeam_channel::Receiver<HotkeyControl>,
+    held_flags: KeyHeldFlags,
 ) -> Result<()> {
     debug!("portal session created");
 
@@ -258,7 +264,13 @@ async fn run_portal_inner(
                     debug!("portal: activated stream closed; listener shutting down");
                     break;
                 };
-                if !forward_activated(&ev, &mut dictation_press_at, &mut assistant_press_at, &tx) {
+                if !forward_activated(
+                    &ev,
+                    &mut dictation_press_at,
+                    &mut assistant_press_at,
+                    &held_flags,
+                    &tx,
+                ) {
                     break;
                 }
             }
@@ -267,7 +279,13 @@ async fn run_portal_inner(
                     debug!("portal: deactivated stream closed; listener shutting down");
                     break;
                 };
-                if !forward_deactivated(&ev, &mut dictation_press_at, &mut assistant_press_at, &tx) {
+                if !forward_deactivated(
+                    &ev,
+                    &mut dictation_press_at,
+                    &mut assistant_press_at,
+                    &held_flags,
+                    &tx,
+                ) {
                     break;
                 }
             }
@@ -303,15 +321,18 @@ fn forward_activated(
     ev: &Activated,
     dictation_press_at: &mut Option<Instant>,
     assistant_press_at: &mut Option<Instant>,
+    held_flags: &KeyHeldFlags,
     tx: &mpsc::UnboundedSender<HotkeyAction>,
 ) -> bool {
     let action = match ev.shortcut_id() {
         SHORTCUT_DICTATION => {
             *dictation_press_at = Some(Instant::now());
+            held_flags.dictation.store(true, Ordering::Relaxed);
             HotkeyAction::TogglePressed
         }
         SHORTCUT_ASSISTANT => {
             *assistant_press_at = Some(Instant::now());
+            held_flags.assistant.store(true, Ordering::Relaxed);
             HotkeyAction::AssistantPressed
         }
         other => {
@@ -330,16 +351,22 @@ fn forward_deactivated(
     ev: &Deactivated,
     dictation_press_at: &mut Option<Instant>,
     assistant_press_at: &mut Option<Instant>,
+    held_flags: &KeyHeldFlags,
     tx: &mpsc::UnboundedSender<HotkeyAction>,
 ) -> bool {
-    let (slot, action) = match ev.shortcut_id() {
-        SHORTCUT_DICTATION => (dictation_press_at, HotkeyAction::TogglePressed),
-        SHORTCUT_ASSISTANT => (assistant_press_at, HotkeyAction::AssistantPressed),
+    let (slot, flag, action) = match ev.shortcut_id() {
+        SHORTCUT_DICTATION => {
+            (dictation_press_at, &held_flags.dictation, HotkeyAction::TogglePressed)
+        }
+        SHORTCUT_ASSISTANT => {
+            (assistant_press_at, &held_flags.assistant, HotkeyAction::AssistantPressed)
+        }
         other => {
             warn!("portal: unknown shortcut id {other:?} deactivated; ignoring");
             return true;
         }
     };
+    flag.store(false, Ordering::Relaxed);
     let Some(t0) = slot.take() else {
         return true;
     };
