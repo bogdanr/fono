@@ -7,7 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Config simplification: 14 inert keys dropped.** The following
+  fields were never consumed at runtime and have been removed from the
+  schema: `general.always_warm_mic` (latency-plan L1 was never wired
+  in `fono-audio`), and all of `interactive.commit_use_prosody`,
+  `commit_prosody_extend_ms`, `commit_use_punctuation_hint`,
+  `commit_punct_extend_ms`, `commit_hold_on_filler`,
+  `commit_filler_words`, `commit_dangling_words`,
+  `eou_drain_extended_ms`, `eou_adaptive`, `resume_grace_ms`,
+  `budget_ceiling_per_minute_umicros`, `max_session_seconds`,
+  `max_session_cost_usd`. The boundary-heuristic defaults now live
+  exclusively in `crates/fono/src/live.rs` (`HeuristicConfig::default`)
+  with identical values, so runtime behaviour is unchanged. The
+  `Keep microphone always-on` tray-preferences checkbox is gone
+  alongside the field. The orphan `fono::live::budget_for` helper
+  was deleted with the budget knob.
+
 ### Added
+
+- **`fono install --server` now auto-enables the Wyoming STT listener.**
+  Server-mode install previously left `[server.wyoming].enabled =
+  false` (the in-code default), so the daemon came up healthy but
+  port 10300 had nothing on it and LAN peers could not discover it.
+  The installer now seeds `/etc/fono/config.toml` (only when no
+  config exists) with `[server.wyoming] enabled = true, bind =
+  "0.0.0.0", port = 10300`, chowns it `root:fono 0640`, and
+  post-start probes `127.0.0.1:10300` via TCP to confirm the
+  listener actually bound. Existing operator configs are preserved
+  byte-for-byte. The install summary prints the bound address, a
+  security caveat ("Wyoming v1 has no in-band auth; bind = 0.0.0.0
+  exposes inference to the LAN"), and a hint to install a Whisper
+  model if `/var/lib/fono/models/` is empty. The dry-run preview
+  lists the new step. **`fono uninstall` in server mode now also
+  wipes `/var/cache/fono`** (reproducible model / hwcheck cache,
+  re-downloaded on next use), matching the desktop branch's
+  `~/.cache/fono` cleanup so multi-GB blobs don't linger after an
+  explicit uninstall.
+
+- **`fono install` auto-detects headless hosts.** Running `sudo fono
+  install` on a server (no graphical session, no display-manager unit,
+  no X11 / Wayland socket on disk, and either `systemctl get-default
+  = multi-user.target` or systemd absent entirely) now picks server
+  mode automatically and prints a one-line banner naming the trigger.
+  Workstations keep today's silent desktop default. A new `--desktop`
+  flag (mutually exclusive with `--server`) forces the desktop lane
+  on hosts that look headless; `--server` still forces the systemd
+  lane unconditionally. The `packaging/install.sh` curl-pipe wrapper
+  now passes `--desktop` explicitly when its own DISPLAY heuristic
+  fires, so the two layers never disagree.
 
 - **Auto-stop on silence is wired up.** When `[audio]
   auto_stop_silence_ms > 0` and dictation is in toggle mode, the
@@ -153,6 +202,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `plans/2026-05-22-fono-auto-stop-silence-v1.md`.
 
 ### Fixed
+
+- **mDNS-discovered Wyoming peers no longer pick IPv6 link-local
+  addresses.** The discovery browser previously took
+  `info.get_addresses().iter().next()` (a `HashSet<IpAddr>`,
+  non-deterministic order), so a server advertising both `192.168.0.74`
+  and `fe80::…` could surface the link-local address in the tray menu.
+  The Wyoming client then formatted it as `fe80::…:10300` without
+  brackets and `TcpStream::connect` returned `EINVAL (os error 22)`,
+  blocking dictation against any LAN peer that exposes a link-local
+  v6 alongside its routable v4. The discovery browser now prefers
+  IPv4 → non-link-local IPv6 → link-local IPv6 (last resort), and
+  the Wyoming client bracket-wraps IPv6 literals in `host:port`
+  strings before passing them to `to_socket_addrs`.
 
 - **Audio playback via `pw-play` now passes `--raw`.** Without it,
   `pw-play` (a symlink to `pw-cat`) tries to parse stdin through

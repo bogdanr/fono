@@ -25,7 +25,7 @@ use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use crate::install::assets::{DESKTOP, ICON_SVG, SYSTEMD_SYSTEM_UNIT};
+use crate::install::assets::{DESKTOP, ICON_SVG, SERVER_CONFIG_SEED, SYSTEMD_SYSTEM_UNIT};
 
 mod assets {
     //! Embedded packaging assets. Single source of truth at
@@ -36,6 +36,11 @@ mod assets {
     pub const DESKTOP: &str = include_str!("../../../packaging/assets/fono.desktop");
     pub const ICON_SVG: &[u8] = include_bytes!("../../../packaging/assets/fono.svg");
     pub const SYSTEMD_SYSTEM_UNIT: &str = include_str!("../../../packaging/assets/fono.service");
+    /// Minimal `/etc/fono/config.toml` seeded by `fono install --server`
+    /// when no config exists yet. Enables the Wyoming STT listener on
+    /// `0.0.0.0:10300` so the daemon is LAN-reachable out of the box.
+    pub const SERVER_CONFIG_SEED: &str =
+        include_str!("../../../packaging/assets/server-config.toml");
 }
 
 // ---------------------------------------------------------------------
@@ -47,6 +52,9 @@ const DESKTOP_MENU: &str = "/usr/share/applications/fono.desktop";
 const DESKTOP_AUTOSTART: &str = "/etc/xdg/autostart/fono.desktop";
 const ICON_PATH: &str = "/usr/share/icons/hicolor/scalable/apps/fono.svg";
 const SYSTEMD_UNIT: &str = "/lib/systemd/system/fono.service";
+const SYSTEM_CONFIG_DIR: &str = "/etc/fono";
+const SYSTEM_CONFIG_FILE: &str = "/etc/fono/config.toml";
+const SYSTEM_CACHE_DIR: &str = "/var/cache/fono";
 const COMPLETION_BASH: &str = "/usr/share/bash-completion/completions/fono";
 const COMPLETION_ZSH: &str = "/usr/share/zsh/site-functions/_fono";
 const COMPLETION_FISH: &str = "/usr/share/fish/vendor_completions.d/fono.fish";
@@ -163,6 +171,83 @@ fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
         .with_context(|| format!("chmod {:o} {}", mode, tmp.path().display()))?;
     tmp.persist(path).map_err(|e| anyhow!("persist into {}: {}", path.display(), e.error))?;
     Ok(())
+}
+
+/// Like [`write_atomic`] but additionally `chown`s the persisted file
+/// to `(uid, gid)`. Used by the server-mode installer to seed
+/// `/etc/fono/config.toml` as `root:fono 0640` so the daemon (running
+/// as `fono`) can read it but it isn't world-readable.
+///
+/// `chown` happens on the temp file *before* the rename so the final
+/// inode is never momentarily root:root world-readable.
+#[cfg(unix)]
+fn write_atomic_owned(path: &Path, bytes: &[u8], mode: u32, uid: u32, gid: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("mkdir -p {}", parent.display()))?;
+    }
+    let dir = path.parent().ok_or_else(|| anyhow!("path {} has no parent dir", path.display()))?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".fono-install-")
+        .tempfile_in(dir)
+        .with_context(|| format!("create temp file in {}", dir.display()))?;
+    tmp.as_file_mut()
+        .write_all(bytes)
+        .with_context(|| format!("write temp file for {}", path.display()))?;
+    tmp.as_file_mut().flush().ok();
+    tmp.as_file_mut().sync_all().ok();
+    std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(mode))
+        .with_context(|| format!("chmod {:o} {}", mode, tmp.path().display()))?;
+    chown_path(tmp.path(), uid, gid)
+        .with_context(|| format!("chown {uid}:{gid} {}", tmp.path().display()))?;
+    tmp.persist(path).map_err(|e| anyhow!("persist into {}: {}", path.display(), e.error))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<()> {
+    use std::ffi::CString;
+    let c = CString::new(path.as_os_str().as_encoded_bytes())
+        .with_context(|| format!("path contains NUL: {}", path.display()))?;
+    // SAFETY: chown is async-signal-safe; we pass a valid C string and
+    // numeric ids. Negative return means errno is set.
+    let rc = unsafe { libc_chown(c.as_ptr(), uid, gid) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(anyhow!("chown failed: {err}"));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "chown"]
+    fn libc_chown(path: *const std::os::raw::c_char, uid: u32, gid: u32) -> i32;
+}
+
+/// Look up `(uid, gid)` for a system user via `getent passwd`. Used
+/// by the server-mode seed flow to chown `/etc/fono/config.toml`
+/// without hard-coding numeric ids (system UIDs vary per distro).
+#[cfg(unix)]
+fn resolve_system_user_ids(name: &str) -> Result<(u32, u32)> {
+    let out = Command::new("getent")
+        .args(["passwd", name])
+        .output()
+        .with_context(|| format!("spawn getent passwd {name}"))?;
+    if !out.status.success() {
+        bail!("getent passwd {name} failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    let line = String::from_utf8_lossy(&out.stdout);
+    // passwd format: name:x:uid:gid:gecos:home:shell
+    let fields: Vec<&str> = line.trim_end().split(':').collect();
+    if fields.len() < 4 {
+        bail!("malformed getent passwd output for {name}: {line:?}");
+    }
+    let uid: u32 = fields[2].parse().with_context(|| format!("parse uid for {name}"))?;
+    let gid: u32 = fields[3].parse().with_context(|| format!("parse gid for {name}"))?;
+    Ok((uid, gid))
 }
 
 #[cfg(not(unix))]
@@ -309,12 +394,202 @@ fn detect_installed_mode() -> Option<Mode> {
 }
 
 // ---------------------------------------------------------------------
+// Headless detection (--server auto-default)
+// ---------------------------------------------------------------------
+
+/// CLI-level mode selector: `Server` and `Desktop` are explicit
+/// overrides (from `--server` / `--desktop`); `Auto` triggers
+/// `detect_headless()` so `sudo fono install` on a server picks the
+/// systemd-unit lane without the operator having to remember the flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallModeArg {
+    Server,
+    Desktop,
+    Auto,
+}
+
+/// Best-effort verdict: is this host running with no graphical session?
+///
+/// Returns `(true, reason)` only when we're confident the host is
+/// headless (no inherited DISPLAY/WAYLAND_DISPLAY, no active loginctl
+/// session of type x11/wayland, no display manager active, no
+/// X11/Wayland sockets on disk, and either `systemctl get-default =
+/// multi-user.target` or systemd is absent entirely). Every other case
+/// returns `(false, _)` so the caller falls through to today's silent
+/// desktop default. Conservative on purpose: a false negative is
+/// recoverable with `--server`; a false positive would surprise a
+/// workstation user with an unwanted systemd unit.
+pub(crate) fn detect_headless() -> (bool, &'static str) {
+    detect_headless_with(&RealProbes)
+}
+
+trait HeadlessProbes {
+    fn env(&self, key: &str) -> Option<String>;
+    /// Run a command, return `Some((status_success, stdout_utf8))` on
+    /// successful spawn; `None` on spawn failure.
+    fn run(&self, prog: &str, args: &[&str]) -> Option<(bool, String)>;
+    /// True iff any direct child of `dir` whose name starts with
+    /// `prefix` exists. Used for `/tmp/.X11-unix/X*` and
+    /// `/run/user/*/wayland-*`.
+    fn dir_has_entry(&self, dir: &Path, prefix: &str) -> bool;
+    /// True iff any subdir of `/run/user` contains a child whose name
+    /// starts with `wayland-`. Spots active Wayland sessions
+    /// independently of loginctl.
+    fn any_user_runtime_wayland_socket(&self) -> bool;
+}
+
+struct RealProbes;
+
+impl HeadlessProbes for RealProbes {
+    fn env(&self, key: &str) -> Option<String> {
+        std::env::var_os(key).map(|v| v.to_string_lossy().into_owned())
+    }
+    fn run(&self, prog: &str, args: &[&str]) -> Option<(bool, String)> {
+        let out = Command::new(prog)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        Some((out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned()))
+    }
+    fn dir_has_entry(&self, dir: &Path, prefix: &str) -> bool {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for ent in rd.flatten() {
+            if ent.file_name().to_string_lossy().starts_with(prefix) {
+                return true;
+            }
+        }
+        false
+    }
+    fn any_user_runtime_wayland_socket(&self) -> bool {
+        let Ok(rd) = std::fs::read_dir("/run/user") else {
+            return false;
+        };
+        for ent in rd.flatten() {
+            if self.dir_has_entry(&ent.path(), "wayland-") {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+fn detect_headless_with(p: &dyn HeadlessProbes) -> (bool, &'static str) {
+    // 1. Caller's inherited graphical env (e.g. `sudo -E` preserved
+    //    DISPLAY). Strongest desktop signal when present.
+    if p.env("DISPLAY").is_some() || p.env("WAYLAND_DISPLAY").is_some() {
+        return (false, "DISPLAY or WAYLAND_DISPLAY inherited from caller");
+    }
+
+    // 2. loginctl: any active graphical user session means desktop.
+    //    `list-sessions` output formatting varies across systemd
+    //    versions, so we only use it to enumerate session IDs and
+    //    re-query each one for its Type/State/Class via show-session.
+    if let Some((true, out)) = p.run("loginctl", &["list-sessions", "--no-legend", "--no-pager"]) {
+        for line in out.lines() {
+            let Some(id) = line.split_whitespace().next() else {
+                continue;
+            };
+            let Some((true, info)) = p.run(
+                "loginctl",
+                &["show-session", id, "--property=Type", "--property=State", "--property=Class"],
+            ) else {
+                continue;
+            };
+            let (mut ty, mut state, mut class) = ("", "", "");
+            for kv in info.lines() {
+                if let Some(v) = kv.strip_prefix("Type=") {
+                    ty = v;
+                } else if let Some(v) = kv.strip_prefix("State=") {
+                    state = v;
+                } else if let Some(v) = kv.strip_prefix("Class=") {
+                    class = v;
+                }
+            }
+            if (ty == "x11" || ty == "wayland")
+                && (state == "active" || state == "online")
+                && class == "user"
+            {
+                return (false, "active graphical loginctl session");
+            }
+        }
+    }
+
+    // 3. Display manager unit active.
+    for dm in [
+        "gdm.service",
+        "sddm.service",
+        "lightdm.service",
+        "lxdm.service",
+        "xdm.service",
+        "greetd.service",
+        "ly.service",
+    ] {
+        if let Some((_, out)) = p.run("systemctl", &["is-active", dm]) {
+            if out.trim() == "active" {
+                return (false, "display manager service active");
+            }
+        }
+    }
+
+    // 4. Filesystem session sockets — independent of systemd; catches
+    //    OpenRC / runit / non-systemd Linux distros running X or
+    //    Wayland.
+    if p.dir_has_entry(Path::new("/tmp/.X11-unix"), "X") {
+        return (false, "X11 socket present under /tmp/.X11-unix");
+    }
+    if p.any_user_runtime_wayland_socket() {
+        return (false, "Wayland socket present under /run/user");
+    }
+
+    // 5. Once we've eliminated every positive desktop signal above
+    //    (no DISPLAY, no graphical loginctl session, no DM active, no
+    //    X11/Wayland socket on disk), the box has no graphical session
+    //    *right now* — installing in server mode is the correct
+    //    choice regardless of what `systemctl get-default` says. Many
+    //    server installs inherit `graphical.target` as the default
+    //    from a desktop-flavoured base image but are run headless;
+    //    treating that as a desktop signal would mis-classify them.
+    //    The default-target probe is now informational only: a
+    //    `multi-user.target` value names the trigger more precisely
+    //    in the banner; anything else (including spawn failure /
+    //    systemd absent) falls back to a generic reason.
+    let reason = match p.run("systemctl", &["get-default"]) {
+        Some((true, out)) if out.trim() == "multi-user.target" => {
+            "systemctl get-default = multi-user.target"
+        }
+        Some((true, _)) => "no graphical session detected",
+        _ => "no systemd and no graphical session detected",
+    };
+    (true, reason)
+}
+
+// ---------------------------------------------------------------------
 // Public entry points
 // ---------------------------------------------------------------------
 
-pub fn run_install(server: bool, dry_run: bool) -> Result<()> {
+pub fn run_install(mode: InstallModeArg, dry_run: bool) -> Result<()> {
+    let want = match mode {
+        InstallModeArg::Server => Mode::Server,
+        InstallModeArg::Desktop => Mode::Desktop,
+        InstallModeArg::Auto => {
+            let (headless, reason) = detect_headless();
+            if headless {
+                eprintln!(
+                    "→ auto-detected headless host ({reason}); installing in server mode (pass --desktop to override)"
+                );
+                Mode::Server
+            } else {
+                Mode::Desktop
+            }
+        }
+    };
+
     if dry_run {
-        let plan = build_install_plan(server);
+        let plan = build_install_plan(want == Mode::Server);
         plan.print(&format!(
             "fono install --dry-run ({} mode) — would perform:",
             plan.mode.as_ref().map(Mode::as_str).unwrap_or("?")
@@ -331,7 +606,6 @@ pub fn run_install(server: bool, dry_run: bool) -> Result<()> {
     // unit, a desktop install drops a menu/autostart/icon — the binary
     // alone is ambiguous so we only refuse when the *other* mode's
     // unique artefacts are present.
-    let want = if server { Mode::Server } else { Mode::Desktop };
     match (&want, detect_installed_mode()) {
         (Mode::Server, Some(Mode::Desktop)) => bail!(
             "desktop install detected (e.g. {DESKTOP_MENU}); run `sudo fono uninstall` first if you want to switch to server mode"
@@ -342,7 +616,7 @@ pub fn run_install(server: bool, dry_run: bool) -> Result<()> {
         _ => {}
     }
 
-    if server {
+    if want == Mode::Server {
         run_install_server()
     } else {
         run_install_desktop()
@@ -377,9 +651,12 @@ pub fn run_uninstall(dry_run: bool) -> Result<()> {
                 }
             }
         }
+        if state.mode == Mode::Server && Path::new(SYSTEM_CACHE_DIR).exists() {
+            plan.step(format!("remove {SYSTEM_CACHE_DIR} (reproducible model / hwcheck cache)"));
+        }
         if state.system_user_removable {
             plan.step(format!(
-                "userdel {SERVICE_USER} (only if no /etc/fono, /var/lib/fono, /var/cache/fono left)"
+                "userdel {SERVICE_USER} (only if no /etc/fono or /var/lib/fono left)"
             ));
         }
         plan.print(&format!(
@@ -485,6 +762,9 @@ fn build_install_plan(server: bool) -> Plan {
         plan.step(format!("ensure system user `{SERVICE_USER}` exists (useradd --system)"));
         plan.step(format!("install running binary -> {BIN_PATH} (mode 0755)"));
         plan.step(format!("write system unit -> {SYSTEMD_UNIT}"));
+        plan.step(format!(
+            "seed {SYSTEM_CONFIG_FILE} with Wyoming listener on 0.0.0.0:10300 (only if absent)"
+        ));
         plan.step("systemctl daemon-reload");
         plan.step("systemctl enable --now fono.service");
     } else {
@@ -1293,6 +1573,11 @@ fn run_install_server() -> Result<()> {
     write_atomic(Path::new(SYSTEMD_UNIT), SYSTEMD_SYSTEM_UNIT.as_bytes(), 0o644)?;
     eprintln!("  · {SYSTEMD_UNIT}");
 
+    // Server config — seed /etc/fono/config.toml when absent so the
+    // daemon comes up with the Wyoming listener already enabled on
+    // 0.0.0.0:10300. Existing operator configs are left alone.
+    let seeded = seed_server_config()?;
+
     // Completions
     write_completions(BIN_PATH);
 
@@ -1316,6 +1601,15 @@ fn run_install_server() -> Result<()> {
 
     if enabled_service {
         verify_service_running("fono.service");
+        if seeded {
+            // The seeded config binds Wyoming on 0.0.0.0:10300; probe
+            // 127.0.0.1:10300 (always reachable from the installer's
+            // own host regardless of the bind value) to confirm the
+            // listener actually came up. The verify_service_running
+            // call above already slept 2 s, so the daemon has had
+            // time to spawn the server task by the time we get here.
+            verify_wyoming_listener("127.0.0.1:10300");
+        }
     }
 
     println!();
@@ -1329,10 +1623,87 @@ fn run_install_server() -> Result<()> {
         println!("  sudo systemctl enable --now fono.service");
     }
     println!();
+    if seeded {
+        println!("Wyoming STT server: listening on 0.0.0.0:10300");
+        println!();
+        println!("To restrict edit {SYSTEM_CONFIG_FILE}");
+    } else {
+        println!("Existing {SYSTEM_CONFIG_FILE} left in place. If you want the");
+        println!("Wyoming server to listen on the LAN, set");
+        println!("`[server.wyoming].enabled = true` and `bind = \"0.0.0.0\"` there,");
+        println!("then `sudo systemctl restart fono.service`.");
+    }
+    println!();
     println!("Service config lives under /etc/fono/, state under /var/lib/fono/,");
     println!("cache under /var/cache/fono/. See docs/providers.md for Wyoming");
     println!("server configuration.");
     Ok(())
+}
+
+/// Seed `/etc/fono/config.toml` with the embedded
+/// [`SERVER_CONFIG_SEED`] when no config exists yet, and ensure the
+/// containing directory has the right ownership / mode for the daemon
+/// (`root:fono 0750`).
+///
+/// Returns `Ok(true)` when the seed was written, `Ok(false)` when an
+/// existing config was preserved. Never overwrites operator state.
+fn seed_server_config() -> Result<bool> {
+    let (uid, gid) = resolve_system_user_ids(SERVICE_USER)
+        .with_context(|| format!("look up uid/gid for `{SERVICE_USER}`"))?;
+
+    // Ensure /etc/fono exists with root:fono 0750. systemd's
+    // ConfigurationDirectory= would normally do this on service
+    // start, but we haven't started the unit yet at this point.
+    let dir = Path::new(SYSTEM_CONFIG_DIR);
+    std::fs::create_dir_all(dir).with_context(|| format!("mkdir -p {}", dir.display()))?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o750))
+            .with_context(|| format!("chmod 0750 {}", dir.display()))?;
+    }
+    chown_path(dir, 0, gid)
+        .with_context(|| format!("chown root:{SERVICE_USER} {}", dir.display()))?;
+
+    let path = Path::new(SYSTEM_CONFIG_FILE);
+    if path.exists() {
+        eprintln!("  · {SYSTEM_CONFIG_FILE} already present — leaving it alone");
+        return Ok(false);
+    }
+    write_atomic_owned(path, SERVER_CONFIG_SEED.as_bytes(), 0o640, 0, gid)
+        .with_context(|| format!("seed {SYSTEM_CONFIG_FILE}"))?;
+    // Silence unused-variable warning on cfg(not(unix)) test runs; the
+    // uid we need is root (0), but we resolved fono's uid above to
+    // confirm the user exists before we wrote the file.
+    let _ = uid;
+    eprintln!("  · {SYSTEM_CONFIG_FILE} (seeded: Wyoming STT server on 0.0.0.0:10300)");
+    Ok(true)
+}
+
+/// Post-install TCP probe to confirm the Wyoming listener actually
+/// bound. `systemctl is-active` reports `active` the moment systemd
+/// successfully spawned the process — it can't tell us whether the
+/// daemon's internal server task got far enough to `listen(2)`.
+/// Without this probe, a server install that silently fails to bind
+/// (port in use, bind address invalid, panic in the server task) ends
+/// up looking healthy at install time and the operator only discovers
+/// it via the cryptic client-side error.
+fn verify_wyoming_listener(addr: &str) {
+    use std::net::ToSocketAddrs;
+    use std::time::Duration;
+
+    let Some(socket) = addr.to_socket_addrs().ok().and_then(|mut it| it.next()) else {
+        eprintln!("  · could not parse Wyoming probe address {addr}");
+        return;
+    };
+    match std::net::TcpStream::connect_timeout(&socket, Duration::from_secs(2)) {
+        Ok(_) => eprintln!("  · Wyoming STT server reachable on {addr} (TCP probe OK)"),
+        Err(e) => {
+            eprintln!(
+                "  · Wyoming STT server NOT reachable on {addr} ({e}); \
+                 inspect with `journalctl -u fono.service -n 50 --no-pager`"
+            );
+        }
+    }
 }
 
 fn ensure_service_user() -> Result<bool> {
@@ -1442,6 +1813,27 @@ fn run_uninstall_real(state: &InstallState) {
     if state.mode == Mode::Server && systemctl_available() {
         let _ = try_run("systemctl", &["daemon-reload"]);
     }
+    if state.mode == Mode::Server {
+        // Reproducible system cache: Whisper / Sherpa / polish model
+        // weights, hwcheck JSON, downloaded archives — mirrors what
+        // the desktop branch wipes below from ~/.cache/fono. Safe to
+        // remove: re-downloaded automatically the next time a model
+        // is requested. Leaving multi-GB blobs under /var/cache after
+        // an explicit uninstall is the kind of surprise the desktop
+        // branch already learned to avoid.
+        let cache = Path::new(SYSTEM_CACHE_DIR);
+        if cache.exists() {
+            match std::fs::remove_dir_all(cache) {
+                Ok(()) => eprintln!("  · removed {SYSTEM_CACHE_DIR}"),
+                Err(e) => {
+                    tracing::warn!(path = SYSTEM_CACHE_DIR, "remove_dir_all failed: {e:#}");
+                    eprintln!(
+                        "  · could not remove {SYSTEM_CACHE_DIR} ({e}); delete manually if no longer needed"
+                    );
+                }
+            }
+        }
+    }
     if state.mode == Mode::Desktop {
         refresh_desktop_database();
         refresh_icon_cache();
@@ -1473,7 +1865,7 @@ fn run_uninstall_real(state: &InstallState) {
     if state.mode == Mode::Server && state.system_user_removable {
         if service_state_remaining() {
             eprintln!(
-                "  · keeping system user `{SERVICE_USER}` (state remains under /etc/fono, /var/lib/fono, or /var/cache/fono)"
+                "  · keeping system user `{SERVICE_USER}` (state remains under /etc/fono or /var/lib/fono)"
             );
         } else if try_run("userdel", &[SERVICE_USER]) {
             eprintln!("  · removed system user `{SERVICE_USER}`");
@@ -1488,11 +1880,18 @@ fn run_uninstall_real(state: &InstallState) {
         println!("Per-user config (~/.config/fono) and history (~/.local/share/fono)");
         println!("are kept and belong to the user. The reproducible cache");
         println!("(~/.cache/fono) was removed.");
+    } else {
+        println!("Service config (/etc/fono) and state (/var/lib/fono) are kept");
+        println!("for a future re-install. The reproducible cache (/var/cache/fono)");
+        println!("was removed.");
     }
 }
 
 fn service_state_remaining() -> bool {
-    ["/etc/fono", "/var/lib/fono", "/var/cache/fono"].iter().any(|p| Path::new(p).exists())
+    // /var/cache/fono is removed by run_uninstall_real before this is
+    // consulted, so checking it would always read `false` here — keep
+    // it out of the predicate.
+    ["/etc/fono", "/var/lib/fono"].iter().any(|p| Path::new(p).exists())
 }
 
 // ---------------------------------------------------------------------
@@ -1520,14 +1919,44 @@ mod tests {
         let plan = build_install_plan(true);
         assert_eq!(plan.mode, Some(Mode::Server));
         let joined = plan.steps.join("\n");
-        for t in [BIN_PATH, SYSTEMD_UNIT, COMPLETION_BASH] {
+        for t in [BIN_PATH, SYSTEMD_UNIT, SYSTEM_CONFIG_FILE, COMPLETION_BASH] {
             assert!(joined.contains(t), "server plan missing {t}");
         }
         assert!(joined.contains("useradd"));
         assert!(joined.contains("systemctl enable"));
+        assert!(joined.contains("0.0.0.0:10300"), "server plan should preview Wyoming bind addr");
         assert!(!joined.contains(DESKTOP_AUTOSTART));
         assert!(!joined.contains(ICON_PATH));
         assert!(!joined.contains("install_marker"));
+    }
+
+    #[test]
+    fn embedded_server_config_seed_is_valid_toml() {
+        // Round-trip the embedded seed through the real Config schema
+        // so any future schema drift (renamed field, type change)
+        // fails this test the moment it lands rather than at install
+        // time on someone's server.
+        let cfg: fono_core::config::Config =
+            toml::from_str(SERVER_CONFIG_SEED).expect("seed parses as fono_core::config::Config");
+        assert!(cfg.server.wyoming.enabled, "seed must enable Wyoming listener");
+        assert_eq!(cfg.server.wyoming.bind, "0.0.0.0");
+        assert_eq!(cfg.server.wyoming.port, 10_300);
+    }
+
+    #[test]
+    fn embedded_server_config_seed_has_security_note() {
+        // The operator's first edit destination is the seeded file
+        // itself; the inline comment must spell out the security
+        // tradeoff so they understand why bind = 0.0.0.0 and how to
+        // restrict it.
+        assert!(SERVER_CONFIG_SEED.contains("0.0.0.0"));
+        assert!(
+            SERVER_CONFIG_SEED.lines().any(|l| {
+                let t = l.trim_start();
+                t.starts_with('#') && t.to_ascii_lowercase().contains("auth")
+            }),
+            "seed must contain a `#` comment mentioning auth"
+        );
     }
 
     #[test]
@@ -1660,5 +2089,184 @@ mod tests {
         assert!(Session::X11.recommend_injector().contains("xdotool"));
         assert!(Session::WlrootsWayland.recommend_injector().contains("wtype"));
         assert!(Session::KdeWayland.recommend_injector().contains("wtype"));
+    }
+
+    // -----------------------------------------------------------------
+    // Headless detection
+    // -----------------------------------------------------------------
+
+    use std::collections::{HashMap, HashSet};
+
+    #[derive(Default)]
+    struct FakeProbes {
+        env: HashMap<String, String>,
+        runs: HashMap<(String, Vec<String>), (bool, String)>,
+        dirs: HashSet<(String, String)>,
+        wayland_socket: bool,
+    }
+
+    impl FakeProbes {
+        fn with_env(mut self, k: &str, v: &str) -> Self {
+            self.env.insert(k.into(), v.into());
+            self
+        }
+        fn with_run(mut self, prog: &str, args: &[&str], ok: bool, out: &str) -> Self {
+            let key = (prog.into(), args.iter().map(|s| (*s).to_string()).collect());
+            self.runs.insert(key, (ok, out.into()));
+            self
+        }
+        fn with_dir_entry(mut self, dir: &str, prefix: &str) -> Self {
+            self.dirs.insert((dir.into(), prefix.into()));
+            self
+        }
+        fn with_wayland_socket(mut self) -> Self {
+            self.wayland_socket = true;
+            self
+        }
+    }
+
+    impl HeadlessProbes for FakeProbes {
+        fn env(&self, k: &str) -> Option<String> {
+            self.env.get(k).cloned()
+        }
+        fn run(&self, prog: &str, args: &[&str]) -> Option<(bool, String)> {
+            let key = (prog.to_string(), args.iter().map(|s| (*s).to_string()).collect::<Vec<_>>());
+            self.runs.get(&key).cloned()
+        }
+        fn dir_has_entry(&self, dir: &Path, prefix: &str) -> bool {
+            self.dirs.contains(&(dir.display().to_string(), prefix.into()))
+        }
+        fn any_user_runtime_wayland_socket(&self) -> bool {
+            self.wayland_socket
+        }
+    }
+
+    #[test]
+    fn headless_false_when_caller_has_display() {
+        let p = FakeProbes::default().with_env("DISPLAY", ":0");
+        let (h, reason) = detect_headless_with(&p);
+        assert!(!h);
+        assert!(reason.contains("DISPLAY"));
+    }
+
+    #[test]
+    fn headless_false_when_caller_has_wayland_display() {
+        let p = FakeProbes::default().with_env("WAYLAND_DISPLAY", "wayland-0");
+        let (h, _) = detect_headless_with(&p);
+        assert!(!h);
+    }
+
+    #[test]
+    fn headless_false_with_active_wayland_loginctl_session() {
+        let p = FakeProbes::default()
+            .with_run(
+                "loginctl",
+                &["list-sessions", "--no-legend", "--no-pager"],
+                true,
+                "5 1000 alice seat0 -\n",
+            )
+            .with_run(
+                "loginctl",
+                &["show-session", "5", "--property=Type", "--property=State", "--property=Class"],
+                true,
+                "Type=wayland\nState=active\nClass=user\n",
+            );
+        let (h, reason) = detect_headless_with(&p);
+        assert!(!h);
+        assert!(reason.contains("loginctl"));
+    }
+
+    #[test]
+    fn headless_false_when_display_manager_active() {
+        // No loginctl, no env — gdm.service alone should flip it.
+        let p = FakeProbes::default().with_run(
+            "systemctl",
+            &["is-active", "gdm.service"],
+            true,
+            "active\n",
+        );
+        let (h, reason) = detect_headless_with(&p);
+        assert!(!h);
+        assert!(reason.contains("display manager"));
+    }
+
+    #[test]
+    fn headless_false_when_x11_socket_present() {
+        let p = FakeProbes::default().with_dir_entry("/tmp/.X11-unix", "X");
+        let (h, reason) = detect_headless_with(&p);
+        assert!(!h);
+        assert!(reason.contains("X11"));
+    }
+
+    #[test]
+    fn headless_false_when_wayland_socket_present_under_run_user() {
+        let p = FakeProbes::default().with_wayland_socket();
+        let (h, reason) = detect_headless_with(&p);
+        assert!(!h);
+        assert!(reason.contains("Wayland"));
+    }
+
+    #[test]
+    fn headless_true_when_multi_user_target_default() {
+        let p = FakeProbes::default().with_run(
+            "systemctl",
+            &["get-default"],
+            true,
+            "multi-user.target\n",
+        );
+        let (h, reason) = detect_headless_with(&p);
+        assert!(h);
+        assert!(reason.contains("multi-user"));
+    }
+
+    #[test]
+    fn headless_true_when_graphical_target_default_but_no_session() {
+        // Server box that inherited `graphical.target` from a desktop
+        // base image (common on Ubuntu/Debian server installs) but
+        // is run headless — no DISPLAY, no graphical loginctl
+        // session, no DM active, no sockets. Must classify as
+        // headless: get-default describes what *would* boot, not
+        // what's running. Regression for the 2026-05-22 .74 bug.
+        let p = FakeProbes::default().with_run(
+            "systemctl",
+            &["get-default"],
+            true,
+            "graphical.target\n",
+        );
+        let (h, reason) = detect_headless_with(&p);
+        assert!(h);
+        assert!(reason.contains("no graphical session"));
+    }
+
+    #[test]
+    fn headless_true_when_no_systemd_and_no_graphical_signals() {
+        // Empty probe set — no env, no commands succeed, no sockets.
+        // On the supported Linux targets this means "no systemd and
+        // no graphical session", which is a confident headless verdict.
+        let p = FakeProbes::default();
+        let (h, reason) = detect_headless_with(&p);
+        assert!(h);
+        assert!(reason.contains("no systemd"));
+    }
+
+    #[test]
+    fn headless_ignores_inactive_loginctl_sessions() {
+        // Closing session (state=closing) should not count as desktop.
+        let p = FakeProbes::default()
+            .with_run(
+                "loginctl",
+                &["list-sessions", "--no-legend", "--no-pager"],
+                true,
+                "5 1000 alice seat0 -\n",
+            )
+            .with_run(
+                "loginctl",
+                &["show-session", "5", "--property=Type", "--property=State", "--property=Class"],
+                true,
+                "Type=wayland\nState=closing\nClass=user\n",
+            )
+            .with_run("systemctl", &["get-default"], true, "multi-user.target\n");
+        let (h, _) = detect_headless_with(&p);
+        assert!(h);
     }
 }

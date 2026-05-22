@@ -155,7 +155,6 @@ pub type PreferencesProvider = Arc<dyn Fn() -> PreferencesSnapshot + Send + Sync
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PreferencesSnapshot {
     pub auto_mute_system: bool,
-    pub always_warm_mic: bool,
     pub also_copy_to_clipboard: bool,
     pub startup_autostart: bool,
     pub vad_enabled: bool,
@@ -252,8 +251,6 @@ pub enum TrayAction {
     SetInputDevice(u8),
     /// Toggle `general.auto_mute_system` (mute other audio while recording).
     SetAutoMuteSystem(bool),
-    /// Toggle `general.always_warm_mic` (keep cpal stream open between dictations).
-    SetAlwaysWarmMic(bool),
     /// Toggle `general.also_copy_to_clipboard`.
     SetAlsoCopyToClipboard(bool),
     /// Toggle `general.startup_autostart`.
@@ -1244,11 +1241,6 @@ mod backend {
             "Mute system audio while recording",
             p.auto_mute_system,
             TrayAction::SetAutoMuteSystem,
-        ));
-        items.push(prefs_check(
-            "Keep microphone always-on (faster start, see privacy docs)",
-            p.always_warm_mic,
-            TrayAction::SetAlwaysWarmMic,
         ));
         items.push(prefs_check(
             "Also copy transcript to clipboard",

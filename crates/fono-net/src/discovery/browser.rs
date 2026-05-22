@@ -216,7 +216,7 @@ fn peer_from_info(kind: PeerKind, info: &ServiceInfo) -> Option<DiscoveredPeer> 
         return None;
     }
     let hostname = info.get_hostname().to_string();
-    let address = info.get_addresses().iter().next().copied();
+    let address = pick_best_address(info.get_addresses().iter().copied());
     let proto = info.get_property_val_str(KEY_PROTO).unwrap_or("").to_string();
     let version = info.get_property_val_str(KEY_VERSION).unwrap_or("").to_string();
     let caps = info.get_property_val_str(KEY_CAPS).map(parse_caps).unwrap_or_default();
@@ -243,4 +243,78 @@ fn peer_from_info(kind: PeerKind, info: &ServiceInfo) -> Option<DiscoveredPeer> 
         path,
         last_seen: Instant::now(),
     })
+}
+
+/// Pick the most-likely-routable address from an mDNS resolver result.
+///
+/// `mdns-sd` returns the resolved address set as a `HashSet<IpAddr>`,
+/// whose iteration order is non-deterministic. Naively taking
+/// `.next()` can hand back an IPv6 link-local (`fe80::/10`) even when
+/// a perfectly fine IPv4 is in the same set — and link-local without
+/// a zone id is unconnectable from a different host (`EINVAL`).
+///
+/// Preference order:
+///
+/// 1. IPv4 (assumed to be a routable LAN address — Wyoming peers are
+///    intra-LAN by definition).
+/// 2. Non-link-local IPv6 (global / ULA).
+/// 3. Link-local IPv6 — last resort, since we can't synthesise a
+///    scope id and the caller is usually on a different host anyway.
+///
+/// Within each tier we keep the iterator's order, which is good
+/// enough — the tiers themselves do the disambiguation we care about.
+fn pick_best_address(
+    addrs: impl IntoIterator<Item = std::net::IpAddr>,
+) -> Option<std::net::IpAddr> {
+    let mut v4: Option<std::net::IpAddr> = None;
+    let mut v6_global: Option<std::net::IpAddr> = None;
+    let mut v6_link_local: Option<std::net::IpAddr> = None;
+    for addr in addrs {
+        match addr {
+            std::net::IpAddr::V4(_) if v4.is_none() => v4 = Some(addr),
+            std::net::IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80 => {
+                if v6_link_local.is_none() {
+                    v6_link_local = Some(addr);
+                }
+            }
+            std::net::IpAddr::V6(_) if v6_global.is_none() => v6_global = Some(addr),
+            _ => {}
+        }
+    }
+    v4.or(v6_global).or(v6_link_local)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::IpAddr;
+
+    use super::pick_best_address;
+
+    #[test]
+    fn prefers_ipv4_over_link_local_v6() {
+        let v4: IpAddr = "192.168.0.74".parse().unwrap();
+        let ll: IpAddr = "fe80::7e10:c9ff:fed3:69b".parse().unwrap();
+        // Try both insertion orders — pick must be stable.
+        assert_eq!(pick_best_address([ll, v4]), Some(v4));
+        assert_eq!(pick_best_address([v4, ll]), Some(v4));
+    }
+
+    #[test]
+    fn prefers_global_v6_over_link_local() {
+        let global: IpAddr = "2001:db8::1".parse().unwrap();
+        let ll: IpAddr = "fe80::1".parse().unwrap();
+        assert_eq!(pick_best_address([ll, global]), Some(global));
+        assert_eq!(pick_best_address([global, ll]), Some(global));
+    }
+
+    #[test]
+    fn falls_back_to_link_local_if_only_choice() {
+        let ll: IpAddr = "fe80::1".parse().unwrap();
+        assert_eq!(pick_best_address([ll]), Some(ll));
+    }
+
+    #[test]
+    fn empty_returns_none() {
+        assert_eq!(pick_best_address(std::iter::empty()), None);
+    }
 }

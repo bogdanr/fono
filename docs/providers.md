@@ -463,6 +463,45 @@ prefer_vision = false
 prefer_web_search = false
 ```
 
+## Hosting a Wyoming STT server with `fono install --server`
+
+When you install Fono in server mode with `sudo fono install --server`,
+the installer seeds `/etc/fono/config.toml` (only if no config exists
+yet) with the Wyoming STT listener already enabled on `0.0.0.0:10300`.
+Other Fono / Home Assistant / Rhasspy clients on the LAN can then
+auto-discover the server via mDNS and route transcription through it.
+
+The seeded block looks like:
+
+```toml
+[server.wyoming]
+enabled = true
+bind = "0.0.0.0"
+port = 10300
+```
+
+**Security.** Wyoming v1 has no in-band authentication. Binding to
+`0.0.0.0` exposes inference to every host that can route to TCP/10300
+on this machine. To restrict exposure, either:
+
+- change `bind` to `"127.0.0.1"` for loopback-only,
+- change `bind` to a specific NIC address (e.g. `"192.168.1.5"`),
+- or block port 10300 at your firewall (iptables / nftables / ufw /
+  firewalld).
+
+After any edit: `sudo systemctl restart fono.service`.
+
+Re-running `sudo fono install --server` is idempotent — an existing
+`/etc/fono/config.toml` is preserved byte-for-byte. The installer
+verifies the listener actually bound by probing `127.0.0.1:10300`
+post-start and prints the result in its summary.
+
+The server lane requires an STT backend to actually transcribe.
+With the default `[stt].backend = "local"` you need at least one
+Whisper model under `/var/lib/fono/models/`; install one with
+`sudo -u fono fono models install small` (or `large-v3-turbo` for
+the strongest local quality).
+
 ## Adding a new backend
 
 Implement the `fono_stt::SpeechToText` or `fono_polish::TextCleanup` async

@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Fono server-mode default config.
+#
+# Written by `sudo fono install --server` when /etc/fono/config.toml
+# does not already exist. Subsequent installs leave this file alone.
+#
+# SECURITY: bind = "0.0.0.0" exposes the Wyoming STT listener to every
+# interface — anyone with TCP reachability to this host on port 10300
+# can run inference. Wyoming v1 has no in-band authentication. To
+# restrict exposure, either:
+#   * change `bind` to "127.0.0.1" for loopback-only serving,
+#   * change `bind` to a specific NIC address (e.g. "192.168.1.5"),
+#   * or restrict the port at your firewall (iptables / nftables /
+#     ufw / firewalld).
+# After any edit: `sudo systemctl restart fono.service`.
+
+[server.wyoming]
+enabled = true
+bind = "0.0.0.0"
+port = 10300

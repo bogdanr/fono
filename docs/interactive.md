@@ -59,9 +59,6 @@ Two switches:
    ```toml
    [interactive]
    enabled = true
-   # Per-minute spending ceiling, in USD micro-cents (1¢ = 10_000 µ¢).
-   # Local STT is free, so leave at 0 unless you flip to cloud streaming.
-   budget_ceiling_per_minute_umicros = 0
    # Quality floor under budget pressure: "max" | "balanced" | "aggressive".
    quality_floor = "max"
    ```
@@ -163,13 +160,16 @@ exit 2 as "skip this row, not failure".
 ## Tuning boundary behaviour
 
 Slice A v7 introduces a small set of additive heuristics that delay
-segment boundaries and flag end-of-utterance dangling words. Every
-knob is opt-out (or opt-in), additive only — turning a heuristic off
-on a fixture that doesn't trigger it produces an identical
-transcript. See `docs/decisions/0015-boundary-heuristics.md` for the
-design rationale.
+segment boundaries and flag end-of-utterance dangling words. The
+heuristics ship with built-in defaults; the matching user-facing config
+keys (`commit_*`, `eou_*`, `resume_grace_ms`, the budget / session-cap
+knobs) were removed in the 2026-05-22 schema simplification because
+they were never plumbed from `[interactive]` into the live session.
+See `docs/decisions/0015-boundary-heuristics.md` for the design
+rationale and `crates/fono/src/live.rs` (`HeuristicConfig::default`)
+for the current values.
 
-All keys live under `[interactive]` in `~/.config/fono/config.toml`.
+The surviving user-tunable knobs under `[interactive]`:
 
 | Key                              | Default                        | What it does                                                                                                          |
 | -------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
@@ -177,41 +177,6 @@ All keys live under `[interactive]` in `~/.config/fono/config.toml`.
 | `chunk_ms_initial`               | `600`                          | Window the streaming decoder waits before the first preview pass. Smaller = lower TTFF, noisier early text.            |
 | `chunk_ms_steady`                | `1500`                         | Steady-state window between preview passes after the first.                                                           |
 | `cleanup_on_finalize`            | `true`                         | Run the polish pass once on the assembled transcript after the hotkey releases. Off = raw STT output is injected. |
-| `max_session_seconds`            | `120`                          | Hard ceiling on a single live session, in seconds.                                                                    |
-| `max_session_cost_usd`           | unset                          | Optional hard cost cap for cloud-streaming sessions.                                                                  |
-| `commit_use_prosody`             | `false`                        | Engage the prosody-aware boundary delay. Flip to `true` if you find segments cut off mid-thought during slow speech.   |
-| `commit_prosody_extend_ms`       | `250`                          | Extension granted when prosody fires. Capped by the session at `chunk_ms_steady * 1.5`.                                |
-| `commit_use_punctuation_hint`    | `true`                         | Engage the punctuation hint (Slice A: function-tested stub; full wiring in Slice B).                                  |
-| `commit_punct_extend_ms`         | `150`                          | Extension granted by the punctuation hint when it fires.                                                              |
-| `commit_hold_on_filler`          | `true`                         | At end-of-input, flag the trailing word if it's a filler/dangling word and surface that signal to the orchestrator.   |
-| `commit_filler_words`            | `["um","uh","er","ah","mm","like","you know"]` | Filler-word vocabulary checked by `commit_hold_on_filler`. **English by default** — see localisation note below.       |
-| `commit_dangling_words`          | `["and","but","or","so","because","the","a","an","of","to","with","for","in","on","at","from"]` | Syntactically-dangling vocabulary. **English by default**.                                                            |
-| `eou_drain_extended_ms`          | `1500`                         | End-of-utterance drain window flagged when a filler/dangling suffix is detected.                                       |
-| `eou_adaptive`                   | `false` (reserved)             | **Reserved for Slice D.** Inert in Slice A.                                                                            |
-| `resume_grace_ms`                | `0` (reserved)                 | **Reserved for Slice D.** Inert in Slice A.                                                                            |
-
-### Localisation caveat
-
-`commit_filler_words` and `commit_dangling_words` ship with English
-vocabularies. Users dictating in other languages should override
-both:
-
-```toml
-[interactive]
-# Brazilian Portuguese
-commit_filler_words = ["é", "tipo", "então", "sabe"]
-commit_dangling_words = ["e", "mas", "ou", "porque", "o", "a", "os", "as", "de"]
-```
-
-Comparison is case-insensitive after stripping trailing `.,;:!?`. An
-empty list disables the corresponding heuristic for that language
-without needing to flip the parent boolean.
-
-### Reserved Slice D keys
-
-`eou_adaptive` and `resume_grace_ms` are accepted by the parser but
-have no effect in Slice A. Slice D (plan tasks R15.x) replaces the
-static `eou_drain_extended_ms` with a silence-distribution estimator
-and adds a hotkey-resume grace window so a re-pressed hotkey within
-`resume_grace_ms` continues the prior session instead of opening a
-new one.
+| `quality_floor`                  | `"max"`                        | Quality floor under budget pressure: `"max"` / `"balanced"` / `"aggressive"`.                                          |
+| `streaming_interval`             | `1.0`                          | Cloud streaming preview cadence in seconds. Clamped to `[0.5, 3.0]`; `> 3.0` disables the preview lane.                |
+| `hold_release_grace_ms`          | `150`                          | Drain window between hotkey release and cpal capture stop so trailing audio reaches the streaming STT.                 |

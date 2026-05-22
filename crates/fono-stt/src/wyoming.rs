@@ -137,7 +137,7 @@ impl WyomingStt {
     }
 
     async fn connect(&self) -> Result<TcpStream> {
-        let addr = format!("{}:{}", self.host, self.port);
+        let addr = format_host_port(&self.host, self.port);
         let stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr))
             .await
             .with_context(|| format!("connecting to wyoming server at {addr} timed out"))?
@@ -147,9 +147,24 @@ impl WyomingStt {
         Ok(stream)
     }
 
-    /// `[host]:port` for log lines.
+    /// `host:port` for log lines (IPv6 literals get bracketed).
     fn endpoint(&self) -> String {
-        format!("{}:{}", self.host, self.port)
+        format_host_port(&self.host, self.port)
+    }
+}
+
+/// Format a `host:port` pair such that it parses with
+/// [`std::net::ToSocketAddrs`] regardless of whether `host` is a name,
+/// an IPv4 literal, or an IPv6 literal. IPv6 literals need brackets to
+/// disambiguate them from the port separator — without them
+/// `TcpStream::connect("fe80::1:10300")` returns `EINVAL`.
+fn format_host_port(host: &str, port: u16) -> String {
+    // Heuristic: an unbracketed IPv6 literal contains at least two
+    // colons. Hostnames and IPv4 contain none.
+    if !host.starts_with('[') && host.matches(':').count() >= 2 {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
     }
 }
 
@@ -373,5 +388,28 @@ mod tests {
             .with_auth_token(Some("secret".into()));
         assert_eq!(s.model.as_deref(), Some("whisper-large-v3"));
         assert_eq!(s.auth_token.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn format_host_port_brackets_ipv6_literals() {
+        assert_eq!(format_host_port("fe80::1", 10300), "[fe80::1]:10300");
+        assert_eq!(format_host_port("::1", 10300), "[::1]:10300");
+        assert_eq!(
+            format_host_port("fe80::7e10:c9ff:fed3:69b", 10300),
+            "[fe80::7e10:c9ff:fed3:69b]:10300"
+        );
+    }
+
+    #[test]
+    fn format_host_port_leaves_names_and_ipv4_alone() {
+        assert_eq!(format_host_port("192.168.0.74", 10300), "192.168.0.74:10300");
+        assert_eq!(format_host_port("kitchen-pc.local", 10300), "kitchen-pc.local:10300");
+    }
+
+    #[test]
+    fn format_host_port_does_not_double_bracket() {
+        // If a caller passes an already-bracketed host (shouldn't
+        // happen via parse_uri but defensive), don't wrap again.
+        assert_eq!(format_host_port("[::1]", 10300), "[::1]:10300");
     }
 }

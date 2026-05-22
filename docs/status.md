@@ -2,6 +2,70 @@
 
 Last updated: 2026-05-22
 
+## 2026-05-22 — Config simplification: 14 inert keys removed
+
+A workspace-wide audit of `fono_core::config` found that 14 fields
+were either entirely write-only or only ever consumed in tests /
+bench harnesses. The Unreleased changelog block lists every dropped
+key in full. Highlights:
+
+- **`general.always_warm_mic`** — latency-plan L1 was never wired in
+  `fono-audio`; the tray's *Keep microphone always-on* preference
+  checkbox went with the field (`PreferencesSnapshot`,
+  `TrayAction::SetAlwaysWarmMic`, and the daemon's match arm).
+- **All `interactive.commit_*` / `eou_*` / `resume_grace_ms`** —
+  boundary-heuristic knobs that look user-tunable in `config.toml`
+  but never reached `LiveSession::with_heuristics`. Defaults move
+  to `HeuristicConfig::default` in `crates/fono/src/live.rs` with
+  identical values; runtime behaviour is byte-identical.
+- **`interactive.budget_ceiling_per_minute_umicros`,
+  `max_session_seconds`, `max_session_cost_usd`** plus the orphan
+  `fono::live::budget_for` helper that read the first of those.
+
+Existing configs continue to load — a new regression test
+(`legacy_interactive_keys_are_ignored_silently`) locks in serde's
+unknown-field tolerance for the dropped keys. Plan file:
+`plans/2026-05-22-config-simplification-prune-interactive-and-warm-mic-v1.md`.
+
+## 2026-05-22 — `fono install` auto-detects headless hosts
+
+`sudo fono install` on a server no longer silently writes desktop
+artefacts the operator never wanted. The subcommand now inspects the
+host for any active graphical session (caller's inherited DISPLAY /
+WAYLAND_DISPLAY, loginctl `Type=x11/wayland` + `State=active` sessions,
+known display-manager units, `/tmp/.X11-unix/X*` sockets, Wayland
+sockets under `/run/user/*`) and, when none are found, falls back to
+`systemctl get-default` — `multi-user.target` (or no systemd at all)
+flips the default to server mode with a one-line banner naming the
+trigger. Anything ambiguous keeps today's silent desktop default, so
+workstations are unaffected.
+
+### What landed
+
+- **`InstallModeArg { Server, Desktop, Auto }`** in
+  `crates/fono/src/install.rs`, plus a new `--desktop` CLI flag
+  (mutually exclusive with `--server`). `Auto` is the value used when
+  neither flag is passed, and it dispatches to a new
+  `detect_headless()` helper.
+- **`detect_headless() -> (bool, &'static str)`** behind a
+  `HeadlessProbes` trait so the six probe sites (env, loginctl
+  list/show-session, `systemctl is-active <dm>`, `/tmp/.X11-unix/X*`,
+  `/run/user/*/wayland-*`, `systemctl get-default`) are unit-testable
+  without touching the host. Ten new tests cover every branch (active
+  loginctl session, DM active, X11/Wayland socket present, multi-user
+  default, graphical default, no-systemd-no-graphical, closing
+  sessions ignored).
+- **`packaging/install.sh`** now passes `--desktop` explicitly when
+  its own DISPLAY heuristic decides desktop, so the shell wrapper and
+  the binary's auto-detect can't disagree on the same host.
+- **ADR `0023-self-installer.md`** picked up a dated addendum
+  documenting the new default; CHANGELOG `[Unreleased]` block records
+  the change for the next release.
+
+Plan file:
+`plans/2026-05-22-fono-install-headless-autodetect-v1.md` (all 7
+tasks ticked).
+
 ## 2026-05-22 — Auto-stop on silence, slice 4 (commit wired)
 
 Slice 4 of `plans/2026-05-22-fono-auto-stop-silence-v1.md` is in.

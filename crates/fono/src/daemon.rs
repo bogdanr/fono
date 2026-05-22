@@ -925,15 +925,6 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                         )
                         .await;
                     }
-                    TrayAction::SetAlwaysWarmMic(v) => {
-                        apply_pref_via_tray(
-                            &paths,
-                            orch_for_tray.as_ref(),
-                            "always_warm_mic",
-                            move |cfg| cfg.general.always_warm_mic = v,
-                        )
-                        .await;
-                    }
                     TrayAction::SetAlsoCopyToClipboard(v) => {
                         apply_pref_via_tray(
                             &paths,
@@ -2021,7 +2012,6 @@ fn preferences_snapshot_from_disk(config_path: &std::path::Path) -> fono_tray::P
     let waveform_style = waveform_style_to_idx(cfg.overlay.style);
     fono_tray::PreferencesSnapshot {
         auto_mute_system: cfg.general.auto_mute_system,
-        always_warm_mic: cfg.general.always_warm_mic,
         also_copy_to_clipboard: cfg.general.also_copy_to_clipboard,
         startup_autostart: cfg.general.startup_autostart,
         // Tray exposes VAD as a boolean. `"silero"` is the only enabled

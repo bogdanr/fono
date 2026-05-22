@@ -90,6 +90,20 @@ one flag) while making each install do exactly one job.
 admin already opted in by passing the flag; surprising restraint
 (write-but-don't-enable) was a worse UX than the alternative.
 
+**Addendum (2026-05-22) — auto-detect headless hosts.** Running
+`sudo fono install` on a headless server (no graphical session, no
+display-manager unit, no X11 / Wayland socket on disk, and either
+`systemctl get-default = multi-user.target` or systemd absent
+entirely) now picks server mode automatically and prints a one-line
+banner naming the trigger. Workstations and ambiguous hosts keep
+today's silent desktop default. The `--server` and `--desktop` flags
+remain explicit overrides in both directions; they're mutually
+exclusive. Detection is conservative: a false negative is recoverable
+with `--server`, a false positive would surprise a workstation user
+with an unwanted systemd unit. See
+`plans/2026-05-22-fono-install-headless-autodetect-v1.md` for the
+signal-priority table and the test matrix.
+
 **Why no `--purge` / no per-component `--no-*` flags.** Uninstall is
 non-destructive by definition (config and history are XDG dirs the
 installer never wrote). Users who want those gone can `rm` them

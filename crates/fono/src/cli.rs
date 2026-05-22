@@ -265,16 +265,26 @@ pub enum Cmd {
     },
     /// Install fono system-wide. Requires root.
     ///
-    /// Default (desktop): binary, menu entry, XDG autostart entry,
-    /// icon, and shell completions. The daemon launches on next login.
+    /// Default (auto-detect): inspects the host for an active
+    /// graphical session (loginctl / display-manager unit / X11 or
+    /// Wayland socket / `systemctl get-default`). On a headless box
+    /// the systemd-unit lane is picked automatically; otherwise the
+    /// desktop lane runs.
     ///
     /// With `--server`: binary, hardened systemd unit (running as a
     /// dedicated `fono` user), and shell completions. The unit is
     /// enabled and started immediately.
+    ///
+    /// With `--desktop`: binary, menu entry, XDG autostart entry,
+    /// icon, and shell completions. Forces the desktop lane even on
+    /// hosts that look headless.
     Install {
-        /// Headless server mode (systemd unit, no desktop entries).
-        #[arg(long)]
+        /// Force headless server mode (systemd unit, no desktop entries).
+        #[arg(long, conflicts_with = "desktop")]
         server: bool,
+        /// Force desktop mode (menu + autostart + icon, no systemd unit).
+        #[arg(long)]
+        desktop: bool,
         /// Print what would be done without writing anything.
         #[arg(long)]
         dry_run: bool,
@@ -522,7 +532,16 @@ pub async fn run(cli: Cli) -> Result<()> {
         Some(Cmd::Update { check, yes, dry_run, channel, no_restart, bin_dir }) => {
             update_cmd(check, yes, dry_run, &channel, no_restart, bin_dir).await
         }
-        Some(Cmd::Install { server, dry_run }) => crate::install::run_install(server, dry_run),
+        Some(Cmd::Install { server, desktop, dry_run }) => {
+            let mode = if server {
+                crate::install::InstallModeArg::Server
+            } else if desktop {
+                crate::install::InstallModeArg::Desktop
+            } else {
+                crate::install::InstallModeArg::Auto
+            };
+            crate::install::run_install(mode, dry_run)
+        }
         Some(Cmd::Uninstall { dry_run }) => crate::install::run_uninstall(dry_run),
     }
 }

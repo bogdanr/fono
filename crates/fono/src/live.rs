@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use fono_audio::{AudioFrameStream, FrameEvent, StreamConfig, Vad, WebRtcVadStub};
-use fono_core::{BudgetController, BudgetVerdict, PriceTable, QualityFloor};
+use fono_core::{BudgetController, BudgetVerdict, QualityFloor};
 use fono_overlay::{OverlayHandle, OverlayState};
 use fono_stt::{
     strip_trailing_hallucinations, StreamFrame, StreamingStt, TranscriptUpdate, UpdateLane,
@@ -40,10 +40,11 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, field, instrument, warn, Span};
 
-/// Tunable knobs for the boundary heuristics. Built from
-/// `fono_core::config::Interactive` by the orchestrator (see
-/// [`HeuristicConfig::from_interactive_defaults`] in tests / cli.rs's
-/// runtime config plumbing).
+/// Tunable knobs for the boundary heuristics. Built-in defaults today;
+/// the user-facing `[interactive].commit_*` knobs were removed in the
+/// 2026-05-22 config simplification because they were never plumbed
+/// here from `fono_core::config::Interactive`. The struct remains in
+/// case a future telemetry pass justifies exposing it again.
 #[derive(Debug, Clone)]
 pub struct HeuristicConfig {
     pub use_prosody: bool,
@@ -503,15 +504,6 @@ fn preview_display(transcript: &LiveTranscript, upd: &TranscriptUpdate) -> Strin
         s.push_str(&upd.text);
     }
     s
-}
-
-/// Convenience: build a budget controller from `[interactive]` config
-/// + the active STT backend's price-table entry.
-#[must_use]
-pub fn budget_for(provider: &str, ceiling_per_minute_umicros: u64) -> BudgetController {
-    let table = PriceTable::defaults();
-    let cost = table.get(provider);
-    BudgetController::new(cost, ceiling_per_minute_umicros, QualityFloor::Max)
 }
 
 /// Parse the `quality_floor` config string.
