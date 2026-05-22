@@ -114,6 +114,9 @@ _2017 Kaby Lake-R quad-core / 8 threads, 15 W; first ULV quad-core generation; T
 | base.en | ac | cpu | 3/3 | 10.08 | 0.8 | 1.79 | 1.8 | 1.74 | 602 | comfortable |  |
 | base.en-q5_1 | ac | cpu | 2/2 | 8.32 | 4.7 | 1.86 | 2.6 | 2.06 | 433 | comfortable |  |
 | base.en-q8_0 | ac | cpu | 2/2 | 9.38 | 4.8 | 1.88 | 6.0 | 1.71 | 476 | comfortable |  |
+| large-v3-turbo | ac | cpu | 2/2 | 0.56 | 0.5 | 0.09 | 0.5 | 43.57 | 3664 | unsuitable |  |
+| large-v3-turbo-q5_0 | ac | cpu | 2/2 | 0.60 | 0.2 | 0.09 | 0.1 | 42.80 | 1660 | unsuitable |  |
+| large-v3-turbo-q8_0 | ac | cpu | 2/2 | 0.76 | 0.0 | 0.12 | 0.2 | 33.33 | 2233 | unsuitable |  |
 | small | ac | cpu | 3/3 | 3.44 | 0.7 | 0.45 | 0.4 | 7.91 | 1359 | borderline |  |
 | small-q5_1 | ac | cpu | 2/2 | 3.47 | 0.6 | 0.43 | 0.9 | 8.20 | 791 | borderline |  |
 | small-q8_0 | ac | cpu | 2/2 | 4.34 | 0.1 | 0.54 | 0.0 | 6.44 | 932 | borderline |  |
@@ -129,15 +132,24 @@ _2017 Kaby Lake-R quad-core / 8 threads, 15 W; first ULV quad-core generation; T
 | base | ac | vulkan | 2/2 | 9.60 | 1.0 | 2.05 | 0.2 | 1.56 | 178 | comfortable |  |
 | base-q5_1 | ac | vulkan | 2/2 | 8.88 | 1.5 | 2.04 | 0.1 | 1.56 | 187 | comfortable |  |
 | base-q8_0 | ac | vulkan | 2/2 | 8.83 | 0.6 | 1.97 | 1.5 | 1.60 | 195 | comfortable |  |
+| base.en | ac | vulkan | 2/2 | 6.91 | 7.1 | 1.94 | 2.6 | 1.67 | 166 | comfortable |  |
+| base.en-q5_1 | ac | vulkan | 2/2 | 6.81 | 11.6 | 1.95 | 0.5 | 1.59 | 176 | comfortable |  |
+| base.en-q8_0 | ac | vulkan | 2/2 | 7.83 | 13.5 | 1.92 | 0.0 | 1.57 | 186 | comfortable |  |
 | large-v3-turbo | ac | vulkan | 2/2 | 0.88 | 1.7 | 0.13 | 0.8 | 28.46 | 272 | unsuitable |  |
 | large-v3-turbo-q5_0 | ac | vulkan | 2/2 | 1.00 | 2.4 | 0.13 | 3.2 | 28.45 | 238 | borderline |  |
 | large-v3-turbo-q8_0 | ac | vulkan | 2/2 | 0.88 | 1.6 | 0.12 | 0.9 | 28.88 | 222 | unsuitable |  |
 | small | ac | vulkan | 2/2 | 3.66 | 0.7 | 0.61 | 0.3 | 5.43 | 199 | borderline |  |
 | small-q5_1 | ac | vulkan | 2/2 | 3.71 | 0.2 | 0.58 | 0.0 | 6.08 | 205 | borderline |  |
 | small-q8_0 | ac | vulkan | 2/2 | 3.43 | 0.9 | 0.56 | 0.1 | 6.20 | 186 | borderline |  |
+| small.en | ac | vulkan | 2/2 | 1.99 | 3.7 | 0.71 | 0.1 | 5.30 | 183 | borderline |  |
+| small.en-q5_1 | ac | vulkan | 2/2 | 2.93 | 5.1 | 0.71 | 0.1 | 5.26 | 193 | borderline |  |
+| small.en-q8_0 | ac | vulkan | 2/2 | 1.90 | 3.2 | 0.69 | 0.1 | 5.33 | 172 | borderline |  |
 | tiny | ac | vulkan | 2/2 | 14.01 | 3.7 | 3.21 | 0.2 | 1.00 | 179 | comfortable |  |
 | tiny-q5_1 | ac | vulkan | 2/2 | 11.95 | 20.1 | 2.77 | 0.4 | 1.55 | 198 | comfortable | batch_rtf spread 20.1% > 15% |
 | tiny-q8_0 | ac | vulkan | 2/2 | 11.94 | 6.4 | 3.39 | 1.0 | 0.81 | 212 | comfortable |  |
+| tiny.en | ac | vulkan | 2/2 | 13.93 | 18.8 | 3.30 | 0.7 | 0.95 | 161 | comfortable | batch_rtf spread 18.8% > 15% |
+| tiny.en-q5_1 | ac | vulkan | 2/2 | 11.88 | 1.7 | 3.73 | 11.3 | 1.00 | 166 | comfortable |  |
+| tiny.en-q8_0 | ac | vulkan | 2/2 | 14.60 | 25.9 | 3.84 | 5.7 | 0.79 | 172 | comfortable | batch_rtf spread 25.9% > 15% |
 
 ## ryzen-5950x — AMD Ryzen 9 5950X 16-Core Processor (16p/32l, 49152 MiB, container) — released 2020-11, high-end desktop
 
