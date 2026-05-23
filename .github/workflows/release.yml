@@ -190,7 +190,13 @@ jobs:
           # Swatinem's default key only varies on `runner.os` ("Linux");
           # different glibc generations and different feature sets must
           # not share cached build-script binaries.
-          key: ${{ matrix.target }}-${{ matrix.os }}-${{ matrix.variant }}
+          # Suffix `-portable` busts the cache for the GGML_NATIVE=OFF
+          # baseline rolled in via `.cargo/config.toml` [env]. whisper-rs-sys's
+          # build.rs does not `rerun-if-env-changed=GGML_*`, so an unchanged
+          # cache key would silently reuse a stale `-march=native` build of
+          # whisper.cpp from a previous CI run. Bump this suffix any time the
+          # GGML ISA flag set in `.cargo/config.toml` changes.
+          key: ${{ matrix.target }}-${{ matrix.os }}-${{ matrix.variant }}-portable
 
       - name: Install Linux build deps
         # GPU variant adds Vulkan headers + the `shaderc` SPIR-V
@@ -228,7 +234,16 @@ jobs:
             ls /usr/include/vulkan/vulkan.h
           fi
 
-      - name: Build (native)
+      - name: Build (portable AVX2 baseline)
+        # `GGML_NATIVE=OFF` + explicit AVX2/FMA/F16C/BMI2 are inherited from
+        # `.cargo/config.toml` [env]. Both CPU and GPU matrix rows use the
+        # same baseline because the GPU variant still bundles the CPU
+        # fallback path (whisper.cpp always builds the CPU backend; Vulkan
+        # is additive). Without this pin the shipped binary auto-vectorises
+        # whatever ISA the GH runner happens to expose today (currently
+        # Zen 3 / EPYC 7763, but the pool migrates to newer Intel Xeons
+        # periodically) and SIGILLs on users' pre-VNNI / pre-AVX2 CPUs.
+        # See `.cargo/config.toml` for the full rationale.
         run: |
           extra=""
           if [ -n "${{ matrix.features }}" ]; then

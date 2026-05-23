@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-only
 #
-# Workspace-wide cargo config. Three concerns are encoded here:
+# Workspace-wide cargo config. Four concerns are encoded here:
 #
 # 1. Duplicate-ggml resolution (legacy, retiring under Phase 1 Task 1.2 of
 #    `plans/2026-04-30-fono-single-binary-size-v1.md`). Both
@@ -54,6 +54,35 @@ rustflags = [
 # llama.cpp; the autovectorised hot kernels are explicitly opted into
 # higher opt-levels by ggml's CMakeLists, so this only shrinks the
 # scaffolding around them.
+#
+# `GGML_NATIVE=OFF` + explicit AVX2/FMA/F16C/BMI2 flags pin the C/C++
+# ISA baseline so the shipped binary runs on every x86_64-v3-ish CPU
+# (Intel Haswell ≥ 2013, AMD Excavator ≥ 2015) without leaking the
+# build machine's full instruction set. ggml's CMakeLists defaults to
+# `GGML_NATIVE=ON` which appends `-march=native` to the compile line
+# (see ggml/src/ggml-cpu/CMakeLists.txt:308). On any modern dev box or
+# GitHub Actions runner that includes VPDPBUSD (AVX-VNNI) or AVX-512,
+# the auto-vectoriser bakes those opcodes into the binary, which then
+# SIGILLs on a user's Zen 3 / Kaby Lake / 8th-gen Intel laptop. The
+# A/B test on ultra7-258v (Lunar Lake, AVX-VNNI) showed `-march=native`
+# costs nothing on a VNNI-capable host either: ±7 % within run-to-run
+# noise across tiny/base/small × {fp16, q8_0, q5_1} (median 0.97x fp16,
+# 1.02x quants), because ggml's hand-written VNNI dot-product kernels
+# are separately gated by `GGML_AVX_VNNI=ON` (also OFF by default).
+# Setting these workspace-wide via `[env]` keeps dev and ship builds
+# byte-identical. Override locally for a faster native build with
+# `GGML_NATIVE=ON cargo build --release` if needed.
+#
+# whisper-rs-sys forwards any `GGML_*` env var to CMake as `-D...` (see
+# whisper-rs-sys-0.15.0/build.rs:278-287). The `cmake` crate documents
+# `[env]` table values are only set if not already present in the
+# inherited environment, so the override above is non-destructive.
 [env]
 CFLAGS = "-Os -ffunction-sections -fdata-sections"
 CXXFLAGS = "-Os -ffunction-sections -fdata-sections"
+GGML_NATIVE = "OFF"
+GGML_AVX = "ON"
+GGML_AVX2 = "ON"
+GGML_FMA = "ON"
+GGML_F16C = "ON"
+GGML_BMI2 = "ON"

@@ -246,9 +246,15 @@ jobs:
           # Swatinem's default key only varies on `runner.os` ("Linux");
           # different glibc generations and different feature sets must
           # not share cached build-script binaries.
-          key: size-budget-ubuntu-22.04-${{ matrix.variant }}
+          # `-portable` suffix mirrors release.yml — busts cache for the
+          # GGML_NATIVE=OFF baseline rolled in via .cargo/config.toml [env].
+          key: size-budget-ubuntu-22.04-${{ matrix.variant }}-portable
 
       - name: Build canonical ship binary
+        # GGML ISA baseline (GGML_NATIVE=OFF + AVX2/FMA/F16C/BMI2) is
+        # inherited from `.cargo/config.toml`; keep this build identical to
+        # what release.yml produces so the size budget reflects the actual
+        # shipped artefact.
         run: |
           extra=""
           if [ -n "${{ matrix.features }}" ]; then
