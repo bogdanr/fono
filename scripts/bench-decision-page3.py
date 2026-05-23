@@ -311,7 +311,40 @@ p.desc{color:var(--muted);font-size:13px;margin-bottom:14px;max-width:880px}
 .findings code{background:var(--bg3);padding:1px 5px;border-radius:3px;font-size:12px}
 
 .chart-box{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:18px}
-.chart-box canvas{width:100%!important}
+.chart-box canvas{width:100%!important;height:var(--ch-h,320px)!important;display:block}
+.chart-box.ch-sweep{--ch-h:260px}
+.chart-box.ch-quant{--ch-h:300px}
+.chart-box.ch-cpu-vk{--ch-h:360px}
+.chart-box.ch-scatter{--ch-h:440px}
+/* Decision-quadrant chart */
+.chart-box.ch-quad{--ch-h:380px}
+.quad-controls{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:12px;padding:10px 12px;background:var(--bg3);border-radius:6px;font-size:12px;align-items:flex-end}
+.quad-controls label{display:flex;flex-direction:column;gap:4px;flex:1;min-width:220px}
+.quad-controls .lbl-top{display:flex;justify-content:space-between;color:var(--muted)}
+.quad-controls .lbl-top .val{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+.quad-controls input[type=range]{width:100%;accent-color:var(--blue)}
+.quad-controls .reset-btn{background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer}
+.quad-controls .reset-btn:hover{background:var(--border)}
+.quad-controls .reset-btn.active{background:var(--blue);border-color:var(--blue);color:#fff}
+.quad-controls .reset-btn.active:hover{background:#1f6feb}
+.quad-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:6px;margin-bottom:18px}
+.quad-card{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:10px 12px;font-size:11px;max-height:260px;overflow-y:auto}
+.quad-card h4{font-size:12px;margin:0 0 6px;font-weight:600;display:flex;justify-content:space-between;align-items:baseline;text-transform:uppercase;letter-spacing:.04em}
+.quad-card h4 .count{background:var(--bg3);color:var(--muted);padding:1px 7px;border-radius:8px;font-size:10px;font-weight:600;letter-spacing:0}
+.quad-card.q-ship{border-left:3px solid var(--green)}
+.quad-card.q-ship h4{color:var(--green)}
+.quad-card.q-fast{border-left:3px solid var(--yellow)}
+.quad-card.q-fast h4{color:var(--yellow)}
+.quad-card.q-slow{border-left:3px solid var(--orange)}
+.quad-card.q-slow h4{color:var(--orange)}
+.quad-card.q-bad{border-left:3px solid var(--red)}
+.quad-card.q-bad h4{color:var(--red)}
+.quad-card ul{list-style:none;padding:0;margin:0}
+.quad-card li{padding:3px 0;border-bottom:1px dotted var(--border);display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:baseline}
+.quad-card li:last-child{border-bottom:none}
+.quad-card li .name{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.quad-card li .met{color:var(--muted);font-variant-numeric:tabular-nums;font-size:10px}
+.quad-empty{color:var(--muted);font-style:italic;padding:6px 0;text-align:center}
 .two-col{display:grid;grid-template-columns:1fr 1fr;gap:18px}
 @media (max-width:900px){.two-col{grid-template-columns:1fr}}
 
@@ -428,14 +461,16 @@ footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--border);color
   <div id="speed-sweep"></div>
 
   <!-- 3. Quant speedup -->
-  <h2>3 · Quant Speedup vs fp16 — VNNI vs avx2-fallback hosts</h2>
+  <h2>3 · Quant Speedup vs fp16 — CPU build, VNNI vs avx2-fallback kernels</h2>
   <p class="desc">
-    Ratio = <code>(quant batch RTF) ÷ (fp16 batch RTF)</code>. A value of 1.0 means
-    no speedup; values &gt;1 mean the quantised model runs faster. Hosts with
-    AVX-VNNI (Alder Lake+, Ryzen Zen3+) execute integer-quant kernels in vector
-    units; pre-VNNI hosts fall back to scalar paths.
+    Ratio = <code>(quant batch RTF) ÷ (fp16 batch RTF)</code>, aggregated across all
+    measured <code>(host, model)</code> pairs that ran on the CPU build. Bars show
+    the median; thin whiskers span min→max; <code>n</code> is the sample count.
+    Hosts with AVX-VNNI (Alder Lake+, Ryzen Zen3+) execute integer-quant kernels
+    in vector units; pre-VNNI hosts fall back to scalar paths. Vulkan rows are
+    excluded here — see chart 4 for the CPU-vs-Vulkan comparison.
   </p>
-  <div class="chart-box"><canvas id="quant-speedup" height="280"></canvas></div>
+  <div class="chart-box ch-quant"><canvas id="quant-speedup"></canvas></div>
 
   <!-- 4. CPU vs Vulkan paired -->
   <h2>4 · CPU vs Vulkan — batch RTF and speedup</h2>
@@ -443,10 +478,59 @@ footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--border);color
     Paired bars per (host, model, quant) where both backends have data.
     Speedup = <code>Vulkan RTF ÷ CPU RTF</code> (&gt;1 means Vulkan faster).
   </p>
-  <div class="chart-box"><canvas id="cpu-vulkan" height="320"></canvas></div>
+  <div class="chart-box ch-cpu-vk"><canvas id="cpu-vulkan"></canvas></div>
 
-  <!-- 5. Coverage matrix -->
-  <h2>5 · Coverage Matrix — what's measured, what's missing</h2>
+  <!-- 5. Speed vs accuracy scatter -->
+  <h2>5 · Speed vs Accuracy — picking a model per host</h2>
+  <p class="desc">
+    One point per measured <code>(host, build, model, quant, language)</code>
+    cell. X = English WER (lower is better, leftmost is most accurate);
+    Y = batch RTF (higher is faster, log scale). The <strong>top-left</strong>
+    is the sweet spot. Colour = host; circle = CPU build, triangle = Vulkan
+    build. Marker size grows with model family (tiny→turbo). Horizontal lines
+    mark <code>batch RTF = 1.0</code> (keeps up live) and <code>2.0</code>
+    (comfortable). Hover any point for full details including <code>Δ</code>
+    accuracy vs that cell's fp16 baseline. Click legend entries to hide/show
+    individual host/build pairs.
+  </p>
+  <div class="chart-box ch-scatter"><canvas id="speed-accuracy"></canvas></div>
+
+  <!-- 6. Decision quadrants -->
+  <h2>6 · Decision Quadrants — interactive accuracy/speed thresholds</h2>
+  <p class="desc">
+    Drag the sliders to set your accuracy ceiling (max WER) and speed floor
+    (min batch RTF). Every measured cell falls into one of four quadrants:
+    <strong style="color:var(--green)">Ship it</strong> (low WER + high RTF, top-left),
+    <strong style="color:var(--yellow)">Fast but inaccurate</strong> (top-right),
+    <strong style="color:var(--orange)">Accurate but slow</strong> (bottom-left), or
+    <strong style="color:var(--red)">Unusable</strong> (bottom-right) — shown
+    as faint background tints. Dot <strong>shape and colour</strong> encode the
+    model family: <span style="color:#bc8cff">● tiny</span> ·
+    <span style="color:#58a6ff">▲ base</span> ·
+    <span style="color:#00c3ad">◆ small</span> ·
+    <span style="color:#ff7eb6">★ turbo</span> (also reflected in the legend).
+    The lists below show exactly which <code>(host, build, model, quant)</code>
+    cells land in each quadrant.
+  </p>
+  <div class="chart-box ch-quad">
+    <div class="quad-controls">
+      <label>
+        <span class="lbl-top">Max WER (accuracy ceiling) <span class="val" id="quad-wer-val">—</span></span>
+        <input type="range" id="quad-wer" min="0" max="0.5" step="0.01" value="0.10">
+      </label>
+      <label>
+        <span class="lbl-top">Min batch RTF (speed floor) <span class="val" id="quad-rtf-val">—</span></span>
+        <input type="range" id="quad-rtf" min="0.5" max="10" step="0.1" value="2.0">
+      </label>
+      <button class="reset-btn" id="quad-best-toggle" onclick="toggleBestPerHost()" title="Keep only the largest, most-accurate model per host within each quadrant">Best per host</button>
+      <button class="reset-btn" onclick="resetQuadrants()">Reset</button>
+    </div>
+    <canvas id="quadrant-chart"></canvas>
+  </div>
+  <div class="quad-grid" id="quad-drill"></div>
+
+  <!-- 7. Coverage matrix -->
+  <h2>7 · Coverage Matrix — what's measured, what's missing</h2>
   <p class="desc">
     Rows = hosts. Columns = (backend × family × language × quant). Green ≥2
     iterations, yellow = 1, grey = not measured. Use this to plan the next
@@ -454,8 +538,8 @@ footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--border);color
   </p>
   <div class="heatmap-wrap"><table class="coverage" id="coverage"></table></div>
 
-  <!-- 6. Full table -->
-  <h2>6 · Full Data Table</h2>
+  <!-- 8. Full table -->
+  <h2>8 · Full Data Table</h2>
   <p class="desc">Click headers to sort. Filters above apply here too.</p>
   <div class="tbl-wrap">
     <table class="data-tbl" id="data-table">
@@ -484,6 +568,8 @@ footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--border);color
     <a href="../../2026-05-19-perf-pass/summary/calibration2.html">calibration2.html</a>.
     Higher RTF = faster. All annotations sourced from <code>THRESH</code>:
     batch_comfort=[[BATCH_COMFORT]], stream_comfort=[[STREAM_COMFORT]].
+    See also: <a href="auto-select.html">Auto-Select Policy Explorer →</a>
+    (turns this matrix into shipped model-picking rules).
   </footer>
 </div>
 
@@ -753,10 +839,10 @@ function buildSpeedSweep() {
     if (!nonEmpty.length) return;
 
     const box = document.createElement('div');
-    box.className = 'chart-box';
+    box.className = 'chart-box ch-sweep';
     const meta = HOST_META[host] || {};
     box.innerHTML = `<h3>${host} · ${meta.released||'?'} · ${meta.quant_kernel||'?'} · ${build}</h3>`
-                  + `<canvas height="220"></canvas>`;
+                  + `<canvas></canvas>`;
     container.appendChild(box);
     const ctx = box.querySelector('canvas').getContext('2d');
     speedCharts.push(new Chart(ctx, {
@@ -764,6 +850,7 @@ function buildSpeedSweep() {
       data: { labels: variants.map(v => v.label), datasets: nonEmpty },
       options: {
         responsive: true,
+        maintainAspectRatio: false,
         plugins: {
           legend: { position:'bottom', labels:{color:'#8b949e',boxWidth:12} },
           tooltip: { callbacks: { label: i => `${i.dataset.label}: ${fmt2(i.raw)}× batch RTF` } },
@@ -787,56 +874,119 @@ function buildSpeedSweep() {
 
 // ─── 3. Quant speedup (vs fp16) ────────────────────────────────────────────
 let quantSpeedupChart = null;
+const KERNEL_CLR = {'vnni':'#58a6ff','avx2-fallback':'#ff8c00'};
+const KERNELS_ORDER = ['vnni','avx2-fallback'];
+const QUANTS_FOR_SPEEDUP = ['q8_0','q5_1','q5_0'];
+
+const whiskerPlugin = {
+  id: 'whiskers',
+  afterDatasetsDraw(chart) {
+    const {ctx} = chart;
+    chart.data.datasets.forEach((ds, di) => {
+      const meta = chart.getDatasetMeta(di);
+      meta.data.forEach((bar, bi) => {
+        const stats = ds._stats && ds._stats[bi];
+        if (!stats || stats.n == null) return;
+        const x = bar.x;
+        const yMin = chart.scales.y.getPixelForValue(stats.min);
+        const yMax = chart.scales.y.getPixelForValue(stats.max);
+        ctx.save();
+        ctx.strokeStyle = '#e6edf3aa';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, yMin); ctx.lineTo(x, yMax);
+        ctx.moveTo(x-5, yMin); ctx.lineTo(x+5, yMin);
+        ctx.moveTo(x-5, yMax); ctx.lineTo(x+5, yMax);
+        ctx.stroke();
+        ctx.fillStyle = '#8b949e';
+        ctx.font = '10px -apple-system,sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(`n=${stats.n}`, x, yMax - 6);
+        ctx.restore();
+      });
+    });
+  }
+};
+
 function buildQuantSpeedup() {
-  const cells = filteredCells();
-  // For each (host, build, model_base): compute quant/fp16 ratio
-  const groups = {};  // (host, build, model_base) → {fp16, q8_0, q5_1, q5_0}
+  // CPU build only — Vulkan kernels are unrelated to AVX-VNNI.
+  const cells = filteredCells().filter(c => c.build === 'cpu' && c.batch_rtf_median);
+  const fp16By = {};
   cells.forEach(c => {
-    if (!c.batch_rtf_median) return;
-    const k = `${c.host}||${c.build}||${c.model_base}`;
-    if (!groups[k]) groups[k] = {host:c.host, build:c.build, base:c.model_base, family:c.model_family, kernel:(HOST_META[c.host]||{}).quant_kernel};
-    if (groups[k][c.quantization] == null) groups[k][c.quantization] = c.batch_rtf_median;
+    if (c.quantization !== 'fp16') return;
+    fp16By[`${c.host}||${c.model_base}`] = c.batch_rtf_median;
+  });
+  const buckets = {};
+  cells.forEach(c => {
+    if (c.quantization === 'fp16') return;
+    if (!QUANTS_FOR_SPEEDUP.includes(c.quantization)) return;
+    const base = fp16By[`${c.host}||${c.model_base}`];
+    if (!base) return;
+    const kernel = (HOST_META[c.host]||{}).quant_kernel;
+    if (!kernel) return;
+    const k = `${kernel}||${c.quantization}`;
+    (buckets[k] = buckets[k] || []).push(c.batch_rtf_median / base);
   });
 
-  // Build bar chart: x = (host/family/lang/build), bars per quant
-  const entries = Object.values(groups).filter(g => g.fp16 != null);
-  // Sort by kernel (vnni first), then host year, then family
-  entries.sort((a,b) => {
-    if ((a.kernel==='vnni') !== (b.kernel==='vnni')) return a.kernel==='vnni' ? -1 : 1;
-    const ya = (HOST_META[a.host]||{}).released||'9999';
-    const yb = (HOST_META[b.host]||{}).released||'9999';
-    if (ya !== yb) return String(ya).localeCompare(String(yb));
-    return a.base.localeCompare(b.base);
+  const median = arr => {
+    const s = [...arr].sort((a,b)=>a-b);
+    const n = s.length;
+    return n % 2 ? s[(n-1)/2] : (s[n/2-1] + s[n/2]) / 2;
+  };
+
+  const datasets = KERNELS_ORDER.map(kernel => {
+    const data = [], stats = [];
+    QUANTS_FOR_SPEEDUP.forEach(q => {
+      const arr = buckets[`${kernel}||${q}`] || [];
+      if (!arr.length) { data.push(null); stats.push(null); return; }
+      data.push(+median(arr).toFixed(2));
+      stats.push({n: arr.length, min: +Math.min(...arr).toFixed(2), max: +Math.max(...arr).toFixed(2)});
+    });
+    return {
+      label: kernel,
+      data, _stats: stats,
+      backgroundColor: KERNEL_CLR[kernel]+'cc',
+      borderColor: KERNEL_CLR[kernel],
+      borderWidth: 1,
+      categoryPercentage: 0.7,
+      barPercentage: 0.9,
+    };
   });
 
-  const labels = entries.map(g => `${g.host}/${g.build}/${g.base}`);
-  const datasets = ['q8_0','q5_1','q5_0'].map(q => ({
-    label: q,
-    data: entries.map(g => g[q] != null ? +(g[q]/g.fp16).toFixed(3) : null),
-    backgroundColor: QUANT_CLR[q]+'cc',
-    borderColor: QUANT_CLR[q],
-    borderWidth: 1,
-  }));
+  let dataMax = 1;
+  datasets.forEach(ds => ds.data.forEach(v => { if (v != null && v > dataMax) dataMax = v; }));
+  const yMax = Math.min(5, Math.ceil(dataMax + 0.5));
 
   const ctx = document.getElementById('quant-speedup').getContext('2d');
   if (quantSpeedupChart) quantSpeedupChart.destroy();
   quantSpeedupChart = new Chart(ctx, {
     type: 'bar',
-    data: { labels, datasets },
+    data: { labels: QUANTS_FOR_SPEEDUP, datasets },
+    plugins: [whiskerPlugin],
     options: {
       responsive: true,
+      maintainAspectRatio: false,
       plugins: {
         legend: { position:'bottom', labels:{color:'#8b949e',boxWidth:12} },
-        tooltip: { callbacks: { label: i => `${i.dataset.label}: ${fmt2(i.raw)}× vs fp16` } },
+        tooltip: {
+          callbacks: {
+            label: i => {
+              const s = i.dataset._stats && i.dataset._stats[i.dataIndex];
+              if (!s) return `${i.dataset.label}: no data`;
+              return `${i.dataset.label} · ${i.label}: median ${fmt2(i.raw)}× (min ${fmt2(s.min)}× · max ${fmt2(s.max)}× · n=${s.n})`;
+            }
+          }
+        },
         annotation: {
           annotations: {
-            unity: { type:'line', yMin:1, yMax:1, borderColor:'#8b949e88', borderWidth:1, borderDash:[4,4], label:{content:'1× (no speedup)',display:true,color:'#8b949e',font:{size:10}} }
+            unity:   { type:'line', yMin:1, yMax:1, borderColor:'#8b949e88', borderWidth:1, borderDash:[4,4], label:{content:'1× (no speedup)',display:true,color:'#8b949e',font:{size:10},position:'start'} },
+            doubled: { type:'line', yMin:2, yMax:2, borderColor:'#3fb95066', borderWidth:1, borderDash:[2,4], label:{content:'2× (doubles throughput)',display:true,color:'#3fb950',font:{size:10},position:'start'} },
           }
         }
       },
       scales: {
-        x: { ticks:{color:'#8b949e',maxRotation:60,font:{size:10}}, grid:{color:'#21262d'} },
-        y: { type:'logarithmic', title:{display:true,text:'Quant RTF ÷ fp16 RTF (higher = quant faster)',color:'#8b949e'}, ticks:{color:'#8b949e'}, grid:{color:'#21262d'} }
+        x: { title:{display:true,text:'Quantisation',color:'#8b949e'}, ticks:{color:'#8b949e',font:{size:12}}, grid:{color:'#21262d'} },
+        y: { type:'linear', min:0, max:yMax, title:{display:true,text:'Median batch RTF ÷ fp16 RTF (higher = quant faster)',color:'#8b949e'}, ticks:{color:'#8b949e'}, grid:{color:'#21262d'} }
       }
     }
   });
@@ -880,6 +1030,7 @@ function buildCpuVulkan() {
     },
     options: {
       responsive: true,
+      maintainAspectRatio: false,
       plugins: {
         legend: { position:'bottom', labels:{color:'#8b949e',boxWidth:12} },
         tooltip: {
@@ -900,7 +1051,310 @@ function buildCpuVulkan() {
   });
 }
 
-// ─── 5. Coverage matrix ────────────────────────────────────────────────────
+// ─── 5. Speed vs accuracy scatter ──────────────────────────────────────────
+const HOST_PALETTE = ['#58a6ff','#3fb950','#bc8cff','#ff8c00','#00c3ad','#f85149','#d29922'];
+const FAMILY_SIZE = {tiny:5, base:7, small:9, turbo:11};
+let speedAccChart = null;
+
+function buildSpeedAccuracy() {
+  const cells = filteredCells().filter(c =>
+    c.batch_rtf_median != null && c.accuracy_en_mean != null
+  );
+
+  const hosts = HOSTS_BY_YEAR.filter(h => cells.some(c => c.host === h));
+  const hostColor = {};
+  hosts.forEach((h, i) => { hostColor[h] = HOST_PALETTE[i % HOST_PALETTE.length]; });
+
+  // One dataset per (host, build) so the legend lets users toggle either axis.
+  const datasets = [];
+  hosts.forEach(host => {
+    ['cpu','vulkan'].forEach(build => {
+      const pts = cells.filter(c => c.host === host && c.build === build);
+      if (!pts.length) return;
+      const meta = HOST_META[host] || {};
+      datasets.push({
+        label: `${host} (${meta.quant_kernel||'?'}) · ${build}`,
+        data: pts.map(c => ({ x: c.accuracy_en_mean, y: c.batch_rtf_median, _cell: c })),
+        backgroundColor: hostColor[host] + (build === 'cpu' ? 'cc' : '66'),
+        borderColor: hostColor[host],
+        borderWidth: build === 'vulkan' ? 1.5 : 1,
+        pointStyle: build === 'cpu' ? 'circle' : 'triangle',
+        pointRadius: ctx => FAMILY_SIZE[(ctx.raw && ctx.raw._cell || {}).model_family] || 6,
+        pointHoverRadius: ctx => (FAMILY_SIZE[(ctx.raw && ctx.raw._cell || {}).model_family] || 6) + 2,
+      });
+    });
+  });
+
+  const ctx = document.getElementById('speed-accuracy').getContext('2d');
+  if (speedAccChart) speedAccChart.destroy();
+  if (!datasets.length) {
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    ctx.fillStyle = '#8b949e';
+    ctx.font = '13px -apple-system,sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('No data matches current filters.', ctx.canvas.width/2, 60);
+    return;
+  }
+
+  speedAccChart = new Chart(ctx, {
+    type: 'scatter',
+    data: { datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { position:'bottom', labels:{color:'#8b949e',boxWidth:12,font:{size:11}} },
+        tooltip: {
+          callbacks: {
+            title: items => {
+              const c = items[0].raw._cell;
+              return `${c.host} · ${c.build} · ${c.model} (${c.quantization})`;
+            },
+            label: i => {
+              const c = i.raw._cell;
+              const delta = c.delta_en_mean != null ? fmtSign(c.delta_en_mean) : '—';
+              return [
+                `WER (EN): ${fmt3(c.accuracy_en_mean)} · Δ vs fp16: ${delta}`,
+                `Batch RTF: ${fmt2(c.batch_rtf_median)}× · Stream RTF: ${fmt2(c.stream_rtf_median)}×`,
+                `RSS: ${Math.round(c.peak_rss_mib_median||0)} MiB · verdict: ${c.verdict}`,
+              ];
+            }
+          }
+        },
+        annotation: {
+          annotations: {
+            batchOk:      { type:'line', yMin:THRESH.batch_ok,      yMax:THRESH.batch_ok,      borderColor:'#d2992288', borderWidth:1, borderDash:[4,4], label:{content:`batch=${THRESH.batch_ok} (keeps up live)`, display:true, color:'#d29922', font:{size:10}, position:'end'} },
+            batchComfort: { type:'line', yMin:THRESH.batch_comfort, yMax:THRESH.batch_comfort, borderColor:'#3fb95088', borderWidth:1, borderDash:[4,4], label:{content:`batch≥${THRESH.batch_comfort} (comfortable)`, display:true, color:'#3fb950', font:{size:10}, position:'end'} },
+          }
+        }
+      },
+      scales: {
+        x: {
+          type:'linear', min:0,
+          title:{display:true,text:'English WER (lower = more accurate, leftmost = best)',color:'#8b949e'},
+          ticks:{color:'#8b949e',callback:v=>(+v).toFixed(2)}, grid:{color:'#21262d'}
+        },
+        y: {
+          type:'logarithmic',
+          title:{display:true,text:'Batch RTF (higher = faster, log)',color:'#8b949e'},
+          ticks:{color:'#8b949e'}, grid:{color:'#21262d'}
+        }
+      }
+    }
+  });
+}
+
+// ─── 6. Decision quadrants ─────────────────────────────────────────────────
+const QUADRANT_STATE = { maxWer: 0.10, minRtf: 2.0, bestPerHost: false };
+let quadrantChart = null;
+
+// Family rank for the "best per host" filter: larger model wins, then lower WER.
+const FAMILY_RANK = {tiny:1, base:2, small:3, turbo:4};
+
+// Visual encoding of model family: distinct shape + colour for legend.
+const FAMILY_STYLE = {
+  tiny:  {color:'#bc8cff', shape:'circle'},
+  base:  {color:'#58a6ff', shape:'triangle'},
+  small: {color:'#00c3ad', shape:'rectRot'},  // diamond
+  turbo: {color:'#ff7eb6', shape:'star'},
+};
+const FAMS_ORDER = ['tiny','base','small','turbo'];
+
+function pickBestPerHost(cells) {
+  const byHost = {};
+  cells.forEach(c => {
+    const cur = byHost[c.host];
+    if (!cur) { byHost[c.host] = c; return; }
+    const ra = FAMILY_RANK[c.model_family] || 0;
+    const re = FAMILY_RANK[cur.model_family] || 0;
+    if (ra > re) byHost[c.host] = c;
+    else if (ra === re && (c.accuracy_en_mean ?? 1) < (cur.accuracy_en_mean ?? 1)) byHost[c.host] = c;
+  });
+  return Object.values(byHost);
+}
+
+// Quadrant predicates assume the (WER, batchRTF) point space.
+// Top-left = best (low WER, high RTF); bottom-right = worst.
+const QUAD_DEFS = [
+  { key:'ship', label:'Ship it',             color:'#3fb950',
+    cond:(c,s) => c.accuracy_en_mean <= s.maxWer && c.batch_rtf_median >= s.minRtf },
+  { key:'fast', label:'Fast but inaccurate', color:'#d29922',
+    cond:(c,s) => c.accuracy_en_mean >  s.maxWer && c.batch_rtf_median >= s.minRtf },
+  { key:'slow', label:'Accurate but slow',   color:'#ff8c00',
+    cond:(c,s) => c.accuracy_en_mean <= s.maxWer && c.batch_rtf_median <  s.minRtf },
+  { key:'bad',  label:'Unusable',            color:'#f85149',
+    cond:(c,s) => c.accuracy_en_mean >  s.maxWer && c.batch_rtf_median <  s.minRtf },
+];
+
+function buildDecisionQuadrants() {
+  const cells = filteredCells().filter(c =>
+    c.batch_rtf_median != null && c.accuracy_en_mean != null
+  );
+  const s = QUADRANT_STATE;
+
+  // Live-update slider value labels (they may not exist yet on first call)
+  const werValEl = document.getElementById('quad-wer-val');
+  const rtfValEl = document.getElementById('quad-rtf-val');
+  if (werValEl) werValEl.textContent = s.maxWer.toFixed(2);
+  if (rtfValEl) rtfValEl.textContent = s.minRtf.toFixed(1) + '×';
+
+  // Bucket cells by quadrant
+  const buckets = {ship:[], fast:[], slow:[], bad:[]};
+  cells.forEach(c => {
+    const q = QUAD_DEFS.find(d => d.cond(c, s));
+    if (q) buckets[q.key].push(c);
+  });
+
+  // "Best per host" mode: within each quadrant, keep one winner per host
+  // (largest model family, tiebreak by lowest WER).
+  if (s.bestPerHost) {
+    Object.keys(buckets).forEach(k => { buckets[k] = pickBestPerHost(buckets[k]); });
+  }
+
+  // Determine X range so the chart breathes (cap at 0.5, never below 0.2)
+  const xs = cells.map(c => c.accuracy_en_mean);
+  const xObserved = xs.length ? Math.max(...xs) : 0.2;
+  const xMax = Math.max(0.2, Math.min(1.0, Math.ceil((xObserved + 0.05) * 10) / 10));
+
+  // Group cells across all quadrants by model family (shape + colour
+  // dataset partitioning). Quadrant membership stays visible via the
+  // background tints below.
+  const allInQuadrants = [].concat(buckets.ship, buckets.fast, buckets.slow, buckets.bad);
+  const byFamily = {};
+  allInQuadrants.forEach(c => {
+    const f = c.model_family || 'unknown';
+    (byFamily[f] = byFamily[f] || []).push(c);
+  });
+  const datasets = FAMS_ORDER.filter(f => (byFamily[f] || []).length).map(f => {
+    const style = FAMILY_STYLE[f];
+    return {
+      label: `${f} (${byFamily[f].length})`,
+      data: byFamily[f].map(c => ({ x: c.accuracy_en_mean, y: c.batch_rtf_median, _cell: c })),
+      backgroundColor: style.color + 'cc',
+      borderColor: style.color,
+      borderWidth: 1.5,
+      pointStyle: style.shape,
+      pointRadius: 6,
+      pointHoverRadius: 9,
+      hitRadius: 12,
+    };
+  });
+
+  // Translucent quadrant tints (slightly stronger now that dots no longer carry
+  // the quadrant colour) + visible threshold lines.
+  const ann = {
+    qShip: { type:'box', xMin:0,        xMax:s.maxWer, yMin:s.minRtf, yMax:1e6,      backgroundColor:'#3fb95022', borderWidth:0, drawTime:'beforeDatasetsDraw' },
+    qFast: { type:'box', xMin:s.maxWer, xMax:1,        yMin:s.minRtf, yMax:1e6,      backgroundColor:'#d2992222', borderWidth:0, drawTime:'beforeDatasetsDraw' },
+    qSlow: { type:'box', xMin:0,        xMax:s.maxWer, yMin:0,        yMax:s.minRtf, backgroundColor:'#ff8c0022', borderWidth:0, drawTime:'beforeDatasetsDraw' },
+    qBad:  { type:'box', xMin:s.maxWer, xMax:1,        yMin:0,        yMax:s.minRtf, backgroundColor:'#f8514922', borderWidth:0, drawTime:'beforeDatasetsDraw' },
+    werLine: { type:'line', xMin:s.maxWer, xMax:s.maxWer, borderColor:'#e6edf366', borderWidth:1, borderDash:[4,4], label:{content:`WER ≤ ${s.maxWer.toFixed(2)}`, display:true, color:'#e6edf3', backgroundColor:'#161b22cc', font:{size:10}, position:'start'} },
+    rtfLine: { type:'line', yMin:s.minRtf, yMax:s.minRtf, borderColor:'#e6edf366', borderWidth:1, borderDash:[4,4], label:{content:`batch ≥ ${s.minRtf.toFixed(1)}×`, display:true, color:'#e6edf3', backgroundColor:'#161b22cc', font:{size:10}, position:'end'} },
+  };
+  const ctx = document.getElementById('quadrant-chart').getContext('2d');
+  if (quadrantChart) quadrantChart.destroy();
+  quadrantChart = new Chart(ctx, {
+    type:'scatter',
+    data:{ datasets },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      interaction:{ mode:'nearest', intersect:false, axis:'xy' },
+      plugins:{
+        legend:{ position:'bottom', labels:{color:'#8b949e',boxWidth:14,boxHeight:14,usePointStyle:true,font:{size:12}} },
+        tooltip:{
+          callbacks:{
+            title: items => {
+              const c = items[0].raw._cell;
+              return `${c.host} · ${c.build} · ${c.model} (${c.quantization})`;
+            },
+            label: i => {
+              const c = i.raw._cell;
+              return [
+                `WER (EN): ${fmt3(c.accuracy_en_mean)}`,
+                `Batch RTF: ${fmt2(c.batch_rtf_median)}×`,
+                `Verdict: ${c.verdict}`,
+              ];
+            }
+          }
+        },
+        annotation:{ annotations: ann },
+      },
+      scales:{
+        x:{ type:'linear', min:0, max:xMax,
+            title:{display:true,text:'English WER (lower = more accurate)',color:'#8b949e'},
+            ticks:{color:'#8b949e',callback:v=>(+v).toFixed(2)}, grid:{color:'#21262d'} },
+        y:{ type:'logarithmic',
+            title:{display:true,text:'Batch RTF (higher = faster, log)',color:'#8b949e'},
+            ticks:{color:'#8b949e'}, grid:{color:'#21262d'} },
+      }
+    }
+  });
+
+  buildQuadrantDrill(buckets);
+}
+
+function buildQuadrantDrill(buckets) {
+  const drill = document.getElementById('quad-drill');
+  if (!drill) return;
+  drill.innerHTML = QUAD_DEFS.map(q => {
+    const items = buckets[q.key] || [];
+    // Sort best-first per quadrant: low WER then high RTF
+    items.sort((a,b) =>
+      (a.accuracy_en_mean||1) - (b.accuracy_en_mean||1) ||
+      (b.batch_rtf_median||0) - (a.batch_rtf_median||0));
+    const MAX = 25;
+    const rows = items.slice(0, MAX).map(c =>
+      `<li><span class="name">${c.host} · ${c.build} · ${c.model} <span style="color:var(--muted)">(${c.quantization})</span></span>`
+      + `<span class="met">WER ${fmt3(c.accuracy_en_mean)}</span>`
+      + `<span class="met">${fmt2(c.batch_rtf_median)}×</span></li>`).join('');
+    const more = items.length > MAX
+      ? `<li class="quad-empty">… ${items.length - MAX} more (refine filters to narrow)</li>`
+      : '';
+    const body = items.length
+      ? `<ul>${rows}${more}</ul>`
+      : `<div class="quad-empty">No models in this quadrant at current thresholds.</div>`;
+    return `<div class="quad-card q-${q.key}">`
+      + `<h4>${q.label} <span class="count">${items.length}</span></h4>${body}</div>`;
+  }).join('');
+}
+
+function resetQuadrants() {
+  QUADRANT_STATE.maxWer = 0.10;
+  QUADRANT_STATE.minRtf = 2.0;
+  QUADRANT_STATE.bestPerHost = false;
+  const werEl = document.getElementById('quad-wer');
+  const rtfEl = document.getElementById('quad-rtf');
+  const bestEl = document.getElementById('quad-best-toggle');
+  if (werEl) werEl.value = '0.10';
+  if (rtfEl) rtfEl.value = '2.0';
+  if (bestEl) bestEl.classList.remove('active');
+  buildDecisionQuadrants();
+}
+
+function toggleBestPerHost() {
+  QUADRANT_STATE.bestPerHost = !QUADRANT_STATE.bestPerHost;
+  const bestEl = document.getElementById('quad-best-toggle');
+  if (bestEl) bestEl.classList.toggle('active', QUADRANT_STATE.bestPerHost);
+  buildDecisionQuadrants();
+}
+
+function initQuadrantSliders() {
+  const werEl = document.getElementById('quad-wer');
+  const rtfEl = document.getElementById('quad-rtf');
+  if (!werEl || !rtfEl) return;
+  // Sync initial state with the DOM defaults
+  QUADRANT_STATE.maxWer = parseFloat(werEl.value);
+  QUADRANT_STATE.minRtf = parseFloat(rtfEl.value);
+  werEl.addEventListener('input', () => {
+    QUADRANT_STATE.maxWer = parseFloat(werEl.value);
+    buildDecisionQuadrants();
+  });
+  rtfEl.addEventListener('input', () => {
+    QUADRANT_STATE.minRtf = parseFloat(rtfEl.value);
+    buildDecisionQuadrants();
+  });
+}
+
+// ─── 7. Coverage matrix ────────────────────────────────────────────────────
 function buildCoverage() {
   const tbl = document.getElementById('coverage');
   const hosts = HOSTS_BY_YEAR;
@@ -944,7 +1398,7 @@ function buildCoverage() {
   tbl.innerHTML = h;
 }
 
-// ─── 6. Table ──────────────────────────────────────────────────────────────
+// ─── 8. Table ──────────────────────────────────────────────────────────────
 let sortCol = 'host', sortDir = 1;
 function buildTable() {
   let rows = filteredCells();
@@ -982,6 +1436,8 @@ function renderAll() {
   buildSpeedSweep();
   buildQuantSpeedup();
   buildCpuVulkan();
+  buildSpeedAccuracy();
+  buildDecisionQuadrants();
   buildCoverage();
   buildTable();
 }
@@ -991,6 +1447,7 @@ function waitForChart(tries) {
   if (typeof Chart !== 'undefined') {
     readHash();
     initFilterBar();
+    initQuadrantSliders();
     buildFindings();
     renderAll();
     document.querySelectorAll('#data-table th[data-col]').forEach(th => {

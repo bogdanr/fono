@@ -11,21 +11,21 @@
       "duration_s": 5.0,
       "modes": {
         "batch": {
-          "text": "neglected. The art of war then is governed by five constant factors.",
-          "elapsed_ms": 513,
-          "ttff_ms": 513
+          "text": "be neglected. The art of war then is governed by five constant fact.",
+          "elapsed_ms": 847,
+          "ttff_ms": 847
         },
         "streaming": {
-          "text": "neglected. The art of war then is governed by five constant factors.",
-          "elapsed_ms": 1388,
-          "ttff_ms": 480
+          "text": "be neglected. The art of war then is governed by five constant factors.",
+          "elapsed_ms": 780,
+          "ttff_ms": 296
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.0,
-        "stt_accuracy_levenshtein": 0.0,
-        "ttff_ratio": 0.9356725,
-        "ttc_ratio": 2.705653
+        "stt_levenshtein_norm": 0.04225352,
+        "stt_accuracy_levenshtein": 0.0882353,
+        "ttff_ratio": 0.3494687,
+        "ttc_ratio": 0.9208973
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -38,21 +38,21 @@
       "duration_s": 20.0,
       "modes": {
         "batch": {
-          "text": "be neglected. The art of war then is governed by five constant factors to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field. These are one, the moral law, two, heaven, three, earths, and",
-          "elapsed_ms": 550,
-          "ttff_ms": 550
+          "text": "be neglected. The art of war then is governed by five constant factors to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field. These are one, the moral law, two, heaven, three, earths. [BLANK_AUDIO]",
+          "elapsed_ms": 473,
+          "ttff_ms": 473
         },
         "streaming": {
           "text": "be neglected. The art of war then is governed by five constant factors to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field. These are one, the moral law, two, heaven, three, earths, and",
-          "elapsed_ms": 1536,
-          "ttff_ms": 431
+          "elapsed_ms": 995,
+          "ttff_ms": 211
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.0,
-        "stt_accuracy_levenshtein": 0.03265306,
-        "ttff_ratio": 0.7836364,
-        "ttc_ratio": 2.7927272
+        "stt_levenshtein_norm": 0.043137256,
+        "stt_accuracy_levenshtein": 0.07450981,
+        "ttff_ratio": 0.4460888,
+        "ttc_ratio": 2.103594
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -66,20 +66,20 @@
       "modes": {
         "batch": {
           "text": "The Jane was yielding to the preference which she'd begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general.",
-          "elapsed_ms": 558,
-          "ttff_ms": 558
+          "elapsed_ms": 289,
+          "ttff_ms": 289
         },
         "streaming": {
           "text": "The Jane was yielding to the preference which she'd begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general.",
-          "elapsed_ms": 2254,
-          "ttff_ms": 460
+          "elapsed_ms": 1024,
+          "ttff_ms": 235
         }
       },
       "metrics": {
         "stt_levenshtein_norm": 0.0,
         "stt_accuracy_levenshtein": 0.008510638,
-        "ttff_ratio": 0.82437277,
-        "ttc_ratio": 4.0394263
+        "ttff_ratio": 0.8131488,
+        "ttc_ratio": 3.5432527
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -92,21 +92,21 @@
       "duration_s": 10.0,
       "modes": {
         "batch": {
-          "text": "encouragement. In nine cases out of ten, a woman had better show more affection than she feels. Bingley likes your sister undoubtedly, but he may never do more than she is.",
-          "elapsed_ms": 968,
-          "ttff_ms": 968
+          "text": "encouragement. In nine cases out of ten, a woman had better show more affection than she feels. Bingling likes your sister undoubtedly, but he may never do more than.",
+          "elapsed_ms": 218,
+          "ttff_ms": 218
         },
         "streaming": {
           "text": "encouragement. In nine cases out of ten, a woman had better show more affection than she feels. Bingley likes your sister undoubtedly, but he may never do more than she is.",
-          "elapsed_ms": 2482,
-          "ttff_ms": 465
+          "elapsed_ms": 1304,
+          "ttff_ms": 213
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.0,
-        "stt_accuracy_levenshtein": 0.046511628,
-        "ttff_ratio": 0.4803719,
-        "ttc_ratio": 2.5640495
+        "stt_levenshtein_norm": 0.058139537,
+        "stt_accuracy_levenshtein": 0.024096385,
+        "ttff_ratio": 0.9770642,
+        "ttc_ratio": 5.9816513
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -119,21 +119,21 @@
       "duration_s": 10.0,
       "modes": {
         "batch": {
-          "text": "tocando bien, por un amphibio sandero de cristales y laureles. El silencio sin estrellas, huyendo del sonso nete,",
-          "elapsed_ms": 1178,
-          "ttff_ms": 1178
+          "text": "tocando bien, por un amphibio sandero de cristales y laureles. El silencio sin estrellas, huyendo del son sonete,",
+          "elapsed_ms": 212,
+          "ttff_ms": 212
         },
         "streaming": {
           "text": "tocando bien, por un amphibio sandero de cristales y laureles. El silencio sin estrellas, huyendo del sonso nete,",
-          "elapsed_ms": 1625,
-          "ttff_ms": 477
+          "elapsed_ms": 847,
+          "ttff_ms": 202
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.0,
+        "stt_levenshtein_norm": 0.017699115,
         "stt_accuracy_levenshtein": 0.07079646,
-        "ttff_ratio": 0.4049236,
-        "ttc_ratio": 1.3794568
+        "ttff_ratio": 0.9528302,
+        "ttc_ratio": 3.9952831
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -146,25 +146,25 @@
       "duration_s": 10.0,
       "modes": {
         "batch": {
-          "text": "et à gérer de l'autre, j'avais dû apprendre moi même l'alphabet des avodes. Mais bientôt, elle devait beaucoup plus habillent comme moi à lire cette écriture, où j'avais assez de pain à m'envoquer.",
-          "elapsed_ms": 669,
-          "ttff_ms": 669
+          "text": "et à gère-trude, j'avais dû apprendre moi même l'alphabets des avodes. Mais bientôt, elle devait un beaucoup plus abil comme moi à lire cette écriture, où j'avais assez de pain à m'aura.",
+          "elapsed_ms": 325,
+          "ttff_ms": 325
         },
         "streaming": {
           "text": "et Ã gÃ©rer de l'autre, j'avais dÃ» apprendre moi mÃªme l'alphabet des avodes. Mais bientÃ´t, elle devait beaucoup plus habillent comme moi Ã lire cette Ã©criture, oÃ¹ j'avais assez de pain Ã m'envoquer.",
-          "elapsed_ms": 3094,
-          "ttff_ms": 503
+          "elapsed_ms": 1072,
+          "ttff_ms": 254
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.073891625,
-        "stt_accuracy_levenshtein": 0.17258883,
-        "ttff_ratio": 0.7518685,
-        "ttc_ratio": 4.624813
+        "stt_levenshtein_norm": 0.20197044,
+        "stt_accuracy_levenshtein": 0.16931216,
+        "ttff_ratio": 0.7815385,
+        "ttc_ratio": 3.2984614
       },
-      "verdict": "pass",
+      "verdict": "fail",
       "skip_reason": null,
-      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.3"
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.3; equiv 0.202 > 0.200"
     },
     {
       "fixture": "zh-luxun-kuangren",
@@ -173,21 +173,21 @@
       "duration_s": 10.0,
       "modes": {
         "batch": {
-          "text": "老君遠到來時,人一早遇,父母弟後補一。贏大笑,出事日記二次,為可見當日病狀。",
-          "elapsed_ms": 2490,
-          "ttff_ms": 2490
+          "text": "老君遠到來時 人一早遇 父某地後補一 贏大笑 出事日記二策為可見當日病狀",
+          "elapsed_ms": 235,
+          "ttff_ms": 235
         },
         "streaming": {
           "text": "èåé å°ä¾æ,äººä¸æ©é,ç¶æ¯å¼å¾è£ä¸ãè´å¤§ç¬,åºäºæ¥è¨äºæ¬¡,çºå¯è¦ç¶æ¥ç çã",
-          "elapsed_ms": 3033,
-          "ttff_ms": 548
+          "elapsed_ms": 885,
+          "ttff_ms": 211
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.9622642,
+        "stt_levenshtein_norm": 0.990566,
         "stt_accuracy_levenshtein": 0.5,
-        "ttff_ratio": 0.22008032,
-        "ttc_ratio": 1.2180723
+        "ttff_ratio": 0.8978723,
+        "ttc_ratio": 3.7659574
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -200,25 +200,25 @@
       "duration_s": 10.0,
       "modes": {
         "batch": {
-          "text": "E a urma, cu sa-au, ce le padat de la Dumnezeu si urit, asa si gristol tu pe ce sa lipsi, adam de emparăție si domniate care o avea să patră.",
-          "elapsed_ms": 662,
-          "ttff_ms": 662
+          "text": "\"A urma clisauul ce le padat de la Dumnezeu si urit, asa si gristol tu pe ce sa lipsi atam din barție si domniat de care o avea si pattor si a fost.\"",
+          "elapsed_ms": 302,
+          "ttff_ms": 302
         },
         "streaming": {
           "text": "E a urma, cu sa-au, ce le padat de la Dumnezeu si urit, asa si gristol tu pe ce sa lipsi, adam de emparÄÈie si domniate care o avea sÄ patrÄ.",
-          "elapsed_ms": 4429,
-          "ttff_ms": 1155
+          "elapsed_ms": 1697,
+          "ttff_ms": 955
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.055172414,
-        "stt_accuracy_levenshtein": 0.375,
-        "ttff_ratio": 1.744713,
-        "ttc_ratio": 6.6903324
+        "stt_levenshtein_norm": 0.24161074,
+        "stt_accuracy_levenshtein": 0.34228188,
+        "ttff_ratio": 3.1622517,
+        "ttc_ratio": 5.6192055
       },
       "verdict": "fail",
       "skip_reason": null,
-      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.3; acc 0.375 > 0.300"
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.3; acc 0.342 > 0.300"
     },
     {
       "fixture": "ro-man",
@@ -227,21 +227,21 @@
       "duration_s": 12.42,
       "modes": {
         "batch": {
-          "text": "La învăța muntul desidurata normala la studilor universitare de licențe este de 3/4-anci cu respunde 1 in număate 6-ește credite de studit transferable pentru un an de studiu.",
-          "elapsed_ms": 1322,
-          "ttff_ms": 1322
+          "text": "La învăța muntul desidurata normala la studilor universitare de licenze este de 3/4-anci cu respunde 1 in 16 de credite de studit transferable pentru un an de studiu.",
+          "elapsed_ms": 298,
+          "ttff_ms": 298
         },
         "streaming": {
           "text": "La Ã®nvÄÈa muntul desidurata normala la studilor universitare de licenÈe este de 3/4-anci cu respunde 1 in numÄate 6-eÈte credite de studit transferable pentru un an de studiu.",
-          "elapsed_ms": 2828,
-          "ttff_ms": 625
+          "elapsed_ms": 1004,
+          "ttff_ms": 235
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.06629834,
-        "stt_accuracy_levenshtein": 0.23280424,
-        "ttff_ratio": 0.47276855,
-        "ttc_ratio": 2.139183
+        "stt_levenshtein_norm": 0.12154696,
+        "stt_accuracy_levenshtein": 0.25396827,
+        "ttff_ratio": 0.7885906,
+        "ttc_ratio": 3.3691275
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -254,25 +254,79 @@
       "duration_s": 11.76,
       "modes": {
         "batch": {
-          "text": "Ia subliniat cât de pericul a sa este de fapsituația andru, cât un umar, atedele strans de persoane ar radege tul mic o asemenea putere economica și un umar.",
-          "elapsed_ms": 767,
-          "ttff_ms": 767
+          "text": "Ia subliniat cât de pericul a sa-i este de fapsituația andru, cât un umar, atedele strans de persoane arar de jetul mic o asemenea putere economica și numămă.",
+          "elapsed_ms": 308,
+          "ttff_ms": 308
         },
         "streaming": {
-          "text": "Ia subliniat cÃ¢t de pericul a sa este de fapsituaÈia andru, cÃ¢t un umar, atedele strans de persoane ar radege tul mic o asemenea putere economica Èi un umar.",
-          "elapsed_ms": 2272,
-          "ttff_ms": 612
+          "text": "Ia subliniat cÃ¢t de pericul a sÄ-i este de fapt situaÈia Ã®n drugÄt un umar atedevestrÃ¢nÈi de persoane arÄrÄa de jetul mic o asemenea putere economica Èi un umar.",
+          "elapsed_ms": 998,
+          "ttff_ms": 226
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.049689442,
-        "stt_accuracy_levenshtein": 0.19875777,
-        "ttff_ratio": 0.79791397,
-        "ttc_ratio": 2.9621904
+        "stt_levenshtein_norm": 0.20467836,
+        "stt_accuracy_levenshtein": 0.22360249,
+        "ttff_ratio": 0.73376626,
+        "ttc_ratio": 3.2402596
       },
       "verdict": "pass",
       "skip_reason": null,
       "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.3"
+    },
+    {
+      "fixture": "ro-bogdan-30s",
+      "language": "ro",
+      "synthetic_placeholder": false,
+      "duration_s": 30.0,
+      "modes": {
+        "batch": {
+          "text": "Vrea-au să facem și o înregistrare mai lungă, cura de oul care rola să pe fundal, și cum inecare măbândesc, mai mult la ce vreau să zic. Case vedem dacă modelul se descur că bine și în situatie asta, când o să agăm într-i și el de peste 12 de secunde, care să continuă o tictele să-l ceva, care vrei să vorbești cu asistemptor.",
+          "elapsed_ms": 656,
+          "ttff_ms": 656
+        },
+        "streaming": {
+          "text": "Vrea-au sÄ facem Èi o Ã®nregistrare mai lungÄ, cura de oul care rola sÄ pe fundal, Èi cum inecare mÄbÃ¢ndesc, mai mult la ce vreau sÄ zic. Case vedem dacÄ modelul se descur cÄ bine Èi Ã®n situatie asta, cÃ¢nd o sÄ agÄm Ã®ntr-i Èi el de peste 12 de secunde, care sÄ continuÄ o tictele sÄ-l ceva, care vrei sÄ vorbeÈti cu asistemptor.",
+          "elapsed_ms": 1494,
+          "ttff_ms": 205
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.13142857,
+        "stt_accuracy_levenshtein": 0.17125382,
+        "ttff_ratio": 0.3125,
+        "ttc_ratio": 2.277439
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.5"
+    },
+    {
+      "fixture": "ro-bogdan-10s",
+      "language": "ro",
+      "synthetic_placeholder": false,
+      "duration_s": 10.0,
+      "modes": {
+        "batch": {
+          "text": "și acum facem un registrare cu musica preferndalul, să vedem dacă model le pot să detectezi de dictarea, între-un cei niști să gămă de fundalul.",
+          "elapsed_ms": 499,
+          "ttff_ms": 499
+        },
+        "streaming": {
+          "text": "Èi acum face mÄ registrare cu mÄscÄ pe fundalul. SÄ vedem dacÄ model le pot sÄ de tectÄzi dictarea, Ã®ntÃ¢mine Èi Ã®nÈteÈi gÄmÄ de fundalul.",
+          "elapsed_ms": 1411,
+          "ttff_ms": 212
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.32026145,
+        "stt_accuracy_levenshtein": 0.24305555,
+        "ttff_ratio": 0.4248497,
+        "ttc_ratio": 2.8276553
+      },
+      "verdict": "fail",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.5; equiv 0.320 > 0.300"
     }
   ],
   "pinned_params": {

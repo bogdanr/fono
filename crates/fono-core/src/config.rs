@@ -608,11 +608,6 @@ pub struct Assistant {
     /// independent of the time window. Caps token cost on long
     /// idle-then-resume flows.
     pub history_max_turns: u32,
-    /// When the user presses the dictation key, clear the assistant's
-    /// rolling history. Default `true`: dictation and assistant are
-    /// separate intents; mixing their contexts is rarely what the user
-    /// wants.
-    pub auto_clear_on_dictation: bool,
     /// When `true`, the assistant builder swaps the catalogue's
     /// `text_model` for `multimodal_model` if the provider exposes
     /// one (e.g. Claude Haiku 4.5, Llama-4 Maverick on Groq).
@@ -640,7 +635,6 @@ impl Default for Assistant {
             prompt_main: default_assistant_prompt().into(),
             history_window_minutes: 5,
             history_max_turns: 12,
-            auto_clear_on_dictation: true,
             prefer_vision: true,
             prefer_web_search: false,
         }

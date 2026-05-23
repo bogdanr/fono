@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Assistant history now survives dictation pivots.** Previously a
+  press of the dictation hotkey (F7) while an assistant conversation
+  was in flight would wipe the rolling chat history; the next F8
+  turn would start fresh and the assistant would tell you it had no
+  memory of what you'd just said. Dictation and the assistant have
+  always had fully separate histories — the dictation transcript log
+  lives in SQLite, the assistant's chat turns live in memory — so
+  the cross-wired auto-clear was surprising rather than protective.
+  The pivot still stops any in-flight assistant playback so it
+  doesn't talk over your dictation, but the chat history is
+  preserved and you can resume the conversation on the next F8.
+
+### Removed
+
+- **`[assistant].auto_clear_on_dictation` config key.** No longer
+  read; remove it from your `config.toml` if present (unknown keys
+  are silently ignored, so existing configs keep working). The
+  remaining knobs (`history_window_minutes`, `history_max_turns`)
+  and the tray "Forget conversation" entry / `fono assistant
+  forget` CLI still cover every legitimate need to drop history.
+
 ## [0.8.1] — 2026-05-23
 
 A quality-of-life release: two more cloud providers, polish on the
@@ -98,6 +121,36 @@ of papercuts gone.
 - **The dictation key held down** while pausing no longer flips the
   overlay into PONDERING and (with auto-stop on) no longer ends the
   session out from under you.
+- **Shipped binaries no longer SIGILL on pre-VNNI / pre-AVX-512 CPUs.**
+  The release build inherited ggml's `GGML_NATIVE=ON` default, which
+  appends `-march=native` to the C/C++ compile line. On the GitHub
+  Actions Linux runner (AMD EPYC 7763, Zen 3) the C compiler's
+  auto-vectoriser baked VPDPBUSD (AVX-VNNI) into the binary, causing
+  immediate SIGILLs on users' Kaby Lake, 8th-gen Intel, and earlier
+  laptops. The shipped binary now pins an explicit
+  AVX2 / FMA / F16C / BMI2 baseline (Intel Haswell ≥ 2013, AMD
+  Excavator ≥ 2015) via `.cargo/config.toml`, so what CI builds is
+  what users download — regardless of which CPU GitHub puts in its
+  runner pool. A/B verified on Lunar Lake: zero throughput loss
+  (±7% noise) because ggml's hand-written VNNI kernels are separately
+  gated by `GGML_AVX_VNNI` (also off by default), so `-march=native`
+  was costing portability without delivering any actual VNNI speedup.
+- **Hotkeys work immediately after `sudo fono install` on
+  GNOME-Wayland.** The post-install autostart spawned the daemon via
+  `runuser -u $SUDO_USER`, which inherited the sudo-scrubbed
+  environment: `DISPLAY=:0` was preserved but `WAYLAND_DISPLAY`,
+  `XDG_RUNTIME_DIR`, and `DBUS_SESSION_BUS_ADDRESS` were not. With
+  only `DISPLAY` set, the daemon's hotkey-backend detector picked
+  the X11 listener, the GNOME-gsettings shim never ran, and F7 / F8
+  fell through in every native-Wayland app — users only saw working
+  hotkeys after logging out and back in (when the XDG autostart entry
+  fired with a real session env). The installer now reconstructs the
+  graphical-session env from `/run/user/$(id -u)` inside the spawn
+  command — after the user-switch — so the first daemon launched by
+  `sudo fono install` is identical to what the next-login autostart
+  would have produced. Drive-by: `shutdown_existing_daemon` no
+  longer panics with "Cannot start a runtime from within a runtime"
+  when re-running install while a previous daemon is still alive.
 
 ### Removed
 

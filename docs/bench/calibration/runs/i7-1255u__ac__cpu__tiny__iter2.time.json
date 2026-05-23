@@ -1,34 +1,36 @@
 {
   "command": [
-    "/mnt/nvme0n1p5/Work/fono/target/release/fono-bench",
+    "/mnt/live/memory/data/Work/fono/target/release/fono-bench",
     "equivalence",
     "--stt",
     "local",
     "--model",
     "tiny",
+    "--fixtures",
+    "/mnt/live/memory/data/Work/fono/tests/fixtures/equivalence",
     "--output",
-    "/mnt/nvme0n1p5/Work/fono/docs/bench/calibration/runs/localhost__ac__cpu__tiny__iter2.json",
+    "/mnt/live/memory/data/Work/fono/docs/bench/calibration/runs/i7-1255u__ac__cpu__tiny__iter2.json",
     "--no-legend"
   ],
   "context_end": {
     "ac_online": "1",
     "battery_pct": 100,
-    "package_temp_c": 76.0
+    "package_temp_c": 70.0
   },
   "context_start": {
     "ac_online": "1",
     "battery_pct": 100,
-    "captured_at_utc": "2026-05-15T13:58:08.710552+00:00",
+    "captured_at_utc": "2026-05-23T09:46:28.441216+00:00",
     "hostname": "nimblex",
-    "package_temp_c": 62.0,
+    "package_temp_c": 55.0,
     "platform": "linux",
     "power_profile": "governor=powersave"
   },
   "exit_code": 1,
   "label": "i7-1255u/ac/cpu/tiny/iter2",
-  "max_rss_kib": 430232,
+  "max_rss_kib": 179556,
   "schema": "fono-bench.rusage/1",
-  "sys_s": 28.953059,
-  "user_s": 656.524218,
-  "wall_clock_s": 63.659602
+  "sys_s": 1.670864,
+  "user_s": 8.846001,
+  "wall_clock_s": 17.663384
 }

@@ -1015,22 +1015,34 @@ fn shutdown_existing_daemon() {
     }
     // Spin a tiny current-thread tokio runtime just for this one
     // request. install.rs is otherwise sync; pulling in a runtime
-    // here is cheap and self-contained.
-    let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
-        return;
-    };
-    let sent = rt.block_on(async {
-        // 1 s connect/read budget — the daemon either replies fast
-        // or it's wedged and we shouldn't block install on it.
-        tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            fono_ipc::request_any(&sockets, &fono_ipc::Request::Shutdown),
-        )
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .is_some()
-    });
+    // here is cheap and self-contained. Build *and* run it on a
+    // dedicated OS thread because `run_install` is called from
+    // inside the top-level async dispatcher in `cli::run` — calling
+    // `block_on` directly here would panic with "Cannot start a
+    // runtime from within a runtime" the moment a previous daemon
+    // is actually running.
+    let sent = std::thread::spawn({
+        let sockets = sockets.clone();
+        move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+                return false;
+            };
+            rt.block_on(async {
+                // 1 s connect/read budget — the daemon either replies fast
+                // or it's wedged and we shouldn't block install on it.
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    fono_ipc::request_any(&sockets, &fono_ipc::Request::Shutdown),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .is_some()
+            })
+        }
+    })
+    .join()
+    .unwrap_or(false);
     if sent {
         eprintln!("  · asked existing fono daemon to exit");
         // Give the old daemon a moment to release the socket file
@@ -1066,6 +1078,19 @@ fn candidate_daemon_sockets_for_target_user() -> Vec<PathBuf> {
 
 /// Spawn `fono` in the background as the target user. Logs append to
 /// `/var/log/fono.log` if writable, else `/dev/null`.
+///
+/// `sudo fono install` runs with the *sudo-scrubbed* environment:
+/// `DISPLAY` is usually preserved, but `WAYLAND_DISPLAY`,
+/// `XDG_RUNTIME_DIR`, and `DBUS_SESSION_BUS_ADDRESS` are not. Without
+/// those, the spawned daemon's hotkey-backend auto-detector
+/// (`fono_hotkey::detect_backend`) lands on `X11` on GNOME-Wayland
+/// hosts and the GNOME-gsettings shim never runs — F7/F8 only fire in
+/// Xwayland windows, which looks to the user like "hotkeys don't
+/// work". Reconstruct the missing graphical-session env from
+/// `/run/user/<uid>` *inside the shell command*, so the resolution
+/// happens after `runuser` / `sudo -u` has switched to the target
+/// user. This mirrors what the next-login XDG autostart entry gets
+/// for free.
 fn try_autostart_for_sudo_user() -> AutostartOutcome {
     let Some(user) = resolve_target_user() else {
         return AutostartOutcome::SpawnFailed;
@@ -1078,8 +1103,28 @@ fn try_autostart_for_sudo_user() -> AutostartOutcome {
     }
 
     let log = fono_core::paths::LOG_FILE;
+    // The `RUNTIME=...` preamble runs *as the target user* (after
+    // runuser/sudo has switched uids), so `id -u` returns the right
+    // uid even when `XDG_RUNTIME_DIR` was scrubbed by sudo. The
+    // `WAYLAND_DISPLAY` loop picks the first real socket and skips
+    // the `.lock` companion files. All exports are no-ops when the
+    // variable was already inherited.
     let shell_cmd = format!(
-        "LOG={log}; [ -w \"$LOG\" ] || LOG=/dev/null; \
+        "RUNTIME=\"${{XDG_RUNTIME_DIR:-/run/user/$(id -u)}}\"; \
+         if [ -d \"$RUNTIME\" ]; then \
+           export XDG_RUNTIME_DIR=\"$RUNTIME\"; \
+           [ -z \"${{DBUS_SESSION_BUS_ADDRESS:-}}\" ] && [ -S \"$RUNTIME/bus\" ] && \
+             export DBUS_SESSION_BUS_ADDRESS=\"unix:path=$RUNTIME/bus\"; \
+           if [ -z \"${{WAYLAND_DISPLAY:-}}\" ]; then \
+             for s in \"$RUNTIME\"/wayland-*; do \
+               case \"$s\" in *.lock) continue;; esac; \
+               [ -S \"$s\" ] || continue; \
+               WAYLAND_DISPLAY=\"${{s##*/}}\"; export WAYLAND_DISPLAY; \
+               break; \
+             done; \
+           fi; \
+         fi; \
+         LOG={log}; [ -w \"$LOG\" ] || LOG=/dev/null; \
          setsid fono </dev/null >>\"$LOG\" 2>&1 &"
     );
     let spawn = |prog: &str, args: &[&str]| -> bool {

@@ -2,6 +2,245 @@
 
 Last updated: 2026-05-23
 
+## 2026-05-23 — Dropped pre-optimization bench cohort (commit b4db59c)
+
+Removed **298 stale benchmark files** (149 run JSONs + 149 `.time.json`
+sidecars) from `docs/bench/calibration/runs/`. All were introduced by
+`b4db59c docs(bench): Phase 0 STT affordability calibration matrix`
+(2026-05-15) — **predating the CPU performance optimization that
+landed 4 days later** in:
+
+> `ef557af feat(stt+polish): quantization ladder + rename LlmBackend -> PolishBackend` (2026-05-19)
+
+The optimization shipped two wins on the CPU path:
+
+1. **`set_audio_ctx()` on clips <30s** — "+70–160% CPU batch RTF with
+   no measurable quality regression", hard-coded on in
+   `crates/fono-stt/src/whisper_local.rs`.
+2. **Thread default switched from logical-CPU count → physical cores**
+   (clamped 1..16); Ryzen 5950X data showed `small` running at half
+   speed with `t=32` vs `t=16` because SMT siblings contend on the
+   256-bit FMA unit.
+
+Together that's a ~1.7×–2.6× CPU speedup that the May-15 cohort never
+saw. Vulkan unaffected, but removing the AC/battery + Vulkan rows from
+the same cohort too because mixing pre- and post-optimization rows on
+the same host poisons every cross-backend ratio (`cpu_vs_vulkan`,
+`quant_vs_fp16`).
+
+### What was dropped per host
+
+| host | cells dropped | models covered (fp16 only) |
+|---|---|---|
+| `i7-1255u`    | 53 (cpu+vulkan, AC+battery) | tiny, tiny.en, base, base.en, small, small.en, large-v3-turbo |
+| `i7-7500u`    | 19 (cpu only, AC)           | same fp16 set |
+| `ryzen-5950x` | 21 (cpu only, AC)           | same fp16 set |
+| `ultra7-258v` | 56 (cpu+vulkan, AC+battery) | same fp16 set |
+
+`i7-8550u` had no May-15 runs — its data is fully post-optimization,
+nothing removed.
+
+### Regenerated artifacts
+
+- `docs/bench/calibration/summary/matrix.json` — **168 cells**
+  (down from 237). Per-host coverage:
+  `i7-1255u: 28 cells (14+14 cpu/vk)`,
+  `i7-7500u: 35 (14+21)`,
+  `i7-8550u: 42 (21+21)`,
+  `ryzen-5950x: 35 (14+21)`,
+  `ultra7-258v: 28 (14+14)`.
+- `docs/bench/calibration/summary/matrix.md` regenerated.
+- `docs/bench/calibration/summary/calibration3.html` (150,579 bytes,
+  6 speedup buckets, 42 coverage gaps — these gaps are the rebench
+  TODO list).
+- `docs/bench/calibration/summary/auto-select.html` (166,635 bytes).
+
+### Follow-up — rebench the 4 affected hosts
+
+The four reference hosts (`i7-1255u`, `i7-7500u`, `ryzen-5950x`,
+`ultra7-258v`) have lost all their fp16 baselines. The auto-select
+page's Section 6 "Data gaps under current policy" will now surface
+those exact configs as missing. The natural next step is one bench
+pass per host on the post-`ef557af` binary, covering at least the
+fp16 + q8 + q5 set for tiny/tiny.en/base/base.en/small/small.en/turbo
+(CPU + Vulkan where applicable). Until that lands, quant-uplift
+ratios on those hosts will appear partial in `calibration3.html`
+chart 3 and `auto-select.html` Section 3.
+
+## 2026-05-23 — auto-select.html: worst-fixture gate + display cap + contrast
+
+Three coupled changes to make the recommendation policy more honest in
+the face of accuracy outliers and the charts more readable:
+
+1. **Switched the accuracy gate from `accuracy_en_mean` to
+   `accuracy_en_max`** (`scripts/bench-auto-select-page.py:48-57`).
+   The mean was hiding catastrophic transcripts behind a friendly
+   average — e.g. `i7-7500u/small/cpu` shows mean 0.285 (passes a 0.30
+   ceiling) while its worst English fixture is **0.853** (74% wrong on
+   one sentence). With the max-gate, that cell now correctly fails any
+   reasonable ceiling. Default ceiling bumped 0.10 → 0.20 because max
+   naturally runs higher than mean; slider range now `0.05 – 0.50`.
+   Mean is still carried in the payload and shown as supporting
+   context in the rec-card trace and Pareto tooltip
+   (`scripts/bench-auto-select-page.py:721-726, 952`), so the reader
+   sees both numbers and can judge the spread.
+2. **Display cap at WER ≤ 0.30** in Pareto and Section-2 accuracy
+   scatter (`scripts/bench-auto-select-page.py:56, 893-924, 964-968`).
+   Cells with worst-fixture CER above the cap are dropped from the
+   plot and counted in a yellow `+N off-scale` chip beside each host
+   title; the Section 6 data-gap list still surfaces them.
+   Pareto x-axis is hard-pinned to `[0, 0.30]` and the
+   Section-2 worst-fixture-CER y-axis to `max: 0.30` so a single
+   outlier can't stretch the axis and squash everything into a strip.
+3. **Contrast bump across the board**: text `#e6edf3 → #f0f6fc`, muted
+   `#8b949e → #b1bac4`, border `#30363d → #3d444d`, all chart accent
+   colours bumped one notch toward saturation (greens, yellows, reds,
+   blues); chart grid lines `#21262d → #30363d`; threshold dash lines
+   went from `borderWidth:1, alpha 88` to `borderWidth:1.5` with full
+   alpha + bold label text. Scatter point fills gained borders for
+   legibility on overlapping clouds.
+
+Also: presetStrict now `batch≥2.5, acc≤0.12`; presetRelaxed
+`batch≥1.2, acc≤0.35` (calibrated for the new max-based gate).
+
+Files: `scripts/bench-auto-select-page.py`,
+`docs/bench/calibration/summary/auto-select.html` (regenerated, 213,553 bytes).
+
+## 2026-05-23 — auto-select.html chart sizing + Pareto enlarge
+
+Three follow-up fixes to `auto-select.html` after first eyeball pass:
+
+1. **Section 1 quant-uplift chart squashed** — Chart.js was
+   re-deriving aspect ratio from the canvas's content (long rotated
+   `host/build` x-labels), collapsing the plot area to a thin strip.
+2. **Section 3 quant-uplift chart resizing on every selector change** —
+   same root cause: every filter rebuild triggered a new aspect-ratio
+   recalculation against a freshly-laid-out canvas.
+3. **Pareto frontier charts (Section 4) are the most informative
+   views but too small to read in the 3-up grid.**
+
+Root cause for (1)+(2): default `maintainAspectRatio:true` combined
+with `responsive:true` forces Chart.js to keep deriving canvas height
+from its width × CSS-driven aspect ratio, which depends on font
+metrics of axis labels that change between renders. Fix:
+
+- Added fixed-height wrappers (`canvas-wrap.h-uplift{height:300px}`,
+  `h-scatter{height:220px}`, `h-pareto{height:260px}`) in
+  `scripts/bench-auto-select-page.py:315-319` — canvas now fills a
+  deterministic box via absolute positioning.
+- Set `maintainAspectRatio:false` on all four chart configs
+  (uplift, scatter ×6, pareto-grid, modal-pareto).
+
+For (3): each Pareto chart-box now has an `⤢ enlarge` button
+(`scripts/bench-auto-select-page.py:891-896`) that opens a `60vh`
+modal (`canvas-wrap` flex-fill) with a freshly-instantiated Chart.js
+instance built via `requestAnimationFrame` so the canvas measures its
+true size before draw. Backdrop click + Close button both destroy the
+modal chart cleanly.
+
+Files: `scripts/bench-auto-select-page.py`,
+`docs/bench/calibration/summary/auto-select.html` (regenerated, 211 KB).
+
+## 2026-05-23 — Auto-Select Policy Explorer (`auto-select.html`)
+
+New companion page next to `calibration3.html`:
+`docs/bench/calibration/summary/auto-select.html`, generated by
+`scripts/bench-auto-select-page.py`. Closes the gap between the
+calibration matrix (diagnostic) and the runtime model picker (the
+stale `LocalTier::default_whisper_model()` in
+`crates/fono-core/src/hwcheck.rs:77-83`, which the page is designed to
+replace).
+
+Per plan `plans/2026-05-23-fono-auto-select-page-v1.md`.
+
+### What the page does
+
+- Eight live controls (batch RTF threshold, accuracy ceiling, stream
+  RTF soft floor, memory budget, binary variant cpu_only/gpu_capable,
+  language requirement, quant preference, power, arch). URL-hash
+  backed so a particular policy state can be linked/bookmarked.
+- **Section 1 — Recommendation walk per measured host.** Each card
+  picks the qualifying candidate per the preference order (largest
+  family > fp16 > q8 > q5; Vulkan only if ≥1.2× CPU on the same model)
+  and shows the gate trace plus why the next-up alternative failed.
+- **Section 2 — Feature vs outcome scatter.** 2×3 grid (cores/ram ×
+  batch/accuracy/peak_rss); colour by VNNI capability, shape by
+  quant, size by family. Where "data hides things we don't expect"
+  becomes visible.
+- **Section 3 — Quant uplift per host.** Median quant/fp16 batch RTF
+  per (host, build); categorical tags (`large` / `moderate` / `none` /
+  `regression`) so "Vulkan + quant = no uplift" pops without reading
+  numbers.
+- **Section 4 — Pareto frontier per host.** Accuracy vs batch RTF
+  scatter; frontier highlighted; recommendation marked with reticle;
+  threshold rule lines visible.
+- **Section 5 — Policy JSON export.** Versioned `schema_version: 1`
+  blob with `arch` × `cpu_flags.avx_vnni` rules, evidence_hosts per
+  rule, and hard-coded fallback rows for `aarch64` and
+  `apple_silicon` so the runtime never panics on unmeasured archs.
+  Copy button.
+- **Section 6 — Data gaps under current policy** (collapsed by
+  default, bottom of page, per user feedback). Missing measurements,
+  n<2 picks, picks with no accuracy data, arch coverage gaps,
+  unmeasured backends. Each missing-measurement row carries a
+  copy-to-clipboard bench command derived mechanically from the gap
+  descriptor.
+
+### Host feature schema (shared with future Rust runtime classifier)
+
+`derive_host_features()` in `scripts/bench-auto-select-page.py:148`
+emits per host: `arch ∈ {x86_64, aarch64, apple_silicon}`,
+`released_year`, `physical_cores`, `ram_gb`,
+`cpu_flags: {avx2, avx_vnni, avx512, avx512_vnni}`,
+`gpu_present`, `gpu_class ∈ {none, integrated, discrete, apple_metal}`.
+`cpu_model_str` is carried for human display only; the policy walk
+and the policy JSON consume the flags, never the model string. All
+five current hosts are tagged `x86_64`; ARM and Apple Silicon get
+hard-coded fallback rules in the policy JSON.
+
+### Verification
+
+- `python3 -m py_compile scripts/bench-auto-select-page.py` clean.
+- `python3 scripts/bench-auto-select-page.py` against the live matrix
+  succeeds: 237 cells, 5 hosts, 237 accuracy entries, output is
+  206,703 bytes.
+- Structural smoke test: `rec-grid`, `scatter-grid`, `quant-uplift`,
+  `pareto-grid`, `policy-json`, `gaps-block`, `f-arch` filter, and
+  `walkHost()` function are all present in the rendered HTML.
+- `calibration3.html` footer now links forward to
+  `auto-select.html` (`scripts/bench-decision-page3.py:487-488`);
+  `auto-select.html` footer links back to `calibration3.html`.
+
+### Files
+
+- `scripts/bench-auto-select-page.py` (new, 1225 lines including
+  embedded HTML template).
+- `docs/bench/calibration/summary/auto-select.html` (regenerated).
+- `scripts/bench-decision-page3.py` — footer cross-link added.
+- `docs/bench/calibration/summary/calibration3.html` — regenerated.
+- `plans/2026-05-23-fono-auto-select-page-v1.md` — the strategic plan
+  that drove this work (Tasks 1-12 + 9b for the data gaps section).
+
+### Pre-commit gate
+
+Not run. Change is Python + generated HTML only; no Rust touched.
+
+### Follow-ups expected
+
+1. **Rust consumer**: write `crates/fono-stt/src/auto_select.rs` that
+   reads the page's exported policy JSON and replaces
+   `LocalTier::default_whisper_model()`. Mirror
+   `derive_host_features()` as a Rust function so the runtime
+   classifier shares the schema.
+2. **Bench data gaps**: open the page in a browser, eyeball the
+   Section 6 list under default sliders, and run the suggested
+   benches to fill rows where the walk currently rests on `n=1`
+   cells.
+3. **Auto-merge**: once the matrix grows to ≥20 hosts, replace the
+   per-host rule emission in `buildPolicy()` with decision-tree
+   induction so the policy JSON ships a compact tree rather than one
+   rule per host.
+
 ## 2026-05-23 — Deepgram STT (Nova-3) batch + WebSocket streaming
 
 `fono use stt deepgram` now works end-to-end. The catalogue, wizard,
@@ -1114,7 +1353,7 @@ dictation.
   OpenAI-compatible family). `fono-audio::playback` adds a
   paplay-based output worker on the Linux release variant.
 - **`[assistant]` / `[tts]` config blocks**, multi-turn rolling
-  history, `auto_clear_on_dictation`, cancellation (F10 again =
+  history, cancellation (F10 again =
   barge-in, Escape = shut up). New CLI subcommands
   (`fono use assistant|tts`, `fono assistant {press,release,
   stop}`), new tray entries + backend submenus, wizard step,

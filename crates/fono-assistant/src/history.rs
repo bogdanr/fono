@@ -95,8 +95,8 @@ impl ConversationHistory {
         self.turns.iter().cloned().collect()
     }
 
-    /// Drop the entire history (e.g. on dictation key press when
-    /// `auto_clear_on_dictation` is set).
+    /// Drop the entire history (e.g. on the tray "Forget conversation"
+    /// entry / `fono assistant forget` CLI).
     pub fn clear(&mut self) {
         self.turns.clear();
         self.last_activity = None;

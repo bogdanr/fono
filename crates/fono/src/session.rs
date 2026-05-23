@@ -1496,11 +1496,15 @@ impl SessionOrchestrator {
             warn!("recording requested while previous pipeline still running; ignoring");
             return Ok(());
         }
-        // Dictation and assistant are separate intents; if the user
-        // pivots from "ask" to "dictate" mid-conversation we wipe the
-        // assistant's rolling context (configurable). Also stops any
-        // assistant turn that's still speaking.
-        self.maybe_clear_assistant_on_dictation().await;
+        // Dictation and assistant have fully separate histories. The
+        // pivot only stops any assistant turn that's still speaking so
+        // it doesn't talk over the user; the rolling chat history is
+        // preserved and the user can resume the conversation on the
+        // next F8 press.
+        {
+            let mut s = self.assistant_session.lock().await;
+            s.stop_current_turn();
+        }
         let mut slot = self.capture.lock().await;
         if slot.is_some() {
             warn!("capture already in progress; ignoring duplicate start");
@@ -2136,22 +2140,6 @@ impl SessionOrchestrator {
         self.tts.read().expect("tts lock poisoned").clone()
     }
 
-    /// Wipe the assistant's rolling history (and stop any in-flight
-    /// playback) when the user pivots to dictation. No-op when
-    /// `[assistant].auto_clear_on_dictation = false`.
-    async fn maybe_clear_assistant_on_dictation(&self) {
-        let cfg = self.current_config();
-        if !cfg.assistant.auto_clear_on_dictation {
-            return;
-        }
-        let mut s = self.assistant_session.lock().await;
-        s.stop_current_turn();
-        if !s.history.snapshot().is_empty() || !s.history.is_stale() {
-            debug!(target: "fono::assistant", "clearing assistant history (dictation pivot)");
-            s.history.clear();
-        }
-    }
-
     /// Re-inject the most recent cleaned (or raw) transcription.
     pub async fn on_paste_last(&self) {
         let last = {
@@ -2475,7 +2463,10 @@ impl SessionOrchestrator {
             warn!("live-dictation requested while previous pipeline still running; ignoring");
             return Ok(());
         }
-        self.maybe_clear_assistant_on_dictation().await;
+        {
+            let mut s = self.assistant_session.lock().await;
+            s.stop_current_turn();
+        }
         let mut slot = self.live_capture.lock().await;
         if slot.is_some() {
             warn!("live-dictation already in progress; ignoring duplicate start");
