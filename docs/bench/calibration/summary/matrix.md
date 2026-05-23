@@ -16,32 +16,46 @@ _2022 Alder Lake-UP3 hybrid (2P+8E, 12 threads, 15 W); mainstream business ultra
 
 | model | power | build | iters | batch RTF | b-σ% | stream RTF | s-σ% | TTFF s | RSS MiB | verdict | notes |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|
+| base | ac | cpu | 2/2 | 26.56 | 1.2 | 7.72 | 1.4 | 0.40 | 181 | comfortable |  |
 | base-q5_1 | ac | cpu | 2/2 | 17.16 | 4.7 | 9.37 | 1.2 | 0.30 | 180 | comfortable |  |
 | base-q8_0 | ac | cpu | 2/2 | 26.36 | 0.5 | 7.97 | 0.7 | 0.31 | 188 | comfortable |  |
+| base.en | ac | cpu | 2/2 | 23.22 | 3.4 | 6.81 | 4.8 | 0.43 | 182 | comfortable |  |
 | base.en-q5_1 | ac | cpu | 2/2 | 25.76 | 0.0 | 9.44 | 0.3 | 0.29 | 185 | comfortable |  |
 | base.en-q8_0 | ac | cpu | 2/2 | 22.08 | 0.6 | 8.65 | 0.9 | 0.31 | 194 | comfortable |  |
+| large-v3-turbo | ac | cpu | 2/2 | 2.38 | 1.3 | 0.48 | 0.6 | 7.87 | 268 | borderline |  |
 | large-v3-turbo-q5_0 | ac | cpu | 2/2 | 4.51 | 16.2 | 0.84 | 3.5 | 4.40 | 212 | borderline | batch_rtf spread 16.2% > 15% |
 | large-v3-turbo-q8_0 | ac | cpu | 2/2 | 4.43 | 4.8 | 0.81 | 2.4 | 4.57 | 211 | borderline |  |
+| small | ac | cpu | 2/2 | 9.12 | 1.0 | 2.17 | 1.4 | 1.65 | 200 | comfortable |  |
 | small-q5_1 | ac | cpu | 2/2 | 15.72 | 1.4 | 3.33 | 1.1 | 1.00 | 198 | comfortable |  |
 | small-q8_0 | ac | cpu | 2/2 | 13.91 | 0.6 | 3.11 | 0.4 | 1.07 | 178 | comfortable |  |
+| small.en | ac | cpu | 2/2 | 4.59 | 2.2 | 2.62 | 0.1 | 1.41 | 199 | comfortable |  |
 | small.en-q5_1 | ac | cpu | 2/2 | 14.75 | 1.6 | 3.95 | 1.6 | 0.83 | 200 | comfortable |  |
 | small.en-q8_0 | ac | cpu | 2/2 | 4.52 | 1.7 | 3.74 | 0.1 | 0.90 | 180 | comfortable |  |
+| tiny | ac | cpu | 2/2 | 34.62 | 8.9 | 11.19 | 0.0 | 0.29 | 178 | comfortable |  |
 | tiny-q5_1 | ac | cpu | 2/2 | 38.09 | 29.9 | 10.47 | 3.8 | 0.45 | 174 | comfortable | batch_rtf spread 29.9% > 15% |
 | tiny-q8_0 | ac | cpu | 2/2 | 38.93 | 1.0 | 12.45 | 0.6 | 0.20 | 184 | comfortable |  |
+| tiny.en | ac | cpu | 2/2 | 39.47 | 1.7 | 13.25 | 1.7 | 0.24 | 172 | comfortable |  |
 | tiny.en-q5_1 | ac | cpu | 2/2 | 51.34 | 1.6 | 17.03 | 0.6 | 0.19 | 176 | comfortable |  |
 | tiny.en-q8_0 | ac | cpu | 2/2 | 47.04 | 2.3 | 15.69 | 0.3 | 0.18 | 182 | comfortable |  |
+| base | ac | vulkan | 2/2 | 21.72 | 3.7 | 6.12 | 2.6 | 0.48 | 176 | comfortable |  |
 | base-q5_1 | ac | vulkan | 2/2 | 17.36 | 2.7 | 9.42 | 0.1 | 0.29 | 188 | comfortable |  |
 | base-q8_0 | ac | vulkan | 2/2 | 27.17 | 2.1 | 8.22 | 0.2 | 0.30 | 202 | comfortable |  |
+| base.en | ac | vulkan | 2/2 | 23.69 | 5.0 | 6.95 | 2.3 | 0.41 | 182 | comfortable |  |
 | base.en-q5_1 | ac | vulkan | 2/2 | 26.56 | 0.3 | 9.71 | 0.0 | 0.28 | 193 | comfortable |  |
 | base.en-q8_0 | ac | vulkan | 2/2 | 23.31 | 1.7 | 8.89 | 0.4 | 0.30 | 201 | comfortable |  |
+| large-v3-turbo | ac | vulkan | 2/2 | 2.39 | 1.2 | 0.50 | 0.5 | 7.74 | 270 | borderline |  |
 | large-v3-turbo-q5_0 | ac | vulkan | 2/2 | 7.01 | 3.0 | 0.93 | 6.6 | 3.75 | 227 | borderline |  |
 | large-v3-turbo-q8_0 | ac | vulkan | 2/2 | 6.33 | 6.4 | 0.90 | 6.1 | 3.87 | 224 | borderline |  |
+| small | ac | vulkan | 2/2 | 8.93 | 2.8 | 2.16 | 0.9 | 1.69 | 200 | comfortable |  |
 | small-q5_1 | ac | vulkan | 2/2 | 12.67 | 8.8 | 2.98 | 17.1 | 1.13 | 206 | comfortable | stream_rtf spread 17.1% > 15% |
 | small-q8_0 | ac | vulkan | 2/2 | 13.26 | 5.5 | 2.90 | 9.4 | 1.15 | 186 | comfortable |  |
+| small.en | ac | vulkan | 2/2 | 4.58 | 2.5 | 2.62 | 0.3 | 1.40 | 198 | comfortable |  |
 | small.en-q5_1 | ac | vulkan | 2/2 | 14.71 | 2.1 | 4.02 | 0.4 | 0.82 | 207 | comfortable |  |
 | small.en-q8_0 | ac | vulkan | 2/2 | 4.29 | 7.7 | 3.68 | 2.7 | 0.91 | 188 | comfortable |  |
+| tiny | ac | vulkan | 2/2 | 30.43 | 28.9 | 10.98 | 0.0 | 0.29 | 177 | comfortable | batch_rtf spread 28.9% > 15% |
 | tiny-q5_1 | ac | vulkan | 2/2 | 42.50 | 13.6 | 10.87 | 0.5 | 0.44 | 189 | comfortable |  |
 | tiny-q8_0 | ac | vulkan | 2/2 | 37.21 | 1.8 | 12.65 | 0.4 | 0.19 | 209 | comfortable |  |
+| tiny.en | ac | vulkan | 2/2 | 41.57 | 4.8 | 13.29 | 1.9 | 0.24 | 172 | comfortable |  |
 | tiny.en-q5_1 | ac | vulkan | 2/2 | 45.54 | 6.9 | 16.96 | 1.8 | 0.20 | 187 | comfortable |  |
 | tiny.en-q8_0 | ac | vulkan | 2/2 | 44.85 | 3.2 | 15.60 | 1.0 | 0.18 | 189 | comfortable |  |
 
@@ -53,18 +67,25 @@ _2016 Kaby Lake dual-core / 4 threads, 15 W; ~10-year-old ultrabook CPU; weakest
 
 | model | power | build | iters | batch RTF | b-σ% | stream RTF | s-σ% | TTFF s | RSS MiB | verdict | notes |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|
+| base | ac | cpu | 2/2 | 7.47 | 0.6 | 1.26 | 0.6 | 3.09 | 603 | borderline |  |
 | base-q5_1 | ac | cpu | 2/2 | 5.93 | 0.4 | 1.06 | 0.3 | 3.45 | 455 | borderline |  |
 | base-q8_0 | ac | cpu | 2/2 | 8.51 | 0.8 | 1.42 | 0.6 | 2.78 | 476 | borderline |  |
+| base.en | ac | cpu | 2/2 | 6.34 | 0.4 | 1.04 | 0.1 | 3.06 | 605 | borderline |  |
 | base.en-q5_1 | ac | cpu | 2/2 | 4.96 | 0.3 | 1.10 | 0.2 | 3.41 | 433 | borderline |  |
 | base.en-q8_0 | ac | cpu | 2/2 | 6.29 | 0.1 | 1.17 | 0.4 | 2.73 | 477 | borderline |  |
+| large-v3-turbo | ac | cpu | 2/2 | 0.37 | 0.4 | 0.06 | 0.4 | 67.24 | 3666 | unsuitable |  |
 | large-v3-turbo-q5_0 | ac | cpu | 2/2 | 0.39 | 0.4 | 0.06 | 0.2 | 65.76 | 1662 | unsuitable |  |
 | large-v3-turbo-q8_0 | ac | cpu | 2/2 | 0.51 | 0.3 | 0.08 | 0.4 | 50.76 | 2234 | unsuitable |  |
+| small | ac | cpu | 2/2 | 2.36 | 0.3 | 0.34 | 0.5 | 12.19 | 1368 | borderline |  |
 | small-q5_1 | ac | cpu | 2/2 | 2.27 | 0.1 | 0.32 | 0.0 | 12.76 | 798 | borderline |  |
 | small-q8_0 | ac | cpu | 2/2 | 2.98 | 0.3 | 0.42 | 0.3 | 9.60 | 944 | borderline |  |
+| small.en | ac | cpu | 2/2 | 2.37 | 0.2 | 0.33 | 0.0 | 11.59 | 1364 | borderline |  |
 | small.en-q5_1 | ac | cpu | 2/2 | 1.61 | 0.2 | 0.30 | 0.1 | 12.54 | 796 | borderline |  |
 | small.en-q8_0 | ac | cpu | 2/2 | 3.01 | 0.1 | 0.39 | 0.1 | 9.66 | 938 | borderline |  |
+| tiny | ac | cpu | 2/2 | 14.47 | 2.2 | 2.54 | 1.9 | 1.46 | 417 | comfortable |  |
 | tiny-q5_1 | ac | cpu | 2/2 | 14.42 | 0.2 | 2.34 | 0.3 | 1.75 | 328 | comfortable |  |
 | tiny-q8_0 | ac | cpu | 2/2 | 16.16 | 0.1 | 2.74 | 0.4 | 1.36 | 352 | comfortable |  |
+| tiny.en | ac | cpu | 2/2 | 18.21 | 0.5 | 2.66 | 0.2 | 1.38 | 382 | comfortable |  |
 | tiny.en-q5_1 | ac | cpu | 2/2 | 17.09 | 0.1 | 2.43 | 0.1 | 1.54 | 292 | comfortable |  |
 | tiny.en-q8_0 | ac | cpu | 2/2 | 20.94 | 0.1 | 2.94 | 0.5 | 1.25 | 333 | comfortable |  |
 | base | ac | vulkan | 2/2 | 9.44 | 0.3 | 2.01 | 0.4 | 1.59 | 187 | comfortable |  |
@@ -192,32 +213,46 @@ _2024 Lunar Lake 4P+4LP-E (no SMT); Intel's current efficiency flagship for thin
 
 | model | power | build | iters | batch RTF | b-σ% | stream RTF | s-σ% | TTFF s | RSS MiB | verdict | notes |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|
+| base | ac | cpu | 2/2 | 22.10 | 1.2 | 4.21 | 1.5 | 0.88 | 603 | comfortable |  |
 | base-q5_1 | ac | cpu | 2/2 | 19.96 | 0.2 | 3.86 | 0.8 | 0.87 | 458 | comfortable |  |
 | base-q8_0 | ac | cpu | 2/2 | 27.17 | 0.6 | 5.21 | 1.1 | 0.72 | 477 | comfortable |  |
+| base.en | ac | cpu | 2/2 | 21.25 | 0.3 | 4.01 | 0.2 | 0.78 | 608 | comfortable |  |
 | base.en-q5_1 | ac | cpu | 2/2 | 19.58 | 0.3 | 4.93 | 0.2 | 0.74 | 437 | comfortable |  |
 | base.en-q8_0 | ac | cpu | 2/2 | 22.54 | 0.3 | 4.98 | 0.2 | 0.63 | 480 | comfortable |  |
+| large-v3-turbo | ac | cpu | 2/2 | 1.06 | 0.1 | 0.17 | 0.3 | 22.53 | 3673 | borderline |  |
 | large-v3-turbo-q5_0 | ac | cpu | 2/2 | 1.21 | 0.0 | 0.19 | 0.1 | 20.74 | 1672 | borderline |  |
 | large-v3-turbo-q8_0 | ac | cpu | 2/2 | 1.46 | 0.1 | 0.23 | 0.1 | 16.93 | 2242 | borderline |  |
+| small | ac | cpu | 2/2 | 6.45 | 2.2 | 0.98 | 2.0 | 4.23 | 1370 | borderline |  |
 | small-q5_1 | ac | cpu | 2/2 | 6.81 | 0.3 | 1.01 | 0.0 | 3.98 | 804 | borderline |  |
 | small-q8_0 | ac | cpu | 2/2 | 8.66 | 0.7 | 1.29 | 0.7 | 3.00 | 944 | borderline |  |
+| small.en | ac | cpu | 2/2 | 7.47 | 0.2 | 1.11 | 2.5 | 3.38 | 1375 | borderline |  |
 | small.en-q5_1 | ac | cpu | 2/2 | 6.10 | 2.0 | 1.09 | 0.9 | 3.32 | 806 | borderline |  |
 | small.en-q8_0 | ac | cpu | 2/2 | 10.98 | 0.2 | 1.45 | 0.0 | 2.55 | 952 | borderline |  |
+| tiny | ac | cpu | 2/2 | 43.52 | 0.3 | 9.00 | 0.1 | 0.40 | 416 | comfortable |  |
 | tiny-q5_1 | ac | cpu | 2/2 | 50.17 | 0.5 | 9.56 | 0.3 | 0.42 | 331 | comfortable |  |
 | tiny-q8_0 | ac | cpu | 2/2 | 51.52 | 0.2 | 10.85 | 0.3 | 0.33 | 350 | comfortable |  |
+| tiny.en | ac | cpu | 2/2 | 52.81 | 0.0 | 9.59 | 0.3 | 0.37 | 401 | comfortable |  |
 | tiny.en-q5_1 | ac | cpu | 2/2 | 57.50 | 1.3 | 10.14 | 0.1 | 0.36 | 301 | comfortable |  |
 | tiny.en-q8_0 | ac | cpu | 2/2 | 64.92 | 0.6 | 11.58 | 0.1 | 0.30 | 334 | comfortable |  |
+| base | ac | vulkan | 2/2 | 49.44 | 0.4 | 18.33 | 0.2 | 0.13 | 172 | comfortable |  |
 | base-q5_1 | ac | vulkan | 2/2 | 46.81 | 1.6 | 19.81 | 0.7 | 0.12 | 182 | comfortable |  |
 | base-q8_0 | ac | vulkan | 2/2 | 50.76 | 0.0 | 19.81 | 1.6 | 0.12 | 191 | comfortable |  |
+| base.en | ac | vulkan | 2/2 | 46.84 | 4.7 | 19.33 | 0.0 | 0.14 | 189 | comfortable |  |
 | base.en-q5_1 | ac | vulkan | 2/2 | 42.44 | 1.7 | 20.16 | 0.2 | 0.14 | 188 | comfortable |  |
 | base.en-q8_0 | ac | vulkan | 2/2 | 50.08 | 3.2 | 20.09 | 2.3 | 0.13 | 197 | comfortable |  |
+| large-v3-turbo | ac | vulkan | 2/2 | 12.80 | 0.6 | 3.32 | 2.2 | 1.00 | 264 | comfortable |  |
 | large-v3-turbo-q5_0 | ac | vulkan | 2/2 | 20.59 | 0.1 | 3.61 | 1.1 | 0.94 | 228 | comfortable |  |
 | large-v3-turbo-q8_0 | ac | vulkan | 2/2 | 15.17 | 0.0 | 3.51 | 2.0 | 0.96 | 222 | comfortable |  |
+| small | ac | vulkan | 2/2 | 26.31 | 0.4 | 8.05 | 0.1 | 0.29 | 193 | comfortable |  |
 | small-q5_1 | ac | vulkan | 2/2 | 30.71 | 1.3 | 8.97 | 0.1 | 0.27 | 204 | comfortable |  |
 | small-q8_0 | ac | vulkan | 2/2 | 30.93 | 0.2 | 8.85 | 0.1 | 0.28 | 182 | comfortable |  |
+| small.en | ac | vulkan | 2/2 | 25.35 | 0.9 | 9.32 | 0.1 | 0.34 | 194 | comfortable |  |
 | small.en-q5_1 | ac | vulkan | 2/2 | 26.53 | 0.8 | 9.60 | 0.1 | 0.32 | 206 | comfortable |  |
 | small.en-q8_0 | ac | vulkan | 2/2 | 12.46 | 0.7 | 9.69 | 0.0 | 0.34 | 185 | comfortable |  |
+| tiny | ac | vulkan | 2/2 | 69.66 | 0.8 | 23.39 | 1.4 | 0.13 | 170 | comfortable |  |
 | tiny-q5_1 | ac | vulkan | 2/2 | 73.14 | 0.1 | 19.31 | 3.2 | 0.22 | 174 | comfortable |  |
 | tiny-q8_0 | ac | vulkan | 2/2 | 71.06 | 3.3 | 26.25 | 4.0 | 0.09 | 184 | comfortable |  |
+| tiny.en | ac | vulkan | 2/2 | 75.33 | 1.4 | 31.43 | 0.4 | 0.10 | 170 | comfortable |  |
 | tiny.en-q5_1 | ac | vulkan | 2/2 | 79.48 | 2.5 | 32.53 | 0.6 | 0.10 | 177 | comfortable |  |
 | tiny.en-q8_0 | ac | vulkan | 2/2 | 81.34 | 2.7 | 33.80 | 0.6 | 0.08 | 182 | comfortable |  |
 

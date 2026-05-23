@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/root/fono-bench-rig/fono-bench-cpu",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "large-v3-turbo",
+    "--fixtures",
+    "/root/fono-bench-rig/fixtures/equivalence",
+    "--output",
+    "/root/fono-bench-rig/runs/i7-7500u__ac__cpu__large-v3-turbo__iter2.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": "1",
+    "battery_pct": 100,
+    "package_temp_c": 70.0
+  },
+  "context_start": {
+    "ac_online": "1",
+    "battery_pct": 100,
+    "captured_at_utc": "2026-05-23T11:36:47.549827+00:00",
+    "hostname": "ThinkPad",
+    "package_temp_c": 64.0,
+    "platform": "linux",
+    "power_profile": "balanced"
+  },
+  "exit_code": 0,
+  "label": "i7-7500u/ac/cpu/large-v3-turbo/iter2",
+  "max_rss_kib": 3753572,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 11.819045,
+  "user_s": 5962.770156,
+  "wall_clock_s": 2990.890616
+}

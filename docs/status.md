@@ -2,6 +2,26 @@
 
 Last updated: 2026-05-23
 
+## 2026-05-23 — fp16 gap-fill sweep (post-optimization baseline restore)
+
+Ran parallel fp16 benchmark sweeps on 3 hosts to restore the baselines deleted
+when the pre-optimization cohort (commit `b4db59c`) was removed.
+
+| host | builds | models | status |
+|---|---|---|---|
+| i7-1255u (localhost) | cpu + vulkan | 7 fp16 × 2 iters | **COMPLETE** |
+| ultra7-258v (192.168.0.251) | cpu + vulkan | 7 fp16 × 2 iters | **COMPLETE** |
+| i7-7500u (192.168.0.112) | cpu + vulkan | 7 fp16 × 2 iters | **COMPLETE** |
+| ryzen-5950x | cpu fp16 | 7 fp16 × 2 iters | **PENDING** — unreachable this session |
+
+Matrix after re-aggregation: **203 cells** (168 → 203).  
+Remaining gap: `ryzen-5950x/cpu` fp16 baselines (7 cells). Vulkan fp16 already present.  
+Generated: `calibration3.html` (166 KB), `auto-select.html` (190 KB).
+
+**Next:** run fp16 cpu sweep on ryzen-5950x when reachable; close remaining 7 gaps.
+
+---
+
 ## 2026-05-23 — Dropped pre-optimization bench cohort (commit b4db59c)
 
 Removed **298 stale benchmark files** (149 run JSONs + 149 `.time.json`

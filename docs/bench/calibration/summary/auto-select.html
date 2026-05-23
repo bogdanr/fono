@@ -1,0 +1,1005 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fono — Auto-Select Policy Explorer</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.1.0/dist/chartjs-plugin-annotation.min.js"></script>
+<style>
+:root{
+  --bg:#0d1117;--bg2:#1a1f27;--bg3:#262c36;--border:#3d444d;
+  --text:#f0f6fc;--muted:#b1bac4;--muted2:#8b949e;
+  --green:#56d364;--yellow:#e3b341;--red:#ff7b72;
+  --blue:#79c0ff;--purple:#d2a8ff;--orange:#ffa657;--teal:#39d0c0;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+a{color:var(--blue)}
+.page{max-width:1280px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:1.6rem;font-weight:700;margin-bottom:4px}
+.subtitle{color:var(--muted);margin-bottom:18px}
+h2{font-size:1.15rem;font-weight:600;margin:36px 0 6px;color:var(--blue);border-bottom:1px solid var(--border);padding-bottom:6px}
+h3{font-size:.95rem;font-weight:600;margin:18px 0 8px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+p.desc{color:var(--muted);font-size:13px;margin-bottom:14px;max-width:880px}
+code{background:var(--bg3);padding:1px 5px;border-radius:3px;font-size:12px}
+
+.filter-bar{position:sticky;top:0;z-index:50;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;align-items:end}
+.filter-bar label{font-size:11px;color:var(--muted);display:flex;flex-direction:column;gap:3px;text-transform:uppercase;letter-spacing:.04em}
+.filter-bar select,.filter-bar input{background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:5px 8px;font-size:13px;text-transform:none;letter-spacing:0}
+.filter-bar .presets{grid-column:1/-1;display:flex;gap:6px;flex-wrap:wrap}
+.filter-bar button{background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:5px 12px;font-size:12px;cursor:pointer}
+.filter-bar button:hover{background:var(--border)}
+.filter-bar button.primary{background:#1f3a5f;border-color:var(--blue);color:var(--blue)}
+
+.banner{background:var(--bg2);border-left:3px solid var(--blue);padding:10px 14px;margin-bottom:14px;font-size:13px;color:var(--muted)}
+.banner strong{color:var(--text)}
+
+.rec-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:14px;margin-top:8px}
+.rec-card{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:14px}
+.rec-card h4{font-size:13px;margin-bottom:4px;color:var(--text);font-weight:600}
+.rec-card .meta{font-size:11px;color:var(--muted);margin-bottom:8px}
+.rec-card .pick{display:flex;align-items:center;gap:6px;margin:6px 0;flex-wrap:wrap}
+.chip{display:inline-block;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600;background:var(--bg3);border:1px solid var(--border)}
+.chip.fam{background:#1f3a5f;border-color:var(--blue);color:var(--blue)}
+.chip.q-fp16{background:#3a2a55;border-color:var(--purple);color:var(--purple)}
+.chip.q-q8{background:#4a3a14;border-color:#ffce6a;color:#ffce6a}
+.chip.q-q5{background:#1f3a5f;border-color:var(--blue);color:var(--blue)}
+.chip.bk-cpu{background:#2d2208;border-color:var(--orange);color:var(--orange)}
+.chip.bk-vulkan{background:#0d2a18;border-color:var(--green);color:var(--green)}
+.chip.warn{background:#4a3a14;border-color:var(--yellow);color:var(--yellow)}
+.chip.err{background:#4a1a1a;border-color:var(--red);color:var(--red)}
+.chip.ok{background:#1b3f29;border-color:var(--green);color:var(--green)}
+.chip.none{background:var(--bg3);color:var(--muted);font-style:italic}
+.trace{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5}
+.trace b{color:var(--text);font-weight:600}
+.alt{font-size:11px;color:var(--muted);margin-top:4px}
+
+.chart-box{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:18px}
+/* A fixed-height wrapper around every canvas. Chart.js with
+   responsive:true and maintainAspectRatio:false respects whatever
+   height the wrapper dictates — without it, the chart's aspect ratio
+   collapses to whatever the canvas measured on first paint and
+   spuriously re-resizes on every filter change. */
+.canvas-wrap{position:relative;width:100%}
+.canvas-wrap.h-uplift{height:300px}
+.canvas-wrap.h-scatter{height:220px}
+.canvas-wrap.h-pareto{height:260px}
+.scatter-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+@media (max-width:900px){.scatter-grid{grid-template-columns:1fr}}
+.scatter-grid .chart-box{margin-bottom:0;padding:10px}
+.scatter-grid .chart-box h4{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px}
+
+.pareto-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:14px}
+.pareto-grid .chart-box{margin-bottom:0;position:relative}
+.pareto-grid .chart-box .enlarge-btn{position:absolute;top:8px;right:8px;background:var(--bg3);border:1px solid var(--border);color:var(--muted);border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;z-index:2}
+.pareto-grid .chart-box .enlarge-btn:hover{color:var(--text);border-color:var(--blue)}
+.pareto-grid .chart-box h4 .hidden-note{font-size:10px;color:var(--yellow);background:#3d2a08;border:1px solid #5a3e0d;border-radius:3px;padding:1px 6px;margin-left:8px;font-weight:normal;cursor:help;text-transform:none;letter-spacing:0;vertical-align:middle}
+.muted{color:var(--muted2)}
+
+/* Lightbox modal for enlarged Pareto inspection. */
+.modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:1000;display:none;align-items:center;justify-content:center;padding:24px}
+.modal-backdrop.open{display:flex}
+.modal-card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:18px;max-width:1100px;width:100%;max-height:92vh;display:flex;flex-direction:column}
+.modal-card header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.modal-card h3{margin:0;color:var(--text);font-size:1.05rem;text-transform:none;letter-spacing:0}
+.modal-card .close-btn{background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:4px 12px;font-size:13px;cursor:pointer}
+.modal-card .close-btn:hover{border-color:var(--red);color:var(--red)}
+.modal-card .canvas-wrap{flex:1;min-height:520px;height:60vh}
+
+textarea.policy{width:100%;min-height:260px;font:11px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:10px;resize:vertical}
+
+details.gaps{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px 14px;margin-top:14px}
+details.gaps summary{cursor:pointer;color:var(--muted);font-size:13px}
+details.gaps summary:hover{color:var(--text)}
+details.gaps[open] summary{color:var(--text);margin-bottom:10px}
+.gap-section{margin:10px 0}
+.gap-section h4{font-size:12px;color:var(--text);margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em}
+.gap-row{font-size:11px;color:var(--muted);padding:3px 0;display:flex;align-items:center;gap:8px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.gap-row button{font-size:10px;background:var(--bg3);border:1px solid var(--border);color:var(--muted);border-radius:3px;padding:1px 6px;cursor:pointer}
+.gap-row button:hover{color:var(--text)}
+
+footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--border);color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Fono — Auto-Select Policy Explorer</h1>
+  <p class="subtitle">
+    Generated 2026-05-23 13:51 UTC · 203 cells · 5 hosts.
+    Companion to <a href="calibration3.html">calibration3.html</a> — that page
+    diagnoses runs; this page <em>decides</em> which model Fono should ship to
+    users with a given hardware fingerprint.
+  </p>
+
+  <div class="banner">
+    <strong>What is this page?</strong> An interactive policy view. Adjust the
+    sliders below; the recommendation walk re-evaluates every measured host
+    under the new gates, the scatter views show which host features predict
+    viability, and the policy JSON section emits a versioned blob that a
+    future <code>crates/fono-stt/src/auto_select.rs</code> consumes to drive
+    runtime model selection. Replaces the static
+    <code>LocalTier::default_whisper_model()</code> path in
+    <code>crates/fono-core/src/hwcheck.rs</code>.
+  </div>
+
+  <div class="filter-bar" id="filter-bar">
+    <label>Batch RTF threshold
+      <input type="number" id="f-batch" min="1.0" max="4.0" step="0.1" value="2.0">
+    </label>
+    <label title="Gate on the worst single English fixture, not the mean — a single bad transcript can't hide behind a friendly average.">Accuracy ceiling (worst-fixture CER ↓)
+      <input type="number" id="f-acc" min="0.00" max="0.50" step="0.01" value="0.20">
+    </label>
+    <label>Stream RTF soft floor (warning only)
+      <input type="number" id="f-stream" min="0.8" max="3.0" step="0.1" value="1.5">
+    </label>
+    <label>Memory budget (MiB peak RSS)
+      <input type="number" id="f-mem" min="256" max="4096" step="128" value="1024">
+    </label>
+    <label>Binary variant
+      <select id="f-binary">
+        <option value="gpu_capable" selected>GPU-capable (CPU + Vulkan)</option>
+        <option value="cpu_only">CPU-only build</option>
+      </select>
+    </label>
+    <label>Language requirement
+      <select id="f-lang">
+        <option value="english_ok" selected>English-only OK (wider)</option>
+        <option value="multilingual_required">Multilingual required</option>
+      </select>
+    </label>
+    <label>Quant preference
+      <select id="f-quant">
+        <option value="auto" selected>Auto</option>
+        <option value="force_fp16">Force fp16</option>
+        <option value="force_q8">Force q8</option>
+        <option value="force_q5">Force q5</option>
+      </select>
+    </label>
+    <label>Power
+      <select id="f-power">
+        <option value="ac" selected>AC</option>
+        <option value="battery">Battery</option>
+        <option value="">Both</option>
+      </select>
+    </label>
+    <label title="aarch64 / Apple Silicon: no calibration data yet — fallback rules used in policy JSON output">Arch
+      <select id="f-arch">
+        <option value="x86_64" selected>x86_64</option>
+      </select>
+    </label>
+    <div class="presets">
+      <button onclick="presetReset()">Reset defaults</button>
+      <button onclick="presetCPUOnly()">CPU-only binary</button>
+      <button onclick="presetStrict()">Strict (batch≥2.5, acc≤0.12)</button>
+      <button onclick="presetRelaxed()">Relaxed (batch≥1.2, acc≤0.35)</button>
+    </div>
+  </div>
+
+  <h2>1 · Recommendation per measured host</h2>
+  <p class="desc">
+    For each measured host the policy walk picks the candidate that passes
+    all hard gates (batch RTF, accuracy, memory, binary variant, language,
+    power) under the largest-family, fp16-preferred, Vulkan-if-≥1.2×-CPU
+    preference order. The trace cites which gate the next-up candidate
+    failed, so you can see <em>why</em> a smaller model was chosen.
+  </p>
+  <div class="rec-grid" id="rec-grid"></div>
+
+  <h2>2 · Feature vs outcome scatter</h2>
+  <p class="desc">
+    Each dot = one measurement. <strong>Color</strong> distinguishes AVX-VNNI
+    capable hosts (blue) from pre-VNNI hosts (orange).
+    <strong>Shape</strong>: ● fp16 / ■ q8 / ▲ q5. <strong>Size</strong>: tiny
+    → small dot, turbo → large. Dashed horizontal/vertical lines show the
+    current threshold; dots in the upper-left quadrant of each batch-RTF
+    panel qualify. This is where "data hides things we don't expect" becomes
+    visible (e.g. quant uplift on Vulkan being flat across all hosts).
+  </p>
+  <div class="scatter-grid" id="scatter-grid"></div>
+
+  <h2>3 · Quant uplift per host — does quantization help here?</h2>
+  <p class="desc">
+    For each (host, build) pair, the bar shows the median
+    <code>quant_RTF / fp16_RTF</code> across all measured (family, language)
+    combinations. A categorical tag labels each bar:
+    <code>large</code> (≥1.5×), <code>moderate</code> (1.1–1.5×),
+    <code>none</code> (0.9–1.1×), <code>regression</code> (&lt;0.9×). Use
+    this to discover host classes where the policy should force fp16
+    (typically Vulkan builds across all measured hosts).
+  </p>
+  <div class="chart-box"><div class="canvas-wrap h-uplift"><canvas id="quant-uplift"></canvas></div></div>
+
+  <h2>4 · Pareto frontier per host — what's the recommendation trading?</h2>
+  <p class="desc">
+    Each scatter = one host. X-axis is <strong>worst-fixture</strong> WER
+    (<code>accuracy_en_max</code>, lower=better) so a single catastrophic
+    transcript can't hide behind a friendly mean. Y-axis is batch RTF
+    (higher=better). The chart caps display at
+    WER&nbsp;≤&nbsp;<code>display_wer_cap</code> (default 0.30); cells worse
+    than that are dropped from the plot but still counted in section&nbsp;6.
+    The Pareto frontier is the set of cells where no other cell is both more
+    accurate AND faster. The current recommendation is marked with a target
+    reticle (◎). Dashed lines show the current thresholds; the qualifying
+    quadrant is upper-left.
+  </p>
+  <div class="pareto-grid" id="pareto-grid"></div>
+
+  <h2>5 · Policy JSON export</h2>
+  <p class="desc">
+    Versioned blob describing the rules currently selected by the sliders.
+    Copy this into <code>crates/fono-stt/src/auto_select.rs</code> (or its
+    designated data file). The Rust side becomes a decision tree over
+    detected host features, not a tier classifier with a hardcoded family
+    map. <code>evidence_hosts</code> tells you how many machines each rule
+    rests on — never ship a rule with <code>n=1</code> without flagging it.
+  </p>
+  <div class="chart-box">
+    <button id="btn-copy-policy" class="chip ok" style="cursor:pointer;font-size:13px;padding:6px 14px">Copy policy as JSON</button>
+    <textarea class="policy" id="policy-json" readonly spellcheck="false"></textarea>
+  </div>
+
+  <h2>6 · Data gaps under current policy</h2>
+  <p class="desc">
+    The recommendation walk only sees cells that exist in the matrix. If a
+    candidate the policy would prefer is unmeasured, the walk silently falls
+    through to a smaller alternative. The list below tells the calibration
+    operator which benchmarks to run next to suppress gaps under the
+    <em>current</em> slider state — collapsed by default to keep the page's
+    focus on the policy view.
+  </p>
+  <details class="gaps" id="gaps-block">
+    <summary id="gaps-summary">No gaps under current policy.</summary>
+    <div id="gaps-body"></div>
+  </details>
+
+  <footer>
+    Fono benchmark · GPL-3.0-only ·
+    <a href="calibration3.html">← Decision page (diagnostic)</a> ·
+    Higher RTF = faster. Lower accuracy CER = better.
+    Page is the source of truth for the values baked into the future
+    <code>crates/fono-stt/src/auto_select.rs</code>.
+  </footer>
+</div>
+
+<div class="modal-backdrop" id="pareto-modal" onclick="if(event.target===this)closeParetoModal()">
+  <div class="modal-card">
+    <header>
+      <h3 id="modal-title">Pareto frontier</h3>
+      <button class="close-btn" onclick="closeParetoModal()">Close ✕</button>
+    </header>
+    <div class="canvas-wrap"><canvas id="modal-canvas"></canvas></div>
+  </div>
+</div>
+
+<script>
+// ─── Embedded data ─────────────────────────────────────────────────────────
+const RAW_CELLS = [{"host":"i7-1255u","power":"ac","build":"cpu","model":"base","model_family":"base","model_base":"base","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":26.562,"stream_rtf_median":7.7239,"ttff_s_median":0.4047,"peak_rss_mib_median":179.5,"wall_clock_s_median":25.3098,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":148,"accuracy_en_mean":0.1049,"accuracy_en_max":0.227,"accuracy_all_mean":0.1674,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"base-q5_1","model_family":"base","model_base":"base","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":17.1646,"stream_rtf_median":9.3734,"ttff_s_median":0.2957,"peak_rss_mib_median":179.6,"wall_clock_s_median":18.4166,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3485,"accuracy_en_max":0.7106,"accuracy_all_mean":0.2699,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"base-q8_0","model_family":"base","model_base":"base","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":26.3588,"stream_rtf_median":7.9661,"ttff_s_median":0.3149,"peak_rss_mib_median":187.9,"wall_clock_s_median":18.2126,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.1765,"accuracy_en_max":0.5135,"accuracy_all_mean":0.1914,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"base.en","model_family":"base","model_base":"base.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":23.2229,"stream_rtf_median":6.8109,"ttff_s_median":0.426,"peak_rss_mib_median":182.4,"wall_clock_s_median":8.9659,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":148,"accuracy_en_mean":0.3275,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3275,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"base.en-q5_1","model_family":"base","model_base":"base.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":25.7605,"stream_rtf_median":9.4406,"ttff_s_median":0.2881,"peak_rss_mib_median":184.6,"wall_clock_s_median":6.8411,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3022,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3022,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"base.en-q8_0","model_family":"base","model_base":"base.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":22.0817,"stream_rtf_median":8.6472,"ttff_s_median":0.3078,"peak_rss_mib_median":194.4,"wall_clock_s_median":7.588,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.3022,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3022,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"large-v3-turbo","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":2.3765,"stream_rtf_median":0.4847,"ttff_s_median":7.8736,"peak_rss_mib_median":258.3,"wall_clock_s_median":377.1028,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":1543,"accuracy_en_mean":0.1859,"accuracy_en_max":0.5259,"accuracy_all_mean":0.1715,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"large-v3-turbo-q5_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q5_0","quant_display":"q5","batch_rtf_median":4.5082,"stream_rtf_median":0.8353,"ttff_s_median":4.4002,"peak_rss_mib_median":211.6,"wall_clock_s_median":215.2248,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":547,"accuracy_en_mean":0.0716,"accuracy_en_max":0.1546,"accuracy_all_mean":0.1257,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"large-v3-turbo-q8_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":4.4321,"stream_rtf_median":0.8124,"ttff_s_median":4.5702,"peak_rss_mib_median":210.6,"wall_clock_s_median":221.8147,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":834,"accuracy_en_mean":0.0716,"accuracy_en_max":0.1546,"accuracy_all_mean":0.1338,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"small","model_family":"small","model_base":"small","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":9.1228,"stream_rtf_median":2.173,"ttff_s_median":1.652,"peak_rss_mib_median":199.4,"wall_clock_s_median":86.2404,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":466,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1097,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"small-q5_1","model_family":"small","model_base":"small","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":15.7215,"stream_rtf_median":3.328,"ttff_s_median":1.0016,"peak_rss_mib_median":197.0,"wall_clock_s_median":40.5328,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1161,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"small-q8_0","model_family":"small","model_base":"small","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":13.9102,"stream_rtf_median":3.1132,"ttff_s_median":1.0686,"peak_rss_mib_median":178.1,"wall_clock_s_median":48.4724,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.0647,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1153,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"small.en","model_family":"small","model_base":"small.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":4.5947,"stream_rtf_median":2.619,"ttff_s_median":1.4147,"peak_rss_mib_median":198.9,"wall_clock_s_median":28.2021,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":466,"accuracy_en_mean":0.2853,"accuracy_en_max":0.4884,"accuracy_all_mean":0.2853,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"small.en-q5_1","model_family":"small","model_base":"small.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":14.7492,"stream_rtf_median":3.9549,"ttff_s_median":0.8334,"peak_rss_mib_median":200.0,"wall_clock_s_median":15.1189,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.2529,"accuracy_en_max":0.4884,"accuracy_all_mean":0.2529,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"small.en-q8_0","model_family":"small","model_base":"small.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":4.5173,"stream_rtf_median":3.7429,"ttff_s_median":0.8962,"peak_rss_mib_median":180.2,"wall_clock_s_median":22.9953,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.2087,"accuracy_en_max":0.25,"accuracy_all_mean":0.2087,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"tiny","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":34.6192,"stream_rtf_median":11.1919,"ttff_s_median":0.2881,"peak_rss_mib_median":176.8,"wall_clock_s_median":18.0003,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":78,"accuracy_en_mean":0.0488,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1808,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"tiny-q5_1","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":38.0867,"stream_rtf_median":10.4667,"ttff_s_median":0.448,"peak_rss_mib_median":173.5,"wall_clock_s_median":13.7911,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.0474,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1843,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"tiny-q8_0","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":38.9305,"stream_rtf_median":12.4546,"ttff_s_median":0.1971,"peak_rss_mib_median":182.7,"wall_clock_s_median":11.8184,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.0488,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1799,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"tiny.en","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":39.4681,"stream_rtf_median":13.2507,"ttff_s_median":0.2425,"peak_rss_mib_median":172.0,"wall_clock_s_median":4.7743,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":78,"accuracy_en_mean":0.078,"accuracy_en_max":0.1618,"accuracy_all_mean":0.078,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"tiny.en-q5_1","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":51.3448,"stream_rtf_median":17.0293,"ttff_s_median":0.1885,"peak_rss_mib_median":175.9,"wall_clock_s_median":3.7138,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.0565,"accuracy_en_max":0.1618,"accuracy_all_mean":0.0565,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"cpu","model":"tiny.en-q8_0","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":47.0363,"stream_rtf_median":15.6929,"ttff_s_median":0.1786,"peak_rss_mib_median":181.9,"wall_clock_s_median":4.028,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.078,"accuracy_en_max":0.1618,"accuracy_all_mean":0.078,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"base","model_family":"base","model_base":"base","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":21.722,"stream_rtf_median":6.1225,"ttff_s_median":0.4835,"peak_rss_mib_median":175.9,"wall_clock_s_median":31.7427,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":148,"accuracy_en_mean":0.1049,"accuracy_en_max":0.227,"accuracy_all_mean":0.1674,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"base-q5_1","model_family":"base","model_base":"base","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":17.3607,"stream_rtf_median":9.4208,"ttff_s_median":0.2918,"peak_rss_mib_median":187.8,"wall_clock_s_median":18.2439,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3485,"accuracy_en_max":0.7106,"accuracy_all_mean":0.2699,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"base-q8_0","model_family":"base","model_base":"base","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":27.1661,"stream_rtf_median":8.2246,"ttff_s_median":0.3034,"peak_rss_mib_median":199.7,"wall_clock_s_median":17.6476,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.1765,"accuracy_en_max":0.5135,"accuracy_all_mean":0.1914,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"base.en","model_family":"base","model_base":"base.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":23.6887,"stream_rtf_median":6.9509,"ttff_s_median":0.4096,"peak_rss_mib_median":181.4,"wall_clock_s_median":8.781,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":148,"accuracy_en_mean":0.3275,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3275,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"base.en-q5_1","model_family":"base","model_base":"base.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":26.5613,"stream_rtf_median":9.7077,"ttff_s_median":0.278,"peak_rss_mib_median":193.2,"wall_clock_s_median":6.6361,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3022,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3022,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"base.en-q8_0","model_family":"base","model_base":"base.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":23.3112,"stream_rtf_median":8.8889,"ttff_s_median":0.301,"peak_rss_mib_median":200.8,"wall_clock_s_median":7.33,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.3022,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3022,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"large-v3-turbo","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":2.3883,"stream_rtf_median":0.4951,"ttff_s_median":7.7401,"peak_rss_mib_median":268.4,"wall_clock_s_median":369.5307,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":1543,"accuracy_en_mean":0.1859,"accuracy_en_max":0.5259,"accuracy_all_mean":0.1715,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"large-v3-turbo-q5_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q5_0","quant_display":"q5","batch_rtf_median":7.012,"stream_rtf_median":0.9349,"ttff_s_median":3.7472,"peak_rss_mib_median":222.7,"wall_clock_s_median":135.1245,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":547,"accuracy_en_mean":0.0716,"accuracy_en_max":0.1546,"accuracy_all_mean":0.1372,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"large-v3-turbo-q8_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":6.3272,"stream_rtf_median":0.8991,"ttff_s_median":3.8706,"peak_rss_mib_median":223.3,"wall_clock_s_median":141.5678,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":834,"accuracy_en_mean":0.0716,"accuracy_en_max":0.1546,"accuracy_all_mean":0.1345,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"small","model_family":"small","model_base":"small","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":8.9328,"stream_rtf_median":2.1554,"ttff_s_median":1.6939,"peak_rss_mib_median":199.9,"wall_clock_s_median":87.1531,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":466,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1097,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"small-q5_1","model_family":"small","model_base":"small","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":12.6721,"stream_rtf_median":2.9831,"ttff_s_median":1.1265,"peak_rss_mib_median":205.6,"wall_clock_s_median":46.6941,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1161,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"small-q8_0","model_family":"small","model_base":"small","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":13.2647,"stream_rtf_median":2.9003,"ttff_s_median":1.1537,"peak_rss_mib_median":185.5,"wall_clock_s_median":46.9588,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.0647,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1154,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"small.en","model_family":"small","model_base":"small.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":4.5836,"stream_rtf_median":2.6233,"ttff_s_median":1.4022,"peak_rss_mib_median":198.3,"wall_clock_s_median":28.1964,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":466,"accuracy_en_mean":0.2853,"accuracy_en_max":0.4884,"accuracy_all_mean":0.2853,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"small.en-q5_1","model_family":"small","model_base":"small.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":14.7138,"stream_rtf_median":4.0204,"ttff_s_median":0.8197,"peak_rss_mib_median":206.4,"wall_clock_s_median":14.9123,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.2529,"accuracy_en_max":0.4884,"accuracy_all_mean":0.2529,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"small.en-q8_0","model_family":"small","model_base":"small.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":4.2907,"stream_rtf_median":3.6828,"ttff_s_median":0.91,"peak_rss_mib_median":187.7,"wall_clock_s_median":23.7792,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.2087,"accuracy_en_max":0.25,"accuracy_all_mean":0.2087,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"tiny","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":30.4289,"stream_rtf_median":10.9813,"ttff_s_median":0.2913,"peak_rss_mib_median":175.7,"wall_clock_s_median":19.0745,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":78,"accuracy_en_mean":0.0488,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1808,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"tiny-q5_1","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":42.5005,"stream_rtf_median":10.8724,"ttff_s_median":0.4354,"peak_rss_mib_median":185.6,"wall_clock_s_median":12.9034,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.0474,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1843,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"tiny-q8_0","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":37.2145,"stream_rtf_median":12.6514,"ttff_s_median":0.1946,"peak_rss_mib_median":199.7,"wall_clock_s_median":11.8107,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.0488,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1799,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"tiny.en","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":41.5663,"stream_rtf_median":13.2925,"ttff_s_median":0.2392,"peak_rss_mib_median":171.5,"wall_clock_s_median":4.7043,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":78,"accuracy_en_mean":0.078,"accuracy_en_max":0.1618,"accuracy_all_mean":0.078,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"tiny.en-q5_1","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":45.5411,"stream_rtf_median":16.9581,"ttff_s_median":0.195,"peak_rss_mib_median":184.4,"wall_clock_s_median":3.8537,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.0565,"accuracy_en_max":0.1618,"accuracy_all_mean":0.0565,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-1255u","power":"ac","build":"vulkan","model":"tiny.en-q8_0","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":44.8485,"stream_rtf_median":15.5999,"ttff_s_median":0.1822,"peak_rss_mib_median":188.3,"wall_clock_s_median":4.0987,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.078,"accuracy_en_max":0.1618,"accuracy_all_mean":0.078,"arch":"x86_64","released_year":2022,"physical_cores":10,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"base","model_family":"base","model_base":"base","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":7.4745,"stream_rtf_median":1.2558,"ttff_s_median":3.0892,"peak_rss_mib_median":602.3,"wall_clock_s_median":140.6866,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":148,"accuracy_en_mean":0.1049,"accuracy_en_max":0.227,"accuracy_all_mean":0.1686,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"base-q5_1","model_family":"base","model_base":"base","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":5.9333,"stream_rtf_median":1.0588,"ttff_s_median":3.4506,"peak_rss_mib_median":454.5,"wall_clock_s_median":168.3315,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3331,"accuracy_en_max":0.7463,"accuracy_all_mean":0.2528,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"base-q8_0","model_family":"base","model_base":"base","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":8.5143,"stream_rtf_median":1.4155,"ttff_s_median":2.7829,"peak_rss_mib_median":474.7,"wall_clock_s_median":124.6242,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.1134,"accuracy_en_max":0.261,"accuracy_all_mean":0.17,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"base.en","model_family":"base","model_base":"base.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":6.345,"stream_rtf_median":1.04,"ttff_s_median":3.0608,"peak_rss_mib_median":604.3,"wall_clock_s_median":52.6442,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":148,"accuracy_en_mean":0.3275,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3275,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"base.en-q5_1","model_family":"base","model_base":"base.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":4.9589,"stream_rtf_median":1.0996,"ttff_s_median":3.414,"peak_rss_mib_median":432.9,"wall_clock_s_median":52.2545,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3022,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3022,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"base.en-q8_0","model_family":"base","model_base":"base.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":6.2944,"stream_rtf_median":1.174,"ttff_s_median":2.7299,"peak_rss_mib_median":476.5,"wall_clock_s_median":47.5396,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.3074,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3074,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"large-v3-turbo","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":0.373,"stream_rtf_median":0.0587,"ttff_s_median":67.2386,"peak_rss_mib_median":3665.1,"wall_clock_s_median":2983.076,"verdict":"unsuitable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":1543,"accuracy_en_mean":0.0473,"accuracy_en_max":0.0685,"accuracy_all_mean":0.1266,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"large-v3-turbo-q5_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q5_0","quant_display":"q5","batch_rtf_median":0.3924,"stream_rtf_median":0.0601,"ttff_s_median":65.7588,"peak_rss_mib_median":1660.7,"wall_clock_s_median":2899.9316,"verdict":"unsuitable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":547,"accuracy_en_mean":0.106,"accuracy_en_max":0.2059,"accuracy_all_mean":0.1366,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"large-v3-turbo-q8_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":0.5148,"stream_rtf_median":0.0777,"ttff_s_median":50.7634,"peak_rss_mib_median":2233.3,"wall_clock_s_median":2239.1603,"verdict":"unsuitable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":834,"accuracy_en_mean":0.0705,"accuracy_en_max":0.1503,"accuracy_all_mean":0.1343,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"small","model_family":"small","model_base":"small","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":2.3623,"stream_rtf_median":0.3402,"ttff_s_median":12.189,"peak_rss_mib_median":1365.0,"wall_clock_s_median":508.5388,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":466,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1111,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"small-q5_1","model_family":"small","model_base":"small","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":2.2662,"stream_rtf_median":0.3205,"ttff_s_median":12.7636,"peak_rss_mib_median":796.9,"wall_clock_s_median":538.5343,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1065,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"small-q8_0","model_family":"small","model_base":"small","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":2.9806,"stream_rtf_median":0.4159,"ttff_s_median":9.5968,"peak_rss_mib_median":942.1,"wall_clock_s_median":414.3376,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1114,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"small.en","model_family":"small","model_base":"small.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":2.3736,"stream_rtf_median":0.328,"ttff_s_median":11.5856,"peak_rss_mib_median":1363.8,"wall_clock_s_median":163.1842,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":466,"accuracy_en_mean":0.1881,"accuracy_en_max":0.25,"accuracy_all_mean":0.1881,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"small.en-q5_1","model_family":"small","model_base":"small.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":1.6146,"stream_rtf_median":0.3049,"ttff_s_median":12.5358,"peak_rss_mib_median":796.1,"wall_clock_s_median":183.3094,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.2666,"accuracy_en_max":0.4884,"accuracy_all_mean":0.2666,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"small.en-q8_0","model_family":"small","model_base":"small.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":3.0125,"stream_rtf_median":0.3936,"ttff_s_median":9.6616,"peak_rss_mib_median":938.0,"wall_clock_s_median":135.0796,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.1874,"accuracy_en_max":0.25,"accuracy_all_mean":0.1874,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"tiny","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":14.4727,"stream_rtf_median":2.542,"ttff_s_median":1.457,"peak_rss_mib_median":398.2,"wall_clock_s_median":69.9824,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":78,"accuracy_en_mean":0.0488,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1813,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"tiny-q5_1","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":14.4221,"stream_rtf_median":2.3398,"ttff_s_median":1.7482,"peak_rss_mib_median":327.5,"wall_clock_s_median":75.1482,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.0474,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1863,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"tiny-q8_0","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":16.1586,"stream_rtf_median":2.741,"ttff_s_median":1.3637,"peak_rss_mib_median":351.4,"wall_clock_s_median":64.5656,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.0474,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1921,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"tiny.en","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":18.2067,"stream_rtf_median":2.6567,"ttff_s_median":1.3799,"peak_rss_mib_median":382.3,"wall_clock_s_median":20.333,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":78,"accuracy_en_mean":0.078,"accuracy_en_max":0.1618,"accuracy_all_mean":0.078,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"tiny.en-q5_1","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":17.0909,"stream_rtf_median":2.4257,"ttff_s_median":1.5406,"peak_rss_mib_median":292.1,"wall_clock_s_median":22.1825,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.0565,"accuracy_en_max":0.1618,"accuracy_all_mean":0.0565,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"cpu","model":"tiny.en-q8_0","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":20.9401,"stream_rtf_median":2.9358,"ttff_s_median":1.2495,"peak_rss_mib_median":333.0,"wall_clock_s_median":18.3125,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.078,"accuracy_en_max":0.1618,"accuracy_all_mean":0.078,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"base","model_family":"base","model_base":"base","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":9.4425,"stream_rtf_median":2.0055,"ttff_s_median":1.5933,"peak_rss_mib_median":185.5,"wall_clock_s_median":67.3192,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":148,"accuracy_en_mean":0.1049,"accuracy_en_max":0.227,"accuracy_all_mean":0.1677,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"base-q5_1","model_family":"base","model_base":"base","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":8.7081,"stream_rtf_median":1.9619,"ttff_s_median":1.6212,"peak_rss_mib_median":194.8,"wall_clock_s_median":69.5199,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3574,"accuracy_en_max":0.7463,"accuracy_all_mean":0.2735,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"base-q8_0","model_family":"base","model_base":"base","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":8.3104,"stream_rtf_median":1.8658,"ttff_s_median":1.6936,"peak_rss_mib_median":203.2,"wall_clock_s_median":73.0481,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.1765,"accuracy_en_max":0.5135,"accuracy_all_mean":0.1908,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"base.en","model_family":"base","model_base":"base.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":8.8529,"stream_rtf_median":1.9533,"ttff_s_median":1.5639,"peak_rss_mib_median":190.5,"wall_clock_s_median":29.4611,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":148,"accuracy_en_mean":0.3275,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3275,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"base.en-q5_1","model_family":"base","model_base":"base.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":7.3221,"stream_rtf_median":1.9074,"ttff_s_median":1.6261,"peak_rss_mib_median":201.0,"wall_clock_s_median":31.1161,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3022,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3022,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"base.en-q8_0","model_family":"base","model_base":"base.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":8.2698,"stream_rtf_median":1.8482,"ttff_s_median":1.625,"peak_rss_mib_median":209.5,"wall_clock_s_median":31.1824,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.3275,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3275,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"large-v3-turbo","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":0.959,"stream_rtf_median":0.1343,"ttff_s_median":27.0377,"peak_rss_mib_median":277.8,"wall_clock_s_median":943.9771,"verdict":"unsuitable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":1543,"accuracy_en_mean":0.1859,"accuracy_en_max":0.5259,"accuracy_all_mean":0.1802,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"large-v3-turbo-q5_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q5_0","quant_display":"q5","batch_rtf_median":1.0017,"stream_rtf_median":0.1284,"ttff_s_median":28.2727,"peak_rss_mib_median":241.0,"wall_clock_s_median":977.247,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":547,"accuracy_en_mean":0.065,"accuracy_en_max":0.1546,"accuracy_all_mean":0.1356,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"large-v3-turbo-q8_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":0.8076,"stream_rtf_median":0.1276,"ttff_s_median":28.2329,"peak_rss_mib_median":225.5,"wall_clock_s_median":1009.1266,"verdict":"unsuitable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":834,"accuracy_en_mean":0.0716,"accuracy_en_max":0.1546,"accuracy_all_mean":0.1389,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"small","model_family":"small","model_base":"small","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":3.6296,"stream_rtf_median":0.6197,"ttff_s_median":5.2927,"peak_rss_mib_median":207.0,"wall_clock_s_median":210.2488,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":466,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1117,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"small-q5_1","model_family":"small","model_base":"small","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":3.6601,"stream_rtf_median":0.5838,"ttff_s_median":6.0341,"peak_rss_mib_median":211.0,"wall_clock_s_median":220.915,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.0647,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1156,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"small-q8_0","model_family":"small","model_base":"small","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":3.3234,"stream_rtf_median":0.5615,"ttff_s_median":6.2185,"peak_rss_mib_median":193.5,"wall_clock_s_median":231.5818,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.0647,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1126,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"small.en","model_family":"small","model_base":"small.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":1.9928,"stream_rtf_median":0.6911,"ttff_s_median":5.3944,"peak_rss_mib_median":206.5,"wall_clock_s_median":91.8083,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":466,"accuracy_en_mean":0.3031,"accuracy_en_max":0.4884,"accuracy_all_mean":0.3031,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"small.en-q5_1","model_family":"small","model_base":"small.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":2.8892,"stream_rtf_median":0.6703,"ttff_s_median":5.515,"peak_rss_mib_median":217.4,"wall_clock_s_median":86.4966,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.2581,"accuracy_en_max":0.4884,"accuracy_all_mean":0.2581,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"small.en-q8_0","model_family":"small","model_base":"small.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":1.445,"stream_rtf_median":0.6485,"ttff_s_median":5.6659,"peak_rss_mib_median":194.8,"wall_clock_s_median":105.1408,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.2087,"accuracy_en_max":0.25,"accuracy_all_mean":0.2087,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"tiny","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":15.2602,"stream_rtf_median":3.3968,"ttff_s_median":0.9468,"peak_rss_mib_median":179.1,"wall_clock_s_median":40.112,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":78,"accuracy_en_mean":0.0488,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1736,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"tiny-q5_1","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":12.3773,"stream_rtf_median":2.9495,"ttff_s_median":1.3982,"peak_rss_mib_median":205.8,"wall_clock_s_median":46.9819,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.0474,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1774,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"tiny-q8_0","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":13.2315,"stream_rtf_median":3.3567,"ttff_s_median":0.8399,"peak_rss_mib_median":208.6,"wall_clock_s_median":41.6002,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.0488,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1779,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"tiny.en","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":17.4317,"stream_rtf_median":4.0838,"ttff_s_median":0.821,"peak_rss_mib_median":184.6,"wall_clock_s_median":14.2648,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":78,"accuracy_en_mean":0.078,"accuracy_en_max":0.1618,"accuracy_all_mean":0.078,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"tiny.en-q5_1","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":15.6263,"stream_rtf_median":3.9701,"ttff_s_median":0.8602,"peak_rss_mib_median":190.7,"wall_clock_s_median":14.929,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.127,"accuracy_en_max":0.4435,"accuracy_all_mean":0.127,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-7500u","power":"ac","build":"vulkan","model":"tiny.en-q8_0","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":16.5441,"stream_rtf_median":3.9059,"ttff_s_median":0.8337,"peak_rss_mib_median":195.2,"wall_clock_s_median":14.9388,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.078,"accuracy_en_max":0.1618,"accuracy_all_mean":0.078,"arch":"x86_64","released_year":2016,"physical_cores":2,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"base","model_family":"base","model_base":"base","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":11.3183,"stream_rtf_median":1.8849,"ttff_s_median":1.7615,"peak_rss_mib_median":600.1,"wall_clock_s_median":68.8875,"verdict":"comfortable","iterations_kept":3,"iterations_total":3,"errors":[],"approx_size_mib":148,"accuracy_en_mean":0.1049,"accuracy_en_max":0.227,"accuracy_all_mean":0.1671,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"base-q5_1","model_family":"base","model_base":"base","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":11.531,"stream_rtf_median":1.7305,"ttff_s_median":1.9147,"peak_rss_mib_median":419.4,"wall_clock_s_median":74.0066,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3331,"accuracy_en_max":0.7463,"accuracy_all_mean":0.2637,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"base-q8_0","model_family":"base","model_base":"base","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":12.6632,"stream_rtf_median":2.011,"ttff_s_median":1.7083,"peak_rss_mib_median":474.0,"wall_clock_s_median":64.4306,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.1134,"accuracy_en_max":0.261,"accuracy_all_mean":0.1685,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"base.en","model_family":"base","model_base":"base.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":10.0772,"stream_rtf_median":1.7929,"ttff_s_median":1.7372,"peak_rss_mib_median":600.9,"wall_clock_s_median":30.8981,"verdict":"comfortable","iterations_kept":3,"iterations_total":3,"errors":[],"approx_size_mib":148,"accuracy_en_mean":0.3275,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3275,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"base.en-q5_1","model_family":"base","model_base":"base.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":8.3202,"stream_rtf_median":1.8558,"ttff_s_median":2.055,"peak_rss_mib_median":433.1,"wall_clock_s_median":31.0329,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3022,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3022,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"base.en-q8_0","model_family":"base","model_base":"base.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":9.3782,"stream_rtf_median":1.8772,"ttff_s_median":1.7144,"peak_rss_mib_median":475.1,"wall_clock_s_median":30.1548,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.3074,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3074,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"large-v3-turbo","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":0.5566,"stream_rtf_median":0.0893,"ttff_s_median":43.5731,"peak_rss_mib_median":3663.6,"wall_clock_s_median":1964.9889,"verdict":"unsuitable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":1543,"accuracy_en_mean":0.0473,"accuracy_en_max":0.0685,"accuracy_all_mean":0.1266,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"large-v3-turbo-q5_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q5_0","quant_display":"q5","batch_rtf_median":0.5966,"stream_rtf_median":0.0914,"ttff_s_median":42.7991,"peak_rss_mib_median":1659.9,"wall_clock_s_median":1907.4728,"verdict":"unsuitable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":547,"accuracy_en_mean":0.106,"accuracy_en_max":0.2059,"accuracy_all_mean":0.1366,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"large-v3-turbo-q8_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":0.7607,"stream_rtf_median":0.117,"ttff_s_median":33.3291,"peak_rss_mib_median":2232.3,"wall_clock_s_median":1490.7,"verdict":"unsuitable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":834,"accuracy_en_mean":0.0705,"accuracy_en_max":0.1503,"accuracy_all_mean":0.1343,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"small","model_family":"small","model_base":"small","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":3.4374,"stream_rtf_median":0.4543,"ttff_s_median":7.9127,"peak_rss_mib_median":1358.1,"wall_clock_s_median":277.4117,"verdict":"borderline","iterations_kept":3,"iterations_total":3,"errors":[],"approx_size_mib":466,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1134,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"small-q5_1","model_family":"small","model_base":"small","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":3.4704,"stream_rtf_median":0.4322,"ttff_s_median":8.2044,"peak_rss_mib_median":791.0,"wall_clock_s_median":289.4048,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1135,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"small-q8_0","model_family":"small","model_base":"small","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":4.3402,"stream_rtf_median":0.5444,"ttff_s_median":6.4377,"peak_rss_mib_median":932.3,"wall_clock_s_median":229.9541,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1144,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"small.en","model_family":"small","model_base":"small.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":3.5464,"stream_rtf_median":0.5132,"ttff_s_median":7.2337,"peak_rss_mib_median":1364.5,"wall_clock_s_median":104.954,"verdict":"borderline","iterations_kept":3,"iterations_total":3,"errors":[],"approx_size_mib":466,"accuracy_en_mean":0.1881,"accuracy_en_max":0.25,"accuracy_all_mean":0.1881,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"small.en-q5_1","model_family":"small","model_base":"small.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":2.551,"stream_rtf_median":0.4633,"ttff_s_median":8.3624,"peak_rss_mib_median":797.1,"wall_clock_s_median":119.941,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.2666,"accuracy_en_max":0.4884,"accuracy_all_mean":0.2666,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"small.en-q8_0","model_family":"small","model_base":"small.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":4.5326,"stream_rtf_median":0.601,"ttff_s_median":6.1967,"peak_rss_mib_median":938.9,"wall_clock_s_median":88.6603,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.1874,"accuracy_en_max":0.25,"accuracy_all_mean":0.1874,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"tiny","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":21.1329,"stream_rtf_median":3.6135,"ttff_s_median":0.9159,"peak_rss_mib_median":405.2,"wall_clock_s_median":36.0904,"verdict":"comfortable","iterations_kept":3,"iterations_total":3,"errors":[],"approx_size_mib":78,"accuracy_en_mean":0.0488,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1757,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"tiny-q5_1","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":25.1368,"stream_rtf_median":3.6851,"ttff_s_median":1.0216,"peak_rss_mib_median":309.8,"wall_clock_s_median":34.64,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.0474,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1806,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"tiny-q8_0","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":24.4622,"stream_rtf_median":3.9982,"ttff_s_median":0.8311,"peak_rss_mib_median":339.6,"wall_clock_s_median":32.406,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.0474,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1855,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"tiny.en","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":25.9239,"stream_rtf_median":4.2883,"ttff_s_median":0.835,"peak_rss_mib_median":403.4,"wall_clock_s_median":12.842,"verdict":"comfortable","iterations_kept":3,"iterations_total":3,"errors":[],"approx_size_mib":78,"accuracy_en_mean":0.078,"accuracy_en_max":0.1618,"accuracy_all_mean":0.078,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"tiny.en-q5_1","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":27.9346,"stream_rtf_median":4.1711,"ttff_s_median":0.8962,"peak_rss_mib_median":312.9,"wall_clock_s_median":13.005,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.0565,"accuracy_en_max":0.1618,"accuracy_all_mean":0.0565,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"cpu","model":"tiny.en-q8_0","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":30.4707,"stream_rtf_median":4.7901,"ttff_s_median":0.7464,"peak_rss_mib_median":336.3,"wall_clock_s_median":11.4207,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.078,"accuracy_en_max":0.1618,"accuracy_all_mean":0.078,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"base","model_family":"base","model_base":"base","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":9.6007,"stream_rtf_median":2.0543,"ttff_s_median":1.5635,"peak_rss_mib_median":177.4,"wall_clock_s_median":65.8158,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":148,"accuracy_en_mean":0.1049,"accuracy_en_max":0.227,"accuracy_all_mean":0.1656,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"base-q5_1","model_family":"base","model_base":"base","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":8.8776,"stream_rtf_median":2.0364,"ttff_s_median":1.5557,"peak_rss_mib_median":187.1,"wall_clock_s_median":67.2072,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3574,"accuracy_en_max":0.7463,"accuracy_all_mean":0.2735,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"base-q8_0","model_family":"base","model_base":"base","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":8.8285,"stream_rtf_median":1.9748,"ttff_s_median":1.6005,"peak_rss_mib_median":194.6,"wall_clock_s_median":68.9945,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.1765,"accuracy_en_max":0.5135,"accuracy_all_mean":0.1908,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"base.en","model_family":"base","model_base":"base.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":6.9054,"stream_rtf_median":1.9356,"ttff_s_median":1.6698,"peak_rss_mib_median":165.7,"wall_clock_s_median":31.3497,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":148,"accuracy_en_mean":0.3275,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3275,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"base.en-q5_1","model_family":"base","model_base":"base.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":6.8076,"stream_rtf_median":1.9504,"ttff_s_median":1.5944,"peak_rss_mib_median":176.1,"wall_clock_s_median":31.2181,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3022,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3022,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"base.en-q8_0","model_family":"base","model_base":"base.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":7.8293,"stream_rtf_median":1.9203,"ttff_s_median":1.5721,"peak_rss_mib_median":186.0,"wall_clock_s_median":30.7202,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.3349,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3349,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"large-v3-turbo","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":0.8817,"stream_rtf_median":0.1275,"ttff_s_median":28.4584,"peak_rss_mib_median":272.0,"wall_clock_s_median":998.3642,"verdict":"unsuitable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":1543,"accuracy_en_mean":0.1859,"accuracy_en_max":0.5259,"accuracy_all_mean":0.1797,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"large-v3-turbo-q5_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q5_0","quant_display":"q5","batch_rtf_median":1.0001,"stream_rtf_median":0.1278,"ttff_s_median":28.4518,"peak_rss_mib_median":226.7,"wall_clock_s_median":981.6435,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":547,"accuracy_en_mean":0.106,"accuracy_en_max":0.2059,"accuracy_all_mean":0.1516,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"large-v3-turbo-q8_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":0.8823,"stream_rtf_median":0.125,"ttff_s_median":28.8789,"peak_rss_mib_median":221.4,"wall_clock_s_median":1016.1068,"verdict":"unsuitable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":834,"accuracy_en_mean":0.0716,"accuracy_en_max":0.1546,"accuracy_all_mean":0.1372,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"small","model_family":"small","model_base":"small","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":3.6605,"stream_rtf_median":0.6079,"ttff_s_median":5.4283,"peak_rss_mib_median":198.6,"wall_clock_s_median":213.467,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":466,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1117,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"small-q5_1","model_family":"small","model_base":"small","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":3.707,"stream_rtf_median":0.5804,"ttff_s_median":6.0765,"peak_rss_mib_median":205.0,"wall_clock_s_median":221.6643,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.0647,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1156,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"small-q8_0","model_family":"small","model_base":"small","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":3.4324,"stream_rtf_median":0.565,"ttff_s_median":6.2049,"peak_rss_mib_median":185.2,"wall_clock_s_median":229.332,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.0647,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1126,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"small.en","model_family":"small","model_base":"small.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":1.9856,"stream_rtf_median":0.709,"ttff_s_median":5.3021,"peak_rss_mib_median":182.5,"wall_clock_s_median":90.2832,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":466,"accuracy_en_mean":0.221,"accuracy_en_max":0.25,"accuracy_all_mean":0.221,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"small.en-q5_1","model_family":"small","model_base":"small.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":2.9343,"stream_rtf_median":0.7082,"ttff_s_median":5.261,"peak_rss_mib_median":192.2,"wall_clock_s_median":82.6275,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.2581,"accuracy_en_max":0.4884,"accuracy_all_mean":0.2581,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"small.en-q8_0","model_family":"small","model_base":"small.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":1.8988,"stream_rtf_median":0.6925,"ttff_s_median":5.3273,"peak_rss_mib_median":171.3,"wall_clock_s_median":92.8775,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.2373,"accuracy_en_max":0.3038,"accuracy_all_mean":0.2373,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"tiny","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":14.0087,"stream_rtf_median":3.2149,"ttff_s_median":1.001,"peak_rss_mib_median":175.7,"wall_clock_s_median":42.6116,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":78,"accuracy_en_mean":0.0488,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1761,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"tiny-q5_1","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":11.9463,"stream_rtf_median":2.7709,"ttff_s_median":1.5536,"peak_rss_mib_median":188.6,"wall_clock_s_median":49.6963,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.0474,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1832,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"tiny-q8_0","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":11.9437,"stream_rtf_median":3.3864,"ttff_s_median":0.8146,"peak_rss_mib_median":200.2,"wall_clock_s_median":42.2295,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.0488,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1782,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"tiny.en","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":13.9266,"stream_rtf_median":3.3026,"ttff_s_median":0.951,"peak_rss_mib_median":158.9,"wall_clock_s_median":17.9794,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":78,"accuracy_en_mean":0.078,"accuracy_en_max":0.1618,"accuracy_all_mean":0.078,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"tiny.en-q5_1","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":11.8794,"stream_rtf_median":3.7263,"ttff_s_median":0.9979,"peak_rss_mib_median":166.2,"wall_clock_s_median":16.9422,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.127,"accuracy_en_max":0.4435,"accuracy_all_mean":0.127,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"i7-8550u","power":"ac","build":"vulkan","model":"tiny.en-q8_0","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":14.5963,"stream_rtf_median":3.8435,"ttff_s_median":0.7937,"peak_rss_mib_median":171.2,"wall_clock_s_median":15.773,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.0565,"accuracy_en_max":0.1618,"accuracy_all_mean":0.0565,"arch":"x86_64","released_year":2017,"physical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ryzen-5950x","power":"ac","build":"cpu","model":"base-q5_1","model_family":"base","model_base":"base","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":46.0851,"stream_rtf_median":6.6794,"ttff_s_median":0.4113,"peak_rss_mib_median":427.8,"wall_clock_s_median":19.1343,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3331,"accuracy_en_max":0.7463,"accuracy_all_mean":0.2637,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"cpu","model":"base-q8_0","model_family":"base","model_base":"base","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":46.1729,"stream_rtf_median":8.5046,"ttff_s_median":0.3836,"peak_rss_mib_median":467.7,"wall_clock_s_median":15.553,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.1134,"accuracy_en_max":0.261,"accuracy_all_mean":0.1685,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"cpu","model":"base.en-q5_1","model_family":"base","model_base":"base.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":36.0708,"stream_rtf_median":8.5526,"ttff_s_median":0.4195,"peak_rss_mib_median":432.7,"wall_clock_s_median":6.8406,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3022,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3022,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"cpu","model":"base.en-q8_0","model_family":"base","model_base":"base.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":38.7154,"stream_rtf_median":8.3653,"ttff_s_median":0.3766,"peak_rss_mib_median":471.5,"wall_clock_s_median":6.8688,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.3074,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3074,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"cpu","model":"large-v3-turbo-q5_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q5_0","quant_display":"q5","batch_rtf_median":5.2007,"stream_rtf_median":0.606,"ttff_s_median":6.0211,"peak_rss_mib_median":1653.3,"wall_clock_s_median":204.9127,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":547,"accuracy_en_mean":0.106,"accuracy_en_max":0.2059,"accuracy_all_mean":0.1509,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"cpu","model":"large-v3-turbo-q8_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":5.7073,"stream_rtf_median":0.7357,"ttff_s_median":4.9322,"peak_rss_mib_median":2226.5,"wall_clock_s_median":170.6987,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":834,"accuracy_en_mean":0.0705,"accuracy_en_max":0.1503,"accuracy_all_mean":0.1351,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"cpu","model":"small-q5_1","model_family":"small","model_base":"small","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":18.3543,"stream_rtf_median":2.5922,"ttff_s_median":1.291,"peak_rss_mib_median":792.9,"wall_clock_s_median":49.0084,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1135,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"cpu","model":"small-q8_0","model_family":"small","model_base":"small","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":19.179,"stream_rtf_median":2.943,"ttff_s_median":1.0867,"peak_rss_mib_median":932.2,"wall_clock_s_median":43.6444,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1144,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"cpu","model":"small.en-q5_1","model_family":"small","model_base":"small.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":13.7493,"stream_rtf_median":2.7981,"ttff_s_median":1.3324,"peak_rss_mib_median":796.7,"wall_clock_s_median":20.2578,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.2666,"accuracy_en_max":0.4884,"accuracy_all_mean":0.2666,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"cpu","model":"small.en-q8_0","model_family":"small","model_base":"small.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":19.0605,"stream_rtf_median":3.224,"ttff_s_median":1.1305,"peak_rss_mib_median":934.1,"wall_clock_s_median":17.083,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.1874,"accuracy_en_max":0.25,"accuracy_all_mean":0.1874,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"cpu","model":"tiny-q5_1","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":84.7409,"stream_rtf_median":12.8985,"ttff_s_median":0.3026,"peak_rss_mib_median":303.6,"wall_clock_s_median":9.9646,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.0474,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1806,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"cpu","model":"tiny-q8_0","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":77.4295,"stream_rtf_median":13.9345,"ttff_s_median":0.234,"peak_rss_mib_median":334.8,"wall_clock_s_median":9.4661,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.0474,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1855,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"cpu","model":"tiny.en-q5_1","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":87.6457,"stream_rtf_median":15.829,"ttff_s_median":0.2299,"peak_rss_mib_median":302.2,"wall_clock_s_median":3.5525,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.0565,"accuracy_en_max":0.1618,"accuracy_all_mean":0.0565,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"cpu","model":"tiny.en-q8_0","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":98.1249,"stream_rtf_median":16.7505,"ttff_s_median":0.2031,"peak_rss_mib_median":320.4,"wall_clock_s_median":3.3318,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.078,"accuracy_en_max":0.1618,"accuracy_all_mean":0.078,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"base","model_family":"base","model_base":"base","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":107.4604,"stream_rtf_median":58.3184,"ttff_s_median":0.037,"peak_rss_mib_median":320.4,"wall_clock_s_median":3.0054,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":148,"accuracy_en_mean":0.1049,"accuracy_en_max":0.227,"accuracy_all_mean":0.1671,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"base-q5_1","model_family":"base","model_base":"base","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":102.6846,"stream_rtf_median":62.1398,"ttff_s_median":0.0323,"peak_rss_mib_median":260.1,"wall_clock_s_median":2.931,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3574,"accuracy_en_max":0.7463,"accuracy_all_mean":0.2619,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"base-q8_0","model_family":"base","model_base":"base","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":109.0205,"stream_rtf_median":59.5732,"ttff_s_median":0.0343,"peak_rss_mib_median":267.9,"wall_clock_s_median":2.9452,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.1765,"accuracy_en_max":0.5135,"accuracy_all_mean":0.1903,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"base.en","model_family":"base","model_base":"base.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":92.3468,"stream_rtf_median":64.3913,"ttff_s_median":0.0418,"peak_rss_mib_median":307.5,"wall_clock_s_median":1.2919,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":148,"accuracy_en_mean":0.3275,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3275,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"base.en-q5_1","model_family":"base","model_base":"base.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":80.8518,"stream_rtf_median":66.6203,"ttff_s_median":0.0369,"peak_rss_mib_median":265.6,"wall_clock_s_median":1.3375,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3022,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3022,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"base.en-q8_0","model_family":"base","model_base":"base.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":98.5758,"stream_rtf_median":67.9306,"ttff_s_median":0.0365,"peak_rss_mib_median":274.3,"wall_clock_s_median":1.218,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.3275,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3275,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"large-v3-turbo","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":75.9951,"stream_rtf_median":29.7274,"ttff_s_median":0.1116,"peak_rss_mib_median":464.3,"wall_clock_s_median":5.3194,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":1543,"accuracy_en_mean":0.0673,"accuracy_en_max":0.1503,"accuracy_all_mean":0.1328,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"large-v3-turbo-q5_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q5_0","quant_display":"q5","batch_rtf_median":58.1394,"stream_rtf_median":22.6444,"ttff_s_median":0.3251,"peak_rss_mib_median":466.1,"wall_clock_s_median":8.6969,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":547,"accuracy_en_mean":0.079,"accuracy_en_max":0.1841,"accuracy_all_mean":0.1408,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"large-v3-turbo-q8_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":86.9281,"stream_rtf_median":31.27,"ttff_s_median":0.1008,"peak_rss_mib_median":345.7,"wall_clock_s_median":4.9262,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":834,"accuracy_en_mean":0.0473,"accuracy_en_max":0.0685,"accuracy_all_mean":0.1248,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"small","model_family":"small","model_base":"small","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":73.9973,"stream_rtf_median":30.0207,"ttff_s_median":0.1117,"peak_rss_mib_median":345.5,"wall_clock_s_median":5.2887,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":466,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.116,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"small-q5_1","model_family":"small","model_base":"small","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":81.6321,"stream_rtf_median":35.6354,"ttff_s_median":0.0562,"peak_rss_mib_median":301.6,"wall_clock_s_median":4.555,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1135,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"small-q8_0","model_family":"small","model_base":"small","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":78.9679,"stream_rtf_median":31.4171,"ttff_s_median":0.1045,"peak_rss_mib_median":299.5,"wall_clock_s_median":5.0203,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.0647,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1132,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"small.en","model_family":"small","model_base":"small.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":61.849,"stream_rtf_median":40.052,"ttff_s_median":0.0866,"peak_rss_mib_median":345.1,"wall_clock_s_median":2.0005,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":466,"accuracy_en_mean":0.1881,"accuracy_en_max":0.25,"accuracy_all_mean":0.1881,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"small.en-q5_1","model_family":"small","model_base":"small.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":65.6507,"stream_rtf_median":40.5812,"ttff_s_median":0.0746,"peak_rss_mib_median":303.9,"wall_clock_s_median":1.9297,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.2451,"accuracy_en_max":0.4884,"accuracy_all_mean":0.2451,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"small.en-q8_0","model_family":"small","model_base":"small.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":67.0472,"stream_rtf_median":43.6601,"ttff_s_median":0.0735,"peak_rss_mib_median":299.5,"wall_clock_s_median":1.8331,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.1881,"accuracy_en_max":0.25,"accuracy_all_mean":0.1881,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"tiny","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":109.4926,"stream_rtf_median":59.4899,"ttff_s_median":0.0524,"peak_rss_mib_median":268.7,"wall_clock_s_median":3.0149,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":78,"accuracy_en_mean":0.0488,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1784,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"tiny-q5_1","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":81.146,"stream_rtf_median":31.5625,"ttff_s_median":0.2858,"peak_rss_mib_median":401.2,"wall_clock_s_median":6.9699,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.0474,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1806,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"tiny-q8_0","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":82.5175,"stream_rtf_median":42.9898,"ttff_s_median":0.1816,"peak_rss_mib_median":363.7,"wall_clock_s_median":5.5682,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.0488,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1781,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"tiny.en","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":106.2181,"stream_rtf_median":89.1998,"ttff_s_median":0.0329,"peak_rss_mib_median":253.8,"wall_clock_s_median":1.0268,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":78,"accuracy_en_mean":0.078,"accuracy_en_max":0.1618,"accuracy_all_mean":0.078,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"tiny.en-q5_1","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":85.7798,"stream_rtf_median":89.6112,"ttff_s_median":0.0335,"peak_rss_mib_median":275.3,"wall_clock_s_median":1.1861,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.0565,"accuracy_en_max":0.1618,"accuracy_all_mean":0.0565,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ryzen-5950x","power":"ac","build":"vulkan","model":"tiny.en-q8_0","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":107.3082,"stream_rtf_median":88.3487,"ttff_s_median":0.0289,"peak_rss_mib_median":262.5,"wall_clock_s_median":1.0299,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.078,"accuracy_en_max":0.1618,"accuracy_all_mean":0.078,"arch":"x86_64","released_year":2020,"physical_cores":16,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"discrete"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"base","model_family":"base","model_base":"base","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":22.104,"stream_rtf_median":4.2101,"ttff_s_median":0.8815,"peak_rss_mib_median":602.2,"wall_clock_s_median":42.7886,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":148,"accuracy_en_mean":0.1049,"accuracy_en_max":0.227,"accuracy_all_mean":0.1686,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"base-q5_1","model_family":"base","model_base":"base","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":19.9644,"stream_rtf_median":3.8635,"ttff_s_median":0.8733,"peak_rss_mib_median":456.1,"wall_clock_s_median":46.7412,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3331,"accuracy_en_max":0.7463,"accuracy_all_mean":0.2528,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"base-q8_0","model_family":"base","model_base":"base","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":27.1716,"stream_rtf_median":5.212,"ttff_s_median":0.7155,"peak_rss_mib_median":476.7,"wall_clock_s_median":34.608,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.1134,"accuracy_en_max":0.261,"accuracy_all_mean":0.17,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"base.en","model_family":"base","model_base":"base.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":21.2478,"stream_rtf_median":4.012,"ttff_s_median":0.7806,"peak_rss_mib_median":606.5,"wall_clock_s_median":13.9434,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":148,"accuracy_en_mean":0.3275,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3275,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"base.en-q5_1","model_family":"base","model_base":"base.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":19.5794,"stream_rtf_median":4.9292,"ttff_s_median":0.7414,"peak_rss_mib_median":436.9,"wall_clock_s_median":11.952,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3022,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3022,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"base.en-q8_0","model_family":"base","model_base":"base.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":22.542,"stream_rtf_median":4.9807,"ttff_s_median":0.6279,"peak_rss_mib_median":479.5,"wall_clock_s_median":11.538,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.3074,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3074,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"large-v3-turbo","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":1.0598,"stream_rtf_median":0.1722,"ttff_s_median":22.5282,"peak_rss_mib_median":3672.4,"wall_clock_s_median":1020.7447,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":1543,"accuracy_en_mean":0.0473,"accuracy_en_max":0.0685,"accuracy_all_mean":0.1266,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"large-v3-turbo-q5_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q5_0","quant_display":"q5","batch_rtf_median":1.205,"stream_rtf_median":0.1867,"ttff_s_median":20.7392,"peak_rss_mib_median":1671.4,"wall_clock_s_median":935.33,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":547,"accuracy_en_mean":0.106,"accuracy_en_max":0.2059,"accuracy_all_mean":0.1366,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"large-v3-turbo-q8_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":1.4608,"stream_rtf_median":0.2292,"ttff_s_median":16.9267,"peak_rss_mib_median":2240.4,"wall_clock_s_median":763.091,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":834,"accuracy_en_mean":0.0705,"accuracy_en_max":0.1503,"accuracy_all_mean":0.1343,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"small","model_family":"small","model_base":"small","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":6.4459,"stream_rtf_median":0.9823,"ttff_s_median":4.2269,"peak_rss_mib_median":1369.8,"wall_clock_s_median":177.4478,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":466,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1111,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"small-q5_1","model_family":"small","model_base":"small","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":6.8099,"stream_rtf_median":1.0102,"ttff_s_median":3.9785,"peak_rss_mib_median":803.7,"wall_clock_s_median":171.9083,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1065,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"small-q8_0","model_family":"small","model_base":"small","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":8.6645,"stream_rtf_median":1.2875,"ttff_s_median":3.005,"peak_rss_mib_median":943.1,"wall_clock_s_median":134.9267,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1114,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"small.en","model_family":"small","model_base":"small.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":7.471,"stream_rtf_median":1.1061,"ttff_s_median":3.3761,"peak_rss_mib_median":1373.2,"wall_clock_s_median":48.8137,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":466,"accuracy_en_mean":0.1881,"accuracy_en_max":0.25,"accuracy_all_mean":0.1881,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"small.en-q5_1","model_family":"small","model_base":"small.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":6.0984,"stream_rtf_median":1.0916,"ttff_s_median":3.3226,"peak_rss_mib_median":805.4,"wall_clock_s_median":50.7872,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.2666,"accuracy_en_max":0.4884,"accuracy_all_mean":0.2666,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"small.en-q8_0","model_family":"small","model_base":"small.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":10.9801,"stream_rtf_median":1.4529,"ttff_s_median":2.552,"peak_rss_mib_median":948.4,"wall_clock_s_median":36.6501,"verdict":"borderline","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.1874,"accuracy_en_max":0.25,"accuracy_all_mean":0.1874,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"tiny","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":43.5178,"stream_rtf_median":9.0004,"ttff_s_median":0.3965,"peak_rss_mib_median":415.5,"wall_clock_s_median":20.3043,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":78,"accuracy_en_mean":0.0488,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1813,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"tiny-q5_1","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":50.1681,"stream_rtf_median":9.5614,"ttff_s_median":0.4188,"peak_rss_mib_median":330.7,"wall_clock_s_median":18.8577,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.0474,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1863,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"tiny-q8_0","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":51.5182,"stream_rtf_median":10.847,"ttff_s_median":0.3302,"peak_rss_mib_median":350.3,"wall_clock_s_median":16.9058,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.0474,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1921,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"tiny.en","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":52.809,"stream_rtf_median":9.5938,"ttff_s_median":0.3739,"peak_rss_mib_median":401.0,"wall_clock_s_median":5.8153,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":78,"accuracy_en_mean":0.078,"accuracy_en_max":0.1618,"accuracy_all_mean":0.078,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"tiny.en-q5_1","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":57.4972,"stream_rtf_median":10.1424,"ttff_s_median":0.3603,"peak_rss_mib_median":300.1,"wall_clock_s_median":5.4732,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.0565,"accuracy_en_max":0.1618,"accuracy_all_mean":0.0565,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"cpu","model":"tiny.en-q8_0","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":64.9182,"stream_rtf_median":11.5849,"ttff_s_median":0.3043,"peak_rss_mib_median":333.6,"wall_clock_s_median":4.804,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.078,"accuracy_en_max":0.1618,"accuracy_all_mean":0.078,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"base","model_family":"base","model_base":"base","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":49.4357,"stream_rtf_median":18.333,"ttff_s_median":0.1293,"peak_rss_mib_median":171.6,"wall_clock_s_median":8.3689,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":148,"accuracy_en_mean":0.1049,"accuracy_en_max":0.227,"accuracy_all_mean":0.1658,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"base-q5_1","model_family":"base","model_base":"base","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":46.8086,"stream_rtf_median":19.8081,"ttff_s_median":0.1216,"peak_rss_mib_median":181.3,"wall_clock_s_median":8.0388,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3574,"accuracy_en_max":0.7463,"accuracy_all_mean":0.2619,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"base-q8_0","model_family":"base","model_base":"base","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":50.7555,"stream_rtf_median":19.8066,"ttff_s_median":0.1234,"peak_rss_mib_median":190.5,"wall_clock_s_median":7.8476,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.2776,"accuracy_en_max":0.5135,"accuracy_all_mean":0.2306,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"base.en","model_family":"base","model_base":"base.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":46.8415,"stream_rtf_median":19.3296,"ttff_s_median":0.1365,"peak_rss_mib_median":182.6,"wall_clock_s_median":3.4767,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":148,"accuracy_en_mean":0.3275,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3275,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"base.en-q5_1","model_family":"base","model_base":"base.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":42.4442,"stream_rtf_median":20.1587,"ttff_s_median":0.1386,"peak_rss_mib_median":187.3,"wall_clock_s_median":3.4682,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":60,"accuracy_en_mean":0.3022,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3022,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"base.en-q8_0","model_family":"base","model_base":"base.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":50.0783,"stream_rtf_median":20.0866,"ttff_s_median":0.1336,"peak_rss_mib_median":196.8,"wall_clock_s_median":3.3116,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":82,"accuracy_en_mean":0.3275,"accuracy_en_max":0.9878,"accuracy_all_mean":0.3275,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"large-v3-turbo","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":12.7965,"stream_rtf_median":3.3242,"ttff_s_median":0.9983,"peak_rss_mib_median":263.5,"wall_clock_s_median":42.2023,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":1543,"accuracy_en_mean":0.0487,"accuracy_en_max":0.0685,"accuracy_all_mean":0.1264,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"large-v3-turbo-q5_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q5_0","quant_display":"q5","batch_rtf_median":20.5946,"stream_rtf_median":3.6115,"ttff_s_median":0.9416,"peak_rss_mib_median":224.8,"wall_clock_s_median":36.2734,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":547,"accuracy_en_mean":0.1215,"accuracy_en_max":0.3543,"accuracy_all_mean":0.1578,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"large-v3-turbo-q8_0","model_family":"turbo","model_base":"large-v3-turbo","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":15.1657,"stream_rtf_median":3.5108,"ttff_s_median":0.9591,"peak_rss_mib_median":222.2,"wall_clock_s_median":39.0534,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":834,"accuracy_en_mean":0.0705,"accuracy_en_max":0.1503,"accuracy_all_mean":0.1351,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"small","model_family":"small","model_base":"small","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":26.3057,"stream_rtf_median":8.0487,"ttff_s_median":0.2883,"peak_rss_mib_median":192.4,"wall_clock_s_median":18.0967,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":466,"accuracy_en_mean":0.061,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1134,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"small-q5_1","model_family":"small","model_base":"small","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":30.7109,"stream_rtf_median":8.9719,"ttff_s_median":0.2698,"peak_rss_mib_median":203.0,"wall_clock_s_median":16.0702,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.0647,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1176,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"small-q8_0","model_family":"small","model_base":"small","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":30.9306,"stream_rtf_median":8.8533,"ttff_s_median":0.2771,"peak_rss_mib_median":181.0,"wall_clock_s_median":16.2058,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.0647,"accuracy_en_max":0.0992,"accuracy_all_mean":0.1158,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"small.en","model_family":"small","model_base":"small.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":25.3517,"stream_rtf_median":9.3152,"ttff_s_median":0.3412,"peak_rss_mib_median":193.5,"wall_clock_s_median":6.9869,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":466,"accuracy_en_mean":0.1881,"accuracy_en_max":0.25,"accuracy_all_mean":0.1881,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"small.en-q5_1","model_family":"small","model_base":"small.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":26.5321,"stream_rtf_median":9.6016,"ttff_s_median":0.321,"peak_rss_mib_median":205.1,"wall_clock_s_median":6.7188,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":181,"accuracy_en_mean":0.2451,"accuracy_en_max":0.4884,"accuracy_all_mean":0.2451,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"small.en-q8_0","model_family":"small","model_base":"small.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":12.4589,"stream_rtf_median":9.6887,"ttff_s_median":0.3415,"peak_rss_mib_median":184.7,"wall_clock_s_median":8.6784,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":264,"accuracy_en_mean":0.2373,"accuracy_en_max":0.3038,"accuracy_all_mean":0.2373,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"tiny","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"fp16","quant_display":"fp16","batch_rtf_median":69.6639,"stream_rtf_median":23.3914,"ttff_s_median":0.131,"peak_rss_mib_median":168.0,"wall_clock_s_median":6.3907,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":78,"accuracy_en_mean":0.0488,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1742,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"tiny-q5_1","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q5_1","quant_display":"q5","batch_rtf_median":73.1448,"stream_rtf_median":19.3084,"ttff_s_median":0.224,"peak_rss_mib_median":173.7,"wall_clock_s_median":7.323,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.0474,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1774,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"tiny-q8_0","model_family":"tiny","model_base":"tiny","language":"multi","quantization":"q8_0","quant_display":"q8","batch_rtf_median":71.0575,"stream_rtf_median":26.2456,"ttff_s_median":0.0877,"peak_rss_mib_median":183.2,"wall_clock_s_median":5.8496,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.0488,"accuracy_en_max":0.0882,"accuracy_all_mean":0.1786,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"tiny.en","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"fp16","quant_display":"fp16","batch_rtf_median":75.3275,"stream_rtf_median":31.4279,"ttff_s_median":0.0953,"peak_rss_mib_median":169.1,"wall_clock_s_median":2.1569,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":78,"accuracy_en_mean":0.078,"accuracy_en_max":0.1618,"accuracy_all_mean":0.078,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"tiny.en-q5_1","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q5_1","quant_display":"q5","batch_rtf_median":79.484,"stream_rtf_median":32.5265,"ttff_s_median":0.0984,"peak_rss_mib_median":176.4,"wall_clock_s_median":2.0718,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":32,"accuracy_en_mean":0.0565,"accuracy_en_max":0.1618,"accuracy_all_mean":0.0565,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"},{"host":"ultra7-258v","power":"ac","build":"vulkan","model":"tiny.en-q8_0","model_family":"tiny","model_base":"tiny.en","language":"en","quantization":"q8_0","quant_display":"q8","batch_rtf_median":81.3443,"stream_rtf_median":33.8013,"ttff_s_median":0.0826,"peak_rss_mib_median":180.8,"wall_clock_s_median":2.0063,"verdict":"comfortable","iterations_kept":2,"iterations_total":2,"errors":[],"approx_size_mib":44,"accuracy_en_mean":0.078,"accuracy_en_max":0.1618,"accuracy_all_mean":0.078,"arch":"x86_64","released_year":2024,"physical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"gpu_present":true,"gpu_class":"integrated"}];
+const HOST_FEATURES = {"i7-1255u":{"host_id":"i7-1255u","arch":"x86_64","released":"2022-02","released_year":2022,"physical_cores":10,"logical_cores":12,"ram_gb":15.3,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"cpu_model_str":"12th Gen Intel(R) Core(TM) i7-1255U","gpu_present":true,"gpu_class":"integrated","gpu_model_str":"00:02.0 VGA compatible controller [0300]: Intel Corporation Alder Lake-UP3 GT2 [","chassis":"laptop"},"i7-7500u":{"host_id":"i7-7500u","arch":"x86_64","released":"2016-08","released_year":2016,"physical_cores":2,"logical_cores":4,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"cpu_model_str":"Intel(R) Core(TM) i7-7500U CPU @ 2.70GHz","gpu_present":true,"gpu_class":"integrated","gpu_model_str":"00:02.0 VGA compatible controller [0300]: Intel Corporation HD Graphics 620 [808","chassis":"laptop"},"i7-8550u":{"host_id":"i7-8550u","arch":"x86_64","released":"2017-08","released_year":2017,"physical_cores":4,"logical_cores":8,"ram_gb":15.4,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"cpu_model_str":"Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz","gpu_present":true,"gpu_class":"integrated","gpu_model_str":"00:02.0 VGA compatible controller [0300]: Intel Corporation Kaby Lake-R GT2 [UHD","chassis":"laptop"},"ryzen-5950x":{"host_id":"ryzen-5950x","arch":"x86_64","released":"2020-11","released_year":2020,"physical_cores":16,"logical_cores":32,"ram_gb":48.0,"cpu_flags":{"avx2":true,"avx_vnni":false,"avx512":false,"avx512_vnni":false},"cpu_model_str":"AMD Ryzen 9 5950X 16-Core Processor","gpu_present":true,"gpu_class":"discrete","gpu_model_str":"0a:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD102 [GeForce RTX ","chassis":"container"},"ultra7-258v":{"host_id":"ultra7-258v","arch":"x86_64","released":"2024-09","released_year":2024,"physical_cores":8,"logical_cores":8,"ram_gb":30.8,"cpu_flags":{"avx2":true,"avx_vnni":true,"avx512":false,"avx512_vnni":false},"cpu_model_str":"Intel(R) Core(TM) Ultra 7 258V","gpu_present":true,"gpu_class":"integrated","gpu_model_str":"00:02.0 VGA compatible controller [0300]: Intel Corporation Lunar Lake [Intel Ar","chassis":"laptop"}};
+const THRESH_DEFAULTS = {"batch_rtf":2.0,"accuracy_ceiling":0.2,"display_wer_cap":0.3,"stream_rtf_soft":1.5,"memory_budget_mib":1024};
+
+// ─── Constants ─────────────────────────────────────────────────────────────
+const FAMILY_ORDER = ['tiny','base','small','turbo'];
+const FAMILY_RANK  = {tiny:0, base:1, small:2, turbo:3};
+const QUANT_ORDER  = ['fp16','q8','q5'];
+const QUANT_RANK   = {fp16:0, q8:1, q5:2};   // lower = more accurate (preferred)
+const QUANT_CLR    = {fp16:'#bc8cff', q8:'#ffce6a', q5:'#58a6ff'};
+const VNNI_CLR     = {true:'#58a6ff', false:'#ff8c00'};
+const HOSTS = [...new Set(RAW_CELLS.map(c => c.host))].sort((a,b) => {
+  const ya = (HOST_FEATURES[a]||{}).released_year || 9999;
+  const yb = (HOST_FEATURES[b]||{}).released_year || 9999;
+  return ya - yb || a.localeCompare(b);
+});
+
+const fmt1 = v => v == null ? '—' : Number(v).toFixed(1);
+const fmt2 = v => v == null ? '—' : Number(v).toFixed(2);
+const fmt3 = v => v == null ? '—' : Number(v).toFixed(3);
+
+// ─── Filter state ──────────────────────────────────────────────────────────
+const FILTER_STATE = {
+  batch:   THRESH_DEFAULTS.batch_rtf,
+  acc:     THRESH_DEFAULTS.accuracy_ceiling,
+  stream:  THRESH_DEFAULTS.stream_rtf_soft,
+  mem:     THRESH_DEFAULTS.memory_budget_mib,
+  binary:  'gpu_capable',
+  lang:    'english_ok',
+  quant:   'auto',
+  power:   'ac',
+  arch:    'x86_64',
+};
+
+function readHash() {
+  try {
+    const h = new URLSearchParams((location.hash||'').slice(1));
+    if (h.has('batch'))  FILTER_STATE.batch  = parseFloat(h.get('batch'));
+    if (h.has('acc'))    FILTER_STATE.acc    = parseFloat(h.get('acc'));
+    if (h.has('stream')) FILTER_STATE.stream = parseFloat(h.get('stream'));
+    if (h.has('mem'))    FILTER_STATE.mem    = parseInt(h.get('mem'));
+    if (h.has('binary')) FILTER_STATE.binary = h.get('binary');
+    if (h.has('lang'))   FILTER_STATE.lang   = h.get('lang');
+    if (h.has('quant'))  FILTER_STATE.quant  = h.get('quant');
+    if (h.has('power'))  FILTER_STATE.power  = h.get('power');
+    if (h.has('arch'))   FILTER_STATE.arch   = h.get('arch');
+  } catch(e) {}
+}
+function writeHash() {
+  const p = new URLSearchParams();
+  Object.entries(FILTER_STATE).forEach(([k,v]) => { if (v !== '' && v != null) p.set(k, v); });
+  history.replaceState(null, '', '#' + p.toString());
+}
+
+// ─── Filtering primitives ──────────────────────────────────────────────────
+function allowedBuilds() {
+  return FILTER_STATE.binary === 'cpu_only' ? ['cpu'] : ['cpu','vulkan'];
+}
+function allowedLangs() {
+  return FILTER_STATE.lang === 'multilingual_required' ? ['multi'] : ['multi','en'];
+}
+function allowedQuants() {
+  if (FILTER_STATE.quant === 'force_fp16') return ['fp16'];
+  if (FILTER_STATE.quant === 'force_q8')   return ['q8'];
+  if (FILTER_STATE.quant === 'force_q5')   return ['q5'];
+  return QUANT_ORDER;
+}
+function powerOk(c) {
+  return FILTER_STATE.power === '' || c.power === FILTER_STATE.power;
+}
+function archOk(c) {
+  return (c.arch || 'x86_64') === FILTER_STATE.arch;
+}
+
+// Candidate cells under current constraints (NOT including thresholds).
+function constrainedCells() {
+  const builds = new Set(allowedBuilds());
+  const langs  = new Set(allowedLangs());
+  const quants = new Set(allowedQuants());
+  return RAW_CELLS.filter(c =>
+    archOk(c) && powerOk(c) &&
+    builds.has(c.build) && langs.has(c.language) &&
+    quants.has(c.quant_display || c.quantization)
+  );
+}
+
+// Hard-gate predicate.
+// Accuracy gate uses `accuracy_en_max` (worst single English fixture). The
+// per-cell `accuracy_en_mean` is still carried in the payload for tooltips
+// and the Pareto x-axis legacy mode, but the policy walks only on `_max`.
+function passesGates(c) {
+  if (c.batch_rtf_median == null || c.batch_rtf_median < FILTER_STATE.batch) return false;
+  if (c.accuracy_en_max != null && c.accuracy_en_max > FILTER_STATE.acc) return false;
+  if (c.peak_rss_mib_median != null && c.peak_rss_mib_median > FILTER_STATE.mem) return false;
+  return true;
+}
+
+// Preference key: largest family > fp16 > q8 > q5, with backend resolved per host below.
+function prefKey(c) {
+  return [
+    -FAMILY_RANK[c.model_family],                // larger family first
+    QUANT_RANK[c.quant_display || c.quantization], // fp16 → q8 → q5
+    -(c.iterations_kept || 0),                    // statistical confidence
+  ];
+}
+function cmpPref(a, b) {
+  const ka = prefKey(a), kb = prefKey(b);
+  for (let i = 0; i < ka.length; i++) if (ka[i] !== kb[i]) return ka[i] - kb[i];
+  return 0;
+}
+
+// Recommendation walk for one host: pick the preferred candidate, and resolve
+// the cpu-vs-vulkan tiebreak by demanding ≥1.2× speedup before preferring Vulkan.
+function walkHost(host) {
+  const hostCells = constrainedCells().filter(c => c.host === host);
+  const qualified = hostCells.filter(passesGates);
+  if (!qualified.length) {
+    // Diagnose: what would have passed if we relaxed each gate?
+    const reasons = [];
+    if (!hostCells.length) reasons.push('no measurements match the active filters');
+    else {
+      const failBatch  = hostCells.filter(c => c.batch_rtf_median != null && c.batch_rtf_median < FILTER_STATE.batch).length;
+      const failAcc    = hostCells.filter(c => c.accuracy_en_max != null && c.accuracy_en_max > FILTER_STATE.acc).length;
+      const failMem    = hostCells.filter(c => c.peak_rss_mib_median != null && c.peak_rss_mib_median > FILTER_STATE.mem).length;
+      if (failBatch) reasons.push(`${failBatch} cells below batch RTF ${FILTER_STATE.batch}`);
+      if (failAcc)   reasons.push(`${failAcc} cells above accuracy ${FILTER_STATE.acc}`);
+      if (failMem)   reasons.push(`${failMem} cells above memory ${FILTER_STATE.mem} MiB`);
+    }
+    return { host, pick: null, reasons };
+  }
+  // Group qualified candidates by (family, language, quant) — backend within
+  // a group becomes the tiebreak.
+  const groups = {};
+  qualified.forEach(c => {
+    const k = `${c.model_family}|${c.language}|${c.quant_display || c.quantization}`;
+    (groups[k] = groups[k] || []).push(c);
+  });
+  // For each group pick the backend per the Vulkan-≥1.2×-CPU rule.
+  const candidates = Object.values(groups).map(grp => {
+    const cpu = grp.find(c => c.build === 'cpu');
+    const vk  = grp.find(c => c.build === 'vulkan');
+    if (vk && cpu && vk.batch_rtf_median >= 1.2 * cpu.batch_rtf_median) return vk;
+    if (cpu) return cpu;
+    return vk || grp[0];
+  });
+  candidates.sort(cmpPref);
+  const pick = candidates[0];
+  const runnerUp = candidates[1] || null;
+  // Find the next-step-up alternative (more accurate) that failed gates.
+  const allCells = hostCells.filter(c => cmpPref(c, pick) < 0);
+  const nextUpFailed = allCells.sort(cmpPref)[0] || null;
+  const nextUpReason = nextUpFailed ? whyFailed(nextUpFailed) : null;
+  // Stream warning + iteration confidence.
+  const streamWarn = pick.stream_rtf_median != null && pick.stream_rtf_median < FILTER_STATE.stream;
+  const lowIter    = (pick.iterations_kept || 0) < 2;
+  return { host, pick, runnerUp, nextUpFailed, nextUpReason, streamWarn, lowIter };
+}
+function whyFailed(c) {
+  if (c.batch_rtf_median == null) return 'no batch_rtf_median measured';
+  if (c.batch_rtf_median < FILTER_STATE.batch) return `batch ${fmt2(c.batch_rtf_median)}× < ${FILTER_STATE.batch}×`;
+  if (c.accuracy_en_max != null && c.accuracy_en_max > FILTER_STATE.acc) return `worst-fixture acc ${fmt3(c.accuracy_en_max)} > ${FILTER_STATE.acc}`;
+  if (c.peak_rss_mib_median != null && c.peak_rss_mib_median > FILTER_STATE.mem) return `RSS ${Math.round(c.peak_rss_mib_median)} MiB > ${FILTER_STATE.mem} MiB`;
+  return 'gate fail';
+}
+
+// ─── 1. Recommendation grid ────────────────────────────────────────────────
+function buildRecGrid() {
+  const grid = document.getElementById('rec-grid');
+  const rows = HOSTS.map(walkHost);
+  grid.innerHTML = rows.map(r => renderRec(r)).join('') || '<p class="desc">No hosts match current arch filter.</p>';
+}
+function renderRec(r) {
+  const hf = HOST_FEATURES[r.host] || {};
+  const vnni = hf.cpu_flags && hf.cpu_flags.avx_vnni;
+  const meta = `${hf.released || '?'} · ${hf.physical_cores || '?'} cores · ${hf.ram_gb || '?'} GB · ${vnni ? 'AVX-VNNI' : 'pre-VNNI'} · ${hf.gpu_class}`;
+  if (!r.pick) {
+    return `<div class="rec-card"><h4>${r.host}</h4><div class="meta">${meta}</div>
+      <div class="pick"><span class="chip none">no qualifying candidate</span></div>
+      <div class="trace">${(r.reasons||[]).map(x=>`• ${x}`).join('<br>')}</div></div>`;
+  }
+  const p = r.pick;
+  const q = p.quant_display || p.quantization;
+  const chips = [
+    `<span class="chip fam">${p.model_family}${p.language==='en'?'.en':''}</span>`,
+    `<span class="chip q-${q}">${q}</span>`,
+    `<span class="chip bk-${p.build}">${p.build}</span>`,
+  ];
+  if (r.streamWarn) chips.push(`<span class="chip warn" title="stream RTF ${fmt2(p.stream_rtf_median)} < soft floor ${FILTER_STATE.stream}">stream slow</span>`);
+  if (r.lowIter)    chips.push(`<span class="chip warn" title="${p.iterations_kept||0}/${p.iterations_total||0} iterations">n=${p.iterations_kept||0}</span>`);
+  if ((p.errors||[]).length) chips.push(`<span class="chip err">errors!</span>`);
+
+  const trace = `<b>batch</b> ${fmt2(p.batch_rtf_median)}× ≥ ${FILTER_STATE.batch}× · `
+              + `<b>worst-fixture acc</b> ${fmt3(p.accuracy_en_max)} ≤ ${FILTER_STATE.acc} `
+              + `<span class="muted">(mean ${fmt3(p.accuracy_en_mean)})</span> · `
+              + `<b>RSS</b> ${Math.round(p.peak_rss_mib_median||0)} MiB ≤ ${FILTER_STATE.mem} · `
+              + `<b>stream</b> ${fmt2(p.stream_rtf_median)}×`;
+  const alt = r.nextUpFailed
+    ? `next-up <code>${r.nextUpFailed.model_family}${r.nextUpFailed.language==='en'?'.en':''}/${r.nextUpFailed.quant_display||r.nextUpFailed.quantization}/${r.nextUpFailed.build}</code> rejected: ${r.nextUpReason}`
+    : `no larger candidate exists in matrix`;
+  return `<div class="rec-card"><h4>${r.host}</h4><div class="meta">${meta}</div>
+    <div class="pick">${chips.join('')}</div>
+    <div class="trace">${trace}</div>
+    <div class="alt">${alt}</div></div>`;
+}
+
+// ─── 2. Scatter grid ───────────────────────────────────────────────────────
+const scatterCharts = [];
+function buildScatterGrid() {
+  const grid = document.getElementById('scatter-grid');
+  scatterCharts.forEach(c => c.destroy());
+  scatterCharts.length = 0;
+  grid.innerHTML = '';
+
+  const cells = constrainedCells();
+  const features = ['physical_cores', 'ram_gb'];
+  const outcomes = [
+    {key:'batch_rtf_median',  label:'Batch RTF ↑', thr:FILTER_STATE.batch, thrLabel:`batch=${FILTER_STATE.batch}`},
+    {key:'accuracy_en_max',  label:'Worst-fixture CER ↓', thr:FILTER_STATE.acc, thrLabel:`acc=${FILTER_STATE.acc}`},
+    {key:'peak_rss_mib_median', label:'Peak RSS MiB ↓', thr:FILTER_STATE.mem, thrLabel:`mem=${FILTER_STATE.mem}`},
+  ];
+  features.forEach(feat => {
+    outcomes.forEach(out => {
+      const box = document.createElement('div');
+      box.className = 'chart-box';
+      box.innerHTML = `<h4>${feat} vs ${out.label}</h4><div class="canvas-wrap h-scatter"><canvas></canvas></div>`;
+      grid.appendChild(box);
+      const ctx = box.querySelector('canvas').getContext('2d');
+      // Split into VNNI / non-VNNI datasets, and shape by quant.
+      const pointStyles = {fp16:'circle', q8:'rect', q5:'triangle'};
+      const sizeByFam = {tiny:3, base:4, small:5, turbo:7};
+      const datasets = [];
+      [true, false].forEach(vnni => {
+        QUANT_ORDER.forEach(q => {
+          const pts = cells.filter(c => {
+            const f = c.cpu_flags || {};
+            return (!!f.avx_vnni) === vnni && (c.quant_display || c.quantization) === q
+                && c[feat] != null && c[out.key] != null;
+          }).map(c => ({x: c[feat], y: c[out.key], _cell: c}));
+          if (!pts.length) return;
+          datasets.push({
+            label: `${vnni?'VNNI':'pre-VNNI'} · ${q}`,
+            data: pts,
+            backgroundColor: VNNI_CLR[vnni] + 'aa',
+            borderColor: VNNI_CLR[vnni],
+            pointStyle: pointStyles[q],
+            pointRadius: pts.map(p => sizeByFam[p._cell.model_family] || 4),
+            pointHoverRadius: pts.map(p => (sizeByFam[p._cell.model_family] || 4) + 2),
+          });
+        });
+      });
+      scatterCharts.push(new Chart(ctx, {
+        type:'scatter',
+        data:{datasets},
+        options:{
+          responsive:true,
+          maintainAspectRatio:false,
+          plugins:{
+            legend:{display:false},
+            tooltip:{callbacks:{label:i=>{
+              const c = i.raw._cell;
+              return `${c.host}/${c.model}/${c.build}: ${feat}=${i.raw.x}, ${out.label.split(' ')[0]}=${fmt3(i.raw.y)}`;
+            }}},
+            annotation:{annotations:{
+              thr:{type:'line', yMin:out.thr, yMax:out.thr, borderColor:'#b1bac4',
+                   borderWidth:1.5, borderDash:[5,4],
+                   label:{content:out.thrLabel, display:true, color:'#b1bac4', font:{size:10}}}
+            }},
+          },
+          scales:{
+            x:{title:{display:true,text:feat,color:'#c9d1d9',font:{size:11,weight:'bold'}},
+               ticks:{color:'#b1bac4',font:{size:10}}, grid:{color:'#30363d'}},
+            y:{title:{display:true,text:out.label,color:'#c9d1d9',font:{size:11,weight:'bold'}},
+               ticks:{color:'#b1bac4',font:{size:10}}, grid:{color:'#30363d'},
+               // For the worst-fixture-CER outcome panel only, cap the y-axis at
+               // the display WER cap so a single outlier doesn't stretch the
+               // axis and squash everything else into a strip near zero.
+               ...(out.key === 'accuracy_en_max' ? {max: THRESH_DEFAULTS.display_wer_cap} : {})},
+          },
+        },
+      }));
+    });
+  });
+}
+
+// ─── 3. Quant uplift ───────────────────────────────────────────────────────
+let quantUpliftChart = null;
+function buildQuantUplift() {
+  const cells = constrainedCells();
+  // (host, build) → median(quant_RTF / fp16_RTF) over all (family, language) pairs.
+  const rows = [];
+  HOSTS.forEach(host => {
+    ['cpu','vulkan'].forEach(build => {
+      const fp16 = {};
+      cells.forEach(c => {
+        if (c.host !== host || c.build !== build || !c.batch_rtf_median) return;
+        if ((c.quant_display || c.quantization) === 'fp16')
+          fp16[`${c.model_family}|${c.language}`] = c.batch_rtf_median;
+      });
+      const ratios = [];
+      cells.forEach(c => {
+        if (c.host !== host || c.build !== build || !c.batch_rtf_median) return;
+        const q = c.quant_display || c.quantization;
+        if (q === 'fp16') return;
+        const fp = fp16[`${c.model_family}|${c.language}`];
+        if (!fp) return;
+        ratios.push(c.batch_rtf_median / fp);
+      });
+      if (!ratios.length) return;
+      ratios.sort((a,b) => a - b);
+      const median = ratios[Math.floor(ratios.length/2)];
+      rows.push({host, build, median, n: ratios.length});
+    });
+  });
+  rows.sort((a,b) => {
+    const ya = (HOST_FEATURES[a.host]||{}).released_year || 9999;
+    const yb = (HOST_FEATURES[b.host]||{}).released_year || 9999;
+    return ya - yb || a.host.localeCompare(b.host) || a.build.localeCompare(b.build);
+  });
+  function tag(m) {
+    if (m >= 1.5) return ['large', '#3fb950'];
+    if (m >= 1.1) return ['moderate', '#58a6ff'];
+    if (m >= 0.9) return ['none', '#8b949e'];
+    return ['regression', '#f85149'];
+  }
+  const labels = rows.map(r => `${r.host}/${r.build}`);
+  const data   = rows.map(r => +r.median.toFixed(3));
+  const colors = rows.map(r => tag(r.median)[1] + 'cc');
+  const tags   = rows.map(r => tag(r.median)[0]);
+
+  const ctx = document.getElementById('quant-uplift').getContext('2d');
+  if (quantUpliftChart) quantUpliftChart.destroy();
+  quantUpliftChart = new Chart(ctx, {
+    type:'bar',
+    data:{labels, datasets:[{label:'median quant/fp16 batch RTF', data, backgroundColor:colors, borderWidth:0}]},
+    options:{
+      responsive:true,
+      maintainAspectRatio:false,
+      plugins:{
+        legend:{display:false},
+        tooltip:{callbacks:{
+          label:i => `median ${fmt2(i.raw)}× — ${tags[i.dataIndex]} (n=${rows[i.dataIndex].n})`,
+        }},
+        annotation:{annotations:{
+          unity:{type:'line', yMin:1, yMax:1, borderColor:'#b1bac4', borderWidth:1.5, borderDash:[5,4],
+                 label:{content:'1× (no uplift)', display:true, color:'#b1bac4', font:{size:10,weight:'bold'}}},
+        }},
+      },
+      scales:{
+        x:{ticks:{color:'#b1bac4',maxRotation:60,font:{size:10}}, grid:{color:'#30363d'}},
+        y:{title:{display:true,text:'Median quant ÷ fp16 batch RTF',color:'#c9d1d9',font:{weight:'bold'}},
+           ticks:{color:'#b1bac4'}, grid:{color:'#30363d'}},
+      },
+    },
+  });
+}
+
+// ─── 4. Pareto frontier per host ──────────────────────────────────────────
+const paretoCharts = [];
+function buildPareto() {
+  const grid = document.getElementById('pareto-grid');
+  paretoCharts.forEach(c => c.destroy());
+  paretoCharts.length = 0;
+  grid.innerHTML = '';
+
+  const cap = THRESH_DEFAULTS.display_wer_cap;
+  const cells = constrainedCells();
+  HOSTS.forEach(host => {
+    const allPts = cells.filter(c => c.host === host && c.accuracy_en_max != null && c.batch_rtf_median != null);
+    const pts    = allPts.filter(c => c.accuracy_en_max <= cap);
+    const hidden = allPts.length - pts.length;
+    if (!pts.length && !hidden) return;
+    // Frontier: a point is non-dominated if no other has lower acc AND higher batch.
+    const frontier = pts.filter(p => !pts.some(q =>
+      q !== p && q.accuracy_en_max <= p.accuracy_en_max && q.batch_rtf_median >= p.batch_rtf_median
+              && (q.accuracy_en_max < p.accuracy_en_max || q.batch_rtf_median > p.batch_rtf_median)));
+    const rec = walkHost(host).pick;
+    const recPt = (rec && rec.accuracy_en_max != null && rec.accuracy_en_max <= cap)
+      ? [{x: rec.accuracy_en_max, y: rec.batch_rtf_median, _cell: rec}] : [];
+
+    const box = document.createElement('div');
+    box.className = 'chart-box';
+    box.dataset.host = host;
+    const hiddenNote = hidden
+      ? `<span class="hidden-note" title="${hidden} measurement(s) with worst-fixture CER > ${cap} are not plotted">+${hidden} off-scale</span>` : '';
+    box.innerHTML = `<button class="enlarge-btn" title="Enlarge for inspection">⤢ enlarge</button>`
+                  + `<h4>${host} ${hiddenNote}</h4><div class="canvas-wrap h-pareto"><canvas></canvas></div>`;
+    grid.appendChild(box);
+    box.querySelector('.enlarge-btn').addEventListener('click', () => openParetoModal(host));
+    if (!pts.length) {
+      box.querySelector('.canvas-wrap').innerHTML = '<p class="desc" style="padding:1em">All measurements above WER cap.</p>';
+      return;
+    }
+    const ctx = box.querySelector('canvas').getContext('2d');
+    paretoCharts.push(new Chart(ctx, {
+      type:'scatter',
+      data:{datasets: paretoDatasets(pts, frontier, recPt)},
+      options:paretoOptions({legend:true}),
+    }));
+  });
+
+  if (!grid.children.length) grid.innerHTML = '<p class="desc">No measured cells with both accuracy and batch_rtf data.</p>';
+}
+
+// Shared Pareto dataset + options builder so the modal chart matches the
+// inline chart's encoding pixel-for-pixel.
+function paretoDatasets(pts, frontier, recPt) {
+  return [
+    {label:'all measurements', data: pts.map(c => ({x:c.accuracy_en_max, y:c.batch_rtf_median, _cell:c})),
+     backgroundColor:'#c9d1d966', borderColor:'#c9d1d9aa', borderWidth:1, pointRadius:4},
+    {label:'Pareto frontier', data: frontier.map(c => ({x:c.accuracy_en_max, y:c.batch_rtf_median, _cell:c})),
+     backgroundColor:'#3fb950', borderColor:'#3fb950', borderWidth:2, pointRadius:6, pointStyle:'rectRot'},
+    {label:'recommendation', data: recPt,
+     backgroundColor:'#58a6ff', borderColor:'#58a6ff', borderWidth:2, pointRadius:11, pointStyle:'crossRot'},
+  ];
+}
+function paretoOptions({legend}) {
+  return {
+    responsive:true,
+    maintainAspectRatio:false,
+    plugins:{
+      legend:{display:legend, position:'bottom', labels:{color:'#c9d1d9', font:{size:11}, boxWidth:12}},
+      tooltip:{callbacks:{label:i => {
+        const c = i.raw._cell;
+        return `${c.model}/${c.build}: worst=${fmt3(c.accuracy_en_max)} mean=${fmt3(c.accuracy_en_mean)} batch=${fmt2(c.batch_rtf_median)}×`;
+      }}},
+      annotation:{annotations:{
+        accThr:{type:'line', xMin:FILTER_STATE.acc, xMax:FILTER_STATE.acc, borderColor:'#d29922',
+                borderWidth:1.5, borderDash:[5,4],
+                label:{content:`acc=${FILTER_STATE.acc}`, display:true, color:'#d29922', font:{size:10,weight:'bold'}}},
+        batchThr:{type:'line', yMin:FILTER_STATE.batch, yMax:FILTER_STATE.batch, borderColor:'#3fb950',
+                  borderWidth:1.5, borderDash:[5,4],
+                  label:{content:`batch=${FILTER_STATE.batch}`, display:true, color:'#3fb950', font:{size:10,weight:'bold'}}},
+      }},
+    },
+    scales:{
+      x:{title:{display:true,text:'Worst-fixture CER (lower=better)',color:'#c9d1d9',font:{size:11,weight:'bold'}},
+         min:0, max:THRESH_DEFAULTS.display_wer_cap,
+         ticks:{color:'#b1bac4',font:{size:10}}, grid:{color:'#30363d'}},
+      y:{title:{display:true,text:'Batch RTF (higher=better)',color:'#c9d1d9',font:{size:11,weight:'bold'}},
+         ticks:{color:'#b1bac4',font:{size:10}}, grid:{color:'#30363d'}},
+    },
+  };
+}
+
+// Lightbox modal — recompute datasets and instantiate a fresh chart so the
+// modal canvas can size itself off the larger wrapper without conflicting
+// with the inline instance.
+let modalChart = null;
+function openParetoModal(host) {
+  const cap = THRESH_DEFAULTS.display_wer_cap;
+  const cells = constrainedCells();
+  const allPts = cells.filter(c => c.host === host && c.accuracy_en_max != null && c.batch_rtf_median != null);
+  const pts    = allPts.filter(c => c.accuracy_en_max <= cap);
+  if (!pts.length) return;
+  const frontier = pts.filter(p => !pts.some(q =>
+    q !== p && q.accuracy_en_max <= p.accuracy_en_max && q.batch_rtf_median >= p.batch_rtf_median
+            && (q.accuracy_en_max < p.accuracy_en_max || q.batch_rtf_median > p.batch_rtf_median)));
+  const rec = walkHost(host).pick;
+  const recPt = (rec && rec.accuracy_en_max != null && rec.accuracy_en_max <= cap)
+    ? [{x: rec.accuracy_en_max, y: rec.batch_rtf_median, _cell: rec}] : [];
+  const hidden = allPts.length - pts.length;
+  const hiddenSuffix = hidden ? `  (+${hidden} off-scale @ CER > ${cap})` : '';
+
+  document.getElementById('modal-title').textContent = `Pareto frontier — ${host}${hiddenSuffix}`;
+  const backdrop = document.getElementById('pareto-modal');
+  backdrop.classList.add('open');
+  if (modalChart) { modalChart.destroy(); modalChart = null; }
+  // Defer chart construction until the modal layout has stabilised so the
+  // canvas wrapper reports its true dimensions to Chart.js.
+  requestAnimationFrame(() => {
+    const ctx = document.getElementById('modal-canvas').getContext('2d');
+    modalChart = new Chart(ctx, {
+      type:'scatter',
+      data:{datasets: paretoDatasets(pts, frontier, recPt)},
+      options:paretoOptions({legend:true}),
+    });
+  });
+}
+function closeParetoModal() {
+  document.getElementById('pareto-modal').classList.remove('open');
+  if (modalChart) { modalChart.destroy(); modalChart = null; }
+}
+
+// ─── 5. Policy JSON ────────────────────────────────────────────────────────
+function buildPolicy() {
+  const rows = HOSTS.map(walkHost).filter(r => r.pick);
+  // Group rules by (arch, cpu_flags.avx_vnni). Within a group emit one rule
+  // per distinct (family, language, quant, backend) pick, listing
+  // evidence_hosts. v1 keeps merging manual; the human inspects this output
+  // when copying into Rust.
+  const ruleBuckets = {};
+  rows.forEach(r => {
+    const hf = HOST_FEATURES[r.host] || {};
+    const vnni = !!(hf.cpu_flags && hf.cpu_flags.avx_vnni);
+    const arch = hf.arch || 'x86_64';
+    const p = r.pick;
+    const key = `${arch}|${vnni}|${p.model_family}|${p.language}|${p.quant_display||p.quantization}|${p.build}`;
+    if (!ruleBuckets[key]) {
+      ruleBuckets[key] = {
+        arch,
+        "cpu_flags.avx_vnni": vnni,
+        cores_min: hf.physical_cores || null,
+        ram_gb_min: hf.ram_gb || null,
+        binary_variant: FILTER_STATE.binary,
+        recommend: {
+          family: p.model_family,
+          language: p.language,
+          quant:    p.quant_display || p.quantization,
+          backend:  p.build,
+        },
+        evidence_hosts: [],
+        evidence_iterations_min: Infinity,
+      };
+    }
+    const b = ruleBuckets[key];
+    if (!b.evidence_hosts.includes(r.host)) b.evidence_hosts.push(r.host);
+    b.evidence_iterations_min = Math.min(b.evidence_iterations_min, p.iterations_kept || 0);
+    if (hf.physical_cores && hf.physical_cores < b.cores_min) b.cores_min = hf.physical_cores;
+    if (hf.ram_gb && hf.ram_gb < b.ram_gb_min) b.ram_gb_min = hf.ram_gb;
+  });
+  const rules = Object.values(ruleBuckets).map(r => ({
+    ...r,
+    evidence_iterations_min: Number.isFinite(r.evidence_iterations_min) ? r.evidence_iterations_min : 0,
+  }));
+  // Hard-coded fallback rules for archs with no calibration data yet.
+  ['aarch64','apple_silicon'].forEach(a => {
+    if (!rules.some(r => r.arch === a)) rules.push({
+      arch: a,
+      _fallback: true,
+      recommend: { family: a === 'apple_silicon' ? 'small' : 'base',
+                   language: 'multi',
+                   quant:    a === 'apple_silicon' ? 'fp16' : 'q8',
+                   backend:  a === 'apple_silicon' ? 'cpu'  : 'cpu' },
+      evidence_hosts: [],
+      _note: 'no calibration data yet — conservative defaults until ARM/Apple benches land',
+    });
+  });
+  const blob = {
+    schema_version: 1,
+    generated_at: new Date().toISOString(),
+    thresholds: {
+      batch_rtf: FILTER_STATE.batch,
+      accuracy_ceiling: FILTER_STATE.acc,
+      stream_rtf_soft: FILTER_STATE.stream,
+      memory_budget_mib: FILTER_STATE.mem,
+    },
+    constraints: {
+      binary_variant: FILTER_STATE.binary,
+      language_requirement: FILTER_STATE.lang,
+      quant_preference: FILTER_STATE.quant,
+      power: FILTER_STATE.power,
+    },
+    rules,
+  };
+  document.getElementById('policy-json').value = JSON.stringify(blob, null, 2);
+}
+
+// ─── 6. Data gaps ──────────────────────────────────────────────────────────
+function buildGaps() {
+  const block = document.getElementById('gaps-block');
+  const summary = document.getElementById('gaps-summary');
+  const body = document.getElementById('gaps-body');
+  const cells = constrainedCells();
+  const builds = allowedBuilds();
+  const langs  = allowedLangs();
+  const quants = allowedQuants();
+
+  // (a) Missing measurements: enumerate the candidate set under current
+  // controls and list combinations with no matching cell.
+  const expected = [];
+  HOSTS.forEach(host => {
+    FAMILY_ORDER.forEach(fam => {
+      langs.forEach(lang => {
+        if (lang === 'en' && fam === 'turbo') return;  // no .en turbo
+        builds.forEach(build => {
+          quants.forEach(q => {
+            expected.push({host, fam, lang, build, quant:q});
+          });
+        });
+      });
+    });
+  });
+  const missing = expected.filter(e => !cells.some(c =>
+    c.host === e.host && c.model_family === e.fam && c.language === e.lang
+    && c.build === e.build && (c.quant_display || c.quantization) === e.quant
+  ));
+
+  // (b) Low-iteration cells the walk picked.
+  const picks = HOSTS.map(walkHost).filter(r => r.pick).map(r => r.pick);
+  const lowIter = picks.filter(p => (p.iterations_kept || 0) < 2);
+
+  // (c) Missing accuracy on picks.
+  const noAcc = picks.filter(p => p.accuracy_en_max == null);
+
+  // (d) Arch fallbacks (informational).
+  const archFallback = ['aarch64','apple_silicon'].filter(a =>
+    !cells.some(c => (c.arch || 'x86_64') === a));
+
+  // (e) Unmeasured backend per host (gpu_present but no vulkan cells, etc.).
+  const backendGaps = [];
+  HOSTS.forEach(host => {
+    const hf = HOST_FEATURES[host] || {};
+    const hostCells = cells.filter(c => c.host === host);
+    if (hf.gpu_present && !hostCells.some(c => c.build === 'vulkan'))
+      backendGaps.push({host, missing:'vulkan'});
+    if (!hostCells.some(c => c.build === 'cpu'))
+      backendGaps.push({host, missing:'cpu'});
+  });
+
+  const G = missing.length + lowIter.length + noAcc.length + archFallback.length + backendGaps.length;
+  summary.textContent = G === 0
+    ? `No gaps under current policy (matrix: ${RAW_CELLS.length} cells).`
+    : `${G} gap${G===1?'':'s'} under current policy — click to expand (matrix: ${RAW_CELLS.length} cells, hosts: ${HOSTS.length}).`;
+
+  const sections = [];
+
+  if (missing.length) {
+    // Group by host for readability.
+    const byHost = {};
+    missing.forEach(g => { (byHost[g.host] = byHost[g.host] || []).push(g); });
+    const rows = Object.entries(byHost).map(([host, gs]) => {
+      return gs.slice(0, 20).map(g => {
+        const cmd = benchCmd(g);
+        return `<div class="gap-row"><span>${host} · ${g.build} · ${g.fam}${g.lang==='en'?'.en':''} · ${g.quant} · power=${FILTER_STATE.power||'any'}</span><button onclick="navigator.clipboard.writeText(${JSON.stringify(cmd)})">copy bench cmd</button></div>`;
+      }).join('') + (gs.length > 20 ? `<div class="gap-row" style="color:var(--muted)">… and ${gs.length-20} more for ${host}</div>` : '');
+    }).join('');
+    sections.push(`<div class="gap-section"><h4>Missing measurements (${missing.length})</h4>${rows}</div>`);
+  }
+  if (lowIter.length) {
+    sections.push(`<div class="gap-section"><h4>Recommendation rests on n&lt;2 (${lowIter.length})</h4>` +
+      lowIter.map(p => `<div class="gap-row"><span class="chip warn">n=${p.iterations_kept||0}</span> ${p.host} · ${p.build} · ${p.model} — re-run to confirm</div>`).join('') +
+      `</div>`);
+  }
+  if (noAcc.length) {
+    sections.push(`<div class="gap-section"><h4>Recommendation has no accuracy data (${noAcc.length})</h4>` +
+      noAcc.map(p => `<div class="gap-row"><span class="chip err">no acc</span> ${p.host} · ${p.build} · ${p.model} — re-run with EN fixtures</div>`).join('') +
+      `</div>`);
+  }
+  if (archFallback.length) {
+    sections.push(`<div class="gap-section"><h4>Arch coverage gaps (informational)</h4>` +
+      archFallback.map(a => `<div class="gap-row"><span class="chip none">${a}</span> no calibration host yet — policy ships conservative fallback</div>`).join('') +
+      `</div>`);
+  }
+  if (backendGaps.length) {
+    sections.push(`<div class="gap-section"><h4>Unmeasured backends (${backendGaps.length})</h4>` +
+      backendGaps.map(g => `<div class="gap-row">${g.host} has gpu_present but missing <code>${g.missing}</code> build</div>`).join('') +
+      `</div>`);
+  }
+  body.innerHTML = sections.join('') || '<p class="desc" style="margin:0">Coverage complete under the active constraints.</p>';
+}
+function benchCmd(g) {
+  // Mechanically derive the (placeholder) re-bench invocation. Operators
+  // can adapt this to whatever harness entry point they actually use.
+  const model = ({tiny:'tiny',base:'base',small:'small',turbo:'large-v3-turbo'})[g.fam]
+              + (g.lang==='en' && g.fam!=='turbo' ? '.en' : '')
+              + (g.quant==='fp16' ? '' : `-${g.quant === 'q8' ? 'q8_0' : (g.fam==='turbo'?'q5_0':'q5_1')}`);
+  return `# host: ${g.host}\nscripts/run-calibration.sh --host ${g.host} --power ${FILTER_STATE.power||'ac'} --build ${g.build} --model ${model}`;
+}
+
+// ─── Filter bar wiring ─────────────────────────────────────────────────────
+function syncFromDOM() {
+  FILTER_STATE.batch  = parseFloat(document.getElementById('f-batch').value);
+  FILTER_STATE.acc    = parseFloat(document.getElementById('f-acc').value);
+  FILTER_STATE.stream = parseFloat(document.getElementById('f-stream').value);
+  FILTER_STATE.mem    = parseInt(document.getElementById('f-mem').value);
+  FILTER_STATE.binary = document.getElementById('f-binary').value;
+  FILTER_STATE.lang   = document.getElementById('f-lang').value;
+  FILTER_STATE.quant  = document.getElementById('f-quant').value;
+  FILTER_STATE.power  = document.getElementById('f-power').value;
+  FILTER_STATE.arch   = document.getElementById('f-arch').value;
+  writeHash();
+  renderAll();
+}
+function syncToDOM() {
+  document.getElementById('f-batch').value  = FILTER_STATE.batch;
+  document.getElementById('f-acc').value    = FILTER_STATE.acc;
+  document.getElementById('f-stream').value = FILTER_STATE.stream;
+  document.getElementById('f-mem').value    = FILTER_STATE.mem;
+  document.getElementById('f-binary').value = FILTER_STATE.binary;
+  document.getElementById('f-lang').value   = FILTER_STATE.lang;
+  document.getElementById('f-quant').value  = FILTER_STATE.quant;
+  document.getElementById('f-power').value  = FILTER_STATE.power;
+  document.getElementById('f-arch').value   = FILTER_STATE.arch;
+}
+function presetReset() {
+  Object.assign(FILTER_STATE, {
+    batch:THRESH_DEFAULTS.batch_rtf, acc:THRESH_DEFAULTS.accuracy_ceiling,
+    stream:THRESH_DEFAULTS.stream_rtf_soft, mem:THRESH_DEFAULTS.memory_budget_mib,
+    binary:'gpu_capable', lang:'english_ok', quant:'auto', power:'ac', arch:'x86_64',
+  });
+  syncToDOM(); writeHash(); renderAll();
+}
+function presetCPUOnly() { FILTER_STATE.binary='cpu_only'; syncToDOM(); writeHash(); renderAll(); }
+function presetStrict()  { FILTER_STATE.batch=2.5; FILTER_STATE.acc=0.12; syncToDOM(); writeHash(); renderAll(); }
+function presetRelaxed() { FILTER_STATE.batch=1.2; FILTER_STATE.acc=0.35; syncToDOM(); writeHash(); renderAll(); }
+
+function renderAll() {
+  buildRecGrid();
+  buildScatterGrid();
+  buildQuantUplift();
+  buildPareto();
+  buildPolicy();
+  buildGaps();
+}
+
+function waitForChart(tries) {
+  if (typeof Chart !== 'undefined') {
+    readHash();
+    syncToDOM();
+    ['f-batch','f-acc','f-stream','f-mem','f-binary','f-lang','f-quant','f-power','f-arch'].forEach(id =>
+      document.getElementById(id).addEventListener('change', syncFromDOM));
+    ['f-batch','f-acc','f-stream','f-mem'].forEach(id =>
+      document.getElementById(id).addEventListener('input', syncFromDOM));
+    document.getElementById('btn-copy-policy').addEventListener('click', () => {
+      const ta = document.getElementById('policy-json');
+      ta.select();
+      navigator.clipboard.writeText(ta.value);
+    });
+    renderAll();
+  } else if (tries < 30) {
+    setTimeout(() => waitForChart(tries+1), 200);
+  } else {
+    console.error('Chart.js failed to load from CDN');
+  }
+}
+document.addEventListener('DOMContentLoaded', () => waitForChart(0));
+</script>
+</body>
+</html>
