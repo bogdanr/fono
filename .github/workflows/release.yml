@@ -158,10 +158,17 @@ jobs:
           # ~3 years of supported distros. The `size-budget` job in
           # `ci.yml` must mirror this pin — keep them in lockstep.
           #
+          # The `ubuntu-22.04-arm` runner is GitHub's free hosted ARM
+          # image (GA Jan 2025, public repos), built from the same
+          # 22.04 base so the aarch64 binary inherits the same glibc
+          # 2.35 floor as the x86_64 one.
+          #
           # Two variants per
           # `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`:
           # CPU-only (compact, default download, fully packaged) and
-          # GPU (Vulkan-enabled, raw binary + .sha256 only).
+          # GPU (Vulkan-enabled, raw binary + .sha256 only). aarch64
+          # currently ships CPU-only (Vulkan SDK story on ARM lands in
+          # a follow-up slice).
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
             cross: false
@@ -176,6 +183,13 @@ jobs:
             variant: gpu
             asset_prefix: fono-gpu
             features: accel-vulkan
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+            cross: false
+            archive: tar.gz
+            variant: cpu
+            asset_prefix: fono
+            features: ""
     steps:
       - uses: actions/checkout@v5
 

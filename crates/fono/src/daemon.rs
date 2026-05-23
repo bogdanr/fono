@@ -1330,7 +1330,11 @@ fn cpu_simd_summary() -> String {
 fn cpu_simd_summary() -> String {
     // aarch64 always has NEON; report the optional dot-product +
     // fp16 extensions when present, since ggml's arm64 kernels
-    // pick them up.
+    // pick them up. `mut` is only needed when one of the cfg-gated
+    // pushes below is active; the portable baseline (no DotProd /
+    // no FP16 in `target_feature`) leaves `feats` untouched, so
+    // suppress the conditional `unused_mut` warning.
+    #[allow(unused_mut)]
     let mut feats: Vec<&'static str> = vec!["NEON"];
     #[cfg(target_feature = "dotprod")]
     feats.push("DotProd");

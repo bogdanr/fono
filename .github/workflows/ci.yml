@@ -170,8 +170,8 @@ jobs:
     # glibc 2.39 would silently bump the floor and exclude ~3 years
     # of supported distros. Must stay in lockstep with `release.yml`'s
     # build matrix.
-    name: Binary size & deps audit (${{ matrix.variant }})
-    runs-on: ubuntu-22.04
+    name: Binary size & deps audit (${{ matrix.variant }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -185,17 +185,41 @@ jobs:
           # build past 20 MiB; raising the ceiling preserves a ~1 MiB
           # headroom while still rejecting accidental dependency drift.
           - variant: cpu
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
             features: ""
             budget_bytes: 23068672
             extra_needed: ""
+            dynamic_linker: ld-linux-x86-64.so.2
           # GPU variant — Vulkan-enabled, ~60 MB. Adds `libvulkan.so.1`
           # to the NEEDED allowlist; budget is loose at 64 MiB (sanity
           # ceiling, not a tight gate). Mirrors `fono-gpu-vX.Y.Z-x86_64`.
           # Per `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`.
           - variant: gpu
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
             features: accel-vulkan
             budget_bytes: 67108864
             extra_needed: libvulkan.so.1
+            dynamic_linker: ld-linux-x86-64.so.2
+          # CPU aarch64 — same shape as the x86_64 CPU row. Runs on
+          # GitHub's hosted `ubuntu-22.04-arm` image (GA Jan 2025,
+          # free for public repos), same glibc 2.35 floor. The
+          # interpreter on aarch64 is `ld-linux-aarch64.so.1` and on
+          # aarch64 it appears only in `PT_INTERP`, not `NEEDED`, so
+          # the allowlist drops it; the universal libc/libm/libgcc_s
+          # triple still applies. Budget matches x86_64 CPU; measured
+          # locally on Debian 13 aarch64 at 18.1 MB.
+          - variant: cpu
+            arch: aarch64
+            target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+            features: ""
+            budget_bytes: 23068672
+            extra_needed: ""
+            dynamic_linker: ld-linux-aarch64.so.1
     steps:
       - uses: actions/checkout@v5
 
@@ -248,7 +272,7 @@ jobs:
           # not share cached build-script binaries.
           # `-portable` suffix mirrors release.yml — busts cache for the
           # GGML_NATIVE=OFF baseline rolled in via .cargo/config.toml [env].
-          key: size-budget-ubuntu-22.04-${{ matrix.variant }}-portable
+          key: size-budget-${{ matrix.runner }}-${{ matrix.variant }}-${{ matrix.arch }}-portable
 
       - name: Build canonical ship binary
         # GGML ISA baseline (GGML_NATIVE=OFF + AVX2/FMA/F16C/BMI2) is
@@ -260,13 +284,13 @@ jobs:
           if [ -n "${{ matrix.features }}" ]; then
             extra="--features ${{ matrix.features }}"
           fi
-          cargo build -p fono --profile release-slim --target x86_64-unknown-linux-gnu $extra
+          cargo build -p fono --profile release-slim --target ${{ matrix.target }} $extra
 
       - name: Assert size budget + NEEDED allowlist
         shell: bash
         run: |
           set -euo pipefail
-          bin="target/x86_64-unknown-linux-gnu/release-slim/fono"
+          bin="target/${{ matrix.target }}/release-slim/fono"
           budget_bytes=${{ matrix.budget_bytes }}
           # Universal glibc + libgcc_s ABI. Modern glibc (≥ 2.34) merged
           # libpthread/librt/libdl back into libc.so.6. Audio is delegated
@@ -275,14 +299,18 @@ jobs:
           # ksni (pure-Rust D-Bus, no GTK). The GPU variant adds
           # `libvulkan.so.1` (provided by `vulkan-loader` /
           # `mesa-vulkan-loaders` / `libvulkan1` on every modern desktop
-          # Linux distro).
-          allowlist='libc.so.6 libm.so.6 libgcc_s.so.1 ld-linux-x86-64.so.2 ${{ matrix.extra_needed }}'
+          # Linux distro). The dynamic linker is included in the
+          # allowlist on x86_64 (where it appears in NEEDED on glibc <
+          # 2.34) and as a no-op on aarch64 (PT_INTERP only, not
+          # NEEDED); listing it here keeps the gate robust across
+          # toolchain generations.
+          allowlist='libc.so.6 libm.so.6 libgcc_s.so.1 ${{ matrix.dynamic_linker }} ${{ matrix.extra_needed }}'
 
           test -f "${bin}"
           size="$(stat -c%s "${bin}")"
           printf "size: %s bytes — budget %s bytes\n" "${size}" "${budget_bytes}"
           if [ "${size}" -gt "${budget_bytes}" ]; then
-            echo "FAIL: ${{ matrix.variant }} binary exceeds budget by $((size - budget_bytes)) bytes" >&2
+            echo "FAIL: ${{ matrix.variant }} (${{ matrix.arch }}) binary exceeds budget by $((size - budget_bytes)) bytes" >&2
             exit 5
           fi
 
@@ -300,7 +328,7 @@ jobs:
             printf "  %s\n" ${actual_needed} >&2
             exit 5
           fi
-          echo "size-budget gate passed (${{ matrix.variant }}); NEEDED:"
+          echo "size-budget gate passed (${{ matrix.variant }}, ${{ matrix.arch }}); NEEDED:"
           printf "  %s\n" ${actual_needed}
 
       - name: Install cargo-bloat (prebuilt)
@@ -322,23 +350,23 @@ jobs:
           cargo bloat \
             -p fono \
             --profile release-slim \
-            --target x86_64-unknown-linux-gnu \
+            --target ${{ matrix.target }} \
             $extra \
             --crates -n 30 \
-            > cargo-bloat-crates-${{ matrix.variant }}.txt 2>&1 || true
+            > cargo-bloat-crates-${{ matrix.variant }}-${{ matrix.arch }}.txt 2>&1 || true
           cargo bloat \
             -p fono \
             --profile release-slim \
-            --target x86_64-unknown-linux-gnu \
+            --target ${{ matrix.target }} \
             $extra \
             -n 50 \
-            > cargo-bloat-symbols-${{ matrix.variant }}.txt 2>&1 || true
+            > cargo-bloat-symbols-${{ matrix.variant }}-${{ matrix.arch }}.txt 2>&1 || true
 
       - name: Upload cargo-bloat reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: cargo-bloat-${{ matrix.variant }}
+          name: cargo-bloat-${{ matrix.variant }}-${{ matrix.arch }}
           path: cargo-bloat-*.txt
           if-no-files-found: ignore
 
