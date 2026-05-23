@@ -2,6 +2,17 @@
 
 Last updated: 2026-05-23
 
+## 2026-05-23 — ryzen-5950x gap-fill (complete matrix 210/210)
+
+Pulled existing May 22 runs-ro data from ryzen-5950x (192.168.0.74), then ran
+the 3 missing cpu fp16 `.en` models (tiny.en, base.en, small.en) today. Turbo
+cells refreshed simultaneously. Matrix is now **210/210 cells** — 5 hosts ×
+2 builds × 21 models, zero gaps.
+
+Regenerated: `calibration3.html` (169 KB), `auto-select.html` (195 KB).
+
+---
+
 ## 2026-05-23 — fp16 gap-fill sweep (post-optimization baseline restore)
 
 Ran parallel fp16 benchmark sweeps on 3 hosts to restore the baselines deleted

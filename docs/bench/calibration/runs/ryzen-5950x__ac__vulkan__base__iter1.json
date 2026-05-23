@@ -5,274 +5,58 @@
   "threshold_levenshtein": 0.05,
   "results": [
     {
-      "fixture": "en-single-sentence",
-      "language": "en",
+      "fixture": "ro-bogdan-30s",
+      "language": "ro",
       "synthetic_placeholder": false,
-      "duration_s": 5.0,
+      "duration_s": 30.0,
       "modes": {
         "batch": {
-          "text": "be neglected. The art of war then is governed by five constant factors.",
-          "elapsed_ms": 322,
-          "ttff_ms": 322
+          "text": "Vreau să facem și un registrare mai lungă, cura diouul care rulează pe fondal, și cu mine care mă gândesc mai mult la ce vreau să zic. Că se vedem dacă modelul se descurcă bine și în situația asta, când o să lume multi și er de peste 20 de secunde, care să conțină o tictea de sau ceva, care vrei să vorbești cu assistentul.",
+          "elapsed_ms": 473,
+          "ttff_ms": 473
         },
         "streaming": {
-          "text": "neglected. The art of war then is governed by five constant factors.",
-          "elapsed_ms": 178,
+          "text": "Vreau sÄ facem Èi un registrare mai lungÄ, cura diouul care ruleazÄ pe fondal, Èi cu mine care mÄ gÃ¢ndesc mai mult la ce vreau sÄ zic. CÄ se vedem dacÄ modelul se descurcÄ bine Èi Ã®n situaÈia asta, cÃ¢nd o sÄ lume multi Èi er de peste 20 de secunde, care sÄ conÈinÄ o tictea de sau ceva, care vrei sÄ vorbeÈti cu assistentul.",
+          "elapsed_ms": 451,
           "ttff_ms": 98
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.04225352,
-        "stt_accuracy_levenshtein": 0.04225352,
-        "ttff_ratio": 0.3043478,
-        "ttc_ratio": 0.55279505
+        "stt_levenshtein_norm": 0.12716763,
+        "stt_accuracy_levenshtein": 0.11728395,
+        "ttff_ratio": 0.20718816,
+        "ttc_ratio": 0.95348835
       },
       "verdict": "pass",
       "skip_reason": null,
-      "note": "per-fixture equiv threshold 1; per-fixture acc threshold 1"
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.5"
     },
     {
-      "fixture": "en-multi-sentence",
-      "language": "en",
-      "synthetic_placeholder": false,
-      "duration_s": 20.0,
-      "modes": {
-        "batch": {
-          "text": "neglected. The art of war then is governed by five constant factors to be taken into account in one's deliberations, when seeking to determine the conditions of taining in the field. These are, 1. The moral law; 2. Heaven; 3. Earth; [BLANK_AUDIO]",
-          "elapsed_ms": 107,
-          "ttff_ms": 107
-        },
-        "streaming": {
-          "text": "neglected. The art of war then is governed by five constant factors to be taken into account in one's deliberations, when seeking to determine the conditions obtaining in the field. These are, 1. The moral law; 2. Heaven; 3. Earth;",
-          "elapsed_ms": 200,
-          "ttff_ms": 22
-        }
-      },
-      "metrics": {
-        "stt_levenshtein_norm": 0.06504065,
-        "stt_accuracy_levenshtein": 0.13821138,
-        "ttff_ratio": 0.20560747,
-        "ttc_ratio": 1.8691589
-      },
-      "verdict": "pass",
-      "skip_reason": null,
-      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2"
-    },
-    {
-      "fixture": "en-narrative-pause",
-      "language": "en",
-      "synthetic_placeholder": false,
-      "duration_s": 12.0,
-      "modes": {
-        "batch": {
-          "text": "that Jane was yielding to the preference which she'd begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general, so that she was not likely to be discovered by the world in general.",
-          "elapsed_ms": 98,
-          "ttff_ms": 98
-        },
-        "streaming": {
-          "text": "that Jane was yielding to the preference which she'd begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general, so that she would be able to",
-          "elapsed_ms": 216,
-          "ttff_ms": 33
-        }
-      },
-      "metrics": {
-        "stt_levenshtein_norm": 0.14802632,
-        "stt_accuracy_levenshtein": 0.22697368,
-        "ttff_ratio": 0.33673468,
-        "ttc_ratio": 2.2040815
-      },
-      "verdict": "fail",
-      "skip_reason": null,
-      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2; acc 0.227 > 0.200"
-    },
-    {
-      "fixture": "en-conversational",
-      "language": "en",
-      "synthetic_placeholder": false,
-      "duration_s": 10.0,
-      "modes": {
-        "batch": {
-          "text": "encouragement. In nine cases out of ten a woman had better show more affection than she feels. Bingley likes your sister undoubtedly but he may never do more than",
-          "elapsed_ms": 56,
-          "ttff_ms": 56
-        },
-        "streaming": {
-          "text": "encouragement. In nine cases out of ten, a woman had better show more affection than she feels. Bingley likes your sister undoubtedly, but he may never do more than",
-          "elapsed_ms": 154,
-          "ttff_ms": 28
-        }
-      },
-      "metrics": {
-        "stt_levenshtein_norm": 0.0121951215,
-        "stt_accuracy_levenshtein": 0.0121951215,
-        "ttff_ratio": 0.5,
-        "ttc_ratio": 2.75
-      },
-      "verdict": "pass",
-      "skip_reason": null,
-      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2"
-    },
-    {
-      "fixture": "es-lorca-reyerta",
-      "language": "es",
-      "synthetic_placeholder": false,
-      "duration_s": 10.0,
-      "modes": {
-        "batch": {
-          "text": "tocando viene, por un anfibio sendero de cristales y laureles. El silencio sin estrellas, huyendo del son sonete,",
-          "elapsed_ms": 60,
-          "ttff_ms": 60
-        },
-        "streaming": {
-          "text": "tocando viene por un anfibio sendero de cristales y laureles. El silencio sin estrellas, huyendo del son sonete,",
-          "elapsed_ms": 155,
-          "ttff_ms": 32
-        }
-      },
-      "metrics": {
-        "stt_levenshtein_norm": 0.0088495575,
-        "stt_accuracy_levenshtein": 0.017699115,
-        "ttff_ratio": 0.53333336,
-        "ttc_ratio": 2.5833333
-      },
-      "verdict": "pass",
-      "skip_reason": null,
-      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.3"
-    },
-    {
-      "fixture": "fr-gide-symphonie",
-      "language": "fr",
-      "synthetic_placeholder": false,
-      "duration_s": 10.0,
-      "modes": {
-        "batch": {
-          "text": "et à Gertrude, j'avais dû apprendre moi-même l'Alphabède des avodes. Mais bientôt, elle devait beaucoup plus habile que moi à lire cette écriture où j'avais assez de pain à me revoir.",
-          "elapsed_ms": 81,
-          "ttff_ms": 81
-        },
-        "streaming": {
-          "text": "et Ã Gertrude, j'avais dÃ» apprendre moi-mÃªme l'AlphabÃ¨de des avodes. Mais bientÃ´t, elle devait beaucoup plus habile que moi Ã lire cette Ã©criture oÃ¹ j'avais assez de pain Ã me voir.",
-          "elapsed_ms": 196,
-          "ttff_ms": 28
-        }
-      },
-      "metrics": {
-        "stt_levenshtein_norm": 0.09090909,
-        "stt_accuracy_levenshtein": 0.08994709,
-        "ttff_ratio": 0.34567901,
-        "ttc_ratio": 2.419753
-      },
-      "verdict": "pass",
-      "skip_reason": null,
-      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.3"
-    },
-    {
-      "fixture": "zh-luxun-kuangren",
-      "language": "zh",
-      "synthetic_placeholder": false,
-      "duration_s": 10.0,
-      "modes": {
-        "batch": {
-          "text": "老君遠到來時,人已早遇,父母的後補已。迎大笑,出事日記二次,為可見當日病壯。",
-          "elapsed_ms": 67,
-          "ttff_ms": 67
-        },
-        "streaming": {
-          "text": "èåé å°ä¾æ¯äººä¸æ©é,ç¶æ¯çå¾è£ä¸ãå å¤§ç¬,åºäºæ¥è¨äºæ¬¡,çºå¯è¦ç¶æ¥ç çã",
-          "elapsed_ms": 162,
-          "ttff_ms": 26
-        }
-      },
-      "metrics": {
-        "stt_levenshtein_norm": 0.9714286,
-        "stt_accuracy_levenshtein": 0.5,
-        "ttff_ratio": 0.3880597,
-        "ttc_ratio": 2.4179103
-      },
-      "verdict": "pass",
-      "skip_reason": null,
-      "note": "per-fixture equiv threshold 1; per-fixture acc threshold 1"
-    },
-    {
-      "fixture": "ro-talcuirea-matei",
+      "fixture": "ro-bogdan-10s",
       "language": "ro",
       "synthetic_placeholder": false,
       "duration_s": 10.0,
       "modes": {
         "batch": {
-          "text": "\"Ea urmat lui sauul, cel le-a pedat de la Dumnezeu și urit, Așa și Christol tu păce să alipsit, adam de împărăția și domnia pe care o avea să factură. Cea...",
-          "elapsed_ms": 95,
-          "ttff_ms": 95
-        },
-        "streaming": {
-          "text": "Ne-au urmat lui sauul cel le-a pedat de la Dumnezeu Èi urit, AÈa Èi Christol tu pÄci sÄ alibsit, adam de Ã®mpÄrÄÈia Èi domnia pe care o avea sÄ facturÄ.",
-          "elapsed_ms": 230,
-          "ttff_ms": 37
-        }
-      },
-      "metrics": {
-        "stt_levenshtein_norm": 0.2208589,
-        "stt_accuracy_levenshtein": 0.3121019,
-        "ttff_ratio": 0.38947368,
-        "ttc_ratio": 2.4210527
-      },
-      "verdict": "fail",
-      "skip_reason": null,
-      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.3; acc 0.312 > 0.300"
-    },
-    {
-      "fixture": "ro-man",
-      "language": "ro",
-      "synthetic_placeholder": false,
-      "duration_s": 12.42,
-      "modes": {
-        "batch": {
-          "text": "La învățământul desid durat a normal astutilor universitare de licențe este de 3-4 an și corresponde 1 inumă de 60 de credite de studi transferabile pentru una ande studiu.",
+          "text": "Si acum facem un registrare cum măscă pe fundal, să vedem dacă model le poți de tecteze dictarea, într-in ce nișteți gămodă fundală.",
           "elapsed_ms": 83,
           "ttff_ms": 83
         },
         "streaming": {
-          "text": "La Ã®nvÄÈÄm Ã®ntÃ¢ntul desid durat a normal a studilor universitare de licenÈe este de 3-4 ani Èi cu corresponde 1 inumÄ de 60 de credite de studi transferabile pentru una ani de studiu.",
-          "elapsed_ms": 222,
-          "ttff_ms": 45
+          "text": "Si acum facem un registrare cum mÄ scher pe fundal, sÄ vedem dacÄ modele poÈi de tecteze dictarea, Ã®ntr-in ce niÈteÈi gÄmodÄ fundalÄ.",
+          "elapsed_ms": 207,
+          "ttff_ms": 35
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.15104167,
-        "stt_accuracy_levenshtein": 0.2010582,
-        "ttff_ratio": 0.5421687,
-        "ttc_ratio": 2.6746988
+        "stt_levenshtein_norm": 0.18181819,
+        "stt_accuracy_levenshtein": 0.23484848,
+        "ttff_ratio": 0.42168674,
+        "ttc_ratio": 2.4939759
       },
       "verdict": "pass",
       "skip_reason": null,
-      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.3"
-    },
-    {
-      "fixture": "ro-woman",
-      "language": "ro",
-      "synthetic_placeholder": false,
-      "duration_s": 11.76,
-      "modes": {
-        "batch": {
-          "text": "Ea subliniat când de pericula să este de fapt situația andru cât unumă atât de restrâns de persoane, are la degetul mic o asemenea puterea economica și numări.",
-          "elapsed_ms": 86,
-          "ttff_ms": 86
-        },
-        "streaming": {
-          "text": "Ea subliniat cÃ¢nd de pericula sÄ este de fapt situaÈia andru Ã®ncÃ¢t unumÄ atÃ¢t de restrÃ¢ns de persoane, are la degetul mic o asemenea puterea economica Èi unumÄri.",
-          "elapsed_ms": 205,
-          "ttff_ms": 23
-        }
-      },
-      "metrics": {
-        "stt_levenshtein_norm": 0.12790698,
-        "stt_accuracy_levenshtein": 0.13043478,
-        "ttff_ratio": 0.26744187,
-        "ttc_ratio": 2.3837209
-      },
-      "verdict": "pass",
-      "skip_reason": null,
-      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.3"
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.5"
     }
   ],
   "pinned_params": {

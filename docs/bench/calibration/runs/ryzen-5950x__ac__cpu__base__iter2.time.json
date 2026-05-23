@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/root/fono-bench-rig/fono-bench-cpu",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "base",
+    "--fixtures",
+    "/root/fono-bench-rig/fixtures/ro-bogdan",
+    "--output",
+    "/root/fono-bench-rig/runs-ro/ryzen-5950x__ac__cpu__base__iter2.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": null,
+    "battery_pct": null,
+    "package_temp_c": 54.5
+  },
+  "context_start": {
+    "ac_online": null,
+    "battery_pct": null,
+    "captured_at_utc": "2026-05-22T06:54:41.079685+00:00",
+    "hostname": "proxmox4",
+    "package_temp_c": 52.625,
+    "platform": "linux",
+    "power_profile": "governor=powersave"
+  },
+  "exit_code": 0,
+  "label": "ryzen-5950x/ac/cpu/base/iter2",
+  "max_rss_kib": 522948,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 9.373284,
+  "user_s": 50.763777,
+  "wall_clock_s": 4.34996
+}

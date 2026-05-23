@@ -169,38 +169,45 @@ _2020 Zen 3 16-core enthusiast desktop; AMD's flagship consumer CPU at launch, s
 
 | model | power | build | iters | batch RTF | b-σ% | stream RTF | s-σ% | TTFF s | RSS MiB | verdict | notes |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|
-| base-q5_1 | ac | cpu | 2/2 | 46.09 | 0.2 | 6.68 | 1.8 | 0.41 | 428 | comfortable |  |
-| base-q8_0 | ac | cpu | 2/2 | 46.17 | 0.9 | 8.50 | 0.1 | 0.38 | 469 | comfortable |  |
+| base | ac | cpu | 2/2 | 38.13 | 0.5 | 11.97 | 3.5 | 0.40 | 511 | comfortable |  |
+| base-q5_1 | ac | cpu | 2/2 | 33.94 | 1.3 | 10.61 | 3.6 | 0.43 | 364 | comfortable |  |
+| base-q8_0 | ac | cpu | 2/2 | 46.33 | 0.9 | 13.48 | 3.4 | 0.40 | 385 | comfortable |  |
+| base.en | ac | cpu | 0/2 | — | — | — | — | — | 13 | errored | no successful iterations |
 | base.en-q5_1 | ac | cpu | 2/2 | 36.07 | 0.3 | 8.55 | 0.7 | 0.42 | 436 | comfortable |  |
 | base.en-q8_0 | ac | cpu | 2/2 | 38.72 | 0.5 | 8.37 | 2.4 | 0.38 | 472 | comfortable |  |
-| large-v3-turbo-q5_0 | ac | cpu | 2/2 | 5.20 | 0.7 | 0.61 | 0.2 | 6.02 | 1655 | borderline |  |
-| large-v3-turbo-q8_0 | ac | cpu | 2/2 | 5.71 | 2.2 | 0.74 | 0.1 | 4.93 | 2227 | borderline |  |
-| small-q5_1 | ac | cpu | 2/2 | 18.35 | 0.5 | 2.59 | 0.3 | 1.29 | 793 | comfortable |  |
-| small-q8_0 | ac | cpu | 2/2 | 19.18 | 0.4 | 2.94 | 0.1 | 1.09 | 934 | comfortable |  |
+| large-v3-turbo | ac | cpu | 2/2 | 3.05 | 0.0 | 0.92 | 0.1 | 5.40 | 3633 | borderline |  |
+| large-v3-turbo-q5_0 | ac | cpu | 2/2 | 2.91 | 1.5 | 0.84 | 0.1 | 5.92 | 1629 | borderline |  |
+| large-v3-turbo-q8_0 | ac | cpu | 2/2 | 3.42 | 0.8 | 1.00 | 0.0 | 4.91 | 2202 | borderline |  |
+| small | ac | cpu | 2/2 | 13.87 | 4.9 | 3.43 | 0.1 | 2.28 | 1280 | comfortable |  |
+| small-q5_1 | ac | cpu | 2/2 | 16.25 | 5.2 | 3.83 | 0.1 | 1.94 | 712 | comfortable |  |
+| small-q8_0 | ac | cpu | 2/2 | 17.42 | 3.0 | 4.84 | 1.2 | 1.14 | 854 | comfortable |  |
+| small.en | ac | cpu | 0/2 | — | — | — | — | — | 13 | errored | no successful iterations |
 | small.en-q5_1 | ac | cpu | 2/2 | 13.75 | 1.9 | 2.80 | 1.0 | 1.33 | 797 | comfortable |  |
 | small.en-q8_0 | ac | cpu | 2/2 | 19.06 | 1.1 | 3.22 | 0.2 | 1.13 | 936 | comfortable |  |
-| tiny-q5_1 | ac | cpu | 2/2 | 84.74 | 0.0 | 12.90 | 1.0 | 0.30 | 304 | comfortable |  |
-| tiny-q8_0 | ac | cpu | 2/2 | 77.43 | 3.9 | 13.93 | 0.8 | 0.23 | 336 | comfortable |  |
+| tiny | ac | cpu | 2/2 | 54.42 | 0.0 | 18.42 | 4.8 | 0.24 | 329 | comfortable |  |
+| tiny-q5_1 | ac | cpu | 2/2 | 68.57 | 2.5 | 20.62 | 3.8 | 0.24 | 244 | comfortable |  |
+| tiny-q8_0 | ac | cpu | 2/2 | 55.93 | 36.9 | 21.69 | 0.5 | 0.22 | 264 | comfortable | batch_rtf spread 36.9% > 15% |
+| tiny.en | ac | cpu | 0/2 | — | — | — | — | — | 13 | errored | no successful iterations |
 | tiny.en-q5_1 | ac | cpu | 2/2 | 87.65 | 11.8 | 15.83 | 2.9 | 0.23 | 308 | comfortable |  |
 | tiny.en-q8_0 | ac | cpu | 2/2 | 98.12 | 0.9 | 16.75 | 0.9 | 0.20 | 327 | comfortable |  |
-| base | ac | vulkan | 2/2 | 107.46 | 2.7 | 58.32 | 0.8 | 0.04 | 336 | comfortable |  |
-| base-q5_1 | ac | vulkan | 2/2 | 102.68 | 2.2 | 62.14 | 1.9 | 0.03 | 260 | comfortable |  |
-| base-q8_0 | ac | vulkan | 2/2 | 109.02 | 1.9 | 59.57 | 1.6 | 0.03 | 268 | comfortable |  |
+| base | ac | vulkan | 2/2 | 75.03 | 5.8 | 62.14 | 3.1 | 0.06 | 295 | comfortable |  |
+| base-q5_1 | ac | vulkan | 2/2 | 80.58 | 6.7 | 68.32 | 0.8 | 0.05 | 261 | comfortable |  |
+| base-q8_0 | ac | vulkan | 2/2 | 80.82 | 4.7 | 67.80 | 1.2 | 0.05 | 269 | comfortable |  |
 | base.en | ac | vulkan | 2/2 | 92.35 | 1.4 | 64.39 | 1.6 | 0.04 | 308 | comfortable |  |
 | base.en-q5_1 | ac | vulkan | 2/2 | 80.85 | 2.5 | 66.62 | 0.5 | 0.04 | 266 | comfortable |  |
 | base.en-q8_0 | ac | vulkan | 2/2 | 98.58 | 3.0 | 67.93 | 1.8 | 0.04 | 275 | comfortable |  |
-| large-v3-turbo | ac | vulkan | 2/2 | 76.00 | 0.4 | 29.73 | 0.3 | 0.11 | 465 | comfortable |  |
-| large-v3-turbo-q5_0 | ac | vulkan | 2/2 | 58.14 | 80.1 | 22.64 | 55.4 | 0.33 | 610 | comfortable | batch_rtf spread 80.1% > 15%; stream_rtf spread 55.4% > 15% |
-| large-v3-turbo-q8_0 | ac | vulkan | 2/2 | 86.93 | 0.4 | 31.27 | 0.3 | 0.10 | 346 | comfortable |  |
-| small | ac | vulkan | 2/2 | 74.00 | 0.4 | 30.02 | 0.6 | 0.11 | 346 | comfortable |  |
-| small-q5_1 | ac | vulkan | 2/2 | 81.63 | 0.7 | 35.64 | 0.7 | 0.06 | 302 | comfortable |  |
-| small-q8_0 | ac | vulkan | 2/2 | 78.97 | 1.1 | 31.42 | 1.0 | 0.10 | 300 | comfortable |  |
+| large-v3-turbo | ac | vulkan | 2/2 | 38.43 | 24.5 | 31.48 | 0.4 | 0.23 | 468 | comfortable | batch_rtf spread 24.5% > 15% |
+| large-v3-turbo-q5_0 | ac | vulkan | 2/2 | 54.75 | 13.7 | 36.53 | 3.0 | 0.15 | 314 | comfortable |  |
+| large-v3-turbo-q8_0 | ac | vulkan | 2/2 | 49.06 | 19.2 | 35.54 | 0.1 | 0.17 | 347 | comfortable | batch_rtf spread 19.2% > 15% |
+| small | ac | vulkan | 2/2 | 53.46 | 12.8 | 27.49 | 0.4 | 0.35 | 346 | comfortable |  |
+| small-q5_1 | ac | vulkan | 2/2 | 61.64 | 6.8 | 45.56 | 0.0 | 0.09 | 300 | comfortable |  |
+| small-q8_0 | ac | vulkan | 2/2 | 60.08 | 5.9 | 27.97 | 2.2 | 0.36 | 289 | comfortable |  |
 | small.en | ac | vulkan | 2/2 | 61.85 | 1.5 | 40.05 | 0.7 | 0.09 | 346 | comfortable |  |
 | small.en-q5_1 | ac | vulkan | 2/2 | 65.65 | 1.6 | 40.58 | 2.4 | 0.07 | 305 | comfortable |  |
 | small.en-q8_0 | ac | vulkan | 2/2 | 67.05 | 0.2 | 43.66 | 0.2 | 0.07 | 300 | comfortable |  |
-| tiny | ac | vulkan | 2/2 | 109.49 | 32.2 | 59.49 | 12.2 | 0.05 | 283 | comfortable | batch_rtf spread 32.2% > 15% |
-| tiny-q5_1 | ac | vulkan | 2/2 | 81.15 | 94.9 | 31.56 | 63.6 | 0.29 | 546 | comfortable | batch_rtf spread 94.9% > 15%; stream_rtf spread 63.6% > 15% |
-| tiny-q8_0 | ac | vulkan | 2/2 | 82.52 | 85.2 | 42.99 | 68.9 | 0.18 | 463 | comfortable | batch_rtf spread 85.2% > 15%; stream_rtf spread 68.9% > 15% |
+| tiny | ac | vulkan | 2/2 | 76.85 | 0.1 | 63.69 | 0.2 | 0.04 | 244 | comfortable |  |
+| tiny-q5_1 | ac | vulkan | 2/2 | 82.76 | 2.5 | 65.64 | 2.0 | 0.04 | 255 | comfortable |  |
+| tiny-q8_0 | ac | vulkan | 2/2 | 81.97 | 0.9 | 62.72 | 5.0 | 0.05 | 262 | comfortable |  |
 | tiny.en | ac | vulkan | 2/2 | 106.22 | 0.8 | 89.20 | 1.9 | 0.03 | 255 | comfortable |  |
 | tiny.en-q5_1 | ac | vulkan | 2/2 | 85.78 | 44.0 | 89.61 | 0.7 | 0.03 | 291 | comfortable | batch_rtf spread 44.0% > 15% |
 | tiny.en-q8_0 | ac | vulkan | 2/2 | 107.31 | 0.7 | 88.35 | 0.8 | 0.03 | 263 | comfortable |  |
