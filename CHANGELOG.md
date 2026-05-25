@@ -7,17 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.8.2] — 2026-05-25
+## [0.8.2] — 2026-05-26
 
-A polish release. Press **Esc** to cancel a recording or an assistant
-reply on Wayland. The first-run wizard now picks the right local model
-on older laptops and other tricky hardware. Assistant memory survives
-when you tap the dictation hotkey mid-conversation. And dictation
-recovers on PipeWire-only Linux hosts that were silently capturing
-noise.
+Context-aware dictation, Esc-to-cancel on Wayland, and smarter
+first-run model picks. Fono now reads which window is focused when you
+press the hotkey and silently adjusts how it transcribes and cleans up
+your speech — terminal windows get a shell-vocabulary bias so `ls`,
+`git commit`, and `chmod 755` come out right; code editors get a
+language-specific vocabulary hint. No configuration required.
 
 ### Added
 
+- **Window-aware context injection.** At hotkey-press time Fono reads
+  the focused window class and title and silently passes a tailored
+  `initial_prompt` to Whisper (local and cloud) and a matching cleanup
+  suffix to the LLM. Built-in profiles cover terminal emulators (shell
+  vocabulary: `ls -la`, `grep -r`, `chmod 755`, `git commit`, etc.),
+  per-language code editors (Cursor, Zed, Kate; hints derived from
+  the file extension in the window title), and private windows
+  (KeePassXC, Bitwarden — history writes suppressed). Existing
+  `[[context_rules]]` entries take precedence as usual. Detection
+  covers X11, sway, Hyprland, and GNOME Wayland (with XWayland
+  fallback for GNOME 46+ where the Shell introspect API is restricted).
+  Visible at any time with `FONO_LOG=fono::context=debug`.
+- **Terminal project and agent detection.** When a terminal emulator is
+  focused, Fono walks `/proc` to find the CWD and detects the active
+  project type (Rust, Python, Node, Go, Docker, K8s) and whether a
+  coding agent (Forge, Claude Code, Codex, Aider, Goose, and others)
+  is running. Project type refines the Whisper vocabulary hint; agent
+  detection is stored for future prompt biasing and is currently no-op.
 - **Escape cancels recordings on Wayland.** The portal hotkey
   backend (KDE / sway / Hyprland) opens a transient second
   `GlobalShortcuts` session while a recording is active; the
