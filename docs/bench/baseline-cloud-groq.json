@@ -103,6 +103,46 @@
       "verdict": "pass"
     },
     {
+      "fixture": "en-self-dictation",
+      "language": "en",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.02500000037252903,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": " I need to record a fixture myself for this benchmark because the ones that I'm finding online are not very well fit to the task that I'm trying to accomplish."
+        },
+        "streaming": null
+      },
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.25",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    },
+    {
+      "fixture": "en-self-casual",
+      "language": "en",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.0,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": null,
+        "ttff_ratio": null
+      },
+      "modes": {
+        "batch": {
+          "text": " Let's go to the Chinese restaurant tonight. But please do not bring Sam, you know, he is very annoying."
+        },
+        "streaming": null
+      },
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.25",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    },
+    {
       "fixture": "es-lorca-reyerta",
       "language": "es",
       "metrics": {
