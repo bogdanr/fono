@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-05-25
+
+A polish release. Press **Esc** to cancel a recording or an assistant
+reply on Wayland. The first-run wizard now picks the right local model
+on older laptops and other tricky hardware. Assistant memory survives
+when you tap the dictation hotkey mid-conversation. And dictation
+recovers on PipeWire-only Linux hosts that were silently capturing
+noise.
+
 ### Added
 
 - **Escape cancels recordings on Wayland.** The portal hotkey
@@ -18,11 +27,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`fono cancel` CLI verb.** Aborts an active recording or
   assistant turn. Idempotent. Backs `Request::Cancel` and the
   Esc grab above.
+- **Native aarch64 release binary.** `fono-vX.Y.Z-aarch64` is now
+  built on a hosted `ubuntu-22.04-arm` runner alongside the x86_64
+  builds and is gated by the same size-budget check (same glibc 2.35
+  floor; verified end-to-end on a Debian 13 aarch64 host).
 
-### Removed
+### Fixed
 
-- **`fono assistant stop` CLI verb** — use `fono cancel` instead.
-- **"Stop assistant" tray entry** — redundant with `fono cancel`.
+- **Dictation on PipeWire-only Linux hosts.** On stock Ubuntu 24.04
+  (and similar systems without `pulseaudio-utils` installed) the
+  `pw-cat` capture helper was missing `--raw` and emitted a
+  containerized stream that Fono interpreted as PCM — recordings
+  came out as noise. The capture path now passes `--raw` and
+  produces clean audio on every PipeWire setup.
+- **Wizard recommendation accuracy on older iGPUs.** The picker no
+  longer credits CPU-only builds with a GPU multiplier they can't
+  deliver, and Vulkan-capable integrated GPUs are split into two
+  classes (`Integrated` at 1.3× for fp16-only parts like UHD 620,
+  `IntegratedTensor` at 2.0× for fp16 + `VK_KHR_cooperative_matrix`
+  parts like Lunar Lake Xe2 and Apple Silicon). The `small.en`
+  registry anchor was also off by 2× — fixed against the matrix.
+  Net effect: older laptops are recommended `small` or `small.en`
+  instead of a turbo model that can't keep up; modern tensor-iGPU
+  laptops correctly get `large-v3-turbo`. `fono doctor` now uses
+  the same affordability walk as the wizard so the two never
+  disagree.
 
 ### Changed
 
@@ -58,6 +87,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`fono assistant stop` CLI verb** — use `fono cancel` instead.
+- **"Stop assistant" tray entry** — redundant with `fono cancel`.
 - **`[assistant].auto_clear_on_dictation` config key.** No longer
   read; remove it from your `config.toml` if present (unknown keys
   are silently ignored, so existing configs keep working). The

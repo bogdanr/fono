@@ -20,14 +20,16 @@ The home page is [fono.page](https://fono.page).
 
 ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge)
 
+**[v0.8.2 — Esc-to-cancel + smarter first-run model picks](#shipped)**  
+Wayland Esc cancel, sharper wizard recommendations on older iGPUs,
+assistant memory that survives a dictation pivot, PipeWire capture fix,
+native aarch64 binary. *(2026-05-25)*
+
 **[v0.8.1 — Two more cloud providers](#shipped)**  
 Deepgram + Cartesia STT, headless install, pause UI polish. *(2026-05-23)*
 
 **[v0.8.0 — One-key cloud setup](#shipped)**  
 Live preview as a waveform style; four new TTS backends. *(2026-05-17)*
-
-**[v0.7.1 — Default hotkey rework](#shipped)**  
-F7 dictation, F8 assistant, toggle mode on by default. *(2026-05-05)*
 
 [Full changelog ↓](#shipped)
 
@@ -236,6 +238,41 @@ system-tray app and native installer on Windows.
 ## Shipped
 
 Newest first.
+
+- ![v0.8.2](https://img.shields.io/badge/v0.8.2-2026--05--25-blue?style=flat-square)
+  **Esc to cancel, smarter first-run model picks, and assistant memory
+  that survives a dictation pivot.** On Wayland, pressing **Esc**
+  during an active recording or assistant reply cancels the turn —
+  the portal hotkey backend opens a transient `GlobalShortcuts`
+  session (KDE / sway / Hyprland) and the GNOME-Wayland shim writes
+  a temporary custom-keybinding, so Esc is only grabbed while Fono
+  actually needs it. The same job is exposed as a new `fono cancel`
+  CLI verb (idempotent, safe to bind anywhere); `fono assistant stop`
+  and the "Stop assistant" tray entry are gone in its favour.
+
+  The first-run wizard is sharper on tricky hardware. CPU-only builds
+  no longer get credited with a GPU multiplier they can't deliver,
+  and Vulkan-capable integrated GPUs are now split into two classes
+  (`Integrated` 1.3× for fp16-only parts like UHD 620;
+  `IntegratedTensor` 2.0× for fp16 + cooperative-matrix parts like
+  Lunar Lake Xe2 and Apple Silicon). Net effect: older laptops are
+  recommended `small` / `small.en` instead of a turbo model that
+  can't keep up, while modern tensor-iGPU laptops correctly land on
+  `large-v3-turbo`. `fono doctor` now walks the same affordability
+  ladder as the wizard so the two never disagree.
+
+  Assistant chat history is no longer wiped when you tap the
+  dictation hotkey (F7) mid-conversation. The pivot still stops any
+  in-flight assistant playback so it doesn't talk over your
+  dictation, but the rolling history is preserved and you can resume
+  the conversation on the next F8.
+
+  Fixes: dictation on PipeWire-only Linux hosts (stock Ubuntu 24.04
+  without `pulseaudio-utils`) was silently capturing noise because
+  the `pw-cat` capture helper was missing `--raw`; clean audio is
+  back. Native aarch64 release binary is now built and gated on a
+  hosted `ubuntu-22.04-arm` runner (same glibc 2.35 floor, same
+  size-budget check). *v0.8.2, 2026-05-25.*
 
 - ![v0.8.1](https://img.shields.io/badge/v0.8.1-2026--05--23-blue?style=flat-square)
   **Two more cloud providers, friendlier installs, and a polished
