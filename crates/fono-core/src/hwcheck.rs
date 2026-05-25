@@ -51,18 +51,29 @@ pub struct CpuFeatures {
 /// Three-class host-GPU summary, derived from the Vulkan probe's
 /// `VkPhysicalDeviceType` + `shaderFloat16` features. The classes are a
 /// gross approximation chosen because they are the smallest set that
-/// reproduces the calibration-matrix speedups (1x / 2x / 4x) on the
-/// five reference hosts without a maintained PCI table. See ADR 0028.
+/// reproduces the calibration-matrix speedups (1x / 1.3x / 2x / 4x) on
+/// the calibration hosts without a maintained PCI table. See ADR 0028.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum HostGpu {
     /// No usable GPU (no Vulkan loader, software rasteriser, or a
     /// legacy iGPU that lacks `shaderFloat16`).
     #[default]
     None,
-    /// Modern integrated GPU with `shaderFloat16` (Vulkan Roadmap 2022
-    /// baseline). Empirically ~2x CPU on the calibration hosts.
+    /// fp16-capable integrated GPU **without** `VK_KHR_cooperative_matrix`.
+    /// Empirically ~1.2-2x CPU on the calibration hosts (Kaby Lake-R
+    /// UHD 620 at the bottom, Alder Lake Iris Xe at the top); the
+    /// `1.3x` multiplier is a conservative split-the-difference value
+    /// that prevents the wizard from over-promising on legacy iGPUs
+    /// while keeping modern Iris Xe-class hosts in the shortlist via
+    /// CPU horsepower.
     Integrated,
+    /// fp16-capable integrated GPU **with** `VK_KHR_cooperative_matrix`
+    /// (Lunar Lake / Arc / Battlemage / Apple Silicon / RDNA3+ APUs).
+    /// Empirically ~3-4x CPU on the calibration hosts; the extension's
+    /// presence is what unlocks whisper.cpp's ggml-vulkan tensor matmul
+    /// kernel.
+    IntegratedTensor,
     /// Discrete GPU. Empirically ~4x CPU on the calibration hosts.
     Discrete,
 }
@@ -75,7 +86,8 @@ impl HostGpu {
     pub fn multiplier(self) -> f32 {
         match self {
             Self::None => 1.0,
-            Self::Integrated => 2.0,
+            Self::Integrated => 1.3,
+            Self::IntegratedTensor => 2.0,
             Self::Discrete => 4.0,
         }
     }
@@ -261,8 +273,8 @@ impl HardwareSnapshot {
     /// One-line, qualitative description of the speech-recognition
     /// acceleration available on this host. Reflects the host's
     /// [`HostGpu`] class; **no numeric multiplier is exposed** (the
-    /// 1x / 2x / 4x multipliers are internal scaling factors, not a
-    /// promise to the user). See ADR 0028.
+    /// 1x / 1.3x / 2x / 4x multipliers are internal scaling factors,
+    /// not a promise to the user). See ADR 0028.
     ///
     /// The wizard prints this under the cores/ram lines so users see at
     /// a glance what hardware will be doing the speech work.
@@ -273,8 +285,11 @@ impl HardwareSnapshot {
         }
         match self.host_gpu {
             HostGpu::Discrete => "Discrete GPU detected -- Vulkan backend recommended".to_string(),
+            HostGpu::IntegratedTensor => {
+                "Tensor-capable integrated GPU detected -- Vulkan backend recommended".to_string()
+            }
             HostGpu::Integrated => {
-                "Modern integrated GPU detected -- Vulkan backend recommended".to_string()
+                "Integrated GPU detected -- Vulkan backend recommended".to_string()
             }
             HostGpu::None => {
                 if self.cpu_features.avx512 {
@@ -290,6 +305,33 @@ impl HardwareSnapshot {
                         .to_string()
                 }
             }
+        }
+    }
+
+    /// Return a copy of this snapshot adjusted for the **inference
+    /// path** actually available to the running binary.
+    ///
+    /// The hardware probe records the host's *capability*: a usable
+    /// Vulkan GPU upgrades [`host_gpu`](Self::host_gpu) to `Integrated`
+    /// or `Discrete`. Whether the currently-running fono binary can
+    /// route inference to that GPU is a build-time fact: only the GPU
+    /// release variant links against the Vulkan whisper backend, so the
+    /// CPU build cannot deliver the speedup encoded in
+    /// [`HostGpu::multiplier`].
+    ///
+    /// Pass `false` whenever inference is CPU-only so the affordability
+    /// scorer ([`affords_model`](Self::affords_model)) does not credit
+    /// the host with a GPU multiplier it cannot deliver. The probed
+    /// `host_gpu` is preserved on the original snapshot for display
+    /// purposes (e.g. `fono doctor`'s acceleration summary still tells
+    /// the user "your hardware has a Vulkan GPU but you're on the CPU
+    /// variant").
+    #[must_use]
+    pub fn for_inference(&self, gpu_inference_available: bool) -> Self {
+        if gpu_inference_available {
+            self.clone()
+        } else {
+            Self { host_gpu: HostGpu::None, ..self.clone() }
         }
     }
 
@@ -366,13 +408,16 @@ pub fn probe(disk_check_dir: &Path) -> HardwareSnapshot {
 }
 
 /// Static platform default for [`HostGpu`] without consulting a runtime
-/// Vulkan probe. Apple Silicon is always [`HostGpu::Integrated`]
-/// (Metal + CoreML are unconditional); every other platform starts at
-/// [`HostGpu::None`] and is upgraded by the Vulkan probe.
+/// Vulkan probe. Apple Silicon is always [`HostGpu::IntegratedTensor`]
+/// (Metal + CoreML on M-series silicon expose the matmul-tensor fast
+/// path that whisper.cpp / ggml-metal exploits, same performance tier
+/// as desktop iGPUs that expose `VK_KHR_cooperative_matrix`); every
+/// other platform starts at [`HostGpu::None`] and is upgraded by the
+/// Vulkan probe.
 #[must_use]
 pub fn default_host_gpu_for_platform() -> HostGpu {
     if std::env::consts::OS == "macos" && std::env::consts::ARCH == "aarch64" {
-        HostGpu::Integrated
+        HostGpu::IntegratedTensor
     } else {
         HostGpu::None
     }
@@ -670,7 +715,7 @@ mod tests {
     #[test]
     fn affords_turbo_fails_on_low_rf_even_with_integrated() {
         // Empirical turbo rf=0.6 × sqrt scaling impossible at 8 cores
-        // × 2.0 (Integrated) = 1.2 < 2.0 → does not afford.
+        // × 1.3 (Integrated) = 0.78 < 2.0 → does not afford.
         let mut s = snap(8, 16, 200, true);
         s.host_gpu = HostGpu::Integrated;
         let turbo_empirical = (4_000_u32, 1_620_u32, 0.6_f32);
@@ -678,14 +723,26 @@ mod tests {
     }
 
     #[test]
+    fn affords_turbo_with_integrated_tensor_gpu() {
+        // turbo rf=2.5 × 1.0 × 1.0 × 2.0 (IntegratedTensor) = 5.0 ≥ 2.0 → affords.
+        // Empirical justification: Lunar Lake / Xe2 hosts measure
+        // ~3-4× Vulkan-vs-CPU on q8_0 turbo, matching the 2.0× anchor.
+        let mut s = snap(8, 16, 200, true);
+        s.host_gpu = HostGpu::IntegratedTensor;
+        assert!(affords(&s, TURBO));
+    }
+
+    #[test]
     fn affords_small_on_apple_silicon() {
-        // Apple Silicon defaults to HostGpu::Integrated (Metal).
+        // Apple Silicon defaults to HostGpu::IntegratedTensor (Metal /
+        // CoreML expose the matmul-tensor fast path; same tier as
+        // VK_KHR_cooperative_matrix-capable iGPUs).
         // small rf=4.0 × 1.0 × 1.0 × 2.0 = 8.0 ≥ 2.0 → affords
         let s = HardwareSnapshot {
             os: "macos".into(),
             arch: "aarch64".into(),
             cpu_features: CpuFeatures { neon: true, ..Default::default() },
-            host_gpu: HostGpu::Integrated,
+            host_gpu: HostGpu::IntegratedTensor,
             ..snap(8, 16, 100, false)
         };
         assert!(affords(&s, SMALL_EN));
@@ -725,10 +782,33 @@ mod tests {
     }
 
     #[test]
-    fn host_gpu_multipliers_are_1x_2x_4x() {
+    fn host_gpu_multipliers_match_calibration_classes() {
+        // 1.0× / 1.3× / 2.0× / 4.0× — see ADR 0028 (amended 2026-05-25).
         assert!((HostGpu::None.multiplier() - 1.0).abs() < f32::EPSILON);
-        assert!((HostGpu::Integrated.multiplier() - 2.0).abs() < f32::EPSILON);
+        assert!((HostGpu::Integrated.multiplier() - 1.3).abs() < f32::EPSILON);
+        assert!((HostGpu::IntegratedTensor.multiplier() - 2.0).abs() < f32::EPSILON);
         assert!((HostGpu::Discrete.multiplier() - 4.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn for_inference_zeros_host_gpu_when_unavailable() {
+        // CPU variant: regardless of probed iGPU, the inference path
+        // gets host_gpu = None so affords_model never credits a GPU
+        // multiplier the binary cannot deliver.
+        let mut s = snap(8, 16, 100, true);
+        s.host_gpu = HostGpu::Integrated;
+        let inf = s.for_inference(false);
+        assert_eq!(inf.host_gpu, HostGpu::None);
+        // Display snapshot is untouched.
+        assert_eq!(s.host_gpu, HostGpu::Integrated);
+        // Under the CPU-only view (host_gpu = None) the legacy/no-AVX2
+        // turbo anchor empirical rf=0.6 × 1.0 × 1.0 × 1.0 = 0.6 < 2.0,
+        // so it drops.
+        let turbo_empirical = (4_000_u32, 1_620_u32, 0.6_f32);
+        assert!(!affords(&inf, turbo_empirical));
+        // GPU variant: snapshot is unchanged.
+        let inf_gpu = s.for_inference(true);
+        assert_eq!(inf_gpu.host_gpu, HostGpu::Integrated);
     }
 
     #[test]
@@ -762,7 +842,17 @@ mod tests {
         let mut s = snap(8, 16, 100, true);
         s.host_gpu = HostGpu::Integrated;
         let line = s.acceleration_summary();
-        assert!(line.contains("integrated"));
+        assert!(line.contains("Integrated"));
+        assert!(line.contains("Vulkan"));
+        assert!(!line.contains("1.3x"));
+    }
+
+    #[test]
+    fn acceleration_summary_integrated_tensor_says_tensor() {
+        let mut s = snap(8, 16, 100, true);
+        s.host_gpu = HostGpu::IntegratedTensor;
+        let line = s.acceleration_summary();
+        assert!(line.to_lowercase().contains("tensor"));
         assert!(line.contains("Vulkan"));
         assert!(!line.contains("2x"));
     }

@@ -1553,7 +1553,13 @@ fn pick_local_stt_model(
     langs: &[String],
     snap: &HardwareSnapshot,
 ) -> Result<&'static str> {
-    let shortlist = build_local_stt_shortlist(english_only, langs, snap);
+    // Affordability is computed against the *inference path actually
+    // available* to this binary, not the host's raw GPU capability.
+    // The CPU release variant has no Vulkan inference backend, so a
+    // probed iGPU/dGPU must not influence the shortlist on a CPU build.
+    let inference_snap =
+        snap.for_inference(matches!(crate::variant::VARIANT, crate::variant::Variant::Gpu));
+    let shortlist = build_local_stt_shortlist(english_only, langs, &inference_snap);
 
     if shortlist.is_empty() {
         // Edge case: every visible model is Unsuitable. Fall back to the

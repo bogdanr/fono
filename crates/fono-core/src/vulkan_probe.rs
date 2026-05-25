@@ -118,6 +118,16 @@ pub struct DeviceInfo {
     /// Whisper.cpp's ggml-vulkan backend requires this for its fp16
     /// kernels; legacy iGPUs without it run the slower fp32 path.
     pub supports_fp16: bool,
+    /// `VK_KHR_cooperative_matrix` extension is exposed by the driver.
+    /// Presence of this extension is what unlocks whisper.cpp's
+    /// ggml-vulkan tensor matmul kernel and is the discriminator
+    /// between [`HostGpu::Integrated`] (fp16-capable but no tensor
+    /// matmul path: Kaby Lake-R through Alder Lake iGPUs) and
+    /// [`HostGpu::IntegratedTensor`] (Lunar Lake / Arc / Battlemage /
+    /// RDNA3+ APUs / Apple Silicon via MoltenVK). Decoders that
+    /// receive a wire-protocol payload from an older fono build that
+    /// pre-dates this field set it to `false` (forward-compatible).
+    pub supports_cooperative_matrix: bool,
 }
 
 /// Outcome of a single probe attempt.
@@ -156,9 +166,11 @@ impl Outcome {
     /// Classify this probe outcome into a [`HostGpu`] (ADR 0028).
     ///
     /// Rule: any `Discrete` device wins; else any `Integrated` device
-    /// with `shaderFloat16` is [`HostGpu::Integrated`]; everything else
-    /// (legacy iGPU without fp16, virtual, software rasteriser, no
-    /// Vulkan, probe failure) is [`HostGpu::None`].
+    /// with `shaderFloat16` **and** `VK_KHR_cooperative_matrix` is
+    /// [`HostGpu::IntegratedTensor`]; else any `Integrated` device with
+    /// `shaderFloat16` (no cooperative matrix) is [`HostGpu::Integrated`];
+    /// everything else (legacy iGPU without fp16, virtual, software
+    /// rasteriser, no Vulkan, probe failure) is [`HostGpu::None`].
     #[must_use]
     pub fn host_gpu_class(&self) -> HostGpu {
         let Self::Available { devices } = self else {
@@ -166,6 +178,11 @@ impl Outcome {
         };
         if devices.iter().any(|d| d.class == DeviceClass::Discrete) {
             return HostGpu::Discrete;
+        }
+        if devices.iter().any(|d| {
+            d.class == DeviceClass::Integrated && d.supports_fp16 && d.supports_cooperative_matrix
+        }) {
+            return HostGpu::IntegratedTensor;
         }
         if devices.iter().any(|d| d.class == DeviceClass::Integrated && d.supports_fp16) {
             return HostGpu::Integrated;
@@ -267,7 +284,29 @@ pub fn probe_in_process() -> Outcome {
                 // initialised; the call only reads device features.
                 unsafe { instance.get_physical_device_features2(dev, &mut features2) };
                 let supports_fp16 = vk12.shader_float16 != 0;
-                DeviceInfo { name, class, supports_fp16 }
+                // VK_KHR_cooperative_matrix presence — query device
+                // extensions and look for the string. The feature
+                // struct itself is in `ash::vk::khr_cooperative_matrix`
+                // but for the wizard's classifier we only care whether
+                // the extension is *advertised* (presence is sufficient
+                // to know ggml-vulkan can take its tensor matmul path).
+                // SAFETY: instance is valid; the call only reads
+                // extension properties.
+                let supports_cooperative_matrix =
+                    unsafe { instance.enumerate_device_extension_properties(dev) }
+                        .map(|exts| {
+                            exts.iter().any(|ext| {
+                                let bytes: &[c_char] = &ext.extension_name;
+                                let name: Vec<u8> = bytes
+                                    .iter()
+                                    .take_while(|&&c| c != 0)
+                                    .map(|&c| c as u8)
+                                    .collect();
+                                name == b"VK_KHR_cooperative_matrix"
+                            })
+                        })
+                        .unwrap_or(false);
+                DeviceInfo { name, class, supports_fp16, supports_cooperative_matrix }
             })
             .collect::<Vec<_>>(),
         Err(err) => {
@@ -332,10 +371,11 @@ fn encode(outcome: &Outcome) -> String {
                 .iter()
                 .map(|d| {
                     format!(
-                        "{}|{}|{}",
+                        "{}|{}|{}|{}",
                         sanitize_field(&d.name).replace('|', " "),
                         d.class.as_code(),
                         u8::from(d.supports_fp16),
+                        u8::from(d.supports_cooperative_matrix),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -354,12 +394,20 @@ fn decode(line: &str) -> Option<Outcome> {
     if let Some(rest) = line.strip_prefix("OK\t") {
         let mut devices = Vec::new();
         for field in rest.split('\t') {
-            let mut parts = field.splitn(3, '|');
+            let mut parts = field.splitn(4, '|');
             let name = parts.next()?.to_string();
             let class_code: u8 = parts.next()?.parse().ok()?;
             let fp16_flag: u8 = parts.next()?.parse().ok()?;
+            // Forward-compatible: pre-cooperative-matrix builds emit
+            // only three fields; treat the missing 4th as 0.
+            let coopmat_flag: u8 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
             let class = DeviceClass::from_code(class_code)?;
-            devices.push(DeviceInfo { name, class, supports_fp16: fp16_flag != 0 });
+            devices.push(DeviceInfo {
+                name,
+                class,
+                supports_fp16: fp16_flag != 0,
+                supports_cooperative_matrix: coopmat_flag != 0,
+            });
         }
         return Some(Outcome::Available { devices });
     }
@@ -493,6 +541,7 @@ mod tests {
                 name: "Test GPU".into(),
                 class: DeviceClass::Discrete,
                 supports_fp16: true,
+                supports_cooperative_matrix: true,
             }],
         };
         assert_eq!(with_dev.summary_line(), "Vulkan: detected (Test GPU)");
@@ -509,11 +558,13 @@ mod tests {
                     name: "iGPU".into(),
                     class: DeviceClass::Integrated,
                     supports_fp16: true,
+                    supports_cooperative_matrix: false,
                 },
                 DeviceInfo {
                     name: "dGPU".into(),
                     class: DeviceClass::Discrete,
                     supports_fp16: true,
+                    supports_cooperative_matrix: true,
                 },
             ],
         };
@@ -525,19 +576,34 @@ mod tests {
                 name: "HD 620".into(),
                 class: DeviceClass::Integrated,
                 supports_fp16: false,
+                supports_cooperative_matrix: false,
             }],
         };
         assert_eq!(legacy.host_gpu_class(), HostGpu::None);
 
-        // Modern integrated with fp16 → Integrated.
+        // Modern integrated with fp16 but no cooperative_matrix
+        // (Iris Xe / UHD 620 on modern Mesa) → Integrated.
         let xe = Outcome::Available {
             devices: vec![DeviceInfo {
                 name: "Iris Xe".into(),
                 class: DeviceClass::Integrated,
                 supports_fp16: true,
+                supports_cooperative_matrix: false,
             }],
         };
         assert_eq!(xe.host_gpu_class(), HostGpu::Integrated);
+
+        // Tensor-capable integrated (Lunar Lake / Xe2): fp16 +
+        // VK_KHR_cooperative_matrix → IntegratedTensor.
+        let xe2 = Outcome::Available {
+            devices: vec![DeviceInfo {
+                name: "Intel Graphics (LNL)".into(),
+                class: DeviceClass::Integrated,
+                supports_fp16: true,
+                supports_cooperative_matrix: true,
+            }],
+        };
+        assert_eq!(xe2.host_gpu_class(), HostGpu::IntegratedTensor);
 
         // Software rasteriser → None.
         let llvmpipe = Outcome::Available {
@@ -545,6 +611,7 @@ mod tests {
                 name: "llvmpipe".into(),
                 class: DeviceClass::Cpu,
                 supports_fp16: true,
+                supports_cooperative_matrix: true,
             }],
         };
         assert_eq!(llvmpipe.host_gpu_class(), HostGpu::None);
@@ -559,11 +626,13 @@ mod tests {
                         name: "GeForce RTX 4090".into(),
                         class: DeviceClass::Discrete,
                         supports_fp16: true,
+                        supports_cooperative_matrix: true,
                     },
                     DeviceInfo {
                         name: "llvmpipe (LLVM 19, 256 bits)".into(),
                         class: DeviceClass::Cpu,
                         supports_fp16: false,
+                        supports_cooperative_matrix: false,
                     },
                 ],
             },
@@ -573,6 +642,7 @@ mod tests {
                     name: "single".into(),
                     class: DeviceClass::Integrated,
                     supports_fp16: true,
+                    supports_cooperative_matrix: false,
                 }],
             },
             Outcome::NotAvailable {

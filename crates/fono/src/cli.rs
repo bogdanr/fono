@@ -1035,7 +1035,13 @@ fn compute_hwprobe_recommendation(
             fono_core::locale::detect_user_languages_ranked().into_iter().map(|d| d.code).collect()
         });
     let english_only = !langs.is_empty() && langs.iter().all(|l| l == "en");
-    let shortlist = crate::wizard::build_local_stt_shortlist(english_only, &langs, snap);
+    // Affordability is computed against the inference path this binary
+    // can actually use: the CPU variant has no Vulkan inference
+    // backend, so a probed GPU must not feed into the shortlist on a
+    // CPU build (see `HardwareSnapshot::for_inference`).
+    let inference_snap =
+        snap.for_inference(matches!(crate::variant::VARIANT, crate::variant::Variant::Gpu));
+    let shortlist = crate::wizard::build_local_stt_shortlist(english_only, &langs, &inference_snap);
     shortlist
         .into_iter()
         .next()
@@ -1089,6 +1095,7 @@ fn hwprobe_cmd(paths: &Paths, json: bool) {
                             vulkan_probe::DeviceClass::Cpu => "cpu",
                         },
                         "supports_fp16": d.supports_fp16,
+                        "supports_cooperative_matrix": d.supports_cooperative_matrix,
                     })
                 })
                 .collect(),
@@ -1097,7 +1104,15 @@ fn hwprobe_cmd(paths: &Paths, json: bool) {
         let v = serde_json::json!({
             "snapshot": snap,
             "tier": tier.as_str(),
-            "default_whisper_model": rec.as_ref().map_or(tier.default_whisper_model(), |r| r.model),
+            "default_whisper_model": rec.as_ref().map_or_else(
+                || fono_stt::registry::ModelRegistry::pick_default_local(
+                    &snap.for_inference(matches!(
+                        crate::variant::VARIANT,
+                        crate::variant::Variant::Gpu
+                    )),
+                ),
+                |r| r.model,
+            ),
             "recommendation": rec.as_ref().map(|r| serde_json::json!({
                 "model": r.model,
                 "accuracy": accuracy_label(r.accuracy),
@@ -1107,6 +1122,7 @@ fn hwprobe_cmd(paths: &Paths, json: bool) {
             "host_gpu": match snap.host_gpu {
                 fono_core::hwcheck::HostGpu::None => "none",
                 fono_core::hwcheck::HostGpu::Integrated => "integrated",
+                fono_core::hwcheck::HostGpu::IntegratedTensor => "integrated-tensor",
                 fono_core::hwcheck::HostGpu::Discrete => "discrete",
             },
             "vulkan_available": vulkan_usable,

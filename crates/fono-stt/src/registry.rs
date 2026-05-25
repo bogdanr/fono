@@ -323,8 +323,9 @@ pub const WHISPER_MODELS: &[ModelInfo] = &[
         approx_mb: 253,
         // Peak RSS ~875 MiB (q8_0) on ultra7-258v Vulkan.
         min_ram_mb: 1_536,
-        // Empirical batch RTF on ultra7-258v CPU q8_0: 3.30.
-        realtime_factor_cpu_avx2: 3.3,
+        // Empirical batch RTF on ultra7-258v CPU q8_0: 7.15
+        // (`docs/bench/calibration/matrix.md:235`).
+        realtime_factor_cpu_avx2: 7.15,
         wer_by_lang: &[("en", 9.0)],
         url_dir: GGERGANOV_DIR,
         default_quantization: Quantization::Q8_0,

@@ -81,7 +81,13 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         if snap.host_gpu == fono_core::hwcheck::HostGpu::None {
             snap.host_gpu = fono_core::vulkan_probe::probe().host_gpu_class();
         }
-        let picked = fono_stt::registry::ModelRegistry::pick_default_local(&snap);
+        // The CPU release variant cannot route inference to the host's
+        // Vulkan GPU even when one is present; collapse host_gpu before
+        // affordability scoring so we don't pre-pick a model that
+        // relies on a GPU speedup we can't deliver.
+        let inference_snap =
+            snap.for_inference(matches!(crate::variant::VARIANT, crate::variant::Variant::Gpu));
+        let picked = fono_stt::registry::ModelRegistry::pick_default_local(&inference_snap);
         if picked != config.stt.local.model {
             info!(
                 "first run: defaulting whisper model to {:?} (was {:?})",

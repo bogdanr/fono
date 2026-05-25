@@ -1,7 +1,8 @@
 # ADR 0028 — `HostGpu` classification from Vulkan `deviceType` + `shaderFloat16`
 
 - **Status:** Accepted
-- **Date:** 2026-05-25
+- **Date:** 2026-05-25 (amended 2026-05-25 to add `IntegratedTensor`
+  and demote `Integrated` to 1.3× — see *Amendment* below)
 - **Plan:** [`plans/2026-05-25-wizard-selection-heuristics-refresh-v5.md`](../bench/calibration/summary/plans/2026-05-25-wizard-selection-heuristics-refresh-v5.md)
 - **Touches:** ADR 0027 (quantization ladder, amended), ADR 0026 (live preview as overlay style, supports the deletion of the live-mode RTF gate).
 
@@ -142,3 +143,73 @@ is now driven by Vulkan facts the driver already reports.
 
 See ADR 0027 (amended 2026-05-25) for the related decision to default
 every model to `q8_0` regardless of `HostGpu`.
+
+## Amendment (2026-05-25): four classes, `VK_KHR_cooperative_matrix` as the top-tier gate
+
+After a three-host Vulkan-capability probe (`i7-8550u` / `i7-1255u` /
+`ultra7-258v`) the original three-class taxonomy was found insufficient:
+
+- All three iGPUs expose **`shaderFloat16`** and **`shaderInt8`** on
+  modern Mesa (>= 26.x), so those bits do not discriminate the 2017-era
+  UHD 620 from the 2024-era Lunar Lake Xe2. The flat `2.0×` multiplier
+  therefore over-promised on legacy iGPUs by ~70% (UHD 620 measures
+  ~1.2× Vulkan-vs-CPU) and under-promised on modern tensor-capable
+  iGPUs by ~50% (Lunar Lake measures ~3-4×).
+- The `VK_KHR_cooperative_matrix` extension *does* cleanly discriminate
+  the two: only Lunar Lake (and Arc / Battlemage / RDNA3+ / Turing+
+  discrete / Apple Silicon via MoltenVK) advertises it. Presence of the
+  extension is causally linked to whisper.cpp's ggml-vulkan dropping
+  into a tensor matmul kernel, which is what produces the 3-4× ratio.
+
+The revised taxonomy is therefore four classes:
+
+```rust
+pub enum HostGpu { None, Integrated, IntegratedTensor, Discrete }
+
+impl HostGpu {
+    pub fn multiplier(self) -> f32 {
+        match self {
+            Self::None             => 1.0,
+            Self::Integrated       => 1.3,  // fp16 only, no coop_matrix
+            Self::IntegratedTensor => 2.0,  // fp16 + VK_KHR_cooperative_matrix
+            Self::Discrete         => 4.0,
+        }
+    }
+}
+```
+
+Classification rule (applied to the union of physical devices the
+Vulkan probe reports):
+
+1. **`HostGpu::Discrete`** — any `DISCRETE_GPU` device.
+2. **`HostGpu::IntegratedTensor`** — any `INTEGRATED_GPU` device with
+   `shaderFloat16` **and** `VK_KHR_cooperative_matrix` advertised.
+3. **`HostGpu::Integrated`** — any `INTEGRATED_GPU` device with
+   `shaderFloat16` but **without** `VK_KHR_cooperative_matrix`.
+4. **`HostGpu::None`** — everything else.
+
+Apple Silicon defaults to `IntegratedTensor` unconditionally (Metal /
+CoreML on M-series expose the same matmul-tensor fast path).
+
+### Empirical justification for the amendment
+
+From the calibration matrix at `docs/bench/calibration/matrix.md`,
+Vulkan-vs-CPU batch-RTF geomean across `{tiny, small, large-v3-turbo}`
+at q8_0:
+
+| Host | `shaderFloat16` | `VK_KHR_cooperative_matrix` | Vulkan/CPU geomean | New class | Multiplier | Over/under-promise |
+|---|---|---|---:|---|---:|---:|
+| `i7-8550u` UHD 620 | yes | no | ~1.20× | Integrated | 1.3× | +8% |
+| `i7-1255u` Iris Xe | yes | no | ~1.94× | Integrated | 1.3× | -33% (under-promise; CPU horsepower carries) |
+| `ultra7-258v` Xe2 | yes | **yes** | ~3.0-3.5× | IntegratedTensor | 2.0× | -33% (under-promise; conservative) |
+
+With the amended classifier each calibration host gets the correct
+wizard verdict on its CPU build *and* its GPU build, without a PCI
+device-ID table.
+
+### Wire-protocol compatibility
+
+The subprocess Vulkan probe's wire protocol gains a fourth
+per-device flag (`coopmat`). Older fono builds that emit only the
+first three fields decode forward-compatibly with `coopmat = false`,
+which correctly maps to `Integrated` (the old default behaviour).

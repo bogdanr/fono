@@ -2,6 +2,153 @@
 
 Last updated: 2026-05-25
 
+## 2026-05-25 — Wizard recommendation accuracy fix (`.131` regression)
+
+Hand-test session on `192.168.0.131` (i7-8550U Kaby Lake-R, 4c/8t, AVX2
++FMA, UHD 620 iGPU, CPU release variant) surfaced two compounding bugs
+in the wizard's data-driven model picker:
+
+1. **GPU multiplier credited to CPU-only builds.** The Vulkan probe set
+   `host_gpu = Integrated` (UHD 620 reports `shaderFloat16`), which the
+   affordability scorer (`HardwareSnapshot::affords_model`) multiplied
+   into the formula as `2.0×`. The CPU release variant has no Vulkan
+   inference backend, so this was a phantom speedup. Effective RTF for
+   `large-v3-turbo` came out at `2.3 × 0.5 × 1.0 × 2.0 = 2.30` —
+   crossing the `BATCH_REALTIME_MIN = 2.0` floor and getting
+   "(recommended)". Measured batch RTF on this host is actually `0.77`
+   (`docs/bench/calibration/matrix.md:127-141`).
+2. **`small.en` registry anchor was off by 2×.** The comment at
+   `crates/fono-stt/src/registry.rs:316-327` cites
+   "ultra7-258v CPU q8_0: 3.30" but the matrix records `7.15`
+   (`docs/bench/calibration/matrix.md:235`). A transcription error.
+3. **Doctor and wizard disagreed.** Doctor used the static
+   `tier.default_whisper_model()` (says `tiny` on Minimum tier); wizard
+   walked `build_local_stt_shortlist` and said `turbo`.
+
+Fixes shipped this session:
+
+- **F1** — Added `HardwareSnapshot::for_inference(gpu_inference_available: bool)`
+  in `crates/fono-core/src/hwcheck.rs:296-321`. Returns a snapshot
+  clone with `host_gpu = HostGpu::None` when the caller declares that
+  inference cannot use a GPU. Truthful display snapshot is preserved
+  separately so `fono doctor` can still surface the
+  "you have a Vulkan GPU but you're on the CPU variant" hint.
+- **F1 wiring** — Every recommendation call site in the binary now
+  passes `snap.for_inference(matches!(VARIANT, Variant::Gpu))` instead
+  of the raw `snap`:
+  `crates/fono/src/wizard.rs:1556-1564` (`pick_local_stt_model`),
+  `crates/fono/src/cli.rs:1037-1046` (`compute_hwprobe_recommendation`),
+  `crates/fono/src/cli.rs:1108-1116` (`hwprobe` JSON
+  `default_whisper_model`), and
+  `crates/fono/src/daemon.rs:84-92` (first-run config seed).
+- **F1.5** — `small.en` `realtime_factor_cpu_avx2: 3.3 → 7.15` and
+  comment fixed (`crates/fono-stt/src/registry.rs:326-328`). Pure data
+  correction, formula unchanged.
+- **F3** — `fono doctor` now uses
+  `ModelRegistry::pick_default_local(&snap.for_inference(...))` rather
+  than `tier.default_whisper_model()` so the diagnostic page and the
+  wizard never disagree on the recommended model
+  (`crates/fono/src/doctor.rs:61-98`).
+
+Test coverage added:
+
+- `for_inference_zeros_host_gpu_when_unavailable` unit test in
+  `crates/fono-core/src/hwcheck.rs` pins the snapshot transform.
+- `cpu_variant_view_of_iigpu_host_drops_turbo` integration test in
+  `crates/fono/tests/wizard_selection.rs` reproduces the `.131` host
+  shape and asserts the multilingual shortlist tops at `small` (not
+  `turbo`) and the English-only shortlist tops at `small.en`.
+
+User-visible effect on `.131`:
+
+| Surface | Before | After |
+|---|---|---|
+| `fono doctor` | "recommends whisper-tiny" | "recommends whisper-small" |
+| Wizard, multilingual | "Turbo (recommended)" | "Small (recommended)" |
+| Wizard, English-only | "Turbo (recommended)" | "Small.en (recommended)" |
+
+Explicitly **not** in scope this session (per user direction): no
+runtime calibration clip, no shipping of `matrix.json` inside the
+binary, no broader re-anchoring of `realtime_factor_cpu_avx2` away
+from the Lunar Lake reference. The longer-term anchor-drift concern
+("modern CPUs in 2 years won't be modern any more") is acknowledged
+and remains open as a future tuning item, but is not addressed by
+this PR.
+
+Pre-commit gate: `cargo fmt --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, and `cargo test --workspace --tests
+--lib` all green (728 tests passing).
+
+## 2026-05-25 — `HostGpu` taxonomy refresh: split `Integrated` into legacy and tensor-capable
+
+Follow-up to the same `.131` regression. After probing the Vulkan
+capability set on three calibration hosts (`192.168.0.131` UHD 620
+Kaby Lake-R, localhost Iris Xe Alder Lake, `192.168.0.251` Lunar Lake
+Xe2) we confirmed that on modern Mesa (>= 26.x) **neither
+`shaderFloat16` nor `shaderInt8` discriminates a 2017 iGPU from a
+2022 one**: all three hosts advertise both features. The flat `2.0×`
+multiplier the wizard was applying to every `Integrated` host
+over-promised on UHD 620 by ~70% (real Vulkan/CPU geomean ~1.2×) and
+under-promised on Lunar Lake by ~50% (real ~3.0-3.5×).
+
+The single Vulkan capability that **does** cleanly discriminate
+Lunar Lake / Arc / Battlemage / RDNA3+ / Turing+ from the older
+Iris Xe and UHD generations is the `VK_KHR_cooperative_matrix`
+extension — and presence of that extension is causally linked to
+whisper.cpp's ggml-vulkan dropping into its tensor matmul kernel,
+which is the underlying reason for the 3-4× speedup.
+
+Changes shipped this session:
+
+- **HostGpu enum expanded** to four classes
+  (`crates/fono-core/src/hwcheck.rs:56-94`):
+  `None` (1.0×) / `Integrated` (1.3×, demoted from 2.0×) /
+  `IntegratedTensor` (2.0×, new) / `Discrete` (4.0×). See ADR 0028
+  amendment.
+- **Vulkan probe extended** to query
+  `VK_KHR_cooperative_matrix` extension presence on every device
+  (`crates/fono-core/src/vulkan_probe.rs:284-310`). New
+  `DeviceInfo.supports_cooperative_matrix` field; classifier returns
+  `IntegratedTensor` when fp16 + coopmat are both present, else
+  `Integrated` when only fp16.
+- **Wire protocol** extended forward-compatibly: a fourth
+  per-device flag (`coopmat`) on the subprocess probe's stdout
+  payload. Old payloads decode with `coopmat = false`, which maps to
+  the legacy `Integrated` class (the previous default).
+- **Apple Silicon default** updated from `Integrated` to
+  `IntegratedTensor` in `default_host_gpu_for_platform`
+  (`crates/fono-core/src/hwcheck.rs:418-424`): Metal / CoreML on
+  M-series exposes the same matmul-tensor fast path as
+  cooperative_matrix-capable iGPUs.
+- **`hwprobe` JSON** gained the new `"integrated-tensor"` value for
+  `host_gpu` (`crates/fono/src/cli.rs:1121-1126`).
+- **ADR 0028 amended** with the new taxonomy, empirical
+  justification across the three calibration hosts, and wire-protocol
+  compatibility note.
+
+Test coverage added/updated:
+
+- `host_gpu_multipliers_match_calibration_classes` and
+  `affords_turbo_with_integrated_tensor_gpu` unit tests in
+  `crates/fono-core/src/hwcheck.rs` pin the new multipliers.
+- `acceleration_summary_integrated_tensor_says_tensor` unit test
+  pins the new summary string for the IntegratedTensor class.
+- `host_gpu_class_picks_best_present` in `vulkan_probe.rs` extended
+  with an `xe2` case that asserts fp16 + coopmat → IntegratedTensor.
+- `integrated_tensor_host_picks_turbo_on_multilingual` integration
+  test in `crates/fono/tests/wizard_selection.rs` reproduces the
+  Lunar Lake host shape and locks the wizard top pick.
+
+Net effect: under the GPU release variant the wizard now picks
+correctly on every calibration host (UHD 620 → small, Iris Xe →
+turbo via CPU horsepower carrying the 1.3× iGPU credit, Lunar Lake
+→ turbo via the 2.0× IntegratedTensor credit). The CPU variant case
+remains as fixed in the preceding session.
+
+Pre-commit gate: `cargo fmt --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, and `cargo test --workspace --tests
+--lib` all green.
+
 ## 2026-05-25 — Wizard model-selection heuristics refresh
 
 Completed the wizard-selection refresh plan

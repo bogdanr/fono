@@ -59,6 +59,15 @@ pub async fn report(paths: &Paths) -> Result<String> {
         snap.host_gpu = fono_core::vulkan_probe::probe().host_gpu_class();
     }
     let tier = snap.tier();
+    // Recommendation is the largest multilingual model that this binary
+    // can actually afford to load — walking the same affordability gate
+    // the wizard uses, against the inference path actually available to
+    // this build (the CPU variant cannot reach the host's Vulkan GPU).
+    // Replaces the static `tier.default_whisper_model()` lookup so
+    // `fono doctor` and the wizard never disagree on the recommendation.
+    let inference_snap =
+        snap.for_inference(matches!(crate::variant::VARIANT, crate::variant::Variant::Gpu,));
+    let recommended_model = fono_stt::registry::ModelRegistry::pick_default_local(&inference_snap);
     let ram_gb = snap.total_ram_bytes / (1024 * 1024 * 1024);
     let disk_gb = snap.free_disk_bytes / (1024 * 1024 * 1024);
     let isa = if snap.cpu_features.avx2 {
@@ -79,12 +88,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
         "  ram   : {ram_gb} GB total · disk free : {disk_gb} GB · arch : {}/{}",
         snap.os, snap.arch
     )?;
-    writeln!(
-        out,
-        "  local-tier : {} (recommends whisper-{})",
-        tier.as_str(),
-        tier.default_whisper_model()
-    )?;
+    writeln!(out, "  local-tier : {} (recommends whisper-{})", tier.as_str(), recommended_model)?;
     if let Err(reason) = snap.suitability() {
         writeln!(out, "  {} {reason}", bad("unsuitable because:"))?;
     }
