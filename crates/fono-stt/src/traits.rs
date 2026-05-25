@@ -11,6 +11,22 @@ pub struct Transcription {
     pub duration_ms: Option<u64>,
 }
 
+/// Per-call transcription options. Passed to [`SpeechToText::transcribe_with_opts`].
+///
+/// Added in Phase D (hover-context injection). The default value produces
+/// identical behaviour to calling [`SpeechToText::transcribe`] directly, so
+/// backends that don't override `transcribe_with_opts` are unaffected.
+#[derive(Debug, Clone, Default)]
+pub struct TranscribeOptions {
+    /// Per-call language override. `None` defers to the backend's configured
+    /// allow-list / auto-detect behaviour (same as passing `None` to
+    /// `transcribe()`).
+    pub lang_override: Option<String>,
+    /// Short vocabulary hint for Whisper's `initial_prompt` (or the cloud
+    /// equivalent). Backends that don't support it silently ignore this field.
+    pub context_hint: Option<String>,
+}
+
 #[async_trait]
 pub trait SpeechToText: Send + Sync {
     /// One-shot transcription of a full PCM buffer (mono f32 @ `sample_rate`).
@@ -20,6 +36,21 @@ pub trait SpeechToText: Send + Sync {
         sample_rate: u32,
         lang: Option<&str>,
     ) -> Result<Transcription>;
+
+    /// Context-aware transcription. The default implementation forwards to
+    /// [`Self::transcribe`] ignoring the `context_hint` so existing backends
+    /// that don't override this method behave identically to before.
+    ///
+    /// Override in backends that support prompt injection (WhisperLocal,
+    /// OpenAI, Groq) to route `opts.context_hint` into the appropriate field.
+    async fn transcribe_with_opts(
+        &self,
+        pcm: &[f32],
+        sample_rate: u32,
+        opts: &TranscribeOptions,
+    ) -> Result<Transcription> {
+        self.transcribe(pcm, sample_rate, opts.lang_override.as_deref()).await
+    }
 
     /// Backend identifier for history / logging.
     fn name(&self) -> &'static str;

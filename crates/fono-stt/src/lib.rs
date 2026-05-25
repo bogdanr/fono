@@ -39,7 +39,7 @@ pub use factory::build_stt;
 pub use lang::LanguageSelection;
 pub use lang_cache::LanguageCache;
 pub use registry::{ModelInfo, ModelRegistry, QuantVariant, Quantization, QuantizationPref};
-pub use traits::{SpeechToText, Transcription};
+pub use traits::{SpeechToText, TranscribeOptions, Transcription};
 
 #[cfg(feature = "streaming")]
 pub use streaming::{

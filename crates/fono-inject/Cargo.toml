@@ -13,7 +13,7 @@ repository.workspace = true
 workspace = true
 
 [features]
-default = ["x11-paste"]
+default = ["x11-paste", "x11-focus"]
 # `enigo` compiles fine on Linux with X11 headers; keep it opt-in so the
 # workspace `cargo build` on a minimal NimbleX without xdotool dev packages
 # still succeeds.
@@ -26,6 +26,7 @@ x11-paste = ["dep:x11rb"]
 [dependencies]
 fono-core = { path = "../fono-core" }
 anyhow = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 enigo = { workspace = true, optional = true }

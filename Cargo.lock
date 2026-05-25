@@ -1406,6 +1406,7 @@ dependencies = [
  "arboard",
  "enigo",
  "fono-core",
+ "serde_json",
  "thiserror 1.0.69",
  "tracing",
  "wayland-client",

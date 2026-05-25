@@ -26,10 +26,11 @@ use fono_core::config::{Config, ContextRule};
 use fono_core::history::{HistoryDb, Transcription as HistoryRow};
 use fono_core::{Paths, Secrets};
 use fono_hotkey::{HotkeyAction, RecordingMode};
+use fono_inject::{ContextClassifier, FocusInfo};
 use fono_polish::{FormatContext, TextFormatter};
-use fono_stt::SpeechToText;
 #[cfg(feature = "interactive")]
 use fono_stt::StreamingStt;
+use fono_stt::{SpeechToText, TranscribeOptions};
 use fono_tts::TextToSpeech;
 use std::sync::Mutex as StdMutex;
 use std::thread::JoinHandle;
@@ -297,18 +298,15 @@ impl Injector for RealInjector {
 /// Trait abstraction over focus detection (X11/Wayland-dependent) so the
 /// integration test can stub out window classes deterministically.
 pub trait FocusProbe: Send + Sync + 'static {
-    fn probe(&self) -> (Option<String>, Option<String>);
+    fn probe(&self) -> FocusInfo;
 }
 
 /// Default focus probe — calls into [`fono_inject::detect_focus`].
 pub struct RealFocusProbe;
 
 impl FocusProbe for RealFocusProbe {
-    fn probe(&self) -> (Option<String>, Option<String>) {
-        match fono_inject::detect_focus() {
-            Ok(f) => (f.window_class, f.window_title),
-            Err(_) => (None, None),
-        }
+    fn probe(&self) -> FocusInfo {
+        fono_inject::detect_focus().unwrap_or_default()
     }
 }
 
@@ -2191,6 +2189,11 @@ impl SessionOrchestrator {
 
         in_flight.store(true, Ordering::SeqCst);
         tokio::spawn(async move {
+            // H.2: `detect_focus()` / `probe()` can block on synchronous
+            // Wayland IPC (sway socket, hyprctl subprocess) or X11 calls.
+            // Run it on a blocking thread so we don't hold an async worker.
+            let focus_info =
+                tokio::task::spawn_blocking(move || focus.probe()).await.unwrap_or_default();
             let outcome = run_pipeline(
                 pcm,
                 sample_rate,
@@ -2200,7 +2203,7 @@ impl SessionOrchestrator {
                 &history,
                 &config,
                 injector.as_ref(),
-                focus.as_ref(),
+                focus_info,
             )
             .await;
             match &outcome {
@@ -2248,6 +2251,11 @@ impl SessionOrchestrator {
         let stt = self.current_stt();
         let polish = self.current_llm();
         let config = self.current_config();
+        // H.2: probe focus on a blocking thread so the async executor
+        // doesn't stall on Wayland IPC / X11 calls.
+        let focus = Arc::clone(&self.focus);
+        let focus_info =
+            tokio::task::spawn_blocking(move || focus.probe()).await.unwrap_or_default();
         run_pipeline(
             pcm,
             self.capture_cfg.target_sample_rate,
@@ -2257,7 +2265,7 @@ impl SessionOrchestrator {
             &self.history,
             &config,
             self.injector.as_ref(),
-            self.focus.as_ref(),
+            focus_info,
         )
         .await
     }
@@ -2625,9 +2633,24 @@ impl SessionOrchestrator {
                     o.set_state(fono_overlay::OverlayState::Processing);
                     o.update_text(raw.clone());
                 }
-                let (app_class, app_title) = self.focus.probe();
-                let ctx =
-                    build_format_context(&cfg, app_class.as_deref(), app_title.as_deref(), None);
+                let focus_probe = Arc::clone(&self.focus);
+                let focus_info = tokio::task::spawn_blocking(move || focus_probe.probe())
+                    .await
+                    .unwrap_or_default();
+                let live_ctx_profile = ContextClassifier::classify(
+                    focus_info.window_class.as_deref(),
+                    focus_info.window_title.as_deref(),
+                );
+                let builtin_suffix = live_ctx_profile.as_ref().and_then(|p| p.llm_suffix);
+                let app_class = focus_info.window_class.clone();
+                let app_title = focus_info.window_title.clone();
+                let ctx = build_format_context(
+                    &cfg,
+                    app_class.as_deref(),
+                    app_title.as_deref(),
+                    None,
+                    builtin_suffix,
+                );
                 llm_label_for_log = Some(polish.name().to_string());
                 match polish.format(&raw, &ctx).await {
                     Ok(c) => {
@@ -2745,23 +2768,33 @@ impl SessionOrchestrator {
             } else {
                 None
             };
-            let (app_class, app_title) = self.focus.probe();
-            let row = HistoryRow {
-                id: None,
-                ts: now_unix(),
-                duration_ms: Some(capture_ms as i64),
-                raw: raw.clone(),
-                cleaned: cleaned.clone(),
-                app_class,
-                app_title,
-                stt_backend: Some(stt_label),
-                polish_backend: llm_label,
-                language: None,
-            };
-            let redact = cfg.history.redact_secrets;
-            let db = self.history.lock().await;
-            if let Err(e) = db.insert(&row, redact) {
-                warn!("live-dictation: history insert failed: {e:#}");
+            let live_focus_probe = Arc::clone(&self.focus);
+            let live_focus_info = tokio::task::spawn_blocking(move || live_focus_probe.probe())
+                .await
+                .unwrap_or_default();
+            let live_suppress = ContextClassifier::classify(
+                live_focus_info.window_class.as_deref(),
+                live_focus_info.window_title.as_deref(),
+            )
+            .is_some_and(|p| p.suppress_history);
+            if !live_suppress {
+                let row = HistoryRow {
+                    id: None,
+                    ts: now_unix(),
+                    duration_ms: Some(capture_ms as i64),
+                    raw: raw.clone(),
+                    cleaned: cleaned.clone(),
+                    app_class: live_focus_info.window_class,
+                    app_title: live_focus_info.window_title,
+                    stt_backend: Some(stt_label),
+                    polish_backend: llm_label,
+                    language: None,
+                };
+                let redact = cfg.history.redact_secrets;
+                let db = self.history.lock().await;
+                if let Err(e) = db.insert(&row, redact) {
+                    warn!("live-dictation: history insert failed: {e:#}");
+                }
             }
         }
 
@@ -2791,7 +2824,7 @@ async fn run_pipeline(
     history: &Arc<Mutex<HistoryDb>>,
     config: &Config,
     injector: &dyn Injector,
-    focus: &dyn FocusProbe,
+    focus_info: FocusInfo,
 ) -> PipelineOutcome {
     if pcm.is_empty() {
         return PipelineOutcome::EmptyOrTooShort { duration_ms: capture_ms };
@@ -2822,10 +2855,60 @@ async fn run_pipeline(
         std::borrow::Cow::Borrowed(&pcm[..])
     };
 
+    // ---- Context classification (snapshot at pipeline-start time) ------
+    // H.1: `focus_info` is computed at the very start of processing
+    // (before STT) so it's a snapshot of the window active at or
+    // immediately after hotkey press. It is used for both STT and polish
+    // so the context is consistent across the whole pipeline.
+    let mut ctx_profile = ContextClassifier::classify(
+        focus_info.window_class.as_deref(),
+        focus_info.window_title.as_deref(),
+    );
+    // Phase C: /proc terminal enrichment when we have a PID.
+    if ctx_profile.as_ref().is_some_and(|p| p.is_terminal) {
+        if let Some(pid) = focus_info.window_pid {
+            if fono_inject::proc_enrichment_available() {
+                let term_ctx = fono_inject::terminal_context(pid);
+                tracing::debug!(target: "fono::context", ?term_ctx, "/proc terminal enrichment");
+                if let Some(ref mut profile) = ctx_profile {
+                    ContextClassifier::enrich_terminal(profile, &term_ctx);
+                }
+            } else {
+                tracing::debug!(target: "fono::context", "/proc enrichment unavailable on this platform");
+            }
+        } else {
+            tracing::debug!(
+                target: "fono::context",
+                "terminal matched but no window PID available — skipping /proc enrichment"
+            );
+        }
+    }
+    if let Some(ref p) = ctx_profile {
+        tracing::debug!(
+            target: "fono::context",
+            profile        = p.name,
+            whisper_hint   = ?p.whisper_hint,
+            llm_suffix     = ?p.llm_suffix,
+            suppress_history = p.suppress_history,
+            detected_agent = ?p.detected_agent,
+            "resolved profile"
+        );
+    } else {
+        tracing::debug!(target: "fono::context", "no built-in profile matched — using base prompts");
+    }
+    let suppress_history = ctx_profile.as_ref().is_some_and(|p| p.suppress_history);
+
     // ---- STT ---------------------------------------------------------
     let stt_started = Instant::now();
     let lang = lang_for(config);
-    let stt_result = stt.transcribe(&pcm_for_stt, sample_rate, lang.as_deref()).await;
+    let stt_opts = TranscribeOptions {
+        lang_override: lang,
+        context_hint: ctx_profile
+            .as_ref()
+            .and_then(|p| p.whisper_hint.as_deref())
+            .map(str::to_string),
+    };
+    let stt_result = stt.transcribe_with_opts(&pcm_for_stt, sample_rate, &stt_opts).await;
     metrics.stt_ms = stt_started.elapsed().as_millis() as u64;
     let trans = match stt_result {
         Ok(t) => t,
@@ -2878,7 +2961,8 @@ async fn run_pipeline(
     info!("stt: {} {}ms → {} chars", stt.name(), metrics.stt_ms, metrics.raw_chars);
 
     // ---- polish (optional) -------------------------------------
-    let (app_class, app_title) = focus.probe();
+    let app_class = focus_info.window_class.clone();
+    let app_title = focus_info.window_title.clone();
     tracing::debug!(
         target: "fono::pipeline",
         "stt.raw lang={:?} app=({:?}, {:?}): {raw:?}",
@@ -2899,11 +2983,13 @@ async fn run_pipeline(
         }
         None
     } else if let Some(polish_backend) = polish {
+        let builtin_suffix = ctx_profile.as_ref().and_then(|p| p.llm_suffix);
         let ctx = build_format_context(
             config,
             app_class.as_deref(),
             app_title.as_deref(),
             trans.language.as_deref(),
+            builtin_suffix,
         );
         tracing::debug!(
             target: "fono::pipeline",
@@ -3018,7 +3104,10 @@ async fn run_pipeline(
     }
 
     // ---- History (off the hot path; failure is non-fatal) -----------
-    if config.history.enabled {
+    // G.2: Skip history writes when the active window is a private/
+    // sensitive app (password manager, etc.) — suppress_history was set
+    // by the classifier's Private profile.
+    if config.history.enabled && !suppress_history {
         let row = HistoryRow {
             id: None,
             ts: now_unix(),
@@ -3054,12 +3143,23 @@ fn build_format_context(
     app_class: Option<&str>,
     app_title: Option<&str>,
     language: Option<&str>,
+    builtin_suffix: Option<&str>,
 ) -> FormatContext {
+    // E.1: Merge user [[context_rules]] (higher priority) with the built-in
+    // classifier suffix. User rule wins; if both match, they are concatenated
+    // (user appended after built-in — additive, not replacing).
+    let rule_suffix =
+        match (matched_rule_suffix(&config.context_rules, app_class, app_title), builtin_suffix) {
+            (Some(user), Some(builtin)) => Some(format!("{builtin}\n{user}")),
+            (Some(user), None) => Some(user),
+            (None, Some(builtin)) => Some(builtin.to_string()),
+            (None, None) => None,
+        };
     let mut ctx = FormatContext {
         main_prompt: config.polish.prompt.main.clone(),
         advanced_prompt: config.polish.prompt.advanced.clone(),
         dictionary: config.polish.prompt.dictionary.clone(),
-        rule_suffix: matched_rule_suffix(&config.context_rules, app_class, app_title),
+        rule_suffix,
         app_class: app_class.map(str::to_string),
         app_title: app_title.map(str::to_string),
         language: language.map(str::to_string),

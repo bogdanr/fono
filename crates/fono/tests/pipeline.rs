@@ -12,6 +12,7 @@ use fono_polish::{FormatContext, TextFormatter};
 use fono_stt::{SpeechToText, Transcription};
 
 use fono::session::{orchestrator_for_test, FocusProbe, Injector, PipelineOutcome};
+use fono_inject::FocusInfo;
 
 struct FakeStt {
     text: String,
@@ -61,8 +62,12 @@ impl Injector for CapturingInjector {
 struct StubFocus;
 
 impl FocusProbe for StubFocus {
-    fn probe(&self) -> (Option<String>, Option<String>) {
-        (Some("Slack".into()), Some("general".into()))
+    fn probe(&self) -> FocusInfo {
+        FocusInfo {
+            window_class: Some("Slack".into()),
+            window_title: Some("general".into()),
+            window_pid: None,
+        }
     }
 }
 

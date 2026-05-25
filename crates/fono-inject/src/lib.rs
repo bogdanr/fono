@@ -15,20 +15,27 @@
 //! - X11 via `x11rb` behind the `x11-focus` feature.
 //! - Always returns `None` on Wayland (callers must gracefully degrade).
 
+pub mod classifier;
 pub mod clipboard_probe;
 pub mod focus;
 pub mod inject;
+pub mod terminal;
 #[cfg(target_os = "linux")]
 pub mod wayland_probe;
 #[cfg(feature = "x11-paste")]
 pub mod xtest_type;
 
+pub use classifier::{
+    BuiltinRule, CodingAgentKind, ContextClassifier, ContextProfile, ProjectKind, TerminalContext,
+    BUILTIN_RULES,
+};
 pub use clipboard_probe::{detect as detect_clipboard_manager, ClipboardManager};
 pub use focus::{detect_focus, FocusInfo};
 pub use inject::{
     copy_to_clipboard, copy_to_clipboard_all, type_text, type_text_with_outcome, warm_backend,
     ClipboardAttempt, InjectOutcome, Injector,
 };
+pub use terminal::{proc_enrichment_available, terminal_context};
 #[cfg(target_os = "linux")]
 pub use wayland_probe::compositor_supports_virtual_keyboard;
 #[cfg(feature = "x11-paste")]

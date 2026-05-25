@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::lang::LanguageSelection;
 use crate::lang_cache::LanguageCache;
-use crate::traits::{SpeechToText, Transcription};
+use crate::traits::{SpeechToText, TranscribeOptions, Transcription};
 
 const GROQ_ENDPOINT: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
 const GROQ_MODELS_ENDPOINT: &str = "https://api.groq.com/openai/v1/models";
@@ -362,6 +362,30 @@ pub async fn groq_post_wav_verbose(
     serde_json::from_str(&body).with_context(|| format!("parse groq verbose response: {body}"))
 }
 
+/// Merge a language-specific prompt with an optional context hint.
+///
+/// The merged result is truncated to 200 characters (same budget as
+/// `WhisperLocal::resolve_prompt`). `None` is returned only when both
+/// inputs are `None`.
+pub(crate) fn merge_prompt(
+    lang_prompt: Option<&str>,
+    context_hint: Option<&str>,
+) -> Option<String> {
+    let merged = match (lang_prompt, context_hint) {
+        (Some(lp), Some(hint)) => Some(format!("{lp} {hint}")),
+        (Some(lp), None) => Some(lp.to_string()),
+        (None, Some(hint)) => Some(hint.to_string()),
+        (None, None) => None,
+    };
+    if let Some(ref s) = merged {
+        if s.len() > 200 {
+            tracing::warn!("groq prompt truncated from {} to 200 chars", s.len());
+            return Some(s.chars().take(200).collect());
+        }
+    }
+    merged
+}
+
 #[async_trait]
 impl SpeechToText for GroqStt {
     async fn transcribe(
@@ -397,6 +421,70 @@ impl SpeechToText for GroqStt {
             if let Some(detected_raw) = parsed.language.as_deref() {
                 // verbose_json echoes the full English name ("english",
                 // "bulgarian"); the allow-list is alpha-2. Normalise.
+                let detected = crate::lang::whisper_lang_to_code(detected_raw);
+                if selection.contains(&detected) {
+                    self.lang_cache.record(BACKEND_KEY, &detected);
+                } else if self.cloud_rerun_on_mismatch {
+                    tracing::info!(
+                        "groq returned banned language {detected_raw:?} (normalised \
+                         {detected:?}, allow-list {:?}); reranking by per-peer avg_logprob",
+                        self.languages
+                    );
+                    if let Some((picked, resp)) = self.pick_best_peer(&wav, peers).await {
+                        self.lang_cache.record(BACKEND_KEY, &picked);
+                        return Ok(Transcription {
+                            text: resp.text,
+                            language: Some(picked),
+                            duration_ms: None,
+                        });
+                    }
+                    tracing::warn!(
+                        "groq rerun: every peer attempt failed; \
+                         falling back to unforced response"
+                    );
+                } else {
+                    tracing::info!("groq detected banned language {detected_raw:?} (normalised {detected:?}); rerun disabled");
+                }
+            }
+        }
+
+        Ok(Transcription { text: parsed.text, language: parsed.language, duration_ms: None })
+    }
+
+    /// Context-aware override: merges `opts.context_hint` with the
+    /// language-specific prompt and sends it as the `prompt` form field.
+    async fn transcribe_with_opts(
+        &self,
+        pcm: &[f32],
+        sample_rate: u32,
+        opts: &TranscribeOptions,
+    ) -> Result<Transcription> {
+        let wav = encode_wav(pcm, sample_rate);
+        let lang = opts.lang_override.as_deref();
+        let selection = self.effective_selection(lang);
+
+        let first_pass_lang: Option<String> = match &selection {
+            LanguageSelection::Auto => None,
+            LanguageSelection::Forced(c) => Some(c.clone()),
+            LanguageSelection::AllowList(_) => None,
+        };
+
+        // Merge language prompt with context hint (truncated to 200 chars).
+        let lang_prompt = self.resolve_prompt(first_pass_lang.as_deref()).map(str::to_string);
+        let merged_prompt = merge_prompt(lang_prompt.as_deref(), opts.context_hint.as_deref());
+
+        let parsed = groq_post_wav(
+            &self.client,
+            &self.api_key,
+            &self.model,
+            &wav,
+            first_pass_lang.as_deref(),
+            merged_prompt.as_deref(),
+        )
+        .await?;
+
+        if let LanguageSelection::AllowList(peers) = &selection {
+            if let Some(detected_raw) = parsed.language.as_deref() {
                 let detected = crate::lang::whisper_lang_to_code(detected_raw);
                 if selection.contains(&detected) {
                     self.lang_cache.record(BACKEND_KEY, &detected);

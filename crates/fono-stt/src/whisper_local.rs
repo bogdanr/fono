@@ -44,7 +44,7 @@ const GPU_PREWARM: bool = true;
 const GPU_PREWARM: bool = false;
 
 use crate::lang::LanguageSelection;
-use crate::traits::{SpeechToText, Transcription};
+use crate::traits::{SpeechToText, TranscribeOptions, Transcription};
 
 /// Install whisper-rs's tracing bridge once per process so whisper.cpp + GGML
 /// logs flow through `tracing` (where they are filtered by the daemon's normal
@@ -121,21 +121,43 @@ impl WhisperLocal {
         self.model_path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains(".en"))
     }
 
-    /// Resolve the initial prompt to send for a given language.
-    /// Returns `None` when the language is unknown (cold-start
-    /// auto-detect) so we don't bias the language classifier.
-    fn resolve_prompt(&self, lang: Option<&str>) -> Option<String> {
-        let code = lang?;
-        if let Some(p) = self.prompts.get(code) {
-            return Some(p.clone());
+    /// Resolve the initial prompt for a given language and optional context hint.
+    ///
+    /// Merging rules (Phase D.2):
+    /// - If both a language prompt and a `context_hint` are present, concatenate
+    ///   them: `"{lang_prompt} {hint}"`.
+    /// - If only a `context_hint` is present (language is auto-detect / unknown),
+    ///   still return the hint — context tokens don't bias language detection.
+    /// - If neither is present, return `None`.
+    /// - The merged result is truncated to 200 chars with a `warn!` if exceeded.
+    fn resolve_prompt(&self, lang: Option<&str>, context_hint: Option<&str>) -> Option<String> {
+        let lang_prompt: Option<String> = lang.and_then(|code| {
+            if let Some(p) = self.prompts.get(code) {
+                return Some(p.clone());
+            }
+            // English-only model + English audio + no custom prompt:
+            // ship the built-in default to suppress the YouTube-flavoured
+            // "Thank you" hallucination at minimal risk.
+            if code == "en" && self.model_is_english_only() {
+                return Some(DEFAULT_EN_PROMPT.to_string());
+            }
+            None
+        });
+
+        let merged: Option<String> = match (lang_prompt, context_hint) {
+            (Some(lp), Some(hint)) => Some(format!("{lp} {hint}")),
+            (Some(lp), None) => Some(lp),
+            (None, Some(hint)) => Some(hint.to_string()),
+            (None, None) => None,
+        };
+
+        if let Some(ref s) = merged {
+            if s.len() > 200 {
+                tracing::warn!("whisper initial_prompt truncated from {} to 200 chars", s.len());
+                return Some(s.chars().take(200).collect());
+            }
         }
-        // English-only model + English audio + no custom prompt:
-        // ship the built-in default to suppress the YouTube-flavoured
-        // "Thank you" hallucination at minimal risk.
-        if code == "en" && self.model_is_english_only() {
-            return Some(DEFAULT_EN_PROMPT.to_string());
-        }
-        None
+        merged
     }
 
     /// Resolve the effective selection for a single call: a per-call
@@ -220,7 +242,7 @@ impl SpeechToText for WhisperLocal {
         params.set_logprob_thold(-1.0);
         params.set_temperature_inc(0.2);
         // Resolve initial prompt by language for the active call.
-        let prompt = self.resolve_prompt(resolved.as_deref());
+        let prompt = self.resolve_prompt(resolved.as_deref(), None);
         if let Some(p) = prompt.as_deref() {
             params.set_initial_prompt(p);
         }
@@ -242,6 +264,70 @@ impl SpeechToText for WhisperLocal {
         // Surface the language whisper actually decoded against —
         // either our resolved pick or, for unconstrained auto, the
         // post-hoc lang id from the state.
+        let detected = resolved.or_else(|| post_hoc_lang(&state));
+        Ok(Transcription { text: text.trim().to_string(), language: detected, duration_ms: None })
+    }
+
+    /// Context-aware override: routes `opts.context_hint` into
+    /// `resolve_prompt()` so Whisper's `initial_prompt` carries both the
+    /// language-specific vocabulary and the app-context hint.
+    async fn transcribe_with_opts(
+        &self,
+        pcm: &[f32],
+        _sample_rate: u32,
+        opts: &TranscribeOptions,
+    ) -> Result<Transcription> {
+        self.ensure_ctx()?;
+        let lang = opts.lang_override.as_deref();
+        let selection = self.effective_selection(lang);
+        let threads = self.threads;
+        let guard = self.ctx.lock().map_err(|_| anyhow!("whisper mutex poisoned"))?;
+        let ctx = guard.as_ref().expect("ensure_ctx succeeded");
+
+        let resolved = resolve_language(ctx, &selection, pcm, threads)?;
+
+        let mut state = ctx.create_state().context("create whisper state")?;
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_n_threads(threads);
+        params.set_translate(false);
+        let audio_ctx_enabled = if cfg!(debug_assertions) {
+            std::env::var("FONO_WHISPER_AUDIO_CTX").map(|v| v != "0").unwrap_or(true)
+        } else {
+            true
+        };
+        if audio_ctx_enabled {
+            let duration_s = pcm.len() as f32 / 16_000.0;
+            if duration_s > 0.0 && duration_s < 30.0 {
+                let frames = (((duration_s + 1.0) * 50.0).ceil() as i32).clamp(200, 1500);
+                params.set_audio_ctx(frames);
+            }
+        }
+        if let Some(code) = resolved.as_deref() {
+            params.set_language(Some(code));
+        }
+        params.set_no_speech_thold(0.6);
+        params.set_logprob_thold(-1.0);
+        params.set_temperature_inc(0.2);
+        // Resolve prompt with context_hint merged in.
+        let prompt = self.resolve_prompt(resolved.as_deref(), opts.context_hint.as_deref());
+        if let Some(p) = prompt.as_deref() {
+            params.set_initial_prompt(p);
+        }
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+
+        state.full(params, pcm).context("whisper full()")?;
+        let segments = state.full_n_segments();
+        let mut text = String::new();
+        for i in 0..segments {
+            if let Some(seg) = state.get_segment(i) {
+                if let Ok(s) = seg.to_str_lossy() {
+                    text.push_str(&s);
+                }
+            }
+        }
         let detected = resolved.or_else(|| post_hoc_lang(&state));
         Ok(Transcription { text: text.trim().to_string(), language: detected, duration_ms: None })
     }
@@ -704,7 +790,7 @@ mod streaming_impl {
         params.set_logprob_thold(-1.0);
         params.set_temperature_inc(0.2);
         let lang_code = lang.filter(|l| *l != "auto");
-        let prompt = stt.resolve_prompt(lang_code);
+        let prompt = stt.resolve_prompt(lang_code, None);
         if let Some(p) = prompt.as_deref() {
             params.set_initial_prompt(p);
         }

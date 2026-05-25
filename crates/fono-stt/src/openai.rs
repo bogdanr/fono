@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::lang::LanguageSelection;
 use crate::lang_cache::LanguageCache;
-use crate::traits::{SpeechToText, Transcription};
+use crate::traits::{SpeechToText, TranscribeOptions, Transcription};
 
 const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/audio/transcriptions";
 const OPENAI_MODELS_ENDPOINT: &str = "https://api.openai.com/v1/models";
@@ -261,6 +261,94 @@ impl SpeechToText for OpenAiStt {
             .or_else(|| first_pass_lang.clone())
             .or_else(|| selection.fallback_hint().map(str::to_string));
 
+        Ok(Transcription { text: parsed.text, language, duration_ms: None })
+    }
+
+    /// Context-aware override: merges `opts.context_hint` with the
+    /// language-specific prompt and sends it as the `prompt` form field.
+    async fn transcribe_with_opts(
+        &self,
+        pcm: &[f32],
+        sample_rate: u32,
+        opts: &TranscribeOptions,
+    ) -> Result<Transcription> {
+        let wav = crate::groq::encode_wav(pcm, sample_rate);
+        let lang = opts.lang_override.as_deref();
+        let selection = self.effective_selection(lang);
+
+        let first_pass_lang: Option<String> = match &selection {
+            LanguageSelection::Auto => None,
+            LanguageSelection::Forced(c) => Some(c.clone()),
+            LanguageSelection::AllowList(_) => None,
+        };
+
+        // Merge language prompt with context hint (truncated to 200 chars).
+        let lang_prompt = self.prompt_for(first_pass_lang.as_deref()).map(str::to_string);
+        let merged_prompt =
+            crate::groq::merge_prompt(lang_prompt.as_deref(), opts.context_hint.as_deref());
+
+        // Build the form with merged prompt.
+        let part =
+            multipart::Part::bytes(wav.clone()).file_name("audio.wav").mime_str("audio/wav")?;
+        let mut form = multipart::Form::new()
+            .text("model", self.model.clone())
+            .text("response_format", "verbose_json")
+            .part("file", part);
+        if let Some(l) = first_pass_lang.as_deref() {
+            form = form.text("language", l.to_string());
+        }
+        if let Some(p) = merged_prompt.as_deref() {
+            form = form.text("prompt", p.to_string());
+        }
+        let res = self
+            .client
+            .post(OPENAI_ENDPOINT)
+            .bearer_auth(&self.api_key)
+            .multipart(form)
+            .send()
+            .await
+            .context("openai POST failed")?;
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("openai STT {status}: {body}");
+        }
+        let parsed: Resp = serde_json::from_str(&body)
+            .with_context(|| format!("parse openai response: {body}"))?;
+
+        if let LanguageSelection::AllowList(peers) = &selection {
+            if let Some(detected_raw) = parsed.language.as_deref() {
+                let detected = crate::lang::whisper_lang_to_code(detected_raw);
+                if selection.contains(&detected) {
+                    self.lang_cache.record(crate::openai::BACKEND_KEY, &detected);
+                } else if self.cloud_rerun_on_mismatch {
+                    tracing::info!(
+                        "openai returned banned language {detected_raw:?} (normalised \
+                         {detected:?}, allow-list {:?}); reranking by per-peer avg_logprob",
+                        self.languages
+                    );
+                    if let Some((picked, resp)) = self.pick_best_peer(&wav, peers).await {
+                        self.lang_cache.record(crate::openai::BACKEND_KEY, &picked);
+                        return Ok(Transcription {
+                            text: resp.text,
+                            language: Some(picked),
+                            duration_ms: None,
+                        });
+                    }
+                    tracing::warn!(
+                        "openai rerun: every peer attempt failed; \
+                         falling back to unforced response"
+                    );
+                } else {
+                    tracing::info!("openai detected banned language {detected_raw:?} (normalised {detected:?}); rerun disabled");
+                }
+            }
+        }
+
+        let language = parsed
+            .language
+            .or(first_pass_lang)
+            .or_else(|| selection.fallback_hint().map(str::to_string));
         Ok(Transcription { text: parsed.text, language, duration_ms: None })
     }
 
