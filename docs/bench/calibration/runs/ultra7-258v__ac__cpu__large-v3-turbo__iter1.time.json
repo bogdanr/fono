@@ -1,15 +1,15 @@
 {
   "command": [
-    "/root/fono-bench-rig/fono-bench-cpu",
+    "/root/Work/fono/target/release/fono-bench-cpu",
     "equivalence",
     "--stt",
     "local",
     "--model",
     "large-v3-turbo",
-    "--fixtures",
-    "/root/fono-bench-rig/fixtures/equivalence",
     "--output",
-    "/root/fono-bench-rig/runs/ultra7-258v__ac__cpu__large-v3-turbo__iter1.json",
+    "/root/Work/fono/runs-local/ultra7-258v__ac__cpu__large-v3-turbo__iter1.json",
+    "--fixtures",
+    "/root/Work/fono/tests/fixtures/equivalence",
     "--no-legend"
   ],
   "context_end": {
@@ -20,17 +20,17 @@
   "context_start": {
     "ac_online": "1",
     "battery_pct": 98,
-    "captured_at_utc": "2026-05-23T13:26:34.720405+00:00",
+    "captured_at_utc": "2026-05-24T10:31:31.962191+00:00",
     "hostname": "nimblex",
-    "package_temp_c": 42.0,
+    "package_temp_c": 48.0,
     "platform": "linux",
     "power_profile": "governor=powersave"
   },
   "exit_code": 0,
   "label": "ultra7-258v/ac/cpu/large-v3-turbo/iter1",
-  "max_rss_kib": 3760716,
+  "max_rss_kib": 3760160,
   "schema": "fono-bench.rusage/1",
-  "sys_s": 4.441404,
-  "user_s": 4047.624532,
-  "wall_clock_s": 1018.856252
+  "sys_s": 4.72014,
+  "user_s": 4374.756106,
+  "wall_clock_s": 1101.118605
 }

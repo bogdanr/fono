@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/tmp/fono-cpu-build/release/fono-bench",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "large-v3-turbo",
+    "--fixtures",
+    "/tmp/fono-ro-bogdan",
+    "--output",
+    "/root/fono-bench-rig/runs-ro/i7-1255u__ac__cpu__large-v3-turbo__iter1.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": "1",
+    "battery_pct": 95,
+    "package_temp_c": 79.0
+  },
+  "context_start": {
+    "ac_online": "1",
+    "battery_pct": 95,
+    "captured_at_utc": "2026-05-22T07:29:21.108043+00:00",
+    "hostname": "nimblex",
+    "package_temp_c": 70.0,
+    "platform": "linux",
+    "power_profile": "governor=powersave"
+  },
+  "exit_code": 0,
+  "label": "i7-1255u/ac/cpu/large-v3-turbo/iter1",
+  "max_rss_kib": 3729196,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 6.763288,
+  "user_s": 2445.509166,
+  "wall_clock_s": 412.440935
+}

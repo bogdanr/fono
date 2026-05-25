@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/tmp/fono-cpu-build/release/fono-bench",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "small",
+    "--fixtures",
+    "/tmp/fono-ro-bogdan",
+    "--output",
+    "/root/fono-bench-rig/runs-ro/i7-1255u__ac__cpu__small__iter2.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": "1",
+    "battery_pct": 95,
+    "package_temp_c": 64.0
+  },
+  "context_start": {
+    "ac_online": "1",
+    "battery_pct": 95,
+    "captured_at_utc": "2026-05-22T07:04:07.178634+00:00",
+    "hostname": "nimblex",
+    "package_temp_c": 62.0,
+    "platform": "linux",
+    "power_profile": "governor=powersave"
+  },
+  "exit_code": 0,
+  "label": "i7-1255u/ac/cpu/small/iter2",
+  "max_rss_kib": 1312128,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 3.670472,
+  "user_s": 321.176721,
+  "wall_clock_s": 56.008239
+}

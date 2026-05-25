@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/mnt/live/memory/data/Work/fono/target/release/fono-bench",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "small",
+    "--fixtures",
+    "/tmp/fono-ro-bogdan",
+    "--output",
+    "/root/fono-bench-rig/runs-ro/i7-1255u__ac__vulkan__small__iter2.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": "1",
+    "battery_pct": 99,
+    "package_temp_c": 63.0
+  },
+  "context_start": {
+    "ac_online": "1",
+    "battery_pct": 99,
+    "captured_at_utc": "2026-05-22T06:22:10.687571+00:00",
+    "hostname": "nimblex",
+    "package_temp_c": 65.0,
+    "platform": "linux",
+    "power_profile": "governor=powersave"
+  },
+  "exit_code": 0,
+  "label": "i7-1255u/ac/vulkan/small/iter2",
+  "max_rss_kib": 192408,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 5.546814,
+  "user_s": 10.121347,
+  "wall_clock_s": 31.251742
+}

@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/root/fono-bench-rig/fono-bench-cpu",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "small",
+    "--fixtures",
+    "/root/fono-bench-rig/fixtures/equivalence",
+    "--output",
+    "/root/fono-bench-rig/runs/i7-7500u__ac__cpu__small__iter2.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": "1",
+    "battery_pct": 100,
+    "package_temp_c": 72.0
+  },
+  "context_start": {
+    "ac_online": "1",
+    "battery_pct": 100,
+    "captured_at_utc": "2026-05-23T10:28:52.688070+00:00",
+    "hostname": "ThinkPad",
+    "package_temp_c": 62.0,
+    "platform": "linux",
+    "power_profile": "balanced"
+  },
+  "exit_code": 0,
+  "label": "i7-7500u/ac/cpu/small/iter2",
+  "max_rss_kib": 1400556,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 7.429753,
+  "user_s": 1005.803585,
+  "wall_clock_s": 510.108482
+}

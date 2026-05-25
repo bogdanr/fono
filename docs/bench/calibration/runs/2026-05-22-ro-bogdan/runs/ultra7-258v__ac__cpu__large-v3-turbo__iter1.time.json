@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/root/fono-bench-rig/fono-bench-cpu",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "large-v3-turbo",
+    "--fixtures",
+    "/root/fono-bench-rig/fixtures/ro-bogdan",
+    "--output",
+    "/root/fono-bench-rig/runs-ro/ultra7-258v__ac__cpu__large-v3-turbo__iter1.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": "1",
+    "battery_pct": 98,
+    "package_temp_c": 54.0
+  },
+  "context_start": {
+    "ac_online": "1",
+    "battery_pct": 98,
+    "captured_at_utc": "2026-05-22T10:15:14.753881+00:00",
+    "hostname": "nimblex",
+    "package_temp_c": 48.0,
+    "platform": "linux",
+    "power_profile": "governor=powersave"
+  },
+  "exit_code": 0,
+  "label": "ultra7-258v/ac/cpu/large-v3-turbo/iter1",
+  "max_rss_kib": 3732844,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 1.286614,
+  "user_s": 949.981657,
+  "wall_clock_s": 239.45296
+}

@@ -1,0 +1,103 @@
+{
+  "fono_version": "0.8.0",
+  "stt_backend": "local:small.en",
+  "tier": "tier1",
+  "threshold_levenshtein": 0.05,
+  "results": [
+    {
+      "fixture": "en-self-dictation",
+      "language": "en",
+      "synthetic_placeholder": false,
+      "duration_s": 12.033,
+      "modes": {
+        "batch": {
+          "text": "I need to record a fixture myself for this benchmark because the ones that I'm finding online are not very well fit to the task that I'm trying to accomplish.",
+          "elapsed_ms": 1918,
+          "ttff_ms": 1918
+        },
+        "streaming": {
+          "text": "I need to record a fixture myself for this benchmark because the ones that I'm finding online are not very well fit to the task that I'm trying to accomplish.",
+          "elapsed_ms": 4566,
+          "ttff_ms": 1629
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.0,
+        "stt_accuracy_levenshtein": 0.025,
+        "ttff_ratio": 0.8493222,
+        "ttc_ratio": 2.3806047
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.25"
+    },
+    {
+      "fixture": "en-self-casual",
+      "language": "en",
+      "synthetic_placeholder": false,
+      "duration_s": 9.78375,
+      "modes": {
+        "batch": {
+          "text": "Let's go to the Chinese restaurant tonight. But please do not bring Sam. You know, he is very annoying.",
+          "elapsed_ms": 744,
+          "ttff_ms": 744
+        },
+        "streaming": {
+          "text": "Let's go to the Chinese restaurant tonight, but please do not bring Sam. You know, he is very annoying.",
+          "elapsed_ms": 3972,
+          "ttff_ms": 1174
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.009708738,
+        "stt_accuracy_levenshtein": 0.009708738,
+        "ttff_ratio": 1.577957,
+        "ttc_ratio": 5.33871
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.25"
+    }
+  ],
+  "pinned_params": {
+    "commit_use_prosody": false,
+    "commit_prosody_extend_ms": 250,
+    "commit_use_punctuation_hint": true,
+    "commit_punct_extend_ms": 150,
+    "commit_hold_on_filler": true,
+    "commit_filler_words": [
+      "um",
+      "uh",
+      "er",
+      "ah",
+      "mm",
+      "like",
+      "you know"
+    ],
+    "commit_dangling_words": [
+      "and",
+      "but",
+      "or",
+      "so",
+      "because",
+      "the",
+      "a",
+      "an",
+      "of",
+      "to",
+      "with",
+      "for",
+      "in",
+      "on",
+      "at",
+      "from"
+    ],
+    "eou_drain_extended_ms": 1500,
+    "chunk_ms_initial": 600,
+    "chunk_ms_steady": 1500
+  },
+  "model_capabilities": {
+    "english_only": true,
+    "model_label": "local:small.en"
+  }
+}

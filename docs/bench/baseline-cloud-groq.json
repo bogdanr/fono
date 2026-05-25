@@ -103,26 +103,6 @@
       "verdict": "pass"
     },
     {
-      "fixture": "en-conversational",
-      "language": "en",
-      "metrics": {
-        "stt_accuracy_levenshtein": 0.0,
-        "stt_levenshtein_norm": 0.0,
-        "ttc_ratio": null,
-        "ttff_ratio": null
-      },
-      "modes": {
-        "batch": {
-          "text": " encouragement. In nine cases out of ten, a woman had better show more affection than she feels. Bingley likes your sister undoubtedly, but he may never do more than"
-        },
-        "streaming": null
-      },
-      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2",
-      "skip_reason": null,
-      "synthetic_placeholder": false,
-      "verdict": "pass"
-    },
-    {
       "fixture": "es-lorca-reyerta",
       "language": "es",
       "metrics": {
@@ -153,7 +133,7 @@
       },
       "modes": {
         "batch": {
-          "text": " à gertrude j'avais dû apprendre moi-même l'alphabet des aveugles mais bientôt elle devint beaucoup plus habile que moi à lire cette écriture où j'avais assez de peine à me"
+          "text": " \u00e0 gertrude j'avais d\u00fb apprendre moi-m\u00eame l'alphabet des aveugles mais bient\u00f4t elle devint beaucoup plus habile que moi \u00e0 lire cette \u00e9criture o\u00f9 j'avais assez de peine \u00e0 me"
         },
         "streaming": null
       },
@@ -173,7 +153,7 @@
       },
       "modes": {
         "batch": {
-          "text": "劳君远道来事然依早遇赴某地后补义应大笑出示日记二册未可见当日病状"
+          "text": "\u52b3\u541b\u8fdc\u9053\u6765\u4e8b\u7136\u4f9d\u65e9\u9047\u8d74\u67d0\u5730\u540e\u8865\u4e49\u5e94\u5927\u7b11\u51fa\u793a\u65e5\u8bb0\u4e8c\u518c\u672a\u53ef\u89c1\u5f53\u65e5\u75c5\u72b6"
         },
         "streaming": null
       },
@@ -193,7 +173,7 @@
       },
       "modes": {
         "batch": {
-          "text": " I-a urmat lui Saul, cel lepădat de la Dumnezeu și urât, așa și Hristul, după ce s-a lipsit Adam de împărăția și domnia pe care o avea asupra tuturor,"
+          "text": " I-a urmat lui Saul, cel lep\u0103dat de la Dumnezeu \u0219i ur\u00e2t, a\u0219a \u0219i Hristul, dup\u0103 ce s-a lipsit Adam de \u00eemp\u0103r\u0103\u021bia \u0219i domnia pe care o avea asupra tuturor,"
         },
         "streaming": null
       },
@@ -213,7 +193,7 @@
       },
       "modes": {
         "batch": {
-          "text": " La învățământul de zi, durata normală a studiilor universitare de licență este de 3-4 ani și corespunde unui număr de 60 de credite de studii transferabile pentru un an de studiu."
+          "text": " La \u00eenv\u0103\u021b\u0103m\u00e2ntul de zi, durata normal\u0103 a studiilor universitare de licen\u021b\u0103 este de 3-4 ani \u0219i corespunde unui num\u0103r de 60 de credite de studii transferabile pentru un an de studiu."
         },
         "streaming": null
       },
@@ -233,7 +213,7 @@
       },
       "modes": {
         "batch": {
-          "text": " Ea a subliniat cât de periculoasă este de fapt situația, într-un cât un număr atât de restrâns de persoane are la degetul mic o asemenea putere economică și nu numai"
+          "text": " Ea a subliniat c\u00e2t de periculoas\u0103 este de fapt situa\u021bia, \u00eentr-un c\u00e2t un num\u0103r at\u00e2t de restr\u00e2ns de persoane are la degetul mic o asemenea putere economic\u0103 \u0219i nu numai"
         },
         "streaming": null
       },
@@ -253,7 +233,7 @@
       },
       "modes": {
         "batch": {
-          "text": " Vreau să facem și o înregistrare mai lungă cu radio-ul care rulează pe fundal și cu mine care mă gândesc mai mult la ce vreau să zic, ca să vedem dacă modelul se descurcă bine și în situația asta, când o să avem un fișier de peste 20 de secunde, care să conțină o dictare sau ceva, care vrei sa vorbesc cu asistentul"
+          "text": " Vreau s\u0103 facem \u0219i o \u00eenregistrare mai lung\u0103 cu radio-ul care ruleaz\u0103 pe fundal \u0219i cu mine care m\u0103 g\u00e2ndesc mai mult la ce vreau s\u0103 zic, ca s\u0103 vedem dac\u0103 modelul se descurc\u0103 bine \u0219i \u00een situa\u021bia asta, c\u00e2nd o s\u0103 avem un fi\u0219ier de peste 20 de secunde, care s\u0103 con\u021bin\u0103 o dictare sau ceva, care vrei sa vorbesc cu asistentul"
         },
         "streaming": null
       },

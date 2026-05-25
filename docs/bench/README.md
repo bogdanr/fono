@@ -1,4 +1,37 @@
-# `fono-bench` per-PR equivalence gate
+# Fono benchmark suite
+
+Two distinct uses share this directory:
+
+1. **Wizard calibration data** — the 210-cell (host × backend × model × quant)
+   matrix that drives the first-run wizard's model-selection algorithm.
+   Interactive decision page: [`calibration/index.html`](calibration/index.html)
+   · live at **https://fono.page/calibration**
+2. **CI equivalence gate** — a deterministic per-PR baseline that catches
+   regressions in transcript quality. The committed JSON files below are that
+   baseline.
+
+## Calibration goal
+
+The wizard's job is to pick, on first run, the heaviest local Whisper model that
+runs comfortably in real time on the user's CPU or GPU — without a live probe and
+without the user specifying anything. To validate and tune that algorithm we
+benchmarked five representative Linux machines across a full
+(model × quantisation × backend) grid.
+
+| Metric | Comfortable gate | Meaning |
+|--------|-----------------|---------|
+| Batch RTF | ≥ 2.0 | audio-seconds processed per wall-second (higher = faster) |
+| Peak RSS | ≤ 1024 MiB | resident memory ceiling |
+| Registry WER | ≤ 15 % (Open-ASR-Leaderboard) | accuracy gate; wizard uses published means |
+
+Each cell is three iterations of `fono-bench equivalence` over ten public-domain
+WAV fixtures (≈ 100 s audio, five languages). See
+[`calibration/README.md`](calibration/README.md) for the full protocol, host
+roster, and headline findings.
+
+---
+
+## `fono-bench` per-PR equivalence gate
 
 This directory holds the deterministic baseline that the CI workflow
 diffs against on every pull request. The gate replaces the prior
@@ -6,7 +39,7 @@ diffs against on every pull request. The gate replaces the prior
 (`.github/workflows/ci.yml`, Wave 2 Thread C) with a real-fixture
 equivalence run against `tests/fixtures/equivalence/manifest.toml`.
 
-## Files
+### Files
 
 - `baseline-comfortable-tiny-en.json` — committed baseline. Captures
   the per-fixture `verdict` (`pass` / `fail` / `skipped`),
@@ -15,7 +48,7 @@ equivalence run against `tests/fixtures/equivalence/manifest.toml`.
   because those flap on shared CI runners and aren't part of the
   contract.
 
-## Contract
+### Contract
 
 The CI step runs:
 
@@ -34,7 +67,7 @@ For `tiny.en`, the expected shape today is **4 English fixtures Pass,
 rows are deferred to Wave 3 and beyond per
 `docs/plans/2026-04-25-fono-roadmap-v2.md` R5.
 
-## Regeneration procedure
+### Regeneration procedure
 
 The whisper `tiny.en` GGML weights live at
 `~/.cache/fono/models/whisper/ggml-tiny.en.bin`. If absent:
@@ -60,7 +93,7 @@ Inspect the diff carefully. Verdict changes mean **either** a real
 quality regression in the harness or a fixture / threshold tweak
 landing in the same PR. Both deserve a callout in the PR description.
 
-## Flapping fixtures
+### Flapping fixtures
 
 If a per-PR run of `tiny.en` produces a verdict that differs from the
 committed baseline because of beam-search non-determinism in
@@ -71,7 +104,7 @@ only, same as `en-single-sentence` and `zh-luxun-kuangren` are handled
 today). Document the demotion in the commit message and append a
 sentence to the bottom of this file. Do **not** disable the gate.
 
-## When to update the baseline
+### When to update the baseline
 
 Update the committed baseline in lockstep with any of:
 
@@ -84,7 +117,7 @@ The baseline is **append-only** in the sense that bumping it is a
 review-able event: it should always be its own commit, with the
 diff explained in the message body.
 
-## Rationale for `tiny.en` over `small`
+### Rationale for `tiny.en` over `small`
 
 `tiny.en` is small (76 MiB), fast (≤30 seconds per full sweep on a
 modest CI runner), deterministic on the English fixtures, and exercises

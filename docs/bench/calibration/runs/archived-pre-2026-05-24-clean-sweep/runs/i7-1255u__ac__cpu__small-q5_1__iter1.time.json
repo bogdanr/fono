@@ -1,0 +1,34 @@
+{
+  "command": [
+    "target/release/fono-bench",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "small-q5_1",
+    "--output",
+    "docs/bench/calibration/runs/i7-1255u__ac__cpu__small-q5_1__iter1.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": "1",
+    "battery_pct": 100,
+    "package_temp_c": 76.0
+  },
+  "context_start": {
+    "ac_online": "1",
+    "battery_pct": 100,
+    "captured_at_utc": "2026-05-22T04:46:37.337106+00:00",
+    "hostname": "nimblex",
+    "package_temp_c": 51.0,
+    "platform": "linux",
+    "power_profile": "governor=powersave"
+  },
+  "exit_code": 0,
+  "label": "i7-1255u/ac/cpu/small-q5_1/iter1",
+  "max_rss_kib": 202464,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 2.3572,
+  "user_s": 13.67868,
+  "wall_clock_s": 40.869699
+}

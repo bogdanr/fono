@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/root/fono-bench-rig/fono-bench",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "large-v3-turbo-q5_0",
+    "--fixtures",
+    "/root/fono-bench-rig/fixtures/ro-bogdan",
+    "--output",
+    "/root/fono-bench-rig/runs-ro/ultra7-258v__ac__vulkan__large-v3-turbo-q5_0__iter1.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": "1",
+    "battery_pct": 98,
+    "package_temp_c": 50.0
+  },
+  "context_start": {
+    "ac_online": "1",
+    "battery_pct": 98,
+    "captured_at_utc": "2026-05-22T09:20:40.285633+00:00",
+    "hostname": "nimblex",
+    "package_temp_c": 38.0,
+    "platform": "linux",
+    "power_profile": "governor=powersave"
+  },
+  "exit_code": 0,
+  "label": "ultra7-258v/ac/vulkan/large-v3-turbo-q5_0/iter1",
+  "max_rss_kib": 216376,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 0.389856,
+  "user_s": 3.19488,
+  "wall_clock_s": 11.657542
+}

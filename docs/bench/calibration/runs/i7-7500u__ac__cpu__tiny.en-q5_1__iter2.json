@@ -1,5 +1,5 @@
 {
-  "fono_version": "0.8.0",
+  "fono_version": "0.8.1",
   "stt_backend": "local:tiny.en-q5_1",
   "tier": "tier1",
   "threshold_levenshtein": 0.05,
@@ -12,20 +12,20 @@
       "modes": {
         "batch": {
           "text": "The art of war then is governed by five constant factors.",
-          "elapsed_ms": 331,
-          "ttff_ms": 331
+          "elapsed_ms": 692,
+          "ttff_ms": 692
         },
         "streaming": {
           "text": "The art of war then is governed by five constant factors.",
-          "elapsed_ms": 4549,
-          "ttff_ms": 1557
+          "elapsed_ms": 8974,
+          "ttff_ms": 3136
         }
       },
       "metrics": {
         "stt_levenshtein_norm": 0.0,
         "stt_accuracy_levenshtein": 0.16176471,
-        "ttff_ratio": 4.7039275,
-        "ttc_ratio": 13.743202
+        "ttff_ratio": 4.5317917,
+        "ttc_ratio": 12.968208
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -39,20 +39,20 @@
       "modes": {
         "batch": {
           "text": "The art of war then is governed by five constant factors to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field. These are one, the moral law, two, heaven, three, earth,",
-          "elapsed_ms": 1136,
-          "ttff_ms": 1136
+          "elapsed_ms": 2222,
+          "ttff_ms": 2222
         },
         "streaming": {
           "text": "The art of war then is governed by five constant factors to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field. These are one, the moral law, two, heaven, three, earth,",
-          "elapsed_ms": 4952,
-          "ttff_ms": 1551
+          "elapsed_ms": 9541,
+          "ttff_ms": 3030
         }
       },
       "metrics": {
         "stt_levenshtein_norm": 0.0,
         "stt_accuracy_levenshtein": 0.046413504,
-        "ttff_ratio": 1.3653169,
-        "ttc_ratio": 4.3591547
+        "ttff_ratio": 1.3636364,
+        "ttc_ratio": 4.2938795
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -66,51 +66,78 @@
       "modes": {
         "batch": {
           "text": "that Jane was yielding to the preference which she'd begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general.",
-          "elapsed_ms": 719,
-          "ttff_ms": 719
+          "elapsed_ms": 1396,
+          "ttff_ms": 1396
         },
         "streaming": {
           "text": "That Jane was yielding to the preference which she'd begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general.",
-          "elapsed_ms": 4958,
-          "ttff_ms": 1516
+          "elapsed_ms": 9288,
+          "ttff_ms": 2861
         }
       },
       "metrics": {
         "stt_levenshtein_norm": 0.0,
         "stt_accuracy_levenshtein": 0.0,
-        "ttff_ratio": 2.108484,
-        "ttc_ratio": 6.8956885
+        "ttff_ratio": 2.049427,
+        "ttc_ratio": 6.653295
       },
       "verdict": "pass",
       "skip_reason": null,
       "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2"
     },
     {
-      "fixture": "en-conversational",
+      "fixture": "en-self-dictation",
       "language": "en",
       "synthetic_placeholder": false,
-      "duration_s": 10.0,
+      "duration_s": 12.033,
       "modes": {
         "batch": {
-          "text": "on encouragement. In nine cases out of ten, a woman had better show more affection than she feels. Bingley likes your sister undoubtedly, but he may never do more than",
-          "elapsed_ms": 566,
-          "ttff_ms": 566
+          "text": "I need to record the fixture myself for this benchmark because the ones that I'm finding online are not very well fit to the task that I'm trying to accomplish.",
+          "elapsed_ms": 1290,
+          "ttff_ms": 1290
         },
         "streaming": {
-          "text": "In nine cases out of ten, a woman had better show more affection than she feels. Bingley likes your sister undoubtedly, but he may never do more than",
-          "elapsed_ms": 4903,
-          "ttff_ms": 1543
+          "text": "I need to record the fixture myself for this benchmark because the ones that I'm finding online are not very well fit to the task that I'm trying to accomplish.",
+          "elapsed_ms": 9049,
+          "ttff_ms": 2894
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.10778443,
-        "stt_accuracy_levenshtein": 0.017964073,
-        "ttff_ratio": 2.7261484,
-        "ttc_ratio": 8.662544
+        "stt_levenshtein_norm": 0.0,
+        "stt_accuracy_levenshtein": 0.04375,
+        "ttff_ratio": 2.2434108,
+        "ttc_ratio": 7.0147285
       },
       "verdict": "pass",
       "skip_reason": null,
-      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2"
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.25"
+    },
+    {
+      "fixture": "en-self-casual",
+      "language": "en",
+      "synthetic_placeholder": false,
+      "duration_s": 9.78375,
+      "modes": {
+        "batch": {
+          "text": "Let's go to the Chinese restaurant tonight but please do not bring Sam, you know, he is very annoying.",
+          "elapsed_ms": 1007,
+          "ttff_ms": 1007
+        },
+        "streaming": {
+          "text": "Let's go to the Chinese restaurant tonight but please do not bring Sam, you know. He is very annoying.",
+          "elapsed_ms": 9021,
+          "ttff_ms": 2925
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.009803922,
+        "stt_accuracy_levenshtein": 0.009708738,
+        "ttff_ratio": 2.9046674,
+        "ttc_ratio": 8.958292
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.25"
     },
     {
       "fixture": "es-lorca-reyerta",

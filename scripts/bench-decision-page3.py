@@ -86,9 +86,15 @@ def load_inventory(inv_dir: Path) -> dict[str, dict]:
 
 
 def load_accuracy(runs_dir: Path) -> dict[tuple, dict]:
-    """Per (host, power, build, model) accuracy stats from per-iteration runs."""
+    """Per (host, power, build, model) accuracy stats from per-iteration runs.
+
+    Emits per-language buckets (`langs.<code>.{mean,max,n}`) in addition to
+    `all_*` and the legacy `en_*` top-level fields so the page can surface
+    every measured language via a dropdown while keeping back-compat for
+    callers that read `en_mean`/`en_max` directly.
+    """
     bucket: dict[tuple, list[float]] = defaultdict(list)
-    en_bucket: dict[tuple, list[float]] = defaultdict(list)
+    per_lang: dict[tuple, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
 
     for path in sorted(runs_dir.glob("*.json")):
         if ".time." in path.name:
@@ -104,27 +110,41 @@ def load_accuracy(runs_dir: Path) -> dict[tuple, dict]:
             if r.get("synthetic_placeholder") or r.get("skip_reason"):
                 continue
             metrics = r.get("metrics") or {}
+            # Accuracy is *only* `stt_accuracy_levenshtein` (batch transcript
+            # vs. manifest reference). The neighbouring `stt_levenshtein_norm`
+            # is batch-vs-streaming *equivalence* — a different quantity that
+            # must never be substituted in here. If a fixture lacks a reference
+            # the row is dropped from accuracy aggregation, not silently
+            # replaced by the equivalence number.
             lev = metrics.get("stt_accuracy_levenshtein")
-            if lev is None:
-                lev = metrics.get("stt_levenshtein_norm")
             if lev is None:
                 continue
             key = (m["host"], m["power"], m["build"], m["model"])
             bucket[key].append(float(lev))
-            lang = (r.get("language") or "").lower()
-            if lang.startswith("en"):
-                en_bucket[key].append(float(lev))
+            lang = (r.get("language") or "").lower()[:2]
+            if lang:
+                per_lang[key][lang].append(float(lev))
 
     out: dict[tuple, dict] = {}
     for k, vs in bucket.items():
-        en_vs = en_bucket.get(k, [])
+        langs = per_lang.get(k, {})
+        lang_stats = {
+            lc: {
+                "mean": round(statistics.mean(lv), 4),
+                "max":  round(max(lv), 4),
+                "n":    len(lv),
+            }
+            for lc, lv in langs.items()
+        }
+        en = lang_stats.get("en")
         out[k] = {
             "all_mean": round(statistics.mean(vs), 4),
             "all_max":  round(max(vs), 4),
-            "en_mean":  round(statistics.mean(en_vs), 4) if en_vs else None,
-            "en_max":   round(max(en_vs), 4) if en_vs else None,
+            "en_mean":  en["mean"] if en else None,
+            "en_max":   en["max"]  if en else None,
             "n":    len(vs),
-            "en_n": len(en_vs),
+            "en_n": en["n"] if en else 0,
+            "langs": lang_stats,
         }
     return out
 
@@ -174,6 +194,13 @@ def enrich_cell(c: dict, accuracy: dict, deltas: dict, inv: dict) -> dict:
         "accuracy_en_mean": acc.get("en_mean"),
         "accuracy_en_max":  acc.get("en_max"),
         "accuracy_all_mean": acc.get("all_mean"),
+        # Per-language WER means {lang_code: mean}. Drives the quadrant chart's
+        # Language dropdown — cells with no data for a given language naturally
+        # drop out of the chart when that language is selected (this is how
+        # English-only `.en` whisper builds disappear on the Romanian view).
+        "accuracy_per_lang": {
+            lc: lv["mean"] for lc, lv in (acc.get("langs") or {}).items()
+        },
         "delta_en_mean": delta["delta_en_mean"] if delta else None,
         "delta_en_max":  delta["delta_en_max"]  if delta else None,
         "accuracy_pass": delta["pass"]          if delta else None,
@@ -303,6 +330,8 @@ p.desc{color:var(--muted);font-size:13px;margin-bottom:14px;max-width:880px}
 .filter-bar .presets{display:flex;gap:6px;margin-left:auto}
 .filter-bar button{background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:4px 10px;font-size:12px;cursor:pointer}
 .filter-bar button:hover{background:var(--border)}
+.filter-bar button.active{background:var(--blue);border-color:var(--blue);color:#fff}
+.filter-bar button.active:hover{background:#1f6feb}
 
 .findings{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:20px;font-size:13px}
 .findings h3{margin-top:0;color:var(--blue)}
@@ -318,6 +347,14 @@ p.desc{color:var(--muted);font-size:13px;margin-bottom:14px;max-width:880px}
 .chart-box.ch-scatter{--ch-h:440px}
 /* Decision-quadrant chart */
 .chart-box.ch-quad{--ch-h:380px}
+/* Dedicated canvas host for the quadrant chart. Without this, Chart.js's
+   responsive sizing reads the .chart-box wrapper (which also contains
+   the controls bar), sets the canvas's intrinsic height to the wrapper
+   height, but CSS pins the displayed height to --ch-h. The two get
+   out of sync → mouse ↔ canvas coord conversion drifts linearly with Y
+   (the "good at top, worse at bottom" hover bug). */
+.quad-canvas-host{position:relative;height:var(--ch-h,380px)}
+.quad-canvas-host > canvas{position:absolute;top:0;left:0;width:100%!important;height:100%!important;display:block}
 .quad-controls{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:12px;padding:10px 12px;background:var(--bg3);border-radius:6px;font-size:12px;align-items:flex-end}
 .quad-controls label{display:flex;flex-direction:column;gap:4px;flex:1;min-width:220px}
 .quad-controls .lbl-top{display:flex;justify-content:space-between;color:var(--muted)}
@@ -431,6 +468,9 @@ footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--border);color
       <select id="f-quant"><option value="">All</option><option>fp16</option><option>q8_0</option><option>q5_1</option><option>q5_0</option></select>
     </label>
     <div class="presets">
+      <button id="f-hide-low-wer" class="active" onclick="toggleHideLowWer()" title="Hide cells with English WER > 0.20 across every chart">Hide WER &gt; 0.20</button>
+      <button id="f-hide-low-rtf" onclick="toggleHideLowRtf()" title="Hide cells with batch RTF &lt; 1.0 (slower than real-time) across every chart">Hide RTF &lt; 1.0</button>
+      <button id="f-piecewise-rtf" onclick="togglePiecewiseRtf()" title="Use a piecewise RTF scale on speed charts: linear 0–10× (the decision zone) takes ~75% of the axis, then log-compressed 10×–200× takes the rest. Useful when overkill speeds compress the meaningful range.">Piecewise RTF</button>
       <button onclick="presetReset()">Reset</button>
       <button onclick="presetVNNI()">VNNI hosts</button>
       <button onclick="presetPreVNNI()">Pre-VNNI hosts</button>
@@ -454,9 +494,9 @@ footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--border);color
   <!-- 2. Speed sweep (faceted small multiples per host) -->
   <h2>2 · Speed Sweep — batch RTF by model variant, faceted per host</h2>
   <p class="desc">
-    One panel per host. Bars within a model variant show fp16 / q8_0 / q5_1
-    (q5_0 only for <code>large-v3-turbo</code>). Empty slots = not measured.
-    Y axis is log; horizontal lines mark batch RTF = 1.0 and 2.0.
+    One panel per host. Bars within a model variant show fp16 / q8 / q5.
+    Empty slots = not measured. Y axis is log; the horizontal line marks
+    batch RTF = 2.0 (comfortable).
   </p>
   <div id="speed-sweep"></div>
 
@@ -523,9 +563,20 @@ footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--border);color
         <input type="range" id="quad-rtf" min="0.5" max="10" step="0.1" value="2.0">
       </label>
       <button class="reset-btn" id="quad-best-toggle" onclick="toggleBestPerHost()" title="Keep only the largest, most-accurate model per host within each quadrant">Best per host</button>
+      <span style="display:inline-flex;gap:4px;align-items:center;border-left:1px solid var(--border);padding-left:8px;margin-left:2px">
+        <span style="color:var(--muted);font-size:11px">Language:</span>
+        <select id="quad-lang" onchange="setQuadLang(this.value)" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:3px 6px;font-size:11px;cursor:pointer"></select>
+      </span>
+      <span style="display:inline-flex;gap:4px;align-items:center;border-left:1px solid var(--border);padding-left:8px;margin-left:2px">
+        <span style="color:var(--muted);font-size:11px">Quant:</span>
+        <button class="reset-btn active" data-quant="fp16" onclick="toggleQuadQuant('fp16')">fp16</button>
+        <button class="reset-btn active" data-quant="q8_0" onclick="toggleQuadQuant('q8_0')">q8_0</button>
+        <button class="reset-btn active" data-quant="q5_1" onclick="toggleQuadQuant('q5_1')">q5_1</button>
+        <button class="reset-btn active" data-quant="q5_0" onclick="toggleQuadQuant('q5_0')">q5_0</button>
+      </span>
       <button class="reset-btn" onclick="resetQuadrants()">Reset</button>
     </div>
-    <canvas id="quadrant-chart"></canvas>
+    <div class="quad-canvas-host"><canvas id="quadrant-chart"></canvas></div>
   </div>
   <div class="quad-grid" id="quad-drill"></div>
 
@@ -617,7 +668,9 @@ function selectBest(cells, predicate, label) {
 }
 
 // ─── Filter state (URL-hash backed) ────────────────────────────────────────
-const FILTER_STATE = {hosts:[],power:'ac',build:'',family:'',language:'',quant:''};
+const FILTER_STATE = {hosts:[],power:'ac',build:'',family:'',language:'',quant:'',hideLowWer:true,hideLowRtf:false,piecewiseRtf:false};
+const HIDE_WER_THRESHOLD = 0.20;
+const HIDE_RTF_THRESHOLD = 1.0;
 
 function readHash() {
   try {
@@ -628,6 +681,9 @@ function readHash() {
     if (h.has('family')) FILTER_STATE.family = h.get('family');
     if (h.has('lang'))   FILTER_STATE.language = h.get('lang');
     if (h.has('quant'))  FILTER_STATE.quant  = h.get('quant');
+    if (h.has('hidewer')) FILTER_STATE.hideLowWer = h.get('hidewer') === '1';
+    if (h.has('hidertf')) FILTER_STATE.hideLowRtf = h.get('hidertf') === '1';
+    if (h.has('piecewise')) FILTER_STATE.piecewiseRtf = h.get('piecewise') === '1';
   } catch(e){}
 }
 function writeHash() {
@@ -638,6 +694,9 @@ function writeHash() {
   if (FILTER_STATE.family) p.set('family', FILTER_STATE.family);
   if (FILTER_STATE.language) p.set('lang', FILTER_STATE.language);
   if (FILTER_STATE.quant)  p.set('quant', FILTER_STATE.quant);
+  if (!FILTER_STATE.hideLowWer) p.set('hidewer', '0');
+  if (FILTER_STATE.hideLowRtf)  p.set('hidertf', '1');
+  if (FILTER_STATE.piecewiseRtf) p.set('piecewise', '1');
   const s = p.toString();
   history.replaceState(null,'', s ? '#'+s : location.pathname);
 }
@@ -649,7 +708,11 @@ function filteredCells() {
     (FILTER_STATE.build === '' || c.build === FILTER_STATE.build) &&
     (FILTER_STATE.family === '' || c.model_family === FILTER_STATE.family) &&
     (FILTER_STATE.language === '' || c.language === FILTER_STATE.language) &&
-    (FILTER_STATE.quant === '' || c.quantization === FILTER_STATE.quant)
+    (FILTER_STATE.quant === '' || c.quantization === FILTER_STATE.quant) &&
+    // Global WER ceiling: drop under-performers (English WER as canonical signal)
+    (!FILTER_STATE.hideLowWer || c.accuracy_en_mean == null || c.accuracy_en_mean <= HIDE_WER_THRESHOLD) &&
+    // Global RTF floor: drop slower-than-realtime cells
+    (!FILTER_STATE.hideLowRtf || c.batch_rtf_median == null || c.batch_rtf_median >= HIDE_RTF_THRESHOLD)
   );
 }
 
@@ -680,6 +743,9 @@ function initFilterBar() {
     document.getElementById('f-family').value = FILTER_STATE.family;
     document.getElementById('f-lang').value = FILTER_STATE.language;
     document.getElementById('f-quant').value = FILTER_STATE.quant;
+    const wEl = document.getElementById('f-hide-low-wer'); if (wEl) wEl.classList.toggle('active', FILTER_STATE.hideLowWer);
+    const rEl = document.getElementById('f-hide-low-rtf'); if (rEl) rEl.classList.toggle('active', FILTER_STATE.hideLowRtf);
+    const pEl = document.getElementById('f-piecewise-rtf'); if (pEl) pEl.classList.toggle('active', FILTER_STATE.piecewiseRtf);
   }
   ['f-host','f-power','f-build','f-family','f-lang','f-quant'].forEach(id =>
     document.getElementById(id).addEventListener('change', sync));
@@ -687,8 +753,64 @@ function initFilterBar() {
 }
 
 function presetReset() {
-  Object.assign(FILTER_STATE, {hosts:[],power:'ac',build:'',family:'',language:'',quant:''});
+  Object.assign(FILTER_STATE, {hosts:[],power:'ac',build:'',family:'',language:'',quant:'',hideLowWer:true,hideLowRtf:false,piecewiseRtf:false});
   refilter();
+}
+function toggleHideLowWer() {
+  FILTER_STATE.hideLowWer = !FILTER_STATE.hideLowWer;
+  const el = document.getElementById('f-hide-low-wer');
+  if (el) el.classList.toggle('active', FILTER_STATE.hideLowWer);
+  writeHash(); renderAll();
+}
+function toggleHideLowRtf() {
+  FILTER_STATE.hideLowRtf = !FILTER_STATE.hideLowRtf;
+  const el = document.getElementById('f-hide-low-rtf');
+  if (el) el.classList.toggle('active', FILTER_STATE.hideLowRtf);
+  writeHash(); renderAll();
+}
+function togglePiecewiseRtf() {
+  FILTER_STATE.piecewiseRtf = !FILTER_STATE.piecewiseRtf;
+  const el = document.getElementById('f-piecewise-rtf');
+  if (el) el.classList.toggle('active', FILTER_STATE.piecewiseRtf);
+  writeHash(); renderAll();
+}
+
+// ─── Piecewise RTF scale ────────────────────────────────────────────────
+// Linear 0..10× takes the lower 75% of the axis (decision zone), then
+// log-compresses 10×..200× into the upper 25% (overkill zone). Identity
+// when the toggle is off.
+const RTF_BREAK = 10;          // boundary RTF value
+const RTF_TOP = 200;           // upper limit of compressed log segment
+const RTF_LIN_FRAC = 0.75;     // fraction of axis given to the linear part
+function rtfFwd(v) {
+  if (v == null || !isFinite(v)) return v;
+  if (!FILTER_STATE.piecewiseRtf) return v;
+  if (v <= 0) return 0;
+  if (v <= RTF_BREAK) return v / RTF_BREAK * RTF_LIN_FRAC;
+  const t = Math.min(1, Math.log10(v / RTF_BREAK) / Math.log10(RTF_TOP / RTF_BREAK));
+  return RTF_LIN_FRAC + t * (1 - RTF_LIN_FRAC);
+}
+function rtfYAxisConfig(titleText) {
+  // When the global "Hide RTF < 1" toggle is on, crop the axis at 1×.
+  // Bar charts otherwise draw bars from the axis baseline (RTF=0 in piecewise,
+  // auto-fit in log), so the danger zone stays visible as a slice under
+  // every bar even though no <1× cells remain in the data.
+  const lo = FILTER_STATE.hideLowRtf ? 1 : null;
+  if (!FILTER_STATE.piecewiseRtf) {
+    const cfg = { type:'logarithmic', title:{display:true,text:titleText,color:'#8b949e'}, ticks:{color:'#8b949e'}, grid:{color:'#21262d'} };
+    if (lo != null) cfg.min = lo;
+    return cfg;
+  }
+  const tickVals = (lo == null ? [0.5, 1, 2, 3, 5, 10, 20, 50, 200] : [1, 2, 3, 5, 10, 20, 50, 200]);
+  return {
+    type:'linear', min: lo == null ? 0 : rtfFwd(1), max:1.0,
+    title:{display:true,text:titleText + ' · piecewise (0–10× linear, 10–200× log)',color:'#8b949e'},
+    ticks:{ color:'#8b949e', callback:(value, index, ticks)=> (ticks && ticks[index] && ticks[index].label) || '', autoSkip:false },
+    grid:{ color:'#21262d' },
+    afterBuildTicks: scale => {
+      scale.ticks = tickVals.map(v => ({ value: rtfFwd(v), label: v < 1 ? v.toFixed(1)+'×' : v+'×' }));
+    },
+  };
 }
 function presetVNNI() {
   FILTER_STATE.hosts = HOSTS_BY_YEAR.filter(h => (HOST_META[h]||{}).quant_kernel === 'vnni');
@@ -710,6 +832,9 @@ function refilter() {
   document.getElementById('f-family').value = FILTER_STATE.family;
   document.getElementById('f-lang').value = FILTER_STATE.language;
   document.getElementById('f-quant').value = FILTER_STATE.quant;
+  const wEl = document.getElementById('f-hide-low-wer'); if (wEl) wEl.classList.toggle('active', FILTER_STATE.hideLowWer);
+  const rEl = document.getElementById('f-hide-low-rtf'); if (rEl) rEl.classList.toggle('active', FILTER_STATE.hideLowRtf);
+  const pEl = document.getElementById('f-piecewise-rtf'); if (pEl) pEl.classList.toggle('active', FILTER_STATE.piecewiseRtf);
   writeHash(); renderAll();
 }
 
@@ -801,14 +926,16 @@ function buildSpeedSweep() {
 
   const cells = filteredCells();
   const hosts = HOSTS_BY_YEAR.filter(h => cells.some(c => c.host === h));
-  const build = FILTER_STATE.build || 'cpu';  // default cpu for the panel
+  // When the build filter is empty (both selected), render one chart per host
+  // containing datasets for BOTH builds. Otherwise honour the single selection.
+  const builds = FILTER_STATE.build ? [FILTER_STATE.build] : ['cpu', 'vulkan'];
 
   // Build per-host panels
   hosts.forEach(host => {
-    const hostCells = cells.filter(c => c.host === host && c.build === build);
+    const hostCells = cells.filter(c => c.host === host && builds.includes(c.build));
     if (!hostCells.length) return;
 
-    // Build (family, language) groups as x-axis labels
+    // Build (family, language) groups as x-axis labels — union across builds
     const variants = [];
     FAMILY_ORDER.forEach(fam => {
       const langs = fam === 'turbo' ? ['multi'] : ['multi','en'];
@@ -820,50 +947,73 @@ function buildSpeedSweep() {
     if (!variants.length) return;
 
     const QUANTS_FOR_FAM = {tiny:['fp16','q8_0','q5_1'],base:['fp16','q8_0','q5_1'],small:['fp16','q8_0','q5_1'],turbo:['fp16','q8_0','q5_0']};
-    // For each quant: array of values per variant (null if n/a)
-    const allQuants = ['fp16','q8_0','q5_1','q5_0'];
-    const datasets = allQuants.map(q => ({
-      label: q,
-      data: variants.map(v => {
-        if (!QUANTS_FOR_FAM[v.fam].includes(q)) return null;
-        const c = selectBest(hostCells, x => x.model_family===v.fam && x.language===v.lang && x.quantization===q, `sweep ${host}/${v.fam}/${v.lang}/${q}`);
-        return c ? c.batch_rtf_median : null;
-      }),
-      backgroundColor: QUANT_CLR[q]+'cc',
-      borderColor: QUANT_CLR[q],
-      borderWidth: 1,
-    }));
+    // Bucket quants by display key (fp16/q8/q5). Each family only has one q5
+    // variant — q5_0 for turbo, q5_1 elsewhere — so a single "q5" dataset
+    // pulls whichever exists and there are no holes for turbo.
+    const QUANT_BUCKETS = [
+      {key:'fp16', match:['fp16'],          colour:'#bc8cff'},
+      {key:'q8',   match:['q8_0'],          colour:'#ffce6a'},
+      {key:'q5',   match:['q5_1','q5_0'],   colour:'#58a6ff'},
+    ];
+    // One dataset per (build, quant-bucket). CPU bars are solid; Vulkan bars
+    // use the same quant colour with a lighter fill — no border, to keep the
+    // chart calm.
+    const datasets = [];
+    builds.forEach(b => {
+      QUANT_BUCKETS.forEach(bucket => {
+        const data = variants.map(v => {
+          const q = bucket.match.find(qq => QUANTS_FOR_FAM[v.fam].includes(qq));
+          if (!q) return null;
+          const c = selectBest(hostCells, x =>
+            x.build === b && x.model_family===v.fam &&
+            x.language===v.lang && x.quantization===q,
+            `sweep ${host}/${b}/${v.fam}/${v.lang}/${bucket.key}`);
+          return c ? c.batch_rtf_median : null;
+        });
+        const dataPlot = data.map(rtfFwd);  // identity when piecewise off
+        if (!data.some(v => v != null)) return; // skip all-null
+        const isCpu = (b === 'cpu');
+        datasets.push({
+          label: `${b} ${bucket.key}`,
+          data: dataPlot,
+          _rawData: data,
+          backgroundColor: bucket.colour + (isCpu ? 'cc' : '55'),
+          borderWidth: 0,
+        });
+      });
+    });
 
-    // Skip dataset if all-null
-    const nonEmpty = datasets.filter(d => d.data.some(v => v != null));
-    if (!nonEmpty.length) return;
+    if (!datasets.length) return;
 
     const box = document.createElement('div');
     box.className = 'chart-box ch-sweep';
     const meta = HOST_META[host] || {};
-    box.innerHTML = `<h3>${host} · ${meta.released||'?'} · ${meta.quant_kernel||'?'} · ${build}</h3>`
+    const buildLabel = builds.length === 1 ? builds[0] : 'cpu + vulkan';
+    box.innerHTML = `<h3>${host} · ${meta.released||'?'} · ${meta.quant_kernel||'?'} · ${buildLabel}</h3>`
                   + `<canvas></canvas>`;
     container.appendChild(box);
     const ctx = box.querySelector('canvas').getContext('2d');
     speedCharts.push(new Chart(ctx, {
       type: 'bar',
-      data: { labels: variants.map(v => v.label), datasets: nonEmpty },
+      data: { labels: variants.map(v => v.label), datasets },
       options: {
         responsive: true,
         maintainAspectRatio: false,
         plugins: {
-          legend: { position:'bottom', labels:{color:'#8b949e',boxWidth:12} },
-          tooltip: { callbacks: { label: i => `${i.dataset.label}: ${fmt2(i.raw)}× batch RTF` } },
+          legend: { position:'bottom', labels:{color:'#8b949e',boxWidth:12,font:{size:10}} },
+          tooltip: { callbacks: { label: i => {
+            const raw = (i.dataset._rawData && i.dataset._rawData[i.dataIndex]) ?? i.raw;
+            return `${i.dataset.label}: ${fmt2(raw)}× batch RTF`;
+          } } },
           annotation: {
             annotations: {
-              ok:      { type:'line', yMin:THRESH.batch_ok,      yMax:THRESH.batch_ok,      borderColor:'#d2992288', borderWidth:1, borderDash:[4,4], label:{content:`batch=${THRESH.batch_ok} (keeps up)`, display:true, color:'#d29922', font:{size:9}} },
-              comfort: { type:'line', yMin:THRESH.batch_comfort, yMax:THRESH.batch_comfort, borderColor:'#3fb95088', borderWidth:1, borderDash:[4,4], label:{content:`batch≥${THRESH.batch_comfort} (comfortable)`, display:true, color:'#3fb950', font:{size:9}} },
+              comfort: { type:'line', yMin:rtfFwd(THRESH.batch_comfort), yMax:rtfFwd(THRESH.batch_comfort), borderColor:'#3fb95088', borderWidth:1, borderDash:[4,4] },
             }
           }
         },
         scales: {
           x: { ticks:{color:'#8b949e',font:{size:11}}, grid:{color:'#21262d'} },
-          y: { type:'logarithmic', title:{display:true,text:'Batch RTF (higher = faster, log)',color:'#8b949e'}, ticks:{color:'#8b949e'}, grid:{color:'#21262d'} }
+          y: rtfYAxisConfig('Batch RTF (higher = faster)')
         }
       }
     }));
@@ -1013,8 +1163,10 @@ function buildCpuVulkan() {
   });
 
   const labels = both.map(g => `${g.host}/${g.base}${g.lang==='en'?'.en':''}/${g.quant}`);
-  const cpuData = both.map(g => g.cpu);
-  const vkData  = both.map(g => g.vulkan);
+  const cpuRaw = both.map(g => g.cpu);
+  const vkRaw  = both.map(g => g.vulkan);
+  const cpuData = cpuRaw.map(rtfFwd);
+  const vkData  = vkRaw.map(rtfFwd);
   const speedup = both.map(g => +(g.vulkan/g.cpu).toFixed(2));
 
   const ctx = document.getElementById('cpu-vulkan').getContext('2d');
@@ -1024,8 +1176,8 @@ function buildCpuVulkan() {
     data: {
       labels,
       datasets: [
-        { label:'CPU batch RTF',    data:cpuData, backgroundColor:'#58a6ff99', borderColor:'#58a6ff', borderWidth:1 },
-        { label:'Vulkan batch RTF', data:vkData,  backgroundColor:'#ff8c0099', borderColor:'#ff8c00', borderWidth:1 },
+        { label:'CPU batch RTF',    data:cpuData, _rawData:cpuRaw, backgroundColor:'#58a6ff99', borderColor:'#58a6ff', borderWidth:1 },
+        { label:'Vulkan batch RTF', data:vkData,  _rawData:vkRaw,  backgroundColor:'#ff8c0099', borderColor:'#ff8c00', borderWidth:1 },
       ]
     },
     options: {
@@ -1035,6 +1187,10 @@ function buildCpuVulkan() {
         legend: { position:'bottom', labels:{color:'#8b949e',boxWidth:12} },
         tooltip: {
           callbacks: {
+            label: i => {
+              const raw = (i.dataset._rawData && i.dataset._rawData[i.dataIndex]) ?? i.raw;
+              return `${i.dataset.label}: ${fmt2(raw)}×`;
+            },
             afterBody: items => {
               const i = items[0].dataIndex;
               const s = speedup[i];
@@ -1045,7 +1201,7 @@ function buildCpuVulkan() {
       },
       scales: {
         x: { ticks:{color:'#8b949e',maxRotation:60,font:{size:9}}, grid:{color:'#21262d'} },
-        y: { type:'logarithmic', title:{display:true,text:'Batch RTF (higher = faster, log)',color:'#8b949e'}, ticks:{color:'#8b949e'}, grid:{color:'#21262d'} }
+        y: rtfYAxisConfig('Batch RTF (higher = faster)')
       }
     }
   });
@@ -1074,7 +1230,7 @@ function buildSpeedAccuracy() {
       const meta = HOST_META[host] || {};
       datasets.push({
         label: `${host} (${meta.quant_kernel||'?'}) · ${build}`,
-        data: pts.map(c => ({ x: c.accuracy_en_mean, y: c.batch_rtf_median, _cell: c })),
+        data: pts.map(c => ({ x: c.accuracy_en_mean, y: rtfFwd(c.batch_rtf_median), _cell: c })),
         backgroundColor: hostColor[host] + (build === 'cpu' ? 'cc' : '66'),
         borderColor: hostColor[host],
         borderWidth: build === 'vulkan' ? 1.5 : 1,
@@ -1135,9 +1291,7 @@ function buildSpeedAccuracy() {
           ticks:{color:'#8b949e',callback:v=>(+v).toFixed(2)}, grid:{color:'#21262d'}
         },
         y: {
-          type:'logarithmic',
-          title:{display:true,text:'Batch RTF (higher = faster, log)',color:'#8b949e'},
-          ticks:{color:'#8b949e'}, grid:{color:'#21262d'}
+          ...rtfYAxisConfig('Batch RTF (higher = faster)')
         }
       }
     }
@@ -1145,8 +1299,32 @@ function buildSpeedAccuracy() {
 }
 
 // ─── 6. Decision quadrants ─────────────────────────────────────────────────
-const QUADRANT_STATE = { maxWer: 0.10, minRtf: 2.0, bestPerHost: false };
+const QUADRANT_STATE = {
+  maxWer: 0.10, minRtf: 2.0, bestPerHost: false,
+  lang: 'en',
+  quants: { fp16: true, q8_0: true, q5_1: true, q5_0: true },
+};
+
 let quadrantChart = null;
+
+// Pretty names for languages discovered in the data; anything unmapped
+// renders as its raw ISO-639-1 code.
+const LANG_NAMES = {
+  en: 'English', ro: 'Romanian', fr: 'French', es: 'Spanish',
+  de: 'German', it: 'Italian', zh: 'Chinese', ja: 'Japanese',
+  pt: 'Portuguese', ru: 'Russian',
+};
+
+// Per-cell accuracy for the currently-selected language. Falls back to
+// the legacy `accuracy_en_mean` field when lang === 'en' (older payloads
+// may not carry the `accuracy_per_lang` map).
+function cellWer(c) {
+  const lang = QUADRANT_STATE.lang;
+  const m = c.accuracy_per_lang || {};
+  if (m[lang] != null) return m[lang];
+  if (lang === 'en' && c.accuracy_en_mean != null) return c.accuracy_en_mean;
+  return null;
+}
 
 // Family rank for the "best per host" filter: larger model wins, then lower WER.
 const FAMILY_RANK = {tiny:1, base:2, small:3, turbo:4};
@@ -1156,7 +1334,7 @@ const FAMILY_STYLE = {
   tiny:  {color:'#bc8cff', shape:'circle'},
   base:  {color:'#58a6ff', shape:'triangle'},
   small: {color:'#00c3ad', shape:'rectRot'},  // diamond
-  turbo: {color:'#ff7eb6', shape:'star'},
+  turbo: {color:'#ff7eb6', shape:'crossRot'},  // symmetric X, hit-detection-friendly
 };
 const FAMS_ORDER = ['tiny','base','small','turbo'];
 
@@ -1168,7 +1346,7 @@ function pickBestPerHost(cells) {
     const ra = FAMILY_RANK[c.model_family] || 0;
     const re = FAMILY_RANK[cur.model_family] || 0;
     if (ra > re) byHost[c.host] = c;
-    else if (ra === re && (c.accuracy_en_mean ?? 1) < (cur.accuracy_en_mean ?? 1)) byHost[c.host] = c;
+    else if (ra === re && (cellWer(c) ?? 1) < (cellWer(cur) ?? 1)) byHost[c.host] = c;
   });
   return Object.values(byHost);
 }
@@ -1177,19 +1355,21 @@ function pickBestPerHost(cells) {
 // Top-left = best (low WER, high RTF); bottom-right = worst.
 const QUAD_DEFS = [
   { key:'ship', label:'Ship it',             color:'#3fb950',
-    cond:(c,s) => c.accuracy_en_mean <= s.maxWer && c.batch_rtf_median >= s.minRtf },
+    cond:(c,s) => cellWer(c) <= s.maxWer && c.batch_rtf_median >= s.minRtf },
   { key:'fast', label:'Fast but inaccurate', color:'#d29922',
-    cond:(c,s) => c.accuracy_en_mean >  s.maxWer && c.batch_rtf_median >= s.minRtf },
+    cond:(c,s) => cellWer(c) >  s.maxWer && c.batch_rtf_median >= s.minRtf },
   { key:'slow', label:'Accurate but slow',   color:'#ff8c00',
-    cond:(c,s) => c.accuracy_en_mean <= s.maxWer && c.batch_rtf_median <  s.minRtf },
+    cond:(c,s) => cellWer(c) <= s.maxWer && c.batch_rtf_median <  s.minRtf },
   { key:'bad',  label:'Unusable',            color:'#f85149',
-    cond:(c,s) => c.accuracy_en_mean >  s.maxWer && c.batch_rtf_median <  s.minRtf },
+    cond:(c,s) => cellWer(c) >  s.maxWer && c.batch_rtf_median <  s.minRtf },
 ];
 
 function buildDecisionQuadrants() {
-  const cells = filteredCells().filter(c =>
-    c.batch_rtf_median != null && c.accuracy_en_mean != null
-  );
+  const cells = filteredCells().filter(c => {
+    const wer = cellWer(c);
+    return c.batch_rtf_median != null && wer != null &&
+      (QUADRANT_STATE.quants[c.quantization] !== false);
+  });
   const s = QUADRANT_STATE;
 
   // Live-update slider value labels (they may not exist yet on first call)
@@ -1211,8 +1391,11 @@ function buildDecisionQuadrants() {
     Object.keys(buckets).forEach(k => { buckets[k] = pickBestPerHost(buckets[k]); });
   }
 
-  // Determine X range so the chart breathes (cap at 0.5, never below 0.2)
-  const xs = cells.map(c => c.accuracy_en_mean);
+  // Determine X range so the chart breathes (cap at 1.0, never below 0.2).
+  // The global Hide-WER filter (if on) already caps cells at 0.20, so the
+  // axis naturally pins itself there. With the filter off, the axis auto-fits
+  // to the observed max.
+  const xs = cells.map(c => cellWer(c));
   const xObserved = xs.length ? Math.max(...xs) : 0.2;
   const xMax = Math.max(0.2, Math.min(1.0, Math.ceil((xObserved + 0.05) * 10) / 10));
 
@@ -1229,26 +1412,31 @@ function buildDecisionQuadrants() {
     const style = FAMILY_STYLE[f];
     return {
       label: `${f} (${byFamily[f].length})`,
-      data: byFamily[f].map(c => ({ x: c.accuracy_en_mean, y: c.batch_rtf_median, _cell: c })),
+      data: byFamily[f].map(c => ({ x: cellWer(c), y: rtfFwd(c.batch_rtf_median), _cell: c })),
       backgroundColor: style.color + 'cc',
       borderColor: style.color,
       borderWidth: 1.5,
       pointStyle: style.shape,
-      pointRadius: 6,
-      pointHoverRadius: 9,
-      hitRadius: 12,
+      pointRadius: 7,
+      pointHoverRadius: 12,
+      // Chart.js v3+ dataset name is `pointHitRadius`, NOT `hitRadius` —
+      // the latter silently falls back to `pointRadius` (6 px) so the
+      // tooltip only triggers exactly on the dot. Star/triangle shapes
+      // whose visual mass sits below the data point centroid then
+      // appear to "only respond when hovering below the icon".
+      pointHitRadius: 8,
     };
   });
 
   // Translucent quadrant tints (slightly stronger now that dots no longer carry
   // the quadrant colour) + visible threshold lines.
   const ann = {
-    qShip: { type:'box', xMin:0,        xMax:s.maxWer, yMin:s.minRtf, yMax:1e6,      backgroundColor:'#3fb95022', borderWidth:0, drawTime:'beforeDatasetsDraw' },
-    qFast: { type:'box', xMin:s.maxWer, xMax:1,        yMin:s.minRtf, yMax:1e6,      backgroundColor:'#d2992222', borderWidth:0, drawTime:'beforeDatasetsDraw' },
-    qSlow: { type:'box', xMin:0,        xMax:s.maxWer, yMin:0,        yMax:s.minRtf, backgroundColor:'#ff8c0022', borderWidth:0, drawTime:'beforeDatasetsDraw' },
-    qBad:  { type:'box', xMin:s.maxWer, xMax:1,        yMin:0,        yMax:s.minRtf, backgroundColor:'#f8514922', borderWidth:0, drawTime:'beforeDatasetsDraw' },
+    qShip: { type:'box', xMin:0,        xMax:s.maxWer, yMin:rtfFwd(s.minRtf), yMax:rtfFwd(RTF_TOP*10), backgroundColor:'#3fb95022', borderWidth:0, drawTime:'beforeDatasetsDraw' },
+    qFast: { type:'box', xMin:s.maxWer, xMax:1,        yMin:rtfFwd(s.minRtf), yMax:rtfFwd(RTF_TOP*10), backgroundColor:'#d2992222', borderWidth:0, drawTime:'beforeDatasetsDraw' },
+    qSlow: { type:'box', xMin:0,        xMax:s.maxWer, yMin:0,                 yMax:rtfFwd(s.minRtf), backgroundColor:'#ff8c0022', borderWidth:0, drawTime:'beforeDatasetsDraw' },
+    qBad:  { type:'box', xMin:s.maxWer, xMax:1,        yMin:0,                 yMax:rtfFwd(s.minRtf), backgroundColor:'#f8514922', borderWidth:0, drawTime:'beforeDatasetsDraw' },
     werLine: { type:'line', xMin:s.maxWer, xMax:s.maxWer, borderColor:'#e6edf366', borderWidth:1, borderDash:[4,4], label:{content:`WER ≤ ${s.maxWer.toFixed(2)}`, display:true, color:'#e6edf3', backgroundColor:'#161b22cc', font:{size:10}, position:'start'} },
-    rtfLine: { type:'line', yMin:s.minRtf, yMax:s.minRtf, borderColor:'#e6edf366', borderWidth:1, borderDash:[4,4], label:{content:`batch ≥ ${s.minRtf.toFixed(1)}×`, display:true, color:'#e6edf3', backgroundColor:'#161b22cc', font:{size:10}, position:'end'} },
+    rtfLine: { type:'line', yMin:rtfFwd(s.minRtf), yMax:rtfFwd(s.minRtf), borderColor:'#e6edf366', borderWidth:1, borderDash:[4,4], label:{content:`batch ≥ ${s.minRtf.toFixed(1)}×`, display:true, color:'#e6edf3', backgroundColor:'#161b22cc', font:{size:10}, position:'end'} },
   };
   const ctx = document.getElementById('quadrant-chart').getContext('2d');
   if (quadrantChart) quadrantChart.destroy();
@@ -1257,21 +1445,43 @@ function buildDecisionQuadrants() {
     data:{ datasets },
     options:{
       responsive:true, maintainAspectRatio:false,
-      interaction:{ mode:'nearest', intersect:false, axis:'xy' },
+      // Force 1:1 intrinsic↔CSS sizing. Chart.js otherwise multiplies
+      // the canvas's intrinsic resolution by window.devicePixelRatio
+      // (often 1.25, 1.5, 2 on HiDPI screens) while keeping the CSS
+      // size from the !important rule above. The two coord systems then
+      // diverge linearly with distance from the top-left, producing the
+      // "hover drift that grows toward the bottom" symptom.
+      devicePixelRatio: 1,
+      // mode:'point' uses each dot's actual drawn pixel area for hit-
+      // test, not transformed-axis distance. This matters on the log Y
+      // axis: 'nearest' measures distance in log space, so a small pixel
+      // offset at the bottom of the chart (where log expands the
+      // spacing) lets the picker walk to a wrong neighbour. 'point'
+      // ignores axis type and only fires when the cursor is on the dot.
+      // (pointHitRadius=8) zone of a point before its tooltip fires.
+      interaction:{ mode:'point', intersect:true },
+      hover:{ mode:'point', intersect:true },
       plugins:{
         legend:{ position:'bottom', labels:{color:'#8b949e',boxWidth:14,boxHeight:14,usePointStyle:true,font:{size:12}} },
         tooltip:{
+          // Anchor the tooltip box at the data point being shown
+          // (default 'average' anchors at the cursor and looked wrong in
+          // the bottom-left quadrant where the box overflows below the
+          // chart area). 'nearest' draws the caret pointing AT the dot.
+          position: 'nearest',
           callbacks:{
-            title: items => {
-              const c = items[0].raw._cell;
-              return `${c.host} · ${c.build} · ${c.model} (${c.quantization})`;
-            },
+            // Title runs ONCE for the whole tooltip — use it just to count
+            // cells when multiple points overlap; the per-item identity
+            // lives in `label` so every overlapping cell gets named.
+            title: items => items.length > 1
+              ? `${items.length} cells under cursor`
+              : '',
             label: i => {
               const c = i.raw._cell;
+              const langLbl = (LANG_NAMES[QUADRANT_STATE.lang] || QUADRANT_STATE.lang.toUpperCase());
               return [
-                `WER (EN): ${fmt3(c.accuracy_en_mean)}`,
-                `Batch RTF: ${fmt2(c.batch_rtf_median)}×`,
-                `Verdict: ${c.verdict}`,
+                `${c.host} · ${c.build} · ${c.model} (${c.quantization})`,
+                `   WER ${fmt3(cellWer(c))} (${langLbl}) · RTF ${fmt2(c.batch_rtf_median)}× · ${c.verdict}`,
               ];
             }
           }
@@ -1280,11 +1490,9 @@ function buildDecisionQuadrants() {
       },
       scales:{
         x:{ type:'linear', min:0, max:xMax,
-            title:{display:true,text:'English WER (lower = more accurate)',color:'#8b949e'},
+            title:{display:true,text:`${LANG_NAMES[QUADRANT_STATE.lang] || QUADRANT_STATE.lang.toUpperCase()} WER (lower = more accurate)`,color:'#8b949e'},
             ticks:{color:'#8b949e',callback:v=>(+v).toFixed(2)}, grid:{color:'#21262d'} },
-        y:{ type:'logarithmic',
-            title:{display:true,text:'Batch RTF (higher = faster, log)',color:'#8b949e'},
-            ticks:{color:'#8b949e'}, grid:{color:'#21262d'} },
+        y:{ ...rtfYAxisConfig('Batch RTF (higher = faster)') },
       }
     }
   });
@@ -1299,12 +1507,12 @@ function buildQuadrantDrill(buckets) {
     const items = buckets[q.key] || [];
     // Sort best-first per quadrant: low WER then high RTF
     items.sort((a,b) =>
-      (a.accuracy_en_mean||1) - (b.accuracy_en_mean||1) ||
+      (cellWer(a)||1) - (cellWer(b)||1) ||
       (b.batch_rtf_median||0) - (a.batch_rtf_median||0));
     const MAX = 25;
     const rows = items.slice(0, MAX).map(c =>
       `<li><span class="name">${c.host} · ${c.build} · ${c.model} <span style="color:var(--muted)">(${c.quantization})</span></span>`
-      + `<span class="met">WER ${fmt3(c.accuracy_en_mean)}</span>`
+      + `<span class="met">WER ${fmt3(cellWer(c))}</span>`
       + `<span class="met">${fmt2(c.batch_rtf_median)}×</span></li>`).join('');
     const more = items.length > MAX
       ? `<li class="quad-empty">… ${items.length - MAX} more (refine filters to narrow)</li>`
@@ -1321,13 +1529,56 @@ function resetQuadrants() {
   QUADRANT_STATE.maxWer = 0.10;
   QUADRANT_STATE.minRtf = 2.0;
   QUADRANT_STATE.bestPerHost = false;
+  QUADRANT_STATE.lang = 'en';
+  Object.keys(QUADRANT_STATE.quants).forEach(q => { QUADRANT_STATE.quants[q] = true; });
   const werEl = document.getElementById('quad-wer');
   const rtfEl = document.getElementById('quad-rtf');
   const bestEl = document.getElementById('quad-best-toggle');
+  const langEl = document.getElementById('quad-lang');
   if (werEl) werEl.value = '0.10';
   if (rtfEl) rtfEl.value = '2.0';
+  if (langEl) langEl.value = 'en';
   if (bestEl) bestEl.classList.remove('active');
+  document.querySelectorAll('.quad-controls button[data-quant]').forEach(b => b.classList.add('active'));
   buildDecisionQuadrants();
+}
+
+function toggleQuadQuant(q) {
+  QUADRANT_STATE.quants[q] = !QUADRANT_STATE.quants[q];
+  const btn = document.querySelector(`.quad-controls button[data-quant="${q}"]`);
+  if (btn) btn.classList.toggle('active', QUADRANT_STATE.quants[q]);
+  buildDecisionQuadrants();
+}
+
+function setQuadLang(lang) {
+  QUADRANT_STATE.lang = lang;
+  buildDecisionQuadrants();
+}
+
+// Discover languages present in the data and populate the dropdown.
+// English is forced to the front; remaining langs ordered by frequency.
+function initQuadLangDropdown() {
+  const sel = document.getElementById('quad-lang');
+  if (!sel) return;
+  const counts = {};
+  (RAW_CELLS || []).forEach(c => {
+    const m = c.accuracy_per_lang || {};
+    Object.keys(m).forEach(k => { if (m[k] != null) counts[k] = (counts[k] || 0) + 1; });
+    // Back-compat: legacy English-only payloads
+    if (!('en' in m) && c.accuracy_en_mean != null) counts.en = (counts.en || 0) + 1;
+  });
+  const langs = Object.keys(counts).sort((a, b) => {
+    if (a === 'en') return -1;
+    if (b === 'en') return 1;
+    return counts[b] - counts[a];
+  });
+  if (!langs.length) langs.push('en');
+  sel.innerHTML = langs.map(l => {
+    const nm = LANG_NAMES[l] || l.toUpperCase();
+    return `<option value="${l}">${nm} (${counts[l] || 0})</option>`;
+  }).join('');
+  sel.value = QUADRANT_STATE.lang in counts ? QUADRANT_STATE.lang : langs[0];
+  QUADRANT_STATE.lang = sel.value;
 }
 
 function toggleBestPerHost() {
@@ -1448,6 +1699,7 @@ function waitForChart(tries) {
     readHash();
     initFilterBar();
     initQuadrantSliders();
+    initQuadLangDropdown();
     buildFindings();
     renderAll();
     document.querySelectorAll('#data-table th[data-col]').forEach(th => {
@@ -1483,6 +1735,7 @@ JS_FIELDS = [
     "verdict", "iterations_kept", "iterations_total", "errors",
     "approx_size_mib",
     "accuracy_en_mean", "accuracy_en_max", "accuracy_all_mean",
+    "accuracy_per_lang",
     "delta_en_mean", "delta_en_max", "accuracy_pass",
 ]
 

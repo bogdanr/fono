@@ -1,0 +1,103 @@
+{
+  "fono_version": "0.8.0",
+  "stt_backend": "local:tiny-q5_1",
+  "tier": "tier1",
+  "threshold_levenshtein": 0.05,
+  "results": [
+    {
+      "fixture": "ro-bogdan-30s",
+      "language": "ro",
+      "synthetic_placeholder": false,
+      "duration_s": 30.0,
+      "modes": {
+        "batch": {
+          "text": "Vrea-au să facem și o înregistrare mai lungă, cu radiol care rola să pe fundal, și cum inecare mă bendeți, că mai mult la ce vreau să zic. - La, sau. - Ca să vedem dacă modelul să descur că bine și în situația asta, cand să agum în trisielde peste 12 de secunde, care să continuă o tictele să-ți o ceva, care vrei să vorbești cu asistemtul.",
+          "elapsed_ms": 735,
+          "ttff_ms": 735
+        },
+        "streaming": {
+          "text": "Vrea-au sÄ facem Èi o Ã®nregistrare mai lungÄ, cu radiol care rola sÄ pe fundal, Èi cum inecare mÄ bendeÈi, cÄ mai mult la ce vreau sÄ zic. - La, sau. - Ca sÄ vedem dacÄ modelul sÄ descur cÄ bine Èi Ã®n situaÈia asta, cand sÄ agum Ã®n trisielde peste 12 de secunde, care sÄ continuÄ o tictele sÄ-Èi o ceva, care vrei sÄ vorbeÈti cu asistemtul.",
+          "elapsed_ms": 1932,
+          "ttff_ms": 501
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.1369863,
+        "stt_accuracy_levenshtein": 0.2,
+        "ttff_ratio": 0.68163264,
+        "ttc_ratio": 2.6285715
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.5"
+    },
+    {
+      "fixture": "ro-bogdan-10s",
+      "language": "ro",
+      "synthetic_placeholder": false,
+      "duration_s": 10.0,
+      "modes": {
+        "batch": {
+          "text": "și acum facem un registrare cu musica pe fundalu, să vedem dacă model le pot să detecteți edictare, întâințe în esteți gămă de fundalu.",
+          "elapsed_ms": 298,
+          "ttff_ms": 298
+        },
+        "streaming": {
+          "text": "Èi acum faceam o registrare cu musica pe fundalu, sÄ vedem dacÄ model le pot sÄ detecteÈi edictare, Ã®ntÃ©m-ci e niÈteÈi gomÄ de fundalu.",
+          "elapsed_ms": 1752,
+          "ttff_ms": 473
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.2137931,
+        "stt_accuracy_levenshtein": 0.22962964,
+        "ttff_ratio": 1.5872483,
+        "ttc_ratio": 5.8791947
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.5"
+    }
+  ],
+  "pinned_params": {
+    "commit_use_prosody": false,
+    "commit_prosody_extend_ms": 250,
+    "commit_use_punctuation_hint": true,
+    "commit_punct_extend_ms": 150,
+    "commit_hold_on_filler": true,
+    "commit_filler_words": [
+      "um",
+      "uh",
+      "er",
+      "ah",
+      "mm",
+      "like",
+      "you know"
+    ],
+    "commit_dangling_words": [
+      "and",
+      "but",
+      "or",
+      "so",
+      "because",
+      "the",
+      "a",
+      "an",
+      "of",
+      "to",
+      "with",
+      "for",
+      "in",
+      "on",
+      "at",
+      "from"
+    ],
+    "eou_drain_extended_ms": 1500,
+    "chunk_ms_initial": 600,
+    "chunk_ms_steady": 1500
+  },
+  "model_capabilities": {
+    "english_only": false,
+    "model_label": "local:tiny-q5_1"
+  }
+}

@@ -1,0 +1,368 @@
+{
+  "fono_version": "0.8.1",
+  "stt_backend": "local:small.en-q8_0",
+  "tier": "tier1",
+  "threshold_levenshtein": 0.05,
+  "results": [
+    {
+      "fixture": "en-single-sentence",
+      "language": "en",
+      "synthetic_placeholder": false,
+      "duration_s": 5.0,
+      "modes": {
+        "batch": {
+          "text": "The art of war, then, is governed by five constant fact-",
+          "elapsed_ms": 299,
+          "ttff_ms": 299
+        },
+        "streaming": {
+          "text": "The art of war, then, is governed by five constant fact-",
+          "elapsed_ms": 3484,
+          "ttff_ms": 1193
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.0,
+        "stt_accuracy_levenshtein": 0.25,
+        "ttff_ratio": 3.9899666,
+        "ttc_ratio": 11.652174
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 1; per-fixture acc threshold 1"
+    },
+    {
+      "fixture": "en-multi-sentence",
+      "language": "en",
+      "synthetic_placeholder": false,
+      "duration_s": 20.0,
+      "modes": {
+        "batch": {
+          "text": "The art of war, then, is governed by five constant factors to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field. These are, one, the moral law, two, heaven, three, earth, and seven.",
+          "elapsed_ms": 990,
+          "ttff_ms": 990
+        },
+        "streaming": {
+          "text": "The art of war, then, is governed by five constant factors to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field. These are, one, the moral law, two, heaven, three, earth, and four.",
+          "elapsed_ms": 3773,
+          "ttff_ms": 1109
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.020833334,
+        "stt_accuracy_levenshtein": 0.104166664,
+        "ttff_ratio": 1.1202021,
+        "ttc_ratio": 3.8111112
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2"
+    },
+    {
+      "fixture": "en-narrative-pause",
+      "language": "en",
+      "synthetic_placeholder": false,
+      "duration_s": 12.0,
+      "modes": {
+        "batch": {
+          "text": "That Jane was yielding to the preference which she had begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general, so that she would be in love with pleasure.",
+          "elapsed_ms": 654,
+          "ttff_ms": 654
+        },
+        "streaming": {
+          "text": "That Jane was yielding to the preference which she had begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general,",
+          "elapsed_ms": 3915,
+          "ttff_ms": 1068
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.15658364,
+        "stt_accuracy_levenshtein": 0.16725978,
+        "ttff_ratio": 1.6330276,
+        "ttc_ratio": 5.9862385
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2"
+    },
+    {
+      "fixture": "en-self-dictation",
+      "language": "en",
+      "synthetic_placeholder": false,
+      "duration_s": 12.033,
+      "modes": {
+        "batch": {
+          "text": "I need to record a fixture myself for this benchmark because the ones that I'm finding online are not very well fit to the task that I'm trying to accomplish.",
+          "elapsed_ms": 502,
+          "ttff_ms": 502
+        },
+        "streaming": {
+          "text": "I need to record a fixture myself for this benchmark because the ones that I'm finding online are not very well fit to the task that I'm trying to accomplish.",
+          "elapsed_ms": 3452,
+          "ttff_ms": 1047
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.0,
+        "stt_accuracy_levenshtein": 0.025,
+        "ttff_ratio": 2.0856574,
+        "ttc_ratio": 6.876494
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.25"
+    },
+    {
+      "fixture": "en-self-casual",
+      "language": "en",
+      "synthetic_placeholder": false,
+      "duration_s": 9.78375,
+      "modes": {
+        "batch": {
+          "text": "Let's go to the Chinese restaurant tonight, but please do not bring Sam, you know he is very annoying.",
+          "elapsed_ms": 395,
+          "ttff_ms": 395
+        },
+        "streaming": {
+          "text": "Let's go to the Chinese restaurant tonight, but please do not bring Sam. You know, he is very annoying.",
+          "elapsed_ms": 3579,
+          "ttff_ms": 1078
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.019417476,
+        "stt_accuracy_levenshtein": 0.019417476,
+        "ttff_ratio": 2.7291138,
+        "ttc_ratio": 9.06076
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.25"
+    },
+    {
+      "fixture": "es-lorca-reyerta",
+      "language": "es",
+      "synthetic_placeholder": false,
+      "duration_s": 0.0,
+      "modes": {
+        "batch": {
+          "text": "",
+          "elapsed_ms": 0,
+          "ttff_ms": 0
+        },
+        "streaming": null
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.0,
+        "stt_accuracy_levenshtein": null,
+        "ttff_ratio": null,
+        "ttc_ratio": null
+      },
+      "verdict": "skipped",
+      "skip_reason": "capability",
+      "note": "model local:small.en-q8_0 is English-only; fixture language is es"
+    },
+    {
+      "fixture": "fr-gide-symphonie",
+      "language": "fr",
+      "synthetic_placeholder": false,
+      "duration_s": 0.0,
+      "modes": {
+        "batch": {
+          "text": "",
+          "elapsed_ms": 0,
+          "ttff_ms": 0
+        },
+        "streaming": null
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.0,
+        "stt_accuracy_levenshtein": null,
+        "ttff_ratio": null,
+        "ttc_ratio": null
+      },
+      "verdict": "skipped",
+      "skip_reason": "capability",
+      "note": "model local:small.en-q8_0 is English-only; fixture language is fr"
+    },
+    {
+      "fixture": "zh-luxun-kuangren",
+      "language": "zh",
+      "synthetic_placeholder": false,
+      "duration_s": 0.0,
+      "modes": {
+        "batch": {
+          "text": "",
+          "elapsed_ms": 0,
+          "ttff_ms": 0
+        },
+        "streaming": null
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.0,
+        "stt_accuracy_levenshtein": null,
+        "ttff_ratio": null,
+        "ttc_ratio": null
+      },
+      "verdict": "skipped",
+      "skip_reason": "capability",
+      "note": "model local:small.en-q8_0 is English-only; fixture language is zh"
+    },
+    {
+      "fixture": "ro-talcuirea-matei",
+      "language": "ro",
+      "synthetic_placeholder": false,
+      "duration_s": 0.0,
+      "modes": {
+        "batch": {
+          "text": "",
+          "elapsed_ms": 0,
+          "ttff_ms": 0
+        },
+        "streaming": null
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.0,
+        "stt_accuracy_levenshtein": null,
+        "ttff_ratio": null,
+        "ttc_ratio": null
+      },
+      "verdict": "skipped",
+      "skip_reason": "capability",
+      "note": "model local:small.en-q8_0 is English-only; fixture language is ro"
+    },
+    {
+      "fixture": "ro-man",
+      "language": "ro",
+      "synthetic_placeholder": false,
+      "duration_s": 0.0,
+      "modes": {
+        "batch": {
+          "text": "",
+          "elapsed_ms": 0,
+          "ttff_ms": 0
+        },
+        "streaming": null
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.0,
+        "stt_accuracy_levenshtein": null,
+        "ttff_ratio": null,
+        "ttc_ratio": null
+      },
+      "verdict": "skipped",
+      "skip_reason": "capability",
+      "note": "model local:small.en-q8_0 is English-only; fixture language is ro"
+    },
+    {
+      "fixture": "ro-woman",
+      "language": "ro",
+      "synthetic_placeholder": false,
+      "duration_s": 0.0,
+      "modes": {
+        "batch": {
+          "text": "",
+          "elapsed_ms": 0,
+          "ttff_ms": 0
+        },
+        "streaming": null
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.0,
+        "stt_accuracy_levenshtein": null,
+        "ttff_ratio": null,
+        "ttc_ratio": null
+      },
+      "verdict": "skipped",
+      "skip_reason": "capability",
+      "note": "model local:small.en-q8_0 is English-only; fixture language is ro"
+    },
+    {
+      "fixture": "ro-bogdan-30s",
+      "language": "ro",
+      "synthetic_placeholder": false,
+      "duration_s": 0.0,
+      "modes": {
+        "batch": {
+          "text": "",
+          "elapsed_ms": 0,
+          "ttff_ms": 0
+        },
+        "streaming": null
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.0,
+        "stt_accuracy_levenshtein": null,
+        "ttff_ratio": null,
+        "ttc_ratio": null
+      },
+      "verdict": "skipped",
+      "skip_reason": "capability",
+      "note": "model local:small.en-q8_0 is English-only; fixture language is ro"
+    },
+    {
+      "fixture": "ro-bogdan-10s",
+      "language": "ro",
+      "synthetic_placeholder": false,
+      "duration_s": 0.0,
+      "modes": {
+        "batch": {
+          "text": "",
+          "elapsed_ms": 0,
+          "ttff_ms": 0
+        },
+        "streaming": null
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.0,
+        "stt_accuracy_levenshtein": null,
+        "ttff_ratio": null,
+        "ttc_ratio": null
+      },
+      "verdict": "skipped",
+      "skip_reason": "capability",
+      "note": "model local:small.en-q8_0 is English-only; fixture language is ro"
+    }
+  ],
+  "pinned_params": {
+    "commit_use_prosody": false,
+    "commit_prosody_extend_ms": 250,
+    "commit_use_punctuation_hint": true,
+    "commit_punct_extend_ms": 150,
+    "commit_hold_on_filler": true,
+    "commit_filler_words": [
+      "um",
+      "uh",
+      "er",
+      "ah",
+      "mm",
+      "like",
+      "you know"
+    ],
+    "commit_dangling_words": [
+      "and",
+      "but",
+      "or",
+      "so",
+      "because",
+      "the",
+      "a",
+      "an",
+      "of",
+      "to",
+      "with",
+      "for",
+      "in",
+      "on",
+      "at",
+      "from"
+    ],
+    "eou_drain_extended_ms": 1500,
+    "chunk_ms_initial": 600,
+    "chunk_ms_steady": 1500
+  },
+  "model_capabilities": {
+    "english_only": true,
+    "model_label": "local:small.en-q8_0"
+  }
+}

@@ -1,36 +1,36 @@
 {
   "command": [
-    "/root/fono-bench-rig/fono-bench-cpu",
+    "/root/Work/fono/target-cpu/release/fono-bench",
     "equivalence",
     "--stt",
     "local",
     "--model",
     "tiny-q8_0",
     "--fixtures",
-    "/root/fono-bench-rig/fixtures/ro-bogdan",
+    "/root/Work/fono/tests/fixtures/equivalence",
     "--output",
-    "/root/fono-bench-rig/runs-ro/ryzen-5950x__ac__cpu__tiny-q8_0__iter2.json",
+    "/root/Work/fono/clean-sweep-runs/ryzen-5950x__ac__cpu__tiny-q8_0__iter2.json",
     "--no-legend"
   ],
   "context_end": {
     "ac_online": null,
     "battery_pct": null,
-    "package_temp_c": 53.125
+    "package_temp_c": 59.75
   },
   "context_start": {
     "ac_online": null,
     "battery_pct": null,
-    "captured_at_utc": "2026-05-22T06:51:29.849362+00:00",
+    "captured_at_utc": "2026-05-24T07:52:27.536756+00:00",
     "hostname": "proxmox4",
-    "package_temp_c": 49.625,
+    "package_temp_c": 46.375,
     "platform": "linux",
     "power_profile": "governor=powersave"
   },
   "exit_code": 1,
   "label": "ryzen-5950x/ac/cpu/tiny-q8_0/iter2",
-  "max_rss_kib": 270552,
+  "max_rss_kib": 353532,
   "schema": "fono-bench.rusage/1",
-  "sys_s": 7.313112,
-  "user_s": 24.592854,
-  "wall_clock_s": 2.838791
+  "sys_s": 39.748383,
+  "user_s": 121.25529,
+  "wall_clock_s": 12.283987
 }

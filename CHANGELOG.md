@@ -7,7 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Escape cancels recordings on Wayland.** The portal hotkey
+  backend (KDE / sway / Hyprland) opens a transient second
+  `GlobalShortcuts` session while a recording is active; the
+  GNOME-Wayland gsettings shim writes a temporary `fono-cancel`
+  custom-keybinding for the same duration. Either way Esc is only
+  grabbed while Fono needs it.
+- **`fono cancel` CLI verb.** Aborts an active recording or
+  assistant turn. Idempotent. Backs `Request::Cancel` and the
+  Esc grab above.
+
+### Removed
+
+- **`fono assistant stop` CLI verb** — use `fono cancel` instead.
+- **"Stop assistant" tray entry** — redundant with `fono cancel`.
+
 ### Changed
+
+- **Wizard model selection is now data-driven.** A new three-class
+  `HostGpu` classifier (`None` / `Integrated` / `Discrete`), derived
+  from the Vulkan probe's `deviceType` + `shaderFloat16` bit, replaces
+  the previous static `accelerated()` 4× heuristic with multipliers
+  `1× / 2× / 4×` (no PCI tables, no runtime calibration, no maintained
+  device lists; see ADR 0028). The live-mode `Borderline` affordability
+  middle state and the two `LIVE_REALTIME_MIN_*` constants are gone —
+  the wizard now applies a single `BATCH_REALTIME_MIN = 2.0` gate and
+  every shortlist entry is comfortable by construction. Quantization
+  defaults are unified on `q8_0` across the registry (per the ADR 0027
+  2026-05-25 amendment): `tiny`, `tiny.en`, `small`, `small.en`, and
+  `large-v3-turbo` all default to `q8_0`; the previous `q5_1` defaults
+  remain reachable via `[stt.local].quantization`. `wer_by_lang`
+  English numbers are refreshed to Open-ASR-Leaderboard means (rounded
+  up: `tiny` 12→16, `tiny.en` 9→13, `small` 6→10, `small.en` 5→9,
+  `large-v3-turbo` 4→8) so the accuracy buckets the wizard surfaces
+  match the public prior users will find elsewhere.
 
 - **Assistant history now survives dictation pivots.** Previously a
   press of the dictation hotkey (F7) while an assistant conversation

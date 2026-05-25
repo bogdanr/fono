@@ -1,36 +1,36 @@
 {
   "command": [
-    "/mnt/live/memory/data/Work/fono/target/release/fono-bench",
+    "/mnt/nvme0n1p5/Work/fono/target/release/fono-bench",
     "equivalence",
     "--stt",
     "local",
     "--model",
     "small",
-    "--fixtures",
-    "/mnt/live/memory/data/Work/fono/tests/fixtures/equivalence",
     "--output",
-    "/mnt/live/memory/data/Work/fono/docs/bench/calibration/runs/i7-1255u__ac__vulkan__small__iter1.json",
+    "/mnt/nvme0n1p5/Work/fono/docs/bench/calibration/runs/i7-1255u__ac__vulkan__small__iter1.json",
+    "--fixtures",
+    "/mnt/nvme0n1p5/Work/fono/tests/fixtures/equivalence",
     "--no-legend"
   ],
   "context_end": {
     "ac_online": "1",
-    "battery_pct": 98,
-    "package_temp_c": 64.0
+    "battery_pct": 95,
+    "package_temp_c": 63.0
   },
   "context_start": {
     "ac_online": "1",
-    "battery_pct": 98,
-    "captured_at_utc": "2026-05-23T10:25:03.024621+00:00",
+    "battery_pct": 95,
+    "captured_at_utc": "2026-05-24T13:15:54.777233+00:00",
     "hostname": "nimblex",
-    "package_temp_c": 54.0,
+    "package_temp_c": 59.0,
     "platform": "linux",
     "power_profile": "governor=powersave"
   },
-  "exit_code": 0,
+  "exit_code": 1,
   "label": "i7-1255u/ac/vulkan/small/iter1",
-  "max_rss_kib": 204736,
+  "max_rss_kib": 204240,
   "schema": "fono-bench.rusage/1",
-  "sys_s": 5.436529,
-  "user_s": 26.971925,
-  "wall_clock_s": 86.400498
+  "sys_s": 8.319854,
+  "user_s": 26.806703,
+  "wall_clock_s": 89.585985
 }

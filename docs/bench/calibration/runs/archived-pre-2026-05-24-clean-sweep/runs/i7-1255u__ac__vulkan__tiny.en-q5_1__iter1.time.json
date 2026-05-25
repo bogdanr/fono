@@ -1,0 +1,34 @@
+{
+  "command": [
+    "target/release/fono-bench",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "tiny.en-q5_1",
+    "--output",
+    "docs/bench/calibration/runs/i7-1255u__ac__vulkan__tiny.en-q5_1__iter1.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": "1",
+    "battery_pct": 98,
+    "package_temp_c": 56.0
+  },
+  "context_start": {
+    "ac_online": "1",
+    "battery_pct": 98,
+    "captured_at_utc": "2026-05-21T21:46:47.850491+00:00",
+    "hostname": "nimblex",
+    "package_temp_c": 48.0,
+    "platform": "linux",
+    "power_profile": "governor=powersave"
+  },
+  "exit_code": 0,
+  "label": "i7-1255u/ac/vulkan/tiny.en-q5_1/iter1",
+  "max_rss_kib": 191128,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 0.607222,
+  "user_s": 2.08984,
+  "wall_clock_s": 3.881235
+}

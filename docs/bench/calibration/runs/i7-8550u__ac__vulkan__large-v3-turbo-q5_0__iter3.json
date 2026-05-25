@@ -1,0 +1,400 @@
+{
+  "fono_version": "0.8.1",
+  "stt_backend": "local:large-v3-turbo-q5_0",
+  "tier": "tier1",
+  "threshold_levenshtein": 0.05,
+  "results": [
+    {
+      "fixture": "en-single-sentence",
+      "language": "en",
+      "synthetic_placeholder": false,
+      "duration_s": 5.0,
+      "modes": {
+        "batch": {
+          "text": "The art of war, then, is governed by five constant factors,",
+          "elapsed_ms": 5970,
+          "ttff_ms": 5970
+        },
+        "streaming": {
+          "text": "The art of war, then, is governed by five constant faculties.",
+          "elapsed_ms": 83418,
+          "ttff_ms": 26889
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.08196721,
+        "stt_accuracy_levenshtein": 0.20588236,
+        "ttff_ratio": 4.50402,
+        "ttc_ratio": 13.972864
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 1; per-fixture acc threshold 1"
+    },
+    {
+      "fixture": "en-multi-sentence",
+      "language": "en",
+      "synthetic_placeholder": false,
+      "duration_s": 20.0,
+      "modes": {
+        "batch": {
+          "text": "be neglected the art of war then is governed by five constant factors to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field these are one the moral law two heaven three earth",
+          "elapsed_ms": 20656,
+          "ttff_ms": 20656
+        },
+        "streaming": {
+          "text": "be neglected the art of war then is governed by five constant factors to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field these are one the moral law two heaven three earth",
+          "elapsed_ms": 90109,
+          "ttff_ms": 29435
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.0,
+        "stt_accuracy_levenshtein": 0.046413504,
+        "ttff_ratio": 1.4250097,
+        "ttc_ratio": 4.3623643
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2"
+    },
+    {
+      "fixture": "en-narrative-pause",
+      "language": "en",
+      "synthetic_placeholder": false,
+      "duration_s": 12.0,
+      "modes": {
+        "batch": {
+          "text": "that Jane was yielding to the preference which she had begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general,",
+          "elapsed_ms": 12391,
+          "ttff_ms": 12391
+        },
+        "streaming": {
+          "text": "that Jane was yielding to the preference which she had begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general,",
+          "elapsed_ms": 90914,
+          "ttff_ms": 29507
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.0,
+        "stt_accuracy_levenshtein": 0.016877636,
+        "ttff_ratio": 2.3813252,
+        "ttc_ratio": 7.3370996
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2"
+    },
+    {
+      "fixture": "en-self-dictation",
+      "language": "en",
+      "synthetic_placeholder": false,
+      "duration_s": 12.033,
+      "modes": {
+        "batch": {
+          "text": "I need to record a picture myself for this benchmark, because the ones that I am finding online are not very well fit to the task that I am trying to accomplish.",
+          "elapsed_ms": 11948,
+          "ttff_ms": 11948
+        },
+        "streaming": {
+          "text": "I need to record a picture myself for this benchmark because the ones that I'm finding online are not very well fit to the task that I'm trying to accomplish.",
+          "elapsed_ms": 89859,
+          "ttff_ms": 29443
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.031055901,
+        "stt_accuracy_levenshtein": 0.01863354,
+        "ttff_ratio": 2.4642618,
+        "ttc_ratio": 7.52084
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.25"
+    },
+    {
+      "fixture": "en-self-casual",
+      "language": "en",
+      "synthetic_placeholder": false,
+      "duration_s": 9.78375,
+      "modes": {
+        "batch": {
+          "text": "Let's go to the Chinese restaurant tonight. But please do not bring Sam, you know. He is very annoying.",
+          "elapsed_ms": 9590,
+          "ttff_ms": 9590
+        },
+        "streaming": {
+          "text": "Let's go to the Chinese restaurant tonight. But please do not bring Sam, you know, he is very annoying.",
+          "elapsed_ms": 89435,
+          "ttff_ms": 29466
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.009708738,
+        "stt_accuracy_levenshtein": 0.009708738,
+        "ttff_ratio": 3.0725756,
+        "ttc_ratio": 9.32586
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.25"
+    },
+    {
+      "fixture": "es-lorca-reyerta",
+      "language": "es",
+      "synthetic_placeholder": false,
+      "duration_s": 10.0,
+      "modes": {
+        "batch": {
+          "text": "tocando viene por un anfibio sendero de cristales y laureles el silencio sin estrellas huyendo del sonsonete",
+          "elapsed_ms": 9799,
+          "ttff_ms": 9799
+        },
+        "streaming": {
+          "text": "tocando viene por un anfibio sendero de cristales y laureles el silencio sin estrellas huyendo del sonsonete",
+          "elapsed_ms": 89749,
+          "ttff_ms": 29489
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.0,
+        "stt_accuracy_levenshtein": 0.035714287,
+        "ttff_ratio": 3.0093887,
+        "ttc_ratio": 9.158996
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.3"
+    },
+    {
+      "fixture": "fr-gide-symphonie",
+      "language": "fr",
+      "synthetic_placeholder": false,
+      "duration_s": 10.0,
+      "modes": {
+        "batch": {
+          "text": "à gertrude j'avais dû apprendre moi-même l'alphabet des aveugles mais bientôt elle devint beaucoup plus habile que moi à lire cette écriture où j'avais assez de peine à me",
+          "elapsed_ms": 10151,
+          "ttff_ms": 10151
+        },
+        "streaming": {
+          "text": "Ã gertrude j'avais dÃ» apprendre moi-mÃªme l'alphabet des aveugles mais bientÃ´t elle devint beaucoup plus habile que moi Ã lire cette Ã©criture oÃ¹ j'avais assez de peine Ã",
+          "elapsed_ms": 90520,
+          "ttff_ms": 29574
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.09248555,
+        "stt_accuracy_levenshtein": 0.0952381,
+        "ttff_ratio": 2.9134076,
+        "ttc_ratio": 8.917348
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.3"
+    },
+    {
+      "fixture": "zh-luxun-kuangren",
+      "language": "zh",
+      "synthetic_placeholder": false,
+      "duration_s": 10.0,
+      "modes": {
+        "batch": {
+          "text": "劳君远到来时然依早遇赴某地后补意应大笑出示日记二册未可见当日病状",
+          "elapsed_ms": 10031,
+          "ttff_ms": 10031
+        },
+        "streaming": {
+          "text": "èåè¿å°æ¥æ¶ ç¶ä»¥æ©é èµ´æå°åè¡¥ä¹åºå¤§ç¬ åºç¤ºæ¥è®°äºä¾§ æªå¯è§å½æ¥ç ç¶",
+          "elapsed_ms": 90645,
+          "ttff_ms": 29646
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 1.0,
+        "stt_accuracy_levenshtein": 0.6052632,
+        "ttff_ratio": 2.9554381,
+        "ttc_ratio": 9.036487
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 1; per-fixture acc threshold 1"
+    },
+    {
+      "fixture": "ro-talcuirea-matei",
+      "language": "ro",
+      "synthetic_placeholder": false,
+      "duration_s": 10.0,
+      "modes": {
+        "batch": {
+          "text": "I-a urmat lui Saul, cel lepădat de la Dumnezeu și urât, așa și Hristul, după ce s-a lipsit, Adam de împărăția și domnia pe care o avea asupra tuturor, și I-a",
+          "elapsed_ms": 10582,
+          "ttff_ms": 10582
+        },
+        "streaming": {
+          "text": "I-a urmat lui Saul, cel lepÄdat de la Dumnezeu Èi urÃ¢t, aÈa Èi Hristul, dupÄ ce s-a lipsit Adam de Ã®mpÄrÄÈia Èi domnia pe care o avea asupra tuturor,",
+          "elapsed_ms": 91409,
+          "ttff_ms": 29556
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.1875,
+        "stt_accuracy_levenshtein": 0.22929937,
+        "ttff_ratio": 2.7930448,
+        "ttc_ratio": 8.638159
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.3"
+    },
+    {
+      "fixture": "ro-man",
+      "language": "ro",
+      "synthetic_placeholder": false,
+      "duration_s": 12.42,
+      "modes": {
+        "batch": {
+          "text": "La învățământul de zi, durata normală a studiilor universitare de licență este de 3-4 ani și corespunde unui număr de 60 de credite de studii transferabile pentru un an de studiu.",
+          "elapsed_ms": 12596,
+          "ttff_ms": 12596
+        },
+        "streaming": {
+          "text": "La Ã®nvÄÈÄmÃ¢ntul de zi, durata normalÄ a studiilor universitare de licenÈÄ este de 3-4 ani Èi corespunde unui numÄr de 60 de credite de studii transferabile pentru un an de studiu.",
+          "elapsed_ms": 91439,
+          "ttff_ms": 29633
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.105820104,
+        "stt_accuracy_levenshtein": 0.105820104,
+        "ttff_ratio": 2.3525722,
+        "ttc_ratio": 7.259368
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.3"
+    },
+    {
+      "fixture": "ro-woman",
+      "language": "ro",
+      "synthetic_placeholder": false,
+      "duration_s": 11.76,
+      "modes": {
+        "batch": {
+          "text": "Ea a subliniat cât de periculoasă este de fapt situația, îndruncât un număr atât de restrâns de persoane are la degetul mic o asemenea putere economică și nu numai.",
+          "elapsed_ms": 11675,
+          "ttff_ms": 11675
+        },
+        "streaming": {
+          "text": "Ea a subliniat cÃ¢t de periculoasÄ este de fapt situaÈia, Ã®ntr-un cÃ¢t un numÄr atÃ¢t de restrÃ¢ns de persoane are la degetul mic o asemenea putere economicÄ Èi nu numai",
+          "elapsed_ms": 91640,
+          "ttff_ms": 29717
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.13714285,
+        "stt_accuracy_levenshtein": 0.024390243,
+        "ttff_ratio": 2.5453534,
+        "ttc_ratio": 7.8492503
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.3"
+    },
+    {
+      "fixture": "ro-bogdan-30s",
+      "language": "ro",
+      "synthetic_placeholder": false,
+      "duration_s": 30.0,
+      "modes": {
+        "batch": {
+          "text": "Vreau să facem și o înregistrare mai lungă cu radio-ul care rulează pe fundal și cu mine care mă gândesc mai mult la ce vreau să zic, ca să vedem dacă modelul se descurcă bine și în situația asta când o să avem un fișier de peste 20 de secunde care să conțină o dictare sau ceva, care vrei sa vorbesc cu asistentul",
+          "elapsed_ms": 61390,
+          "ttff_ms": 61390
+        },
+        "streaming": {
+          "text": "Vreau sÄ facem Èi o Ã®nregistrare mai lungÄ cu radio-ul care ruleazÄ pe fundal Èi cu mine care mÄ gÃ¢ndesc mai mult la ce vreau sÄ zic, ca sÄ vedem dacÄ modelul se descurcÄ bine Èi Ã®n situaÈia asta cÃ¢nd o sÄ avem un fiÈier de peste 20 de secunde care sÄ conÈinÄ o dictare sau ceva, care vrei sa vorbesc cu asistentul",
+          "elapsed_ms": 152430,
+          "ttff_ms": 29635
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.12537314,
+        "stt_accuracy_levenshtein": 0.04658385,
+        "ttff_ratio": 0.48273334,
+        "ttc_ratio": 2.4829776
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.5"
+    },
+    {
+      "fixture": "ro-bogdan-10s",
+      "language": "ro",
+      "synthetic_placeholder": false,
+      "duration_s": 10.0,
+      "modes": {
+        "batch": {
+          "text": "Si acum facem o registrare cu muzica pe fundal, sa vedem daca modelele pot sa detecteze dictarea in timp ce e niste zgomul de fundal.",
+          "elapsed_ms": 10040,
+          "ttff_ms": 10040
+        },
+        "streaming": {
+          "text": "Si acum facem o registrare cu muzica pe fundal sa vedem daca modelele pot sa detecteze dictarea in timp ce este zgomul de fundal",
+          "elapsed_ms": 90660,
+          "ttff_ms": 29777
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.037593983,
+        "stt_accuracy_levenshtein": 0.09022556,
+        "ttff_ratio": 2.9658368,
+        "ttc_ratio": 9.029881
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.5"
+    }
+  ],
+  "pinned_params": {
+    "commit_use_prosody": false,
+    "commit_prosody_extend_ms": 250,
+    "commit_use_punctuation_hint": true,
+    "commit_punct_extend_ms": 150,
+    "commit_hold_on_filler": true,
+    "commit_filler_words": [
+      "um",
+      "uh",
+      "er",
+      "ah",
+      "mm",
+      "like",
+      "you know"
+    ],
+    "commit_dangling_words": [
+      "and",
+      "but",
+      "or",
+      "so",
+      "because",
+      "the",
+      "a",
+      "an",
+      "of",
+      "to",
+      "with",
+      "for",
+      "in",
+      "on",
+      "at",
+      "from"
+    ],
+    "eou_drain_extended_ms": 1500,
+    "chunk_ms_initial": 600,
+    "chunk_ms_steady": 1500
+  },
+  "model_capabilities": {
+    "english_only": false,
+    "model_label": "local:large-v3-turbo-q5_0"
+  }
+}

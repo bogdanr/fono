@@ -16,9 +16,8 @@
 //! 1. **Language scope first** — "English only?" before the model picker so
 //!    `.en` variants are only shown to mono-lingual English users.
 //! 2. **Hardware-aware shortlist** — `HardwareSnapshot::affords_model` gates
-//!    each candidate; Unsuitable models are hidden, Borderline models appear
-//!    with a friendly warning. The shortlist is capped to **3 entries** so
-//!    new users aren't overwhelmed.
+//!    each candidate; unaffordable models are hidden. The shortlist is
+//!    capped to **3 entries** so new users aren't overwhelmed.
 //! 3. **Friendly accuracy labels** — each item shows a quality bucket
 //!    (Excellent / Good / Acceptable / Inaccurate) computed from the
 //!    model's worst WER across the user's selected languages. Raw
@@ -37,7 +36,7 @@ use fono_core::config::{
     AssistantBackend, AssistantCloud, Config, PolishBackend, PolishCloud, PolishLocal, Stt,
     SttBackend, SttCloud, SttLocal, TtsBackend, TtsCloud, TtsWyoming,
 };
-use fono_core::hwcheck::{Affordability, HardwareSnapshot, LocalTier};
+use fono_core::hwcheck::{HardwareSnapshot, HostGpu, LocalTier};
 use fono_core::locale::detect_user_languages_ranked;
 use fono_core::provider_catalog::{CloudProvider, WebSearchSupport, CLOUD_PROVIDERS};
 use fono_core::providers::{
@@ -69,7 +68,12 @@ pub async fn run(paths: &Paths) -> Result<()> {
     };
 
     // ---------- Hardware probe + tier ----------
-    let snap = fono_core::hwcheck::probe(&paths.cache_dir);
+    let mut snap = fono_core::hwcheck::probe(&paths.cache_dir);
+    // Upgrade `host_gpu` based on the Vulkan probe (no-op on Apple
+    // Silicon, which already starts at Integrated). See ADR 0028.
+    if snap.host_gpu == HostGpu::None {
+        snap.host_gpu = fono_core::vulkan_probe::probe().host_gpu_class();
+    }
     let tier = snap.tier();
     print_hw_summary(&snap, tier);
 
@@ -1057,7 +1061,7 @@ fn build_polish_options(snap: &HardwareSnapshot) -> Vec<String> {
 /// Today: Apple Silicon (Metal/CoreML) or a Vulkan-capable GPU.
 /// CUDA / ROCm / NPU detection lands when those backends are wired.
 fn host_has_llm_acceleration(snap: &HardwareSnapshot) -> bool {
-    if snap.accelerated() {
+    if snap.host_gpu != HostGpu::None {
         return true;
     }
     fono_core::vulkan_probe::probe().is_usable()
@@ -1442,10 +1446,13 @@ fn accuracy_for_langs(model: &ModelInfo, langs: &[String]) -> AccuracyBucket {
     }
 }
 
-/// A candidate model for the wizard shortlist.
+/// A candidate model for the wizard shortlist. Every entry has been
+/// validated by [`HardwareSnapshot::affords_model`]; the shortlist no
+/// longer carries an `Affordability` field because that was always a
+/// boolean in disguise once the `Borderline` middle state was removed
+/// (plan `2026-05-25-wizard-selection-heuristics-refresh-v5`, A3).
 pub struct ShortlistEntry {
     pub model: &'static ModelInfo,
-    pub affordability: Affordability,
     pub accuracy: AccuracyBucket,
 }
 
@@ -1456,16 +1463,15 @@ pub const SHORTLIST_MAX: usize = 3;
 /// Build an ordered shortlist of whisper models for this hardware + language
 /// scope. Excluded:
 ///
-/// - models the hardware cannot load at all (`Affordability::Unsuitable`),
+/// - models the hardware cannot load (`affords_model` returns `false`),
 /// - models whose accuracy is `Inaccurate` for the selected languages
 ///   (worst WER > 15%) — unless every remaining candidate is also
 ///   Inaccurate, in which case we keep them as a fallback.
 ///
 /// Within the shortlist, entries are sorted by:
 ///
-/// 1. Affordability (Comfortable before Borderline);
-/// 2. Accuracy (Excellent → Good → Acceptable);
-/// 3. Largest-first (better quality first).
+/// 1. Accuracy (Excellent → Good → Acceptable);
+/// 2. Largest-first (better quality first).
 ///
 /// Capped at [`SHORTLIST_MAX`] entries so the picker stays uncluttered.
 ///
@@ -1479,15 +1485,10 @@ pub fn build_local_stt_shortlist(
         .iter()
         .filter(|m| m.multilingual != english_only)
         .filter_map(|m| {
-            let aff = snap.affords_model(m.min_ram_mb, m.approx_mb, m.realtime_factor_cpu_avx2);
-            if aff == Affordability::Unsuitable {
-                None
+            if snap.affords_model(m.min_ram_mb, m.approx_mb, m.realtime_factor_cpu_avx2) {
+                Some(ShortlistEntry { model: m, accuracy: accuracy_for_langs(m, langs) })
             } else {
-                Some(ShortlistEntry {
-                    model: m,
-                    affordability: aff,
-                    accuracy: accuracy_for_langs(m, langs),
-                })
+                None
             }
         })
         .collect();
@@ -1503,11 +1504,6 @@ pub fn build_local_stt_shortlist(
     };
 
     entries.sort_by(|a, b| {
-        let aff_order = |aff: &Affordability| match aff {
-            Affordability::Comfortable => 0,
-            Affordability::Borderline => 1,
-            Affordability::Unsuitable => 2,
-        };
         let acc_order = |acc: &AccuracyBucket| match acc {
             AccuracyBucket::Excellent => 0,
             AccuracyBucket::Good => 1,
@@ -1515,9 +1511,8 @@ pub fn build_local_stt_shortlist(
             AccuracyBucket::Unknown => 3,
             AccuracyBucket::Inaccurate => 4,
         };
-        aff_order(&a.affordability)
-            .cmp(&aff_order(&b.affordability))
-            .then_with(|| acc_order(&a.accuracy).cmp(&acc_order(&b.accuracy)))
+        acc_order(&a.accuracy)
+            .cmp(&acc_order(&b.accuracy))
             .then(b.model.approx_mb.cmp(&a.model.approx_mb))
     });
 
@@ -1549,10 +1544,9 @@ fn friendly_model_label(model: &ModelInfo) -> &'static str {
 /// Data-driven local STT model picker. Replaces the hard-coded tier match.
 ///
 /// Shows at most [`SHORTLIST_MAX`] models matching the language scope
-/// (`.en` for English-only, multilingual otherwise). Borderline models
-/// appear with a friendly "may lag in live mode" suffix. The default
-/// cursor points at the highest-ranked entry (Comfortable + best
-/// accuracy first).
+/// (`.en` for English-only, multilingual otherwise). Every shortlist
+/// entry is affordable by construction; the default cursor points at
+/// the top (best accuracy, then largest model).
 fn pick_local_stt_model(
     theme: &ColorfulTheme,
     english_only: bool,
@@ -1603,22 +1597,11 @@ fn pick_local_stt_model(
             let label = friendly_model_label(entry.model);
             let size = size_label(entry.model.approx_mb);
             let acc = entry.accuracy.label();
-            let warn = match entry.affordability {
-                Affordability::Comfortable => "",
-                Affordability::Borderline => " — may lag in live mode on this machine",
-                Affordability::Unsuitable => unreachable!("filtered above"),
-            };
-            // Only tag the top entry as (recommended) when it is
-            // genuinely Comfortable; a Borderline entry at position 0
-            // already carries a "may lag" suffix, so adding
-            // "(recommended)" alongside it would contradict itself.
-            let default_tag = if i == 0 && matches!(entry.affordability, Affordability::Comfortable)
-            {
-                "  (recommended)"
-            } else {
-                ""
-            };
-            format!("{label}, {size} — accuracy: {acc}{warn}{default_tag}")
+            // Every entry is affordable, so the top one is always the
+            // recommended pick — no live-mode warning needed (live
+            // preview is one of five viz styles, not the default).
+            let default_tag = if i == 0 { "  (recommended)" } else { "" };
+            format!("{label}, {size} — accuracy: {acc}{default_tag}")
         })
         .collect();
 
@@ -2207,6 +2190,7 @@ mod tests {
             cpu_features: CpuFeatures { avx2, avx512: false, fma: false, neon: false },
             os: "linux".into(),
             arch: "x86_64".into(),
+            host_gpu: HostGpu::None,
         }
     }
 
@@ -2253,41 +2237,38 @@ mod tests {
 
     #[test]
     fn english_only_recommended_pick_is_small_en_on_12_core_cpu() {
-        // With threshold 3.0: small.en (rf=3.0) on 12-core CPU =
-        // 3.0 × sqrt(12/8) ≈ 3.67 ≥ 3.0 → Comfortable; outranks base.en.
+        // small.en (rf=3.3) on 12-core CPU = 3.3 × sqrt(12/8) ≈ 4.04 ≥ 2.0
+        // → affords; outranks tiny.en on accuracy.
         let s = snap(12, 32, 200, true);
         let shortlist = build_local_stt_shortlist(true, &["en".to_string()], &s);
         assert!(!shortlist.is_empty());
         assert_eq!(shortlist[0].model.name, "small.en");
-        assert_eq!(shortlist[0].affordability, Affordability::Comfortable);
     }
 
     #[test]
     fn multilingual_recommended_pick_is_turbo_on_apple_silicon() {
-        // Apple Silicon: relaxed live threshold lets turbo become Comfortable.
+        // Apple Silicon defaults to HostGpu::Integrated (2x multiplier);
+        // turbo (rf=2.3) × 2.0 = 4.6 ≥ 2.0 → affords; outranks small on accuracy.
         let s = HardwareSnapshot {
             os: "macos".into(),
             arch: "aarch64".into(),
             cpu_features: CpuFeatures { neon: true, ..Default::default() },
+            host_gpu: HostGpu::Integrated,
             ..snap(8, 16, 200, false)
         };
         let shortlist = build_local_stt_shortlist(false, &["en".to_string()], &s);
         assert!(!shortlist.is_empty());
         assert_eq!(shortlist[0].model.name, "large-v3-turbo");
-        assert_eq!(shortlist[0].affordability, Affordability::Comfortable);
     }
 
     #[test]
-    fn small_is_comfortable_on_8_core_cpu_only() {
-        // With threshold 3.0: small.en (rf=3.0) on 8-core CPU =
-        // 3.0 × 1.0 = 3.0 → Comfortable. Matches Phase 0 measurement
-        // on ultra7-258v (3.13× batch RTF).
+    fn small_is_affordable_on_8_core_cpu_only() {
+        // small.en (rf=3.3) on 8-core CPU = 3.3 × 1.0 = 3.3 ≥ 2.0 → affords.
         let s = snap(8, 16, 200, true);
         let entry = build_local_stt_shortlist(true, &["en".to_string()], &s)
             .into_iter()
-            .find(|e| e.model.name == "small.en")
-            .expect("small.en should be in shortlist");
-        assert_eq!(entry.affordability, Affordability::Comfortable);
+            .find(|e| e.model.name == "small.en");
+        assert!(entry.is_some(), "small.en should be in shortlist on 8-core CPU");
     }
 
     #[test]
@@ -2301,6 +2282,7 @@ mod tests {
             cpu_features: CpuFeatures { avx2: true, ..Default::default() },
             os: "linux".into(),
             arch: "x86_64".into(),
+            host_gpu: HostGpu::None,
         };
         let has_tiny_en = build_local_stt_shortlist(true, &["en".to_string()], &s)
             .iter()
@@ -2308,32 +2290,15 @@ mod tests {
         assert!(has_tiny_en, "tiny.en should be in shortlist on a 1 GiB-available machine");
     }
 
-    #[test]
-    fn comfortable_first_in_shortlist() {
-        let s = snap(6, 16, 200, true);
-        let shortlist = build_local_stt_shortlist(true, &["en".to_string()], &s);
-        let mut seen_borderline = false;
-        for entry in &shortlist {
-            if entry.affordability == Affordability::Borderline {
-                seen_borderline = true;
-            }
-            if seen_borderline {
-                assert_ne!(
-                    entry.affordability,
-                    Affordability::Comfortable,
-                    "Comfortable entry '{}' found after a Borderline entry",
-                    entry.model.name
-                );
-            }
-        }
-    }
-
     // ── accuracy_for_langs ───────────────────────────────────────────────
 
     #[test]
-    fn accuracy_excellent_for_small_en_on_english() {
+    fn accuracy_good_for_small_en_on_english() {
+        // After the 2026-05-25 wer_by_lang refresh to Open-ASR-Leaderboard
+        // means, no Whisper variant lands in the Excellent (≤6%) bucket —
+        // small.en sits at 9% WER and buckets as Good.
         let m = ModelRegistry::get("small.en").unwrap();
-        assert_eq!(accuracy_for_langs(m, &["en".to_string()]), AccuracyBucket::Excellent);
+        assert_eq!(accuracy_for_langs(m, &["en".to_string()]), AccuracyBucket::Good);
     }
 
     #[test]

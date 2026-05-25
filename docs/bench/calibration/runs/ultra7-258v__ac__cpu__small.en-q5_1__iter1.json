@@ -1,5 +1,5 @@
 {
-  "fono_version": "0.8.0",
+  "fono_version": "0.8.1",
   "stt_backend": "local:small.en-q5_1",
   "tier": "tier1",
   "threshold_levenshtein": 0.05,
@@ -12,20 +12,20 @@
       "modes": {
         "batch": {
           "text": "The art of war, then, is governed by five constant fact-",
-          "elapsed_ms": 575,
-          "ttff_ms": 575
+          "elapsed_ms": 574,
+          "ttff_ms": 574
         },
         "streaming": {
           "text": "The art of war, then, is governed by five constant fact-",
-          "elapsed_ms": 8142,
-          "ttff_ms": 2708
+          "elapsed_ms": 8117,
+          "ttff_ms": 2701
         }
       },
       "metrics": {
         "stt_levenshtein_norm": 0.0,
         "stt_accuracy_levenshtein": 0.25,
-        "ttff_ratio": 4.709565,
-        "ttc_ratio": 14.16
+        "ttff_ratio": 4.705575,
+        "ttc_ratio": 14.141115
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -39,20 +39,20 @@
       "modes": {
         "batch": {
           "text": "The art of war, then, is governed by five constant factors to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field. These are 1. The moral law, 2. Heaven, 3. Earth, 5.",
-          "elapsed_ms": 3763,
-          "ttff_ms": 3763
+          "elapsed_ms": 3756,
+          "ttff_ms": 3756
         },
         "streaming": {
           "text": "The art of war, then, is governed by five constant factors to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field. These are, one, the moral law, two, heaven, three, earth, and four, earth.",
-          "elapsed_ms": 10276,
-          "ttff_ms": 2776
+          "elapsed_ms": 10207,
+          "ttff_ms": 2757
         }
       },
       "metrics": {
         "stt_levenshtein_norm": 0.12195122,
         "stt_accuracy_levenshtein": 0.12658228,
-        "ttff_ratio": 0.7377093,
-        "ttc_ratio": 2.7308
+        "ttff_ratio": 0.73402554,
+        "ttc_ratio": 2.7175186
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -66,51 +66,78 @@
       "modes": {
         "batch": {
           "text": "That Jane was yielding to the preference which she had begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general, so that she would be able to be in love with the world.",
-          "elapsed_ms": 1798,
-          "ttff_ms": 1798
+          "elapsed_ms": 1801,
+          "ttff_ms": 1801
         },
         "streaming": {
           "text": "That Jane was yielding to the preference which she had begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general,",
-          "elapsed_ms": 12097,
-          "ttff_ms": 3713
+          "elapsed_ms": 12337,
+          "ttff_ms": 3702
         }
       },
       "metrics": {
         "stt_levenshtein_norm": 0.19112629,
         "stt_accuracy_levenshtein": 0.20136519,
-        "ttff_ratio": 2.0650723,
-        "ttc_ratio": 6.728031
+        "ttff_ratio": 2.0555248,
+        "ttc_ratio": 6.8500834
       },
       "verdict": "fail",
       "skip_reason": null,
       "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2; acc 0.201 > 0.200"
     },
     {
-      "fixture": "en-conversational",
+      "fixture": "en-self-dictation",
       "language": "en",
       "synthetic_placeholder": false,
-      "duration_s": 10.0,
+      "duration_s": 12.033,
       "modes": {
         "batch": {
-          "text": "In nine cases out of ten a woman had better show more affection than she feels. Bingley likes your sister undoubtedly, but he may never do more than she feels. Bingley likes your sister undoubtedly, but he may never do more than she feels. Bingley likes your",
-          "elapsed_ms": 1684,
-          "ttff_ms": 1684
+          "text": "I need to record a fixture myself for this benchmark because the ones that I'm finding online are not very well fit to the task that I'm trying to accomplish.",
+          "elapsed_ms": 1779,
+          "ttff_ms": 1779
         },
         "streaming": {
-          "text": "In nine cases out of ten a woman had better show more affection than she feels.",
-          "elapsed_ms": 12812,
-          "ttff_ms": 4209
+          "text": "I need to record a fixture myself for this benchmark because the ones that I'm finding online are not very well fit to the task that I'm trying to accomplish.",
+          "elapsed_ms": 13007,
+          "ttff_ms": 4191
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.6937984,
-        "stt_accuracy_levenshtein": 0.4883721,
-        "ttff_ratio": 2.499406,
-        "ttc_ratio": 7.608076
+        "stt_levenshtein_norm": 0.0,
+        "stt_accuracy_levenshtein": 0.025,
+        "ttff_ratio": 2.3558178,
+        "ttc_ratio": 7.311411
       },
-      "verdict": "fail",
+      "verdict": "pass",
       "skip_reason": null,
-      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2; equiv 0.694 > 0.200; acc 0.488 > 0.200"
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.25"
+    },
+    {
+      "fixture": "en-self-casual",
+      "language": "en",
+      "synthetic_placeholder": false,
+      "duration_s": 9.78375,
+      "modes": {
+        "batch": {
+          "text": "Let's go to the Chinese restaurant tonight, but please do not bring Sam, you know he is very annoying.",
+          "elapsed_ms": 1439,
+          "ttff_ms": 1439
+        },
+        "streaming": {
+          "text": "Let's go to the Chinese restaurant tonight, but please do not bring Sam. You know, he is very annoying.",
+          "elapsed_ms": 12874,
+          "ttff_ms": 4181
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.019417476,
+        "stt_accuracy_levenshtein": 0.019417476,
+        "ttff_ratio": 2.90549,
+        "ttc_ratio": 8.94649
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.25"
     },
     {
       "fixture": "es-lorca-reyerta",

@@ -298,31 +298,53 @@ fn spawn_parec(target_rate: u32) -> Result<Child> {
         .context("spawn parec")
 }
 
-/// PipeWire-native fallback. `pw-cat --record` ships in `pipewire-bin`
-/// which is preinstalled on Ubuntu 24.04 and other modern distros.
-/// Output format syntax differs from parec: no `--raw` flag, and the
-/// trailing `-` filename means "write to stdout"; the explicit
-/// `--format=s16` makes it emit raw little-endian 16-bit PCM.
+/// PipeWire-native capture path. `pw-cat --record` ships in
+/// `pipewire-bin` which is preinstalled on Ubuntu 24.04 and every
+/// other modern PipeWire distro. The `--raw` flag is non-negotiable:
+/// without it pw-cat writes a container on stdout (WAV when the
+/// output is a file with a recognized extension, a PipeWire-native
+/// `dns.` framing when the output is `-` / stdout) and the framing
+/// bytes get mis-interpreted as PCM samples by [`s16le_to_f32`],
+/// producing periodic clicks and pops in the captured audio. Pair it
+/// with `--format=s16` to lock the sample format to little-endian
+/// signed 16-bit and `-` as the filename to route raw PCM to stdout.
+/// Mirrors the `--raw` behaviour of [`spawn_parec`].
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
 fn spawn_pw_cat(target_rate: u32) -> Result<Child> {
+    let rate_arg = format!("--rate={target_rate}");
+    let args = pw_cat_args(&rate_arg);
     debug!("capture: spawning pw-cat raw s16 mono at {target_rate} Hz");
     Command::new("pw-cat")
-        .args([
-            "--record",
-            "--format=s16",
-            "--channels=1",
-            &format!("--rate={target_rate}"),
-            // 20 ms latency — matches the parec configuration so the
-            // waveform overlay and VAD timing behave identically
-            // regardless of which backend ends up serving capture.
-            "--latency=20ms",
-            "-",
-        ])
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .context("spawn pw-cat")
+}
+
+/// Argument vector passed to `pw-cat --record`. Extracted so the
+/// regression test can assert the presence of `--raw` without having
+/// to spawn a real audio stack. `rate_arg` is the formatted
+/// `--rate=<N>` string supplied by the caller (the borrow keeps the
+/// returned slice tied to the caller's lifetime).
+#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+fn pw_cat_args(rate_arg: &str) -> [&str; 7] {
+    [
+        "--record",
+        // `--raw` forces bare PCM on stdout. Without it pw-cat wraps
+        // the stream in a container and Fono mis-reads the framing
+        // bytes as samples — see the doc comment on `spawn_pw_cat`.
+        "--raw",
+        "--format=s16",
+        "--channels=1",
+        rate_arg,
+        // 20 ms latency — matches the parec configuration so the
+        // waveform overlay and VAD timing behave identically
+        // regardless of which backend ends up serving capture.
+        "--latency=20ms",
+        "-",
+    ]
 }
 
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
@@ -454,6 +476,30 @@ mod tests {
     fn mono_averages_channels() {
         let out = to_mono_f32(&[1.0, 3.0, 2.0, 4.0], 2);
         assert_eq!(out, vec![2.0, 3.0]);
+    }
+
+    /// Regression test for the v0.8.0 → v0.8.1 "only records noise"
+    /// bug: `pw-cat` must be invoked with `--raw`, otherwise it writes
+    /// a containerised stream on stdout whose framing bytes are
+    /// mis-interpreted as PCM samples by [`s16le_to_f32`]. Symptom on
+    /// affected Linux hosts (PipeWire without `parec`/`pulseaudio-utils`)
+    /// is sample counts that are no longer multiples of the 20 ms frame
+    /// size and transcripts that come back as pure noise. See
+    /// CHANGELOG entry under 0.8.2.
+    #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+    #[test]
+    fn pw_cat_args_include_raw_flag() {
+        let rate = format!("--rate={TARGET_SAMPLE_RATE}");
+        let args = pw_cat_args(&rate);
+        assert!(args.contains(&"--record"), "pw-cat must run in record mode: {args:?}");
+        assert!(
+            args.contains(&"--raw"),
+            "pw-cat must be invoked with --raw to emit bare s16le PCM on stdout; \
+             without it the output is a container and Fono records noise: {args:?}"
+        );
+        assert!(args.contains(&"--format=s16"), "pw-cat must request s16 format: {args:?}");
+        assert!(args.contains(&"--channels=1"), "pw-cat must request mono: {args:?}");
+        assert!(args.contains(&rate.as_str()), "pw-cat must carry rate arg {rate:?}: {args:?}");
     }
 
     #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]

@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/root/Work/fono/target/release/fono-bench-cpu",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "small.en",
+    "--output",
+    "/root/Work/fono/runs-local/ultra7-258v__ac__cpu__small.en__iter3.json",
+    "--fixtures",
+    "/root/Work/fono/tests/fixtures/equivalence",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": "1",
+    "battery_pct": 98,
+    "package_temp_c": 56.0
+  },
+  "context_start": {
+    "ac_online": "1",
+    "battery_pct": 98,
+    "captured_at_utc": "2026-05-24T10:17:18.993384+00:00",
+    "hostname": "nimblex",
+    "package_temp_c": 46.0,
+    "platform": "linux",
+    "power_profile": "governor=powersave"
+  },
+  "exit_code": 0,
+  "label": "ultra7-258v/ac/cpu/small.en/iter3",
+  "max_rss_kib": 1408596,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 1.233282,
+  "user_s": 258.387723,
+  "wall_clock_s": 65.845067
+}

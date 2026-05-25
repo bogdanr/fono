@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/root/Work/fono/target/release/fono-bench-vulkan",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "tiny.en",
+    "--fixtures",
+    "/root/Work/fono/tests/fixtures/equivalence",
+    "--output",
+    "/root/Work/fono/runs-local/ryzen-5950x__ac__vulkan__tiny.en__iter3.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": null,
+    "battery_pct": null,
+    "package_temp_c": 55.75
+  },
+  "context_start": {
+    "ac_online": null,
+    "battery_pct": null,
+    "captured_at_utc": "2026-05-24T18:11:19.601096+00:00",
+    "hostname": "proxmox4",
+    "package_temp_c": 53.625,
+    "platform": "linux",
+    "power_profile": "governor=powersave"
+  },
+  "exit_code": 0,
+  "label": "ryzen-5950x/ac/vulkan/tiny.en/iter3",
+  "max_rss_kib": 254488,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 0.41938,
+  "user_s": 1.211316,
+  "wall_clock_s": 1.178497
+}

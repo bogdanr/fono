@@ -20,6 +20,15 @@ set -eu
 MODELS="${MODELS:-tiny tiny.en base base.en small small.en large-v3-turbo}"
 ITERS="${ITERS:-3}"
 COOLDOWN="${COOLDOWN:-60}"
+# Fixtures dir is normally auto-detected from the workspace root by
+# fono-bench. When the binary lives outside its build tree (e.g. on a
+# remote bench host), the auto-detection fails, so accept an explicit
+# override via FIXTURES env var.
+FIXTURES="${FIXTURES:-}"
+FIXTURES_FLAG=""
+if [ -n "$FIXTURES" ]; then
+    FIXTURES_FLAG="--fixtures $FIXTURES"
+fi
 
 mkdir -p "$RUNS_DIR"
 echo "sweep: host=$HOST power=$POWER build=$BUILD models='$MODELS' iters=$ITERS cooldown=${COOLDOWN}s"
@@ -46,7 +55,7 @@ for m in $MODELS; do
         fi
         if python3 "$WRAPPER" --sidecar "$sidecar" --label "$label" -- \
             "$BENCH" equivalence --stt local --model "$m" --output "$out" \
-            --no-legend; then
+            $FIXTURES_FLAG --no-legend; then
             echo "$(date -u +%FT%TZ) OK $label"
         else
             rc=$?

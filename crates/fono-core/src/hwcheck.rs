@@ -31,6 +31,11 @@ pub struct HardwareSnapshot {
     pub cpu_features: CpuFeatures,
     pub os: String,
     pub arch: String,
+    /// Three-class GPU summary derived from the Vulkan probe. See
+    /// [`HostGpu`] and ADR 0028. Defaults to [`HostGpu::None`] for
+    /// snapshots that pre-date the field (serde `default`).
+    #[serde(default)]
+    pub host_gpu: HostGpu,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -41,6 +46,39 @@ pub struct CpuFeatures {
     pub avx512: bool,
     pub fma: bool,
     pub neon: bool,
+}
+
+/// Three-class host-GPU summary, derived from the Vulkan probe's
+/// `VkPhysicalDeviceType` + `shaderFloat16` features. The classes are a
+/// gross approximation chosen because they are the smallest set that
+/// reproduces the calibration-matrix speedups (1x / 2x / 4x) on the
+/// five reference hosts without a maintained PCI table. See ADR 0028.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HostGpu {
+    /// No usable GPU (no Vulkan loader, software rasteriser, or a
+    /// legacy iGPU that lacks `shaderFloat16`).
+    #[default]
+    None,
+    /// Modern integrated GPU with `shaderFloat16` (Vulkan Roadmap 2022
+    /// baseline). Empirically ~2x CPU on the calibration hosts.
+    Integrated,
+    /// Discrete GPU. Empirically ~4x CPU on the calibration hosts.
+    Discrete,
+}
+
+impl HostGpu {
+    /// Multiplier applied to the CPU-AVX2 batch-RTF anchor in
+    /// [`HardwareSnapshot::affords_model`]. Internal only -- do **not**
+    /// surface to users.
+    #[must_use]
+    pub fn multiplier(self) -> f32 {
+        match self {
+            Self::None => 1.0,
+            Self::Integrated => 2.0,
+            Self::Discrete => 4.0,
+        }
+    }
 }
 
 /// Predicted ability to run local Fono workloads.
@@ -88,48 +126,13 @@ impl LocalTier {
     }
 }
 
-/// Predicted feasibility of running a specific whisper model on this hardware.
-///
-/// Returned by [`HardwareSnapshot::affords_model`]. The three buckets let the
-/// wizard filter, warn, or hide models without exposing raw numbers to users.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Affordability {
-    /// Fits in RAM and the CPU can keep up with real-time transcription.
-    /// Safe to offer as a default in the wizard.
-    Comfortable,
-    /// Fits in RAM but the effective real-time factor is below the live-mode
-    /// threshold on this machine — batch dictation will be smooth but live
-    /// preview may lag. Offered with a warning suffix in the wizard.
-    Borderline,
-    /// Insufficient available RAM or free disk space — the model cannot load
-    /// without swapping. Hidden from the wizard shortlist; a footer explains
-    /// why it was excluded.
-    Unsuitable,
-}
-
-/// Minimum effective batch real-time factor required for comfortable
-/// live-mode transcription on a CPU-only machine. Live mode adds
-/// roughly 2–4× compute amplification on top of batch decoding
-/// (overlapping windows, look-ahead context), so a model that decodes
-/// at 4× batch realtime is *only just* fast enough for streaming.
-///
-/// Phase 0 (2026-05-15) measured small batch RTF at 3.13× on
-/// ultra7-258v (Lunar Lake 8c) — comfortable for dictation. Threshold
-/// set to 3.0 so small lands Comfortable on modern 8+ core laptops.
-pub const LIVE_REALTIME_MIN_CPU: f32 = 3.0;
-
-/// Minimum effective batch real-time factor on machines with hardware
-/// acceleration (Apple Silicon Metal/CoreML today; future: CUDA,
-/// Vulkan, Intel NPU). Whisper.cpp's accelerated path uses far less
-/// CPU per audio-second, so streaming overhead is much smaller and a
-/// model needs only ~1.5× batch realtime to feel snappy live.
-pub const LIVE_REALTIME_MIN_ACCEL: f32 = 1.5;
-
-/// Floor on effective batch RTF. Below this the model cannot keep up
-/// even in batch mode → hide rather than soft-warn. Calibrated against
-/// the 2026-05-15 Phase 0 sweep where every laptop landed turbo below
-/// batch RTF 1.0 on CPU.
-pub const BATCH_REALTIME_MIN: f32 = 1.0;
+/// Floor on effective batch RTF below which a model is considered
+/// unsuitable for the host: it cannot keep up with real-time audio in
+/// the wizard's data-driven walk. Raised from 1.0 to 2.0 on
+/// 2026-05-25 (plan `2026-05-25-wizard-selection-heuristics-refresh-v5`)
+/// to match the auto-select walk's gate
+/// (`docs/bench/calibration/summary/auto-select.html:279, 368`).
+pub const BATCH_REALTIME_MIN: f32 = 2.0;
 
 /// Number of physical cores on the AVX2 reference machine used for the
 /// `realtime_factor_cpu_avx2` benchmark in the model registry.
@@ -199,22 +202,26 @@ impl HardwareSnapshot {
 
     /// Predict whether this machine can run a model with the given parameters.
     ///
-    /// This is a pure function over the hardware snapshot — no I/O. The wizard
+    /// This is a pure function over the hardware snapshot -- no I/O. The wizard
     /// calls it for each candidate model; `fono-stt`'s `ModelInfo` fields map
     /// directly to the three parameters so the caller avoids a circular dep
-    /// (`fono-core` ← `fono-stt`):
+    /// (`fono-core` <- `fono-stt`):
     ///
     /// ```ignore
-    /// let aff = snap.affords_model(
+    /// let ok = snap.affords_model(
     ///     model.min_ram_mb,
     ///     model.approx_mb,
     ///     model.realtime_factor_cpu_avx2,
     /// );
     /// ```
     ///
+    /// Returns `true` when the host has enough RAM + disk headroom AND
+    /// the effective batch RTF (CPU AVX2 anchor scaled by cores, ISA,
+    /// and the [`HostGpu`] multiplier) clears [`BATCH_REALTIME_MIN`].
+    ///
     /// # Parameters
     /// - `min_ram_mb`: minimum available RAM (MiB) the model needs.
-    /// - `approx_mb`: on-disk size (MiB); needs 2× headroom on free disk.
+    /// - `approx_mb`: on-disk size (MiB); needs 2x headroom on free disk.
     /// - `realtime_factor_cpu_avx2`: audio-seconds per wall-second on the
     ///   8-core AVX2 reference machine ([`REFERENCE_CORES`]).
     #[must_use]
@@ -223,13 +230,13 @@ impl HardwareSnapshot {
         min_ram_mb: u32,
         approx_mb: u32,
         realtime_factor_cpu_avx2: f32,
-    ) -> Affordability {
+    ) -> bool {
         let avail_ram_mb = (self.available_ram_bytes / (1024 * 1024)) as u32;
         let free_disk_mb = (self.free_disk_bytes / (1024 * 1024)) as u32;
 
         // Cannot load without swapping or without disk headroom.
         if avail_ram_mb < min_ram_mb || free_disk_mb < approx_mb * 2 {
-            return Affordability::Unsuitable;
+            return false;
         }
 
         // Whisper.cpp is memory-bandwidth-bound past ~6 threads, so
@@ -244,80 +251,45 @@ impl HardwareSnapshot {
         let isa_scale = if self.cpu_features.avx2 || self.cpu_features.neon {
             1.0_f32
         } else {
-            0.5 // non-vectorised path is roughly 2× slower
+            0.5 // non-vectorised path is roughly 2x slower
         };
-        let mut effective_rf = realtime_factor_cpu_avx2 * core_scale * isa_scale;
-
-        // Accelerated builds run whisper.cpp on GPU/Metal/CoreML. Phase 0
-        // measured 5-14× speedup over CPU across Iris Xe / Arc Battlemage /
-        // Apple Silicon. Apply a conservative 4× to lift the CPU-anchored
-        // rf into the right ballpark without over-promising on weak iGPUs.
-        if self.accelerated() {
-            effective_rf *= 4.0;
-        } else if effective_rf < BATCH_REALTIME_MIN {
-            // CPU-only floor: below 1× batch the model cannot keep up.
-            return Affordability::Unsuitable;
-        }
-
-        let threshold =
-            if self.accelerated() { LIVE_REALTIME_MIN_ACCEL } else { LIVE_REALTIME_MIN_CPU };
-
-        if effective_rf < threshold {
-            Affordability::Borderline
-        } else {
-            Affordability::Comfortable
-        }
+        let effective_rf =
+            realtime_factor_cpu_avx2 * core_scale * isa_scale * self.host_gpu.multiplier();
+        effective_rf >= BATCH_REALTIME_MIN
     }
 
-    /// Whether whisper.cpp can use a hardware accelerator on this host.
+    /// One-line, qualitative description of the speech-recognition
+    /// acceleration available on this host. Reflects the host's
+    /// [`HostGpu`] class; **no numeric multiplier is exposed** (the
+    /// 1x / 2x / 4x multipliers are internal scaling factors, not a
+    /// promise to the user). See ADR 0028.
     ///
-    /// True on Apple Silicon (Metal/CoreML ships by default) or when
-    /// the build enabled an `accel-*` feature (CUDA, Vulkan, HipBLAS,
-    /// Metal, CoreML). We cannot tell GPU classes apart from `cfg!`
-    /// alone, so weak iGPUs may land `borderline` rather than
-    /// `unsuitable`; the wizard's "may lag in live mode" suffix still
-    /// warns the user.
-    #[must_use]
-    pub fn accelerated(&self) -> bool {
-        if self.os == "macos" && self.arch == "aarch64" {
-            return true;
-        }
-        cfg!(any(
-            feature = "accel-cuda",
-            feature = "accel-vulkan",
-            feature = "accel-hipblas",
-            feature = "accel-metal",
-            feature = "accel-coreml",
-        ))
-    }
-
-    /// One-line, human-readable description of the speech-recognition
-    /// acceleration available on this host.
-    ///
-    /// The wizard prints this under the cores/ram lines so users see at a
-    /// glance what hardware will be doing the speech work, and roughly how
-    /// much it helps live (streaming) transcription.
-    ///
-    /// The expected-impact figures are rough — they reflect the ratio of
-    /// the strict CPU realtime threshold to the relaxed accel threshold
-    /// (`LIVE_REALTIME_MIN_CPU / LIVE_REALTIME_MIN_ACCEL` ≈ 4×) and the
-    /// observation that whisper.cpp's Metal path often runs the encoder
-    /// 3–5× faster than AVX2 on the same machine.
+    /// The wizard prints this under the cores/ram lines so users see at
+    /// a glance what hardware will be doing the speech work.
     #[must_use]
     pub fn acceleration_summary(&self) -> String {
         if self.os == "macos" && self.arch == "aarch64" {
-            "Apple Silicon (Metal + CoreML) — ~3–5× faster, live mode OK".to_string()
-        } else if self.cpu_features.avx512 {
-            "CPU only (AVX-512) — solid for batch dictation; live mode works for tiny / base"
-                .to_string()
-        } else if self.cpu_features.avx2 && self.cpu_features.fma {
-            "CPU only (AVX2 + FMA) — fine for batch dictation; live mode best with tiny".to_string()
-        } else if self.cpu_features.avx2 {
-            "CPU only (AVX2) — fine for batch dictation; live mode best with tiny".to_string()
-        } else if self.cpu_features.neon {
-            "CPU only (NEON) — fine for batch dictation; live mode not recommended".to_string()
-        } else {
-            "CPU only (no vector extensions) — local models will be very slow, cloud STT recommended".to_string()
+            return "Apple Silicon (Metal + CoreML) -- Vulkan backend recommended".to_string();
+        }
+        match self.host_gpu {
+            HostGpu::Discrete => "Discrete GPU detected -- Vulkan backend recommended".to_string(),
+            HostGpu::Integrated => {
+                "Modern integrated GPU detected -- Vulkan backend recommended".to_string()
+            }
+            HostGpu::None => {
+                if self.cpu_features.avx512 {
+                    "Legacy / no GPU -- CPU backend (AVX-512)".to_string()
+                } else if self.cpu_features.avx2 && self.cpu_features.fma {
+                    "Legacy / no GPU -- CPU backend (AVX2 + FMA)".to_string()
+                } else if self.cpu_features.avx2 {
+                    "Legacy / no GPU -- CPU backend (AVX2)".to_string()
+                } else if self.cpu_features.neon {
+                    "Legacy / no GPU -- CPU backend (NEON)".to_string()
+                } else {
+                    "Legacy / no GPU -- CPU backend (no vector extensions; cloud STT recommended)"
+                        .to_string()
+                }
+            }
         }
     }
 
@@ -385,6 +357,24 @@ pub fn probe(disk_check_dir: &Path) -> HardwareSnapshot {
         cpu_features: detect_cpu_features(),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
+        // Apple Silicon is Integrated (Metal/CoreML); every other
+        // platform starts at None and is upgraded by the Vulkan probe
+        // (the probe lives in `fono-core::vulkan_probe`, owned by the
+        // host binary). See ADR 0028.
+        host_gpu: default_host_gpu_for_platform(),
+    }
+}
+
+/// Static platform default for [`HostGpu`] without consulting a runtime
+/// Vulkan probe. Apple Silicon is always [`HostGpu::Integrated`]
+/// (Metal + CoreML are unconditional); every other platform starts at
+/// [`HostGpu::None`] and is upgraded by the Vulkan probe.
+#[must_use]
+pub fn default_host_gpu_for_platform() -> HostGpu {
+    if std::env::consts::OS == "macos" && std::env::consts::ARCH == "aarch64" {
+        HostGpu::Integrated
+    } else {
+        HostGpu::None
     }
 }
 
@@ -529,6 +519,7 @@ mod tests {
             cpu_features: CpuFeatures { avx2, avx512: false, fma: false, neon: false },
             os: "linux".into(),
             arch: "x86_64".into(),
+            host_gpu: HostGpu::None,
         }
     }
 
@@ -634,69 +625,75 @@ mod tests {
     /// Realistic tiny.en: min_ram=250 MiB, approx=75 MiB, rf=20
     const TINY_EN: (u32, u32, f32) = (250, 75, 20.0);
 
-    fn affords(s: &HardwareSnapshot, (min_ram, approx, rf): (u32, u32, f32)) -> Affordability {
+    fn affords(s: &HardwareSnapshot, (min_ram, approx, rf): (u32, u32, f32)) -> bool {
         s.affords_model(min_ram, approx, rf)
     }
 
     #[test]
-    fn affords_tiny_comfortable_on_8_core_avx2() {
-        // tiny rf=20 × 1.0 × 1.0 = 20 ≥ 6.0 (CPU threshold) → Comfortable
+    fn affords_tiny_on_8_core_avx2() {
+        // tiny rf=20 × 1.0 × 1.0 × 1.0 = 20 ≥ 2.0 → affords
         let s = snap(8, 16, 100, true);
-        assert_eq!(affords(&s, TINY_EN), Affordability::Comfortable);
+        assert!(affords(&s, TINY_EN));
     }
 
     #[test]
-    fn affords_small_comfortable_on_8_core_cpu_only() {
-        // small rf=3.0 × 1.0 × 1.0 = 3.0 ≥ 3.0 (CPU threshold) → Comfortable.
-        // Phase 0 measured 3.13× batch RTF on ultra7-258v (Lunar Lake 8c).
+    fn affords_small_on_8_core_cpu_only() {
+        // small rf=4.0 × 1.0 × 1.0 × 1.0 = 4.0 ≥ 2.0 → affords
         let s = snap(8, 16, 100, true);
-        assert_eq!(affords(&s, SMALL_EN), Affordability::Comfortable);
+        assert!(affords(&s, SMALL_EN));
     }
 
     #[test]
-    fn affords_small_comfortable_on_high_core_cpu_only() {
-        // 24 cores: small rf=3.0 × sqrt(24/8) × 1.0 ≈ 5.20 ≥ 3.0 → Comfortable.
-        // Past the 8-core reference the curve is sub-linear (Phase 0
-        // calibration showed whisper.cpp doesn't scale 1:1 past ~6 threads).
-        let s = snap(24, 64, 200, true);
-        assert_eq!(affords(&s, SMALL_EN), Affordability::Comfortable);
-    }
-
-    #[test]
-    fn affords_turbo_comfortable_on_high_core_cpu_only() {
-        // Synthetic turbo rf=2.5 × sqrt(12/8) ≈ 3.06 ≥ 3.0 → Comfortable.
-        // (Real registry turbo rf=0.6 — see Unsuitable test below — but this
-        // exercises the predicate's high-core comfortable path.)
+    fn affords_turbo_on_high_core_cpu_only() {
+        // turbo rf=2.5 × sqrt(12/8) ≈ 3.06 ≥ 2.0 → affords
         let s = snap(12, 32, 200, true);
-        assert_eq!(affords(&s, TURBO), Affordability::Comfortable);
+        assert!(affords(&s, TURBO));
     }
 
     #[test]
-    fn affords_turbo_unsuitable_on_typical_laptop_cpu() {
-        // Phase 0 finding: turbo rf=0.6 (empirical) on 8-core laptop:
-        // 0.6 × 1.0 × 1.0 = 0.6 < BATCH_REALTIME_MIN (1.0) → Unsuitable,
-        // not Borderline. Closes the original wizard over-recommendation bug.
+    fn affords_turbo_fails_on_typical_laptop_cpu() {
+        // Empirical turbo rf=0.6 on 8-core laptop:
+        // 0.6 × 1.0 × 1.0 × 1.0 = 0.6 < 2.0 → does not afford.
         let s = snap(8, 16, 200, true);
         let turbo_empirical = (4_000_u32, 1_620_u32, 0.6_f32);
-        assert_eq!(affords(&s, turbo_empirical), Affordability::Unsuitable);
+        assert!(!affords(&s, turbo_empirical));
     }
 
     #[test]
-    fn affords_small_comfortable_on_apple_silicon() {
-        // Apple Silicon: relaxed threshold (1.5). small rf=4.0 ≥ 1.5 → Comfortable
+    fn affords_turbo_with_discrete_gpu() {
+        // turbo rf=2.5 × 1.0 × 1.0 × 4.0 (Discrete) = 10.0 ≥ 2.0 → affords
+        let mut s = snap(8, 16, 200, true);
+        s.host_gpu = HostGpu::Discrete;
+        assert!(affords(&s, TURBO));
+    }
+
+    #[test]
+    fn affords_turbo_fails_on_low_rf_even_with_integrated() {
+        // Empirical turbo rf=0.6 × sqrt scaling impossible at 8 cores
+        // × 2.0 (Integrated) = 1.2 < 2.0 → does not afford.
+        let mut s = snap(8, 16, 200, true);
+        s.host_gpu = HostGpu::Integrated;
+        let turbo_empirical = (4_000_u32, 1_620_u32, 0.6_f32);
+        assert!(!affords(&s, turbo_empirical));
+    }
+
+    #[test]
+    fn affords_small_on_apple_silicon() {
+        // Apple Silicon defaults to HostGpu::Integrated (Metal).
+        // small rf=4.0 × 1.0 × 1.0 × 2.0 = 8.0 ≥ 2.0 → affords
         let s = HardwareSnapshot {
             os: "macos".into(),
             arch: "aarch64".into(),
             cpu_features: CpuFeatures { neon: true, ..Default::default() },
+            host_gpu: HostGpu::Integrated,
             ..snap(8, 16, 100, false)
         };
-        assert!(s.accelerated());
-        assert_eq!(affords(&s, SMALL_EN), Affordability::Comfortable);
-        assert_eq!(affords(&s, TURBO), Affordability::Comfortable);
+        assert!(affords(&s, SMALL_EN));
+        assert!(affords(&s, TURBO));
     }
 
     #[test]
-    fn affords_unsuitable_when_not_enough_ram() {
+    fn affords_fails_when_not_enough_ram() {
         let s = HardwareSnapshot {
             physical_cores: 8,
             logical_cores: 16,
@@ -706,13 +703,13 @@ mod tests {
             cpu_features: CpuFeatures { avx2: true, ..Default::default() },
             os: "linux".into(),
             arch: "x86_64".into(),
+            host_gpu: HostGpu::None,
         };
-        assert_eq!(affords(&s, SMALL_EN), Affordability::Unsuitable);
+        assert!(!affords(&s, SMALL_EN));
     }
 
     #[test]
-    fn affords_unsuitable_when_not_enough_disk() {
-        // small.en needs 466 MB × 2 = 932 MB — only 800 MB free disk
+    fn affords_fails_when_not_enough_disk() {
         let s = HardwareSnapshot {
             physical_cores: 8,
             logical_cores: 16,
@@ -722,32 +719,16 @@ mod tests {
             cpu_features: CpuFeatures { avx2: true, ..Default::default() },
             os: "linux".into(),
             arch: "x86_64".into(),
+            host_gpu: HostGpu::None,
         };
-        assert_eq!(affords(&s, SMALL_EN), Affordability::Unsuitable);
+        assert!(!affords(&s, SMALL_EN));
     }
 
     #[test]
-    fn accelerated_only_on_apple_silicon() {
-        let mac_arm = HardwareSnapshot {
-            os: "macos".into(),
-            arch: "aarch64".into(),
-            ..snap(8, 16, 100, false)
-        };
-        assert!(mac_arm.accelerated());
-
-        let mac_intel = HardwareSnapshot {
-            os: "macos".into(),
-            arch: "x86_64".into(),
-            ..snap(8, 16, 100, true)
-        };
-        assert!(!mac_intel.accelerated());
-
-        let linux = HardwareSnapshot {
-            os: "linux".into(),
-            arch: "x86_64".into(),
-            ..snap(8, 16, 100, true)
-        };
-        assert!(!linux.accelerated());
+    fn host_gpu_multipliers_are_1x_2x_4x() {
+        assert!((HostGpu::None.multiplier() - 1.0).abs() < f32::EPSILON);
+        assert!((HostGpu::Integrated.multiplier() - 2.0).abs() < f32::EPSILON);
+        assert!((HostGpu::Discrete.multiplier() - 4.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -756,17 +737,40 @@ mod tests {
             os: "macos".into(),
             arch: "aarch64".into(),
             cpu_features: CpuFeatures { neon: true, ..Default::default() },
+            host_gpu: HostGpu::Integrated,
             ..snap(8, 16, 100, false)
         };
         let s = mac_arm.acceleration_summary();
         assert!(s.contains("Apple Silicon"));
         assert!(s.contains("Metal"));
+        // No numeric multiplier exposed.
+        assert!(!s.contains("2x") && !s.contains("4x"));
     }
 
     #[test]
-    fn acceleration_summary_avx2_says_cpu_only() {
+    fn acceleration_summary_discrete_gpu_says_discrete() {
+        let mut s = snap(8, 16, 100, true);
+        s.host_gpu = HostGpu::Discrete;
+        let line = s.acceleration_summary();
+        assert!(line.contains("Discrete"));
+        assert!(line.contains("Vulkan"));
+        assert!(!line.contains("4x"));
+    }
+
+    #[test]
+    fn acceleration_summary_integrated_gpu_says_integrated() {
+        let mut s = snap(8, 16, 100, true);
+        s.host_gpu = HostGpu::Integrated;
+        let line = s.acceleration_summary();
+        assert!(line.contains("integrated"));
+        assert!(line.contains("Vulkan"));
+        assert!(!line.contains("2x"));
+    }
+
+    #[test]
+    fn acceleration_summary_no_gpu_avx2_says_cpu_backend() {
         let s = snap(8, 16, 100, true).acceleration_summary();
-        assert!(s.starts_with("CPU only"));
+        assert!(s.contains("CPU backend"));
         assert!(s.contains("AVX2"));
     }
 

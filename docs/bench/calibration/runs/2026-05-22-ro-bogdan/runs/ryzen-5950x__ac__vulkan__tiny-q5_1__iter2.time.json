@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/root/fono-bench-rig/fono-bench",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "tiny-q5_1",
+    "--fixtures",
+    "/root/fono-bench-rig/fixtures/ro-bogdan",
+    "--output",
+    "/root/fono-bench-rig/runs-ro/ryzen-5950x__ac__vulkan__tiny-q5_1__iter2.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": null,
+    "battery_pct": null,
+    "package_temp_c": 51.5
+  },
+  "context_start": {
+    "ac_online": null,
+    "battery_pct": null,
+    "captured_at_utc": "2026-05-22T06:13:26.751969+00:00",
+    "hostname": "proxmox4",
+    "package_temp_c": 47.625,
+    "platform": "linux",
+    "power_profile": "governor=powersave"
+  },
+  "exit_code": 0,
+  "label": "ryzen-5950x/ac/vulkan/tiny-q5_1/iter2",
+  "max_rss_kib": 259228,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 0.295383,
+  "user_s": 1.115555,
+  "wall_clock_s": 1.148843
+}

@@ -11,12 +11,25 @@ The home page is [fono.page](https://fono.page).
 
 ---
 
-| ![Up next](https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge) | ![On the horizon](https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge) | ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge) |
-|:---|:---|:---|
-| **[Automatic translation](#automatic-translation)**<br>Speak in any language, type in another — any pair, per-app rules, batch and live parity. | **[Hover-context injection](#hover-context-injection)** *(experimental)*<br>Terminal hovered → shell prompts. Code editor hovered → identifier casing. | **Two more cloud providers, friendlier installs, polished pause UI**<br>Deepgram + Cartesia STT working end-to-end, Cartesia TTS speaks each language in a native voice, headless servers install themselves, and the PONDERING pause indicator is consistent everywhere. ![v0.8.1](https://img.shields.io/badge/v0.8.1-blue?style=flat-square) |
-| **[Wake-word activation](#wake-word-activation)**<br>Say the magic word — Fono wakes and starts dictating. No hotkey, no hands. | **[REST API + MCP server](#local-rest-api--mcp-server)**<br>Scripts and AI coding assistants drive Fono over HTTP. | **One-key cloud setup + live preview as a waveform style**<br>Pick a primary provider once and the wizard wires STT, polish, assistant, and TTS from a single key. Four new TTS backends; live transcription is now a tray-picker style. ![v0.8.0](https://img.shields.io/badge/v0.8.0-blue?style=flat-square) |
-| | **[Better Wayland hotkeys](#better-wayland-hotkeys)**<br>Auto-register via the `GlobalShortcuts` portal when available. | **Voice assistant**<br>Press F8, ask a question, hear the answer through your speakers. Multi-turn history, streaming sentence-by-sentence into TTS for fast first audio. ![v0.7.0](https://img.shields.io/badge/v0.7.0-blue?style=flat-square) |
-| | **[macOS + Windows](#macos-and-windows)**<br>Native platform integrations. | **Audio-visualisation overlay**<br>Bars, oscilloscope, FFT, or heatmap during recording, plus a right-side VU meter for live dictation. ![v0.6.0](https://img.shields.io/badge/v0.6.0-blue?style=flat-square) |
+<table width="100%">
+<tr>
+<td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#wake-word-activation">Wake-word activation</a></strong><br>Say the magic word — Fono wakes and starts dictating. No hotkey, no hands.<br><br><strong><a href="#local-text-to-speech--home-assistant-voice-server">Local text-to-speech + Home Assistant voice server</a></strong><br>Speak any of your languages locally — Kokoro where it shines, Piper everywhere else (including Romanian). The same engine answers Home Assistant over Wyoming, no Python sidecar.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".</td>
+<td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#hover-context-injection">Hover-context injection</a></strong> <em>(experimental)</em><br>Terminal hovered → shell prompts. Code editor hovered → identifier casing.<br><br><strong><a href="#voice-loop-for-coding-agents">Voice loop for coding agents</a></strong><br>Talk to Forge, Claude Code, Cursor and friends entirely by voice. Short spoken answers, A/B/C choices, no keyboard between turns.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#realtime-voice-assistant">Realtime voice assistant</a></strong><br>OpenAI Realtime and Gemini Live: F8 speaks straight to the model, single WebSocket, sub-second time-to-first-audio.<br><br><strong><a href="#better-wayland-hotkeys">Better Wayland hotkeys</a></strong><br>Auto-register via the <code>GlobalShortcuts</code> portal when available.<br><br><strong><a href="#macos-and-windows">macOS + Windows</a></strong><br>Native platform integrations.</td>
+</tr>
+</table>
+
+![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge)
+
+**[v0.8.1 — Two more cloud providers](#shipped)**  
+Deepgram + Cartesia STT, headless install, pause UI polish. *(2026-05-23)*
+
+**[v0.8.0 — One-key cloud setup](#shipped)**  
+Live preview as a waveform style; four new TTS backends. *(2026-05-17)*
+
+**[v0.7.1 — Default hotkey rework](#shipped)**  
+F7 dictation, F8 assistant, toggle mode on by default. *(2026-05-05)*
+
+[Full changelog ↓](#shipped)
 
 ---
 
@@ -50,6 +63,56 @@ core. Say the magic word and Fono wakes up and starts dictating — no hotkey, n
 reaching for the keyboard. When you stop speaking it goes back to sleep. The wake-word
 model runs locally; your audio never leaves the machine while idle.
 
+### Local text-to-speech + Home Assistant voice server
+
+> Hear your assistant in your own language, locally. Then let Home Assistant
+> hear it too.
+
+Fono will speak back without a cloud call and without a separate Python sidecar.
+Two engines, one automatic router: **Kokoro** for the nine locales it speaks
+natively (American / British English, Spanish, French, Hindi, Italian, Japanese,
+Brazilian Portuguese, Mandarin) where its prosody is best in class, and **Piper**
+for everything else — Romanian, Polish, German, Dutch, Russian, Turkish, and the
+long tail of European, Slavic, and Asian languages. Voices and language data
+download on first use, like the Whisper models do today; the binary stays
+self-contained.
+
+The same local engine becomes a **Wyoming-protocol TTS server**, autodiscovered
+by Home Assistant over mDNS. One Fono daemon on the LAN replaces
+`wyoming-piper` (and, for the languages Kokoro covers, dramatically improves on
+it) as your house's voice. ASR and TTS can run side-by-side on the same
+listener; a headless `sudo fono install --server` box becomes a complete
+HA-voice endpoint with one config flag.
+
+Local TTS ships as a third release variant (`fono-tts-vX.Y.Z-x86_64`, target
+≤ 32 MiB) alongside the existing CPU and GPU builds. `fono update` picks the
+right one automatically. Plan:
+`plans/2026-05-25-local-tts-piper-kokoro-and-wyoming-server-v1.md`.
+
+### Talk over the assistant
+
+> Just start speaking. Fono will hear you over its own voice and hand the turn
+> back to you.
+
+The voice assistant already accepts a tap of F8 or Escape to barge in mid-reply,
+but you have to reach for the keyboard. After this lands, the assistant listens
+while it speaks: the moment you start a sentence aloud, it stops talking, drops
+the rest of its planned reply, keeps the conversation history, and starts a new
+turn on your follow-up — exactly as if you had pressed F8 at that instant.
+
+The trick is acoustic echo cancellation, otherwise the assistant interrupts
+itself the instant its own voice reaches the mic. Rather than grow the binary
+with a built-in AEC, Fono asks PipeWire to do the work: a private echo-cancel
+sink and source bound to the assistant's playback, never touching your default
+audio devices, so Zoom calls and music in other apps are unaffected. On the
+modern Linux distros where PipeWire is the default audio stack
+(Fedora 34+, Arch / Manjaro, openSUSE Tumbleweed, Debian 12+, Ubuntu 22.10+),
+this is enabled automatically with no setup. Where PipeWire's echo-cancel
+module isn't installed, Fono silently keeps the manual F8 / Escape behaviour
+and tells you in `fono doctor` how to enable it. macOS and Windows ship in a
+later slice. Plan:
+`plans/2026-05-25-double-talk-barge-in-pipewire-aec-v1.md`.
+
 ---
 
 ## On the horizon
@@ -71,6 +134,91 @@ is exposing that same interface over HTTP and the
 [Model Context Protocol](https://modelcontextprotocol.io), so scripts, editor plugins,
 and AI coding assistants can drive Fono without any special tooling.
 
+The MCP half lands first as a focused voice-loop integration — see
+[Voice loop for coding agents](#voice-loop-for-coding-agents) below. The REST half
+follows as a thin shim over the same IPC surface.
+
+### Voice actions
+
+> Stop asking. Start doing.
+
+The voice assistant today answers questions. The next step is letting it **do
+things** — turn on the kitchen lights, start a Pomodoro, open a GitHub issue,
+anything an MCP server can expose. You hold F8, say what you want, and Fono
+either explains (as today) or acts. The assistant decides per turn, no special
+keyword, no separate hotkey.
+
+The connector is the [Model Context Protocol](https://modelcontextprotocol.io)
+— Fono is the **client**, speaking to whichever MCP servers you configure. A
+typical setup points at Home Assistant on your LAN for smart-home control;
+power users add GitHub, calendar, file-search, or any of the growing MCP
+ecosystem. Tools are advertised to the assistant LLM via its native
+function-calling API (works on OpenAI, Anthropic, Groq, Cerebras, and Gemini —
+local LLM tool-calling lands later).
+
+Two in-process built-ins ship by default — `pomodoro_start` and
+`pomodoro_cancel` — so the feature works out of the box without any external
+server, and the tray shows the active timer. A confirmation-policy hook is
+wired in from day one so dangerous actions ("delete every file in Downloads")
+can later require a spoken "yes" or a hotkey tap before they fire. v1 ships
+with confirmation off by default; the UX layers on later without schema churn.
+
+Concrete plan: `plans/2026-05-22-voice-actions-via-mcp-v1.md`. Strict
+prerequisite for the [Realtime voice assistant](#realtime-voice-assistant) so
+realtime and staged paths gain voice actions in lockstep.
+
+### Realtime voice assistant
+
+> Skip the relay race. Talk straight to the model.
+
+Today the F8 assistant runs a relay: speech-to-text, then a chat LLM, then
+text-to-speech, then the speaker — four stages, each waiting on the last. For
+users on OpenAI or Google Gemini, the model itself can do the whole exchange
+in one WebSocket: you speak, it hears you, it speaks back.
+
+When the configured assistant model is a **realtime model** (OpenAI Realtime,
+Gemini Live), pressing F8 opens a single bidirectional connection and bypasses
+the staged pipeline entirely for that turn — F7 dictation is untouched.
+Expected time-to-first-audio drops from ~1.5–3 s to **~500–900 ms** depending
+on geography. Function calling works identically to the staged path: the same
+`[assistant.tools]` config, the same Home Assistant integration, the same
+dispatcher — so [voice actions](#voice-actions) work just as well over
+realtime as over the regular pipeline.
+
+Realtime audio is expensive (often 5–25× the cost of equivalent text tokens),
+so Fono defaults to the **mini** tier on each provider and labels each option
+with its cost multiplier in the wizard. The full preview tier is opt-in for
+users who explicitly want it.
+
+Concrete plan: `plans/2026-05-25-realtime-end-to-end-assistant-v4.md`. Blocked
+on [Voice actions](#voice-actions) landing first so that voice actions are
+available from day one on both paths.
+
+### Voice loop for coding agents
+
+> Talk to your coding agent. Hear short, voice-friendly answers back. Pick A, B, or C
+> with your voice. Don't touch the keyboard between turns.
+
+**The end goal is agent-agnostic.** Fono will speak the **server** side of the
+[Model Context Protocol](https://modelcontextprotocol.io), exposing three voice tools
+(`fono.speak`, `fono.listen`, `fono.confirm`) over stdio. Any MCP-capable coding agent —
+present or future — becomes voice-driven by adding one `fono` MCP server entry to its
+config and pointing at one shared voice-mode system prompt biased toward short
+responses and A/B/C choices instead of page-long markdown. Adding a new agent is a
+config snippet and a documentation section, never new Fono code.
+
+**Forge is the first dogfood target** because it's the maintainer's daily driver, but
+v1 ships verified end-to-end against at least three different agents (Forge + Claude
+Code + Cursor) precisely to prove the integration is genuinely agent-agnostic before
+tag. Codex CLI, Gemini CLI, Cline, Continue, Windsurf, and Goose ship as best-effort
+documentation in the same release, plus an "Adding your own agent" recipe so the story
+is genuinely open-ended.
+
+Concrete plan: `plans/2026-05-25-fono-voice-loop-for-coding-agents-v1.md`.
+Complementary to (but independent of) the [Voice actions](#voice-actions) work
+where Fono is the MCP *client* asking Home Assistant et al. to do things on the
+user's behalf.
+
 ### Better Wayland hotkeys
 
 Today on Wayland (KDE, GNOME, wlroots) you bind the hotkey through your compositor's
@@ -82,19 +230,6 @@ setup.
 
 Native integrations for both platforms: menu-bar app and signed `.dmg` on macOS;
 system-tray app and native installer on Windows.
-
-### Custom-quantized `large-v3-turbo`
-
-*(research)* Investigate producing our own `ggml-large-v3-turbo-q5_1.bin` via
-whisper.cpp's `quantize` tool to slot between the current T2 (`small-q5_1`,
-~182 MB) and T3 (`large-v3-turbo-q8_0`, ~834 MB) rungs of the model ladder.
-The upstream `ggerganov/whisper.cpp` repository only publishes q8_0 and q5_0
-quantizations of turbo; q5_0 has been measured to break English fixtures
-catastrophically and q8_0 is the smallest currently-safe turbo variant.
-A self-built q5_1 would land near ~548 MB if it preserves quality, narrowing
-the T2→T3 gap for users on mid-range hardware. Deferred until either the
-upstream publishes it or a user-facing complaint motivates the build-and-host
-work (signing, CI, mirror).
 
 ---
 

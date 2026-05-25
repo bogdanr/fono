@@ -109,28 +109,6 @@
       "verdict": "pass"
     },
     {
-      "fixture": "en-conversational",
-      "language": "en",
-      "metrics": {
-        "stt_accuracy_levenshtein": 0.0,
-        "stt_levenshtein_norm": 0.0,
-        "ttc_ratio": 3.3603150844573975,
-        "ttff_ratio": 0.8982807993888855
-      },
-      "modes": {
-        "batch": {
-          "text": "encouragement. In nine cases out of ten, a woman had better show more affection than she feels. Bingley likes your sister undoubtedly, but he may never do more than"
-        },
-        "streaming": {
-          "text": "encouragement. In nine cases out of ten, a woman had better show more affection than she feels. Bingley likes your sister undoubtedly, but he may never do more than"
-        }
-      },
-      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2",
-      "skip_reason": null,
-      "synthetic_placeholder": false,
-      "verdict": "pass"
-    },
-    {
       "fixture": "es-lorca-reyerta",
       "language": "es",
       "metrics": {

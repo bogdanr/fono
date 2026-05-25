@@ -222,14 +222,14 @@ pub const WHISPER_MODELS: &[ModelInfo] = &[
     ModelInfo {
         name: "tiny",
         multilingual: true,
-        approx_mb: 31,
+        approx_mb: 42,
         // Peak RSS 311 MiB (q5_1) on ultra7-258v Vulkan; +50% headroom
         // for KV-cache growth on long segments and CPU-lane padding.
         min_ram_mb: 1_024,
-        // Empirical batch RTF on ultra7-258v CPU q5_1: 30.30.
-        realtime_factor_cpu_avx2: 30.0,
+        // Empirical batch RTF on ultra7-258v CPU q8_0: 40.x.
+        realtime_factor_cpu_avx2: 40.0,
         wer_by_lang: &[
-            ("en", 12.0),
+            ("en", 16.0),
             ("es", 14.0),
             ("fr", 18.0),
             ("de", 22.0),
@@ -245,52 +245,52 @@ pub const WHISPER_MODELS: &[ModelInfo] = &[
             ("ja", 34.0),
         ],
         url_dir: GGERGANOV_DIR,
-        default_quantization: Quantization::Q5_1,
-        quantizations: &[QuantVariant {
-            quantization: Quantization::Q5_1,
-            approx_mb: 31,
-            sha256: UNPINNED,
-        }],
+        // q8_0 default per ADR 0027 acceptance rule (2026-05-25 amendment):
+        // universal q8_0 selected for consistency across the registry;
+        // q5_1 reachable via `[stt.local].quantization = "q5_1"`.
+        default_quantization: Quantization::Q8_0,
+        quantizations: &[
+            QuantVariant { quantization: Quantization::Q5_1, approx_mb: 31, sha256: UNPINNED },
+            QuantVariant { quantization: Quantization::Q8_0, approx_mb: 42, sha256: UNPINNED },
+        ],
     },
     // ── tiny.en — English-only ──────────────────────────────────────────
-    // Default: q5_1 (31 MB). Δacc −0.018 vs fp16 (i.e. quantization
-    // measurably *improved* one fixture). Top-end speed on every host
-    // we measured.
+    // Default: q8_0 (42 MB) per ADR 0027 acceptance rule — universal q8_0
+    // selected for consistency; q5_1 reachable via override.
     ModelInfo {
         name: "tiny.en",
         multilingual: false,
-        approx_mb: 31,
+        approx_mb: 42,
         // Peak RSS 309 MiB (q5_1) on ultra7-258v Vulkan.
         min_ram_mb: 1_024,
-        // Empirical batch RTF on ultra7-258v CPU q5_1: 36.x. Held to
-        // 30.0 to match the multilingual sibling and stay conservative
-        // on older hosts with smaller branch predictors.
-        realtime_factor_cpu_avx2: 30.0,
-        wer_by_lang: &[("en", 9.0)],
+        // Empirical batch RTF on ultra7-258v CPU q8_0: 52.x (matrix.md:39,
+        // rounded down).
+        realtime_factor_cpu_avx2: 52.0,
+        wer_by_lang: &[("en", 13.0)],
         url_dir: GGERGANOV_DIR,
-        default_quantization: Quantization::Q5_1,
-        quantizations: &[QuantVariant {
-            quantization: Quantization::Q5_1,
-            approx_mb: 31,
-            sha256: UNPINNED,
-        }],
+        default_quantization: Quantization::Q8_0,
+        quantizations: &[
+            QuantVariant { quantization: Quantization::Q5_1, approx_mb: 31, sha256: UNPINNED },
+            QuantVariant { quantization: Quantization::Q8_0, approx_mb: 42, sha256: UNPINNED },
+        ],
     },
     // ── small — multilingual ────────────────────────────────────────────
-    // Default: q5_1 (182 MB). On every host the q5_1 variant matched
-    // or beat fp16 on English fixtures (fp16 itself flakes on
-    // `en-single-sentence` due to the short-clip behaviour documented
-    // in `tests/fixtures/equivalence/manifest.toml`). q8_0 (253 MB) and
-    // fp16 (466 MB) are kept reachable via `[stt.local].quantization`.
+    // Default: q8_0 (253 MB) per ADR 0027 acceptance rule — universal
+    // q8_0 selected for consistency; q5_1 and fp16 reachable via
+    // `[stt.local].quantization`. q5_1 matched or beat fp16 on every
+    // English fixture but q8_0 is the safer middle ground (Lunar Lake
+    // CPU keeps RTF ≥ 2.0 at q8_0, and accuracy stays inside the
+    // ADR 0027 +0.05 / +0.20 gate at every fixture).
     ModelInfo {
         name: "small",
         multilingual: true,
-        approx_mb: 182,
-        // Peak RSS 805 MiB (q5_1) on ultra7-258v Vulkan.
+        approx_mb: 253,
+        // Peak RSS 940 MiB (q8_0) on ultra7-258v Vulkan.
         min_ram_mb: 1_536,
-        // Empirical batch RTF on ultra7-258v CPU q5_1: 8.32.
-        realtime_factor_cpu_avx2: 8.3,
+        // Empirical batch RTF on ultra7-258v CPU q8_0: 8.68 (matrix.md:233).
+        realtime_factor_cpu_avx2: 8.7,
         wer_by_lang: &[
-            ("en", 6.0),
+            ("en", 10.0),
             ("es", 7.0),
             ("fr", 9.0),
             ("de", 10.0),
@@ -306,7 +306,7 @@ pub const WHISPER_MODELS: &[ModelInfo] = &[
             ("ja", 17.0),
         ],
         url_dir: GGERGANOV_DIR,
-        default_quantization: Quantization::Q5_1,
+        default_quantization: Quantization::Q8_0,
         quantizations: &[
             QuantVariant { quantization: Quantization::Q5_1, approx_mb: 182, sha256: UNPINNED },
             QuantVariant { quantization: Quantization::Q8_0, approx_mb: 253, sha256: UNPINNED },
@@ -325,7 +325,7 @@ pub const WHISPER_MODELS: &[ModelInfo] = &[
         min_ram_mb: 1_536,
         // Empirical batch RTF on ultra7-258v CPU q8_0: 3.30.
         realtime_factor_cpu_avx2: 3.3,
-        wer_by_lang: &[("en", 5.0)],
+        wer_by_lang: &[("en", 9.0)],
         url_dir: GGERGANOV_DIR,
         default_quantization: Quantization::Q8_0,
         quantizations: &[
@@ -351,7 +351,7 @@ pub const WHISPER_MODELS: &[ModelInfo] = &[
         // Empirical batch RTF on ultra7-258v CPU q8_0: 2.31.
         realtime_factor_cpu_avx2: 2.3,
         wer_by_lang: &[
-            ("en", 4.0),
+            ("en", 8.0),
             ("es", 5.0),
             ("fr", 6.0),
             ("de", 7.0),
@@ -453,21 +453,16 @@ impl ModelRegistry {
     /// config even when the user hasn't gone through the wizard.
     ///
     /// Selection rule: walk the multilingual models from largest to
-    /// smallest and return the first that lands `Comfortable` (or
-    /// `Borderline`). Falls back to `tiny` if even that is impossible.
+    /// smallest and return the first that `affords_model` accepts.
+    /// Falls back to `tiny` if even that is impossible.
     ///
     /// Multilingual is the safe default because the OOTB config has an
     /// empty languages list (auto-detect). An English-only model would
     /// silently mistranscribe non-English audio.
     #[must_use]
     pub fn pick_default_local(snap: &fono_core::HardwareSnapshot) -> &'static str {
-        use fono_core::hwcheck::Affordability;
-        // Walk largest → smallest, return the first non-Unsuitable. We
-        // prefer a larger Borderline over a smaller Comfortable because
-        // accuracy matters more than headroom for dictation.
         for m in WHISPER_MODELS.iter().filter(|m| m.multilingual).rev() {
-            let aff = snap.affords_model(m.min_ram_mb, m.approx_mb, m.realtime_factor_cpu_avx2);
-            if aff != Affordability::Unsuitable {
+            if snap.affords_model(m.min_ram_mb, m.approx_mb, m.realtime_factor_cpu_avx2) {
                 return m.name;
             }
         }
@@ -483,6 +478,21 @@ mod tests {
     fn default_small_model_is_multilingual() {
         let m = ModelRegistry::get("small").unwrap();
         assert!(m.multilingual);
+    }
+
+    #[test]
+    fn english_only_variants_beat_multilingual_on_english() {
+        let wer_of = |name: &str| {
+            ModelRegistry::get(name)
+                .and_then(|m| m.wer_by_lang.iter().find(|&&(l, _)| l == "en"))
+                .map(|&(_, w)| w)
+                .expect("missing English WER")
+        };
+        for size in ["tiny", "small"] {
+            let multi = wer_of(size);
+            let en = wer_of(&format!("{size}.en"));
+            assert!(en <= multi, "{size}.en={en} should be <= {size}={multi} on English");
+        }
     }
 
     #[test]
@@ -617,9 +627,9 @@ mod tests {
         // Locks in the per-model quantization defaults from the
         // 2026-05-19 perf pass (see plans/2026-05-19-stt-perf-pass-v1.md).
         let cases = [
-            ("tiny", Quantization::Q5_1),
-            ("tiny.en", Quantization::Q5_1),
-            ("small", Quantization::Q5_1),
+            ("tiny", Quantization::Q8_0),
+            ("tiny.en", Quantization::Q8_0),
+            ("small", Quantization::Q8_0),
             ("small.en", Quantization::Q8_0),
             ("large-v3-turbo", Quantization::Q8_0),
         ];
@@ -676,10 +686,11 @@ mod tests {
     #[test]
     fn url_for_returns_none_for_unsupported_variant() {
         let m = ModelRegistry::get("tiny").unwrap();
-        // tiny ships only q5_1; fp16 and q8_0 are not in the registry.
+        // tiny ships q5_1 and q8_0 (post-2026-05-25); fp16 is not in the
+        // registry.
         assert!(ModelRegistry::url_for(m, Quantization::Fp16).is_none());
-        assert!(ModelRegistry::url_for(m, Quantization::Q8_0).is_none());
         assert!(ModelRegistry::url_for(m, Quantization::Q5_1).is_some());
+        assert!(ModelRegistry::url_for(m, Quantization::Q8_0).is_some());
     }
 
     #[test]
@@ -712,6 +723,7 @@ mod tests {
             cpu_features: fono_core::hwcheck::CpuFeatures { avx2, ..Default::default() },
             os: "linux".into(),
             arch: "x86_64".into(),
+            host_gpu: fono_core::hwcheck::HostGpu::None,
         }
     }
 
@@ -726,7 +738,7 @@ mod tests {
 
     #[test]
     fn pick_default_local_scales_to_hardware() {
-        // Weak laptop: turbo Unsuitable, small q5_1 Borderline → small.
+        // Weak laptop: turbo unaffordable, small at q8_0 still unaffordable → small at default.
         let weak = fake_snap(2, 4, true);
         assert_eq!(ModelRegistry::pick_default_local(&weak), "small");
 
@@ -735,5 +747,125 @@ mod tests {
         // ladder.
         let strong = fake_snap(16, 32, true);
         assert_eq!(ModelRegistry::pick_default_local(&strong), "large-v3-turbo");
+    }
+
+    /// For every (host, model-family) pair in the calibration matrix, the
+    /// registry's chosen default quantization should not be more than 1.5×
+    /// slower than the fastest variant for that family on that host.
+    ///
+    /// If a future calibration sweep trips this invariant, that's the
+    /// signal to revisit the registry defaults (or to add an
+    /// exception-with-rationale below).
+    #[test]
+    fn matrix_winners_within_1_5x() {
+        use std::collections::BTreeMap;
+
+        const MATRIX_JSON: &str = include_str!("../../../docs/bench/calibration/matrix.json");
+        // Known-accepted exceptions: cells where the universal-q8_0
+        // default is >1.5× slower than the matrix winner but the
+        // wizard's host-pick policy never selects this model on this
+        // host, so the slower RTF is unreachable in practice.
+        const EXCEPTIONS: &[(&str, &str, &str)] = &[
+            // i7-7500u CPU: wizard picks small.en, never tiny. Per plan
+            // 2026-05-25-wizard-selection-heuristics-refresh-v5.md.
+            ("i7-7500u", "cpu", "tiny"),
+            // small.en on Vulkan iGPUs: every host strong enough to
+            // run Vulkan lands large-v3-turbo Comfortable, which
+            // outranks small.en on accuracy → small.en/Vulkan is
+            // unreachable. See plan v5 §"Alternative Approaches" #1.
+            ("i7-1255u", "vulkan", "small.en"),
+            ("i7-7500u", "vulkan", "small.en"),
+            ("i7-8550u", "vulkan", "small.en"),
+            ("ultra7-258v", "vulkan", "small.en"),
+        ];
+
+        let v: serde_json::Value = serde_json::from_str(MATRIX_JSON).expect("matrix.json parses");
+        // Flatten — matrix.json is `{ "cells": [...] }` or a top-level
+        // array depending on the generator; walk both shapes.
+        let cells: Vec<&serde_json::Value> = match &v {
+            serde_json::Value::Array(a) => a.iter().collect(),
+            serde_json::Value::Object(o) => o
+                .get("cells")
+                .and_then(|c| c.as_array())
+                .map(|a| a.iter().collect())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        assert!(!cells.is_empty(), "matrix.json contained no cells");
+
+        // Bucket cells by (host, family, backend). `model` looks like
+        // `small`, `small-q5_1`, `small.en-q8_0`, etc. — the family is
+        // the substring before the first `-`.
+        let mut buckets: BTreeMap<(String, String, String), Vec<(String, f64)>> = BTreeMap::new();
+
+        for cell in &cells {
+            let host = cell.get("host").and_then(|h| h.as_str()).unwrap_or("");
+            let backend = cell.get("build").and_then(|b| b.as_str()).unwrap_or("");
+            let model = cell.get("model").and_then(|m| m.as_str()).unwrap_or("");
+            let rtf = cell.get("batch_rtf_median").and_then(serde_json::Value::as_f64);
+            if host.is_empty() || backend.is_empty() || model.is_empty() {
+                continue;
+            }
+            let Some(rtf) = rtf else { continue };
+            let family = model.split('-').next().unwrap_or(model).to_string();
+            let quant = if let Some((_, q)) = model.split_once('-') {
+                q.to_string()
+            } else {
+                "fp16".to_string()
+            };
+            buckets
+                .entry((host.to_string(), family, backend.to_string()))
+                .or_default()
+                .push((quant, rtf));
+        }
+
+        // For each registry model, check every (host, backend) bucket
+        // that contains the family.
+        let mut violations: Vec<String> = Vec::new();
+        for m in WHISPER_MODELS {
+            // The registry's family is the model name verbatim (we
+            // don't ship multiple families per ModelInfo).
+            let want_family = m.name.to_string();
+            let want_quant = match m.default_quantization {
+                Quantization::Fp16 => "fp16",
+                Quantization::Q5_1 => "q5_1",
+                Quantization::Q8_0 => "q8_0",
+            };
+            for ((host, family, backend), variants) in &buckets {
+                if family != &want_family {
+                    continue;
+                }
+                if EXCEPTIONS
+                    .iter()
+                    .any(|(h, b, f)| h == host && b == backend && *f == want_family.as_str())
+                {
+                    continue;
+                }
+                // The fastest variant in this bucket is the matrix winner.
+                let winner = variants.iter().map(|(_, rtf)| *rtf).fold(f64::MIN, f64::max);
+                // Find the default's RTF; if absent, the registry has
+                // not been calibrated against this cell — skip (the
+                // affordability check elsewhere keeps us honest).
+                let Some(default_rtf) = variants
+                    .iter()
+                    .find(|(q, _)| q == want_quant || (want_quant == "fp16" && q == "fp16"))
+                    .map(|(_, r)| *r)
+                else {
+                    continue;
+                };
+                if winner > 0.0 && default_rtf * 1.5 < winner {
+                    violations.push(format!(
+                        "{host}/{backend}/{want_family}: default={want_quant} \
+                         rtf={default_rtf:.2} < winner rtf={winner:.2}/1.5"
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "registry default within 1.5× matrix winner failed:\n  {}",
+            violations.join("\n  ")
+        );
     }
 }

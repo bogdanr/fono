@@ -1,36 +1,36 @@
 {
   "command": [
-    "/root/fono-bench-rig/fono-bench",
+    "/root/Work/fono/target/release/fono-bench-cpu",
     "equivalence",
     "--stt",
     "local",
     "--model",
     "tiny",
     "--output",
-    "/root/fono-bench-rig/runs/i7-8550u__ac__cpu__tiny__iter2.json",
+    "/root/Work/fono/runs-local/i7-8550u__ac__cpu__tiny__iter2.json",
     "--fixtures",
-    "/root/fono-bench-rig/fixtures/equivalence",
+    "/root/Work/fono/tests/fixtures/equivalence",
     "--no-legend"
   ],
   "context_end": {
     "ac_online": "1",
-    "battery_pct": 98,
-    "package_temp_c": 67.0
+    "battery_pct": 99,
+    "package_temp_c": 80.0
   },
   "context_start": {
     "ac_online": "1",
-    "battery_pct": 97,
-    "captured_at_utc": "2026-05-21T10:25:46.562329+00:00",
+    "battery_pct": 99,
+    "captured_at_utc": "2026-05-24T05:50:26.176348+00:00",
     "hostname": "ubuntu",
-    "package_temp_c": 51.0,
+    "package_temp_c": 88.0,
     "platform": "linux",
     "power_profile": "balanced"
   },
   "exit_code": 1,
   "label": "i7-8550u/ac/cpu/tiny/iter2",
-  "max_rss_kib": 415072,
+  "max_rss_kib": 426644,
   "schema": "fono-bench.rusage/1",
-  "sys_s": 4.602979,
-  "user_s": 130.620054,
-  "wall_clock_s": 35.967492
+  "sys_s": 9.750894,
+  "user_s": 329.834927,
+  "wall_clock_s": 90.929317
 }

@@ -1,0 +1,103 @@
+{
+  "fono_version": "0.8.0",
+  "stt_backend": "local:base-q5_1",
+  "tier": "tier1",
+  "threshold_levenshtein": 0.05,
+  "results": [
+    {
+      "fixture": "ro-bogdan-30s",
+      "language": "ro",
+      "synthetic_placeholder": false,
+      "duration_s": 30.0,
+      "modes": {
+        "batch": {
+          "text": "Vreau să facem și o registrare mai lungă, cura diouul care rulează pe fondal și cu mine care mă gândesc mai mult la ce vreau să zic. C-a să vădăm dacă modelul se descurca bine și în situația asta când o sălvi multri și erde peste 20 de secunde care se conțină o tictea de sau ceva care vrei să vorbești cu assistentul.",
+          "elapsed_ms": 4310,
+          "ttff_ms": 4310
+        },
+        "streaming": {
+          "text": "Vreau sÄ facem Èi o registrare mai lungÄ, cura diouul care ruleazÄ pe fondal Èi cu mine care mÄ gÃ¢ndesc mai mult la ce vreau sÄ zic. C-a sÄ vÄdÄm dacÄ modelul se descurca bine Èi Ã®n situaÈia asta cÃ¢nd o sÄlvi multri Èi erde peste 20 de secunde care se conÈinÄ o tictea de sau ceva care vrei sÄ vorbeÈti cu assistentul.",
+          "elapsed_ms": 9783,
+          "ttff_ms": 1711
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.12941177,
+        "stt_accuracy_levenshtein": 0.11801242,
+        "ttff_ratio": 0.39698377,
+        "ttc_ratio": 2.2698376
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.5"
+    },
+    {
+      "fixture": "ro-bogdan-10s",
+      "language": "ro",
+      "synthetic_placeholder": false,
+      "duration_s": 10.0,
+      "modes": {
+        "batch": {
+          "text": "Si acum facem un registrare cum măscă pe fondalul, să vedem dacă model le poți de tecteze dictarea, într-in ce nișteți gămodă fondalul.",
+          "elapsed_ms": 1003,
+          "ttff_ms": 1003
+        },
+        "streaming": {
+          "text": "Si acum facem un registrare cum mÄsicÄ pe fondalul, sÄ vedem dacÄ model le poÈi sÄ detecteze dictarea Ã®ntr-in ce niÈteÈi gÄmodÄ fondalul.",
+          "elapsed_ms": 5511,
+          "ttff_ms": 1528
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.18243243,
+        "stt_accuracy_levenshtein": 0.26666668,
+        "ttff_ratio": 1.5234298,
+        "ttc_ratio": 5.4945164
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.5"
+    }
+  ],
+  "pinned_params": {
+    "commit_use_prosody": false,
+    "commit_prosody_extend_ms": 250,
+    "commit_use_punctuation_hint": true,
+    "commit_punct_extend_ms": 150,
+    "commit_hold_on_filler": true,
+    "commit_filler_words": [
+      "um",
+      "uh",
+      "er",
+      "ah",
+      "mm",
+      "like",
+      "you know"
+    ],
+    "commit_dangling_words": [
+      "and",
+      "but",
+      "or",
+      "so",
+      "because",
+      "the",
+      "a",
+      "an",
+      "of",
+      "to",
+      "with",
+      "for",
+      "in",
+      "on",
+      "at",
+      "from"
+    ],
+    "eou_drain_extended_ms": 1500,
+    "chunk_ms_initial": 600,
+    "chunk_ms_steady": 1500
+  },
+  "model_capabilities": {
+    "english_only": false,
+    "model_label": "local:base-q5_1"
+  }
+}

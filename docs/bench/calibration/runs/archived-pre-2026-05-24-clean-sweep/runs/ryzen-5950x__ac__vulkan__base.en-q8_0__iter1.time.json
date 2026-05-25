@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/root/fono-bench",
+    "equivalence",
+    "--fixtures",
+    "/root/work/tests/fixtures/equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "base.en-q8_0",
+    "--output",
+    "/root/runs/ryzen-5950x__ac__vulkan__base.en-q8_0__iter1.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": null,
+    "battery_pct": null,
+    "package_temp_c": 55.375
+  },
+  "context_start": {
+    "ac_online": null,
+    "battery_pct": null,
+    "captured_at_utc": "2026-05-21T22:05:08.969202+00:00",
+    "hostname": "proxmox4",
+    "package_temp_c": 52.875,
+    "platform": "linux",
+    "power_profile": "governor=powersave"
+  },
+  "exit_code": 1,
+  "label": "ryzen-5950x/ac/vulkan/base.en-q8_0/iter1",
+  "max_rss_kib": 280480,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 0.424597,
+  "user_s": 1.082382,
+  "wall_clock_s": 1.236729
+}

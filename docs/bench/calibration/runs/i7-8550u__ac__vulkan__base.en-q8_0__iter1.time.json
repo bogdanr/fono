@@ -1,36 +1,36 @@
 {
   "command": [
-    "/root/fono-bench-rig/fono-bench",
+    "/root/Work/fono/target/release/fono-bench-vulkan",
     "equivalence",
     "--stt",
     "local",
     "--model",
     "base.en-q8_0",
-    "--fixtures",
-    "/root/fono-bench-rig/fixtures/equivalence",
     "--output",
-    "/root/fono-bench-rig/runs/i7-8550u__ac__vulkan__base.en-q8_0__iter1.json",
+    "/root/Work/fono/runs-local/i7-8550u__ac__vulkan__base.en-q8_0__iter1.json",
+    "--fixtures",
+    "/root/Work/fono/tests/fixtures/equivalence",
     "--no-legend"
   ],
   "context_end": {
     "ac_online": "1",
-    "battery_pct": 99,
-    "package_temp_c": 66.0
+    "battery_pct": 98,
+    "package_temp_c": 71.0
   },
   "context_start": {
     "ac_online": "1",
-    "battery_pct": 99,
-    "captured_at_utc": "2026-05-22T11:59:48.329387+00:00",
+    "battery_pct": 98,
+    "captured_at_utc": "2026-05-24T21:20:10.546170+00:00",
     "hostname": "ubuntu",
-    "package_temp_c": 57.0,
+    "package_temp_c": 53.0,
     "platform": "linux",
     "power_profile": "balanced"
   },
-  "exit_code": 1,
+  "exit_code": 0,
   "label": "i7-8550u/ac/vulkan/base.en-q8_0/iter1",
-  "max_rss_kib": 190700,
+  "max_rss_kib": 208080,
   "schema": "fono-bench.rusage/1",
-  "sys_s": 3.474433,
-  "user_s": 8.871253,
-  "wall_clock_s": 31.41164
+  "sys_s": 2.513876,
+  "user_s": 10.719975,
+  "wall_clock_s": 35.994605
 }

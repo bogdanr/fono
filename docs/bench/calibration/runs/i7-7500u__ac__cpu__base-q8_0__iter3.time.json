@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/root/Work/fono/target/release/fono-bench-cpu",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "base-q8_0",
+    "--output",
+    "/root/Work/fono/runs-local/i7-7500u__ac__cpu__base-q8_0__iter3.json",
+    "--fixtures",
+    "/root/Work/fono/tests/fixtures/equivalence",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": "1",
+    "battery_pct": 100,
+    "package_temp_c": 72.0
+  },
+  "context_start": {
+    "ac_online": "1",
+    "battery_pct": 100,
+    "captured_at_utc": "2026-05-24T06:12:43.718447+00:00",
+    "hostname": "ThinkPad",
+    "package_temp_c": 55.0,
+    "platform": "linux",
+    "power_profile": "balanced"
+  },
+  "exit_code": 1,
+  "label": "i7-7500u/ac/cpu/base-q8_0/iter3",
+  "max_rss_kib": 486708,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 4.104176,
+  "user_s": 265.070353,
+  "wall_clock_s": 136.293962
+}

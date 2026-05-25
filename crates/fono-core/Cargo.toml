@@ -25,11 +25,12 @@ vulkan-probe = ["dep:ash"]
 # Compile-time advertisement that the host binary was built with a
 # whisper.cpp hardware-acceleration backend. These features have no
 # Rust dependencies of their own; they are toggled by the parent
-# `fono` / `fono-bench` crates' matching `accel-*` features so that
-# `HardwareSnapshot::accelerated()` can return `true` and the wizard's
-# affordability gate can use the relaxed `LIVE_REALTIME_MIN_ACCEL`
-# threshold. See `docs/bench/calibration/summary/matrix.json` for the
-# empirical justification (Phase 0, 2026-05-15).
+# `fono` / `fono-bench` crates' matching `accel-*` features. They are
+# historical (the `HardwareSnapshot::accelerated()` accessor was
+# replaced by the `HostGpu` enum in ADR 0028) but the build features
+# remain to keep the workspace's `--features accel-*` matrix valid.
+# See `docs/bench/calibration/summary/matrix.json` for the empirical
+# justification (Phase 0, 2026-05-15).
 accel-cuda = []
 accel-vulkan = []
 accel-hipblas = []

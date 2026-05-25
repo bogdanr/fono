@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/root/fono-bench-rig/fono-bench-cpu",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "tiny",
+    "--fixtures",
+    "/root/fono-bench-rig/fixtures/ro-bogdan",
+    "--output",
+    "/root/fono-bench-rig/runs-ro/ultra7-258v__ac__cpu__tiny__iter2.json",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": "1",
+    "battery_pct": 98,
+    "package_temp_c": 56.0
+  },
+  "context_start": {
+    "ac_online": "1",
+    "battery_pct": 98,
+    "captured_at_utc": "2026-05-22T09:52:52.507841+00:00",
+    "hostname": "nimblex",
+    "package_temp_c": 57.0,
+    "platform": "linux",
+    "power_profile": "governor=powersave"
+  },
+  "exit_code": 1,
+  "label": "ultra7-258v/ac/cpu/tiny/iter2",
+  "max_rss_kib": 342816,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 0.637004,
+  "user_s": 14.988349,
+  "wall_clock_s": 4.377618
+}

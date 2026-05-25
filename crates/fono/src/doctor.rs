@@ -52,7 +52,12 @@ pub async fn report(paths: &Paths) -> Result<String> {
     // Hardware probe + tier (drives wizard recommendations + helps
     // diagnose "why is local STT slow on my machine?")
     // ----------------------------------------------------------------
-    let snap = hwcheck::probe(&paths.cache_dir);
+    let mut snap = hwcheck::probe(&paths.cache_dir);
+    // Upgrade `host_gpu` from the Vulkan probe (no-op on Apple Silicon).
+    // See ADR 0028.
+    if snap.host_gpu == hwcheck::HostGpu::None {
+        snap.host_gpu = fono_core::vulkan_probe::probe().host_gpu_class();
+    }
     let tier = snap.tier();
     let ram_gb = snap.total_ram_bytes / (1024 * 1024 * 1024);
     let disk_gb = snap.free_disk_bytes / (1024 * 1024 * 1024);

@@ -1,36 +1,36 @@
 {
   "command": [
-    "/root/fono-bench-rig/fono-bench",
+    "/root/Work/fono/target/release/fono-bench-vulkan",
     "equivalence",
     "--stt",
     "local",
     "--model",
     "large-v3-turbo-q5_0",
     "--fixtures",
-    "/root/fono-bench-rig/fixtures/ro-bogdan",
+    "/root/Work/fono/tests/fixtures/equivalence",
     "--output",
-    "/root/fono-bench-rig/runs-ro/ryzen-5950x__ac__vulkan__large-v3-turbo-q5_0__iter2.json",
+    "/root/Work/fono/runs-local/ryzen-5950x__ac__vulkan__large-v3-turbo-q5_0__iter2.json",
     "--no-legend"
   ],
   "context_end": {
     "ac_online": null,
     "battery_pct": null,
-    "package_temp_c": 55.75
+    "package_temp_c": 55.25
   },
   "context_start": {
     "ac_online": null,
     "battery_pct": null,
-    "captured_at_utc": "2026-05-22T06:19:54.147902+00:00",
+    "captured_at_utc": "2026-05-24T18:12:09.813142+00:00",
     "hostname": "proxmox4",
-    "package_temp_c": 44.75,
+    "package_temp_c": 47.875,
     "platform": "linux",
     "power_profile": "governor=powersave"
   },
   "exit_code": 0,
   "label": "ryzen-5950x/ac/vulkan/large-v3-turbo-q5_0/iter2",
-  "max_rss_kib": 321212,
+  "max_rss_kib": 328756,
   "schema": "fono-bench.rusage/1",
-  "sys_s": 0.408623,
-  "user_s": 1.254986,
-  "wall_clock_s": 1.853536
+  "sys_s": 1.10267,
+  "user_s": 4.727901,
+  "wall_clock_s": 6.504332
 }

@@ -13,14 +13,17 @@
 //!   dialog at first launch ("Allow Fono to use these shortcuts?");
 //!   per-backend permission caches mean subsequent launches reuse the
 //!   approval silently.
-//! - **Esc cancel is not yet bound through the portal.** Binding it
-//!   permanently would grab `Esc` system-wide while Fono runs (which
-//!   violates the user-stated invariant that bare `Esc` must work in
-//!   other apps). The proper fix is a transient second session opened
-//!   on `HotkeyControl::EnableCancel` and closed on `DisableCancel`,
-//!   leaning on the backend permission cache to skip the re-prompt.
-//!   That refactor is tracked as a follow-up. Until it lands, `Esc`
-//!   cancel falls back to the tray "Cancel" entry on Wayland.
+//! - **Esc cancel uses a transient second portal session.** Binding
+//!   `Escape` to the main session permanently would grab it
+//!   system-wide while Fono runs, breaking bare Esc in other apps.
+//!   Instead, on `HotkeyControl::EnableCancel` we open a fresh
+//!   `GlobalShortcuts` session, bind the cancel trigger to it, and
+//!   close the session again on `DisableCancel`. The portal's
+//!   per-app-id permission cache (in xdg-desktop-portal-gnome /
+//!   xdg-desktop-portal-kde / xdg-desktop-portal-hyprland) means the
+//!   user only sees the consent dialog the first time a cancel
+//!   session is opened — every subsequent recording silently reuses
+//!   the cached approval (verified across reboots).
 //!
 //! ## Long-press semantics
 //!
@@ -49,6 +52,7 @@ use crate::KeyHeldFlags;
 
 const SHORTCUT_DICTATION: &str = "dictation";
 const SHORTCUT_ASSISTANT: &str = "assistant";
+const SHORTCUT_CANCEL: &str = "cancel";
 
 /// Spawn the portal-based listener. Same return shape as
 /// [`crate::listener::spawn`] so the daemon's call site can dispatch on
@@ -257,6 +261,8 @@ async fn run_portal_inner(
         .ok();
 
     info!("portal listener armed; waiting for shortcut activations");
+    let cancel_trigger = bindings.cancel.trim().to_string();
+    let mut cancel_session: Option<Arc<ashpd::desktop::Session<'_, GlobalShortcuts<'_>>>> = None;
     loop {
         tokio::select! {
             ev = activated.next() => {
@@ -295,16 +301,37 @@ async fn run_portal_inner(
                     break;
                 };
                 match ctrl {
-                    HotkeyControl::EnableCancel | HotkeyControl::DisableCancel => {
-                        // The portal cancel-session refactor (transient
-                        // second session) is a follow-up. For now we
-                        // log and let the orchestrator's existing
-                        // tray/IPC cancel paths cover the gap on
-                        // Wayland.
-                        debug!(
-                            "portal: {ctrl:?} ignored (Esc cancel on Wayland portal is a follow-up; \
-                             use the tray or `fono cancel` for now)"
-                        );
+                    HotkeyControl::EnableCancel => {
+                        if cancel_session.is_some() {
+                            continue;
+                        }
+                        if cancel_trigger.is_empty() {
+                            debug!("portal: EnableCancel ignored (no cancel binding configured)");
+                            continue;
+                        }
+                        match open_cancel_session(&proxy, &cancel_trigger).await {
+                            Ok(s) => {
+                                debug!(
+                                    "portal: cancel session opened (trigger={cancel_trigger:?})"
+                                );
+                                cancel_session = Some(s);
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "portal: failed to open cancel session ({cancel_trigger:?}): \
+                                     {e:#}. Use `fono cancel` to abort instead."
+                                );
+                            }
+                        }
+                    }
+                    HotkeyControl::DisableCancel => {
+                        if let Some(s) = cancel_session.take() {
+                            if let Err(e) = s.close().await {
+                                warn!("portal: cancel session close failed: {e:#}");
+                            } else {
+                                debug!("portal: cancel session closed");
+                            }
+                        }
                     }
                 }
             }
@@ -335,6 +362,13 @@ fn forward_activated(
             held_flags.assistant.store(true, Ordering::Relaxed);
             HotkeyAction::AssistantPressed
         }
+        SHORTCUT_CANCEL => {
+            // Cancel is a single-shot press: no long-press semantics,
+            // no press-timestamp bookkeeping. Mirrors the X11
+            // listener path at `crate::listener::forward_press` for
+            // the cancel role.
+            HotkeyAction::CancelPressed
+        }
         other => {
             warn!("portal: unknown shortcut id {other:?} activated; ignoring");
             return true;
@@ -361,6 +395,11 @@ fn forward_deactivated(
         SHORTCUT_ASSISTANT => {
             (assistant_press_at, &held_flags.assistant, HotkeyAction::AssistantPressed)
         }
+        SHORTCUT_CANCEL => {
+            // Cancel deactivations are no-ops: the cancel action
+            // already fired on `Activated`.
+            return true;
+        }
         other => {
             warn!("portal: unknown shortcut id {other:?} deactivated; ignoring");
             return true;
@@ -380,4 +419,47 @@ fn forward_deactivated(
     }
     tracing::debug!("portal Deactivated {} (short press, no synthetic stop)", ev.shortcut_id());
     true
+}
+
+/// Open a fresh portal session and bind a single `cancel` shortcut to
+/// the configured trigger (typically `Escape`). Called on
+/// `HotkeyControl::EnableCancel`; the returned session is closed again
+/// on `DisableCancel` so we don't hold a global Esc grab outside an
+/// active recording / assistant turn. Re-uses the portal's per-app-id
+/// permission cache so the consent dialog fires at most once per
+/// install on backends that persist approvals (xdg-desktop-portal-gnome,
+/// -kde, -hyprland).
+async fn open_cancel_session<'a>(
+    proxy: &GlobalShortcuts<'a>,
+    trigger: &str,
+) -> Result<Arc<ashpd::desktop::Session<'a, GlobalShortcuts<'a>>>> {
+    let session = Arc::new(proxy.create_session().await.context("create cancel session")?);
+    let shortcuts = [NewShortcut::new(SHORTCUT_CANCEL, "Cancel recording / assistant turn")
+        .preferred_trigger(Some(trigger))];
+
+    // Re-use the cached approval when present. A fresh session on a
+    // backend that persists per-app-id approvals returns the cached
+    // binding from ListShortcuts on the very first call, so we skip
+    // BindShortcuts (and therefore the consent dialog) entirely.
+    let listed = proxy
+        .list_shortcuts(&session)
+        .await
+        .ok()
+        .and_then(|req| req.response().ok())
+        .map(|r| r.shortcuts().to_vec())
+        .unwrap_or_default();
+
+    if listed.is_empty() {
+        let bind = proxy
+            .bind_shortcuts(&session, &shortcuts, &WindowIdentifier::default())
+            .await
+            .context("portal BindShortcuts(cancel) call failed")?;
+        bind.response().map_err(|e| {
+            anyhow::anyhow!(
+                "portal cancel BindShortcuts rejected by the user or backend: {e}. \
+                 Approve the consent dialog or use `fono cancel` instead."
+            )
+        })?;
+    }
+    Ok(session)
 }

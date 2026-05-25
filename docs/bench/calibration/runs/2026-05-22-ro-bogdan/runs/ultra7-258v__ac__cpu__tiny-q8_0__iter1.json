@@ -1,0 +1,103 @@
+{
+  "fono_version": "0.8.0",
+  "stt_backend": "local:tiny-q8_0",
+  "tier": "tier1",
+  "threshold_levenshtein": 0.05,
+  "results": [
+    {
+      "fixture": "ro-bogdan-30s",
+      "language": "ro",
+      "synthetic_placeholder": false,
+      "duration_s": 30.0,
+      "modes": {
+        "batch": {
+          "text": "Vrea-au să facem și o înregistrare mai lungă, cura de oul care rola să pe fundal, și cum inecare mă bendezc, mai mult la ce vreau să zic. Case vedem dacă modelul se descur că bine și în situatie asta, cand să agum în trisielde peste 12 de secunde, care să continuă o tictele să-o ceva, care vrei să vorbești cu asistemptor.",
+          "elapsed_ms": 1093,
+          "ttff_ms": 1093
+        },
+        "streaming": {
+          "text": "Vrea-au sÄ facem Èi o Ã®nregistrare mai lungÄ, cura de oul care rola sÄ pe fundal, Èi cum inecare mÄ bendezc, mai mult la ce vreau sÄ zic. Case vedem dacÄ modelul se descur cÄ bine Èi Ã®n situatie asta, cand sÄ agum Ã®n trisielde peste 12 de secunde, care sÄ continuÄ o tictele sÄ-o ceva, care vrei sÄ vorbeÈti cu asistemptor.",
+          "elapsed_ms": 3254,
+          "ttff_ms": 825
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.11111111,
+        "stt_accuracy_levenshtein": 0.18266253,
+        "ttff_ratio": 0.7548033,
+        "ttc_ratio": 2.977127
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.5"
+    },
+    {
+      "fixture": "ro-bogdan-10s",
+      "language": "ro",
+      "synthetic_placeholder": false,
+      "duration_s": 10.0,
+      "modes": {
+        "batch": {
+          "text": "și acum facem un registrare cu musica preferndalul, să vedem dacă model le pot să detectezi de dictare, între-un cei un este scomodă funnalul.",
+          "elapsed_ms": 487,
+          "ttff_ms": 487
+        },
+        "streaming": {
+          "text": "Èi acum face m-am registrare cu musica pe fundalul, sau vedem dacÄ model le pot sÄ detectezi dictarea, Ã®ntÃ¢mtii Ã®nceirinÈi-te sÄ gÄmÄ de fundalul.",
+          "elapsed_ms": 3030,
+          "ttff_ms": 787
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.30769232,
+        "stt_accuracy_levenshtein": 0.26760563,
+        "ttff_ratio": 1.6160164,
+        "ttc_ratio": 6.221766
+      },
+      "verdict": "fail",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.3; per-fixture acc threshold 0.5; equiv 0.308 > 0.300"
+    }
+  ],
+  "pinned_params": {
+    "commit_use_prosody": false,
+    "commit_prosody_extend_ms": 250,
+    "commit_use_punctuation_hint": true,
+    "commit_punct_extend_ms": 150,
+    "commit_hold_on_filler": true,
+    "commit_filler_words": [
+      "um",
+      "uh",
+      "er",
+      "ah",
+      "mm",
+      "like",
+      "you know"
+    ],
+    "commit_dangling_words": [
+      "and",
+      "but",
+      "or",
+      "so",
+      "because",
+      "the",
+      "a",
+      "an",
+      "of",
+      "to",
+      "with",
+      "for",
+      "in",
+      "on",
+      "at",
+      "from"
+    ],
+    "eou_drain_extended_ms": 1500,
+    "chunk_ms_initial": 600,
+    "chunk_ms_steady": 1500
+  },
+  "model_capabilities": {
+    "english_only": false,
+    "model_label": "local:tiny-q8_0"
+  }
+}

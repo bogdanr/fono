@@ -8,8 +8,12 @@
 //!
 //! 1. Opening `libvulkan.so.1` via `ash::Entry::load()` (which uses
 //!    `libloading` under the hood — no link-time dep).
-//! 2. Creating a minimal `VkInstance`.
-//! 3. Enumerating physical devices and capturing their friendly names.
+//! 2. Creating a minimal `VkInstance` (Vulkan 1.2 requested so the
+//!    `shaderFloat16` device feature is reachable via core
+//!    `vkGetPhysicalDeviceFeatures2`).
+//! 3. Enumerating physical devices and capturing their friendly names,
+//!    `VkPhysicalDeviceType`, and `shaderFloat16` support — the three
+//!    facts the wizard's `HostGpu` classifier (ADR 0028) needs.
 //!
 //! ## Why we run the probe in a subprocess
 //!
@@ -50,6 +54,8 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use crate::hwcheck::HostGpu;
+
 /// Environment variable used to signal an `FONO_INTERNAL_VULKAN_PROBE=1`
 /// re-exec. The host binary's entry point should call
 /// [`run_subprocess_probe_if_requested`] before initialising any
@@ -63,12 +69,63 @@ pub const PROBE_ENV_VAR: &str = "FONO_INTERNAL_VULKAN_PROBE";
 /// driver enumeration from being mis-classified as failure.
 const CHILD_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// Coarse `VkPhysicalDeviceType` mapping. Only the four classes that
+/// matter for the `HostGpu` classifier (ADR 0028); the spec's `Other`
+/// is folded into [`DeviceClass::Cpu`] (treated as no-real-GPU).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceClass {
+    /// `VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU`.
+    Integrated,
+    /// `VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU`.
+    Discrete,
+    /// `VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU`. Treat as no real GPU.
+    Virtual,
+    /// `VK_PHYSICAL_DEVICE_TYPE_CPU` or `_OTHER` (software rasteriser).
+    Cpu,
+}
+
+impl DeviceClass {
+    fn as_code(self) -> u8 {
+        match self {
+            Self::Integrated => 1,
+            Self::Discrete => 2,
+            Self::Virtual => 3,
+            Self::Cpu => 4,
+        }
+    }
+
+    fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Integrated),
+            2 => Some(Self::Discrete),
+            3 => Some(Self::Virtual),
+            4 => Some(Self::Cpu),
+            _ => None,
+        }
+    }
+}
+
+/// One physical device, as reported by the Vulkan loader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceInfo {
+    /// `VkPhysicalDeviceProperties.deviceName`.
+    pub name: String,
+    /// Coarse class (Integrated / Discrete / Virtual / CPU). Drives the
+    /// `HostGpu` classifier in ADR 0028.
+    pub class: DeviceClass,
+    /// `VkPhysicalDeviceVulkan12Features.shaderFloat16` (or the
+    /// `KHR_shader_float16_int8` extension feature on 1.1 loaders).
+    /// Whisper.cpp's ggml-vulkan backend requires this for its fp16
+    /// kernels; legacy iGPUs without it run the slower fp32 path.
+    pub supports_fp16: bool,
+}
+
 /// Outcome of a single probe attempt.
 #[derive(Debug, Clone)]
 pub enum Outcome {
     /// `libvulkan.so.1` was loadable and at least one physical device was
-    /// reported. The names come from `VkPhysicalDeviceProperties.deviceName`.
-    Available { devices: Vec<String> },
+    /// reported.
+    Available { devices: Vec<DeviceInfo> },
     /// Probe failed at some step — libvulkan missing, instance creation
     /// rejected, or device enumeration empty/error. The short reason is
     /// suitable for a doctor / log line.
@@ -84,15 +141,36 @@ impl Outcome {
                 "Vulkan: loader present but no physical devices".to_string()
             }
             Self::Available { devices } => {
-                format!("Vulkan: detected ({})", devices.join(", "))
+                let names: Vec<&str> = devices.iter().map(|d| d.name.as_str()).collect();
+                format!("Vulkan: detected ({})", names.join(", "))
             }
             Self::NotAvailable { reason } => format!("Vulkan: not available ({reason})"),
         }
     }
 
     #[must_use]
-    pub const fn is_usable(&self) -> bool {
+    pub fn is_usable(&self) -> bool {
         matches!(self, Self::Available { devices } if !devices.is_empty())
+    }
+
+    /// Classify this probe outcome into a [`HostGpu`] (ADR 0028).
+    ///
+    /// Rule: any `Discrete` device wins; else any `Integrated` device
+    /// with `shaderFloat16` is [`HostGpu::Integrated`]; everything else
+    /// (legacy iGPU without fp16, virtual, software rasteriser, no
+    /// Vulkan, probe failure) is [`HostGpu::None`].
+    #[must_use]
+    pub fn host_gpu_class(&self) -> HostGpu {
+        let Self::Available { devices } = self else {
+            return HostGpu::None;
+        };
+        if devices.iter().any(|d| d.class == DeviceClass::Discrete) {
+            return HostGpu::Discrete;
+        }
+        if devices.iter().any(|d| d.class == DeviceClass::Integrated && d.supports_fp16) {
+            return HostGpu::Integrated;
+        }
+        HostGpu::None
     }
 }
 
@@ -141,14 +219,20 @@ pub fn probe_in_process() -> Outcome {
         }
     };
 
-    // Minimal application info — required by spec, contents unobserved
-    // by the loader for an enumeration-only run.
+    // Minimal application info. Request Vulkan 1.2 so
+    // `vkGetPhysicalDeviceFeatures2` is core and the
+    // `VkPhysicalDeviceVulkan12Features.shaderFloat16` query works
+    // uniformly across drivers. If a loader refuses (very old
+    // libvulkan), `vkCreateInstance` returns an error and we degrade
+    // gracefully to `NotAvailable` — the caller treats that as
+    // `HostGpu::None`, which is the right verdict for any host too old
+    // to satisfy the 1.2 instance contract.
     let app_info = ash::vk::ApplicationInfo::default()
         .application_name(c"fono")
         .application_version(0)
         .engine_name(c"fono-vulkan-probe")
         .engine_version(0)
-        .api_version(ash::vk::API_VERSION_1_0);
+        .api_version(ash::vk::API_VERSION_1_2);
     let create_info = ash::vk::InstanceCreateInfo::default().application_info(&app_info);
 
     // SAFETY: create_instance is a standard Vulkan entry point;
@@ -162,13 +246,28 @@ pub fn probe_in_process() -> Outcome {
 
     // SAFETY: instance is valid; the call only reads properties.
     let devices_result = unsafe { instance.enumerate_physical_devices() };
-    let names = match devices_result {
+    let devices = match devices_result {
         Ok(devs) => devs
             .into_iter()
             .map(|dev| {
                 // SAFETY: instance is valid; properties is a POD output.
                 let props = unsafe { instance.get_physical_device_properties(dev) };
-                device_name_from_properties(&props.device_name)
+                let name = device_name_from_properties(&props.device_name);
+                let class = match props.device_type {
+                    ash::vk::PhysicalDeviceType::INTEGRATED_GPU => DeviceClass::Integrated,
+                    ash::vk::PhysicalDeviceType::DISCRETE_GPU => DeviceClass::Discrete,
+                    ash::vk::PhysicalDeviceType::VIRTUAL_GPU => DeviceClass::Virtual,
+                    _ => DeviceClass::Cpu,
+                };
+                // Query shaderFloat16 via the Vulkan 1.2 features chain.
+                let mut vk12 = ash::vk::PhysicalDeviceVulkan12Features::default();
+                let mut features2 =
+                    ash::vk::PhysicalDeviceFeatures2::default().push_next(&mut vk12);
+                // SAFETY: instance is valid; features2 chain is properly
+                // initialised; the call only reads device features.
+                unsafe { instance.get_physical_device_features2(dev, &mut features2) };
+                let supports_fp16 = vk12.shader_float16 != 0;
+                DeviceInfo { name, class, supports_fp16 }
             })
             .collect::<Vec<_>>(),
         Err(err) => {
@@ -183,7 +282,7 @@ pub fn probe_in_process() -> Outcome {
     // SAFETY: instance is valid; clean shutdown before returning the names.
     unsafe { instance.destroy_instance(None) };
 
-    Outcome::Available { devices: names }
+    Outcome::Available { devices }
 }
 
 /// If the current process was spawned by [`probe`] (i.e. the
@@ -222,12 +321,25 @@ pub fn run_subprocess_probe_if_requested() -> bool {
 }
 
 /// Encode an `Outcome` for transport on the child's stdout. Single
-/// line, tab-separated, ASCII-safe.
+/// line, tab-separated, ASCII-safe. Each device is encoded as
+/// `name|class_code|fp16_flag` where `class_code` is the
+/// [`DeviceClass`] integer and `fp16_flag` is `0` or `1`.
 fn encode(outcome: &Outcome) -> String {
     match outcome {
         Outcome::Available { devices } if devices.is_empty() => "OK_EMPTY".to_string(),
         Outcome::Available { devices } => {
-            let joined = devices.iter().map(|d| sanitize_field(d)).collect::<Vec<_>>().join("\t");
+            let joined = devices
+                .iter()
+                .map(|d| {
+                    format!(
+                        "{}|{}|{}",
+                        sanitize_field(&d.name).replace('|', " "),
+                        d.class.as_code(),
+                        u8::from(d.supports_fp16),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\t");
             format!("OK\t{joined}")
         }
         Outcome::NotAvailable { reason } => format!("ERR\t{}", sanitize_field(reason)),
@@ -240,9 +352,16 @@ fn decode(line: &str) -> Option<Outcome> {
         return Some(Outcome::Available { devices: vec![] });
     }
     if let Some(rest) = line.strip_prefix("OK\t") {
-        return Some(Outcome::Available {
-            devices: rest.split('\t').map(str::to_string).collect(),
-        });
+        let mut devices = Vec::new();
+        for field in rest.split('\t') {
+            let mut parts = field.splitn(3, '|');
+            let name = parts.next()?.to_string();
+            let class_code: u8 = parts.next()?.parse().ok()?;
+            let fp16_flag: u8 = parts.next()?.parse().ok()?;
+            let class = DeviceClass::from_code(class_code)?;
+            devices.push(DeviceInfo { name, class, supports_fp16: fp16_flag != 0 });
+        }
+        return Some(Outcome::Available { devices });
     }
     if let Some(rest) = line.strip_prefix("ERR\t") {
         return Some(Outcome::NotAvailable { reason: rest.to_string() });
@@ -362,24 +481,100 @@ mod tests {
         };
         assert!(absent.summary_line().starts_with("Vulkan: not available"));
         assert!(!absent.is_usable());
+        assert_eq!(absent.host_gpu_class(), HostGpu::None);
 
         let empty = Outcome::Available { devices: vec![] };
         assert_eq!(empty.summary_line(), "Vulkan: loader present but no physical devices");
         assert!(!empty.is_usable());
+        assert_eq!(empty.host_gpu_class(), HostGpu::None);
 
-        let with_dev = Outcome::Available { devices: vec!["Test GPU".to_string()] };
+        let with_dev = Outcome::Available {
+            devices: vec![DeviceInfo {
+                name: "Test GPU".into(),
+                class: DeviceClass::Discrete,
+                supports_fp16: true,
+            }],
+        };
         assert_eq!(with_dev.summary_line(), "Vulkan: detected (Test GPU)");
         assert!(with_dev.is_usable());
+        assert_eq!(with_dev.host_gpu_class(), HostGpu::Discrete);
+    }
+
+    #[test]
+    fn host_gpu_class_picks_best_present() {
+        // Discrete wins over integrated.
+        let mixed = Outcome::Available {
+            devices: vec![
+                DeviceInfo {
+                    name: "iGPU".into(),
+                    class: DeviceClass::Integrated,
+                    supports_fp16: true,
+                },
+                DeviceInfo {
+                    name: "dGPU".into(),
+                    class: DeviceClass::Discrete,
+                    supports_fp16: true,
+                },
+            ],
+        };
+        assert_eq!(mixed.host_gpu_class(), HostGpu::Discrete);
+
+        // Integrated without fp16 falls back to None.
+        let legacy = Outcome::Available {
+            devices: vec![DeviceInfo {
+                name: "HD 620".into(),
+                class: DeviceClass::Integrated,
+                supports_fp16: false,
+            }],
+        };
+        assert_eq!(legacy.host_gpu_class(), HostGpu::None);
+
+        // Modern integrated with fp16 → Integrated.
+        let xe = Outcome::Available {
+            devices: vec![DeviceInfo {
+                name: "Iris Xe".into(),
+                class: DeviceClass::Integrated,
+                supports_fp16: true,
+            }],
+        };
+        assert_eq!(xe.host_gpu_class(), HostGpu::Integrated);
+
+        // Software rasteriser → None.
+        let llvmpipe = Outcome::Available {
+            devices: vec![DeviceInfo {
+                name: "llvmpipe".into(),
+                class: DeviceClass::Cpu,
+                supports_fp16: true,
+            }],
+        };
+        assert_eq!(llvmpipe.host_gpu_class(), HostGpu::None);
     }
 
     #[test]
     fn wire_protocol_roundtrips() {
         let cases = [
             Outcome::Available {
-                devices: vec!["GeForce RTX 4090".into(), "llvmpipe (LLVM 19, 256 bits)".into()],
+                devices: vec![
+                    DeviceInfo {
+                        name: "GeForce RTX 4090".into(),
+                        class: DeviceClass::Discrete,
+                        supports_fp16: true,
+                    },
+                    DeviceInfo {
+                        name: "llvmpipe (LLVM 19, 256 bits)".into(),
+                        class: DeviceClass::Cpu,
+                        supports_fp16: false,
+                    },
+                ],
             },
             Outcome::Available { devices: vec![] },
-            Outcome::Available { devices: vec!["single".into()] },
+            Outcome::Available {
+                devices: vec![DeviceInfo {
+                    name: "single".into(),
+                    class: DeviceClass::Integrated,
+                    supports_fp16: true,
+                }],
+            },
             Outcome::NotAvailable {
                 reason: "libvulkan.so.1 not loadable: cannot open shared object".into(),
             },

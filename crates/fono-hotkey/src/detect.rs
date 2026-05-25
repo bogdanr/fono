@@ -108,18 +108,23 @@ pub fn spawn(
                 // portal is still attempted on non-GNOME Wayland
                 // compositors (sway, Hyprland, KDE) where it works.
                 if crate::gnome_gsettings::is_gnome_session() {
-                    match crate::gnome_gsettings::install(&bindings.dictation, &bindings.assistant)
-                    {
-                        Ok(exe) => {
+                    match crate::gnome_gsettings::spawn(
+                        &bindings.dictation,
+                        &bindings.assistant,
+                        &bindings.cancel,
+                    ) {
+                        Ok((exe, handle)) => {
                             info!(
                                 "GNOME-Wayland: registered gsettings custom-keybindings \
-                                 {} → {} toggle, {} → {} assistant",
+                                 {} → {} toggle, {} → {} assistant; \
+                                 cancel key {:?} bound dynamically while recording",
                                 bindings.dictation,
                                 exe.display(),
                                 bindings.assistant,
-                                exe.display()
+                                exe.display(),
+                                bindings.cancel,
                             );
-                            return Ok(None);
+                            return Ok(Some(handle));
                         }
                         Err(e) => {
                             tracing::warn!(

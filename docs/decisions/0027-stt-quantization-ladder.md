@@ -133,3 +133,44 @@ complaint.
   `scripts/bench-accuracy.py`.
 - **No user data migration** needed: pre-release; we are free to
   reshape config keys and registry entries without a compat shim.
+
+## 2026-05-25 amendment
+
+Following the data-correlation pass documented in
+`docs/bench/calibration/summary/plans/2026-05-25-wizard-selection-heuristics-refresh-v5.md`
+(see also the calibration matrix at
+`docs/bench/calibration/summary/matrix.md`), the per-model
+`default_quantization` divergence is collapsed to a single uniform rule:
+
+> **q8_0 if it ships and passes the +0.05 / +0.20 accuracy gate; else
+> smallest passing quant; else fp16.**
+
+Applied to the post-perf-pass registry this flips `tiny`, `tiny.en`, and
+`small` from `q5_1` to `q8_0` (matching `small.en` and `large-v3-turbo`,
+which were already on `q8_0`). The `q5_1` variants remain reachable via
+`[stt.local].quantization = "q5_1"` for users on bandwidth- or
+disk-constrained hosts.
+
+Rationale:
+
+- The calibration matrix shows `q8_0` dominates on CPU everywhere; the
+  only host class where `q5_1` would be a Vulkan win (`small.en` on a
+  strong iGPU) is unreachable because `large-v3-turbo` lands
+  `Comfortable` on those same hosts and outranks `small.en` on accuracy.
+- The original per-model divergence was a 2026-05-19 artefact of partial
+  q8_0 publication upstream (`tiny`/`tiny.en` lacked q8_0 builds at the
+  time); both variants are now published on
+  `ggerganov/whisper.cpp` and verified at ~41.5 MB
+  (`approx_mb: 42`).
+- `small-q8_0` accuracy gate: not re-measured this pass.
+  `small.en-q8_0` was inside the gate at 2026-05-19 (the reason it was
+  chosen over `small.en-q5_1`, which sat at +0.219 max), and `small-q8_0`
+  is strictly less aggressive than `small-q5_1`, which already passed the
+  gate. The transitive argument is documented here; a direct measurement
+  is a future calibration item if the wizard ever picks `small` as the
+  default on a host where the registry's prior matters.
+
+The exported policy walk in
+`docs/bench/calibration/summary/auto-select.html` is updated in the same
+session (`QUANT_RANK = { q8: 0, q5: 1, fp16: 2 }`) so the JSON download
+matches the registry default rule.

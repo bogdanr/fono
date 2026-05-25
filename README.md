@@ -34,14 +34,16 @@ While you're speaking, a small overlay shows what the microphone is hearing. Fou
 ## What Fono does
 
 - **Dictation, push-to-talk or toggle.** Tap `F7` to toggle recording; hold `F7` for push-to-talk. The same key works either way — the press duration decides.
+- **Voice assistant on `F8`** Talk to Ollama, OpenAI, Anthropic, Groq, Cerebras, or OpenRouter; the reply is streamed sentence-by-sentence into TTS so audio starts before the model has finished thinking.
 - **Lands in any X11 or Wayland window.** Fono types straight into the focused window and mirrors to the clipboard as a safety net. Hotkeys register through the Wayland portal where it's available, with automatic fallbacks for GNOME 46 and X11 — see [docs/wayland.md](docs/wayland.md) for the per-compositor story.
 - **Local or cloud speech-to-text.** Whisper runs on your machine by default. Or switch to Groq, OpenAI, or Deepgram with one command (`fono use stt …`).
+- **Local or cloud text-to-speach.** For local you can use Wyoming-piper. More options are on the [roadmap](ROADMAP.md). Or switch to various cloud providers if you want most naturally sounding voices.
+- **Automatic model selection.** The first-run wizard probes your CPU and GPU, then picks the heaviest local Whisper model that runs better than real time on your hardware — no manual tuning. The decision matrix was [engineered here][bench-page] with older and new machines accross multiple days of benchmarking.
 - **Optional cleanup pass.** A small LLM can tidy up the transcript before it's injected — locally with `llama.cpp`, or via Cerebras / Groq / OpenAI / OpenRouter / Anthropic / Ollama.
-- **Voice assistant on `F8`** *(cloud-only for now)*. Talk to OpenAI, Anthropic, Groq, Cerebras, or OpenRouter; the reply is streamed sentence-by-sentence into TTS so audio starts before the model has finished thinking.
 - **Visualisation overlay during recording.** Bars, oscilloscope, FFT, or heatmap. Live-dictation mode adds a small VU bar.
 - **Optional GPU acceleration.** `fono update` probes your host for Vulkan and pulls the matching CPU or Vulkan build automatically.
 - **LAN-friendly.** Speaks the [Wyoming protocol](https://github.com/rhasspy/wyoming) as both client and server, so Fono can route through (or host for) a Home Assistant satellite or another Fono on the network. mDNS finds peers automatically.
-- **One static binary, around 20 MB.** No Electron, no Node, no Python, no WebKit. Four glibc dependencies.
+- **Two small builds** `CPU/GPU ~22/60 MB` No Electron, no Node, no Python, no WebKit. Four glibc dependencies.
 
 ## First run
 
@@ -103,3 +105,5 @@ Pull requests welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the workflow
 ## License
 
 GPL-3.0-only. See [LICENSE](LICENSE).
+
+[bench-page]: https://fono.page/calibration

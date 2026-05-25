@@ -1,36 +1,36 @@
 {
   "command": [
-    "/root/fono-bench-rig/fono-bench-cpu",
+    "/root/Work/fono/target/release/fono-bench-cpu",
     "equivalence",
     "--stt",
     "local",
     "--model",
     "large-v3-turbo-q5_0",
-    "--fixtures",
-    "/root/fono-bench-rig/fixtures/equivalence",
     "--output",
-    "/root/fono-bench-rig/runs/i7-8550u__ac__cpu__large-v3-turbo-q5_0__iter2.json",
+    "/root/Work/fono/runs-local/i7-8550u__ac__cpu__large-v3-turbo-q5_0__iter2.json",
+    "--fixtures",
+    "/root/Work/fono/tests/fixtures/equivalence",
     "--no-legend"
   ],
   "context_end": {
     "ac_online": "1",
-    "battery_pct": 99,
-    "package_temp_c": 73.0
+    "battery_pct": 98,
+    "package_temp_c": 85.0
   },
   "context_start": {
     "ac_online": "1",
     "battery_pct": 99,
-    "captured_at_utc": "2026-05-22T13:46:14.357763+00:00",
+    "captured_at_utc": "2026-05-24T14:24:00.245612+00:00",
     "hostname": "ubuntu",
-    "package_temp_c": 57.0,
+    "package_temp_c": 70.0,
     "platform": "linux",
     "power_profile": "balanced"
   },
   "exit_code": 0,
   "label": "i7-8550u/ac/cpu/large-v3-turbo-q5_0/iter2",
-  "max_rss_kib": 1699148,
+  "max_rss_kib": 1701248,
   "schema": "fono-bench.rusage/1",
-  "sys_s": 20.98541,
-  "user_s": 7586.094393,
-  "wall_clock_s": 1905.623502
+  "sys_s": 22.855626,
+  "user_s": 8233.552357,
+  "wall_clock_s": 2068.160664
 }

@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/root/Work/fono/target/release/fono-bench-cpu",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "base.en-q8_0",
+    "--output",
+    "/root/Work/fono/runs-local/i7-8550u__ac__cpu__base.en-q8_0__iter3.json",
+    "--fixtures",
+    "/root/Work/fono/tests/fixtures/equivalence",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": "1",
+    "battery_pct": 99,
+    "package_temp_c": 82.0
+  },
+  "context_start": {
+    "ac_online": "1",
+    "battery_pct": 99,
+    "captured_at_utc": "2026-05-24T07:17:28.256523+00:00",
+    "hostname": "ubuntu",
+    "package_temp_c": 82.0,
+    "platform": "linux",
+    "power_profile": "balanced"
+  },
+  "exit_code": 0,
+  "label": "i7-8550u/ac/cpu/base.en-q8_0/iter3",
+  "max_rss_kib": 485824,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 5.367386,
+  "user_s": 287.699472,
+  "wall_clock_s": 76.138503
+}

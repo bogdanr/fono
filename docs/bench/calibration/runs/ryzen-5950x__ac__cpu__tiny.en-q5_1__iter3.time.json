@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/root/Work/fono/target/release/fono-bench-cpu",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "tiny.en-q5_1",
+    "--output",
+    "/root/Work/fono/runs-local/ryzen-5950x__ac__cpu__tiny.en-q5_1__iter3.json",
+    "--fixtures",
+    "/root/Work/fono/tests/fixtures/equivalence",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": null,
+    "battery_pct": null,
+    "package_temp_c": 55.25
+  },
+  "context_start": {
+    "ac_online": null,
+    "battery_pct": null,
+    "captured_at_utc": "2026-05-24T06:03:38.058762+00:00",
+    "hostname": "proxmox4",
+    "package_temp_c": 53.625,
+    "platform": "linux",
+    "power_profile": "governor=powersave"
+  },
+  "exit_code": 0,
+  "label": "ryzen-5950x/ac/cpu/tiny.en-q5_1/iter3",
+  "max_rss_kib": 312396,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 14.332405,
+  "user_s": 43.436289,
+  "wall_clock_s": 4.262766
+}

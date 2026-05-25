@@ -1,36 +1,36 @@
 {
   "command": [
-    "/root/fono-bench-rig/fono-bench-cpu",
+    "/root/Work/fono/target/release/fono-bench-cpu",
     "equivalence",
     "--stt",
     "local",
     "--model",
     "tiny-q5_1",
-    "--fixtures",
-    "/root/fono-bench-rig/fixtures/equivalence",
     "--output",
-    "/root/fono-bench-rig/runs/i7-7500u__ac__cpu__tiny-q5_1__iter2.json",
+    "/root/Work/fono/runs-local/i7-7500u__ac__cpu__tiny-q5_1__iter2.json",
+    "--fixtures",
+    "/root/Work/fono/tests/fixtures/equivalence",
     "--no-legend"
   ],
   "context_end": {
     "ac_online": "1",
     "battery_pct": 100,
-    "package_temp_c": 71.0
+    "package_temp_c": 75.0
   },
   "context_start": {
     "ac_online": "1",
     "battery_pct": 100,
-    "captured_at_utc": "2026-05-22T18:22:13.559791+00:00",
+    "captured_at_utc": "2026-05-25T04:53:03.286101+00:00",
     "hostname": "ThinkPad",
-    "package_temp_c": 60.0,
+    "package_temp_c": 76.0,
     "platform": "linux",
     "power_profile": "balanced"
   },
   "exit_code": 1,
   "label": "i7-7500u/ac/cpu/tiny-q5_1/iter2",
-  "max_rss_kib": 335944,
+  "max_rss_kib": 335328,
   "schema": "fono-bench.rusage/1",
-  "sys_s": 2.92675,
-  "user_s": 143.814866,
-  "wall_clock_s": 75.292493
+  "sys_s": 4.566617,
+  "user_s": 273.624301,
+  "wall_clock_s": 144.460849
 }

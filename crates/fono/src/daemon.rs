@@ -75,7 +75,12 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         // No config on disk: pick a hardware-appropriate whisper model
         // so the daemon comes up working even when the user skipped the
         // wizard.
-        let snap = fono_core::hwcheck::probe(&paths.cache_dir);
+        let mut snap = fono_core::hwcheck::probe(&paths.cache_dir);
+        // Upgrade `host_gpu` from the Vulkan probe before classifying;
+        // see ADR 0028. Daemon shares the cached probe with the wizard.
+        if snap.host_gpu == fono_core::hwcheck::HostGpu::None {
+            snap.host_gpu = fono_core::vulkan_probe::probe().host_gpu_class();
+        }
         let picked = fono_stt::registry::ModelRegistry::pick_default_local(&snap);
         if picked != config.stt.local.model {
             info!(
@@ -1050,11 +1055,6 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                     TrayAction::OpenSettingsTui => {
                         open_settings_tui();
                     }
-                    TrayAction::AssistantStop => {
-                        if let Some(o) = orchestrator_for_tray.as_ref() {
-                            o.on_assistant_stop().await;
-                        }
-                    }
                     TrayAction::AssistantForget => {
                         if let Some(o) = orchestrator_for_tray.as_ref() {
                             o.on_assistant_forget().await;
@@ -1443,6 +1443,23 @@ async fn handle_client(
             }
             None => Response::Error("daemon is in degraded mode (no orchestrator)".into()),
         },
+        Request::Cancel => {
+            // Route through the FSM so its state stays in sync. The
+            // FSM's `CancelPressed` arm covers every active state
+            // (Recording, LiveDictating, AssistantRecording,
+            // AssistantThinking, AssistantSpeaking) and emits the
+            // matching `HotkeyEvent::Cancel` /
+            // `StopAssistantPlayback`, which the event consumer
+            // already dispatches to `orch.on_cancel()` /
+            // `orch.on_assistant_stop()` plus `DisableCancel`. Going
+            // straight to the orchestrator instead would leave the
+            // FSM stuck in Recording, so the next F7 press would
+            // transition Recording → Processing (a no-op stop) and
+            // the *second* F7 would be the one that actually starts
+            // a new recording — the user-visible "F7 twice" bug.
+            send_translated(HotkeyAction::CancelPressed);
+            Response::Ok
+        }
         Request::Shutdown => {
             std::process::exit(0);
         }

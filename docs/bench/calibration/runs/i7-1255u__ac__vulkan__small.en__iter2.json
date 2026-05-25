@@ -1,5 +1,5 @@
 {
-  "fono_version": "0.8.0",
+  "fono_version": "0.8.1",
   "stt_backend": "local:small.en",
   "tier": "tier1",
   "threshold_levenshtein": 0.05,
@@ -12,20 +12,20 @@
       "modes": {
         "batch": {
           "text": "The art of war, then, is governed by five constant fact-",
-          "elapsed_ms": 1124,
-          "ttff_ms": 1124
+          "elapsed_ms": 1094,
+          "ttff_ms": 1094
         },
         "streaming": {
           "text": "The art of war, then, is governed by five constant fact-",
-          "elapsed_ms": 4531,
-          "ttff_ms": 1955
+          "elapsed_ms": 4378,
+          "ttff_ms": 1844
         }
       },
       "metrics": {
         "stt_levenshtein_norm": 0.0,
         "stt_accuracy_levenshtein": 0.25,
-        "ttff_ratio": 1.7393239,
-        "ttc_ratio": 4.031139
+        "ttff_ratio": 1.6855576,
+        "ttc_ratio": 4.001828
       },
       "verdict": "pass",
       "skip_reason": null,
@@ -38,25 +38,25 @@
       "duration_s": 20.0,
       "modes": {
         "batch": {
-          "text": "The art of war, then, is governed by five constant factors, to be taken into account in one's deliberations, when seeking to determine the conditions obtaining in the field. These are, one, the moral law; two, heaven; three, earth; and two, heaven; three, earth; and three, earth.",
-          "elapsed_ms": 6679,
-          "ttff_ms": 6679
+          "text": "The art of war, then, is governed by five constant factors, to be taken into account in one's deliberations, when seeking to determine the conditions obtaining in the field.",
+          "elapsed_ms": 6328,
+          "ttff_ms": 6328
         },
         "streaming": {
           "text": "The art of war, then, is governed by five constant factors to be taken into account in one's deliberations when seeking to determine the conditions obtaining in the field. These are, one, the moral law, two, heaven, three, earth, and four.",
-          "elapsed_ms": 4915,
-          "ttff_ms": 1347
+          "elapsed_ms": 4848,
+          "ttff_ms": 1339
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.16428572,
-        "stt_accuracy_levenshtein": 0.23571429,
-        "ttff_ratio": 0.2016769,
-        "ttc_ratio": 0.7358886
+        "stt_levenshtein_norm": 0.29288703,
+        "stt_accuracy_levenshtein": 0.30379745,
+        "ttff_ratio": 0.21159925,
+        "ttc_ratio": 0.7661188
       },
       "verdict": "fail",
       "skip_reason": null,
-      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2; acc 0.236 > 0.200"
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2; equiv 0.293 > 0.200; acc 0.304 > 0.200"
     },
     {
       "fixture": "en-narrative-pause",
@@ -65,52 +65,79 @@
       "duration_s": 12.0,
       "modes": {
         "batch": {
-          "text": "That Jane was yielding to the preference which she had begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general, so that she would be in love with pleasure.",
-          "elapsed_ms": 1211,
-          "ttff_ms": 1211
+          "text": "That Jane was yielding to the preference which she had begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general, so that she would be in love with the world.",
+          "elapsed_ms": 1232,
+          "ttff_ms": 1232
         },
         "streaming": {
           "text": "That Jane was yielding to the preference which she had begun to entertain for him from the first, and was in a way to be very much in love. But she considered with pleasure that it was not likely to be discovered by the world in general,",
-          "elapsed_ms": 4670,
-          "ttff_ms": 1187
+          "elapsed_ms": 4519,
+          "ttff_ms": 1173
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.15658364,
-        "stt_accuracy_levenshtein": 0.16725978,
-        "ttff_ratio": 0.9801817,
-        "ttc_ratio": 3.856317
+        "stt_levenshtein_norm": 0.15957446,
+        "stt_accuracy_levenshtein": 0.17021276,
+        "ttff_ratio": 0.9521104,
+        "ttc_ratio": 3.6680195
       },
       "verdict": "pass",
       "skip_reason": null,
       "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2"
     },
     {
-      "fixture": "en-conversational",
+      "fixture": "en-self-dictation",
       "language": "en",
       "synthetic_placeholder": false,
-      "duration_s": 10.0,
+      "duration_s": 12.033,
       "modes": {
         "batch": {
-          "text": "In nine cases out of ten a woman had better show more affection than she feels. Bingley likes your sister undoubtedly, but he may never do more than she feels. Bingley likes your sister undoubtedly, but he may never do more than she feels. Bingley likes your",
-          "elapsed_ms": 1065,
-          "ttff_ms": 1065
+          "text": "I need to record a fixture myself for this benchmark because the ones that I'm finding online are not very well fit to the task that I'm trying to accomplish.",
+          "elapsed_ms": 854,
+          "ttff_ms": 854
         },
         "streaming": {
-          "text": "In nine cases out of ten a woman had better show more affection than she feels.",
-          "elapsed_ms": 3842,
-          "ttff_ms": 1170
+          "text": "I need to record a fixture myself for this benchmark because the ones that I'm finding online are not very well fit to the task that I'm trying to accomplish.",
+          "elapsed_ms": 4147,
+          "ttff_ms": 1140
         }
       },
       "metrics": {
-        "stt_levenshtein_norm": 0.6937984,
-        "stt_accuracy_levenshtein": 0.4883721,
-        "ttff_ratio": 1.0985916,
-        "ttc_ratio": 3.6075118
+        "stt_levenshtein_norm": 0.0,
+        "stt_accuracy_levenshtein": 0.025,
+        "ttff_ratio": 1.3348947,
+        "ttc_ratio": 4.855972
       },
-      "verdict": "fail",
+      "verdict": "pass",
       "skip_reason": null,
-      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.2; equiv 0.694 > 0.200; acc 0.488 > 0.200"
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.25"
+    },
+    {
+      "fixture": "en-self-casual",
+      "language": "en",
+      "synthetic_placeholder": false,
+      "duration_s": 9.78375,
+      "modes": {
+        "batch": {
+          "text": "Let's go to the Chinese restaurant tonight. But please do not bring Sam. You know, he is very annoying.",
+          "elapsed_ms": 739,
+          "ttff_ms": 739
+        },
+        "streaming": {
+          "text": "Let's go to the Chinese restaurant tonight, but please do not bring Sam. You know, he is very annoying.",
+          "elapsed_ms": 4010,
+          "ttff_ms": 1180
+        }
+      },
+      "metrics": {
+        "stt_levenshtein_norm": 0.009708738,
+        "stt_accuracy_levenshtein": 0.009708738,
+        "ttff_ratio": 1.5967524,
+        "ttc_ratio": 5.426252
+      },
+      "verdict": "pass",
+      "skip_reason": null,
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.25"
     },
     {
       "fixture": "es-lorca-reyerta",

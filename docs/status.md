@@ -1,6 +1,87 @@
 # Fono — Project Status
 
-Last updated: 2026-05-23
+Last updated: 2026-05-25
+
+## 2026-05-25 — Wizard model-selection heuristics refresh
+
+Completed the wizard-selection refresh plan
+(`docs/bench/calibration/summary/plans/2026-05-25-wizard-selection-heuristics-refresh-v5.md`):
+dropped live-RTF gating, collapsed `Affordability` to `bool`, introduced
+the data-driven `HostGpu` classifier (1×/2×/4× multipliers per ADR 0028),
+refreshed `wer_by_lang` to Open-ASR-Leaderboard means, and unified
+`default_quantization` on `q8_0` across the registry (per the ADR 0027
+2026-05-25 amendment). New invariant tests pin the published `.en ≤
+multilingual` WER ranking and the matrix-winners-within-1.5× behaviour;
+new wizard-flow integration tests cover the three HostGpu classes.
+
+## 2026-05-23 — en-self-* focused sweep + .en-vs-multi side report
+
+Unattended ~2 h sweep of the two new first-person CC0 dictation fixtures
+(`en-self-dictation`, `en-self-casual`) across the inventory grid, with
+focused side report comparing `.en` vs multilingual whisper builds at
+each model size tier.
+
+| host | builds attempted | result |
+|---|---|---|
+| i7-1255u (localhost) | vulkan only (no cpu binary on disk) | **COMPLETE** — 63 reports, 21 cells × 3 iters |
+| ultra7-258v (192.168.0.251) | cpu + vulkan | **PARTIAL** — full CPU build (63 reports, 21 cells × 3 iters); vulkan build was just starting at collection time |
+| i7-7500u (192.168.0.112) | cpu + vulkan | **PARTIAL** — 41 CPU reports through `base.en-q8_0` iter2; Skylake CPU is too slow for the large-v3-turbo cells within the 2 h budget |
+| ryzen-5950x (192.168.0.74) | cpu + vulkan | **FAILED** — host rebooted twice mid-sweep (NVIDIA driver mismatch 580→595); /tmp tmpfs wiped both times. Pre-reboot CPU build was complete (63 reports) but the run JSONs did not survive. No data collected this session. |
+| i7-8550u (192.168.0.131) | — | **SKIPPED** at pre-flight — no `fono-bench` binary, no python rig, no models on disk; Ubuntu live host needs provisioning before it can participate. |
+
+Total reports collected into `docs/bench/calibration/runs-self-fixtures/`:
+**167** (63 + 63 + 41). Sidecar `*.time.json` files preserved alongside.
+
+Merged into `docs/bench/calibration/runs/` (852 → **962** files):
+- `appended-2`: 112 cells already in the main matrix had the two new
+  fixtures' result entries appended idempotently (sha-keyed on fixture name).
+- `copied-new`: 55 cells were new files (mostly iter3 entries that the
+  original 2-iter cohort did not have).
+
+Regenerated pages: `calibration3.html` (171 KB), `auto-select.html`
+(195 KB) — both stamped 2026-05-23 21:20Z.
+
+### Headline finding — `.en` vs multilingual on real dictation
+
+Side report at `docs/bench/calibration/summary/self-fixtures-en-vs-multi.md`.
+Accuracy is `stt_accuracy_levenshtein` (lower = better). Delta = `.en − multi`.
+
+- **base tier**: `.en` wins on all 3 hosts with data
+  (`delta ≈ −0.009`, ~50 % relative error reduction).
+- **small tier**: `.en` wins decisively where measured
+  (`delta = −0.13` on ultra7 cpu, `−0.21` on i7-1255u vulkan).
+  Multilingual `small` produces significantly worse transcripts on
+  these fixtures.
+- **tiny tier**: multilingual is *better* (`delta = +0.018`,
+  consistent across all 3 hosts) — the only tier where the older
+  intuition "multi ≥ .en" holds.
+- **turbo baseline** (multilingual only): `acc ≈ 0.010` — best in
+  class, as expected.
+
+So past results showing `.en` losing were almost certainly poisoned by
+the now-removed `en-conversational` fixture (truncation bug noted in
+the manifest). On clean first-person dictation, `.en` wins at `base`
+and `small`, and the corpus now reflects that.
+
+### Pointers
+- New per-host runs: `docs/bench/calibration/runs-self-fixtures/`
+- Side report: `docs/bench/calibration/summary/self-fixtures-en-vs-multi.md`
+- Per-host sweep logs: `docs/bench/calibration/logs/self-sweep-*-2026-05-23*.log`
+- Regenerated pages: `docs/bench/calibration/summary/calibration3.html`,
+  `docs/bench/calibration/summary/auto-select.html`
+
+### Gaps to close in a follow-up session
+1. Re-run ryzen-5950x once the NVIDIA driver mismatch is fixed (likely
+   a `nvidia-smi` userspace ↔ kernel module skew after the recent
+   driver upgrade). Recommend pinning models on persistent disk and
+   moving `runs-self-fixtures` off tmpfs before relaunch.
+2. Finish ultra7-258v vulkan build (currently 0/63 vulkan cells).
+3. Finish i7-7500u CPU base/small/turbo-post + entire vulkan build
+   (currently ~22/63 CPU cells; vulkan untouched).
+4. Provision i7-8550u (Ubuntu live) with the bench rig before
+   including it in future sweeps.
+
+---
 
 ## 2026-05-23 — ryzen-5950x gap-fill (complete matrix 210/210)
 

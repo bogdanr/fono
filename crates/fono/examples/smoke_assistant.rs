@@ -358,7 +358,11 @@ async fn exercise_groq_e2e(secrets: &Secrets) -> Result<()> {
     // 1. STT — Groq Whisper on a real public-domain English clip.
     //    The equivalence harness already pins the fixture path and
     //    license; we just read raw PCM and shove it at the cloud.
-    let fixture = Path::new("tests/fixtures/equivalence/en-conversational.wav");
+    // Was `en-conversational.wav`; that fixture was removed 2026-05-23 because
+    // every `.en` whisper build truncated its batch transcript to "In" on every
+    // host, poisoning calibration accuracy aggregates. `en-narrative-pause` is
+    // the next-longest PD English clip in the manifest.
+    let fixture = Path::new("tests/fixtures/equivalence/en-narrative-pause.wav");
     let (pcm, sample_rate) = read_wav_mono_f32(fixture)
         .map_err(|e| anyhow!("read fixture {}: {e:#}", fixture.display()))?;
     let stt_cfg = SttCfg {

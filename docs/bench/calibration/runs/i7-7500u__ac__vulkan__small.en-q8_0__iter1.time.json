@@ -1,36 +1,36 @@
 {
   "command": [
-    "/root/fono-bench-rig/fono-bench",
+    "/root/Work/fono/target/release/fono-bench-vulkan",
     "equivalence",
     "--stt",
     "local",
     "--model",
     "small.en-q8_0",
-    "--fixtures",
-    "/root/fono-bench-rig/fixtures/equivalence",
     "--output",
-    "/root/fono-bench-rig/runs/i7-7500u__ac__vulkan__small.en-q8_0__iter1.json",
+    "/root/Work/fono/runs-local/i7-7500u__ac__vulkan__small.en-q8_0__iter1.json",
+    "--fixtures",
+    "/root/Work/fono/tests/fixtures/equivalence",
     "--no-legend"
   ],
   "context_end": {
     "ac_online": "1",
     "battery_pct": 100,
-    "package_temp_c": 71.0
+    "package_temp_c": 74.0
   },
   "context_start": {
     "ac_online": "1",
     "battery_pct": 100,
-    "captured_at_utc": "2026-05-22T18:05:20.199233+00:00",
+    "captured_at_utc": "2026-05-24T22:50:57.891112+00:00",
     "hostname": "ThinkPad",
-    "package_temp_c": 62.0,
+    "package_temp_c": 75.0,
     "platform": "linux",
     "power_profile": "balanced"
   },
   "exit_code": 1,
   "label": "i7-7500u/ac/vulkan/small.en-q8_0/iter1",
-  "max_rss_kib": 199016,
+  "max_rss_kib": 235040,
   "schema": "fono-bench.rusage/1",
-  "sys_s": 4.055733,
-  "user_s": 29.437926,
-  "wall_clock_s": 105.29607
+  "sys_s": 7.095904,
+  "user_s": 42.974529,
+  "wall_clock_s": 148.990092
 }

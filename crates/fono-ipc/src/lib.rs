@@ -50,6 +50,12 @@ pub enum Request {
     /// entry. Distinct from [`Self::AssistantStop`] so a casual stop
     /// doesn't lose context.
     AssistantForget,
+    /// Cancel any in-flight activity: aborts an active recording
+    /// (batch or live dictation) AND stops in-flight assistant
+    /// playback / pump. Idempotent — no-op when nothing is active.
+    /// Backs `fono cancel` (replacing the older `fono assistant stop`
+    /// CLI verb) and the Wayland Escape fallback.
+    Cancel,
     /// Graceful shutdown.
     Shutdown,
 }

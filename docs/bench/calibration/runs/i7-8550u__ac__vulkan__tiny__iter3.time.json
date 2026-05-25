@@ -1,0 +1,36 @@
+{
+  "command": [
+    "/root/Work/fono/target/release/fono-bench-vulkan",
+    "equivalence",
+    "--stt",
+    "local",
+    "--model",
+    "tiny",
+    "--output",
+    "/root/Work/fono/runs-local/i7-8550u__ac__vulkan__tiny__iter3.json",
+    "--fixtures",
+    "/root/Work/fono/tests/fixtures/equivalence",
+    "--no-legend"
+  ],
+  "context_end": {
+    "ac_online": "1",
+    "battery_pct": 98,
+    "package_temp_c": 65.0
+  },
+  "context_start": {
+    "ac_online": "1",
+    "battery_pct": 98,
+    "captured_at_utc": "2026-05-24T20:26:46.215592+00:00",
+    "hostname": "ubuntu",
+    "package_temp_c": 52.0,
+    "platform": "linux",
+    "power_profile": "balanced"
+  },
+  "exit_code": 1,
+  "label": "i7-8550u/ac/vulkan/tiny/iter3",
+  "max_rss_kib": 182704,
+  "schema": "fono-bench.rusage/1",
+  "sys_s": 5.314575,
+  "user_s": 22.566579,
+  "wall_clock_s": 55.809116
+}

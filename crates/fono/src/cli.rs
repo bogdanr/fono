@@ -106,6 +106,14 @@ impl Cli {
 pub enum Cmd {
     /// Toggle recording on the running daemon.
     Toggle,
+    /// Cancel any in-flight activity on the running daemon: aborts an
+    /// active recording (batch or live dictation) and stops in-flight
+    /// assistant playback. Idempotent — no-op when nothing is active.
+    /// On Wayland the daemon already grabs the configured cancel key
+    /// (default `Escape`) through the portal while a recording is
+    /// running; this CLI verb is the fallback for environments where
+    /// the portal isn't available, and for scripted invocations.
+    Cancel,
     /// Record once from the mic, transcribe, inject, exit.
     ///
     /// Captures audio until silence, Ctrl-C, or the `--max-seconds`
@@ -149,8 +157,9 @@ pub enum Cmd {
     PasteLast,
     /// Voice-assistant push-to-talk control. Subcommands match the
     /// IPC contract used by the F8 hotkey: `press` starts audio
-    /// capture, `release` runs the streaming pump, `stop` aborts an
-    /// in-flight reply. Useful for end-to-end smoke tests and for
+    /// capture, `release` runs the streaming pump. Use `fono cancel`
+    /// to abort an in-flight reply (it covers both dictation and the
+    /// assistant). Useful for end-to-end smoke tests and for
     /// scripted invocations.
     Assistant {
         #[command(subcommand)]
@@ -390,8 +399,6 @@ pub enum AssistantCmd {
     /// End capture and run the streaming reply (STT → chat → TTS).
     /// Mirrors releasing F8.
     Release,
-    /// Stop an in-flight assistant reply (drain audio, abort pump).
-    Stop,
 }
 
 #[derive(Debug, Subcommand)]
@@ -480,12 +487,12 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Some(Cmd::Setup) => Box::pin(wizard::run(&paths)).await,
         Some(Cmd::Toggle) => ipc_simple(&paths, Request::Toggle).await,
+        Some(Cmd::Cancel) => ipc_simple(&paths, Request::Cancel).await,
         Some(Cmd::PasteLast) => ipc_simple(&paths, Request::PasteLast).await,
         Some(Cmd::Assistant { action }) => {
             let req = match action {
                 AssistantCmd::Press => Request::AssistantHoldPress,
                 AssistantCmd::Release => Request::AssistantHoldRelease,
-                AssistantCmd::Stop => Request::AssistantStop,
             };
             ipc_simple(&paths, req).await
         }
@@ -1009,7 +1016,6 @@ fn read_wav_mono_f32(path: &std::path::Path) -> Result<(Vec<f32>, u32)> {
 /// know about per-model affordability.
 struct HwprobeRecommendation {
     model: &'static str,
-    affordability: fono_core::hwcheck::Affordability,
     accuracy: crate::wizard::AccuracyBucket,
 }
 
@@ -1030,20 +1036,10 @@ fn compute_hwprobe_recommendation(
         });
     let english_only = !langs.is_empty() && langs.iter().all(|l| l == "en");
     let shortlist = crate::wizard::build_local_stt_shortlist(english_only, &langs, snap);
-    shortlist.into_iter().next().map(|e| HwprobeRecommendation {
-        model: e.model.name,
-        affordability: e.affordability,
-        accuracy: e.accuracy,
-    })
-}
-
-fn affordability_label(aff: fono_core::hwcheck::Affordability) -> &'static str {
-    use fono_core::hwcheck::Affordability;
-    match aff {
-        Affordability::Comfortable => "comfortable",
-        Affordability::Borderline => "borderline (live mode may lag)",
-        Affordability::Unsuitable => "unsuitable",
-    }
+    shortlist
+        .into_iter()
+        .next()
+        .map(|e| HwprobeRecommendation { model: e.model.name, accuracy: e.accuracy })
 }
 
 fn accuracy_label(acc: crate::wizard::AccuracyBucket) -> &'static str {
@@ -1059,14 +1055,19 @@ fn accuracy_label(acc: crate::wizard::AccuracyBucket) -> &'static str {
 
 fn hwprobe_cmd(paths: &Paths, json: bool) {
     use fono_core::{hwcheck, vulkan_probe};
-    let snap = hwcheck::probe(&paths.cache_dir);
-    let tier = snap.tier();
-    let rec = compute_hwprobe_recommendation(paths, &snap);
+    let mut snap = hwcheck::probe(&paths.cache_dir);
     // Reuse the same Vulkan probe the update / tray flow does (loads
     // libvulkan.so.1 in a subprocess and enumerates physical devices).
     // The result is cached for the lifetime of the process, so calling
     // it here costs nothing if the daemon already probed at startup.
     let vulkan = vulkan_probe::probe();
+    // Upgrade `host_gpu` based on the Vulkan probe (no-op on Apple
+    // Silicon, which already starts at Integrated). See ADR 0028.
+    if snap.host_gpu == hwcheck::HostGpu::None {
+        snap.host_gpu = vulkan.host_gpu_class();
+    }
+    let tier = snap.tier();
+    let rec = compute_hwprobe_recommendation(paths, &snap);
     let vulkan_usable = vulkan.is_usable();
     // Suggest an accelerated build only when (a) this is the CPU-only
     // ship and (b) the host has a usable Vulkan device. Matches the
@@ -1075,8 +1076,22 @@ fn hwprobe_cmd(paths: &Paths, json: bool) {
     let suggest_vulkan_upgrade =
         crate::variant::VARIANT == crate::variant::Variant::Cpu && vulkan_usable;
     if json {
-        let vulkan_devices = match &vulkan {
-            vulkan_probe::Outcome::Available { devices } => devices.clone(),
+        let vulkan_devices: Vec<serde_json::Value> = match &vulkan {
+            vulkan_probe::Outcome::Available { devices } => devices
+                .iter()
+                .map(|d| {
+                    serde_json::json!({
+                        "name": d.name,
+                        "class": match d.class {
+                            vulkan_probe::DeviceClass::Integrated => "integrated",
+                            vulkan_probe::DeviceClass::Discrete => "discrete",
+                            vulkan_probe::DeviceClass::Virtual => "virtual",
+                            vulkan_probe::DeviceClass::Cpu => "cpu",
+                        },
+                        "supports_fp16": d.supports_fp16,
+                    })
+                })
+                .collect(),
             vulkan_probe::Outcome::NotAvailable { .. } => Vec::new(),
         };
         let v = serde_json::json!({
@@ -1085,12 +1100,15 @@ fn hwprobe_cmd(paths: &Paths, json: bool) {
             "default_whisper_model": rec.as_ref().map_or(tier.default_whisper_model(), |r| r.model),
             "recommendation": rec.as_ref().map(|r| serde_json::json!({
                 "model": r.model,
-                "affordability": affordability_label(r.affordability),
                 "accuracy": accuracy_label(r.accuracy),
             })),
             "local_default": tier.local_default(),
             "variant": crate::variant::VARIANT.label(),
-            "accelerated": snap.accelerated(),
+            "host_gpu": match snap.host_gpu {
+                fono_core::hwcheck::HostGpu::None => "none",
+                fono_core::hwcheck::HostGpu::Integrated => "integrated",
+                fono_core::hwcheck::HostGpu::Discrete => "discrete",
+            },
             "vulkan_available": vulkan_usable,
             "vulkan_devices": vulkan_devices,
             "suggest_vulkan_upgrade": suggest_vulkan_upgrade,
@@ -1115,10 +1133,9 @@ fn hwprobe_cmd(paths: &Paths, json: bool) {
     println!("ram   : {ram_gb} GB total · disk free : {disk_gb} GB · {}/{}", snap.os, snap.arch);
     match &rec {
         Some(r) => println!(
-            "tier  : {} (recommends whisper-{} — {}, accuracy: {})",
+            "tier  : {} (recommends whisper-{} — accuracy: {})",
             tier.as_str(),
             r.model,
-            affordability_label(r.affordability),
             accuracy_label(r.accuracy),
         ),
         None => println!(
