@@ -109,6 +109,50 @@
       "verdict": "pass"
     },
     {
+      "fixture": "en-self-dictation",
+      "language": "en",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.04374999925494194,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": 6.8682169914245605,
+        "ttff_ratio": 2.0232558250427246
+      },
+      "modes": {
+        "batch": {
+          "text": "I need to record the fixture myself for this benchmark because the ones that I'm finding online are not very well fit to the task that I'm trying to accomplish."
+        },
+        "streaming": {
+          "text": "I need to record the fixture myself for this benchmark because the ones that I'm finding online are not very well fit to the task that I'm trying to accomplish."
+        }
+      },
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.25",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    },
+    {
+      "fixture": "en-self-casual",
+      "language": "en",
+      "metrics": {
+        "stt_accuracy_levenshtein": 0.009708737954497337,
+        "stt_levenshtein_norm": 0.0,
+        "ttc_ratio": 7.845982074737549,
+        "ttff_ratio": 2.5870535373687744
+      },
+      "modes": {
+        "batch": {
+          "text": "Let's go to the Chinese restaurant tonight, but please do not bring Sam, you know, he is very annoying."
+        },
+        "streaming": {
+          "text": "Let's go to the Chinese restaurant tonight, but please do not bring Sam, you know, he is very annoying."
+        }
+      },
+      "note": "per-fixture equiv threshold 0.2; per-fixture acc threshold 0.25",
+      "skip_reason": null,
+      "synthetic_placeholder": false,
+      "verdict": "pass"
+    },
+    {
       "fixture": "es-lorca-reyerta",
       "language": "es",
       "metrics": {

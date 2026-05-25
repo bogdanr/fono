@@ -9,7 +9,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use fono_core::config::{General, Stt, SttBackend, SttCloud, SttWyoming};
+#[cfg(feature = "wyoming")]
+use fono_core::config::SttWyoming;
+use fono_core::config::{General, Stt, SttBackend, SttCloud};
 use fono_core::locale::detect_os_languages;
 use fono_core::providers::stt_key_env;
 use fono_core::Secrets;
