@@ -3,7 +3,27 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Fono — Model Decision Page (v3)</title>
+<title>Fono Calibration — Whisper model benchmarks across CPUs &amp; Vulkan GPUs</title>
+<meta name="description" content="Benchmark matrix behind Fono's first-run wizard: Whisper tiny/small/turbo across fp16/q8/q5 on CPU and Vulkan, measured on five Intel and AMD hosts. Pareto frontiers, speed-vs-accuracy scatter, and the exact picks Fono would make." />
+<meta name="keywords" content="Fono, Whisper benchmark, whisper.cpp, speech-to-text benchmark, Vulkan Whisper, AVX-VNNI, RTF, WER, Linux voice dictation" />
+<meta name="author" content="Bogdan Radulescu" />
+<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1" />
+<meta name="theme-color" content="#0d1117" />
+<link rel="canonical" href="https://fono.page/calibration/" />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<link rel="icon" href="/favicon.svg" sizes="any" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180" />
+<link rel="manifest" href="/site.webmanifest" />
+<meta property="og:title" content="Fono Calibration — Whisper benchmark matrix" />
+<meta property="og:description" content="How Fono picks the right Whisper model, quantisation and backend per host — backed by ~920 measured runs across CPU and Vulkan." />
+<meta property="og:url" content="https://fono.page/calibration/" />
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Fono" />
+<meta property="og:image" content="https://fono.page/assets/og.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="Fono Calibration — Whisper benchmark matrix" />
+<meta name="twitter:description" content="How Fono picks the right Whisper model, quantisation and backend per host — backed by ~920 measured runs." />
+<meta name="twitter:image" content="https://fono.page/assets/og.png" />
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.1.0/dist/chartjs-plugin-annotation.min.js"></script>
 <style>
@@ -181,7 +201,8 @@ footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--border);color
 </head>
 <body>
 <div class="page">
-  <h1>Fono — Model Decision Page</h1>
+  <p style="font-size:12px;margin-bottom:8px"><a href="https://fono.page/" rel="home">← fono.page</a> · <a href="https://github.com/bogdanr/fono">GitHub</a></p>
+  <h1><a href="https://fono.page/" style="color:inherit;text-decoration:none">Fono</a> — Model Decision Page</h1>
   <p class="subtitle">
     Matrix last extended <strong id="matrix-fresh">2026-05-23</strong> ·
     <span id="matrix-stats">629 measured iterations · 210 cells · 5 hosts</span> ·
@@ -197,8 +218,8 @@ footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--border);color
     <br><br>
     <strong>Scope.</strong> We have collected ≈ 920 benchmark runs to date:
     629 of them survive in the current matrix as 210 (host × backend × model ×
-    quant) cells; the rest were discarded as the harness, fixtures, and accuracy
-    gates were tightened. The findings below are computed from the cells still
+    quant) cells; the rest were discarded as I did some performance optimizations
+    and data was no longer relevant. The findings are computed from the cells still
     in the matrix; the per-host Pareto frontier (section 6) simulates the live
     wizard algorithm so the page can be read as both data and decision.
   </div>
@@ -442,7 +463,7 @@ footer{margin-top:48px;padding-top:18px;border-top:1px solid var(--border);color
   </div>
 
   <footer>
-    Fono benchmark · GPL-3.0-only ·
+    <a href="https://fono.page/">Fono</a> benchmark · <a href="https://github.com/bogdanr/fono">source on GitHub</a> · GPL-3.0-only ·
     Higher RTF = faster
   </footer>
 </div>
