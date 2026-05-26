@@ -178,18 +178,18 @@ jobs:
       matrix:
         include:
           # CPU variant — the default download. Strict 4-entry allowlist,
-          # 22 MiB budget. Mirrors the canonical `fono-vX.Y.Z-x86_64`
-          # release asset. Budget grew from 20 MiB (v0.4.0 measured at
-          # 18.08 MB) to 22 MiB at v0.7.1 — multi-wave Wyoming /
-          # streaming / assistant code added enough to nudge the slim
-          # build past 20 MiB; raising the ceiling preserves a ~1 MiB
-          # headroom while still rejecting accidental dependency drift.
+          # 24 MiB budget. Mirrors the canonical `fono-vX.Y.Z-x86_64`
+          # release asset. Budget history: 20 MiB at v0.4.0 (measured
+          # 18.08 MB) → 22 MiB at v0.7.1 (multi-wave Wyoming / streaming /
+          # assistant code) → 24 MiB at v0.9.0 (MCP voice-loop server
+          # measured at 22.5 MB). Preserves ~1.5 MiB headroom while
+          # still rejecting accidental dependency drift.
           - variant: cpu
             arch: x86_64
             target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
             features: ""
-            budget_bytes: 23068672
+            budget_bytes: 25165824
             extra_needed: ""
             dynamic_linker: ld-linux-x86-64.so.2
           # GPU variant — Vulkan-enabled, ~60 MB. Adds `libvulkan.so.1`
@@ -210,14 +210,13 @@ jobs:
           # interpreter on aarch64 is `ld-linux-aarch64.so.1` and on
           # aarch64 it appears only in `PT_INTERP`, not `NEEDED`, so
           # the allowlist drops it; the universal libc/libm/libgcc_s
-          # triple still applies. Budget matches x86_64 CPU; measured
-          # locally on Debian 13 aarch64 at 18.1 MB.
+          # triple still applies. Budget matches x86_64 CPU (24 MiB).
           - variant: cpu
             arch: aarch64
             target: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04-arm
             features: ""
-            budget_bytes: 23068672
+            budget_bytes: 25165824
             extra_needed: ""
             dynamic_linker: ld-linux-aarch64.so.1
     steps:
