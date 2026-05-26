@@ -5,7 +5,13 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0] — 2026-05-26
+
+Talk to your coding agent. The headline feature is an early-preview voice
+loop that lets any MCP-capable coding agent — Forge, Claude Code, Cursor,
+Codex CLI, Gemini CLI, and others — speak and listen through Fono. Plus a
+Debian/Ubuntu install fix so the on-screen overlay shows up on first run
+instead of after a manual restart.
 
 ### Added
 
@@ -84,6 +90,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MCP listen default `max_seconds` lowered from 60 s to 45 s** —
   combined with the multi-utterance relevance loop this gives a
   responsive turn-taking budget without stranding you.
+
+### Fixed
+
+- **Overlay now appears on first run on Debian/Ubuntu desktops.**
+  Installing via `curl https://fono.page/install | sh` silently
+  skipped the post-install prompt that offers to add
+  `libxkbcommon-x11` and `xdotool`, so the on-screen recording
+  overlay fell back to `noop` and only appeared after a manual
+  restart. The prompt now reads from `/dev/tty` directly so it
+  survives `curl|sh` + `sudo` PTY allocation, and the background
+  daemon spawn also reconstructs `DISPLAY` and `XAUTHORITY` when
+  sudo strips them. Server installs are unaffected — they never
+  pull X11 libraries.
 
 ## [0.8.2] — 2026-05-26
 
@@ -2218,7 +2237,9 @@ feature and ships fully wired in v0.2.
 - Local LLM cleanup (Qwen / SmolLM) is opt-in / preview.
 - Real `winit + softbuffer` overlay window is a stub (event channel only).
 
-[Unreleased]: https://github.com/bogdanr/fono/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/bogdanr/fono/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/bogdanr/fono/compare/v0.8.2...v0.9.0
+[0.8.2]: https://github.com/bogdanr/fono/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/bogdanr/fono/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/bogdanr/fono/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/bogdanr/fono/compare/v0.7.0...v0.7.1

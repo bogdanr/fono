@@ -2172,8 +2172,12 @@ mod tests {
         // somehow has a real install on /usr/local/bin/fono this
         // assertion will fire and they'll know to uninstall first.)
         let state = detect_install_state();
-        if Path::new(BIN_PATH).exists() || Path::new(SYSTEMD_UNIT).exists() {
-            // A real install is present — skip rather than mis-fail.
+        if Path::new(BIN_PATH).symlink_metadata().is_ok()
+            || Path::new(SYSTEMD_UNIT).symlink_metadata().is_ok()
+        {
+            // A real (or stale) install marker is present — skip rather
+            // than mis-fail. Mirrors detect_install_state which uses
+            // symlink_metadata so broken symlinks still count.
             return;
         }
         assert!(state.files.is_empty());

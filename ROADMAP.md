@@ -14,11 +14,17 @@ The home page is [fono.page](https://fono.page).
 <table width="100%">
 <tr>
 <td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#wake-word-activation">Wake-word activation</a></strong><br>Say the magic word — Fono wakes and starts dictating. No hotkey, no hands.<br><br><strong><a href="#local-text-to-speech--home-assistant-voice-server">Local text-to-speech + Home Assistant voice server</a></strong><br>Speak any of your languages locally — Kokoro where it shines, Piper everywhere else (including Romanian). The same engine answers Home Assistant over Wyoming, no Python sidecar.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".</td>
-<td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#hover-context-injection">Hover-context injection</a></strong> <em>(experimental)</em><br>Terminal hovered → shell prompts. Code editor hovered → identifier casing.<br><br><strong><a href="#voice-loop-for-coding-agents">Voice loop for coding agents</a></strong><br>Talk to Forge, Claude Code, Cursor and friends entirely by voice. Short spoken answers, A/B/C choices, no keyboard between turns.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#realtime-voice-assistant">Realtime voice assistant</a></strong><br>OpenAI Realtime and Gemini Live: F8 speaks straight to the model, single WebSocket, sub-second time-to-first-audio.<br><br><strong><a href="#better-wayland-hotkeys">Better Wayland hotkeys</a></strong><br>Auto-register via the <code>GlobalShortcuts</code> portal when available.<br><br><strong><a href="#macos-and-windows">macOS + Windows</a></strong><br>Native platform integrations.</td>
+<td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#hover-context-injection">Hover-context injection</a></strong> <em>(experimental)</em><br>Terminal hovered → shell prompts. Code editor hovered → identifier casing.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#realtime-voice-assistant">Realtime voice assistant</a></strong><br>OpenAI Realtime and Gemini Live: F8 speaks straight to the model, single WebSocket, sub-second time-to-first-audio.<br><br><strong><a href="#better-wayland-hotkeys">Better Wayland hotkeys</a></strong><br>Auto-register via the <code>GlobalShortcuts</code> portal when available.<br><br><strong><a href="#macos-and-windows">macOS + Windows</a></strong><br>Native platform integrations.</td>
 </tr>
 </table>
 
 ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge)
+
+**[v0.9.0 — Voice loop for coding agents](#shipped)**  
+Talk to Forge, Claude Code, Cursor, Codex CLI, Gemini CLI and other
+MCP-capable agents entirely by voice. Short spoken answers, A/B/C choices,
+no keyboard between turns. Plus a Debian/Ubuntu install fix so the overlay
+shows up on first run. *(2026-05-26)*
 
 **[v0.8.2 — Context-aware dictation + Esc-to-cancel](#shipped)**  
 Window-aware Whisper and LLM prompting (terminal, code editor, private windows),
@@ -184,33 +190,6 @@ Concrete plan: `plans/2026-05-25-realtime-end-to-end-assistant-v4.md`. Blocked
 on [Voice actions](#voice-actions) landing first so that voice actions are
 available from day one on both paths.
 
-### Voice loop for coding agents
-
-> Talk to your coding agent. Hear short, voice-friendly answers back. Pick A, B, or C
-> with your voice. Don't touch the keyboard between turns.
-
-**Early preview, shipping in v0.9.** `fono-mcp-server` ships three voice tools
-(`fono.speak`, `fono.listen`, `fono.confirm`) over stdio. The integration is
-**agent-agnostic by design**: any MCP-capable coding agent — Forge, Claude Code,
-Cursor, Codex CLI, Gemini CLI, and anything that ships tomorrow — is voice-driven by
-adding one `fono` MCP server entry to its config and loading the shared voice-mode
-system prompt at `assets/agent-presets/voice.md`. No per-agent code inside Fono; new
-agents are `agents.toml` entries and `docs/coding-agents.md` sections, never Fono code
-changes.
-
-Verified end-to-end against Forge and Claude Code; Cursor, Codex CLI, and Gemini CLI
-documented as best-effort. `fono agent-setup <name>` is the one-shot setup that wires
-the MCP server, agent MCP JSON, and voice-mode preset; after that the user launches
-their agent the normal way. Disabled by default — opt in with
-`fono use mcp-server on`. Because the protocol, defaults, and tool surface may still
-shift before this feature graduates, expect rough edges in v0.9 and breaking changes
-between v0.9 and the eventual stable release.
-
-Concrete plan: `plans/2026-05-25-fono-voice-loop-for-coding-agents-v1.md`.
-Complementary to (but independent of) the [Voice actions](#voice-actions) work
-where Fono is the MCP *client* asking Home Assistant et al. to do things on the
-user's behalf.
-
 ### Better Wayland hotkeys
 
 Today on Wayland (KDE, GNOME, wlroots) you bind the hotkey through your compositor's
@@ -228,6 +207,41 @@ system-tray app and native installer on Windows.
 ## Shipped
 
 Newest first.
+
+- ![v0.9.0](https://img.shields.io/badge/v0.9.0-2026--05--26-blue?style=flat-square)
+  **Voice loop for coding agents (early preview).** Fono ships an MCP
+  server with three voice tools — `fono.speak`, `fono.listen`, and
+  `fono.confirm` — that let any MCP-capable coding agent drive a
+  voice loop: the agent speaks short replies, asks free-form
+  questions, or offers A/B/C choices, and you answer with your
+  voice. Verified end-to-end against Forge and Claude Code;
+  best-effort against Cursor, Codex CLI, Gemini CLI, Cline,
+  Continue, Windsurf, and Goose. `fono agent-setup <name>` wires
+  everything in one shot — enables the MCP server, merges the
+  right `mcpServers.fono` entry into your agent's MCP config, and
+  appends the shared voice-mode preset to your project's
+  `AGENTS.md` / `CLAUDE.md`. The same dictation overlay pops up
+  while the agent is listening so you always know whether Fono is
+  hearing you, and the tray icon turns amber while a voice turn is
+  in flight. A built-in background-speech filter ignores radio /
+  TV / side-conversation chatter when the agent is waiting for an
+  answer (`[mcp].relevance_filter`, default `"heuristic"`, with an
+  optional `"llm"` mode that uses the configured polish backend as
+  a one-shot classifier with a 1.5 s timeout). New companion CLI
+  verbs: `fono speak --stream` (sentence-segments stdin and speaks
+  through the configured TTS backend) and
+  `fono use mcp-server on|off`. Disabled by default — opt in with
+  `fono use mcp-server on`. ADR 0030 captures the design.
+  Protocol, defaults, and tool surface may still shift before the
+  feature graduates.
+
+  Fixes: installing via `curl https://fono.page/install | sh` on
+  Debian/Ubuntu desktops no longer skips the prompt that offers to
+  install `libxkbcommon-x11` and `xdotool`, so the on-screen
+  recording overlay shows up on first run instead of after a manual
+  daemon restart. The background daemon spawn also reconstructs
+  `DISPLAY` and `XAUTHORITY` when sudo strips them. Server installs
+  are unaffected. *v0.9.0, 2026-05-26.*
 
 - ![v0.8.2](https://img.shields.io/badge/v0.8.2-2026--05--26-blue?style=flat-square)
   **Context-aware dictation, Esc-to-cancel, and smarter first-run model
@@ -559,5 +573,7 @@ Newest first.
 [v0.6.1]: https://github.com/bogdanr/fono/releases/tag/v0.6.1
 [v0.7.0]: https://github.com/bogdanr/fono/releases/tag/v0.7.0
 [v0.7.1]: https://github.com/bogdanr/fono/releases/tag/v0.7.1
+[v0.9.0]: https://github.com/bogdanr/fono/releases/tag/v0.9.0
+[v0.8.2]: https://github.com/bogdanr/fono/releases/tag/v0.8.2
 [v0.8.1]: https://github.com/bogdanr/fono/releases/tag/v0.8.1
 [v0.8.0]: https://github.com/bogdanr/fono/releases/tag/v0.8.0
