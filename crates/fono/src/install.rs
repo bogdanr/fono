@@ -1081,23 +1081,31 @@ fn candidate_daemon_sockets_for_target_user() -> Vec<PathBuf> {
 ///
 /// `sudo fono install` runs with the *sudo-scrubbed* environment:
 /// `DISPLAY` is usually preserved, but `WAYLAND_DISPLAY`,
-/// `XDG_RUNTIME_DIR`, and `DBUS_SESSION_BUS_ADDRESS` are not. Without
-/// those, the spawned daemon's hotkey-backend auto-detector
-/// (`fono_hotkey::detect_backend`) lands on `X11` on GNOME-Wayland
-/// hosts and the GNOME-gsettings shim never runs — F7/F8 only fire in
-/// Xwayland windows, which looks to the user like "hotkeys don't
-/// work". Reconstruct the missing graphical-session env from
-/// `/run/user/<uid>` *inside the shell command*, so the resolution
-/// happens after `runuser` / `sudo -u` has switched to the target
-/// user. This mirrors what the next-login XDG autostart entry gets
-/// for free.
+/// `XDG_RUNTIME_DIR`, and `DBUS_SESSION_BUS_ADDRESS` are not. On
+/// distros with stricter sudoers (Ubuntu's `casper` cloud-init
+/// image, Debian without `env_keep += "DISPLAY"`, sudo invocations
+/// that print `'-E' is ignored`), even `DISPLAY` can be scrubbed.
+/// Without those vars the spawned daemon's overlay backend selector
+/// (`fono_overlay::backend::candidate_list`) sees no graphical
+/// session and falls through to the no-op backend — the user sees
+/// no recording indicator until they restart fono manually from a
+/// graphical shell.
+///
+/// Reconstruct the missing graphical-session env from
+/// `/run/user/<uid>` and `/tmp/.X11-unix` *inside the shell command*,
+/// so the resolution happens after `runuser` / `sudo -u` has switched
+/// to the target user. This mirrors what the next-login XDG autostart
+/// entry gets for free.
 fn try_autostart_for_sudo_user() -> AutostartOutcome {
     let Some(user) = resolve_target_user() else {
         return AutostartOutcome::SpawnFailed;
     };
     let has_graphical_env = std::env::var_os("DISPLAY").is_some()
         || std::env::var_os("WAYLAND_DISPLAY").is_some()
-        || std::env::var_os("XDG_RUNTIME_DIR").is_some();
+        || std::env::var_os("XDG_RUNTIME_DIR").is_some()
+        || Path::new("/tmp/.X11-unix").read_dir().is_ok_and(|mut it| {
+            it.any(|e| e.is_ok_and(|e| e.file_name().to_string_lossy().starts_with('X')))
+        });
     if !has_graphical_env {
         return AutostartOutcome::Headless;
     }
@@ -1107,8 +1115,10 @@ fn try_autostart_for_sudo_user() -> AutostartOutcome {
     // runuser/sudo has switched uids), so `id -u` returns the right
     // uid even when `XDG_RUNTIME_DIR` was scrubbed by sudo. The
     // `WAYLAND_DISPLAY` loop picks the first real socket and skips
-    // the `.lock` companion files. All exports are no-ops when the
-    // variable was already inherited.
+    // the `.lock` companion files. The `DISPLAY` loop walks
+    // `/tmp/.X11-unix/X*` (the X11 abstract-socket directory) and
+    // turns the first match `X0` into `:0`. All exports are no-ops
+    // when the variable was already inherited.
     let shell_cmd = format!(
         "RUNTIME=\"${{XDG_RUNTIME_DIR:-/run/user/$(id -u)}}\"; \
          if [ -d \"$RUNTIME\" ]; then \
@@ -1123,6 +1133,22 @@ fn try_autostart_for_sudo_user() -> AutostartOutcome {
                break; \
              done; \
            fi; \
+           if [ -z \"${{XAUTHORITY:-}}\" ]; then \
+             for a in \"$RUNTIME\"/.mutter-Xwaylandauth.* \"$RUNTIME\"/gdm/Xauthority \"$HOME\"/.Xauthority; do \
+               [ -f \"$a\" ] || continue; \
+               XAUTHORITY=\"$a\"; export XAUTHORITY; \
+               break; \
+             done; \
+           fi; \
+         fi; \
+         if [ -z \"${{DISPLAY:-}}\" ]; then \
+           for s in /tmp/.X11-unix/X*; do \
+             [ -S \"$s\" ] || continue; \
+             n=\"${{s##*/X}}\"; \
+             case \"$n\" in ''|*[!0-9]*) continue;; esac; \
+             DISPLAY=\":$n\"; export DISPLAY; \
+             break; \
+           done; \
          fi; \
          LOG={log}; [ -w \"$LOG\" ] || LOG=/dev/null; \
          setsid fono </dev/null >>\"$LOG\" 2>&1 &"
@@ -1508,11 +1534,22 @@ fn format_install_cmd(prog: &str, args: &[String]) -> String {
 /// Session-aware preflight that offers to install the runtime
 /// packages Fono needs on the detected session. Stays silent when
 /// nothing is missing, when running on Slackware, or when the
-/// package manager isn't one we know how to drive. Honours the
-/// stdin/stdout TTY gate (non-interactive shells get a hint line
-/// instead of a prompt).
+/// package manager isn't one we know how to drive.
+///
+/// The prompt reads from `/dev/tty` directly instead of `stdin`/`stdout`,
+/// so it survives the `curl … | sh` flow used by the public installer
+/// (where `stdin` is the script-feeding pipe and even `</dev/tty`
+/// from the wrapper script can be swallowed by `sudo`'s `use_pty`
+/// proxy). When `/dev/tty` is genuinely unavailable (true non-
+/// interactive run — CI, systemd, ssh without `-t`), we fall back
+/// to printing a hint line so the operator can install the
+/// packages by hand later.
+///
+/// This branch only runs from `run_install_desktop`; `run_install_server`
+/// never calls it, so headless servers will never be offered (or
+/// silently nudged toward) X11-pulling libraries like `libxkbcommon-x11`.
 fn offer_install_missing_packages() {
-    use std::io::{BufRead, IsTerminal};
+    use std::io::{BufRead, Write};
 
     if is_slackware() {
         return;
@@ -1539,7 +1576,23 @@ fn offer_install_missing_packages() {
     let (prog, args) = pm.install_command(&names);
     let cmd = format_install_cmd(prog, &args);
 
-    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+    // Try to open the controlling terminal directly. Two opens (read
+    // + write) keeps the read side blocking on user input while the
+    // write side is line-buffered for the prompt. `OpenOptions::new()
+    // .read(true).write(true)` on `/dev/tty` works on every Unix the
+    // installer targets — the only failure mode is "no controlling
+    // terminal", which is what we want as the non-interactive trigger.
+    let tty_rw: Option<(std::fs::File, std::fs::File)> = {
+        let r = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").ok();
+        let w = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").ok();
+        match (r, w) {
+            (Some(r), Some(w)) => Some((r, w)),
+            _ => None,
+        }
+    };
+
+    let Some((tty_r, mut tty_w)) = tty_rw else {
+        // True non-interactive — no controlling terminal at all.
         eprintln!();
         eprintln!("Note: Fono recommends installing the following on {}:", session.label());
         for p in &missing {
@@ -1547,47 +1600,53 @@ fn offer_install_missing_packages() {
         }
         eprintln!("Install later with: {cmd}");
         return;
-    }
+    };
 
-    eprintln!();
-    eprintln!("Fono detected a {} session and recommends installing:", session.label());
+    let _ = writeln!(tty_w);
+    let _ =
+        writeln!(tty_w, "Fono detected a {} session and recommends installing:", session.label());
     for p in &missing {
-        eprintln!("  · {} — {}", p.human(), p.purpose());
+        let _ = writeln!(tty_w, "  · {} — {}", p.human(), p.purpose());
     }
-    eprintln!("Dictation still works without these, but auto-typing and/or the on-screen");
-    eprintln!("overlay will be degraded.");
-    eprint!("Install now via `{cmd}`? [Y/n] ");
-    let _ = std::io::Write::flush(&mut std::io::stderr());
+    let _ = writeln!(
+        tty_w,
+        "Dictation still works without these, but auto-typing and/or the on-screen"
+    );
+    let _ = writeln!(tty_w, "overlay will be degraded.");
+    let _ = write!(tty_w, "Install now via `{cmd}`? [Y/n] ");
+    let _ = tty_w.flush();
 
     let mut line = String::new();
-    let stdin = std::io::stdin();
-    if stdin.lock().read_line(&mut line).is_err() {
-        eprintln!("(could not read answer — skipping)");
+    let mut reader = std::io::BufReader::new(tty_r);
+    if reader.read_line(&mut line).is_err() {
+        let _ = writeln!(tty_w, "(could not read answer — skipping)");
         return;
     }
     let answer = line.trim().to_ascii_lowercase();
     if !(answer.is_empty() || answer == "y" || answer == "yes") {
-        eprintln!("Skipping. You can install them later with: {cmd}");
+        let _ = writeln!(tty_w, "Skipping. You can install them later with: {cmd}");
         return;
     }
 
-    eprintln!("→ running: {prog} {}", args.join(" "));
+    let _ = writeln!(tty_w, "→ running: {prog} {}", args.join(" "));
+    let _ = tty_w.flush();
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let status = Command::new(prog).args(&arg_refs).stdin(std::process::Stdio::null()).status();
     match status {
         Ok(s) if s.success() => {
             for p in &missing {
-                eprintln!("  · installed {}", p.human());
+                let _ = writeln!(tty_w, "  · installed {}", p.human());
             }
         }
         Ok(s) => {
-            eprintln!(
+            let _ = writeln!(
+                tty_w,
                 "  · {prog} exited with status {} — install the packages manually if you want full functionality",
                 s.code().map_or_else(|| "<signal>".into(), |c| c.to_string())
             );
         }
         Err(e) => {
-            eprintln!("  · failed to spawn {prog}: {e}");
+            let _ = writeln!(tty_w, "  · failed to spawn {prog}: {e}");
         }
     }
 }
