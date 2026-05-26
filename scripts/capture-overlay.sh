@@ -705,14 +705,14 @@ clear_background() {
 }
 
 # ---------------------------------------------------------------------------
-# fono daemon lifecycle (optional)
+# fono daemon lifecycle (optional — `fono` with no args IS the daemon)
 # ---------------------------------------------------------------------------
 
 FONO_PID=""
 start_fono_if_requested() {
     [ "$START_FONO" -eq 1 ] || return 0
     have fono || die "--start-fono passed but `fono` not on PATH"
-    info "spawning fono daemon..."
+    info "spawning fono..."
     fono >/dev/null 2>&1 &
     FONO_PID=$!
     sleep 1.5

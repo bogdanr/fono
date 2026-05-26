@@ -1,0 +1,697 @@
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<!--
+  Fono website FFT visualisation demo.
+
+  Drop-in 600x300 canvas that simulates the Fono overlay's `WaveformStyle::Fft`
+  rendering for the marketing site, with a synced "dictated text" surface
+  underneath. No microphone, no audio playback, no network — runs entirely
+  off a seeded virtual clock.
+
+  Algorithms mirrored from the real product (see comments inline):
+    * crates/fono/src/session.rs:49-80, :665-771  — FFT pipeline
+    * crates/fono-overlay/src/real.rs:218-287     — panel palette / geometry
+    * crates/fono-overlay/src/real.rs:786-853     — draw_fft bar geometry
+
+  Single file, no dependencies, ~10 KB minified+gzipped target.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex,follow" />
+<link rel="canonical" href="https://fono.page/" />
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fono — live FFT demo</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0;
+    background: #0b0b0e;
+    display: grid;
+    place-items: center;
+    min-height: 100vh;
+    font-family: -apple-system, "Segoe UI", "DejaVu Sans", sans-serif;
+  }
+  .fono-demo {
+    width: 600px;
+    aspect-ratio: 2 / 1;
+    max-width: 100%;
+    position: relative;
+    display: block;
+  }
+  .fono-demo canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  .fono-demo .play-pill {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+    padding: 6px 14px;
+    border-radius: 999px;
+    background: rgba(23, 23, 27, 0.85);
+    color: #ececf1;
+    font: 600 12px/1 -apple-system, "Segoe UI", "DejaVu Sans", sans-serif;
+    letter-spacing: 0.06em;
+    border: 1px solid rgba(99, 122, 255, 0.4);
+    cursor: pointer;
+    display: none;
+  }
+  .fono-demo[data-paused="true"] .play-pill { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="fono-demo" id="fono-demo">
+  <canvas id="fono-demo-canvas" width="1200" height="600"
+          aria-label="Fono live dictation FFT visualisation"></canvas>
+  <button class="play-pill" type="button" aria-label="Play demo">PLAY DEMO</button>
+</div>
+<script>
+(() => {
+  'use strict';
+
+  // ── Constants mirrored from the Rust source ─────────────────────────────
+  // session.rs:49-80
+  const SAMPLE_RATE     = 16000;
+  const FFT_SIZE        = 2048;          // 4096 in product; 2048 here is
+                                         // visually indistinguishable and
+                                         // halves per-frame CPU.
+  const FFT_MAX_HZ      = 3000;
+  const FFT_BINS        = 300;
+  const FFT_DB_FLOOR    = -20;
+  const FFT_DB_CEILING  =  30;
+  const TICK_MS         = 50;            // 20 fps producer cadence
+  // real.rs:218-287
+  const PADDING_X       = 24;
+  const PADDING_TOP     = 14;
+  const PADDING_BOT     = 16;
+  const ACCENT_WIDTH    = 4;
+  const CORNER_RADIUS   = 12;
+  const STATUS_FONT_PX  = 13;
+  const STATUS_TO_TEXT  = 14;
+  const TEXT_FONT_PX    = 20;
+  const LINE_GAP        = 6;
+  const COLOR_BG        = 'rgba(23, 23, 27, 0.80)';   // 0xCC17171B
+  const COLOR_TEXT      = '#ECECF1';                  // 0xFFECECF1
+  const COLOR_TEXT_DIM  = '#AAAAB2';                  // 0xCCAAAAB2
+  // accent_color() arms — only the ones we cycle through:
+  const ACCENT_LIVE       = [0x63, 0x7A, 0xFF];   // indigo
+  const ACCENT_RECORDING  = [0xE0, 0x54, 0x54];   // soft red
+  const ACCENT_POLISHING  = [0xE0, 0xA0, 0x40];   // warm amber
+
+  // ── Canvas / sizing ─────────────────────────────────────────────────────
+  const wrap   = document.getElementById('fono-demo');
+  const canvas = document.getElementById('fono-demo-canvas');
+  const pill   = wrap.querySelector('.play-pill');
+  const ctx    = canvas.getContext('2d');
+  // CSS box is 600x300; backing store sized to devicePixelRatio (clamped).
+  const W_CSS = 600, H_CSS = 300;
+  function resizeBacking() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width  = W_CSS * dpr;
+    canvas.height = H_CSS * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  resizeBacking();
+  window.addEventListener('resize', resizeBacking);
+
+  // ── Seeded PRNG (mulberry32) ────────────────────────────────────────────
+  function mulberry32(seed) {
+    let s = seed >>> 0;
+    return () => {
+      s = (s + 0x6D2B79F5) >>> 0;
+      let t = s;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const rng = mulberry32(0xF07DEFEE >>> 0);
+
+  // ── Synthetic voice generator ───────────────────────────────────────────
+  // Additive synthesis tuned to reproduce what a real voice FFT looks
+  // like on the Fono overlay (see assets/fono.gif as the reference):
+  //
+  //   * A discrete *comb* of bright spikes at every multiple of F0,
+  //     with near-silent bins between them. The comb is the visual
+  //     signature of voiced speech.
+  //   * Energy concentrated in the low third of the panel (0 – 1 kHz),
+  //     tapering rapidly toward 3 kHz. Real voice falls off as
+  //     ≈ 1/k² past the first harmonic (glottal pulse + radiation
+  //     filtering).
+  //   * F0 stable inside each syllable so the comb doesn't slide
+  //     sideways; vibrato is ±1.2 % only.
+  //
+  // Knobs that drive the comb being visible (vs a smeared wall):
+  //
+  //   1. `ROLLOFF_EXP = 1.9` — strong 1/k^1.9 amplitude decay, so the
+  //      upper third of the panel is naturally dark and the eye reads
+  //      the bright low harmonics as discrete spikes.
+  //   2. No flat floor on the per-harmonic gain (formants alone
+  //      shape relative brightness). A floor would re-light every
+  //      between-harmonic bin and erase the comb.
+  //   3. Signal scaled so the loudest harmonic lands at ~+25 dB after
+  //      windowing — well under the +30 dB ceiling — leaving enough
+  //      dynamic range for between-harmonic bins (dominated by Hann
+  //      sidelobe leakage at ≈ −32 dB peak) to map to v ≈ 0.15.
+  //   4. Tight formants (BW 50 / 70 / 90 Hz) so the brightness
+  //      envelope sits over a few consecutive harmonics rather than
+  //      smearing across the panel.
+  const FORMANT_SETS = [
+    // [F1, F2, F3] in Hz — rough vowel set (a, e, i, o, u, schwa)
+    [ 730, 1090, 2440],
+    [ 530, 1840, 2480],
+    [ 270, 2290, 3010],
+    [ 570,  840, 2410],
+    [ 300,  870, 2240],
+    [ 500, 1500, 2500],
+  ];
+  const N_HARMONICS  = 22;     // up to ~22 × 200 Hz = 4.4 kHz; upper
+                               // ones near-silent thanks to ROLLOFF.
+  const ROLLOFF_EXP  = 1.2;    // 1/k^1.2 — left third of the panel
+                               // glows brighter, but every harmonic
+                               // still contributes a visible bar so
+                               // the comb texture extends across the
+                               // whole width (matches assets/fono.gif).
+  const SIGNAL_GAIN  = 0.13;   // Peak per-harmonic amplitude. Pushed
+                               // high enough that the fundamental and
+                               // lowest few harmonics saturate at
+                               // v = 1.0 during loud voiced syllables
+                               // — the bars hit the top of the FFT
+                               // panel ("full scale") rather than
+                               // staying half-height.
+  const NOISE_AMP    = 0.040;  // Breathy noise — the dominant source
+                               // of the "spiky grass" texture. Each
+                               // FFT bin of white noise has Rayleigh-
+                               // distributed magnitude (σ ≈ mean), so
+                               // adjacent bins land at random heights
+                               // bin-to-bin. That random per-bar
+                               // variance is what makes the spectrum
+                               // *look* like a forest of discrete
+                               // spikes rather than a smooth wall —
+                               // it is the "harmonics separation"
+                               // visible in assets/fono.gif. At this
+                               // amplitude grass lands around v ≈ 0.25
+                               // average, with individual bars ranging
+                               // v ≈ 0.1 – 0.45, and the voiced
+                               // harmonics on top peak v ≈ 0.5 – 1.0.
+
+  // Filtered noise state (one-pole low-pass for "pink-ish" feel).
+  let noiseState = 0;
+  function noise() {
+    const w = (rng() * 2 - 1);
+    noiseState = noiseState * 0.92 + w * 0.08;
+    return noiseState;
+  }
+
+  // Compute the syllable envelope for a given virtual time (seconds).
+  // Returns [0..1]. Built from a stream of Gaussian bursts at ~3.2 Hz
+  // with occasional silences ("breath gaps") so typing visibly pauses
+  // between phrases.
+  function envelope(tSec) {
+    const SYL_HZ = 3.2;
+    const sylIdx = Math.floor(tSec * SYL_HZ);
+    const phase  = tSec * SYL_HZ - sylIdx;
+    const inGap = (sylIdx % 13) === 4 || (sylIdx % 17) === 9;
+    if (inGap) return 0.02;
+    const x = (phase - 0.45) / 0.22;
+    return Math.exp(-0.5 * x * x);
+  }
+
+  // Deterministic per-syllable parameters: stable F0 and vowel for the
+  // whole duration of a syllable. No caching needed — pure hash of idx.
+  function hash01(seed) {
+    // Tiny integer hash → [0, 1).
+    let x = (seed | 0) ^ 0x9E3779B9;
+    x = Math.imul(x ^ (x >>> 16), 0x85EBCA6B);
+    x = Math.imul(x ^ (x >>> 13), 0xC2B2AE35);
+    x ^= x >>> 16;
+    return ((x >>> 0) % 1000003) / 1000003;
+  }
+  function syllableParams(sylIdx) {
+    const a = hash01(sylIdx * 73856093);
+    const b = hash01(sylIdx * 19349663 + 1);
+    return {
+      // 115 – 200 Hz speaker range, stable inside the syllable.
+      f0: 115 + a * 85,
+      fset: FORMANT_SETS[Math.floor(b * FORMANT_SETS.length)],
+    };
+  }
+
+  // Formant resonance: a peaked response centred at F with bandwidth BW.
+  function formantGain(freq, F, BW) {
+    const d = (freq - F) / BW;
+    return 1 / (1 + d * d);
+  }
+
+  // Ring buffer of the last FFT_SIZE samples (always full).
+  const ringBuf = new Float32Array(FFT_SIZE);
+  let   ringPos = 0;       // next write index
+  let   sampleClock = 0;   // total samples generated since t=0
+
+  // Generate `n` samples and write into the ring buffer.
+  function generateSamples(n) {
+    for (let i = 0; i < n; i++) {
+      const t = sampleClock / SAMPLE_RATE;
+      const env = envelope(t);
+      let s = 0;
+      if (env > 0.03) {
+        const sylIdx = Math.floor(t * 3.2);
+        const p = syllableParams(sylIdx);
+        // Light vibrato (~5.5 Hz, ±1.2 %) keeps the spectrum alive
+        // without sliding the comb visibly.
+        const vibrato = 1 + 0.012 * Math.sin(2 * Math.PI * 5.5 * t);
+        const f0 = p.f0 * vibrato;
+        const F = p.fset;
+        for (let k = 1; k <= N_HARMONICS; k++) {
+          const fh = f0 * k;
+          if (fh > FFT_MAX_HZ * 1.1) break;
+          // Three tight formant resonators with no flat floor —
+          // formants alone shape per-harmonic brightness so the
+          // comb structure (bright spikes / dim valleys) reads
+          // through cleanly.
+          const formant =
+            formantGain(fh, F[0], 50) * 1.0 +
+            formantGain(fh, F[1], 70) * 0.85 +
+            formantGain(fh, F[2], 90) * 0.6;
+          const g = Math.min(formant, 1.5);
+          // 1/k^ROLLOFF_EXP voice-style roll-off: most energy in
+          // the lower third of the panel, tapering to near-silence
+          // up at FFT_MAX_HZ.
+          s += (g / Math.pow(k, ROLLOFF_EXP)) * Math.sin(2 * Math.PI * fh * t);
+        }
+        s *= SIGNAL_GAIN * env;
+      }
+      // Breathy noise — present at all times, even between syllables,
+      // so the spectrum always has visible "grass" between the comb
+      // spikes (matches the look in assets/fono.gif where every bin
+      // shows at least a short bar).
+      s += noise() * NOISE_AMP * (env > 0.05 ? 1.0 : 0.45);
+      ringBuf[ringPos] = s;
+      ringPos = (ringPos + 1) % FFT_SIZE;
+      sampleClock++;
+    }
+  }
+
+  // ── Radix-2 in-place complex FFT ────────────────────────────────────────
+  // Cooley-Tukey. We feed a Hann-windowed real signal into the real
+  // half and zero into the imag half (real FFT via plain complex FFT —
+  // simple and plenty fast at N=2048).
+  const FFT_LOG2 = Math.log2(FFT_SIZE) | 0;
+  const fftRe = new Float32Array(FFT_SIZE);
+  const fftIm = new Float32Array(FFT_SIZE);
+  // Bit-reversal index table.
+  const bitRev = new Uint16Array(FFT_SIZE);
+  for (let i = 0; i < FFT_SIZE; i++) {
+    let r = 0, x = i;
+    for (let j = 0; j < FFT_LOG2; j++) { r = (r << 1) | (x & 1); x >>= 1; }
+    bitRev[i] = r;
+  }
+  // Twiddle factors.
+  const twRe = new Float32Array(FFT_SIZE / 2);
+  const twIm = new Float32Array(FFT_SIZE / 2);
+  for (let i = 0; i < FFT_SIZE / 2; i++) {
+    const a = -2 * Math.PI * i / FFT_SIZE;
+    twRe[i] = Math.cos(a);
+    twIm[i] = Math.sin(a);
+  }
+  // Hann window — session.rs:720-727.
+  const hann = new Float32Array(FFT_SIZE);
+  for (let i = 0; i < FFT_SIZE; i++) {
+    hann[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (FFT_SIZE - 1));
+  }
+
+  function fftForward() {
+    // Bit-reverse permute.
+    for (let i = 0; i < FFT_SIZE; i++) {
+      const j = bitRev[i];
+      if (j > i) {
+        const tr = fftRe[i]; fftRe[i] = fftRe[j]; fftRe[j] = tr;
+        const ti = fftIm[i]; fftIm[i] = fftIm[j]; fftIm[j] = ti;
+      }
+    }
+    // Butterflies.
+    for (let size = 2; size <= FFT_SIZE; size <<= 1) {
+      const half = size >> 1;
+      const step = FFT_SIZE / size;
+      for (let i = 0; i < FFT_SIZE; i += size) {
+        let k = 0;
+        for (let j = i; j < i + half; j++) {
+          const wr = twRe[k], wi = twIm[k];
+          const xr = fftRe[j + half], xi = fftIm[j + half];
+          const tr = wr * xr - wi * xi;
+          const ti = wr * xi + wi * xr;
+          fftRe[j + half] = fftRe[j] - tr;
+          fftIm[j + half] = fftIm[j] - ti;
+          fftRe[j] += tr;
+          fftIm[j] += ti;
+          k += step;
+        }
+      }
+    }
+  }
+
+  // Source bins covering 0..FFT_MAX_HZ.
+  const MAX_SOURCE_BIN = Math.floor(FFT_MAX_HZ * FFT_SIZE / SAMPLE_RATE);
+  const DB_SPAN = FFT_DB_CEILING - FFT_DB_FLOOR;
+  const displayBins = new Float32Array(FFT_BINS);
+
+  // Run one FFT frame against the current ring buffer; write into
+  // `displayBins`. Mirrors session.rs:733-770 exactly: window, FFT,
+  // magnitude, source→display averaging, dB, normalise.
+  function computeFrame() {
+    // Copy ring buffer (oldest first) into fftRe with Hann window.
+    for (let i = 0; i < FFT_SIZE; i++) {
+      const idx = (ringPos + i) % FFT_SIZE;
+      fftRe[i] = ringBuf[idx] * hann[i];
+      fftIm[i] = 0;
+    }
+    fftForward();
+    for (let b = 0; b < FFT_BINS; b++) {
+      // Each display bin owns a [start, end) slice of source bins.
+      const start = Math.floor(b       * MAX_SOURCE_BIN / FFT_BINS);
+      const end   = Math.max(start + 1,
+                    Math.floor((b + 1) * MAX_SOURCE_BIN / FFT_BINS));
+      let sum = 0;
+      for (let s = start; s < end; s++) {
+        sum += Math.hypot(fftRe[s], fftIm[s]);
+      }
+      const mag = sum / (end - start);
+      const db  = 20 * Math.log10(Math.max(mag, 1e-6));
+      let v = (db - FFT_DB_FLOOR) / DB_SPAN;
+      if (v < 0) v = 0; else if (v > 1) v = 1;
+      displayBins[b] = v;
+    }
+  }
+
+  // ── Marketing copy (the "dictated text") ────────────────────────────────
+  const SCRIPT = [
+    "Push to talk. Speak naturally.",
+    "Fono types it for you.",
+    "Fully offline. Fully yours.",
+    "One binary. No cloud. No tracking.",
+  ];
+  let scriptLine = 0;
+  let scriptChar = 0;
+  let scriptPhase = 'typing';   // 'typing' | 'hold' | 'polish'
+  let scriptPhaseAt = 0;        // ms (virtual)
+  let charPaceMs = 0;           // accumulator gating per-character advance
+
+  // The demo cycles through two states the user actually sees in the
+  // product: `RECORDING` (red, voice spectrum) while a sentence is
+  // being dictated, then a brief `POLISHING` flash (amber, synthetic
+  // Gaussian-scanner FFT) between sentences — mirroring the cleanup
+  // pass the LLM does on every dictation.
+  //   crates/fono/src/session.rs:863-902     — thinking-mode scanner
+  //   crates/fono-overlay/src/real.rs:868-942 — gapped FFT draw
+  function stateFor(phase) { return phase === 'polish' ? 'POLISHING' : 'RECORDING'; }
+  function accentFor(state) { return state === 'POLISHING' ? ACCENT_POLISHING : ACCENT_RECORDING; }
+
+  // Polishing-FFT bins (gapped, 100 wide, like the real product's
+  // thinking-mode FFT). Updated each frame off `virtualMs`.
+  const POLISH_BINS = 100;
+  const polishBins  = new Float32Array(POLISH_BINS);
+  function computePolishFrame(timeMs) {
+    const n = POLISH_BINS;
+    // Gaussian scanner sweeps across the bins; σ ≈ 8 bins. Plus a
+    // per-bin breathing baseline so even bins far from the focus
+    // stay alive instead of dropping to zero.
+    const scanPhase = (Math.sin(timeMs * 0.0015) + 1) * 0.5;
+    const focus = scanPhase * n;
+    const breathBase = (Math.sin(timeMs * 0.003) + 1) * 0.5;
+    for (let i = 0; i < n; i++) {
+      const d = i - focus;
+      const scanner = Math.exp(-d * d / (2 * 8 * 8));
+      const breathing = breathBase * (0.5 + 0.5 * Math.sin(i * 0.4 + timeMs * 0.002));
+      const combined = scanner + (1 - scanner) * breathing * 0.30;
+      polishBins[i] = combined > 1 ? 1 : combined;
+    }
+  }
+
+  // ── Drawing helpers ─────────────────────────────────────────────────────
+  function rgba(rgb, a) {
+    return 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',' + a + ')';
+  }
+  function roundRectPath(x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+
+  // Draw a Fono-style panel at (px, py, pw, ph). `kind` selects the
+  // inner content: 'fft' or 'text'.
+  function drawPanel(px, py, pw, ph, kind, state) {
+    // Panel BG.
+    roundRectPath(px, py, pw, ph, CORNER_RADIUS);
+    ctx.fillStyle = COLOR_BG;
+    ctx.fill();
+    // Accent stripe — real.rs:1645-1651
+    const accent = accentFor(state);
+    const stripeInset = CORNER_RADIUS * 0.4;
+    roundRectPath(px, py + stripeInset, ACCENT_WIDTH, ph - stripeInset * 2,
+                  ACCENT_WIDTH * 0.5);
+    ctx.fillStyle = rgba(accent, 1);
+    ctx.fill();
+    // Status label.
+    ctx.fillStyle = COLOR_TEXT_DIM;
+    ctx.font = '600 ' + STATUS_FONT_PX + 'px -apple-system, "Segoe UI", "DejaVu Sans", sans-serif';
+    ctx.textBaseline = 'alphabetic';
+    const pad_x = px + PADDING_X + ACCENT_WIDTH;
+    ctx.fillText(kind === 'fft' ? state : 'TRANSCRIPT',
+                 pad_x, py + PADDING_TOP + STATUS_FONT_PX * 0.85);
+
+    // Content area bounds.
+    const cx0 = pad_x;
+    const cx1 = px + pw - PADDING_X;
+    const cy0 = py + PADDING_TOP + STATUS_FONT_PX + STATUS_TO_TEXT;
+    const cy1 = py + ph - PADDING_BOT;
+
+    if (kind === 'fft') {
+      if (state === 'POLISHING') {
+        drawFft(cx0, cy0, cx1, cy1, accent, polishBins, POLISH_BINS, /*gapped=*/true);
+      } else {
+        drawFft(cx0, cy0, cx1, cy1, accent, displayBins, FFT_BINS,  /*gapped=*/false);
+      }
+    } else {
+      drawText(cx0, cy0, cx1, cy1);
+    }
+  }
+
+  // Mirrors real.rs:786-853 (draw_fft) and real.rs:868-942
+  // (draw_fft_gapped) — pixel-aligned bars, no AA at seams,
+  // alpha = 0x33 + (0xFF - 0x33) * v, dim floor line. The gapped
+  // variant leaves a 2-px gap on the right of each slot so the
+  // polishing spectrum reads as a discrete "thinking" comb rather
+  // than a continuous wall.
+  function drawFft(x0, y0, x1, y1, accent, bins, binCount, gapped) {
+    const areaW = Math.max(x1 - x0, 0);
+    const areaH = Math.max(y1 - y0, 0);
+    const BUCKETS = 8;
+    const buckets = [];
+    for (let i = 0; i < BUCKETS; i++) buckets.push([]);
+    const gap = gapped ? 2 : 0;
+    for (let i = 0; i < binCount; i++) {
+      const v = bins[i];
+      const barH = Math.max(v * areaH, 1);
+      const bxf0 = x0 + (i     / binCount) * areaW;
+      const bxf1 = x0 + ((i+1) / binCount) * areaW;
+      const slotX0 = Math.round(bxf0);
+      const slotX1 = Math.round(bxf1);
+      const xi0 = slotX0;
+      const xi1 = gapped ? Math.max(slotX1 - gap, slotX0 + 1) : slotX1;
+      if (xi1 <= xi0) continue;
+      const yi0 = Math.round(y1 - barH);
+      const alpha = (0x33 + (0xFF - 0x33) * v) / 255;
+      const b = Math.min(BUCKETS - 1, Math.floor(alpha * BUCKETS));
+      buckets[b].push(xi0, yi0, xi1 - xi0, Math.round(y1) - yi0);
+    }
+    for (let b = 0; b < BUCKETS; b++) {
+      const arr = buckets[b];
+      if (arr.length === 0) continue;
+      const a = ((b + 0.5) / BUCKETS);
+      ctx.fillStyle = rgba(accent, a);
+      for (let i = 0; i < arr.length; i += 4) {
+        ctx.fillRect(arr[i], arr[i+1], arr[i+2], arr[i+3]);
+      }
+    }
+    // Floor line.
+    ctx.fillStyle = 'rgba(170, 170, 178, 0.20)';
+    ctx.fillRect(x0, Math.round(y1), x1 - x0, 1);
+  }
+
+  // Bottom panel: previous completed sentence in dim above, current
+  // sentence growing character-by-character in bright below, plus a
+  // blinking caret.
+  function drawText(x0, y0, x1, y1) {
+    ctx.font = '500 ' + TEXT_FONT_PX + 'px -apple-system, "Segoe UI", "DejaVu Sans", sans-serif';
+    ctx.textBaseline = 'alphabetic';
+    const prevIdx = (scriptLine + SCRIPT.length - 1) % SCRIPT.length;
+    let y = y0 + TEXT_FONT_PX * 0.85;
+    ctx.fillStyle = COLOR_TEXT_DIM;
+    ctx.fillText(SCRIPT[prevIdx], x0, y);
+    y += TEXT_FONT_PX + LINE_GAP;
+    const line = SCRIPT[scriptLine].slice(0, scriptChar);
+    ctx.fillStyle = COLOR_TEXT;
+    ctx.fillText(line, x0, y);
+    // Blinking cursor — half-period 500 ms.
+    const blink = (Math.floor(virtualMs / 500) % 2) === 0;
+    if (blink) {
+      const w = ctx.measureText(line).width;
+      ctx.fillStyle = COLOR_TEXT;
+      ctx.fillRect(x0 + w + 2, y - TEXT_FONT_PX * 0.85, 2, TEXT_FONT_PX);
+    }
+  }
+
+  // ── Main loop ───────────────────────────────────────────────────────────
+  let virtualMs = 0;
+  let lastSampleMs = 0;
+  let nextTickMs = 0;
+  let lastRaf = 0;
+  let paused = false;
+
+  function tick(now) {
+    if (paused) { lastRaf = now; return; }
+    if (!lastRaf) lastRaf = now;
+    const dt = Math.min(now - lastRaf, 100);  // clamp catch-up after stalls
+    lastRaf = now;
+    virtualMs += dt;
+
+    // Generate enough samples to advance the virtual sample clock.
+    const wantSample = Math.floor(virtualMs * SAMPLE_RATE / 1000);
+    const lastSample = Math.floor(lastSampleMs * SAMPLE_RATE / 1000);
+    const need = wantSample - lastSample;
+    if (need > 0) generateSamples(need);
+    lastSampleMs = virtualMs;
+
+    // Producer cadence: one FFT frame per TICK_MS.
+    if (virtualMs >= nextTickMs) {
+      while (virtualMs >= nextTickMs) nextTickMs += TICK_MS;
+      computeFrame();
+    }
+
+    // Drive text state machine off the synth envelope.
+    const env = envelope(virtualMs / 1000);
+    const ACTIVE = 0.18;
+    if (scriptPhase === 'typing') {
+      // Advance characters only while audio is active.
+      if (env > ACTIVE) {
+        charPaceMs += dt;
+        // ~35 ms per character feels close to a brisk dictation cadence.
+        while (charPaceMs >= 35 && scriptChar < SCRIPT[scriptLine].length) {
+          scriptChar++;
+          charPaceMs -= 35;
+        }
+      } else {
+        charPaceMs = 0;
+      }
+      if (scriptChar >= SCRIPT[scriptLine].length) {
+        scriptPhase = 'hold';
+        scriptPhaseAt = virtualMs;
+      }
+    } else if (scriptPhase === 'hold') {
+      // Brief hold on the completed sentence, then flash POLISHING.
+      if (virtualMs - scriptPhaseAt > 600) {
+        scriptPhase = 'polish';
+        scriptPhaseAt = virtualMs;
+      }
+    } else if (scriptPhase === 'polish') {
+      // ~1 s of cleanup visual, then roll the next sentence in. The
+      // 1 000 ms matches the real product's typical LLM cleanup pass
+      // for short utterances.
+      if (virtualMs - scriptPhaseAt > 1000) {
+        scriptLine = (scriptLine + 1) % SCRIPT.length;
+        scriptChar = 0;
+        scriptPhase = 'typing';
+        // Reset synth clock so each line starts at t=0. Without
+        // this, sampleClock and sylIdx grow unboundedly across
+        // iterations, eventually landing on F0 values where
+        // harmonic k=2 hits the F1 formant peak and dominates
+        // the spectrum bins. For an FFT view the visual effect
+        // is subtle (the comb pattern shifts), but the demo is
+        // now deterministic: iteration N renders identically to
+        // iteration 1 for the same line.
+        sampleClock = 0;
+        noiseState = 0;
+      }
+    }
+
+    // Polishing FFT animates off `virtualMs` directly — no need to
+    // wait for the producer tick; it's already a smooth function of
+    // time.
+    if (scriptPhase === 'polish') computePolishFrame(virtualMs);
+
+    render();
+    rafHandle = requestAnimationFrame(tick);
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, W_CSS, H_CSS);
+    const state = stateFor(scriptPhase);
+    // Top panel — voice FFT (RECORDING) or cleanup scanner (POLISHING).
+    // Bottom panel — dictated text in either case.
+    drawPanel(10, 10, W_CSS - 20, 130, 'fft',  state);
+    drawPanel(10, 160, W_CSS - 20, 130, 'text', state);
+  }
+
+  // ── prefers-reduced-motion / pause-on-hidden / play pill ────────────────
+  let rafHandle = 0;
+  function start() {
+    paused = false;
+    wrap.dataset.paused = 'false';
+    lastRaf = 0;
+    rafHandle = requestAnimationFrame(tick);
+  }
+  function stop() {
+    paused = true;
+    wrap.dataset.paused = 'true';
+    if (rafHandle) cancelAnimationFrame(rafHandle);
+    rafHandle = 0;
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stop();
+    else if (!reducedMotion.matches) start();
+  });
+  pill.addEventListener('click', () => {
+    if (paused) start();
+  });
+
+  // Reduced-motion: pre-roll the synth for ~2 s to get a representative
+  // spectrum, render one frame, and stop. The play pill lets the user
+  // opt in to the animation.
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  function renderStill() {
+    // Advance virtual clock by 2 s to land on a syllable peak.
+    virtualMs = 600;
+    generateSamples(SAMPLE_RATE);  // 1 s of audio fills the ring twice over
+    computeFrame();
+    scriptLine = 0;
+    scriptChar = SCRIPT[0].length;
+    scriptPhase = 'hold';
+    render();
+  }
+  if (reducedMotion.matches) {
+    renderStill();
+    paused = true;
+    wrap.dataset.paused = 'true';
+  } else {
+    start();
+  }
+  reducedMotion.addEventListener?.('change', e => {
+    if (e.matches) { stop(); renderStill(); }
+    else           { start(); }
+  });
+})();
+</script>
+</body>
+</html>

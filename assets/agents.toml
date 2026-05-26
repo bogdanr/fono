@@ -1,0 +1,74 @@
+
+# Fono first-party agent registry.
+#
+# Users can extend or override entries by placing their own
+# ~/.config/fono/agents.toml alongside this bundled file.
+# Entries in the user file take precedence over bundled entries of
+# the same name.
+#
+# Fields:
+#   name            — unique key; used with `fono agent-setup <name>`
+#   command         — argv[0] for the agent binary (documentation only;
+#                     Fono does not spawn the agent for you — after
+#                     `fono agent-setup` finishes you launch it the normal way)
+#   args            — extra CLI arguments (preset injection, etc.)
+#   mcp_config_path — where to paste the Fono MCP server snippet
+#                     (documentation only; Fono does not write this file)
+#   preset_injection — how the voice preset reaches the agent:
+#                      "agents-md"   inject into AGENTS.md (Forge)
+#                      "claude-md"   inject into CLAUDE.md (Claude Code)
+#                      "cli-flag"    pass via a CLI flag (see args)
+#                      "config-file" paste into a settings file
+#                      "none"        manual — see docs/coding-agents.md
+#   install_command — optional shell command run via `sh -c` (or
+#                     `cmd /C` on Windows) when the agent's launcher
+#                     isn't on $PATH. `fono agent-setup` prompts
+#                     before executing it. Leave empty for agents
+#                     with no canonical install path (GUI editors
+#                     etc.) — the setup will then bail with a clear
+#                     manual-install message.
+
+[[agent]]
+name = "forge"
+command = ["forge"]
+args = []
+mcp_config_path = "~/.forge/.mcp.json"
+preset_injection = "agents-md"
+install_command = "curl -fsSL https://forgecode.dev/cli | sh"
+
+[[agent]]
+name = "claude-code"
+command = ["claude"]
+args = []
+mcp_config_path = "~/.claude.json"
+preset_injection = "claude-md"
+# Official native installer from Anthropic (no Node.js required).
+install_command = "curl -fsSL https://claude.ai/install.sh | sh"
+
+[[agent]]
+name = "cursor"
+command = ["cursor"]
+args = []
+mcp_config_path = "~/.cursor/mcp.json"
+preset_injection = "none"
+# install_command intentionally empty — Cursor is a GUI editor
+
+[[agent]]
+name = "codex"
+command = ["codex"]
+args = []
+mcp_config_path = "~/.codex/mcp.json"
+preset_injection = "none"
+# Official native installer from OpenAI (no Node.js required).
+install_command = "curl -fsSL https://chatgpt.com/codex/install.sh | sh"
+
+[[agent]]
+name = "gemini"
+command = ["gemini"]
+args = []
+mcp_config_path = "~/.gemini/settings.json"
+preset_injection = "none"
+# Google ships no native curl-pipe installer for Gemini CLI;
+# upstream options are npm or Homebrew. Both pull in toolchains we
+# don't want to assume, so leave install_command empty and let the
+# user pick. See https://github.com/google-gemini/gemini-cli.

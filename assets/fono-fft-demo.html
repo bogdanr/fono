@@ -1,0 +1,749 @@
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<!--
+  Fono website COMBINED demo.
+
+  Drop-in 600x300 canvas that simulates the Fono overlay across both
+  product modes back-to-back, telling the full story in one loop:
+
+    Turn A — DICTATION
+      1. RECORDING  (red, #E05454)    voice FFT, transcript types
+                                      into the bottom panel.
+      2. POLISHING  (amber, #E0A040)  ~900 ms cleanup flash —
+                                      gapped scanner FFT while the
+                                      LLM tidies the transcript.
+
+    Turn B — ASSISTANT Q&A
+      3. ASSISTANT  (green, #22C55E)  voice FFT, user's question
+                                      types into the bottom panel.
+      4. THINKING   (amber, #F59E0B)  gapped Gaussian-scanner FFT
+                                      while the reply streams in.
+
+  Between turns the bottom panel clears so each scene starts from
+  empty — a new question never shares the screen with the previous
+  turn's text.
+
+  No microphone, no audio playback, no network — everything runs
+  off a seeded virtual clock.
+
+  Algorithms mirrored from the real product:
+    * crates/fono/src/session.rs:49-80, :665-771  — FFT pipeline
+    * crates/fono/src/session.rs:863-902          — scanner pattern
+    * crates/fono-overlay/src/lib.rs              — overlay states
+    * crates/fono-overlay/src/real.rs:259-287     — accent palette
+    * crates/fono-overlay/src/real.rs:786-942     — bar geometry
+-->
+<!doctype html>
+<html lang="en">
+<head>
+<meta name="robots" content="noindex,follow" />
+<link rel="canonical" href="https://fono.page/" />
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fono — combined demo</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0;
+    background: #0b0b0e;
+    display: grid;
+    place-items: center;
+    min-height: 100vh;
+    font-family: -apple-system, "Segoe UI", "DejaVu Sans", sans-serif;
+  }
+  .fono-demo {
+    width: 600px;
+    aspect-ratio: 2 / 1;
+    max-width: 100%;
+    position: relative;
+    display: block;
+  }
+  .fono-demo canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  .fono-demo .play-pill {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+    padding: 6px 14px;
+    border-radius: 999px;
+    background: rgba(23, 23, 27, 0.85);
+    color: #ececf1;
+    font: 600 12px/1 -apple-system, "Segoe UI", "DejaVu Sans", sans-serif;
+    letter-spacing: 0.06em;
+    border: 1px solid rgba(99, 122, 255, 0.4);
+    cursor: pointer;
+    display: none;
+  }
+  .fono-demo[data-paused="true"] .play-pill { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="fono-demo" id="fono-demo">
+  <canvas id="fono-demo-canvas" width="1200" height="600"
+          aria-label="Fono dictation and assistant visualisation"></canvas>
+  <button class="play-pill" type="button" aria-label="Play demo">PLAY DEMO</button>
+</div>
+<script>
+(() => {
+  'use strict';
+
+  // ── Constants mirrored from the Rust source ─────────────────────────────
+  // session.rs:49-80
+  const SAMPLE_RATE     = 16000;
+  const FFT_SIZE        = 2048;
+  const FFT_MAX_HZ      = 3000;
+  const FFT_BINS        = 300;
+  const FFT_DB_FLOOR    = -20;
+  const FFT_DB_CEILING  =  30;
+  const TICK_MS         = 50;
+  // real.rs:218-287
+  const PADDING_X       = 24;
+  const PADDING_TOP     = 14;
+  const PADDING_BOT     = 16;
+  const ACCENT_WIDTH    = 4;
+  const CORNER_RADIUS   = 12;
+  const STATUS_FONT_PX  = 13;
+  const STATUS_TO_TEXT  = 14;
+  const TEXT_FONT_PX    = 20;
+  const LINE_GAP        = 6;
+  const COLOR_BG        = 'rgba(23, 23, 27, 0.80)';
+  const COLOR_TEXT      = '#ECECF1';
+  const COLOR_TEXT_DIM  = '#AAAAB2';
+  // accent_color() arms — all four states the demo cycles through.
+  const ACCENT_RECORDING = [0xE0, 0x54, 0x54];   // red    — Recording
+  const ACCENT_POLISHING = [0xE0, 0xA0, 0x40];   // amber  — Polishing
+  const ACCENT_ASSISTANT = [0x22, 0xC5, 0x5E];   // green  — AssistantRecording
+  const ACCENT_THINKING  = [0xF5, 0x9E, 0x0B];   // amber  — AssistantThinking
+
+  // ── Canvas / sizing ─────────────────────────────────────────────────────
+  const wrap   = document.getElementById('fono-demo');
+  const canvas = document.getElementById('fono-demo-canvas');
+  const pill   = wrap.querySelector('.play-pill');
+  const ctx    = canvas.getContext('2d');
+  const W_CSS = 600, H_CSS = 300;
+  function resizeBacking() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width  = W_CSS * dpr;
+    canvas.height = H_CSS * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  resizeBacking();
+  window.addEventListener('resize', resizeBacking);
+
+  // ── Seeded PRNG (mulberry32) ────────────────────────────────────────────
+  function mulberry32(seed) {
+    let s = seed >>> 0;
+    return () => {
+      s = (s + 0x6D2B79F5) >>> 0;
+      let t = s;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const rng = mulberry32(0xC0F0_FEED >>> 0);
+
+  // ── Synthetic voice generator ───────────────────────────────────────────
+  // Same tuning as fono-demo.html / fono-assistant-demo.html so all
+  // three demos read the same harmonic-comb texture during voice
+  // phases. See assets/fono.gif as the reference. Knobs that drive
+  // the comb being visible documented in the sibling files.
+  const FORMANT_SETS = [
+    [ 730, 1090, 2440], [ 530, 1840, 2480], [ 270, 2290, 3010],
+    [ 570,  840, 2410], [ 300,  870, 2240], [ 500, 1500, 2500],
+  ];
+  const N_HARMONICS  = 22;
+  const ROLLOFF_EXP  = 1.2;
+  const SIGNAL_GAIN  = 0.13;
+  const NOISE_AMP    = 0.040;
+
+  let noiseState = 0;
+  function noise() {
+    const w = (rng() * 2 - 1);
+    noiseState = noiseState * 0.92 + w * 0.08;
+    return noiseState;
+  }
+
+  function envelope(tSec) {
+    const SYL_HZ = 3.2;
+    const sylIdx = Math.floor(tSec * SYL_HZ);
+    const phase  = tSec * SYL_HZ - sylIdx;
+    const inGap = (sylIdx % 13) === 4 || (sylIdx % 17) === 9;
+    if (inGap) return 0.02;
+    const x = (phase - 0.45) / 0.22;
+    return Math.exp(-0.5 * x * x);
+  }
+
+  function hash01(seed) {
+    let x = (seed | 0) ^ 0x9E3779B9;
+    x = Math.imul(x ^ (x >>> 16), 0x85EBCA6B);
+    x = Math.imul(x ^ (x >>> 13), 0xC2B2AE35);
+    x ^= x >>> 16;
+    return ((x >>> 0) % 1000003) / 1000003;
+  }
+  function syllableParams(sylIdx) {
+    const a = hash01(sylIdx * 73856093);
+    const b = hash01(sylIdx * 19349663 + 1);
+    return {
+      f0: 115 + a * 85,
+      fset: FORMANT_SETS[Math.floor(b * FORMANT_SETS.length)],
+    };
+  }
+  function formantGain(freq, F, BW) {
+    const d = (freq - F) / BW;
+    return 1 / (1 + d * d);
+  }
+
+  const ringBuf = new Float32Array(FFT_SIZE);
+  let   ringPos = 0;
+  let   sampleClock = 0;
+
+  function generateSamples(n) {
+    for (let i = 0; i < n; i++) {
+      const t = sampleClock / SAMPLE_RATE;
+      const env = envelope(t);
+      let s = 0;
+      if (env > 0.03) {
+        const sylIdx = Math.floor(t * 3.2);
+        const p = syllableParams(sylIdx);
+        const vibrato = 1 + 0.012 * Math.sin(2 * Math.PI * 5.5 * t);
+        const f0 = p.f0 * vibrato;
+        const F = p.fset;
+        for (let k = 1; k <= N_HARMONICS; k++) {
+          const fh = f0 * k;
+          if (fh > FFT_MAX_HZ * 1.1) break;
+          const formant =
+            formantGain(fh, F[0], 50) * 1.0 +
+            formantGain(fh, F[1], 70) * 0.85 +
+            formantGain(fh, F[2], 90) * 0.6;
+          const g = Math.min(formant, 1.5);
+          s += (g / Math.pow(k, ROLLOFF_EXP)) * Math.sin(2 * Math.PI * fh * t);
+        }
+        s *= SIGNAL_GAIN * env;
+      }
+      s += noise() * NOISE_AMP * (env > 0.05 ? 1.0 : 0.45);
+      ringBuf[ringPos] = s;
+      ringPos = (ringPos + 1) % FFT_SIZE;
+      sampleClock++;
+    }
+  }
+
+  // ── Radix-2 in-place complex FFT ────────────────────────────────────────
+  const FFT_LOG2 = Math.log2(FFT_SIZE) | 0;
+  const fftRe = new Float32Array(FFT_SIZE);
+  const fftIm = new Float32Array(FFT_SIZE);
+  const bitRev = new Uint16Array(FFT_SIZE);
+  for (let i = 0; i < FFT_SIZE; i++) {
+    let r = 0, x = i;
+    for (let j = 0; j < FFT_LOG2; j++) { r = (r << 1) | (x & 1); x >>= 1; }
+    bitRev[i] = r;
+  }
+  const twRe = new Float32Array(FFT_SIZE / 2);
+  const twIm = new Float32Array(FFT_SIZE / 2);
+  for (let i = 0; i < FFT_SIZE / 2; i++) {
+    const a = -2 * Math.PI * i / FFT_SIZE;
+    twRe[i] = Math.cos(a);
+    twIm[i] = Math.sin(a);
+  }
+  const hann = new Float32Array(FFT_SIZE);
+  for (let i = 0; i < FFT_SIZE; i++) {
+    hann[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (FFT_SIZE - 1));
+  }
+  function fftForward() {
+    for (let i = 0; i < FFT_SIZE; i++) {
+      const j = bitRev[i];
+      if (j > i) {
+        const tr = fftRe[i]; fftRe[i] = fftRe[j]; fftRe[j] = tr;
+        const ti = fftIm[i]; fftIm[i] = fftIm[j]; fftIm[j] = ti;
+      }
+    }
+    for (let size = 2; size <= FFT_SIZE; size <<= 1) {
+      const half = size >> 1;
+      const step = FFT_SIZE / size;
+      for (let i = 0; i < FFT_SIZE; i += size) {
+        let k = 0;
+        for (let j = i; j < i + half; j++) {
+          const wr = twRe[k], wi = twIm[k];
+          const xr = fftRe[j + half], xi = fftIm[j + half];
+          const tr = wr * xr - wi * xi;
+          const ti = wr * xi + wi * xr;
+          fftRe[j + half] = fftRe[j] - tr;
+          fftIm[j + half] = fftIm[j] - ti;
+          fftRe[j] += tr;
+          fftIm[j] += ti;
+          k += step;
+        }
+      }
+    }
+  }
+
+  const MAX_SOURCE_BIN = Math.floor(FFT_MAX_HZ * FFT_SIZE / SAMPLE_RATE);
+  const DB_SPAN = FFT_DB_CEILING - FFT_DB_FLOOR;
+  const displayBins = new Float32Array(FFT_BINS);
+
+  function computeFrame() {
+    for (let i = 0; i < FFT_SIZE; i++) {
+      const idx = (ringPos + i) % FFT_SIZE;
+      fftRe[i] = ringBuf[idx] * hann[i];
+      fftIm[i] = 0;
+    }
+    fftForward();
+    for (let b = 0; b < FFT_BINS; b++) {
+      const start = Math.floor(b       * MAX_SOURCE_BIN / FFT_BINS);
+      const end   = Math.max(start + 1,
+                    Math.floor((b + 1) * MAX_SOURCE_BIN / FFT_BINS));
+      let sum = 0;
+      for (let s = start; s < end; s++) {
+        sum += Math.hypot(fftRe[s], fftIm[s]);
+      }
+      const mag = sum / (end - start);
+      const db  = 20 * Math.log10(Math.max(mag, 1e-6));
+      let v = (db - FFT_DB_FLOOR) / DB_SPAN;
+      if (v < 0) v = 0; else if (v > 1) v = 1;
+      displayBins[b] = v;
+    }
+  }
+
+  // Gaussian-scanner FFT, used both for POLISHING (post-dictation
+  // cleanup) and AssistantThinking. Ported from session.rs:863-902.
+  const SCAN_BINS = 100;
+  const scanBins  = new Float32Array(SCAN_BINS);
+  function computeScanFrame(timeMs) {
+    const n = SCAN_BINS;
+    const scanPhase = (Math.sin(timeMs * 0.0015) + 1) * 0.5;
+    const focus = scanPhase * n;
+    const breathBase = (Math.sin(timeMs * 0.003) + 1) * 0.5;
+    for (let i = 0; i < n; i++) {
+      const d = i - focus;
+      const scanner = Math.exp(-d * d / (2 * 8 * 8));
+      const breathing = breathBase * (0.5 + 0.5 * Math.sin(i * 0.4 + timeMs * 0.002));
+      const combined = scanner + (1 - scanner) * breathing * 0.30;
+      scanBins[i] = combined > 1 ? 1 : combined;
+    }
+  }
+
+  // ── Script content ──────────────────────────────────────────────────────
+  // Two product modes shown back-to-back, grouped (not interleaved)
+  // so a first-time viewer can tell them apart:
+  //
+  //   1. Three DICTATION lines in a row — red RECORDING accent,
+  //      transcript appears in the bottom panel, brief amber
+  //      POLISHING flash between each line.
+  //   2. Three ASSISTANT Q&A round-trips in a row — green ASSISTANT
+  //      accent for the question, amber THINKING accent while the
+  //      reply streams in.
+  //
+  // Scope notes:
+  //   * DICTATION lines are short marketing copy — the kind of thing
+  //     the user would actually dictate into their editor.
+  //   * ASSISTANT entries are pure Q&A (no tools, no actions, no
+  //     external integrations). Knowledge / translation / how-to
+  //     questions answerable from the model's own parameters.
+  const TURNS = [
+    { kind: 'dictate',  text: "Push to talk. Speak naturally." },
+    { kind: 'dictate',  text: "Fono types it for you." },
+    { kind: 'dictate',  text: "Fully offline. Fully yours." },
+    { kind: 'ask',
+      q: "How do you say 'thank you' in Japanese?",
+      a: "Arigatou gozaimasu." },
+    { kind: 'ask',
+      q: "What does FFT stand for?",
+      a: "Fast Fourier Transform." },
+    { kind: 'ask',
+      q: "How do I exit Vim?",
+      a: "Press Escape, then type :q and Enter." },
+  ];
+
+  // ── State machine ───────────────────────────────────────────────────────
+  //   dictate kind:
+  //     d-typing  RECORDING (red)    — text types when audio is active
+  //     d-hold    RECORDING (red)    — 400 ms pause once line finishes
+  //     d-polish  POLISHING (amber)  — 900 ms scanner FFT
+  //     d-clear   (no panel content) — 250 ms blank text panel
+  //   ask kind:
+  //     a-typing  ASSISTANT (green)  — question types as user speaks
+  //     a-hold    ASSISTANT (green)  — 400 ms pause
+  //     a-think   THINKING  (amber)  — reply streams in (~22 ms/char)
+  //     a-dwell   THINKING  (amber)  — 1600 ms so the reader sees it
+  //     a-clear   (no panel content) — 250 ms blank text panel
+  //
+  // The brief `*-clear` phases guarantee the panel resets between
+  // turns: a new question never shares the screen with the previous
+  // turn's reply, and a dictation never starts with leftover Q&A.
+  let turnIdx     = 0;
+  let qChar       = 0;
+  let aChar       = 0;
+  let dChar       = 0;
+  let scriptPhase = 'd-typing';
+  let scriptPhaseAt = 0;
+  let charPaceMs    = 0;
+
+  function currentState() {
+    switch (scriptPhase) {
+      case 'd-typing':
+      case 'd-hold':    return 'RECORDING';
+      case 'd-polish':  return 'POLISHING';
+      case 'd-clear':   return 'RECORDING';  // brief, accent already
+                                              // fading into next turn
+      case 'a-typing':
+      case 'a-hold':    return 'ASSISTANT';
+      case 'a-think':
+      case 'a-dwell':   return 'THINKING';
+      case 'a-clear':   return 'ASSISTANT';
+    }
+    return 'RECORDING';
+  }
+  function accentFor(state) {
+    switch (state) {
+      case 'RECORDING': return ACCENT_RECORDING;
+      case 'POLISHING': return ACCENT_POLISHING;
+      case 'ASSISTANT': return ACCENT_ASSISTANT;
+      case 'THINKING':  return ACCENT_THINKING;
+    }
+    return ACCENT_RECORDING;
+  }
+  function isScanPhase(phase) {
+    return phase === 'd-polish' || phase === 'a-think' || phase === 'a-dwell';
+  }
+
+  // ── Drawing helpers ─────────────────────────────────────────────────────
+  function rgba(rgb, a) {
+    return 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',' + a + ')';
+  }
+  function roundRectPath(x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+
+  function drawPanel(px, py, pw, ph, kind, state) {
+    roundRectPath(px, py, pw, ph, CORNER_RADIUS);
+    ctx.fillStyle = COLOR_BG;
+    ctx.fill();
+    const accent = accentFor(state);
+    const stripeInset = CORNER_RADIUS * 0.4;
+    roundRectPath(px, py + stripeInset, ACCENT_WIDTH, ph - stripeInset * 2,
+                  ACCENT_WIDTH * 0.5);
+    ctx.fillStyle = rgba(accent, 1);
+    ctx.fill();
+    ctx.fillStyle = COLOR_TEXT_DIM;
+    ctx.font = '600 ' + STATUS_FONT_PX + 'px -apple-system, "Segoe UI", "DejaVu Sans", sans-serif';
+    ctx.textBaseline = 'alphabetic';
+    const pad_x = px + PADDING_X + ACCENT_WIDTH;
+    ctx.fillText(kind === 'fft' ? state : 'TRANSCRIPT',
+                 pad_x, py + PADDING_TOP + STATUS_FONT_PX * 0.85);
+
+    const cx0 = pad_x;
+    const cx1 = px + pw - PADDING_X;
+    const cy0 = py + PADDING_TOP + STATUS_FONT_PX + STATUS_TO_TEXT;
+    const cy1 = py + ph - PADDING_BOT;
+
+    if (kind === 'fft') {
+      if (isScanPhase(scriptPhase)) {
+        drawFft(cx0, cy0, cx1, cy1, accent, scanBins,    SCAN_BINS, true);
+      } else {
+        drawFft(cx0, cy0, cx1, cy1, accent, displayBins, FFT_BINS,  false);
+      }
+    } else {
+      drawText(cx0, cy0, cx1, cy1);
+    }
+  }
+
+  // real.rs:786-942
+  function drawFft(x0, y0, x1, y1, accent, bins, binCount, gapped) {
+    const areaW = Math.max(x1 - x0, 0);
+    const areaH = Math.max(y1 - y0, 0);
+    const BUCKETS = 8;
+    const buckets = [];
+    for (let i = 0; i < BUCKETS; i++) buckets.push([]);
+    const gap = gapped ? 2 : 0;
+    for (let i = 0; i < binCount; i++) {
+      const v = bins[i];
+      const barH = Math.max(v * areaH, 1);
+      const bxf0 = x0 + (i     / binCount) * areaW;
+      const bxf1 = x0 + ((i+1) / binCount) * areaW;
+      const slotX0 = Math.round(bxf0);
+      const slotX1 = Math.round(bxf1);
+      const xi0 = slotX0;
+      const xi1 = gapped ? Math.max(slotX1 - gap, slotX0 + 1) : slotX1;
+      if (xi1 <= xi0) continue;
+      const yi0 = Math.round(y1 - barH);
+      const alpha = (0x33 + (0xFF - 0x33) * v) / 255;
+      const b = Math.min(BUCKETS - 1, Math.floor(alpha * BUCKETS));
+      buckets[b].push(xi0, yi0, xi1 - xi0, Math.round(y1) - yi0);
+    }
+    for (let b = 0; b < BUCKETS; b++) {
+      const arr = buckets[b];
+      if (arr.length === 0) continue;
+      const a = ((b + 0.5) / BUCKETS);
+      ctx.fillStyle = rgba(accent, a);
+      for (let i = 0; i < arr.length; i += 4) {
+        ctx.fillRect(arr[i], arr[i+1], arr[i+2], arr[i+3]);
+      }
+    }
+    ctx.fillStyle = 'rgba(170, 170, 178, 0.20)';
+    ctx.fillRect(x0, Math.round(y1), x1 - x0, 1);
+  }
+
+  // Bottom panel — text content depends on the current turn kind.
+  //   dictate: one transcribed line, bright while typing, dim during
+  //            the polish/clear tail (so the user sees the cleaned
+  //            result settle for a beat before the panel clears).
+  //   ask:     two lines — "›  question" then "‹  reply" — each
+  //            empty until its phase begins, so the previous turn's
+  //            reply never overlaps with a new question.
+  function drawText(x0, y0, x1, y1) {
+    ctx.font = '500 ' + TEXT_FONT_PX + 'px -apple-system, "Segoe UI", "DejaVu Sans", sans-serif';
+    ctx.textBaseline = 'alphabetic';
+    const cur = TURNS[turnIdx];
+
+    if (cur.kind === 'dictate') {
+      if (scriptPhase === 'd-clear') return;     // blank panel
+      const line = cur.text.slice(0, dChar);
+      const y = y0 + TEXT_FONT_PX * 0.85;
+      ctx.fillStyle = (scriptPhase === 'd-typing') ? COLOR_TEXT : COLOR_TEXT_DIM;
+      ctx.fillText(line, x0, y);
+      if (scriptPhase === 'd-typing') drawCaret(line, x0, y);
+      return;
+    }
+
+    // kind === 'ask'
+    if (scriptPhase === 'a-clear') return;       // blank panel
+    const qText = cur.q.slice(0, qChar);
+    const inThink = scriptPhase === 'a-think' || scriptPhase === 'a-dwell';
+    const aText = inThink ? cur.a.slice(0, aChar) : '';
+
+    const qLine = '\u203A  ' + qText;
+    let y = y0 + TEXT_FONT_PX * 0.85;
+    ctx.fillStyle = (scriptPhase === 'a-typing') ? COLOR_TEXT : COLOR_TEXT_DIM;
+    ctx.fillText(qLine, x0, y);
+    if (scriptPhase === 'a-typing') drawCaret(qLine, x0, y);
+
+    if (aText.length > 0) {
+      const aLine = '\u2039  ' + aText;
+      y += TEXT_FONT_PX + LINE_GAP;
+      ctx.fillStyle = (scriptPhase === 'a-think') ? COLOR_TEXT : COLOR_TEXT_DIM;
+      ctx.fillText(aLine, x0, y);
+      if (scriptPhase === 'a-think') drawCaret(aLine, x0, y);
+    }
+  }
+
+  function drawCaret(line, x0, baselineY) {
+    const blink = (Math.floor(virtualMs / 500) % 2) === 0;
+    if (!blink) return;
+    const w = ctx.measureText(line).width;
+    ctx.fillRect(x0 + w + 2, baselineY - TEXT_FONT_PX * 0.85, 2, TEXT_FONT_PX);
+  }
+
+  // ── Main loop ───────────────────────────────────────────────────────────
+  let virtualMs = 0;
+  let lastSampleMs = 0;
+  let nextTickMs = 0;
+  let lastRaf = 0;
+  let paused = false;
+
+  // Phase durations (ms). Tuned so the whole loop reads cleanly:
+  //   dictate turn ≈ length(text) * 35 + 400 + 900 + 250 = ~2.6 – 3.5 s
+  //   ask     turn ≈ qChars*35 + 400 + aChars*22 + 1600 + 250 = ~3 – 5 s
+  const D_HOLD_MS    = 400;
+  const D_POLISH_MS  = 900;
+  const D_CLEAR_MS   = 250;
+  const A_HOLD_MS    = 400;
+  const A_DWELL_MS   = 1600;
+  const A_CLEAR_MS   = 250;
+  const CHAR_MS_VOICE = 35;   // dictation / question typing cadence
+  const CHAR_MS_REPLY = 22;   // LLM-token cadence
+  const ACTIVE_THRESH = 0.18;
+
+  function advanceTurn() {
+    turnIdx = (turnIdx + 1) % TURNS.length;
+    const next = TURNS[turnIdx];
+    qChar = 0; aChar = 0; dChar = 0;
+    charPaceMs = 0;
+    scriptPhase = (next.kind === 'dictate') ? 'd-typing' : 'a-typing';
+    scriptPhaseAt = virtualMs;
+    // Reset synth clock + noise IIR so each turn starts at t=0.
+    // For an FFT view the visible drift is subtle (the harmonic
+    // comb shifts as wordIdx grows), but resetting guarantees
+    // determinism: iteration N renders identically to iter 1.
+    sampleClock = 0;
+    noiseState = 0;
+  }
+
+  function tick(now) {
+    if (paused) { lastRaf = now; return; }
+    if (!lastRaf) lastRaf = now;
+    const dt = Math.min(now - lastRaf, 100);
+    lastRaf = now;
+    virtualMs += dt;
+
+    const wantSample = Math.floor(virtualMs * SAMPLE_RATE / 1000);
+    const lastSample = Math.floor(lastSampleMs * SAMPLE_RATE / 1000);
+    const need = wantSample - lastSample;
+    if (need > 0) generateSamples(need);
+    lastSampleMs = virtualMs;
+
+    if (virtualMs >= nextTickMs) {
+      while (virtualMs >= nextTickMs) nextTickMs += TICK_MS;
+      computeFrame();
+    }
+
+    const env = envelope(virtualMs / 1000);
+    const cur = TURNS[turnIdx];
+
+    switch (scriptPhase) {
+      // ── Dictation turn ──────────────────────────────────────────
+      case 'd-typing': {
+        if (env > ACTIVE_THRESH) {
+          charPaceMs += dt;
+          while (charPaceMs >= CHAR_MS_VOICE && dChar < cur.text.length) {
+            dChar++;
+            charPaceMs -= CHAR_MS_VOICE;
+          }
+        } else {
+          charPaceMs = 0;
+        }
+        if (dChar >= cur.text.length) {
+          scriptPhase = 'd-hold'; scriptPhaseAt = virtualMs;
+        }
+        break;
+      }
+      case 'd-hold': {
+        if (virtualMs - scriptPhaseAt > D_HOLD_MS) {
+          scriptPhase = 'd-polish'; scriptPhaseAt = virtualMs;
+        }
+        break;
+      }
+      case 'd-polish': {
+        if (virtualMs - scriptPhaseAt > D_POLISH_MS) {
+          scriptPhase = 'd-clear'; scriptPhaseAt = virtualMs;
+        }
+        break;
+      }
+      case 'd-clear': {
+        if (virtualMs - scriptPhaseAt > D_CLEAR_MS) advanceTurn();
+        break;
+      }
+
+      // ── Assistant turn ──────────────────────────────────────────
+      case 'a-typing': {
+        if (env > ACTIVE_THRESH) {
+          charPaceMs += dt;
+          while (charPaceMs >= CHAR_MS_VOICE && qChar < cur.q.length) {
+            qChar++;
+            charPaceMs -= CHAR_MS_VOICE;
+          }
+        } else {
+          charPaceMs = 0;
+        }
+        if (qChar >= cur.q.length) {
+          scriptPhase = 'a-hold'; scriptPhaseAt = virtualMs;
+        }
+        break;
+      }
+      case 'a-hold': {
+        if (virtualMs - scriptPhaseAt > A_HOLD_MS) {
+          scriptPhase = 'a-think'; scriptPhaseAt = virtualMs;
+          aChar = 0; charPaceMs = 0;
+        }
+        break;
+      }
+      case 'a-think': {
+        charPaceMs += dt;
+        while (charPaceMs >= CHAR_MS_REPLY && aChar < cur.a.length) {
+          aChar++;
+          charPaceMs -= CHAR_MS_REPLY;
+        }
+        if (aChar >= cur.a.length) {
+          scriptPhase = 'a-dwell'; scriptPhaseAt = virtualMs;
+        }
+        break;
+      }
+      case 'a-dwell': {
+        if (virtualMs - scriptPhaseAt > A_DWELL_MS) {
+          scriptPhase = 'a-clear'; scriptPhaseAt = virtualMs;
+        }
+        break;
+      }
+      case 'a-clear': {
+        if (virtualMs - scriptPhaseAt > A_CLEAR_MS) advanceTurn();
+        break;
+      }
+    }
+
+    if (isScanPhase(scriptPhase)) computeScanFrame(virtualMs);
+
+    render();
+    rafHandle = requestAnimationFrame(tick);
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, W_CSS, H_CSS);
+    const state = currentState();
+    drawPanel(10,  10, W_CSS - 20, 130, 'fft',  state);
+    drawPanel(10, 160, W_CSS - 20, 130, 'text', state);
+  }
+
+  // ── prefers-reduced-motion / pause-on-hidden / play pill ────────────────
+  let rafHandle = 0;
+  function start() {
+    paused = false;
+    wrap.dataset.paused = 'false';
+    lastRaf = 0;
+    rafHandle = requestAnimationFrame(tick);
+  }
+  function stop() {
+    paused = true;
+    wrap.dataset.paused = 'true';
+    if (rafHandle) cancelAnimationFrame(rafHandle);
+    rafHandle = 0;
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stop();
+    else if (!reducedMotion.matches) start();
+  });
+  pill.addEventListener('click', () => {
+    if (paused) start();
+  });
+
+  // Reduced-motion still: representative dictation frame — RECORDING
+  // accent, transcript half-typed. Covers the dictation half of the
+  // demo's story in one frame; the assistant half is shown if the
+  // user clicks PLAY DEMO.
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  function renderStill() {
+    virtualMs = 2000;
+    generateSamples(SAMPLE_RATE);
+    computeFrame();
+    turnIdx = 0;
+    dChar = Math.floor(TURNS[0].text.length * 0.7);
+    scriptPhase = 'd-typing';
+    render();
+  }
+  if (reducedMotion.matches) {
+    renderStill();
+    paused = true;
+    wrap.dataset.paused = 'true';
+  } else {
+    start();
+  }
+  reducedMotion.addEventListener?.('change', e => {
+    if (e.matches) { stop(); renderStill(); }
+    else           { start(); }
+  });
+})();
+</script>
+</body>
+</html>

@@ -1690,6 +1690,15 @@ fn run_install_server() -> Result<()> {
 /// containing directory has the right ownership / mode for the daemon
 /// (`root:fono 0750`).
 ///
+/// The seeded file is a concatenation of the static `[server.wyoming]`
+/// block (with its security-warning comment) and a dynamically-chosen
+/// `[stt.local]` block whose `model` field matches what
+/// [`crate::wizard::recommend_local_stt_model_headless`] would pick
+/// for this host. Without the second block the daemon falls back to
+/// the in-code default of `"small"` regardless of CPU / RAM — which
+/// on a 1-core cloud VM means downloading ~250 MB and running a model
+/// `fono doctor` itself reports as `unsuitable` on the same screen.
+///
 /// Returns `Ok(true)` when the seed was written, `Ok(false)` when an
 /// existing config was preserved. Never overwrites operator state.
 fn seed_server_config() -> Result<bool> {
@@ -1714,41 +1723,106 @@ fn seed_server_config() -> Result<bool> {
         eprintln!("  · {SYSTEM_CONFIG_FILE} already present — leaving it alone");
         return Ok(false);
     }
-    write_atomic_owned(path, SERVER_CONFIG_SEED.as_bytes(), 0o640, 0, gid)
+
+    // Probe hardware so the [stt.local].model field matches what
+    // `fono doctor` / `fono hwprobe` would recommend on this host.
+    // `disk_check_dir` only feeds `free_disk_bytes` (statfs) — any
+    // mounted path works. /var/cache always exists on Linux; we don't
+    // require /var/cache/fono to be created yet.
+    let mut snap = fono_core::hwcheck::probe(Path::new("/var/cache"));
+    if snap.host_gpu == fono_core::hwcheck::HostGpu::None {
+        snap.host_gpu = fono_core::vulkan_probe::probe().host_gpu_class();
+    }
+    let model = crate::wizard::recommend_local_stt_model_headless(&snap);
+    let seed = build_server_config_seed(model);
+
+    write_atomic_owned(path, seed.as_bytes(), 0o640, 0, gid)
         .with_context(|| format!("seed {SYSTEM_CONFIG_FILE}"))?;
     // Silence unused-variable warning on cfg(not(unix)) test runs; the
     // uid we need is root (0), but we resolved fono's uid above to
     // confirm the user exists before we wrote the file.
     let _ = uid;
     eprintln!("  · {SYSTEM_CONFIG_FILE} (seeded: Wyoming STT server on 0.0.0.0:10300)");
+    eprintln!(
+        "  · local STT model auto-selected for this host: {model} \
+         (edit [stt.local].model to override)"
+    );
     Ok(true)
 }
 
-/// Post-install TCP probe to confirm the Wyoming listener actually
+/// Build the full text of the seeded `/etc/fono/config.toml`.
+///
+/// Concatenates [`SERVER_CONFIG_SEED`] (the static `[server.wyoming]`
+/// block with its security-warning comment) with a dynamic
+/// `[stt.local]` block whose `model` matches the wizard's headless
+/// recommendation for the current host. The trailing newline of the
+/// static seed is normalised so the two sections are always separated
+/// by exactly one blank line regardless of how the asset is edited.
+fn build_server_config_seed(local_stt_model: &str) -> String {
+    let head = SERVER_CONFIG_SEED.trim_end();
+    format!(
+        "{head}\n\
+         \n\
+         # Local speech-to-text model. Auto-selected by\n\
+         # `sudo fono install --server` based on this host's CPU, RAM,\n\
+         # and GPU (same algorithm `fono doctor` / `fono hwprobe` use).\n\
+         # Edit to override; run `fono models list` for available names.\n\
+         [stt.local]\n\
+         model = \"{local_stt_model}\"\n",
+    )
+}
+
+/// Post-install TCP probe that confirms the Wyoming listener actually
 /// bound. `systemctl is-active` reports `active` the moment systemd
 /// successfully spawned the process — it can't tell us whether the
-/// daemon's internal server task got far enough to `listen(2)`.
-/// Without this probe, a server install that silently fails to bind
-/// (port in use, bind address invalid, panic in the server task) ends
-/// up looking healthy at install time and the operator only discovers
-/// it via the cryptic client-side error.
+/// daemon's internal server task got far enough to `listen(2)`, and
+/// when the daemon has to download a multi-hundred-MB model on first
+/// start the listener doesn't open until the download finishes.
+///
+/// Polls the address with 200 ms increments up to a 20 s budget;
+/// reports the first success or a one-shot failure at timeout. The
+/// upper bound covers a model download on a slow link (e.g. a ~250 MB
+/// `small-q8_0` on a 1 MiB/s connection lands well inside 20 s).
 fn verify_wyoming_listener(addr: &str) {
     use std::net::ToSocketAddrs;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    const POLL_INTERVAL: Duration = Duration::from_millis(200);
+    const POLL_BUDGET: Duration = Duration::from_secs(20);
+    const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 
     let Some(socket) = addr.to_socket_addrs().ok().and_then(|mut it| it.next()) else {
         eprintln!("  · could not parse Wyoming probe address {addr}");
         return;
     };
-    match std::net::TcpStream::connect_timeout(&socket, Duration::from_secs(2)) {
-        Ok(_) => eprintln!("  · Wyoming STT server reachable on {addr} (TCP probe OK)"),
-        Err(e) => {
-            eprintln!(
-                "  · Wyoming STT server NOT reachable on {addr} ({e}); \
-                 inspect with `journalctl -u fono.service -n 50 --no-pager`"
-            );
+
+    let started = Instant::now();
+    let mut last_err: Option<String> = None;
+    while started.elapsed() < POLL_BUDGET {
+        match std::net::TcpStream::connect_timeout(&socket, CONNECT_TIMEOUT) {
+            Ok(_) => {
+                let waited = started.elapsed();
+                if waited < Duration::from_millis(250) {
+                    eprintln!("  · Wyoming STT server reachable on {addr} (TCP probe OK)");
+                } else {
+                    eprintln!(
+                        "  · Wyoming STT server reachable on {addr} \
+                         (TCP probe OK after {:.1}s)",
+                        waited.as_secs_f32(),
+                    );
+                }
+                return;
+            }
+            Err(e) => last_err = Some(e.to_string()),
         }
+        std::thread::sleep(POLL_INTERVAL);
     }
+    let err = last_err.unwrap_or_else(|| "timeout".to_string());
+    eprintln!(
+        "  · Wyoming STT server NOT reachable on {addr} after {}s ({err}); \
+         inspect with `journalctl -u fono.service -n 50 --no-pager`",
+        POLL_BUDGET.as_secs(),
+    );
 }
 
 fn ensure_service_user() -> Result<bool> {
@@ -2002,6 +2076,33 @@ mod tests {
             }),
             "seed must contain a `#` comment mentioning auth"
         );
+    }
+
+    #[test]
+    fn build_server_config_seed_appends_stt_local_block() {
+        // The dynamic builder must concatenate the static
+        // `[server.wyoming]` block with a `[stt.local]` block whose
+        // `model` matches the wizard's headless recommendation. Round-
+        // trip through the real Config schema so any future drift
+        // (renamed field, type change, accidental shadowing) trips
+        // this test rather than landing on someone's server.
+        let seed = super::build_server_config_seed("tiny.en");
+        let cfg: fono_core::config::Config =
+            toml::from_str(&seed).expect("dynamic seed parses as fono_core::config::Config");
+        assert!(cfg.server.wyoming.enabled);
+        assert_eq!(cfg.server.wyoming.bind, "0.0.0.0");
+        assert_eq!(cfg.server.wyoming.port, 10_300);
+        assert_eq!(cfg.stt.local.model, "tiny.en");
+        // The two blocks must be separated by a blank line so a
+        // human-edited file stays readable.  The static seed and the
+        // [stt.local] block are separated by a blank line + comment
+        // block, so we check for a blank line anywhere before the header.
+        assert!(seed.contains("\n\n"), "seed must contain a blank line between blocks");
+        assert!(seed.contains("\n[stt.local]\n"), "blocks must be visually separated");
+        // The comment guiding the operator to `fono models list` is
+        // load-bearing — without it the next sysadmin won't know how
+        // to override.
+        assert!(seed.contains("fono models list"));
     }
 
     #[test]

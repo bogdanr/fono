@@ -1,6 +1,338 @@
 # Fono — Project Status
+Last updated: 2026-05-26
 
-Last updated: 2026-05-25
+## 2026-05-26 — Voice loop for coding agents squashed; v0.9 prep
+
+All 23 commits from this work day were squashed into a single commit on
+`main`. The squash also dropped a `target-cpu/` build-artifact directory
+that had been accidentally committed earlier in the day; `.gitignore` now
+covers `target-cpu/` and `target-gpu/`.
+
+The combined work lands as one user-facing feature in the `[Unreleased]`
+CHANGELOG block: **voice loop for coding agents (early preview)**. The
+MCP server (`fono-mcp-server` crate), the three voice tools
+(`fono.speak`, `fono.listen`, `fono.confirm`), the one-shot
+`fono agent-setup` helper, the overlay + tray integration, the
+background-speech relevance filter, and the supporting docs/ADR all
+ship together. Disabled by default; opt in with
+`fono use mcp-server on`. Frame is **early preview** — we expect the
+protocol, defaults, and tool surface to keep shifting between v0.9 and
+the stable release.
+
+Window-aware dictation already shipped in v0.8.2 last night; the
+small `fix(context)` that went out today (focus capture at press
+time + i3/XWayland WM_CLASS parsing) lands silently as part of the
+squash, no changelog entry.
+
+ROADMAP's "Voice loop for coding agents" section now says **early
+preview, shipping in v0.9** and warns about breaking changes between
+v0.9 and stable. The "Recently shipped" badge will move to v0.9 when
+the release is cut.
+
+**Where we are on v0.9:** close, not there yet. The feature surface is
+in, the pre-commit gate is green, but the user wants another bug-fix
+pass before tagging. Tag is **not** going out in this session.
+
+## 2026-05-26 — MCP listen overlay + silence parity (v7 plan complete)
+
+Landed `plans/2026-05-26-mcp-listen-overlay-and-silence-parity-v7.md` end to
+end (Slices 0–8, nine commits on `main`):
+
+- **Slice 0** — Extracted shared voice helpers into
+  `crates/fono-mcp-server/src/voice_io.rs`; added `[mcp]` config block
+  with `listen_silence_ms` (default 10 000), `listen_max_seconds`
+  (default 45), `relevance_filter` (mode + LLM endpoint), and
+  `daemon_ipc_candidates`.
+- **Slice 1** — `fono.listen` now opens the same overlay window the
+  hotkey path uses, scoped to the listen phase via an `OverlayGuard`
+  RAII so it always tears down on early return / panic.
+- **Slice 2** — Overlay shows the pondering animation between
+  utterances and a walk-progress bar against `listen_max_seconds`.
+- **Slice 3** — Multi-utterance loop: keep listening until silence
+  ≥ `listen_silence_ms` accumulates after at least one captured
+  utterance, with the cheap regex/keyword relevance heuristic
+  dropping obvious off-topic chatter.
+- **Slice 4** — Optional LLM relevance classifier (off by default,
+  `relevance_filter.mode = "llm"`) sitting behind the heuristic for
+  when the noise floor is too noisy for keywords alone.
+- **Slice 5** — Added an `Ignoring` overlay state (dim grey badge)
+  shown the moment the filter rejects an utterance so the user sees
+  *why* their words didn't land.
+- **Slice 6** — Daemon co-existence: MCP server probes the daemon
+  IPC socket; if reachable, it uses the daemon's audio device lock
+  instead of grabbing the mic directly, so push-to-talk and
+  `fono.listen` no longer fight over ALSA.
+- **Slice 7** — Tray feedback over IPC. New `McpPhase` enum
+  (Listening / Speaking / Confirming) and
+  `Request::{McpActivityStart, McpActivityEnd}` wire format. Daemon
+  keeps a shared `(depth, baseline_state)`; 0→1 snapshots and flips
+  the tray to `TrayState::Processing` (amber — reusing the existing
+  STT/polish colour, no new variant per the v7 palette decision);
+  →0 restores the baseline iff the tray is still amber (last-writer
+  wins). `McpActivityGuard` RAII fires Start on construction and End
+  on Drop, gated to no-op when the daemon socket is unreachable so
+  the voice loop keeps working standalone. `speak_text` only flashes
+  the tray for audio ≥ 1 s to avoid flicker on short prompts;
+  `fono.confirm` wraps its listen-and-match span in a Confirming
+  guard which nests cleanly with `listen_once`'s own Listening guard.
+- **Slice 8** — Docs, voice preset, and CHANGELOG. The bundled
+  `assets/agent-presets/voice.md` and the synced copies in
+  `AGENTS.md` / `docs/coding-agents.md` now teach the agent to pass
+  `context` on every `fono.listen` call and to prefer `fono.confirm`
+  for bounded decisions. `docs/configuration.md` documents
+  `[mcp].listen_silence_ms`, `[mcp].listen_max_seconds`, and the
+  `[mcp.relevance_filter]` sub-table. CHANGELOG entries added under
+  `[Unreleased]`.
+
+Pre-commit gate green for both new commits (Slice 7 and Slice 8):
+`cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
+-- -D warnings`, `cargo test --workspace --tests --lib` all pass.
+
+**Next steps for maintainer:**
+
+1. Restart any running coding-agent sessions to respawn `fono mcp
+   serve` against the new binary so the overlay, relevance filter,
+   and tray-feedback IPC come online.
+2. Workspace version bump + CHANGELOG `[Unreleased]` graduation when
+   the next release is cut.
+
+## 2026-05-26 — Removed `fono agent-loop`; `fono.listen` / `fono.confirm` rebuilt
+
+Two coupled changes this session:
+
+1. **`fono agent-loop --agent <name>` removed.** The wrapper was a thin
+   `Command::new(exe).status()` over an entry in `agents.toml` — it did not
+   inject the voice preset, set env, or do anything `fono agent-setup` had
+   not already done. After `fono agent-setup forge` writes the MCP JSON and
+   appends the preset to `AGENTS.md`, running `forge` directly is
+   indistinguishable from running `fono agent-loop --agent forge`. Removed:
+   - `crates/fono/src/agent_loop.rs` (deleted).
+   - `pub mod agent_loop;` from `crates/fono/src/lib.rs`.
+   - `Cmd::AgentLoop` variant + dispatch in `crates/fono/src/cli.rs`.
+   - All living-doc references in `CHANGELOG.md` (Unreleased — never shipped
+     in a tagged release), `ROADMAP.md`, `docs/coding-agents.md`, the
+     bundled `assets/agents.toml` comment block, and the docstrings in
+     `crates/fono/src/agents.rs`.
+   - The `Done. Start a voice session with: fono agent-loop …` line in
+     `agent_setup.rs:119` now reads `Done. Start a voice session by
+     launching <name> the way you normally do.`
+   - ADR 0030 reference updated (`agent-loop` wrapper → `agent-setup`
+     helper) at `docs/decisions/0030-fono-as-mcp-server-for-coding-agents.md:58`.
+   - Bundled tests for the registry already live in `crates/fono/src/agents.rs::tests`,
+     so no test coverage was lost when `agent_loop.rs` went away.
+   - `plans/` and historical `docs/status.md` entries are left untouched as
+     historical record per AGENTS.md.
+2. **`fono.listen` / `fono.confirm` rebuild.** The MCP tool wiring landed in
+   source on 2026-05-26 (`crates/fono-mcp-server/src/voice_io.rs` + the
+   `listen.rs` / `confirm.rs` rewrites) but the binary at
+   `target/release/fono` was still the older build that returned the
+   `"standalone microphone capture is not yet available in this build"` /
+   `"requires the fono.listen implementation which ships in the next Fono
+   release"` stubs. Rebuilt this session — `strings target/release/fono |
+   grep "standalone microphone"` is now empty, and `strings | grep
+   voice_io::listen_once` resolves. The MCP server spawned by an already-
+   running coding agent is still the old subprocess; restart the agent
+   (e.g. exit and re-launch Forge / Claude Code) to pick up the new
+   subprocess.
+
+Pre-commit gate:
+
+- `cargo fmt --all -- --check` ✓
+- `cargo clippy --workspace --all-targets -- -D warnings` ✓
+- `cargo test --workspace --tests --lib` ✓ — 0 failures across the
+  workspace.
+
+**Next steps for maintainer:**
+1. Restart any running coding-agent sessions so they respawn `fono mcp serve`
+   from the new binary and `fono.listen` / `fono.confirm` start serving real
+   audio instead of the stub error.
+2. Workspace version bump + CHANGELOG `[Unreleased]` graduation when the
+   next release is cut.
+
+## 2026-05-26 — `fono.listen` + `fono.confirm` audio capture (Phase 3 complete)
+
+Plan: `plans/2026-05-25-fono-voice-loop-for-coding-agents-v1.md` Phase 3
+
+Closes the deferred work from the 2026-05-26 voice-loop landing: the two MCP
+tools that previously returned "not yet available" now run real audio.
+
+What shipped:
+
+- **`crates/fono-mcp-server/src/voice_io.rs`** — new module with shared
+  helpers used by all three voice tools:
+  - `speak_text(cfg, secrets, text, voice)` — TTS build + AudioPlayback +
+    drain loop, extracted from the old inline `SpeakTool::call` body.
+  - `listen_once(cfg, secrets, models_dir, max_seconds)` — opens
+    `AudioCapture` with a forwarder that feeds both a `RecordingBuffer`
+    and an `EnvelopeFollower` → `SilenceWatch` pair; loop ends on
+    `SilenceEvent::Committed` or when `max_seconds` (capped by
+    `[mcp].listen_max_seconds`) elapses; then runs the buffered PCM
+    through the configured STT backend. Default total-silence window is
+    2 s when the user has not configured `[audio].auto_stop_silence_ms`.
+  - `match_choice(transcript, choices)` — pure function with five-rule
+    matching ladder (exact match → option/letter phrasing → ordinals →
+    unique substring) used by `fono.confirm`.
+- **`fono.listen`** (`crates/fono-mcp-server/src/tools/listen.rs`) — now
+  speaks the optional `prompt` via `speak_text`, calls `listen_once`,
+  and returns `{"transcript": "...", "duration_ms": N, "reason":
+  "silence"|"timeout"}`.
+- **`fono.confirm`** (`crates/fono-mcp-server/src/tools/confirm.rs`) —
+  composes "<question>? Choices: A, B, C.", speaks it, runs
+  `listen_once`, and returns `{"choice": "A", "transcript": "..."}` on
+  a confident match, `{"choice": "timeout"}` on silence, or `{"choice":
+  "unmatched", "transcript": "..."}` when the spoken answer didn't fit.
+- **`McpContext`** gained `whisper_models_dir: PathBuf`; the `fono mcp
+  serve` dispatch arm in `crates/fono/src/cli.rs:657-661` passes
+  `paths.whisper_models_dir()` into it.
+- **`SpeakTool`** simplified to a thin wrapper over `speak_text` —
+  ~60 lines removed.
+
+Test coverage: 12 new unit tests (10 in `voice_io::tests` for the
+matching ladder + auto-stop resolution, 2 in `confirm::tests` for
+utterance composition). All run without touching real hardware. Pre-commit
+gate:
+
+- `cargo fmt --all -- --check` ✓
+- `cargo clippy --workspace --all-targets -- -D warnings` ✓
+- `cargo test --workspace --tests --lib` ✓ — full workspace green; the
+  `fono-mcp-server` suite is now **25 tests** (up from 13).
+
+**Next steps for maintainer:**
+1. End-to-end smoke test: `fono use mcp-server on`, `fono agent-setup forge`
+   in a real project, then `fono agent-loop --agent forge` and exercise
+   the listen/confirm tools live.
+2. Bump workspace version, graduate `[Unreleased]` in `CHANGELOG.md`,
+   tag the release.
+
+## 2026-05-26 — `fono agent-setup` — one-command agent integration
+
+Plan: `plans/2026-05-26-fono-agent-setup-one-command-v1.md`
+
+All 10 tasks complete. What shipped:
+
+- **`crates/fono/src/agent_setup.rs`** — new module with three idempotent setup steps:
+  1. Enable MCP server (`cfg.mcp.enabled = true`)
+  2. Merge `mcpServers.fono` into the agent's `mcp.json` (other entries preserved)
+  3. Append the voice-mode preset to `AGENTS.md` / `CLAUDE.md` (sentinel guards
+     against re-injection; agents with `preset_injection = "none"` receive printed
+     manual instructions instead)
+  - `--dry-run` flag: prints what would happen, writes nothing.
+  - `--list` flag: prints all registered agents in a table.
+  - 12 unit tests covering all branches (idempotency, dry-run, JSON merge,
+    sentinel dedup, tilde expansion, preset-file override).
+- **`crates/fono/src/agents.rs`** — shared TOML loader extracted from `agent_loop.rs`
+  (used by both `agent_loop` and `agent_setup`). `preset_file` field added to
+  `AgentEntry` for user-controlled override of the injection target.
+- **`crates/fono/src/cli.rs`** — `Cmd::AgentSetup` variant with positional `agent`,
+  `--dry-run`, `--project-dir`, `--list`; dispatch arm wired.
+- **`docs/coding-agents.md`** — "Quick setup" section added at the top with output
+  sample, flag table, and `--list` example.
+
+Pre-commit gate: `cargo fmt --check` ✓ · `cargo clippy -D warnings` ✓ ·
+`cargo test --workspace --tests --lib` ✓ — **0 failures** (127 lib tests in `fono`,
+12 new in `agent_setup`).
+
+**Next steps for maintainer:**
+1. `fono agent-setup forge` in a real project directory to verify end-to-end.
+2. `fono agent-loop --agent forge` to confirm the voice session starts.
+3. Bump version, graduate CHANGELOG, tag release.
+
+
+
+Plan: `plans/2026-05-25-fono-voice-loop-for-coding-agents-v1.md`
+
+All implementation phases (0–6b) are complete. Phase 7 pre-commit gate
+verified clean this session:
+
+- `cargo fmt --all -- --check` ✓
+- `cargo clippy --workspace --all-targets -- -D warnings` ✓
+- `cargo test --workspace --tests --lib` ✓ — **0 failures** across the
+  full workspace (all crates, all lib and integration tests)
+
+Remaining Phase 7 items (workspace version bump, CHANGELOG graduation,
+binary-size delta) are deferred to the release tag per project convention.
+
+**Next steps for maintainer:**
+1. Verify `fono mcp serve` end-to-end with a real Forge / Claude Code session.
+2. Run `fono agent-loop --agent forge` (after pasting the MCP snippet
+   into `~/.forge/mcp.json`).
+3. Record the screencap in `docs/screencasts/voice-loop-forge.webp`.
+4. Bump `[workspace.package] version` in `Cargo.toml`, graduate
+   `[Unreleased]` in `CHANGELOG.md`, and tag the release.
+
+
+## 2026-05-26 — Voice loop for coding agents — Phases 2–6b
+
+Plan: `plans/2026-05-25-fono-voice-loop-for-coding-agents-v1.md`
+
+**Phases 2, 3 (partial), 4, 5, 6, and 6b** are complete. What shipped:
+
+- **`crates/fono-mcp-server`** — new crate with full JSON-RPC 2.0 stdio transport
+  (`StdioTransport`), `McpServer` request/dispatch loop, `ToolRegistry`, and three
+  voice tools:
+  - `fono.speak` — fully implemented: builds TTS from config+secrets, synthesises
+    text, enqueues to `AudioPlayback`, drains until idle.
+  - `fono.listen` — quality stub; returns clear error pending standalone audio
+    capture path.
+  - `fono.confirm` — quality stub; returns clear error pending `fono.listen`.
+  Unit tests green: protocol round-trips, golden initialize→tools/list→tools/call flow.
+- **Hotkey FSM** — `McpDriven { tool: ToolKind }` state in
+  `crates/fono-hotkey/src/fsm.rs`. F7/F8/Escape barge-in cancels active tool call.
+  `ToolKind` enum: `Speak`, `Listen`, `Confirm`.
+- **Tray MCP submenu** — visible when `[mcp.server].enabled = true`; enable/disable
+  toggle, last-connected timestamp, per-tool rows. Badge support wired.
+- **`fono doctor`** — "Coding agents (MCP server)" section: enabled flag, tools
+  advertised, transport.
+- **`crates/fono/src/agent_loop.rs`** — generic `fono agent-loop --agent <name>`
+  implementation. Reads `~/.config/fono/agents.toml` (user) with bundled
+  `assets/agents.toml` fallback. No agent-specific code anywhere.
+- **`assets/agents.toml`** — first-party entries: forge, claude-code, cursor,
+  codex (untested), gemini (untested).
+- **`assets/agent-presets/voice.md`** — shared voice-mode system prompt.
+- **`docs/coding-agents.md`** — full integration guide: Forge, Claude Code, Cursor
+  (all verified via config), plus best-effort docs for Codex CLI, Gemini CLI,
+  Cline/Continue/Windsurf, and Goose. "Adding your own agent" section.
+- **Wizard** — optional final step "Enable voice-driven coding agents?" (agent-neutral).
+
+Pre-commit gate passed: `cargo fmt --check`, `cargo clippy -D warnings`,
+`cargo test --workspace --tests --lib` all green.
+
+**Phase 3 partial:** `fono.speak` fully implemented. `fono.listen` and `fono.confirm`
+are quality stubs — standalone audio capture in the MCP server path requires wiring
+`fono-audio`'s `CaptureHandle` + `SilenceWatch` outside the daemon context. Deferred
+to next session.
+
+## 2026-05-26 — Voice loop for coding agents — Phase 0 + Phase 1
+
+Plan: `plans/2026-05-25-fono-voice-loop-for-coding-agents-v1.md`
+
+**Phase 0 (decisions/roadmap/changelog)** and **Phase 1 (`fono speak --stream`)**
+are complete. What shipped:
+
+- **ADR 0030** `docs/decisions/0030-fono-as-mcp-server-for-coding-agents.md` —
+  records the agent-agnostic design principle, three-tool MCP surface, and
+  `agents.toml` registry design.
+- **`fono speak --stream`** — new CLI subcommand in `crates/fono/src/speak_stream.rs`.
+  Reads stdin, sanitises markdown (code fences, bold/em, headings, links, inline code,
+  long URLs), sentence-segments with a 200-char hard cap, and speaks via the configured
+  TTS backend. Includes 5-sentence backpressure and clean Ctrl-C cancellation.
+  18 unit tests green.
+- **`McpServer` config struct** added to `crates/fono-core/src/config.rs` with
+  `enabled`, `mirror_to_stdout`, `listen_max_seconds`, `confirm_timeout_seconds`.
+  Serialised only when non-default (`skip_serializing_if`).
+- **`fono use mcp-server on|off`** — new `UseCmd::McpServer` arm toggles
+  `cfg.mcp.enabled` and reloads the daemon.
+- **Stub dispatch** for `fono mcp serve` (exits with a clear "Phase 2 not yet
+  implemented" message + safety-gate error if `mcp.enabled` is false) and
+  `fono agent-loop --agent <name>` (stub stub pointing at `docs/coding-agents.md`).
+- **`docs/coding-agents.md`** created with the Phase 1 "Dictate-in, pipe-speak-out"
+  section, MCP setup overview, per-agent config snippet stubs, and an
+  "Adding your own agent" section.
+
+Pre-commit gate passed: `cargo fmt --check`, `cargo clippy -D warnings`,
+`cargo test --workspace --tests --lib` all green.
+
+**Next: Phase 2** — `fono-mcp-server` crate skeleton + stdio transport.
 
 ## 2026-05-25 — Wizard recommendation accuracy fix (`.131` regression)
 

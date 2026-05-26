@@ -286,6 +286,11 @@ pub enum TrayAction {
     UseAssistant(u8),
     /// Switch the active TTS backend. Index into `tts_labels`.
     UseTts(u8),
+    /// Toggle `[mcp.server].enabled` from the tray. The daemon writes
+    /// the change to `config.toml` and the setting takes effect on the
+    /// next `fono mcp serve` invocation (a full daemon restart is not
+    /// required).
+    ToggleMcpServer,
     Quit,
 }
 
@@ -316,6 +321,20 @@ impl Tray {
             3 => TrayState::Paused,
             4 => TrayState::Assistant,
             _ => TrayState::Idle,
+        }
+    }
+
+    /// Build a tray handle that has no backend wired up — only the
+    /// in-memory state atom. Intended for unit tests in downstream
+    /// crates (notably `fono::daemon`) that need to feed `Tray` into
+    /// the IPC dispatch helpers and inspect [`Tray::state`] without
+    /// spawning the real ksni service.
+    #[must_use]
+    pub fn for_tests() -> Self {
+        Self {
+            shared_state: Arc::new(AtomicU8::new(TrayState::Idle as u8)),
+            #[cfg(feature = "tray-backend")]
+            state_tx: None,
         }
     }
 }
@@ -362,6 +381,7 @@ pub fn spawn(
     gpu_upgrade_provider: GpuUpgradeProvider,
     microphones_provider: MicrophonesProvider,
     preferences_provider: PreferencesProvider,
+    mcp_server_enabled: bool,
 ) -> (Tray, mpsc::UnboundedReceiver<TrayAction>) {
     let shared = Arc::new(AtomicU8::new(TrayState::Idle as u8));
     let (action_tx, action_rx) = mpsc::unbounded_channel();
@@ -384,6 +404,7 @@ pub fn spawn(
             gpu_upgrade_provider,
             microphones_provider,
             preferences_provider,
+            mcp_server_enabled,
         );
         let state_tx = if started { Some(state_tx) } else { None };
         (Tray { shared_state: shared, state_tx }, action_rx)
@@ -460,6 +481,9 @@ mod backend {
         gpu_upgrade_label: Option<String>,
         microphones: (Vec<String>, u8),
         prefs: PreferencesSnapshot,
+        /// Whether `[mcp.server].enabled = true` in the user config.
+        /// When `true`, the "MCP server" submenu is shown.
+        mcp_server_enabled: bool,
         actions: mpsc::UnboundedSender<TrayAction>,
     }
 
@@ -521,6 +545,7 @@ mod backend {
         gpu_upgrade_provider: GpuUpgradeProvider,
         microphones_provider: MicrophonesProvider,
         preferences_provider: PreferencesProvider,
+        mcp_server_enabled: bool,
     ) -> bool {
         // We need to be inside a tokio runtime to spawn the ksni
         // service; the daemon always is. Probe `Handle::try_current`
@@ -545,6 +570,7 @@ mod backend {
                 gpu_upgrade_provider,
                 microphones_provider,
                 preferences_provider,
+                mcp_server_enabled,
             )
             .await
             {
@@ -773,6 +799,7 @@ mod backend {
         gpu_upgrade_provider: GpuUpgradeProvider,
         microphones_provider: MicrophonesProvider,
         preferences_provider: PreferencesProvider,
+        mcp_server_enabled: bool,
     ) -> anyhow::Result<()> {
         // Make sure DBUS_SESSION_BUS_ADDRESS is set before zbus tries
         // to connect; zbus's pure-Rust discovery is stricter than
@@ -801,6 +828,7 @@ mod backend {
             gpu_upgrade_label: None,
             microphones: (Vec::new(), u8::MAX),
             prefs: PreferencesSnapshot::default(),
+            mcp_server_enabled,
             actions,
         };
 
@@ -1156,6 +1184,43 @@ mod backend {
         // we keep the nested layout the user prefers and document the
         // workaround (`pkill snixembed && snixembed &`) for now.
         items.push(build_preferences_submenu(t));
+
+        // MCP server submenu — shown only when `[mcp.server].enabled = true`.
+        // Toggle via `fono use mcp-server on|off` or from this submenu.
+        if t.mcp_server_enabled {
+            let mcp_items: Vec<MenuItem<KsniTray>> = vec![
+                StandardItem {
+                    label: "● Enabled (stdio transport)".into(),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+                MenuItem::Separator,
+                StandardItem {
+                    label: "Disable MCP server".into(),
+                    activate: send_action(TrayAction::ToggleMcpServer),
+                    ..Default::default()
+                }
+                .into(),
+                StandardItem {
+                    label: "Tools: fono.speak, fono.listen, fono.confirm".into(),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+                StandardItem {
+                    label: "See docs/coding-agents.md for setup".into(),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            ];
+            items.push(
+                SubMenu { label: "MCP server".into(), submenu: mcp_items, ..Default::default() }
+                    .into(),
+            );
+        }
+
         items.push(MenuItem::Separator);
 
         // Update entry — surfaced only when the background checker

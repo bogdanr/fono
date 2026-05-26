@@ -132,6 +132,14 @@ struct CaptureSession {
     stop_tx: std::sync::mpsc::Sender<()>,
     join: Option<JoinHandle<()>>,
     started_at: Instant,
+    /// Snapshot of the focused window captured at hotkey-press time
+    /// (H.1 in `plans/2026-05-25-hover-context-injection-v1.md`).
+    /// Carried through to the pipeline so STT/LLM enrichment reflects
+    /// the window the user was actually pointing at when they started
+    /// dictating, not whatever wins focus by the time we tear down the
+    /// recording (e.g. when an overlay surface or a focus-follows-mouse
+    /// move steals it mid-utterance).
+    focus_info: FocusInfo,
     /// AbortHandle for the audio-level ticker that feeds the standalone
     /// waveform overlay. `None` when no overlay is attached.
     #[cfg(feature = "interactive")]
@@ -173,6 +181,9 @@ impl CaptureSession {
 /// produces the final [`crate::live::LiveTranscript`].
 #[cfg(feature = "interactive")]
 struct LiveCaptureSession {
+    /// Snapshot of the focused window captured when the live session
+    /// started — same H.1 rationale as `CaptureSession::focus_info`.
+    focus_info: FocusInfo,
     /// Stops the capture thread (drops the cpal stream, which in turn
     /// drops the forwarder closure and the realtime SPSC `Sender`,
     /// signalling EOF to the bridge thread).
@@ -1546,6 +1557,20 @@ impl SessionOrchestrator {
             mode, self.capture_cfg.target_sample_rate
         );
 
+        // H.1: snapshot the focused window at hotkey-press time, before
+        // any overlay surface activity or focus-follows-mouse cursor
+        // motion can move it. Sway/Hyprland/X11 IPC takes ~5 ms; run it
+        // on a blocking thread so we don't hold the async executor.
+        let focus = Arc::clone(&self.focus);
+        let focus_info =
+            tokio::task::spawn_blocking(move || focus.probe()).await.unwrap_or_default();
+        tracing::debug!(
+            target: "fono::context",
+            class = ?focus_info.window_class,
+            title = ?focus_info.window_title,
+            "capture: focus snapshot at press"
+        );
+
         // Standalone-waveform overlay: spawn the level ticker that
         // feeds bars/pulse RMS or oscilloscope sample snapshots, and
         // toggle the overlay to `Recording` so the panel shows up. Only
@@ -1576,6 +1601,7 @@ impl SessionOrchestrator {
             stop_tx,
             join: Some(join),
             started_at: Instant::now(),
+            focus_info,
             #[cfg(feature = "interactive")]
             level_task,
             #[cfg(feature = "interactive")]
@@ -1627,6 +1653,9 @@ impl SessionOrchestrator {
         };
         #[cfg(not(feature = "interactive"))]
         let polish_anim: Option<tokio::task::AbortHandle> = None;
+        // Pull the press-time focus snapshot out before consuming the
+        // session in the blocking stop/drain below.
+        let focus_info = session.focus_info.clone();
         let (samples, elapsed) =
             tokio::task::spawn_blocking(move || session.stop_and_drain()).await.unwrap_or_default();
         let capture_ms = elapsed.as_millis() as u64;
@@ -1647,7 +1676,7 @@ impl SessionOrchestrator {
             return;
         }
 
-        self.spawn_pipeline(samples, capture_ms, polish_anim);
+        self.spawn_pipeline(samples, capture_ms, polish_anim, focus_info);
     }
 
     /// Cancel an active recording, dropping the audio without invoking STT.
@@ -1756,6 +1785,9 @@ impl SessionOrchestrator {
                         streaming,
                         fono_overlay::OverlayState::AssistantRecording { db: 0 },
                         Some(SilenceWatchFlavor::Assistant { auto_stop_commit: true }),
+                        // Assistant streaming path does not use the
+                        // focus snapshot — a default is fine.
+                        FocusInfo::default(),
                     )?;
                     *slot = Some(session);
                     if self.current_config().general.auto_mute_system {
@@ -1837,6 +1869,9 @@ impl SessionOrchestrator {
             stop_tx,
             join: Some(join),
             started_at: Instant::now(),
+            // Assistant batch path doesn't route through `spawn_pipeline`;
+            // focus is not consumed downstream, so a default is fine.
+            focus_info: FocusInfo::default(),
             #[cfg(feature = "interactive")]
             level_task,
             #[cfg(feature = "interactive")]
@@ -2165,6 +2200,7 @@ impl SessionOrchestrator {
         pcm: Vec<f32>,
         capture_ms: u64,
         polish_anim: Option<tokio::task::AbortHandle>,
+        focus_info: FocusInfo,
     ) {
         let stt = self.current_stt();
         let polish = self.current_llm();
@@ -2173,7 +2209,6 @@ impl SessionOrchestrator {
         let in_flight = Arc::clone(&self.pipeline_in_flight);
         let config = self.current_config();
         let injector = Arc::clone(&self.injector);
-        let focus = Arc::clone(&self.focus);
         let sample_rate = self.capture_cfg.target_sample_rate;
         // Standalone-waveform overlay: clone the handle so the pipeline
         // task can hide the panel once STT + LLM + inject are done. The
@@ -2189,11 +2224,12 @@ impl SessionOrchestrator {
 
         in_flight.store(true, Ordering::SeqCst);
         tokio::spawn(async move {
-            // H.2: `detect_focus()` / `probe()` can block on synchronous
-            // Wayland IPC (sway socket, hyprctl subprocess) or X11 calls.
-            // Run it on a blocking thread so we don't hold an async worker.
-            let focus_info =
-                tokio::task::spawn_blocking(move || focus.probe()).await.unwrap_or_default();
+            // H.1: focus_info was captured at hotkey-press time in
+            // `on_start_recording` and threaded through `CaptureSession`.
+            // We deliberately do NOT re-probe here — by the time we
+            // reach this point the user has released the hotkey, the
+            // overlay surface may have been mapped, and focus may have
+            // moved off the window the user was actually dictating into.
             let outcome = run_pipeline(
                 pcm,
                 sample_rate,
@@ -2297,6 +2333,7 @@ impl SessionOrchestrator {
         streaming: Arc<dyn StreamingStt>,
         active_state: fono_overlay::OverlayState,
         silence_flavor: Option<SilenceWatchFlavor>,
+        focus_info: FocusInfo,
     ) -> Result<LiveCaptureSession> {
         // Slice A: streaming pipeline operates at 16 kHz to keep the
         // pump's broadcast frame budget aligned with whisper. The
@@ -2434,6 +2471,7 @@ impl SessionOrchestrator {
         };
 
         Ok(LiveCaptureSession {
+            focus_info,
             capture_stop_tx,
             capture_join: Some(capture_join),
             bridge_join: Some(bridge_join),
@@ -2489,10 +2527,22 @@ impl SessionOrchestrator {
         // boundary, same as the batch path.
         let silence_flavor =
             matches!(mode, RecordingMode::Toggle).then_some(SilenceWatchFlavor::Dictation);
+        // H.1: snapshot focus at press time, before the overlay surface
+        // is shown and before any focus-follows-mouse motion can move it.
+        let focus = Arc::clone(&self.focus);
+        let focus_info =
+            tokio::task::spawn_blocking(move || focus.probe()).await.unwrap_or_default();
+        tracing::debug!(
+            target: "fono::context",
+            class = ?focus_info.window_class,
+            title = ?focus_info.window_title,
+            "live-capture: focus snapshot at press"
+        );
         let session = self.build_live_capture_pipeline(
             streaming,
             fono_overlay::OverlayState::LiveDictating,
             silence_flavor,
+            focus_info,
         )?;
 
         let cfg = self.current_config();
@@ -2633,10 +2683,10 @@ impl SessionOrchestrator {
                     o.set_state(fono_overlay::OverlayState::Processing);
                     o.update_text(raw.clone());
                 }
-                let focus_probe = Arc::clone(&self.focus);
-                let focus_info = tokio::task::spawn_blocking(move || focus_probe.probe())
-                    .await
-                    .unwrap_or_default();
+                // H.1: use the focus snapshot captured at press time.
+                // Re-probing here would pick up whatever stole focus
+                // since the overlay was mapped.
+                let focus_info = session.focus_info.clone();
                 let live_ctx_profile = ContextClassifier::classify(
                     focus_info.window_class.as_deref(),
                     focus_info.window_title.as_deref(),
@@ -2768,10 +2818,8 @@ impl SessionOrchestrator {
             } else {
                 None
             };
-            let live_focus_probe = Arc::clone(&self.focus);
-            let live_focus_info = tokio::task::spawn_blocking(move || live_focus_probe.probe())
-                .await
-                .unwrap_or_default();
+            // H.1: same press-time focus snapshot used for polish.
+            let live_focus_info = session.focus_info.clone();
             let live_suppress = ContextClassifier::classify(
                 live_focus_info.window_class.as_deref(),
                 live_focus_info.window_title.as_deref(),

@@ -1254,6 +1254,7 @@ dependencies = [
  "fono-http",
  "fono-inject",
  "fono-ipc",
+ "fono-mcp-server",
  "fono-net",
  "fono-overlay",
  "fono-polish",
@@ -1264,7 +1265,9 @@ dependencies = [
  "futures",
  "libloading",
  "mdns-sd",
+ "once_cell",
  "realfft",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
@@ -1423,6 +1426,27 @@ dependencies = [
  "serde",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "fono-mcp-server"
+version = "0.8.2"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fono-audio",
+ "fono-core",
+ "fono-ipc",
+ "fono-overlay",
+ "fono-polish",
+ "fono-stt",
+ "fono-tts",
+ "realfft",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

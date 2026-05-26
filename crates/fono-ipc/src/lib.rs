@@ -58,6 +58,57 @@ pub enum Request {
     Cancel,
     /// Graceful shutdown.
     Shutdown,
+    /// MCP server is starting a voice interaction with the user
+    /// (`fono.listen`, `fono.speak`, or `fono.confirm`). The daemon
+    /// increments an internal depth counter and — on the 0→1
+    /// transition — snapshots the current tray state and flips the
+    /// tray to [`fono_tray::TrayState::Processing`] (amber). The
+    /// `phase` field is logged for observability but, per v7 of the
+    /// MCP overlay plan, all three phases map to the same amber tint
+    /// today. Slice 7 of
+    /// `plans/2026-05-26-mcp-listen-overlay-and-silence-parity-v7.md`.
+    McpActivityStart { phase: McpPhase },
+    /// Companion to [`Self::McpActivityStart`]. Decrements the
+    /// daemon's depth counter; on the →0 transition the previously
+    /// snapshotted tray state is restored (unless another writer has
+    /// taken over in the meantime — last-writer-wins).
+    McpActivityEnd,
+    /// MCP server asks the daemon for exclusive access to the audio
+    /// output device for the duration of a `fono.speak` playback.
+    /// The daemon serialises these requests through a single
+    /// `tokio::sync::Mutex` so concurrent `fono mcp serve` processes
+    /// (one per coding agent — Claude Code, Forge, Cursor, …) never
+    /// produce overlapping TTS audio on the same speakers.
+    ///
+    /// **Connection-scoped lock.** The daemon writes the matching
+    /// `Response::Ok` *only* after acquiring the mutex, and keeps the
+    /// connection open while the lock is held. The client signals
+    /// release by closing its end of the socket (drop the
+    /// `UnixStream`); the daemon's read loop sees EOF and releases
+    /// the mutex. This makes the lock robust against MCP-server
+    /// crashes — kernel-level socket cleanup always unblocks the
+    /// next waiter.
+    ///
+    /// **Best-effort.** Clients fall back to no-coordination
+    /// (potential overlap) when the daemon is unreachable; the
+    /// guarantee is "no overlap *when the daemon is running*".
+    McpSpeakAcquire,
+}
+
+/// Sub-state of an MCP voice interaction. Logged on the daemon side
+/// for observability; all three variants map to the same
+/// [`fono_tray::TrayState::Processing`] (amber) tint in v7. Future
+/// versions may map them to distinct tints; the wire format already
+/// carries the discriminator so the change is daemon-local.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum McpPhase {
+    /// `fono.listen` — microphone is open.
+    Listening,
+    /// `fono.speak` — TTS audio is playing back (only emitted for
+    /// utterances ≥ 1 s so short prompts don't flash the tray).
+    Speaking,
+    /// `fono.confirm` — listening for an A/B/C answer.
+    Confirming,
 }
 
 /// Serializable, IPC-friendly view of one mDNS-discovered peer. Mirrors
@@ -202,4 +253,37 @@ pub async fn request_any(sockets: &[std::path::PathBuf], req: &Request) -> Resul
     write_frame(&mut stream, req).await?;
     let resp: Response = read_frame(&mut stream).await?;
     Ok(resp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Round-trip a `Request` through bincode. Mirrors the wire-level
+    /// `write_frame` / `read_frame` codec used at runtime so a future
+    /// breaking change to the encoding shows up here.
+    fn bincode_roundtrip(req: &Request) -> Request {
+        let bytes = bincode::serialize(req).expect("serialize");
+        bincode::deserialize(&bytes).expect("deserialize")
+    }
+
+    #[test]
+    fn mcp_activity_start_roundtrips() {
+        for phase in [McpPhase::Listening, McpPhase::Speaking, McpPhase::Confirming] {
+            let req = Request::McpActivityStart { phase };
+            assert_eq!(bincode_roundtrip(&req), req);
+        }
+    }
+
+    #[test]
+    fn mcp_activity_end_roundtrips() {
+        let req = Request::McpActivityEnd;
+        assert_eq!(bincode_roundtrip(&req), req);
+    }
+
+    #[test]
+    fn mcp_speak_acquire_roundtrips() {
+        let req = Request::McpSpeakAcquire;
+        assert_eq!(bincode_roundtrip(&req), req);
+    }
 }

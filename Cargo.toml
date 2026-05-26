@@ -19,6 +19,7 @@ members = [
     "crates/fono-http",
     "crates/fono-net-codec",
     "crates/fono-net",
+    "crates/fono-mcp-server",
 ]
 
 [workspace.package]

@@ -120,17 +120,13 @@ later slice. Plan:
 
 ## On the horizon
 
-### Local REST API + MCP server
+### Local REST API
 
 Fono already runs as a daemon with a Unix-socket IPC layer — every CLI subcommand
 (`fono toggle`, `fono history`, `fono use …`) is a client talking to it. The next step
-is exposing that same interface over HTTP and the
-[Model Context Protocol](https://modelcontextprotocol.io), so scripts, editor plugins,
-and AI coding assistants can drive Fono without any special tooling.
-
-The MCP half lands first as a focused voice-loop integration — see
-[Voice loop for coding agents](#voice-loop-for-coding-agents) below. The REST half
-follows as a thin shim over the same IPC surface.
+is exposing that same interface over HTTP, so scripts, editor plugins, and tools that
+are not MCP-capable can drive Fono without any special tooling. This is a thin shim
+over the existing IPC surface, independent of the MCP work.
 
 ### Voice actions
 
@@ -193,20 +189,22 @@ available from day one on both paths.
 > Talk to your coding agent. Hear short, voice-friendly answers back. Pick A, B, or C
 > with your voice. Don't touch the keyboard between turns.
 
-**The end goal is agent-agnostic.** Fono will speak the **server** side of the
-[Model Context Protocol](https://modelcontextprotocol.io), exposing three voice tools
-(`fono.speak`, `fono.listen`, `fono.confirm`) over stdio. Any MCP-capable coding agent —
-present or future — becomes voice-driven by adding one `fono` MCP server entry to its
-config and pointing at one shared voice-mode system prompt biased toward short
-responses and A/B/C choices instead of page-long markdown. Adding a new agent is a
-config snippet and a documentation section, never new Fono code.
+**Early preview, shipping in v0.9.** `fono-mcp-server` ships three voice tools
+(`fono.speak`, `fono.listen`, `fono.confirm`) over stdio. The integration is
+**agent-agnostic by design**: any MCP-capable coding agent — Forge, Claude Code,
+Cursor, Codex CLI, Gemini CLI, and anything that ships tomorrow — is voice-driven by
+adding one `fono` MCP server entry to its config and loading the shared voice-mode
+system prompt at `assets/agent-presets/voice.md`. No per-agent code inside Fono; new
+agents are `agents.toml` entries and `docs/coding-agents.md` sections, never Fono code
+changes.
 
-**Forge is the first dogfood target** because it's the maintainer's daily driver, but
-v1 ships verified end-to-end against at least three different agents (Forge + Claude
-Code + Cursor) precisely to prove the integration is genuinely agent-agnostic before
-tag. Codex CLI, Gemini CLI, Cline, Continue, Windsurf, and Goose ship as best-effort
-documentation in the same release, plus an "Adding your own agent" recipe so the story
-is genuinely open-ended.
+Verified end-to-end against Forge and Claude Code; Cursor, Codex CLI, and Gemini CLI
+documented as best-effort. `fono agent-setup <name>` is the one-shot setup that wires
+the MCP server, agent MCP JSON, and voice-mode preset; after that the user launches
+their agent the normal way. Disabled by default — opt in with
+`fono use mcp-server on`. Because the protocol, defaults, and tool surface may still
+shift before this feature graduates, expect rough edges in v0.9 and breaking changes
+between v0.9 and the eventual stable release.
 
 Concrete plan: `plans/2026-05-25-fono-voice-loop-for-coding-agents-v1.md`.
 Complementary to (but independent of) the [Voice actions](#voice-actions) work

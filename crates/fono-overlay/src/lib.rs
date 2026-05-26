@@ -97,6 +97,44 @@ pub enum OverlayState {
     /// Live dictation in progress. The text is shown via
     /// [`OverlayHandle::update_text`].
     LiveDictating,
+    /// MCP `fono.listen` relevance gate dropped the previous
+    /// utterance. The panel flashes this state for ~700 ms after
+    /// each rejection so the user gets a discriminable visual ack
+    /// ("Fono heard you but is still waiting for a real answer")
+    /// before reverting to [`Self::Recording`] for the next
+    /// utterance attempt. Slice 5 of
+    /// `plans/2026-05-26-mcp-listen-overlay-and-silence-parity-v7.md`.
+    ///
+    /// Renderer contract: neutral-grey accent, label `"IGNORED"`,
+    /// VU bar hidden (we're not metering anything — the mic is
+    /// being re-armed). The `reason` is plumbed through so future
+    /// iterations can surface sub-labels without another enum
+    /// migration.
+    Ignoring {
+        reason: IgnoreReason,
+    },
+}
+
+/// Why the MCP relevance gate ignored an utterance, surfaced in the
+/// overlay's `Ignoring` flash and in debug logs. Mirrors (but is
+/// intentionally not the same type as) `fono_mcp_server::relevance::
+/// IgnoreReason` — the overlay crate must not depend on the MCP
+/// server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IgnoreReason {
+    /// Looked like radio / TV / side conversation. Either the LLM
+    /// classifier returned `BACKGROUND` or a future on-device
+    /// classifier flagged the utterance as off-topic.
+    BackgroundSpeech,
+    /// Heuristic dropped the utterance as too short / filler-only /
+    /// otherwise low-information. Kept distinct from
+    /// `BackgroundSpeech` so future visual treatments can
+    /// differentiate (e.g. a smaller flash for filler vs a larger
+    /// one for a TV news anchor mid-sentence).
+    LowConfidence,
+    /// Transcript matched the agent's prompt closely enough that we
+    /// assume AEC didn't fully cancel the TTS playback.
+    EchoFromPrompt,
 }
 
 impl Default for OverlayState {

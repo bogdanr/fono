@@ -18,6 +18,8 @@
 // `plans/2026-04-27-shared-ggml-static-binary-v1.md` for the full
 // rationale and the long-term shared-ggml plan.
 
+pub mod agent_setup;
+pub mod agents;
 pub mod assistant;
 pub mod audio_recovery;
 pub mod cli;
@@ -26,6 +28,7 @@ pub mod doctor;
 pub mod install;
 pub mod models;
 pub mod session;
+pub mod speak_stream;
 pub mod variant;
 pub mod wizard;
 

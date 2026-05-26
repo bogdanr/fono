@@ -447,6 +447,29 @@ pub async fn report(paths: &Paths) -> Result<String> {
         }
     }
 
+    // ----------------------------------------------------------------
+    // Coding agents — MCP server status
+    // ----------------------------------------------------------------
+    if let Some(c) = cfg.as_ref() {
+        writeln!(out, "{}", head("Coding agents (MCP server):"))?;
+        if c.mcp.enabled {
+            writeln!(out, "  mcp.enabled          : {}", ok("true"))?;
+        } else {
+            writeln!(
+                out,
+                "  mcp.enabled          : {} (enable with `fono use mcp-server on`)",
+                warn("false")
+            )?;
+        }
+        writeln!(out, "  transport            : stdio")?;
+        writeln!(out, "  tools available      : fono.speak, fono.listen, fono.confirm")?;
+        writeln!(
+            out,
+            "  voice preset         : assets/agent-presets/voice.md (see docs/coding-agents.md)"
+        )?;
+        writeln!(out)?;
+    }
+
     writeln!(out)?;
     writeln!(out, "{} ({}):", head("Log tail"), paths.log_file().display())?;
     match tail_log(&paths.log_file(), 10) {

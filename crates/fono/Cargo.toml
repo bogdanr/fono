@@ -87,6 +87,7 @@ fono-update = { path = "../fono-update" }
 # LAN servers (Wyoming today; mDNS + Fono-native land in Slices 4–6).
 # Default-on so `fono serve wyoming` works in the standard build.
 fono-net = { path = "../fono-net", features = ["discovery"] }
+fono-mcp-server = { path = "../fono-mcp-server" }
 mdns-sd = { workspace = true }
 
 anyhow = { workspace = true }
@@ -103,6 +104,8 @@ toml = { workspace = true }
 reqwest = { workspace = true }
 crossbeam-channel = { workspace = true }
 tempfile = { workspace = true }
+once_cell = { workspace = true }
+regex = { workspace = true }
 futures = { workspace = true, optional = true }
 tokio-stream = { workspace = true, optional = true }
 # Real-input FFT for the `fft` and `heatmap` waveform styles. Small

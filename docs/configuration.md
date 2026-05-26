@@ -42,6 +42,7 @@ field-level rustdoc comments. The user-facing sections are:
 | `[update]` | Auto-check toggle, release channel | [install.md](install.md) |
 | `[server]` | Wyoming-protocol STT server (LAN host mode) | [install.md](install.md) |
 | `[network]` | mDNS metadata overrides | — |
+| `[mcp]` | MCP server limits + voice-tool relevance filter | this file |
 | `[[context_rules]]` | Per-app prompt/behaviour overrides | this file |
 
 ## Common knobs by example
@@ -155,6 +156,40 @@ max_entries = 10_000        # rolling cap; older entries are pruned
 
 `fono history clear` truncates the table without touching the file;
 deleting `~/.local/share/fono/history.sqlite` wipes everything.
+
+### MCP voice-tool relevance filter
+
+When a coding agent calls `fono.listen` (directly or via
+`fono.confirm`), the captured utterance is scored to filter out
+background speech (radio, TV, side conversation, prompt-TTS echo):
+
+```toml
+[mcp]
+# "off"       — disable the filter, every transcript is returned.
+# "heuristic" — length / filler / echo rules only (cheap, default).
+# "llm"       — heuristic first, then the configured polish backend
+#               as a one-shot classifier (1.5 s hardcoded timeout;
+#               fails open on timeout / parse failure).
+relevance_filter = "heuristic"
+
+# Maximum number of background utterances the loop will drop before
+# returning the most recent one regardless. Prevents an infinite
+# wait in pathological environments.
+relevance_max_rejections = 2
+```
+
+The 1.5 s LLM-classifier timeout is hardcoded in
+`crates/fono-mcp-server/src/relevance.rs` and not user-configurable;
+it's a per-iteration ceiling, not a budget. On timeout the filter
+**fails open** (accepts the utterance) so a sluggish polish backend
+can never strand a real answer.
+
+Tray feedback during MCP voice interactions is **automatic** — no
+config knob. The daemon's tray icon turns amber (the same colour as
+the existing `Processing` state used for STT / polish) for the
+duration of any `fono.listen`, `fono.speak`, or `fono.confirm` call,
+then restores whatever it was showing before. See
+[coding-agents.md](coding-agents.md#what-you-see-and-hear-during-an-mcp-voice-turn).
 
 ## Hotkeys
 

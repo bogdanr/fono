@@ -1,13 +1,23 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Recording-state finite state machine.
 //!
-//! Two pipelines share one FSM: dictation (`Recording` /
-//! `LiveDictating` → `Processing`) and the voice assistant
-//! (`AssistantRecording` → `AssistantThinking` → `AssistantSpeaking`).
+//! Three pipelines share one FSM: dictation (`Recording` /
+//! `LiveDictating` → `Processing`), the voice assistant
+//! (`AssistantRecording` → `AssistantThinking` → `AssistantSpeaking`),
+//! and MCP-driven tool calls (`McpDriven`).
 //! Guards keep them mutually exclusive so a stray F10 mid-dictation —
 //! or vice versa — is ignored rather than mixing buffers.
 
 use tokio::sync::mpsc;
+
+/// Which MCP tool is currently active. Used by the `McpDriven` FSM
+/// state to let the orchestrator know what to cancel on barge-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolKind {
+    Speak,
+    Listen,
+    Confirm,
+}
 
 /// Events emitted to the orchestrator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +46,13 @@ pub enum HotkeyEvent {
     /// orchestrator drops the audio queue and aborts the LLM stream.
     /// History is preserved.
     StopAssistantPlayback,
+    /// An MCP tool call started; the tray should show the active badge.
+    McpToolStarted(ToolKind),
+    /// The user barged in (F7 / F8 / Escape) while an MCP tool was
+    /// active; the orchestrator should cancel the in-flight tool call.
+    McpToolCancelled,
+    /// The MCP tool call completed normally; return to Idle.
+    McpToolDone,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +64,12 @@ pub enum RecordingMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Idle,
+    /// An MCP tool call (`fono.speak`, `fono.listen`, `fono.confirm`)
+    /// is in progress. The hotkey F7/F8/Escape barge-in cancels the
+    /// tool call instead of starting a new dictation or assistant turn.
+    McpDriven {
+        tool: ToolKind,
+    },
     Recording(RecordingMode),
     /// Live (streaming) dictation. The streaming pipeline is consuming
     /// audio frames and emitting preview/finalize updates. Plan R7.4 /
@@ -69,6 +92,7 @@ pub enum State {
 
 /// Input actions the hotkey/ipc layers dispatch to the FSM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HotkeyAction {
     HoldPressed,
     HoldReleased,
@@ -95,6 +119,10 @@ pub enum HotkeyAction {
     /// has actually started replying). Drives `AssistantThinking →
     /// AssistantSpeaking`.
     AssistantSpeakingStarted,
+    /// MCP server started a tool call. Drives `Idle → McpDriven`.
+    McpToolStarted(ToolKind),
+    /// MCP tool call completed normally. Drives `McpDriven → Idle`.
+    McpToolDone,
 }
 
 pub struct RecordingFsm {
@@ -215,6 +243,29 @@ impl RecordingFsm {
             ) => State::Idle,
             (_, HotkeyAction::ProcessingStarted) => State::Processing,
             (State::Processing, HotkeyAction::ProcessingDone) => State::Idle,
+            // ── MCP-driven tool call ──────────────────────────────────────
+            // Entry: any in-flight MCP tool call signals itself via this
+            // action. Only from Idle — don't interrupt dictation/assistant.
+            (State::Idle, HotkeyAction::McpToolStarted(tool)) => {
+                let _ = self.tx.send(HotkeyEvent::McpToolStarted(tool));
+                State::McpDriven { tool }
+            }
+            // Barge-in: F7 / F8 / AssistantPressed / CancelPressed while an
+            // MCP tool is running → cancel and return to Idle.
+            (
+                State::McpDriven { .. },
+                HotkeyAction::CancelPressed
+                | HotkeyAction::HoldPressed
+                | HotkeyAction::AssistantPressed,
+            ) => {
+                let _ = self.tx.send(HotkeyEvent::McpToolCancelled);
+                State::Idle
+            }
+            // Normal completion of the tool call.
+            (State::McpDriven { .. }, HotkeyAction::McpToolDone) => {
+                let _ = self.tx.send(HotkeyEvent::McpToolDone);
+                State::Idle
+            }
             (current, _) => current, // ignore invalid transitions
         };
         self.state = next;
@@ -369,5 +420,49 @@ mod tests {
         let (mut fsm, _rx) = RecordingFsm::new();
         fsm.dispatch(HotkeyAction::AssistantPressed);
         assert_eq!(fsm.dispatch(HotkeyAction::HoldPressed), State::AssistantRecording);
+    }
+
+    // ── McpDriven tests ──────────────────────────────────────────────
+
+    #[test]
+    fn mcp_tool_start_and_done() {
+        let (mut fsm, mut rx) = RecordingFsm::new();
+        assert_eq!(
+            fsm.dispatch(HotkeyAction::McpToolStarted(ToolKind::Speak)),
+            State::McpDriven { tool: ToolKind::Speak }
+        );
+        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::McpToolStarted(ToolKind::Speak));
+        assert_eq!(fsm.dispatch(HotkeyAction::McpToolDone), State::Idle);
+        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::McpToolDone);
+    }
+
+    #[test]
+    fn mcp_barge_in_via_cancel() {
+        let (mut fsm, mut rx) = RecordingFsm::new();
+        fsm.dispatch(HotkeyAction::McpToolStarted(ToolKind::Listen));
+        let _ = rx.try_recv(); // drain McpToolStarted
+        assert_eq!(fsm.dispatch(HotkeyAction::CancelPressed), State::Idle);
+        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::McpToolCancelled);
+    }
+
+    #[test]
+    fn mcp_barge_in_via_hold() {
+        let (mut fsm, mut rx) = RecordingFsm::new();
+        fsm.dispatch(HotkeyAction::McpToolStarted(ToolKind::Confirm));
+        let _ = rx.try_recv();
+        // F7 (HoldPressed) while MCP is active → barge-in, not dictation
+        assert_eq!(fsm.dispatch(HotkeyAction::HoldPressed), State::Idle);
+        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::McpToolCancelled);
+    }
+
+    #[test]
+    fn mcp_does_not_interrupt_dictation() {
+        // An MCP start while dictation is in progress is ignored.
+        let (mut fsm, _rx) = RecordingFsm::new();
+        fsm.dispatch(HotkeyAction::HoldPressed);
+        assert_eq!(
+            fsm.dispatch(HotkeyAction::McpToolStarted(ToolKind::Speak)),
+            State::Recording(RecordingMode::Hold)
+        );
     }
 }

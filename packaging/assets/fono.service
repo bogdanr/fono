@@ -38,6 +38,10 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 StateDirectory=fono
 CacheDirectory=fono
 ConfigurationDirectory=fono
+# Match the mode `fono install --server` chmod()s onto /etc/fono so
+# systemd doesn't warn on every start that the on-disk mode (0750,
+# root:fono) differs from the unit-declared default (0755).
+ConfigurationDirectoryMode=0750
 
 [Install]
 WantedBy=multi-user.target

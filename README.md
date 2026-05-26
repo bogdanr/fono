@@ -35,6 +35,7 @@ While you're speaking, a small overlay shows what the microphone is hearing. Fou
 
 - **Dictation, push-to-talk or toggle.** Tap `F7` to toggle recording; hold `F7` for push-to-talk. The same key works either way — the press duration decides.
 - **Voice assistant on `F8`** Talk to Ollama, OpenAI, Anthropic, Groq, Cerebras, or OpenRouter; the reply is streamed sentence-by-sentence into TTS so audio starts before the model has finished thinking.
+- **Talk to your coding agent (early preview).** Drive Forge, Claude Code, Cursor, Codex CLI, Gemini CLI — any MCP-capable agent — entirely by voice. `fono agent-setup <name>` wires it up in one shot; after that the agent speaks its replies, listens for your follow-ups, and offers A/B/C choices you pick with your voice. See [docs/coding-agents.md](docs/coding-agents.md).
 - **Lands in any X11 or Wayland window.** Fono types straight into the focused window and mirrors to the clipboard as a safety net. Hotkeys register through the Wayland portal where it's available, with automatic fallbacks for GNOME 46 and X11 — see [docs/wayland.md](docs/wayland.md) for the per-compositor story.
 - **Local or cloud speech-to-text.** Whisper runs on your machine by default. Or switch to Groq, OpenAI, or Deepgram with one command (`fono use stt …`).
 - **Local or cloud text-to-speach.** For local you can use Wyoming-piper. More options are on the [roadmap](ROADMAP.md). Or switch to various cloud providers if you want most naturally sounding voices.

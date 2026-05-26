@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Talk to your coding agent (early preview).** Fono now ships an
+  MCP server that lets any MCP-capable coding agent — Forge, Claude
+  Code, Cursor, Codex CLI, Gemini CLI, and others — drive a voice
+  loop through three tools: `fono.speak` (the agent speaks a reply),
+  `fono.listen` (the agent asks a free-form question and gets your
+  spoken answer back as text), and `fono.confirm` (the agent offers
+  A/B/C choices and matches your spoken pick). Verified end-to-end
+  against Forge and Claude Code; best-effort for the rest. Disabled
+  by default, opt in with `fono use mcp-server on`. This is an
+  **early preview** — the protocol, defaults, and tool surface may
+  still shift before the feature graduates.
+- **One-command setup for your coding agent.**
+  `fono agent-setup <name>` wires everything in one shot: enables
+  the MCP server, merges the right `mcpServers.fono` entry into
+  your agent's MCP config, and appends the shared voice-mode preset
+  to your project's `AGENTS.md` / `CLAUDE.md`. Idempotent, supports
+  `--dry-run`, and `--list` shows every registered agent. After
+  setup, launch your agent the normal way and it can speak and
+  listen.
+- **Voice-friendly overlay while the agent is talking with you.**
+  When the agent calls `fono.listen` the same overlay you see for
+  F7 dictation pops up — waveform/transcript while you speak, a
+  PONDERING animation while it waits — so you always know whether
+  Fono is listening. The overlay is scoped strictly to the
+  microphone-open phase (not while the agent is speaking its
+  prompt) and is skipped when a regular Fono daemon is already
+  running so a daemon-paired environment never double-paints.
+- **Background-speech filter.** When the agent asks a question,
+  Fono now filters out chatter that doesn't look like an answer —
+  radio, TV, a side conversation in the room, or the agent's own
+  prompt echoing back through the speakers. Tunable via
+  `[mcp].relevance_filter` (`"off" | "heuristic" | "llm"`, default
+  `"heuristic"`) and `[mcp].relevance_max_rejections` (default
+  `2`). The optional `"llm"` mode uses the configured polish
+  backend as a one-shot classifier with a 1.5 s timeout; on
+  timeout or parse failure it fails open and accepts the
+  utterance. Each rejection flashes a dim grey `Ignoring` badge in
+  the overlay so you can see that Fono heard you but is still
+  waiting for a real answer.
+- **Tray icon turns amber while the agent is in a voice turn.**
+  Same colour Fono uses while STT or polish is running, so you can
+  tell at a glance that a `fono.listen` / `fono.speak` /
+  `fono.confirm` call is in flight. The previous tray state is
+  restored when the call ends; nested spans (a prompt that speaks
+  before listening) keep the icon steady. No configuration needed.
+- **`fono speak --stream`** — reads stdin line by line, segments
+  into sentences, strips markdown, and speaks each sentence
+  through the configured TTS backend. Backpressure prevents a
+  fast producer from outrunning playback; SIGINT flushes cleanly.
+  Pipe-friendly: `echo "Hello. World." | fono speak --stream`.
+- **`fono use mcp-server on|off`** — toggle `[mcp.server].enabled`
+  without editing config by hand.
+- **`fono doctor` "Coding agents" section** — reports whether the
+  MCP server is enabled, the last MCP handshake timestamp, the
+  advertised tools, and the last tool-call result.
+- **Tray "MCP server" submenu** (visible only when enabled) —
+  enable/disable toggle, last-connected timestamp, per-tool
+  enable/disable rows.
+- **Docs.** New `docs/coding-agents.md` integration guide covering
+  Forge, Claude Code and Cursor (verified) plus Codex CLI, Gemini
+  CLI, Cline, Continue, Windsurf and Goose (best-effort), with an
+  "Adding your own agent" section. Shared voice-mode preset at
+  `assets/agent-presets/voice.md`.
+- **ADR 0030** — records the Fono-as-MCP-server decision, the
+  three-tool surface, the agent-agnostic design principle, and the
+  `agents.toml` registry.
+
+### Changed
+
+- **MCP listen default silence is now 10 s** (was 2 s) so an
+  agent turn can pause for thought without being cut off
+  mid-sentence.
+- **MCP listen default `max_seconds` lowered from 60 s to 45 s** —
+  combined with the multi-utterance relevance loop this gives a
+  responsive turn-taking budget without stranding you.
+
 ## [0.8.2] — 2026-05-26
 
 Context-aware dictation, Esc-to-cancel on Wayland, and smarter

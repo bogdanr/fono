@@ -96,7 +96,14 @@ fn init_tracing(verbosity: cli::Verbosity) {
     let targets: Targets =
         combined.parse().unwrap_or_else(|_| Targets::new().with_default(LevelFilter::INFO));
 
+    // Tracing must go to **stderr**, never stdout. The `fono mcp serve`
+    // subcommand uses stdout exclusively for JSON-RPC frames; any log line
+    // that leaks onto stdout corrupts the MCP transport and causes the
+    // client (e.g. Forge's rmcp) to tear down the connection on the first
+    // parse error. Stderr is also the convention for every other CLI/TUI
+    // subcommand, so this default is universally correct.
     let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
         .with_ansi(true)
         .with_target(verbosity.is_trace())
         .with_file(verbosity.is_trace())

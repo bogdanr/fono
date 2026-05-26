@@ -97,6 +97,11 @@ pub fn accent_color(state: OverlayState) -> u32 {
         OverlayState::AssistantSpeaking => 0xFF38_BDF8,
         OverlayState::Processing | OverlayState::Polishing => 0xFFE0_A040,
         OverlayState::LiveDictating => 0xFF63_7AFF,
+        // Neutral grey — deliberately unsaturated so it reads as
+        // "Fono paused, not actively listening" rather than fighting
+        // the Recording red for visual attention. Mirrors the
+        // tray's `Idle` palette intent.
+        OverlayState::Ignoring { .. } => 0xFF6B_7280,
     }
 }
 
@@ -112,6 +117,7 @@ pub fn state_label(state: OverlayState) -> &'static str {
         OverlayState::AssistantSpeaking => "SPEAKING",
         OverlayState::Processing | OverlayState::Polishing => "POLISHING",
         OverlayState::LiveDictating => "LIVE",
+        OverlayState::Ignoring { .. } => "IGNORED",
     }
 }
 
@@ -1487,6 +1493,7 @@ impl RendererState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::IgnoreReason;
 
     #[test]
     fn highlight_idx_zero_is_none() {
@@ -1549,5 +1556,34 @@ mod tests {
         assert!(m.inst_rms.abs() < f32::EPSILON);
         assert!(m.voiced_rms.abs() < f32::EPSILON);
         assert!(m.silence_rms.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn ignoring_state_paints_neutral_grey() {
+        // Slice 5 of plan v7 — the relevance gate's "ignored"
+        // flash must read as muted / paused so it doesn't fight
+        // the Recording red for visual attention.
+        let state = OverlayState::Ignoring { reason: IgnoreReason::BackgroundSpeech };
+        assert_eq!(accent_color(state), 0xFF6B_7280);
+    }
+
+    #[test]
+    fn ignoring_state_label_is_ignored() {
+        for reason in [
+            IgnoreReason::BackgroundSpeech,
+            IgnoreReason::LowConfidence,
+            IgnoreReason::EchoFromPrompt,
+        ] {
+            let state = OverlayState::Ignoring { reason };
+            assert_eq!(state_label(state), "IGNORED", "reason={reason:?}");
+        }
+    }
+
+    #[test]
+    fn ignoring_state_hides_vu_bar() {
+        // The mic is being re-armed during the flash, so the VU
+        // bar would be meaningless. Keep it hidden.
+        let state = OverlayState::Ignoring { reason: IgnoreReason::BackgroundSpeech };
+        assert!(!state_has_vu_bar(state));
     }
 }

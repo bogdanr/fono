@@ -94,6 +94,22 @@ pub async fn run(paths: &Paths) -> Result<()> {
     // and a TTS layer that doesn't exist on the dictation path).
     configure_assistant(&theme, &mut config, &mut secrets).await?;
 
+    // Optional: enable voice-driven coding agents (agent-agnostic prompt).
+    // Wizard wording is intentionally neutral — points to docs for per-agent setup.
+    println!();
+    println!("  ── Voice-driven coding agents (optional) ───────────────");
+    println!("  Any MCP-capable agent (Forge, Claude Code, Cursor, …) can be");
+    println!("  driven by voice once the Fono MCP server is enabled.");
+    let enable_mcp = Confirm::with_theme(&theme)
+        .with_prompt("Enable voice-driven coding agents?")
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+    if enable_mcp {
+        config.mcp.enabled = true;
+        println!("  MCP server enabled. See docs/coding-agents.md for per-agent setup.");
+    }
+
     config.save(&paths.config_file())?;
     if !secrets.keys.is_empty() {
         secrets.save(&paths.secrets_file())?;
@@ -1623,6 +1639,43 @@ fn pick_local_stt_model(
         .interact()?;
 
     Ok(shortlist[idx].model.name)
+}
+
+/// Headless / non-interactive variant of [`pick_local_stt_model`].
+///
+/// Used by `fono install --server` to seed `[stt.local].model` in
+/// `/etc/fono/config.toml` so the daemon comes up with a model that
+/// actually fits the host's hardware. Without this, the daemon falls
+/// back to the in-code default of `"small"` (~250 MB) on every host
+/// regardless of CPU/RAM, which means a 1-core cloud VM downloads the
+/// same model as a 16-core workstation — directly contradicting the
+/// affordability walk that `fono doctor` and `fono hwprobe` perform.
+///
+/// Picks multilingual by default since a Wyoming server can be called
+/// by any LAN client; operators who only ever serve English can edit
+/// the config and switch to a `.en` model afterward.
+///
+/// Returns the same shortlist top entry the interactive picker would
+/// auto-select on this host, with the same `for_inference()` GPU
+/// guard the wizard applies. Falls back to the smallest multilingual
+/// model when every visible model is unsuitable (very low-end host —
+/// the daemon will still load it, just slowly).
+#[must_use]
+pub fn recommend_local_stt_model_headless(snap: &HardwareSnapshot) -> &'static str {
+    let inference_snap =
+        snap.for_inference(matches!(crate::variant::VARIANT, crate::variant::Variant::Gpu));
+    let shortlist = build_local_stt_shortlist(false, &[], &inference_snap);
+    if let Some(top) = shortlist.first() {
+        return top.model.name;
+    }
+    // Every model is unsuitable. Fall back to the smallest
+    // multilingual entry in the registry.
+    WHISPER_MODELS
+        .iter()
+        .filter(|m| m.multilingual)
+        .min_by_key(|m| m.approx_mb)
+        .map(|m| m.name)
+        .unwrap_or("tiny")
 }
 
 // ─── LLM configuration helpers ─────────────────────────────────────────────

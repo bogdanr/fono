@@ -73,6 +73,11 @@ pub struct Config {
     /// This block is only for cosmetic mDNS metadata overrides.
     #[serde(default, skip_serializing_if = "Network::is_default")]
     pub network: Network,
+
+    /// MCP server settings (Phase 2 of the voice-loop-for-coding-agents
+    /// plan). Off by default; opt in with `fono use mcp-server on`.
+    #[serde(default, skip_serializing_if = "McpServer::is_default")]
+    pub mcp: McpServer,
 }
 
 impl Default for Config {
@@ -94,6 +99,7 @@ impl Default for Config {
             interactive: Interactive::default(),
             server: Server::default(),
             network: Network::default(),
+            mcp: McpServer::default(),
         }
     }
 }
@@ -973,6 +979,68 @@ pub struct Network {
     /// pick the same friendly name.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub instance_name: String,
+}
+
+/// `[mcp.server]` — MCP server settings for voice-driven coding agent
+/// integration. Disabled by default. Enable with `fono use mcp-server on`.
+///
+/// Three tools are advertised when the server is active: `fono.speak`,
+/// `fono.listen`, and `fono.confirm`. Only stdio transport is supported
+/// in v1 (the `fono mcp serve` process is spawned by the agent itself).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct McpServer {
+    /// Master toggle. When `false` (default) `fono mcp serve` exits
+    /// immediately with a human-readable error. Users opt in with
+    /// `fono use mcp-server on`.
+    pub enabled: bool,
+    /// Whether to mirror spoken text to stdout during `fono.speak`
+    /// calls. Off by default; useful when tuning the agent preset.
+    pub mirror_to_stdout: bool,
+    /// Safety ceiling on a single `fono.listen` call in seconds.
+    /// Agent-supplied `max_seconds` may not exceed this value.
+    pub listen_max_seconds: u32,
+    /// Timeout for `fono.confirm` in seconds. Default `10`.
+    pub confirm_timeout_seconds: u32,
+    /// Relevance filter for `fono.listen`. Controls whether transcripts
+    /// that don't look like answers to the agent's question (radio /
+    /// TV / side conversation / prompt-TTS echo) are discarded so the
+    /// loop keeps listening.
+    ///
+    /// One of:
+    /// - `"off"`: filter disabled — every transcript is returned.
+    /// - `"heuristic"` (default): cheap on-device checks only
+    ///   (empty / filler / echo-of-prompt).
+    /// - `"llm"`: heuristic gate plus an LLM classifier that reuses
+    ///   the configured `[polish]` backend. Privacy + cost
+    ///   implications follow the user's `[polish]` choice. Falls
+    ///   back to heuristic-only when polish is disabled.
+    pub relevance_filter: String,
+    /// Maximum number of consecutive rejected utterances before the
+    /// loop gives up and returns whatever came next. Belt-and-braces
+    /// against pathological environments (someone left a radio
+    /// playing nearby).
+    pub relevance_max_rejections: u32,
+}
+
+impl Default for McpServer {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mirror_to_stdout: false,
+            listen_max_seconds: 45,
+            confirm_timeout_seconds: 10,
+            relevance_filter: "heuristic".to_string(),
+            relevance_max_rejections: 2,
+        }
+    }
+}
+
+impl McpServer {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl Network {

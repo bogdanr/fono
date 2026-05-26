@@ -33,7 +33,13 @@ pub fn detect_focus() -> Result<FocusInfo> {
     if std::env::var("SWAYSOCK").is_ok() || std::env::var("I3SOCK").is_ok() {
         match sway_focus() {
             Ok(info) => {
-                tracing::debug!(target: "fono::context", "detect_focus: sway succeeded");
+                tracing::debug!(
+                    target: "fono::context",
+                    class = ?info.window_class,
+                    title = ?info.window_title,
+                    pid = ?info.window_pid,
+                    "detect_focus: sway succeeded"
+                );
                 return Ok(info);
             }
             Err(e) => tracing::debug!(target: "fono::context", "sway_focus failed: {e:#}"),
@@ -44,7 +50,13 @@ pub fn detect_focus() -> Result<FocusInfo> {
     if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
         match hyprland_focus() {
             Ok(info) => {
-                tracing::debug!(target: "fono::context", "detect_focus: hyprland succeeded");
+                tracing::debug!(
+                    target: "fono::context",
+                    class = ?info.window_class,
+                    title = ?info.window_title,
+                    pid = ?info.window_pid,
+                    "detect_focus: hyprland succeeded"
+                );
                 return Ok(info);
             }
             Err(e) => tracing::debug!(target: "fono::context", "hyprland_focus failed: {e:#}"),
@@ -57,7 +69,12 @@ pub fn detect_focus() -> Result<FocusInfo> {
     if is_gnome_session() && session_type != "x11" {
         match gnome_focus() {
             Ok(info) => {
-                tracing::debug!(target: "fono::context", "detect_focus: gnome succeeded");
+                tracing::debug!(
+                    target: "fono::context",
+                    class = ?info.window_class,
+                    title = ?info.window_title,
+                    "detect_focus: gnome succeeded"
+                );
                 return Ok(info);
             }
             Err(e) => {
@@ -82,7 +99,13 @@ pub fn detect_focus() -> Result<FocusInfo> {
     {
         match x11_focus() {
             Ok(info) => {
-                tracing::debug!(target: "fono::context", "detect_focus: x11");
+                tracing::debug!(
+                    target: "fono::context",
+                    class = ?info.window_class,
+                    title = ?info.window_title,
+                    pid = ?info.window_pid,
+                    "detect_focus: x11 succeeded"
+                );
                 return Ok(info);
             }
             Err(e) => tracing::debug!(target: "fono::context", "x11_focus failed: {e:#}"),
@@ -146,7 +169,25 @@ fn sway_focus() -> Result<FocusInfo> {
         .get("app_id")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned);
+        .map(ToOwned::to_owned)
+        // Native Wayland apps populate `app_id`. XWayland apps leave it
+        // null and surface WM_CLASS under `window_properties.class`
+        // instead — fall back to that so xterm / xdotool-launched apps
+        // / Electron-on-XWayland windows still classify.
+        .or_else(|| {
+            node.get("window_properties")
+                .and_then(|wp| wp.get("class"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| {
+            node.get("window_properties")
+                .and_then(|wp| wp.get("instance"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned)
+        });
 
     let window_title =
         node.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(ToOwned::to_owned);

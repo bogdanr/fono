@@ -7,7 +7,7 @@ use clap_complete::Shell;
 use fono_core::{Config, Paths, Secrets};
 use fono_ipc::{Request, Response};
 
-use crate::{daemon, doctor, wizard};
+use crate::{agent_setup, daemon, doctor, wizard};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -311,6 +311,52 @@ pub enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Read text from stdin and speak it through the configured TTS backend.
+    ///
+    /// Segments input into sentences, strips markdown (code blocks,
+    /// bold/em, headings, links), and synthesises each sentence for
+    /// playback. Backpressure prevents a fast producer from outrunning
+    /// the listener (at most 5 sentences queue ahead).
+    ///
+    /// Example: `echo "Hello there. This is sentence two." | fono speak --stream`
+    ///
+    /// Pipe from a coding agent: `forge | fono speak --stream`
+    Speak {
+        #[command(subcommand)]
+        action: SpeakCmd,
+    },
+    /// Run Fono as an MCP (Model Context Protocol) server over stdio.
+    ///
+    /// Exposes three voice tools: `fono.speak`, `fono.listen`, and
+    /// `fono.confirm`. The server is disabled by default; enable it
+    /// with `fono use mcp-server on`. Only stdio transport is available
+    /// in v1; SSE/HTTP transport follows in v2.
+    Mcp {
+        #[command(subcommand)]
+        action: McpCmd,
+    },
+    /// One-command setup: enable the MCP server, write the agent MCP
+    /// JSON, and inject the shared voice-mode preset — all idempotent.
+    ///
+    /// Example: `fono agent-setup forge`
+    ///
+    /// Use `--list` to print all known agents without configuring any.
+    AgentSetup {
+        /// Agent name (e.g. `forge`, `claude-code`, `cursor`).
+        /// Omit when using `--list`.
+        #[arg(conflicts_with = "list")]
+        agent: Option<String>,
+        /// Project directory for preset-file injection (AGENTS.md etc.).
+        /// Defaults to the current directory.
+        #[arg(long, default_value = ".")]
+        project_dir: std::path::PathBuf,
+        /// Print what would be done without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Print all registered agents and exit.
+        #[arg(long)]
+        list: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -359,6 +405,15 @@ pub enum UseCmd {
     Local,
     /// Print the active STT/LLM and the running daemon's view.
     Show,
+    /// Enable or disable the MCP server (sets `[mcp.server].enabled`).
+    ///
+    /// When enabled, `fono mcp serve` exposes `fono.speak`,
+    /// `fono.listen`, and `fono.confirm` over stdio for MCP-capable
+    /// coding agents.
+    McpServer {
+        /// `on` to enable, `off` to disable.
+        state: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -425,7 +480,26 @@ pub enum ModelsCmd {
     Verify,
 }
 
-#[allow(clippy::large_stack_frames, clippy::too_many_lines)]
+#[derive(Debug, Subcommand)]
+pub enum SpeakCmd {
+    /// Read text from stdin and speak it through the configured TTS backend.
+    ///
+    /// Segments input into sentences, strips markdown formatting, and
+    /// synthesises each sentence for playback. Useful standalone as a
+    /// pipe: `echo "Hello. World." | fono speak --stream`
+    Stream,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum McpCmd {
+    /// Start an MCP server over stdio. Exposes `fono.speak`,
+    /// `fono.listen`, and `fono.confirm` tools for any MCP-capable
+    /// coding agent. Exits when stdin closes. The server must be
+    /// enabled first with `fono use mcp-server on`.
+    Serve,
+}
+
+#[allow(clippy::large_stack_frames, clippy::too_many_lines, clippy::cognitive_complexity)]
 pub async fn run(cli: Cli) -> Result<()> {
     let paths = Paths::resolve().context("resolve XDG paths")?;
     paths.ensure()?;
@@ -550,6 +624,38 @@ pub async fn run(cli: Cli) -> Result<()> {
             crate::install::run_install(mode, dry_run)
         }
         Some(Cmd::Uninstall { dry_run }) => crate::install::run_uninstall(dry_run),
+        Some(Cmd::Speak { action }) => match action {
+            SpeakCmd::Stream => crate::speak_stream::run(&paths).await,
+        },
+        Some(Cmd::Mcp { action }) => match action {
+            McpCmd::Serve => {
+                let cfg = fono_core::Config::load(&paths.config_file())?;
+                if !cfg.mcp.enabled {
+                    anyhow::bail!(
+                        "MCP server is disabled. Enable it first with:\n\n  \
+                         fono use mcp-server on\n\nThis is the master safety gate — \
+                         only processes that can spawn `fono mcp serve` can drive your \
+                         microphone via MCP. Opt in when you're ready."
+                    );
+                }
+                let secrets = fono_core::Secrets::load(&paths.secrets_file()).unwrap_or_default();
+                let ctx = fono_mcp_server::McpContext {
+                    cfg,
+                    secrets,
+                    whisper_models_dir: paths.whisper_models_dir(),
+                    polish_models_dir: paths.polish_models_dir(),
+                    polish_classifier_cache: fono_mcp_server::McpContext::new_classifier_cache(),
+                    daemon_ipc_candidates: paths.client_ipc_socket_candidates(),
+                };
+                let registry = fono_mcp_server::ToolRegistry::default_with_context(&ctx);
+                let transport = fono_mcp_server::StdioTransport::new();
+                let mut server = fono_mcp_server::McpServer::new(Box::new(transport), registry);
+                server.run().await
+            }
+        },
+        Some(Cmd::AgentSetup { agent, project_dir, dry_run, list }) => {
+            agent_setup::run(agent.as_deref(), &project_dir, dry_run, list, &paths).await
+        }
     }
 }
 
@@ -1371,6 +1477,16 @@ async fn use_cmd(paths: &Paths, action: UseCmd) -> Result<()> {
             set_active_llm(&mut cfg, PolishBackend::None);
             cfg.save(&path)?;
             "local: stt = local (whisper), polish = none".to_string()
+        }
+        UseCmd::McpServer { state } => {
+            let on = match state.trim().to_ascii_lowercase().as_str() {
+                "on" | "true" | "1" | "enable" | "enabled" => true,
+                "off" | "false" | "0" | "disable" | "disabled" => false,
+                _ => anyhow::bail!("expected `on` or `off`, got {state:?}"),
+            };
+            cfg.mcp.enabled = on;
+            cfg.save(&path)?;
+            format!("mcp.server.enabled = {on}")
         }
         UseCmd::Show => {
             print_show(paths, &cfg).await;
