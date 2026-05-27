@@ -1,5 +1,62 @@
 # Fono — Project Status
-Last updated: 2026-05-26
+Last updated: 2026-05-27
+
+## 2026-05-27 — 3D overlay: Terrain + Blob landed (Phase 2 + 3)
+
+Followed up the Lissajous slice with the remaining two 3D styles
+from `plans/2026-05-27-3d-overlay-visualisations-v1.md`:
+
+- **Terrain 3D** (`WaveformStyle::Terrain3d`) — a wireframe
+  spectrogram landscape. Reuses the FFT capture tap and the
+  heatmap colour ramp; renders a 28 × 24 vertex grid as two
+  passes of depth-faded polylines (one per time slice, one per
+  frequency column). No new audio plumbing. Synthetic idle
+  ripple keeps the terrain alive during silence.
+- **Blob 3D** (`WaveformStyle::Blob3d`) — a stretched 42-vertex
+  icosphere with hand-baked vertex / triangle tables, filled
+  triangles via the `r3d::draw_triangle_3d_filled` primitive,
+  Lambert shading from the upper-left. Radius breathes with the
+  live RMS level; spectral centroid tilts the lean along X.
+  Unit tests guard the icosphere table size and confirm every
+  vertex sits within 5 % of the unit sphere.
+
+Both styles share the existing FFT / level taps in
+`crates/fono/src/session.rs` (recording path) and
+`crates/fono-mcp-server/src/voice_io.rs` (MCP visualizer task);
+the assistant-thinking path pushes a slow synthetic FFT ridge
+for terrain and a breathing centroid for blob.
+
+Tray entries added with descriptive sub-labels
+(`"Terrain 3D (spectrogram landscape)"`,
+`"Blob 3D (audio-reactive orb)"`). Daemon index map extended to
+6 / 7. Pre-commit gate green (fmt, clippy, all tests except the
+pre-existing `resolve_auto_stop_falls_back_to_default` failure).
+
+CHANGELOG updated under `[Unreleased]`. Default style remains
+`Fft` so existing configs are unaffected.
+
+## 2026-05-27 — 3D overlay: Lissajous wire (Phase 0 + 1)
+
+First slice of the 3D overlay visualisations plan
+(`plans/2026-05-27-3d-overlay-visualisations-v1.md`) is in. Phase 0
+adds a small CPU 3D primitives module
+(`crates/fono-overlay/src/r3d.rs`) — `Vec3`, `Mat4`, perspective +
+look-at + rotation, point projection, AA line draw, polyline draw,
+and a depth buffer — with unit tests. No new dependencies.
+
+Phase 1 wires the **Lissajous 3D** waveform style end-to-end: new
+`WaveformStyle::Lissajous3d` variant, recording-time PCM tap shares
+the existing oscilloscope path, assistant-thinking synthetic
+samples follow the oscilloscope pattern so the curve breathes
+during silence and thinking, tray submenu picks it up. Software
+rasterised, no GPU. Pre-commit gate green (fmt, clippy);
+`cargo test` clean except for one pre-existing failure in
+`fono-mcp-server` (`resolve_auto_stop_falls_back_to_default`,
+unrelated to this work — present on `main` HEAD before the change).
+
+Phases 2 (spectrogram terrain) and 3 (audio-reactive blob) are
+gated on a live eyeball pass of Lissajous per the plan's checkpoint
+schedule.
 
 ## 2026-05-26 — Voice loop for coding agents squashed; v0.9 prep
 

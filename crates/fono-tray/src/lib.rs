@@ -209,6 +209,7 @@ pub const WAVEFORM_STYLES: &[(&str, &str)] = &[
     ("fft", "FFT"),
     ("heatmap", "Heatmap"),
     ("transcript", "Transcript"),
+    ("terrain3d", "Terrain 3D"),
 ];
 
 /// Auto-stop silence presets surfaced in the tray's radio group.
@@ -1433,6 +1434,7 @@ mod backend {
                     "FFT" => "FFT (frequency spectrum)",
                     "Heatmap" => "Heatmap (rolling spectrogram)",
                     "Transcript" => "Transcript (live preview — more CPU / tokens)",
+                    "Terrain 3D" => "Terrain 3D (spectrogram landscape)",
                     other => other,
                 };
                 StandardItem {

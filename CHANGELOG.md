@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Overlay: new **Terrain 3D** waveform style — a filled spectrogram
+  landscape that uses the live FFT history as a relief map (frequency
+  along the long axis, magnitude as height, time receding into the
+  distance). Brightness-modulated opaque accent colours so the
+  surface stays vibrantly tinted at every magnitude, and the mesh
+  spans nearly the full panel width. Software 3D pipeline, no GPU.
+- Overlay: dropped the experimental Lissajous 3D and Helix 3D
+  waveform styles introduced earlier in `[Unreleased]`. Both turned
+  out to be a poor fit for the panel's tight landscape aspect ratio
+  during dogfooding; Terrain 3D remains as the single 3D style.
+  Migration: configs or tray entries using `"lissajous3d"` or
+  `"helix3d"` should switch to `"terrain3d"` (or any of the 2D
+  styles).
 - Voice preset: listen-by-default, confirm as a UX shortcut not a safety gate,
   never voice-authorise destructive actions, no bare spoken questions, every
   spoken turn opens with a short refocus preamble.

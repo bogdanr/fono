@@ -2307,6 +2307,7 @@ fn waveform_style_to_idx(style: fono_core::config::WaveformStyle) -> u8 {
         fono_core::config::WaveformStyle::Fft => 2,
         fono_core::config::WaveformStyle::Heatmap => 3,
         fono_core::config::WaveformStyle::Transcript => 4,
+        fono_core::config::WaveformStyle::Terrain3d => 5,
     }
 }
 
@@ -2320,6 +2321,7 @@ fn waveform_style_from_idx(idx: u8) -> Option<fono_core::config::WaveformStyle> 
         2 => Some(fono_core::config::WaveformStyle::Fft),
         3 => Some(fono_core::config::WaveformStyle::Heatmap),
         4 => Some(fono_core::config::WaveformStyle::Transcript),
+        5 => Some(fono_core::config::WaveformStyle::Terrain3d),
         _ => None,
     }
 }

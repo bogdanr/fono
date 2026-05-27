@@ -193,6 +193,9 @@ impl Overlay {
 #[cfg(any(feature = "real-window", feature = "backend-x11", feature = "backend-wlr"))]
 pub mod renderer;
 
+#[cfg(any(feature = "real-window", feature = "backend-x11", feature = "backend-wlr"))]
+pub mod r3d;
+
 pub mod backend;
 pub mod backends;
 

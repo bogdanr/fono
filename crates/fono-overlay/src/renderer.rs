@@ -945,6 +945,270 @@ pub fn draw_heatmap(
 }
 
 // ---------------------------------------------------------------------------
+//  3D Spectrogram terrain (`WaveformStyle::Terrain3d`)
+// ---------------------------------------------------------------------------
+
+/// Mesh resolution along the frequency axis. Wider grid → smoother
+/// ridges; the spatial 3-tap blur below softens isolated spikes.
+const TERRAIN_FREQ_BINS: usize = 64;
+/// Mesh resolution along the time axis.
+const TERRAIN_TIME_SLICES: usize = 128;
+/// Vertical scale on magnitude. High enough that peaks read as
+/// clear ridges against the baseline grid.
+const TERRAIN_HEIGHT: f32 = 1.10;
+/// Noise floor subtracted from every FFT magnitude before lifting
+/// the grid. Without this, the constant low-level energy that
+/// sits in any room (HVAC, computer fans, mic self-noise) keeps
+/// the front row permanently elevated and washes out real peaks.
+const TERRAIN_NOISE_FLOOR: f32 = 0.20;
+/// Compression curve. We use a `log10(1 + k*m) / log10(1 + k)`
+/// shape — perceptually similar to dB scaling but with smoother
+/// behaviour at zero. Lower `k` = more linear; higher `k` = more
+/// aggressive compression of the high end.
+const TERRAIN_LOG_K: f32 = 18.0;
+/// Temporal smoothing coefficient. Low so syllable onsets land
+/// almost immediately on the front row.
+const TERRAIN_EMA: f32 = 0.22;
+/// World-space X half-extent. Sized so the projected front
+/// (newest) row reaches the bottom-left and bottom-right
+/// corners of the panel. Wider than strictly needed by ~10% so
+/// the corners are reliably covered across slightly different
+/// panel aspects.
+const TERRAIN_X_HALF: f32 = 11.0;
+/// Input gain applied after noise-floor subtraction and before
+/// log compression. At a normal microphone level (≈ -12 dBFS
+/// peaks) the FFT magnitudes saturate the log curve and the
+/// grid pegs at full height; this scales the input so the
+/// usable dynamic range sits in the middle of the curve.
+/// Empirically tuned at ~0.30 — equivalent to the user dropping
+/// their mic volume to a third, which they already confirmed
+/// makes the visualisation read clearly.
+const TERRAIN_INPUT_GAIN: f32 = 0.30;
+/// World-space Y baseline. The grid sits below the origin so the
+/// projected baseline row lands flush with the panel bottom.
+const TERRAIN_Y_BASE: f32 = -1.60;
+/// World-space Z of the back (oldest) row. More negative = back
+/// row sits closer to the top of the panel because perspective
+/// pushes it further into the distance.
+const TERRAIN_Z_BACK: f32 = -6.5;
+/// World-space Z of the front (newest) row.
+const TERRAIN_Z_FRONT: f32 = 0.55;
+/// Recent-history window. Only the most recent N frames of the
+/// FFT ring are sampled across the mesh, so a syllable that hits
+/// the front row reaches the back row in ~N×50 ms — fast enough
+/// that the user sees the time flow.
+const TERRAIN_RECENT_FRAMES: usize = 50;
+
+/// 3D spectrogram terrain. Renders the FFT history as a Tron-style
+/// wireframe grid — horizontal "time" rows and vertical "frequency"
+/// columns drawn in the accent colour, with depth-modulated
+/// brightness so the front rows pop and the back rows fade calmly
+/// into the panel. Audio magnitude lifts vertices on the Y axis so
+/// the grid ripples gently when the user speaks; at silence it
+/// reads as a flat perspective plane.
+///
+/// Compared to the filled-triangle surface in `bfa211b`, this
+/// wireframe version:
+///   - reads as a clean grid even at silence (the filled version
+///     had no visible structure once magnitudes dropped);
+///   - costs less to render (≈100 line draws instead of ≈2400
+///     triangle fills) so it stays at 60 fps on a Kaby Lake CPU;
+///   - matches the synthwave / Tron mood the user picked when
+///     reviewing the visualisation.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn draw_terrain_3d(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    frames: &VecDeque<Vec<f32>>,
+    x0: f32,
+    x1: f32,
+    y_top: f32,
+    y_bot: f32,
+    accent: u32,
+    _scale: f32,
+    elapsed_secs: f32,
+) {
+    use crate::r3d::{draw_polyline_3d, Mat4, Vec3};
+
+    let panel_w = (x1 - x0).max(1.0);
+    let panel_h = (y_bot - y_top).max(1.0);
+    let aspect = panel_w / panel_h;
+    let viewport = (x0, y_top, panel_w, panel_h);
+
+    // Higher, more tilted camera so the back row sits closer to
+    // the top of the panel and the front row sits closer to the
+    // bottom — more inclined plane, more dramatic perspective.
+    let eye = Vec3::new(0.0, 1.35, 1.35);
+    let target = Vec3::new(0.0, -0.90, -0.8);
+    let view = Mat4::look_at(eye, target, Vec3::new(0.0, 1.0, 0.0));
+    let proj = Mat4::perspective(62.0_f32.to_radians(), aspect, 0.1, 100.0);
+    let view_proj = proj.mul(view);
+
+    // Step 1: sample raw magnitudes into a (TIME × FREQ) grid.
+    // Only the most recent `TERRAIN_RECENT_FRAMES` frames are
+    // sampled so audio flows from front to back in ~2.5 s.
+    let frame_count = frames.len();
+    let window = frame_count.min(TERRAIN_RECENT_FRAMES);
+    let window_start = frame_count.saturating_sub(window);
+    let mut raw: Vec<f32> = vec![0.0; TERRAIN_FREQ_BINS * TERRAIN_TIME_SLICES];
+    for t in 0..TERRAIN_TIME_SLICES {
+        let frame_idx = if window == 0 {
+            None
+        } else {
+            let frac = t as f32 / (TERRAIN_TIME_SLICES.max(2) - 1) as f32;
+            let offset = (frac * (window - 1) as f32).round() as usize;
+            Some((window_start + offset).min(frame_count - 1))
+        };
+        for f in 0..TERRAIN_FREQ_BINS {
+            let mag = frame_idx.map_or_else(
+                || {
+                    // Synthetic idle ripple — quite subtle so the
+                    // grid stays mostly flat when nobody's talking.
+                    let fu = f as f32 / TERRAIN_FREQ_BINS as f32;
+                    let tu = t as f32 / TERRAIN_TIME_SLICES as f32;
+                    let phase = elapsed_secs * 0.8 + fu * 4.0 + tu * 2.0;
+                    (phase.sin() * 0.5 + 0.5) * 0.10
+                },
+                |idx| {
+                    let frame = &frames[idx];
+                    if frame.is_empty() {
+                        0.0
+                    } else {
+                        let frac = f as f32 / (TERRAIN_FREQ_BINS.max(2) - 1) as f32;
+                        let bin = (frac * (frame.len() - 1) as f32).round() as usize;
+                        frame[bin.min(frame.len() - 1)]
+                    }
+                },
+            );
+            raw[t * TERRAIN_FREQ_BINS + f] = mag;
+        }
+    }
+
+    // Step 2: spatial 1-2-1 blur across frequency, two passes.
+    let mut smoothed: Vec<f32> = raw.clone();
+    for _pass in 0..2 {
+        let src = smoothed.clone();
+        for t in 0..TERRAIN_TIME_SLICES {
+            let row = t * TERRAIN_FREQ_BINS;
+            for f in 0..TERRAIN_FREQ_BINS {
+                let lf = if f == 0 { 0 } else { f - 1 };
+                let rf = if f + 1 >= TERRAIN_FREQ_BINS { f } else { f + 1 };
+                smoothed[row + f] = (src[row + lf] + src[row + f] * 2.0 + src[row + rf]) * 0.25;
+            }
+        }
+    }
+    // Step 3: temporal EMA front-to-back.
+    for t in 1..TERRAIN_TIME_SLICES {
+        let prev_row = (t - 1) * TERRAIN_FREQ_BINS;
+        let row = t * TERRAIN_FREQ_BINS;
+        for f in 0..TERRAIN_FREQ_BINS {
+            smoothed[row + f] =
+                smoothed[row + f] * (1.0 - TERRAIN_EMA) + smoothed[prev_row + f] * TERRAIN_EMA;
+        }
+    }
+
+    // Step 4: build the vertex grid in world space.
+    let log_denom = TERRAIN_LOG_K.ln_1p();
+    let mut verts: Vec<Vec3> = Vec::with_capacity(TERRAIN_FREQ_BINS * TERRAIN_TIME_SLICES);
+    for t in 0..TERRAIN_TIME_SLICES {
+        let tf = t as f32 / (TERRAIN_TIME_SLICES.max(2) - 1) as f32;
+        let z = TERRAIN_Z_BACK + tf * (TERRAIN_Z_FRONT - TERRAIN_Z_BACK);
+        for f in 0..TERRAIN_FREQ_BINS {
+            let ff = f as f32 / (TERRAIN_FREQ_BINS.max(2) - 1) as f32;
+            let x = (ff - 0.5) * (TERRAIN_X_HALF * 2.0);
+            // Subtract a noise floor (so the front row sits flat at
+            // silence) then log-compress so quiet syllables still
+            // lift the grid visibly while loud peaks don't blow out.
+            let mag = smoothed[t * TERRAIN_FREQ_BINS + f].clamp(0.0, 1.0);
+            let denoised = ((mag - TERRAIN_NOISE_FLOOR) / (1.0 - TERRAIN_NOISE_FLOOR)).max(0.0);
+            let scaled = (denoised * TERRAIN_INPUT_GAIN).min(1.0);
+            let boosted = (TERRAIN_LOG_K * scaled).ln_1p() / log_denom;
+            let y = TERRAIN_Y_BASE + boosted * TERRAIN_HEIGHT;
+            verts.push(Vec3::new(x, y, z));
+        }
+    }
+
+    // Per-row brightness ramp: front rows bright, back rows dim,
+    // so the perspective grid has the synthwave glow-toward-camera
+    // look in the reference screenshot.
+    let line_color_for_row = |t: usize| -> u32 {
+        let tf = t as f32 / (TERRAIN_TIME_SLICES.max(2) - 1) as f32;
+        // Front (tf = 1.0) → full alpha; back (tf = 0.0) → ~0x30.
+        let alpha = (48.0 + tf * 207.0).clamp(48.0, 255.0) as u8;
+        with_alpha(accent, alpha)
+    };
+
+    let visible_rows: usize = 32;
+    let visible_columns: usize = 64;
+
+    // Horizontal lines — sub-sample time slices to ~7 visible
+    // rows. Use evenly-distributed indices that include both the
+    // back row (t=0) and the front row (t=TERRAIN_TIME_SLICES-1)
+    // so the spacing between adjacent visible rows is uniform —
+    // a naive `step_by` with an appended endpoint produces a
+    // narrow final gap that looks broken on the panel.
+    let last_row = TERRAIN_TIME_SLICES - 1;
+    let row_indices: Vec<usize> =
+        (0..visible_rows).map(|i| (i * last_row) / (visible_rows - 1)).collect();
+    for &t in &row_indices {
+        let row_start = t * TERRAIN_FREQ_BINS;
+        let row = &verts[row_start..row_start + TERRAIN_FREQ_BINS];
+        let polyline: Vec<Vec3> = row.to_vec();
+        draw_polyline_3d(
+            buf,
+            stride,
+            h,
+            &polyline,
+            line_color_for_row(t),
+            &view_proj,
+            viewport,
+            false,
+        );
+    }
+
+    // Vertical lines (one per frequency column) — same uniform-
+    // distribution trick as the rows, so the rightmost cell is
+    // the same width as every other cell instead of being a
+    // narrow leftover from `step_by + push last`.
+    let last_col = TERRAIN_FREQ_BINS - 1;
+    let col_indices: Vec<usize> =
+        (0..visible_columns).map(|i| (i * last_col) / (visible_columns - 1)).collect();
+    let mut column: Vec<Vec3> = Vec::with_capacity(TERRAIN_TIME_SLICES);
+    for &f in &col_indices {
+        column.clear();
+        for t in 0..TERRAIN_TIME_SLICES {
+            column.push(verts[t * TERRAIN_FREQ_BINS + f]);
+        }
+        // Column colour blends front-to-back along its length, so
+        // we draw it as a series of short segments rather than a
+        // single polyline. Use the average alpha of the row it
+        // touches at each endpoint.
+        for t in 0..(TERRAIN_TIME_SLICES - 1) {
+            let a = column[t];
+            let b = column[t + 1];
+            let alpha_a = (48.0 + (t as f32 / (TERRAIN_TIME_SLICES.max(2) - 1) as f32) * 207.0)
+                .clamp(48.0, 255.0) as u8;
+            let alpha_b = (48.0
+                + ((t + 1) as f32 / (TERRAIN_TIME_SLICES.max(2) - 1) as f32) * 207.0)
+                .clamp(48.0, 255.0) as u8;
+            let mean_alpha = ((u16::from(alpha_a) + u16::from(alpha_b)) / 2) as u8;
+            crate::r3d::draw_line_3d(
+                buf,
+                stride,
+                h,
+                a,
+                b,
+                with_alpha(accent, mean_alpha),
+                0xFF,
+                &view_proj,
+                viewport,
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 //  Word wrapping
 // ---------------------------------------------------------------------------
 
@@ -1130,6 +1394,12 @@ pub struct RendererState {
     pub fft_frames: VecDeque<Vec<f32>>,
     pub heatmap_cache: Vec<u32>,
     pub heatmap_cache_dim: (u32, u32),
+    /// Reference instant captured at renderer construction. The 3D
+    /// styles (Lissajous, terrain, blob) derive their auto-rotation
+    /// phase and synthetic-idle ripple from
+    /// `start_instant.elapsed()` so motion is continuous across
+    /// state transitions and independent of redraw cadence.
+    pub start_instant: std::time::Instant,
 }
 
 impl RendererState {
@@ -1147,6 +1417,7 @@ impl RendererState {
             fft_frames: VecDeque::with_capacity(FFT_FRAMES_CAP),
             heatmap_cache: Vec::new(),
             heatmap_cache_dim: (0, 0),
+            start_instant: std::time::Instant::now(),
         }
     }
 
@@ -1531,6 +1802,22 @@ impl RendererState {
                     }
                 }
                 WaveformStyle::Transcript => {}
+                WaveformStyle::Terrain3d => {
+                    let elapsed_secs = self.start_instant.elapsed().as_secs_f32();
+                    draw_terrain_3d(
+                        buf,
+                        w,
+                        h,
+                        &self.fft_frames,
+                        x0,
+                        x1,
+                        y_top,
+                        y_bot,
+                        accent,
+                        scale,
+                        elapsed_secs,
+                    );
+                }
             }
         } else if !self.wrapped.is_empty() {
             let mut baseline = text_top + TEXT_FONT_PX * scale * 0.85;

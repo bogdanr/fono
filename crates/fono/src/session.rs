@@ -841,7 +841,8 @@ impl SessionOrchestrator {
                             }
                         }
                         fono_core::config::WaveformStyle::Fft
-                        | fono_core::config::WaveformStyle::Heatmap => {
+                        | fono_core::config::WaveformStyle::Heatmap
+                        | fono_core::config::WaveformStyle::Terrain3d => {
                             let mut planner = realfft::RealFftPlanner::<f32>::new();
                             let r2c = planner.plan_fft_forward(WAVEFORM_FFT_SIZE);
                             let mut input_buf = r2c.make_input_vec();
@@ -854,7 +855,8 @@ impl SessionOrchestrator {
                                 })
                                 .collect();
                             let max_hz = match style {
-                                fono_core::config::WaveformStyle::Heatmap => {
+                                fono_core::config::WaveformStyle::Heatmap
+                                | fono_core::config::WaveformStyle::Terrain3d => {
                                     WAVEFORM_FFT_MAX_HZ_HEATMAP
                                 }
                                 _ => WAVEFORM_FFT_MAX_HZ_FFT,
@@ -1398,6 +1400,28 @@ impl SessionOrchestrator {
                     // an animated visualisation — nothing to push from
                     // this task. The match must remain exhaustive.
                     fono_core::config::WaveformStyle::Transcript => {}
+                    // ── Terrain 3D: travelling spectral ridge ─────
+                    // Reuses the FFT frame ring; a Gaussian "ridge"
+                    // sweeps across the freq bins so the terrain
+                    // mesh shows a moving peak that recedes into
+                    // the distance as new frames push in.
+                    fono_core::config::WaveformStyle::Terrain3d => {
+                        let n = FFT_BINS_THINKING;
+                        let scan_phase = ((time_ms * 0.0012).sin() + 1.0) / 2.0;
+                        let focus = scan_phase * n as f64;
+                        let sigma_bins = 10.0_f64;
+                        let denom = 2.0 * sigma_bins * sigma_bins;
+                        let mut bins = vec![0.0_f32; n];
+                        for (i, slot) in bins.iter_mut().enumerate() {
+                            let dist = (i as f64) - focus;
+                            let scanner = (-(dist * dist) / denom).exp();
+                            let breathing =
+                                ((time_ms * 0.0025 + (i as f64) * 0.15).sin() + 1.0) / 2.0;
+                            let combined = scanner * 0.85 + (1.0 - scanner) * breathing * 0.20;
+                            *slot = combined.clamp(0.0, 1.0) as f32;
+                        }
+                        o.push_fft_bins(bins);
+                    }
                 }
             }
         });

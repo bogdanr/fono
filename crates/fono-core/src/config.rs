@@ -755,6 +755,12 @@ pub enum WaveformStyle {
     /// GPU); cloud backends re-POST the trailing window at
     /// `streaming_interval` cadence (API tokens / requests).
     Transcript,
+    /// 3D spectrogram terrain. The FFT history is rendered as a
+    /// continuous surface — frequency along the long axis, time
+    /// receding into the distance, magnitude as height. Reuses the
+    /// FFT capture tap (same as `Fft` / `Heatmap`) so the cost shape
+    /// is FFT-plus-mesh.
+    Terrain3d,
 }
 
 impl Default for WaveformStyle {

@@ -40,9 +40,14 @@ const WAVEFORM_AMPLITUDE_CEILING: f32 = 0.22;
 /// `crates/fono/src/session.rs:86`.
 const WAVEFORM_FFT_SIZE: usize = 4096;
 
-/// Upper frequency cutoff for the FFT visualisations. Mirrors
-/// `crates/fono/src/session.rs:93`.
+/// Upper frequency cutoff for the FFT and Fft-style visualisations.
+/// Mirrors `crates/fono/src/session.rs:92`.
 const WAVEFORM_FFT_MAX_HZ: f32 = 3000.0;
+
+/// Upper frequency cutoff for the heatmap and 3D terrain
+/// visualisations. Mirrors
+/// `crates/fono/src/session.rs:98`.
+const WAVEFORM_FFT_MAX_HZ_WIDE: f32 = 6000.0;
 
 /// Display-bin count pushed to the overlay per FFT frame. Mirrors
 /// `crates/fono/src/session.rs:102`.
@@ -795,7 +800,9 @@ fn spawn_visualizer_task(
                     }
                 }
             }
-            fono_core::config::WaveformStyle::Fft | fono_core::config::WaveformStyle::Heatmap => {
+            fono_core::config::WaveformStyle::Fft
+            | fono_core::config::WaveformStyle::Heatmap
+            | fono_core::config::WaveformStyle::Terrain3d => {
                 let mut planner = realfft::RealFftPlanner::<f32>::new();
                 let r2c = planner.plan_fft_forward(WAVEFORM_FFT_SIZE);
                 let mut input_buf = r2c.make_input_vec();
@@ -807,8 +814,13 @@ fn spawn_visualizer_task(
                         0.5 - 0.5 * phase.cos()
                     })
                     .collect();
-                let max_source_bin = ((WAVEFORM_FFT_MAX_HZ * WAVEFORM_FFT_SIZE as f32)
-                    / sample_rate as f32) as usize;
+                let max_hz = match style {
+                    fono_core::config::WaveformStyle::Heatmap
+                    | fono_core::config::WaveformStyle::Terrain3d => WAVEFORM_FFT_MAX_HZ_WIDE,
+                    _ => WAVEFORM_FFT_MAX_HZ,
+                };
+                let max_source_bin =
+                    ((max_hz * WAVEFORM_FFT_SIZE as f32) / sample_rate as f32) as usize;
                 let display_bins = WAVEFORM_FFT_BINS.max(1);
                 let db_span = WAVEFORM_FFT_DB_CEILING - WAVEFORM_FFT_DB_FLOOR;
                 let mut tick = tokio::time::interval(Duration::from_millis(50));
