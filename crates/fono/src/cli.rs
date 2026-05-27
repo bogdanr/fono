@@ -632,10 +632,8 @@ pub async fn run(cli: Cli) -> Result<()> {
                 let cfg = fono_core::Config::load(&paths.config_file())?;
                 if !cfg.mcp.enabled {
                     anyhow::bail!(
-                        "MCP server is disabled. Enable it first with:\n\n  \
-                         fono use mcp-server on\n\nThis is the master safety gate — \
-                         only processes that can spawn `fono mcp serve` can drive your \
-                         microphone via MCP. Opt in when you're ready."
+                        "MCP server is disabled in your config (`[mcp] enabled = false`).\n\n\
+                         Re-enable it with:\n\n  fono use mcp-server on"
                     );
                 }
                 let secrets = fono_core::Secrets::load(&paths.secrets_file()).unwrap_or_default();

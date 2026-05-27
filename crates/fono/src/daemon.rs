@@ -582,7 +582,33 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                 }) as fono_tray::MicrophonesProvider
             },
             preferences_provider,
-            config.mcp.enabled,
+            {
+                // MCP-enabled provider: re-read the on-disk config on
+                // every ~2 s tray tick so the unified "Servers"
+                // submenu's MCP checkmark reflects external toggles
+                // (`fono use mcp-server on/off`) and the tray-driven
+                // toggle below picks up the new state without a
+                // daemon restart.
+                let config_path_for_mcp = paths.config_file();
+                Arc::new(move || {
+                    fono_core::Config::load(&config_path_for_mcp)
+                        .map(|c| c.mcp.enabled)
+                        .unwrap_or(true)
+                }) as fono_tray::McpEnabledProvider
+            },
+            {
+                // Wyoming-enabled provider: same shape as the MCP
+                // provider but reads `[server.wyoming].enabled`.
+                // Default to `false` on a read error since the LAN
+                // listener is off by default — a missing config
+                // shouldn't render a misleading checkmark.
+                let config_path_for_wyoming = paths.config_file();
+                Arc::new(move || {
+                    fono_core::Config::load(&config_path_for_wyoming)
+                        .map(|c| c.server.wyoming.enabled)
+                        .unwrap_or(false)
+                }) as fono_tray::WyomingEnabledProvider
+            },
         );
         (Some(t), rx)
     };
@@ -1106,6 +1132,48 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                                 }
                             }
                             Err(e) => warn!("tray ToggleMcpServer: load config failed: {e:#}"),
+                        }
+                    }
+                    TrayAction::ToggleWyomingServer => {
+                        // Toggle `[server.wyoming].enabled` and persist.
+                        // The LAN listener is spawned once at daemon
+                        // boot (see `spawn_wyoming_server_if_enabled`)
+                        // and isn't hot-reloadable today, so we
+                        // surface a desktop notification telling the
+                        // user a restart is required for the change
+                        // to take effect.
+                        match fono_core::Config::load(&paths.config_file()) {
+                            Ok(mut cfg) => {
+                                cfg.server.wyoming.enabled = !cfg.server.wyoming.enabled;
+                                let new_state = cfg.server.wyoming.enabled;
+                                if let Err(e) = cfg.save(&paths.config_file()) {
+                                    warn!("tray ToggleWyomingServer: save failed: {e:#}");
+                                } else {
+                                    info!(
+                                        enabled = new_state,
+                                        "Wyoming server toggled via tray; restart Fono to apply"
+                                    );
+                                    let body = if new_state {
+                                        "Wyoming STT server will start on the next Fono \
+                                         restart. Quit and relaunch Fono to bring the LAN \
+                                         listener up."
+                                    } else {
+                                        "Wyoming STT server will stop on the next Fono \
+                                         restart. Quit and relaunch Fono to release the \
+                                         LAN listener."
+                                    };
+                                    fono_core::notify::send(
+                                        "Fono — Wyoming server",
+                                        body,
+                                        "network-server",
+                                        8_000,
+                                        fono_core::notify::Urgency::Normal,
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                warn!("tray ToggleWyomingServer: load config failed: {e:#}");
+                            }
                         }
                     }
                 }

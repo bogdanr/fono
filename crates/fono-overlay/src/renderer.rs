@@ -61,14 +61,14 @@ pub const WIN_WAVEFORM_HEIGHT: f32 = 100.0;
 /// Inset from the bottom edge.
 pub const BOTTOM_OFFSET: u32 = 48;
 
-pub const PADDING_X: f32 = 24.0;
-pub const PADDING_TOP: f32 = 14.0;
-pub const PADDING_BOT: f32 = 16.0;
+pub const PADDING_X: f32 = 16.0;
+pub const PADDING_TOP: f32 = 8.0;
+pub const PADDING_BOT: f32 = 8.0;
 pub const ACCENT_WIDTH: f32 = 4.0;
 pub const CORNER_RADIUS: f32 = 12.0;
 pub const STATUS_FONT_PX: f32 = 13.0;
 pub const TEXT_FONT_PX: f32 = 20.0;
-pub const STATUS_TO_TEXT: f32 = 14.0;
+pub const STATUS_TO_TEXT: f32 = 8.0;
 pub const LINE_GAP: f32 = 6.0;
 
 /// `0xAARRGGBB`. The compositor honours the alpha byte when the
@@ -648,34 +648,57 @@ pub fn draw_fft(
     }
     let area_w = (x1 - x0).max(0.0);
     let area_h = (y_bot - y_top).max(0.0);
-    let bin_count = bins.len() as f32;
-    for (i, &v) in bins.iter().enumerate() {
-        let v = v.clamp(0.0, 1.0);
-        let bar_h = (v * area_h).max(1.0 * scale);
-        let bxf0 = x0 + (i as f32 / bin_count) * area_w;
-        let bxf1 = x0 + ((i + 1) as f32 / bin_count) * area_w;
-        let xi0 = bxf0.round() as i32;
-        let xi1 = bxf1.round() as i32;
-        let yi0 = (y_bot - bar_h).round() as i32;
-        let yi1 = y_bot.round() as i32;
-        if xi1 <= xi0 || yi1 <= yi0 {
+    let bin_count = bins.len();
+    let bin_last = bin_count.saturating_sub(1) as f32;
+    let xi_l = x0.floor() as i32;
+    let xi_r = x1.ceil() as i32;
+    let yi_bot = y_bot.round() as i32;
+    let min_h = 1.0_f32 * scale;
+    // Horizontal smoothstep fade at the left and right edges so the
+    // visualisation dissolves into the panel background rather than hitting
+    // a hard vertical wall. `fade_w` is the ramp width in logical pixels.
+    let fade_w = 14.0_f32 * scale;
+    // One continuous silhouette: per pixel column, linearly interpolate the
+    // bin envelope and fill from y_bot up to the interpolated height. The
+    // topmost row of each column receives fractional coverage so the silhouette
+    // edge is sub-pixel smooth rather than stair-stepped.
+    for xi in xi_l..xi_r {
+        if xi < 0 || (xi as u32) >= stride {
             continue;
         }
+        // Sample at the column's centre, in bin-index space, with the
+        // bin-centre convention (bin i is centered at i + 0.5).
+        let col_centre = xi as f32 + 0.5;
+        let pos = ((col_centre - x0) / area_w * bin_count as f32 - 0.5).clamp(0.0, bin_last);
+        let lo = pos.floor() as usize;
+        let hi = (lo + 1).min(bin_count - 1);
+        let t = pos - lo as f32;
+        let v = (bins[lo] + (bins[hi] - bins[lo]) * t).clamp(0.0, 1.0);
+        let bar_h = (v * area_h).max(min_h);
+        let yi0_f = y_bot - bar_h;
+        let yi0 = yi0_f.floor() as i32;
+        if yi_bot <= yi0 {
+            continue;
+        }
+        // Edge fade: linear ramp from 0..1 over `fade_w` pixels, shaped by
+        // a smoothstep S-curve so the transition is gentle at both ends.
+        let dist_l = (col_centre - x0) / fade_w;
+        let dist_r = (x1 - col_centre) / fade_w;
+        let e = dist_l.min(dist_r).clamp(0.0, 1.0);
+        let edge_cov = e * e * (3.0 - 2.0 * e);
         let alpha = 0x33 + ((0xFF - 0x33) as f32 * v) as u32;
         let color = with_alpha(accent, alpha as u8);
         let cov = (color >> 24) as u8;
-        for yi in yi0..yi1 {
+        let top_f = 1.0_f32 - yi0_f.fract();
+        for yi in yi0..yi_bot {
             if yi < 0 || (yi as u32) >= h {
                 continue;
             }
-            for xi in xi0..xi1 {
-                if xi < 0 || (xi as u32) >= stride {
-                    continue;
-                }
-                let idx = (yi as u32 * stride + xi as u32) as usize;
-                if let Some(slot) = buf.get_mut(idx) {
-                    *slot = blend(*slot, color, cov);
-                }
+            let v_cov = if yi == yi0 { top_f } else { 1.0_f32 };
+            let final_cov = (cov as f32 * v_cov * edge_cov) as u8;
+            let idx = (yi as u32 * stride + xi as u32) as usize;
+            if let Some(slot) = buf.get_mut(idx) {
+                *slot = blend(*slot, color, final_cov);
             }
         }
     }
@@ -793,10 +816,17 @@ pub fn heatmap_render_column(
     }
     let bins_len = frame.len();
     let row_span = rows.saturating_sub(1).max(1);
+    let scale = (bins_len - 1) as f32;
+    let rspan_f = row_span as f32;
     for ry in 0..rows {
-        let bin_frac = 1.0 - (ry as f32 / row_span as f32);
-        let bin_idx = (bin_frac * (bins_len - 1) as f32).round() as usize;
-        let v = *frame.get(bin_idx.min(bins_len - 1)).unwrap_or(&0.0);
+        // Compute the bin-space range this row covers, then average it so
+        // that all ~(bins/rows) bins in the range contribute equally.
+        let pos_hi = ((1.0 - ry as f32 / rspan_f) * scale).clamp(0.0, scale);
+        let pos_lo = ((1.0 - (ry + 1) as f32 / rspan_f) * scale).clamp(0.0, scale);
+        let idx_lo = pos_lo.floor() as usize;
+        let idx_hi = (pos_hi.ceil() as usize).min(bins_len - 1);
+        let count = (idx_hi - idx_lo + 1) as f32;
+        let v: f32 = frame[idx_lo..=idx_hi].iter().sum::<f32>() / count;
         let color = heatmap_color(v, accent);
         let cov = (color >> 24) as u8;
         let pre = blend(COLOR_BG_PRE, color, cov);
@@ -865,6 +895,7 @@ pub fn draw_heatmap(
     y_top: f32,
     y_bot: f32,
     accent: u32,
+    scale: f32,
 ) {
     if frames.is_empty() {
         return;
@@ -872,9 +903,9 @@ pub fn draw_heatmap(
     let frame_count = frames.len();
     let cols = ((x1 - x0).max(1.0) as i32).max(1);
     let rows = ((y_bot - y_top).max(1.0) as i32).max(1);
-    let bins_len = frames.iter().map(Vec::len).max().unwrap_or(0).max(1);
     let xi0 = x0.round() as i32;
     let yi0 = y_top.round() as i32;
+    let fade_w = 14.0_f32 * scale;
     for cx in 0..cols {
         let frame_frac = cx as f32 / (cols.max(1) - 1).max(1) as f32;
         let frame_idx = (frame_frac * (frame_count - 1) as f32).round() as usize;
@@ -882,10 +913,22 @@ pub fn draw_heatmap(
         if frame.is_empty() {
             continue;
         }
+        // Horizontal smoothstep edge fade — identical maths to the FFT path.
+        let col_centre = (xi0 + cx) as f32 + 0.5;
+        let dl = (col_centre - x0) / fade_w;
+        let dr = (x1 - col_centre) / fade_w;
+        let e = dl.min(dr).clamp(0.0, 1.0);
+        let edge_cov = e * e * (3.0 - 2.0 * e);
+        let frame_bins = frame.len();
+        let fscale = (frame_bins - 1) as f32;
+        let rspan_f = (rows.max(1) - 1).max(1) as f32;
         for ry in 0..rows {
-            let bin_frac = 1.0 - (ry as f32 / (rows.max(1) - 1).max(1) as f32);
-            let bin_idx = (bin_frac * (bins_len - 1) as f32).round() as usize;
-            let v = *frame.get(bin_idx.min(frame.len() - 1)).unwrap_or(&0.0);
+            let pos_hi = ((1.0 - ry as f32 / rspan_f) * fscale).clamp(0.0, fscale);
+            let pos_lo = ((1.0 - (ry + 1) as f32 / rspan_f) * fscale).clamp(0.0, fscale);
+            let idx_lo = pos_lo.floor() as usize;
+            let idx_hi = (pos_hi.ceil() as usize).min(frame_bins - 1);
+            let count = (idx_hi - idx_lo + 1) as f32;
+            let v: f32 = frame[idx_lo..=idx_hi].iter().sum::<f32>() / count;
             let color = heatmap_color(v, accent);
             let px = xi0 + cx;
             let py = yi0 + ry;
@@ -894,7 +937,8 @@ pub fn draw_heatmap(
             }
             let idx = (py as u32 * stride + px as u32) as usize;
             if let Some(slot) = buf.get_mut(idx) {
-                *slot = blend(*slot, color, (color >> 24) as u8);
+                let alpha = ((color >> 24) as f32 * edge_cov) as u8;
+                *slot = blend(*slot, color, alpha);
             }
         }
     }
@@ -1288,6 +1332,7 @@ impl RendererState {
         let pad_x = (PADDING_X + ACCENT_WIDTH) * scale;
         let pad_top = PADDING_TOP * scale;
         let label = state_label(self.state);
+        // Status label is drawn first so the visualisation paints on top of it.
         if !label.is_empty() {
             let status_baseline = pad_top + STATUS_FONT_PX * scale * 0.85;
             if let OverlayState::Pondering { walk_progress, .. }
@@ -1336,7 +1381,7 @@ impl RendererState {
         if waveform_active {
             let x0 = (PADDING_X + ACCENT_WIDTH) * scale;
             let x1 = w as f32 - PADDING_X * scale;
-            let y_top = text_top;
+            let y_top = pad_top;
             let y_bot = h as f32 - PADDING_BOT * scale;
             // Treat AssistantSpeaking the same way as AssistantThinking
             // and Polishing for the renderer: synthetic animation
@@ -1412,6 +1457,20 @@ impl RendererState {
                         let cy0 = y_top.round() as i32;
                         let cols_u = cache_cols as u32;
                         let rows_u = cache_rows as u32;
+                        // Precompute the horizontal smoothstep edge fade once
+                        // per visible column. Each entry is the lerp weight
+                        // from COLOR_BG_PRE (0) toward the cached pixel (255).
+                        let fade_w = 14.0_f32 * scale;
+                        let edge: Vec<u8> = (0..cols_u)
+                            .map(|cx| {
+                                let col_centre = (cx0 + cx as i32) as f32 + 0.5;
+                                let dl = (col_centre - x0) / fade_w;
+                                let dr = (x1 - col_centre) / fade_w;
+                                let e = dl.min(dr).clamp(0.0, 1.0);
+                                let s = e * e * (3.0 - 2.0 * e);
+                                (s * 255.0) as u8
+                            })
+                            .collect();
                         for ry in 0..rows_u {
                             let dst_y = cy0 + ry as i32;
                             if dst_y < 0 || (dst_y as u32) >= h {
@@ -1432,13 +1491,43 @@ impl RendererState {
                             if dst_off + copy_len <= buf.len()
                                 && src_off + copy_len <= self.heatmap_cache.len()
                             {
-                                buf[dst_off..dst_off + copy_len].copy_from_slice(
-                                    &self.heatmap_cache[src_off..src_off + copy_len],
-                                );
+                                // Per-pixel lerp from COLOR_BG_PRE toward the
+                                // cached colour by the edge weight. Centre
+                                // columns pass through unchanged (weight 255);
+                                // edge columns dissolve into the panel BG.
+                                for k in 0..copy_len {
+                                    let src_px = self.heatmap_cache[src_off + k];
+                                    let w8 = edge[skip as usize + k] as u32;
+                                    if w8 == 255 {
+                                        buf[dst_off + k] = src_px;
+                                        continue;
+                                    }
+                                    let iw = 255 - w8;
+                                    let lerp_ch = |sh: u32| -> u32 {
+                                        let av = (COLOR_BG_PRE >> sh) & 0xFF;
+                                        let bv = (src_px >> sh) & 0xFF;
+                                        ((av * iw + bv * w8) / 255) & 0xFF
+                                    };
+                                    buf[dst_off + k] = (lerp_ch(24) << 24)
+                                        | (lerp_ch(16) << 16)
+                                        | (lerp_ch(8) << 8)
+                                        | lerp_ch(0);
+                                }
                             }
                         }
                     } else {
-                        draw_heatmap(buf, w, h, &self.fft_frames, x0, x1, y_top, y_bot, accent);
+                        draw_heatmap(
+                            buf,
+                            w,
+                            h,
+                            &self.fft_frames,
+                            x0,
+                            x1,
+                            y_top,
+                            y_bot,
+                            accent,
+                            scale,
+                        );
                     }
                 }
                 WaveformStyle::Transcript => {}

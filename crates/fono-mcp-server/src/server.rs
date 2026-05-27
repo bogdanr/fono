@@ -276,6 +276,7 @@ mod tests {
             polish_classifier_cache: McpContext::new_classifier_cache(),
             daemon_ipc_candidates: Vec::new(),
         };
-        assert!(!ctx.cfg.mcp.enabled);
+        // MCP server is enabled by default (stdio only, no network exposure).
+        assert!(ctx.cfg.mcp.enabled);
     }
 }

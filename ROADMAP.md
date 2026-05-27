@@ -122,6 +122,10 @@ and tells you in `fono doctor` how to enable it. macOS and Windows ship in a
 later slice. Plan:
 `plans/2026-05-25-double-talk-barge-in-pipewire-aec-v1.md`.
 
+Voice UX polish follow-up: an optional server-side wake chime
+before TTS after long idle gaps, as a deferred refinement to the
+spoken refocus preamble.
+
 ---
 
 ## On the horizon

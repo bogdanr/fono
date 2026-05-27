@@ -2,7 +2,7 @@
 
 # Fono
 
-A lightweight dictation tool for Linux. Press a key, speak, and the text lands at your cursor.
+**Talk to Linux.** Press a key, speak — Fono types it into any window, or routes it to your LLM, or drives your coding agent (Claude Code, Cursor, Forge) by voice. Local-first, one static binary.
 
 [![CI](https://github.com/bogdanr/fono/actions/workflows/ci.yml/badge.svg)](https://github.com/bogdanr/fono/actions/workflows/ci.yml)
 [![License: GPL-3.0-only](https://img.shields.io/badge/License-GPL--3.0--only-blue.svg)](LICENSE)
@@ -12,7 +12,7 @@ A lightweight dictation tool for Linux. Press a key, speak, and the text lands a
 </div>
 
 <p align="center">
-  <a href="assets/fono.webp"><img src="assets/fono.webp" alt="Fono dictation demo: press a hotkey, speak, the text appears at the cursor" width="720" loading="lazy"></a>
+  <a href="assets/fono.webp"><img src="assets/fono.webp" alt="Fono demo: press a hotkey, speak — dictate into any window, ask an LLM, or drive your coding agent by voice" width="720" loading="lazy"></a>
 </p>
 
 ## Install one-liner

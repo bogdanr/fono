@@ -85,12 +85,17 @@ const SILENCE_GAIN: f32 = 0.251_188_64;
 #[cfg(feature = "interactive")]
 const WAVEFORM_FFT_SIZE: usize = 4096;
 
-/// Upper frequency cutoff for the FFT visualisations. Most voice
-/// intelligibility (fundamentals + first three formants) sits below
-/// 3 kHz — anything higher is sibilance or background noise that
-/// clutters the view.
+/// Upper frequency cutoff for the FFT bar visualisation. Set low so
+/// the voice fundamental + first formant fill the panel and small
+/// pitch changes are clearly visible.
 #[cfg(feature = "interactive")]
-const WAVEFORM_FFT_MAX_HZ: f32 = 3000.0;
+const WAVEFORM_FFT_MAX_HZ_FFT: f32 = 1500.0;
+
+/// Upper frequency cutoff for the spectrogram (Heatmap) visualisation.
+/// Wider than the bar style so sibilance and higher formants appear as
+/// distinct horizontal bands rather than getting clipped at the top.
+#[cfg(feature = "interactive")]
+const WAVEFORM_FFT_MAX_HZ_HEATMAP: f32 = 6000.0;
 
 /// Target display-bin count pushed to the overlay per frame. The
 /// ticker maps each display bin to a `[start, end)` slice of the
@@ -848,9 +853,14 @@ impl SessionOrchestrator {
                                     0.5 - 0.5 * phase.cos()
                                 })
                                 .collect();
-                            let max_source_bin = ((WAVEFORM_FFT_MAX_HZ * WAVEFORM_FFT_SIZE as f32)
-                                / sample_rate as f32)
-                                as usize;
+                            let max_hz = match style {
+                                fono_core::config::WaveformStyle::Heatmap => {
+                                    WAVEFORM_FFT_MAX_HZ_HEATMAP
+                                }
+                                _ => WAVEFORM_FFT_MAX_HZ_FFT,
+                            };
+                            let max_source_bin =
+                                ((max_hz * WAVEFORM_FFT_SIZE as f32) / sample_rate as f32) as usize;
                             let display_bins = WAVEFORM_FFT_BINS.max(1);
                             let db_span = WAVEFORM_FFT_DB_CEILING - WAVEFORM_FFT_DB_FLOOR;
                             let mut tick = tokio::time::interval(Duration::from_millis(50));
@@ -986,7 +996,7 @@ impl SessionOrchestrator {
         // state, walking-letter highlight, and any auto-stop
         // commit only make sense when the user has actually
         // opted into the silence-driven boundary. With
-        // `audio.auto_stop_silence_ms = 0` (the shipping default)
+        // `audio.auto_stop_silence_ms = 0` (disabled by the user)
         // the user owns the boundary by keypress; surfacing
         // "PONDERING" under their finger only confuses things.
         // Skip spawning the watch entirely so it costs nothing.

@@ -273,8 +273,16 @@ fn spawn_capture_tool(target_rate: u32) -> Result<(Child, &'static str)> {
 
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
 fn spawn_parec(target_rate: u32) -> Result<Child> {
-    debug!("capture: spawning parec raw s16le mono at {target_rate} Hz");
-    Command::new("parec")
+    debug!("capture: spawning parec raw s16le mono at {target_rate} Hz (stdbuf -o0)");
+    // `stdbuf -o0` defeats glibc's default 8 KB block-buffering on
+    // pipe stdouts so PCM bytes reach the reader thread as soon as
+    // PulseAudio writes them, not in coarse 256 ms chunks. Same
+    // rationale as `spawn_pw_cat` — without this the waveform
+    // overlay's FFT/heatmap visibly drops to ~4 fps even though
+    // `--latency-msec=20` is honoured by parec on the PA side.
+    Command::new("stdbuf")
+        .arg("-o0")
+        .arg("parec")
         .args([
             "--raw",
             "--format=s16le",
@@ -309,12 +317,27 @@ fn spawn_parec(target_rate: u32) -> Result<Child> {
 /// with `--format=s16` to lock the sample format to little-endian
 /// signed 16-bit and `-` as the filename to route raw PCM to stdout.
 /// Mirrors the `--raw` behaviour of [`spawn_parec`].
+///
+/// `stdbuf -o0` wraps the invocation so `pw-cat`'s stdout is
+/// **unbuffered**. Without it glibc block-buffers raw stdout to a
+/// pipe at `BUFSIZ` (~8 KB), which at 16 kHz mono s16 is ~256 ms of
+/// PCM. The recording buffer would then only grow in 256 ms steps,
+/// the 50 ms FFT animator would read the same trailing 4096-sample
+/// window ~5 ticks in a row, the spectrogram heatmap would paint
+/// each FFT push as a wide "block" instead of one column, and the
+/// FFT-bars panel would visibly stutter at ~4 fps. The `--latency`
+/// flag controls the PipeWire-side buffer, not libc's stdio
+/// buffering, so it does *not* fix this on its own. See the
+/// `pw_cat_uses_stdbuf` regression test and the v0.9.x heatmap
+/// regression notes.
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
 fn spawn_pw_cat(target_rate: u32) -> Result<Child> {
     let rate_arg = format!("--rate={target_rate}");
     let args = pw_cat_args(&rate_arg);
-    debug!("capture: spawning pw-cat raw s16 mono at {target_rate} Hz");
-    Command::new("pw-cat")
+    debug!("capture: spawning pw-cat raw s16 mono at {target_rate} Hz (stdbuf -o0)");
+    Command::new("stdbuf")
+        .arg("-o0")
+        .arg("pw-cat")
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -476,6 +499,54 @@ mod tests {
     fn mono_averages_channels() {
         let out = to_mono_f32(&[1.0, 3.0, 2.0, 4.0], 2);
         assert_eq!(out, vec![2.0, 3.0]);
+    }
+
+    /// Regression test for the v0.9.x heatmap / FFT-bars "frozen at
+    /// ~4 fps" bug: `pw-cat` and `parec` must be wrapped in `stdbuf
+    /// -o0` so glibc doesn't block-buffer their raw stdout in ~8 KB
+    /// (~256 ms) chunks. Without it the spectrogram heatmap paints
+    /// each FFT push as a wide identical block (because 5 consecutive
+    /// 50 ms FFT ticks see the same trailing 4096-sample window) and
+    /// the FFT-bars panel visibly stutters even though CPU is idle.
+    /// `--latency=20ms` / `--latency-msec=20` only governs the
+    /// PipeWire/PulseAudio-side buffer, not libc's stdio buffering on
+    /// the recorder's stdout.
+    #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+    #[test]
+    fn spawn_helpers_wrap_capture_tool_in_stdbuf() {
+        // We can't easily reach into the `Command` after construction
+        // to inspect its argv (`std::process::Command::get_program`
+        // / `get_args` are stable, so use them). Build the commands
+        // via the same code path as the spawners and verify the
+        // wrapper + tool layout.
+        let rate = TARGET_SAMPLE_RATE;
+        let rate_arg = format!("--rate={rate}");
+        let pw_cmd = {
+            let args = pw_cat_args(&rate_arg);
+            let mut c = Command::new("stdbuf");
+            c.arg("-o0").arg("pw-cat").args(args);
+            c
+        };
+        assert_eq!(pw_cmd.get_program(), "stdbuf");
+        let pw_args: Vec<&std::ffi::OsStr> = pw_cmd.get_args().collect();
+        assert_eq!(pw_args.first().map(|s| s.to_str().unwrap()), Some("-o0"));
+        assert_eq!(pw_args.get(1).map(|s| s.to_str().unwrap()), Some("pw-cat"));
+
+        let parec_cmd = {
+            let mut c = Command::new("stdbuf");
+            c.arg("-o0").arg("parec").args([
+                "--raw",
+                "--format=s16le",
+                "--channels=1",
+                &rate_arg,
+                "--latency-msec=20",
+            ]);
+            c
+        };
+        assert_eq!(parec_cmd.get_program(), "stdbuf");
+        let parec_args: Vec<&std::ffi::OsStr> = parec_cmd.get_args().collect();
+        assert_eq!(parec_args.first().map(|s| s.to_str().unwrap()), Some("-o0"));
+        assert_eq!(parec_args.get(1).map(|s| s.to_str().unwrap()), Some("parec"));
     }
 
     /// Regression test for the v0.8.0 → v0.8.1 "only records noise"

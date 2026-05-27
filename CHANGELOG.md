@@ -5,6 +5,13 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+- Voice preset: listen-by-default, confirm as a UX shortcut not a safety gate,
+  never voice-authorise destructive actions, no bare spoken questions, every
+  spoken turn opens with a short refocus preamble.
+- Voice preset mode R now covers completion and status reports — no manufactured trailing questions when the agent is just letting the user know something finished.
+
 ## [0.9.0] — 2026-05-26
 
 Talk to your coding agent. The headline feature is an early-preview voice

@@ -137,6 +137,28 @@ pub type MicrophonesProvider = Arc<dyn Fn() -> (Vec<String>, u8) + Send + Sync>;
 /// a related field).
 pub type PreferencesProvider = Arc<dyn Fn() -> PreferencesSnapshot + Send + Sync>;
 
+/// Provider returning whether `[mcp] enabled = true` in the user
+/// config. Polled on the same ~2 s cadence as the other providers so
+/// the unified "Servers" submenu reflects on-disk changes (e.g. an
+/// external `fono use mcp-server on/off` or a hand-edit of
+/// `config.toml`) without a daemon restart. The submenu is always
+/// visible — the checkmark next to "MCP (stdio)" just flips depending
+/// on the current value.
+pub type McpEnabledProvider = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// Provider returning whether `[server.wyoming].enabled = true` in the
+/// user config. Polled on the same ~2 s cadence so the "Servers ▸
+/// Wyoming" checkmark reflects external `config.toml` edits without
+/// a tray restart.
+///
+/// Unlike the MCP toggle (which only affects subprocess `fono mcp
+/// serve` invocations spawned by coding agents), flipping the Wyoming
+/// flag does not start/stop the live LAN listener: the daemon spawns
+/// the Wyoming server once at boot from `spawn_wyoming_server_if_enabled`.
+/// The daemon's tray-action handler emits a desktop notification
+/// telling the user a restart is required.
+pub type WyomingEnabledProvider = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// Snapshot view of the user-facing config fields surfaced in the
 /// "Preferences" submenu. Tracked as a flat struct so the 2 s poll
 /// can diff with `PartialEq` and only repaint when something moved.
@@ -291,6 +313,11 @@ pub enum TrayAction {
     /// next `fono mcp serve` invocation (a full daemon restart is not
     /// required).
     ToggleMcpServer,
+    /// Toggle `[server.wyoming].enabled` from the tray. The daemon
+    /// writes the change to `config.toml` and emits a notification
+    /// telling the user to restart Fono — the LAN listener is
+    /// spawned once at daemon boot and isn't hot-reloadable today.
+    ToggleWyomingServer,
     Quit,
 }
 
@@ -381,7 +408,8 @@ pub fn spawn(
     gpu_upgrade_provider: GpuUpgradeProvider,
     microphones_provider: MicrophonesProvider,
     preferences_provider: PreferencesProvider,
-    mcp_server_enabled: bool,
+    mcp_enabled_provider: McpEnabledProvider,
+    wyoming_enabled_provider: WyomingEnabledProvider,
 ) -> (Tray, mpsc::UnboundedReceiver<TrayAction>) {
     let shared = Arc::new(AtomicU8::new(TrayState::Idle as u8));
     let (action_tx, action_rx) = mpsc::unbounded_channel();
@@ -404,7 +432,8 @@ pub fn spawn(
             gpu_upgrade_provider,
             microphones_provider,
             preferences_provider,
-            mcp_server_enabled,
+            mcp_enabled_provider,
+            wyoming_enabled_provider,
         );
         let state_tx = if started { Some(state_tx) } else { None };
         (Tray { shared_state: shared, state_tx }, action_rx)
@@ -424,9 +453,9 @@ pub fn spawn(
 mod backend {
     use super::{
         ActiveBackends, ActiveProvider, DiscoveredSttProvider, GpuUpgradeProvider,
-        MicrophonesProvider, PreferencesProvider, PreferencesSnapshot, RecentProvider, TrayAction,
-        TrayState, UpdateProvider, AUTO_STOP_PRESETS_MS, LANGUAGE_SHORTLIST, RECENT_SLOTS,
-        WAVEFORM_STYLES,
+        McpEnabledProvider, MicrophonesProvider, PreferencesProvider, PreferencesSnapshot,
+        RecentProvider, TrayAction, TrayState, UpdateProvider, WyomingEnabledProvider,
+        AUTO_STOP_PRESETS_MS, LANGUAGE_SHORTLIST, RECENT_SLOTS, WAVEFORM_STYLES,
     };
     use fono_core::notify::{self, Urgency};
     use ksni::{
@@ -482,8 +511,13 @@ mod backend {
         microphones: (Vec<String>, u8),
         prefs: PreferencesSnapshot,
         /// Whether `[mcp.server].enabled = true` in the user config.
-        /// When `true`, the "MCP server" submenu is shown.
+        /// Reflected as a checkmark on the "MCP (stdio)" row of the
+        /// unified "Servers" submenu.
         mcp_server_enabled: bool,
+        /// Whether `[server.wyoming].enabled = true` in the user
+        /// config. Reflected as a checkmark on the "Wyoming (STT
+        /// host)" row of the unified "Servers" submenu.
+        wyoming_server_enabled: bool,
         actions: mpsc::UnboundedSender<TrayAction>,
     }
 
@@ -545,7 +579,8 @@ mod backend {
         gpu_upgrade_provider: GpuUpgradeProvider,
         microphones_provider: MicrophonesProvider,
         preferences_provider: PreferencesProvider,
-        mcp_server_enabled: bool,
+        mcp_enabled_provider: McpEnabledProvider,
+        wyoming_enabled_provider: WyomingEnabledProvider,
     ) -> bool {
         // We need to be inside a tokio runtime to spawn the ksni
         // service; the daemon always is. Probe `Handle::try_current`
@@ -570,7 +605,8 @@ mod backend {
                 gpu_upgrade_provider,
                 microphones_provider,
                 preferences_provider,
-                mcp_server_enabled,
+                mcp_enabled_provider,
+                wyoming_enabled_provider,
             )
             .await
             {
@@ -799,7 +835,8 @@ mod backend {
         gpu_upgrade_provider: GpuUpgradeProvider,
         microphones_provider: MicrophonesProvider,
         preferences_provider: PreferencesProvider,
-        mcp_server_enabled: bool,
+        mcp_enabled_provider: McpEnabledProvider,
+        wyoming_enabled_provider: WyomingEnabledProvider,
     ) -> anyhow::Result<()> {
         // Make sure DBUS_SESSION_BUS_ADDRESS is set before zbus tries
         // to connect; zbus's pure-Rust discovery is stricter than
@@ -814,6 +851,8 @@ mod backend {
             );
         }
 
+        let initial_mcp_enabled = mcp_enabled_provider();
+        let initial_wyoming_enabled = wyoming_enabled_provider();
         let model = KsniTray {
             tooltip,
             state: TrayState::Idle,
@@ -828,7 +867,8 @@ mod backend {
             gpu_upgrade_label: None,
             microphones: (Vec::new(), u8::MAX),
             prefs: PreferencesSnapshot::default(),
-            mcp_server_enabled,
+            mcp_server_enabled: initial_mcp_enabled,
+            wyoming_server_enabled: initial_wyoming_enabled,
             actions,
         };
 
@@ -862,6 +902,8 @@ mod backend {
         let mut last_gpu_upd: Option<String> = None;
         let mut last_mics: (Vec<String>, u8) = (Vec::new(), u8::MAX);
         let mut last_prefs: PreferencesSnapshot = PreferencesSnapshot::default();
+        let mut last_mcp_enabled: bool = initial_mcp_enabled;
+        let mut last_wyoming_enabled: bool = initial_wyoming_enabled;
 
         loop {
             tokio::select! {
@@ -876,6 +918,8 @@ mod backend {
                     let gpu_upd = gpu_upgrade_provider();
                     let mics = microphones_provider();
                     let prefs = preferences_provider();
+                    let mcp_enabled = mcp_enabled_provider();
+                    let wyoming_enabled = wyoming_enabled_provider();
 
                     let changed = recent != last_recent
                         || active != last_active
@@ -883,7 +927,9 @@ mod backend {
                         || upd != last_upd
                         || gpu_upd != last_gpu_upd
                         || mics != last_mics
-                        || prefs != last_prefs;
+                        || prefs != last_prefs
+                        || mcp_enabled != last_mcp_enabled
+                        || wyoming_enabled != last_wyoming_enabled;
                     if !changed {
                         continue;
                     }
@@ -894,6 +940,8 @@ mod backend {
                     last_gpu_upd.clone_from(&gpu_upd);
                     last_mics.clone_from(&mics);
                     last_prefs.clone_from(&prefs);
+                    last_mcp_enabled = mcp_enabled;
+                    last_wyoming_enabled = wyoming_enabled;
 
                     handle.update(move |t: &mut KsniTray| {
                         t.recent = recent;
@@ -903,6 +951,8 @@ mod backend {
                         t.gpu_upgrade_label = gpu_upd;
                         t.microphones = mics;
                         t.prefs = prefs;
+                        t.mcp_server_enabled = mcp_enabled;
+                        t.wyoming_server_enabled = wyoming_enabled;
                     }).await;
                 }
                 else => break,
@@ -1185,41 +1235,56 @@ mod backend {
         // workaround (`pkill snixembed && snixembed &`) for now.
         items.push(build_preferences_submenu(t));
 
-        // MCP server submenu — shown only when `[mcp.server].enabled = true`.
-        // Toggle via `fono use mcp-server on|off` or from this submenu.
-        if t.mcp_server_enabled {
-            let mcp_items: Vec<MenuItem<KsniTray>> = vec![
-                StandardItem {
-                    label: "● Enabled (stdio transport)".into(),
-                    enabled: false,
-                    ..Default::default()
-                }
-                .into(),
-                MenuItem::Separator,
-                StandardItem {
-                    label: "Disable MCP server".into(),
-                    activate: send_action(TrayAction::ToggleMcpServer),
-                    ..Default::default()
-                }
-                .into(),
-                StandardItem {
-                    label: "Tools: fono.speak, fono.listen, fono.confirm".into(),
-                    enabled: false,
-                    ..Default::default()
-                }
-                .into(),
-                StandardItem {
-                    label: "See docs/coding-agents.md for setup".into(),
-                    enabled: false,
-                    ..Default::default()
-                }
-                .into(),
-            ];
-            items.push(
-                SubMenu { label: "MCP server".into(), submenu: mcp_items, ..Default::default() }
-                    .into(),
-            );
-        }
+        // Unified "Servers" submenu — groups everything Fono can
+        // *expose* (MCP for coding agents, Wyoming STT host for the
+        // LAN, and any future network-facing server) so the tray UX
+        // mirrors the role-based STT / TTS / Polish submenus above
+        // (which group what Fono *consumes*). CheckmarkItem renders a
+        // real OS-native checkbox glyph; clicking flips the
+        // corresponding `enabled` flag in `config.toml`.
+        //
+        // Network MCP is reserved as a disabled placeholder so the
+        // entry can light up the day the transport ships without a
+        // tray-layout churn.
+        let mut server_items: Vec<MenuItem<KsniTray>> = Vec::new();
+        server_items.push(
+            CheckmarkItem {
+                label: "MCP (local) — lets apps use Fono".into(),
+                checked: t.mcp_server_enabled,
+                activate: send_action(TrayAction::ToggleMcpServer),
+                ..Default::default()
+            }
+            .into(),
+        );
+        server_items.push(
+            StandardItem {
+                label: "  MCP (network) — coming soon".into(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+        );
+        server_items.push(
+            CheckmarkItem {
+                label: "Wyoming (STT) — restart required".into(),
+                checked: t.wyoming_server_enabled,
+                activate: send_action(TrayAction::ToggleWyomingServer),
+                ..Default::default()
+            }
+            .into(),
+        );
+        server_items.push(MenuItem::Separator);
+        server_items.push(
+            StandardItem {
+                label: "See docs/coding-agents.md and docs/providers.md".into(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+        );
+        items.push(
+            SubMenu { label: "Servers".into(), submenu: server_items, ..Default::default() }.into(),
+        );
 
         items.push(MenuItem::Separator);
 

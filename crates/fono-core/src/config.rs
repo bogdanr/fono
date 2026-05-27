@@ -74,8 +74,8 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Network::is_default")]
     pub network: Network,
 
-    /// MCP server settings (Phase 2 of the voice-loop-for-coding-agents
-    /// plan). Off by default; opt in with `fono use mcp-server on`.
+    /// MCP server settings. Enabled by default (stdio transport only —
+    /// no network exposure). Disable with `fono use mcp-server off`.
     #[serde(default, skip_serializing_if = "McpServer::is_default")]
     pub mcp: McpServer,
 }
@@ -256,7 +256,7 @@ impl Default for Audio {
             sample_rate: 16000,
             vad_backend: "silero".into(),
             trim_silence: true,
-            auto_stop_silence_ms: 0,
+            auto_stop_silence_ms: 5_000,
         }
     }
 }
@@ -982,17 +982,18 @@ pub struct Network {
 }
 
 /// `[mcp.server]` — MCP server settings for voice-driven coding agent
-/// integration. Disabled by default. Enable with `fono use mcp-server on`.
+/// integration. Enabled by default (stdio only — no network exposure).
 ///
 /// Three tools are advertised when the server is active: `fono.speak`,
 /// `fono.listen`, and `fono.confirm`. Only stdio transport is supported
 /// in v1 (the `fono mcp serve` process is spawned by the agent itself).
+/// Disable with `fono use mcp-server off` or `[mcp] enabled = false`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct McpServer {
-    /// Master toggle. When `false` (default) `fono mcp serve` exits
-    /// immediately with a human-readable error. Users opt in with
-    /// `fono use mcp-server on`.
+    /// Master toggle. Defaults `true` (stdio only — no network socket is
+    /// opened). Set to `false` to block `fono mcp serve` entirely, e.g.
+    /// on shared or kiosk machines. Toggle with `fono use mcp-server on|off`.
     pub enabled: bool,
     /// Whether to mirror spoken text to stdout during `fono.speak`
     /// calls. Off by default; useful when tuning the agent preset.
@@ -1026,7 +1027,7 @@ pub struct McpServer {
 impl Default for McpServer {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             mirror_to_stdout: false,
             listen_max_seconds: 45,
             confirm_timeout_seconds: 10,
