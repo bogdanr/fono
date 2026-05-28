@@ -9,7 +9,8 @@
 //! own backend, runs to completion, and tears down.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
@@ -111,26 +112,45 @@ pub(crate) struct OverlayGuard {
 }
 
 impl OverlayGuard {
-    /// Spawn the configured overlay backend and return a guard.
-    /// Silently degrades to a no-op guard on spawn failure so MCP
-    /// listen keeps working on headless hosts / inside test
-    /// harnesses.
+    /// Return a guard wrapping the process-wide shared
+    /// [`OverlayHandle`]. The handle is spawned lazily on first call
+    /// and reused for the lifetime of the MCP server process —
+    /// winit's X11 `EventLoop` cannot be recreated after the first
+    /// one is destroyed, so spawning per listen worked once and then
+    /// every subsequent listen silently fell through to the `noop`
+    /// backend. The persistent handle keeps the X11 window hidden
+    /// between listens (cheap) and visible whenever a listen is
+    /// active.
+    ///
+    /// Silently degrades to a no-op guard if `spawn_overlay` itself
+    /// reports an error (in practice unreachable — the `noop`
+    /// backend is a terminal sink).
     pub(crate) fn spawn(cfg: &Config) -> Self {
-        let handle = match spawn_overlay(cfg.overlay.style) {
-            Ok(h) => {
-                h.set_waveform_style(cfg.overlay.style);
-                h.set_volume_bar(cfg.overlay.volume_bar);
-                Some(h)
-            }
-            Err(e) => {
-                debug!(
-                    target: "fono_mcp_server::voice_io",
-                    error = %e,
-                    "overlay spawn failed; continuing without visual indicator",
-                );
-                None
-            }
-        };
+        static SHARED: OnceLock<Option<OverlayHandle>> = OnceLock::new();
+        let handle = SHARED
+            .get_or_init(|| match spawn_overlay(cfg.overlay.style) {
+                Ok(h) => {
+                    h.set_waveform_style(cfg.overlay.style);
+                    h.set_volume_bar(cfg.overlay.volume_bar);
+                    Some(h)
+                }
+                Err(e) => {
+                    debug!(
+                        target: "fono_mcp_server::voice_io",
+                        error = %e,
+                        "overlay spawn failed; continuing without visual indicator",
+                    );
+                    None
+                }
+            })
+            .clone();
+        // Re-apply per-call style/volume-bar configuration in case the
+        // user edited config between listens. Cheap; both paths are
+        // simple channel sends.
+        if let Some(h) = handle.as_ref() {
+            h.set_waveform_style(cfg.overlay.style);
+            h.set_volume_bar(cfg.overlay.volume_bar);
+        }
         Self { handle }
     }
 
@@ -150,9 +170,13 @@ impl OverlayGuard {
 
 impl Drop for OverlayGuard {
     fn drop(&mut self) {
-        if let Some(h) = self.handle.take() {
+        // The handle is process-shared (see `spawn` above); only flip
+        // it to `Hidden`. Calling `shutdown` would destroy winit's
+        // EventLoop and X11 won't let us create another one in the
+        // same process, so every subsequent listen would fall through
+        // to the noop backend. Hiding is cheap and reversible.
+        if let Some(h) = self.handle.as_ref() {
             h.set_state(OverlayState::Hidden);
-            h.shutdown();
         }
     }
 }
@@ -237,6 +261,113 @@ impl Drop for McpActivityGuard {
     }
 }
 
+/// Connection-scoped guard for an MCP listen/confirm span.
+///
+/// Unlike [`McpActivityGuard`] (fire-and-forget `McpActivityStart` /
+/// `McpActivityEnd`), this guard holds an IPC connection open for the
+/// entire duration of the listen. Two properties follow from that:
+///
+/// 1. **Tray is always restored** — if the MCP server is killed
+///    mid-listen (Ctrl-C or crash), kernel-level socket cleanup closes
+///    the connection and the daemon automatically decrements its depth
+///    counter and restores the previous tray state.
+///
+/// 2. **Escape cancels the listen** — when the user presses Escape, the
+///    daemon writes `Response::McpListenCancelled` to the open
+///    connection. A background read task sets `cancelled` to `true`;
+///    `capture_pcm_once` checks this flag every 50 ms and exits early.
+///
+/// Construction is best-effort: if no daemon is reachable the guard
+/// becomes a no-op and `cancelled` is always `false`.
+pub(crate) struct McpListenHoldGuard {
+    /// Set to `true` when the daemon sends `Response::McpListenCancelled`
+    /// (Escape key pressed while listening). `capture_pcm_once` polls
+    /// this at 50 ms cadence.
+    pub cancelled: Arc<AtomicBool>,
+    /// Write half kept alive so that dropping the guard closes the
+    /// connection, signalling EOF to the daemon which then decrements
+    /// the activity depth and restores the tray.
+    _write_half: Option<tokio::net::unix::OwnedWriteHalf>,
+    /// Background task reading for `McpListenCancelled` signals from
+    /// the daemon. Aborted on drop so the read half is cleaned up.
+    _read_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl McpListenHoldGuard {
+    /// Connect to the daemon, send `McpActivityHold`, wait for `Ok`,
+    /// then hand the read half to a background watcher task. Returns a
+    /// no-op guard when no daemon is reachable.
+    pub(crate) async fn acquire(phase: McpPhase, candidates: &[std::path::PathBuf]) -> Self {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        if candidates.is_empty() {
+            return Self { cancelled, _write_half: None, _read_task: None };
+        }
+        let mut stream = match fono_ipc::connect_any(candidates).await {
+            Ok(s) => s,
+            Err(e) => {
+                debug!(
+                    target: "fono_mcp_server::voice_io",
+                    error = %e,
+                    "McpListenHoldGuard: daemon unreachable; continuing without hold",
+                );
+                return Self { cancelled, _write_half: None, _read_task: None };
+            }
+        };
+        if let Err(e) =
+            fono_ipc::write_frame(&mut stream, &Request::McpActivityHold { phase }).await
+        {
+            debug!(
+                target: "fono_mcp_server::voice_io",
+                error = %e,
+                "McpListenHoldGuard: send failed",
+            );
+            return Self { cancelled, _write_half: None, _read_task: None };
+        }
+        match fono_ipc::read_frame::<Response, _>(&mut stream).await {
+            Ok(Response::Ok) => {}
+            other => {
+                debug!(
+                    target: "fono_mcp_server::voice_io",
+                    response = ?other.as_ref().ok(),
+                    "McpListenHoldGuard: unexpected ack; continuing without hold",
+                );
+                return Self { cancelled, _write_half: None, _read_task: None };
+            }
+        }
+        // Split: write half stays in the guard (its drop closes the
+        // connection). Read half goes to the watcher task.
+        let (mut read_half, write_half) = stream.into_split();
+        let cancelled_clone = Arc::clone(&cancelled);
+        let task = tokio::spawn(async move {
+            loop {
+                match fono_ipc::read_frame::<Response, _>(&mut read_half).await {
+                    Ok(Response::McpListenCancelled) => {
+                        cancelled_clone.store(true, Ordering::Release);
+                        debug!(
+                            target: "fono_mcp_server::voice_io",
+                            "McpListenHoldGuard: received cancel from daemon",
+                        );
+                        break;
+                    }
+                    Ok(_) => {}      // unexpected message — keep reading
+                    Err(_) => break, // connection closed
+                }
+            }
+        });
+        Self { cancelled, _write_half: Some(write_half), _read_task: Some(task) }
+    }
+}
+
+impl Drop for McpListenHoldGuard {
+    fn drop(&mut self) {
+        if let Some(task) = self._read_task.take() {
+            task.abort();
+        }
+        // Dropping _write_half sends FIN to the daemon → daemon EOF
+        // handler decrements the activity depth and restores the tray.
+    }
+}
+
 /// Cross-process serialisation guard for `fono.speak`. Each coding
 /// agent (Claude Code, Forge, Cursor, …) spawns its own
 /// `fono mcp serve` process, so concurrent `fono.speak` calls would
@@ -287,7 +418,7 @@ impl SpeakSlotGuard {
             );
             return Self { _stream: None };
         }
-        match fono_ipc::read_frame::<Response>(&mut stream).await {
+        match fono_ipc::read_frame::<Response, _>(&mut stream).await {
             Ok(Response::Ok) => Self { _stream: Some(stream) },
             Ok(other) => {
                 debug!(
@@ -401,6 +532,9 @@ pub enum ListenStopReason {
     Silence,
     /// `max_seconds` elapsed (or the hard ceiling did).
     Timeout,
+    /// The daemon sent `Response::McpListenCancelled` (Escape key
+    /// pressed) so the listen was aborted early.
+    Cancelled,
 }
 
 /// Open the configured input device and run the multi-utterance
@@ -447,10 +581,15 @@ pub async fn listen_once(
 
     // Tray feedback: flip the daemon's tray icon to amber for the
     // duration of the listen span (across all utterances in the
-    // multi-utterance loop). The guard is dropped when this function
-    // returns, which restores the previous tray state via the IPC End
-    // frame. Slice 7 of plan v7.
-    let _mcp_activity = McpActivityGuard::new(McpPhase::Listening, daemon_ipc_candidates);
+    // multi-utterance loop). The persistent `McpListenHoldGuard`
+    // ensures the tray is always restored even when the MCP server
+    // is killed (Ctrl-C) — the kernel closes the IPC connection and
+    // the daemon's EOF handler decrements the depth counter. The guard
+    // also carries the `cancelled` flag that flips to `true` when the
+    // daemon forwards a `Response::McpListenCancelled` (Escape key).
+    // Slice 7 of plan v7; upgraded to hold-based in the cancel-fix pass.
+    let hold_guard = McpListenHoldGuard::acquire(McpPhase::Listening, daemon_ipc_candidates).await;
+    let cancelled = Arc::clone(&hold_guard.cancelled);
 
     // Visual feedback for the duration of the (potentially multi-
     // utterance) listen loop. RAII-managed: dropped at the end of
@@ -501,7 +640,20 @@ pub async fn listen_once(
         }
         let per_iter_secs = max_seconds.max(1).min(remaining.as_secs().max(1) as u32);
 
-        let (pcm, reason, iter_ms) = capture_pcm_once(cfg, &overlay, per_iter_secs).await?;
+        let (pcm, reason, iter_ms) =
+            capture_pcm_once(cfg, &overlay, per_iter_secs, &cancelled).await?;
+
+        // Propagate cancellation immediately — don't transcribe or filter,
+        // just surface the early exit to the caller.
+        if matches!(reason, ListenStopReason::Cancelled) {
+            let total_ms = loop_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+            return Ok(ListenOutcome {
+                transcript: String::new(),
+                duration_ms: total_ms,
+                reason,
+                rejected_count,
+            });
+        }
 
         let transcript = if pcm.is_empty() {
             String::new()
@@ -597,14 +749,20 @@ pub async fn listen_once(
 }
 
 /// Capture a single utterance: open the input device, accumulate PCM
-/// until silence-commit or the per-iteration budget, return the
-/// buffered samples. The overlay (held across iterations by
-/// `listen_once`) is driven via the `forwarder`-side cb plus the
-/// 50 ms polling loop.
+/// until silence-commit, the per-iteration budget, or a cancellation
+/// from the daemon, return the buffered samples. The overlay (held
+/// across iterations by `listen_once`) is driven via the
+/// `forwarder`-side cb plus the 50 ms polling loop.
+///
+/// `cancelled` is the [`McpListenHoldGuard::cancelled`] flag; the
+/// polling loop checks it every 50 ms. When `true` the function
+/// returns early with [`ListenStopReason::Cancelled`] so the caller
+/// can abort without transcribing the partial buffer.
 async fn capture_pcm_once(
     cfg: &Config,
     overlay: &OverlayGuard,
     max_seconds: u32,
+    cancelled: &Arc<AtomicBool>,
 ) -> Result<(Vec<f32>, ListenStopReason, u64)> {
     let capture = AudioCapture::new(CaptureConfig::default());
     let buffer = Arc::new(Mutex::new(RecordingBuffer::default()));
@@ -709,6 +867,10 @@ async fn capture_pcm_once(
         }
         if Instant::now() >= deadline {
             break ListenStopReason::Timeout;
+        }
+        // Daemon signalled Escape → abort the listen immediately.
+        if cancelled.load(Ordering::Acquire) {
+            break ListenStopReason::Cancelled;
         }
         let in_pondering =
             pondering.lock().map(|g| *g).unwrap_or(false) && overlay.handle().is_some();

@@ -666,6 +666,7 @@ async fn ipc_simple(paths: &Paths, req: Request) -> Result<()> {
         }
         Ok(Response::Discovered(_)) => Ok(()),
         Ok(Response::Error(e)) => Err(anyhow::anyhow!(e)),
+        Ok(Response::McpListenCancelled) => Ok(()),
         Err(e) => Err(e),
     }
 }
@@ -1503,6 +1504,7 @@ async fn use_cmd(paths: &Paths, action: UseCmd) -> Result<()> {
         Ok(fono_ipc::Response::Ok) => println!("daemon: reloaded"),
         Ok(fono_ipc::Response::Error(e)) => println!("daemon reload error: {e}"),
         Ok(fono_ipc::Response::Discovered(_)) => println!("daemon: reloaded"),
+        Ok(fono_ipc::Response::McpListenCancelled) => println!("daemon: reloaded"),
         Err(_) => println!("daemon: not running (config saved; will apply on next start)"),
     }
     Ok(())

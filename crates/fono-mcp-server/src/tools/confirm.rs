@@ -177,6 +177,9 @@ impl Tool for ConfirmTool {
             }
         };
 
+        if outcome.transcript.is_empty() && outcome.reason == ListenStopReason::Cancelled {
+            return ToolCallResult::success("{\"choice\":\"cancelled\"}");
+        }
         if outcome.transcript.is_empty() && outcome.reason == ListenStopReason::Timeout {
             return ToolCallResult::success("{\"choice\":\"timeout\"}");
         }

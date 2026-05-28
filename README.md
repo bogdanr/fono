@@ -84,8 +84,7 @@ TTS works with OpenAI, Groq, OpenRouter (Kokoro), Cartesia, Deepgram, and any Wy
 Local-first. Nothing leaves your machine unless you pick a cloud provider.
 
 ## Documentation
-
-- [Documentation index](docs/index.md) — the full map.
+- [Documentation index](docs/README.md) — the full map.
 - [Install](docs/install.md) — one-liner, manual install, server mode, updating.
 - [Quickstart](docs/quickstart.md) — first dictation, common follow-ups.
 - [Configuration](docs/configuration.md) — every key in `config.toml`.

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
 /// Commands from the CLI to the running daemon.
@@ -93,6 +93,18 @@ pub enum Request {
     /// (potential overlap) when the daemon is unreachable; the
     /// guarantee is "no overlap *when the daemon is running*".
     McpSpeakAcquire,
+    /// Connection-scoped MCP activity hold. The daemon increments the
+    /// depth counter, flips the tray to amber on the 0→1 transition,
+    /// writes `Response::Ok`, and keeps the connection open. While
+    /// open the daemon can push `Response::McpListenCancelled` (e.g.
+    /// when the user presses Escape) to ask the MCP server to abort
+    /// its current listen. On EOF (MCP server completed or was
+    /// killed), the daemon decrements the depth counter and restores
+    /// the tray. This replaces the fire-and-forget
+    /// `McpActivityStart` + `McpActivityEnd` pair for the listen and
+    /// confirm paths — the persistent connection guarantees the tray
+    /// is always cleaned up even when the MCP server crashes.
+    McpActivityHold { phase: McpPhase },
 }
 
 /// Sub-state of an MCP voice interaction. Logged on the daemon side
@@ -154,10 +166,20 @@ pub enum Response {
     /// Snapshot of the LAN-discovery registry. Slice 4.
     Discovered(Vec<DiscoveredPeer>),
     Error(String),
+    /// Sent by the daemon over an active [`Request::McpActivityHold`]
+    /// connection to signal that the current MCP listen should be
+    /// cancelled (e.g. because the user pressed Escape). The MCP
+    /// server should abort its current `listen_once` call as soon as
+    /// it observes this response.
+    McpListenCancelled,
 }
 
-/// Write a length-prefixed bincode frame.
-pub async fn write_frame<T: Serialize>(stream: &mut UnixStream, value: &T) -> Result<()> {
+/// Write a length-prefixed bincode frame to any async writer.
+pub async fn write_frame<T, W>(stream: &mut W, value: &T) -> Result<()>
+where
+    T: Serialize,
+    W: AsyncWrite + Unpin,
+{
     let bytes = bincode::serialize(value).context("bincode serialize")?;
     let len = u32::try_from(bytes.len()).context("frame too large")?;
     stream.write_all(&len.to_le_bytes()).await?;
@@ -166,8 +188,12 @@ pub async fn write_frame<T: Serialize>(stream: &mut UnixStream, value: &T) -> Re
     Ok(())
 }
 
-/// Read a length-prefixed bincode frame.
-pub async fn read_frame<T: for<'de> Deserialize<'de>>(stream: &mut UnixStream) -> Result<T> {
+/// Read a length-prefixed bincode frame from any async reader.
+pub async fn read_frame<T, R>(stream: &mut R) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+    R: AsyncRead + Unpin,
+{
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let len = u32::from_le_bytes(len_buf) as usize;
@@ -285,5 +311,24 @@ mod tests {
     fn mcp_speak_acquire_roundtrips() {
         let req = Request::McpSpeakAcquire;
         assert_eq!(bincode_roundtrip(&req), req);
+    }
+
+    #[test]
+    fn mcp_activity_hold_roundtrips() {
+        for phase in [McpPhase::Listening, McpPhase::Speaking, McpPhase::Confirming] {
+            let req = Request::McpActivityHold { phase };
+            assert_eq!(bincode_roundtrip(&req), req);
+        }
+    }
+
+    fn response_roundtrip(resp: &Response) -> Response {
+        let bytes = bincode::serialize(resp).expect("serialize");
+        bincode::deserialize(&bytes).expect("deserialize")
+    }
+
+    #[test]
+    fn mcp_listen_cancelled_roundtrips() {
+        let resp = Response::McpListenCancelled;
+        assert_eq!(response_roundtrip(&resp), resp);
     }
 }

@@ -178,6 +178,7 @@ impl Tool for ListenTool {
                 let reason = match outcome.reason {
                     ListenStopReason::Silence => "silence",
                     ListenStopReason::Timeout => "timeout",
+                    ListenStopReason::Cancelled => "cancelled",
                 };
                 let body = serde_json::json!({
                     "transcript": outcome.transcript,

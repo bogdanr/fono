@@ -139,7 +139,11 @@ pub async fn run(paths: &Paths) -> Result<()> {
     match fono_ipc::request_any(&paths.client_ipc_socket_candidates(), &fono_ipc::Request::Reload)
         .await
     {
-        Ok(fono_ipc::Response::Ok | fono_ipc::Response::Discovered(_)) => {
+        Ok(
+            fono_ipc::Response::Ok
+            | fono_ipc::Response::Discovered(_)
+            | fono_ipc::Response::McpListenCancelled,
+        ) => {
             println!("  Daemon reloaded — new settings are live.");
         }
         Ok(fono_ipc::Response::Text(t)) => println!("  Daemon: {t}"),

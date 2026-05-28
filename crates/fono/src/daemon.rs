@@ -817,6 +817,24 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         });
     }
 
+    // Tracks nested MCP voice interactions over the lifetime of the
+    // daemon. The `u32` is the recursion depth (0 = no MCP activity
+    // active; >0 = inside `fono.listen` / `fono.speak` / `fono.confirm`).
+    // The `TrayState` is the snapshot taken on the 0→1 transition so
+    // we can restore exactly what was on screen before MCP took over.
+    // Slice 7 of plan v7.
+    let mcp_activity: Arc<std::sync::Mutex<(u32, TrayState)>> =
+        Arc::new(std::sync::Mutex::new((0, TrayState::Idle)));
+    // Broadcast sender used to forward "Escape pressed while MCP is
+    // listening" from the action dispatcher to the active
+    // `McpActivityHold` connection handlers. Each hold handler
+    // subscribes on entry and writes `Response::McpListenCancelled` to
+    // the MCP server when a token arrives. Capacity 16 prevents slow
+    // handlers from lagging behind on rapid presses; any lag just means
+    // the oldest cancel gets dropped and the next one lands.
+    let (mcp_cancel_tx, _mcp_cancel_rx) = tokio::sync::broadcast::channel::<()>(16);
+    let mcp_cancel_tx: Arc<tokio::sync::broadcast::Sender<()>> = Arc::new(mcp_cancel_tx);
+
     // ---------------------------------------------------------------
     // Action dispatcher — drains HotkeyAction into the FSM. Also flips
     // the tray to Idle when the pipeline reports ProcessingDone.
@@ -834,6 +852,8 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         let tray = Arc::clone(&tray);
         let orch_for_dispatch = orchestrator.clone();
         let cancel_ctrl_disp = cancel_ctrl.clone();
+        let mcp_activity_disp = Arc::clone(&mcp_activity);
+        let mcp_cancel_tx_disp = Arc::clone(&mcp_cancel_tx);
         tokio::spawn(async move {
             while let Some(action) = action_rx.recv().await {
                 // Read `live_preview` straight from the orchestrator's
@@ -865,6 +885,18 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                 if new_state == FsmState::Idle {
                     if let Some(ctrl) = cancel_ctrl_disp.as_ref() {
                         let _ = ctrl.send(HotkeyControl::DisableCancel);
+                    }
+                }
+                // Forward Escape to any active MCP listen sessions.
+                // When the user presses Escape while an `McpActivityHold`
+                // connection is open, broadcast a cancel token so the
+                // hold handler writes `Response::McpListenCancelled` to
+                // the MCP server's read half, aborting the current
+                // `listen_once` call.
+                if matches!(action, HotkeyAction::CancelPressed) {
+                    let depth = mcp_activity_disp.lock().map(|g| g.0).unwrap_or(0);
+                    if depth > 0 {
+                        let _ = mcp_cancel_tx_disp.send(());
                     }
                 }
             }
@@ -1184,14 +1216,6 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     // IPC server
     // ---------------------------------------------------------------
     let listener = fono_ipc::bind_listener(&paths.ipc_socket()).context("bind IPC socket")?;
-    // Tracks nested MCP voice interactions over the lifetime of the
-    // daemon. The `u32` is the recursion depth (0 = no MCP activity
-    // active; >0 = inside `fono.listen` / `fono.speak` / `fono.confirm`).
-    // The `TrayState` is the snapshot taken on the 0→1 transition so
-    // we can restore exactly what was on screen before MCP took over.
-    // Slice 7 of plan v7.
-    let mcp_activity: Arc<std::sync::Mutex<(u32, TrayState)>> =
-        Arc::new(std::sync::Mutex::new((0, TrayState::Idle)));
     // Cross-process audio-output mutex for `fono.speak`. Each
     // coding-agent integration spawns its own `fono mcp serve`
     // process; without this lock two agents calling `fono.speak`
@@ -1218,10 +1242,12 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                 let tray_for_ipc = Arc::clone(&tray);
                 let mcp_activity = Arc::clone(&mcp_activity);
                 let mcp_speak_slot = Arc::clone(&mcp_speak_slot);
+                let mcp_cancel_tx = Arc::clone(&mcp_cancel_tx);
+                let cancel_ctrl_for_ipc = cancel_ctrl.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_client(
                         stream, fsm, action_tx, orch, registry, tray_for_ipc, mcp_activity,
-                        mcp_speak_slot,
+                        mcp_speak_slot, mcp_cancel_tx, cancel_ctrl_for_ipc,
                     )
                     .await
                     {
@@ -1482,7 +1508,7 @@ fn cpu_simd_summary() -> String {
     std::env::consts::ARCH.to_string()
 }
 
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments, clippy::cognitive_complexity)]
 async fn handle_client(
     mut stream: UnixStream,
     fsm: Arc<Mutex<RecordingFsm>>,
@@ -1492,6 +1518,8 @@ async fn handle_client(
     tray: Arc<Option<Tray>>,
     mcp_activity: Arc<std::sync::Mutex<(u32, TrayState)>>,
     mcp_speak_slot: Arc<tokio::sync::Mutex<()>>,
+    mcp_cancel_tx: Arc<tokio::sync::broadcast::Sender<()>>,
+    cancel_ctrl: Option<fono_hotkey::HotkeyControlSender>,
 ) -> Result<()> {
     let req: Request = read_frame(&mut stream).await?;
     // Read live-preview from the orchestrator's post-reload config
@@ -1599,12 +1627,77 @@ async fn handle_client(
             Response::Ok
         }
         Request::McpActivityStart { phase } => {
-            handle_mcp_activity_start(&mcp_activity, tray.as_ref().as_ref(), phase);
+            handle_mcp_activity_start(
+                &mcp_activity,
+                tray.as_ref().as_ref(),
+                phase,
+                cancel_ctrl.as_ref(),
+            );
             Response::Ok
         }
         Request::McpActivityEnd => {
-            handle_mcp_activity_end(&mcp_activity, tray.as_ref().as_ref());
+            handle_mcp_activity_end(&mcp_activity, tray.as_ref().as_ref(), cancel_ctrl.as_ref());
             Response::Ok
+        }
+        Request::McpActivityHold { phase } => {
+            // Persistent-connection hold: increment depth (flip tray on
+            // 0→1), ack the client, then wait for either a cancel broadcast
+            // or EOF from the client side. On EOF (clean exit or Ctrl-C
+            // kill of the MCP server) the depth is decremented and the
+            // tray is restored. If the user presses Escape while we're
+            // in here, the broadcast fires and we forward
+            // `Response::McpListenCancelled` so the MCP server's polling
+            // loop can abort `listen_once`.
+            use tokio::io::AsyncReadExt as _;
+            handle_mcp_activity_start(
+                &mcp_activity,
+                tray.as_ref().as_ref(),
+                phase,
+                cancel_ctrl.as_ref(),
+            );
+            write_frame(&mut stream, &Response::Ok).await?;
+            // Subscribe before the loop so we don't miss a cancel fired
+            // between the Ok ack and the first iteration.
+            let mut cancel_rx = mcp_cancel_tx.subscribe();
+            // Split so we can read for EOF while also writing cancel signals.
+            let (mut read_half, mut write_half) = stream.into_split();
+            let mut eof_buf = [0u8; 1];
+            loop {
+                tokio::select! {
+                    // Cancel broadcast from the action dispatcher (Escape key).
+                    result = cancel_rx.recv() => {
+                        match result {
+                            Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                debug!(
+                                    target: "fono::daemon",
+                                    "MCP hold: forwarding cancel to MCP server"
+                                );
+                                if let Err(e) =
+                                    write_frame(&mut write_half, &Response::McpListenCancelled)
+                                        .await
+                                {
+                                    debug!(
+                                        target: "fono::daemon",
+                                        error = %e,
+                                        "MCP hold: cancel write failed (client gone?)",
+                                    );
+                                    break;
+                                }
+                                // Keep looping — wait for the client to
+                                // finish its listen and close the connection.
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                    // EOF / error from the MCP server side means it's done.
+                    result = read_half.read(&mut eof_buf) => {
+                        let _ = result;
+                        break;
+                    }
+                }
+            }
+            handle_mcp_activity_end(&mcp_activity, tray.as_ref().as_ref(), cancel_ctrl.as_ref());
+            return Ok(());
         }
         Request::McpSpeakAcquire => {
             // Acquire the global speak-slot mutex (await — concurrent
@@ -1648,6 +1741,7 @@ fn handle_mcp_activity_start(
     state: &std::sync::Mutex<(u32, TrayState)>,
     tray: Option<&Tray>,
     phase: McpPhase,
+    cancel_ctrl: Option<&fono_hotkey::HotkeyControlSender>,
 ) {
     let mut g = state.lock().expect("mcp_activity lock poisoned");
     let (depth, baseline) = &mut *g;
@@ -1656,6 +1750,11 @@ fn handle_mcp_activity_start(
         *baseline = snapshot;
         if let Some(t) = tray {
             t.set_state(TrayState::Processing);
+        }
+        // Grab the Escape key so the user can cancel the MCP listen
+        // even though the FSM is Idle (no F7 dictation active).
+        if let Some(ctrl) = cancel_ctrl {
+            let _ = ctrl.send(fono_hotkey::HotkeyControl::EnableCancel);
         }
         info!(
             ?phase,
@@ -1678,7 +1777,11 @@ fn handle_mcp_activity_start(
 /// transit, so being lenient avoids spurious tray flips on noisy
 /// links. Slice 7 of plan v7.
 #[allow(clippy::significant_drop_tightening)]
-fn handle_mcp_activity_end(state: &std::sync::Mutex<(u32, TrayState)>, tray: Option<&Tray>) {
+fn handle_mcp_activity_end(
+    state: &std::sync::Mutex<(u32, TrayState)>,
+    tray: Option<&Tray>,
+    cancel_ctrl: Option<&fono_hotkey::HotkeyControlSender>,
+) {
     let mut g = state.lock().expect("mcp_activity lock poisoned");
     let (depth, baseline) = &mut *g;
     if *depth == 0 {
@@ -1687,6 +1790,10 @@ fn handle_mcp_activity_end(state: &std::sync::Mutex<(u32, TrayState)>, tray: Opt
     }
     *depth -= 1;
     if *depth == 0 {
+        // Release the Escape grab now that no MCP listen is active.
+        if let Some(ctrl) = cancel_ctrl {
+            let _ = ctrl.send(fono_hotkey::HotkeyControl::DisableCancel);
+        }
         if let Some(t) = tray {
             let current = t.state();
             if current == TrayState::Processing {
@@ -3086,24 +3193,24 @@ mod tests {
         let state = std::sync::Mutex::new((0u32, TrayState::Idle));
 
         // Outer start: snapshot Recording, flip to Processing.
-        handle_mcp_activity_start(&state, Some(&tray), McpPhase::Listening);
+        handle_mcp_activity_start(&state, Some(&tray), McpPhase::Listening, None);
         assert_eq!(tray.state(), TrayState::Processing);
         assert_eq!(state.lock().unwrap().0, 1);
         assert_eq!(state.lock().unwrap().1, TrayState::Recording);
 
         // Nested start: depth bumps, tray stays amber, baseline unchanged.
-        handle_mcp_activity_start(&state, Some(&tray), McpPhase::Speaking);
+        handle_mcp_activity_start(&state, Some(&tray), McpPhase::Speaking, None);
         assert_eq!(tray.state(), TrayState::Processing);
         assert_eq!(state.lock().unwrap().0, 2);
         assert_eq!(state.lock().unwrap().1, TrayState::Recording);
 
         // Inner end: depth drops to 1, tray stays amber.
-        handle_mcp_activity_end(&state, Some(&tray));
+        handle_mcp_activity_end(&state, Some(&tray), None);
         assert_eq!(tray.state(), TrayState::Processing);
         assert_eq!(state.lock().unwrap().0, 1);
 
         // Outer end: depth hits 0, tray restores to the original baseline.
-        handle_mcp_activity_end(&state, Some(&tray));
+        handle_mcp_activity_end(&state, Some(&tray), None);
         assert_eq!(tray.state(), TrayState::Recording);
         assert_eq!(state.lock().unwrap().0, 0);
     }
@@ -3113,14 +3220,14 @@ mod tests {
         let tray = Tray::for_tests();
         let state = std::sync::Mutex::new((0u32, TrayState::Idle));
 
-        handle_mcp_activity_start(&state, Some(&tray), McpPhase::Listening);
+        handle_mcp_activity_start(&state, Some(&tray), McpPhase::Listening, None);
         assert_eq!(tray.state(), TrayState::Processing);
 
         // Simulate another writer (FSM event consumer) taking over the
         // tray while the MCP span is still active.
         tray.set_state(TrayState::Recording);
 
-        handle_mcp_activity_end(&state, Some(&tray));
+        handle_mcp_activity_end(&state, Some(&tray), None);
         // Tray must stay where the other writer left it — last-writer-wins.
         assert_eq!(tray.state(), TrayState::Recording);
         assert_eq!(state.lock().unwrap().0, 0);
@@ -3132,9 +3239,9 @@ mod tests {
         let state = std::sync::Mutex::new((0u32, TrayState::Idle));
 
         assert_eq!(tray.state(), TrayState::Idle);
-        handle_mcp_activity_start(&state, Some(&tray), McpPhase::Confirming);
+        handle_mcp_activity_start(&state, Some(&tray), McpPhase::Confirming, None);
         assert_eq!(tray.state(), TrayState::Processing);
-        handle_mcp_activity_end(&state, Some(&tray));
+        handle_mcp_activity_end(&state, Some(&tray), None);
         assert_eq!(tray.state(), TrayState::Idle);
     }
 
@@ -3145,7 +3252,7 @@ mod tests {
         let state = std::sync::Mutex::new((0u32, TrayState::Idle));
         // No prior Start — End must be a no-op (don't touch the tray,
         // don't underflow the counter).
-        handle_mcp_activity_end(&state, Some(&tray));
+        handle_mcp_activity_end(&state, Some(&tray), None);
         assert_eq!(tray.state(), TrayState::Recording);
         assert_eq!(state.lock().unwrap().0, 0);
     }
