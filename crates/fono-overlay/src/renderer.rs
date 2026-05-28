@@ -998,6 +998,21 @@ const TERRAIN_Z_FRONT: f32 = 0.55;
 /// the front row reaches the back row in ~N×50 ms — fast enough
 /// that the user sees the time flow.
 const TERRAIN_RECENT_FRAMES: usize = 50;
+/// Silence-floor colour mix. Each accent channel is multiplied by
+/// this fraction to produce the colour used for flat (silent)
+/// segments; peak segments use the full accent. Segments in
+/// between lerp linearly based on their vertex height. Lower
+/// values give more contrast between peaks and valleys; 1.0
+/// disables the effect (every segment renders in full accent).
+const TERRAIN_DIM_FLOOR: f32 = 0.8;
+/// Height threshold (as a fraction of `TERRAIN_HEIGHT`) above
+/// which a segment is treated as "lifted" and renders at the
+/// peak-end colour. Below the threshold the segment renders at
+/// the baseline (dim) colour. A small non-zero value
+/// (`~0.02–0.05`) is enough to ignore floating-point noise from
+/// the EMA smoothing while still snapping to peak colour on any
+/// real audio energy.
+const TERRAIN_LIFT_THRESHOLD: f32 = 0.03;
 
 /// 3D spectrogram terrain. Renders the FFT history as a Tron-style
 /// wireframe grid — horizontal "time" rows and vertical "frequency"
@@ -1029,7 +1044,7 @@ pub fn draw_terrain_3d(
     _scale: f32,
     elapsed_secs: f32,
 ) {
-    use crate::r3d::{draw_polyline_3d, Mat4, Vec3};
+    use crate::r3d::{Mat4, Vec3};
 
     let panel_w = (x1 - x0).max(1.0);
     let panel_h = (y_bot - y_top).max(1.0);
@@ -1129,42 +1144,62 @@ pub fn draw_terrain_3d(
         }
     }
 
-    // Per-row brightness ramp: front rows bright, back rows dim,
-    // so the perspective grid has the synthwave glow-toward-camera
-    // look in the reference screenshot.
-    let line_color_for_row = |t: usize| -> u32 {
+    // Per-row depth alpha — front rows bright, back rows dim.
+    let row_alpha = |t: usize| -> u8 {
         let tf = t as f32 / (TERRAIN_TIME_SLICES.max(2) - 1) as f32;
-        // Front (tf = 1.0) → full alpha; back (tf = 0.0) → ~0x30.
-        let alpha = (48.0 + tf * 207.0).clamp(48.0, 255.0) as u8;
-        with_alpha(accent, alpha)
+        (48.0 + tf * 207.0).clamp(48.0, 255.0) as u8
+    };
+
+    // Per-segment colour. Each segment's colour lerps from the
+    // dim floor (`accent × TERRAIN_DIM_FLOOR`) at the baseline to
+    // the full accent at peak height. Height is read straight off
+    // the vertex Y so we reuse the same value that lifts the
+    // mesh — no parallel intensity array, no second normalisation.
+    let accent_r = ((accent >> 16) & 0xFF) as f32;
+    let accent_g = ((accent >> 8) & 0xFF) as f32;
+    let accent_b = (accent & 0xFF) as f32;
+    let segment_color = |y_a: f32, y_b: f32, alpha: u8| -> u32 {
+        let mean_y = (y_a + y_b) * 0.5;
+        let h = ((mean_y - TERRAIN_Y_BASE) / TERRAIN_HEIGHT).clamp(0.0, 1.0);
+        // Binary step: any lift above the threshold snaps the
+        // segment to the full accent; everything below renders at
+        // the dim floor. The threshold ignores EMA noise around
+        // silence so the flat valleys stay calmly dim.
+        let k = if h > TERRAIN_LIFT_THRESHOLD { 1.0 } else { TERRAIN_DIM_FLOOR };
+        let r = (accent_r * k) as u32;
+        let g = (accent_g * k) as u32;
+        let b = (accent_b * k) as u32;
+        ((u32::from(alpha)) << 24) | (r << 16) | (g << 8) | b
     };
 
     let visible_rows: usize = 32;
     let visible_columns: usize = 64;
 
-    // Horizontal lines — sub-sample time slices to ~7 visible
-    // rows. Use evenly-distributed indices that include both the
-    // back row (t=0) and the front row (t=TERRAIN_TIME_SLICES-1)
-    // so the spacing between adjacent visible rows is uniform —
-    // a naive `step_by` with an appended endpoint produces a
-    // narrow final gap that looks broken on the panel.
+    // Horizontal lines — drawn as per-segment strokes so each
+    // segment can take its own colour based on the mean height of
+    // its two endpoints.
     let last_row = TERRAIN_TIME_SLICES - 1;
     let row_indices: Vec<usize> =
         (0..visible_rows).map(|i| (i * last_row) / (visible_rows - 1)).collect();
     for &t in &row_indices {
         let row_start = t * TERRAIN_FREQ_BINS;
         let row = &verts[row_start..row_start + TERRAIN_FREQ_BINS];
-        let polyline: Vec<Vec3> = row.to_vec();
-        draw_polyline_3d(
-            buf,
-            stride,
-            h,
-            &polyline,
-            line_color_for_row(t),
-            &view_proj,
-            viewport,
-            false,
-        );
+        let alpha = row_alpha(t);
+        for pair in row.windows(2) {
+            let a = pair[0];
+            let b = pair[1];
+            crate::r3d::draw_line_3d(
+                buf,
+                stride,
+                h,
+                a,
+                b,
+                segment_color(a.y, b.y, alpha),
+                0xFF,
+                &view_proj,
+                viewport,
+            );
+        }
     }
 
     // Vertical lines (one per frequency column) — same uniform-
@@ -1180,26 +1215,20 @@ pub fn draw_terrain_3d(
         for t in 0..TERRAIN_TIME_SLICES {
             column.push(verts[t * TERRAIN_FREQ_BINS + f]);
         }
-        // Column colour blends front-to-back along its length, so
-        // we draw it as a series of short segments rather than a
-        // single polyline. Use the average alpha of the row it
-        // touches at each endpoint.
+        // Each column segment uses the mean of the two row alphas
+        // it touches for depth fade, and the segment colour ramp
+        // for height.
         for t in 0..(TERRAIN_TIME_SLICES - 1) {
             let a = column[t];
             let b = column[t + 1];
-            let alpha_a = (48.0 + (t as f32 / (TERRAIN_TIME_SLICES.max(2) - 1) as f32) * 207.0)
-                .clamp(48.0, 255.0) as u8;
-            let alpha_b = (48.0
-                + ((t + 1) as f32 / (TERRAIN_TIME_SLICES.max(2) - 1) as f32) * 207.0)
-                .clamp(48.0, 255.0) as u8;
-            let mean_alpha = ((u16::from(alpha_a) + u16::from(alpha_b)) / 2) as u8;
+            let mean_alpha = ((u16::from(row_alpha(t)) + u16::from(row_alpha(t + 1))) / 2) as u8;
             crate::r3d::draw_line_3d(
                 buf,
                 stride,
                 h,
                 a,
                 b,
-                with_alpha(accent, mean_alpha),
+                segment_color(a.y, b.y, mean_alpha),
                 0xFF,
                 &view_proj,
                 viewport,
@@ -1557,7 +1586,7 @@ impl RendererState {
     /// assistant-thinking / polishing phases (the orchestrator
     /// pushes per-bar profiles via `push_fft_bins`).
     pub fn fft_push_needs_redraw(&self) -> bool {
-        matches!(self.style, WaveformStyle::Fft | WaveformStyle::Heatmap)
+        matches!(self.style, WaveformStyle::Fft | WaveformStyle::Heatmap | WaveformStyle::Terrain3d)
             || matches!(
                 (self.style, self.state),
                 (

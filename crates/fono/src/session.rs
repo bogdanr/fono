@@ -1400,25 +1400,60 @@ impl SessionOrchestrator {
                     // an animated visualisation — nothing to push from
                     // this task. The match must remain exhaustive.
                     fono_core::config::WaveformStyle::Transcript => {}
-                    // ── Terrain 3D: travelling spectral ridge ─────
-                    // Reuses the FFT frame ring; a Gaussian "ridge"
-                    // sweeps across the freq bins so the terrain
-                    // mesh shows a moving peak that recedes into
-                    // the distance as new frames push in.
+                    // ── Terrain 3D: ambient turbulence field ──────
+                    // No single feature — instead a sum of many
+                    // incoherent low-frequency components, each
+                    // with its own spatial frequency, temporal
+                    // frequency, and phase. The resulting field
+                    // reads as a textured plane that constantly
+                    // evolves, with no single peak the eye can
+                    // latch onto and follow. Avoids the 'worm /
+                    // snake / comb' artefacts that previous
+                    // single-mass attempts produced when their
+                    // shape scrolled through the time axis.
                     fono_core::config::WaveformStyle::Terrain3d => {
                         let n = FFT_BINS_THINKING;
-                        let scan_phase = ((time_ms * 0.0012).sin() + 1.0) / 2.0;
-                        let focus = scan_phase * n as f64;
-                        let sigma_bins = 10.0_f64;
-                        let denom = 2.0 * sigma_bins * sigma_bins;
+                        let t_s = time_ms / 1000.0;
+                        // Six octaves of sin(k_x · i + k_t · t + phi),
+                        // each independently gated by a smooth
+                        // sigmoid envelope on its own slow clock.
+                        // Gate ω_g periods are 5–13 s, pairwise
+                        // incommensurate, so each octave fades in
+                        // and out independently — there's no
+                        // moment where the whole field freezes or
+                        // simultaneously erupts.
+                        // Tuple layout: (k_x, k_t, phi, amp, ω_g, phi_g).
+                        // Gate periods: 2.2, 3.1, 4.3, 2.7, 5.9, 6.7 s
+                        // (incommensurate, all in the 2–7 s band).
+                        let comps: [(f64, f64, f64, f64, f64, f64); 6] = [
+                            (2.3, 6.4, 0.0, 0.16, 2.856, 0.0),
+                            (3.7, 4.1, 1.7, 0.13, 2.027, 1.3),
+                            (5.1, 9.8, 0.9, 0.10, 1.461, 2.5),
+                            (6.7, 2.7, 2.4, 0.09, 2.327, 0.4),
+                            (8.3, 7.9, 1.2, 0.07, 1.065, 3.0),
+                            (11.0, 5.3, 3.1, 0.05, 0.938, 1.8),
+                        ];
+                        // Pre-compute each octave's gate once per
+                        // tick — they don't depend on bin index.
+                        let mut gates = [0.0_f64; 6];
+                        for (idx, &(_, _, _, _, w_g, phi_g)) in comps.iter().enumerate() {
+                            // Sigmoid (tanh) on a sin keeps the
+                            // gate near 0 or 1 most of the time
+                            // with smooth crossings — no cliffs.
+                            let s = (w_g * t_s + phi_g).sin();
+                            gates[idx] = 0.5 * (1.0 + (3.0 * s).tanh());
+                        }
                         let mut bins = vec![0.0_f32; n];
+                        let inv_n = 1.0 / (n as f64);
                         for (i, slot) in bins.iter_mut().enumerate() {
-                            let dist = (i as f64) - focus;
-                            let scanner = (-(dist * dist) / denom).exp();
-                            let breathing =
-                                ((time_ms * 0.0025 + (i as f64) * 0.15).sin() + 1.0) / 2.0;
-                            let combined = scanner * 0.85 + (1.0 - scanner) * breathing * 0.20;
-                            *slot = combined.clamp(0.0, 1.0) as f32;
+                            let u = (i as f64) * inv_n; // 0..1 across panel
+                            let mut h = 0.45_f64;
+                            for (idx, &(k_x, k_t, phi, amp, _, _)) in comps.iter().enumerate() {
+                                h += gates[idx]
+                                    * amp
+                                    * (std::f64::consts::TAU * k_x * u + k_t * t_s + phi).sin();
+                            }
+                            *slot = h.clamp(0.0, 1.0) as f32;
                         }
                         o.push_fft_bins(bins);
                     }
