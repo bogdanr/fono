@@ -761,6 +761,13 @@ pub enum WaveformStyle {
     /// FFT capture tap (same as `Fft` / `Heatmap`) so the cost shape
     /// is FFT-plus-mesh.
     Terrain3d,
+    /// "System/360" — terminal/CLI-flavoured visualisation built
+    /// from a grid of dots, evoking mainframe operator-console
+    /// status lamps. Each FFT magnitude lights up dots from the
+    /// bottom of its column. Reuses the FFT capture tap (same
+    /// as `Fft` / `Heatmap` / `Terrain3d`).
+    #[serde(rename = "system360")]
+    System360,
 }
 
 impl Default for WaveformStyle {

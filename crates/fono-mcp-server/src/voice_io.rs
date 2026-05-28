@@ -802,7 +802,8 @@ fn spawn_visualizer_task(
             }
             fono_core::config::WaveformStyle::Fft
             | fono_core::config::WaveformStyle::Heatmap
-            | fono_core::config::WaveformStyle::Terrain3d => {
+            | fono_core::config::WaveformStyle::Terrain3d
+            | fono_core::config::WaveformStyle::System360 => {
                 let mut planner = realfft::RealFftPlanner::<f32>::new();
                 let r2c = planner.plan_fft_forward(WAVEFORM_FFT_SIZE);
                 let mut input_buf = r2c.make_input_vec();
@@ -816,7 +817,8 @@ fn spawn_visualizer_task(
                     .collect();
                 let max_hz = match style {
                     fono_core::config::WaveformStyle::Heatmap
-                    | fono_core::config::WaveformStyle::Terrain3d => WAVEFORM_FFT_MAX_HZ_WIDE,
+                    | fono_core::config::WaveformStyle::Terrain3d
+                    | fono_core::config::WaveformStyle::System360 => WAVEFORM_FFT_MAX_HZ_WIDE,
                     _ => WAVEFORM_FFT_MAX_HZ,
                 };
                 let max_source_bin =
@@ -1120,7 +1122,12 @@ mod tests {
 
     #[test]
     fn resolve_auto_stop_falls_back_to_default() {
-        let cfg = Config::default();
+        // auto_stop_silence_ms = 0 means "not set by user" → fall back to
+        // the MCP-listen default. Config::default() sets it to 5_000 (the
+        // dictation default), so we must explicitly zero it here to exercise
+        // the fallback branch.
+        let mut cfg = Config::default();
+        cfg.audio.auto_stop_silence_ms = 0;
         assert_eq!(resolve_auto_stop_ms(&cfg), MCP_LISTEN_DEFAULT_AUTO_STOP_MS);
         assert_eq!(MCP_LISTEN_DEFAULT_AUTO_STOP_MS, 10_000);
     }

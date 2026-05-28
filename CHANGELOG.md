@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Overlay: new **Aurora Beziers** waveform style — four overlapping
+  cubic Bezier ribbons that slide past one another with soft
+  alpha-blended overlaps for the Siri-style glowing-intersection look.
+  PCM-driven amplitude.
+- Overlay: new **System/360** waveform style — a retro mainframe-
+  console-lamp spectrum, 60 dot columns × 7 rows of small filled
+  dots, magnitude lights up lamps from the bottom up. Native
+  primitive, no font dependency.
+
 - Overlay: new **Terrain 3D** waveform style — a filled spectrogram
   landscape that uses the live FFT history as a relief map (frequency
   along the long axis, magnitude as height, time receding into the

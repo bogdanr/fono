@@ -1237,9 +1237,167 @@ pub fn draw_terrain_3d(
     }
 }
 
+//  System/360 (`WaveformStyle::System360`)
 // ---------------------------------------------------------------------------
-//  Word wrapping
-// ---------------------------------------------------------------------------
+
+/// System/360-style FFT visualisation rendered natively as a grid
+/// of round dots — evoking the rows of operator-console status
+/// lamps on a 1960s mainframe. Each FFT bin maps to a column of
+/// dots; magnitude controls how many dots in that column are lit,
+/// counting from the bottom up.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_system_360(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    frames: &VecDeque<Vec<f32>>,
+    x0: f32,
+    x1: f32,
+    y_top: f32,
+    y_bot: f32,
+    accent: u32,
+    _scale: f32,
+) {
+    let panel_w = (x1 - x0).max(1.0);
+    let panel_h = (y_bot - y_top).max(1.0);
+    if panel_w < 8.0 || panel_h < 8.0 {
+        return;
+    }
+
+    // Geometry: 7 dot-rows tall, one row of lamps per FFT-magnitude
+    // bucket. Row pitch derived from panel height with vertical
+    // padding so the grid doesn't touch the top / bottom margins.
+    let dot_rows: usize = 7;
+    let row_pitch = (panel_h / (dot_rows as f32 + 0.5)).clamp(2.0, 12.0);
+    let dot_diameter = (row_pitch * 0.75).clamp(1.5, 8.0);
+    // 60 dot columns across the panel — chunky enough to read as
+    // discrete lamps, dense enough to show spectral structure.
+    let target_dot_cols: usize = 50;
+    let col_pitch = panel_w / target_dot_cols as f32;
+    let n_dot_cols = target_dot_cols;
+
+    // Latest FFT frame: pick one magnitude per dot column by
+    // linear sampling. Each value lands in [0, 1].
+    let mags: Vec<f32> = frames.back().map_or_else(
+        || vec![0.0; n_dot_cols],
+        |latest| {
+            let n = latest.len();
+            (0..n_dot_cols)
+                .map(|i| {
+                    if n == 0 {
+                        0.0
+                    } else if n == 1 {
+                        latest[0].clamp(0.0, 1.0)
+                    } else {
+                        let f = (i as f32 / (n_dot_cols.saturating_sub(1).max(1)) as f32)
+                            * (n - 1) as f32;
+                        let idx = (f as usize).min(n - 1);
+                        latest[idx].clamp(0.0, 1.0)
+                    }
+                })
+                .collect()
+        },
+    );
+    // Total grid height: dot_rows × row_pitch.
+    // panel bottom so the grid sits flush with the status bar.
+    let baseline_y = y_bot - row_pitch * 0.5;
+
+    // Accent components for the lit-lamp colour and a much dimmer
+    // "off" lamp colour for visual structure (the empty grid stays
+    // faintly visible like an idle status panel).
+    let ar = ((accent >> 16) & 0xFF) as f32;
+    let ag = ((accent >> 8) & 0xFF) as f32;
+    let ab = (accent & 0xFF) as f32;
+    let off_alpha: u8 = 0x18;
+    let on_alpha: u8 = 0xFF;
+
+    let radius = dot_diameter * 0.5;
+    for (i, &mag) in mags.iter().enumerate() {
+        let lit = (mag * (dot_rows as f32 + 0.001)).clamp(0.0, dot_rows as f32);
+        let lit_floor = lit.floor() as usize;
+        let partial = lit - lit_floor as f32;
+        let cx = x0 + (i as f32 + 0.5) * col_pitch;
+        for r in 0..dot_rows {
+            let cy = baseline_y - r as f32 * row_pitch;
+            let intensity = match r.cmp(&lit_floor) {
+                std::cmp::Ordering::Less => 1.0,
+                std::cmp::Ordering::Equal => partial,
+                std::cmp::Ordering::Greater => 0.0,
+            };
+            let alpha = if intensity > 0.0 {
+                // Lerp between off_alpha and on_alpha by intensity.
+                let mix = u16::from(off_alpha)
+                    + ((u16::from(on_alpha) - u16::from(off_alpha)) as f32 * intensity) as u16;
+                mix.clamp(0, 255) as u8
+            } else {
+                off_alpha
+            };
+            // Lit dots blend toward white the more they're lit so
+            // peak columns crisp up rather than just changing
+            // alpha.
+            let mix = intensity * 0.45;
+            let r_c = (ar + (255.0 - ar) * mix) as u32;
+            let g_c = (ag + (255.0 - ag) * mix) as u32;
+            let b_c = (ab + (255.0 - ab) * mix) as u32;
+            let color = (0xFF << 24) | (r_c << 16) | (g_c << 8) | b_c;
+            fill_disc(buf, stride, h, cx, cy, radius, color, alpha);
+        }
+    }
+}
+
+/// Small filled-disc primitive for the System/360 dot grid. Uses
+/// box-coverage anti-aliasing (sample at each pixel centre and
+/// compute distance to the disc centre) so dots render cleanly
+/// at non-integer pitches.
+fn fill_disc(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    color: u32,
+    alpha: u8,
+) {
+    if radius <= 0.0 || alpha == 0 {
+        return;
+    }
+    let x_min = (cx - radius - 1.0).floor() as i32;
+    let x_max = (cx + radius + 1.0).ceil() as i32;
+    let y_min = (cy - radius - 1.0).floor() as i32;
+    let y_max = (cy + radius + 1.0).ceil() as i32;
+    for yi in y_min..=y_max {
+        if yi < 0 || (yi as u32) >= h {
+            continue;
+        }
+        let dy = yi as f32 + 0.5 - cy;
+        for xi in x_min..=x_max {
+            if xi < 0 || (xi as u32) >= stride {
+                continue;
+            }
+            let dx = xi as f32 + 0.5 - cx;
+            let d2 = dx * dx + dy * dy;
+            if d2 >= (radius + 0.5) * (radius + 0.5) {
+                continue;
+            }
+            // Smooth edge over the outermost pixel ring.
+            let cov = if d2 <= (radius - 0.5).max(0.0) * (radius - 0.5).max(0.0) {
+                1.0
+            } else {
+                let d = d2.sqrt();
+                (radius + 0.5 - d).clamp(0.0, 1.0)
+            };
+            let a = ((u16::from(alpha) as f32) * cov) as u8;
+            if a == 0 {
+                continue;
+            }
+            let idx = (yi as u32 * stride + xi as u32) as usize;
+            if let Some(slot) = buf.get_mut(idx) {
+                *slot = blend(*slot, color, a);
+            }
+        }
+    }
+}
 
 pub fn wrap_text(
     font: &ab_glyph::FontArc,
@@ -1586,17 +1744,22 @@ impl RendererState {
     /// assistant-thinking / polishing phases (the orchestrator
     /// pushes per-bar profiles via `push_fft_bins`).
     pub fn fft_push_needs_redraw(&self) -> bool {
-        matches!(self.style, WaveformStyle::Fft | WaveformStyle::Heatmap | WaveformStyle::Terrain3d)
-            || matches!(
-                (self.style, self.state),
-                (
-                    WaveformStyle::Bars,
-                    OverlayState::AssistantThinking
-                        | OverlayState::AssistantSynthesising
-                        | OverlayState::AssistantSpeaking
-                        | OverlayState::Polishing,
-                )
+        matches!(
+            self.style,
+            WaveformStyle::Fft
+                | WaveformStyle::Heatmap
+                | WaveformStyle::Terrain3d
+                | WaveformStyle::System360
+        ) || matches!(
+            (self.style, self.state),
+            (
+                WaveformStyle::Bars,
+                OverlayState::AssistantThinking
+                    | OverlayState::AssistantSynthesising
+                    | OverlayState::AssistantSpeaking
+                    | OverlayState::Polishing,
             )
+        )
     }
 
     /// Whether a fresh PCM sample push should trigger a redraw.
@@ -1845,6 +2008,20 @@ impl RendererState {
                         accent,
                         scale,
                         elapsed_secs,
+                    );
+                }
+                WaveformStyle::System360 => {
+                    draw_system_360(
+                        buf,
+                        w,
+                        h,
+                        &self.fft_frames,
+                        x0,
+                        x1,
+                        y_top,
+                        y_bot,
+                        accent,
+                        scale,
                     );
                 }
             }

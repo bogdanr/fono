@@ -842,7 +842,8 @@ impl SessionOrchestrator {
                         }
                         fono_core::config::WaveformStyle::Fft
                         | fono_core::config::WaveformStyle::Heatmap
-                        | fono_core::config::WaveformStyle::Terrain3d => {
+                        | fono_core::config::WaveformStyle::Terrain3d
+                        | fono_core::config::WaveformStyle::System360 => {
                             let mut planner = realfft::RealFftPlanner::<f32>::new();
                             let r2c = planner.plan_fft_forward(WAVEFORM_FFT_SIZE);
                             let mut input_buf = r2c.make_input_vec();
@@ -1452,6 +1453,31 @@ impl SessionOrchestrator {
                                 h += gates[idx]
                                     * amp
                                     * (std::f64::consts::TAU * k_x * u + k_t * t_s + phi).sin();
+                            }
+                            *slot = h.clamp(0.0, 1.0) as f32;
+                        }
+                        o.push_fft_bins(bins);
+                    }
+                    // ── System/360: same turbulence field as Terrain3D ─
+                    // Reuses the multi-octave turbulence field so the
+                    // dotted lamp grid never goes static during idle / thinking.
+                    fono_core::config::WaveformStyle::System360 => {
+                        let n = FFT_BINS_THINKING;
+                        let t_s = time_ms / 1000.0;
+                        let comps: [(f64, f64, f64, f64); 4] = [
+                            (2.3, 6.4, 0.0, 0.20),
+                            (3.7, 4.1, 1.7, 0.16),
+                            (5.1, 9.8, 0.9, 0.12),
+                            (8.3, 7.9, 1.2, 0.10),
+                        ];
+                        let mut bins = vec![0.0_f32; n];
+                        let inv_n = 1.0 / (n as f64);
+                        for (i, slot) in bins.iter_mut().enumerate() {
+                            let u = (i as f64) * inv_n;
+                            let mut h = 0.35_f64;
+                            for &(k_x, k_t, phi, amp) in &comps {
+                                h +=
+                                    amp * (std::f64::consts::TAU * k_x * u + k_t * t_s + phi).sin();
                             }
                             *slot = h.clamp(0.0, 1.0) as f32;
                         }

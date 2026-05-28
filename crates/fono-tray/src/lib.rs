@@ -210,6 +210,7 @@ pub const WAVEFORM_STYLES: &[(&str, &str)] = &[
     ("heatmap", "Heatmap"),
     ("transcript", "Transcript"),
     ("terrain3d", "Terrain 3D"),
+    ("system360", "System/360"),
 ];
 
 /// Auto-stop silence presets surfaced in the tray's radio group.
@@ -1435,6 +1436,8 @@ mod backend {
                     "Heatmap" => "Heatmap (rolling spectrogram)",
                     "Transcript" => "Transcript (live preview — more CPU / tokens)",
                     "Terrain 3D" => "Terrain 3D (spectrogram landscape)",
+                    "Aurora Beziers" => "Aurora Beziers (glowing fluid ribbons)",
+                    "System/360" => "System/360 (mainframe console lamps)",
                     other => other,
                 };
                 StandardItem {

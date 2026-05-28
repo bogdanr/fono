@@ -94,21 +94,9 @@ pub async fn run(paths: &Paths) -> Result<()> {
     // and a TTS layer that doesn't exist on the dictation path).
     configure_assistant(&theme, &mut config, &mut secrets).await?;
 
-    // Optional: enable voice-driven coding agents (agent-agnostic prompt).
-    // Wizard wording is intentionally neutral — points to docs for per-agent setup.
-    println!();
-    println!("  ── Voice-driven coding agents (optional) ───────────────");
-    println!("  Any MCP-capable agent (Forge, Claude Code, Cursor, …) can be");
-    println!("  driven by voice once the Fono MCP server is enabled.");
-    let enable_mcp = Confirm::with_theme(&theme)
-        .with_prompt("Enable voice-driven coding agents?")
-        .default(false)
-        .interact()
-        .unwrap_or(false);
-    if enable_mcp {
-        config.mcp.enabled = true;
-        println!("  MCP server enabled. See docs/coding-agents.md for per-agent setup.");
-    }
+    // MCP server is enabled by default — no wizard prompt needed.
+    // Users who want to disable it can run `fono use mcp-server off`
+    // or toggle it from the tray.
 
     config.save(&paths.config_file())?;
     if !secrets.keys.is_empty() {
