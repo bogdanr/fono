@@ -145,14 +145,30 @@ fn run_manager(
     )?;
 
     let mut roles: HashMap<u32, Role> = HashMap::new();
-    register(&manager, dictation, Role::Dictation, &bindings.dictation, &mut roles);
+    let mut registered_labels: Vec<String> = Vec::new();
+    register(
+        &manager,
+        dictation,
+        Role::Dictation,
+        &bindings.dictation,
+        &mut roles,
+        &mut registered_labels,
+    );
     if let Some(hk) = assistant {
-        register(&manager, hk, Role::Assistant, &bindings.assistant, &mut roles);
+        register(
+            &manager,
+            hk,
+            Role::Assistant,
+            &bindings.assistant,
+            &mut roles,
+            &mut registered_labels,
+        );
     }
 
     if roles.is_empty() {
         anyhow::bail!("no hotkeys were successfully registered");
     }
+    info!("registered hotkeys: {}", registered_labels.join(", "));
 
     // Track whether the cancel hotkey is currently grabbed so we never
     // double-register or unregister-when-not-registered (both error).
@@ -264,11 +280,12 @@ fn register(
     role: Role,
     label: &str,
     roles: &mut HashMap<u32, Role>,
+    registered: &mut Vec<String>,
 ) {
     match manager.register(hk) {
         Ok(()) => {
             roles.insert(hk.id(), role);
-            info!("registered hotkey {role:?} = {label}");
+            registered.push(format!("{role:?}={label}"));
         }
         Err(e) => {
             warn!(

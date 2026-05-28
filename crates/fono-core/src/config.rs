@@ -142,7 +142,7 @@ pub struct General {
     /// After every successful pipeline, also place the cleaned/raw text
     /// on the system clipboard as a belt-and-suspenders safety net.
     /// Robust against KDE Wayland where `wtype` exits 0 but doesn't
-    /// actually deliver keys to the focused window. Default `true`.
+    /// actually deliver keys to the focused window. Default `false`
     pub also_copy_to_clipboard: bool,
     /// Cloud STT only: when the provider returns a banned language
     /// **and** the in-memory language cache holds a previously-
@@ -160,7 +160,7 @@ impl Default for General {
             languages: Vec::new(),
             startup_autostart: false,
             auto_mute_system: true,
-            also_copy_to_clipboard: true,
+            also_copy_to_clipboard: false,
             cloud_rerun_on_language_mismatch: true,
         }
     }

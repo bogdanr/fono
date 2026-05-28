@@ -53,9 +53,9 @@ impl TextFormatter for FakePolish {
 struct CapturingInjector(Arc<Mutex<Vec<String>>>);
 
 impl Injector for CapturingInjector {
-    fn inject(&self, text: &str) -> Result<bool> {
+    fn inject(&self, text: &str) -> Result<(bool, String)> {
         self.0.lock().unwrap().push(text.to_string());
-        Ok(true)
+        Ok((true, "test".to_string()))
     }
 }
 

@@ -361,7 +361,7 @@ pub fn spawn_overlay(style: WaveformStyle) -> std::io::Result<OverlayHandle> {
     });
 
     for id in candidates {
-        tracing::info!("overlay: trying `{}`...", id.as_str());
+        tracing::debug!("overlay: trying `{}`...", id.as_str());
         match try_spawn(id, style) {
             Ok(spawned) => {
                 tracing::info!(

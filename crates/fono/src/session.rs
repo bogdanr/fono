@@ -233,6 +233,16 @@ pub struct PipelineMetrics {
     /// True if the LLM was skipped because the raw transcript was below
     /// `Polish.skip_if_words_lt` words. Latency plan L9.
     pub llm_skipped_short: bool,
+    /// Detected language code returned by the STT backend (e.g. `"en"`,
+    /// `"ro"`). `None` when the backend did not report a language.
+    pub language: Option<String>,
+    /// Short tag describing how much context was available to the polish
+    /// LLM (e.g. `"app+rule+dict"`). Empty string when polish was not
+    /// run. Used by the `pipeline:` summary log line.
+    pub ctx_tag: String,
+    /// Short identifier of the inject backend actually used
+    /// (e.g. `"xtest-type"`, `"wtype"`, `"clipboard/xclip"`).
+    pub inject_backend: String,
 }
 
 /// Outcome of one full dictation pipeline run, returned by the inner
@@ -251,14 +261,14 @@ pub enum PipelineOutcome {
 /// Trait abstraction over text injection so the integration test can
 /// substitute a buffer-collector and skip the real keyboard backend.
 ///
-/// Returns `true` when the inject path itself has already populated the
-/// system clipboard with the final text (e.g. the clipboard fallback
-/// path when no key-injector worked). The orchestrator uses that
-/// signal to skip the redundant belt‑and‑suspenders copy in
-/// `run_pipeline`, which otherwise duplicates clipboard writes (and
-/// log lines) on every dictation.
+/// Returns `(clipboard_populated, backend_name)` where
+/// `clipboard_populated` is `true` when the inject path itself already
+/// placed the text on the clipboard (e.g. the clipboard fallback when
+/// no key-injector worked — the orchestrator skips the redundant
+/// `also_copy_to_clipboard` write in that case), and `backend_name`
+/// is a short identifier surfaced in the `pipeline:` summary log line.
 pub trait Injector: Send + Sync + 'static {
-    fn inject(&self, text: &str) -> Result<bool>;
+    fn inject(&self, text: &str) -> Result<(bool, String)>;
 }
 
 /// Default injector — calls into [`fono_inject::type_text_with_outcome`]
@@ -276,18 +286,18 @@ static CLIPBOARD_HINT_SHOWN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 impl Injector for RealInjector {
-    fn inject(&self, text: &str) -> Result<bool> {
+    fn inject(&self, text: &str) -> Result<(bool, String)> {
         match fono_inject::type_text_with_outcome(text)? {
             fono_inject::InjectOutcome::Typed(backend) => {
-                tracing::info!("inject backend: typed via {backend}");
+                debug!("inject backend: typed via {backend}");
                 // All current key-injection backends (wtype/ydotool/
                 // xdotool/enigo/xtest-type) deliver keystrokes directly
                 // and leave the clipboard untouched, so the orchestrator
                 // should still run `also_copy_to_clipboard` if enabled.
-                Ok(false)
+                Ok((false, backend.to_string()))
             }
             fono_inject::InjectOutcome::Clipboard(tool) => {
-                tracing::info!("inject backend: clipboard via {tool} (no key-injection worked)");
+                debug!("inject backend: clipboard via {tool} (no key-injection worked)");
                 // Surface the "press Ctrl+V to paste" hint only once
                 // per daemon process. On Wayland without an active
                 // virtual-keyboard / RemoteDesktop session this is
@@ -296,7 +306,6 @@ impl Injector for RealInjector {
                 // utterance is intolerably noisy. Doctor and the
                 // tray cover the persistent-state surface.
                 if !CLIPBOARD_HINT_SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    let _ = tool;
                     fono_core::notify::send(
                         "Fono — text copied",
                         "Press Ctrl+V or Shift+Insert to paste.",
@@ -305,7 +314,7 @@ impl Injector for RealInjector {
                         fono_core::notify::Urgency::Normal,
                     );
                 }
-                Ok(true)
+                Ok((true, format!("clipboard/{tool}")))
             }
         }
     }
@@ -1647,7 +1656,7 @@ impl SessionOrchestrator {
         if cfg.general.auto_mute_system {
             fono_audio::mute::set_default_sink_mute(true);
         }
-        info!(
+        debug!(
             "recording started (mode={:?} sample_rate={})",
             mode, self.capture_cfg.target_sample_rate
         );
@@ -1754,7 +1763,7 @@ impl SessionOrchestrator {
         let (samples, elapsed) =
             tokio::task::spawn_blocking(move || session.stop_and_drain()).await.unwrap_or_default();
         let capture_ms = elapsed.as_millis() as u64;
-        info!("recording stopped: {capture_ms} ms / {} samples", samples.len());
+        debug!("recording stopped: {capture_ms} ms / {} samples", samples.len());
 
         if elapsed < MIN_RECORDING || samples.is_empty() {
             warn!("recording too short ({capture_ms} ms); skipping STT");
@@ -2339,19 +2348,7 @@ impl SessionOrchestrator {
             .await;
             match &outcome {
                 PipelineOutcome::Completed { metrics, .. } => {
-                    info!(
-                        "pipeline ok: capture={}ms trim={}ms ({}→{} samples) stt={}ms polish={}ms{} inject={}ms ({} → {} chars)",
-                        metrics.capture_ms,
-                        metrics.trim_ms,
-                        metrics.samples,
-                        metrics.trimmed_samples,
-                        metrics.stt_ms,
-                        metrics.llm_ms,
-                        if metrics.llm_skipped_short { " (skipped:short)" } else { "" },
-                        metrics.inject_ms,
-                        metrics.raw_chars,
-                        metrics.final_chars,
-                    );
+                    info!("{}", format_pipeline_summary(metrics));
                 }
                 PipelineOutcome::EmptyOrTooShort { duration_ms } => {
                     warn!("pipeline: empty/too short ({duration_ms}ms)");
@@ -2770,6 +2767,8 @@ impl SessionOrchestrator {
         let llm_started = Instant::now();
         let mut llm_ms: u64 = 0;
         let mut llm_label_for_log: Option<String> = None;
+        let mut live_ctx_tag = String::new();
+        let trans_language: Option<String> = None; // live STT path: language not yet surfaced
         let cleaned = if cfg.interactive.cleanup_on_finalize {
             if let Some(polish) = self.current_llm() {
                 // Show "polishing…" so the user knows we haven't
@@ -2796,6 +2795,7 @@ impl SessionOrchestrator {
                     None,
                     builtin_suffix,
                 );
+                live_ctx_tag = build_ctx_tag(&ctx, app_class.as_deref());
                 llm_label_for_log = Some(polish.name().to_string());
                 match polish.format(&raw, &ctx).await {
                     Ok(c) => {
@@ -2803,19 +2803,16 @@ impl SessionOrchestrator {
                         let trimmed = c.trim().to_string();
                         let raw_chars = raw.chars().count();
                         let new_chars = trimmed.chars().count();
-                        // Mirror the batch pipeline's INFO logs at
-                        // `session.rs:1253-1265` so live and batch produce
-                        // structurally-identical operator output.
-                        info!("polish: {} {}ms → {} chars", polish.name(), llm_ms, new_chars);
                         let diff = i64::try_from(new_chars).unwrap_or(0)
                             - i64::try_from(raw_chars).unwrap_or(0);
-                        if trimmed == raw {
-                            info!("polish: cleanup no-op (input unchanged, {raw_chars} chars)");
-                        } else {
-                            info!(
-                                "polish: cleanup diff {raw_chars} → {new_chars} chars ({diff:+})"
-                            );
-                        }
+                        debug!(
+                            "polish: {} {}ms  {} → {} chars ({:+})",
+                            polish.name(),
+                            llm_ms,
+                            raw_chars,
+                            new_chars,
+                            diff
+                        );
                         if trimmed.is_empty() {
                             None
                         } else {
@@ -2873,12 +2870,12 @@ impl SessionOrchestrator {
         let inject_started = Instant::now();
         let injector = Arc::clone(&self.injector);
         let final_for_inject = final_text.clone();
-        let clipboard_already_populated =
+        let (clipboard_already_populated, live_inject_backend) =
             tokio::task::spawn_blocking(move || injector.inject(&final_for_inject))
                 .await
                 .ok()
                 .and_then(std::result::Result::ok)
-                .unwrap_or(false);
+                .unwrap_or_else(|| (false, "unknown".to_string()));
         if cfg.general.also_copy_to_clipboard && !clipboard_already_populated {
             if let Err(e) = fono_inject::copy_to_clipboard(&final_text) {
                 warn!("live-dictation: clipboard copy failed: {e:#}");
@@ -2895,14 +2892,19 @@ impl SessionOrchestrator {
         let final_chars = final_text.chars().count();
         let llm_label = llm_label_for_log.as_deref().unwrap_or("none");
         info!(
-            "pipeline ok (live): capture={}ms stt=streaming({} segments) polish={} {}ms inject={}ms ({} → {} chars)",
-            capture_ms,
-            transcript.segments_finalized,
-            llm_label,
-            llm_ms,
-            inject_ms,
-            raw_chars,
-            final_chars,
+            "{}",
+            format_pipeline_summary_live(
+                capture_ms,
+                trans_language.as_deref(),
+                transcript.segments_finalized,
+                raw_chars,
+                llm_label,
+                llm_ms,
+                &live_ctx_tag,
+                final_chars,
+                inject_ms,
+                &live_inject_backend,
+            )
         );
 
         // History (non-fatal on failure).
@@ -3101,7 +3103,8 @@ async fn run_pipeline(
         crate::audio_recovery::notify_empty_capture(capture_ms);
         return PipelineOutcome::EmptyOrTooShort { duration_ms: capture_ms };
     }
-    info!("stt: {} {}ms → {} chars", stt.name(), metrics.stt_ms, metrics.raw_chars);
+    debug!("stt: {} {}ms → {} chars", stt.name(), metrics.stt_ms, metrics.raw_chars);
+    metrics.language.clone_from(&trans.language);
 
     // ---- polish (optional) -------------------------------------
     let app_class = focus_info.window_class.clone();
@@ -3134,6 +3137,7 @@ async fn run_pipeline(
             trans.language.as_deref(),
             builtin_suffix,
         );
+        metrics.ctx_tag = build_ctx_tag(&ctx, app_class.as_deref());
         tracing::debug!(
             target: "fono::pipeline",
             "polish.prompt main={:?} advanced={:?} dictionary={:?}",
@@ -3147,19 +3151,16 @@ async fn run_pipeline(
                 let trimmed = c.trim().to_string();
                 let raw_chars = raw.chars().count();
                 let new_chars = trimmed.chars().count();
-                info!(
-                    "polish: {} {}ms → {} chars",
-                    polish_backend.name(),
-                    metrics.llm_ms,
-                    new_chars
-                );
                 let diff =
                     i64::try_from(new_chars).unwrap_or(0) - i64::try_from(raw_chars).unwrap_or(0);
-                if trimmed == raw {
-                    info!("polish: cleanup no-op (input unchanged, {raw_chars} chars)");
-                } else {
-                    info!("polish: cleanup diff {raw_chars} → {new_chars} chars ({diff:+})");
-                }
+                debug!(
+                    "polish: {} {}ms  {} → {} chars ({:+})",
+                    polish_backend.name(),
+                    metrics.llm_ms,
+                    raw_chars,
+                    new_chars,
+                    diff
+                );
                 tracing::debug!(target: "fono::pipeline", "polish.output: {trimmed:?}");
                 if trimmed.is_empty() {
                     None
@@ -3205,7 +3206,10 @@ async fn run_pipeline(
     // ---- Inject -----------------------------------------------------
     let inject_started = Instant::now();
     let clipboard_already_populated = match injector.inject(&final_text) {
-        Ok(populated) => populated,
+        Ok((populated, backend)) => {
+            metrics.inject_backend = backend;
+            populated
+        }
         Err(e) => {
             warn!("inject failed: {e:#}");
             // Critical: the user just dictated something and now
@@ -3219,11 +3223,12 @@ async fn run_pipeline(
                 fono_core::critical_notify::classify(&err_text),
                 &err_text,
             );
+            metrics.inject_backend = "failed".to_string();
             false
         }
     };
     metrics.inject_ms = inject_started.elapsed().as_millis() as u64;
-    debug!("inject: {}ms", metrics.inject_ms);
+    debug!("inject: {}ms via {}", metrics.inject_ms, metrics.inject_backend);
     tracing::debug!(target: "fono::pipeline", "inject.text: {final_text:?}");
 
     // ---- Belt-and-suspenders: also copy to clipboard --------------
@@ -3348,6 +3353,119 @@ fn regex_lite_match(needle: &str, hay: &str) -> bool {
 fn now_unix() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+// ─── log helpers ──────────────────────────────────────────────────────────────
+
+/// ANSI yellow escape, used to flag slow pipeline stages.
+/// Only emitted when stdout is a TTY; stripped otherwise so log files
+/// stay clean.
+fn yellow(s: &str) -> String {
+    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        format!("\x1b[33m{s}\x1b[0m")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Format a millisecond value, colouring it yellow when it exceeds `warn_ms`.
+fn fmt_ms(ms: u64, warn_ms: u64) -> String {
+    let s = format!("{ms}ms");
+    if ms >= warn_ms {
+        yellow(&s)
+    } else {
+        s
+    }
+}
+
+/// Capture duration: show as seconds with one decimal when ≥ 10 s, else ms.
+fn fmt_capture(ms: u64) -> String {
+    if ms >= 10_000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        format!("{ms}ms")
+    }
+}
+
+/// Build the short context-enrichment tag from a `FormatContext`.
+///
+/// Examples: `"-"`, `"app"`, `"app+rule"`, `"app+dict"`, `"app+rule+dict"`.
+fn build_ctx_tag(ctx: &fono_polish::FormatContext, app_class: Option<&str>) -> String {
+    let has_app = app_class.is_some();
+    let has_rule = ctx.rule_suffix.is_some();
+    let has_dict = !ctx.dictionary.is_empty();
+    let has_adv = !ctx.advanced_prompt.is_empty();
+    if !has_app && !has_rule && !has_dict && !has_adv {
+        return "-".to_string();
+    }
+    let mut parts = Vec::new();
+    if has_app {
+        parts.push("app");
+    }
+    if has_rule {
+        parts.push("rule");
+    }
+    if has_adv {
+        parts.push("adv");
+    }
+    if has_dict {
+        parts.push("dict");
+    }
+    parts.join("+")
+}
+
+/// Format the single `pipeline:` INFO line for the **batch** path.
+///
+/// Thresholds for yellow highlighting:
+/// * STT  > 2 000 ms
+/// * Polish > 1 500 ms
+fn format_pipeline_summary(m: &PipelineMetrics) -> String {
+    let capture = fmt_capture(m.capture_ms);
+    let lang = m.language.as_deref().unwrap_or("?");
+    let stt = fmt_ms(m.stt_ms, 2_000);
+    let polish_seg = if m.llm_skipped_short {
+        "polish skipped (short)".to_string()
+    } else if m.llm_ms == 0 && m.ctx_tag.is_empty() {
+        "polish none".to_string()
+    } else {
+        let pol = fmt_ms(m.llm_ms, 1_500);
+        format!("polish {pol} [{}] {} → {} chars", m.ctx_tag, m.raw_chars, m.final_chars)
+    };
+    let inject = fmt_ms(m.inject_ms, 500);
+    format!(
+        "pipeline: {capture} trim={}ms | {lang} | stt {stt} {} chars | {polish_seg} | inject {} {inject}",
+        m.trim_ms,
+        m.raw_chars,
+        m.inject_backend,
+    )
+}
+
+/// Format the single `pipeline (live):` INFO line for the **streaming** path.
+#[allow(clippy::too_many_arguments)]
+fn format_pipeline_summary_live(
+    capture_ms: u64,
+    language: Option<&str>,
+    segments: u32,
+    raw_chars: usize,
+    polish_backend: &str,
+    polish_ms: u64,
+    ctx_tag: &str,
+    final_chars: usize,
+    inject_ms: u64,
+    inject_backend: &str,
+) -> String {
+    let capture = fmt_capture(capture_ms);
+    let lang = language.unwrap_or("?");
+    let polish_seg = if polish_backend == "none" {
+        "polish none".to_string()
+    } else {
+        let pol = fmt_ms(polish_ms, 1_500);
+        format!("polish {pol} [{ctx_tag}] {raw_chars} → {final_chars} chars")
+    };
+    let inject = fmt_ms(inject_ms, 500);
+    format!(
+        "pipeline (live): {capture} | {lang} | stt streaming ({segments} segs) {raw_chars} chars | {polish_seg} | inject {inject_backend} {inject}",
+    )
 }
 
 /// Helper used by `fono record` and the integration test to construct an

@@ -434,11 +434,10 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         // so logging them once gives us a definitive answer about
         // whether the issue is data (empty here means empty menu) or
         // host rendering (non-empty here + empty menu means it's
-        // KDE/GNOME mishandling LayoutUpdated). Always at info so
-        // users running with default verbosity see the line in their
-        // terminal when they reproduce.
-        info!("tray: configured STT backends ({}) = {:?}", stt_labels.len(), stt_labels);
-        info!("tray: configured polish backends ({}) = {:?}", polish_labels.len(), polish_labels);
+        // KDE/GNOME mishandling LayoutUpdated). At debug to avoid
+        // cluttering the default startup output.
+        debug!("tray: configured STT backends ({}) = {:?}", stt_labels.len(), stt_labels);
+        debug!("tray: configured polish backends ({}) = {:?}", polish_labels.len(), polish_labels);
 
         // Active-provider closure — tray polls this every ~2 s. Reads
         // the orchestrator's current backend pair (which already reflects
@@ -1204,7 +1203,6 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     // handler can `.await` on lock acquisition without parking the
     // executor thread.
     let mcp_speak_slot: Arc<tokio::sync::Mutex<()>> = Arc::new(tokio::sync::Mutex::new(()));
-    info!("daemon ready — press Ctrl+C to stop");
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -1280,7 +1278,7 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
         // Else: silent. A slim build with a passive waveform style
         // is a fully-supported configuration; no log line needed.
     }
-    info!("variant      : {}", crate::variant::VARIANT.label());
+    debug!("variant      : {}", crate::variant::VARIANT.label());
     info!("hw accel     : {}", hardware_acceleration_summary());
     info!("vulkan probe : {}", fono_core::vulkan_probe::probe().summary_line());
     // Surface what the OS thinks the user's languages are so users

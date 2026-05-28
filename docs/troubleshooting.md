@@ -21,18 +21,41 @@ when you press the hotkey. If not, see "Hotkey doesn't fire" below.
 
 ### Step 3 — confirm the pipeline ran
 
-After `StopRecording` you should see lines like:
+After `StopRecording` you should see a single `pipeline:` summary line:
 
 ```
-INFO recording stopped: 2300 ms / 36800 samples
-INFO stt: groq 540ms → 42 chars
-INFO polish: groq 310ms → 45 chars
-INFO inject backend: typed via xtest-paste in 11ms
-INFO clipboard: also wrote via xsel [primary]
-INFO pipeline ok: capture=2300ms trim=4ms ...
+INFO pipeline: 2.3s trim=4ms | en | stt groq 540ms 42 chars | polish groq 310ms [app] 42→45 chars | inject xtest-type 11ms
 ```
 
-If the pipeline ran but text didn't land, jump to "Pipeline ran but
+**Reading the fields:**
+
+| Field | Meaning |
+|---|---|
+| `2.3s` | Capture duration (seconds ≥ 10 s, ms below) |
+| `trim=4ms` | Time spent trimming silence from the audio |
+| `en` | Language detected by the STT backend |
+| `stt groq 540ms 42 chars` | STT backend, latency, and character count of the raw transcript |
+| `polish groq 310ms [app] 42→45 chars` | Polish backend, latency, context enrichment tag, and char count before → after |
+| `inject xtest-type 11ms` | Injection backend used and latency |
+
+**Context enrichment tags** (the `[…]` after the polish latency):
+
+| Tag | Meaning |
+|---|---|
+| `[-]` | Default prompt only — no app context |
+| `[app]` | Active window class was detected and sent to polish |
+| `[app+rule]` | Window class matched a `[[context_rules]]` entry |
+| `[app+dict]` | Window class + personal dictionary |
+| `[app+rule+dict]` | Window class + context rule + personal dictionary |
+
+**Slow-stage highlighting:** latency values that exceed thresholds (STT > 2 s,
+polish > 1.5 s, inject > 500 ms) appear in yellow on a TTY — a quick visual
+cue that something is taking longer than expected.
+
+If `polish skipped` appears instead of a polish entry, the utterance was below
+the `[polish].skip_if_words_lt` threshold (default: 3 words).
+
+If the pipeline line appears but text didn't land, jump to "Pipeline ran but
 nothing pasted".
 
 ### Step 4 — confirm STT and polish are reachable
