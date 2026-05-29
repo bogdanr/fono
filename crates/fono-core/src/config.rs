@@ -569,6 +569,51 @@ impl Default for Prompt {
 /// `plans/2026-04-28-polish-cleanup-clarification-refusal-fix-v1.md`.
 pub const fn default_prompt_main() -> &'static str {
     "You are a transcription cleanup post-processor, not a chat assistant. The user message \
+between the <<< and >>> markers is a raw speech-to-text transcript. Your job is to return that \
+transcript with filler words removed (um, uh, like), proper punctuation and capitalization \
+added, and obvious stutters collapsed. Keep the speaker's language and tone — do not translate, \
+summarise, or explain.\n\n\
+The transcript may be garbled: words mis-heard by the recogniser, run together, or stripped of \
+their diacritics. Reconstruct such garbled or phonetically-mangled words into the most plausible \
+intended words IN THE LANGUAGE THE SPEAKER IS USING, and restore that language's correct \
+orthography — including every diacritic (for example, Romanian ă, â, î, ș, ț). This repair is \
+expected; it is not inventing content.\n\n\
+Hard rules:\n\
+- Output ONLY the cleaned transcript text. No quotes, no markdown, no preamble, no commentary.\n\
+- NEVER ask the user for clarification or more context. NEVER respond with a question, an \
+apology, or a meta-comment about the input.\n\
+- Do not add new ideas, sentences, or facts the speaker did not say. Repairing mangled words to \
+what was most plausibly spoken is allowed; adding content is not.\n\
+- If the transcript is short, ambiguous, a single word, empty, or already clean, return it \
+verbatim (with at most punctuation/capitalization/diacritic fixes).\n\
+- Do not include the <<< or >>> markers in your output."
+}
+
+/// Baked-in default advanced prompt (Phase 5 Task 5.5).
+pub const fn default_prompt_advanced() -> &'static str {
+    "If the speaker self-corrects (\"scratch that\", \"I mean\", \"no wait\"), apply the \
+correction and drop the discarded fragment. If the speaker dictates a list (\"first\", \
+\"second\", \"next point\"), format it as a bulleted or numbered list. If the speaker names \
+a term in the personal dictionary, prefer that exact spelling. For low-confidence or garbled \
+tokens, prefer the most likely in-language reconstruction over passing the broken token \
+through literally."
+}
+
+/// Superseded baked-in `[polish.prompt].main` defaults. A config whose
+/// stored prompt matches one of these verbatim (modulo surrounding
+/// whitespace) was never customised by the user, so [`Config::migrate`]
+/// silently upgrades it to the current [`default_prompt_main`]. Genuine
+/// customisations never match a superseded literal and are preserved.
+///
+/// **Append — never edit — entries.** When the default wording changes,
+/// move the *previous* default's literal text into this list so existing
+/// on-disk configs keep auto-upgrading to the newest default.
+const SUPERSEDED_PROMPT_MAIN: &[&str] = &[
+    // Pre-2026-05 cleanup prompt. Forbade word-level reconstruction and
+    // diacritic repair ("Do not invent missing content" / "do not … add
+    // content"), which left non-English dictation (Romanian, …) reading
+    // as garbled raw STT even with cleanup enabled.
+    "You are a transcription cleanup post-processor, not a chat assistant. The user message \
 between the <<< and >>> markers is a raw speech-to-text transcript. Your only job is to \
 return that transcript with filler words removed (um, uh, like), proper punctuation and \
 capitalization added, and obvious stutters collapsed. Preserve the speaker's language and \
@@ -579,16 +624,18 @@ Hard rules:\n\
 apology, or a meta-comment about the input.\n\
 - If the transcript is short, ambiguous, a single word, empty, or already clean, return it \
 verbatim (with at most punctuation/capitalization fixes). Do not invent missing content.\n\
-- Do not include the <<< or >>> markers in your output."
-}
+- Do not include the <<< or >>> markers in your output.",
+];
 
-/// Baked-in default advanced prompt (Phase 5 Task 5.5).
-pub const fn default_prompt_advanced() -> &'static str {
+/// Superseded baked-in `[polish.prompt].advanced` defaults. Same upgrade
+/// semantics as [`SUPERSEDED_PROMPT_MAIN`].
+const SUPERSEDED_PROMPT_ADVANCED: &[&str] = &[
+    // Pre-2026-05: no low-confidence reconstruction guidance.
     "If the speaker self-corrects (\"scratch that\", \"I mean\", \"no wait\"), apply the \
 correction and drop the discarded fragment. If the speaker dictates a list (\"first\", \
 \"second\", \"next point\"), format it as a bulleted or numbered list. If the speaker names \
-a term in the personal dictionary, prefer that exact spelling."
-}
+a term in the personal dictionary, prefer that exact spelling.",
+];
 
 /// `[assistant]` — voice-assistant chat config. Distinct from `[polish]`
 /// (the dictation cleanup pipeline) so a user can run a fast local
@@ -1239,6 +1286,21 @@ impl Config {
         }
 
         self.version = CURRENT_VERSION;
+
+        // Refresh baked-in polish prompts the user never customised.
+        // Content-matched (not version-gated) so existing v1 configs whose
+        // prompt was persisted before a wording change still pick up the
+        // new default. A genuine customisation never matches a superseded
+        // literal, so it is left untouched. See `SUPERSEDED_PROMPT_MAIN`.
+        let main_trim = self.polish.prompt.main.trim();
+        if SUPERSEDED_PROMPT_MAIN.iter().any(|old| old.trim() == main_trim) {
+            self.polish.prompt.main = default_prompt_main().to_string();
+        }
+        let advanced_trim = self.polish.prompt.advanced.trim();
+        if SUPERSEDED_PROMPT_ADVANCED.iter().any(|old| old.trim() == advanced_trim) {
+            self.polish.prompt.advanced = default_prompt_advanced().to_string();
+        }
+
         Ok(())
     }
 
@@ -1450,5 +1512,58 @@ mod tests {
         let configured = cfg.tts_configured(&secrets);
         std::env::remove_var("GROQ_API_KEY");
         assert!(!configured, "env-only GROQ_API_KEY must not satisfy tts_configured");
+    }
+
+    // ----- polish prompt migration ------------------------------------
+
+    #[test]
+    fn migrate_upgrades_superseded_default_prompts() {
+        // A config persisted with the pre-2026-05 baked-in default
+        // prompt (the one that forbade reconstruction) must be silently
+        // upgraded to the current default on load, otherwise the
+        // reworded default never reaches existing users.
+        let mut cfg = Config::default();
+        cfg.polish.prompt.main = SUPERSEDED_PROMPT_MAIN[0].to_string();
+        cfg.polish.prompt.advanced = SUPERSEDED_PROMPT_ADVANCED[0].to_string();
+        cfg.migrate().unwrap();
+        assert_eq!(cfg.polish.prompt.main, default_prompt_main());
+        assert_eq!(cfg.polish.prompt.advanced, default_prompt_advanced());
+        // The upgraded text must carry the reconstruction directive.
+        assert!(cfg.polish.prompt.main.contains("Reconstruct"));
+    }
+
+    #[test]
+    fn migrate_upgrades_through_load_from_disk() {
+        // End-to-end: an on-disk config with the old prompt is upgraded
+        // by `Config::load` (which calls `migrate`).
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("old.toml");
+        let mut cfg = Config::default();
+        cfg.polish.prompt.main = SUPERSEDED_PROMPT_MAIN[0].to_string();
+        cfg.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.polish.prompt.main, default_prompt_main());
+    }
+
+    #[test]
+    fn migrate_preserves_user_customised_prompt() {
+        // A genuinely customised prompt never matches a superseded
+        // literal, so it must survive migration untouched.
+        let mut cfg = Config::default();
+        let custom = "Always answer like a pirate. Keep diacritics.".to_string();
+        cfg.polish.prompt.main = custom.clone();
+        cfg.migrate().unwrap();
+        assert_eq!(cfg.polish.prompt.main, custom);
+    }
+
+    #[test]
+    fn migrate_is_idempotent_on_current_default() {
+        // Running migrate on a config already holding the current
+        // default must leave it unchanged (the new text does not match
+        // any superseded literal).
+        let mut cfg = Config::default();
+        cfg.migrate().unwrap();
+        assert_eq!(cfg.polish.prompt.main, default_prompt_main());
+        assert_eq!(cfg.polish.prompt.advanced, default_prompt_advanced());
     }
 }

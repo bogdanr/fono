@@ -3417,6 +3417,16 @@ fn build_format_context(
         app_class: app_class.map(str::to_string),
         app_title: app_title.map(str::to_string),
         language: language.map(str::to_string),
+        // Candidate set fed to the cleanup LLM so it can detect the
+        // utterance's language and restore diacritics, engine-
+        // independent of `Transcription.language`. Mirror `lang_for`'s
+        // per-backend override: `stt.local.languages` wins when set,
+        // else `general.languages` (the auto-populated locale subset).
+        candidate_languages: if config.stt.local.languages.is_empty() {
+            config.general.languages.clone()
+        } else {
+            config.stt.local.languages.clone()
+        },
     };
     // Trim trivially-empty fields so the system prompt stays compact.
     if ctx.advanced_prompt.trim().is_empty() {

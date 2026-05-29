@@ -12,7 +12,18 @@ pub struct FormatContext {
     pub rule_suffix: Option<String>,
     pub app_class: Option<String>,
     pub app_title: Option<String>,
+    /// Best-effort per-utterance language code reported by the STT
+    /// backend (e.g. `"ro"`). Engine-dependent and often `None` — a
+    /// soft hint only, never load-bearing. See
+    /// `plans/2026-05-29-romanian-dictation-polish-reconstruction-v2.md`.
     pub language: Option<String>,
+    /// The user's candidate language set (BCP-47 codes, e.g.
+    /// `["ro", "en"]`), auto-populated from OS-locale signals in
+    /// `general.languages`. Always available regardless of STT
+    /// engine; the reliable signal the cleanup directive leans on so
+    /// the LLM can detect the transcript's language, keep its output
+    /// in that language, and restore diacritics.
+    pub candidate_languages: Vec<String>,
 }
 
 impl FormatContext {
@@ -37,7 +48,52 @@ impl FormatContext {
             s.push_str(sfx);
             s.push_str("\n\n");
         }
+        if let Some(directive) = self.language_directive() {
+            s.push_str(&directive);
+            s.push_str("\n\n");
+        }
         s.trim_end().to_string()
+    }
+
+    /// Build the candidate-language directive appended to the system
+    /// prompt. Returns `None` when no candidate set is configured (so
+    /// the prompt stays byte-identical to today's on exotic systems
+    /// where locale detection yielded nothing).
+    ///
+    /// When the set is non-empty, instructs the model to detect which
+    /// of the candidate languages the transcript is in, keep its
+    /// output in that language, and restore its orthography — every
+    /// diacritic included. When the soft `language` hint is present
+    /// and its code is one of the candidates, an "It is most likely
+    /// <Name>." sentence is appended to bias the choice. See
+    /// `plans/2026-05-29-romanian-dictation-polish-reconstruction-v2.md`.
+    fn language_directive(&self) -> Option<String> {
+        if self.candidate_languages.is_empty() {
+            return None;
+        }
+        let names: Vec<&str> = self
+            .candidate_languages
+            .iter()
+            .map(|c| fono_core::languages::display_name(c))
+            .collect();
+        let mut directive = format!(
+            "This transcript is in one of these languages: {}. Detect which one, keep your \
+output entirely in that language, and restore its correct orthography — including all \
+diacritics (for example, Romanian uses ă, â, î, ș, ț). Do not translate between these \
+languages.",
+            names.join(", ")
+        );
+        if let Some(hint) = &self.language {
+            if self.candidate_languages.iter().any(|c| c == hint) {
+                use std::fmt::Write as _;
+                let _ = write!(
+                    directive,
+                    " It is most likely {}.",
+                    fono_core::languages::display_name(hint)
+                );
+            }
+        }
+        Some(directive)
     }
 }
 
@@ -207,5 +263,57 @@ mod tests {
     fn detector_ignores_leading_whitespace_and_punctuation() {
         let s = "\n  \"It seems like you're missing context. Could you provide more details?\"";
         assert!(looks_like_clarification(s));
+    }
+
+    #[test]
+    fn directive_names_candidates_and_mentions_diacritics() {
+        let ctx = FormatContext {
+            candidate_languages: vec!["ro".into(), "en".into()],
+            ..Default::default()
+        };
+        let sp = ctx.system_prompt();
+        assert!(sp.contains("Romanian"), "directive must name Romanian: {sp}");
+        assert!(sp.contains("English"), "directive must name English: {sp}");
+        assert!(sp.contains("diacritics"), "directive must mention diacritics: {sp}");
+        assert!(sp.contains("ă, â, î, ș, ț"), "directive must list Romanian diacritics: {sp}");
+        assert!(sp.contains("Do not translate"), "directive must forbid translation: {sp}");
+    }
+
+    #[test]
+    fn directive_absent_when_candidate_set_empty() {
+        let ctx = FormatContext { language: Some("ro".into()), ..Default::default() };
+        let sp = ctx.system_prompt();
+        assert!(!sp.contains("This transcript is in one of"), "no directive without candidates");
+        assert!(!sp.contains("It is most likely"), "no soft-hint sentence without candidates");
+    }
+
+    #[test]
+    fn soft_hint_sentence_only_when_hint_in_candidate_set() {
+        // Hint inside the set ⇒ the "most likely" sentence appears.
+        let in_set = FormatContext {
+            candidate_languages: vec!["ro".into(), "en".into()],
+            language: Some("ro".into()),
+            ..Default::default()
+        };
+        let sp = in_set.system_prompt();
+        assert!(sp.contains("It is most likely Romanian."), "soft hint should appear: {sp}");
+
+        // Hint outside the set ⇒ no soft-hint sentence, directive still present.
+        let out_of_set = FormatContext {
+            candidate_languages: vec!["ro".into(), "en".into()],
+            language: Some("fr".into()),
+            ..Default::default()
+        };
+        let sp = out_of_set.system_prompt();
+        assert!(sp.contains("This transcript is in one of"), "directive still present: {sp}");
+        assert!(!sp.contains("It is most likely"), "no soft hint for out-of-set code: {sp}");
+
+        // No hint at all ⇒ directive present, no soft-hint sentence.
+        let no_hint = FormatContext {
+            candidate_languages: vec!["ro".into(), "en".into()],
+            ..Default::default()
+        };
+        let sp = no_hint.system_prompt();
+        assert!(!sp.contains("It is most likely"), "no soft hint when language is None: {sp}");
     }
 }

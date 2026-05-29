@@ -104,9 +104,47 @@ struct ChatReq<'a> {
     // OpenAI, OpenRouter, Ollama).
     #[serde(rename = "max_completion_tokens")]
     max_tokens: u32,
+    // Reasoning models (gpt-oss — the Groq cleanup default —, gpt-5 /
+    // o-series, qwen3, deepseek-r1, …) burn an unbounded, variable
+    // number of *hidden reasoning* tokens before emitting any visible
+    // content. With a tight `max_completion_tokens` the reasoning eats
+    // the whole budget and `content` comes back empty, so cleanup
+    // silently fell back to the raw STT text (the "polish does nothing
+    // / garbled non-English" bug). Pinning the effort to `low` keeps
+    // reasoning short and predictable so the visible answer fits the
+    // budget. Omitted for non-reasoning models — Cerebras Llama,
+    // Ollama, … reject the field with a 400. See
+    // `plans/2026-05-29-romanian-dictation-polish-reconstruction-v2.md`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     stop: Vec<&'a str>,
     stream: bool,
+}
+
+/// Best-effort detection of chat models that emit hidden
+/// chain-of-thought tokens before their visible answer. Matched by
+/// family substring (case-insensitive) so new point releases inherit
+/// the behaviour automatically. Used to decide whether to send
+/// `reasoning_effort` and to drop the `"\n\n"` stop sequence (which
+/// otherwise fires inside the reasoning channel and truncates the
+/// answer to empty). Conservative by design: a false negative just
+/// reverts to the previous request shape, a false positive only adds
+/// a field reasoning models already accept.
+#[must_use]
+pub(crate) fn is_reasoning_model(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.contains("gpt-oss")
+        || m.contains("gpt-5")
+        || m.contains("deepseek-r1")
+        || m.contains("qwen3")
+        || m.contains("-thinking")
+        || m.contains("o1-")
+        || m.contains("o3-")
+        || m.contains("o4-")
+        || m == "o1"
+        || m == "o3"
+        || m == "o4-mini"
 }
 
 #[derive(Serialize)]
@@ -136,6 +174,7 @@ impl TextFormatter for OpenAiCompat {
     async fn format(&self, raw: &str, ctx: &FormatContext) -> Result<String> {
         let system = ctx.system_prompt();
         let user = user_prompt(raw);
+        let reasoning = is_reasoning_model(&self.model);
         let req = ChatReq {
             model: &self.model,
             messages: vec![
@@ -143,12 +182,20 @@ impl TextFormatter for OpenAiCompat {
                 Message { role: "user", content: &user },
             ],
             // Latency plan L19 — short cleanup outputs, deterministic
-            // tone. Bounded `max_tokens` is critical on cloud providers
-            // that meter wall-clock time.
+            // tone. The budget must also cover a reasoning model's
+            // hidden chain-of-thought (gpt-oss, the Groq default),
+            // otherwise the visible `content` comes back empty and we
+            // fall back to raw STT. 2048 comfortably fits `low`-effort
+            // reasoning plus a long dictation's cleaned text.
             temperature: 0.2,
             top_p: 0.9,
-            max_tokens: 256,
-            stop: vec!["\n\n"],
+            max_tokens: 2048,
+            reasoning_effort: reasoning.then_some("low"),
+            // The `"\n\n"` stop sequence fires inside a reasoning
+            // model's chain-of-thought and truncates the answer to
+            // empty, so it must be dropped for those. Non-reasoning
+            // models keep it as a cheap guard against trailing chatter.
+            stop: if reasoning { vec![] } else { vec!["\n\n"] },
             stream: false,
         };
         let mut builder = self.client.post(&self.endpoint).json(&req);
@@ -314,5 +361,59 @@ impl TextFormatter for OpenAiCompat {
         timings.mark_headers();
         let _ = read_body_with_watchdog(res, LLM_CHUNK_TIMEOUT, &mut timings).await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_reasoning_models() {
+        // gpt-oss is the shipped Groq cleanup default — the model whose
+        // hidden reasoning starved the old 256-token budget and made
+        // cleanup a no-op for non-trivial dictation.
+        for m in [
+            "openai/gpt-oss-20b",
+            "openai/gpt-oss-120b",
+            "gpt-5.4-nano",
+            "openai/gpt-5.4-nano",
+            "deepseek-r1-distill-llama-70b",
+            "qwen3-32b",
+            "o1",
+            "o3-mini",
+            "o4-mini",
+        ] {
+            assert!(is_reasoning_model(m), "should be reasoning: {m}");
+        }
+    }
+
+    #[test]
+    fn does_not_flag_plain_instruct_models() {
+        // These must NOT receive `reasoning_effort` — Cerebras Llama and
+        // Ollama reject the field with a 400.
+        for m in [
+            "llama3.1-8b",
+            "llama-3.3-70b-versatile",
+            "llama3.2",
+            "gpt-4o-mini",
+            "claude-haiku-4-5-20251001",
+            "mixtral-8x7b",
+        ] {
+            assert!(!is_reasoning_model(m), "should NOT be reasoning: {m}");
+        }
+    }
+
+    #[test]
+    fn reasoning_model_request_drops_stop_and_sets_effort() {
+        // Lock in the request shape: reasoning models get `low` effort
+        // and no stop sequence; plain models keep the legacy guard.
+        let reasoning = is_reasoning_model("openai/gpt-oss-20b");
+        assert!(reasoning);
+        assert_eq!(reasoning.then_some("low"), Some("low"));
+
+        let plain = is_reasoning_model("llama3.1-8b");
+        assert!(!plain);
+        assert_eq!(plain.then_some("low"), None);
     }
 }

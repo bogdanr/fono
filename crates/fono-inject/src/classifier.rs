@@ -110,20 +110,36 @@ fn terminal_profile() -> ContextProfile {
             "ls -la, grep -r, chmod 755, git commit, sudo apt install, \
              cd /etc, rm -rf, | grep, > /dev/null, ./script.sh, ssh user@host",
         )),
-        llm_suffix: Some(
-            "The user is dictating shell commands. Output as shell syntax. \
-             Use lowercase. Preserve flags verbatim (e.g. -rf, -la, --verbose). \
-             Convert spoken paths to filesystem notation \
-             (\"home dot config\" → ~/.config, \"dot slash\" → ./, \
-             \"pipe\" → |, \"redirect\" → >, \"dev null\" → /dev/null). \
-             No prose punctuation. Do not capitalise the first word.",
-        ),
+        llm_suffix: Some(TERMINAL_SHELL_SUFFIX),
         suppress_history: false,
         detected_agent: None,
         is_terminal: true,
         is_code_editor: false,
     }
 }
+
+/// LLM framing for a bare shell prompt: terse, lowercase, shell-syntax.
+const TERMINAL_SHELL_SUFFIX: &str =
+    "The user is dictating shell commands. Output as shell syntax. \
+     Use lowercase. Preserve flags verbatim (e.g. -rf, -la, --verbose). \
+     Convert spoken paths to filesystem notation \
+     (\"home dot config\" → ~/.config, \"dot slash\" → ./, \
+     \"pipe\" → |, \"redirect\" → >, \"dev null\" → /dev/null). \
+     No prose punctuation. Do not capitalise the first word.";
+
+/// LLM framing for a terminal running a coding agent (Forge, Claude Code,
+/// Aider, …). The foreground program is a conversational REPL, so the user
+/// is dictating a natural-language *instruction to the agent*, not a shell
+/// command. The shell-syntax / force-lowercase framing actively corrupts
+/// such prose (lowercased sentence starts and proper nouns), so we swap in
+/// a prose framing the moment an agent is detected. See
+/// `plans/2026-05-29-romanian-dictation-polish-reconstruction-v2.md`.
+const TERMINAL_AGENT_SUFFIX: &str =
+    "The user is dictating a natural-language message to a coding agent running in this \
+     terminal — prose, not a shell command. Format it as ordinary prose in the speaker's \
+     language: capitalise the first letter of every sentence and all proper nouns (people, \
+     places, product and project names), and use full sentence punctuation. Do NOT force \
+     lowercase and do NOT rewrite the text as shell syntax.";
 fn code_editor_profile() -> ContextProfile {
     ContextProfile {
         name: "CodeEditor",
@@ -353,6 +369,14 @@ impl ContextClassifier {
         }
 
         profile.detected_agent = ctx.agent;
+
+        // A coding agent in the foreground means the terminal is a
+        // conversational REPL: the user is dictating prose to the agent,
+        // not shell commands. Swap the lowercase shell framing for prose
+        // framing so sentence starts and proper nouns are capitalised.
+        if ctx.agent.is_some() {
+            profile.llm_suffix = Some(TERMINAL_AGENT_SUFFIX);
+        }
     }
 
     /// Classify a focused window into a [`ContextProfile`].
@@ -493,6 +517,30 @@ mod tests {
         assert!(p.whisper_hint.is_some());
         assert!(p.llm_suffix.is_some());
         assert!(!p.suppress_history);
+    }
+
+    #[test]
+    fn terminal_agent_switches_to_prose_framing() {
+        // Bare shell prompt: lowercase shell framing.
+        let mut shell = ContextClassifier::classify(Some("kitty"), None).unwrap();
+        assert_eq!(shell.llm_suffix, Some(TERMINAL_SHELL_SUFFIX));
+
+        // Same terminal, but a coding agent is detected as a child: the
+        // user is dictating prose to the agent, so the framing must flip
+        // to prose (capitalisation + punctuation), never force-lowercase.
+        let ctx =
+            TerminalContext { project: ProjectKind::Rust, agent: Some(CodingAgentKind::Forge) };
+        ContextClassifier::enrich_terminal(&mut shell, &ctx);
+        assert_eq!(shell.llm_suffix, Some(TERMINAL_AGENT_SUFFIX));
+        let suffix = shell.llm_suffix.unwrap();
+        assert!(suffix.contains("capitalise"), "agent framing must request capitalisation");
+        assert!(!suffix.contains("Do not capitalise"), "must not keep the shell lowercase rule");
+
+        // No agent ⇒ stay on shell framing.
+        let mut shell2 = ContextClassifier::classify(Some("kitty"), None).unwrap();
+        let bare = TerminalContext { project: ProjectKind::Shell, agent: None };
+        ContextClassifier::enrich_terminal(&mut shell2, &bare);
+        assert_eq!(shell2.llm_suffix, Some(TERMINAL_SHELL_SUFFIX));
     }
 
     #[test]

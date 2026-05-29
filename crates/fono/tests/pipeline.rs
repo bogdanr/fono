@@ -293,3 +293,120 @@ async fn pipeline_passes_raw_through_when_no_llm() {
     assert_eq!(rows.len(), 1);
     assert!(rows[0].polish_backend.is_none());
 }
+
+/// A `TextFormatter` that records the [`FormatContext`] it was handed
+/// (the candidate set and the rendered `system_prompt()`) so the test
+/// can assert the cleanup directive reached the LLM. Echoes the raw
+/// text back as the cleaned output.
+struct AssertingPolish {
+    candidates: Arc<Mutex<Vec<String>>>,
+    system_prompt: Arc<Mutex<String>>,
+}
+
+#[async_trait]
+impl TextFormatter for AssertingPolish {
+    async fn format(&self, raw: &str, ctx: &FormatContext) -> Result<String> {
+        self.candidates.lock().unwrap().clone_from(&ctx.candidate_languages);
+        *self.system_prompt.lock().unwrap() = ctx.system_prompt();
+        Ok(raw.trim().to_string())
+    }
+    fn name(&self) -> &'static str {
+        "asserting-polish"
+    }
+}
+
+/// Plan task E1 — a garbled, diacritic-stripped Romanian capture with
+/// `language: None` (STT engine reports no language) but
+/// `general.languages = ["ro", "en"]` must still reach the cleanup LLM
+/// with the candidate set and the Romanian diacritic directive. Proves
+/// engine-independence: correctness does not depend on
+/// `Transcription.language`.
+#[tokio::test]
+async fn pipeline_feeds_candidate_set_and_directive_when_stt_reports_no_language() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("history.sqlite");
+
+    // Five words, diacritics stripped, language unreported by the engine.
+    let stt: Arc<dyn SpeechToText> =
+        Arc::new(FakeStt { text: "as vrea sa merg acasa".into(), lang: None });
+    let candidates = Arc::new(Mutex::new(Vec::<String>::new()));
+    let system_prompt = Arc::new(Mutex::new(String::new()));
+    let polish: Option<Arc<dyn TextFormatter>> = Some(Arc::new(AssertingPolish {
+        candidates: Arc::clone(&candidates),
+        system_prompt: Arc::clone(&system_prompt),
+    }));
+    let injected = Arc::new(Mutex::new(Vec::<String>::new()));
+    let injector = Arc::new(CapturingInjector(Arc::clone(&injected)));
+
+    let mut cfg = Config::default();
+    cfg.polish.enabled = true;
+    cfg.polish.backend = PolishBackend::OpenAI;
+    cfg.general.languages = vec!["ro".into(), "en".into()];
+    let cfg = Arc::new(cfg);
+
+    let (orch, _rx) = orchestrator_for_test(
+        stt,
+        polish,
+        &db_path,
+        Arc::clone(&cfg),
+        injector,
+        Arc::new(StubFocus),
+    );
+
+    let outcome = orch.run_oneshot(vec![0.0_f32; 16_000], 1000).await;
+    assert!(matches!(outcome, PipelineOutcome::Completed { .. }));
+
+    // The candidate set reached the formatter intact.
+    assert_eq!(candidates.lock().unwrap().clone(), vec!["ro".to_string(), "en".to_string()]);
+
+    // The rendered system prompt carries the Romanian diacritic directive.
+    let sp = system_prompt.lock().unwrap().clone();
+    assert!(sp.contains("Romanian"), "directive must name Romanian: {sp}");
+    assert!(sp.contains("English"), "directive must name English: {sp}");
+    assert!(sp.contains("ă, â, î, ș, ț"), "directive must list Romanian diacritics: {sp}");
+    // No engine language ⇒ no soft-hint sentence.
+    assert!(!sp.contains("It is most likely"), "no soft hint when STT reports no language: {sp}");
+}
+
+/// Plan task E2 — when the STT engine *does* report a language inside
+/// the candidate set (`language: Some("ro")`), the soft-hint sentence
+/// is added on top of the directive. Covers the Whisper/Groq path
+/// without making it load-bearing.
+#[tokio::test]
+async fn pipeline_adds_soft_hint_sentence_when_stt_reports_language() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("history.sqlite");
+
+    let stt: Arc<dyn SpeechToText> =
+        Arc::new(FakeStt { text: "as vrea sa merg acasa".into(), lang: Some("ro".into()) });
+    let candidates = Arc::new(Mutex::new(Vec::<String>::new()));
+    let system_prompt = Arc::new(Mutex::new(String::new()));
+    let polish: Option<Arc<dyn TextFormatter>> = Some(Arc::new(AssertingPolish {
+        candidates: Arc::clone(&candidates),
+        system_prompt: Arc::clone(&system_prompt),
+    }));
+    let injected = Arc::new(Mutex::new(Vec::<String>::new()));
+    let injector = Arc::new(CapturingInjector(Arc::clone(&injected)));
+
+    let mut cfg = Config::default();
+    cfg.polish.enabled = true;
+    cfg.polish.backend = PolishBackend::OpenAI;
+    cfg.general.languages = vec!["ro".into(), "en".into()];
+    let cfg = Arc::new(cfg);
+
+    let (orch, _rx) = orchestrator_for_test(
+        stt,
+        polish,
+        &db_path,
+        Arc::clone(&cfg),
+        injector,
+        Arc::new(StubFocus),
+    );
+
+    let outcome = orch.run_oneshot(vec![0.0_f32; 16_000], 1000).await;
+    assert!(matches!(outcome, PipelineOutcome::Completed { .. }));
+
+    let sp = system_prompt.lock().unwrap().clone();
+    assert!(sp.contains("This transcript is in one of"), "directive present: {sp}");
+    assert!(sp.contains("It is most likely Romanian."), "soft-hint sentence must appear: {sp}");
+}

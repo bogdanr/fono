@@ -13,6 +13,7 @@
 //! (`xdotool`/`wtype`/`ydotool`/`enigo`) is installed.
 
 use anyhow::{anyhow, Context, Result};
+use std::collections::HashMap;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::ConnectionExt as XprotoExt;
 use x11rb::protocol::xtest::ConnectionExt as XtestExt;
@@ -38,9 +39,23 @@ pub fn xtest_type_available() -> bool {
     conn.xtest_get_version(2, 2).ok().and_then(|c| c.reply().ok()).is_some()
 }
 
+/// Map a character to the X11 keysym we synthesize for it.
+fn char_keysym(ch: char) -> u32 {
+    match ch {
+        '\n' => XK_RETURN,
+        '\t' => XK_TAB,
+        '\u{0008}' => XK_BACKSPACE,
+        c if (c as u32) < 0x80 => c as u32,
+        // X11 Unicode keysym range. See "A proposal for adding
+        // Unicode keysyms to X" (Markus Kuhn, 1998).
+        c => 0x0100_0000 | (c as u32),
+    }
+}
+
 /// Type `text` into the currently focused X window, one character at a
 /// time, via XTEST. Returns once every keystroke event has been sent to
 /// the X server.
+#[allow(clippy::too_many_lines)]
 pub fn type_via_xtest(text: &str) -> Result<()> {
     if text.is_empty() {
         return Ok(());
@@ -85,31 +100,56 @@ pub fn type_via_xtest(text: &str) -> Result<()> {
 
     let shift_kc = lookup(XK_SHIFT_L).map(|(kc, _)| kc);
 
-    // Find a "spare" keycode: one whose every keysym slot is `NoSymbol`
-    // (0). We use this slot to temporarily map characters absent from
-    // the user's active layout (e.g. accented letters on a plain US
-    // layout, emoji, CJK), fire the synthetic press, then restore the
-    // slot to `NoSymbol` at the end.
-    let spare_kc: Option<u8> = mapping
+    // Collect every keycode whose keysym slots are all `NoSymbol` (0).
+    // These "spare" slots get temporarily mapped to characters absent
+    // from the user's active layout (accented letters on a plain US
+    // layout, emoji, CJK, …), then restored at the end.
+    let spares: Vec<u8> = mapping
         .keysyms
         .chunks(per)
         .enumerate()
-        .find(|(_, chunk)| chunk.iter().all(|&s| s == 0))
-        .and_then(|(i, _)| u8::try_from(i).ok())
-        .and_then(|i| min_kc.checked_add(i));
+        .filter(|(_, chunk)| chunk.iter().all(|&s| s == 0))
+        .filter_map(|(i, _)| u8::try_from(i).ok())
+        .filter_map(|i| min_kc.checked_add(i))
+        .collect();
 
-    let mut spare_was_used = false;
+    // Assign each *distinct* out-of-layout keysym its OWN spare keycode
+    // and program the whole batch up front, BEFORE typing anything.
+    //
+    // The previous implementation reused a single spare keycode and
+    // remapped it between every character. That races against keysym
+    // translation: a `KeyPress` carries only the keycode, and the
+    // receiving client resolves it to a keysym using whatever keymap it
+    // holds when it dequeues the event — by which point a later
+    // remap of that same keycode may already have landed. The result
+    // was dropped/swapped diacritics (e.g. Romanian "să" arriving as
+    // "sș"). Giving each character a stable, distinct keycode that is
+    // never remapped mid-run removes the race entirely.
+    let mut assigned: HashMap<u32, u8> = HashMap::new();
+    for ch in text.chars() {
+        let keysym = char_keysym(ch);
+        if lookup(keysym).is_some() || assigned.contains_key(&keysym) {
+            continue;
+        }
+        let Some(&kc) = spares.get(assigned.len()) else {
+            // Ran out of spare keycodes — extremely unlikely (typical
+            // keymaps expose 100+ free slots vs. a handful of distinct
+            // accented glyphs). The unassigned characters fall through
+            // to the warn-and-skip path below.
+            break;
+        };
+        let new_syms: Vec<u32> = (0..per).map(|_| keysym).collect();
+        conn.change_keyboard_mapping(1, kc, per_u8, &new_syms)
+            .context("xtest-type: ChangeKeyboardMapping (remap) failed")?;
+        assigned.insert(keysym, kc);
+    }
+    if !assigned.is_empty() {
+        // One round-trip so every remap is in effect before we type.
+        conn.sync().context("xtest-type: sync after remap failed")?;
+    }
 
     for ch in text.chars() {
-        let keysym: u32 = match ch {
-            '\n' => XK_RETURN,
-            '\t' => XK_TAB,
-            '\u{0008}' => XK_BACKSPACE,
-            c if (c as u32) < 0x80 => c as u32,
-            // X11 Unicode keysym range. See "A proposal for adding
-            // Unicode keysyms to X" (Markus Kuhn, 1998).
-            c => 0x0100_0000 | (c as u32),
-        };
+        let keysym = char_keysym(ch);
 
         if let Some((kc, shifted)) = lookup(keysym) {
             if shifted {
@@ -129,18 +169,10 @@ pub fn type_via_xtest(text: &str) -> Result<()> {
                 fake_input(&conn, KEY_PRESS, kc)?;
                 fake_input(&conn, KEY_RELEASE, kc)?;
             }
-        } else if let Some(skc) = spare_kc {
-            // Remap the spare keycode to this keysym, tap it, leave the
-            // mapping in place for the next character (we restore once
-            // at the end of the run rather than per character to halve
-            // the number of round-trips).
-            let new_syms: Vec<u32> = (0..per).map(|_| keysym).collect();
-            conn.change_keyboard_mapping(1, skc, per_u8, &new_syms)
-                .context("xtest-type: ChangeKeyboardMapping (remap) failed")?;
-            conn.sync().context("xtest-type: sync after remap failed")?;
-            fake_input(&conn, KEY_PRESS, skc)?;
-            fake_input(&conn, KEY_RELEASE, skc)?;
-            spare_was_used = true;
+        } else if let Some(&kc) = assigned.get(&keysym) {
+            // Pre-mapped, stable keycode — safe to tap with no remap.
+            fake_input(&conn, KEY_PRESS, kc)?;
+            fake_input(&conn, KEY_RELEASE, kc)?;
         } else {
             tracing::warn!(
                 "xtest-type: character {ch:?} (keysym 0x{keysym:x}) not in active keymap and \
@@ -150,14 +182,16 @@ pub fn type_via_xtest(text: &str) -> Result<()> {
         }
     }
 
-    // Restore the spare keycode to NoSymbol so we leave the user's
-    // keymap exactly as we found it. Only needed if we actually used it.
-    if spare_was_used {
-        if let Some(skc) = spare_kc {
-            let zeros: Vec<u32> = (0..per).map(|_| 0_u32).collect();
-            if let Err(e) = conn.change_keyboard_mapping(1, skc, per_u8, &zeros) {
-                tracing::warn!("xtest-type: failed to restore spare keycode {skc}: {e}");
-            }
+    // Flush all key events so the receiving client has translated them
+    // against the batch mapping BEFORE we restore the spares below.
+    conn.sync().context("xtest-type: sync after typing failed")?;
+
+    // Restore every spare keycode we touched to `NoSymbol`, leaving the
+    // user's keymap exactly as we found it.
+    let zeros: Vec<u32> = (0..per).map(|_| 0_u32).collect();
+    for &kc in assigned.values() {
+        if let Err(e) = conn.change_keyboard_mapping(1, kc, per_u8, &zeros) {
+            tracing::warn!("xtest-type: failed to restore spare keycode {kc}: {e}");
         }
     }
     conn.sync().context("xtest-type: final server sync failed")?;
@@ -165,7 +199,7 @@ pub fn type_via_xtest(text: &str) -> Result<()> {
         target: "fono::inject::xtest_type",
         chars = text.chars().count(),
         bytes = text.len(),
-        used_remap = spare_was_used,
+        remapped = assigned.len(),
         "typed via XTEST"
     );
     Ok(())
