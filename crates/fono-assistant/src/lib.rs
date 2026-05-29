@@ -25,5 +25,5 @@ pub mod anthropic_chat;
 pub mod openai_compat_chat;
 
 pub use factory::build_assistant;
-pub use history::{ChatRole, ChatTurn, ConversationHistory};
-pub use traits::{Assistant, AssistantContext, ScreenCaptureFn, TokenDelta};
+pub use history::{ChatRole, ChatTurn, ConversationHistory, ToolCall};
+pub use traits::{Assistant, AssistantContext, ScreenCaptureFn, TokenDelta, ToolEvent};

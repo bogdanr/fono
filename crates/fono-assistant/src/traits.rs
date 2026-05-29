@@ -8,16 +8,57 @@ use async_trait::async_trait;
 use fono_core::screen_capture::{CaptureError, CaptureMode, CapturedImage};
 use futures::stream::BoxStream;
 
-use crate::history::ChatTurn;
+use crate::history::{ChatTurn, ToolCall};
 
-/// One token delta yielded by [`Assistant::reply_stream`]. `text` is
-/// the new piece of model output (typically a single token's worth of
-/// characters). The struct is kept future-proof for tool-call deltas
-/// (function calls, audio output, etc.) by leaving room for new
-/// optional fields without a breaking change.
+/// One token delta yielded by [`Assistant::reply_stream`]. Most
+/// deltas carry spoken `text`; a small number carry a sentinel
+/// [`ToolEvent`] that the caller MUST record in
+/// [`crate::ConversationHistory`] so subsequent turns can echo the
+/// tool sequence back to the model.
+///
+/// A single delta carries _either_ `text` or `tool_event` — never
+/// both at once. Callers should branch on `tool_event` first; if
+/// `Some`, ignore `text`.
 #[derive(Debug, Clone, Default)]
 pub struct TokenDelta {
     pub text: String,
+    /// Sentinel for non-text events on the stream (tool call issued,
+    /// tool result observed). When `Some`, this delta has no spoken
+    /// content and the caller should append a corresponding entry
+    /// to the rolling history before pushing the final assistant
+    /// reply.
+    pub tool_event: Option<ToolEvent>,
+}
+
+impl TokenDelta {
+    /// Build a pure-text delta. Equivalent to `TokenDelta { text,
+    /// tool_event: None }` but reads cleaner at call sites.
+    #[must_use]
+    pub fn text(text: String) -> Self {
+        Self { text, tool_event: None }
+    }
+
+    /// Build a sentinel delta carrying a [`ToolEvent`]. The `text`
+    /// field is empty and must not be spoken.
+    #[must_use]
+    pub fn tool(event: ToolEvent) -> Self {
+        Self { text: String::new(), tool_event: Some(event) }
+    }
+}
+
+/// Side-band events on the token stream that record tool usage.
+/// Emitted by the assistant client during a turn where the model
+/// invoked a function-calling tool.
+#[derive(Debug, Clone)]
+pub enum ToolEvent {
+    /// The model issued a tool call. The caller should append an
+    /// assistant turn with this tool call to history so the next
+    /// turn's wire request can echo it back to the model.
+    Called(ToolCall),
+    /// The tool returned a result. `summary` is a short, prose
+    /// description suitable for storing in history; the actual
+    /// payload (image bytes, etc.) is _not_ retained.
+    Result { tool_call_id: String, summary: String },
 }
 
 /// Synchronous screen-capture callback type. The closure runs the

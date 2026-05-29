@@ -36,6 +36,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true, optional = true }
 fono-http = { path = "../fono-http", optional = true }
+base64 = "0.22"
 
 [dev-dependencies]
 tokio = { workspace = true }

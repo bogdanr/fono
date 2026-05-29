@@ -209,9 +209,9 @@ impl GrabberProbe {
         // Spectacle is a KDE-only tool; it hangs in non-KDE sessions because
         // it waits for KDE D-Bus services. Only include it when KDE_FULL_SESSION
         // is set (KDE Plasma) or XDG_CURRENT_DESKTOP contains "KDE".
-        let in_kde_session = std::env::var_os("KDE_FULL_SESSION").map_or(false, |v| !v.is_empty())
+        let in_kde_session = std::env::var_os("KDE_FULL_SESSION").is_some_and(|v| !v.is_empty())
             || std::env::var("XDG_CURRENT_DESKTOP")
-                .map_or(false, |d| d.to_ascii_uppercase().contains("KDE"));
+                .is_ok_and(|d| d.to_ascii_uppercase().contains("KDE"));
         let has_display = display.is_some();
 
         if wayland.is_some() {

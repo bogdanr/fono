@@ -14,21 +14,40 @@ pub enum ChatRole {
     User,
     Assistant,
     System,
+    /// Result of a tool/function call executed on behalf of the
+    /// model. Paired with the originating assistant turn via
+    /// [`ChatTurn::tool_call_id`]. OpenAI-compatible providers use
+    /// the literal wire role `"tool"`; Anthropic is text-only for
+    /// now and downgrades these turns to a brief narration.
+    Tool,
 }
 
 impl ChatRole {
     /// Lower-case wire identifier. OpenAI-compatible providers use
-    /// `system|user|assistant`; Anthropic uses `user|assistant` and
-    /// elevates `system` to a top-level field — backends translate
-    /// as needed.
+    /// `system|user|assistant|tool`; Anthropic uses `user|assistant`
+    /// and elevates `system` to a top-level field — backends
+    /// translate as needed.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",
             Self::Assistant => "assistant",
             Self::System => "system",
+            Self::Tool => "tool",
         }
     }
+}
+
+/// One tool/function call as emitted by the model. Mirrors the
+/// OpenAI `tool_calls[].function` wire shape. `arguments` is a raw
+/// JSON string per the spec (it is _not_ pre-parsed because the
+/// model may emit invalid JSON that still needs to be echoed back
+/// verbatim on subsequent turns).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +57,14 @@ pub struct ChatTurn {
     /// Wall-clock instant at which the turn was recorded. Used by
     /// [`ConversationHistory`]'s window-based pruning.
     pub at: Instant,
+    /// Populated on [`ChatRole::Assistant`] turns where the model
+    /// invoked one or more tools. Empty otherwise. When non-empty,
+    /// `content` is usually empty too (the model emits either text
+    /// _or_ tool calls in a single completion, not both).
+    pub tool_calls: Vec<ToolCall>,
+    /// Populated on [`ChatRole::Tool`] turns; pairs the result back
+    /// to the originating call in the preceding assistant turn.
+    pub tool_call_id: Option<String>,
 }
 
 /// Rolling chat history.
@@ -71,18 +98,41 @@ impl ConversationHistory {
 
     /// Append a user turn.
     pub fn push_user(&mut self, content: String) {
-        self.push(ChatRole::User, content);
+        self.push_full(ChatRole::User, content, Vec::new(), None);
     }
 
     /// Append an assistant turn (the model's reply).
     pub fn push_assistant(&mut self, content: String) {
-        self.push(ChatRole::Assistant, content);
+        self.push_full(ChatRole::Assistant, content, Vec::new(), None);
     }
 
-    fn push(&mut self, role: ChatRole, content: String) {
+    /// Append an assistant turn whose only output was a set of tool
+    /// calls. `content` may be empty (and usually is — the model
+    /// either spoke or called tools, not both). The list MUST match
+    /// the tool calls actually issued so the next turn's wire
+    /// serialisation can echo them back.
+    pub fn push_assistant_tool_calls(&mut self, content: String, calls: Vec<ToolCall>) {
+        self.push_full(ChatRole::Assistant, content, calls, None);
+    }
+
+    /// Append a tool-result turn. `content` is a short text summary
+    /// that the model can read in subsequent turns; the actual tool
+    /// payload (image data, large blobs) is _not_ retained in
+    /// history.
+    pub fn push_tool_result(&mut self, tool_call_id: String, summary: String) {
+        self.push_full(ChatRole::Tool, summary, Vec::new(), Some(tool_call_id));
+    }
+
+    fn push_full(
+        &mut self,
+        role: ChatRole,
+        content: String,
+        tool_calls: Vec<ToolCall>,
+        tool_call_id: Option<String>,
+    ) {
         let at = Instant::now();
         self.last_activity = Some(at);
-        self.turns.push_back(ChatTurn { role, content, at });
+        self.turns.push_back(ChatTurn { role, content, at, tool_calls, tool_call_id });
         self.trim_max_turns();
     }
 
@@ -216,6 +266,35 @@ mod tests {
         assert_eq!(ChatRole::User.as_str(), "user");
         assert_eq!(ChatRole::Assistant.as_str(), "assistant");
         assert_eq!(ChatRole::System.as_str(), "system");
+        assert_eq!(ChatRole::Tool.as_str(), "tool");
+    }
+
+    #[test]
+    fn tool_call_turns_round_trip_through_history() {
+        let mut h = ConversationHistory::default();
+        h.push_user("what am I looking at?".into());
+        h.push_assistant_tool_calls(
+            String::new(),
+            vec![ToolCall {
+                id: "call_1".into(),
+                name: "fono_screen".into(),
+                arguments: "{\"mode\":\"automatic\"}".into(),
+            }],
+        );
+        h.push_tool_result("call_1".into(), "Captured 800x600 PNG of focused window".into());
+        h.push_assistant("Looks like a terminal with an error.".into());
+
+        let snap = h.snapshot();
+        assert_eq!(snap.len(), 4);
+        assert_eq!(snap[0].role, ChatRole::User);
+        assert_eq!(snap[1].role, ChatRole::Assistant);
+        assert_eq!(snap[1].tool_calls.len(), 1);
+        assert_eq!(snap[1].tool_calls[0].name, "fono_screen");
+        assert_eq!(snap[2].role, ChatRole::Tool);
+        assert_eq!(snap[2].tool_call_id.as_deref(), Some("call_1"));
+        assert!(snap[2].content.contains("Captured"));
+        assert_eq!(snap[3].role, ChatRole::Assistant);
+        assert!(snap[3].tool_calls.is_empty());
     }
 
     #[test]

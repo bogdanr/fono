@@ -139,8 +139,31 @@ impl Assistant for AnthropicChat {
                     }
                     history_system_extra.push_str(&turn.content);
                 }
-                ChatRole::User | ChatRole::Assistant => {
-                    messages.push(Message { role: turn.role.as_str(), content: &turn.content });
+                ChatRole::User => {
+                    messages.push(Message { role: "user", content: &turn.content });
+                }
+                ChatRole::Assistant => {
+                    // Anthropic Messages API rejects empty assistant
+                    // turns. When the model only emitted tool_calls
+                    // (no text), the rolling history records an
+                    // empty-content assistant turn; collapse it to a
+                    // short narration so the API accepts the request.
+                    if turn.content.is_empty() && !turn.tool_calls.is_empty() {
+                        // Skip — the following `Tool` turn will
+                        // carry the prose summary.
+                        continue;
+                    }
+                    messages.push(Message { role: "assistant", content: &turn.content });
+                }
+                ChatRole::Tool => {
+                    // Anthropic's `messages` array doesn't have a
+                    // tool role on the OpenAI-style wire (Anthropic's
+                    // own tool-use shape lives inside content blocks
+                    // and is not wired here yet). Downgrade the
+                    // result to a brief user-channel narration so
+                    // subsequent turns still have the context. The
+                    // actual image is _not_ resent.
+                    messages.push(Message { role: "user", content: &turn.content });
                 }
             }
         }
@@ -229,7 +252,7 @@ impl Assistant for AnthropicChat {
                             if is_text {
                                 if let Some(text) = parsed.delta.text {
                                     if !text.is_empty()
-                                        && tx.send(Ok(TokenDelta { text })).await.is_err()
+                                        && tx.send(Ok(TokenDelta::text(text))).await.is_err()
                                     {
                                         return;
                                     }

@@ -20,7 +20,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use fono_assistant::{Assistant, AssistantContext, ConversationHistory, ScreenCaptureFn};
+use fono_assistant::{
+    Assistant, AssistantContext, ConversationHistory, ScreenCaptureFn, ToolEvent,
+};
 use fono_audio::AudioPlayback;
 use fono_hotkey::HotkeyAction;
 use fono_stt::SpeechToText;
@@ -265,6 +267,10 @@ pub async fn run_assistant_turn(
     let mut first_audio_at: Option<std::time::Instant> = None;
     let mut speaking_announced = false;
     let mut synthesising_announced = false;
+    // Tool events observed on the stream. Recorded into history
+    // after the turn finishes so subsequent turns can echo the
+    // tool-call exchange back to the model. None ⇒ no tool used.
+    let mut tool_event_log: Vec<ToolEvent> = Vec::new();
 
     loop {
         let next = tokio::select! {
@@ -322,6 +328,15 @@ pub async fn run_assistant_turn(
                 o.set_state(fono_overlay::OverlayState::AssistantSynthesising);
             }
         }
+        // Tool sentinels carry no spoken text — record them and
+        // skip the splitter / TTS path entirely. The assistant
+        // client follows up with the real prose reply on the same
+        // stream.
+        if let Some(event) = delta.tool_event {
+            debug!(target: "fono::assistant", ?event, "tool event recorded for history");
+            tool_event_log.push(event);
+            continue;
+        }
         full_reply.push_str(&delta.text);
         for sentence in splitter.push(&delta.text) {
             if synth_and_enqueue(&state, &tts, &sentence, &notify).await {
@@ -376,12 +391,30 @@ pub async fn run_assistant_turn(
         }
     }
 
-    // 6. Push the assistant turn into history (with whatever we got
-    //    before cancellation; partial replies still inform the next
-    //    turn).
-    if !full_reply.trim().is_empty() {
+    // 6. Push the assistant turn(s) into history. When the model
+    //    used a tool, the rolling log expands to three entries so
+    //    subsequent turns can echo the canonical tool sequence back
+    //    to the provider:
+    //
+    //      assistant (tool_calls=...) → tool (result summary) → assistant (text)
+    //
+    //    All three are appended atomically under a single lock so a
+    //    cancelled turn cannot leave history half-rebuilt.
+    {
         let mut s = state.lock().await;
-        s.history.push_assistant(full_reply.trim().to_string());
+        for event in tool_event_log {
+            match event {
+                ToolEvent::Called(call) => {
+                    s.history.push_assistant_tool_calls(String::new(), vec![call]);
+                }
+                ToolEvent::Result { tool_call_id, summary } => {
+                    s.history.push_tool_result(tool_call_id, summary);
+                }
+            }
+        }
+        if !full_reply.trim().is_empty() {
+            s.history.push_assistant(full_reply.trim().to_string());
+        }
     }
 
     info!(
