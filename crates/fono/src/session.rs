@@ -263,6 +263,76 @@ pub struct PipelineMetrics {
     pub inject_backend: String,
 }
 
+/// Outcome classification for one tool call observed during an
+/// assistant turn. Maps onto the short token shown after the tool
+/// name in the `assistant:` summary line (e.g. `[fono_screen 1284ms]`
+/// vs `[fono_screen failed=cancelled]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssistantToolOutcome {
+    /// Tool returned a usable result.
+    Ok,
+    /// User pressed Escape in the OS-side region picker.
+    Cancelled,
+    /// Focused window was on the private-window allow-list and the
+    /// capture was refused before any pixels were read.
+    Private,
+    /// No grabber tool was available on the system.
+    NoTool,
+    /// Anything else (timeouts, downscale failures, …).
+    Failed,
+}
+
+/// One tool invocation observed during an assistant turn.
+#[derive(Debug, Clone)]
+pub struct AssistantToolMetric {
+    /// Tool name as registered with the LLM (e.g. `"fono_screen"`).
+    pub name: String,
+    /// Wall-clock time spent executing the tool, measured from the
+    /// `ToolEvent::Called` sentinel to the matching `ToolEvent::Result`.
+    pub exec_ms: u64,
+    /// Classification of the result for the summary tag.
+    pub outcome: AssistantToolOutcome,
+}
+
+/// Per-turn metrics for the assistant (F8) pipeline. Populated by
+/// [`crate::assistant::run_assistant_turn`] and consumed by
+/// [`format_assistant_summary`].
+#[derive(Debug, Clone, Default)]
+pub struct AssistantTurnMetrics {
+    /// Total wall-clock time from start of STT to the moment the
+    /// last audio chunk was queued for playback. Drain time is not
+    /// included.
+    pub total_ms: u64,
+    /// Detected / configured language. `None` ⇒ rendered as `?`.
+    pub language: Option<String>,
+    /// Batch STT latency. `None` when the live-streaming path
+    /// supplied a pre-transcribed string instead.
+    pub stt_ms: Option<u64>,
+    /// User-text length in chars (the prompt sent to the LLM).
+    pub user_chars: usize,
+    /// Time-to-first-delta on the LLM stream. `0` when the turn
+    /// aborted before any delta arrived.
+    pub llm_ttfb_ms: u64,
+    /// Total LLM streaming time including any tool round-trip wait.
+    pub llm_total_ms: u64,
+    /// Assistant reply length in chars (what gets spoken).
+    pub reply_chars: usize,
+    /// Tools observed in execution order. Empty for plain text-only
+    /// turns. Currently only `fono_screen` is registered.
+    pub tools: Vec<AssistantToolMetric>,
+    /// Time-to-first-audio queued for playback. `None` when no
+    /// audio was produced (cancelled before TTS, empty reply, …).
+    pub tts_ttfa_ms: Option<u64>,
+    /// Number of sentences synthesised + enqueued. Even when audio
+    /// production happened, this can be zero if cancellation hit
+    /// between splitter pushes.
+    pub sentences: u32,
+    /// True when the turn was aborted mid-stream (cancel hotkey,
+    /// playback-stop, etc.). Renders as `| aborted` at the end of
+    /// the summary line.
+    pub aborted: bool,
+}
+
 /// Outcome of one full dictation pipeline run, returned by the inner
 /// pipeline task and consumed by the daemon for tray + tracing.
 #[derive(Debug, Clone)]
@@ -3393,18 +3463,76 @@ fn now_unix() -> i64 {
 
 // ─── log helpers ──────────────────────────────────────────────────────────────
 
-/// ANSI yellow escape, used to flag slow pipeline stages.
-/// Only emitted when stdout is a TTY; stripped otherwise so log files
-/// stay clean.
+/// Whether log lines may carry ANSI color escapes. True iff stderr
+/// (where tracing writes — see `main.rs::init_tracing`) is a TTY and
+/// `NO_COLOR` is unset. Cached on first call.
+///
+/// This is the **single** gate shared between the in-message color
+/// helpers here (e.g. [`yellow`]) and the tracing `fmt` layer's
+/// `with_ansi(..)` flag. Keeping them in lock-step is what prevents
+/// literal `\x1b[33m` bytes from leaking into redirected logs
+/// (journald, files, copy-paste): if the formatter won't interpret
+/// escapes, we must not bake them into the message either.
+#[must_use]
+pub fn log_color_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("NO_COLOR").is_none()
+            && std::io::IsTerminal::is_terminal(&std::io::stderr())
+    })
+}
+
+/// ANSI yellow wrap, used to flag slow pipeline stages in the
+/// `pipeline:` / `assistant:` summary lines.
+///
+/// Gated on [`log_color_enabled`] — the **same** gate the tracing
+/// `fmt` layer's `with_ansi(..)` consults (see `main.rs`). When stderr
+/// is a real terminal the number turns yellow; when it is redirected
+/// (journald, a log file, a pipe for parsing) the gate is false and
+/// the plain digits are emitted with **no** escape bytes and **no**
+/// marker character — so captured logs stay clean and trivially
+/// parseable. The formatter and the message thus always agree: either
+/// both colour, or neither does.
 fn yellow(s: &str) -> String {
-    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+    if log_color_enabled() {
         format!("\x1b[33m{s}\x1b[0m")
     } else {
         s.to_string()
     }
 }
 
-/// Format a millisecond value, colouring it yellow when it exceeds `warn_ms`.
+/// Per-stage latency thresholds (milliseconds). A pipeline/assistant
+/// summary stage is painted yellow once its measured duration reaches
+/// the matching value here **and** colour is enabled (see [`fmt_ms`]).
+///
+/// These are the single source of truth for "what counts as slow" in
+/// the `pipeline:` / `pipeline (live):` / `assistant:` summary lines —
+/// adjust a number here and every call site updates. They are tuning
+/// hints only: changing one never alters what is logged, just whether
+/// the figure is highlighted on a colour-capable terminal.
+mod warn_ms {
+    /// Speech-to-text transcription (batch and assistant paths).
+    pub const STT: u64 = 3_000;
+    /// LLM polish pass (batch and live dictation paths).
+    pub const POLISH: u64 = 1_000;
+    /// Text injection into the focused window.
+    pub const INJECT: u64 = 500;
+    /// Assistant LLM time-to-first-byte.
+    pub const LLM_TTFB: u64 = 1_500;
+    /// Assistant LLM total generation time.
+    pub const LLM_TOTAL: u64 = 7_000;
+    /// A single assistant tool-call execution.
+    pub const TOOL_EXEC: u64 = 1_000;
+    /// Assistant TTS time-to-first-audio.
+    pub const TTS_TTFA: u64 = 2_500;
+}
+
+/// Format a millisecond value, colouring it yellow when it exceeds
+/// `warn_ms` **and** colour is enabled. Below the threshold, or when
+/// colour is disabled, the bare `<n>ms` is returned unchanged — no
+/// suffix, no escape — so the value parses identically in every sink.
+/// Thresholds live in the [`warn_ms`] module.
 fn fmt_ms(ms: u64, warn_ms: u64) -> String {
     let s = format!("{ms}ms");
     if ms >= warn_ms {
@@ -3458,16 +3586,16 @@ fn build_ctx_tag(ctx: &fono_polish::FormatContext, app_class: Option<&str>) -> S
 fn format_pipeline_summary(m: &PipelineMetrics) -> String {
     let capture = fmt_capture(m.capture_ms);
     let lang = m.language.as_deref().unwrap_or("?");
-    let stt = fmt_ms(m.stt_ms, 2_000);
+    let stt = fmt_ms(m.stt_ms, warn_ms::STT);
     let polish_seg = if m.llm_skipped_short {
         "polish skipped (short)".to_string()
     } else if m.llm_ms == 0 && m.ctx_tag.is_empty() {
         "polish none".to_string()
     } else {
-        let pol = fmt_ms(m.llm_ms, 1_500);
+        let pol = fmt_ms(m.llm_ms, warn_ms::POLISH);
         format!("polish {pol} [{}] {} → {} chars", m.ctx_tag, m.raw_chars, m.final_chars)
     };
-    let inject = fmt_ms(m.inject_ms, 500);
+    let inject = fmt_ms(m.inject_ms, warn_ms::INJECT);
     format!(
         "pipeline: {capture} trim={}ms | {lang} | stt {stt} {} chars | {polish_seg} | inject {} {inject}",
         m.trim_ms,
@@ -3495,13 +3623,67 @@ fn format_pipeline_summary_live(
     let polish_seg = if polish_backend == "none" {
         "polish none".to_string()
     } else {
-        let pol = fmt_ms(polish_ms, 1_500);
+        let pol = fmt_ms(polish_ms, warn_ms::POLISH);
         format!("polish {pol} [{ctx_tag}] {raw_chars} → {final_chars} chars")
     };
-    let inject = fmt_ms(inject_ms, 500);
+    let inject = fmt_ms(inject_ms, warn_ms::INJECT);
     format!(
         "pipeline (live): {capture} | {lang} | stt streaming ({segments} segs) {raw_chars} chars | {polish_seg} | inject {inject_backend} {inject}",
     )
+}
+
+/// Format the single `assistant:` INFO line emitted at the end of
+/// every F8 voice turn. Style mirrors [`format_pipeline_summary`] so
+/// the dictation and assistant lines read alike when scrolling the
+/// log.
+///
+/// Stages slower than their threshold are coloured yellow when colour
+/// is enabled (real terminal, `NO_COLOR` unset); otherwise the plain
+/// number is emitted (see [`fmt_ms`]):
+/// * STT       > 2 000 ms
+/// * LLM ttfb  > 1 500 ms
+/// * LLM total > 5 000 ms
+/// * Tool exec > 1 000 ms
+/// * TTS ttfa  > 1 500 ms
+#[must_use]
+pub fn format_assistant_summary(m: &AssistantTurnMetrics) -> String {
+    let total = fmt_capture(m.total_ms);
+    let lang = m.language.as_deref().unwrap_or("?");
+    let stt_seg = m.stt_ms.map_or_else(
+        || format!("stt skipped (live) {} chars in", m.user_chars),
+        |ms| format!("stt {} {} chars in", fmt_ms(ms, warn_ms::STT), m.user_chars),
+    );
+    let llm_seg = format!(
+        "llm {} ttfb / {} {} chars out",
+        fmt_ms(m.llm_ttfb_ms, warn_ms::LLM_TTFB),
+        fmt_ms(m.llm_total_ms, warn_ms::LLM_TOTAL),
+        m.reply_chars,
+    );
+    let tool_seg = if m.tools.is_empty() {
+        String::new()
+    } else {
+        let inner = m
+            .tools
+            .iter()
+            .map(|t| match t.outcome {
+                AssistantToolOutcome::Ok => {
+                    format!("{} {}", t.name, fmt_ms(t.exec_ms, warn_ms::TOOL_EXEC))
+                }
+                AssistantToolOutcome::Cancelled => format!("{} failed=cancelled", t.name),
+                AssistantToolOutcome::Private => format!("{} failed=private", t.name),
+                AssistantToolOutcome::NoTool => format!("{} failed=no-tool", t.name),
+                AssistantToolOutcome::Failed => format!("{} failed", t.name),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" [{inner}]")
+    };
+    let tts_seg = m.tts_ttfa_ms.map_or_else(
+        || "tts none".to_string(),
+        |ms| format!("tts {} ttfa / {} sent", fmt_ms(ms, warn_ms::TTS_TTFA), m.sentences),
+    );
+    let tail = if m.aborted { " | aborted" } else { "" };
+    format!("assistant: {total} | {lang} | {stt_seg} | {llm_seg}{tool_seg} | {tts_seg}{tail}")
 }
 
 /// Helper used by `fono record` and the integration test to construct an
@@ -3563,5 +3745,135 @@ mod tests {
             Some("use casual tone"),
         );
         assert!(matched_rule_suffix(&c.context_rules, Some("Firefox"), None).is_none());
+    }
+
+    #[test]
+    fn assistant_summary_full_turn_with_tool() {
+        let m = AssistantTurnMetrics {
+            total_ms: 4823,
+            language: Some("en".into()),
+            stt_ms: Some(580),
+            user_chars: 14,
+            llm_ttfb_ms: 234,
+            llm_total_ms: 2103,
+            reply_chars: 312,
+            tools: vec![AssistantToolMetric {
+                name: "fono_screen".into(),
+                exec_ms: 1284,
+                outcome: AssistantToolOutcome::Ok,
+            }],
+            tts_ttfa_ms: Some(420),
+            sentences: 8,
+            aborted: false,
+        };
+        // Tests run with stderr piped (non-TTY), so `log_color_enabled()`
+        // is false: numbers are plain, no colour, no marker — even the
+        // slow 1284 ms tool exec.
+        let line = format_assistant_summary(&m);
+        assert_eq!(
+            line,
+            "assistant: 4823ms | en | stt 580ms 14 chars in | llm 234ms ttfb / 2103ms 312 chars out [fono_screen 1284ms] | tts 420ms ttfa / 8 sent"
+        );
+    }
+
+    #[test]
+    fn assistant_summary_clean_when_color_disabled() {
+        // Under `cargo test` stderr is a pipe, so `log_color_enabled()`
+        // is false: the summary must carry NO ANSI escape bytes and NO
+        // suffix marker — just bare `<n>ms` numbers — so a captured log
+        // (journald, file, `fono doctor` replay) is trivially parseable.
+        // Use deliberately slow values so every threshold would fire if
+        // colour were on.
+        let m = AssistantTurnMetrics {
+            total_ms: 7577,
+            language: None,
+            stt_ms: Some(9000),
+            user_chars: 26,
+            llm_ttfb_ms: 9000,
+            llm_total_ms: 9000,
+            reply_chars: 344,
+            tools: vec![AssistantToolMetric {
+                name: "fono_screen".into(),
+                exec_ms: 9000,
+                outcome: AssistantToolOutcome::Ok,
+            }],
+            tts_ttfa_ms: Some(9000),
+            sentences: 2,
+            aborted: false,
+        };
+        let line = format_assistant_summary(&m);
+        assert!(!line.contains('\u{1b}'), "summary leaked an ANSI escape: {line:?}");
+        assert!(!line.contains("\\x1b"), "summary leaked a literal escape: {line:?}");
+        // Plain digits, no marker — slow stages look identical to fast
+        // ones when colour is off (the colour, when on, is the only cue).
+        assert!(line.contains("llm 9000ms ttfb / 9000ms"), "unexpected ms shape: {line:?}");
+        assert!(!line.contains("ms!"), "unexpected suffix marker: {line:?}");
+    }
+
+    #[test]
+    fn assistant_summary_text_only_turn_omits_tool_segment() {
+        let m = AssistantTurnMetrics {
+            total_ms: 3120,
+            language: Some("ro".into()),
+            stt_ms: Some(412),
+            user_chars: 22,
+            llm_ttfb_ms: 180,
+            llm_total_ms: 1450,
+            reply_chars: 198,
+            tools: vec![],
+            tts_ttfa_ms: Some(330),
+            sentences: 5,
+            aborted: false,
+        };
+        let line = format_assistant_summary(&m);
+        assert!(
+            !line.contains('['),
+            "tool segment must be omitted on text-only turns, got: {line}"
+        );
+        assert!(line.contains("llm 180ms ttfb / 1450ms 198 chars out | tts"), "got: {line}");
+    }
+
+    #[test]
+    fn assistant_summary_live_mode_marks_stt_skipped() {
+        let m = AssistantTurnMetrics {
+            language: Some("en".into()),
+            stt_ms: None,
+            user_chars: 33,
+            ..Default::default()
+        };
+        let line = format_assistant_summary(&m);
+        assert!(line.contains("stt skipped (live) 33 chars in"), "got: {line}");
+    }
+
+    #[test]
+    fn assistant_summary_cancelled_tool_renders_failure_tag() {
+        let m = AssistantTurnMetrics {
+            tools: vec![AssistantToolMetric {
+                name: "fono_screen".into(),
+                exec_ms: 0,
+                outcome: AssistantToolOutcome::Cancelled,
+            }],
+            ..Default::default()
+        };
+        let line = format_assistant_summary(&m);
+        assert!(line.contains("[fono_screen failed=cancelled]"), "got: {line}");
+    }
+
+    #[test]
+    fn assistant_summary_aborted_appends_tail() {
+        let m = AssistantTurnMetrics {
+            total_ms: 980,
+            language: Some("en".into()),
+            stt_ms: Some(420),
+            user_chars: 7,
+            llm_ttfb_ms: 0,
+            llm_total_ms: 540,
+            reply_chars: 0,
+            aborted: true,
+            ..Default::default()
+        };
+        let line = format_assistant_summary(&m);
+        assert!(line.ends_with("| aborted"), "got: {line}");
+        assert!(line.contains("tts none"), "got: {line}");
     }
 }

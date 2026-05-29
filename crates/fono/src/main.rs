@@ -102,9 +102,11 @@ fn init_tracing(verbosity: cli::Verbosity) {
     // client (e.g. Forge's rmcp) to tear down the connection on the first
     // parse error. Stderr is also the convention for every other CLI/TUI
     // subcommand, so this default is universally correct.
+    let ansi = fono::session::log_color_enabled();
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
-        .with_ansi(true)
+        .with_ansi(ansi)
+        .with_ansi_sanitization(!ansi)
         .with_target(verbosity.is_trace())
         .with_file(verbosity.is_trace())
         .with_line_number(verbosity.is_trace());

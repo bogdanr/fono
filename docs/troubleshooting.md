@@ -49,8 +49,10 @@ INFO pipeline: 2.3s trim=4ms | en | stt groq 540ms 42 chars | polish groq 310ms 
 | `[app+rule+dict]` | Window class + context rule + personal dictionary |
 
 **Slow-stage highlighting:** latency values that exceed thresholds (STT > 2 s,
-polish > 1.5 s, inject > 500 ms) appear in yellow on a TTY — a quick visual
-cue that something is taking longer than expected.
+polish > 1.5 s, inject > 500 ms) appear in yellow when the log is shown in a
+real terminal. When the log is redirected (journald, a file, a pipe), the
+numbers are emitted plain — no colour escape, no marker character — so captured
+logs stay trivially parseable. Honours `NO_COLOR`.
 
 If `polish skipped` appears instead of a polish entry, the utterance was below
 the `[polish].skip_if_words_lt` threshold (default: 3 words).
@@ -66,6 +68,58 @@ fono doctor
 
 Look for the Providers (STT) and Providers (Polish) sections. Each should
 show `(active) reachable` next to your selected backend.
+
+## Assistant (F8) turn diagnostics
+
+Every F8 voice-assistant turn emits a single `assistant:` INFO line at the
+end. Pair it with the `pipeline:` line above to reason about the two
+distinct flows in one place.
+
+```
+INFO assistant: 4823ms | en | stt 580ms 14 chars in | llm 234ms ttfb / 2103ms 312 chars out [fono_screen 1284ms] | tts 420ms ttfa / 8 sent
+```
+
+**Reading the fields:**
+
+| Field | Meaning |
+|---|---|
+| `4823ms` | Total turn time — STT start to last audio queued (seconds ≥ 10 s, ms below). Drain time is **not** included. |
+| `en` | Language tag (`?` when neither STT nor config supplied one) |
+| `stt 580ms 14 chars in` | Batch STT latency + user-text length in chars |
+| `stt skipped (live) 14 chars in` | Live-streaming F8 path — the streaming STT already produced text; batch STT did not run |
+| `llm 234ms ttfb / 2103ms 312 chars out` | Time-to-first-delta + full LLM stream time + reply char count. Includes any tool-roundtrip wait. |
+| `[fono_screen 1284ms]` | **Optional.** Tool name + exec time. Multiple tools comma-separated. Omitted entirely on text-only turns. |
+| `tts 420ms ttfa / 8 sent` | Time-to-first-audio queued for playback + number of sentences synthesised |
+| `tts none` | No audio produced (cancelled before TTS, empty reply) |
+| `| aborted` (tail) | Turn was cancelled mid-stream (Esc, F9 toggle, hotkey re-press) |
+
+**Tool outcome tags** (the `[…]` segment, only present when tools were used):
+
+| Tag | Meaning |
+|---|---|
+| `[fono_screen 1284ms]` | Tool ran successfully — exec time shown |
+| `[fono_screen failed=cancelled]` | User pressed Escape in the OS-side region picker |
+| `[fono_screen failed=private]` | Focused window is on the private-window allow-list (KeePassXC, Bitwarden, …) |
+| `[fono_screen failed=no-tool]` | No grabber tool (scrot/maim/grim/import/spectacle/gnome-screenshot) found in `PATH` |
+| `[fono_screen failed]` | Anything else (timeout, downscale failure, …) |
+
+**Slow-stage highlighting:** latency values that exceed thresholds appear in
+yellow when the log is shown in a real terminal. When stderr is redirected
+(journald, a file, a pipe for parsing) the numbers are emitted plain — no ANSI
+escape, no marker character — so captured logs stay trivially parseable.
+Honours `NO_COLOR`.
+
+| Stage | Yellow above |
+|---|---|
+| STT | 2 000 ms |
+| LLM ttfb | 1 500 ms |
+| LLM total | 5 000 ms |
+| Tool exec | 1 000 ms |
+| TTS ttfa | 1 500 ms |
+
+For per-phase debug logging (the individual `STT:`, `first LLM delta`,
+`first audio queued` lines that used to appear at INFO level) run with
+`RUST_LOG=fono::assistant=debug`.
 
 ## Hotkey doesn't fire
 

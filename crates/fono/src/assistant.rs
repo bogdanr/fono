@@ -17,6 +17,7 @@
 //! [`AssistantSessionState`] and calls into the pump function from
 //! `on_assistant_hold_release`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -30,6 +31,10 @@ use fono_tts::{SentenceSplitter, TextToSpeech};
 use futures::stream::StreamExt;
 use tokio::sync::{mpsc, Mutex, Notify};
 use tracing::{debug, info, warn};
+
+use crate::session::{
+    format_assistant_summary, AssistantToolMetric, AssistantToolOutcome, AssistantTurnMetrics,
+};
 
 /// Per-orchestrator assistant state. Owned by the
 /// [`crate::session::SessionOrchestrator`] inside an `Arc<Mutex<…>>`
@@ -151,6 +156,11 @@ pub async fn run_assistant_turn(
         screen_capture_fn,
     } = inputs;
 
+    // Turn-wide metrics. Populated as the pump progresses; emitted
+    // as a single `assistant:` INFO line on the success path.
+    let turn_started = std::time::Instant::now();
+    let mut metrics = AssistantTurnMetrics { language: language.clone(), ..Default::default() };
+
     // 1. Resolve the user's text. When `pre_transcribed` is set the
     //    caller already ran streaming STT (live-mode F8 path); we
     //    skip the batch call entirely. Otherwise run STT on the
@@ -161,7 +171,7 @@ pub async fn run_assistant_turn(
             debug!(target: "fono::assistant", "skip: empty pre-transcribed text");
             return Ok(false);
         }
-        info!(
+        debug!(
             target: "fono::assistant",
             "pre-transcribed: {trimmed:?}"
         );
@@ -185,13 +195,22 @@ pub async fn run_assistant_turn(
             debug!(target: "fono::assistant", "skip: empty transcript");
             return Ok(false);
         }
-        info!(
+        let stt_ms = stt_started.elapsed().as_millis() as u64;
+        metrics.stt_ms = Some(stt_ms);
+        // Prefer the language the STT engine actually detected over the
+        // configured hint (which is `None` in auto-detect mode and would
+        // otherwise render as `?` in the summary line).
+        if let Some(lang) = transcription.language.as_ref().filter(|s| !s.trim().is_empty()) {
+            metrics.language = Some(lang.clone());
+        }
+        debug!(
             target: "fono::assistant",
-            stt_ms = stt_started.elapsed().as_millis() as u64,
+            stt_ms,
             "STT: {trimmed:?}"
         );
         trimmed
     };
+    metrics.user_chars = user_text.chars().count();
 
     // 2. Build context from history (prune-on-snapshot) + push user turn.
     let history_snapshot = {
@@ -265,18 +284,29 @@ pub async fn run_assistant_turn(
     let mut full_reply = String::new();
     let mut any_audio = false;
     let mut first_audio_at: Option<std::time::Instant> = None;
+    let mut last_audio_at: Option<std::time::Instant> = None;
     let mut speaking_announced = false;
     let mut synthesising_announced = false;
     // Tool events observed on the stream. Recorded into history
     // after the turn finishes so subsequent turns can echo the
     // tool-call exchange back to the model. None ⇒ no tool used.
     let mut tool_event_log: Vec<ToolEvent> = Vec::new();
+    // Wall-clock timestamps for per-tool exec_ms. The `Called`
+    // sentinel marks the start; the matching `Result` (by
+    // tool_call_id) marks the end. Used to populate `metrics.tools`.
+    let mut tool_started: HashMap<String, (String, std::time::Instant)> = HashMap::new();
+    // Set true on cancel / stream-error so the final summary line
+    // and history-rebuild can distinguish a clean turn from an
+    // aborted one. `notify_triggered` always returns false (Tokio's
+    // Notify has no non-await probe), so we track abort explicitly.
+    let mut aborted_mid_stream = false;
 
     loop {
         let next = tokio::select! {
             biased;
             () = notify.notified() => {
                 debug!(target: "fono::assistant", "cancelled mid-stream");
+                aborted_mid_stream = true;
                 break;
             }
             n = deltas.next() => n,
@@ -319,9 +349,10 @@ pub async fn run_assistant_turn(
         // part of "thinking".
         if !synthesising_announced {
             synthesising_announced = true;
-            info!(
+            metrics.llm_ttfb_ms = llm_started.elapsed().as_millis() as u64;
+            debug!(
                 target: "fono::assistant",
-                llm_ttfb_ms = llm_started.elapsed().as_millis() as u64,
+                llm_ttfb_ms = metrics.llm_ttfb_ms,
                 "first LLM delta — overlay: THINKING → SYNTHESISING"
             );
             if let Some(o) = overlay.as_ref() {
@@ -333,6 +364,19 @@ pub async fn run_assistant_turn(
         // client follows up with the real prose reply on the same
         // stream.
         if let Some(event) = delta.tool_event {
+            match &event {
+                ToolEvent::Called(call) => {
+                    tool_started
+                        .insert(call.id.clone(), (call.name.clone(), std::time::Instant::now()));
+                }
+                ToolEvent::Result { tool_call_id, summary } => {
+                    if let Some((name, started_at)) = tool_started.remove(tool_call_id) {
+                        let exec_ms = started_at.elapsed().as_millis() as u64;
+                        let outcome = classify_tool_outcome(summary);
+                        metrics.tools.push(AssistantToolMetric { name, exec_ms, outcome });
+                    }
+                }
+            }
             debug!(target: "fono::assistant", ?event, "tool event recorded for history");
             tool_event_log.push(event);
             continue;
@@ -341,11 +385,15 @@ pub async fn run_assistant_turn(
         for sentence in splitter.push(&delta.text) {
             if synth_and_enqueue(&state, &tts, &sentence, &notify).await {
                 any_audio = true;
+                metrics.sentences = metrics.sentences.saturating_add(1);
+                let now = std::time::Instant::now();
+                last_audio_at = Some(now);
                 if first_audio_at.is_none() {
-                    first_audio_at = Some(std::time::Instant::now());
-                    info!(
+                    first_audio_at = Some(now);
+                    metrics.tts_ttfa_ms = Some(llm_started.elapsed().as_millis() as u64);
+                    debug!(
                         target: "fono::assistant",
-                        ttfa_ms = llm_started.elapsed().as_millis() as u64,
+                        ttfa_ms = metrics.tts_ttfa_ms.unwrap_or(0),
                         "first audio queued"
                     );
                     // FSM `AssistantThinking → AssistantSpeaking` +
@@ -370,10 +418,14 @@ pub async fn run_assistant_turn(
         }
     }
 
-    if !notify_triggered(&notify) {
+    metrics.llm_total_ms = llm_started.elapsed().as_millis() as u64;
+
+    if !aborted_mid_stream {
         if let Some(tail) = splitter.flush() {
             if synth_and_enqueue(&state, &tts, &tail, &notify).await {
                 any_audio = true;
+                metrics.sentences = metrics.sentences.saturating_add(1);
+                last_audio_at = Some(std::time::Instant::now());
                 // Belt-and-braces: a tail flush that arrives without
                 // any preceding delta is impossible (the splitter is
                 // empty until `push`ed), but if a future refactor
@@ -417,12 +469,13 @@ pub async fn run_assistant_turn(
         }
     }
 
-    info!(
-        target: "fono::assistant",
-        total_ms = llm_started.elapsed().as_millis() as u64,
-        chars = full_reply.len(),
-        "assistant turn done"
-    );
+    metrics.reply_chars = full_reply.chars().count();
+    metrics.aborted = aborted_mid_stream;
+    // Total = STT start → last audio queued (drain not included).
+    // When no audio was produced we fall back to LLM stream end.
+    let total_anchor = last_audio_at.unwrap_or_else(std::time::Instant::now);
+    metrics.total_ms = total_anchor.duration_since(turn_started).as_millis() as u64;
+    info!(target: "fono::assistant", "{}", format_assistant_summary(&metrics));
 
     // Cooperative playback-drain wait. The LLM stream is done and
     // every sentence is enqueued, but the `AudioPlayback` worker may
@@ -604,6 +657,29 @@ fn truncate(s: &str, max: usize) -> std::borrow::Cow<'_, str> {
     }
     let cut: String = s.chars().take(max.saturating_sub(1)).collect();
     std::borrow::Cow::Owned(format!("{cut}…"))
+}
+
+/// Map a `ToolEvent::Result.summary` string back to a typed
+/// [`AssistantToolOutcome`] for the `assistant:` summary line. The
+/// classifier is conservative: it only recognises the canned phrases
+/// emitted by the assistant client's tool-dispatch helper; any other
+/// summary (including the success case `"Captured 954x564 PNG…"`)
+/// falls through to [`AssistantToolOutcome::Ok`].
+fn classify_tool_outcome(summary: &str) -> AssistantToolOutcome {
+    let lower = summary.to_ascii_lowercase();
+    if lower.contains("private window") {
+        AssistantToolOutcome::Private
+    } else if lower.contains("cancel") {
+        AssistantToolOutcome::Cancelled
+    } else if lower.contains("no capture tool") || lower.contains("no-tool") {
+        AssistantToolOutcome::NoTool
+    } else if lower.starts_with("captured ") || lower.contains("png of") {
+        AssistantToolOutcome::Ok
+    } else if lower.contains("failed") || lower.contains("error") {
+        AssistantToolOutcome::Failed
+    } else {
+        AssistantToolOutcome::Ok
+    }
 }
 
 /// Non-blocking probe — returns true if the pump should bail. Uses
