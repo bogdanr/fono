@@ -7,44 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-05-29
+
+Show your screen, dictate in any language. This release teaches the voice
+assistant and your coding agents to *look* at what you're pointing at, fixes
+AI cleanup so it stops dropping text and accents on non-English dictation, and
+adds a few new looks for the recording overlay.
+
 ### Added
 
-- Visual context for agents and assistant: new `fono.screen` MCP tool and `fono_screen` LLM function-calling tool let coding agents and the F8 voice assistant capture a screenshot (focused window or interactive region) and include it in the next turn.
+- **Point at your screen and ask.** The F8 voice assistant and any
+  connected coding agent can now see your screen when you reference
+  something on it — "what does this error mean?", "read this dialog to
+  me". Fono grabs the focused window automatically, or opens your
+  desktop's region picker so you can frame exactly what to share, then
+  hands the picture to the model. Private windows (KeePassXC, Bitwarden,
+  1Password) are never captured. Works out of the box with whatever
+  screenshot tool you already have (scrot, grim, maim, spectacle,
+  gnome-screenshot, …) — no new required dependencies. `fono doctor`
+  shows whether capture is ready.
+- **New looks for the recording overlay.** Three fresh visualisation
+  styles join the picker: **Aurora Beziers** (Siri-style glowing
+  ribbons), **System/360** (a retro mainframe console-lamp spectrum),
+  and **Terrain 3D** (your voice as a flowing 3D landscape). Pick one
+  from the tray's Visualization menu.
 
-- feat(capture): visual context for agents and assistant — `fono.screen` MCP tool captures
-  focused window or user-selected region as a PNG, returned as an MCP image content block.
-  The `fono_screen` LLM function-calling tool lets the voice assistant look at the screen
-  when the user references something visible. Privacy gate blocks private windows
-  (KeePassXC, Bitwarden, 1Password). Tool ladder probes PATH at startup (scrot / grim+slurp /
-  maim / spectacle / gnome-screenshot / import) so no new required deps. `fono doctor` shows
-  capture status.
+### Changed
 
-- Overlay: new **Aurora Beziers** waveform style — four overlapping
-  cubic Bezier ribbons that slide past one another with soft
-  alpha-blended overlaps for the Siri-style glowing-intersection look.
-  PCM-driven amplitude.
-- Overlay: new **System/360** waveform style — a retro mainframe-
-  console-lamp spectrum, 60 dot columns × 7 rows of small filled
-  dots, magnitude lights up lamps from the bottom up. Native
-  primitive, no font dependency.
+- **The voice assistant is on by default.** The pipeline that powers F8
+  and the coding-agent voice loop now works without extra setup. If you
+  had explicitly turned it off, that choice is respected.
+- **Voice mode talks more naturally.** The built-in voice preset for
+  coding agents was rewritten: agents now listen by default, only ask
+  bounded A/B/C questions when it actually helps, never ask you to
+  approve risky actions by voice, and open each spoken turn with a short
+  cue so you have a moment to refocus before the answer.
 
-- Overlay: new **Terrain 3D** waveform style — a filled spectrogram
-  landscape that uses the live FFT history as a relief map (frequency
-  along the long axis, magnitude as height, time receding into the
-  distance). Brightness-modulated opaque accent colours so the
-  surface stays vibrantly tinted at every magnitude, and the mesh
-  spans nearly the full panel width. Software 3D pipeline, no GPU.
-- Overlay: dropped the experimental Lissajous 3D and Helix 3D
-  waveform styles introduced earlier in `[Unreleased]`. Both turned
-  out to be a poor fit for the panel's tight landscape aspect ratio
-  during dogfooding; Terrain 3D remains as the single 3D style.
-  Migration: configs or tray entries using `"lissajous3d"` or
-  `"helix3d"` should switch to `"terrain3d"` (or any of the 2D
-  styles).
-- Voice preset: listen-by-default, confirm as a UX shortcut not a safety gate,
-  never voice-authorise destructive actions, no bare spoken questions, every
-  spoken turn opens with a short refocus preamble.
-- Voice preset mode R now covers completion and status reports — no manufactured trailing questions when the agent is just letting the user know something finished.
+### Fixed
+
+- **Dictation cleanup no longer drops your words — or your accents.**
+  On non-English dictation, the AI cleanup step could silently come back
+  empty and inject the raw, unpolished transcript instead; diacritics
+  (ă, î, ș, ț, é, ñ, …) could also get lost on the way to the cursor.
+  Both are fixed: cleanup now reliably tidies up non-English text and
+  restores the correct accented characters. When a coding agent is in
+  focus in a terminal, dictation is framed as prose (capitalisation and
+  punctuation) rather than shell commands.
+- **The assistant now actually answers about your screen.** Previously
+  it captured the screen but spoke a placeholder instead of describing
+  what it saw. It now sends the image to the model and reads back the
+  real answer.
+- **Escape reliably cancels while the agent is listening,** and Ctrl-C
+  restores the tray icon cleanly when you stop a voice session.
 
 ## [0.9.0] — 2026-05-26
 

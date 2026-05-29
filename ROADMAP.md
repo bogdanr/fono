@@ -20,6 +20,11 @@ The home page is [fono.page](https://fono.page).
 
 ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge)
 
+**[v0.9.1 — See your screen, dictate in any language](#shipped)**  
+The voice assistant and your coding agents can now look at your screen when you
+point at something. AI cleanup no longer drops text or accents on non-English
+dictation. Three new overlay looks. *(2026-05-29)*
+
 **[v0.9.0 — Voice loop for coding agents](#shipped)**  
 Talk to Forge, Claude Code, Cursor, Codex CLI, Gemini CLI and other
 MCP-capable agents entirely by voice. Short spoken answers, A/B/C choices,
@@ -126,12 +131,6 @@ Voice UX polish follow-up: an optional server-side wake chime
 before TTS after long idle gaps, as a deferred refinement to the
 spoken refocus preamble.
 
-### Visual context for agents and assistant
-
-> Point at your screen and ask. No typing, no copy-paste.
-
-Automatic mode grabs the focused window instantly — no clicks, no interaction. Interactive mode opens the OS-native region picker so you can frame exactly the area you want to share. Coding agents reach it via the `fono.screen` MCP tool; the F8 voice assistant calls `fono_screen` via LLM function-calling — no new config needed, no required dependencies.
-
 ---
 
 ## On the horizon
@@ -217,6 +216,26 @@ system-tray app and native installer on Windows.
 ## Shipped
 
 Newest first.
+
+- ![v0.9.1](https://img.shields.io/badge/v0.9.1-2026--05--29-blue?style=flat-square)
+  **See your screen, dictate in any language.** The F8 voice
+  assistant and any connected coding agent can now look at your
+  screen when you reference something on it — automatic mode grabs
+  the focused window instantly, interactive mode opens your
+  desktop's region picker so you frame exactly what to share.
+  Private windows (KeePassXC, Bitwarden, 1Password) are never
+  captured, and it works with whatever screenshot tool you already
+  have — no new required dependencies. Coding agents reach it via
+  the `fono.screen` MCP tool; the assistant calls `fono_screen` via
+  LLM function-calling.
+
+  AI cleanup of non-English dictation is fixed: it no longer
+  silently returns empty (injecting the raw transcript) and no
+  longer drops diacritics on the way to the cursor — Romanian,
+  French, Spanish and the rest now come out polished and correctly
+  accented. The voice assistant pipeline is on by default, and the
+  recording overlay gains three new looks (Aurora Beziers,
+  System/360, Terrain 3D). *(2026-05-29)*
 
 - ![v0.9.0](https://img.shields.io/badge/v0.9.0-2026--05--26-blue?style=flat-square)
   **Voice loop for coding agents (early preview).** Fono ships an MCP
@@ -583,6 +602,7 @@ Newest first.
 [v0.6.1]: https://github.com/bogdanr/fono/releases/tag/v0.6.1
 [v0.7.0]: https://github.com/bogdanr/fono/releases/tag/v0.7.0
 [v0.7.1]: https://github.com/bogdanr/fono/releases/tag/v0.7.1
+[v0.9.1]: https://github.com/bogdanr/fono/releases/tag/v0.9.1
 [v0.9.0]: https://github.com/bogdanr/fono/releases/tag/v0.9.0
 [v0.8.2]: https://github.com/bogdanr/fono/releases/tag/v0.8.2
 [v0.8.1]: https://github.com/bogdanr/fono/releases/tag/v0.8.1
