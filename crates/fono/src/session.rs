@@ -128,7 +128,25 @@ fn normalised_rms(samples: &[f32]) -> f32 {
     (rms / WAVEFORM_AMPLITUDE_CEILING).clamp(0.0, 1.0)
 }
 
-/// Active capture session. The cpal stream itself is `!Send` on Linux
+/// Return `true` when the configured assistant backend is vision-capable
+/// (has a `multimodal_model` in the provider catalogue). Used to gate
+/// the `fono_screen` tool injection in the F8 voice loop.
+fn backend_is_vision_capable(backend: &fono_core::config::AssistantBackend) -> bool {
+    use fono_core::config::AssistantBackend;
+    let id = match backend {
+        AssistantBackend::OpenAI => "openai",
+        AssistantBackend::Anthropic => "anthropic",
+        AssistantBackend::Groq => "groq",
+        AssistantBackend::Cerebras => "cerebras",
+        AssistantBackend::OpenRouter => "openrouter",
+        AssistantBackend::Ollama | AssistantBackend::None => return false,
+    };
+    fono_core::provider_catalog::find(id)
+        .and_then(|p| p.assistant)
+        .and_then(|a| a.multimodal_model)
+        .is_some()
+}
+
 /// (ALSA / PipeWire), so it is kept on a dedicated thread; we
 /// communicate with that thread via a stop signal and the shared
 /// buffer.
@@ -2149,6 +2167,22 @@ impl SessionOrchestrator {
             let mut s = self.assistant_session.lock().await;
             s.current_turn = Some(notify.clone());
         }
+        // Build the screen-capture closure when prefer_vision is on
+        // and the configured assistant backend is vision-capable.
+        let prefer_vision = cfg.assistant.prefer_vision;
+        let screen_capture_fn: Option<fono_assistant::ScreenCaptureFn> =
+            if prefer_vision && backend_is_vision_capable(&cfg.assistant.backend) {
+                use fono_core::screen_capture::GrabberProbe;
+                use fono_inject::focus::detect_focus;
+                let probe = GrabberProbe::detect();
+                Some(Arc::new(move |mode| {
+                    let fi = detect_focus().ok();
+                    let wm_class = fi.and_then(|f| f.window_class);
+                    probe.capture(mode, wm_class.as_deref())
+                }))
+            } else {
+                None
+            };
         let inputs = AssistantTurnInputs {
             pcm,
             sample_rate: self.capture_cfg.target_sample_rate,
@@ -2164,6 +2198,8 @@ impl SessionOrchestrator {
             // None when no graphical session is attached.
             overlay: self.overlay.read().ok().and_then(|g| g.clone()),
             pre_transcribed,
+            prefer_vision,
+            screen_capture_fn,
         };
         let state_for_task = self.assistant_session.clone();
         let action_tx = self.action_tx.clone();

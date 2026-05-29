@@ -521,6 +521,52 @@ this host (auto-discovery via mDNS). The installer seeds a minimal
 [install.md → Server mode](install.md#server-mode-wyoming-stt-host) for
 the install, security, and key-management story.
 
+## Screen capture
+
+Fono can capture screenshots to give agents and the voice assistant visual
+context. Two modes are available: **automatic** (grabs the focused window
+instantly) and **interactive** (opens the OS-native region picker).
+
+A **privacy gate** blocks capture when the focused window belongs to a
+known sensitive application (KeePassXC, Bitwarden, 1Password, GNOME
+Keyring, Seahorse). Fono returns an error instead of leaking the screen
+contents.
+
+All screen-capture tools are **entirely optional runtime dependencies** —
+Fono probes PATH at startup and builds a tool ladder from whichever subset
+is installed, falling back gracefully when tools are absent. No tool is
+required; the feature degrades to "unavailable" only when none are present.
+
+| Tool | Distro package | Ladder rungs covered | Example install |
+|------|---------------|----------------------|-----------------|
+| `scrot` | `scrot` (Debian/Ubuntu/Fedora/Arch) | X11 auto (rung 1), X11 interactive (rung 1) | `sudo apt install scrot` |
+| `maim` | `maim` (Debian/Ubuntu/Fedora/Arch) | X11 auto (rung 2), X11 interactive (rung 2) | `sudo apt install maim` |
+| `xdotool` | `xdotool` (Debian/Ubuntu/Fedora/Arch) | Required helper for `maim` focused-window mode | `sudo apt install xdotool` |
+| `grim` | `grim` (Debian/Ubuntu/Fedora/Arch) | Wayland interactive (rung 1, paired with `slurp`) | `sudo apt install grim` |
+| `slurp` | `slurp` (Debian/Ubuntu/Fedora/Arch) | Wayland interactive region picker (paired with `grim`) | `sudo apt install slurp` |
+| `spectacle` | `kde-spectacle` / `spectacle` (Debian/Ubuntu/Fedora/Arch) | Wayland auto (rung 3), Wayland interactive (rung 3) | `sudo apt install kde-spectacle` |
+| `gnome-screenshot` | `gnome-screenshot` (Debian/Ubuntu/Fedora/Arch) | All ladders (last resort, rung 4) | `sudo apt install gnome-screenshot` |
+| `import` (ImageMagick) | `imagemagick` / `ImageMagick` (Debian/Ubuntu/Arch/Fedora) | Wayland auto (rung 2, Xwayland only when `DISPLAY` set); X11 auto (rung 3), X11 interactive (rung 3) | `sudo apt install imagemagick` |
+
+Recommended minimal install per desktop:
+
+```bash
+# Wayland / wlroots (sway, Hyprland)
+sudo apt install grim slurp
+
+# X11
+sudo apt install scrot
+
+# KDE (Wayland or X11)
+sudo apt install kde-spectacle
+
+# GNOME
+sudo apt install gnome-screenshot
+```
+
+No configuration is needed; `fono doctor` shows which tools are
+available and which rung is active.
+
 ## Adding a new backend
 
 Implement the `fono_stt::SpeechToText` or `fono_polish::TextCleanup` async

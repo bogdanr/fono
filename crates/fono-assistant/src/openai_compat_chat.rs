@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use fono_core::screen_capture::CaptureMode;
 use fono_http::{emit_http_debug, provider_request_id, Outcome, RequestTimings};
 use futures::stream::{BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -174,6 +175,61 @@ struct StreamChoice {
 struct ChunkDelta {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<ToolCallDelta>>,
+}
+
+/// Accumulated tool-call fragment from a streaming chunk.
+#[derive(Deserialize, Default)]
+struct ToolCallDelta {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<ToolFunctionDelta>,
+}
+
+#[derive(Deserialize, Default)]
+struct ToolFunctionDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+/// Build the `fono_screen` OpenAI function-calling tool descriptor.
+///
+/// Returned as a one-element vec to be inserted into the `tools` array.
+pub(crate) fn build_screen_tool() -> Vec<serde_json::Value> {
+    vec![serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "fono_screen",
+            "description": "Capture a screenshot to see what's on the user's screen. \
+                mode=automatic grabs the focused window instantly. \
+                mode=interactive lets the user frame a region. \
+                Only call when user references something visible.",
+            "parameters": {
+                "type": "object",
+                "required": ["mode"],
+                "properties": {
+                    "mode": {"type": "string", "enum": ["automatic", "interactive"]}
+                }
+            }
+        }
+    })]
+}
+
+/// Parse a `{"mode": "..."}` JSON arguments string from a tool call
+/// into a [`CaptureMode`]. Defaults to [`CaptureMode::Automatic`] on
+/// missing / unknown values.
+pub(crate) fn parse_tool_call_mode(args: &str) -> CaptureMode {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(args) else {
+        return CaptureMode::Automatic;
+    };
+    match v.get("mode").and_then(|m| m.as_str()) {
+        Some("interactive") => CaptureMode::Interactive,
+        _ => CaptureMode::Automatic,
+    }
 }
 
 #[async_trait]
@@ -216,7 +272,16 @@ impl Assistant for OpenAiCompatChat {
                 );
             });
         }
-        let tools: Option<Vec<serde_json::Value>> = None;
+        // Include `fono_screen` when prefer_vision=true and a capture
+        // callback is attached via the context.
+        let tools: Option<Vec<serde_json::Value>> =
+            if ctx.prefer_vision && ctx.screen_capture.is_some() {
+                Some(build_screen_tool())
+            } else {
+                None
+            };
+        // Clone the capture callback (cheap Arc clone) for the spawned task.
+        let screen_cap_fn = ctx.screen_capture.clone();
         let req = ChatReq {
             model: &self.model,
             messages,
@@ -293,6 +358,7 @@ impl Assistant for OpenAiCompatChat {
         let backend_name: &'static str = self.backend_name;
         let bytes_stream = resp.bytes_stream();
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<TokenDelta>>(32);
+        let screen_cap_fn = screen_cap_fn;
 
         // Pump the byte stream → SSE → JSON → TokenDelta in a
         // detached task. Dropping the receiver (e.g. via cancellation)
@@ -305,6 +371,11 @@ impl Assistant for OpenAiCompatChat {
             let mut total_bytes: u64 = 0;
             let mut chunk_count: u32 = 0;
             let mut outcome = Outcome::Ok;
+            // Tool-call accumulator for `fono_screen` calls.
+            let mut tool_call_id = String::new();
+            let mut tool_call_name = String::new();
+            let mut tool_call_args = String::new();
+            let mut finish_is_tool_calls = false;
             'outer: loop {
                 let next = tokio::time::timeout(SSE_CHUNK_TIMEOUT, bytes_stream.next()).await;
                 let chunk = match next {
@@ -370,8 +441,32 @@ impl Assistant for OpenAiCompatChat {
                                         return;
                                     }
                                 }
-                                if choice.finish_reason.is_some() {
-                                    done = true;
+                                // Accumulate tool_call fragments.
+                                if let Some(tcs) = choice.delta.tool_calls {
+                                    for tc in tcs {
+                                        if let Some(id) = tc.id {
+                                            tool_call_id = id;
+                                        }
+                                        if let Some(func) = tc.function {
+                                            if let Some(name) = func.name {
+                                                tool_call_name = name;
+                                            }
+                                            if let Some(args) = func.arguments {
+                                                tool_call_args.push_str(&args);
+                                            }
+                                        }
+                                    }
+                                }
+                                match choice.finish_reason.as_deref() {
+                                    Some("tool_calls") => {
+                                        finish_is_tool_calls = true;
+                                        done = true;
+                                    }
+                                    Some(_) | None => {
+                                        if choice.finish_reason.is_some() {
+                                            done = true;
+                                        }
+                                    }
                                 }
                             }
                             if done {
@@ -391,6 +486,28 @@ impl Assistant for OpenAiCompatChat {
                 }
             }
             timings.mark_body_done();
+            // Handle fono_screen tool call if the model requested one.
+            if finish_is_tool_calls && tool_call_name == "fono_screen" && !tool_call_id.is_empty() {
+                if let Some(cap_fn) = screen_cap_fn {
+                    let mode = parse_tool_call_mode(&tool_call_args);
+                    let cb = std::sync::Arc::clone(&cap_fn);
+                    match tokio::task::spawn_blocking(move || cb(mode)).await {
+                        Ok(Ok(img)) => {
+                            let msg = format!(
+                                "[Screen captured: {}\u{d7}{} via {}]",
+                                img.width, img.height, img.tool
+                            );
+                            let _ = tx.send(Ok(TokenDelta { text: msg })).await;
+                        }
+                        Ok(Err(e)) => {
+                            let _ = tx.send(Err(anyhow!("fono_screen: {e}"))).await;
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Err(anyhow!("fono_screen task error: {e}"))).await;
+                        }
+                    }
+                }
+            }
             let _ = done;
             emit_http_debug(
                 "assistant",
@@ -505,5 +622,84 @@ mod tests {
         };
         let body = serde_json::to_string(&req).unwrap();
         assert!(!body.contains("\"tools\""), "{body}");
+    }
+
+    /// Phase 5 — parse a streaming chunk that contains a `fono_screen`
+    /// tool_call and extract the [`CaptureMode`] from its arguments.
+    #[test]
+    fn openai_tool_call_parsing() {
+        use fono_core::screen_capture::CaptureMode;
+
+        let json = r#"{
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "id": "call_abc123",
+                        "function": {
+                            "name": "fono_screen",
+                            "arguments": "{\"mode\":\"automatic\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }"#;
+        let chunk: StreamChunk = serde_json::from_str(json).unwrap();
+        let choice = &chunk.choices[0];
+        assert_eq!(choice.finish_reason.as_deref(), Some("tool_calls"));
+        let tcs = choice.delta.tool_calls.as_ref().unwrap();
+        let tc = &tcs[0];
+        assert_eq!(tc.id.as_deref(), Some("call_abc123"));
+        let func = tc.function.as_ref().unwrap();
+        assert_eq!(func.name.as_deref(), Some("fono_screen"));
+        let mode = parse_tool_call_mode(func.arguments.as_deref().unwrap_or(""));
+        assert!(matches!(mode, CaptureMode::Automatic));
+    }
+
+    /// Phase 5 — parse_tool_call_mode returns Interactive for that mode.
+    #[test]
+    fn openai_tool_call_mode_interactive() {
+        use fono_core::screen_capture::CaptureMode;
+        let mode = parse_tool_call_mode(r#"{"mode":"interactive"}"#);
+        assert!(matches!(mode, CaptureMode::Interactive));
+    }
+
+    /// Phase 5 — when prefer_vision is false the `tools` field must be
+    /// absent from the serialised request (pre-Phase-5 default path).
+    #[test]
+    fn prefer_vision_false_excludes_tool() {
+        // Simulate prefer_vision=false: tools stays None.
+        let req = ChatReq {
+            model: "gpt-5-mini",
+            messages: vec![],
+            temperature: 0.5,
+            top_p: 0.9,
+            max_tokens: 512,
+            stream: true,
+            tools: None,
+        };
+        let body = serde_json::to_string(&req).unwrap();
+        assert!(
+            !body.contains("\"tools\""),
+            "tools must be absent when prefer_vision=false: {body}"
+        );
+    }
+
+    /// Phase 5 — when prefer_vision is true the `fono_screen` tool
+    /// descriptor must appear in the serialised request.
+    #[test]
+    fn prefer_vision_true_includes_screen_tool() {
+        let req = ChatReq {
+            model: "gpt-5-mini",
+            messages: vec![],
+            temperature: 0.5,
+            top_p: 0.9,
+            max_tokens: 512,
+            stream: true,
+            tools: Some(build_screen_tool()),
+        };
+        let body = serde_json::to_string(&req).unwrap();
+        assert!(body.contains("fono_screen"), "fono_screen tool must be in body: {body}");
+        assert!(body.contains("\"type\":\"function\""), "tool must be function type: {body}");
     }
 }

@@ -10,6 +10,7 @@ use crate::protocol::{ToolCallResult, ToolDef};
 
 pub mod confirm;
 pub mod listen;
+pub mod screen;
 pub mod speak;
 
 // ── Context ───────────────────────────────────────────────────────────────────
@@ -111,6 +112,7 @@ impl ToolRegistry {
         reg.register(speak::SpeakTool::new(ctx));
         reg.register(listen::ListenTool::new(ctx));
         reg.register(confirm::ConfirmTool::new(ctx));
+        reg.register(screen::ScreenTool::new(ctx));
         reg
     }
 

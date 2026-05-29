@@ -22,6 +22,8 @@ fono-audio = { path = "../fono-audio" }
 fono-overlay = { path = "../fono-overlay" }
 fono-polish = { path = "../fono-polish" }
 fono-ipc = { path = "../fono-ipc" }
+fono-inject = { path = "../fono-inject" }
+base64 = "0.22"
 realfft = "3"
 
 [dev-dependencies]

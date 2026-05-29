@@ -178,19 +178,46 @@ impl ToolCallResult {
     pub fn failure(text: impl Into<String>) -> Self {
         Self { content: vec![ContentBlock::text(text)], is_error: true }
     }
+
+    /// Return a successful result containing an image block followed by a
+    /// metadata text block.  Used by `fono.screen`.
+    pub fn with_image(b64_data: String, meta_text: String) -> Self {
+        Self {
+            content: vec![
+                ContentBlock::image(b64_data, "image/png".to_string()),
+                ContentBlock::text(meta_text),
+            ],
+            is_error: false,
+        }
+    }
 }
 
 /// A single content block in a tool result.
+///
+/// Supports both `text` blocks (`{"type":"text","text":"..."}`) and
+/// `image` blocks (`{"type":"image","data":"<base64>","mimeType":"image/png"}`).
 #[derive(Debug, Clone, Serialize)]
 pub struct ContentBlock {
     #[serde(rename = "type")]
     pub kind: String,
-    pub text: String,
+    /// Present on `text` blocks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Present on `image` blocks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    /// Present on `image` blocks.
+    #[serde(rename = "mimeType", skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
 }
 
 impl ContentBlock {
     pub fn text(text: impl Into<String>) -> Self {
-        Self { kind: "text".into(), text: text.into() }
+        Self { kind: "text".into(), text: Some(text.into()), data: None, mime_type: None }
+    }
+
+    pub fn image(data: String, mime_type: String) -> Self {
+        Self { kind: "image".into(), text: None, data: Some(data), mime_type: Some(mime_type) }
     }
 }
 
@@ -258,7 +285,7 @@ mod tests {
     fn tool_call_result_success_not_error() {
         let r = ToolCallResult::success("done");
         assert!(!r.is_error);
-        assert_eq!(r.content[0].text, "done");
+        assert_eq!(r.content[0].text.as_deref(), Some("done"));
     }
 
     #[test]

@@ -448,6 +448,70 @@ pub async fn report(paths: &Paths) -> Result<String> {
     }
 
     // ----------------------------------------------------------------
+    // Screen capture section
+    // ----------------------------------------------------------------
+    {
+        use fono_core::screen_capture::{GrabberProbe, RungKind};
+        let probe = GrabberProbe::detect();
+
+        writeln!(out, "{}", head("Screen capture:"))?;
+        writeln!(out, "  Session type : {}", probe.session_label())?;
+
+        let auto_rungs = probe.auto_rungs();
+        if auto_rungs.is_empty() {
+            writeln!(
+                out,
+                "  Active (auto): {}",
+                bad("none — install scrot (X11) or grim+slurp (Wayland)")
+            )?;
+        } else {
+            let auto_display: Vec<String> = auto_rungs
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    let name = r.display_name();
+                    if i == 0 {
+                        format!("{} {}", ok(&format!("{name} ✓")), dim("(active)"))
+                    } else if r == &RungKind::Portal || which_in_path(r.binary()) {
+                        format!("{name} {}", ok("✓"))
+                    } else {
+                        format!("{name} {}", dim("[missing]"))
+                    }
+                })
+                .collect();
+            writeln!(out, "  Auto rungs   : {}", auto_display.join("  "))?;
+            writeln!(out, "  Active (auto): {}", ok(auto_rungs[0].display_name()))?;
+        }
+
+        let sel_rungs = probe.select_rungs();
+        if sel_rungs.is_empty() {
+            writeln!(
+                out,
+                "  Active (sel.): {}",
+                bad("none — install grim+slurp (Wayland) or scrot -s (X11)")
+            )?;
+        } else {
+            let sel_display: Vec<String> = sel_rungs
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    let name = r.display_name();
+                    if i == 0 {
+                        format!("{} {}", ok(&format!("{name} ✓")), dim("(active)"))
+                    } else if r == &RungKind::Portal || which_in_path(r.binary()) {
+                        format!("{name} {}", ok("✓"))
+                    } else {
+                        format!("{name} {}", dim("[missing]"))
+                    }
+                })
+                .collect();
+            writeln!(out, "  Select rungs : {}", sel_display.join("  "))?;
+            writeln!(out, "  Active (sel.): {}", ok(sel_rungs[0].display_name()))?;
+        }
+        writeln!(out)?;
+    }
+
+    // ----------------------------------------------------------------
     // Coding agents — MCP server status
     // ----------------------------------------------------------------
     if let Some(c) = cfg.as_ref() {
@@ -462,7 +526,10 @@ pub async fn report(paths: &Paths) -> Result<String> {
             )?;
         }
         writeln!(out, "  transport            : stdio")?;
-        writeln!(out, "  tools available      : fono.speak, fono.listen, fono.confirm")?;
+        writeln!(
+            out,
+            "  tools available      : fono.speak, fono.listen, fono.confirm, fono.screen"
+        )?;
         writeln!(
             out,
             "  voice preset         : assets/agent-presets/voice.md (see docs/coding-agents.md)"

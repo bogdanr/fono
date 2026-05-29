@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use fono_assistant::{Assistant, AssistantContext, ConversationHistory};
+use fono_assistant::{Assistant, AssistantContext, ConversationHistory, ScreenCaptureFn};
 use fono_audio::AudioPlayback;
 use fono_hotkey::HotkeyAction;
 use fono_stt::SpeechToText;
@@ -109,6 +109,14 @@ pub struct AssistantTurnInputs {
     /// transcription that drove the realtime overlay preview gets
     /// forwarded to the LLM rather than re-running STT.
     pub pre_transcribed: Option<String>,
+    /// Whether to include the `fono_screen` tool in LLM requests (from
+    /// `[assistant].prefer_vision`).
+    pub prefer_vision: bool,
+    /// Optional screen-capture callback. When `Some`, the LLM may
+    /// call `fono_screen` to grab a screenshot. Built from a
+    /// `GrabberProbe` in the F8 voice loop when `prefer_vision` is
+    /// true and the backend is vision-capable.
+    pub screen_capture_fn: Option<ScreenCaptureFn>,
 }
 
 /// Run one assistant turn: STT the captured PCM, push the user turn
@@ -137,6 +145,8 @@ pub async fn run_assistant_turn(
         action_tx,
         overlay,
         pre_transcribed,
+        prefer_vision,
+        screen_capture_fn,
     } = inputs;
 
     // 1. Resolve the user's text. When `pre_transcribed` is set the
@@ -187,7 +197,13 @@ pub async fn run_assistant_turn(
         s.history.push_user(user_text.clone());
         s.history.snapshot()
     };
-    let ctx = AssistantContext { system_prompt, language, history: history_snapshot };
+    let ctx = AssistantContext {
+        system_prompt,
+        language,
+        history: history_snapshot,
+        screen_capture: screen_capture_fn,
+        prefer_vision,
+    };
 
     // 3. Open the LLM stream.
     let llm_started = std::time::Instant::now();

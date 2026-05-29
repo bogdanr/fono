@@ -15,6 +15,7 @@ pub mod openrouter_attribution;
 pub mod paths;
 pub mod provider_catalog;
 pub mod providers;
+pub mod screen_capture;
 pub mod secrets;
 
 #[cfg(feature = "budget")]
@@ -31,6 +32,7 @@ pub use provider_catalog::{
     AssistantDefaults, Badge, CloudProvider, PolishDefaults, SttDefaults, TtsDefaults, TtsEndpoint,
     WebSearchSupport, CLOUD_PROVIDERS,
 };
+pub use screen_capture::{CaptureError, CaptureMode, CaptureSource, CapturedImage, GrabberProbe};
 pub use secrets::Secrets;
 
 #[cfg(feature = "budget")]

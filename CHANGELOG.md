@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Visual context for agents and assistant: new `fono.screen` MCP tool and `fono_screen` LLM function-calling tool let coding agents and the F8 voice assistant capture a screenshot (focused window or interactive region) and include it in the next turn.
+
+- feat(capture): visual context for agents and assistant — `fono.screen` MCP tool captures
+  focused window or user-selected region as a PNG, returned as an MCP image content block.
+  The `fono_screen` LLM function-calling tool lets the voice assistant look at the screen
+  when the user references something visible. Privacy gate blocks private windows
+  (KeePassXC, Bitwarden, 1Password). Tool ladder probes PATH at startup (scrot / grim+slurp /
+  maim / spectacle / gnome-screenshot / import) so no new required deps. `fono doctor` shows
+  capture status.
+
 - Overlay: new **Aurora Beziers** waveform style — four overlapping
   cubic Bezier ribbons that slide past one another with soft
   alpha-blended overlaps for the Siri-style glowing-intersection look.

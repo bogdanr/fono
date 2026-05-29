@@ -1,5 +1,85 @@
 # Fono — Project Status
-Last updated: 2026-05-27
+Last updated: 2026-05-29
+
+## 2026-05-29 — Visual context for agents and assistant
+
+Built the full visual-context feature end-to-end across `fono-core`, `fono-mcp-server`,
+and the daemon/assistant layer.
+
+**`fono-core::screen_capture`** — `GrabberProbe` with four probe ladders:
+- Wayland-auto: portal (`xdg-desktop-portal`), `grim`, `scrot`, `maim`, `spectacle`,
+  `gnome-screenshot`, `import` (Xwayland fallback)
+- Wayland-interactive: portal with region, `grim+slurp`, `scrot -s`, `maim -s`,
+  `spectacle -r`, `gnome-screenshot -a`
+- X11-auto and X11-interactive mirrors of the above
+- Rungs ordered lightest/fastest first; portal preferred on Wayland, scrot/maim on X11
+- Privacy gate: blocks `Automatic` mode when the focused window is on the private-window
+  list (by WM_CLASS / app-id); returns `CaptureError::PrivateWindow`
+- PNG IHDR parser to extract dimensions without an image crate dependency
+- Optional downscale via `magick convert` (configurable `max_dimension`)
+- Terminal-text fast-path: for known terminal emulator classes (kitty, alacritty, wezterm,
+  foot, xterm, gnome-terminal, konsole, …) captures the pane text via `tmux capture-pane`
+  or GNU screen; avoids a pixel screenshot entirely when text suffices
+
+**`fono.screen` MCP tool**:
+- `mode`: `"automatic"` (no user gesture) or `"interactive"` (crosshair/region picker)
+- Returns an MCP `image` content block (base64 PNG) plus a `metadata` JSON text block
+  (dimensions, rung used, terminal_text if present, timestamp)
+- Error handling: `PrivateWindow` → 403-style error text; `Cancelled` → user-cancelled
+  message; `NoToolAvailable` → actionable install hint
+- Tray flashes amber during capture; restores previous icon on completion
+- Registered in `ToolRegistry` alongside existing tools
+
+**`fono_screen` LLM tool**:
+- Included in the assistant chat request when `prefer_vision = true` and the active
+  provider is vision-capable (OpenAI, Anthropic, OpenRouter with vision models)
+- Handles both OpenAI-compatible (`tool_call`) and Anthropic (`tool_use`) wire formats
+- Model decides autonomously when to call it — no hardcoded trigger phrases
+- First built-in action tool; the same plumbing underpins the upcoming Voice Actions phase
+
+**`fono doctor` screen capture section**:
+- Reports session type (Wayland/X11/unknown) and active compositor hint
+- Per-rung availability: `✓ available` or `[missing: <binary>]` for each of the ~7 rungs
+- Shows which rung would be selected for auto vs interactive capture
+
+**Docs / meta**:
+- ADR 0031 (`docs/decisions/0031-screen-capture-architecture.md`) — records probe-ladder
+  design, privacy gate rationale, terminal-text fast-path, and why no image crate dep
+- `docs/providers.md` — screen-capture tool requirements section added
+- `CHANGELOG.md` — `[Unreleased]` section updated with all new items
+- `ROADMAP.md` — visual context item moved from In Progress → Shipped
+
+Pre-commit gate:
+
+| Step | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cargo test --workspace --tests --lib` | green — all tests pass |
+
+No new Cargo dependencies added.
+
+## 2026-05-29 — screen_capture.rs pre-commit gate clean
+
+`crates/fono-core/src/screen_capture.rs` was already implemented (tool-ladder probe,
+privacy gate, terminal-text fast-path, PNG IHDR parser, `GrabberProbe::detect`,
+`GrabberProbe::capture`, downscale via `magick`). This session ran the pre-commit gate
+and fixed two clippy errors that were present:
+
+- `and_then(|_| focused_pid)` → `and(focused_pid)` (unnecessary lazy eval)
+- `terminal_text: terminal_text.clone()` → `terminal_text` (redundant clone — value
+  was dropped immediately after)
+
+`cargo fmt --all` was also run to fix two trailing-blank-line and one long-line diff in
+`screen_capture.rs` and `session.rs`.
+
+Pre-commit gate (all three steps):
+
+| Step | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cargo test --workspace --tests --lib` | green — 14 screen_capture tests pass |
 
 ## 2026-05-27 — 3D overlay: Terrain + Blob landed (Phase 2 + 3)
 

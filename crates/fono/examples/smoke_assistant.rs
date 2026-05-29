@@ -294,6 +294,8 @@ async fn exercise_assistant(cfg: &AssistantCfg, secrets: &Secrets) -> Result<usi
         system_prompt: "You are a smoke-test fixture. Reply in 5 words exactly.".into(),
         language: None,
         history: ConversationHistory::default().snapshot(),
+        screen_capture: None,
+        prefer_vision: false,
     };
     let stream_started = Instant::now();
     let stream =
@@ -419,6 +421,8 @@ async fn exercise_groq_e2e(secrets: &Secrets) -> Result<()> {
         system_prompt: "You are a brief smoke-test assistant. Reply in one short sentence.".into(),
         language: None,
         history: ConversationHistory::default().snapshot(),
+        screen_capture: None,
+        prefer_vision: false,
     };
     let started = Instant::now();
     let mut stream =

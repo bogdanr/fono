@@ -126,6 +126,12 @@ Voice UX polish follow-up: an optional server-side wake chime
 before TTS after long idle gaps, as a deferred refinement to the
 spoken refocus preamble.
 
+### Visual context for agents and assistant
+
+> Point at your screen and ask. No typing, no copy-paste.
+
+Automatic mode grabs the focused window instantly — no clicks, no interaction. Interactive mode opens the OS-native region picker so you can frame exactly the area you want to share. Coding agents reach it via the `fono.screen` MCP tool; the F8 voice assistant calls `fono_screen` via LLM function-calling — no new config needed, no required dependencies.
+
 ---
 
 ## On the horizon

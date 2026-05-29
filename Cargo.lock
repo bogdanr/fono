@@ -1434,8 +1434,10 @@ version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "fono-audio",
  "fono-core",
+ "fono-inject",
  "fono-ipc",
  "fono-overlay",
  "fono-polish",

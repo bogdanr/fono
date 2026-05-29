@@ -26,4 +26,4 @@ pub mod openai_compat_chat;
 
 pub use factory::build_assistant;
 pub use history::{ChatRole, ChatTurn, ConversationHistory};
-pub use traits::{Assistant, AssistantContext, TokenDelta};
+pub use traits::{Assistant, AssistantContext, ScreenCaptureFn, TokenDelta};
