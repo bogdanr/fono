@@ -1764,7 +1764,7 @@ async fn configure_cloud_llm(
     secrets: &mut Secrets,
 ) -> Result<()> {
     let llm_providers = &[
-        "Cerebras (llama3.1-8b, < 1s latency) — recommended",
+        "Cerebras (gpt-oss-120b, < 1s latency) — recommended",
         "Groq (openai/gpt-oss-20b)",
         "OpenAI (gpt-5.4-nano)",
         "Anthropic (claude-haiku-4-5)",
@@ -1782,7 +1782,7 @@ async fn configure_cloud_llm(
         return Ok(());
     }
     let (backend, key_name, model) = match llm_idx {
-        0 => (PolishBackend::Cerebras, "CEREBRAS_API_KEY", "llama3.1-8b"),
+        0 => (PolishBackend::Cerebras, "CEREBRAS_API_KEY", "gpt-oss-120b"),
         1 => (PolishBackend::Groq, "GROQ_API_KEY", "openai/gpt-oss-20b"),
         2 => (PolishBackend::OpenAI, "OPENAI_API_KEY", "gpt-5.4-nano"),
         _ => (PolishBackend::Anthropic, "ANTHROPIC_API_KEY", "claude-haiku-4-5-20251001"),
