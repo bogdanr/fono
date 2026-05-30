@@ -291,9 +291,9 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         console_url: "https://cloud.cerebras.ai/platform/keys",
         key_env: "CEREBRAS_API_KEY",
         stt: None,
-        polish: Some(PolishDefaults { model: "llama3.1-8b" }),
+        polish: Some(PolishDefaults { model: "gpt-oss-120b" }),
         assistant: Some(AssistantDefaults {
-            text_model: "qwen-3-235b-a22b-instruct-2507",
+            text_model: "zai-glm-4.7",
             multimodal_model: None,
             web_search: WebSearchSupport::None,
             badges: &[Badge::Polish, Badge::Assistant, Badge::Fast],

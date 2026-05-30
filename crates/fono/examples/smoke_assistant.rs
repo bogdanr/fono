@@ -81,7 +81,7 @@ fn providers() -> Vec<Provider> {
             key_env: "CEREBRAS_API_KEY",
             // Mirrors the user-facing default in
             // fono-assistant/src/factory.rs:73.
-            model: "qwen-3-235b-a22b-instruct-2507",
+            model: "zai-glm-4.7",
             ci: true,
         },
         Provider {
