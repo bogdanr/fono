@@ -458,7 +458,8 @@ pub async fn speak_text(
     voice: Option<&str>,
     daemon_ipc_candidates: &[std::path::PathBuf],
 ) -> Result<()> {
-    let tts = fono_tts::build_tts(&cfg.tts, secrets, &cfg.general.languages)
+    let voices_dir = fono_core::Paths::resolve().map(|p| p.voices_dir()).unwrap_or_default();
+    let tts = fono_tts::build_tts(&cfg.tts, secrets, &cfg.general.languages, &voices_dir)
         .context("TTS build failed")?
         .ok_or_else(|| {
             anyhow!(

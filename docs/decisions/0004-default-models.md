@@ -32,6 +32,42 @@ with GPL-3.0.
 - **Cloud options offered**: Cerebras, Groq, OpenAI, Anthropic, Gemini, OpenRouter,
   Ollama.
 
+### TTS (text-to-speech) — added 2026-05-31
+
+Local TTS defaults, per
+`plans/2026-05-31-local-tts-onnx-voice-stack-and-wyoming-server-v3.md`:
+
+- **Piper** (`OHF-Voice/piper1-gpl`) — **GPL-3.0**. The `rhasspy/piper`
+  repo (formerly MIT) was archived 2025-10; upstream relicensed to
+  GPL-3.0 under the Open Home Foundation. GPL-3.0 is **compatible with
+  Fono's GPL-3.0-only license** — fine to link, arguably cleaner than a
+  permissive dep. Used for Romanian and the long tail of languages.
+- **Kokoro** — **Apache-2.0**. Used for its trained high-prosody
+  locales.
+
+Both clear the bar below: OSI-/GPL-compatible, neither is a
+Llama-family nor Gemma model. The engines run on the **ONNX Runtime**
+voice-stack platform (ADR 0032), statically linked via `ort`; Piper and
+Kokoro are distributed as `.onnx` and load directly. Model weights
+download at runtime, never bundled.
+
+### Voice stack (other ONNX models) — added 2026-05-31, per ADR 0032
+
+The same ONNX runtime carries the rest of the local voice stack. Default
+models, all license-clean:
+
+- **Silero VAD** — MIT/Apache (neural VAD upgrade over the energy
+  envelope).
+- **Zipformer transducer** (k2-fsa / sherpa) — Apache-2.0 (streaming
+  STT, which whisper.cpp cannot do natively).
+- **Transducer KWS** (k2-fsa / sherpa) — Apache-2.0 (wake-word; chosen
+  over openWakeWord because a custom wake phrase is specified by tokens,
+  with no per-word model training). Names ADR 0012's deferred engine.
+
+These are **opt-in capabilities** layered on the shared runtime as the
+stack grows; each new model must be added to the minimal-build
+`ops.config` (see `docs/binary-size.md`) so the runtime stays small.
+
 ## Deliberate exclusions from defaults
 
 - **Llama 3.x family** — the Llama Community License is **not OSI-approved**; its

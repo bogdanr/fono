@@ -1,5 +1,14 @@
 # Local TTS (Piper + Kokoro) and Fono-as-a-Wyoming-TTS-Server
 
+> **SUPERSEDED (2026-05-31)** by
+> `plans/2026-05-31-local-tts-ggml-piper-kokoro-and-wyoming-server-v2.md`.
+> v2 replaces this plan's "third `fono-tts` variant" + ONNX-fallback
+> strategy with **ggml-reuse** (no new variant; TTS absorbed into the
+> CPU + Vulkan builds), corrects Piper's license (now GPL-3.0,
+> `OHF-Voice/piper1-gpl`), pulls the Wyoming server forward as the first
+> code slice, and gates Kokoro behind an explicit feasibility spike.
+> This file is kept for history; do not execute it.
+
 ## Objective
 
 Make Fono speak — locally, multilingually, including Romanian — in the

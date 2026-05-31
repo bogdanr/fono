@@ -655,7 +655,8 @@ mod tests {
             );
         }
         for b in crate::providers::all_tts_backends() {
-            if matches!(b, TtsBackend::None | TtsBackend::Wyoming) {
+            // None / Wyoming / Local are not cloud providers.
+            if matches!(b, TtsBackend::None | TtsBackend::Wyoming | TtsBackend::Local) {
                 continue;
             }
             let id = tts_backend_str(&b);

@@ -142,6 +142,7 @@ pub const fn tts_backend_str(b: &TtsBackend) -> &'static str {
         TtsBackend::OpenRouter => "openrouter",
         TtsBackend::Cartesia => "cartesia",
         TtsBackend::Deepgram => "deepgram",
+        TtsBackend::Local => "local",
     }
 }
 
@@ -155,6 +156,7 @@ pub fn parse_tts_backend(s: &str) -> Option<TtsBackend> {
         "openrouter" => Some(TtsBackend::OpenRouter),
         "cartesia" => Some(TtsBackend::Cartesia),
         "deepgram" => Some(TtsBackend::Deepgram),
+        "local" => Some(TtsBackend::Local),
         _ => None,
     }
 }
@@ -165,7 +167,7 @@ pub fn parse_tts_backend(s: &str) -> Option<TtsBackend> {
 #[must_use]
 pub const fn tts_key_env(b: &TtsBackend) -> &'static str {
     match b {
-        TtsBackend::None | TtsBackend::Wyoming => "",
+        TtsBackend::None | TtsBackend::Wyoming | TtsBackend::Local => "",
         TtsBackend::OpenAI => "OPENAI_API_KEY",
         TtsBackend::Groq => "GROQ_API_KEY",
         TtsBackend::OpenRouter => "OPENROUTER_API_KEY",
@@ -312,7 +314,7 @@ pub fn all_assistant_backends() -> [AssistantBackend; 7] {
 }
 
 #[must_use]
-pub fn all_tts_backends() -> [TtsBackend; 7] {
+pub fn all_tts_backends() -> [TtsBackend; 8] {
     [
         TtsBackend::None,
         TtsBackend::Wyoming,
@@ -321,6 +323,7 @@ pub fn all_tts_backends() -> [TtsBackend; 7] {
         TtsBackend::OpenRouter,
         TtsBackend::Cartesia,
         TtsBackend::Deepgram,
+        TtsBackend::Local,
     ]
 }
 
@@ -617,7 +620,9 @@ mod tests {
         // test the active backend is `None`, which placed `None` after
         // Wyoming as a disable affordance).
         for b in &backends[wyoming_pos + 1..] {
-            if matches!(b, TtsBackend::None) {
+            if matches!(b, TtsBackend::None | TtsBackend::Local) {
+                // `None` is the disable affordance; `Local` is a keyless
+                // on-device backend — neither requires an API key.
                 continue;
             }
             assert!(tts_requires_key(b));

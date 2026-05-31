@@ -60,6 +60,12 @@ interactive = [
 # working dictation thanks to fono-inject's clipboard fallback (see
 # `fono_inject::type_text_with_outcome`).
 enigo = ["fono-inject/enigo-backend"]
+# Local ONNX voice stack (Piper TTS now; Kokoro/VAD/wake-word/streaming-STT
+# later) on the statically-linked `ort` runtime. OFF in source-default
+# builds; turned ON in the shipped `cpu`/`gpu` artefacts once the minimal
+# `libonnxruntime.a` is pinned (ADR 0032, `docs/binary-size.md`). Building
+# with this feature requires `ORT_LIB_LOCATION` to point at that archive.
+tts-local = ["fono-tts/tts-local"]
 
 [dependencies]
 fono-core = { path = "../fono-core", features = ["vulkan-probe"] }

@@ -90,7 +90,55 @@ pub async fn ensure_models(paths: &Paths, config: &Config) -> Result<()> {
             warn!("auto-download of LLM model failed: {e:#}");
         }
     }
+    #[cfg(feature = "tts-local")]
+    if config.tts.backend == fono_core::config::TtsBackend::Local {
+        // Boxed: the voice-ensure future (catalog Voice + download buffers)
+        // is large enough to trip `clippy::large_futures` if inlined here.
+        if let Err(e) = Box::pin(ensure_local_tts(paths, config)).await {
+            warn!("auto-download of local TTS voice failed: {e:#}");
+        }
+    }
     Ok(())
+}
+
+/// Ensure the configured local TTS voice (`.ort` model + `.onnx.json`
+/// config) is cached under `voices_dir`, downloading and verifying it
+/// from the `fono-voice` mirror when missing. Resolution mirrors
+/// `fono_tts::factory`: an explicit `[tts.local].voice` wins, otherwise
+/// the first catalog voice matching the first configured language.
+#[cfg(feature = "tts-local")]
+pub async fn ensure_local_tts(paths: &Paths, config: &Config) -> Result<EnsureOutcome> {
+    let local = &config.tts.local;
+    let voice = if local.voice.is_empty() {
+        let lang = config.general.languages.first().map_or("en", String::as_str);
+        fono_tts::voices::for_language(lang)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "no local voice in the catalog for language {lang:?}; \
+                 set [tts.local].voice to a catalog voice id"
+            )
+        })?
+    } else {
+        fono_tts::voices::by_name(&local.voice)?.ok_or_else(|| {
+            anyhow::anyhow!("[tts.local].voice = {:?} is not in the voice catalog", local.voice)
+        })?
+    };
+    let voices_dir = paths.voices_dir();
+    let already = voices_dir.join(&voice.model.file).is_file()
+        && voices_dir.join(&voice.config.file).is_file();
+    let base = (!local.base_url.is_empty()).then_some(local.base_url.as_str());
+    if !already {
+        info!("local voice {:?} missing — downloading from the fono-voice mirror", voice.name);
+    }
+    fono_tts::voices::ensure_voice(&voice, &voices_dir, base)
+        .await
+        .with_context(|| format!("ensuring local voice {:?}", voice.name))?;
+    if already {
+        debug!("local voice ready: {}", voice.name);
+        Ok(EnsureOutcome::AlreadyPresent)
+    } else {
+        info!("local voice installed: {}", voice.name);
+        Ok(EnsureOutcome::Downloaded)
+    }
 }
 
 /// Ensure the named whisper model (at the configured quantization) is

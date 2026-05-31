@@ -525,7 +525,12 @@ impl SessionOrchestrator {
                     None
                 }
             };
-        let tts = match fono_tts::build_tts(&config.tts, secrets, &config.general.languages) {
+        let tts = match fono_tts::build_tts(
+            &config.tts,
+            secrets,
+            &config.general.languages,
+            &paths.voices_dir(),
+        ) {
             Ok(opt) => opt,
             Err(e) => {
                 warn!("TTS backend unavailable; assistant replies will be silent: {e:#}");
@@ -703,7 +708,12 @@ impl SessionOrchestrator {
                 None
             }
         };
-        let new_tts = match fono_tts::build_tts(&cfg.tts, &secrets, &cfg.general.languages) {
+        let new_tts = match fono_tts::build_tts(
+            &cfg.tts,
+            &secrets,
+            &cfg.general.languages,
+            &paths.voices_dir(),
+        ) {
             Ok(opt) => opt,
             Err(e) => {
                 let err_text = format!("{e:#}");
@@ -840,6 +850,15 @@ impl SessionOrchestrator {
     #[must_use]
     pub fn stt_snapshot(&self) -> Arc<dyn SpeechToText> {
         self.current_stt()
+    }
+
+    /// Snapshot of the active TTS backend for the Wyoming server's
+    /// `TtsProvider`. `None` when no `[tts]` backend is configured.
+    /// Invoked once per accepted connection so `Reload`-driven swaps
+    /// are tracked without restarting the listener.
+    #[must_use]
+    pub fn tts_snapshot(&self) -> Option<Arc<dyn TextToSpeech>> {
+        self.current_tts()
     }
 
     fn current_llm(&self) -> Option<Arc<dyn TextFormatter>> {

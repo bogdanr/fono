@@ -33,7 +33,7 @@ pub async fn download(url: &str, dest: &Path, expected_sha256: &str) -> Result<(
         }
     }
 
-    let actual = sha256_of(dest).await?;
+    let actual = sha256_file(dest).await?;
     if expected_sha256.chars().all(|c| c == '0') {
         info!("downloaded {dest:?}: sha256={actual} (unpinned)");
     } else if !actual.eq_ignore_ascii_case(expected_sha256) {
@@ -92,7 +92,9 @@ async fn try_download(url: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn sha256_of(path: &Path) -> Result<String> {
+/// Compute the lowercase-hex SHA-256 of an on-disk file. Exposed so callers
+/// can verify an already-cached file and skip a redundant download.
+pub async fn sha256_file(path: &Path) -> Result<String> {
     use tokio::io::AsyncReadExt;
     let mut f = File::open(path).await?;
     let mut hasher = Sha256::new();

@@ -504,6 +504,7 @@ fn tts_short_label(b: &TtsBackend) -> &'static str {
         TtsBackend::Cartesia => "Cartesia",
         TtsBackend::Deepgram => "Deepgram",
         TtsBackend::Wyoming => "Wyoming",
+        TtsBackend::Local => "Local voice",
         TtsBackend::None => "no",
     }
 }

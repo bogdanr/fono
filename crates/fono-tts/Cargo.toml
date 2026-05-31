@@ -28,6 +28,18 @@ cartesia = ["dep:reqwest", "dep:fono-http"]
 deepgram = ["dep:reqwest", "dep:fono-http"]
 # LAN Wyoming TTS server.
 wyoming = ["dep:fono-net-codec"]
+# Local ONNX voice engine (Piper now; Kokoro/VAD/wake-word later) on the
+# statically-linked `ort` runtime. OFF in source-default builds; ON in the
+# shipped `cpu`/`gpu` artefacts. Requires a pinned `libonnxruntime.a` via
+# `ORT_LIB_LOCATION` at build time (ADR 0032, `docs/binary-size.md`).
+# Pulls the pure-Rust `espeak-ng` phonemizer with embedded Romanian data
+# (`bundled-data-ro`); further voices add their `bundled-data-<lang>` here.
+tts-local = [
+    "dep:ort",
+    "dep:espeak-ng",
+    "espeak-ng/bundled-data-ro",
+    "dep:fono-download",
+]
 
 [dependencies]
 fono-core = { path = "../fono-core" }
@@ -41,8 +53,14 @@ serde_json = { workspace = true }
 reqwest = { workspace = true, optional = true }
 fono-http = { path = "../fono-http", optional = true }
 fono-net-codec = { path = "../fono-net-codec", optional = true }
+ort = { workspace = true, optional = true }
+espeak-ng = { workspace = true, optional = true }
+fono-download = { path = "../fono-download", optional = true }
 
 [dev-dependencies]
 fono-net-codec = { path = "../fono-net-codec" }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+tempfile = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

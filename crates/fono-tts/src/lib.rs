@@ -31,6 +31,13 @@ pub mod openai_compat;
 #[cfg(feature = "wyoming")]
 pub mod wyoming;
 
+#[cfg(feature = "tts-local")]
+pub mod local;
+#[cfg(feature = "tts-local")]
+pub mod piper;
+#[cfg(feature = "tts-local")]
+pub mod voices;
+
 pub use factory::build_tts;
 pub use sentence_split::SentenceSplitter;
 pub use traits::{TextToSpeech, TtsAudio};

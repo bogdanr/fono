@@ -49,6 +49,7 @@ impl Paths {
             &self.whisper_models_dir(),
             &self.polish_models_dir(),
             &self.sherpa_models_dir(),
+            &self.voices_dir(),
         ] {
             std::fs::create_dir_all(dir)
                 .map_err(|source| Error::Io { path: dir.clone(), source })?;
@@ -89,6 +90,15 @@ impl Paths {
     #[must_use]
     pub fn sherpa_models_dir(&self) -> PathBuf {
         self.cache_dir.join("models").join("sherpa")
+    }
+
+    /// Cache directory for local ONNX voice assets: the `.ort` models, their
+    /// `.onnx.json` config sidecars, and per-voice espeak-ng data, fetched on
+    /// demand from the fono-voice mirror (ADR 0033). Mirrors the
+    /// `models/<kind>` convention used by the STT model dirs.
+    #[must_use]
+    pub fn voices_dir(&self) -> PathBuf {
+        self.cache_dir.join("models").join("voices")
     }
 
     #[must_use]

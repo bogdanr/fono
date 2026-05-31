@@ -1421,7 +1421,7 @@ async fn use_cmd(paths: &Paths, action: UseCmd) -> Result<()> {
         UseCmd::Tts { backend, uri } => {
             let b = parse_tts_backend(&backend).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "unknown TTS backend {backend:?}; try none, wyoming, piper, openai, \
+                    "unknown TTS backend {backend:?}; try none, local, wyoming, openai, \
                      groq, openrouter, cartesia, deepgram"
                 )
             })?;

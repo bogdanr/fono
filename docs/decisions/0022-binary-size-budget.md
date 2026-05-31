@@ -31,6 +31,87 @@ size-budget gate is now a matrix:
 See `plans/2026-05-02-fono-cpu-gpu-variants-v1.md` for the variant
 plumbing, runtime detection, and upcoming upgrade UX.
 
+**Amended 2026-05-31 (local TTS — no third variant):** local
+text-to-speech does **not** ship as a third release artefact. Fono will
+have **at most** the existing two builds — `cpu` and `gpu` (Vulkan) —
+and may collapse to a single GPU-only build in future; it will not
+fragment further.
+
+> **SUPERSEDED 2026-05-31 (part 2) by ADR 0032.** The paragraph below
+> assumed local TTS would be hand-ported onto the shared ggml runtime
+> ("no ONNX, no candle"). That premise was reversed once Fono committed
+> to a **full local voice stack** (TTS + wake-word + streaming STT +
+> neural VAD + speaker-ID). Per ADR 0032, the voice stack runs on
+> **ONNX Runtime, statically linked via `ort`** — one Apache-2.0 runtime
+> for all those model classes. The ggml-reuse requirement and the
+> "shared-ggml is a hard prerequisite for TTS" claim no longer hold:
+> shared-ggml is now a *size-offset* task (Phase after Piper), not a
+> blocker. The binding constraints that survive — **no third variant**,
+> **four-entry `NEEDED` allowlist**, **engine code never bundled as a
+> `.so`** — are unchanged and are satisfied by static ONNX (verified
+> 2026-05-31; see ADR 0032). Read the paragraph below as historical.
+
+The (now-superseded) ggml-reuse consequences were:
+
+- Local TTS engines (Piper, later Kokoro) are **absorbed into the `cpu`
+  and `gpu` builds**, behind a `tts-local` cargo feature that is off in
+  source-default builds but **on** in the shipped artefacts.
+- The engines **must reuse the shared ggml runtime** (no second/third
+  ggml copy, no ONNX Runtime, no candle). This makes **Phase 1 Task 1.2
+  (source-shared ggml) a hard prerequisite** for local TTS, not just a
+  size optimisation: shared-ggml first reclaims ~7 MB, which offsets the
+  Piper graph code (~1–3 MB) + static `libespeak-ng` (~2–4 MB).
+- The `cpu` cap is **re-measured after the Piper engine lands** (Phase
+  2b of
+  `plans/2026-05-31-local-tts-ggml-piper-kokoro-and-wyoming-server-v2.md`).
+  Target **≤ 24 MiB**; the 20 MiB line is raised only if the shared-ggml
+  reclaim does not fully absorb the additions, and the new number is
+  recorded here with the measurement. The `gpu` build inherits the same
+  additions under its existing 64 MiB cap.
+- `NEEDED` is unchanged: `libespeak-ng` is linked **statically**, so the
+  four-entry allowlist (`cpu`) / five-entry (`gpu`, + `libvulkan.so.1`)
+  still holds. Any new dynamic dep fails the gate.
+
+**Amended 2026-05-31 (part 3 — ONNX voice stack, per ADR 0032):** the
+local voice stack runs on **statically-linked ONNX Runtime** (`ort`),
+not ggml. Consequences for this ADR:
+
+- The full prebuilt onnxruntime adds **~19 MiB** (measured). Fono ships a
+  **custom minimal build** (`--minimal_build --include_ops_by_config
+  --enable_reduced_operator_type_support --disable_ml_ops
+  --disable_exceptions --disable_rtti --config MinSizeRel`, ORT-format
+  models), tuned to exactly the operators our model set uses. **Measured
+  2026-05-31: the minimal build adds only ~2.1 MiB** to a release binary
+  (`opt-level=s` + LTO + strip + `--gc-sections`) for the 10-operator
+  Piper VITS op set — far better than the ~7–11 MiB estimate, because
+  `--gc-sections` prunes the bulk of the 50 MiB archive that the fixed op
+  set never references. The static `libonnxruntime.a` is built in CI and
+  pinned via `ORT_LIB_LOCATION` (no CDN fetch, no `libonnxruntime.so`).
+- **`NEEDED` is unchanged** — static ONNX adds only a dynamic `-lstdc++`
+  that Fono already forces static (the `llama-cpp-2/static-stdcxx`
+  mechanism). Four-entry (`cpu`) / five-entry (`gpu`) allowlist holds.
+  Verified 2026-05-31: a static-`ort` binary presents exactly `{libc,
+  libm, libgcc_s, ld-linux}`.
+- **New `cpu` cap: ≤ 32 MiB.** With the minimal build measuring only
+  ~2.1 MiB of incremental code (2026-05-31), the cap retains generous
+  headroom; the per-op growth of future voice models (Kokoro, Silero
+  VAD, KWS, streaming STT) is the real consumer of that headroom. The
+  source-shared ggml dedup (Phase 3) still reclaims ~7 MiB as an
+  independent offset. Record measured numbers here as they land. `gpu`
+  stays ≤ 64 MiB.
+- The voice stack is **CPU-only** (XNNPACK EP); ONNX has no Vulkan EP and
+  does not use the `gpu` variant's Vulkan. ggml-Vulkan still serves
+  whisper-large + the LLM. See ADR 0032 "CPU / Vulkan split".
+- Source-shared ggml (Task 1.2) is **no longer a prerequisite** for the
+  voice stack — it is reclassified as a size-offset task scheduled after
+  Piper ships.
+
+The full size-and-capability engineering is documented in
+`docs/binary-size.md`.
+
+The rejected "third `fono-tts` variant" approach (a 2026-05-25 draft) is
+not adopted; see the superseded v1 TTS plan for that history.
+
 ## Context
 
 The v1 design plan (`docs/plans/2026-04-24-fono-design-v1.md:514-516`)

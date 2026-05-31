@@ -32,6 +32,11 @@ discovery = ["dep:mdns-sd"]
 fono-core = { path = "../fono-core" }
 fono-net-codec = { path = "../fono-net-codec" }
 fono-stt = { path = "../fono-stt", default-features = false }
+# TTS trait only — the Wyoming TTS *server* endpoint drives any
+# `Arc<dyn TextToSpeech>` (local engine, cloud, or a Wyoming-client
+# backend). Default `wyoming` feature is light (pulls only the codec we
+# already depend on); no native/C++ deps.
+fono-tts = { path = "../fono-tts" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }

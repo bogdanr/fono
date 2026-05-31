@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "comment": "In-repo voice catalog for the local ONNX voice stack (ADR 0033). Each voice resolves to a pinned .ort model + .onnx.json config hosted by the fono-voice mirror as release assets tagged by ONNX Runtime ABI (release_tag). SHA-256s are verified on download; the base URL is overridable. Keep this in sync with bogdanr/fono-voice manifest.json. The default engine policy is Kokoro for English, Piper for every other language.",
+  "voices": [
+    {
+      "name": "ro_RO-mihai-medium",
+      "engine": "piper",
+      "language": "ro",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "ro_RO-mihai-medium.ort",
+        "sha256": "c49d666d478207edb2f2a70e5e4acbb1714de4a6112ac87dd0a62ebae10dbc35",
+        "size": 63745280
+      },
+      "config": {
+        "file": "ro_RO-mihai-medium.onnx.json",
+        "sha256": "8cc0c9f077dc0cec3c25a6a055ec8046db8e40a2510591582f2c9c869f4bc47e",
+        "size": 4877
+      }
+    }
+  ]
+}

@@ -31,11 +31,13 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use fono_net_codec::wyoming::{
-    AsrModel, AsrProgram, Attribution, AudioChunk, AudioStart, AudioStop, Info, Transcribe,
-    Transcript, AUDIO_CHUNK, AUDIO_START, AUDIO_STOP, DESCRIBE, INFO, TRANSCRIBE, TRANSCRIPT,
+    AsrModel, AsrProgram, Attribution, AudioChunk, AudioStart, AudioStop, Info, Synthesize,
+    Transcribe, Transcript, TtsProgram, TtsVoice, AUDIO_CHUNK, AUDIO_START, AUDIO_STOP, DESCRIBE,
+    INFO, SYNTHESIZE, TRANSCRIBE, TRANSCRIPT,
 };
 use fono_net_codec::Frame;
 use fono_stt::traits::SpeechToText;
+use fono_tts::traits::TextToSpeech;
 use serde_json::to_value;
 use tokio::io::{AsyncWrite, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -78,11 +80,27 @@ pub struct WyomingServerConfig {
     /// even if the bind address would have allowed them. Set when
     /// `bind = "127.0.0.1"` for defence in depth.
     pub loopback_only: bool,
+    /// Voices advertised in `info.tts[].voices`. Empty (the default)
+    /// means this listener advertises ASR only. The daemon populates
+    /// this from `[server.tts]` when it also binds a TTS backend via
+    /// [`WyomingServer::with_tts`]; advertisement and serving are kept
+    /// in lockstep that way.
+    pub tts_voices: Vec<AdvertisedVoice>,
 }
 
 /// One model entry surfaced via `info.asr[].models`.
 #[derive(Debug, Clone)]
 pub struct AdvertisedModel {
+    pub name: String,
+    pub languages: Vec<String>,
+    pub description: Option<String>,
+    pub version: Option<String>,
+}
+
+/// One voice entry surfaced via `info.tts[].voices`. Synthesised by
+/// the daemon from `[server.tts]` + the active local voice catalogue.
+#[derive(Debug, Clone)]
+pub struct AdvertisedVoice {
     pub name: String,
     pub languages: Vec<String>,
     pub description: Option<String>,
@@ -99,6 +117,7 @@ impl Default for WyomingServerConfig {
             server_version: env!("CARGO_PKG_VERSION").to_string(),
             models: Vec::new(),
             loopback_only: true,
+            tts_voices: Vec::new(),
         }
     }
 }
@@ -146,18 +165,25 @@ impl Drop for WyomingServerHandle {
 /// without restarting the listener.
 pub type SttProvider = Arc<dyn Fn() -> Arc<dyn SpeechToText> + Send + Sync>;
 
+/// Provider closure for the active TTS backend, parallel to
+/// [`SttProvider`]. Bound via [`WyomingServer::with_tts`]; when the
+/// server holds `None` it does not answer `synthesize` requests and
+/// advertises no `info.tts` service.
+pub type TtsProvider = Arc<dyn Fn() -> Arc<dyn TextToSpeech> + Send + Sync>;
+
 /// The server itself. Stateless beyond the config; one instance per
 /// `[server.wyoming]` block.
 pub struct WyomingServer {
     cfg: WyomingServerConfig,
     stt: SttProvider,
+    tts: Option<TtsProvider>,
 }
 
 impl WyomingServer {
     /// Build a server. Does not bind yet — call [`Self::start`].
     #[must_use]
     pub fn new(cfg: WyomingServerConfig, stt: SttProvider) -> Self {
-        Self { cfg, stt }
+        Self { cfg, stt, tts: None }
     }
 
     /// Convenience constructor for callers that want to pin a single
@@ -166,6 +192,23 @@ impl WyomingServer {
     #[must_use]
     pub fn with_fixed_stt(cfg: WyomingServerConfig, stt: Arc<dyn SpeechToText>) -> Self {
         Self::new(cfg, Arc::new(move || Arc::clone(&stt)))
+    }
+
+    /// Bind a TTS backend provider so this listener also answers
+    /// `synthesize` requests and advertises `info.tts`. The closure is
+    /// invoked once per accepted connection to track `Reload` swaps,
+    /// exactly like [`SttProvider`].
+    #[must_use]
+    pub fn with_tts(mut self, tts: TtsProvider) -> Self {
+        self.tts = Some(tts);
+        self
+    }
+
+    /// Convenience: pin a single TTS backend for the listener's
+    /// lifetime (no `Reload` tracking). Tests use this.
+    #[must_use]
+    pub fn with_fixed_tts(self, tts: Arc<dyn TextToSpeech>) -> Self {
+        self.with_tts(Arc::new(move || Arc::clone(&tts)))
     }
 
     /// Bind the listener and spawn the accept loop. Returns once the
@@ -186,6 +229,7 @@ impl WyomingServer {
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
         let cfg = Arc::new(self.cfg);
         let stt = self.stt;
+        let tts = self.tts;
         let join = tokio::spawn(async move {
             // Bound mpsc just to give us a place to count active conns
             // and to provide a backpressure point if accept() outpaces
@@ -212,10 +256,11 @@ impl WyomingServer {
                                 }
                                 let cfg2 = Arc::clone(&cfg);
                                 let stt_snapshot = (stt)();
+                                let tts_snapshot = tts.as_ref().map(|f| f());
                                 let slot_tx2 = slot_tx.clone();
                                 tokio::spawn(async move {
                                     let _slot = slot_tx2.try_send(()).ok();
-                                    if let Err(e) = handle_connection(sock, peer, cfg2, stt_snapshot).await {
+                                    if let Err(e) = handle_connection(sock, peer, cfg2, stt_snapshot, tts_snapshot).await {
                                         tracing::debug!(
                                             target: "fono::wyoming::server",
                                             %peer,
@@ -259,6 +304,7 @@ async fn handle_connection(
     peer: SocketAddr,
     cfg: Arc<WyomingServerConfig>,
     stt: Arc<dyn SpeechToText>,
+    tts: Option<Arc<dyn TextToSpeech>>,
 ) -> Result<()> {
     sock.set_nodelay(true).ok();
     let (read_half, mut write_half) = sock.into_split();
@@ -346,6 +392,9 @@ async fn handle_connection(
                     .await?;
                 }
             }
+            SYNTHESIZE => {
+                dispatch_synthesize(peer, tts.as_ref(), &mut write_half, frame.data).await?;
+            }
             other => {
                 tracing::trace!(
                     target: "fono::wyoming::server",
@@ -396,6 +445,101 @@ where
     let resp = Transcript { text: res.text, language: res.language };
     Frame::new(TRANSCRIPT).with_data(to_value(&resp)?).write_async(write_half).await?;
     pcm_f32.clear();
+    Ok(())
+}
+
+/// Samples per `audio-chunk` frame. At 22.05 kHz mono this is ~93 ms
+/// of audio per chunk — small enough that Home Assistant begins
+/// playback promptly, large enough that framing overhead stays
+/// negligible.
+const TTS_CHUNK_SAMPLES: usize = 2048;
+
+/// Decode a `synthesize` event and, if a TTS backend is bound, drive
+/// it via [`handle_synthesize`]. With no backend bound the request is
+/// logged and dropped — an ASR-only listener stays well-behaved rather
+/// than tearing down the connection.
+async fn dispatch_synthesize<W>(
+    peer: SocketAddr,
+    tts: Option<&Arc<dyn TextToSpeech>>,
+    write_half: &mut W,
+    frame_data: serde_json::Value,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let req: Synthesize = serde_json::from_value(frame_data).context("decoding synthesize")?;
+    if let Some(tts) = tts {
+        handle_synthesize(peer, tts.as_ref(), write_half, req).await?;
+    } else {
+        tracing::warn!(
+            target: "fono::wyoming::server",
+            %peer,
+            "synthesize requested but no TTS backend is bound; ignoring"
+        );
+    }
+    Ok(())
+}
+
+/// Drive a `synthesize` request: call the backend, then stream the
+/// result back as the canonical `audio-start` / `audio-chunk`* /
+/// `audio-stop` sequence in int16 LE mono (the Wyoming wire format).
+/// Empty `text` yields an empty PCM buffer (trait contract), which we
+/// honour as `audio-start` immediately followed by `audio-stop` with no
+/// chunks in between.
+async fn handle_synthesize<W>(
+    peer: SocketAddr,
+    tts: &dyn TextToSpeech,
+    write_half: &mut W,
+    req: Synthesize,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let (voice, lang) =
+        req.voice.as_ref().map_or((None, None), |v| (v.name.as_deref(), v.language.as_deref()));
+    tracing::info!(
+        target: "fono::wyoming::server",
+        %peer,
+        chars = req.text.chars().count(),
+        voice,
+        lang,
+        "processing synthesize request"
+    );
+    let started = std::time::Instant::now();
+    let audio = tts.synthesize(&req.text, voice, lang).await.context("backend tts.synthesize")?;
+    let rate = audio.sample_rate;
+
+    Frame::new(AUDIO_START)
+        .with_data(to_value(AudioStart { rate, width: 2, channels: 1, timestamp: None })?)
+        .write_async(write_half)
+        .await?;
+
+    for chunk in audio.pcm.chunks(TTS_CHUNK_SAMPLES) {
+        let mut bytes = Vec::with_capacity(chunk.len() * 2);
+        for &s in chunk {
+            let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        Frame::new(AUDIO_CHUNK)
+            .with_data(to_value(AudioChunk { rate, width: 2, channels: 1, timestamp: None })?)
+            .with_payload(bytes)
+            .write_async(write_half)
+            .await?;
+    }
+
+    Frame::new(AUDIO_STOP)
+        .with_data(to_value(AudioStop::default())?)
+        .write_async(write_half)
+        .await?;
+
+    tracing::info!(
+        target: "fono::wyoming::server",
+        %peer,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        samples = audio.pcm.len(),
+        rate,
+        "synthesize request complete"
+    );
     Ok(())
 }
 
@@ -457,20 +601,47 @@ fn build_info(cfg: &WyomingServerConfig) -> Info {
             version: m.version.clone().or_else(|| Some(cfg.server_version.clone())),
         })
         .collect();
-    Info {
-        asr: vec![AsrProgram {
+    let asr = vec![AsrProgram {
+        name: cfg.server_name.clone(),
+        attribution: attribution.clone(),
+        installed: true,
+        description: Some("Fono speech-to-text".to_string()),
+        version: Some(cfg.server_version.clone()),
+        models,
+        // Streaming-response support arrives when StreamingStt is
+        // wired through. For now, advertise the one-shot lane only.
+        supports_transcript_streaming: false,
+    }];
+    // Advertise a TTS program only when voices are configured — an
+    // empty `tts` array means "ASR only" to Home Assistant's loader.
+    let tts = if cfg.tts_voices.is_empty() {
+        Vec::new()
+    } else {
+        vec![TtsProgram {
             name: cfg.server_name.clone(),
-            attribution,
+            attribution: attribution.clone(),
             installed: true,
-            description: Some("Fono speech-to-text".to_string()),
+            description: Some("Fono text-to-speech".to_string()),
             version: Some(cfg.server_version.clone()),
-            models,
-            // Streaming-response support arrives when StreamingStt is
-            // wired through. For now, advertise the one-shot lane only.
-            supports_transcript_streaming: false,
-        }],
-        ..Info::default()
-    }
+            voices: cfg
+                .tts_voices
+                .iter()
+                .map(|v| TtsVoice {
+                    name: v.name.clone(),
+                    languages: v.languages.clone(),
+                    speakers: Vec::new(),
+                    installed: true,
+                    attribution: attribution.clone(),
+                    description: v.description.clone(),
+                    version: v.version.clone().or_else(|| Some(cfg.server_version.clone())),
+                })
+                .collect(),
+            // Sentence-level streaming is plumbed when the local engine
+            // streams; the one-shot lane is correct for now.
+            supports_synthesize_streaming: false,
+        }]
+    };
+    Info { asr, tts, ..Info::default() }
 }
 
 #[cfg(test)]
@@ -519,5 +690,128 @@ mod tests {
         assert_eq!(asr.models[0].languages, vec!["en", "ro"]);
         assert!(!asr.supports_transcript_streaming);
         assert_eq!(asr.models[0].attribution.name, "Fono");
+    }
+
+    use fono_tts::traits::TtsAudio;
+    use tokio::io::BufReader;
+
+    /// Minimal in-process TTS backend that returns a fixed PCM buffer,
+    /// so the server-side `synthesize` framing can be tested without a
+    /// real engine or a network peer.
+    struct MockTts {
+        pcm: Vec<f32>,
+        rate: u32,
+    }
+
+    #[async_trait::async_trait]
+    impl TextToSpeech for MockTts {
+        async fn synthesize(
+            &self,
+            _text: &str,
+            _voice: Option<&str>,
+            _lang: Option<&str>,
+        ) -> Result<TtsAudio> {
+            Ok(TtsAudio { pcm: self.pcm.clone(), sample_rate: self.rate })
+        }
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+        fn native_sample_rate(&self) -> u32 {
+            self.rate
+        }
+    }
+
+    /// Run one `synthesize` through the handler and parse the emitted
+    /// frames back, returning `(audio-start header, total samples across
+    /// chunks, saw audio-stop)`.
+    async fn collect_synth_frames(pcm: Vec<f32>, rate: u32) -> (AudioStart, usize, bool) {
+        let tts = MockTts { pcm, rate };
+        let req = Synthesize { text: "hello".into(), voice: None };
+        let peer: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        handle_synthesize(peer, &tts, &mut buf, req).await.unwrap();
+
+        let mut reader = BufReader::new(buf.as_slice());
+        let start_frame = Frame::read_async(&mut reader).await.unwrap();
+        assert_eq!(start_frame.kind, AUDIO_START);
+        let start: AudioStart = serde_json::from_value(start_frame.data).unwrap();
+
+        let mut samples = 0usize;
+        let saw_stop;
+        loop {
+            let f = Frame::read_async(&mut reader).await.unwrap();
+            match f.kind.as_str() {
+                AUDIO_STOP => {
+                    saw_stop = true;
+                    break;
+                }
+                AUDIO_CHUNK => samples += f.payload.len() / 2,
+                other => panic!("unexpected frame {other}"),
+            }
+        }
+        (start, samples, saw_stop)
+    }
+
+    #[tokio::test]
+    async fn synthesize_streams_audio_start_chunks_stop() {
+        let (start, samples, saw_stop) = collect_synth_frames(vec![0.25_f32; 5000], 22050).await;
+        assert_eq!(start.rate, 22050);
+        assert_eq!(start.width, 2);
+        assert_eq!(start.channels, 1);
+        assert_eq!(samples, 5000, "all PCM samples must survive chunking");
+        assert!(saw_stop, "stream must terminate with audio-stop");
+    }
+
+    #[tokio::test]
+    async fn synthesize_empty_text_emits_start_then_stop_no_chunks() {
+        let (start, samples, saw_stop) = collect_synth_frames(Vec::new(), 16000).await;
+        assert_eq!(start.rate, 16000);
+        assert_eq!(samples, 0, "empty PCM must emit no audio-chunk frames");
+        assert!(saw_stop);
+    }
+
+    #[tokio::test]
+    async fn synthesize_round_trips_full_scale_sample() {
+        // +1.0 maps to 0x7fff (32767) little-endian.
+        let tts = MockTts { pcm: vec![1.0], rate: 22050 };
+        let peer: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        handle_synthesize(peer, &tts, &mut buf, Synthesize { text: "x".into(), voice: None })
+            .await
+            .unwrap();
+        let mut reader = BufReader::new(buf.as_slice());
+        let _start = Frame::read_async(&mut reader).await.unwrap();
+        let chunk = Frame::read_async(&mut reader).await.unwrap();
+        assert_eq!(chunk.kind, AUDIO_CHUNK);
+        assert_eq!(chunk.payload, vec![0xff, 0x7f]);
+    }
+
+    #[test]
+    fn build_info_advertises_tts_voices_when_configured() {
+        let cfg = WyomingServerConfig {
+            tts_voices: vec![AdvertisedVoice {
+                name: "ro_RO-mihai-medium".into(),
+                languages: vec!["ro".into()],
+                description: Some("Piper".into()),
+                version: None,
+            }],
+            ..WyomingServerConfig::default()
+        };
+        let info = build_info(&cfg);
+        assert_eq!(info.tts.len(), 1);
+        let prog = &info.tts[0];
+        assert_eq!(prog.name, "Fono");
+        assert!(prog.installed);
+        assert_eq!(prog.voices.len(), 1);
+        assert_eq!(prog.voices[0].name, "ro_RO-mihai-medium");
+        assert_eq!(prog.voices[0].languages, vec!["ro"]);
+        assert_eq!(prog.voices[0].attribution.name, "Fono");
+    }
+
+    #[test]
+    fn build_info_omits_tts_when_no_voices() {
+        let info = build_info(&WyomingServerConfig::default());
+        assert!(info.tts.is_empty(), "no voices configured => no tts program");
+        assert!(!info.asr.is_empty(), "asr is always advertised");
     }
 }

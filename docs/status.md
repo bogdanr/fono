@@ -1,5 +1,277 @@
 # Fono — Project Status
-Last updated: 2026-05-29
+Last updated: 2026-05-31
+
+## 2026-05-31 — Phase 2.4/2.5: local TTS now user-selectable
+
+The local Piper engine is wired all the way through to config — a user
+can now run `fono use tts local` and the daemon downloads, verifies,
+caches, loads, and serves the voice. This closes the gap flagged in the
+previous commit (the engine existed but wasn't reachable).
+
+- **`TtsBackend::Local`** added to `fono-core` with a `[tts.local]`
+  config block (`voice`, `base_url`). All exhaustive call sites updated:
+  `parse_tts_backend`/`tts_backend_str`/`all_tts_backends`,
+  `configured_tts_backends`, doctor's TTS provider listing, the wizard
+  short-label, and the tray menu label.
+- **Factory `Local` arm** (`fono-tts::factory::build_local`): resolves
+  the catalog voice (explicit `[tts.local].voice`, else first voice for
+  `general.languages[0]`), loads the cached `.ort` + `.onnx.json` via
+  `PiperLocal`, materialising embedded espeak data. `build_tts` gained a
+  `voices_dir` parameter, threaded through every caller (session, doctor,
+  speak_stream, mcp-server, smoke example).
+- **Auto-download at startup** (`fono::models::ensure_local_tts`, boxed
+  to satisfy `clippy::large_futures`): when `[tts].backend = "local"`,
+  `ensure_models` fetches the voice from the `fono-voice` mirror and
+  verifies it against the committed catalog SHA-256 before the factory
+  loads it — mirroring the whisper/LLM ensure flow.
+
+**Gate:** `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -D warnings` (and `-p fono --features tts-local`), and
+`cargo test --workspace` all green (153 pass, 1 ignored; `fono-tts
+--features tts-local` 42 pass). Default `fono` graph still excludes the
+feature.
+
+**Next:** 2.6 (drop app-release `.sha256` sidecars; point `fono-update`
+at `SHA256SUMS`), then 4.1 (Kokoro for English) which also lands the
+router's Kokoro-vs-Piper split, and the espeak per-language dict fetch.
+
+## 2026-05-31 — Phase 2.2b: PiperLocal ONNX inference + measured size
+
+End-to-end local Piper synthesis works. With the support files dropped
+into `./tmp` (a prebuilt **minimal** `libonnxruntime.a`, the converted
+`ro_RO-mihai-medium.ort`, and a python venv with onnxruntime 1.24.2), I
+unblocked the previously CI-gated inference path and validated the build
+tooling.
+
+- **`PiperLocal`** added to `crates/fono-tts/src/piper.rs`: builds an
+  `ort::Session` from the `.ort` model (graph optimisation disabled via
+  the `recover()` idiom for minimal-build compatibility), runs the
+  standard single-speaker VITS signature (`input` ids, `input_lengths`,
+  `scales[noise, length, noise_w]`) → f32 PCM at the voice sample rate.
+  Implements `TextToSpeech`.
+- **Verified end-to-end** (`#[ignore]`d test, run here with the real
+  artefacts): synthesises >0.5s of Romanian audio, peak amplitude in
+  range, against the minimal 10-operator VITS `libonnxruntime.a` + the
+  converted `.ort` model.
+- **Build tooling validated:** `scripts/gen-ort-models.sh` runs clean
+  with the venv python (10-op `ops.config` + `.ort` produced);
+  `scripts/build-onnxruntime-minimal.sh` updated with the three
+  container/root build flags from the user's working `tmp/build-ort.sh`.
+- **Measured size (the number Phase 1.4 was waiting on):** the minimal
+  ONNX runtime adds only **~2.1 MiB** to a release binary (`opt-level=s`
+  + LTO + strip + `--gc-sections`) for the Piper op set — far below the
+  ~7–11 MiB estimate. The `.a` is ~50 MiB on disk but `--gc-sections`
+  prunes everything the fixed op set never references. `NEEDED` = exactly
+  the four-entry allowlist; onnxruntime statically embedded. ADR 0022,
+  `docs/binary-size.md`, and plan v3 updated with the real figure.
+
+**Gate:** `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -D warnings`, `cargo test --workspace --tests --lib` all
+green; clippy + tests green for `-p fono-tts --features tts-local` (36
+pass, 1 ignored). Feature absent from the default `fono` graph.
+
+**Next:** Phase 1.4 (CI size gate building the minimal `.a` + asserting
+the cap on the real `fono` binary), then 2.3 (voice download/cache),
+2.4 (router), 2.5 (factory + Wyoming wiring for end-to-end playback).
+
+## 2026-05-31 — Phase 2.2a: Piper front half (phonemize + id encoding)
+
+Landed the deterministic, unit-testable front half of the local Piper
+engine on the `tts-local` feature — everything up to (but not including)
+the `ort` inference call:
+
+- **`espeak-ng = 0.1.2`** added to `[workspace.dependencies]`
+  (`default-features = false`, GPL-3.0-or-later — compatible). It is a
+  **pure-Rust** eSpeak NG port: no system `libespeak-ng`, no C, language
+  data embedded per-voice. `tts-local` enables `espeak-ng/bundled-data-ro`.
+- **`crates/fono-tts/src/piper.rs`** (new, feature-gated):
+  - `PiperConfig` — parses the `<voice>.onnx.json` sidecar (audio,
+    espeak, inference, `phoneme_id_map`); unknown fields ignored.
+  - `phoneme_ids` — canonical piper-phonemize layout (BOS, interspersed
+    PAD, EOS; unmapped codepoints skipped), verified against the real
+    `ro_RO-mihai-medium.onnx.json` (`_`=0, `^`=1, `$`=2).
+  - `PiperVoice` — installs embedded espeak data once per voice, then
+    `text → IPA → ids`.
+- **De-risked for real:** the pure-Rust phonemizer compiles and produces
+  correct Romanian IPA (`"Bună ziua" → "bˈunə zˈiwa"`). 6 unit tests
+  incl. a Romanian end-to-end against `bundled-data-ro` — all green, no
+  network, no system espeak.
+
+**Gate:** `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -D warnings`, `cargo test --workspace --tests --lib` all
+green; clippy + tests also green for `-p fono-tts --features tts-local`
+(6/6 piper tests pass). Feature stays absent from the default `fono`
+graph. Doctests skipped locally (no `rustdoc`; CI runs them).
+
+**Licensing follow-up (recorded, not yet blocking):** the transitive
+`espeak-ng-data-phonemes` / `espeak-ng-data-dict-ro` crates ship no
+`license` field upstream (data is GPL-3.0-or-later). Not seen by CI
+cargo-deny today (`all-features = false`, feature off); needs a
+`[licenses.clarify]` entry before `tts-local` graduates to the checked
+build. Tracked in plan v3 Phase 2.
+
+**Next:** Phase 2.2b — feed the ids through an `ort` session
+(`.ort` Piper model) to f32 PCM; needs the minimal-build runtime +
+converted model from the CI build step.
+
+## 2026-05-31 — Phase 1.2 verified: ort wired + static-link proven (plan v3)
+
+Wired the ONNX Runtime into the workspace and **verified the static-link
+invariant on real code** (not just the throwaway spike crate):
+
+- **`ort 2.0.0-rc.12`** added to `[workspace.dependencies]` with
+  `default-features = false` (drops `download-binaries`/`tls-native`/
+  `copy-dylibs`): release builds link a pinned `libonnxruntime.a` via
+  `ORT_LIB_LOCATION`, never the CDN. `api-24` matches onnxruntime 1.24.2.
+- **`tts-local` feature** on `crates/fono-tts` (+ new `local` module:
+  `RUNTIME_API_VERSION`, `ensure_runtime()`), propagated through the
+  `fono` crate. **OFF by default** — `cargo tree -p fono -i ort` shows
+  `ort` is absent from the default graph (zero bytes in the canonical
+  binary); it appears only with `--features tts-local`.
+- **Verification:** built the `fono-tts` test binary against the cached
+  real 1.24.2 `libonnxruntime.a` (`ORT_LIB_LOCATION` + Fono's static-
+  libstdc++ flags). Result: onnxruntime **statically embedded** (19,611
+  `Ort*` symbols pulled in — genuine link, not a no-op), `NEEDED` =
+  **exactly the four-entry allowlist** (`ld-linux`, `libc`, `libgcc_s`,
+  `libm`; no `libstdc++.so.6`, no `libonnxruntime.so`), and the
+  `ensure_runtime()` test runs. Confirms ADR 0032's core claim on real code.
+- **Drive-by fix:** `factory.rs` test imports (`TtsCloud`/`TtsWyoming`)
+  now cfg-gated to the features that use them — a latent unused-import
+  that only surfaces in isolated (non-cloud) feature builds like
+  `tts-local`.
+
+**Gate:** `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -D warnings`, and `cargo test --workspace --tests --lib`
+all green; clippy + tests also green for `-p fono-tts --features
+tts-local`. Doctests skipped locally (no `rustdoc`; CI runs them).
+
+**Environment note:** the 1.1 minimal onnxruntime build was **not** run
+here — `protoc` missing, no python `onnxruntime`, cmake is 4.x (1.24.2
+wants 3.28), `/tmp` has 5.2 G. Confirms it belongs in CI.
+
+**Next:** run `scripts/build-onnxruntime-minimal.sh` in CI to produce +
+pin the minimal `libonnxruntime.a`, enable `xnnpack`, then Phase 1.4 (CI
+size gate, `cpu` cap → 32 MiB) and Phase 2.2 (`PiperLocal` engine).
+
+## 2026-05-31 — Phase 1: minimal-build tooling + version pin (plan v3)
+
+Started Phase 1 (minimal ONNX Runtime build infrastructure). Verified the
+load-bearing version pin and landed the two foundation scripts:
+
+- **Version pin corrected:** `ort 2.0.0-rc.12` → `ort-sys 2.0.0-rc.12`
+  links **onnxruntime 1.24.2** (pyke `ms@1.24.2`, read from `ort-sys`'s
+  `build/download/dist.txt`), **not 1.26** as the spike note said. The
+  hand-built static lib must match this tag for ABI compatibility.
+- **`scripts/gen-ort-models.sh`** (Task 1.3) — converts `.onnx` → `.ort`
+  and emits `ops.config` via onnxruntime's `convert_onnx_models_to_ort`
+  with type reduction; seeded with the Piper `ro_RO-mihai-medium` voice.
+  The standing pipeline every future model plugs into.
+- **`scripts/build-onnxruntime-minimal.sh`** (Task 1.1) — clones
+  onnxruntime `v1.24.2`, runs the documented minimal/MinSizeRel build
+  consuming `ops.config`, merges the per-target `.a` files into one
+  `libonnxruntime.a` for `ORT_LIB_LOCATION`.
+
+Both scripts are pinned, commented, and `sh -n` syntax-clean. They are
+recipes that run in CI / on a capable host (~45-min networked compile);
+they were not executed in this session.
+
+**Not done (gated on the artefact above):** Phase 1.2 (`ort` wired via
+`ORT_LIB_LOCATION`, `download-binaries` off) and Phase 1.4 (CI size gate
++ `cpu` cap → 32 MiB) need a real `libonnxruntime.a` to link/measure, so
+they were deliberately left unwritten rather than shipped red or wired to
+the forbidden full-CDN download. No Rust changed; the tree stays green.
+
+**Next:** run `build-onnxruntime-minimal.sh` in CI to produce + pin the
+artefact, then do 1.2 + 1.4 and measure the real `fono` size/`NEEDED`.
+
+## 2026-05-31 — Voice stack pivots to ONNX Runtime (plan v3 + ADR 0032)
+
+Followed the static-ONNX spike (below) with the owner's decision: **Fono
+is a full local voice stack, and it runs on statically-linked ONNX
+Runtime**, built minimally to stay small, with shared-ggml as a later
+size offset.
+
+**Spike (decisive evidence):** built a real binary on `ort 2.0.0-rc.12`
+(onnxruntime 1.24.2 — corrected from the earlier "1.26" note).
+onnxruntime links **statically** (no
+`libonnxruntime.so` in `NEEDED`); with Fono's existing static-libstdc++
+mechanism the binary presents **exactly the four-entry allowlist** and
+runs. Full prebuilt adds **~19 MiB**; a custom **minimal build**
+(`--minimal_build --include_ops_by_config` from our ORT-format model set,
+pinned via `ORT_LIB_LOCATION`) targets **~7–11 MiB**. HA's Piper is the
+same onnxruntime shipped dynamically in a container — no lighter engine
+to copy. ONNX has **no Vulkan EP** (Dawn/WebGPU is dynamic → would break
+the allowlist); voice models are CPU-realtime, so the runtimes split:
+ggml-Vulkan for whisper-large + LLM, ONNX CPU-only (XNNPACK) for the
+voice stack.
+
+**Landed this session (docs/decisions foundation):**
+- **ADR 0032** — ONNX Runtime as the voice-stack platform (new).
+- **ADR 0022** amended — supersede the ggml-reuse TTS line; ONNX minimal
+  build + dedup offset; `cpu` cap → **≤ 32 MiB**; allowlist unchanged.
+- **ADR 0004** amended — per-model licensing (Piper GPL; Kokoro / Silero /
+  Zipformer / KWS Apache); engines run on ONNX, not ggml.
+- **`docs/binary-size.md`** (new) — the consolidated "keeping Fono small
+  and capable" engineering guide (invariants, runtime split, size levers,
+  the per-model `ops.config` discipline, add-a-capability checklist).
+- **Plan v3** `plans/2026-05-31-local-tts-onnx-voice-stack-and-wyoming-server-v3.md`;
+  v2 banner-superseded (retained for its spike evidence trail).
+
+**Next:** Phase 1 — stand up the minimal onnxruntime static build in CI +
+`ORT_LIB_LOCATION` pin + ORT-format/`ops.config` tooling, then Phase 2
+(Piper-on-`ort`, Romanian first). Phase 2a Wyoming TTS server already
+ships and is unaffected.
+
+## 2026-05-31 — Local TTS: plan v2 + Wyoming TTS server (Phase 2a complete)
+
+Audited and rewrote the local-TTS plan, then landed the first code phase.
+
+**Plan/decision groundwork**
+- New authoritative plan `plans/2026-05-31-local-tts-ggml-piper-kokoro-and-wyoming-server-v2.md`;
+  v1 banner-deprecated. Direction: **ggml-reuse** substrate (small binary, rides the
+  existing Vulkan backend) — TTS lands in the canonical CPU + Vulkan builds, **no separate
+  variant**. Kokoro-ggml feasibility spike scheduled *after* Phase 2b, just before Kokoro work.
+- ADR 0022 amended (dropped the `fono-tts` third-variant strategy; size reframed around the
+  canonical binary). ADR 0004 corrected: Piper is now `OHF-Voice/piper1-gpl`, **GPL-3.0**
+  (was MIT); fine to link for a GPL-3.0 project.
+
+**Phase 2a — Wyoming TTS server endpoint (decoupled from any local engine; done):**
+- Codec TTS types (`Synthesize`, `TtsProgram`, `TtsVoice`, `Info.tts`, `SYNTHESIZE`) were
+  already in `fono-net-codec`.
+- Server-side `handle_synthesize` + `dispatch_synthesize` stream `audio-start` →
+  `audio-chunk*` → `audio-stop` (int16 LE mono) from any bound `TextToSpeech`;
+  `build_info` advertises an `info.tts` program only when voices are configured.
+  `WyomingServer::with_tts` / `with_fixed_tts` + `TtsProvider` mirror the STT provider.
+- `[server.tts]` config block (`enabled`, `voices`, `default_voice`) in `fono-core`.
+- Daemon wiring: binds the orchestrator's `tts_snapshot()` to the listener when
+  `[server.tts].enabled`; mDNS `caps` gains `"tts"` via `wyoming_caps()`. TTS rides the
+  existing `[server.wyoming]` listener (one port; Wyoming multiplexes by event type).
+- Tests: synthesize framing/empty/full-scale round-trips, `build_info` tts-branch,
+  `[server.tts]` config round-trip, `wyoming_caps`. `cargo fmt`, workspace `clippy -D
+  warnings`, and the new tests all pass.
+- **Remaining (2a.8):** live Home Assistant discovery + `tts.speak` verification, and the
+  `docs/providers.md` note — needs a running HA instance.
+
+**Phase 1 (shared-ggml) — feasibility spike done; DEFERRED (owner chose Option B):**
+- No external-ggml CMake knob exists: `whisper-rs-sys-0.15.0/build.rs` unconditionally builds
+  and links whisper.cpp's bundled ggml (`build.rs:312-316`). Only the fork-and-drop-ggml path
+  is viable.
+- The two ggml copies are **different revisions** — `ggml.h` differs by 77 lines (whisper
+  102,112 B vs llama fork 104,314 B); the llama fork carries newer backends. Sharing one binary
+  needs ABI reconciliation + a published `whisper-rs-sys` fork, not a flag flip.
+- **Decision:** ship Piper first on the existing `--allow-multiple-definition` trick (temporary
+  +~7 MB); land shared-ggml later as a pure size-reclaim pass. Plan + ADR 0018/0022 cross-refs
+  updated; phase order reworked in the v2 plan.
+
+**Phase 2b (Piper-on-ggml) — scope correction surfaced (not yet started):** verified three
+prerequisites are net-new — no ggml binding is exposed to our code (no `ggml-sys`; `whisper-rs-sys`
+has no `links` key), no espeak-ng crate, and Piper voices ship as **ONNX not GGUF** (needs
+weight conversion + a hand-written VITS/HiFi-GAN graph). So 2b.2 is a model port of the same
+risk class as Kokoro. Recommended a Piper-ggml micro-spike to gate it (documented in the v2 plan).
+
+**Next:** run the Piper-ggml micro-spike (ggml-binding approach, ONNX→GGUF for one Romanian
+voice, espeak-ng phonemization) before writing engine code; optionally complete 2a.8 (live HA
+verification) when an HA instance is available.
 
 ## 2026-05-29 — Visual context for agents and assistant
 

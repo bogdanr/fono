@@ -92,6 +92,24 @@ whisper-rs = { version = "0.16", features = ["tracing_backend"] }
 # references from both llama.cpp and whisper.cpp without retaining a
 # dynamic `libstdc++.so.6` `NEEDED` entry.
 llama-cpp-2 = { version = "0.1", default-features = false, features = ["openmp", "static-openmp", "static-stdcxx"] }
+# Local voice stack (TTS/VAD/wake-word/streaming-STT) runs on ONNX Runtime
+# via `ort`, linked STATICALLY. `default-features = false` drops
+# `download-binaries` (and the `tls-native`/`copy-dylibs` machinery that only
+# the CDN path needs): release builds MUST link a pinned, minimally-built
+# `libonnxruntime.a` via `ORT_LIB_LOCATION` (see ADR 0032,
+# `docs/binary-size.md`, and `scripts/build-onnxruntime-minimal.sh`), never
+# the full ~19 MiB CDN runtime. `api-24` matches onnxruntime 1.24.2, the
+# version `ort-sys` 2.0.0-rc.12 pins. `xnnpack` is added in tandem with the
+# minimal build (which compiles the EP in). Gated behind `fono-tts`'s
+# `tts-local` feature, off in source-default builds.
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "api-24"] }
+# Pure-Rust eSpeak NG port — grapheme→IPA phonemization, the front half of
+# the local Piper TTS pipeline (ADR 0032). GPL-3.0-or-later, no C, no system
+# `libespeak-ng`. Language data is embedded per-language via the
+# `bundled-data-<lang>` features (enabled by consumers, e.g. `bundled-data-ro`)
+# and written to a cache dir at runtime via `install_bundled_language`.
+# `default-features = false` drops the `install-espeak-ng-shim` binary guard.
+espeak-ng = { version = "0.1.2", default-features = false }
 
 # Desktop integration.
 #

@@ -392,6 +392,11 @@ pub struct Tts {
     pub cloud: Option<TtsCloud>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wyoming: Option<TtsWyoming>,
+    /// `[tts.local]` — on-device ONNX voice engine (Piper). Only
+    /// consulted for [`TtsBackend::Local`]; the voice's `.ort` model is
+    /// downloaded + cached on first use (ADR 0033).
+    #[serde(default)]
+    pub local: TtsLocal,
 }
 
 impl Default for Tts {
@@ -402,6 +407,7 @@ impl Default for Tts {
             output_device: String::new(),
             cloud: None,
             wyoming: None,
+            local: TtsLocal::default(),
         }
     }
 }
@@ -424,6 +430,11 @@ pub enum TtsBackend {
     Cartesia,
     /// Deepgram's `/v1/speak` endpoint (Aura TTS).
     Deepgram,
+    /// On-device ONNX voice engine (Piper now; Kokoro later) on the
+    /// statically-linked `ort` runtime. Requires the `tts-local` build
+    /// feature. Configure via `[tts.local]`; the voice downloads from
+    /// the `fono-voice` mirror on first use (ADR 0032, ADR 0033).
+    Local,
 }
 
 impl Default for TtsBackend {
@@ -446,6 +457,24 @@ pub struct TtsCloud {
     /// Model override. Empty = factory default (e.g. `tts-1`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
+}
+
+/// `[tts.local]` — on-device ONNX voice engine (feature `tts-local`).
+/// The voice's `.ort` model + `.onnx.json` config are fetched from the
+/// `fono-voice` mirror on first use, verified against the committed
+/// catalog, and cached under the voices cache dir (ADR 0033).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TtsLocal {
+    /// Catalog voice id, e.g. `ro_RO-mihai-medium`. Empty = pick the
+    /// first catalog voice matching the first entry of
+    /// `general.languages`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub voice: String,
+    /// Mirror base URL override (forks / self-hosting / CDN). Empty =
+    /// the built-in `fono-voice` default.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub base_url: String,
 }
 
 /// `[tts.wyoming]` — coordinates of a Wyoming-protocol TTS server.
@@ -990,6 +1019,38 @@ pub struct Server {
     /// `Arc<dyn SpeechToText>` so Home Assistant satellites and other
     /// Wyoming peers can route inference through this daemon.
     pub wyoming: ServerWyoming,
+    /// Wyoming-protocol TTS serving. When `enabled`, the same
+    /// `[server.wyoming]` listener also answers `synthesize` requests
+    /// using the daemon's active `[tts]` backend (cloud or, later, a
+    /// local engine) and advertises an `info.tts` program plus the
+    /// `tts` mDNS capability tag. The Wyoming protocol multiplexes ASR
+    /// and TTS over one connection, so no separate port is needed.
+    pub tts: ServerTts,
+}
+
+/// `[server.tts]` — opt-in Wyoming TTS serving. Decoupled from any
+/// local engine: it serves whatever `[tts].backend` resolves to, so a
+/// `fono install --server` box can answer Home Assistant TTS over a
+/// cloud backend today and a local engine later, unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ServerTts {
+    /// Master switch. Default `false`. Requires `[server.wyoming]` to
+    /// also be enabled (TTS rides that listener) and a configured
+    /// `[tts]` backend; otherwise the daemon logs a warning and serves
+    /// ASR only.
+    pub enabled: bool,
+    /// Voice names advertised in `info.tts[].voices`, surfaced to Home
+    /// Assistant as selectable voices. Empty (default) advertises no
+    /// voices — set the names your backend accepts (e.g.
+    /// `["ro_RO-mihai-medium"]`). Advertisement is metadata only; the
+    /// configured `[tts]` backend performs the actual synthesis.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub voices: Vec<String>,
+    /// Voice used when a `synthesize` request omits one. Empty (default)
+    /// defers to the backend's own configured voice.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub default_voice: String,
 }
 
 /// `[server.wyoming]` — coordinates of the LAN Wyoming server. The
@@ -1249,6 +1310,11 @@ impl Config {
             TtsBackend::Wyoming => {
                 self.tts.wyoming.as_ref().is_some_and(|w| !w.uri.trim().is_empty())
             }
+            // Local engine needs no credential; the voice download is
+            // handled at daemon startup (ADR 0033). Treat as configured
+            // whenever selected — a missing voice surfaces at load time
+            // with an actionable error.
+            TtsBackend::Local => true,
             TtsBackend::OpenAI
             | TtsBackend::Groq
             | TtsBackend::OpenRouter
@@ -1357,6 +1423,29 @@ mod tests {
         assert!(loaded.general.languages.is_empty(), "default = unconstrained auto-detect");
         assert_eq!(loaded.stt.local.model, "small");
         assert_eq!(loaded.polish.local.model, "qwen2.5-1.5b-instruct");
+    }
+
+    #[test]
+    fn server_tts_defaults_disabled() {
+        let s = ServerTts::default();
+        assert!(!s.enabled);
+        assert!(s.voices.is_empty());
+        assert!(s.default_voice.is_empty());
+    }
+
+    #[test]
+    fn server_tts_round_trips() {
+        let mut cfg = Config::default();
+        cfg.server.tts.enabled = true;
+        cfg.server.tts.voices = vec!["ro_RO-mihai-medium".into(), "en_US-amy-medium".into()];
+        cfg.server.tts.default_voice = "ro_RO-mihai-medium".into();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        cfg.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert!(loaded.server.tts.enabled);
+        assert_eq!(loaded.server.tts.voices, cfg.server.tts.voices);
+        assert_eq!(loaded.server.tts.default_voice, "ro_RO-mihai-medium");
     }
 
     #[test]

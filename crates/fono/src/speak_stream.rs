@@ -49,12 +49,13 @@ pub async fn run(paths: &Paths) -> Result<()> {
     let cfg = Config::load(&paths.config_file())?;
     let secrets = Secrets::load(&paths.secrets_file()).unwrap_or_default();
 
-    let tts_arc = fono_tts::build_tts(&cfg.tts, &secrets, &cfg.general.languages)
-        .context("loading TTS backend")?
-        .context(
-            "TTS backend is disabled — set `[tts].backend` to a real provider \
+    let tts_arc =
+        fono_tts::build_tts(&cfg.tts, &secrets, &cfg.general.languages, &paths.voices_dir())
+            .context("loading TTS backend")?
+            .context(
+                "TTS backend is disabled — set `[tts].backend` to a real provider \
              (e.g. `fono use tts openai`) before using `fono speak --stream`",
-        )?;
+            )?;
 
     let playback = AudioPlayback::new(None).context("opening audio playback device")?;
 

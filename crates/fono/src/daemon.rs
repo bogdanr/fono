@@ -2055,6 +2055,7 @@ fn tts_menu_label(b: &fono_core::config::TtsBackend, secrets: &fono_core::Secret
     match b {
         TtsBackend::None => "Off (disabled)".to_string(),
         TtsBackend::Wyoming => "Wyoming (local)".to_string(),
+        TtsBackend::Local => "Local voice (on-device)".to_string(),
         TtsBackend::OpenAI
         | TtsBackend::Groq
         | TtsBackend::OpenRouter
@@ -2807,6 +2808,27 @@ async fn spawn_wyoming_server_if_enabled(
     let auth_token =
         if cfg.auth_token_ref.is_empty() { None } else { std::env::var(&cfg.auth_token_ref).ok() };
     let model = config.stt.local.model.clone();
+    // TTS serving (`[server.tts]`) rides this same listener. Advertise
+    // the configured voice names; the active `[tts]` backend does the
+    // synthesis. Intent-based: if enabled without a backend, we warn
+    // below and serve ASR only.
+    let serve_tts = config.server.tts.enabled;
+    let tts_voices = if serve_tts {
+        config
+            .server
+            .tts
+            .voices
+            .iter()
+            .map(|name| fono_net::wyoming::server::AdvertisedVoice {
+                name: name.clone(),
+                languages: config.general.languages.clone(),
+                description: None,
+                version: None,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let server_cfg = fono_net::wyoming::server::WyomingServerConfig {
         bind: cfg.bind.clone(),
         port: cfg.port,
@@ -2823,12 +2845,30 @@ async fn spawn_wyoming_server_if_enabled(
             version: None,
         }],
         loopback_only,
+        tts_voices,
     };
 
     let orch_for_provider = Arc::clone(orch);
     let provider: fono_net::wyoming::server::SttProvider =
         Arc::new(move || orch_for_provider.stt_snapshot());
-    let server = fono_net::wyoming::server::WyomingServer::new(server_cfg, provider);
+    let mut server = fono_net::wyoming::server::WyomingServer::new(server_cfg, provider);
+    if serve_tts {
+        if let Some(initial) = orch.tts_snapshot() {
+            let orch_tts = Arc::clone(orch);
+            let tts_provider: fono_net::wyoming::server::TtsProvider =
+                Arc::new(move || orch_tts.tts_snapshot().unwrap_or_else(|| Arc::clone(&initial)));
+            server = server.with_tts(tts_provider);
+            info!(
+                "Wyoming server: TTS serving enabled ({} advertised voice(s))",
+                config.server.tts.voices.len()
+            );
+        } else {
+            warn!(
+                "[server.tts].enabled = true but no `[tts]` backend is configured; \
+                 serving ASR only"
+            );
+        }
+    }
     match server.start().await {
         Ok(handle) => {
             info!(
@@ -2913,6 +2953,17 @@ async fn spawn_discovery_if_enabled(config: &Config) -> Option<DiscoveryRuntime>
     })
 }
 
+/// Capability tags advertised over mDNS for the Wyoming service.
+/// `stt` is always served; `tts` is added when `[server.tts].enabled`
+/// so Home Assistant discovers this daemon as a TTS provider too.
+fn wyoming_caps(config: &Config) -> Vec<String> {
+    let mut caps = vec!["stt".to_string()];
+    if config.server.tts.enabled {
+        caps.push("tts".to_string());
+    }
+    caps
+}
+
 fn spawn_wyoming_advert(
     daemon: &mdns_sd::ServiceDaemon,
     config: &Config,
@@ -2946,7 +2997,7 @@ fn spawn_wyoming_advert(
         addresses: vec![],
         proto: "wyoming/1".into(),
         version: env!("CARGO_PKG_VERSION").into(),
-        caps: vec!["stt".into()],
+        caps: wyoming_caps(config),
         model: Some(config.stt.local.model.clone()),
         auth_required: !cfg.auth_token_ref.is_empty(),
         path: None,
@@ -2991,7 +3042,7 @@ fn local_wyoming_peer(
         port: config.server.wyoming.port,
         proto: "wyoming/1".into(),
         version: env!("CARGO_PKG_VERSION").into(),
-        caps: vec!["stt".into()],
+        caps: wyoming_caps(config),
         model: Some(config.stt.local.model.clone()),
         auth_required: !config.server.wyoming.auth_token_ref.is_empty(),
         path: None,
@@ -3044,6 +3095,19 @@ fn snapshot_discovered(registry: &fono_net::discovery::Registry) -> Vec<fono_ipc
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wyoming_caps_stt_only_by_default() {
+        let cfg = Config::default();
+        assert_eq!(wyoming_caps(&cfg), vec!["stt".to_string()]);
+    }
+
+    #[test]
+    fn wyoming_caps_adds_tts_when_enabled() {
+        let mut cfg = Config::default();
+        cfg.server.tts.enabled = true;
+        assert_eq!(wyoming_caps(&cfg), vec!["stt".to_string(), "tts".to_string()]);
+    }
 
     /// Slim build: translation never fires regardless of config.
     #[cfg(not(feature = "interactive"))]

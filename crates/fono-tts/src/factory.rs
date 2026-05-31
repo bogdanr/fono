@@ -8,6 +8,8 @@
 #[allow(unused_imports)]
 use std::sync::Arc;
 
+use std::path::Path;
+
 use anyhow::{anyhow, Result};
 use fono_core::config::{Tts, TtsBackend};
 #[cfg(any(
@@ -41,6 +43,7 @@ pub fn build_tts(
     cfg: &Tts,
     secrets: &Secrets,
     languages: &[String],
+    voices_dir: &Path,
 ) -> Result<Option<Arc<dyn TextToSpeech>>> {
     match cfg.backend {
         TtsBackend::None => Ok(None),
@@ -50,7 +53,70 @@ pub fn build_tts(
         TtsBackend::OpenRouter => build_openrouter(cfg, secrets).map(Some),
         TtsBackend::Cartesia => build_cartesia(cfg, secrets, languages).map(Some),
         TtsBackend::Deepgram => build_deepgram(cfg, secrets).map(Some),
+        TtsBackend::Local => build_local(cfg, languages, voices_dir).map(Some),
     }
+}
+
+/// Build the on-device Piper engine from a cached voice. The `.ort`
+/// model + `.onnx.json` config are expected to already be present under
+/// `voices_dir` (the daemon downloads them at startup via the voice
+/// catalog, mirroring the STT model-ensure flow); a missing voice
+/// yields an actionable error rather than a silent failure.
+#[cfg(feature = "tts-local")]
+fn build_local(
+    cfg: &Tts,
+    languages: &[String],
+    voices_dir: &Path,
+) -> Result<Arc<dyn TextToSpeech>> {
+    let voice = resolve_local_voice(cfg, languages)?;
+    let model_path = voices_dir.join(&voice.model.file);
+    let config_path = voices_dir.join(&voice.config.file);
+    if !model_path.is_file() || !config_path.is_file() {
+        return Err(anyhow!(
+            "local voice {:?} is not downloaded yet (expected {} + its .onnx.json under {}); \
+             it is fetched automatically at daemon startup — restart the daemon or check the \
+             logs / network",
+            voice.name,
+            voice.model.file,
+            voices_dir.display()
+        ));
+    }
+    let cfg_bytes = std::fs::read(&config_path)
+        .map_err(|e| anyhow!("read voice config {}: {e}", config_path.display()))?;
+    let piper_cfg = crate::piper::PiperConfig::from_json(&cfg_bytes)?;
+    // Per-voice espeak-ng data is materialised under a stable subdir so
+    // it is written once and reused across runs.
+    let espeak_dir = voices_dir.join("espeak");
+    let engine = crate::piper::PiperLocal::load(&model_path, piper_cfg, espeak_dir)?;
+    Ok(Arc::new(engine))
+}
+
+/// Resolve which catalog voice the local backend should load: the
+/// explicit `[tts.local].voice` if set, otherwise the first catalog
+/// voice matching the first configured language.
+#[cfg(feature = "tts-local")]
+fn resolve_local_voice(cfg: &Tts, languages: &[String]) -> Result<crate::voices::Voice> {
+    if !cfg.local.voice.is_empty() {
+        return crate::voices::by_name(&cfg.local.voice)?.ok_or_else(|| {
+            anyhow!("[tts.local].voice = {:?} is not in the voice catalog", cfg.local.voice)
+        });
+    }
+    let lang = languages.first().map_or("en", String::as_str);
+    crate::voices::for_language(lang)?.ok_or_else(|| {
+        anyhow!(
+            "no local voice in the catalog for language {lang:?}; \
+             set [tts.local].voice to a catalog voice id"
+        )
+    })
+}
+
+#[cfg(not(feature = "tts-local"))]
+fn build_local(
+    _cfg: &Tts,
+    _languages: &[String],
+    _voices_dir: &Path,
+) -> Result<Arc<dyn TextToSpeech>> {
+    Err(anyhow!("local ONNX TTS not compiled in (build `fono` with the `tts-local` feature)"))
 }
 
 #[cfg(feature = "wyoming")]
@@ -246,20 +312,27 @@ fn build_deepgram(_cfg: &Tts, _secrets: &Secrets) -> Result<Arc<dyn TextToSpeech
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fono_core::config::{Tts as TtsCfg, TtsBackend, TtsCloud, TtsWyoming};
+    #[cfg(feature = "openai")]
+    use fono_core::config::TtsCloud;
+    #[cfg(feature = "wyoming")]
+    use fono_core::config::TtsWyoming;
+    use fono_core::config::{Tts as TtsCfg, TtsBackend};
 
     #[test]
     fn none_backend_returns_none() {
         let cfg = TtsCfg { backend: TtsBackend::None, ..TtsCfg::default() };
         let secrets = Secrets::default();
-        assert!(build_tts(&cfg, &secrets, &[]).unwrap().is_none());
+        assert!(build_tts(&cfg, &secrets, &[], std::path::Path::new("")).unwrap().is_none());
     }
 
     #[cfg(feature = "wyoming")]
     #[test]
     fn wyoming_missing_block_errors_clearly() {
         let cfg = TtsCfg { backend: TtsBackend::Wyoming, wyoming: None, ..TtsCfg::default() };
-        let err = build_tts(&cfg, &Secrets::default(), &[]).err().unwrap().to_string();
+        let err = build_tts(&cfg, &Secrets::default(), &[], std::path::Path::new(""))
+            .err()
+            .unwrap()
+            .to_string();
         assert!(err.contains("[tts.wyoming]"), "{err}");
     }
 
@@ -271,7 +344,10 @@ mod tests {
             wyoming: Some(TtsWyoming::default()),
             ..TtsCfg::default()
         };
-        let err = build_tts(&cfg, &Secrets::default(), &[]).err().unwrap().to_string();
+        let err = build_tts(&cfg, &Secrets::default(), &[], std::path::Path::new(""))
+            .err()
+            .unwrap()
+            .to_string();
         assert!(err.contains("uri"), "{err}");
     }
 
@@ -286,7 +362,7 @@ mod tests {
             }),
             ..TtsCfg::default()
         };
-        let got = build_tts(&cfg, &Secrets::default(), &[]).unwrap();
+        let got = build_tts(&cfg, &Secrets::default(), &[], std::path::Path::new("")).unwrap();
         assert!(got.is_some());
     }
 
@@ -298,7 +374,10 @@ mod tests {
             cloud: Some(TtsCloud { provider: "openai".into(), ..TtsCloud::default() }),
             ..TtsCfg::default()
         };
-        let err = build_tts(&cfg, &Secrets::default(), &[]).err().unwrap().to_string();
+        let err = build_tts(&cfg, &Secrets::default(), &[], std::path::Path::new(""))
+            .err()
+            .unwrap()
+            .to_string();
         assert!(err.contains("OPENAI_API_KEY") && err.contains("fono keys add"), "{err}");
     }
 
@@ -308,7 +387,7 @@ mod tests {
         let cfg = TtsCfg { backend: TtsBackend::OpenAI, cloud: None, ..TtsCfg::default() };
         let mut secrets = Secrets::default();
         secrets.insert("OPENAI_API_KEY", "sk-test");
-        assert!(build_tts(&cfg, &secrets, &[]).unwrap().is_some());
+        assert!(build_tts(&cfg, &secrets, &[], std::path::Path::new("")).unwrap().is_some());
     }
 
     /// Phase F: every new cloud backend errors clearly when the key
@@ -319,7 +398,7 @@ mod tests {
         let cfg = TtsCfg { backend: TtsBackend::Groq, ..TtsCfg::default() };
         let mut secrets = Secrets::default();
         secrets.insert("GROQ_API_KEY", "gsk-test");
-        assert!(build_tts(&cfg, &secrets, &[]).unwrap().is_some());
+        assert!(build_tts(&cfg, &secrets, &[], std::path::Path::new("")).unwrap().is_some());
     }
 
     #[cfg(feature = "openrouter")]
@@ -328,7 +407,7 @@ mod tests {
         let cfg = TtsCfg { backend: TtsBackend::OpenRouter, ..TtsCfg::default() };
         let mut secrets = Secrets::default();
         secrets.insert("OPENROUTER_API_KEY", "sk-or-test");
-        assert!(build_tts(&cfg, &secrets, &[]).unwrap().is_some());
+        assert!(build_tts(&cfg, &secrets, &[], std::path::Path::new("")).unwrap().is_some());
     }
 
     #[cfg(feature = "cartesia")]
@@ -337,7 +416,7 @@ mod tests {
         let cfg = TtsCfg { backend: TtsBackend::Cartesia, ..TtsCfg::default() };
         let mut secrets = Secrets::default();
         secrets.insert("CARTESIA_API_KEY", "ck-test");
-        assert!(build_tts(&cfg, &secrets, &[]).unwrap().is_some());
+        assert!(build_tts(&cfg, &secrets, &[], std::path::Path::new("")).unwrap().is_some());
     }
 
     #[cfg(feature = "deepgram")]
@@ -346,14 +425,17 @@ mod tests {
         let cfg = TtsCfg { backend: TtsBackend::Deepgram, ..TtsCfg::default() };
         let mut secrets = Secrets::default();
         secrets.insert("DEEPGRAM_API_KEY", "dg-test");
-        assert!(build_tts(&cfg, &secrets, &[]).unwrap().is_some());
+        assert!(build_tts(&cfg, &secrets, &[], std::path::Path::new("")).unwrap().is_some());
     }
 
     #[cfg(feature = "groq")]
     #[test]
     fn groq_missing_key_errors_clearly() {
         let cfg = TtsCfg { backend: TtsBackend::Groq, ..TtsCfg::default() };
-        let err = build_tts(&cfg, &Secrets::default(), &[]).err().unwrap().to_string();
+        let err = build_tts(&cfg, &Secrets::default(), &[], std::path::Path::new(""))
+            .err()
+            .unwrap()
+            .to_string();
         assert!(err.contains("GROQ_API_KEY"), "{err}");
     }
 

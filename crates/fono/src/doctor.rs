@@ -181,7 +181,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
             Ok(None) => writeln!(out, "  assistant: {}", dim("disabled"))?,
             Err(e) => writeln!(out, "  assistant: {} {e:#}", bad("FAIL —"))?,
         }
-        match fono_tts::build_tts(&c.tts, &secrets, &c.general.languages) {
+        match fono_tts::build_tts(&c.tts, &secrets, &c.general.languages, &paths.voices_dir()) {
             Ok(Some(t)) => writeln!(out, "  tts: {} {}", t.name(), ok("ready"))?,
             Ok(None) => {
                 writeln!(out, "  tts: {}", warn("disabled (assistant replies will be silent)"))?;
@@ -285,6 +285,13 @@ pub async fn report(paths: &Paths) -> Result<String> {
                         ok(&format!("{key_env} present"))
                     } else {
                         dim(&format!("{key_env} missing"))
+                    }
+                }
+                fono_core::config::TtsBackend::Local => {
+                    if c.tts.local.voice.is_empty() {
+                        dim("voice=(default)")
+                    } else {
+                        format!("voice={}", c.tts.local.voice)
                     }
                 }
                 fono_core::config::TtsBackend::None => dim("—"),
