@@ -78,6 +78,21 @@ rustflags = [
 # `[env]` table values are only set if not already present in the
 # inherited environment, so the override above is non-destructive.
 [env]
+# 4. Static libstdc++ for the `ort`/`ort-sys` link (Phase 1.2, ADR 0032).
+#    `ort-sys` defaults to emitting a *dynamic* `-lstdc++`
+#    (build/static_link/mod.rs:20-33), which pulls `libstdc++.so.6` into
+#    NEEDED and breaks the size-budget allowlist (verified 2026-05-31:
+#    present with `tts-local`, absent without). Setting `ORT_CXX_STDLIB`
+#    *empty* makes `ort-sys` emit no stdc++ link directive at all; the C++
+#    runtime onnxruntime needs is then resolved by the `static=stdc++` that
+#    `llama-cpp-2/static-stdcxx` already emits for the whole final link
+#    line — together with the `libstdc++.a` search path llama discovers via
+#    `gcc --print-file-name` (llama-cpp-sys-2 build.rs:1088-1090). One
+#    static libstdc++ covers both consumers; nothing dynamic leaks. Setting
+#    it via `static=stdc++` here instead fails because rustc has no search
+#    path for the archive while compiling `ort-sys` in isolation.
+#    No effect on builds without `tts-local` (ort-sys never runs).
+ORT_CXX_STDLIB = ""
 CFLAGS = "-Os -ffunction-sections -fdata-sections"
 CXXFLAGS = "-Os -ffunction-sections -fdata-sections"
 GGML_NATIVE = "OFF"
