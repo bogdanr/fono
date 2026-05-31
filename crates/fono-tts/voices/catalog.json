@@ -1,7 +1,500 @@
 {
   "schema": 1,
-  "comment": "In-repo voice catalog for the local ONNX voice stack (ADR 0033). Each voice resolves to a pinned .ort model + .onnx.json config hosted by the fono-voice mirror as release assets tagged by ONNX Runtime ABI (release_tag). SHA-256s are verified on download; the base URL is overridable. Keep this in sync with bogdanr/fono-voice manifest.json. The default engine policy is Kokoro for English, Piper for every other language.",
+  "comment": "In-repo voice catalog for the local ONNX voice stack (ADR 0033). Each voice resolves to a pinned .ort model + .onnx.json config hosted by the fono-voice mirror as release assets tagged by ONNX Runtime ABI (release_tag). SHA-256s are verified on download; the base URL is overridable. Keep this in sync with bogdanr/fono-voice manifest.json. Engine policy: Kokoro for English, Piper for every other language. One default Piper voice per language; voices using control-flow ops unsupported by the minimal runtime are omitted (el,id,is,ml,ne,pt_BR,te).",
   "voices": [
+    {
+      "name": "ar_JO-kareem-medium",
+      "engine": "piper",
+      "language": "ar",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "ar_JO-kareem-medium.ort",
+        "sha256": "032c69366005a8118fd301b7c580bb96ed9bbde1bf397a697a5e989cd5edc8ba",
+        "size": 63745280
+      },
+      "config": {
+        "file": "ar_JO-kareem-medium.onnx.json",
+        "sha256": "ea6d9b9d9076dbdb6bf5c98c6a141ef154959d2359709b37855727964e7d6c4d",
+        "size": 5024
+      }
+    },
+    {
+      "name": "bg_BG-dimitar-medium",
+      "engine": "piper",
+      "language": "bg",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "bg_BG-dimitar-medium.ort",
+        "sha256": "ddec761abba141d08af721b51e14e32c004809868e948259d1c559ef91d8664f",
+        "size": 63813688
+      },
+      "config": {
+        "file": "bg_BG-dimitar-medium.onnx.json",
+        "sha256": "ec9a9abdd17384d3db225e83085b2f68b790b112f058417c3a8a2ac58b79e7f0",
+        "size": 5123
+      }
+    },
+    {
+      "name": "ca_ES-upc_ona-medium",
+      "engine": "piper",
+      "language": "ca",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "ca_ES-upc_ona-medium.ort",
+        "sha256": "6ac8180479a2338835da2db4dabd9d5c15f0be9f7295736a934d26fcf0cf06a3",
+        "size": 63745280
+      },
+      "config": {
+        "file": "ca_ES-upc_ona-medium.onnx.json",
+        "sha256": "7f76acc9c06f4eda9e6aef2997b75782d97855aab48d4b401eb956a6e655eddc",
+        "size": 4875
+      }
+    },
+    {
+      "name": "cs_CZ-jirka-medium",
+      "engine": "piper",
+      "language": "cs",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "cs_CZ-jirka-medium.ort",
+        "sha256": "6388f0879143793fb544169fecb8dfd8717669e0fd8f3a138bb640567b6de3f2",
+        "size": 63745280
+      },
+      "config": {
+        "file": "cs_CZ-jirka-medium.onnx.json",
+        "sha256": "fb38b1799b7354808227c065efa97b1ffa2b0cde59505babb56a36d35af9c637",
+        "size": 5025
+      }
+    },
+    {
+      "name": "cy_GB-gwryw_gogleddol-medium",
+      "engine": "piper",
+      "language": "cy",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "cy_GB-gwryw_gogleddol-medium.ort",
+        "sha256": "54d8c7a6540f39b90a53bef863932ce5d06daf240042479552c484c88b87be43",
+        "size": 64139520
+      },
+      "config": {
+        "file": "cy_GB-gwryw_gogleddol-medium.onnx.json",
+        "sha256": "b31d2cfa51cd5709371a2346860b409b24eceec1a290235cb9299cff8a9c34c0",
+        "size": 4975
+      }
+    },
+    {
+      "name": "da_DK-talesyntese-medium",
+      "engine": "piper",
+      "language": "da",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "da_DK-talesyntese-medium.ort",
+        "sha256": "21de08559d98615e0b1abb912b10d12fd1758976b18b1d7e626692961d155959",
+        "size": 63745280
+      },
+      "config": {
+        "file": "da_DK-talesyntese-medium.onnx.json",
+        "sha256": "89fe13bd251406cc0088570d103ea7ac35823211d8466faf913268ab8506f41b",
+        "size": 4878
+      }
+    },
+    {
+      "name": "de_DE-thorsten-medium",
+      "engine": "piper",
+      "language": "de",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "de_DE-thorsten-medium.ort",
+        "sha256": "f770486b77c2d5d24601e775d9b742ecfb19bdebd20226fb774f61ee28720405",
+        "size": 63745280
+      },
+      "config": {
+        "file": "de_DE-thorsten-medium.onnx.json",
+        "sha256": "974adee790533adb273a1ac88f49027d2a1b8f0f2cf4905954a4791e79264e85",
+        "size": 4819
+      }
+    },
+    {
+      "name": "en_US-amy-medium",
+      "engine": "piper",
+      "language": "en",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "en_US-amy-medium.ort",
+        "sha256": "772c1e8621d768da23516300c85ceac55d72ec2bdd850ffa92e27124dce8036e",
+        "size": 63745280
+      },
+      "config": {
+        "file": "en_US-amy-medium.onnx.json",
+        "sha256": "95a23eb4d42909d38df73bb9ac7f45f597dbfcde2d1bf9526fdeaf5466977d77",
+        "size": 4882
+      }
+    },
+    {
+      "name": "en_GB-alan-medium",
+      "engine": "piper",
+      "language": "en",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "en_GB-alan-medium.ort",
+        "sha256": "73a023b18510bda550ca29ee2dc34aa4b3e3c6ab256bc7d4bad17dd8e722b3ec",
+        "size": 63745280
+      },
+      "config": {
+        "file": "en_GB-alan-medium.onnx.json",
+        "sha256": "c0f0d124e5895c00e7c03b35dcc8287f319a6998a365b182deb5c8e752ee8c1e",
+        "size": 4888
+      }
+    },
+    {
+      "name": "es_ES-davefx-medium",
+      "engine": "piper",
+      "language": "es",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "es_ES-davefx-medium.ort",
+        "sha256": "da0316176e04943f3639c1766074e76050bd87426076af607e0f649550a704a8",
+        "size": 63745280
+      },
+      "config": {
+        "file": "es_ES-davefx-medium.onnx.json",
+        "sha256": "0e0dda87c732f6f38771ff274a6380d9252f327dca77aa2963d5fbdf9ec54842",
+        "size": 4817
+      }
+    },
+    {
+      "name": "es_AR-daniela-high",
+      "engine": "piper",
+      "language": "es",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "es_AR-daniela-high.ort",
+        "sha256": "060c057e440c161e5732d64151e2646c0edc771dacda888579f70138fd5aa55a",
+        "size": 114881136
+      },
+      "config": {
+        "file": "es_AR-daniela-high.onnx.json",
+        "sha256": "aedbf69647e1d754c62ecf8e0366ca5f16af3e768e3c6b5329af6eb6bde3852b",
+        "size": 7248
+      }
+    },
+    {
+      "name": "es_MX-ald-medium",
+      "engine": "piper",
+      "language": "es",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "es_MX-ald-medium.ort",
+        "sha256": "6c5faa97a3714e78b7d173831ebe3855d172c6976a4abf88309f4a006ceeab63",
+        "size": 63745280
+      },
+      "config": {
+        "file": "es_MX-ald-medium.onnx.json",
+        "sha256": "5a71498158e04afc8099bfd019c7e87c68eb9d042505a2b1a87e5c1ac2b1a61d",
+        "size": 4878
+      }
+    },
+    {
+      "name": "eu_ES-antton-medium",
+      "engine": "piper",
+      "language": "eu",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "eu_ES-antton-medium.ort",
+        "sha256": "ea4b7593f7d1e249e0bfaaf691eb75d33369321662e07de1a959f0197571cadb",
+        "size": 64166728
+      },
+      "config": {
+        "file": "eu_ES-antton-medium.onnx.json",
+        "sha256": "bc26d21295427594330bb8ea579c8b922d1d1f9dde1b51dc9949fbf3f559dcea",
+        "size": 5076
+      }
+    },
+    {
+      "name": "fa_IR-amir-medium",
+      "engine": "piper",
+      "language": "fa",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "fa_IR-amir-medium.ort",
+        "sha256": "14f910c1766b047008100f32706b43152946bf6fc7a5e0af2e4402f7a84bcfab",
+        "size": 64166728
+      },
+      "config": {
+        "file": "fa_IR-amir-medium.onnx.json",
+        "sha256": "75f918a3bf0f57a9179abe725af529f2a5c79d6c899e2a84aec76c685d5dfb9a",
+        "size": 4958
+      }
+    },
+    {
+      "name": "fi_FI-harri-medium",
+      "engine": "piper",
+      "language": "fi",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "fi_FI-harri-medium.ort",
+        "sha256": "5e5be3f8701d93ac0245a19c9ceea2b6527215ec8ad90554a12b02c3434d2f08",
+        "size": 63745280
+      },
+      "config": {
+        "file": "fi_FI-harri-medium.onnx.json",
+        "sha256": "3f9c9f76f74adf1fbe7279e41eea17d6610757e45effd6808bbea6be74b8916d",
+        "size": 4873
+      }
+    },
+    {
+      "name": "fr_FR-siwis-medium",
+      "engine": "piper",
+      "language": "fr",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "fr_FR-siwis-medium.ort",
+        "sha256": "dd0e3bda0fc702f76fd83117141a83b92db1ec4a839bcbffa93944609adcbe8f",
+        "size": 63745280
+      },
+      "config": {
+        "file": "fr_FR-siwis-medium.onnx.json",
+        "sha256": "39479916c2db192b5ac9764daddd0c744d83e023ad890c6976c0633ae4df8959",
+        "size": 4875
+      }
+    },
+    {
+      "name": "hi_IN-pratham-medium",
+      "engine": "piper",
+      "language": "hi",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "hi_IN-pratham-medium.ort",
+        "sha256": "ccb0796ae7ccae6ea3d20f123e961fe161a3612d33055f065e33b6209e06dd7d",
+        "size": 64160400
+      },
+      "config": {
+        "file": "hi_IN-pratham-medium.onnx.json",
+        "sha256": "b68edd2cd7950dd436314013b7cd12e9699e5a3f6fe5af5af94294cf6aa7b9fd",
+        "size": 4970
+      }
+    },
+    {
+      "name": "hu_HU-anna-medium",
+      "engine": "piper",
+      "language": "hu",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "hu_HU-anna-medium.ort",
+        "sha256": "7cf606514f8cd4332e044bfed363668db813143ac8ebf417f903b02036f3cd66",
+        "size": 63745280
+      },
+      "config": {
+        "file": "hu_HU-anna-medium.onnx.json",
+        "sha256": "ccf967d8db8018c9d8ffdb0edc8814ffcb6b75273bb0d84337317240f710283a",
+        "size": 5018
+      }
+    },
+    {
+      "name": "it_IT-paola-medium",
+      "engine": "piper",
+      "language": "it",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "it_IT-paola-medium.ort",
+        "sha256": "8f94e45b11cece63c9b688ca3178008bcf0624230ead645d4d6094e0323b8df8",
+        "size": 64139520
+      },
+      "config": {
+        "file": "it_IT-paola-medium.onnx.json",
+        "sha256": "aea19c0a7fce29fbc359b93f10e7902854401e4c95ae2ea328ae516b15d296cf",
+        "size": 7099
+      }
+    },
+    {
+      "name": "ka_GE-natia-medium",
+      "engine": "piper",
+      "language": "ka",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "ka_GE-natia-medium.ort",
+        "sha256": "2a4f24556a00aa71208f2e33ce982a2453e58ec2788adcc7a71da596f5976f09",
+        "size": 63745280
+      },
+      "config": {
+        "file": "ka_GE-natia-medium.onnx.json",
+        "sha256": "906436d0f8de79fcd65576470b10c7ea937c750f9b6b6dafc72a27cebd4a88f6",
+        "size": 4842
+      }
+    },
+    {
+      "name": "kk_KZ-issai-high",
+      "engine": "piper",
+      "language": "kk",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "kk_KZ-issai-high.ort",
+        "sha256": "55a983cb866474cd15a1ed11ced6f9e3c14fc90cf6a1f187c03c63082cfa3946",
+        "size": 128456376
+      },
+      "config": {
+        "file": "kk_KZ-issai-high.onnx.json",
+        "sha256": "eb145ac8712b87beda9f0266e95b98cad76acce89d4626cd8b1408234e9842f0",
+        "size": 4358
+      }
+    },
+    {
+      "name": "ku_TR-berfin_renas-medium",
+      "engine": "piper",
+      "language": "ku",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "ku_TR-berfin_renas-medium.ort",
+        "sha256": "2596667235fab41bc33575c3e6d2d478aaa5f239d493fa9bb967830054a499b2",
+        "size": 77704384
+      },
+      "config": {
+        "file": "ku_TR-berfin_renas-medium.onnx.json",
+        "sha256": "66d0da87aa8e572c7e6ee67647aa6af6008e85e38819679f17dc9b86e3affca8",
+        "size": 5131
+      }
+    },
+    {
+      "name": "lb_LU-marylux-medium",
+      "engine": "piper",
+      "language": "lb",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "lb_LU-marylux-medium.ort",
+        "sha256": "c384301c317fb2a02129cbd4044aa60a59b9fc8ab62212b3c5e92f3d7f6a920b",
+        "size": 63745280
+      },
+      "config": {
+        "file": "lb_LU-marylux-medium.onnx.json",
+        "sha256": "e5c5dec5433d33ff573e76fa567e80dcf636d05de5dcc817b273963f0733d742",
+        "size": 4979
+      }
+    },
+    {
+      "name": "lv_LV-aivars-medium",
+      "engine": "piper",
+      "language": "lv",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "lv_LV-aivars-medium.ort",
+        "sha256": "adfc157031c206998672855b21a963aa4ecf9262b407f57b7529b1a8cc401455",
+        "size": 64139520
+      },
+      "config": {
+        "file": "lv_LV-aivars-medium.onnx.json",
+        "sha256": "08ae2c297be8aa04f15f3f97b7ffeae0146b30b0bd8f7baebcdc46bc2c2f33dc",
+        "size": 7242
+      }
+    },
+    {
+      "name": "nl_NL-alex-medium",
+      "engine": "piper",
+      "language": "nl",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "nl_NL-alex-medium.ort",
+        "sha256": "23b5472ff3023deac75c937cc23e896ad7878515432f7e42a04280a486675af4",
+        "size": 64166728
+      },
+      "config": {
+        "file": "nl_NL-alex-medium.onnx.json",
+        "sha256": "9ea643871742c038511b6aaf20e6fc098a78a11968122d2f6ca3e50403423f95",
+        "size": 4965
+      }
+    },
+    {
+      "name": "nl_BE-nathalie-medium",
+      "engine": "piper",
+      "language": "nl",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "nl_BE-nathalie-medium.ort",
+        "sha256": "0e5f5f762d3271d499bfc0d4f0849bf2c83b32cf980139ae58dd77e5fc710190",
+        "size": 63745280
+      },
+      "config": {
+        "file": "nl_BE-nathalie-medium.onnx.json",
+        "sha256": "4704af2736022e910a3f32672480d5530dd39da5c2bcc079f315f604166ff0de",
+        "size": 4879
+      }
+    },
+    {
+      "name": "no_NO-talesyntese-medium",
+      "engine": "piper",
+      "language": "no",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "no_NO-talesyntese-medium.ort",
+        "sha256": "d853acdfa9ff78a9cb6d721a436652259e24d809cd4f8fb71a4d87225632a8cc",
+        "size": 63745280
+      },
+      "config": {
+        "file": "no_NO-talesyntese-medium.onnx.json",
+        "sha256": "b0eb0491fc8bf9843d2beac8acf8773b6cf59274316406b36ff579ae8a1909d5",
+        "size": 4880
+      }
+    },
+    {
+      "name": "pl_PL-darkman-medium",
+      "engine": "piper",
+      "language": "pl",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "pl_PL-darkman-medium.ort",
+        "sha256": "c417d691cc938f7d8a211ec8990b8a94fc2d812d7378a2a5c19429af3272977b",
+        "size": 63745280
+      },
+      "config": {
+        "file": "pl_PL-darkman-medium.onnx.json",
+        "sha256": "70f999f11fa8ad13d3ef779041ee93c9f38be5abdbacdfad42449712fe91c81b",
+        "size": 4816
+      }
+    },
+    {
+      "name": "pt_PT-tugão-medium",
+      "engine": "piper",
+      "language": "pt",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "pt_PT-tugão-medium.ort",
+        "sha256": "f633f7088f7dd30ee0ce8ec3830c327f669e4b67fc8c8401ee4a57b96ca1993b",
+        "size": 63745280
+      },
+      "config": {
+        "file": "pt_PT-tugão-medium.onnx.json",
+        "sha256": "fe0918dfc0f1a89264a6eea4afe8e95d8e9fed3cc6c81b5c2f87fcb2b50c7320",
+        "size": 5026
+      }
+    },
     {
       "name": "ro_RO-mihai-medium",
       "engine": "piper",
@@ -17,6 +510,210 @@
         "file": "ro_RO-mihai-medium.onnx.json",
         "sha256": "8cc0c9f077dc0cec3c25a6a055ec8046db8e40a2510591582f2c9c869f4bc47e",
         "size": 4877
+      }
+    },
+    {
+      "name": "ru_RU-denis-medium",
+      "engine": "piper",
+      "language": "ru",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "ru_RU-denis-medium.ort",
+        "sha256": "65f2499a0e400d97165f15ae252805461ea5547cd0c06086393574adffbf0772",
+        "size": 63745280
+      },
+      "config": {
+        "file": "ru_RU-denis-medium.onnx.json",
+        "sha256": "831c860dac0b5073eaa81610a0a638ec23d90a6cf8e5f871b4485c2cec3767c8",
+        "size": 4823
+      }
+    },
+    {
+      "name": "sk_SK-lili-medium",
+      "engine": "piper",
+      "language": "sk",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "sk_SK-lili-medium.ort",
+        "sha256": "0ebe08d1e1e598832d38492f56ee5a44ebb1f8c22dbced47a1ae6a341a81250d",
+        "size": 63745280
+      },
+      "config": {
+        "file": "sk_SK-lili-medium.onnx.json",
+        "sha256": "b7c474eba411913f9feb65b9da322463e8698e7b200d2b757f6e684802951333",
+        "size": 4963
+      }
+    },
+    {
+      "name": "sl_SI-artur-medium",
+      "engine": "piper",
+      "language": "sl",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "sl_SI-artur-medium.ort",
+        "sha256": "d2d6f01db261727bd40a07bd6c8f20e885790bcb9373cd07b10bc5179a53303a",
+        "size": 63739240
+      },
+      "config": {
+        "file": "sl_SI-artur-medium.onnx.json",
+        "sha256": "741283430f1fa2be5c61717c6f1fe795a7b9f537491927340dd12f90f3b3cc04",
+        "size": 4970
+      }
+    },
+    {
+      "name": "sq_AL-edon-medium",
+      "engine": "piper",
+      "language": "sq",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "sq_AL-edon-medium.ort",
+        "sha256": "3a543a5b704e17dfb2954495b4dfaa2ca7df793216bb6e980b854c5678865810",
+        "size": 64139520
+      },
+      "config": {
+        "file": "sq_AL-edon-medium.onnx.json",
+        "sha256": "e9ee77beea52d8042bca589448bb48033ac0f7c1d86daee84ad1d5692d1270f7",
+        "size": 4961
+      }
+    },
+    {
+      "name": "sr_RS-serbski_institut-medium",
+      "engine": "piper",
+      "language": "sr",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "sr_RS-serbski_institut-medium.ort",
+        "sha256": "e3c2bc5acc4e4ecbf9d7d708f138f94dbea5087aeb19d192f5745fea23bceda4",
+        "size": 77277816
+      },
+      "config": {
+        "file": "sr_RS-serbski_institut-medium.onnx.json",
+        "sha256": "39ad6531b46ac629c0bed10aa9205dd2431e2dab3808b8535808711db87c2bc0",
+        "size": 4999
+      }
+    },
+    {
+      "name": "sv_SE-alma-medium",
+      "engine": "piper",
+      "language": "sv",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "sv_SE-alma-medium.ort",
+        "sha256": "d0f09daea904c28a675d11cc34ea576f1da25144de21ae8dda4ffad057f1160e",
+        "size": 64069960
+      },
+      "config": {
+        "file": "sv_SE-alma-medium.onnx.json",
+        "sha256": "6924380892f769afa92fc6b28ff91d558690d7fb4e3ef8cbf821cefadc8f38fe",
+        "size": 6059
+      }
+    },
+    {
+      "name": "sw_CD-lanfrica-medium",
+      "engine": "piper",
+      "language": "sw",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "sw_CD-lanfrica-medium.ort",
+        "sha256": "95d3a47162c0d76a18e6fdf7ce255f2b9d63adfcd7af3e2375df619cbdacae4d",
+        "size": 63745280
+      },
+      "config": {
+        "file": "sw_CD-lanfrica-medium.onnx.json",
+        "sha256": "5bd6f6ad659aa8f1f89f414e23a3df84fc753eb9c066e91fe86729da2ad4c1fc",
+        "size": 4905
+      }
+    },
+    {
+      "name": "tr_TR-dfki-medium",
+      "engine": "piper",
+      "language": "tr",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "tr_TR-dfki-medium.ort",
+        "sha256": "22a3bf9a5cd5a888cf1b5cedf1a301e7cb3f8b5529aefa3c9ed14b988f523039",
+        "size": 63745280
+      },
+      "config": {
+        "file": "tr_TR-dfki-medium.onnx.json",
+        "sha256": "13ebd7810f1b61b5027583cf3131a0a233b6ea81c38f2200ebc4ff41c3cca039",
+        "size": 4960
+      }
+    },
+    {
+      "name": "uk_UA-ukrainian_tts-medium",
+      "engine": "piper",
+      "language": "uk",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "uk_UA-ukrainian_tts-medium.ort",
+        "sha256": "327e3d8f06aaf3aefe8722f016ec71b736ee859c9b19c78da233da37f7842f80",
+        "size": 77279864
+      },
+      "config": {
+        "file": "uk_UA-ukrainian_tts-medium.onnx.json",
+        "sha256": "4e96e72917ca9b94edc77d6ccfee03a73f450ba2fc1ca93c2e562bc014e5aa55",
+        "size": 2002
+      }
+    },
+    {
+      "name": "ur_PK-fasih-medium",
+      "engine": "piper",
+      "language": "ur",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "ur_PK-fasih-medium.ort",
+        "sha256": "74d29c0b4d641328564d61e4683b653b5df0cb656f9c2bfc4b47f6609d4140c6",
+        "size": 64167792
+      },
+      "config": {
+        "file": "ur_PK-fasih-medium.onnx.json",
+        "sha256": "cfcf484a50b4036cb55675b6bbcdb9ddb9061ac10a51cfb2b3ce8391213205ec",
+        "size": 3146
+      }
+    },
+    {
+      "name": "vi_VN-vais1000-medium",
+      "engine": "piper",
+      "language": "vi",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "vi_VN-vais1000-medium.ort",
+        "sha256": "e6c2a4051d94503ca316ec519826aee8eec9c80d133e25182e41bb6aacdf52ab",
+        "size": 63745280
+      },
+      "config": {
+        "file": "vi_VN-vais1000-medium.onnx.json",
+        "sha256": "fafb9da1354ed4b77c31af228ed41fb41cd825c14cffa105454b25e6ae751ee0",
+        "size": 4860
+      }
+    },
+    {
+      "name": "zh_CN-chaowen-medium",
+      "engine": "piper",
+      "language": "zh",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "zh_CN-chaowen-medium.ort",
+        "sha256": "8b839e7b8e3a9788bb58947d13d61e52ab284b3c25da069cd08b872f0fe713e9",
+        "size": 63813688
+      },
+      "config": {
+        "file": "zh_CN-chaowen-medium.onnx.json",
+        "sha256": "a6bb2caafa0645642f13cbf7e2f6fbbb16fded66e51109fc26d622f6472fa16f",
+        "size": 2927
       }
     }
   ]
