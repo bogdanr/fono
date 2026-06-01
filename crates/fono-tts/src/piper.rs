@@ -4,8 +4,8 @@
 //! Front half of the Piper pipeline, on the shared `ort` runtime (ADR 0032):
 //!
 //! 1. **text → IPA** via the pure-Rust [`espeak_ng`] phonemizer (no system
-//!    `libespeak-ng`, language data embedded per-voice — see
-//!    [`PiperVoice::phonemize`]).
+//!    `libespeak-ng`; the shared G2P core is embedded and per-language dicts
+//!    download on demand — see [`crate::espeak`] and [`PiperVoice::phonemize`]).
 //! 2. **IPA → phoneme ids** via the voice's `.onnx.json` map, using the
 //!    canonical piper-phonemize layout (BOS, interspersed PAD, EOS — see
 //!    [`PiperConfig::phoneme_ids`]).
@@ -135,17 +135,16 @@ pub struct PiperVoice {
 
 impl PiperVoice {
     /// Build a voice from its parsed config, materialising the embedded
-    /// espeak-ng data for `config.espeak.voice` under `data_dir`.
+    /// espeak-ng G2P core under `data_dir`.
     ///
-    /// `data_dir` is a persistent cache location (e.g. under the model cache);
-    /// the embedded data is written there once and reused across runs.
+    /// `data_dir` is a persistent cache location (e.g. under the voice cache);
+    /// the embedded core (~102 KiB, [`crate::espeak::install_core`]) is written
+    /// there. The matching per-language `<lang>_dict` is **not** written here —
+    /// it downloads on demand (see [`crate::voices`]) into the same directory
+    /// and must be present before [`Self::phonemize`] runs.
     pub fn new(config: PiperConfig, data_dir: impl Into<PathBuf>) -> Result<Self> {
         let data_dir = data_dir.into();
-        std::fs::create_dir_all(&data_dir)
-            .with_context(|| format!("create espeak data dir {}", data_dir.display()))?;
-        espeak_ng::install_bundled_language(&data_dir, &config.espeak.voice).with_context(
-            || format!("install embedded espeak-ng data for '{}'", config.espeak.voice),
-        )?;
+        crate::espeak::install_core(&data_dir)?;
         Ok(Self { config, data_dir })
     }
 
@@ -161,7 +160,10 @@ impl PiperVoice {
 
     /// Phonemize `text` to an IPA string using this voice's espeak-ng data.
     pub fn phonemize(&self, text: &str) -> Result<String> {
-        let voice = &self.config.espeak.voice;
+        // Fold the voice's espeak code onto the canonical base language whose
+        // phoneme table ships in the embedded core (e.g. nb→no, en-gb-x-rp→en);
+        // this also matches the downloaded `<canonical>_dict` filename.
+        let voice = crate::espeak::canonical_lang(&self.config.espeak.voice);
         let translator = espeak_ng::Translator::new(voice, Some(self.data_dir.as_path()))
             .map_err(|e| anyhow::anyhow!("espeak-ng translator init for '{voice}': {e}"))?;
         translator
@@ -362,14 +364,29 @@ mod tests {
         assert!(c.phoneme_ids("a").is_empty());
     }
 
-    /// End-to-end front half against the *embedded* Romanian espeak data.
-    /// Builds a voice in a temp dir, phonemizes Romanian text, and checks the
-    /// id stream is well-formed (BOS-prefixed, EOS-suffixed, non-trivial).
-    /// Exercises the `bundled-data-ro` feature wiring; no network, no system
-    /// espeak.
+    /// End-to-end front half against the *embedded* G2P core plus a real
+    /// `<lang>_dict`. Builds a voice in a temp dir, installs the embedded core,
+    /// drops in the dictionary, phonemizes Romanian, and checks the id stream
+    /// is well-formed (BOS-prefixed, EOS-suffixed, non-trivial).
+    ///
+    /// Ignored by default: `tts-local` links `ort` (needs the static runtime),
+    /// and the test needs a `ro_dict` it can't bundle. Provide one via
+    /// `FONO_TEST_ESPEAK_DICT` (path to a `ro_dict`) and run with:
+    ///
+    /// ```text
+    /// ORT_LIB_LOCATION=tmp/onnxruntime-minimal \
+    /// FONO_TEST_ESPEAK_DICT=/path/to/ro_dict \
+    ///   cargo test -p fono-tts --features tts-local -- --ignored text_to_ids
+    /// ```
     #[test]
+    #[ignore = "needs a linked runtime + a ro_dict via FONO_TEST_ESPEAK_DICT"]
     fn romanian_text_to_ids_end_to_end() {
+        let dict = std::env::var("FONO_TEST_ESPEAK_DICT").expect("FONO_TEST_ESPEAK_DICT");
         let dir = std::env::temp_dir().join("fono-piper-test-ro");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Stage the dictionary the way the voice mirror would, then build the
+        // voice (which writes the embedded core alongside it).
+        std::fs::copy(&dict, dir.join("ro_dict")).expect("stage ro_dict");
         let voice = PiperVoice::new(sample(), &dir).expect("build ro voice");
 
         let ipa = voice.phonemize("Bună ziua").expect("phonemize");
@@ -389,6 +406,7 @@ mod tests {
     /// ORT_LIB_LOCATION=tmp/onnxruntime-minimal \
     /// FONO_TEST_PIPER_ORT=tmp/voice-models/ort/ro_RO-mihai-medium.ort \
     /// FONO_TEST_PIPER_JSON=tmp/voice-models/ro_RO-mihai-medium.onnx.json \
+    /// FONO_TEST_ESPEAK_DICT=/path/to/ro_dict \
     ///   cargo test -p fono-tts --features tts-local -- --ignored piper_local
     /// ```
     #[test]
@@ -396,8 +414,13 @@ mod tests {
     fn piper_local_synthesizes_real_audio() {
         let model = std::env::var("FONO_TEST_PIPER_ORT").expect("FONO_TEST_PIPER_ORT");
         let json = std::env::var("FONO_TEST_PIPER_JSON").expect("FONO_TEST_PIPER_JSON");
+        let dict = std::env::var("FONO_TEST_ESPEAK_DICT").expect("FONO_TEST_ESPEAK_DICT");
         let config = PiperConfig::from_json(&std::fs::read(json).unwrap()).unwrap();
         let dir = std::env::temp_dir().join("fono-piper-engine-ro");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Stage the dictionary the way the voice mirror would; `PiperLocal::load`
+        // writes the embedded core alongside it.
+        std::fs::copy(&dict, dir.join("ro_dict")).expect("stage ro_dict");
         let engine = PiperLocal::load(model, config, &dir).expect("load PiperLocal");
 
         let rt = tokio::runtime::Runtime::new().unwrap();

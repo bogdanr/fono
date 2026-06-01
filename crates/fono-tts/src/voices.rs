@@ -31,6 +31,12 @@ const CATALOG_JSON: &str = include_str!("../voices/catalog.json");
 #[derive(Debug, Clone, Deserialize)]
 struct Catalog {
     voices: Vec<Voice>,
+    /// Per-language espeak-ng `<lang>_dict` phonemizer dictionaries. Optional
+    /// so older catalogs (and tests) parse without it; an empty list simply
+    /// means "no dictionaries to fetch" and the per-voice ensure logs a
+    /// warning when a voice's language has none.
+    #[serde(default)]
+    dicts: Vec<Dict>,
 }
 
 /// A single catalog entry: one voice's identity plus its two pinned assets.
@@ -64,6 +70,25 @@ pub struct Asset {
     pub size: u64,
 }
 
+/// A per-language espeak-ng phonemizer dictionary, hosted on the mirror and
+/// downloaded on demand into `voices_dir/espeak/` next to the embedded G2P
+/// core (see [`crate::espeak`]). The shared core is in the binary; only the
+/// language-specific `<lang>_dict` travels over the network, keeping the
+/// binary independent of how many languages exist.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Dict {
+    /// espeak-ng voice code this dictionary serves, e.g. `"ro"`, `"cmn"`.
+    /// Matched against the `espeak.voice` field of a voice's `.onnx.json`,
+    /// which is *not* always the BCP-47 language (zh → `cmn`, no → `nb`).
+    pub lang: String,
+    /// Release tag the dict asset lives under in the mirror, e.g.
+    /// `"espeak-ng-1.52"` (espeak data is versioned independently of voices).
+    pub release_tag: String,
+    /// The downloadable `<lang>_dict` asset (`file` is e.g. `ro_dict`).
+    #[serde(flatten)]
+    pub asset: Asset,
+}
+
 /// Resolved on-disk locations of a voice's assets after [`ensure_voice`].
 #[derive(Debug, Clone)]
 pub struct VoicePaths {
@@ -94,6 +119,19 @@ pub fn for_language(language: &str) -> Result<Option<Voice>> {
     Ok(catalog()?.into_iter().find(|v| v.language == language))
 }
 
+/// All espeak-ng dictionaries declared in the catalog.
+pub fn dicts() -> Result<Vec<Dict>> {
+    let parsed: Catalog =
+        serde_json::from_str(CATALOG_JSON).context("parse embedded voices/catalog.json")?;
+    Ok(parsed.dicts)
+}
+
+/// Look up the espeak-ng dictionary for an espeak voice code (the
+/// `espeak.voice` value from a voice's `.onnx.json`, e.g. `"ro"`).
+pub fn dict_for(lang: &str) -> Result<Option<Dict>> {
+    Ok(dicts()?.into_iter().find(|d| d.lang == lang))
+}
+
 /// Build the full download URL for an asset: `{base}/{release_tag}/{file}`.
 #[must_use]
 pub fn asset_url(base_url: &str, release_tag: &str, file: &str) -> String {
@@ -113,9 +151,60 @@ pub async fn ensure_voice(
     base_url: Option<&str>,
 ) -> Result<VoicePaths> {
     let base = base_url.unwrap_or(DEFAULT_BASE_URL);
-    let model = fetch_asset(&voice.model, &voice.release_tag, base, voices_dir).await?;
-    let config = fetch_asset(&voice.config, &voice.release_tag, base, voices_dir).await?;
+    // Box each fetch future so this fn's own stack frame holds pointers rather
+    // than three inlined download state machines (otherwise their combined size
+    // trips `clippy::large_stack_frames`).
+    let model = Box::pin(fetch_asset(&voice.model, &voice.release_tag, base, voices_dir)).await?;
+    let config = Box::pin(fetch_asset(&voice.config, &voice.release_tag, base, voices_dir)).await?;
+    // Piper voices phonemize with espeak-ng, which needs the matching
+    // `<lang>_dict` beside the embedded G2P core. Fetch it on first use.
+    Box::pin(ensure_voice_dict(&config, voices_dir, base)).await?;
     Ok(VoicePaths { model, config })
+}
+
+/// Ensure the espeak-ng dictionary for a voice (read from its downloaded
+/// `.onnx.json`) is present under `voices_dir/espeak/`. A voice whose config
+/// declares no espeak voice (e.g. a future non-espeak engine) is a no-op; a
+/// language absent from the catalog logs an actionable warning rather than
+/// failing the voice, so the model still loads and the gap is visible.
+async fn ensure_voice_dict(config_path: &Path, voices_dir: &Path, base_url: &str) -> Result<()> {
+    let bytes = std::fs::read(config_path)
+        .with_context(|| format!("read voice config {}", config_path.display()))?;
+    let Some(lang) = read_espeak_voice(&bytes) else {
+        return Ok(());
+    };
+    // Fold variant/alias codes onto the canonical base the catalog hosts a dict
+    // for (e.g. nb→no, en-gb-x-rp→en); keeps one dict per base language.
+    let lang = crate::espeak::canonical_lang(&lang);
+    let Some(dict) = dict_for(lang)? else {
+        tracing::warn!(
+            "no espeak dictionary for language {lang:?} in the catalog; local \
+             phonemization for this voice will fail until a {lang:?} dict entry \
+             is added to voices/catalog.json and uploaded to the mirror"
+        );
+        return Ok(());
+    };
+    let espeak_dir = voices_dir.join("espeak");
+    fetch_asset(&dict.asset, &dict.release_tag, base_url, &espeak_dir).await?;
+    Ok(())
+}
+
+/// Extract the `espeak.voice` code from a Piper `.onnx.json` config, if any.
+/// Tolerates unrelated/extra fields and non-espeak configs (returns `None`).
+fn read_espeak_voice(config_bytes: &[u8]) -> Option<String> {
+    #[derive(Deserialize)]
+    struct ConfigEspeak {
+        espeak: Option<EspeakField>,
+    }
+    #[derive(Deserialize)]
+    struct EspeakField {
+        voice: Option<String>,
+    }
+    serde_json::from_slice::<ConfigEspeak>(config_bytes)
+        .ok()
+        .and_then(|c| c.espeak)
+        .and_then(|e| e.voice)
+        .filter(|v| !v.is_empty())
 }
 
 /// Fetch one asset into `voices_dir`, reusing a cached copy whose hash already
@@ -178,6 +267,45 @@ mod tests {
         let v = for_language("ro").unwrap().expect("ro voice");
         assert_eq!(v.name, "ro_RO-mihai-medium");
         assert!(for_language("xx").unwrap().is_none(), "unknown language yields None");
+    }
+
+    #[test]
+    fn seed_romanian_dict_is_present_and_well_formed() {
+        let d = dict_for("ro").unwrap().expect("ro dict present in catalog");
+        assert_eq!(d.asset.file, "ro_dict");
+        assert_eq!(d.release_tag, "espeak-ng-1.52");
+        // Flattened asset fields must parse from the top-level dict object.
+        assert_eq!(d.asset.sha256.len(), 64);
+        assert!(d.asset.sha256.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(d.asset.size > 0);
+        // An espeak voice code with no catalog dict resolves to None, which the
+        // ensure path treats as a warning rather than a hard failure.
+        assert!(dict_for("xx").unwrap().is_none());
+    }
+
+    #[test]
+    fn all_catalog_dicts_are_well_formed_and_named_by_their_stem() {
+        let dicts = dicts().expect("catalog dicts parse");
+        assert!(dicts.len() >= 38, "expected the full per-language dict set");
+        for d in &dicts {
+            assert_eq!(d.asset.file, format!("{}_dict", d.lang), "dict file must be <lang>_dict");
+            assert_eq!(d.release_tag, "espeak-ng-1.52");
+            assert_eq!(d.asset.sha256.len(), 64, "{} sha must be 64 hex", d.lang);
+            assert!(d.asset.sha256.bytes().all(|b| b.is_ascii_hexdigit()));
+            assert!(d.asset.size > 0, "{} dict size must be > 0", d.lang);
+        }
+    }
+
+    #[test]
+    fn canonical_lang_targets_all_have_a_catalog_dict() {
+        // Every base language the canonicalizer folds onto must be hostable.
+        for code in ["nb", "zh", "en-gb-x-rp", "es-419", "ro", "de", "fr"] {
+            let canon = crate::espeak::canonical_lang(code);
+            assert!(
+                dict_for(canon).unwrap().is_some(),
+                "canonical lang {canon:?} (from {code:?}) has no catalog dict"
+            );
+        }
     }
 
     #[test]

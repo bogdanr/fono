@@ -100,32 +100,49 @@ echo "building minimal static onnxruntime ($ORT_TAG, MinSizeRel, xnnpack=$USE_XN
     $xnnpack_flag
 
 # --- 3. Merge the per-target static archives into one libonnxruntime.a -----
-# A static onnxruntime build emits many `.a` files (session, framework,
+# A static onnxruntime build emits many object archives (session, framework,
 # graph, optimizer, mlas, flatbuffers, onnx, protobuf, re2, abseil, ...).
-# `ort`'s ORT_LIB_LOCATION expects a single merged archive, so combine them
-# with an `ar` MRI script. The exact set is enumerated at build time rather
-# than hard-coded, since it varies with the flags above.
+# `ort`'s ORT_LIB_LOCATION expects ONE merged archive, so combine them. The
+# exact set is enumerated at build time rather than hard-coded, since it
+# varies with the flags above. The merge tool is OS-specific:
+#   - Linux  : GNU `ar` MRI script (`create`/`addlib`/`save`).
+#   - macOS  : BSD `ar` has no `-M`; use `libtool -static`.
+#   - Windows: `lib.exe /OUT` (handled in the GitHub matrix, MSVC `.lib`).
 cfg_dir="$BUILD_DIR/MinSizeRel"
-merged="$OUT_DIR/libonnxruntime.a"
-mri="$OUT_DIR/.merge.mri"
+os_name="$(uname -s)"
 
-archives="$(find "$cfg_dir" -name '*.a' -type f 2>/dev/null || true)"
-if [ -z "$archives" ]; then
-    echo "ERROR: no static archives found under $cfg_dir" >&2
-    exit 6
+if [ "$os_name" = "Darwin" ]; then
+    merged="$OUT_DIR/libonnxruntime.a"
+    # shellcheck disable=SC2046 # intentional word-split of the archive list
+    archives="$(find "$cfg_dir" -name '*.a' -type f 2>/dev/null || true)"
+    if [ -z "$archives" ]; then
+        echo "ERROR: no static archives found under $cfg_dir" >&2
+        exit 6
+    fi
+    rm -f "$merged"
+    # libtool -static dedups members and writes a ranlib'd fat-free archive.
+    # shellcheck disable=SC2086
+    libtool -static -o "$merged" $archives
+else
+    merged="$OUT_DIR/libonnxruntime.a"
+    mri="$OUT_DIR/.merge.mri"
+    archives="$(find "$cfg_dir" -name '*.a' -type f 2>/dev/null || true)"
+    if [ -z "$archives" ]; then
+        echo "ERROR: no static archives found under $cfg_dir" >&2
+        exit 6
+    fi
+    {
+        echo "create $merged"
+        for a in $archives; do
+            echo "addlib $a"
+        done
+        echo "save"
+        echo "end"
+    } > "$mri"
+    rm -f "$merged"
+    ar -M < "$mri"
+    ranlib "$merged"
 fi
-
-{
-    echo "create $merged"
-    for a in $archives; do
-        echo "addlib $a"
-    done
-    echo "save"
-    echo "end"
-} > "$mri"
-rm -f "$merged"
-ar -M < "$mri"
-ranlib "$merged"
 
 echo "----"
 echo "merged archive: $merged"

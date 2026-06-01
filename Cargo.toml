@@ -105,10 +105,12 @@ llama-cpp-2 = { version = "0.1", default-features = false, features = ["openmp",
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "api-24"] }
 # Pure-Rust eSpeak NG port — grapheme→IPA phonemization, the front half of
 # the local Piper TTS pipeline (ADR 0032). GPL-3.0-or-later, no C, no system
-# `libespeak-ng`. Language data is embedded per-language via the
-# `bundled-data-<lang>` features (enabled by consumers, e.g. `bundled-data-ro`)
-# and written to a cache dir at runtime via `install_bundled_language`.
-# `default-features = false` drops the `install-espeak-ng-shim` binary guard.
+# `libespeak-ng`. We deliberately enable *no* `bundled-data-*` features: the
+# language-independent G2P core (~102 KiB) is embedded directly in fono-tts
+# (`src/espeak.rs`) and per-language `<lang>_dict` files download from the
+# voice mirror at runtime (ADR 0033), keeping the binary independent of how
+# many languages we ship. `default-features = false` also drops the
+# `install-espeak-ng-shim` binary guard.
 espeak-ng = { version = "0.1.2", default-features = false }
 
 # Desktop integration.

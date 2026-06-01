@@ -1159,22 +1159,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "083cee3337773bfa7f1c38fe022dab392438ced57f3a64c883011952d13b83a1"
 dependencies = [
  "bitflags 2.11.1",
- "espeak-ng-data-dict-ro",
- "espeak-ng-data-phonemes",
  "thiserror 1.0.69",
 ]
-
-[[package]]
-name = "espeak-ng-data-dict-ro"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce47e68cfbf8ad578ee5f1caad13d63a5e07f32828838a37fab387e46882533f"
-
-[[package]]
-name = "espeak-ng-data-phonemes"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d65418fdbf64db690f177ae55b6cb0f01eec5ffd46f5e1cba6f841ae3f214ec0"
 
 [[package]]
 name = "event-listener"

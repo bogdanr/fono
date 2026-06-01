@@ -716,5 +716,274 @@
         "size": 2927
       }
     }
+  ],
+  "dicts_comment": "Per-language espeak-ng phonemizer dictionaries. The shared G2P core (~102 KiB) is embedded in the binary (crates/fono-tts/assets/espeak-core, ADR 0033); only the language-specific <lang>_dict downloads at runtime into voices_dir/espeak/. `lang` is the espeak voice code from each voice's .onnx.json (espeak.voice), which is not always the BCP-47 code (zh->cmn, no->nb). Regenerate this list and the mirror assets with scripts/gen-espeak-dicts.sh; SHA-256s are verified on download.",
+  "dicts": [
+    {
+      "lang": "ar",
+      "release_tag": "espeak-ng-1.52",
+      "file": "ar_dict",
+      "sha256": "72316426e797777fe4df9420935a3b6a79b37d7e3f3948537ba71cd7b21b2541",
+      "size": 478165
+    },
+    {
+      "lang": "bg",
+      "release_tag": "espeak-ng-1.52",
+      "file": "bg_dict",
+      "sha256": "8fa3adec8e18a3e695b2bbea1d4780182e17222d8b9f8da9908a237828f6b063",
+      "size": 87051
+    },
+    {
+      "lang": "ca",
+      "release_tag": "espeak-ng-1.52",
+      "file": "ca_dict",
+      "sha256": "59f0f94d03cb6341a1b952ff735d8f0d0cb10136a593462558db7cfc8ee5318d",
+      "size": 310331
+    },
+    {
+      "lang": "cmn",
+      "release_tag": "espeak-ng-1.52",
+      "file": "cmn_dict",
+      "sha256": "2a41ddab7213d0284a984def6b40c72cbc40b346d3220db08c6ae324f46d59aa",
+      "size": 1566347
+    },
+    {
+      "lang": "cs",
+      "release_tag": "espeak-ng-1.52",
+      "file": "cs_dict",
+      "sha256": "61e649cdf0339e9e8248bdcdfa88b19c2cd129ef21e530adfe1860115420681d",
+      "size": 50455
+    },
+    {
+      "lang": "cy",
+      "release_tag": "espeak-ng-1.52",
+      "file": "cy_dict",
+      "sha256": "31d74ccad218ab80b79566caeb8d21bcf0fe43326ed7c437fa736d39b85e603e",
+      "size": 43130
+    },
+    {
+      "lang": "da",
+      "release_tag": "espeak-ng-1.52",
+      "file": "da_dict",
+      "sha256": "b2a462a9116cd22637da54fe994978a6c2002868b45f6d8905e08b4db7760bfb",
+      "size": 245287
+    },
+    {
+      "lang": "de",
+      "release_tag": "espeak-ng-1.52",
+      "file": "de_dict",
+      "sha256": "755d9cab00305b04c074141990ef0339191835de746dfa074936e194f3a5ad54",
+      "size": 69277
+    },
+    {
+      "lang": "en",
+      "release_tag": "espeak-ng-1.52",
+      "file": "en_dict",
+      "sha256": "1053f74a34af38abb6fbd64b7838dacbc655a687c48ce1bb663d364a127b05de",
+      "size": 168204
+    },
+    {
+      "lang": "es",
+      "release_tag": "espeak-ng-1.52",
+      "file": "es_dict",
+      "sha256": "e7c6347e407d5c14f283eeada18b86c6d560b03b62f53659473109bbff096757",
+      "size": 49285
+    },
+    {
+      "lang": "eu",
+      "release_tag": "espeak-ng-1.52",
+      "file": "eu_dict",
+      "sha256": "762a6eff63552ef72cd88bf1e92dc5a823eb378d50cb85c7917e8c5bba079137",
+      "size": 48841
+    },
+    {
+      "lang": "fa",
+      "release_tag": "espeak-ng-1.52",
+      "file": "fa_dict",
+      "sha256": "ae382adc58dd4d789824cb9f3b61cb0856ad067c5181e84747db498de87896cf",
+      "size": 292907
+    },
+    {
+      "lang": "fi",
+      "release_tag": "espeak-ng-1.52",
+      "file": "fi_dict",
+      "sha256": "dda999437bd4b37a7f7400a2230aace1200a52906ab0b1ff3507d44ab19d64b1",
+      "size": 43928
+    },
+    {
+      "lang": "fr",
+      "release_tag": "espeak-ng-1.52",
+      "file": "fr_dict",
+      "sha256": "e399ab924c4d10beef1fc310b30ea56e4ddfd8b4b64b8ed978e9c65394d49b2d",
+      "size": 63727
+    },
+    {
+      "lang": "hi",
+      "release_tag": "espeak-ng-1.52",
+      "file": "hi_dict",
+      "sha256": "5a68c9532624e57ac845b26ce1e2e5034c4f6353bede46ecbe57e583ec8effd6",
+      "size": 92143
+    },
+    {
+      "lang": "hu",
+      "release_tag": "espeak-ng-1.52",
+      "file": "hu_dict",
+      "sha256": "f9e3a5174ce89c48caf93865bdce2a7d92fa3da09d4147668020542edbe87b87",
+      "size": 177886
+    },
+    {
+      "lang": "it",
+      "release_tag": "espeak-ng-1.52",
+      "file": "it_dict",
+      "sha256": "7ce5b6b4e2ee251516708584267a413a3c02b2fa07cb527a2eb421fbbb3b12cf",
+      "size": 154408
+    },
+    {
+      "lang": "ka",
+      "release_tag": "espeak-ng-1.52",
+      "file": "ka_dict",
+      "sha256": "c8624947110a13bee72d4fc15b06026004df3f40c16c7b917d27e369ca122a32",
+      "size": 87775
+    },
+    {
+      "lang": "kk",
+      "release_tag": "espeak-ng-1.52",
+      "file": "kk_dict",
+      "sha256": "88dc0106629a57d0aca5073afb11db1a044799185355088a7ad4331c836affd3",
+      "size": 1859
+    },
+    {
+      "lang": "ku",
+      "release_tag": "espeak-ng-1.52",
+      "file": "ku_dict",
+      "sha256": "65de1c5429e8d193775b36fcf169a60fbbb9964ef13a4a1bab7ff0ce855cad20",
+      "size": 2265
+    },
+    {
+      "lang": "lb",
+      "release_tag": "espeak-ng-1.52",
+      "file": "lb_dict",
+      "sha256": "d819a062b9722334f187540d3530fac1de365cd200d4a466f5ecccd7e3c05772",
+      "size": 687931
+    },
+    {
+      "lang": "lv",
+      "release_tag": "espeak-ng-1.52",
+      "file": "lv_dict",
+      "sha256": "3e246c76b7da924235ffb75925070865e669da2ce3e41e98395e99be1f8db9f7",
+      "size": 66337
+    },
+    {
+      "lang": "nl",
+      "release_tag": "espeak-ng-1.52",
+      "file": "nl_dict",
+      "sha256": "f9f270a7b6204f322d9b7943460fe310fe7bc918dd5d4bc1acac8db28fa902d1",
+      "size": 65396
+    },
+    {
+      "lang": "no",
+      "release_tag": "espeak-ng-1.52",
+      "file": "no_dict",
+      "sha256": "43b828f8c1709e7abb23a0cc6416fb32e4814e3f1ff1db4baf2935bf7c77c9ff",
+      "size": 4178
+    },
+    {
+      "lang": "pl",
+      "release_tag": "espeak-ng-1.52",
+      "file": "pl_dict",
+      "sha256": "4daed8b7fce7bad6c690a8f040f254b6de5d238eb87cf0188a46f6b8a7030933",
+      "size": 76620
+    },
+    {
+      "lang": "pt",
+      "release_tag": "espeak-ng-1.52",
+      "file": "pt_dict",
+      "sha256": "94c689153e12e9c5e0ecbf60518a93ebb2ea0fbe805c63d97fa84c43331424e9",
+      "size": 76389
+    },
+    {
+      "lang": "ro",
+      "release_tag": "espeak-ng-1.52",
+      "file": "ro_dict",
+      "sha256": "b14f68866b0440c4b0d95fb7da3b7ffd3c59b693e8593d188474fabfc9a1117d",
+      "size": 68538
+    },
+    {
+      "lang": "ru",
+      "release_tag": "espeak-ng-1.52",
+      "file": "ru_dict",
+      "sha256": "5fe35e079e1fc44feed6429acd8c12e4cd974ad43e96f1968018c4d92a6dddd6",
+      "size": 8538195
+    },
+    {
+      "lang": "sk",
+      "release_tag": "espeak-ng-1.52",
+      "file": "sk_dict",
+      "sha256": "58b9bc11c9a95d81e96966242367009f8d02ab7a3f8f4fd77e3581ed4159f0a8",
+      "size": 50002
+    },
+    {
+      "lang": "sl",
+      "release_tag": "espeak-ng-1.52",
+      "file": "sl_dict",
+      "sha256": "9cb2bcbf616a5e7dd7ca769e7d222a48c613299ef1d76e44c08b002f8c22861a",
+      "size": 45047
+    },
+    {
+      "lang": "sq",
+      "release_tag": "espeak-ng-1.52",
+      "file": "sq_dict",
+      "sha256": "6b74bef94c3319407c27e44d944e765d036a88b30b4c17f30bbc182dbffcc4ce",
+      "size": 45003
+    },
+    {
+      "lang": "sr",
+      "release_tag": "espeak-ng-1.52",
+      "file": "sr_dict",
+      "sha256": "770cae9c516e48af7896629faf4abefaf041e1fd4ae184011aad07b97196f613",
+      "size": 46832
+    },
+    {
+      "lang": "sv",
+      "release_tag": "espeak-ng-1.52",
+      "file": "sv_dict",
+      "sha256": "565f058b14f1c89c6bfa44fc3700793886a39c7818f1037ad1f4961fa7517509",
+      "size": 47836
+    },
+    {
+      "lang": "sw",
+      "release_tag": "espeak-ng-1.52",
+      "file": "sw_dict",
+      "sha256": "375fab2ccd0d669177ad406b20b0cdb5851a1e86f093672f24f72c29fec8a815",
+      "size": 47804
+    },
+    {
+      "lang": "tr",
+      "release_tag": "espeak-ng-1.52",
+      "file": "tr_dict",
+      "sha256": "311b0557059f2dab5ee2faabb51361f5033368f0e2a54c4bdfe45e730674f26e",
+      "size": 46793
+    },
+    {
+      "lang": "uk",
+      "release_tag": "espeak-ng-1.52",
+      "file": "uk_dict",
+      "sha256": "a779bb0f51ce5cebb650a4e2282162fc8c44609210a2baa700f81f3e83e6e10c",
+      "size": 3492
+    },
+    {
+      "lang": "ur",
+      "release_tag": "espeak-ng-1.52",
+      "file": "ur_dict",
+      "sha256": "74b60e4331f532810ccfc70751ad07ab440647550a2d25823f44663a0dfa86fb",
+      "size": 133556
+    },
+    {
+      "lang": "vi",
+      "release_tag": "espeak-ng-1.52",
+      "file": "vi_dict",
+      "sha256": "2a2f6e06d39b14c8bbe875f8d3c1ab2701e23b6455f2bd998f7ab728fc51de8b",
+      "size": 52608
+    }
   ]
 }

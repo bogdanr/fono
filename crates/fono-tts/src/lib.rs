@@ -32,6 +32,8 @@ pub mod openai_compat;
 pub mod wyoming;
 
 #[cfg(feature = "tts-local")]
+pub mod espeak;
+#[cfg(feature = "tts-local")]
 pub mod local;
 #[cfg(feature = "tts-local")]
 pub mod piper;

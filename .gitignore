@@ -6,6 +6,9 @@
 **/*.rs.bk
 Cargo.lock.bak
 
+# Local scratch / large support files (models, prebuilt libs, venv)
+/tmp/
+
 # IDE / editor
 .idea/
 .vscode/

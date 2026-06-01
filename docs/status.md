@@ -1,5 +1,133 @@
 # Fono — Project Status
-Last updated: 2026-05-31
+Last updated: 2026-06-01
+
+## 2026-06-01 — Static libstdc++ linkage for `tts-local` (four-entry allowlist restored)
+
+The `tts-local` ONNX build leaked a dynamic `libstdc++.so.6` into `NEEDED`
+(5 entries), violating the linkage allowlist. Fixed by linking libstdc++
+statically so the shipped artifact stays portable across glibc Linux hosts.
+
+- **Root cause:** `ort-sys` emits its own `cargo:rustc-link-lib={ORT_CXX_STDLIB}`
+  for the C++ runtime, independently of llama's `static-stdcxx`. With the
+  previous empty value it fell back to a dynamic `-lstdc++`; with a plain
+  `static=stdc++` rustc tried to *bundle* `libstdc++.a` into the `ort-sys`
+  rlib at its own compile time, where no search path is visible → build error.
+- **Fix:** set `ORT_CXX_STDLIB="static:-bundle=stdc++"` in `.cargo/config.toml`
+  — the `-bundle` modifier defers the archive to the **final `fono` link**,
+  where the `libstdc++.a` search path (emitted by a new feature-gated
+  `crates/fono-tts/build.rs` via `gcc --print-file-name=libstdc++.a`, mirroring
+  llama's approach) is present. No hardcoded paths.
+- **Measured (`release-slim` glibc CPU artifact):**
+  - default (no `tts-local`): 22.52 MiB, 4 `NEEDED`
+  - `tts-local`, libstdc++ dynamic (old): 25.33 MiB, **5** `NEEDED` (leak)
+  - `tts-local`, libstdc++ static (now): **24.45 MiB, 4 `NEEDED`** — both
+    onnxruntime and libstdc++ statically embedded; ~0.9 MiB *smaller* than the
+    leaky dynamic state (`--gc-sections` prunes the unused archive).
+- **Verified with zero manual flags:** a plain `cargo build -p fono
+  --profile release-slim --features tts-local` (only `ORT_LIB_LOCATION` set)
+  yields the clean four-entry binary that runs. The build script is
+  feature-gated, so default builds emit nothing and are unchanged.
+- Gate green: `cargo fmt --check`, `cargo clippy --workspace --all-targets
+  -D warnings`, `cargo test --workspace`; `-p fono-tts --features tts-local`
+  clippy + tests clean with no manual `RUSTFLAGS`/`ORT_CXX_STDLIB`.
+- Docs: ADR 0022 corrected (the prior "llama's static-stdcxx covers ort"
+  claim was wrong) and `docs/binary-size.md` updated with the mechanism and
+  measured numbers.
+
+Two blockers remain before `tts-local` can become a default feature: wiring
+the minimal-runtime build + size/`NEEDED` gate into CI (Phase 1.1/1.4) so a
+clean build can obtain the pinned `libonnxruntime.a` automatically. The
+libstdc++ leak — the other blocker — is now closed.
+
+## 2026-06-01 — Phase 2.2e: per-language espeak dicts uploaded; lang canonicalization
+
+All catalogued voice languages can now phonemize: the per-language espeak
+dictionaries are live on the `fono-voice` mirror and the catalog references
+them, closing the "mirror action required" item from 2.2d.
+
+- **Mirror release `espeak-ng-1.52`** on `bogdanr/fono-voice`: 38 distinct
+  `<lang>_dict` files (13.5 MiB total), extracted from the espeak-ng 1.52
+  data set (GPL-3.0-or-later, via the `espeak-ng` crate's data). Files are
+  named by their canonical espeak base code. Verified downloadable;
+  `ro_dict` matches the catalog seed hash.
+- **Catalog `dicts` array regenerated** to 38 entries (one per distinct
+  base dictionary), each SHA-256 + size pinned. 42 voices → 40 distinct
+  `espeak.voice` codes → 38 physical dicts (two pairs share a base).
+- **Language canonicalization** (`crate::espeak::canonical_lang`): folds
+  espeak voice *variants/aliases* onto the base dictionary that actually
+  exists — `nb→no`, `zh→cmn`, `en-gb-x-rp→en`, `es-419→es`, identity
+  otherwise. The espeak phoneme-table lookup needs the base language code,
+  not the variant, so the canonical code is used both when choosing which
+  dict to download (`ensure_voice_dict`) and when constructing the
+  `Translator` (`phonemize`). Without this, variant/alias voices failed at
+  the phoneme-table stage even with the dict present.
+- **Verified end-to-end against the live mirror**: downloaded the German
+  and Chinese voices + their dicts straight from the release, phonemized
+  with the embedded core — German clean (`hˈaloː das ɪst aɪn tˈɛst`),
+  Mandarin produces phonemes without error (espeak's Mandarin G2P is
+  inherently rough — a downstream voice-quality matter, not a
+  data-completeness one). All 40 codes phonemize with zero failures.
+- **Tests**: three catalog guards added in `fono-tts::voices` — the
+  Romanian seed, the full 38-dict well-formedness/`<lang>_dict` naming
+  check, and that every `canonical_lang` target has a hostable dict.
+
+**Gate:** `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -D warnings`, `cargo test --workspace` all green;
+`-p fono-tts --features tts-local` → 48 pass, 2 ignored. Default `fono`
+graph still excludes the feature.
+
+**Regeneration:** `scripts/gen-espeak-dicts.sh` produces the dict assets +
+manifest; re-run + re-upload to bump the espeak data version.
+
+## 2026-06-01 — Phase 2.2d: espeak G2P core embedded; per-language dicts download
+
+Removed the compile-time `bundled-data-ro` espeak dependency and moved
+to a runtime model: a tiny shared phoneme core ships in the binary, and
+each voice's language dictionary downloads from the `fono-voice` mirror
+alongside the `.ort` voice — so all 38+ catalogued voices work without
+bloating the binary with per-language data (measured ~14 MiB if all
+bundled; Russian alone 8.5 MiB).
+
+- **Upstream patch prepared** (`/tmp/espeak-ng-rs`, branch
+  `phondata-optional`): `PhonemeData::load` no longer requires the
+  ~550 KiB `phondata` synthesis blob when only phonemizing — a missing
+  file is treated as "synthesis disabled" (tables load, rate defaults to
+  22.05 kHz); a present-but-truncated header still errors. Committed
+  under the maintainer-style identity with a plain commit message and a
+  `PR_DESCRIPTION.md`. Verified: Romanian + English phonemize with **no**
+  `phondata` present at all. This removes Fono's reliance on the 8-byte
+  stub trick once it lands upstream.
+- **Embedded G2P core** (`crates/fono-tts/assets/espeak-core`, ~104 KiB):
+  real `phontab` (59K) + `phonindex` (43K) + `intonations` (2K) + an
+  8-byte `phondata` header stub. Vendored with `scripts/gen-espeak-core.sh`
+  for provenance. `crates/fono-tts/src/espeak.rs` materialises it into the
+  voice data dir via `include_bytes!`.
+- **Per-language dict download** (`fono-tts::voices`): catalog gains a
+  `dicts` array (SHA-256 + size, seeded with `ro_dict` 68538 B);
+  `ensure_dict` fetches `<lang>_dict` into `voices_dir/espeak/` through the
+  pinned `fono-download` flow. `ensure_voice` boxed to satisfy
+  `clippy::large_stack_frames`.
+- **`PiperVoice::new`** drops `install_bundled_language`; it installs the
+  embedded core then expects the language dict already staged in the data
+  dir. `scripts/gen-espeak-dicts.sh` produces the dict assets + manifest
+  for the mirror.
+
+**Gate:** `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -D warnings`, and `cargo test --workspace` all green;
+`-p fono-tts --features tts-local` → 45 pass, 2 ignored. Both ignored
+end-to-end tests (Romanian text→IPA→ids, and full ONNX synthesis) pass
+with the embedded core + a staged `ro_dict`, producing real audio.
+Default `fono` graph still excludes the feature.
+
+**Mirror action required:** upload per-language `<lang>_dict` assets
+(run `scripts/gen-espeak-dicts.sh`) to the `fono-voice` mirror for every
+catalogued voice's language, and add their SHA-256/size to the catalog's
+`dicts` array. Only `ro_dict` is seeded so far — other languages will
+fail `ensure_dict` until uploaded.
+
+**Next:** populate the catalog `dicts` for all shipped voice languages;
+open the espeak-ng-rs PR; then 4.1 (Kokoro for English) + the router
+Kokoro-vs-Piper split.
 
 ## 2026-05-31 — Phase 2.4/2.5: local TTS now user-selectable
 

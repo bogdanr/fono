@@ -146,11 +146,20 @@ landed as part of 1.2 above.
   **Measured: minimal ONNX runtime adds only ~2.1 MiB** to a release
   binary, `NEEDED` = exactly the four-entry allowlist, onnxruntime
   statically embedded.)*
-- [ ] **2.2d** Embed the shared espeak G2P set via `include_bytes!`
-  (`phontab`+`phonindex`+`intonations`+8-byte `phondata` stub, ≈ 102 KiB;
-  stub generated from the real `phondata` header at build time so it
-  tracks `VERSION_PHDATA`). Load per-language dicts from the download
-  cache dir. Retires `bundled-data-*` for production (ADR 0033).
+- [x] **2.2d** Embed the shared espeak G2P set via `include_bytes!`
+  (`phontab`+`phonindex`+`intonations`+8-byte `phondata` stub, ≈ 104 KiB).
+  Load per-language dicts from the download cache dir. Retires
+  `bundled-data-*` for production (ADR 0033).
+  *(Landed + verified: assets vendored at
+  `crates/fono-tts/assets/espeak-core` via `scripts/gen-espeak-core.sh`;
+  `crates/fono-tts/src/espeak.rs` materialises them with `include_bytes!`.
+  `PiperVoice::new` drops `install_bundled_language` and installs the core,
+  expecting the language dict pre-staged in the data dir. `bundled-data-ro`
+  removed from the `tts-local` feature; the two Romanian end-to-end tests
+  are `#[ignore]` + `FONO_TEST_ESPEAK_DICT`-driven and pass with a staged
+  `ro_dict`, producing real audio. Upstream `phondata`-optional patch
+  prepared in `/tmp/espeak-ng-rs` (branch `phondata-optional`) to retire
+  even the 8-byte stub once merged.)*
 - [ ] **2.3** Voice download + cache (**`.ort` model** + `.onnx.json`
   sidecar + matching espeak per-language **dict**) from the
   **`bogdanr/fono-voice`** repo's `ort-<version>` release, verified
@@ -166,8 +175,22 @@ landed as part of 1.2 above.
     `Paths::voices_dir()`; `fono_download::sha256_file` made public.
     Unit-tested (catalog parse, language lookup, URL join, cache-hit,
     malformed-sha). *(2026-05-31.)*
-  - [ ] Remaining: espeak per-language **dict** fetch + first-run wizard
-    entry (lands with the router/factory wiring, 2.4/2.5).
+  - [x] espeak per-language **dict** fetch: catalog gains a `dicts`
+    array (seeded with `ro_dict`); `ensure_dict` downloads `<lang>_dict`
+    into `voices_dir/espeak/` (SHA-256-pinned), `ensure_voice` boxed for
+    `clippy::large_stack_frames`. `scripts/gen-espeak-dicts.sh` builds the
+    dict assets + manifest for the mirror. *(2026-06-01.)*
+  - [x] **2.2e** All per-language dicts uploaded: mirror release
+    `espeak-ng-1.52` hosts 38 distinct `<lang>_dict` files (13.5 MiB);
+    catalog `dicts` array regenerated to 38 SHA-256/size-pinned entries
+    (42 voices → 40 espeak codes → 38 physical dicts). Language
+    canonicalization `crate::espeak::canonical_lang` folds variant/alias
+    codes (`nb→no`, `zh→cmn`, `en-gb-x-rp→en`, `es-419→es`) onto the base
+    table at both `ensure_voice_dict` and `phonemize`. Verified live
+    end-to-end (German + Chinese downloaded from the mirror, phonemized
+    against the embedded core); all 40 codes phonemize cleanly.
+    *(2026-06-01.)*
+  - [ ] Remaining: first-run wizard entry.
 - [~] **2.4** Router scaffold (language → voice); Romanian → Piper;
   English → Kokoro (once 4.1 lands), everything else → Piper.
   - [x] Voice resolution by configured language
@@ -190,8 +213,9 @@ landed as part of 1.2 above.
   - [x] Engine verified end-to-end: Romanian Piper synthesis produces
     real PCM against the minimal runtime (ignored test
     `piper_local_synthesizes_real_audio`). *(2026-05-31.)*
-  - [ ] Remaining: live daemon HA playback smoke + the espeak
-    per-language **dict** fetch (Romanian data is embedded today).
+  - [ ] Remaining: live daemon HA playback smoke. *(espeak
+    per-language dict fetch wired in 2.3; mirror uploads complete in
+    2.2e.)*
 - [ ] **2.6** De-clutter the **app** release artifacts (ADR 0033 side
   effect): drop the per-asset `<asset>.sha256` sidecars
   (`release.yml:601-610`) now that voices live in `fono-voice`; migrate

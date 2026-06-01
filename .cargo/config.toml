@@ -82,17 +82,32 @@ rustflags = [
 #    `ort-sys` defaults to emitting a *dynamic* `-lstdc++`
 #    (build/static_link/mod.rs:20-33), which pulls `libstdc++.so.6` into
 #    NEEDED and breaks the size-budget allowlist (verified 2026-05-31:
-#    present with `tts-local`, absent without). Setting `ORT_CXX_STDLIB`
-#    *empty* makes `ort-sys` emit no stdc++ link directive at all; the C++
-#    runtime onnxruntime needs is then resolved by the `static=stdc++` that
-#    `llama-cpp-2/static-stdcxx` already emits for the whole final link
-#    line — together with the `libstdc++.a` search path llama discovers via
-#    `gcc --print-file-name` (llama-cpp-sys-2 build.rs:1088-1090). One
-#    static libstdc++ covers both consumers; nothing dynamic leaks. Setting
-#    it via `static=stdc++` here instead fails because rustc has no search
-#    path for the archive while compiling `ort-sys` in isolation.
-#    No effect on builds without `tts-local` (ort-sys never runs).
-ORT_CXX_STDLIB = ""
+#    present with `tts-local`, absent without). Relying on the
+#    `static=stdc++` that `llama-cpp-2/static-stdcxx` already emits is *not*
+#    enough: GNU ld scans llama's `libstdc++.a` to satisfy llama's own C++
+#    symbols, then meets `libonnxruntime.a` later on the link line whose C++
+#    symbols are still undefined — ld does not re-scan the archive, so a
+#    dynamic `-lstdc++` gets pulled in to close them and leaks into NEEDED
+#    (measured 2026-06-01: empty value → 5 entries / 25.33 MiB). Setting
+#    `ORT_CXX_STDLIB=static:-bundle=stdc++` makes `ort-sys` emit
+#    `cargo:rustc-link-lib=static:-bundle=stdc++` adjacent to its *own*
+#    objects, so `libstdc++.a` is scanned at the point onnxruntime's C++
+#    symbols are undefined and resolves them statically. The `-bundle`
+#    modifier is essential: without it rustc tries to *bundle* `libstdc++.a`
+#    into the `ort-sys` rlib at ort-sys compile time, where no search path is
+#    visible (a build script's `rustc-link-search` only propagates to
+#    *dependents*, and `ort-sys` is a sibling of `fono-tts`, not a dependent)
+#    — that fails with "could not find native static library `stdc++`".
+#    `-bundle` instead defers the archive to the *final* `fono` link, where
+#    both `llama-cpp-2/static-stdcxx`'s search path and `fono-tts`'s own (see
+#    below) are present. rustc needs a search path that contains
+#    `libstdc++.a` for that directive; `crates/fono-tts/build.rs` discovers
+#    it via `<cxx> --print-file-name=libstdc++.a` and emits a
+#    `rustc-link-search`, which Cargo propagates to the final binary link.
+#    Result: four-entry NEEDED, 24.45 MiB (≈ −0.9 MiB vs the dynamic leak).
+#    No effect on builds without `tts-local` (ort-sys never runs, and the
+#    fono-tts build script no-ops on that feature gate).
+ORT_CXX_STDLIB = "static:-bundle=stdc++"
 CFLAGS = "-Os -ffunction-sections -fdata-sections"
 CXXFLAGS = "-Os -ffunction-sections -fdata-sections"
 GGML_NATIVE = "OFF"

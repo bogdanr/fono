@@ -32,12 +32,14 @@ wyoming = ["dep:fono-net-codec"]
 # statically-linked `ort` runtime. OFF in source-default builds; ON in the
 # shipped `cpu`/`gpu` artefacts. Requires a pinned `libonnxruntime.a` via
 # `ORT_LIB_LOCATION` at build time (ADR 0032, `docs/binary-size.md`).
-# Pulls the pure-Rust `espeak-ng` phonemizer with embedded Romanian data
-# (`bundled-data-ro`); further voices add their `bundled-data-<lang>` here.
+# Pulls the pure-Rust `espeak-ng` phonemizer. No `bundled-data-*` features:
+# the ~102 KiB language-independent G2P core is embedded directly
+# (`src/espeak.rs`) and per-language `<lang>_dict` files download from the
+# voice mirror at runtime (ADR 0033) — so the binary stays independent of
+# how many languages we ship.
 tts-local = [
     "dep:ort",
     "dep:espeak-ng",
-    "espeak-ng/bundled-data-ro",
     "dep:fono-download",
 ]
 

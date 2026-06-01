@@ -87,18 +87,31 @@ not ggml. Consequences for this ADR:
   `--gc-sections` prunes the bulk of the 50 MiB archive that the fixed op
   set never references. The static `libonnxruntime.a` is built in CI and
   pinned via `ORT_LIB_LOCATION` (no CDN fetch, no `libonnxruntime.so`).
-- **`NEEDED` is unchanged** — static ONNX adds only a dynamic `-lstdc++`
-  that Fono already forces static (the `llama-cpp-2/static-stdcxx`
-  mechanism). Four-entry (`cpu`) / five-entry (`gpu`) allowlist holds.
-  Verified 2026-05-31: a static-`ort` binary presents exactly `{libc,
-  libm, libgcc_s, ld-linux}`.
-- **New `cpu` cap: ≤ 32 MiB.** With the minimal build measuring only
-  ~2.1 MiB of incremental code (2026-05-31), the cap retains generous
-  headroom; the per-op growth of future voice models (Kokoro, Silero
-  VAD, KWS, streaming STT) is the real consumer of that headroom. The
-  source-shared ggml dedup (Phase 3) still reclaims ~7 MiB as an
-  independent offset. Record measured numbers here as they land. `gpu`
-  stays ≤ 64 MiB.
+- **`NEEDED` stays four-entry, but ONNX needed a dedicated libstdc++
+  fix.** `ort-sys` emits its own `-lstdc++` link directive separately
+  from `llama-cpp-sys-2`; the `llama-cpp-2/static-stdcxx` mechanism does
+  **not** cover it (link ordering — llama's `libstdc++.a` is already
+  scanned before onnxruntime's C++ symbols resolve), so a naive
+  `tts-local` build **leaks a dynamic `libstdc++.so.6`** (measured
+  2026-06-01: 5-entry `NEEDED`, 25.33 MiB). The fix:
+  `ORT_CXX_STDLIB="static:-bundle=stdc++"` in `.cargo/config.toml`
+  (defers the static archive to the **final `fono` link**, where the
+  search path is present) plus a feature-gated `crates/fono-tts/build.rs`
+  that emits the `libstdc++.a` search path via
+  `gcc --print-file-name=libstdc++.a`. With this, a plain
+  `cargo build --features tts-local` (only `ORT_LIB_LOCATION` set, no
+  manual `RUSTFLAGS`) presents exactly `{libc, libm, libgcc_s,
+  ld-linux}`. Note the static link is also **~0.9 MiB smaller** than the
+  dynamic leak, because `--gc-sections` prunes the unreferenced bulk of
+  `libstdc++.a`.
+- **New `cpu` cap: ≤ 32 MiB.** Measured `release-slim` numbers
+  (2026-06-01): default (no `tts-local`) **22.52 MiB**, four-entry;
+  `tts-local` with static libstdc++ **24.45 MiB** (+1.9 MiB),
+  four-entry. The per-op growth of future voice models (Kokoro, Silero
+  VAD, KWS, streaming STT) is the real consumer of the remaining
+  headroom. The source-shared ggml dedup (Phase 3) still reclaims ~7 MiB
+  as an independent offset. Record measured numbers here as they land.
+  `gpu` stays ≤ 64 MiB.
 - The voice stack is **CPU-only** (XNNPACK EP); ONNX has no Vulkan EP and
   does not use the `gpu` variant's Vulkan. ggml-Vulkan still serves
   whisper-large + the LLM. See ADR 0032 "CPU / Vulkan split".

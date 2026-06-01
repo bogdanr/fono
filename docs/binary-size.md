@@ -128,10 +128,27 @@ C/C++ dependencies (ggml, onnxruntime) want to pull `libstdc++.so.6`,
 
 - `libstdc++` / `libgomp` go static via the `llama-cpp-2/static-stdcxx`
   and `llama-cpp-2/static-openmp` features, which make the sys crate emit
+  both a `libstdc++.a` search path (from `gcc --print-file-name`) and
   `static=stdc++` / `static=gomp` on the final link line.
-- `ort-sys` emits a *dynamic* `-lstdc++`; the same static mechanism +
-  `-Wl,--as-needed` keep it out of `NEEDED`. Verified 2026-05-31: a
-  static-`ort` binary presents exactly the four-entry allowlist.
+- `ort-sys` emits its own C++ stdlib link directive, driven by the
+  `ORT_CXX_STDLIB` env var (passed through verbatim into
+  `cargo:rustc-link-lib=<value>`). A plain `static=stdc++` makes rustc try
+  to *bundle* `libstdc++.a` into the `ort-sys` rlib at its own compile
+  time — where no search path is visible (the path emitted by a sibling
+  build script does not reach an already-compiling crate), so the build
+  fails with "could not find native static library `stdc++`". The fix is
+  `ORT_CXX_STDLIB="static:-bundle=stdc++"`: the `-bundle` modifier defers
+  the static archive to the **final `fono` link**, where llama's (and
+  `fono-tts`'s own) `libstdc++.a` search path is present. Set in
+  `.cargo/config.toml [env]`; `crates/fono-tts/build.rs` (feature-gated on
+  `tts-local`) emits the matching `rustc-link-search` so the archive
+  resolves regardless of whether llama is in the build.
+- Verified 2026-06-01: a plain `cargo build -p fono --profile
+  release-slim --features tts-local` (only `ORT_LIB_LOCATION` set, no
+  manual `RUSTFLAGS`) yields **24.45 MiB** with exactly the four-entry
+  allowlist — both `libstdc++` and `libonnxruntime` statically embedded.
+  This is ~0.9 MiB *smaller* than leaving `libstdc++` dynamic, because
+  `--gc-sections` prunes the unreferenced bulk of the 6.3 MiB archive.
 - Linker flags live in `.cargo/config.toml`: `--gc-sections`,
   `--as-needed`, and (legacy) `--allow-multiple-definition`.
 
