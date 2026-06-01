@@ -81,6 +81,14 @@ if [ "$USE_XNNPACK" = "1" ]; then
     xnnpack_flag="--use_xnnpack"
 fi
 
+# --allow_running_as_root is only a valid build.py argument when actually
+# running as root (Linux CI containers). macOS / Windows runners are not root
+# and build.py rejects the flag as unrecognized, so gate it on the real uid.
+root_flag=""
+if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
+    root_flag="--allow_running_as_root"
+fi
+
 echo "building minimal static onnxruntime ($ORT_TAG, MinSizeRel, xnnpack=$USE_XNNPACK)"
 "$PYTHON" "$SRC_DIR/tools/ci_build/build.py" \
     --build_dir "$BUILD_DIR" \
@@ -94,9 +102,9 @@ echo "building minimal static onnxruntime ($ORT_TAG, MinSizeRel, xnnpack=$USE_XN
     --disable_rtti \
     --enable_reduced_operator_type_support \
     --include_ops_by_config "$OPS_CONFIG" \
-    --allow_running_as_root \
     --cmake_extra_defines CMAKE_SKIP_INSTALL_RULES=ON \
     --cmake_extra_defines FETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER \
+    $root_flag \
     $xnnpack_flag
 
 # --- 3. Merge the per-target static archives into one libonnxruntime.a -----
