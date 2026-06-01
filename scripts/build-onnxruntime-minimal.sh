@@ -34,9 +34,13 @@ OPS_CONFIG="${OPS_CONFIG:-calibration/voice-models/ort/ops.config}"
 OUT_DIR="${OUT_DIR:-calibration/onnxruntime-minimal}"
 SRC_DIR="${SRC_DIR:-${OUT_DIR}/onnxruntime-src}"
 BUILD_DIR="${BUILD_DIR:-${OUT_DIR}/build}"
-# XNNPACK: the statically-linkable CPU accelerator (ADR 0032). On by default
-# to match plan task 1.2; set USE_XNNPACK=0 to measure the size delta.
-USE_XNNPACK="${USE_XNNPACK:-1}"
+# XNNPACK: the statically-linkable CPU accelerator (ADR 0032). Off by default:
+# its execution-provider sources fail to compile under --minimal_build +
+# --enable_reduced_operator_type_support in onnxruntime 1.24.2 (NodeUnit is an
+# incomplete type in node_support_checker.cc). We don't need it — the Piper /
+# Kokoro / Silero models are all CPU-realtime without it. Set USE_XNNPACK=1 to
+# opt back in (e.g. on a non-minimal build) and measure the delta.
+USE_XNNPACK="${USE_XNNPACK:-0}"
 PYTHON="${PYTHON:-python3}"
 
 if [ ! -f "$OPS_CONFIG" ]; then
