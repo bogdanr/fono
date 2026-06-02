@@ -51,16 +51,19 @@ fi
 sha_for_triple() {
 	case "$1" in
 	x86_64-unknown-linux-gnu)
-		echo "943bd16027d778ffdc6b581ad187525ba55a73be2114f9ffa79147c4ddf608dd"
+		echo "8ae4f035a0054611619e830c26e49a0b54574e891c621d75a4b4f2aecf71fb65"
 		;;
 	aarch64-unknown-linux-gnu)
-		echo "e14d4e71dfb1f9949741bc52029cbfe1dac1c5f074a81ac6b88ed0c93abdd174"
+		echo "4dc96968e978b39d374e4907739b754260cbd439766d5a53b939baeaa70413a3"
 		;;
 	aarch64-apple-darwin)
-		echo "3c60d45f5850f40fe2d4cdbd59690d85da36c5333f536fbb003ba28354f3aa18"
+		echo "e66e23dffcda0c2836c84f0f9d8a75773b74ae2941ee8120a05c907a92bafa76"
+		;;
+	x86_64-apple-darwin)
+		echo ""
 		;;
 	x86_64-pc-windows-msvc)
-		echo "0731b03361975fa48466b15e49f05965da5f5b624ec938aae5629f2384973912"
+		echo "4d8c20133da76fc2355505c152a5586d4814264489fa8b2e7e65a464c29469ba"
 		;;
 	*)
 		echo ""
