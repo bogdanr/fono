@@ -1,6 +1,26 @@
 # Fono — Project Status
 Last updated: 2026-06-02
 
+## 2026-06-02 — Local TTS: Romanian comma-below diacritics phonemized
+
+Bug report: Piper cut Romanian words at comma-below `ș`/`ț` — reading "Ploie"
+for `Ploiești`, and skipping `țara` entirely — while Home Assistant's Piper
+handled the same model fine. Root cause is the vendored pure-Rust `espeak-ng`
+0.1.2 port: it only understands the **cedilla** forms (`ş` U+015F, `ţ` U+0163),
+not the modern **comma-below** forms (`ș` U+0219, `ț` U+021B). It truncates a
+word at the first comma-below letter or drops it. Confirmed empirically with a
+throwaway harness against the cached `ro_dict`: comma-below `Ploiești` → `plˈoje`,
+cedilla `Ploieşti` → `plˈojeʃtˌʲ`. The real C espeak-ng normalizes comma-below →
+cedilla internally; the port skips that step.
+
+Fix: `espeak::normalize_diacritics` folds the four comma-below codepoints
+(`Ș`/`ș`/`Ț`/`ț`) onto their cedilla equivalents, applied in
+`PiperVoice::phonemize` before `text_to_ipa`. Returns a borrowed `Cow` (no-op)
+for text without them, so non-Romanian text is untouched. No new dependency.
+Unit-tested; verified all six failing words now phonemize fully. Caveat: the
+port has shaky handling of codepoints ≥ U+0100 generally, so other languages
+may have their own gaps — a broader audit is a separate task.
+
 ## 2026-06-02 — Local TTS: text language is authoritative for voice choice
 
 Persisting bug report: Romanian replies were *still* spoken by the English

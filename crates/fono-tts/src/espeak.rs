@@ -24,6 +24,7 @@
 //! Regenerate the vendored bytes with `scripts/gen-espeak-core.sh` when the
 //! pinned `espeak-ng` data version changes.
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -83,6 +84,38 @@ pub fn canonical_lang(code: &str) -> &str {
     }
 }
 
+/// Fold Romanian comma-below letters onto their cedilla equivalents so the
+/// pure-Rust `espeak-ng` port phonemizes them.
+///
+/// Modern Romanian orthography uses comma-below `ș`/`ț` (U+0218–U+021B); the
+/// older encoding uses cedilla `ş`/`ţ` (U+015E–U+0163). The real C espeak-ng
+/// normalizes the comma-below forms internally, but the vendored Rust port
+/// (v0.1.2) does not — it silently truncates a word at the first comma-below
+/// letter (`Ploiești` → `plˈoje`) or drops it entirely (`țara` → empty). The
+/// cedilla forms phonemize correctly, so we apply the same fold espeak does.
+///
+/// Returns a borrowed `Cow` when the text contains none of the four
+/// codepoints (the common case for non-Romanian text), so it costs nothing
+/// outside Romanian.
+#[must_use]
+pub fn normalize_diacritics(text: &str) -> Cow<'_, str> {
+    if text.contains(['Ș', 'ș', 'Ț', 'ț']) {
+        Cow::Owned(
+            text.chars()
+                .map(|c| match c {
+                    'Ș' => 'Ş', // U+0218 -> U+015E
+                    'ș' => 'ş', // U+0219 -> U+015F
+                    'Ț' => 'Ţ', // U+021A -> U+0162
+                    'ț' => 'ţ', // U+021B -> U+0163
+                    other => other,
+                })
+                .collect(),
+        )
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +132,25 @@ mod tests {
         // Unmapped codes (incl. variants espeak resolves itself) pass through.
         assert_eq!(canonical_lang("ro"), "ro");
         assert_eq!(canonical_lang("cmn"), "cmn");
+    }
+
+    #[test]
+    fn normalize_diacritics_folds_comma_below_to_cedilla() {
+        // Comma-below ș/ț (U+0219/U+021B) -> cedilla ş/ţ (U+015F/U+0163).
+        assert_eq!(normalize_diacritics("Ploiești"), "Ploieşti");
+        assert_eq!(normalize_diacritics("țara"), "ţara");
+        assert_eq!(normalize_diacritics("școală"), "şcoală");
+        // Uppercase forms too.
+        assert_eq!(normalize_diacritics("ȚARĂ ȘI"), "ŢARĂ ŞI");
+    }
+
+    #[test]
+    fn normalize_diacritics_leaves_other_text_borrowed() {
+        // No comma-below letters -> borrowed, untouched (incl. ă/â/î).
+        assert!(matches!(normalize_diacritics("Bună ziua, România"), Cow::Borrowed(_)));
+        assert!(matches!(normalize_diacritics("hello world"), Cow::Borrowed(_)));
+        // Already-cedilla text is left as-is.
+        assert_eq!(normalize_diacritics("ţara"), "ţara");
     }
 
     /// `VERSION_PHDATA` the embedded `phondata` stub must carry in its first

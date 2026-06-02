@@ -166,8 +166,12 @@ impl PiperVoice {
         let voice = crate::espeak::canonical_lang(&self.config.espeak.voice);
         let translator = espeak_ng::Translator::new(voice, Some(self.data_dir.as_path()))
             .map_err(|e| anyhow::anyhow!("espeak-ng translator init for '{voice}': {e}"))?;
+        // The vendored espeak-ng port truncates words at Romanian comma-below
+        // letters; fold them onto the cedilla forms it understands, as the C
+        // library does internally. No-op (borrowed) for text without them.
+        let text = crate::espeak::normalize_diacritics(text);
         translator
-            .text_to_ipa(text)
+            .text_to_ipa(&text)
             .map_err(|e| anyhow::anyhow!("espeak-ng phonemize '{voice}': {e}"))
     }
 

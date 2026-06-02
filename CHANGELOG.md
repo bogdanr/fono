@@ -33,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dictionary in the catalog; it now folds onto the shared `en` base/`en_dict`
   (same as the British `en-gb-x-rp` voice), so the on-demand dictionary
   download resolves instead of warning.
+- Local TTS no longer mangles Romanian words containing the comma-below letters
+  `ș`/`ț`. The vendored pure-Rust espeak-ng port truncated a word at the first
+  such letter (`Ploiești` came out as "Ploie") or dropped it entirely (`țara`
+  was silent); these comma-below codepoints are now folded onto their cedilla
+  equivalents (`ş`/`ţ`) before phonemization, as the upstream C library does
+  internally.
 
 ## [0.9.1] — 2026-05-29
 
