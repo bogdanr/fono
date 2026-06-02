@@ -111,38 +111,10 @@ pub async fn ensure_models(paths: &Paths, config: &Config) -> Result<()> {
 /// catalog voice are skipped with a warning rather than failing the lot.
 #[cfg(feature = "tts-local")]
 pub async fn ensure_local_tts(paths: &Paths, config: &Config) -> Result<EnsureOutcome> {
-    let local = &config.tts.local;
-    let voices = if local.voice.is_empty() {
-        let mut langs: Vec<&str> = config.general.languages.iter().map(String::as_str).collect();
-        if langs.is_empty() {
-            langs.push("en");
-        }
-        let mut chosen: Vec<fono_tts::voices::Voice> = Vec::new();
-        for lang in langs {
-            match fono_tts::voices::for_language(lang)? {
-                Some(v) if !chosen.iter().any(|c| c.name == v.name) => chosen.push(v),
-                Some(_) => {} // a different language already mapped to this voice
-                None => warn!(
-                    "no local TTS voice in the catalog for configured language {lang:?}; \
-                     it will fall back to the primary voice"
-                ),
-            }
-        }
-        if chosen.is_empty() {
-            let lang = config.general.languages.first().map_or("en", String::as_str);
-            return Err(anyhow::anyhow!(
-                "no local voice in the catalog for any configured language (e.g. {lang:?}); \
-                 set [tts.local].voice to a catalog voice id"
-            ));
-        }
-        chosen
-    } else {
-        vec![fono_tts::voices::by_name(&local.voice)?.ok_or_else(|| {
-            anyhow::anyhow!("[tts.local].voice = {:?} is not in the voice catalog", local.voice)
-        })?]
-    };
+    let voices = resolve_local_tts_voices(config)?;
     let voices_dir = paths.voices_dir();
-    let base = (!local.base_url.is_empty()).then_some(local.base_url.as_str());
+    let base_url = &config.tts.local.base_url;
+    let base = (!base_url.is_empty()).then_some(base_url.as_str());
     let mut any_downloaded = false;
     for voice in &voices {
         let already = voices_dir.join(&voice.model.file).is_file()
@@ -161,6 +133,66 @@ pub async fn ensure_local_tts(paths: &Paths, config: &Config) -> Result<EnsureOu
         }
     }
     Ok(if any_downloaded { EnsureOutcome::Downloaded } else { EnsureOutcome::AlreadyPresent })
+}
+
+/// Resolve which catalog voices the local backend needs, mirroring
+/// `fono_tts::factory`: an explicit `[tts.local].voice` pins one voice,
+/// otherwise one voice per configured language (deduped) is chosen.
+/// Languages without a catalog voice are skipped with a warning.
+#[cfg(feature = "tts-local")]
+fn resolve_local_tts_voices(config: &Config) -> Result<Vec<fono_tts::voices::Voice>> {
+    let local = &config.tts.local;
+    if !local.voice.is_empty() {
+        return Ok(vec![fono_tts::voices::by_name(&local.voice)?.ok_or_else(|| {
+            anyhow::anyhow!("[tts.local].voice = {:?} is not in the voice catalog", local.voice)
+        })?]);
+    }
+    let mut langs: Vec<&str> = config.general.languages.iter().map(String::as_str).collect();
+    if langs.is_empty() {
+        langs.push("en");
+    }
+    let mut chosen: Vec<fono_tts::voices::Voice> = Vec::new();
+    for lang in langs {
+        match fono_tts::voices::for_language(lang)? {
+            Some(v) if !chosen.iter().any(|c| c.name == v.name) => chosen.push(v),
+            Some(_) => {} // a different language already mapped to this voice
+            None => warn!(
+                "no local TTS voice in the catalog for configured language {lang:?}; \
+                 it will fall back to the primary voice"
+            ),
+        }
+    }
+    if chosen.is_empty() {
+        let lang = config.general.languages.first().map_or("en", String::as_str);
+        return Err(anyhow::anyhow!(
+            "no local voice in the catalog for any configured language (e.g. {lang:?}); \
+             set [tts.local].voice to a catalog voice id"
+        ));
+    }
+    Ok(chosen)
+}
+
+/// Approximate total download size (MB) for the local TTS voices the
+/// current config requires that are **not yet on disk**, or `None` when
+/// every required voice is already cached (so callers can skip the
+/// "downloading…" notification). Used by the tray switcher.
+#[cfg(feature = "tts-local")]
+#[must_use]
+pub fn local_tts_pending_mb(paths: &Paths, config: &Config) -> Option<u32> {
+    let voices = resolve_local_tts_voices(config).ok()?;
+    let voices_dir = paths.voices_dir();
+    let pending: u64 = voices
+        .iter()
+        .filter(|v| {
+            !(voices_dir.join(&v.model.file).is_file() && voices_dir.join(&v.config.file).is_file())
+        })
+        .map(|v| v.model.size + v.config.size)
+        .sum();
+    if pending == 0 {
+        None
+    } else {
+        Some((pending / 1_000_000).max(1) as u32)
+    }
 }
 
 /// Ensure the named whisper model (at the configured quantization) is

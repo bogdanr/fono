@@ -148,15 +148,11 @@ pub type McpEnabledProvider = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// Provider returning whether `[server.wyoming].enabled = true` in the
 /// user config. Polled on the same ~2 s cadence so the "Servers ▸
-/// Wyoming" checkmark reflects external `config.toml` edits without
-/// a tray restart.
-///
-/// Unlike the MCP toggle (which only affects subprocess `fono mcp
-/// serve` invocations spawned by coding agents), flipping the Wyoming
-/// flag does not start/stop the live LAN listener: the daemon spawns
-/// the Wyoming server once at boot from `spawn_wyoming_server_if_enabled`.
-/// The daemon's tray-action handler emits a desktop notification
-/// telling the user a restart is required.
+/// Wyoming server" checkmark reflects external `config.toml` edits
+/// without a tray restart. The single switch governs both STT serving
+/// (always on when enabled) and TTS serving (added automatically when a
+/// `[tts]` backend is configured). The daemon's tray-action handler
+/// hot-reloads the LAN listener, so no restart is needed.
 pub type WyomingEnabledProvider = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// Snapshot view of the user-facing config fields surfaced in the
@@ -316,9 +312,11 @@ pub enum TrayAction {
     /// required).
     ToggleMcpServer,
     /// Toggle `[server.wyoming].enabled` from the tray. The daemon
-    /// writes the change to `config.toml` and emits a notification
-    /// telling the user to restart Fono — the LAN listener is
-    /// spawned once at daemon boot and isn't hot-reloadable today.
+    /// writes the change to `config.toml` and hot-reloads the LAN
+    /// listener in place — no restart required. The one switch governs
+    /// STT serving (always) plus TTS serving (whenever a `[tts]`
+    /// backend is configured), since Wyoming multiplexes both over one
+    /// connection.
     ToggleWyomingServer,
     Quit,
 }
@@ -517,8 +515,8 @@ mod backend {
         /// unified "Servers" submenu.
         mcp_server_enabled: bool,
         /// Whether `[server.wyoming].enabled = true` in the user
-        /// config. Reflected as a checkmark on the "Wyoming (STT
-        /// host)" row of the unified "Servers" submenu.
+        /// config. Reflected as a checkmark on the "Wyoming server"
+        /// row of the unified "Servers" submenu.
         wyoming_server_enabled: bool,
         actions: mpsc::UnboundedSender<TrayAction>,
     }
@@ -1268,7 +1266,7 @@ mod backend {
         );
         server_items.push(
             CheckmarkItem {
-                label: "Wyoming (STT) — restart required".into(),
+                label: "Wyoming server (STT + TTS) — shares Fono on the LAN".into(),
                 checked: t.wyoming_server_enabled,
                 activate: send_action(TrayAction::ToggleWyomingServer),
                 ..Default::default()

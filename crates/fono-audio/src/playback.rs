@@ -51,6 +51,36 @@ pub struct AudioPlayback {
     stop: Arc<AtomicBool>,
 }
 
+/// Milliseconds of digital silence prepended to every enqueued utterance.
+///
+/// The Linux default backend spawns a fresh `pw-play`/`paplay` process per
+/// utterance, and an idle PipeWire/Pulse sink (or a USB/Bluetooth DAC that has
+/// powered down) takes a moment to actually start moving samples. Without a
+/// lead-in, that wake latency eats the first phonemes — Piper starts at the
+/// first phoneme with no natural leading silence, so the very start of a word
+/// gets clipped. A short silent head wakes the device before real audio plays;
+/// because the sink plays its buffer in order, the silence is heard *after* the
+/// device is up, so no speech is lost. 150 ms covers built-in/USB DACs
+/// comfortably while staying below the ~250 ms "feels laggy" threshold and
+/// reading as a natural inter-sentence pause. (A fully-cold Bluetooth link can
+/// take longer to wake; the pad still prevents clipping there — the first word
+/// may just start slightly late.)
+const LEAD_IN_MS: u32 = 150;
+
+/// Prepend [`LEAD_IN_MS`] of digital silence (zero samples at `sample_rate`) to
+/// `pcm`. Caller guarantees `pcm` is non-empty; the silent head count is
+/// `round(sample_rate * LEAD_IN_MS / 1000)`.
+fn with_lead_in(pcm: Vec<f32>, sample_rate: u32) -> Vec<f32> {
+    let lead = (u64::from(sample_rate) * u64::from(LEAD_IN_MS) / 1000) as usize;
+    if lead == 0 {
+        return pcm;
+    }
+    let mut out = Vec::with_capacity(lead + pcm.len());
+    out.resize(lead, 0.0);
+    out.extend_from_slice(&pcm);
+    out
+}
+
 enum Cmd {
     Play {
         pcm: Vec<f32>,
@@ -80,10 +110,15 @@ impl AudioPlayback {
 
     /// Enqueue one utterance for playback. Returns immediately —
     /// playback runs on the worker thread.
+    ///
+    /// A short [`LEAD_IN_MS`] head of digital silence is prepended so the
+    /// audio sink has time to wake before real speech plays (see the constant's
+    /// docs). Empty input stays a no-op.
     pub fn enqueue(&self, pcm: Vec<f32>, sample_rate: u32) -> Result<()> {
         if pcm.is_empty() {
             return Ok(());
         }
+        let pcm = with_lead_in(pcm, sample_rate);
         self.pending.fetch_add(1, Ordering::SeqCst);
         self.tx
             .send(Cmd::Play { pcm, sample_rate })
@@ -460,5 +495,26 @@ mod tests {
             pb.stop();
             assert!(pb.is_idle());
         }
+    }
+
+    #[test]
+    fn lead_in_prepends_expected_silence() {
+        // 150 ms at 22.05 kHz = round(22050 * 150 / 1000) = 3307 samples.
+        let pcm = vec![1.0_f32, -1.0, 0.5];
+        let out = with_lead_in(pcm.clone(), 22_050);
+        let lead = 22_050 * 150 / 1000;
+        assert_eq!(out.len(), lead + pcm.len());
+        assert!(out[..lead].iter().all(|&s| s == 0.0), "head must be silence");
+        assert_eq!(&out[lead..], &pcm[..], "original samples follow unchanged");
+
+        // 150 ms at 16 kHz = 2400 samples.
+        let out16 = with_lead_in(vec![0.25_f32; 10], 16_000);
+        assert_eq!(out16.len(), 16_000 * 150 / 1000 + 10);
+    }
+
+    #[test]
+    fn lead_in_zero_rate_is_noop() {
+        let pcm = vec![1.0_f32, 2.0, 3.0];
+        assert_eq!(with_lead_in(pcm.clone(), 0), pcm);
     }
 }

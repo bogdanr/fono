@@ -81,10 +81,10 @@ pub struct WyomingServerConfig {
     /// `bind = "127.0.0.1"` for defence in depth.
     pub loopback_only: bool,
     /// Voices advertised in `info.tts[].voices`. Empty (the default)
-    /// means this listener advertises ASR only. The daemon populates
-    /// this from `[server.tts]` when it also binds a TTS backend via
-    /// [`WyomingServer::with_tts`]; advertisement and serving are kept
-    /// in lockstep that way.
+    /// means this listener advertises ASR only. The daemon derives this
+    /// from the active `[tts]` backend when it also binds a TTS backend
+    /// via [`WyomingServer::with_tts`]; advertisement and serving are
+    /// kept in lockstep that way.
     pub tts_voices: Vec<AdvertisedVoice>,
 }
 
@@ -97,8 +97,8 @@ pub struct AdvertisedModel {
     pub version: Option<String>,
 }
 
-/// One voice entry surfaced via `info.tts[].voices`. Synthesised by
-/// the daemon from `[server.tts]` + the active local voice catalogue.
+/// One voice entry surfaced via `info.tts[].voices`. Derived by the
+/// daemon from the active `[tts]` backend + the local voice catalogue.
 #[derive(Debug, Clone)]
 pub struct AdvertisedVoice {
     pub name: String,

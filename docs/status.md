@@ -1,6 +1,20 @@
 # Fono — Project Status
 Last updated: 2026-06-02
 
+## 2026-06-02 — `cargo build` works without ORT_LIB_LOCATION (dev fallback)
+
+With `tts-local` now source-default, a bare `cargo build` (and rust-analyzer)
+linked `ort` and failed `undefined reference to OrtGetApiBase` when
+`ORT_LIB_LOCATION` was unset. Fix: re-enable `ort`'s `download-binaries` +
+`tls-rustls` in the workspace `Cargo.toml`. `ort-sys` checks `ORT_LIB_LOCATION`
+first, so CI/release (which export it via `scripts/fetch-onnxruntime.sh`) still
+link our pinned static `libonnxruntime.a` unchanged; only env-less local builds
+take the CDN fallback. Build-only deps added (`ureq`, `ureq-proto`, `socks`,
+`hmac-sha256`, `lzma-rust2`, `utf8-zero`; rustls/ring/webpki-roots already
+present via reqwest) — all permissive, none in the binary. Verified shipped
+`release-slim` byte-identical: 26,038,648 B (24.83 MiB), four-entry `NEEDED`,
+no leak. fmt/clippy/fono-tts tests green. ADR 0032 amended.
+
 ## 2026-06-02 — Local TTS: Romanian comma-below diacritics phonemized
 
 Bug report: Piper cut Romanian words at comma-below `ș`/`ț` — reading "Ploie"

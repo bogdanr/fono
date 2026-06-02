@@ -188,24 +188,33 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     };
 
     // ---------------------------------------------------------------
-    // LAN Wyoming server (Slice 3 of the network plan). Off by default;
-    // spawned only when `[server.wyoming].enabled = true` *and* the
-    // orchestrator came up (degraded mode skips serving — there's no
-    // STT backend to host). The handle is dropped on daemon exit which
-    // closes the listener; in-flight connections finish naturally.
-    // ---------------------------------------------------------------
-    let _wyoming_server: Option<fono_net::wyoming::server::WyomingServerHandle> =
-        spawn_wyoming_server_if_enabled(&config, orchestrator.as_ref()).await;
-
-    // ---------------------------------------------------------------
     // mDNS discovery (Slice 4 of the network plan). The browser is
     // always on when the daemon can create an mDNS service daemon — it
     // populates the LAN registry exposed via IPC `ListDiscovered`. The
-    // advertiser only runs when a `[server.*]` block is enabled.
+    // Wyoming advertiser is managed alongside the LAN listener below so
+    // both can be toggled live from the tray.
     // ---------------------------------------------------------------
-    let discovery = spawn_discovery_if_enabled(&config).await;
+    let discovery = spawn_discovery_if_enabled().await;
     let discovery_registry: Option<fono_net::discovery::Registry> =
         discovery.as_ref().map(|d| d.registry.clone());
+
+    // ---------------------------------------------------------------
+    // LAN Wyoming server (Slice 3 of the network plan). Off by default;
+    // started only when `[server.wyoming].enabled = true` *and* the
+    // orchestrator came up (degraded mode skips serving — there's no
+    // STT backend to host). The single switch serves STT always and
+    // TTS automatically whenever a `[tts]` backend is configured. The
+    // listener handle and its mDNS advert live in a shared
+    // `WyomingControl` so the tray toggle can start/stop them in place
+    // without a daemon restart. Held for the daemon's lifetime; dropped
+    // on exit, which closes the listener and fires the mDNS goodbye.
+    // ---------------------------------------------------------------
+    let wyoming_ctl = WyomingControl {
+        rt: Arc::new(tokio::sync::Mutex::new(WyomingRuntime::default())),
+        mdns: discovery.as_ref().and_then(|d| d.daemon.clone()),
+        registry: discovery_registry.clone(),
+    };
+    wyoming_ctl.reconcile(&config, orchestrator.as_ref()).await;
 
     // ---------------------------------------------------------------
     // Global hotkey listener
@@ -942,6 +951,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         let discovered_registry_for_dispatch = discovery_registry.clone();
         let local_wyoming_fullname_for_dispatch = local_wyoming_fullname(&config);
         let orchestrator_for_tray = orchestrator.clone();
+        let wyoming_ctl_for_tray = wyoming_ctl.clone();
         tokio::spawn(async move {
             while let Some(ta) = tray_rx.recv().await {
                 debug!("tray action: {ta:?}");
@@ -1166,13 +1176,11 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                         }
                     }
                     TrayAction::ToggleWyomingServer => {
-                        // Toggle `[server.wyoming].enabled` and persist.
-                        // The LAN listener is spawned once at daemon
-                        // boot (see `spawn_wyoming_server_if_enabled`)
-                        // and isn't hot-reloadable today, so we
-                        // surface a desktop notification telling the
-                        // user a restart is required for the change
-                        // to take effect.
+                        // Flip `[server.wyoming].enabled`, persist, and
+                        // hot-reload the LAN listener in place (start or
+                        // stop) — no restart needed. The one switch
+                        // serves STT always and TTS automatically
+                        // whenever a `[tts]` backend is configured.
                         match fono_core::Config::load(&paths.config_file()) {
                             Ok(mut cfg) => {
                                 cfg.server.wyoming.enabled = !cfg.server.wyoming.enabled;
@@ -1180,24 +1188,31 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                                 if let Err(e) = cfg.save(&paths.config_file()) {
                                     warn!("tray ToggleWyomingServer: save failed: {e:#}");
                                 } else {
+                                    wyoming_ctl_for_tray
+                                        .reconcile(&cfg, orchestrator_for_tray.as_ref())
+                                        .await;
+                                    let running = wyoming_ctl_for_tray.is_running().await;
                                     info!(
                                         enabled = new_state,
-                                        "Wyoming server toggled via tray; restart Fono to apply"
+                                        running, "Wyoming server toggled via tray (hot-reloaded)"
                                     );
-                                    let body = if new_state {
-                                        "Wyoming STT server will start on the next Fono \
-                                         restart. Quit and relaunch Fono to bring the LAN \
-                                         listener up."
+                                    let body = if new_state && running {
+                                        "Wyoming server is live on the LAN — sharing \
+                                         speech-to-text, plus text-to-speech when a voice \
+                                         backend is configured."
+                                    } else if new_state {
+                                        "Wyoming server enabled, but the listener could not \
+                                         start — check the logs (no STT backend, or the port \
+                                         is busy)."
                                     } else {
-                                        "Wyoming STT server will stop on the next Fono \
-                                         restart. Quit and relaunch Fono to release the \
-                                         LAN listener."
+                                        "Wyoming server stopped — Fono is no longer shared on \
+                                         the LAN."
                                     };
                                     fono_core::notify::send(
                                         "Fono — Wyoming server",
                                         body,
                                         "network-server",
-                                        8_000,
+                                        6_000,
                                         fono_core::notify::Urgency::Normal,
                                     );
                                 }
@@ -2055,7 +2070,7 @@ fn tts_menu_label(b: &fono_core::config::TtsBackend, secrets: &fono_core::Secret
     match b {
         TtsBackend::None => "Off (disabled)".to_string(),
         TtsBackend::Wyoming => "Wyoming (local)".to_string(),
-        TtsBackend::Local => "Local voice (on-device)".to_string(),
+        TtsBackend::Local => "Local voice".to_string(),
         TtsBackend::OpenAI
         | TtsBackend::Groq
         | TtsBackend::OpenRouter
@@ -2303,6 +2318,17 @@ async fn switch_tts_via_tray(
     match result {
         Ok(Ok(())) => {
             info!("tray: switched TTS to {label}");
+            // Switching to the on-device backend with voices not yet
+            // downloaded (e.g. the user started on a cloud backend, so
+            // startup never fetched them) would reload onto a router
+            // that can't load its voice and silently drop every reply.
+            // Fetch first, notifying, and only reload once it's ready.
+            #[cfg(feature = "tts-local")]
+            if matches!(backend, fono_core::config::TtsBackend::Local)
+                && !ensure_local_tts_with_notify(paths).await
+            {
+                return;
+            }
             if let Some(o) = orch {
                 if let Err(e) = o.reload().await {
                     warn!("tray: TTS reload failed: {e:#}");
@@ -2656,6 +2682,58 @@ async fn ensure_local_polish_with_notify(paths: &fono_core::Paths) -> bool {
     }
 }
 
+/// Local TTS counterpart to [`ensure_local_stt_with_notify`]. Ensures
+/// the on-device Piper voice(s) the on-disk config requires are present,
+/// downloading and notifying around any fetch. Returns `true` when the
+/// voices are ready to load, `false` on failure — callers must NOT
+/// reload the orchestrator on `false` (the local router would fail to
+/// load and replies would be silent). Only compiled with `tts-local`;
+/// without it, switching to Local surfaces a "not compiled in" error
+/// from the factory on reload, so no ensure step is needed.
+#[cfg(feature = "tts-local")]
+async fn ensure_local_tts_with_notify(paths: &fono_core::Paths) -> bool {
+    let cfg = match fono_core::Config::load(&paths.config_file()) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("ensure_local_tts: config load failed: {e:#}");
+            return false;
+        }
+    };
+    if let Some(mb) = crate::models::local_tts_pending_mb(paths, &cfg) {
+        fono_core::notify::send(
+            "Fono — downloading voice",
+            &format!("On-device TTS voice ({mb} MB)"),
+            "emblem-downloads",
+            4_000,
+            fono_core::notify::Urgency::Normal,
+        );
+    }
+    match crate::models::ensure_local_tts(paths, &cfg).await {
+        Ok(crate::models::EnsureOutcome::Downloaded) => {
+            fono_core::notify::send(
+                "Fono — voice ready",
+                "On-device TTS voice downloaded and cached",
+                "emblem-default",
+                4_000,
+                fono_core::notify::Urgency::Normal,
+            );
+            true
+        }
+        Ok(_) => true,
+        Err(e) => {
+            warn!("ensure_local_tts: download failed: {e:#}");
+            fono_core::notify::send(
+                "Fono — voice download failed",
+                &format!("{e}"),
+                "dialog-error",
+                6_000,
+                fono_core::notify::Urgency::Critical,
+            );
+            false
+        }
+    }
+}
+
 /// Render the tray "Update to vX.Y.Z" label from the shared update
 /// status; returns `None` when no upgrade is available so the menu
 /// falls back to its on-demand "Check for updates…" copy.
@@ -2781,6 +2859,91 @@ async fn apply_update_via_tray(update_status: Arc<RwLock<Option<fono_update::Upd
     }
 }
 
+/// Shared, hot-reloadable handles for the LAN Wyoming server and its
+/// mDNS advertiser. Cloned into the tray-action task so the "Wyoming
+/// server" toggle can start/stop the listener in place — no daemon
+/// restart. Held by the daemon for its lifetime; dropping the last
+/// clone closes the listener and fires the mDNS goodbye.
+#[derive(Clone)]
+struct WyomingControl {
+    rt: Arc<tokio::sync::Mutex<WyomingRuntime>>,
+    /// The shared mDNS service daemon, when discovery came up. Needed
+    /// to register/unregister the Wyoming advert on toggle.
+    mdns: Option<mdns_sd::ServiceDaemon>,
+    /// The discovery registry, so the local peer can be (un)seeded as
+    /// the listener starts/stops.
+    registry: Option<fono_net::discovery::Registry>,
+}
+
+/// The live handles owned by a [`WyomingControl`]. Both are `None` when
+/// the listener is stopped.
+#[derive(Default)]
+struct WyomingRuntime {
+    server: Option<fono_net::wyoming::server::WyomingServerHandle>,
+    advert: Option<fono_net::discovery::advertiser::AdvertiserHandle>,
+}
+
+impl WyomingControl {
+    /// Whether the LAN listener is currently running.
+    async fn is_running(&self) -> bool {
+        self.rt.lock().await.server.is_some()
+    }
+
+    /// Reconcile the running listener (and its mDNS advert) with
+    /// `config.server.wyoming.enabled`, starting or stopping both in
+    /// place. Idempotent: a no-op when already in the desired state.
+    async fn reconcile(&self, config: &Config, orch: Option<&Arc<SessionOrchestrator>>) {
+        let mut rt = self.rt.lock().await;
+        let want = config.server.wyoming.enabled;
+        let running = rt.server.is_some();
+        if want && !running {
+            let handle = spawn_wyoming_server_if_enabled(config, orch).await;
+            let started = handle.is_some();
+            rt.server = handle;
+            if started {
+                if let Some(daemon) = &self.mdns {
+                    if let Some((h, host)) = spawn_wyoming_advert(daemon, config) {
+                        if let Some(reg) = &self.registry {
+                            reg.upsert(local_wyoming_peer(config, &host, h.fullname()));
+                        }
+                        rt.advert = Some(h);
+                    }
+                }
+            }
+        } else if !want && running {
+            // Dropping both handles shuts the listener and fires the
+            // mDNS goodbye; in-flight connections finish naturally.
+            rt.server = None;
+            rt.advert = None;
+        }
+    }
+}
+
+/// Voices advertised in `info.tts[].voices`, derived from the active
+/// `[tts]` backend. Local (on-device) backends advertise the whole
+/// embedded catalog so Home Assistant can pick any installed voice at
+/// no cost. Cloud backends advertise *none*: every `synthesize` request
+/// then synthesises with the daemon's single configured `[tts].voice`,
+/// so a LAN peer can't run up cloud bills by voice-shopping (option B
+/// of the design discussion).
+fn wyoming_tts_voices(config: &Config) -> Vec<fono_net::wyoming::server::AdvertisedVoice> {
+    use fono_core::config::TtsBackend;
+    match config.tts.backend {
+        #[cfg(feature = "tts-local")]
+        TtsBackend::Local => fono_tts::voices::catalog()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| fono_net::wyoming::server::AdvertisedVoice {
+                name: v.name,
+                languages: vec![v.language],
+                description: None,
+                version: None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Spawn the LAN Wyoming server if `[server.wyoming].enabled = true`
 /// and the orchestrator is alive. Returns `None` when the server is
 /// disabled, the orchestrator is in degraded mode, or the listener
@@ -2808,27 +2971,13 @@ async fn spawn_wyoming_server_if_enabled(
     let auth_token =
         if cfg.auth_token_ref.is_empty() { None } else { std::env::var(&cfg.auth_token_ref).ok() };
     let model = config.stt.local.model.clone();
-    // TTS serving (`[server.tts]`) rides this same listener. Advertise
-    // the configured voice names; the active `[tts]` backend does the
-    // synthesis. Intent-based: if enabled without a backend, we warn
-    // below and serve ASR only.
-    let serve_tts = config.server.tts.enabled;
-    let tts_voices = if serve_tts {
-        config
-            .server
-            .tts
-            .voices
-            .iter()
-            .map(|name| fono_net::wyoming::server::AdvertisedVoice {
-                name: name.clone(),
-                languages: config.general.languages.clone(),
-                description: None,
-                version: None,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // TTS rides this same listener and is served automatically whenever
+    // a `[tts]` backend is configured (the orchestrator hands out a
+    // snapshot only then). Advertised voices are derived from that
+    // backend; see `wyoming_tts_voices`.
+    let serve_tts = orch.tts_snapshot().is_some();
+    let tts_voices = if serve_tts { wyoming_tts_voices(config) } else { Vec::new() };
+    let advertised_voice_count = tts_voices.len();
     let server_cfg = fono_net::wyoming::server::WyomingServerConfig {
         bind: cfg.bind.clone(),
         port: cfg.port,
@@ -2859,15 +3008,12 @@ async fn spawn_wyoming_server_if_enabled(
                 Arc::new(move || orch_tts.tts_snapshot().unwrap_or_else(|| Arc::clone(&initial)));
             server = server.with_tts(tts_provider);
             info!(
-                "Wyoming server: TTS serving enabled ({} advertised voice(s))",
-                config.server.tts.voices.len()
-            );
-        } else {
-            warn!(
-                "[server.tts].enabled = true but no `[tts]` backend is configured; \
-                 serving ASR only"
+                "Wyoming server: TTS serving enabled ({advertised_voice_count} advertised \
+                 voice(s))"
             );
         }
+    } else {
+        info!("Wyoming server: no [tts] backend configured; serving STT only");
     }
     match server.start().await {
         Ok(handle) => {
@@ -2890,17 +3036,18 @@ async fn spawn_wyoming_server_if_enabled(
 /// packets fire when it exits.
 struct DiscoveryRuntime {
     registry: fono_net::discovery::Registry,
+    /// The shared mDNS service daemon, cloned into [`WyomingControl`] so
+    /// the Wyoming advert can be (un)registered live on a tray toggle.
+    daemon: Option<mdns_sd::ServiceDaemon>,
     _browser: Option<fono_net::discovery::browser::BrowserHandle>,
-    _wyoming_advert: Option<fono_net::discovery::advertiser::AdvertiserHandle>,
 }
 
-/// Spawn the always-on mDNS browser and the matching advertisers for
-/// any enabled `[server.*]` blocks. All failure paths log and continue —
-/// discovery is a convenience layer, not a hard dependency. Slice 4 of
-/// the network plan.
-async fn spawn_discovery_if_enabled(config: &Config) -> Option<DiscoveryRuntime> {
-    let server = &config.server;
-
+/// Spawn the always-on mDNS browser. The Wyoming advertiser is *not*
+/// started here — it is owned by [`WyomingControl`] alongside the LAN
+/// listener so both can be toggled live from the tray. All failure
+/// paths log and continue — discovery is a convenience layer, not a
+/// hard dependency. Slice 4 of the network plan.
+async fn spawn_discovery_if_enabled() -> Option<DiscoveryRuntime> {
     let daemon = match mdns_sd::ServiceDaemon::new() {
         Ok(d) => d,
         Err(e) => {
@@ -2926,39 +3073,16 @@ async fn spawn_discovery_if_enabled(config: &Config) -> Option<DiscoveryRuntime>
         }
     };
 
-    let wyoming_advert =
-        if server.wyoming.enabled { spawn_wyoming_advert(&daemon, config) } else { None };
-
-    // Seed the local Wyoming service directly into the registry so that
-    // `fono discover` shows it immediately without waiting for the
-    // mDNS probing phase + multicast-loopback round-trip. The browser
-    // will keep the entry fresh via loopback announcements once the
-    // probing phase completes (~750 ms); the initial upsert ensures the
-    // peer is visible even if the first `fono discover` call races the
-    // probe.
-    if let Some((ref handle, ref short_host)) = wyoming_advert {
-        let peer = local_wyoming_peer(config, short_host, handle.fullname());
-        registry.upsert(peer);
-        debug!(
-            target: "fono::discovery",
-            fullname = %handle.fullname(),
-            "seeded local wyoming peer into registry"
-        );
-    }
-
-    Some(DiscoveryRuntime {
-        registry,
-        _browser: browser,
-        _wyoming_advert: wyoming_advert.map(|(h, _)| h),
-    })
+    Some(DiscoveryRuntime { registry, daemon: Some(daemon), _browser: browser })
 }
 
 /// Capability tags advertised over mDNS for the Wyoming service.
-/// `stt` is always served; `tts` is added when `[server.tts].enabled`
-/// so Home Assistant discovers this daemon as a TTS provider too.
+/// `stt` is always served; `tts` is added whenever a `[tts]` backend is
+/// configured, so Home Assistant discovers this daemon as a TTS
+/// provider too.
 fn wyoming_caps(config: &Config) -> Vec<String> {
     let mut caps = vec!["stt".to_string()];
-    if config.server.tts.enabled {
+    if config.tts.backend != fono_core::config::TtsBackend::None {
         caps.push("tts".to_string());
     }
     caps
@@ -3103,9 +3227,9 @@ mod tests {
     }
 
     #[test]
-    fn wyoming_caps_adds_tts_when_enabled() {
+    fn wyoming_caps_adds_tts_when_backend_configured() {
         let mut cfg = Config::default();
-        cfg.server.tts.enabled = true;
+        cfg.tts.backend = fono_core::config::TtsBackend::OpenAI;
         assert_eq!(wyoming_caps(&cfg), vec!["stt".to_string(), "tts".to_string()]);
     }
 

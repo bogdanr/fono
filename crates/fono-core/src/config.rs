@@ -1015,42 +1015,14 @@ impl Default for Update {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Server {
-    /// Wyoming-protocol STT server. Hosts the active
-    /// `Arc<dyn SpeechToText>` so Home Assistant satellites and other
-    /// Wyoming peers can route inference through this daemon.
+    /// Wyoming-protocol server. Hosts the active `Arc<dyn SpeechToText>`
+    /// (always, when enabled) and — whenever a `[tts]` backend is
+    /// configured — also answers `synthesize` requests over the same
+    /// listener, advertising an `info.tts` program plus the `tts` mDNS
+    /// capability tag. The Wyoming protocol multiplexes ASR and TTS
+    /// over one connection, so STT and TTS share a single on/off switch
+    /// (`[server.wyoming].enabled`) and a single port.
     pub wyoming: ServerWyoming,
-    /// Wyoming-protocol TTS serving. When `enabled`, the same
-    /// `[server.wyoming]` listener also answers `synthesize` requests
-    /// using the daemon's active `[tts]` backend (cloud or, later, a
-    /// local engine) and advertises an `info.tts` program plus the
-    /// `tts` mDNS capability tag. The Wyoming protocol multiplexes ASR
-    /// and TTS over one connection, so no separate port is needed.
-    pub tts: ServerTts,
-}
-
-/// `[server.tts]` — opt-in Wyoming TTS serving. Decoupled from any
-/// local engine: it serves whatever `[tts].backend` resolves to, so a
-/// `fono install --server` box can answer Home Assistant TTS over a
-/// cloud backend today and a local engine later, unchanged.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
-pub struct ServerTts {
-    /// Master switch. Default `false`. Requires `[server.wyoming]` to
-    /// also be enabled (TTS rides that listener) and a configured
-    /// `[tts]` backend; otherwise the daemon logs a warning and serves
-    /// ASR only.
-    pub enabled: bool,
-    /// Voice names advertised in `info.tts[].voices`, surfaced to Home
-    /// Assistant as selectable voices. Empty (default) advertises no
-    /// voices — set the names your backend accepts (e.g.
-    /// `["ro_RO-mihai-medium"]`). Advertisement is metadata only; the
-    /// configured `[tts]` backend performs the actual synthesis.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub voices: Vec<String>,
-    /// Voice used when a `synthesize` request omits one. Empty (default)
-    /// defers to the backend's own configured voice.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub default_voice: String,
 }
 
 /// `[server.wyoming]` — coordinates of the LAN Wyoming server. The
@@ -1423,29 +1395,6 @@ mod tests {
         assert!(loaded.general.languages.is_empty(), "default = unconstrained auto-detect");
         assert_eq!(loaded.stt.local.model, "small");
         assert_eq!(loaded.polish.local.model, "qwen2.5-1.5b-instruct");
-    }
-
-    #[test]
-    fn server_tts_defaults_disabled() {
-        let s = ServerTts::default();
-        assert!(!s.enabled);
-        assert!(s.voices.is_empty());
-        assert!(s.default_voice.is_empty());
-    }
-
-    #[test]
-    fn server_tts_round_trips() {
-        let mut cfg = Config::default();
-        cfg.server.tts.enabled = true;
-        cfg.server.tts.voices = vec!["ro_RO-mihai-medium".into(), "en_US-amy-medium".into()];
-        cfg.server.tts.default_voice = "ro_RO-mihai-medium".into();
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        cfg.save(&path).unwrap();
-        let loaded = Config::load(&path).unwrap();
-        assert!(loaded.server.tts.enabled);
-        assert_eq!(loaded.server.tts.voices, cfg.server.tts.voices);
-        assert_eq!(loaded.server.tts.default_voice, "ro_RO-mihai-medium");
     }
 
     #[test]

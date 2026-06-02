@@ -155,6 +155,25 @@ standing levers offset it:
 - **Reproducible/offline builds** require the vendored static lib, not the
   pyke CDN fetch — handled by the `ORT_LIB_LOCATION` pin.
 
+### Amended 2026-06-02 — `download-binaries` kept on as a dev fallback
+
+Once `tts-local` became a source-default feature, a bare `cargo build`
+(and rust-analyzer/IDE builds) linked `ort` unconditionally and failed
+with `undefined reference to OrtGetApiBase` whenever `ORT_LIB_LOCATION`
+was unset — a poor first-run experience for contributors. We therefore
+re-enable `ort`'s `download-binaries` (plus `tls-rustls` for the
+pure-Rust fetch) instead of dropping it. `ort-sys` consults
+`ORT_LIB_LOCATION` first: every CI/release job runs
+`scripts/fetch-onnxruntime.sh` and exports it, so they still link the
+pinned static `libonnxruntime.a` and the download path is never reached.
+Only an env-less local build takes the CDN fallback. The feature adds
+build-only deps to `ort-sys` (`ureq`, `ureq-proto`, `socks`,
+`hmac-sha256`, `lzma-rust2`, `utf8-zero`; `rustls`/`ring`/`webpki-roots`
+were already present via `reqwest`) — all permissive, none linked into
+the binary. Verified the shipped `release-slim` artefact is byte-identical
+(26,038,648 B / 24.83 MiB, four-entry `NEEDED`, no onnxruntime/libstdc++/
+ssl leak); the `size-budget` gate enforces this.
+
 ## Alternatives rejected
 
 - **ggml-reuse** — smallest in theory but a from-scratch model-graph port

@@ -537,6 +537,7 @@ fn humanize_chat_model(entry: &CloudProvider) -> String {
 enum TtsPickerAction {
     Cloud(&'static CloudProvider),
     Wyoming,
+    Local,
     Skip,
 }
 
@@ -557,6 +558,10 @@ async fn pick_tts_for_assistant(
                 labels.push("Wyoming TTS server (LAN piper)".into());
                 actions.push(TtsPickerAction::Wyoming);
             }
+            TtsBackend::Local => {
+                labels.push("Local voice (downloads on first use)".into());
+                actions.push(TtsPickerAction::Local);
+            }
             _ => {
                 let id = fono_core::providers::tts_backend_str(&b);
                 let Some(entry) = fono_core::provider_catalog::find(id) else {
@@ -567,7 +572,7 @@ async fn pick_tts_for_assistant(
                 let extra = match entry.id {
                     "groq" => " — fastest",
                     "cartesia" => " — best quality",
-                    "openrouter" => " — OpenAI Mini TTS / multilingual",
+                    "openrouter" => " — OpenAI Mini TTS",
                     _ => "",
                 };
                 labels.push(format!("{} TTS (cloud, {key_part}){extra}", entry.display_name));
@@ -586,6 +591,16 @@ async fn pick_tts_for_assistant(
     match &actions[idx] {
         TtsPickerAction::Skip => {
             config.tts.backend = TtsBackend::None;
+        }
+        TtsPickerAction::Local => {
+            // On-device Piper. No key, no prompt: the voice for the
+            // primary configured language is fetched automatically the
+            // first time the daemon needs it (startup `ensure_models`,
+            // or the tray's "switch to Local" ensure step). Leave
+            // `[tts.local].voice` empty so the language router picks the
+            // per-language voice rather than pinning one.
+            config.tts.backend = TtsBackend::Local;
+            config.tts.voice = String::new();
         }
         TtsPickerAction::Wyoming => {
             let default_uri = config

@@ -93,16 +93,33 @@ whisper-rs = { version = "0.16", features = ["tracing_backend"] }
 # dynamic `libstdc++.so.6` `NEEDED` entry.
 llama-cpp-2 = { version = "0.1", default-features = false, features = ["openmp", "static-openmp", "static-stdcxx"] }
 # Local voice stack (TTS/VAD/wake-word/streaming-STT) runs on ONNX Runtime
-# via `ort`, linked STATICALLY. `default-features = false` drops
-# `download-binaries` (and the `tls-native`/`copy-dylibs` machinery that only
-# the CDN path needs): release builds MUST link a pinned, minimally-built
-# `libonnxruntime.a` via `ORT_LIB_LOCATION` (see ADR 0032,
+# via `ort`. RELEASE and CI builds link a pinned, minimally-built
+# `libonnxruntime.a` STATICALLY via `ORT_LIB_LOCATION` (see ADR 0032,
 # `docs/binary-size.md`, and `scripts/build-onnxruntime-minimal.sh`), never
-# the full ~19 MiB CDN runtime. `api-24` matches onnxruntime 1.24.2, the
-# version `ort-sys` 2.0.0-rc.12 pins. `xnnpack` is added in tandem with the
-# minimal build (which compiles the EP in). Gated behind `fono-tts`'s
-# `tts-local` feature, off in source-default builds.
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "api-24"] }
+# the full ~19 MiB CDN runtime. `download-binaries` is kept ON as a
+# *developer fallback*: `ort-sys` consults `ORT_LIB_LOCATION` first and, when
+# it is set (every CI/release job — `.github/workflows/{ci,release}.yml` run
+# `scripts/fetch-onnxruntime.sh` and export it), SKIPS the download entirely
+# and links our pinned static lib. Only a bare local `cargo build`/IDE build
+# with the var unset takes the download path, so `tts-local` being default no
+# longer breaks `cargo build` out of the box. The feature pulls three
+# BUILD-only deps into `ort-sys` (`ureq`/`lzma-rust2`/`hmac-sha256`); they run
+# in its build script and never link into the `fono` binary, so the shipped
+# artefact (size + four-entry `NEEDED`) is unchanged — enforced by the
+# `size-budget` gate. `api-24` matches onnxruntime 1.24.2, the version
+# `size-budget` gate. `api-21` is the highest ONNX Runtime API level we
+# use: onnxruntime 1.24.2 (the version `ort-sys` 2.0.0-rc.12 pins) provides
+# up to api-24, but we deliberately cap at 21 to keep `ort`'s `api-22`
+# *Model Editor API* code path uncompiled. That path (graph editing, which
+# Fono never does) probes `GetModelEditorApi` while reading a session's
+# input/output metadata; against our `--minimal_build` `libonnxruntime.a`
+# the probe returns "Model Editor API is not supported in a minimal build"
+# and leaks that line to stderr on every `fono speak` session create. We
+# only ever call `CreateSession`/`Run`/tensor APIs (all < api-22), so
+# capping at 21 loses nothing and silences the noise. Gated behind
+# `fono-tts`'s `tts-local` feature, default in the `fono` binary as of
+# 2026-06-02.
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "api-21", "download-binaries", "tls-rustls"] }
 # Pure-Rust eSpeak NG port — grapheme→IPA phonemization, the front half of
 # the local Piper TTS pipeline (ADR 0032). GPL-3.0-or-later, no C, no system
 # `libespeak-ng`. We deliberately enable *no* `bundled-data-*` features: the
