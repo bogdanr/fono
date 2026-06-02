@@ -301,6 +301,12 @@ pub async fn run_assistant_turn(
     // Notify has no non-await probe), so we track abort explicitly.
     let mut aborted_mid_stream = false;
 
+    // Voice routing hint for the local (and Cartesia) TTS backends: the
+    // language the STT engine actually detected for this turn (falling back to
+    // the configured hint), so a Romanian reply is spoken by the Romanian
+    // voice rather than whichever voice the primary language resolved to.
+    let tts_lang: Option<String> = metrics.language.clone();
+
     loop {
         let next = tokio::select! {
             biased;
@@ -383,7 +389,7 @@ pub async fn run_assistant_turn(
         }
         full_reply.push_str(&delta.text);
         for sentence in splitter.push(&delta.text) {
-            if synth_and_enqueue(&state, &tts, &sentence, &notify).await {
+            if synth_and_enqueue(&state, &tts, &sentence, tts_lang.as_deref(), &notify).await {
                 any_audio = true;
                 metrics.sentences = metrics.sentences.saturating_add(1);
                 let now = std::time::Instant::now();
@@ -422,7 +428,7 @@ pub async fn run_assistant_turn(
 
     if !aborted_mid_stream {
         if let Some(tail) = splitter.flush() {
-            if synth_and_enqueue(&state, &tts, &tail, &notify).await {
+            if synth_and_enqueue(&state, &tts, &tail, tts_lang.as_deref(), &notify).await {
                 any_audio = true;
                 metrics.sentences = metrics.sentences.saturating_add(1);
                 last_audio_at = Some(std::time::Instant::now());
@@ -538,6 +544,7 @@ async fn synth_and_enqueue(
     state: &Arc<Mutex<AssistantSessionState>>,
     tts: &Arc<dyn TextToSpeech>,
     sentence: &str,
+    lang: Option<&str>,
     notify: &Arc<Notify>,
 ) -> bool {
     if sentence.trim().is_empty() {
@@ -550,7 +557,7 @@ async fn synth_and_enqueue(
             debug!(target: "fono::assistant", "cancelled before TTS synth");
             return false;
         }
-        r = tts.synthesize(sentence, None, None) => match r {
+        r = tts.synthesize(sentence, None, lang) => match r {
             Ok(a) => a,
             Err(e) => {
                 warn!(target: "fono::assistant", error = %e, "TTS synth failed");

@@ -162,6 +162,12 @@ sha2 = "0.10"
 hex = "0.4"
 once_cell = "1.20"
 regex = "1.11"
+# Pure-Rust offline language identification (trigram model, MIT). Used by
+# the local TTS router to pick the right per-language Piper voice when the
+# caller supplies no `lang` hint (e.g. the MCP `fono.speak` path), with
+# detection constrained to the user's configured `general.languages` so
+# short replies stay accurate. No network, no system deps.
+whatlang = "0.16"
 
 # mDNS / DNS-SD autodiscovery (Slice 4 of the network plan). Pure Rust,
 # dual MIT/Apache-2.0, no Avahi/Bonjour FFI. Surface area we touch:

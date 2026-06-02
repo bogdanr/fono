@@ -42,10 +42,25 @@ fi
 
 # Per-triple SHA-256 of the EXTRACTED static library. Add a row here when a
 # new platform's library is published to the release.
+#
+# These values are the `raw_sha256` published in each `sha-<triple>.txt` asset
+# on the `onnxruntime-<version>` release (that field names the EXTRACTED
+# library, not the .xz). When the hosted libs are rebuilt (e.g. an ABI or
+# link-flag change such as the static-libstdc++ fix), re-pin every row from the
+# updated sha files: curl "$BASE_URL/$RELEASE_TAG/sha-<triple>.txt".
 sha_for_triple() {
 	case "$1" in
 	x86_64-unknown-linux-gnu)
-		echo "9b084ea566faac4e78c54187b61014bcb8c3986abc974d8b284e4b868c39ac34"
+		echo "943bd16027d778ffdc6b581ad187525ba55a73be2114f9ffa79147c4ddf608dd"
+		;;
+	aarch64-unknown-linux-gnu)
+		echo "e14d4e71dfb1f9949741bc52029cbfe1dac1c5f074a81ac6b88ed0c93abdd174"
+		;;
+	aarch64-apple-darwin)
+		echo "3c60d45f5850f40fe2d4cdbd59690d85da36c5333f536fbb003ba28354f3aa18"
+		;;
+	x86_64-pc-windows-msvc)
+		echo "0731b03361975fa48466b15e49f05965da5f5b624ec938aae5629f2384973912"
 		;;
 	*)
 		echo ""

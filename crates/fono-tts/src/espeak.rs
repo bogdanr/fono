@@ -65,8 +65,9 @@ pub fn install_core(data_dir: &Path) -> Result<()> {
 ///
 /// - `nb` → `no` and `zh` → `cmn`: espeak language aliases (the voice-alias
 ///   names live only in the stripped `lang/` dir; the real tables are `no`/`cmn`).
-/// - `en-gb-x-rp` → `en` and `es-419` → `es`: regional/extended variants with no
-///   standalone phoneme table; the base table is the correct fallback.
+/// - `en-us` / `en-gb-x-rp` → `en` and `es-419` → `es`: regional/extended
+///   variants with no standalone phoneme table; the base table (and the shared
+///   `en_dict` / `es_dict`) is the correct fallback.
 ///
 /// The matching `<canonical>_dict` is what the catalog hosts and what
 /// [`crate::voices::ensure_voice`] downloads, so this is also the dictionary
@@ -76,7 +77,7 @@ pub fn canonical_lang(code: &str) -> &str {
     match code {
         "nb" => "no",
         "zh" => "cmn",
-        "en-gb-x-rp" => "en",
+        "en-us" | "en-gb-x-rp" => "en",
         "es-419" => "es",
         other => other,
     }
@@ -91,10 +92,12 @@ mod tests {
         assert_eq!(canonical_lang("nb"), "no");
         assert_eq!(canonical_lang("zh"), "cmn");
         assert_eq!(canonical_lang("en-gb-x-rp"), "en");
+        // en_US-amy-medium's .onnx.json declares espeak voice "en-us"; it must
+        // fold onto the shared "en" base/dict, not pass through (no en-us dict).
+        assert_eq!(canonical_lang("en-us"), "en");
         assert_eq!(canonical_lang("es-419"), "es");
         // Unmapped codes (incl. variants espeak resolves itself) pass through.
         assert_eq!(canonical_lang("ro"), "ro");
-        assert_eq!(canonical_lang("en-us"), "en-us");
         assert_eq!(canonical_lang("cmn"), "cmn");
     }
 

@@ -25,7 +25,15 @@ path = "src/main.rs"
 # static binary with both locals enabled. The duplicate-ggml symbol
 # collision is resolved at link time by
 # `-Wl,--allow-multiple-definition` set in `.cargo/config.toml`.
-default = ["tray", "local-models", "llama-local", "interactive"]
+#
+# `tts-local` is also default as of 2026-06-02: the shipped binary does
+# local Piper TTS out of the box. This makes EVERY build of `fono`
+# (including `cargo test`/`clippy` and all release variants) link the
+# statically-pinned `libonnxruntime.a`, so `ORT_LIB_LOCATION` must point
+# at it — run `scripts/fetch-onnxruntime.sh` first (CI does this
+# automatically; see `.github/workflows/ci.yml` + `release.yml`):
+#   export ORT_LIB_LOCATION="$(sh scripts/fetch-onnxruntime.sh)"
+default = ["tray", "local-models", "llama-local", "interactive", "tts-local"]
 tray = ["fono-tray/tray-backend"]
 local-models = ["fono-stt/whisper-local"]
 llama-local = ["fono-polish/llama-local"]
@@ -61,10 +69,11 @@ interactive = [
 # `fono_inject::type_text_with_outcome`).
 enigo = ["fono-inject/enigo-backend"]
 # Local ONNX voice stack (Piper TTS now; Kokoro/VAD/wake-word/streaming-STT
-# later) on the statically-linked `ort` runtime. OFF in source-default
-# builds; turned ON in the shipped `cpu`/`gpu` artefacts once the minimal
-# `libonnxruntime.a` is pinned (ADR 0032, `docs/binary-size.md`). Building
-# with this feature requires `ORT_LIB_LOCATION` to point at that archive.
+# later) on the statically-linked `ort` runtime. DEFAULT as of 2026-06-02
+# (ADR 0032, `docs/binary-size.md`): the shipped `cpu`/`gpu` artefacts do
+# local TTS out of the box. Building (any profile) requires `ORT_LIB_LOCATION`
+# to point at the pinned `libonnxruntime.a` — `scripts/fetch-onnxruntime.sh`
+# provides it.
 tts-local = ["fono-tts/tts-local"]
 
 [dependencies]

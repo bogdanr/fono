@@ -119,6 +119,29 @@ not ggml. Consequences for this ADR:
   voice stack — it is reclassified as a size-offset task scheduled after
   Piper ships.
 
+**Amended 2026-06-02 (tts-local is now source-default):** the
+"off in source-default builds but on in the shipped artefacts" split
+(part 1 above, line ~57) is **retired**. With both original blockers
+cleared — static-libstdc++ leak fixed (`ORT_CXX_STDLIB="static:-bundle=stdc++"`)
+and a hosted prebuilt `libonnxruntime.a` (pinned by SHA per triple in
+`scripts/fetch-onnxruntime.sh`, served from the `bogdanr/fono-voice`
+mirror, tag `onnxruntime-1.24.2`) — `tts-local` joins the default
+feature set in `crates/fono/Cargo.toml`. Consequences for this gate:
+
+- **Every compiling job now links `ort`** and therefore needs
+  `ORT_LIB_LOCATION`. The fetcher runs unconditionally in the `test`
+  and `size-budget` jobs (`.github/workflows/ci.yml`) and in the
+  `cloud-assistant` + `build` jobs (`.github/workflows/release.yml`).
+  `cloud-equivalence`/`fono-bench` is unaffected (no `ort` in its graph).
+- **The dedicated `cpu-tts-local` size-budget row is removed** — the
+  default `cpu` row now exercises the static onnxruntime link directly.
+- **`cpu` budget raised to 26 MiB (27 262 976 B).** Measured
+  `release-slim` default (now incl. `tts-local`) **2026-06-02:
+  25 768 120 B (24.57 MiB)**, four-entry `NEEDED`
+  (`ld-linux`, `libc`, `libgcc_s`, `libm`) — no `libonnxruntime.so`,
+  no `libstdc++.so.6`. ~1.4 MiB headroom under the 26 MiB row budget;
+  well under the ≤ 32 MiB hard `cpu` cap. `gpu` stays ≤ 64 MiB.
+
 The full size-and-capability engineering is documented in
 `docs/binary-size.md`.
 

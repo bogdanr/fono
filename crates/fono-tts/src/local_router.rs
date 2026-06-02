@@ -1,0 +1,395 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//! Language-aware router over per-language Piper voices (feature `tts-local`).
+//!
+//! [`PiperLocal`] wraps exactly one voice. A bilingual user (e.g.
+//! `languages = ["en", "ro"]`) needs the *Romanian* voice for a Romanian reply
+//! and the *English* voice for an English one — synthesising Romanian text
+//! through the English voice produces the wrong phonemes and an English accent.
+//!
+//! [`LocalRouter`] is the [`TextToSpeech`] the daemon actually holds. It keys a
+//! lazily-populated map of [`PiperLocal`] engines by catalog voice and, on each
+//! `synthesize`, picks the voice for the utterance's language (the best-effort
+//! `lang` hint the caller threads through from STT detection). Engines load on
+//! first use per language and are cached for the process lifetime.
+//!
+//! An explicit `[tts.local].voice` pin disables routing: every utterance uses
+//! the pinned voice, matching the Cartesia client's "user pinned a voice"
+//! semantics.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use whatlang::{Detector, Lang};
+
+use crate::piper::{PiperConfig, PiperLocal};
+use crate::traits::{TextToSpeech, TtsAudio};
+use crate::voices::Voice;
+
+/// A [`TextToSpeech`] that routes each utterance to the cached Piper voice
+/// matching its language, loading voices on demand.
+pub struct LocalRouter {
+    voices_dir: PathBuf,
+    /// Loaded engines keyed by catalog voice `name`. Populated lazily; the
+    /// `default_voice` engine is loaded eagerly at construction.
+    cache: Mutex<HashMap<String, Arc<PiperLocal>>>,
+    /// Voice used when the utterance language has no dedicated catalog voice,
+    /// when no `lang` hint is supplied, or when a voice pin is in effect: the
+    /// user's primary language voice, or the explicit `[tts.local].voice`.
+    default_voice: Voice,
+    /// When set, every utterance uses `default_voice` regardless of `lang`
+    /// (an explicit `[tts.local].voice` pin).
+    pinned: bool,
+    /// The user's configured `general.languages` as base codes (deduped,
+    /// e.g. `["en", "ro"]`). When a caller supplies no `lang` hint, text is
+    /// language-identified against *this* allowlist so detection on short
+    /// replies stays accurate.
+    langs: Vec<String>,
+    /// Native PCM rate of `default_voice`, for the playback warmup hint.
+    native_rate: u32,
+}
+
+impl LocalRouter {
+    /// Build a router. Eagerly loads `default_voice` (so a missing primary
+    /// voice surfaces the same actionable error the single-voice path gave,
+    /// and the playback layer gets a real sample-rate hint); other languages
+    /// load on first use.
+    pub fn new(
+        voices_dir: impl Into<PathBuf>,
+        default_voice: Voice,
+        pinned: bool,
+        languages: &[String],
+    ) -> Result<Self> {
+        let voices_dir = voices_dir.into();
+        let engine = load_engine(&voices_dir, &default_voice)?;
+        let native_rate = engine.native_sample_rate();
+        let mut cache = HashMap::new();
+        cache.insert(default_voice.name.clone(), Arc::new(engine));
+        let langs = dedup_base_langs(languages);
+        Ok(Self { voices_dir, cache: Mutex::new(cache), default_voice, pinned, langs, native_rate })
+    }
+
+    /// Resolve which catalog voice should speak `text`.
+    ///
+    /// The voice must match the language of the **text being spoken**, which is
+    /// not always the caller's `lang` hint: on the assistant path that hint is
+    /// the language the STT engine detected for the *user's speech*, but the
+    /// LLM reply can be in a different language (ask an English question, get a
+    /// Romanian answer). So we identify the language from the text itself first
+    /// — constrained to the configured `langs` for accuracy — and fall back to
+    /// the caller's hint only when detection is inconclusive (e.g. a reply too
+    /// short to fingerprint), then to the default voice.
+    fn voice_for(&self, text: &str, lang: Option<&str>) -> Voice {
+        if self.pinned {
+            return self.default_voice.clone();
+        }
+        let detected = detect_base_lang(text, &self.langs);
+        let chosen = detected
+            .clone()
+            .or_else(|| lang.map(str::trim).filter(|l| !l.is_empty()).map(str::to_string));
+        let voice = resolve_voice_for_lang(&self.default_voice, self.pinned, chosen.as_deref());
+        tracing::debug!(
+            target: "fono_tts::local_router",
+            hint = lang.unwrap_or(""),
+            detected = detected.as_deref().unwrap_or(""),
+            chosen_lang = chosen.as_deref().unwrap_or(""),
+            voice = %voice.name,
+            "local TTS voice selection",
+        );
+        voice
+    }
+
+    /// Get the cached engine for `voice`, loading + caching it on first use.
+    /// The lock is never held across the (synchronous) load, so concurrent
+    /// first-uses of two languages don't serialise; a rare double-load is
+    /// resolved by keeping whichever insert wins.
+    fn engine_for(&self, voice: &Voice) -> Result<Arc<PiperLocal>> {
+        if let Some(e) = self.cache.lock().expect("router cache mutex poisoned").get(&voice.name) {
+            return Ok(Arc::clone(e));
+        }
+        let engine = Arc::new(load_engine(&self.voices_dir, voice)?);
+        let mut cache = self.cache.lock().expect("router cache mutex poisoned");
+        Ok(Arc::clone(cache.entry(voice.name.clone()).or_insert(engine)))
+    }
+}
+
+/// Normalise a BCP-47-ish language tag to the catalog's base code: lowercase,
+/// dropping any region/script subtag (`en-US` → `en`, `pt_BR` → `pt`).
+#[must_use]
+pub fn base_lang(lang: &str) -> String {
+    let cut = lang.find(['-', '_']).unwrap_or(lang.len());
+    lang[..cut].to_ascii_lowercase()
+}
+
+/// Normalise + dedup a list of configured language tags to base codes,
+/// preserving order (the first entry is the user's primary language).
+fn dedup_base_langs(languages: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for l in languages {
+        let b = base_lang(l);
+        if !b.is_empty() && !out.contains(&b) {
+            out.push(b);
+        }
+    }
+    out
+}
+
+/// Map an ISO 639-1 base code to the corresponding `whatlang` language, for
+/// the subset of catalog languages `whatlang`'s trigram model can identify.
+/// Languages it cannot detect (e.g. `eu`, `sq`, `cy`, `kk`) return `None` and
+/// simply do not participate in text detection — those users fall back to the
+/// default voice when no `lang` hint is supplied.
+fn whatlang_for_base(base: &str) -> Option<Lang> {
+    Some(match base {
+        "ar" => Lang::Ara,
+        "bg" => Lang::Bul,
+        "ca" => Lang::Cat,
+        "cs" => Lang::Ces,
+        "da" => Lang::Dan,
+        "de" => Lang::Deu,
+        "en" => Lang::Eng,
+        "es" => Lang::Spa,
+        "fa" => Lang::Pes,
+        "fi" => Lang::Fin,
+        "fr" => Lang::Fra,
+        "hi" => Lang::Hin,
+        "hu" => Lang::Hun,
+        "it" => Lang::Ita,
+        "ka" => Lang::Kat,
+        "lv" => Lang::Lav,
+        "nl" => Lang::Nld,
+        "no" => Lang::Nob,
+        "pl" => Lang::Pol,
+        "pt" => Lang::Por,
+        "ro" => Lang::Ron,
+        "ru" => Lang::Rus,
+        "sk" => Lang::Slk,
+        "sl" => Lang::Slv,
+        "sr" => Lang::Srp,
+        "sv" => Lang::Swe,
+        "tr" => Lang::Tur,
+        "uk" => Lang::Ukr,
+        "ur" => Lang::Urd,
+        "vi" => Lang::Vie,
+        "zh" => Lang::Cmn,
+        _ => return None,
+    })
+}
+
+/// Identify the base language of `text`, constrained to the `allowed` base
+/// codes. Returns `None` when there is nothing to disambiguate (fewer than two
+/// detectable candidates), when detection is unreliable (typically very short
+/// text), or when the winning language is not in `allowed` — in every such
+/// case the caller keeps the default voice. Constraining the detector to the
+/// user's configured languages is what makes single-sentence replies route
+/// correctly.
+#[must_use]
+pub fn detect_base_lang(text: &str, allowed: &[String]) -> Option<String> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    // (base_code, whatlang Lang) for the detectable configured languages.
+    let candidates: Vec<(String, Lang)> =
+        allowed.iter().filter_map(|b| whatlang_for_base(b).map(|l| (b.clone(), l))).collect();
+    // With zero or one detectable candidate there is nothing to choose between
+    // — the default voice already covers it.
+    if candidates.len() < 2 {
+        return None;
+    }
+    let allowlist: Vec<Lang> = candidates.iter().map(|(_, l)| *l).collect();
+    let info = Detector::with_allowlist(allowlist).detect(text)?;
+    if !info.is_reliable() {
+        return None;
+    }
+    candidates.into_iter().find(|(_, l)| *l == info.lang()).map(|(b, _)| b)
+}
+
+/// Pure voice-selection policy (unit-testable without a loaded runtime): a
+/// pin or an absent/unmatched hint yields `default_voice`; otherwise the first
+/// catalog voice for the hint's base language, falling back to the default.
+#[must_use]
+pub fn resolve_voice_for_lang(default_voice: &Voice, pinned: bool, lang: Option<&str>) -> Voice {
+    if pinned {
+        return default_voice.clone();
+    }
+    let Some(lang) = lang.map(base_lang).filter(|s| !s.is_empty()) else {
+        return default_voice.clone();
+    };
+    if lang == base_lang(&default_voice.language) {
+        return default_voice.clone();
+    }
+    crate::voices::for_language(&lang).ok().flatten().unwrap_or_else(|| default_voice.clone())
+}
+
+/// Load a [`PiperLocal`] from a voice's cached `.ort` model + `.onnx.json`
+/// config under `voices_dir`. A missing asset yields an actionable error
+/// (the daemon downloads voices at startup; see `ensure_local_tts`).
+fn load_engine(voices_dir: &Path, voice: &Voice) -> Result<PiperLocal> {
+    let model_path = voices_dir.join(&voice.model.file);
+    let config_path = voices_dir.join(&voice.config.file);
+    if !model_path.is_file() || !config_path.is_file() {
+        return Err(anyhow!(
+            "local voice {:?} is not downloaded yet (expected {} + its .onnx.json under {}); \
+             it is fetched automatically at daemon startup — restart the daemon or check the \
+             logs / network",
+            voice.name,
+            voice.model.file,
+            voices_dir.display()
+        ));
+    }
+    let cfg_bytes = std::fs::read(&config_path)
+        .map_err(|e| anyhow!("read voice config {}: {e}", config_path.display()))?;
+    let piper_cfg = PiperConfig::from_json(&cfg_bytes)?;
+    // Per-voice espeak-ng data is materialised under a stable subdir so it is
+    // written once and reused across runs and across voices.
+    let espeak_dir = voices_dir.join("espeak");
+    PiperLocal::load(&model_path, piper_cfg, espeak_dir)
+}
+
+#[async_trait]
+impl TextToSpeech for LocalRouter {
+    async fn synthesize(
+        &self,
+        text: &str,
+        _voice: Option<&str>,
+        lang: Option<&str>,
+    ) -> Result<TtsAudio> {
+        if text.trim().is_empty() {
+            return Ok(TtsAudio { pcm: Vec::new(), sample_rate: self.native_rate });
+        }
+        let voice = self.voice_for(text, lang);
+        let engine = self.engine_for(&voice)?;
+        // The chosen engine owns the voice; its own `synthesize` does the
+        // phonemize + ONNX inference (off the async runtime via spawn_blocking).
+        engine.synthesize(text, None, None).await
+    }
+
+    fn name(&self) -> &'static str {
+        "piper-local"
+    }
+
+    fn native_sample_rate(&self) -> u32 {
+        self.native_rate
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn voice(name: &str, language: &str) -> Voice {
+        // serde_json keeps the test fixture compact and exercises the real
+        // Deserialize path the catalog uses.
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "engine": "piper",
+            "language": language,
+            "ort_version": "1.24.2",
+            "release_tag": "ort-1.24.2",
+            "model": { "file": format!("{name}.ort"), "sha256": "0".repeat(64), "size": 1 },
+            "config": { "file": format!("{name}.onnx.json"), "sha256": "0".repeat(64), "size": 1 }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn base_lang_strips_region_and_lowercases() {
+        assert_eq!(base_lang("en"), "en");
+        assert_eq!(base_lang("en-US"), "en");
+        assert_eq!(base_lang("pt_BR"), "pt");
+        assert_eq!(base_lang("RO"), "ro");
+        assert_eq!(base_lang(""), "");
+    }
+
+    #[test]
+    fn pin_always_returns_default_voice() {
+        let def = voice("en_US-amy-medium", "en");
+        // Even with a Romanian hint, a pinned voice wins.
+        let got = resolve_voice_for_lang(&def, true, Some("ro"));
+        assert_eq!(got.name, "en_US-amy-medium");
+    }
+
+    #[test]
+    fn absent_hint_returns_default_voice() {
+        let def = voice("en_US-amy-medium", "en");
+        assert_eq!(resolve_voice_for_lang(&def, false, None).name, "en_US-amy-medium");
+        assert_eq!(resolve_voice_for_lang(&def, false, Some("  ")).name, "en_US-amy-medium");
+    }
+
+    #[test]
+    fn matching_default_language_keeps_default_voice() {
+        // A user whose default is en_GB-alan but whose reply is tagged "en"
+        // (or "en-US") must keep their chosen English voice, not be re-routed
+        // to whichever English voice the catalog lists first.
+        let def = voice("en_GB-alan-medium", "en");
+        assert_eq!(resolve_voice_for_lang(&def, false, Some("en")).name, "en_GB-alan-medium");
+        assert_eq!(resolve_voice_for_lang(&def, false, Some("en-US")).name, "en_GB-alan-medium");
+    }
+
+    #[test]
+    fn romanian_hint_routes_to_romanian_catalog_voice() {
+        let def = voice("en_US-amy-medium", "en");
+        let got = resolve_voice_for_lang(&def, false, Some("ro"));
+        assert_eq!(got.language, "ro", "ro hint must route to a Romanian catalog voice");
+        assert_eq!(got.name, "ro_RO-mihai-medium");
+    }
+
+    #[test]
+    fn unknown_language_falls_back_to_default() {
+        let def = voice("en_US-amy-medium", "en");
+        // "xx" is not in the catalog; keep the default rather than erroring.
+        assert_eq!(resolve_voice_for_lang(&def, false, Some("xx")).name, "en_US-amy-medium");
+    }
+
+    fn langs(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn dedup_base_langs_normalises_and_dedups_preserving_order() {
+        assert_eq!(dedup_base_langs(&langs(&["en-US", "ro_RO", "en"])), vec!["en", "ro"]);
+        assert_eq!(dedup_base_langs(&langs(&["RO", ""])), vec!["ro"]);
+        assert!(dedup_base_langs(&[]).is_empty());
+    }
+
+    #[test]
+    fn detect_routes_romanian_text_to_ro() {
+        // A real Romanian sentence against an en/ro user must detect `ro`,
+        // which is the whole point: the MCP path supplies no lang hint.
+        let allowed = langs(&["en", "ro"]);
+        let text = "Bună ziua, astăzi vom vorbi despre cum funcționează acest program.";
+        assert_eq!(detect_base_lang(text, &allowed).as_deref(), Some("ro"));
+    }
+
+    #[test]
+    fn detect_routes_english_text_to_en() {
+        let allowed = langs(&["en", "ro"]);
+        let text = "Good afternoon, today we will talk about how this program works.";
+        assert_eq!(detect_base_lang(text, &allowed).as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn detect_returns_none_without_two_detectable_candidates() {
+        // Single configured language: nothing to disambiguate, keep default.
+        assert!(detect_base_lang("orice text aici", &langs(&["ro"])).is_none());
+        // `eu` (Basque) is not in whatlang's model, so en+eu collapses to one
+        // detectable candidate -> no detection.
+        assert!(detect_base_lang("hello there friend", &langs(&["en", "eu"])).is_none());
+    }
+
+    #[test]
+    fn detect_returns_none_for_empty_text() {
+        assert!(detect_base_lang("   ", &langs(&["en", "ro"])).is_none());
+    }
+
+    #[test]
+    fn whatlang_for_base_maps_known_and_skips_unknown() {
+        assert_eq!(whatlang_for_base("ro"), Some(Lang::Ron));
+        assert_eq!(whatlang_for_base("en"), Some(Lang::Eng));
+        assert_eq!(whatlang_for_base("zh"), Some(Lang::Cmn));
+        assert!(whatlang_for_base("eu").is_none());
+        assert!(whatlang_for_base("xx").is_none());
+    }
+}

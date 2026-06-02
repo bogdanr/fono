@@ -57,38 +57,25 @@ pub fn build_tts(
     }
 }
 
-/// Build the on-device Piper engine from a cached voice. The `.ort`
-/// model + `.onnx.json` config are expected to already be present under
-/// `voices_dir` (the daemon downloads them at startup via the voice
-/// catalog, mirroring the STT model-ensure flow); a missing voice
-/// yields an actionable error rather than a silent failure.
+/// Build the on-device Piper engine(s) from cached voices. The `.ort`
+/// model + `.onnx.json` config of the primary voice are expected to
+/// already be present under `voices_dir` (the daemon downloads them at
+/// startup via the voice catalog, mirroring the STT model-ensure flow);
+/// a missing voice yields an actionable error rather than a silent
+/// failure. The returned [`crate::local_router::LocalRouter`] routes
+/// each utterance to the voice matching its language and lazily loads
+/// the other configured languages on first use.
 #[cfg(feature = "tts-local")]
 fn build_local(
     cfg: &Tts,
     languages: &[String],
     voices_dir: &Path,
 ) -> Result<Arc<dyn TextToSpeech>> {
-    let voice = resolve_local_voice(cfg, languages)?;
-    let model_path = voices_dir.join(&voice.model.file);
-    let config_path = voices_dir.join(&voice.config.file);
-    if !model_path.is_file() || !config_path.is_file() {
-        return Err(anyhow!(
-            "local voice {:?} is not downloaded yet (expected {} + its .onnx.json under {}); \
-             it is fetched automatically at daemon startup — restart the daemon or check the \
-             logs / network",
-            voice.name,
-            voice.model.file,
-            voices_dir.display()
-        ));
-    }
-    let cfg_bytes = std::fs::read(&config_path)
-        .map_err(|e| anyhow!("read voice config {}: {e}", config_path.display()))?;
-    let piper_cfg = crate::piper::PiperConfig::from_json(&cfg_bytes)?;
-    // Per-voice espeak-ng data is materialised under a stable subdir so
-    // it is written once and reused across runs.
-    let espeak_dir = voices_dir.join("espeak");
-    let engine = crate::piper::PiperLocal::load(&model_path, piper_cfg, espeak_dir)?;
-    Ok(Arc::new(engine))
+    let pinned = !cfg.local.voice.is_empty();
+    let default_voice = resolve_local_voice(cfg, languages)?;
+    let router =
+        crate::local_router::LocalRouter::new(voices_dir, default_voice, pinned, languages)?;
+    Ok(Arc::new(router))
 }
 
 /// Resolve which catalog voice the local backend should load: the

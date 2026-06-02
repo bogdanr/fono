@@ -68,11 +68,22 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             build-essential clang cmake pkg-config libclang-dev \
-            libxdo-dev libasound2-dev \
+            libxdo-dev libasound2-dev xz-utils \
             libxkbcommon-dev libwayland-dev
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+
+      - name: Fetch minimal onnxruntime static lib (pin ORT_LIB_LOCATION)
+        # `tts-local` is a default feature, so `cargo build`/`clippy`/`test`
+        # all link the statically-pinned `libonnxruntime.a`. Pull it from
+        # the fono-voice release mirror (SHA-256 verified) and pin
+        # ORT_LIB_LOCATION for every later step in this job — the `ort`
+        # build never touches the upstream CDN.
+        run: |
+          ort_dir="$(sh scripts/fetch-onnxruntime.sh)"
+          echo "ORT_LIB_LOCATION=${ort_dir}" >> "$GITHUB_ENV"
+          echo "pinned ORT_LIB_LOCATION=${ort_dir}"
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -177,19 +188,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # CPU variant — the default download. Strict 4-entry allowlist,
-          # 24 MiB budget. Mirrors the canonical `fono-vX.Y.Z-x86_64`
-          # release asset. Budget history: 20 MiB at v0.4.0 (measured
-          # 18.08 MB) → 22 MiB at v0.7.1 (multi-wave Wyoming / streaming /
-          # assistant code) → 24 MiB at v0.9.0 (MCP voice-loop server
-          # measured at 22.5 MB). Preserves ~1.5 MiB headroom while
-          # still rejecting accidental dependency drift.
+          # CPU variant — the default download. Strict 4-entry allowlist.
+          # Mirrors the canonical `fono-vX.Y.Z-x86_64` release asset
+          # (default features, which now INCLUDE `tts-local`). Budget
+          # history: 20 MiB at v0.4.0 (18.08 MB) → 22 MiB at v0.7.1 →
+          # 24 MiB at v0.9.0 (22.5 MB) → 26 MiB at 2026-06-02 when
+          # `tts-local` became default (statically-linked onnxruntime,
+          # measured 24.45 MiB). Still well under the ≤32 MiB `cpu` cap
+          # (ADR 0022) and rejects accidental dependency drift. The
+          # onnxruntime fetch step below pins `libonnxruntime.a` so the
+          # `ort` link resolves; the 4-entry allowlist is unchanged because
+          # onnxruntime + libstdc++ are statically embedded.
           - variant: cpu
             arch: x86_64
             target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
             features: ""
-            budget_bytes: 25165824
+            budget_bytes: 27262976
             extra_needed: ""
             dynamic_linker: ld-linux-x86-64.so.2
           # GPU variant — Vulkan-enabled, ~60 MB. Adds `libvulkan.so.1`
@@ -210,13 +225,15 @@ jobs:
           # interpreter on aarch64 is `ld-linux-aarch64.so.1` and on
           # aarch64 it appears only in `PT_INTERP`, not `NEEDED`, so
           # the allowlist drops it; the universal libc/libm/libgcc_s
-          # triple still applies. Budget matches x86_64 CPU (24 MiB).
+          # triple still applies. Budget matches x86_64 CPU (26 MiB now
+          # that `tts-local` is default; the aarch64 `libonnxruntime.a`
+          # is hosted + pinned in `fetch-onnxruntime.sh`).
           - variant: cpu
             arch: aarch64
             target: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04-arm
             features: ""
-            budget_bytes: 25165824
+            budget_bytes: 27262976
             extra_needed: ""
             dynamic_linker: ld-linux-aarch64.so.1
     steps:
@@ -272,6 +289,20 @@ jobs:
           # `-portable` suffix mirrors release.yml — busts cache for the
           # GGML_NATIVE=OFF baseline rolled in via .cargo/config.toml [env].
           key: size-budget-${{ matrix.runner }}-${{ matrix.variant }}-${{ matrix.arch }}-portable
+
+      - name: Fetch minimal onnxruntime static lib (pin ORT_LIB_LOCATION)
+        # `tts-local` is a default feature, so every variant here links the
+        # statically-pinned `libonnxruntime.a`. Pull the prebuilt,
+        # op-set-matched archive from the fono-voice release mirror and pin
+        # it via ORT_LIB_LOCATION so the `ort` build never touches the
+        # upstream CDN. The fetcher verifies the SHA-256 and prints the
+        # containing dir on stdout (diagnostics to stderr). `xz-utils` is
+        # the only extra tool it needs beyond the base deps step.
+        run: |
+          sudo apt-get install -y -qq xz-utils
+          ort_dir="$(TARGET=${{ matrix.target }} sh scripts/fetch-onnxruntime.sh)"
+          echo "ORT_LIB_LOCATION=${ort_dir}" >> "$GITHUB_ENV"
+          echo "pinned ORT_LIB_LOCATION=${ort_dir}"
 
       - name: Build canonical ship binary
         # GGML ISA baseline (GGML_NATIVE=OFF + AVX2/FMA/F16C/BMI2) is

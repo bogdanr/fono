@@ -299,7 +299,7 @@ mod tests {
     #[test]
     fn canonical_lang_targets_all_have_a_catalog_dict() {
         // Every base language the canonicalizer folds onto must be hostable.
-        for code in ["nb", "zh", "en-gb-x-rp", "es-419", "ro", "de", "fr"] {
+        for code in ["nb", "zh", "en-us", "en-gb-x-rp", "es-419", "ro", "de", "fr"] {
             let canon = crate::espeak::canonical_lang(code);
             assert!(
                 dict_for(canon).unwrap().is_some(),

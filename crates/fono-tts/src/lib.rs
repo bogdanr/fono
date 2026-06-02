@@ -36,6 +36,8 @@ pub mod espeak;
 #[cfg(feature = "tts-local")]
 pub mod local;
 #[cfg(feature = "tts-local")]
+pub mod local_router;
+#[cfg(feature = "tts-local")]
 pub mod piper;
 #[cfg(feature = "tts-local")]
 pub mod voices;

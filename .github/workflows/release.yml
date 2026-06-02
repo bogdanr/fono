@@ -117,8 +117,17 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
-            build-essential clang cmake pkg-config libclang-dev libasound2-dev \
+            build-essential clang cmake pkg-config libclang-dev libasound2-dev xz-utils \
             libxkbcommon-dev libwayland-dev
+
+      - name: Fetch minimal onnxruntime static lib (pin ORT_LIB_LOCATION)
+        # The `smoke_assistant` example builds `-p fono` with default
+        # features, which now include `tts-local` → the `ort` link needs
+        # the pinned `libonnxruntime.a`. SHA-256 verified; no upstream CDN.
+        run: |
+          ort_dir="$(sh scripts/fetch-onnxruntime.sh)"
+          echo "ORT_LIB_LOCATION=${ort_dir}" >> "$GITHUB_ENV"
+          echo "pinned ORT_LIB_LOCATION=${ort_dir}"
 
       - name: Run assistant smoke (Groq + Cerebras)
         env:
@@ -220,7 +229,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             build-essential clang cmake pkg-config libclang-dev \
-            libxdo-dev \
+            libxdo-dev xz-utils \
             libxkbcommon-dev libwayland-dev
           if [ "${{ matrix.variant }}" = "gpu" ]; then
             # Ubuntu 22.04's stock repo has no `glslc` package, and
@@ -247,6 +256,17 @@ jobs:
             glslc --version | head -1
             ls /usr/include/vulkan/vulkan.h
           fi
+
+      - name: Fetch minimal onnxruntime static lib (pin ORT_LIB_LOCATION)
+        # `tts-local` is a default feature, so the shipped binary links the
+        # statically-pinned `libonnxruntime.a` (onnxruntime + libstdc++
+        # embedded; NEEDED stays the 4-entry allowlist). Pull the per-triple
+        # archive from the fono-voice release mirror, SHA-256 verified, and
+        # pin ORT_LIB_LOCATION — the `ort` build never touches the CDN.
+        run: |
+          ort_dir="$(TARGET=${{ matrix.target }} sh scripts/fetch-onnxruntime.sh)"
+          echo "ORT_LIB_LOCATION=${ort_dir}" >> "$GITHUB_ENV"
+          echo "pinned ORT_LIB_LOCATION=${ort_dir}"
 
       - name: Build (portable AVX2 baseline)
         # `GGML_NATIVE=OFF` + explicit AVX2/FMA/F16C/BMI2 are inherited from

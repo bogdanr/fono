@@ -101,44 +101,66 @@ pub async fn ensure_models(paths: &Paths, config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Ensure the configured local TTS voice (`.ort` model + `.onnx.json`
-/// config) is cached under `voices_dir`, downloading and verifying it
-/// from the `fono-voice` mirror when missing. Resolution mirrors
-/// `fono_tts::factory`: an explicit `[tts.local].voice` wins, otherwise
-/// the first catalog voice matching the first configured language.
+/// Ensure the local TTS voices (`.ort` model + `.onnx.json` config) are
+/// cached under `voices_dir`, downloading and verifying them from the
+/// `fono-voice` mirror when missing. Resolution mirrors
+/// `fono_tts::factory`: an explicit `[tts.local].voice` pins a single
+/// voice; otherwise one voice per configured language is ensured so the
+/// language router can switch voices offline (a Romanian reply gets the
+/// Romanian voice, an English reply the English one). Languages without a
+/// catalog voice are skipped with a warning rather than failing the lot.
 #[cfg(feature = "tts-local")]
 pub async fn ensure_local_tts(paths: &Paths, config: &Config) -> Result<EnsureOutcome> {
     let local = &config.tts.local;
-    let voice = if local.voice.is_empty() {
-        let lang = config.general.languages.first().map_or("en", String::as_str);
-        fono_tts::voices::for_language(lang)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "no local voice in the catalog for language {lang:?}; \
+    let voices = if local.voice.is_empty() {
+        let mut langs: Vec<&str> = config.general.languages.iter().map(String::as_str).collect();
+        if langs.is_empty() {
+            langs.push("en");
+        }
+        let mut chosen: Vec<fono_tts::voices::Voice> = Vec::new();
+        for lang in langs {
+            match fono_tts::voices::for_language(lang)? {
+                Some(v) if !chosen.iter().any(|c| c.name == v.name) => chosen.push(v),
+                Some(_) => {} // a different language already mapped to this voice
+                None => warn!(
+                    "no local TTS voice in the catalog for configured language {lang:?}; \
+                     it will fall back to the primary voice"
+                ),
+            }
+        }
+        if chosen.is_empty() {
+            let lang = config.general.languages.first().map_or("en", String::as_str);
+            return Err(anyhow::anyhow!(
+                "no local voice in the catalog for any configured language (e.g. {lang:?}); \
                  set [tts.local].voice to a catalog voice id"
-            )
-        })?
+            ));
+        }
+        chosen
     } else {
-        fono_tts::voices::by_name(&local.voice)?.ok_or_else(|| {
+        vec![fono_tts::voices::by_name(&local.voice)?.ok_or_else(|| {
             anyhow::anyhow!("[tts.local].voice = {:?} is not in the voice catalog", local.voice)
-        })?
+        })?]
     };
     let voices_dir = paths.voices_dir();
-    let already = voices_dir.join(&voice.model.file).is_file()
-        && voices_dir.join(&voice.config.file).is_file();
     let base = (!local.base_url.is_empty()).then_some(local.base_url.as_str());
-    if !already {
-        info!("local voice {:?} missing — downloading from the fono-voice mirror", voice.name);
+    let mut any_downloaded = false;
+    for voice in &voices {
+        let already = voices_dir.join(&voice.model.file).is_file()
+            && voices_dir.join(&voice.config.file).is_file();
+        if !already {
+            any_downloaded = true;
+            info!("local voice {:?} missing — downloading from the fono-voice mirror", voice.name);
+        }
+        fono_tts::voices::ensure_voice(voice, &voices_dir, base)
+            .await
+            .with_context(|| format!("ensuring local voice {:?}", voice.name))?;
+        if already {
+            debug!("local voice ready: {}", voice.name);
+        } else {
+            info!("local voice installed: {}", voice.name);
+        }
     }
-    fono_tts::voices::ensure_voice(&voice, &voices_dir, base)
-        .await
-        .with_context(|| format!("ensuring local voice {:?}", voice.name))?;
-    if already {
-        debug!("local voice ready: {}", voice.name);
-        Ok(EnsureOutcome::AlreadyPresent)
-    } else {
-        info!("local voice installed: {}", voice.name);
-        Ok(EnsureOutcome::Downloaded)
-    }
+    Ok(if any_downloaded { EnsureOutcome::Downloaded } else { EnsureOutcome::AlreadyPresent })
 }
 
 /// Ensure the named whisper model (at the configured quantization) is

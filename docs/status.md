@@ -1,5 +1,204 @@
 # Fono — Project Status
-Last updated: 2026-06-01
+Last updated: 2026-06-02
+
+## 2026-06-02 — Local TTS: text language is authoritative for voice choice
+
+Persisting bug report: Romanian replies were *still* spoken by the English
+voice after the previous two fixes. Root cause was the selection *priority*, not
+the detector. On the assistant path `synth_and_enqueue` passes
+`metrics.language` — the language the STT engine detected for the **user's
+speech** — as the `lang` hint. But the LLM reply can be in a different language
+(English question → Romanian answer). The router honoured that hint over the
+text, so a Romanian sentence tagged with an `en` input hint got the English
+voice.
+
+- **`LocalRouter::voice_for`** now treats the **text being spoken** as the
+  authoritative signal: it runs `detect_base_lang(text, &langs)` first and only
+  falls back to the caller's `lang` hint when detection is inconclusive (reply
+  too short to fingerprint), then to the default voice. Priority is now
+  text-detection → STT hint → primary voice (pin still overrides all).
+- Added a `tracing::debug!(target: "fono_tts::local_router")` line logging
+  `hint` / `detected` / `chosen_lang` / `voice` per utterance, so a recurrence
+  can be diagnosed from `RUST_LOG=fono_tts::local_router=debug` rather than by
+  guesswork.
+- **Verified:** `cargo fmt --check`, `cargo clippy -p fono-tts --features
+  tts-local --all-targets -D warnings`, `cargo test -p fono-tts --features
+  tts-local` all green; debug `-p fono` builds clean. release-slim rebuild in
+  progress.
+- Operational reminder: the audio the user hears comes from whichever `fono`
+  binary is actually running — the live `fono.speak` MCP channel was a *stale*
+  build (compile-time `bundled-data-ro`). The fix only takes effect after the
+  running daemon / `fono mcp serve` is rebuilt and restarted from this tree.
+
+## 2026-06-02 — Local TTS text-based language detection (no-hint path)
+
+Follow-up bug report: even after the per-utterance router landed and the
+Romanian voice downloaded, replies were still spoken by the English voice. Root
+cause: the live audio channel is the MCP `fono.speak` tool, whose `speak_text`
+path (`crates/fono-mcp-server/src/voice_io.rs:475`) calls `synthesize` with
+`lang = None`. With no hint the router fell back to the primary (English) voice.
+The assistant path I wired earlier only helps when STT returns a language.
+
+- **`crates/fono-tts/src/local_router.rs`** now identifies the language from the
+  text itself when no `lang` hint is supplied. New pure, unit-tested
+  `detect_base_lang(text, allowed)` runs `whatlang` constrained to the user's
+  configured `general.languages` (mapped ISO 639-1 → `whatlang::Lang` via
+  `whatlang_for_base`). It returns `None` — keeping the default voice — when
+  there are fewer than two detectable candidates, when detection is unreliable
+  (short text), or when the winner is unmapped. `LocalRouter::new` now takes the
+  configured `languages` (deduped to base codes via `dedup_base_langs`).
+- **`factory::build_local`** threads `languages` into `LocalRouter::new`.
+- **`whatlang` 0.16** added to the workspace + `fono-tts` `tts-local` feature
+  (MIT, pure-Rust trigram model, no network/system deps; license graph clean —
+  all MIT/Apache/BSD, all already transitively present).
+- **Priority:** explicit `lang` hint (STT on the assistant path) > text
+  detection (MCP/no-hint path) > primary voice. A `[tts.local].voice` pin still
+  short-circuits everything.
+- **Verified:** `cargo fmt --check`, `cargo clippy --workspace --all-targets -D
+  warnings`, `cargo test --workspace`, `cargo test -p fono-tts --features
+  tts-local` all green (6 new detection unit tests, incl. real ro/en sentences).
+  `release-slim` rebuilt: 26,034,520 B (24.83 MiB) — under the 26 MiB budget
+  (~1.2 MiB headroom), four-entry `NEEDED` unchanged. whatlang adds ~266 KiB.
+- Note: the running MCP server binary is still stale (compile-time
+  `bundled-data-ro`), so the live `fono.speak` channel needs a daemon rebuild +
+  restart to exercise this; the code path is unit-covered.
+
+## 2026-06-02 — Local TTS language router (per-utterance voice selection)
+
+Bug report: with `tts-local` default, a bilingual user heard Romanian replies
+spoken by the English voice. Cause: the local backend was monolingual —
+`build_local` loaded exactly one `PiperLocal` (resolved from
+`languages.first()`), and `PiperLocal::synthesize` ignored the `lang` hint. The
+"language router (plan task 2.4)" was the deferred piece.
+
+- **New `crates/fono-tts/src/local_router.rs` (`LocalRouter`).** A
+  `TextToSpeech` that keys a lazily-populated `HashMap<voice_name, PiperLocal>`
+  and, per `synthesize`, picks the voice for the utterance language via a pure,
+  unit-tested `resolve_voice_for_lang` + `base_lang` (`en-US` → `en`). The
+  primary voice loads eagerly (preserving the missing-voice error and the
+  sample-rate hint); other languages load on first use. An explicit
+  `[tts.local].voice` pin disables routing (Cartesia-style pin semantics).
+- **`factory::build_local`** now returns a `LocalRouter` instead of a bare
+  `PiperLocal`; the engine-load logic moved into the router.
+- **`models::ensure_local_tts`** downloads a voice per configured language
+  (deduped) when unpinned, so the router can switch voices offline; languages
+  with no catalog voice warn and fall back to the primary.
+- **`assistant.rs`** threads the STT-detected language (`metrics.language`)
+  into `synth_and_enqueue` → `tts.synthesize(sentence, None, Some(lang))`. The
+  wizard only writes the *cloud* `tts.voice`, never `tts.local.voice`, so
+  routing is active by default for local users.
+- **Verified:** `cargo fmt --check`, `cargo clippy --workspace --all-targets
+  -D warnings`, `cargo test --workspace` + `cargo test -p fono-tts --features
+  tts-local` all green (new router unit tests included). `release-slim` rebuilt:
+  **25 788 632 B (24.59 MiB)**, still under the 26 MiB budget. CHANGELOG
+  `[Unreleased]` Fixed entry added.
+
+## 2026-06-02 — Fix: `en-us` voice phonemization (catalog dict fold)
+
+Running the freshly-rebuilt `release-slim` binary surfaced
+`WARN no espeak dictionary for language "en-us" in the catalog …`. Root cause:
+`en_US-amy-medium.onnx.json` declares espeak voice `en-us`, but
+`espeak::canonical_lang` passed `en-us` through unchanged, so `dict_for("en-us")`
+found nothing (the catalog hosts a shared `en`/`en_dict`, same file espeak uses
+for every English variant). The British voice already worked because
+`en-gb-x-rp` was folded to `en`.
+
+- **Fix:** `crates/fono-tts/src/espeak.rs` — `canonical_lang` now folds
+  `"en-us" | "en-gb-x-rp" => "en"`. Doc comment + unit test updated (the
+  pass-through assertion for `en-us` became a fold assertion); the
+  catalog-coverage test `canonical_lang_targets_all_have_a_catalog_dict`
+  (`voices.rs`) now includes `en-us`.
+- This drives both the on-demand dict download (`voices::ensure_*`) and the
+  Piper engine's runtime phonemizer (`piper.rs` `Translator::new`), so the
+  warning and the downstream phonemization failure both clear.
+- **Verified:** `cargo fmt --check`, `cargo clippy --workspace --all-targets
+  -D warnings`, `cargo test --workspace --tests --lib` all green; `release-slim`
+  rebuilt. CHANGELOG `[Unreleased]` Fixed entry added.
+
+## 2026-06-02 — `tts-local` is now a DEFAULT feature
+
+Flipped `tts-local` into the `fono` default feature set
+(`crates/fono/Cargo.toml:36`), so the shipped `cpu`/`gpu` binaries do local
+Piper TTS out of the box. Verified the full blast radius and wired every
+build path.
+
+- **Cargo:** `default = [… , "tts-local"]`. Default graph now pulls `ort`
+  2.0.0-rc.12 + `espeak-ng` 0.1.2 (no `espeak-ng-data-*` crates — bundled-data
+  stays off; the G2P core is embedded and dicts download at runtime).
+- **Licensing (cargo-deny):** the new default-graph crates are all allowed —
+  `espeak-ng` GPL-3.0-or-later, `ort`/`ort-sys` MIT OR Apache-2.0. No
+  missing-license data crates, so the 2.2a `[licenses.clarify]` worry is moot.
+  The `deny` job reads metadata only (no build), so it needs no lib.
+- **CI (`ci.yml`):** the `test` job now fetches + pins `ORT_LIB_LOCATION`
+  before fmt/clippy/test (every default build links `ort`). The `size-budget`
+  job's per-row fetch is now unconditional; the redundant `cpu-tts-local` row
+  was dropped and the `cpu`/`aarch64` budgets raised 24→26 MiB. `xz-utils`
+  added where the fetcher runs.
+- **Release (`release.yml`):** the `build` (all three variants) and
+  `cloud-assistant` (`-p fono` example) jobs fetch + pin the lib; `xz-utils`
+  added. `cloud-equivalence` is unaffected (`fono-bench` doesn't pull `ort`).
+- **Verified locally with the lib pinned:** `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets -D warnings`,
+  `cargo test --workspace --tests --lib` all green (`fono-tts` 96 pass, 2
+  ignored). Real `release-slim` `cpu` artifact: **25 768 120 B (24.57 MiB)**,
+  under the 26 MiB budget, `NEEDED` = exactly the four-entry allowlist
+  (`ld-linux`, `libc`, `libgcc_s`, `libm`) — onnxruntime + libstdc++ embedded.
+- Docs: `tts-local` feature comments in both `Cargo.toml`s updated;
+  CHANGELOG `[Unreleased]` Added entry.
+
+**Next:** confirm a tagged release builds green end-to-end; rebuild/restart any
+running `fono mcp serve` so its espeak path has the runtime per-language dict
+fetch (the dev box's MCP binary predates the 2.2d dict refactor — `fono.speak`
+still errors on `en-us` until that subprocess is replaced).
+
+## 2026-06-02 — Phase 1.4: `tts-local` in the CI size gate; multi-triple ort libs pinned
+
+The hosted minimal `libonnxruntime.a` is now exercised by CI, and the
+fetcher is pinned for every triple the mirror hosts.
+
+**Fetcher (`scripts/fetch-onnxruntime.sh`) — re-pinned from the live mirror.**
+The `onnxruntime-1.24.2` release on `bogdanr/fono-voice` hosts four libs
+(`x86_64`/`aarch64` Linux, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`),
+each with a `sha-<triple>.txt` whose `raw_sha256` is the EXTRACTED-library
+hash (verified: extracted x86_64 = `943bd160…`, size 56 412 710 matches
+`raw_size`). Two fixes:
+
+- The x86_64 pin was **stale** — `9b084ea5…` no longer matches the hosted lib
+  (`943bd160…`); the lib was rebuilt for the static-libstdc++ fix and
+  re-uploaded but the script was never updated. Left as-is, even the x86_64
+  fetch (and the new CI row below) would fail SHA verification. Corrected.
+- Added the three other triples: `aarch64-unknown-linux-gnu` (`e14d4e71…`),
+  `aarch64-apple-darwin` (`3c60d45f…`), `x86_64-pc-windows-msvc` (`0731b033…`).
+  All four confirmed by download+extract+sha here. Ran end-to-end on this
+  x86_64 host: download → extract 56 MB lib → SHA verify → exit 0. `sh -n` clean.
+
+**CI size gate (`.github/workflows/ci.yml`).** Added a `cpu-tts-local` row to
+the `size-budget` matrix: a `fetch_ort`-gated step runs the fetcher, pins
+`ORT_LIB_LOCATION` via `$GITHUB_ENV` (no CDN), then builds
+`-p fono --features tts-local` and reuses the size + 4-entry `NEEDED` assert.
+Budget 26 MiB (measured 24.45 MiB, under the ≤32 MiB `cpu` cap). A regressed
+dynamic `libonnxruntime.so`/`libstdc++.so.6` leak now fails the PR. YAML parses
+clean.
+
+**Both prior "default-flip" blockers are now cleared:**
+
+1. **aarch64 hosted lib — DONE.** The lib is hosted *and* pinned in the fetcher
+   (above), so a `tts-local` aarch64 build no longer dies at the fetch step.
+2. **Default English voice — DONE.** `en_US-amy-medium` is hosted in the
+   `ort-1.24.2` release and the catalog hashes match exactly
+   (`crates/fono-tts/voices/catalog.json:132,137` = hosted `SHA256SUMS`), so the
+   ensure-at-startup download+verify path is sound. The earlier live
+   `fono.speak` failure was an empty local model cache on the dev box, not a
+   hosting/catalog gap.
+
+**Next (now unblocked, but with real blast radius to handle deliberately):**
+flipping `tts-local` into the default feature set means *every* `cargo build`
+of `fono` — including the `test`/`clippy` jobs in `ci.yml` and all three
+`release.yml` variants — would compile `ort` and require `ORT_LIB_LOCATION`.
+So the default-flip must land together with the fetcher step added to those
+jobs (and `release.yml`), not on its own. That wiring + the flip is the next
+session's work.
+
 
 ## 2026-06-01 — Static libstdc++ linkage for `tts-local` (four-entry allowlist restored)
 

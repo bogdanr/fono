@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Local text-to-speech is now built into the shipped binary by default. The
+  `cpu` and `gpu` downloads do offline Piper TTS out of the box (42 voices
+  across 38 languages); pick it with `fono use tts local`. The statically
+  linked ONNX Runtime adds ~2 MiB and keeps the binary's runtime dependency
+  set at the same four-entry glibc allowlist (measured 24.57 MiB, `cpu`).
+
+### Fixed
+
+- Local TTS now speaks each reply in the matching voice. Previously a bilingual
+  user heard every reply in their primary language's voice — a Romanian reply
+  read aloud by the English voice (wrong phonemes, wrong accent). The local
+  backend now picks the voice per utterance from the language of the text it is
+  about to speak, identified against the configured `general.languages`, and
+  loads each language's voice on demand. Identifying the language from the text
+  itself (rather than from the speech recogniser's detected *input* language)
+  is what makes a Romanian answer to an English question come out in the
+  Romanian voice. The speech-recogniser language is used only as a fallback for
+  text too short to fingerprint. An explicit `[tts.local].voice` still pins one
+  voice for everything.
+- Local TTS for the US English voice (`en_US-amy-medium`) no longer fails
+  phonemization. Its `.onnx.json` declares espeak voice `en-us`, which had no
+  dictionary in the catalog; it now folds onto the shared `en` base/`en_dict`
+  (same as the British `en-gb-x-rp` voice), so the on-demand dictionary
+  download resolves instead of warning.
+
 ## [0.9.1] — 2026-05-29
 
 Show your screen, dictate in any language. This release teaches the voice
