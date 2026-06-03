@@ -110,6 +110,16 @@ build.sh --config MinSizeRel --build_shared_lib \
   — far below the ~7–11 MiB estimate. The minimal `libonnxruntime.a` is
   ~50 MiB on disk, but `--gc-sections` discards everything the fixed op
   set never references, so only ~2 MiB actually links in.
+- **Measured 2026-06-03: adding Kokoro (q8f16) to the union op set costs
+  only ~0.77 MiB more.** The runtime now also registers Kokoro's net-new
+  operators (LSTM, STFT, LayerNormalization, Atan, Cos, Sin, plus the
+  q8f16 quant kernels — ConvInteger, DynamicQuantize{Linear,LSTM,MatMul},
+  MatMulInteger{,ToFloat}, DequantizeLinear, SkipLayerNormalization). The
+  union `libonnxruntime.a` is ~50.4 MiB on disk (up from ~50.3 MiB Piper-
+  only — the operator delta is dwarfed by shared infrastructure), and a
+  `release-slim --features tts-local` glibc binary links in at **25.22 MiB**
+  (up from the 24.45 MiB Piper-only baseline below), still well under the
+  32 MiB `cpu` cap with the four-entry `NEEDED` allowlist intact.
 - The resulting static `libonnxruntime.a` is built in CI and pinned via
   the `ORT_LIB_LOCATION` env var, which turns off `ort`'s
   `download-binaries` (so builds are reproducible/offline and no
