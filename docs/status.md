@@ -1,5 +1,56 @@
 # Fono — Project Status
-Last updated: 2026-06-02
+Last updated: 2026-06-03
+
+## 2026-06-03 — Phase 4.1: Kokoro local English TTS (engine + router split)
+
+Landed plan v3 task 4.1 — Kokoro is now the local TTS engine for English,
+Piper for every other language (ADR 0033). Followed the de-risking-first
+plan `plans/2026-06-02-kokoro-local-english-tts-v1.md` (Phases A–G).
+
+**De-risking spike (Phase A, GO).** Converted Kokoro to `.ort` and proved
+the load-bearing risk is clear: **zero control-flow ops** (`If`/`Loop`/`Scan`)
+in both fp32 and the quantized variant — the exact blocker that omitted 7
+Piper voices is absent. Built three throwaway minimal runtimes; the
+quantized Piper+Kokoro **union** runtime loads `q8f16` (incl. the
+`DynamicQuantizeLSTM` contrib op) **and** all Piper voices together. en-US
+IPA mapped 50/50 chars against the embedded espeak core; synthesis produced
+clean 24 kHz audio.
+
+**Distribution (Phase B).** Ships the q8f16 variant
+(`onnx-community/Kokoro-82M-v1.0-ONNX`, Apache-2.0) shared across four
+voices — `af_heart` (en-us, default), `af_bella`, `af_nicole` (en-us),
+`bf_emma` (en-gb) — each a 0.5 MiB raw f32 `[510,256]` style pack. Model +
+style packs + merged `SHA256SUMS` published to the `ort-1.24.2` release on
+`bogdanr/fono-voice` (Piper checksums preserved). `onnxruntime/ops.config`
+in `fono-voice` regenerated to the union and its existing CI workflow
+rebuilt all triples; `scripts/fetch-onnxruntime.sh` re-pinned per triple
+(x86_64-darwin pending its CI job, falls through to source-build).
+
+**Engine + router + schema (Phases C–E).** New
+`crates/fono-tts/src/kokoro.rs` (`KokoroLocal`, embedded 178-entry phoneme
+vocab, espeak accent per voice prefix, style row by token count, reads the
+model's actual input name). Catalog schema extended: `Voice.config` is now
+`Option` (Kokoro has no `.onnx.json`), plus optional `style` and
+`espeak_voice`. Router (`local_router.rs`) cache generalized to
+`Arc<dyn TextToSpeech>` and dispatches on `voice.engine`; English resolves
+to `af_heart` via catalog ordering. `crates/fono/src/models.rs` handles the
+optional config + style pack.
+
+**Wizard + size (Phases F–G).** Wizard leaves `tts.local.voice` empty so
+the router picks Kokoro for English automatically; comment de-Piper-ized.
+Measured `release-slim --features tts-local` glibc binary at **25.22 MiB**
+(up from the 24.45 MiB Piper-only baseline, +0.77 MiB for Kokoro's ops),
+well under the 32 MiB `cpu` cap, with the four-entry `NEEDED` allowlist
+intact. Recorded in `docs/binary-size.md`.
+
+**Gate:** `cargo fmt --check`, `cargo clippy` (my crates clean; remaining
+warnings are pre-existing fono-core lints flagged only by local clippy
+1.96, not CI's pinned 1.88), full workspace tests green incl. an
+end-to-end Kokoro synthesis run against the union runtime. ADR 0033's
+design is now fully realized — no amendment needed.
+
+**Remaining:** x86_64-apple-darwin union runtime SHA to pin once its CI
+job finishes; otherwise 4.1 is complete.
 
 ## 2026-06-02 — `cargo build` works without ORT_LIB_LOCATION (dev fallback)
 

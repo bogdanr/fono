@@ -75,6 +75,10 @@ Target users: Linux desktop (i3 / sway / KDE / GNOME, X11 and Wayland), Windows,
   are compatible with GPL-3.0.
 - Do **NOT** add Llama-family or Gemma models as defaults — their licenses are not
   OSI-approved. Opt-in only. (See `docs/decisions/0004-default-models.md`.)
+- Do **NOT** run `git push` unless the user explicitly says to push. Commit and report
+  what is staged; wait for the push instruction.
+- Batch related doc/plan changes into a **single commit**. Do not make multiple
+  incremental commits for what is one logical documentation change.
 - Do **NOT** attempt to install system packages on NimbleX. Document required deps in
   `docs/providers.md` or the SlackBuild `REQUIRES=` and let the user install them.
 - Work **one phase at a time**; tick checkboxes in the design plan as you go; update

@@ -13,7 +13,7 @@ The home page is [fono.page](https://fono.page).
 
 <table width="100%">
 <tr>
-<td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#wake-word-activation">Wake-word activation</a></strong><br>Say the magic word — Fono wakes and starts dictating. No hotkey, no hands.<br><br><strong><a href="#local-text-to-speech--home-assistant-voice-server">Local text-to-speech + Home Assistant voice server</a></strong><br>Speak any of your languages locally — Kokoro where it shines, Piper everywhere else (including Romanian). The same engine answers Home Assistant over Wyoming, no Python sidecar.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".</td>
+<td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#personal-vocabulary--voice-correction">Personal vocabulary &amp; voice correction</a></strong><br>Teach Fono once that "Phono" means "Fono" — it sticks forever, deterministically, before the text ever hits the cursor. Later: say "fix that" by voice to correct a mishearing and auto-grow your vocabulary.<br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#wake-word-activation">Wake-word activation</a></strong><br>Say the magic word — Fono wakes and starts dictating. No hotkey, no hands.<br><br><strong><a href="#local-text-to-speech--home-assistant-voice-server">Local text-to-speech + Home Assistant voice server</a></strong><br>Speak any of your languages locally — Kokoro where it shines, Piper everywhere else (including Romanian). The same engine answers Home Assistant over Wyoming, no Python sidecar.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".</td>
 <td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#hover-context-injection">Hover-context injection</a></strong> <em>(experimental)</em><br>Terminal hovered → shell prompts. Code editor hovered → identifier casing.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#realtime-voice-assistant">Realtime voice assistant</a></strong><br>OpenAI Realtime and Gemini Live: F8 speaks straight to the model, single WebSocket, sub-second time-to-first-audio.<br><br><strong><a href="#better-wayland-hotkeys">Better Wayland hotkeys</a></strong><br>Auto-register via the <code>GlobalShortcuts</code> portal when available.<br><br><strong><a href="#macos-and-windows">macOS + Windows</a></strong><br>Native platform integrations.</td>
 </tr>
 </table>
@@ -48,6 +48,29 @@ Live preview as a waveform style; four new TTS backends. *(2026-05-17)*
 ---
 
 ## Up next
+
+### Personal vocabulary & voice correction
+
+> Say "Fono". Get "Fono". Every time. Without touching the keyboard.
+
+Whisper — cloud and local alike — reliably mishears proper nouns, project names,
+and jargon. Fono will let you teach it your vocabulary once, and have every future
+dictation corrected before the text ever reaches the cursor.
+
+**How it works:** a `vocabulary.toml` in your config directory maps mishearings to
+canonical spellings (`phono → Fono`, `bug done → Bogdan`, `cube ernetes → Kubernetes`).
+After every STT result — regardless of whether LLM cleanup is on or off — a
+word-boundary-aware substitution pass rewrites the final text before injection. It is
+deterministic and idempotent: no probability, no model call, no network round-trip.
+
+The vocabulary grows via `fono vocabulary add/remove/list`. `fono vocabulary suggest`
+mines your dictation history for swaps you already accepted via LLM cleanup and offers
+them for one-keystroke confirmation — no auto-pollution of your vocabulary file.
+
+Later in the same slice: a **voice "fix that" correction hotkey**. Press it after a
+mishearing, speak the intended word, and Fono re-injects the corrected text and
+auto-records the (heard → meant) pair into your vocabulary so the same error never
+recurs. Plan: `plans/2026-06-03-correction-with-memory-v2.md`.
 
 ### Automatic translation
 

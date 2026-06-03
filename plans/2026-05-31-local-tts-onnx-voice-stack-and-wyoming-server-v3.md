@@ -198,8 +198,9 @@ landed as part of 1.2 above.
     `fono::models::ensure_local_tts`): explicit `[tts.local].voice`
     wins, else first catalog voice for `general.languages[0]`.
     *(2026-05-31.)*
-  - [ ] Remaining: the Kokoro-vs-Piper split itself lands with 4.1
-    (only Piper voices exist in the catalog today).
+  - [x] The Kokoro-vs-Piper split landed with 4.1: English now resolves
+    to Kokoro `af_heart` via catalog ordering, every other language to
+    Piper. *(2026-06-03.)*
 - [x] **2.5** Wire into the factory + the (already-shipping) Wyoming
   server so the local engine answers HA directly.
   - [x] `TtsBackend::Local` variant + `[tts.local]` config block
@@ -250,12 +251,22 @@ landed as part of 1.2 above.
 Each is "wire a model into ONNX + regenerate `ops.config`", not a new
 engine:
 
-- [ ] **4.1** **Kokoro** TTS for **English only** (its sole strong
-  locale, en-US/en-GB); extend the router with the rule **English →
-  Kokoro, everything else → Piper** (ADR 0033 — Kokoro's non-English
-  voices are thin/weak). (`onnx-community/Kokoro-82M-v1.0-ONNX`,
-  `af_heart`.) Convert to `.ort` + regenerate `ops.config`; publish to
-  the Fono `.ort` mirror.
+- [x] **4.1** **Kokoro** TTS for **English only** (its sole strong
+  locale, en-US/en-GB); router rule **English → Kokoro, everything else
+  → Piper** (ADR 0033). Ships the q8f16 variant
+  (`onnx-community/Kokoro-82M-v1.0-ONNX`) shared across four voices:
+  `af_heart` (en-us, default), `af_bella`, `af_nicole` (en-us),
+  `bf_emma` (en-gb). Converted to `.ort`; `onnxruntime/ops.config` in
+  `bogdanr/fono-voice` regenerated to the Piper+Kokoro union and the
+  per-triple minimal runtime re-pinned in `scripts/fetch-onnxruntime.sh`
+  (x86_64-darwin pending its CI job). Model + per-voice `[510,256]` f32
+  style packs + merged `SHA256SUMS` published to the `ort-1.24.2`
+  mirror release. New engine `crates/fono-tts/src/kokoro.rs` (embedded
+  178-entry phoneme vocab, espeak accent per voice prefix); router
+  dispatch on `voice.engine`; catalog schema extended (`config`
+  optional, new `style`/`espeak_voice`). Binary delta +0.77 MiB
+  (25.22 MiB, under the 32 MiB cap; four-entry `NEEDED` allowlist
+  intact). *(2026-06-03.)*
 - [ ] **4.2** **Silero VAD** — neural VAD upgrade over the energy
   envelope (`crates/fono-audio/src/vad.rs` `SileroVad` slot exists).
 - [ ] **4.3** **Wake-word** via transducer KWS (ADR 0012 engine choice;

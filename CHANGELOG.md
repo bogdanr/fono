@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- English dictation read-back now uses **Kokoro**, a higher-quality local
+  voice, while every other language keeps using Piper. Four English voices
+  ship — `af_heart` (the default), `af_bella`, `af_nicole` (American) and
+  `bf_emma` (British) — all sharing one model, so picking a different one is
+  a tiny download. The model and voices fetch on demand like every other
+  voice, and the binary's runtime dependency set is unchanged (the
+  statically linked runtime grows ~0.8 MiB, well under the size budget).
 - Local text-to-speech is now built into the shipped binary by default. The
   `cpu` and `gpu` downloads do offline Piper TTS out of the box (42 voices
   across 38 languages); pick it with `fono use tts local`. The statically
