@@ -34,6 +34,8 @@ pub mod wyoming;
 #[cfg(feature = "tts-local")]
 pub mod espeak;
 #[cfg(feature = "tts-local")]
+pub mod kokoro;
+#[cfg(feature = "tts-local")]
 pub mod local;
 #[cfg(feature = "tts-local")]
 pub mod local_router;

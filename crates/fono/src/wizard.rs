@@ -593,10 +593,11 @@ async fn pick_tts_for_assistant(
             config.tts.backend = TtsBackend::None;
         }
         TtsPickerAction::Local => {
-            // On-device Piper. No key, no prompt: the voice for the
-            // primary configured language is fetched automatically the
-            // first time the daemon needs it (startup `ensure_models`,
-            // or the tray's "switch to Local" ensure step). Leave
+            // On-device neural TTS (Kokoro for English, Piper for every
+            // other language — ADR 0033). No key, no prompt: the voice for
+            // the primary configured language is fetched automatically the
+            // first time the daemon needs it (startup `ensure_models`, or
+            // the tray's "switch to Local" ensure step). Leave
             // `[tts.local].voice` empty so the language router picks the
             // per-language voice rather than pinning one.
             config.tts.backend = TtsBackend::Local;

@@ -53,10 +53,27 @@ pub struct Voice {
     pub ort_version: String,
     /// Release tag the assets live under in the mirror, e.g. `"ort-1.24.2"`.
     pub release_tag: String,
-    /// The `.ort` model asset.
+    /// The `.ort` model asset. For Kokoro voices this is the shared
+    /// model file (every Kokoro voice in the catalog points at the same
+    /// `.ort`; the per-voice difference is the `style` pack below).
     pub model: Asset,
-    /// The `.onnx.json` Piper config sidecar asset.
-    pub config: Asset,
+    /// The `.onnx.json` Piper config sidecar asset. Absent for Kokoro
+    /// voices, which use a fixed built-in phoneme vocab and a `style`
+    /// pack rather than a per-voice sidecar.
+    #[serde(default)]
+    pub config: Option<Asset>,
+    /// Kokoro per-voice style pack: a raw little-endian `f32` `[510, 256]`
+    /// tensor, one 256-d style vector per output token-count bucket.
+    /// Absent for Piper voices.
+    #[serde(default)]
+    pub style: Option<Asset>,
+    /// espeak-ng voice code driving the phonemizer accent. Piper reads
+    /// this from its `.onnx.json`; Kokoro has no sidecar, so the catalog
+    /// declares it here (e.g. `en-us` for `af_*`, `en-gb` for `bf_*`).
+    /// Folded onto a canonical base for dict lookup (see
+    /// [`crate::espeak::canonical_lang`]).
+    #[serde(default)]
+    pub espeak_voice: Option<String>,
 }
 
 /// A downloadable, SHA-256-pinned asset.
@@ -94,8 +111,12 @@ pub struct Dict {
 pub struct VoicePaths {
     /// Absolute path to the cached `.ort` model.
     pub model: PathBuf,
-    /// Absolute path to the cached `.onnx.json` config sidecar.
-    pub config: PathBuf,
+    /// Absolute path to the cached `.onnx.json` config sidecar (Piper
+    /// voices only; `None` for Kokoro).
+    pub config: Option<PathBuf>,
+    /// Absolute path to the cached style pack (Kokoro voices only; `None`
+    /// for Piper).
+    pub style: Option<PathBuf>,
 }
 
 /// The embedded voice catalog. Parsed on each call (cheap; a handful of
@@ -152,30 +173,49 @@ pub async fn ensure_voice(
 ) -> Result<VoicePaths> {
     let base = base_url.unwrap_or(DEFAULT_BASE_URL);
     // Box each fetch future so this fn's own stack frame holds pointers rather
-    // than three inlined download state machines (otherwise their combined size
-    // trips `clippy::large_stack_frames`).
+    // than several inlined download state machines (otherwise their combined
+    // size trips `clippy::large_stack_frames`).
     let model = Box::pin(fetch_asset(&voice.model, &voice.release_tag, base, voices_dir)).await?;
-    let config = Box::pin(fetch_asset(&voice.config, &voice.release_tag, base, voices_dir)).await?;
-    // Piper voices phonemize with espeak-ng, which needs the matching
-    // `<lang>_dict` beside the embedded G2P core. Fetch it on first use.
-    Box::pin(ensure_voice_dict(&config, voices_dir, base)).await?;
-    Ok(VoicePaths { model, config })
+    // Piper carries a `.onnx.json` sidecar; Kokoro carries a style pack. Each
+    // is optional in the schema, so fetch whichever the catalog declares.
+    let config = match &voice.config {
+        Some(c) => Some(Box::pin(fetch_asset(c, &voice.release_tag, base, voices_dir)).await?),
+        None => None,
+    };
+    let style = match &voice.style {
+        Some(s) => Some(Box::pin(fetch_asset(s, &voice.release_tag, base, voices_dir)).await?),
+        None => None,
+    };
+    // Both engines phonemize with espeak-ng, which needs the matching
+    // `<lang>_dict` beside the embedded G2P core. Piper declares its espeak
+    // voice in the downloaded sidecar; Kokoro declares it in the catalog.
+    if let Some(espeak_voice) = espeak_voice_for(voice, config.as_deref())? {
+        Box::pin(ensure_dict(&espeak_voice, voices_dir, base)).await?;
+    }
+    Ok(VoicePaths { model, config, style })
 }
 
-/// Ensure the espeak-ng dictionary for a voice (read from its downloaded
-/// `.onnx.json`) is present under `voices_dir/espeak/`. A voice whose config
-/// declares no espeak voice (e.g. a future non-espeak engine) is a no-op; a
-/// language absent from the catalog logs an actionable warning rather than
-/// failing the voice, so the model still loads and the gap is visible.
-async fn ensure_voice_dict(config_path: &Path, voices_dir: &Path, base_url: &str) -> Result<()> {
-    let bytes = std::fs::read(config_path)
-        .with_context(|| format!("read voice config {}", config_path.display()))?;
-    let Some(lang) = read_espeak_voice(&bytes) else {
-        return Ok(());
-    };
+/// Determine the espeak-ng voice code a voice phonemizes with: from the
+/// downloaded Piper `.onnx.json` sidecar when present, otherwise from the
+/// catalog's `espeak_voice` field (Kokoro). `None` means "no phonemizer
+/// dictionary needed" (e.g. a config that declares no espeak voice).
+fn espeak_voice_for(voice: &Voice, config_path: Option<&Path>) -> Result<Option<String>> {
+    if let Some(path) = config_path {
+        let bytes =
+            std::fs::read(path).with_context(|| format!("read voice config {}", path.display()))?;
+        return Ok(read_espeak_voice(&bytes));
+    }
+    Ok(voice.espeak_voice.clone().filter(|v| !v.is_empty()))
+}
+
+/// Ensure the espeak-ng dictionary for an espeak voice code is present under
+/// `voices_dir/espeak/`. A language absent from the catalog logs an actionable
+/// warning rather than failing the voice, so the model still loads and the gap
+/// is visible.
+async fn ensure_dict(espeak_voice: &str, voices_dir: &Path, base_url: &str) -> Result<()> {
     // Fold variant/alias codes onto the canonical base the catalog hosts a dict
-    // for (e.g. nb→no, en-gb-x-rp→en); keeps one dict per base language.
-    let lang = crate::espeak::canonical_lang(&lang);
+    // for (e.g. nb→no, en-gb-x-rp→en, en-us→en); keeps one dict per base language.
+    let lang = crate::espeak::canonical_lang(espeak_voice);
     let Some(dict) = dict_for(lang)? else {
         tracing::warn!(
             "no espeak dictionary for language {lang:?} in the catalog; local \
@@ -254,12 +294,52 @@ mod tests {
         assert_eq!(v.ort_version, "1.24.2");
         assert_eq!(v.release_tag, "ort-1.24.2");
         assert_eq!(v.model.file, "ro_RO-mihai-medium.ort");
-        assert_eq!(v.config.file, "ro_RO-mihai-medium.onnx.json");
+        let config = v.config.as_ref().expect("piper voice must carry a config sidecar");
+        assert_eq!(config.file, "ro_RO-mihai-medium.onnx.json");
+        assert!(v.style.is_none(), "piper voice must not carry a Kokoro style pack");
         // Catalog SHA-256s must be canonical 64-char lowercase hex.
-        for sha in [&v.model.sha256, &v.config.sha256] {
+        for sha in [&v.model.sha256, &config.sha256] {
             assert_eq!(sha.len(), 64);
             assert!(sha.bytes().all(|b| b.is_ascii_hexdigit()));
         }
+    }
+
+    #[test]
+    fn kokoro_english_voices_are_present_and_well_formed() {
+        // af_heart is the default English voice and must win `for_language("en")`.
+        let en = for_language("en").unwrap().expect("an English voice");
+        assert_eq!(en.name, "af_heart", "af_heart must be the first English voice");
+        assert_eq!(en.engine, "kokoro");
+
+        for (name, accent) in [
+            ("af_heart", "en-us"),
+            ("af_bella", "en-us"),
+            ("af_nicole", "en-us"),
+            ("bf_emma", "en-gb"),
+        ] {
+            let v = by_name(name).unwrap().unwrap_or_else(|| panic!("{name} present"));
+            assert_eq!(v.engine, "kokoro");
+            assert_eq!(v.language, "en");
+            // Kokoro voices share the model and carry a per-voice style pack
+            // instead of a `.onnx.json` config sidecar.
+            assert!(v.config.is_none(), "{name} must not carry a Piper config");
+            let style = v.style.as_ref().unwrap_or_else(|| panic!("{name} has a style pack"));
+            assert_eq!(style.file, format!("{name}.style.bin"));
+            assert_eq!(style.sha256.len(), 64);
+            assert!(style.sha256.bytes().all(|b| b.is_ascii_hexdigit()));
+            assert_eq!(v.espeak_voice.as_deref(), Some(accent));
+        }
+    }
+
+    #[test]
+    fn all_kokoro_voices_share_one_model() {
+        let models: std::collections::BTreeSet<String> = catalog()
+            .unwrap()
+            .into_iter()
+            .filter(|v| v.engine == "kokoro")
+            .map(|v| v.model.file)
+            .collect();
+        assert_eq!(models.len(), 1, "every Kokoro voice must point at the same shared model");
     }
 
     #[test]

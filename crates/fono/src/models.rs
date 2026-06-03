@@ -118,7 +118,8 @@ pub async fn ensure_local_tts(paths: &Paths, config: &Config) -> Result<EnsureOu
     let mut any_downloaded = false;
     for voice in &voices {
         let already = voices_dir.join(&voice.model.file).is_file()
-            && voices_dir.join(&voice.config.file).is_file();
+            && voice.config.as_ref().is_none_or(|c| voices_dir.join(&c.file).is_file())
+            && voice.style.as_ref().is_none_or(|s| voices_dir.join(&s.file).is_file());
         if !already {
             any_downloaded = true;
             info!("local voice {:?} missing — downloading from the fono-voice mirror", voice.name);
@@ -184,9 +185,16 @@ pub fn local_tts_pending_mb(paths: &Paths, config: &Config) -> Option<u32> {
     let pending: u64 = voices
         .iter()
         .filter(|v| {
-            !(voices_dir.join(&v.model.file).is_file() && voices_dir.join(&v.config.file).is_file())
+            let present = voices_dir.join(&v.model.file).is_file()
+                && v.config.as_ref().is_none_or(|c| voices_dir.join(&c.file).is_file())
+                && v.style.as_ref().is_none_or(|s| voices_dir.join(&s.file).is_file());
+            !present
         })
-        .map(|v| v.model.size + v.config.size)
+        .map(|v| {
+            v.model.size
+                + v.config.as_ref().map_or(0, |c| c.size)
+                + v.style.as_ref().map_or(0, |s| s.size)
+        })
         .sum();
     if pending == 0 {
         None

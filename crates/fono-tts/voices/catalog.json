@@ -122,6 +122,78 @@
       }
     },
     {
+      "name": "af_heart",
+      "engine": "kokoro",
+      "language": "en",
+      "espeak_voice": "en-us",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "kokoro-v1.0-q8f16.ort",
+        "sha256": "65143671df8bf52331652798c9871c7c4fd44a0cc16a864399df48e03d0e4dd7",
+        "size": 93914104
+      },
+      "style": {
+        "file": "af_heart.style.bin",
+        "sha256": "d583ccff3cdca2f7fae535cb998ac07e9fcb90f09737b9a41fa2734ec44a8f0b",
+        "size": 522240
+      }
+    },
+    {
+      "name": "af_bella",
+      "engine": "kokoro",
+      "language": "en",
+      "espeak_voice": "en-us",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "kokoro-v1.0-q8f16.ort",
+        "sha256": "65143671df8bf52331652798c9871c7c4fd44a0cc16a864399df48e03d0e4dd7",
+        "size": 93914104
+      },
+      "style": {
+        "file": "af_bella.style.bin",
+        "sha256": "f69d836209b78eb8c66e75e3cda491e26ea838a3674257e9d4e5703cbaf55c8b",
+        "size": 522240
+      }
+    },
+    {
+      "name": "af_nicole",
+      "engine": "kokoro",
+      "language": "en",
+      "espeak_voice": "en-us",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "kokoro-v1.0-q8f16.ort",
+        "sha256": "65143671df8bf52331652798c9871c7c4fd44a0cc16a864399df48e03d0e4dd7",
+        "size": 93914104
+      },
+      "style": {
+        "file": "af_nicole.style.bin",
+        "sha256": "cd2191ab31b914ed7b318416b0e4440fdf392ddad9106a060819aa600a64f59a",
+        "size": 522240
+      }
+    },
+    {
+      "name": "bf_emma",
+      "engine": "kokoro",
+      "language": "en",
+      "espeak_voice": "en-gb",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "kokoro-v1.0-q8f16.ort",
+        "sha256": "65143671df8bf52331652798c9871c7c4fd44a0cc16a864399df48e03d0e4dd7",
+        "size": 93914104
+      },
+      "style": {
+        "file": "bf_emma.style.bin",
+        "sha256": "669fe0647f9dd04fcab92f1439a40eeb4c8b4ab1f82e4996fe3d918ce4a63b73",
+        "size": 522240
+      }
+    },
+    {
       "name": "en_US-amy-medium",
       "engine": "piper",
       "language": "en",

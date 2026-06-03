@@ -24,6 +24,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use whatlang::{Detector, Lang};
 
+use crate::kokoro::KokoroLocal;
 use crate::piper::{PiperConfig, PiperLocal};
 use crate::traits::{TextToSpeech, TtsAudio};
 use crate::voices::Voice;
@@ -33,8 +34,10 @@ use crate::voices::Voice;
 pub struct LocalRouter {
     voices_dir: PathBuf,
     /// Loaded engines keyed by catalog voice `name`. Populated lazily; the
-    /// `default_voice` engine is loaded eagerly at construction.
-    cache: Mutex<HashMap<String, Arc<PiperLocal>>>,
+    /// `default_voice` engine is loaded eagerly at construction. Engines are
+    /// trait objects so Piper and Kokoro voices coexist in one map (ADR 0033:
+    /// Kokoro for English, Piper for the rest).
+    cache: Mutex<HashMap<String, Arc<dyn TextToSpeech>>>,
     /// Voice used when the utterance language has no dedicated catalog voice,
     /// when no `lang` hint is supplied, or when a voice pin is in effect: the
     /// user's primary language voice, or the explicit `[tts.local].voice`.
@@ -65,8 +68,8 @@ impl LocalRouter {
         let voices_dir = voices_dir.into();
         let engine = load_engine(&voices_dir, &default_voice)?;
         let native_rate = engine.native_sample_rate();
-        let mut cache = HashMap::new();
-        cache.insert(default_voice.name.clone(), Arc::new(engine));
+        let mut cache: HashMap<String, Arc<dyn TextToSpeech>> = HashMap::new();
+        cache.insert(default_voice.name.clone(), engine);
         let langs = dedup_base_langs(languages);
         Ok(Self { voices_dir, cache: Mutex::new(cache), default_voice, pinned, langs, native_rate })
     }
@@ -105,11 +108,11 @@ impl LocalRouter {
     /// The lock is never held across the (synchronous) load, so concurrent
     /// first-uses of two languages don't serialise; a rare double-load is
     /// resolved by keeping whichever insert wins.
-    fn engine_for(&self, voice: &Voice) -> Result<Arc<PiperLocal>> {
+    fn engine_for(&self, voice: &Voice) -> Result<Arc<dyn TextToSpeech>> {
         if let Some(e) = self.cache.lock().expect("router cache mutex poisoned").get(&voice.name) {
             return Ok(Arc::clone(e));
         }
-        let engine = Arc::new(load_engine(&self.voices_dir, voice)?);
+        let engine = load_engine(&self.voices_dir, voice)?;
         let mut cache = self.cache.lock().expect("router cache mutex poisoned");
         Ok(Arc::clone(cache.entry(voice.name.clone()).or_insert(engine)))
     }
@@ -223,29 +226,59 @@ pub fn resolve_voice_for_lang(default_voice: &Voice, pinned: bool, lang: Option<
     crate::voices::for_language(&lang).ok().flatten().unwrap_or_else(|| default_voice.clone())
 }
 
-/// Load a [`PiperLocal`] from a voice's cached `.ort` model + `.onnx.json`
-/// config under `voices_dir`. A missing asset yields an actionable error
+/// Load the engine for a voice from its cached assets under `voices_dir`,
+/// dispatching on `voice.engine`: Kokoro voices (English) use a shared `.ort`
+/// model plus a per-voice style pack; Piper voices use a `.ort` model plus a
+/// `.onnx.json` config sidecar. A missing asset yields an actionable error
 /// (the daemon downloads voices at startup; see `ensure_local_tts`).
-fn load_engine(voices_dir: &Path, voice: &Voice) -> Result<PiperLocal> {
+fn load_engine(voices_dir: &Path, voice: &Voice) -> Result<Arc<dyn TextToSpeech>> {
     let model_path = voices_dir.join(&voice.model.file);
-    let config_path = voices_dir.join(&voice.config.file);
-    if !model_path.is_file() || !config_path.is_file() {
-        return Err(anyhow!(
-            "local voice {:?} is not downloaded yet (expected {} + its .onnx.json under {}); \
-             it is fetched automatically at daemon startup — restart the daemon or check the \
-             logs / network",
-            voice.name,
-            voice.model.file,
-            voices_dir.display()
-        ));
+    if !model_path.is_file() {
+        return Err(not_downloaded(voice, voices_dir));
+    }
+    // Per-voice espeak-ng data is materialised under a stable subdir so it is
+    // written once and reused across runs and across voices.
+    let espeak_dir = voices_dir.join("espeak");
+    // Kokoro is the English engine; every other engine string is Piper
+    // (ADR 0033). Dispatch on the catalog's `engine` field.
+    if voice.engine == "kokoro" {
+        let style = voice.style.as_ref().ok_or_else(|| {
+            anyhow!("kokoro voice {:?} has no style asset in the catalog", voice.name)
+        })?;
+        let style_path = voices_dir.join(&style.file);
+        if !style_path.is_file() {
+            return Err(not_downloaded(voice, voices_dir));
+        }
+        // The catalog declares the espeak accent for Kokoro (no sidecar);
+        // default to en-us so a malformed entry still phonemizes English.
+        let accent = voice.espeak_voice.clone().unwrap_or_else(|| "en-us".to_string());
+        let engine = KokoroLocal::load(&model_path, &style_path, accent, espeak_dir)?;
+        return Ok(Arc::new(engine));
+    }
+    let config = voice.config.as_ref().ok_or_else(|| {
+        anyhow!("piper voice {:?} has no config (.onnx.json) asset in the catalog", voice.name)
+    })?;
+    let config_path = voices_dir.join(&config.file);
+    if !config_path.is_file() {
+        return Err(not_downloaded(voice, voices_dir));
     }
     let cfg_bytes = std::fs::read(&config_path)
         .map_err(|e| anyhow!("read voice config {}: {e}", config_path.display()))?;
     let piper_cfg = PiperConfig::from_json(&cfg_bytes)?;
-    // Per-voice espeak-ng data is materialised under a stable subdir so it is
-    // written once and reused across runs and across voices.
-    let espeak_dir = voices_dir.join("espeak");
-    PiperLocal::load(&model_path, piper_cfg, espeak_dir)
+    let engine = PiperLocal::load(&model_path, piper_cfg, espeak_dir)?;
+    Ok(Arc::new(engine))
+}
+
+/// Actionable error for a voice whose assets are not yet on disk.
+fn not_downloaded(voice: &Voice, voices_dir: &Path) -> anyhow::Error {
+    anyhow!(
+        "local voice {:?} is not downloaded yet (expected {} and its companion asset under {}); \
+         it is fetched automatically at daemon startup — restart the daemon or check the \
+         logs / network",
+        voice.name,
+        voice.model.file,
+        voices_dir.display()
+    )
 }
 
 #[async_trait]
