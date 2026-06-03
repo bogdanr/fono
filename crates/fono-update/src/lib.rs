@@ -35,17 +35,12 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Release channel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Channel {
+    #[default]
     Stable,
     Prerelease,
-}
-
-impl Default for Channel {
-    fn default() -> Self {
-        Self::Stable
-    }
 }
 
 impl Channel {

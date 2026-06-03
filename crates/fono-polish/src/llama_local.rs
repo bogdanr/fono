@@ -196,9 +196,8 @@ impl LlamaLocal {
             .and_then(|v| v.into_iter().next());
         let mut out = String::new();
         let mut sample_idx = last_prefill_idx;
-        let mut n_cur = tokens.len() as i32;
         let mut decoder = encoding_rs::UTF_8.new_decoder();
-        for _ in 0..MAX_NEW_TOKENS {
+        for n_cur in (tokens.len() as i32..).take(MAX_NEW_TOKENS as usize) {
             let token = sampler.sample(&ctx, sample_idx);
             sampler.accept(token);
             if token == eos || Some(token) == im_end {
@@ -211,7 +210,6 @@ impl LlamaLocal {
             out.push_str(&piece);
             batch.clear();
             batch.add(token, n_cur, &[0], true).context("decode batch.add")?;
-            n_cur += 1;
             sample_idx = 0;
             ctx.decode(&mut batch).context("decode loop")?;
         }

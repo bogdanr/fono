@@ -287,9 +287,10 @@ pub struct Stt {
     pub prompts: std::collections::HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SttBackend {
+    #[default]
     Local,
     Groq,
     Deepgram,
@@ -309,12 +310,6 @@ pub enum SttBackend {
     /// (`wyoming-faster-whisper`, `fono serve wyoming`, Rhasspy, etc.).
     /// Configure via `[stt.wyoming]`.
     Wyoming,
-}
-
-impl Default for SttBackend {
-    fn default() -> Self {
-        Self::Local
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,9 +407,10 @@ impl Default for Tts {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TtsBackend {
+    #[default]
     None,
     /// Wyoming-protocol TTS server on the LAN (e.g. `wyoming-piper`).
     /// Configure via `[tts.wyoming]`.
@@ -435,12 +431,6 @@ pub enum TtsBackend {
     /// feature. Configure via `[tts.local]`; the voice downloads from
     /// the `fono-voice` mirror on first use (ADR 0032, ADR 0033).
     Local,
-}
-
-impl Default for TtsBackend {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -526,9 +516,10 @@ impl Default for Polish {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum PolishBackend {
+    #[default]
     Local,
     None,
     OpenAI,
@@ -538,12 +529,6 @@ pub enum PolishBackend {
     Cerebras,
     OpenRouter,
     Ollama,
-}
-
-impl Default for PolishBackend {
-    fn default() -> Self {
-        Self::Local
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -727,9 +712,10 @@ impl Default for Assistant {
 /// [`PolishBackend`] minus a shape change: assistant defaults to `None`
 /// (off) rather than `Local`, because turning on the assistant
 /// without picking a backend would be a footgun.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AssistantBackend {
+    #[default]
     None,
     OpenAI,
     Anthropic,
@@ -737,12 +723,6 @@ pub enum AssistantBackend {
     Cerebras,
     OpenRouter,
     Ollama,
-}
-
-impl Default for AssistantBackend {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -805,7 +785,7 @@ pub struct ContextMatch {
 /// requests (cloud STT) than the four waveform styles, which only
 /// drive a passive level/spectrum visualisation off the recording
 /// buffer. See `docs/interactive.md` for the cost shape per backend.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum WaveformStyle {
     /// Scrolling amplitude bars; bars glow brighter at higher amplitude.
@@ -814,6 +794,7 @@ pub enum WaveformStyle {
     Oscilloscope,
     /// Vertical spectrum bars from a real-input FFT — current frame
     /// only.
+    #[default]
     Fft,
     /// Rolling spectrogram (frequency on Y, time on X, magnitude as
     /// colour).
@@ -844,18 +825,6 @@ pub enum WaveformStyle {
     /// as `Fft` / `Heatmap` / `Terrain3d`).
     #[serde(rename = "system360")]
     System360,
-}
-
-impl Default for WaveformStyle {
-    fn default() -> Self {
-        // FFT reads as the most "active" of the four passive styles
-        // during both recording (real spectrum) and assistant-thinking
-        // (sweeping bell scanner with crisp inter-bar gaps), so it
-        // makes the strongest first-run impression. Users can switch
-        // to Bars/Oscilloscope/Heatmap or to the heavier Transcript
-        // style from the tray submenu or `[overlay].style`.
-        Self::Fft
-    }
 }
 
 impl WaveformStyle {

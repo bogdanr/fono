@@ -739,7 +739,7 @@ mod tests {
             let s = Arc::clone(&started_cb);
             Box::pin(async move {
                 let _g = s.lock().await;
-                tokio::time::sleep(Duration::from_millis(3000)).await;
+                tokio::time::sleep(Duration::from_secs(3)).await;
                 Ok(GroqResponse { text: "slow".into(), language: None })
             }) as GroqRequestFuture
         });

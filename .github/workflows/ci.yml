@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths-ignore:
@@ -207,16 +208,18 @@ jobs:
             budget_bytes: 27262976
             extra_needed: ""
             dynamic_linker: ld-linux-x86-64.so.2
-          # GPU variant — Vulkan-enabled, ~60 MB. Adds `libvulkan.so.1`
-          # to the NEEDED allowlist; budget is loose at 64 MiB (sanity
-          # ceiling, not a tight gate). Mirrors `fono-gpu-vX.Y.Z-x86_64`.
+          # GPU variant — Vulkan-enabled, ~66 MB. Adds `libvulkan.so.1`
+          # to the NEEDED allowlist; budget is a loose sanity ceiling at
+          # 72 MiB — not a tight gate. Measured 69,224,488 bytes (~66 MiB)
+          # after `tts-local` became a default feature (2026-06-03).
+          # Mirrors `fono-gpu-vX.Y.Z-x86_64`.
           # Per `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`.
           - variant: gpu
             arch: x86_64
             target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
             features: accel-vulkan
-            budget_bytes: 67108864
+            budget_bytes: 75497472
             extra_needed: libvulkan.so.1
             dynamic_linker: ld-linux-x86-64.so.2
           # CPU aarch64 — same shape as the x86_64 CPU row. Runs on

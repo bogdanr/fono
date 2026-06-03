@@ -35,7 +35,7 @@ use crate::KeyHeldFlags;
 /// Press duration at which a press flips from "toggle" to "hold"
 /// semantics. A release before this elapses leaves recording running
 /// (next press stops it); a release after it stops recording.
-pub const LONG_PRESS_THRESHOLD: Duration = Duration::from_millis(1000);
+pub const LONG_PRESS_THRESHOLD: Duration = Duration::from_secs(1);
 
 /// Configured hotkey strings (as they appear in `config.toml`).
 #[derive(Debug, Clone)]

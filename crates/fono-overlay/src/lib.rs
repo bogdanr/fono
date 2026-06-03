@@ -21,8 +21,9 @@
 //! `noop` backend is the terminal sink so the daemon never aborts on
 //! a missing graphics environment.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum OverlayState {
+    #[default]
     Hidden,
     Recording {
         db: i8,
@@ -135,12 +136,6 @@ pub enum IgnoreReason {
     /// Transcript matched the agent's prompt closely enough that we
     /// assume AEC didn't fully cancel the TTS playback.
     EchoFromPrompt,
-}
-
-impl Default for OverlayState {
-    fn default() -> Self {
-        Self::Hidden
-    }
 }
 
 /// Compile-time-stub overlay used in tests + by callers that need an

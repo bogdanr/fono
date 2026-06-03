@@ -604,7 +604,7 @@ mod tests {
         let got = collected.lock().unwrap().clone();
         assert_eq!(got.len(), 400, "forwarder dropped or duplicated frames");
         for (i, v) in got.iter().enumerate() {
-            assert!((*v - i as f32).abs() < f32::EPSILON, "sample {i} out of order: got {v}",);
+            assert!((*v - i as f32).abs() < f32::EPSILON, "sample {i} out of order: got {v}");
         }
     }
 }

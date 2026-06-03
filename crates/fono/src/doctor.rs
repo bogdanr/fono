@@ -434,7 +434,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 click_passthrough: true,
             },
         };
-        writeln!(out, "{} {} ({}) — {reason}", head("Overlay     :"), id.as_str(), caps.summary(),)?;
+        writeln!(out, "{} {} ({}) — {reason}", head("Overlay     :"), id.as_str(), caps.summary())?;
         // Wayland session without layer-shell and without Xwayland
         // — we have no graphical overlay path. Tell the user how
         // to fix it.

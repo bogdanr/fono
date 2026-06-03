@@ -21,10 +21,11 @@
 use std::fmt;
 
 /// Effective language selection for a single STT call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum LanguageSelection {
     /// No constraint — let the backend auto-detect across every
     /// language it knows.
+    #[default]
     Auto,
     /// Force a single language. Backends MUST pass this code through
     /// to the underlying engine (Whisper `set_language`, cloud
@@ -126,12 +127,6 @@ impl LanguageSelection {
             Some("auto") => Self::Auto,
             Some(code) => Self::Forced(code.to_ascii_lowercase()),
         }
-    }
-}
-
-impl Default for LanguageSelection {
-    fn default() -> Self {
-        Self::Auto
     }
 }
 

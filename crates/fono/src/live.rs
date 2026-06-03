@@ -621,7 +621,7 @@ fn autocorr_f0(
     for period in min_period..=max_period {
         let mut r = 0.0;
         for i in 0..(frame.len() - period) {
-            r += frame[i] * frame[i + period];
+            r = frame[i].mul_add(frame[i + period], r);
         }
         if r > best_r {
             best_r = r;

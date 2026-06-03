@@ -893,7 +893,7 @@ fn assistant_picker_rows(
         let key = if secrets.has_in_file(p.key_env) { "set" } else { "missing" };
         let display = p.display_name;
         let mut row = String::new();
-        let _ = write!(&mut row, "{display:<provider_w$}{model:<model_w$}{key}",);
+        let _ = write!(&mut row, "{display:<provider_w$}{model:<model_w$}{key}");
         rows.push(row.trim_end().to_string());
     }
     (rows, header)
