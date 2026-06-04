@@ -25,7 +25,7 @@ use std::collections::VecDeque;
 
 use fono_core::config::WaveformStyle;
 
-use crate::OverlayState;
+use crate::{OverlayState, PolishingPhase};
 
 /// True when the chosen [`WaveformStyle`] renders the transcript
 /// text panel rather than an audio visualisation. Only `Transcript`
@@ -95,7 +95,7 @@ pub fn accent_color(state: OverlayState) -> u32 {
         }
         OverlayState::AssistantThinking | OverlayState::AssistantSynthesising => 0xFFF5_9E0B,
         OverlayState::AssistantSpeaking => 0xFF38_BDF8,
-        OverlayState::Processing | OverlayState::Polishing => 0xFFE0_A040,
+        OverlayState::Processing | OverlayState::Polishing { .. } => 0xFFE0_A040,
         OverlayState::LiveDictating => 0xFF63_7AFF,
         // Neutral grey — deliberately unsaturated so it reads as
         // "Fono paused, not actively listening" rather than fighting
@@ -115,7 +115,7 @@ pub fn state_label(state: OverlayState) -> &'static str {
         OverlayState::AssistantThinking => "THINKING",
         OverlayState::AssistantSynthesising => "SYNTHESISING",
         OverlayState::AssistantSpeaking => "SPEAKING",
-        OverlayState::Processing | OverlayState::Polishing => "POLISHING",
+        OverlayState::Processing | OverlayState::Polishing { .. } => "POLISHING",
         OverlayState::LiveDictating => "LIVE",
         OverlayState::Ignoring { .. } => "IGNORED",
     }
@@ -1535,6 +1535,19 @@ pub fn draw_line_with_highlight(
 /// `plans/2026-05-22-fono-auto-stop-silence-v1.md`.
 pub const COLOR_PONDER_HIGHLIGHT: u32 = 0xCCE6_B073;
 
+/// Convert fixed-point walk progress into a character index for a
+/// `letter_count`-wide status label. Progress is clamped instead of
+/// wrapped: once a phase reaches the end it stays there until the
+/// orchestrator changes phase.
+#[must_use]
+pub fn walking_highlight_idx(walk_progress: u16, letter_count: usize) -> Option<usize> {
+    if walk_progress == 0 || letter_count == 0 {
+        return None;
+    }
+    let p = u32::from(walk_progress).saturating_sub(1);
+    Some(((p * letter_count as u32) / 10_000).min(letter_count as u32 - 1) as usize)
+}
+
 /// Convert an `OverlayState::Pondering { walk_progress }` value into
 /// the character index of "Pondering" (the 9-letter prefix of
 /// "Pondering...") that should be drawn in the highlight color.
@@ -1542,11 +1555,19 @@ pub const COLOR_PONDER_HIGHLIGHT: u32 = 0xCCE6_B073;
 /// grace before the walk begins.
 #[must_use]
 pub fn pondering_highlight_idx(walk_progress: u16) -> Option<usize> {
-    if walk_progress == 0 {
-        return None;
-    }
-    let p = u32::from(walk_progress).saturating_sub(1);
-    Some(((p * 9) / 10_000).min(8) as usize)
+    walking_highlight_idx(walk_progress, 9)
+}
+
+/// Convert polishing phase + fixed-point progress into the highlighted
+/// character of `"POLISHING"`. STT walks left-to-right; LLM cleanup
+/// walks the same label right-to-left.
+#[must_use]
+pub fn polishing_highlight_idx(phase: PolishingPhase, walk_progress: u16) -> Option<usize> {
+    let idx = walking_highlight_idx(walk_progress, 9)?;
+    Some(match phase {
+        PolishingPhase::Transcribing => idx,
+        PolishingPhase::Cleanup => 8 - idx,
+    })
 }
 
 /// Compute target window height (logical px) that fits `n_lines` of
@@ -1757,7 +1778,7 @@ impl RendererState {
                 OverlayState::AssistantThinking
                     | OverlayState::AssistantSynthesising
                     | OverlayState::AssistantSpeaking
-                    | OverlayState::Polishing,
+                    | OverlayState::Polishing { .. },
             )
         )
     }
@@ -1814,6 +1835,20 @@ impl RendererState {
                     pad_x,
                     status_baseline,
                 );
+            } else if let OverlayState::Polishing { phase, walk_progress } = self.state {
+                draw_line_with_highlight(
+                    buf,
+                    w,
+                    h,
+                    font,
+                    label,
+                    COLOR_TEXT_DIM,
+                    accent,
+                    polishing_highlight_idx(phase, walk_progress),
+                    STATUS_FONT_PX * scale,
+                    pad_x,
+                    status_baseline,
+                );
             } else {
                 draw_line(
                     buf,
@@ -1839,7 +1874,7 @@ impl RendererState {
                     | OverlayState::AssistantThinking
                     | OverlayState::AssistantSynthesising
                     | OverlayState::AssistantSpeaking
-                    | OverlayState::Polishing
+                    | OverlayState::Polishing { .. }
             );
         if waveform_active {
             let x0 = (PADDING_X + ACCENT_WIDTH) * scale;
@@ -1859,7 +1894,7 @@ impl RendererState {
                 OverlayState::AssistantThinking
                     | OverlayState::AssistantSynthesising
                     | OverlayState::AssistantSpeaking
-                    | OverlayState::Polishing
+                    | OverlayState::Polishing { .. }
             );
             match self.style {
                 WaveformStyle::Bars if thinking => {
@@ -2118,8 +2153,34 @@ mod tests {
         assert!(state_has_vu_bar(OverlayState::Pondering { db: 0, walk_progress: 0 }));
         assert!(!state_has_vu_bar(OverlayState::Hidden));
         assert!(!state_has_vu_bar(OverlayState::Processing));
-        assert!(!state_has_vu_bar(OverlayState::Polishing));
+        assert!(!state_has_vu_bar(OverlayState::Polishing {
+            phase: PolishingPhase::Transcribing,
+            walk_progress: 0,
+        }));
         assert!(!state_has_vu_bar(OverlayState::AssistantThinking));
+    }
+
+    #[test]
+    fn polishing_highlight_transcribing_walks_left_to_right() {
+        assert_eq!(polishing_highlight_idx(PolishingPhase::Transcribing, 0), None);
+        assert_eq!(polishing_highlight_idx(PolishingPhase::Transcribing, 1), Some(0));
+        assert_eq!(polishing_highlight_idx(PolishingPhase::Transcribing, 10_000), Some(8));
+    }
+
+    #[test]
+    fn polishing_highlight_cleanup_walks_right_to_left() {
+        assert_eq!(polishing_highlight_idx(PolishingPhase::Cleanup, 0), None);
+        assert_eq!(polishing_highlight_idx(PolishingPhase::Cleanup, 1), Some(8));
+        assert_eq!(polishing_highlight_idx(PolishingPhase::Cleanup, 10_000), Some(0));
+    }
+
+    #[test]
+    fn polishing_state_label_stays_polishing() {
+        for phase in [PolishingPhase::Transcribing, PolishingPhase::Cleanup] {
+            let lbl = state_label(OverlayState::Polishing { phase, walk_progress: 5_000 });
+            assert_eq!(lbl, "POLISHING");
+            assert_eq!(lbl.chars().count(), 9);
+        }
     }
 
     #[test]

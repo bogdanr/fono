@@ -90,11 +90,16 @@ pub enum OverlayState {
     /// `AssistantThinking → AssistantSpeaking` transition.
     AssistantSpeaking,
     Processing,
-    /// Dictation post-release: STT and/or polish is running and is
-    /// expected to take long enough (local backends) to warrant a
-    /// live animation. Same synthetic-frame contract as
-    /// [`Self::AssistantThinking`].
-    Polishing,
+    /// Dictation post-release: the batch STT and optional LLM cleanup
+    /// pipeline is running and is expected to take long enough (local
+    /// backends) to warrant live feedback. The visible label stays
+    /// `"POLISHING"`; `phase` only controls the walking-letter
+    /// direction so STT reads left-to-right and cleanup reads
+    /// right-to-left without adding more text to the panel.
+    Polishing {
+        phase: PolishingPhase,
+        walk_progress: u16,
+    },
     /// Live dictation in progress. The text is shown via
     /// [`OverlayHandle::update_text`].
     LiveDictating,
@@ -114,6 +119,20 @@ pub enum OverlayState {
     Ignoring {
         reason: IgnoreReason,
     },
+}
+
+/// Which internal post-recording step the dictation polishing overlay
+/// is visualising. The renderer deliberately keeps the public label as
+/// `"POLISHING"`; this discriminator only changes the highlight walk
+/// direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolishingPhase {
+    /// Batch STT is turning recorded audio into raw text. The label
+    /// highlight walks left-to-right.
+    Transcribing,
+    /// The optional LLM cleanup step is editing the raw transcript.
+    /// The label highlight walks right-to-left.
+    Cleanup,
 }
 
 /// Why the MCP relevance gate ignored an utterance, surfaced in the

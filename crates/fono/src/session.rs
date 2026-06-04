@@ -27,6 +27,8 @@ use fono_core::history::{HistoryDb, Transcription as HistoryRow};
 use fono_core::{Paths, Secrets};
 use fono_hotkey::{HotkeyAction, RecordingMode};
 use fono_inject::{ContextClassifier, FocusInfo};
+#[cfg(feature = "interactive")]
+use fono_overlay::PolishingPhase;
 use fono_polish::{FormatContext, TextFormatter};
 #[cfg(feature = "interactive")]
 use fono_stt::StreamingStt;
@@ -42,6 +44,42 @@ use crate::assistant::{run_assistant_turn, AssistantSessionState, AssistantTurnI
 /// Minimum duration of audio that will be passed to STT. Anything
 /// shorter is treated as a misfire.
 pub const MIN_RECORDING: Duration = Duration::from_millis(300);
+
+const POLISH_WALK_MIN: Duration = Duration::from_secs(1);
+const POLISH_WALK_MAX: Duration = Duration::from_secs(5);
+
+fn polish_walk_duration(recording_duration: Duration) -> Duration {
+    (recording_duration / 2).clamp(POLISH_WALK_MIN, POLISH_WALK_MAX)
+}
+
+#[cfg(feature = "interactive")]
+fn polish_walk_progress(started: Instant, duration: Duration) -> u16 {
+    let elapsed_ms = started.elapsed().as_millis();
+    let duration_ms = duration.as_millis().max(1);
+    let raw = (elapsed_ms.saturating_mul(10_000) / duration_ms).min(10_000);
+    raw as u16
+}
+
+#[cfg(feature = "interactive")]
+fn spawn_polishing_phase_task_for_handle(
+    o: fono_overlay::OverlayHandle,
+    phase: PolishingPhase,
+    walk_duration: Duration,
+) -> tokio::task::AbortHandle {
+    let task = tokio::spawn(async move {
+        let started = Instant::now();
+        o.set_state(fono_overlay::OverlayState::Polishing { phase, walk_progress: 0 });
+        let mut tick = tokio::time::interval(Duration::from_millis(50));
+        loop {
+            tick.tick().await;
+            o.set_state(fono_overlay::OverlayState::Polishing {
+                phase,
+                walk_progress: polish_walk_progress(started, walk_duration),
+            });
+        }
+    });
+    task.abort_handle()
+}
 
 /// Amplitude that maps to "full" on every audio-driven visualisation
 /// — RMS for bars + the live-dictation VU bar, peak amplitude for the
@@ -1605,6 +1643,19 @@ impl SessionOrchestrator {
         Some(task.abort_handle())
     }
 
+    #[cfg(feature = "interactive")]
+    fn spawn_polishing_phase_task(
+        &self,
+        phase: PolishingPhase,
+        walk_duration: Duration,
+    ) -> Option<tokio::task::AbortHandle> {
+        if !self.current_config().overlay.waveform {
+            return None;
+        }
+        let o = self.overlay.read().ok().and_then(|g| g.clone())?;
+        Some(spawn_polishing_phase_task_for_handle(o, phase, walk_duration))
+    }
+
     /// Fire-and-forget warmup for STT, LLM and the inject backend.
     /// Latency plan tasks L2 (whisper mmap), L3 (HTTP keep-alive),
     /// L5 (inject binary page-cache).
@@ -1835,7 +1886,7 @@ impl SessionOrchestrator {
             fono_audio::mute::set_default_sink_mute(false);
         }
         // Standalone-waveform overlay: shift to amber `Polishing`
-        // (animated, when STT or LLM is local) or `Processing`
+        // (walking label, when STT or LLM is local) or `Processing`
         // (static, for cloud) while STT runs. Live-dictation mode
         // owns its own state transitions; only flip when this is
         // the batch path.
@@ -1846,16 +1897,15 @@ impl SessionOrchestrator {
                 let llm_local = cfg.interactive.cleanup_on_finalize
                     && self.current_llm().is_some_and(|l| l.is_local());
                 let animate = stt_local || llm_local;
-                if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
-                    o.set_state(if animate {
-                        fono_overlay::OverlayState::Polishing
-                    } else {
-                        fono_overlay::OverlayState::Processing
-                    });
-                }
                 if animate {
-                    self.spawn_thinking_animation_task(&cfg)
+                    self.spawn_polishing_phase_task(
+                        PolishingPhase::Transcribing,
+                        polish_walk_duration(session.started_at.elapsed()),
+                    )
                 } else {
+                    if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
+                        o.set_state(fono_overlay::OverlayState::Processing);
+                    }
                     None
                 }
             } else {
@@ -2450,9 +2500,12 @@ impl SessionOrchestrator {
         } else {
             None
         };
+        #[cfg(not(feature = "interactive"))]
+        let overlay: Option<fono_overlay::OverlayHandle> = None;
 
         in_flight.store(true, Ordering::SeqCst);
         tokio::spawn(async move {
+            let mut polish_anim = polish_anim;
             // H.1: focus_info was captured at hotkey-press time in
             // `on_start_recording` and threaded through `CaptureSession`.
             // We deliberately do NOT re-probe here — by the time we
@@ -2469,6 +2522,9 @@ impl SessionOrchestrator {
                 &config,
                 injector.as_ref(),
                 focus_info,
+                overlay.as_ref(),
+                &mut polish_anim,
+                polish_walk_duration(Duration::from_millis(capture_ms)),
             )
             .await;
             match &outcome {
@@ -2509,6 +2565,7 @@ impl SessionOrchestrator {
         let focus = Arc::clone(&self.focus);
         let focus_info =
             tokio::task::spawn_blocking(move || focus.probe()).await.unwrap_or_default();
+        let mut polish_anim = None;
         run_pipeline(
             pcm,
             self.capture_cfg.target_sample_rate,
@@ -2519,6 +2576,9 @@ impl SessionOrchestrator {
             &config,
             self.injector.as_ref(),
             focus_info,
+            None,
+            &mut polish_anim,
+            polish_walk_duration(Duration::from_millis(capture_ms)),
         )
         .await
     }
@@ -3095,6 +3155,9 @@ async fn run_pipeline(
     config: &Config,
     injector: &dyn Injector,
     focus_info: FocusInfo,
+    overlay: Option<&fono_overlay::OverlayHandle>,
+    polish_anim: &mut Option<tokio::task::AbortHandle>,
+    polish_walk_duration: Duration,
 ) -> PipelineOutcome {
     if pcm.is_empty() {
         return PipelineOutcome::EmptyOrTooShort { duration_ms: capture_ms };
@@ -3254,6 +3317,19 @@ async fn run_pipeline(
         }
         None
     } else if let Some(polish_backend) = polish {
+        #[cfg(feature = "interactive")]
+        if let Some(o) = overlay.filter(|_| polish_anim.is_some()) {
+            if config.overlay.waveform && !config.live_preview() {
+                if let Some(t) = polish_anim.take() {
+                    t.abort();
+                }
+                *polish_anim = Some(spawn_polishing_phase_task_for_handle(
+                    o.clone(),
+                    PolishingPhase::Cleanup,
+                    polish_walk_duration,
+                ));
+            }
+        }
         let builtin_suffix =
             gated_builtin_suffix(ctx_profile.as_ref(), &raw, trans.language.as_deref());
         let ctx = build_format_context(
