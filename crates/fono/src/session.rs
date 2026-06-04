@@ -1891,7 +1891,7 @@ impl SessionOrchestrator {
         // owns its own state transitions; only flip when this is
         // the batch path.
         #[cfg(feature = "interactive")]
-        let polish_anim: Option<tokio::task::AbortHandle> = {
+        let polish_label_anim: Option<tokio::task::AbortHandle> = {
             if cfg.overlay.waveform && !cfg.live_preview() {
                 let stt_local = self.current_stt().is_local();
                 let llm_local = cfg.interactive.cleanup_on_finalize
@@ -1912,8 +1912,18 @@ impl SessionOrchestrator {
                 None
             }
         };
+        #[cfg(feature = "interactive")]
+        let polish_waveform_anim: Option<tokio::task::AbortHandle> = {
+            if polish_label_anim.is_some() {
+                self.spawn_thinking_animation_task(&cfg)
+            } else {
+                None
+            }
+        };
         #[cfg(not(feature = "interactive"))]
-        let polish_anim: Option<tokio::task::AbortHandle> = None;
+        let polish_label_anim: Option<tokio::task::AbortHandle> = None;
+        #[cfg(not(feature = "interactive"))]
+        let polish_waveform_anim: Option<tokio::task::AbortHandle> = None;
         // Pull the press-time focus snapshot out before consuming the
         // session in the blocking stop/drain below.
         let focus_info = session.focus_info.clone();
@@ -1926,7 +1936,10 @@ impl SessionOrchestrator {
             warn!("recording too short ({capture_ms} ms); skipping STT");
             #[cfg(feature = "interactive")]
             if cfg.overlay.waveform && !cfg.live_preview() {
-                if let Some(t) = polish_anim {
+                if let Some(t) = polish_label_anim {
+                    t.abort();
+                }
+                if let Some(t) = polish_waveform_anim {
                     t.abort();
                 }
                 if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
@@ -1937,7 +1950,13 @@ impl SessionOrchestrator {
             return;
         }
 
-        self.spawn_pipeline(samples, capture_ms, polish_anim, focus_info);
+        self.spawn_pipeline(
+            samples,
+            capture_ms,
+            polish_label_anim,
+            polish_waveform_anim,
+            focus_info,
+        );
     }
 
     /// Cancel an active recording, dropping the audio without invoking STT.
@@ -2478,7 +2497,8 @@ impl SessionOrchestrator {
         &self,
         pcm: Vec<f32>,
         capture_ms: u64,
-        polish_anim: Option<tokio::task::AbortHandle>,
+        polish_label_anim: Option<tokio::task::AbortHandle>,
+        polish_waveform_anim: Option<tokio::task::AbortHandle>,
         focus_info: FocusInfo,
     ) {
         let stt = self.current_stt();
@@ -2505,7 +2525,7 @@ impl SessionOrchestrator {
 
         in_flight.store(true, Ordering::SeqCst);
         tokio::spawn(async move {
-            let mut polish_anim = polish_anim;
+            let mut polish_label_anim = polish_label_anim;
             // H.1: focus_info was captured at hotkey-press time in
             // `on_start_recording` and threaded through `CaptureSession`.
             // We deliberately do NOT re-probe here — by the time we
@@ -2523,7 +2543,7 @@ impl SessionOrchestrator {
                 injector.as_ref(),
                 focus_info,
                 overlay.as_ref(),
-                &mut polish_anim,
+                &mut polish_label_anim,
                 polish_walk_duration(Duration::from_millis(capture_ms)),
             )
             .await;
@@ -2539,11 +2559,17 @@ impl SessionOrchestrator {
                 }
             }
             #[cfg(feature = "interactive")]
-            if let Some(t) = polish_anim {
+            if let Some(t) = polish_label_anim {
+                t.abort();
+            }
+            #[cfg(feature = "interactive")]
+            if let Some(t) = polish_waveform_anim {
                 t.abort();
             }
             #[cfg(not(feature = "interactive"))]
-            drop(polish_anim);
+            drop(polish_label_anim);
+            #[cfg(not(feature = "interactive"))]
+            drop(polish_waveform_anim);
             #[cfg(feature = "interactive")]
             if let Some(o) = overlay {
                 o.set_state(fono_overlay::OverlayState::Hidden);
@@ -3156,7 +3182,7 @@ async fn run_pipeline(
     injector: &dyn Injector,
     focus_info: FocusInfo,
     overlay: Option<&fono_overlay::OverlayHandle>,
-    polish_anim: &mut Option<tokio::task::AbortHandle>,
+    polish_label_anim: &mut Option<tokio::task::AbortHandle>,
     polish_walk_duration: Duration,
 ) -> PipelineOutcome {
     if pcm.is_empty() {
@@ -3318,12 +3344,12 @@ async fn run_pipeline(
         None
     } else if let Some(polish_backend) = polish {
         #[cfg(feature = "interactive")]
-        if let Some(o) = overlay.filter(|_| polish_anim.is_some()) {
+        if let Some(o) = overlay.filter(|_| polish_label_anim.is_some()) {
             if config.overlay.waveform && !config.live_preview() {
-                if let Some(t) = polish_anim.take() {
+                if let Some(t) = polish_label_anim.take() {
                     t.abort();
                 }
-                *polish_anim = Some(spawn_polishing_phase_task_for_handle(
+                *polish_label_anim = Some(spawn_polishing_phase_task_for_handle(
                     o.clone(),
                     PolishingPhase::Cleanup,
                     polish_walk_duration,

@@ -1500,8 +1500,42 @@ pub fn draw_line_with_highlight(
     x_origin: f32,
     baseline_y: f32,
 ) {
+    draw_line_with_highlight_alpha(
+        buf,
+        stride,
+        h,
+        font,
+        text,
+        base_color,
+        highlight_color,
+        highlight_char_idx,
+        0xFF,
+        size_px,
+        x_origin,
+        baseline_y,
+    );
+}
+
+/// Same as [`draw_line_with_highlight`], but lets the caller attenuate
+/// the highlighted character. Used by the terminal polishing pulse so
+/// an overrun reads as "still working" rather than a frozen end-stop.
+pub fn draw_line_with_highlight_alpha(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    font: &ab_glyph::FontArc,
+    text: &str,
+    base_color: u32,
+    highlight_color: u32,
+    highlight_char_idx: Option<usize>,
+    highlight_alpha: u8,
+    size_px: f32,
+    x_origin: f32,
+    baseline_y: f32,
+) {
     use ab_glyph::{Font, ScaleFont};
     let scaled = font.as_scaled(size_px);
+    let highlight_color = with_alpha(highlight_color, highlight_alpha);
     let mut x = x_origin;
     for (i, ch) in text.chars().enumerate() {
         let color = if Some(i) == highlight_char_idx { highlight_color } else { base_color };
@@ -1568,6 +1602,16 @@ pub fn polishing_highlight_idx(phase: PolishingPhase, walk_progress: u16) -> Opt
         PolishingPhase::Transcribing => idx,
         PolishingPhase::Cleanup => 8 - idx,
     })
+}
+
+#[must_use]
+pub fn polishing_terminal_pulse_alpha(walk_progress: u16, elapsed_secs: f32) -> u8 {
+    if walk_progress < 10_000 {
+        return 0xFF;
+    }
+    let wave = (elapsed_secs * std::f32::consts::TAU).sin();
+    let t = (wave + 1.0) * 0.5;
+    (0x66 as f32 + t * (0xFF - 0x66) as f32).round() as u8
 }
 
 /// Compute target window height (logical px) that fits `n_lines` of
@@ -1836,7 +1880,7 @@ impl RendererState {
                     status_baseline,
                 );
             } else if let OverlayState::Polishing { phase, walk_progress } = self.state {
-                draw_line_with_highlight(
+                draw_line_with_highlight_alpha(
                     buf,
                     w,
                     h,
@@ -1845,6 +1889,10 @@ impl RendererState {
                     COLOR_TEXT_DIM,
                     accent,
                     polishing_highlight_idx(phase, walk_progress),
+                    polishing_terminal_pulse_alpha(
+                        walk_progress,
+                        self.start_instant.elapsed().as_secs_f32(),
+                    ),
                     STATUS_FONT_PX * scale,
                     pad_x,
                     status_baseline,
@@ -2179,8 +2227,14 @@ mod tests {
         for phase in [PolishingPhase::Transcribing, PolishingPhase::Cleanup] {
             let lbl = state_label(OverlayState::Polishing { phase, walk_progress: 5_000 });
             assert_eq!(lbl, "POLISHING");
-            assert_eq!(lbl.chars().count(), 9);
         }
+    }
+
+    #[test]
+    fn polishing_terminal_pulse_only_after_walk_finishes() {
+        assert_eq!(polishing_terminal_pulse_alpha(9_999, 0.25), 0xFF);
+        assert_eq!(polishing_terminal_pulse_alpha(10_000, 0.25), 0xFF);
+        assert_eq!(polishing_terminal_pulse_alpha(10_000, 0.75), 0x66);
     }
 
     #[test]
