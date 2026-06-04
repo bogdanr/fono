@@ -34,7 +34,7 @@ use dialoguer::console::{Key, Term};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, MultiSelect, Select};
 use fono_core::config::{
     AssistantBackend, AssistantCloud, Config, PolishBackend, PolishCloud, PolishLocal, Stt,
-    SttBackend, SttCloud, SttLocal, TtsBackend, TtsCloud, TtsWyoming,
+    SttBackend, SttCloud, SttLocal, TtsBackend, TtsCloud, TtsWyoming, DEFAULT_POLISH_LOCAL_MODEL,
 };
 use fono_core::hwcheck::{HardwareSnapshot, HostGpu, LocalTier};
 use fono_core::locale::detect_user_languages_ranked;
@@ -1002,8 +1002,6 @@ async fn configure_local(
     secrets: &mut Secrets,
     snap: &HardwareSnapshot,
 ) -> Result<()> {
-    let tier = snap.tier();
-
     // Step 1 — English-only or multilingual?
     let english_only = pick_english_only(theme);
 
@@ -1031,10 +1029,9 @@ async fn configure_local(
     // Step 4 — polish choice. Default is **Skip**: dictation is
     // valuable on its own without an LLM rewrite step, and the user
     // can opt in later via `fono settings`. Cloud comes second
-    // (cheap, fast, no model download). Local comes last and is only
-    // marked "recommended" when the host has real LLM acceleration —
-    // CPU-only inference on a 1.5 GB Qwen model is a frustrating
-    // first-run experience.
+    // (cheap, fast, no model download). Local comes last; accelerated
+    // and high-end hosts get the 2B local cleanup model, while more
+    // modest machines get the 0.8B default.
     let polish_options = build_polish_options(snap);
     let llm_choice = Select::with_theme(theme)
         .with_prompt("Apply polish (filler-removal, capitalization, punctuation)?")
@@ -1050,7 +1047,7 @@ async fn configure_local(
             config.polish.local = PolishLocal::default();
         }
         1 => configure_cloud_llm(theme, config, secrets).await?,
-        _ => configure_local_llm(theme, config, tier)?,
+        _ => configure_local_llm(config, snap),
     }
     Ok(())
 }
@@ -1058,34 +1055,62 @@ async fn configure_local(
 /// Build the LLM-cleanup-choice menu items in the standard order
 /// (Skip, Cloud, Local) with the "— recommended" suffix attached
 /// only to the entry the wizard actively wants the user to pick.
-/// Local gets the recommendation only when the host has hardware
-/// acceleration that makes local inference comfortable; otherwise
-/// Cloud picks up the suffix. Skip never carries the suffix —
-/// it's the safe default but not "the wizard's pick".
+/// Local gets the recommendation when the host has hardware acceleration
+/// or high-end CPU headroom; otherwise Cloud picks up the suffix. Skip
+/// never carries the suffix — it's the safe default but not "the wizard's
+/// pick".
 fn build_polish_options(snap: &HardwareSnapshot) -> Vec<String> {
-    let local_accelerated = host_has_llm_acceleration(snap);
-    let local_label = if local_accelerated {
-        "Local polish (qwen2.5, private, offline) — recommended"
-    } else {
-        "Local polish (qwen2.5, private, offline) — slow without GPU/Apple Silicon"
-    };
-    let cloud_label = if local_accelerated {
+    let model = default_local_polish_model(snap);
+    let local_model_label = local_polish_model_label(model);
+    let local_recommended = should_use_high_tier_local_polish(snap);
+    let local_label = format!("Local polish ({local_model_label}, private, offline)");
+    let cloud_label = if local_recommended {
         "Cloud polish (Cerebras / Groq / OpenAI / Anthropic — needs key)"
     } else {
         "Cloud polish (Cerebras / Groq / OpenAI / Anthropic — needs key) — recommended"
     };
-    vec![
-        "Skip polish (raw whisper output)".to_string(),
-        cloud_label.to_string(),
-        local_label.to_string(),
-    ]
+    vec!["Skip polish (raw whisper output)".to_string(), cloud_label.to_string(), local_label]
 }
 
-/// Whether this host has the kind of acceleration that makes local
-/// polish comfortable enough to recommend to a first-time user.
-/// Today: Apple Silicon (Metal/CoreML) or a Vulkan-capable GPU.
-/// CUDA / ROCm / NPU detection lands when those backends are wired.
+/// Pick the local cleanup model without showing a second model menu.
+///
+/// `qwen3.5-2b` is reserved for hosts with LLM acceleration or clearly
+/// high-end CPU-only headroom; everyone else gets the smaller default.
+fn default_local_polish_model(snap: &HardwareSnapshot) -> &'static str {
+    let inference_snap = local_polish_inference_snapshot(snap);
+    if should_use_high_tier_local_polish(&inference_snap) {
+        "qwen3.5-2b"
+    } else {
+        DEFAULT_POLISH_LOCAL_MODEL
+    }
+}
+
+fn local_polish_inference_snapshot(snap: &HardwareSnapshot) -> HardwareSnapshot {
+    snap.for_inference(matches!(crate::variant::VARIANT, crate::variant::Variant::Gpu))
+}
+
+fn should_use_high_tier_local_polish(snap: &HardwareSnapshot) -> bool {
+    host_has_llm_acceleration(snap) || snap.tier() == LocalTier::HighEnd
+}
+
+fn local_polish_model_label(model: &str) -> &'static str {
+    match model {
+        "qwen3.5-2b" => "Qwen3.5 2B",
+        "qwen3.5-0.8b" => "Qwen3.5 0.8B",
+        _ => "local LLM",
+    }
+}
+
+/// Whether this build can use the host's acceleration for local polish.
+///
+/// The raw hardware probe may see a Vulkan GPU even when this is the
+/// compact CPU-only binary. Mirror the STT picker policy: GPU hardware
+/// only counts when the current release variant can actually route local
+/// inference through the accelerated backend.
 fn host_has_llm_acceleration(snap: &HardwareSnapshot) -> bool {
+    if !matches!(crate::variant::VARIANT, crate::variant::Variant::Gpu) {
+        return false;
+    }
     if snap.host_gpu != HostGpu::None {
         return true;
     }
@@ -1282,7 +1307,7 @@ async fn configure_customize(
             config.polish.enabled = false;
         }
         1 => configure_cloud_llm(theme, config, secrets).await?,
-        _ => configure_local_llm(theme, config, tier)?,
+        _ => configure_local_llm(config, snap),
     }
 
     Ok(())
@@ -1689,48 +1714,16 @@ pub fn recommend_local_stt_model_headless(snap: &HardwareSnapshot) -> &'static s
 
 // ─── LLM configuration helpers ─────────────────────────────────────────────
 
-/// Tier-aware local LLM model picker. Sets `config.polish` to the chosen
-/// `PolishBackend::Local` + matching `PolishLocal` defaults. The model file
-/// is downloaded later by `ensure_models` once the wizard finishes.
-fn configure_local_llm(theme: &ColorfulTheme, config: &mut Config, tier: LocalTier) -> Result<()> {
-    let (items, models, default_idx) = match tier {
-        LocalTier::HighEnd => (
-            vec![
-                "qwen2.5-3b-instruct  (~2.0 GB) — recommended for your machine",
-                "qwen2.5-1.5b-instruct (~1.0 GB) — lighter",
-                "qwen2.5-0.5b-instruct (~350 MB) — lightest",
-            ],
-            vec!["qwen2.5-3b-instruct", "qwen2.5-1.5b-instruct", "qwen2.5-0.5b-instruct"],
-            0usize,
-        ),
-        LocalTier::Recommended | LocalTier::Comfortable => (
-            vec![
-                "qwen2.5-1.5b-instruct (~1.0 GB) — recommended for your machine",
-                "qwen2.5-0.5b-instruct (~350 MB) — lighter (faster, lower quality)",
-                "qwen2.5-3b-instruct  (~2.0 GB) — slower but higher quality",
-            ],
-            vec!["qwen2.5-1.5b-instruct", "qwen2.5-0.5b-instruct", "qwen2.5-3b-instruct"],
-            0usize,
-        ),
-        LocalTier::Minimum | LocalTier::Unsuitable => (
-            vec![
-                "qwen2.5-0.5b-instruct (~350 MB) — recommended for your machine",
-                "qwen2.5-1.5b-instruct (~1.0 GB) — slower but higher quality",
-            ],
-            vec!["qwen2.5-0.5b-instruct", "qwen2.5-1.5b-instruct"],
-            0usize,
-        ),
-    };
-    let idx = Select::with_theme(theme)
-        .with_prompt("Pick a local LLM model")
-        .items(&items)
-        .default(default_idx)
-        .interact()?;
+/// Hardware-aware local LLM selector. Sets `config.polish` to
+/// `PolishBackend::Local` and picks one of the two supported local cleanup
+/// models without opening a second model menu. The model file is downloaded
+/// later by `ensure_models` once the wizard finishes.
+fn configure_local_llm(config: &mut Config, snap: &HardwareSnapshot) {
     config.polish.backend = PolishBackend::Local;
     config.polish.enabled = true;
-    config.polish.local = PolishLocal { model: models[idx].into(), ..PolishLocal::default() };
+    config.polish.local =
+        PolishLocal { model: default_local_polish_model(snap).into(), ..PolishLocal::default() };
     config.polish.cloud = None;
-    Ok(())
 }
 
 async fn configure_cloud_stt(
@@ -2150,6 +2143,32 @@ mod tests {
         // Key status reflects secrets.toml presence.
         assert!(rows[0].ends_with("set"));
         assert!(rows[1].ends_with("missing"));
+    }
+
+    #[test]
+    fn polish_options_name_automatic_local_model() {
+        let modest = build_polish_options(&snap(8, 16, 200, true));
+        assert!(modest.iter().any(|label| label.contains("Qwen3.5 0.8B")), "{modest:?}");
+        assert!(modest.iter().all(|label| !label.contains("qwen2.5")), "{modest:?}");
+
+        let high_end = build_polish_options(&snap(12, 32, 200, true));
+        assert!(high_end.iter().any(|label| label.contains("Qwen3.5 2B")), "{high_end:?}");
+        assert!(high_end.iter().all(|label| !label.contains("qwen2.5")), "{high_end:?}");
+    }
+
+    #[test]
+    fn local_polish_model_selection_respects_build_variant_inference_path() {
+        assert_eq!(default_local_polish_model(&snap(8, 16, 200, true)), "qwen3.5-0.8b");
+        assert_eq!(default_local_polish_model(&snap(12, 32, 200, true)), "qwen3.5-2b");
+
+        let mut gpu_snap = snap(8, 16, 200, true);
+        gpu_snap.host_gpu = HostGpu::Integrated;
+        let expected = if matches!(crate::variant::VARIANT, crate::variant::Variant::Gpu) {
+            "qwen3.5-2b"
+        } else {
+            "qwen3.5-0.8b"
+        };
+        assert_eq!(default_local_polish_model(&gpu_snap), expected);
     }
 
     #[test]

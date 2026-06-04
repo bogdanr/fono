@@ -16,40 +16,23 @@ pub struct PolishModelInfo {
 
 /// HuggingFace GGUF weights pinned for the first-run downloader.
 ///
-/// NOTE: SHA256s below are pinned from the Qwen2.5 / SmolLM2 GGUF releases at
-/// the time of Phase 5 plan authoring; `fono models verify` re-checks them.
+/// NOTE: SHA256s below are pinned from the Qwen3.5 GGUF releases at the
+/// time of registry updates; `fono models verify` re-checks them.
 pub const POLISH_MODELS: &[PolishModelInfo] = &[
     PolishModelInfo {
-        name: "qwen2.5-0.5b-instruct",
+        name: "qwen3.5-0.8b",
         multilingual: true,
-        approx_mb: 350,
-        url_path: "Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
-        sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+        approx_mb: 528,
+        url_path: "lmstudio-community/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf",
+        sha256: "f5b14da98939b60bbe1019a964eba656407e1e0b64f1fe3003ff6d650e93bfec",
         license: "Apache-2.0",
     },
     PolishModelInfo {
-        name: "qwen2.5-1.5b-instruct",
+        name: "qwen3.5-2b",
         multilingual: true,
-        approx_mb: 1_000,
-        url_path: "Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
-        sha256: "0000000000000000000000000000000000000000000000000000000000000000",
-        license: "Apache-2.0",
-    },
-    PolishModelInfo {
-        name: "qwen2.5-3b-instruct",
-        multilingual: true,
-        approx_mb: 2_000,
-        url_path: "Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
-        sha256: "0000000000000000000000000000000000000000000000000000000000000000",
-        license: "Apache-2.0",
-    },
-    PolishModelInfo {
-        name: "smollm2-1.7b-instruct",
-        multilingual: false,
-        approx_mb: 1_100,
-        url_path:
-            "HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF/resolve/main/smollm2-1.7b-instruct-q4_k_m.gguf",
-        sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+        approx_mb: 1_270,
+        url_path: "lmstudio-community/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
+        sha256: "0bfe35afc9f05b7fac3fa04925e051ac7939a42a8a17ea11afc99701bea826cc",
         license: "Apache-2.0",
     },
 ];
@@ -84,9 +67,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_qwen_1_5b() {
-        let m = PolishRegistry::get("qwen2.5-1.5b-instruct").unwrap();
-        assert_eq!(m.license, "Apache-2.0");
-        assert!(m.multilingual);
+    fn qwen3_5_models_are_apache_multilingual() {
+        let default = PolishRegistry::get("qwen3.5-0.8b").unwrap();
+        assert_eq!(default.license, "Apache-2.0");
+        assert!(default.multilingual);
+        assert_eq!(
+            default.sha256,
+            "f5b14da98939b60bbe1019a964eba656407e1e0b64f1fe3003ff6d650e93bfec"
+        );
+
+        let high = PolishRegistry::get("qwen3.5-2b").unwrap();
+        assert_eq!(high.license, "Apache-2.0");
+        assert!(high.multilingual);
+        assert_eq!(high.approx_mb, 1_270);
+        assert_eq!(high.sha256, "0bfe35afc9f05b7fac3fa04925e051ac7939a42a8a17ea11afc99701bea826cc");
     }
 }

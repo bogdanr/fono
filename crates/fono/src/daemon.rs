@@ -188,35 +188,6 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     };
 
     // ---------------------------------------------------------------
-    // mDNS discovery (Slice 4 of the network plan). The browser is
-    // always on when the daemon can create an mDNS service daemon — it
-    // populates the LAN registry exposed via IPC `ListDiscovered`. The
-    // Wyoming advertiser is managed alongside the LAN listener below so
-    // both can be toggled live from the tray.
-    // ---------------------------------------------------------------
-    let discovery = spawn_discovery_if_enabled().await;
-    let discovery_registry: Option<fono_net::discovery::Registry> =
-        discovery.as_ref().map(|d| d.registry.clone());
-
-    // ---------------------------------------------------------------
-    // LAN Wyoming server (Slice 3 of the network plan). Off by default;
-    // started only when `[server.wyoming].enabled = true` *and* the
-    // orchestrator came up (degraded mode skips serving — there's no
-    // STT backend to host). The single switch serves STT always and
-    // TTS automatically whenever a `[tts]` backend is configured. The
-    // listener handle and its mDNS advert live in a shared
-    // `WyomingControl` so the tray toggle can start/stop them in place
-    // without a daemon restart. Held for the daemon's lifetime; dropped
-    // on exit, which closes the listener and fires the mDNS goodbye.
-    // ---------------------------------------------------------------
-    let wyoming_ctl = WyomingControl {
-        rt: Arc::new(tokio::sync::Mutex::new(WyomingRuntime::default())),
-        mdns: discovery.as_ref().and_then(|d| d.daemon.clone()),
-        registry: discovery_registry.clone(),
-    };
-    wyoming_ctl.reconcile(&config, orchestrator.as_ref()).await;
-
-    // ---------------------------------------------------------------
     // Global hotkey listener
     //
     // Skipped entirely on headless hosts (no `DISPLAY`, no
@@ -273,6 +244,30 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         debug!("hotkey listener skipped (headless: no DISPLAY / WAYLAND_DISPLAY)");
         None
     };
+
+    // ---------------------------------------------------------------
+    // mDNS discovery (Slice 4 of the network plan). Starts after the
+    // global hotkey grab so LAN browsing cannot delay local desktop
+    // readiness. The Wyoming advertiser is managed alongside the LAN
+    // listener below so both can be toggled live from the tray.
+    // ---------------------------------------------------------------
+    let discovery = spawn_discovery_if_enabled().await;
+    let discovery_registry: Option<fono_net::discovery::Registry> =
+        discovery.as_ref().map(|d| d.registry.clone());
+
+    // ---------------------------------------------------------------
+    // LAN Wyoming server (Slice 3 of the network plan). Off by default;
+    // reconciled after the hotkey grab so optional network serving does
+    // not hold up local dictation readiness. Held for the daemon's
+    // lifetime; dropped on exit, which closes the listener and fires
+    // the mDNS goodbye.
+    // ---------------------------------------------------------------
+    let wyoming_ctl = WyomingControl {
+        rt: Arc::new(tokio::sync::Mutex::new(WyomingRuntime::default())),
+        mdns: discovery.as_ref().and_then(|d| d.daemon.clone()),
+        registry: discovery_registry.clone(),
+    };
+    wyoming_ctl.reconcile(&config, orchestrator.as_ref()).await;
 
     // ---------------------------------------------------------------
     // Background update checker — hits GitHub releases once on startup

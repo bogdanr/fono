@@ -531,6 +531,16 @@ pub enum PolishBackend {
     Ollama,
 }
 
+pub const DEFAULT_POLISH_LOCAL_MODEL: &str = "qwen3.5-0.8b";
+const DEFAULT_POLISH_LOCAL_QUANTIZATION: &str = "q4_k_m";
+const DEFAULT_POLISH_LOCAL_CONTEXT: u32 = 4096;
+const SUPERSEDED_POLISH_LOCAL_MODELS: &[&str] = &[
+    "qwen2.5-0.5b-instruct",
+    "qwen2.5-1.5b-instruct",
+    "qwen2.5-3b-instruct",
+    "smollm2-1.7b-instruct",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PolishLocal {
@@ -541,7 +551,11 @@ pub struct PolishLocal {
 
 impl Default for PolishLocal {
     fn default() -> Self {
-        Self { model: "qwen2.5-1.5b-instruct".into(), quantization: "q4_k_m".into(), context: 4096 }
+        Self {
+            model: DEFAULT_POLISH_LOCAL_MODEL.into(),
+            quantization: DEFAULT_POLISH_LOCAL_QUANTIZATION.into(),
+            context: DEFAULT_POLISH_LOCAL_CONTEXT,
+        }
     }
 }
 
@@ -737,7 +751,11 @@ impl Default for AssistantLocal {
     fn default() -> Self {
         // A 3B-class chat model is the floor for usable assistant
         // quality; 1.5B (the cleanup default) tends to ramble.
-        Self { model: "qwen2.5-3b-instruct".into(), quantization: "q4_k_m".into(), context: 8192 }
+        Self {
+            model: DEFAULT_POLISH_LOCAL_MODEL.into(),
+            quantization: "q4_k_m".into(),
+            context: 8192,
+        }
     }
 }
 
@@ -1308,6 +1326,16 @@ impl Config {
             self.polish.prompt.advanced = default_prompt_advanced().to_string();
         }
 
+        // Refresh the old baked-in local cleanup model when the rest of
+        // `[polish.local]` still matches the default shape. Users who pinned a
+        // different model, quantization, or context keep their explicit choice.
+        if SUPERSEDED_POLISH_LOCAL_MODELS.contains(&self.polish.local.model.as_str())
+            && self.polish.local.quantization == DEFAULT_POLISH_LOCAL_QUANTIZATION
+            && self.polish.local.context == DEFAULT_POLISH_LOCAL_CONTEXT
+        {
+            self.polish.local.model = DEFAULT_POLISH_LOCAL_MODEL.to_string();
+        }
+
         Ok(())
     }
 
@@ -1363,7 +1391,30 @@ mod tests {
         assert_eq!(loaded.version, CURRENT_VERSION);
         assert!(loaded.general.languages.is_empty(), "default = unconstrained auto-detect");
         assert_eq!(loaded.stt.local.model, "small");
-        assert_eq!(loaded.polish.local.model, "qwen2.5-1.5b-instruct");
+        assert_eq!(loaded.polish.local.model, DEFAULT_POLISH_LOCAL_MODEL);
+    }
+
+    #[test]
+    fn migrate_upgrades_superseded_local_polish_defaults() {
+        for old_model in SUPERSEDED_POLISH_LOCAL_MODELS {
+            let mut cfg = Config::default();
+            cfg.polish.local.model = (*old_model).to_string();
+
+            cfg.migrate().unwrap();
+
+            assert_eq!(cfg.polish.local.model, DEFAULT_POLISH_LOCAL_MODEL, "{old_model}");
+        }
+    }
+
+    #[test]
+    fn migrate_preserves_custom_local_polish_model() {
+        let mut cfg = Config::default();
+        cfg.polish.local.model = "qwen2.5-3b-instruct".to_string();
+        cfg.polish.local.context = 8192;
+
+        cfg.migrate().unwrap();
+
+        assert_eq!(cfg.polish.local.model, "qwen2.5-3b-instruct");
     }
 
     #[test]

@@ -2910,7 +2910,7 @@ impl SessionOrchestrator {
                     focus_info.window_class.as_deref(),
                     focus_info.window_title.as_deref(),
                 );
-                let builtin_suffix = live_ctx_profile.as_ref().and_then(|p| p.llm_suffix);
+                let builtin_suffix = gated_builtin_suffix(live_ctx_profile.as_ref(), &raw, None);
                 let app_class = focus_info.window_class.clone();
                 let app_title = focus_info.window_title.clone();
                 let ctx = build_format_context(
@@ -3254,7 +3254,8 @@ async fn run_pipeline(
         }
         None
     } else if let Some(polish_backend) = polish {
-        let builtin_suffix = ctx_profile.as_ref().and_then(|p| p.llm_suffix);
+        let builtin_suffix =
+            gated_builtin_suffix(ctx_profile.as_ref(), &raw, trans.language.as_deref());
         let ctx = build_format_context(
             config,
             app_class.as_deref(),
@@ -3265,8 +3266,8 @@ async fn run_pipeline(
         metrics.ctx_tag = build_ctx_tag(&ctx, app_class.as_deref());
         tracing::debug!(
             target: "fono::pipeline",
-            "polish.prompt main={:?} advanced={:?} dictionary={:?}",
-            ctx.main_prompt, ctx.advanced_prompt, ctx.dictionary,
+            "polish.prompt main={:?} advanced={:?} dictionary={:?} rule_suffix={:?} candidate_languages={:?}",
+            ctx.main_prompt, ctx.advanced_prompt, ctx.dictionary, ctx.rule_suffix, ctx.candidate_languages,
         );
         tracing::debug!(target: "fono::pipeline", "polish.input: {raw:?}");
         let llm_started = Instant::now();
@@ -3452,6 +3453,176 @@ fn build_format_context(
         ctx.advanced_prompt.clear();
     }
     ctx
+}
+
+fn gated_builtin_suffix(
+    profile: Option<&fono_inject::ContextProfile>,
+    raw: &str,
+    language: Option<&str>,
+) -> Option<&'static str> {
+    let profile = profile?;
+    let suffix = profile.llm_suffix?;
+
+    // A bare terminal window makes shell cleanup available, but it is not
+    // proof that the utterance is a command. Gate the transforming shell
+    // suffix after STT so natural-language dictation in terminals (for
+    // example prose in Romanian) still receives the base cleanup prompt.
+    // Agent terminals keep their prose suffix unchanged: there the built-in
+    // classifier has already established that the foreground program is a
+    // conversational agent rather than a shell prompt.
+    if profile.is_terminal
+        && profile.detected_agent.is_none()
+        && !looks_like_shell_command(raw, language)
+    {
+        debug!(
+            target: "fono::context",
+            profile = profile.name,
+            ?language,
+            "terminal shell suffix suppressed: transcript did not look command-like"
+        );
+        return None;
+    }
+
+    Some(suffix)
+}
+
+fn looks_like_shell_command(raw: &str, language: Option<&str>) -> bool {
+    let lower = raw.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    let normalized = lower.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    let has_spoken_shell_marker = has_spoken_shell_marker(&normalized);
+
+    has_shell_syntax(&normalized)
+        || starts_with_shell_command(&normalized)
+        || (!is_confident_non_english(language) && has_spoken_shell_marker)
+}
+
+fn has_shell_syntax(s: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "./",
+        "../",
+        "~/",
+        " | ",
+        " > ",
+        " >> ",
+        " < ",
+        " && ",
+        " || ",
+        " 1>",
+        " 2>",
+        "--",
+        " -",
+        "/dev/null",
+    ];
+    MARKERS.iter().any(|marker| s.contains(marker))
+}
+
+fn starts_with_shell_command(s: &str) -> bool {
+    const COMMANDS: &[&str] = &[
+        "alias",
+        "awk",
+        "bash",
+        "bat",
+        "bun",
+        "cargo",
+        "cat",
+        "cd",
+        "chmod",
+        "chown",
+        "clear",
+        "cp",
+        "curl",
+        "deno",
+        "df",
+        "docker",
+        "du",
+        "exit",
+        "find",
+        "gh",
+        "git",
+        "grep",
+        "helm",
+        "journalctl",
+        "kill",
+        "kubectl",
+        "less",
+        "ln",
+        "ls",
+        "mkdir",
+        "mv",
+        "nano",
+        "nix",
+        "npm",
+        "npx",
+        "pacman",
+        "ping",
+        "pnpm",
+        "ps",
+        "pwd",
+        "python",
+        "python3",
+        "rm",
+        "rsync",
+        "scp",
+        "ssh",
+        "sudo",
+        "systemctl",
+        "tar",
+        "touch",
+        "uv",
+        "vim",
+        "wget",
+        "yarn",
+        "zig",
+        "zsh",
+    ];
+
+    let mut tokens = s.split_whitespace().map(trim_shell_token).filter(|token| !token.is_empty());
+    let Some(first) = tokens.next() else { return false };
+    let candidate =
+        if matches!(first, "$" | "#" | ">") { tokens.next().unwrap_or("") } else { first };
+
+    candidate.starts_with("./")
+        || candidate.starts_with("../")
+        || candidate.starts_with("~/")
+        || candidate.starts_with('/')
+        || COMMANDS.contains(&candidate)
+}
+
+fn trim_shell_token(token: &str) -> &str {
+    token.trim_matches(|c: char| {
+        matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ';' | ',')
+    })
+}
+
+fn has_spoken_shell_marker(s: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "dash dash",
+        "dot slash",
+        "dot dot slash",
+        "home dot config",
+        "dev null",
+        "pipe",
+        "redirect",
+        "standard out",
+        "standard error",
+    ];
+    MARKERS.iter().any(|marker| s.contains(marker))
+}
+
+fn is_confident_non_english(language: Option<&str>) -> bool {
+    language.is_some_and(|lang| {
+        let lang = lang.trim();
+        if lang.is_empty() {
+            false
+        } else {
+            let lang = lang.to_ascii_lowercase();
+            !(lang == "en" || lang.starts_with("en-") || lang.starts_with("en_"))
+        }
+    })
 }
 
 fn matched_rule_suffix(
@@ -3774,6 +3945,71 @@ mod tests {
             Some("use casual tone"),
         );
         assert!(matched_rule_suffix(&c.context_rules, Some("Firefox"), None).is_none());
+    }
+
+    #[test]
+    fn terminal_suffix_is_suppressed_for_romanian_prose() {
+        let profile = ContextClassifier::classify(Some("kitty"), Some("fono -v"));
+        assert!(profile.as_ref().is_some_and(|p| p.is_terminal && p.llm_suffix.is_some()));
+
+        let suffix = gated_builtin_suffix(
+            profile.as_ref(),
+            "o sa facem un test sa vedem daca sta face din limba romanana, limba inglesa",
+            Some("ro"),
+        );
+        assert!(suffix.is_none());
+    }
+
+    #[test]
+    fn terminal_suffix_is_kept_for_shell_commands() {
+        let profile = ContextClassifier::classify(Some("kitty"), None);
+        let examples = [
+            "git status",
+            "cd /etc",
+            "sudo apt install vim",
+            "grep -r fono .",
+            "cargo test",
+            "rm -rf target",
+            "./script.sh --verbose",
+        ];
+
+        for raw in examples {
+            assert!(
+                gated_builtin_suffix(profile.as_ref(), raw, Some("en")).is_some(),
+                "expected terminal suffix for command-like transcript: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_suffix_keeps_agent_prose_framing() {
+        let mut profile =
+            ContextClassifier::classify(Some("kitty"), None).expect("terminal profile");
+        profile.detected_agent = Some(fono_inject::CodingAgentKind::Forge);
+        profile.llm_suffix = Some("agent prose suffix");
+
+        assert_eq!(
+            gated_builtin_suffix(Some(&profile), "please inspect the failing test", Some("en")),
+            Some("agent prose suffix"),
+        );
+    }
+
+    #[test]
+    fn gated_suffix_keeps_non_terminal_profiles_unchanged() {
+        let profile = fono_inject::ContextProfile {
+            name: "TestProfile",
+            whisper_hint: None,
+            llm_suffix: Some("custom suffix"),
+            suppress_history: false,
+            detected_agent: None,
+            is_terminal: false,
+            is_code_editor: false,
+        };
+
+        assert_eq!(
+            gated_builtin_suffix(Some(&profile), "plain prose", Some("ro")),
+            Some("custom suffix")
+        );
     }
 
     #[test]

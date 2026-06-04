@@ -224,13 +224,13 @@ mod tests {
     fn local_path_resolution_uses_models_dir() {
         let cfg = LlmCfg {
             local: fono_core::config::PolishLocal {
-                model: "qwen2.5-1.5b-instruct".into(),
+                model: "qwen3.5-2b".into(),
                 ..fono_core::config::PolishLocal::default()
             },
             ..LlmCfg::default()
         };
         let dir = Path::new("/var/lib/fono/polish");
         let p = resolve_local_model_path(&cfg, dir);
-        assert_eq!(p, std::path::PathBuf::from("/var/lib/fono/polish/qwen2.5-1.5b-instruct.gguf"));
+        assert_eq!(p, std::path::PathBuf::from("/var/lib/fono/polish/qwen3.5-2b.gguf"));
     }
 }

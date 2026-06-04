@@ -34,7 +34,10 @@ use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use tracing::{debug, info, warn};
 
-use crate::traits::{looks_like_clarification, user_prompt, FormatContext, TextFormatter};
+use crate::traits::{
+    looks_like_clarification, looks_like_translated_cleanup, user_prompt, FormatContext,
+    TextFormatter,
+};
 
 /// Hard cap on tokens generated for a cleanup pass. Cleanup outputs are
 /// usually shorter than the input; capping bounds runtime on slow hardware
@@ -186,9 +189,9 @@ impl LlamaLocal {
         // Sample loop.
         let mut sampler = LlamaSampler::greedy();
         let eos = model.token_eos();
-        // Qwen2.5 / SmolLM2 stop token. If the tokenizer doesn't round-trip
-        // the literal we fall back to EOS only — generation still terminates
-        // by MAX_NEW_TOKENS in the worst case.
+        // Qwen2.5 / Qwen3.5 / SmolLM stop token. If the tokenizer doesn't
+        // round-trip the literal we fall back to EOS only — generation still
+        // terminates by MAX_NEW_TOKENS in the worst case.
         let im_end = model
             .str_to_token("<|im_end|>", AddBos::Never)
             .ok()
@@ -217,11 +220,26 @@ impl LlamaLocal {
     }
 }
 
-/// ChatML prompt template — used by Qwen2.5 and SmolLM2, the only models
-/// in our PolishRegistry today. A future model with a different chat template
-/// would need a per-model dispatch here.
+/// ChatML prompt template used by the Apache-2.0 local cleanup models in
+/// [`PolishRegistry`](crate::registry::PolishRegistry). Qwen3-family GGUFs use
+/// a thinking-capable template; for cleanup we explicitly seed the assistant
+/// turn with an empty `<think>` block so generation starts directly in the
+/// visible answer channel.
+#[cfg(test)]
 fn build_chatml_prompt(system: &str, user: &str) -> String {
-    let mut s = String::with_capacity(system.len() + user.len() + 64);
+    build_chatml_prompt_with_options(system, user, false)
+}
+
+fn build_chatml_prompt_for_model(system: &str, user: &str, model_name: &str) -> String {
+    build_chatml_prompt_with_options(system, user, model_uses_qwen_thinking_template(model_name))
+}
+
+fn model_uses_qwen_thinking_template(model_name: &str) -> bool {
+    model_name.to_ascii_lowercase().contains("qwen3")
+}
+
+fn build_chatml_prompt_with_options(system: &str, user: &str, disable_thinking: bool) -> String {
+    let mut s = String::with_capacity(system.len() + user.len() + 96);
     if !system.is_empty() {
         s.push_str("<|im_start|>system\n");
         s.push_str(system);
@@ -230,13 +248,18 @@ fn build_chatml_prompt(system: &str, user: &str) -> String {
     s.push_str("<|im_start|>user\n");
     s.push_str(user);
     s.push_str("<|im_end|>\n<|im_start|>assistant\n");
+    if disable_thinking {
+        s.push_str("<think>\n\n</think>\n\n");
+    }
     s
 }
 
 #[async_trait]
 impl TextFormatter for LlamaLocal {
     async fn format(&self, raw: &str, ctx: &FormatContext) -> Result<String> {
-        let prompt = build_chatml_prompt(&ctx.system_prompt(), &user_prompt(raw));
+        let model_name = self.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        let prompt =
+            build_chatml_prompt_for_model(&ctx.system_prompt(), &user_prompt(raw), model_name);
         let me = self.clone_thin();
         let started = Instant::now();
         let text = tokio::task::spawn_blocking(move || -> Result<String> {
@@ -260,6 +283,12 @@ impl TextFormatter for LlamaLocal {
         if looks_like_clarification(&text) {
             anyhow::bail!(
                 "llama-local returned a clarification reply instead of a cleaned transcript; \
+                 falling back to raw text. response: {text:?}"
+            );
+        }
+        if looks_like_translated_cleanup(raw, &text, ctx) {
+            anyhow::bail!(
+                "llama-local appears to have translated the transcript instead of cleaning it; \
                  falling back to raw text. response: {text:?}"
             );
         }
@@ -303,6 +332,12 @@ mod tests {
         let p = build_chatml_prompt("", "hi");
         assert!(!p.contains("<|im_start|>system"));
         assert!(p.contains("<|im_start|>user\nhi<|im_end|>"));
+    }
+
+    #[test]
+    fn qwen3_5_prompt_disables_thinking() {
+        let p = build_chatml_prompt_for_model("be terse", "hello world", "qwen3.5-0.8b");
+        assert!(p.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
     }
 
     #[test]

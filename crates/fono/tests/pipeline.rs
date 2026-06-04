@@ -368,15 +368,13 @@ async fn pipeline_feeds_candidate_set_and_directive_when_stt_reports_no_language
     assert!(!sp.contains("It is most likely"), "no soft hint when STT reports no language: {sp}");
 }
 
-/// Plan task E2 — when the STT engine *does* report a language inside
-/// the candidate set (`language: Some("ro")`), the soft-hint sentence
-/// is added on top of the directive. Covers the Whisper/Groq path
-/// without making it load-bearing.
+/// Plan task E2 — when the STT engine *does* report a language, cleanup
+/// treats it as the source-language anchor. The prompt must frame the
+/// job as same-language editing, not candidate detection or translation.
 #[tokio::test]
-async fn pipeline_adds_soft_hint_sentence_when_stt_reports_language() {
+async fn pipeline_adds_source_language_contract_when_stt_reports_language() {
     let tmp = tempfile::tempdir().unwrap();
     let db_path = tmp.path().join("history.sqlite");
-
     let stt: Arc<dyn SpeechToText> =
         Arc::new(FakeStt { text: "as vrea sa merg acasa".into(), lang: Some("ro".into()) });
     let candidates = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -407,6 +405,15 @@ async fn pipeline_adds_soft_hint_sentence_when_stt_reports_language() {
     assert!(matches!(outcome, PipelineOutcome::Completed { .. }));
 
     let sp = system_prompt.lock().unwrap().clone();
-    assert!(sp.contains("This transcript is in one of"), "directive present: {sp}");
-    assert!(sp.contains("It is most likely Romanian."), "soft-hint sentence must appear: {sp}");
+    assert!(sp.contains("SOURCE_LANGUAGE: Romanian (ro)."), "source contract present: {sp}");
+    assert!(sp.contains("same-language transcription cleanup task"), "same-language task: {sp}");
+    assert!(sp.contains("not a translation task"), "translation must be forbidden: {sp}");
+    assert!(
+        !sp.contains("Detect which one"),
+        "known source language must not ask for detection: {sp}"
+    );
+    assert!(
+        !sp.contains("It is most likely"),
+        "known source language must not be a soft hint: {sp}"
+    );
 }

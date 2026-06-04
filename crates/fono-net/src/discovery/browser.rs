@@ -163,11 +163,11 @@ impl Browser {
                                     );
                                 }
                             }
-                            Some((_, ServiceEvent::SearchStarted(ty))) => {
-                                debug!(target: "fono::discovery", %ty, "browse started");
+                            Some((kind, ServiceEvent::SearchStarted(_))) => {
+                                log_browse_started(kind);
                             }
-                            Some((_, ServiceEvent::SearchStopped(ty))) => {
-                                debug!(target: "fono::discovery", %ty, "browse stopped");
+                            Some((kind, ServiceEvent::SearchStopped(_))) => {
+                                log_browse_stopped(kind);
                             }
                             Some((_, ServiceEvent::ServiceFound(_, _))) => {
                                 // Resolution still in progress; nothing
@@ -207,6 +207,22 @@ async fn recv_first(
         .collect();
     let (winner, _idx, _rest) = futures::future::select_all(futs).await;
     winner
+}
+
+fn log_browse_started(kind: PeerKind) {
+    debug!(
+        target: "fono::discovery",
+        service_type = kind.service_type(),
+        "browse started"
+    );
+}
+
+fn log_browse_stopped(kind: PeerKind) {
+    debug!(
+        target: "fono::discovery",
+        service_type = kind.service_type(),
+        "browse stopped"
+    );
 }
 
 fn peer_from_info(kind: PeerKind, info: &ServiceInfo) -> Option<DiscoveredPeer> {

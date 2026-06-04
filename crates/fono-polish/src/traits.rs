@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use whatlang::{Detector, Lang};
 
 #[derive(Debug, Clone, Default)]
 pub struct FormatContext {
@@ -13,16 +14,16 @@ pub struct FormatContext {
     pub app_class: Option<String>,
     pub app_title: Option<String>,
     /// Best-effort per-utterance language code reported by the STT
-    /// backend (e.g. `"ro"`). Engine-dependent and often `None` — a
-    /// soft hint only, never load-bearing. See
-    /// `plans/2026-05-29-romanian-dictation-polish-reconstruction-v2.md`.
+    /// backend (e.g. `"ro"`). When present, cleanup treats it as the
+    /// source-language anchor for same-language editing: the formatter
+    /// may polish text, but must not translate it.
     pub language: Option<String>,
     /// The user's candidate language set (BCP-47 codes, e.g.
     /// `["ro", "en"]`), auto-populated from OS-locale signals in
-    /// `general.languages`. Always available regardless of STT
-    /// engine; the reliable signal the cleanup directive leans on so
-    /// the LLM can detect the transcript's language, keep its output
-    /// in that language, and restore diacritics.
+    /// `general.languages`. Used when the STT backend did not provide a
+    /// concrete source language so the cleanup model can infer the
+    /// transcript's language from a bounded set and keep its output in
+    /// that language.
     pub candidate_languages: Vec<String>,
 }
 
@@ -55,19 +56,26 @@ impl FormatContext {
         s.trim_end().to_string()
     }
 
-    /// Build the candidate-language directive appended to the system
-    /// prompt. Returns `None` when no candidate set is configured (so
-    /// the prompt stays byte-identical to today's on exotic systems
-    /// where locale detection yielded nothing).
+    /// Build the language directive appended to the system prompt.
     ///
-    /// When the set is non-empty, instructs the model to detect which
-    /// of the candidate languages the transcript is in, keep its
-    /// output in that language, and restore its orthography — every
-    /// diacritic included. When the soft `language` hint is present
-    /// and its code is one of the candidates, an "It is most likely
-    /// <Name>." sentence is appended to bias the choice. See
-    /// `plans/2026-05-29-romanian-dictation-polish-reconstruction-v2.md`.
+    /// When STT provides a concrete language, cleanup treats that code
+    /// as the source language and frames the task as same-language
+    /// copy-editing rather than language detection. Candidate-language
+    /// detection is only used when the source language is unknown.
     fn language_directive(&self) -> Option<String> {
+        if let Some(source) = self.language.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let name = fono_core::languages::display_name(source);
+            return Some(format!(
+                "SOURCE_LANGUAGE: {name} ({source}).\n\nThis is a same-language transcription cleanup \
+task, not a translation task. Return the cleaned transcript in SOURCE_LANGUAGE only. Preserve \
+SOURCE_LANGUAGE even when the transcript mentions other languages, products, commands, names, or \
+technical terms. Allowed edits: punctuation, capitalization, diacritics/orthography restoration, \
+filler removal, and obvious STT repairs. Forbidden edits: translation, paraphrase, summarization, \
+adding facts, or changing the language. If you cannot clean the transcript while preserving \
+SOURCE_LANGUAGE, return the original transcript unchanged."
+            ));
+        }
+
         if self.candidate_languages.is_empty() {
             return None;
         }
@@ -76,24 +84,15 @@ impl FormatContext {
             .iter()
             .map(|c| fono_core::languages::display_name(c))
             .collect();
-        let mut directive = format!(
-            "This transcript is in one of these languages: {}. Detect which one, keep your \
-output entirely in that language, and restore its correct orthography — including all \
-diacritics (for example, Romanian uses ă, â, î, ș, ț). Do not translate between these \
-languages.",
+        Some(format!(
+            "This transcript is in one of these languages: {}. Detect which one, then perform \
+same-language transcription cleanup in that detected language. Return the cleaned transcript \
+entirely in the detected source language, and restore its correct orthography — including \
+diacritics when that language uses them (for example, Romanian uses ă, â, î, ș, ț). Do not \
+translate between these languages or into any other language. If detection is uncertain, return \
+the original transcript unchanged.",
             names.join(", ")
-        );
-        if let Some(hint) = &self.language {
-            if self.candidate_languages.iter().any(|c| c == hint) {
-                use std::fmt::Write as _;
-                let _ = write!(
-                    directive,
-                    " It is most likely {}.",
-                    fono_core::languages::display_name(hint)
-                );
-            }
-        }
-        Some(directive)
+        ))
     }
 }
 
@@ -173,6 +172,167 @@ pub fn looks_like_clarification(out: &str) -> bool {
         return false;
     }
     TELLS.iter().any(|t| lower.contains(t))
+}
+
+/// Heuristic: did a cleanup model change the transcript's language instead of
+/// returning the same transcript cleaned in-place?
+///
+/// The prompt already says "do not translate", but small local instruction
+/// models can still produce a translated paraphrase. This guard is intentionally
+/// conservative and language-agnostic: it only fires for sufficiently long text
+/// when Fono has a source language from the STT backend or reliable text
+/// detection, and the cleanup output is reliably detected as another language.
+/// Short or ambiguous text is accepted.
+#[must_use]
+pub fn looks_like_translated_cleanup(raw: &str, out: &str, ctx: &FormatContext) -> bool {
+    if !has_enough_text_for_language_guard(raw) || !has_enough_text_for_language_guard(out) {
+        return false;
+    }
+
+    let candidate_langs = candidate_whatlangs(&ctx.candidate_languages);
+    let Some(source_lang) = expected_source_lang(raw, ctx, &candidate_langs) else { return false };
+    let Some(output_lang) =
+        detect_lang_unconstrained(out).or_else(|| detect_lang_allowed(out, &candidate_langs))
+    else {
+        return false;
+    };
+
+    source_lang != output_lang
+}
+
+fn expected_source_lang(raw: &str, ctx: &FormatContext, candidate_langs: &[Lang]) -> Option<Lang> {
+    // STT detects language from the audio, while text-only language ID sees the
+    // recogniser's imperfect transcript (often diacritic-stripped or garbled).
+    // Prefer the audio-derived hint when present; fall back to text detection
+    // for backends/configurations that do not provide one.
+    ctx.language
+        .as_deref()
+        .and_then(whatlang_for_code)
+        .or_else(|| detect_lang_allowed(raw, candidate_langs))
+        .or_else(|| detect_lang_unconstrained(raw))
+}
+
+fn detect_lang_allowed(text: &str, allowed: &[Lang]) -> Option<Lang> {
+    if allowed.len() < 2 {
+        return None;
+    }
+    let info = Detector::with_allowlist(allowed.to_vec()).detect(text)?;
+    reliable_lang(&info).then_some(info.lang())
+}
+
+fn detect_lang_unconstrained(text: &str) -> Option<Lang> {
+    let info = Detector::new().detect(text)?;
+    reliable_lang(&info).then_some(info.lang())
+}
+
+fn reliable_lang(info: &whatlang::Info) -> bool {
+    info.confidence() >= 0.65
+}
+
+fn candidate_whatlangs(codes: &[String]) -> Vec<Lang> {
+    let mut out = Vec::new();
+    for code in codes {
+        if let Some(lang) = whatlang_for_code(code) {
+            if !out.contains(&lang) {
+                out.push(lang);
+            }
+        }
+    }
+    out
+}
+
+fn has_enough_text_for_language_guard(text: &str) -> bool {
+    let alpha_chars = text.chars().filter(|c| c.is_alphabetic()).count();
+    let words = text.split(|c: char| !c.is_alphabetic()).filter(|w| !w.is_empty()).count();
+    let non_ascii_alpha_chars = text.chars().filter(|c| c.is_alphabetic() && !c.is_ascii()).count();
+
+    (alpha_chars >= 24 && words >= 4) || non_ascii_alpha_chars >= 8
+}
+
+#[allow(clippy::too_many_lines)]
+fn whatlang_for_code(code: &str) -> Option<Lang> {
+    let base = lang_base(code).to_ascii_lowercase();
+    if let Some(lang) = Lang::from_code(&base) {
+        return Some(lang);
+    }
+    Some(match base.as_str() {
+        "af" => Lang::Afr,
+        "ak" => Lang::Aka,
+        "am" => Lang::Amh,
+        "ar" => Lang::Ara,
+        "az" => Lang::Aze,
+        "be" => Lang::Bel,
+        "bg" => Lang::Bul,
+        "bn" => Lang::Ben,
+        "ca" => Lang::Cat,
+        "cs" => Lang::Ces,
+        "da" => Lang::Dan,
+        "de" => Lang::Deu,
+        "el" => Lang::Ell,
+        "en" => Lang::Eng,
+        "eo" => Lang::Epo,
+        "es" => Lang::Spa,
+        "et" => Lang::Est,
+        "fa" => Lang::Pes,
+        "fi" => Lang::Fin,
+        "fr" => Lang::Fra,
+        "gu" => Lang::Guj,
+        "he" | "iw" => Lang::Heb,
+        "hi" => Lang::Hin,
+        "hr" => Lang::Hrv,
+        "hu" => Lang::Hun,
+        "hy" => Lang::Hye,
+        "id" => Lang::Ind,
+        "it" => Lang::Ita,
+        "ja" => Lang::Jpn,
+        "jv" | "jw" => Lang::Jav,
+        "ka" => Lang::Kat,
+        "km" => Lang::Khm,
+        "kn" => Lang::Kan,
+        "ko" => Lang::Kor,
+        "la" => Lang::Lat,
+        "lt" => Lang::Lit,
+        "lv" => Lang::Lav,
+        "mk" => Lang::Mkd,
+        "ml" => Lang::Mal,
+        "mo" | "ro" => Lang::Ron,
+        "mr" => Lang::Mar,
+        "my" => Lang::Mya,
+        "nb" | "no" => Lang::Nob,
+        "ne" => Lang::Nep,
+        "nl" => Lang::Nld,
+        "or" => Lang::Ori,
+        "pa" => Lang::Pan,
+        "pl" => Lang::Pol,
+        "pt" => Lang::Por,
+        "ru" => Lang::Rus,
+        "si" => Lang::Sin,
+        "sk" => Lang::Slk,
+        "sl" => Lang::Slv,
+        "sn" => Lang::Sna,
+        "sr" => Lang::Srp,
+        "sv" => Lang::Swe,
+        "ta" => Lang::Tam,
+        "te" => Lang::Tel,
+        "th" => Lang::Tha,
+        "tk" => Lang::Tuk,
+        "tl" => Lang::Tgl,
+        "tr" => Lang::Tur,
+        "uk" => Lang::Ukr,
+        "ur" => Lang::Urd,
+        "uz" => Lang::Uzb,
+        "vi" => Lang::Vie,
+        "yi" => Lang::Yid,
+        "zh" => Lang::Cmn,
+        "zu" => Lang::Zul,
+        _ => return None,
+    })
+}
+
+fn lang_base(lang: &str) -> &str {
+    let trimmed = lang.trim();
+    let cut = trimmed.find(['-', '_']).unwrap_or(trimmed.len());
+    &trimmed[..cut]
 }
 
 #[async_trait]
@@ -266,6 +426,109 @@ mod tests {
     }
 
     #[test]
+    fn rejects_cleanup_when_romanian_hint_translates_to_english() {
+        let ctx = FormatContext {
+            language: Some("ro".into()),
+            candidate_languages: vec!["ro".into(), "en".into()],
+            ..Default::default()
+        };
+        let raw = "O să dictesc ceva în limba română ca să văd că nu se traduce din greșeala în limba ingleza.";
+        let out =
+            "I will speak in Romanian as I see that it is not translated correctly into English.";
+        assert!(looks_like_translated_cleanup(raw, out, &ctx));
+    }
+
+    #[test]
+    fn rejects_cleanup_when_diacriticless_hint_translates_to_english() {
+        let ctx = FormatContext {
+            language: Some("ro".into()),
+            candidate_languages: vec!["ro".into(), "en".into()],
+            ..Default::default()
+        };
+        let raw = "o sa facem un test sa vedem daca sta face din limba romanana, limba inglesa";
+        let out = "Let's make a test to see if it's in Romanian, English.";
+        assert!(looks_like_translated_cleanup(raw, out, &ctx));
+    }
+
+    #[test]
+    fn rejects_cleanup_when_spanish_hint_translates_to_english() {
+        let ctx = FormatContext {
+            language: Some("es".into()),
+            candidate_languages: vec!["es".into(), "en".into()],
+            ..Default::default()
+        };
+        let raw = "Voy a dictar una frase en español para comprobar que no se traduzca al inglés.";
+        let out =
+            "I will dictate a sentence in Spanish to check that it is not translated into English.";
+        assert!(looks_like_translated_cleanup(raw, out, &ctx));
+    }
+
+    #[test]
+    fn rejects_cleanup_when_japanese_hint_translates_to_english() {
+        let ctx = FormatContext {
+            language: Some("ja".into()),
+            candidate_languages: vec!["ja".into(), "en".into()],
+            ..Default::default()
+        };
+        let raw = "今日は日本語で文章を音声入力して、英語に翻訳されないことを確認します。";
+        let out =
+            "Today I will dictate a sentence in Japanese and confirm it is not translated into English.";
+        assert!(looks_like_translated_cleanup(raw, out, &ctx));
+    }
+
+    #[test]
+    fn accepts_cleanup_kept_in_source_language() {
+        let ctx = FormatContext {
+            language: Some("es".into()),
+            candidate_languages: vec!["es".into(), "en".into()],
+            ..Default::default()
+        };
+        let raw = "Voy a dictar una frase en espanol para comprobar que no se traduzca.";
+        let out = "Voy a dictar una frase en español para comprobar que no se traduzca.";
+        assert!(!looks_like_translated_cleanup(raw, out, &ctx));
+    }
+
+    #[test]
+    fn accepts_english_cleanup() {
+        let ctx = FormatContext {
+            language: Some("en".into()),
+            candidate_languages: vec!["ro".into(), "en".into()],
+            ..Default::default()
+        };
+        let raw = "I will dictate something in English and see whether it cleans correctly";
+        let out = "I will dictate something in English and see whether it cleans correctly.";
+        assert!(!looks_like_translated_cleanup(raw, out, &ctx));
+    }
+
+    #[test]
+    fn accepts_source_language_that_mentions_another_language() {
+        let ctx = FormatContext {
+            language: Some("ro".into()),
+            candidate_languages: vec!["ro".into(), "en".into()],
+            ..Default::default()
+        };
+        let raw = "Vreau să văd dacă limba română nu devine limba engleză.";
+        let out = "Vreau să văd dacă limba română nu devine limba engleză.";
+        assert!(!looks_like_translated_cleanup(raw, out, &ctx));
+    }
+
+    #[test]
+    fn language_guard_accepts_short_or_ambiguous_text() {
+        let ctx = FormatContext {
+            language: Some("es".into()),
+            candidate_languages: vec!["es".into(), "en".into()],
+            ..Default::default()
+        };
+        assert!(!looks_like_translated_cleanup("hola", "hello", &ctx));
+    }
+
+    #[test]
+    fn whatlang_mapping_covers_curated_language_codes() {
+        for (code, _) in fono_core::languages::CURATED_LANGUAGES {
+            assert!(whatlang_for_code(code).is_some(), "missing whatlang mapping for {code}");
+        }
+    }
+    #[test]
     fn directive_names_candidates_and_mentions_diacritics() {
         let ctx = FormatContext {
             candidate_languages: vec!["ro".into(), "en".into()],
@@ -280,40 +543,62 @@ mod tests {
     }
 
     #[test]
-    fn directive_absent_when_candidate_set_empty() {
+    fn source_language_contract_applies_even_without_candidates() {
         let ctx = FormatContext { language: Some("ro".into()), ..Default::default() };
         let sp = ctx.system_prompt();
-        assert!(!sp.contains("This transcript is in one of"), "no directive without candidates");
-        assert!(!sp.contains("It is most likely"), "no soft-hint sentence without candidates");
+        assert!(sp.contains("SOURCE_LANGUAGE: Romanian (ro)."), "source contract missing: {sp}");
+        assert!(
+            sp.contains("same-language transcription cleanup task"),
+            "source contract must frame cleanup as same-language editing: {sp}"
+        );
+        assert!(
+            sp.contains("not a translation task"),
+            "source contract must forbid translation: {sp}"
+        );
+        assert!(
+            sp.contains("return the original transcript unchanged"),
+            "source contract must define safe fallback: {sp}"
+        );
+        assert!(
+            !sp.contains("Detect which one"),
+            "known source language must not ask for detection"
+        );
+        assert!(!sp.contains("It is most likely"), "known source language must not be a soft hint");
     }
 
     #[test]
-    fn soft_hint_sentence_only_when_hint_in_candidate_set() {
-        // Hint inside the set ⇒ the "most likely" sentence appears.
-        let in_set = FormatContext {
+    fn source_language_contract_overrides_candidate_detection() {
+        let ctx = FormatContext {
             candidate_languages: vec!["ro".into(), "en".into()],
             language: Some("ro".into()),
             ..Default::default()
         };
-        let sp = in_set.system_prompt();
-        assert!(sp.contains("It is most likely Romanian."), "soft hint should appear: {sp}");
+        let sp = ctx.system_prompt();
+        assert!(sp.contains("SOURCE_LANGUAGE: Romanian (ro)."), "source contract missing: {sp}");
+        assert!(sp.contains("Preserve SOURCE_LANGUAGE"), "source language must be preserved: {sp}");
+        assert!(
+            !sp.contains("Detect which one"),
+            "known source language must not ask for detection: {sp}"
+        );
+        assert!(
+            !sp.contains("It is most likely"),
+            "known source language must not be a soft hint: {sp}"
+        );
+    }
 
-        // Hint outside the set ⇒ no soft-hint sentence, directive still present.
-        let out_of_set = FormatContext {
+    #[test]
+    fn candidate_detection_used_only_when_source_language_unknown() {
+        let ctx = FormatContext {
             candidate_languages: vec!["ro".into(), "en".into()],
-            language: Some("fr".into()),
             ..Default::default()
         };
-        let sp = out_of_set.system_prompt();
-        assert!(sp.contains("This transcript is in one of"), "directive still present: {sp}");
-        assert!(!sp.contains("It is most likely"), "no soft hint for out-of-set code: {sp}");
-
-        // No hint at all ⇒ directive present, no soft-hint sentence.
-        let no_hint = FormatContext {
-            candidate_languages: vec!["ro".into(), "en".into()],
-            ..Default::default()
-        };
-        let sp = no_hint.system_prompt();
+        let sp = ctx.system_prompt();
+        assert!(sp.contains("This transcript is in one of"), "candidate directive missing: {sp}");
+        assert!(
+            sp.contains("Detect which one"),
+            "unknown source language should ask for detection: {sp}"
+        );
+        assert!(!sp.contains("SOURCE_LANGUAGE:"), "no source contract without STT language: {sp}");
         assert!(!sp.contains("It is most likely"), "no soft hint when language is None: {sp}");
     }
 }
