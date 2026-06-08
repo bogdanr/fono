@@ -1,0 +1,134 @@
+suite_version = "assistant-factual-v2"
+prompt_version = "fono-assistant-factual-v2"
+
+# Intentional general-knowledge coverage for local voice assistants.
+# Categories: geography, science/numbers, technology, culture/literature,
+# Romanian language handling, and strict concise output formatting.
+
+[[fixture]]
+id = "en_geo_capital_france"
+language = "en"
+question = "What is the capital of France? Answer with only the city name."
+expected = ["Paris"]
+forbidden = ["Lyon", "Marseille", "France", "capital"]
+max_words = 3
+
+[[fixture]]
+id = "en_geo_largest_ocean"
+language = "en"
+question = "What is the largest ocean on Earth? Answer with the ocean name only."
+expected = ["Pacific", "Pacific Ocean"]
+forbidden = ["Atlantic", "Indian", "Arctic"]
+max_words = 4
+
+[[fixture]]
+id = "en_science_boiling_water"
+language = "en"
+question = "At standard atmospheric pressure, what temperature does water boil at in Celsius? Answer with the number and unit."
+expected = ["100°C", "100 °C", "100 C", "100 degrees Celsius", "100 Celsius"]
+forbidden = ["zero", "212 Celsius", "Fahrenheit"]
+max_words = 8
+
+[[fixture]]
+id = "en_science_speed_of_light"
+language = "en"
+question = "Approximately how fast does light travel in vacuum? Answer in kilometres per second."
+expected = ["299,792", "299792", "300,000", "300000", "300 thousand"]
+forbidden = ["miles per hour", "sound"]
+max_words = 20
+
+[[fixture]]
+id = "en_science_red_planet"
+language = "en"
+question = "Which planet is known as the red planet? Answer with one word."
+expected = ["Mars"]
+forbidden = ["Venus", "Jupiter", "Mercury"]
+max_words = 3
+
+[[fixture]]
+id = "en_tech_linux_creator"
+language = "en"
+question = "Who created the Linux kernel? Answer with the person's name only."
+expected = ["Linus Torvalds"]
+forbidden = ["Richard Stallman", "Bill Gates", "Unix"]
+max_words = 5
+
+[[fixture]]
+id = "en_tech_http_404"
+language = "en"
+question = "In HTTP, what does status code 404 mean? Answer in at most five words."
+expected = ["not found", "Not Found"]
+forbidden = ["server error", "unauthorized", "forbidden"]
+max_words = 7
+
+[[fixture]]
+id = "en_culture_hamlet_author"
+language = "en"
+question = "Who wrote Hamlet? Answer with the author's name only."
+expected = ["William Shakespeare", "Shakespeare"]
+forbidden = ["Charles Dickens", "Goethe", "Molière"]
+max_words = 4
+
+[[fixture]]
+id = "ro_geo_capitala_frantei"
+language = "ro"
+question = "Care este capitala Franței? Răspunde doar cu numele orașului."
+expected = ["Paris"]
+forbidden = ["Lyon", "Marsilia", "Franței", "capitala"]
+max_words = 3
+
+[[fixture]]
+id = "ro_geo_oceanul_cel_mai_mare"
+language = "ro"
+question = "Care este cel mai mare ocean de pe Pământ? Răspunde doar cu numele oceanului."
+expected = ["Pacific", "Oceanul Pacific"]
+forbidden = ["Atlantic", "Indian", "Arctic"]
+max_words = 4
+
+[[fixture]]
+id = "ro_science_fierbere_apa"
+language = "ro"
+question = "La presiune atmosferică standard, la ce temperatură fierbe apa în grade Celsius? Răspunde cu numărul și unitatea."
+expected = ["100°C", "100 °C", "100 C", "100 de grade Celsius", "100 grade Celsius"]
+forbidden = ["zero", "212 Celsius", "Fahrenheit"]
+max_words = 8
+
+[[fixture]]
+id = "ro_science_planeta_rosie"
+language = "ro"
+question = "Ce planetă este cunoscută drept planeta roșie? Răspunde într-un singur cuvânt."
+expected = ["Marte"]
+forbidden = ["Venus", "Jupiter", "Mercur"]
+max_words = 3
+
+[[fixture]]
+id = "ro_science_satelitul_pamantului"
+language = "ro"
+question = "Cum se numește satelitul natural al Pământului? Răspunde într-un singur cuvânt."
+expected = ["Luna"]
+forbidden = ["Soarele", "Marte", "satelit"]
+max_words = 3
+
+[[fixture]]
+id = "ro_literature_luceafarul_author"
+language = "ro"
+question = "Cine a scris poezia Luceafărul? Răspunde doar cu numele autorului."
+expected = ["Mihai Eminescu", "Eminescu"]
+forbidden = ["Ion Creangă", "Caragiale", "Arghezi"]
+max_words = 5
+
+[[fixture]]
+id = "ro_tech_http_404"
+language = "ro"
+question = "În HTTP, ce înseamnă codul 404? Răspunde în cel mult cinci cuvinte."
+expected = ["nu a fost găsit", "negăsit", "not found"]
+forbidden = ["eroare de server", "neautorizat", "interzis"]
+max_words = 7
+
+[[fixture]]
+id = "ro_history_unirea_1918"
+language = "ro"
+question = "În ce an a avut loc Marea Unire a României? Răspunde doar cu anul."
+expected = ["1918"]
+forbidden = ["1914", "1945", "Romania"]
+max_words = 3

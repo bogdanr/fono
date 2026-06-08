@@ -1,0 +1,113 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Editable text-only polish fixtures for `fono-bench polish-text`.
+#
+# Rules for stable, comparable runs:
+# - Keep `suite_version` unchanged unless fixture semantics change.
+# - Add new fixtures instead of rewriting old ones when possible.
+# - `raw` is the transcript as STT/local dictation produced it.
+# - `reference` is one acceptable polished result; scoring also checks invariants.
+# - `must_contain` substrings must appear in the polished output.
+# - `must_not_contain` substrings catch chatter, translation, or prompt leakage.
+# - `preserve_diacritics = true` means language-specific diacritics must survive.
+
+suite_version = "polish-text-v1"
+prompt_version = "fono-polish-default-v1"
+
+[[fixture]]
+id = "en_email_quick_note"
+language = "en"
+tags = ["email", "punctuation", "casual"]
+raw = "hi john can you please send me the updated invoice by friday thanks"
+reference = "Hi John, can you please send me the updated invoice by Friday? Thanks."
+must_contain = ["John", "invoice", "Friday"]
+must_not_contain = ["Here is", "Sure", "<<<", ">>>"]
+preserve_diacritics = false
+max_length_ratio = 1.8
+
+[[fixture]]
+id = "en_terminal_instruction"
+language = "en"
+tags = ["technical", "commands", "dictation"]
+raw = "run cargo test workspace tests lib and if it fails paste the first error"
+reference = "Run `cargo test --workspace --tests --lib`, and if it fails, paste the first error."
+must_contain = ["cargo test", "--workspace", "--tests", "--lib"]
+must_not_contain = ["Here is", "Sure", "I can", "<<<", ">>>"]
+preserve_diacritics = false
+max_length_ratio = 2.0
+
+[[fixture]]
+id = "es_meeting_followup"
+language = "es"
+tags = ["meeting", "punctuation", "diacritics"]
+raw = "mañana revisamos el presupuesto y despues mandamos la version final al cliente"
+reference = "Mañana revisamos el presupuesto y después mandamos la versión final al cliente."
+must_contain = ["Mañana", "presupuesto", "versión final", "cliente"]
+must_not_contain = ["Here is", "Sure", "English", "<<<", ">>>"]
+preserve_diacritics = true
+max_length_ratio = 1.8
+
+[[fixture]]
+id = "fr_short_task"
+language = "fr"
+tags = ["task", "punctuation", "diacritics"]
+raw = "ajoute une note pour rappeler que la reunion commence a quinze heures"
+reference = "Ajoute une note pour rappeler que la réunion commence à quinze heures."
+must_contain = ["réunion", "quinze heures"]
+must_not_contain = ["Here is", "Sure", "translation", "<<<", ">>>"]
+preserve_diacritics = true
+max_length_ratio = 1.8
+
+[[fixture]]
+id = "de_calendar_note"
+language = "de"
+tags = ["calendar", "punctuation", "diacritics"]
+raw = "bitte morgen um neun uhr den termin mit frau müller bestätigen"
+reference = "Bitte morgen um neun Uhr den Termin mit Frau Müller bestätigen."
+must_contain = ["neun Uhr", "Frau Müller", "bestätigen"]
+must_not_contain = ["Here is", "Sure", "translation", "<<<", ">>>"]
+preserve_diacritics = true
+max_length_ratio = 1.8
+
+[[fixture]]
+id = "ro_email_factura"
+language = "ro"
+tags = ["email", "diacritics", "business"]
+raw = "salut mihai te rog trimite factura actualizata pana maine dimineata multumesc"
+reference = "Salut, Mihai. Te rog trimite factura actualizată până mâine dimineață. Mulțumesc."
+must_contain = ["Mihai", "factura actualizată", "până mâine", "Mulțumesc"]
+must_not_contain = ["Here is", "Sure", "English", "traduc", "<<<", ">>>"]
+preserve_diacritics = true
+max_length_ratio = 1.8
+
+[[fixture]]
+id = "ro_bug_report_real_life"
+language = "ro"
+tags = ["real-life", "bug-report", "diacritics", "technical"]
+raw = "vreau sa deschid un bug pentru fono pentru ca atunci cand dictez in romana uneori pierde diacriticele si pune textul in engleza"
+reference = "Vreau să deschid un bug pentru Fono, pentru că atunci când dictez în română uneori pierde diacriticele și pune textul în engleză."
+must_contain = ["Fono", "dictez în română", "diacriticele", "engleză"]
+must_not_contain = ["Here is", "Sure", "I want to", "translation", "<<<", ">>>"]
+preserve_diacritics = true
+max_length_ratio = 1.9
+
+[[fixture]]
+id = "ro_shopping_real_life"
+language = "ro"
+tags = ["real-life", "note", "diacritics"]
+raw = "adauga pe lista de cumparaturi paine lapte cafea si doua sticle de apa plata daca ajungi la magazin"
+reference = "Adaugă pe lista de cumpărături pâine, lapte, cafea și două sticle de apă plată, dacă ajungi la magazin."
+must_contain = ["lista de cumpărături", "pâine", "lapte", "două sticle", "apă plată"]
+must_not_contain = ["Here is", "Sure", "shopping list", "translation", "<<<", ">>>"]
+preserve_diacritics = true
+max_length_ratio = 1.9
+
+[[fixture]]
+id = "ro_calendar_real_life"
+language = "ro"
+tags = ["real-life", "calendar", "diacritics"]
+raw = "maine la ora zece am sedinta cu ana despre planul de lansare si trebuie sa pregatesc notitele"
+reference = "Mâine la ora zece am ședința cu Ana despre planul de lansare și trebuie să pregătesc notițele."
+must_contain = ["Mâine", "ora zece", "ședința cu Ana", "notițele"]
+must_not_contain = ["Here is", "Sure", "meeting", "translation", "<<<", ">>>"]
+preserve_diacritics = true
+max_length_ratio = 1.9

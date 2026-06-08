@@ -1,0 +1,165 @@
+suite_version = "2026-06-05-homeassistant-lights-v1"
+prompt_version = "fono-assistant-tool-use-v1"
+
+# Inventory is deliberately small and realistic: enough devices to test exact
+# entity targeting, area targeting, Romanian synonyms, and ambiguity handling.
+[[inventory]]
+entity_id = "light.kitchen_ceiling"
+name = "Kitchen ceiling"
+area = "kitchen"
+
+[[inventory]]
+entity_id = "light.bedroom_lamp"
+name = "Bedroom lamp"
+area = "bedroom"
+
+[[inventory]]
+entity_id = "light.living_room_floor_lamp"
+name = "Living room floor lamp"
+area = "living_room"
+
+[[inventory]]
+entity_id = "light.office_desk_lamp"
+name = "Office desk lamp"
+area = "office"
+
+[[inventory]]
+entity_id = "light.hallway_ceiling"
+name = "Hallway ceiling"
+area = "hallway"
+
+# Direct entity commands: the model must map explicit spoken names to an exact
+# allow-listed light and service.
+[[fixture]]
+id = "en-direct-kitchen-on"
+language = "en"
+request = "Turn on the kitchen light."
+expected_action = "turn_on"
+expected_entity_ids = ["light.kitchen_ceiling"]
+tool_result = '{"ok":true,"service":"light.turn_on","entity_id":"light.kitchen_ceiling"}'
+expected_final = ["kitchen"]
+forbidden_final = ["think", "reasoning", "which"]
+max_words = 8
+
+[[fixture]]
+id = "en-direct-bedroom-off"
+language = "en"
+request = "Turn off the bedroom lamp."
+expected_action = "turn_off"
+expected_entity_ids = ["light.bedroom_lamp"]
+tool_result = '{"ok":true,"service":"light.turn_off","entity_id":"light.bedroom_lamp"}'
+expected_final = ["bedroom"]
+forbidden_final = ["think", "reasoning", "which"]
+max_words = 8
+
+[[fixture]]
+id = "ro-direct-kitchen-on"
+language = "ro"
+request = "Aprinde lumina din bucătărie."
+expected_action = "turn_on"
+expected_entity_ids = ["light.kitchen_ceiling"]
+tool_result = '{"ok":true,"service":"light.turn_on","entity_id":"light.kitchen_ceiling"}'
+expected_final = ["bucătărie", "aprins"]
+forbidden_final = ["think", "reasoning", "care"]
+max_words = 8
+
+[[fixture]]
+id = "ro-direct-bedroom-off"
+language = "ro"
+request = "Stinge veioza din dormitor."
+expected_action = "turn_off"
+expected_entity_ids = ["light.bedroom_lamp"]
+tool_result = '{"ok":true,"service":"light.turn_off","entity_id":"light.bedroom_lamp"}'
+expected_final = ["dormitor", "stins"]
+forbidden_final = ["think", "reasoning", "care"]
+max_words = 8
+
+# Area-level commands: the model may target the area or a light in that area,
+# but it must not pick an unrelated room.
+[[fixture]]
+id = "en-area-living-room-off"
+language = "en"
+request = "Turn off the lights in the living room."
+expected_action = "turn_off"
+expected_entity_ids = ["light.living_room_floor_lamp"]
+expected_area = "living_room"
+tool_result = '{"ok":true,"service":"light.turn_off","area":"living_room"}'
+expected_final = ["living room"]
+forbidden_final = ["think", "reasoning", "which"]
+max_words = 10
+
+[[fixture]]
+id = "ro-area-office-on"
+language = "ro"
+request = "Aprinde luminile din birou."
+expected_action = "turn_on"
+expected_entity_ids = ["light.office_desk_lamp"]
+expected_area = "office"
+tool_result = '{"ok":true,"service":"light.turn_on","area":"office"}'
+expected_final = ["birou", "aprins"]
+forbidden_final = ["think", "reasoning", "care"]
+max_words = 10
+
+# Ambiguous commands: with several lights available, the assistant must ask a
+# short clarification and must not call the tool.
+[[fixture]]
+id = "en-ambiguous-light-on"
+language = "en"
+request = "Turn on the light."
+expect_no_tool = true
+expected_final = ["which light", "which room"]
+forbidden_final = ["done", "turned on", "kitchen", "bedroom", "think", "reasoning"]
+max_words = 12
+
+[[fixture]]
+id = "ro-ambiguous-light-off"
+language = "ro"
+request = "Stinge lumina."
+expect_no_tool = true
+expected_final = ["care lumin", "ce camer", "unde"]
+forbidden_final = ["gata", "am stins", "bucătărie", "dormitor", "think", "reasoning"]
+max_words = 12
+
+# Non-action requests: these should not toggle lights even though they mention
+# Home Assistant language or a light name.
+[[fixture]]
+id = "en-status-not-action"
+language = "en"
+request = "Is the kitchen light on?"
+expect_no_tool = true
+expected_final = ["can't check", "cannot check", "status"]
+forbidden_final = ["turned on", "turned off", "done", "think", "reasoning"]
+max_words = 18
+
+[[fixture]]
+id = "ro-explanation-not-action"
+language = "ro"
+request = "Ce înseamnă light.turn_on?"
+expect_no_tool = true
+expected_final = ["aprinde", "serviciu"]
+forbidden_final = ["am aprins", "gata", "bucătărie", "think", "reasoning"]
+max_words = 18
+
+# Failure handling: the model should still choose the right tool, then produce a
+# concise user-facing failure message after the simulated Home Assistant result.
+[[fixture]]
+id = "en-unavailable-kitchen-on"
+language = "en"
+request = "Turn on the kitchen light."
+expected_action = "turn_on"
+expected_entity_ids = ["light.kitchen_ceiling"]
+tool_result = '{"ok":false,"error":"entity_unavailable","entity_id":"light.kitchen_ceiling"}'
+expected_final = ["unavailable", "can't"]
+forbidden_final = ["turned on", "done", "think", "reasoning"]
+max_words = 12
+
+[[fixture]]
+id = "ro-unavailable-bedroom-off"
+language = "ro"
+request = "Stinge veioza din dormitor."
+expected_action = "turn_off"
+expected_entity_ids = ["light.bedroom_lamp"]
+tool_result = '{"ok":false,"error":"entity_unavailable","entity_id":"light.bedroom_lamp"}'
+expected_final = ["indisponibil", "nu pot"]
+forbidden_final = ["am stins", "gata", "think", "reasoning"]
+max_words = 12

@@ -20,6 +20,7 @@ hex = { workspace = true }
 indicatif = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+reqwest = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -30,10 +31,12 @@ tracing-subscriber = { workspace = true }
 # we wrap the cleanup stage so latency reports still mean something even
 # when the user benchmarks STT-only.
 fono-stt = { path = "../fono-stt", default-features = false }
-fono-polish = { path = "../fono-polish" }
+fono-polish = { path = "../fono-polish", default-features = false, features = ["anthropic", "cerebras", "openai-compat"] }
+fono-assistant = { path = "../fono-assistant", default-features = false, features = ["anthropic", "openai-compat"] }
+fono-core = { path = "../fono-core" }
 fono-download = { path = "../fono-download" }
 toml = { workspace = true }
-futures = { workspace = true, optional = true }
+futures = { workspace = true }
 tokio-stream = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -58,7 +61,14 @@ accel-openblas = ["whisper-local", "fono-stt/accel-openblas"]
 # streaming primitives from fono-stt and the small futures glue
 # needed to build a BoxStream<StreamFrame> from an in-memory PCM
 # buffer.
-equivalence = ["fono-stt/streaming", "dep:futures", "dep:tokio-stream"]
+equivalence = ["fono-stt/streaming", "dep:tokio-stream"]
+# Direct embedded llama.cpp polish and assistant backends for comparing
+# Fono's local runtime against Ollama with the same fixtures.
+llama-local = ["fono-polish/llama-local", "fono-assistant/llama-local"]
+accel-polish-cuda = ["llama-local", "fono-polish/accel-cuda"]
+accel-polish-vulkan = ["llama-local", "fono-polish/accel-vulkan"]
+accel-polish-metal = ["llama-local", "fono-polish/accel-metal"]
+accel-polish-rocm = ["llama-local", "fono-polish/accel-rocm"]
 
 [[bin]]
 name = "fono-bench"
