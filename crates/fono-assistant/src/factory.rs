@@ -6,7 +6,7 @@
 //! Otherwise mirrors [`fono_polish::factory::build_polish`] with chat
 //! invariants (different default models, different prompt usage).
 
-#[allow(unused_imports)]
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -127,7 +127,7 @@ fn resolve_cloud(
 #[cfg(any(feature = "openai-compat", feature = "anthropic"))]
 fn default_cloud_model(provider: &str) -> &'static str {
     if provider == "ollama" {
-        return "llama3.2";
+        return fono_core::config::DEFAULT_POLISH_LOCAL_MODEL;
     }
     provider_catalog::find(provider).and_then(|p| p.assistant.as_ref()).map_or("", |a| a.text_model)
 }
@@ -138,6 +138,7 @@ fn default_cloud_model(provider: &str) -> &'static str {
 pub fn build_assistant(
     cfg: &AssistantCfg,
     secrets: &Secrets,
+    assistant_models_dir: &Path,
 ) -> Result<Option<Arc<dyn Assistant>>> {
     if !cfg.enabled || matches!(cfg.backend, AssistantBackend::None) {
         return Ok(None);
@@ -148,7 +149,7 @@ pub fn build_assistant(
         AssistantBackend::Groq => build_groq(cfg, secrets).map(Some),
         AssistantBackend::OpenAI => build_openai(cfg, secrets).map(Some),
         AssistantBackend::OpenRouter => build_openrouter(cfg, secrets).map(Some),
-        AssistantBackend::Ollama => build_ollama(cfg).map(Some),
+        AssistantBackend::Ollama => build_ollama(cfg, assistant_models_dir).map(Some),
         AssistantBackend::Anthropic => build_anthropic(cfg, secrets).map(Some),
     }
 }
@@ -189,35 +190,68 @@ fn build_openrouter(cfg: &AssistantCfg, secrets: &Secrets) -> Result<Arc<dyn Ass
     ))
 }
 
-// Returns Result for symmetry with the other build_* functions, even
-// though Ollama construction can't currently fail (no key resolution).
-#[cfg(feature = "openai-compat")]
-#[allow(clippy::unnecessary_wraps)]
-fn build_ollama(cfg: &AssistantCfg) -> Result<Arc<dyn Assistant>> {
-    // Ollama needs an explicit endpoint; we lift it from cfg.cloud.api_key_ref
-    // when provided (interpreted as a URL placeholder), else default to
-    // localhost. Same convention as fono-polish.
-    let endpoint = cfg
-        .cloud
-        .as_ref()
-        .and_then(|c| {
-            let ref_str = &c.api_key_ref;
-            if ref_str.starts_with("http://") || ref_str.starts_with("https://") {
-                Some(ref_str.clone())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "http://localhost:11434/v1/chat/completions".to_string());
-    let model = cfg
-        .cloud
+fn manual_local_server_endpoint(cfg: &AssistantCfg) -> Option<String> {
+    cfg.cloud.as_ref().and_then(|c| {
+        let provider = c.provider.trim();
+        let explicitly_manual = matches!(provider, "ollama-server" | "openai-compatible-local");
+        let ref_str = &c.api_key_ref;
+        if explicitly_manual && (ref_str.starts_with("http://") || ref_str.starts_with("https://"))
+        {
+            Some(ref_str.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn local_model(cfg: &AssistantCfg) -> String {
+    cfg.cloud
         .as_ref()
         .map(|c| c.model.clone())
         .filter(|m| !m.is_empty())
-        .unwrap_or_else(|| default_cloud_model("ollama").to_string());
-    // Ollama has no native web-search tool surface; ignore the
-    // toggle even when it's set on the config.
-    Ok(Arc::new(crate::openai_compat_chat::OpenAiCompatChat::ollama(endpoint, model)))
+        .unwrap_or_else(|| cfg.local.model.clone())
+}
+
+#[cfg(feature = "llama-local")]
+fn resolve_local_model_path(cfg: &AssistantCfg, assistant_models_dir: &Path) -> std::path::PathBuf {
+    assistant_models_dir.join(format!("{}.gguf", cfg.local.model))
+}
+
+#[cfg(feature = "llama-local")]
+fn build_embedded_local(
+    cfg: &AssistantCfg,
+    assistant_models_dir: &Path,
+) -> Result<Arc<dyn Assistant>> {
+    let model_path = resolve_local_model_path(cfg, assistant_models_dir);
+    if !model_path.exists() {
+        return Err(anyhow!(
+            "local assistant model not found at {:?}; run `fono models install {}` or choose a cloud assistant backend",
+            model_path,
+            cfg.local.model
+        ));
+    }
+    Ok(Arc::new(crate::llama_local::LlamaLocalAssistant::new(model_path, cfg.local.context)))
+}
+
+#[cfg(not(feature = "llama-local"))]
+fn build_embedded_local(_: &AssistantCfg, _: &Path) -> Result<Arc<dyn Assistant>> {
+    Err(anyhow!(
+        "local assistant requested but this binary was built without embedded local assistant support; rebuild with the `llama-local` feature or manually configure an Ollama/OpenAI-compatible local server URL"
+    ))
+}
+
+// Returns Result for symmetry with the other build_* functions, even
+// though local-server construction can't currently fail (no key resolution).
+#[cfg(feature = "openai-compat")]
+#[allow(clippy::unnecessary_wraps)]
+fn build_ollama(cfg: &AssistantCfg, assistant_models_dir: &Path) -> Result<Arc<dyn Assistant>> {
+    if let Some(endpoint) = manual_local_server_endpoint(cfg) {
+        return Ok(Arc::new(crate::openai_compat_chat::OpenAiCompatChat::ollama(
+            endpoint,
+            local_model(cfg),
+        )));
+    }
+    build_embedded_local(cfg, assistant_models_dir)
 }
 
 #[cfg(not(feature = "openai-compat"))]
@@ -245,10 +279,13 @@ fn build_openrouter(_cfg: &AssistantCfg, _secrets: &Secrets) -> Result<Arc<dyn A
     ))
 }
 #[cfg(not(feature = "openai-compat"))]
-fn build_ollama(_cfg: &AssistantCfg) -> Result<Arc<dyn Assistant>> {
-    Err(anyhow!(
-        "OpenAI-compatible assistant backends not compiled in (enable the `openai-compat` feature on `fono-assistant`)"
-    ))
+fn build_ollama(cfg: &AssistantCfg, assistant_models_dir: &Path) -> Result<Arc<dyn Assistant>> {
+    if manual_local_server_endpoint(cfg).is_some() {
+        return Err(anyhow!(
+            "manual Ollama/OpenAI-compatible assistant server requested but this binary was built without the `openai-compat` feature"
+        ));
+    }
+    build_embedded_local(cfg, assistant_models_dir)
 }
 
 #[cfg(feature = "anthropic")]
@@ -280,7 +317,7 @@ mod tests {
             ..AssistantCfg::default()
         };
         let secrets = Secrets::default();
-        assert!(build_assistant(&cfg, &secrets).unwrap().is_none());
+        assert!(build_assistant(&cfg, &secrets, Path::new(".")).unwrap().is_none());
     }
 
     #[test]
@@ -290,7 +327,7 @@ mod tests {
             backend: AssistantBackend::None,
             ..AssistantCfg::default()
         };
-        assert!(build_assistant(&cfg, &Secrets::default()).unwrap().is_none());
+        assert!(build_assistant(&cfg, &Secrets::default(), Path::new(".")).unwrap().is_none());
     }
 
     #[cfg(feature = "anthropic")]
@@ -302,7 +339,8 @@ mod tests {
             cloud: Some(AssistantCloud::default()),
             ..AssistantCfg::default()
         };
-        let err = build_assistant(&cfg, &Secrets::default()).err().unwrap().to_string();
+        let err =
+            build_assistant(&cfg, &Secrets::default(), Path::new(".")).err().unwrap().to_string();
         assert!(err.contains("ANTHROPIC_API_KEY") && err.contains("fono keys add"), "{err}");
     }
 
@@ -317,7 +355,7 @@ mod tests {
         };
         let mut secrets = Secrets::default();
         secrets.insert("ANTHROPIC_API_KEY", "sk-ant-test");
-        assert!(build_assistant(&cfg, &secrets).unwrap().is_some());
+        assert!(build_assistant(&cfg, &secrets, Path::new(".")).unwrap().is_some());
     }
 
     #[cfg(feature = "openai-compat")]
@@ -331,7 +369,55 @@ mod tests {
         };
         let mut secrets = Secrets::default();
         secrets.insert("OPENAI_API_KEY", "sk-test");
-        assert!(build_assistant(&cfg, &secrets).unwrap().is_some());
+        assert!(build_assistant(&cfg, &secrets, Path::new(".")).unwrap().is_some());
+    }
+
+    #[cfg(feature = "openai-compat")]
+    #[test]
+    fn local_assistant_uses_embedded_model_by_default() {
+        let cfg = AssistantCfg {
+            enabled: true,
+            backend: AssistantBackend::Ollama,
+            ..AssistantCfg::default()
+        };
+        assert_eq!(cfg.local.model, fono_core::config::DEFAULT_POLISH_LOCAL_MODEL);
+        assert!(build_assistant(&cfg, &Secrets::default(), Path::new("/this/path/does/not/exist"))
+            .is_err());
+    }
+
+    #[cfg(feature = "openai-compat")]
+    #[test]
+    fn wizard_legacy_ollama_provider_ignores_stale_endpoint() {
+        let cfg = AssistantCfg {
+            enabled: true,
+            backend: AssistantBackend::Ollama,
+            cloud: Some(AssistantCloud {
+                provider: "ollama".into(),
+                api_key_ref: "http://localhost:11434/v1/chat/completions".into(),
+                model: fono_core::config::DEFAULT_POLISH_LOCAL_MODEL.into(),
+            }),
+            ..AssistantCfg::default()
+        };
+        assert!(build_assistant(&cfg, &Secrets::default(), Path::new("/this/path/does/not/exist"))
+            .is_err());
+    }
+
+    #[cfg(feature = "openai-compat")]
+    #[test]
+    fn manual_ollama_endpoint_still_builds_without_model_file() {
+        let cfg = AssistantCfg {
+            enabled: true,
+            backend: AssistantBackend::Ollama,
+            cloud: Some(AssistantCloud {
+                provider: "ollama-server".into(),
+                api_key_ref: "http://localhost:11434/v1/chat/completions".into(),
+                model: "gemma3:1b".into(),
+            }),
+            ..AssistantCfg::default()
+        };
+        assert!(build_assistant(&cfg, &Secrets::default(), Path::new("/this/path/does/not/exist"))
+            .unwrap()
+            .is_some());
     }
 
     // ── Phase E4 + E5: resolve_cloud unit tests ───────────────────

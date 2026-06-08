@@ -17,6 +17,7 @@ pub mod provider_catalog;
 pub mod providers;
 pub mod screen_capture;
 pub mod secrets;
+pub mod turn_trace;
 
 #[cfg(feature = "budget")]
 pub mod budget;

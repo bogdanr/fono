@@ -21,10 +21,12 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use fono_core::turn_trace::current_span;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use ort::value::Tensor;
 use serde::Deserialize;
+use serde_json::json;
 
 use crate::traits::{TextToSpeech, TtsAudio};
 
@@ -285,7 +287,9 @@ impl TextToSpeech for PiperLocal {
         if text.trim().is_empty() {
             return Ok(TtsAudio { pcm: Vec::new(), sample_rate: self.sample_rate });
         }
+        let phonemize_span = current_span("tts.piper_phonemize", "assistant.tts", "tts");
         let ids = self.voice.text_to_ids(text)?;
+        phonemize_span.finish(json!({ "chars": text.chars().count(), "ids": ids.len() }));
         if ids.is_empty() {
             return Ok(TtsAudio { pcm: Vec::new(), sample_rate: self.sample_rate });
         }
@@ -293,9 +297,11 @@ impl TextToSpeech for PiperLocal {
         let scales = [inf.noise_scale, inf.length_scale, inf.noise_w];
         let session = Arc::clone(&self.session);
         // ONNX inference is CPU-bound and blocking; keep it off the async runtime.
+        let inference_span = current_span("tts.piper_onnx_run", "assistant.tts", "tts");
         let pcm = tokio::task::spawn_blocking(move || Self::run_inference(&session, ids, scales))
             .await
             .context("piper inference task")??;
+        inference_span.finish(json!({ "samples": pcm.len(), "sample_rate": self.sample_rate }));
         Ok(TtsAudio { pcm, sample_rate: self.sample_rate })
     }
 

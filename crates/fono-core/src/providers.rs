@@ -198,7 +198,7 @@ pub const fn assistant_backend_str(b: &AssistantBackend) -> &'static str {
         AssistantBackend::Groq => "groq",
         AssistantBackend::Cerebras => "cerebras",
         AssistantBackend::OpenRouter => "openrouter",
-        AssistantBackend::Ollama => "ollama",
+        AssistantBackend::Ollama => "local",
     }
 }
 
@@ -211,7 +211,7 @@ pub fn parse_assistant_backend(s: &str) -> Option<AssistantBackend> {
         "groq" => Some(AssistantBackend::Groq),
         "cerebras" => Some(AssistantBackend::Cerebras),
         "openrouter" => Some(AssistantBackend::OpenRouter),
-        "ollama" => Some(AssistantBackend::Ollama),
+        "local" | "ollama" => Some(AssistantBackend::Ollama),
         _ => None,
     }
 }
@@ -471,6 +471,13 @@ mod tests {
     fn unknown_returns_none() {
         assert!(parse_stt_backend("nope").is_none());
         assert!(parse_polish_backend("nope").is_none());
+    }
+
+    #[test]
+    fn assistant_local_backend_is_user_facing_local_with_manual_ollama_alias() {
+        assert_eq!(assistant_backend_str(&AssistantBackend::Ollama), "local");
+        assert_eq!(parse_assistant_backend("local"), Some(AssistantBackend::Ollama));
+        assert_eq!(parse_assistant_backend("ollama"), Some(AssistantBackend::Ollama));
     }
 
     #[test]

@@ -22,7 +22,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use fono_core::config::{Config, PolishBackend, SttBackend};
+use fono_core::config::{AssistantBackend, Config, PolishBackend, SttBackend};
 use fono_core::Paths;
 use fono_stt::{ModelInfo, ModelRegistry, Quantization, QuantizationPref};
 use tracing::{debug, info, warn};
@@ -86,8 +86,17 @@ pub async fn ensure_models(paths: &Paths, config: &Config) -> Result<()> {
         }
     }
     if config.polish.backend == PolishBackend::Local {
-        if let Err(e) = ensure_local_polish(paths, &config.polish.local.model).await {
+        // Boxed: the LLM-ensure future may carry registry/download state
+        // large enough to trip stack-frame lints when inlined here.
+        if let Err(e) = Box::pin(ensure_local_polish(paths, &config.polish.local.model)).await {
             warn!("auto-download of LLM model failed: {e:#}");
+        }
+    }
+    if config.assistant.enabled && config.assistant.backend == AssistantBackend::Ollama {
+        // Boxed for the same reason as the polish LLM ensure above; local
+        // assistant and cleanup share the registry/download path.
+        if let Err(e) = Box::pin(ensure_local_polish(paths, &config.assistant.local.model)).await {
+            warn!("auto-download of assistant LLM model failed: {e:#}");
         }
     }
     #[cfg(feature = "tts-local")]
@@ -122,7 +131,7 @@ pub async fn ensure_local_tts(paths: &Paths, config: &Config) -> Result<EnsureOu
             && voice.style.as_ref().is_none_or(|s| voices_dir.join(&s.file).is_file());
         if !already {
             any_downloaded = true;
-            info!("local voice {:?} missing — downloading from the fono-voice mirror", voice.name);
+            debug!("local voice {:?} missing; downloading from the fono-voice mirror", voice.name);
         }
         fono_tts::voices::ensure_voice(voice, &voices_dir, base)
             .await
@@ -229,8 +238,8 @@ pub async fn ensure_local_stt(
     }
     let url =
         ModelRegistry::url_for(info, quant).expect("variant lookup succeeded so URL must resolve");
-    info!(
-        "whisper model {model_name:?} ({quant}) missing — downloading {} MB from {url}",
+    debug!(
+        "whisper model {model_name:?} ({quant}) missing; downloading {} MB from {url}",
         variant.approx_mb
     );
     fono_download::download(&url, &dest, variant.sha256)
@@ -257,7 +266,7 @@ pub async fn ensure_local_polish(paths: &Paths, model_name: &str) -> Result<Ensu
         return Ok(EnsureOutcome::AlreadyPresent);
     }
     let url = fono_polish::PolishRegistry::url_for(info);
-    info!("LLM model {model_name:?} missing — downloading {} MB from {url}", info.approx_mb);
+    debug!("LLM model {model_name:?} missing; downloading {} MB from {url}", info.approx_mb);
     fono_download::download(&url, &dest, info.sha256)
         .await
         .with_context(|| format!("downloading LLM model {model_name:?}"))?;

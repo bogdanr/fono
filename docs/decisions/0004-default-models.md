@@ -46,7 +46,7 @@ Local TTS defaults, per
   locales.
 
 Both clear the bar below: OSI-/GPL-compatible, neither is a
-Llama-family nor Gemma model. The engines run on the **ONNX Runtime**
+Llama-family nor non-OSI Gemma model. The engines run on the **ONNX Runtime**
 voice-stack platform (ADR 0032), statically linked via `ort`; Piper and
 Kokoro are distributed as `.onnx` and load directly. Model weights
 download at runtime, never bundled.
@@ -73,7 +73,13 @@ stack grows; each new model must be added to the minimal-build
 - **Llama 3.x family** — the Llama Community License is **not OSI-approved**; its
   acceptable-use clauses conflict with the GPL-3.0 project ethos. Offered as
   opt-in only, gated behind an explicit `--accept-llama-license` flag.
-- **Gemma family** — custom Google license, same reasoning. Opt-in only.
+- **Gemma family** — older Gemma releases used a custom Google license and remain
+  opt-in only when published under non-OSI or extra-restriction terms. Gemma models
+  may be defaults only when the specific artifact and its upstream base model are
+  both published under an OSI-approved, GPL-3.0-compatible license such as
+  Apache-2.0, with no additional use restrictions. Verified examples: Gemma 4 E2B
+  and E4B instruction-tuned QAT/GGUF artifacts published by Google with
+  `license: apache-2.0` and `license_link` to the Gemma 4 Apache-2.0 license.
 - **Parakeet (NVIDIA)** — Apache-2.0, so license-clean, but ~600 MB quantised and
   English-only. Too big for the default tier; available as opt-in for power users
   who want higher English STT accuracy.

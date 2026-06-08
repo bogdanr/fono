@@ -50,6 +50,10 @@ use crate::history::{ChatRole, ChatTurn, ToolCall};
 use crate::sse::SseBuffer;
 use crate::traits::{Assistant, AssistantContext, TokenDelta, ToolEvent};
 
+fn is_local_backend(backend_name: &str) -> bool {
+    backend_name == "ollama"
+}
+
 /// Inter-chunk watchdog for streaming chat. SSE replies tick at most
 /// every few seconds even on slow providers (Cerebras / Groq deliver
 /// one chunk per token roughly every 30-50 ms); 20 s of silence
@@ -148,8 +152,10 @@ fn warm_client() -> reqwest::Client {
 struct ChatReq {
     model: String,
     messages: Vec<WireMessage>,
-    temperature: f32,
-    top_p: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
     /// OpenAI's gpt-5 / o-series reject the legacy `max_tokens` and
     /// demand `max_completion_tokens`. Older OpenAI models plus
     /// every Cerebras / Groq / OpenRouter / Ollama deployment
@@ -157,6 +163,14 @@ struct ChatReq {
     #[serde(rename = "max_completion_tokens")]
     max_tokens: u32,
     stream: bool,
+    /// Local OpenAI-compatible servers default thinking-capable models
+    /// (Qwen3.x, DeepSeek-R1, etc.) to hidden reasoning. The assistant
+    /// should speak the final answer only, so local endpoints get both
+    /// Ollama's native `think: false` and llama.cpp's Jinja override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<serde_json::Value>>,
 }
@@ -617,6 +631,14 @@ struct ChatRunner {
     is_openrouter: bool,
 }
 
+fn assistant_token_budget(backend_name: &str) -> u32 {
+    if is_local_backend(backend_name) {
+        256
+    } else {
+        1024
+    }
+}
+
 /// Outcome of one pump: the buffered content (when buffering was
 /// enabled) and the accumulated tool call (if any).
 struct PumpResult {
@@ -641,10 +663,17 @@ impl ChatRunner {
         let req = ChatReq {
             model: self.model.clone(),
             messages,
-            temperature: 0.5,
-            top_p: 0.9,
-            max_tokens: 1024,
+            temperature: (!uses_default_sampling_only(self.backend_name, &self.model))
+                .then_some(0.5),
+            top_p: (!uses_default_sampling_only(self.backend_name, &self.model)).then_some(0.9),
+            max_tokens: assistant_token_budget(self.backend_name),
             stream: true,
+            think: is_local_backend(self.backend_name).then_some(false),
+            chat_template_kwargs: is_local_backend(self.backend_name).then_some(
+                serde_json::json!({
+                    "enable_thinking": false,
+                }),
+            ),
             tools,
         };
 
@@ -839,6 +868,10 @@ impl ChatRunner {
     }
 }
 
+fn uses_default_sampling_only(backend_name: &str, model: &str) -> bool {
+    backend_name == "openai" && model.to_ascii_lowercase().contains("gpt-5")
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -894,6 +927,7 @@ mod tests {
             system_prompt: "be brief".into(),
             language: None,
             history: vec![turn(ChatRole::User, "hi"), turn(ChatRole::Assistant, "hello")],
+            active_window_context: None,
             screen_capture: None,
             prefer_vision: false,
         };
@@ -929,6 +963,7 @@ mod tests {
                 tool_turn,
                 turn(ChatRole::Assistant, "I see a terminal."),
             ],
+            active_window_context: None,
             screen_capture: None,
             prefer_vision: false,
         };
@@ -1009,16 +1044,43 @@ mod tests {
     }
 
     #[test]
+    fn local_backends_disable_thinking() {
+        assert!(is_local_backend("ollama"));
+        assert!(!is_local_backend("groq"));
+        assert!(!is_local_backend("openai"));
+    }
+
+    #[test]
+    fn local_request_serializes_thinking_disabled() {
+        let req = ChatReq {
+            model: "qwen3.5-4b".into(),
+            messages: Vec::new(),
+            temperature: Some(0.5),
+            top_p: Some(0.9),
+            max_tokens: assistant_token_budget("ollama"),
+            stream: true,
+            think: Some(false),
+            chat_template_kwargs: Some(serde_json::json!({ "enable_thinking": false })),
+            tools: None,
+        };
+        let body = serde_json::to_string(&req).unwrap();
+        assert!(body.contains("\"think\":false"), "body: {body}");
+        assert!(body.contains("\"enable_thinking\":false"), "body: {body}");
+    }
+
+    #[test]
     fn prefer_vision_false_omits_tools() {
         // With prefer_vision=false the reply_stream MUST NOT include
         // the `tools` field in the body.
         let req = ChatReq {
             model: "gpt-5-mini".into(),
             messages: Vec::new(),
-            temperature: 0.5,
-            top_p: 0.9,
+            temperature: Some(0.5),
+            top_p: Some(0.9),
             max_tokens: 1024,
             stream: true,
+            think: None,
+            chat_template_kwargs: None,
             tools: None,
         };
         let body = serde_json::to_string(&req).unwrap();
@@ -1030,10 +1092,12 @@ mod tests {
         let req = ChatReq {
             model: "gpt-5-mini".into(),
             messages: Vec::new(),
-            temperature: 0.5,
-            top_p: 0.9,
+            temperature: Some(0.5),
+            top_p: Some(0.9),
             max_tokens: 1024,
             stream: true,
+            think: None,
+            chat_template_kwargs: None,
             tools: Some(build_screen_tool()),
         };
         let body = serde_json::to_string(&req).unwrap();

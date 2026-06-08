@@ -22,6 +22,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use fono_core::turn_trace::{current_instant, current_span};
+use serde_json::json;
 use whatlang::{Detector, Lang};
 
 use crate::kokoro::KokoroLocal;
@@ -93,6 +95,18 @@ impl LocalRouter {
             .clone()
             .or_else(|| lang.map(str::trim).filter(|l| !l.is_empty()).map(str::to_string));
         let voice = resolve_voice_for_lang(&self.default_voice, self.pinned, chosen.as_deref());
+        current_instant(
+            "tts.voice_select",
+            "assistant.tts",
+            "tts",
+            json!({
+                "hint": lang.unwrap_or(""),
+                "detected": detected.as_deref().unwrap_or(""),
+                "chosen_lang": chosen.as_deref().unwrap_or(""),
+                "voice": voice.name,
+                "pinned": self.pinned,
+            }),
+        );
         tracing::debug!(
             target: "fono_tts::local_router",
             hint = lang.unwrap_or(""),
@@ -109,11 +123,14 @@ impl LocalRouter {
     /// first-uses of two languages don't serialise; a rare double-load is
     /// resolved by keeping whichever insert wins.
     fn engine_for(&self, voice: &Voice) -> Result<Arc<dyn TextToSpeech>> {
+        let span = current_span("tts.engine_for", "assistant.tts", "tts");
         if let Some(e) = self.cache.lock().expect("router cache mutex poisoned").get(&voice.name) {
+            span.finish(json!({ "voice": voice.name, "cache_hit": true }));
             return Ok(Arc::clone(e));
         }
         let engine = load_engine(&self.voices_dir, voice)?;
         let mut cache = self.cache.lock().expect("router cache mutex poisoned");
+        span.finish(json!({ "voice": voice.name, "cache_hit": false, "engine": voice.engine }));
         Ok(Arc::clone(cache.entry(voice.name.clone()).or_insert(engine)))
     }
 }
@@ -292,11 +309,20 @@ impl TextToSpeech for LocalRouter {
         if text.trim().is_empty() {
             return Ok(TtsAudio { pcm: Vec::new(), sample_rate: self.native_rate });
         }
+        let route_span = current_span("tts.local_router", "assistant.tts", "tts");
         let voice = self.voice_for(text, lang);
         let engine = self.engine_for(&voice)?;
         // The chosen engine owns the voice; its own `synthesize` does the
         // phonemize + ONNX inference (off the async runtime via spawn_blocking).
-        engine.synthesize(text, None, None).await
+        let audio = engine.synthesize(text, None, None).await?;
+        route_span.finish(json!({
+            "voice": voice.name,
+            "engine": voice.engine,
+            "chars": text.chars().count(),
+            "sample_rate": audio.sample_rate,
+            "samples": audio.pcm.len(),
+        }));
+        Ok(audio)
     }
 
     fn name(&self) -> &'static str {

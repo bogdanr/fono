@@ -278,7 +278,7 @@ async fn main() -> Result<()> {
 }
 
 async fn exercise_assistant(cfg: &AssistantCfg, secrets: &Secrets) -> Result<usize> {
-    let assistant = fono_assistant::build_assistant(cfg, secrets)?
+    let assistant = fono_assistant::build_assistant(cfg, secrets, Path::new("."))?
         .ok_or_else(|| anyhow::anyhow!("build_assistant returned None"))?;
     // Prewarm — for cloud backends this hits /v1/models so a wrong
     // key fails here with a clear status.
@@ -294,6 +294,7 @@ async fn exercise_assistant(cfg: &AssistantCfg, secrets: &Secrets) -> Result<usi
         system_prompt: "You are a smoke-test fixture. Reply in 5 words exactly.".into(),
         language: None,
         history: ConversationHistory::default().snapshot(),
+        active_window_context: None,
         screen_capture: None,
         prefer_vision: false,
     };
@@ -414,13 +415,14 @@ async fn exercise_groq_e2e(secrets: &Secrets) -> Result<()> {
         }),
         ..AssistantCfg::default()
     };
-    let assistant = fono_assistant::build_assistant(&llm_cfg, secrets)
+    let assistant = fono_assistant::build_assistant(&llm_cfg, secrets, Path::new("."))
         .map_err(|e| anyhow!("build_assistant: {e:#}"))?
         .ok_or_else(|| anyhow!("build_assistant returned None"))?;
     let ctx = AssistantContext {
         system_prompt: "You are a brief smoke-test assistant. Reply in one short sentence.".into(),
         language: None,
         history: ConversationHistory::default().snapshot(),
+        active_window_context: None,
         screen_capture: None,
         prefer_vision: false,
     };

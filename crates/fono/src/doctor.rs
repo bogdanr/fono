@@ -176,7 +176,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
             Ok(None) => writeln!(out, "  polish: {}", dim("disabled (cleanup off)"))?,
             Err(e) => writeln!(out, "  polish: {} {e:#}", bad("FAIL —"))?,
         }
-        match fono_assistant::build_assistant(&c.assistant, &secrets) {
+        match fono_assistant::build_assistant(&c.assistant, &secrets, &paths.polish_models_dir()) {
             Ok(Some(a)) => writeln!(out, "  assistant: {} {}", a.name(), ok("ready"))?,
             Ok(None) => writeln!(out, "  assistant: {}", dim("disabled"))?,
             Err(e) => writeln!(out, "  assistant: {} {e:#}", bad("FAIL —"))?,

@@ -96,8 +96,10 @@ pub(crate) fn warm_client() -> reqwest::Client {
 struct ChatReq<'a> {
     model: &'a str,
     messages: Vec<Message<'a>>,
-    temperature: f32,
-    top_p: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
     // OpenAI's gpt-5 / o-series reject the legacy `max_tokens` field
     // with a 400; the new name `max_completion_tokens` is accepted
     // by all the OpenAI-compat providers we ship (Cerebras, Groq,
@@ -117,6 +119,15 @@ struct ChatReq<'a> {
     // `plans/2026-05-29-romanian-dictation-polish-reconstruction-v2.md`.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'a str>,
+    // Local OpenAI-compatible servers default thinking-capable models
+    // (Qwen3.x, DeepSeek-R1, etc.) to emitting hidden reasoning. Fono's
+    // cleanup path needs the final cleaned transcript only, so local
+    // endpoints get both Ollama's native `think: false` switch and
+    // llama.cpp's Jinja `enable_thinking: false` override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     stop: Vec<&'a str>,
     stream: bool,
@@ -147,6 +158,16 @@ pub(crate) fn is_reasoning_model(model: &str) -> bool {
         || m == "o4-mini"
 }
 
+#[must_use]
+pub(crate) fn uses_default_sampling_only(backend_name: &str, model: &str) -> bool {
+    backend_name == "openai" && model.to_ascii_lowercase().contains("gpt-5")
+}
+
+#[must_use]
+pub(crate) fn is_local_backend(backend_name: &str) -> bool {
+    backend_name == "ollama"
+}
+
 #[derive(Serialize)]
 struct Message<'a> {
     role: &'a str,
@@ -168,6 +189,16 @@ struct RespMessage {
     content: String,
 }
 
+#[must_use]
+fn cleanup_token_budget(raw: &str, local_backend: bool, reasoning_model: bool) -> u32 {
+    if !local_backend || reasoning_model {
+        return 2048;
+    }
+
+    let estimated_input_tokens = (raw.chars().count() as u32 / 4).max(16);
+    (estimated_input_tokens + 64).clamp(96, 512)
+}
+
 #[async_trait]
 impl TextFormatter for OpenAiCompat {
     #[allow(clippy::too_many_lines)]
@@ -175,22 +206,28 @@ impl TextFormatter for OpenAiCompat {
         let system = ctx.system_prompt();
         let user = user_prompt(raw);
         let reasoning = is_reasoning_model(&self.model);
+        let default_sampling_only = uses_default_sampling_only(self.backend_name, &self.model);
         let req = ChatReq {
             model: &self.model,
             messages: vec![
                 Message { role: "system", content: &system },
                 Message { role: "user", content: &user },
             ],
-            // Latency plan L19 — short cleanup outputs, deterministic
-            // tone. The budget must also cover a reasoning model's
-            // hidden chain-of-thought (gpt-oss, the Groq default),
-            // otherwise the visible `content` comes back empty and we
-            // fall back to raw STT. 2048 comfortably fits `low`-effort
-            // reasoning plus a long dictation's cleaned text.
-            temperature: 0.2,
-            top_p: 0.9,
-            max_tokens: 2048,
+            // Latency plan L19 — cleanup outputs should be close to the input length.
+            // Cloud reasoning models need a large budget because hidden tokens can consume part of
+            // it, but local non-thinking endpoints should stay tight to avoid rambling and reduce
+            // tail latency. The local budget scales with input size and is capped well below the
+            // cloud budget.
+            temperature: (!default_sampling_only).then_some(0.2),
+            top_p: (!default_sampling_only).then_some(0.9),
+            max_tokens: cleanup_token_budget(raw, is_local_backend(self.backend_name), reasoning),
             reasoning_effort: reasoning.then_some("low"),
+            think: is_local_backend(self.backend_name).then_some(false),
+            chat_template_kwargs: is_local_backend(self.backend_name).then_some(
+                serde_json::json!({
+                    "enable_thinking": false,
+                }),
+            ),
             // The `"\n\n"` stop sequence fires inside a reasoning
             // model's chain-of-thought and truncates the answer to
             // empty, so it must be dropped for those. Non-reasoning
@@ -415,5 +452,40 @@ mod tests {
         let plain = is_reasoning_model("llama3.1-8b");
         assert!(!plain);
         assert_eq!(plain.then_some("low"), None);
+    }
+
+    #[test]
+    fn local_backends_disable_thinking() {
+        assert!(is_local_backend("ollama"));
+        assert!(!is_local_backend("groq"));
+        assert!(!is_local_backend("openai"));
+    }
+
+    #[test]
+    fn local_request_serializes_thinking_disabled() {
+        let req = ChatReq {
+            model: "qwen3.5-4b",
+            messages: Vec::new(),
+            temperature: Some(0.2),
+            top_p: Some(0.9),
+            max_tokens: cleanup_token_budget("Ana are mere.", true, false),
+            reasoning_effort: None,
+            think: Some(false),
+            chat_template_kwargs: Some(serde_json::json!({ "enable_thinking": false })),
+            stop: Vec::new(),
+            stream: false,
+        };
+        let body = serde_json::to_string(&req).unwrap();
+        assert!(body.contains("\"think\":false"), "body: {body}");
+        assert!(body.contains("\"enable_thinking\":false"), "body: {body}");
+    }
+
+    #[test]
+    fn openai_gpt5_uses_default_sampling_only() {
+        assert!(uses_default_sampling_only("openai", "gpt-5.4-mini"));
+        assert!(uses_default_sampling_only("openai", "gpt-5.5-mini"));
+        assert!(!uses_default_sampling_only("openai", "gpt-4.1-mini"));
+        assert!(!uses_default_sampling_only("groq", "openai/gpt-oss-20b"));
+        assert!(!uses_default_sampling_only("ollama", "gpt-5-local-test"));
     }
 }

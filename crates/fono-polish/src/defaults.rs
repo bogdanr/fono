@@ -7,18 +7,18 @@
 //! single source of truth. To change the default cleanup model for a
 //! cloud provider, edit its `PolishDefaults` entry there.
 //!
-//! Ollama has no catalogue entry (it's a self-hosted local server, not
-//! a cloud provider) so its default is hard-coded here.
+//! Gemma E2B is the shared default for self-hosted OpenAI-compatible local
+//! servers (Ollama or llama.cpp server).
 
 use fono_core::provider_catalog;
 
 /// Default cloud polish model for `provider`. Reads the catalogue
-/// for cloud providers; hard-codes Ollama (no catalogue entry); falls
+/// for cloud providers; hard-codes Ollama/local-server; falls
 /// back to `llama3.1-8b` for unknown ids.
 #[must_use]
 pub fn default_cloud_model(provider: &str) -> &'static str {
     if provider == "ollama" {
-        return "llama3.2";
+        return fono_core::config::DEFAULT_POLISH_LOCAL_MODEL;
     }
     provider_catalog::find(provider).and_then(|p| p.polish).map_or("llama3.1-8b", |l| l.model)
 }
@@ -38,8 +38,8 @@ mod tests {
     }
 
     #[test]
-    fn ollama_is_special_cased() {
-        assert_eq!(default_cloud_model("ollama"), "llama3.2");
+    fn ollama_uses_local_gemma_default() {
+        assert_eq!(default_cloud_model("ollama"), fono_core::config::DEFAULT_POLISH_LOCAL_MODEL);
     }
 
     #[test]

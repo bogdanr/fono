@@ -36,17 +36,17 @@ path = "src/main.rs"
 default = ["tray", "local-models", "llama-local", "interactive", "tts-local"]
 tray = ["fono-tray/tray-backend"]
 local-models = ["fono-stt/whisper-local"]
-llama-local = ["fono-polish/llama-local"]
+llama-local = ["fono-polish/llama-local", "fono-assistant/llama-local"]
 # Hardware acceleration features — fan out to the matching opt-in
 # features on `fono-stt` and `fono-polish`, which themselves forward to
 # `whisper-rs`/`llama-cpp-2`. Off by default because they require the
 # corresponding SDK at build time (CUDA toolkit, Vulkan SDK, etc.);
 # devs / packaging matrices opt in. Surfaced at runtime via
 # `daemon::hardware_acceleration_summary`.
-accel-cuda = ["fono-stt/accel-cuda", "fono-polish/accel-cuda"]
-accel-metal = ["fono-stt/accel-metal", "fono-polish/accel-metal"]
-accel-vulkan = ["fono-stt/accel-vulkan", "fono-polish/accel-vulkan"]
-accel-rocm = ["fono-stt/accel-hipblas", "fono-polish/accel-rocm"]
+accel-cuda = ["fono-stt/accel-cuda", "fono-polish/accel-cuda", "fono-assistant/accel-cuda"]
+accel-metal = ["fono-stt/accel-metal", "fono-polish/accel-metal", "fono-assistant/accel-metal"]
+accel-vulkan = ["fono-stt/accel-vulkan", "fono-polish/accel-vulkan", "fono-assistant/accel-vulkan"]
+accel-rocm = ["fono-stt/accel-hipblas", "fono-polish/accel-rocm", "fono-assistant/accel-rocm"]
 accel-coreml = ["fono-stt/accel-coreml"]
 accel-openblas = ["fono-stt/accel-openblas"]
 # Live-dictation streaming pipeline + the audio-visualisation overlay

@@ -531,14 +531,18 @@ pub enum PolishBackend {
     Ollama,
 }
 
-pub const DEFAULT_POLISH_LOCAL_MODEL: &str = "qwen3.5-0.8b";
-const DEFAULT_POLISH_LOCAL_QUANTIZATION: &str = "q4_k_m";
-const DEFAULT_POLISH_LOCAL_CONTEXT: u32 = 4096;
+pub const DEFAULT_POLISH_LOCAL_MODEL: &str = "gemma-4-e2b";
+const DEFAULT_POLISH_LOCAL_QUANTIZATION: &str = "q4_0";
+const DEFAULT_POLISH_LOCAL_CONTEXT: u32 = 2048;
+const LEGACY_QWEN_POLISH_LOCAL_QUANTIZATION: &str = "q4_k_m";
+const LEGACY_QWEN_POLISH_LOCAL_CONTEXT: u32 = 4096;
 const SUPERSEDED_POLISH_LOCAL_MODELS: &[&str] = &[
     "qwen2.5-0.5b-instruct",
     "qwen2.5-1.5b-instruct",
     "qwen2.5-3b-instruct",
     "smollm2-1.7b-instruct",
+    "qwen3.5-0.8b",
+    "qwen3.5-2b",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -749,11 +753,12 @@ pub struct AssistantLocal {
 
 impl Default for AssistantLocal {
     fn default() -> Self {
-        // A 3B-class chat model is the floor for usable assistant
-        // quality; 1.5B (the cleanup default) tends to ramble.
+        // Gemma E2B is the shared default for local cleanup and
+        // assistant chat; the assistant keeps a larger context window
+        // for short conversation history while cleanup uses 2048.
         Self {
             model: DEFAULT_POLISH_LOCAL_MODEL.into(),
-            quantization: "q4_k_m".into(),
+            quantization: DEFAULT_POLISH_LOCAL_QUANTIZATION.into(),
             context: 8192,
         }
     }
@@ -1329,11 +1334,18 @@ impl Config {
         // Refresh the old baked-in local cleanup model when the rest of
         // `[polish.local]` still matches the default shape. Users who pinned a
         // different model, quantization, or context keep their explicit choice.
+        let local_polish_is_baked_in = self.polish.local.quantization
+            == DEFAULT_POLISH_LOCAL_QUANTIZATION
+            && self.polish.local.context == DEFAULT_POLISH_LOCAL_CONTEXT;
+        let local_polish_is_legacy_qwen_default = self.polish.local.quantization
+            == LEGACY_QWEN_POLISH_LOCAL_QUANTIZATION
+            && self.polish.local.context == LEGACY_QWEN_POLISH_LOCAL_CONTEXT;
         if SUPERSEDED_POLISH_LOCAL_MODELS.contains(&self.polish.local.model.as_str())
-            && self.polish.local.quantization == DEFAULT_POLISH_LOCAL_QUANTIZATION
-            && self.polish.local.context == DEFAULT_POLISH_LOCAL_CONTEXT
+            && (local_polish_is_baked_in || local_polish_is_legacy_qwen_default)
         {
             self.polish.local.model = DEFAULT_POLISH_LOCAL_MODEL.to_string();
+            self.polish.local.quantization = DEFAULT_POLISH_LOCAL_QUANTIZATION.to_string();
+            self.polish.local.context = DEFAULT_POLISH_LOCAL_CONTEXT;
         }
 
         Ok(())
@@ -1392,6 +1404,8 @@ mod tests {
         assert!(loaded.general.languages.is_empty(), "default = unconstrained auto-detect");
         assert_eq!(loaded.stt.local.model, "small");
         assert_eq!(loaded.polish.local.model, DEFAULT_POLISH_LOCAL_MODEL);
+        assert_eq!(loaded.polish.local.context, DEFAULT_POLISH_LOCAL_CONTEXT);
+        assert_eq!(loaded.assistant.local.model, DEFAULT_POLISH_LOCAL_MODEL);
     }
 
     #[test]

@@ -17,7 +17,10 @@ use std::sync::RwLock as StdRwLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use fono_assistant::{Assistant, ConversationHistory};
+use fono_assistant::{
+    Assistant, AssistantCacheTrigger, AssistantPromptCacheSnapshot, AssistantPromptCacheWarmup,
+    ConversationHistory,
+};
 use fono_audio::{
     AudioCapture, CaptureConfig, EnvelopeConfig, EnvelopeFollower, RecordingBuffer, SilenceEvent,
     SilenceWatch, SilenceWatchConfig,
@@ -183,6 +186,72 @@ fn backend_is_vision_capable(backend: &fono_core::config::AssistantBackend) -> b
         .and_then(|p| p.assistant)
         .and_then(|a| a.multimodal_model)
         .is_some()
+}
+
+fn assistant_cache_warmup(config: &Config) -> AssistantPromptCacheWarmup {
+    AssistantPromptCacheWarmup {
+        f7_system_prompt: Some(f7_polish_prompt_for_cache(config)),
+        f8_system_prompt: Some(config.assistant.prompt_main.clone()),
+        assistant_tool_prompt: config
+            .assistant
+            .prefer_vision
+            .then(|| ASSISTANT_SCREEN_TOOL_PROMPT.to_string()),
+    }
+}
+
+fn f7_polish_prompt_for_cache(config: &Config) -> String {
+    let mut prompt = config.polish.prompt.main.trim().to_string();
+    let advanced = config.polish.prompt.advanced.trim();
+    if !advanced.is_empty() {
+        if !prompt.is_empty() {
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(advanced);
+    }
+    if !config.polish.prompt.dictionary.is_empty() {
+        if !prompt.is_empty() {
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str("Personal dictionary:\n");
+        prompt.push_str(&config.polish.prompt.dictionary.join("\n"));
+    }
+    prompt
+}
+
+const ASSISTANT_SCREEN_TOOL_PROMPT: &str = "Assistant tool schema: fono_screen captures the focused window or a user-selected screen region when the user asks about visible on-screen content. Call it only when the answer needs current pixels.";
+
+fn assistant_window_context_for_cache(focus_info: &FocusInfo) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(class) = focus_info.window_class.as_deref().filter(|s| !s.trim().is_empty()) {
+        parts.push(format!("Active app class: {class}"));
+    }
+    if let Some(title) = focus_info.window_title.as_deref().filter(|s| !s.trim().is_empty()) {
+        parts.push(format!("Active window title: {title}"));
+    }
+    let mut profile = ContextClassifier::classify(
+        focus_info.window_class.as_deref(),
+        focus_info.window_title.as_deref(),
+    );
+    if profile.as_ref().is_some_and(|p| p.is_terminal) {
+        if let Some(pid) = focus_info.window_pid {
+            if fono_inject::proc_enrichment_available() {
+                let term_ctx = fono_inject::terminal_context(pid);
+                if let Some(ref mut profile) = profile {
+                    ContextClassifier::enrich_terminal(profile, &term_ctx);
+                }
+            }
+        }
+    }
+    if let Some(profile) = profile {
+        parts.push(format!("Context profile: {}", profile.name));
+        if let Some(agent) = profile.detected_agent {
+            parts.push(format!("Detected coding agent: {agent:?}"));
+        }
+        if let Some(suffix) = profile.llm_suffix {
+            parts.push(format!("Context guidance: {suffix}"));
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
 /// (ALSA / PipeWire), so it is kept on a dedicated thread; we
@@ -575,7 +644,11 @@ impl SessionOrchestrator {
                 None
             }
         };
-        let assistant_backend = match fono_assistant::build_assistant(&config.assistant, secrets) {
+        let assistant_backend = match fono_assistant::build_assistant(
+            &config.assistant,
+            secrets,
+            &paths.polish_models_dir(),
+        ) {
             Ok(opt) => opt,
             Err(e) => {
                 warn!("Assistant backend unavailable; F8 will notify but not respond: {e:#}");
@@ -765,7 +838,11 @@ impl SessionOrchestrator {
                 None
             }
         };
-        let new_assistant = match fono_assistant::build_assistant(&cfg.assistant, &secrets) {
+        let new_assistant = match fono_assistant::build_assistant(
+            &cfg.assistant,
+            &secrets,
+            &paths.polish_models_dir(),
+        ) {
             Ok(opt) => opt,
             Err(e) => {
                 let err_text = format!("{e:#}");
@@ -1685,6 +1762,24 @@ impl SessionOrchestrator {
                 }
             });
         }
+        if let Some(assistant) = self.current_assistant() {
+            let warmup = assistant_cache_warmup(&self.current_config());
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let started = Instant::now();
+                match assistant.prewarm_prompt_caches(warmup).await {
+                    Ok(()) => debug!(
+                        "warmup: assistant {} prompt caches ready in {}ms",
+                        assistant.name(),
+                        started.elapsed().as_millis()
+                    ),
+                    Err(e) => debug!(
+                        "warmup: assistant {} prompt-cache prewarm skipped: {e:#}",
+                        assistant.name()
+                    ),
+                }
+            });
+        }
         // TTS prewarm matters for Cartesia: it pre-resolves a native
         // voice per non-English configured language via `/voices?…`
         // and caches them, so the first synth doesn't pay the HTTP
@@ -1832,6 +1927,17 @@ impl SessionOrchestrator {
             title = ?focus_info.window_title,
             "capture: focus snapshot at press"
         );
+        if let Some(assistant) = self.current_assistant() {
+            let history = Vec::new();
+            Self::prepare_assistant_prompt_cache(
+                assistant,
+                history,
+                AssistantCacheTrigger::F7,
+                f7_polish_prompt_for_cache(&cfg),
+                focus_info.clone(),
+                cfg.assistant.prefer_vision,
+            );
+        }
 
         // Standalone-waveform overlay: spawn the level ticker that
         // feeds bars/pulse RMS or oscilloscope sample snapshots, and
@@ -2039,6 +2145,7 @@ impl SessionOrchestrator {
     /// On release the captured transcript is forwarded to the LLM
     /// (skipping the batch STT step in [`run_assistant_turn`]).
     #[allow(clippy::significant_drop_tightening)]
+    #[allow(clippy::too_many_lines)]
     pub async fn on_assistant_hold_press(&self) -> Result<()> {
         // If a previous turn's playback is still finishing, stop it
         // — second-press semantics: barge-in.
@@ -2061,13 +2168,32 @@ impl SessionOrchestrator {
                         );
                         return Ok(());
                     }
+                    // Snapshot focus now so F8 can restore/extend prompt state
+                    // before the streaming STT result is available.
+                    let focus = Arc::clone(&self.focus);
+                    let focus_info = tokio::task::spawn_blocking(move || focus.probe())
+                        .await
+                        .unwrap_or_default();
+                    let cfg = self.current_config();
+                    if let Some(assistant) = self.current_assistant() {
+                        let history = {
+                            let mut s = self.assistant_session.lock().await;
+                            s.history.snapshot()
+                        };
+                        Self::prepare_assistant_prompt_cache(
+                            assistant,
+                            history,
+                            AssistantCacheTrigger::F8,
+                            cfg.assistant.prompt_main.clone(),
+                            focus_info.clone(),
+                            cfg.assistant.prefer_vision,
+                        );
+                    }
                     let session = self.build_live_capture_pipeline(
                         streaming,
                         fono_overlay::OverlayState::AssistantRecording { db: 0 },
                         Some(SilenceWatchFlavor::Assistant { auto_stop_commit: true }),
-                        // Assistant streaming path does not use the
-                        // focus snapshot — a default is fine.
-                        FocusInfo::default(),
+                        focus_info,
                     )?;
                     *slot = Some(session);
                     if self.current_config().general.auto_mute_system {
@@ -2117,6 +2243,27 @@ impl SessionOrchestrator {
                 ))
             }
         };
+        // Snapshot focus for active-window prompt-state caching before the
+        // overlay can steal focus. The assistant batch path also carries this
+        // into the LLM context after STT completes.
+        let focus = Arc::clone(&self.focus);
+        let focus_info =
+            tokio::task::spawn_blocking(move || focus.probe()).await.unwrap_or_default();
+        let cfg = self.current_config();
+        if let Some(assistant) = self.current_assistant() {
+            let history = {
+                let mut s = self.assistant_session.lock().await;
+                s.history.snapshot()
+            };
+            Self::prepare_assistant_prompt_cache(
+                assistant,
+                history,
+                AssistantCacheTrigger::F8,
+                cfg.assistant.prompt_main.clone(),
+                focus_info.clone(),
+                cfg.assistant.prefer_vision,
+            );
+        }
         // Reuse the dictation-side waveform overlay for the assistant
         // recording. Same Bars / FFT / Heatmap / Oscilloscope styles —
         // only the panel title ("ASSISTANT") and accent colour
@@ -2149,9 +2296,7 @@ impl SessionOrchestrator {
             stop_tx,
             join: Some(join),
             started_at: Instant::now(),
-            // Assistant batch path doesn't route through `spawn_pipeline`;
-            // focus is not consumed downstream, so a default is fine.
-            focus_info: FocusInfo::default(),
+            focus_info,
             #[cfg(feature = "interactive")]
             level_task,
             #[cfg(feature = "interactive")]
@@ -2183,10 +2328,12 @@ impl SessionOrchestrator {
         // text injector.
         let mut pre_transcribed: Option<String> = None;
         let mut elapsed: Option<Duration> = None;
+        let mut assistant_focus_info: Option<FocusInfo> = None;
         #[cfg(feature = "interactive")]
         {
             let live_taken = self.assistant_live_capture.lock().await.take();
             if let Some(mut session) = live_taken {
+                assistant_focus_info = Some(session.focus_info.clone());
                 let captured_for = session.started_at.elapsed();
                 // Same trailing-word grace as the F7 path: the cpal
                 // callback may still have a few frames in flight when
@@ -2254,6 +2401,7 @@ impl SessionOrchestrator {
                 let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
                 return;
             };
+            assistant_focus_info = Some(session.focus_info.clone());
             if self.current_config().general.auto_mute_system {
                 fono_audio::mute::set_default_sink_mute(false);
             }
@@ -2341,6 +2489,8 @@ impl SessionOrchestrator {
             } else {
                 None
             };
+        let active_window_context =
+            assistant_focus_info.as_ref().and_then(assistant_window_context_for_cache);
         let inputs = AssistantTurnInputs {
             pcm,
             sample_rate: self.capture_cfg.target_sample_rate,
@@ -2358,6 +2508,7 @@ impl SessionOrchestrator {
             pre_transcribed,
             prefer_vision,
             screen_capture_fn,
+            active_window_context,
         };
         let state_for_task = self.assistant_session.clone();
         let action_tx = self.action_tx.clone();
@@ -2469,6 +2620,34 @@ impl SessionOrchestrator {
 
     fn current_tts(&self) -> Option<Arc<dyn TextToSpeech>> {
         self.tts.read().expect("tts lock poisoned").clone()
+    }
+
+    /// Schedule hotkey-time prompt-state cache preparation on the active
+    /// assistant backend. Embedded llama.cpp backends restore/build the stable
+    /// F7/F8 checkpoint and, when window context is available, a dynamic
+    /// window-context checkpoint; cloud backends treat this as a no-op via the
+    /// default trait method. Fire-and-forget so the hotkey press path never
+    /// blocks on cache work (plan tasks 5–7/9).
+    fn prepare_assistant_prompt_cache(
+        assistant: Arc<dyn Assistant>,
+        history: Vec<fono_assistant::ChatTurn>,
+        trigger: AssistantCacheTrigger,
+        system_prompt: String,
+        focus_info: FocusInfo,
+        prefer_vision: bool,
+    ) {
+        let snapshot = AssistantPromptCacheSnapshot {
+            trigger,
+            system_prompt,
+            history,
+            active_window_context: assistant_window_context_for_cache(&focus_info),
+            prefer_vision,
+        };
+        tokio::spawn(async move {
+            if let Err(e) = assistant.prepare_prompt_cache_for_turn(snapshot).await {
+                debug!("assistant prompt-cache preparation skipped: {e:#}");
+            }
+        });
     }
 
     /// Re-inject the most recent cleaned (or raw) transcription.

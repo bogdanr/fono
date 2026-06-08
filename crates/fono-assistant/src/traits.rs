@@ -10,6 +10,38 @@ use futures::stream::BoxStream;
 
 use crate::history::{ChatTurn, ToolCall};
 
+/// Hotkey/runtime trigger that selected a prompt-state cache family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssistantCacheTrigger {
+    /// F7 dictation/polish flow. Local assistant backends may warm a compatible
+    /// cleanup prompt prefix when they share the embedded llama.cpp runtime.
+    F7,
+    /// F8 voice-assistant flow.
+    F8,
+}
+
+/// Stable prompt families the daemon may ask an assistant backend to warm at
+/// startup/idle time. Non-local backends ignore this through the default trait
+/// implementation.
+#[derive(Debug, Clone, Default)]
+pub struct AssistantPromptCacheWarmup {
+    pub f7_system_prompt: Option<String>,
+    pub f8_system_prompt: Option<String>,
+    pub assistant_tool_prompt: Option<String>,
+}
+
+/// Per-turn cache preparation request captured at hotkey press time, before STT
+/// finishes. The user transcript is intentionally absent; only stable prompt and
+/// active-window state are available this early.
+#[derive(Debug, Clone)]
+pub struct AssistantPromptCacheSnapshot {
+    pub trigger: AssistantCacheTrigger,
+    pub system_prompt: String,
+    pub history: Vec<ChatTurn>,
+    pub active_window_context: Option<String>,
+    pub prefer_vision: bool,
+}
+
 /// One token delta yielded by [`Assistant::reply_stream`]. Most
 /// deltas carry spoken `text`; a small number carry a sentinel
 /// [`ToolEvent`] that the caller MUST record in
@@ -78,6 +110,10 @@ pub struct AssistantContext {
     pub system_prompt: String,
     pub language: Option<String>,
     pub history: Vec<ChatTurn>,
+    /// Short, runtime-only description of the window active when the assistant
+    /// hotkey was pressed. This is cached separately from stable prompts so a
+    /// window change cannot invalidate F8's base prompt checkpoint.
+    pub active_window_context: Option<String>,
     /// When `Some`, tool-calling is enabled and the model may invoke
     /// `fono_screen` to capture the screen during a voice turn.
     /// Set from the F8 voice loop when a `GrabberProbe` is available.
@@ -94,6 +130,7 @@ impl std::fmt::Debug for AssistantContext {
             .field("system_prompt", &self.system_prompt)
             .field("language", &self.language)
             .field("history", &self.history)
+            .field("active_window_context", &self.active_window_context)
             .field("screen_capture", &self.screen_capture.is_some())
             .field("prefer_vision", &self.prefer_vision)
             .finish()
@@ -119,6 +156,23 @@ pub trait Assistant: Send + Sync {
     /// HEAD/GET; local backends should mmap their model. Failures are
     /// non-fatal.
     async fn prewarm(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Optional startup/idle prompt-state cache warmup. Embedded local
+    /// backends use this to prefill stable F7/F8/tool prompts without making
+    /// the hotkey path pay the prompt cost. Cloud backends ignore it.
+    async fn prewarm_prompt_caches(&self, _warmup: AssistantPromptCacheWarmup) -> Result<()> {
+        Ok(())
+    }
+
+    /// Optional hotkey-time cache preparation. The default is a no-op; embedded
+    /// local backends may restore/build a stable checkpoint and, when window
+    /// context is available, schedule a dynamic window checkpoint.
+    async fn prepare_prompt_cache_for_turn(
+        &self,
+        _snapshot: AssistantPromptCacheSnapshot,
+    ) -> Result<()> {
         Ok(())
     }
 }

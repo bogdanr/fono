@@ -341,6 +341,13 @@ mod tests {
     }
 
     #[test]
+    fn gemma_prompt_does_not_seed_qwen_thinking() {
+        let p = build_chatml_prompt_for_model("be terse", "hello world", "gemma-4-e2b");
+        assert!(p.ends_with("<|im_start|>assistant\n"));
+        assert!(!p.contains("<think>"));
+    }
+
+    #[test]
     fn missing_model_path_errors_clearly() {
         let m = LlamaLocal::new("/this/path/does/not/exist.gguf", 1024);
         let e = m.ensure_loaded().unwrap_err().to_string();

@@ -374,7 +374,7 @@ pub enum UseCmd {
     /// Switch the active voice-assistant chat backend. Independent of
     /// the polish pipeline (`fono use polish`).
     Assistant {
-        /// none | local | cerebras | groq | openai | anthropic | openrouter | ollama | gemini
+        /// none | local | cerebras | groq | openai | anthropic | openrouter
         backend: String,
     },
     /// Switch the active TTS backend (assistant audio replies).

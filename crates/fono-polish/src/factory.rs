@@ -6,6 +6,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+#[cfg(test)]
+use fono_core::config::DEFAULT_POLISH_LOCAL_MODEL;
 use fono_core::config::{Polish, PolishBackend};
 use fono_core::providers::polish_key_env;
 use fono_core::Secrets;
@@ -100,6 +102,26 @@ pub fn build_polish(
     .map(Some)
 }
 
+fn local_openai_endpoint(cfg: &Polish) -> String {
+    cfg.cloud
+        .as_ref()
+        .map(|c| c.api_key_ref.clone())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "http://localhost:11434/v1/chat/completions".to_string())
+}
+
+fn local_openai_model(cfg: &Polish) -> String {
+    cfg.cloud
+        .as_ref()
+        .map(|c| c.model.clone())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| cfg.local.model.clone())
+}
+
+fn is_gemma_model(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("gemma")
+}
+
 /// Resolve the model name in `cfg.local.model` to a `<polish_models_dir>/<name>.gguf`
 /// path. Mirrors the whisper resolver in `fono::models::ensure_whisper`.
 #[cfg(any(feature = "llama-local", test))]
@@ -138,16 +160,10 @@ fn build_oa_openrouter(key: String, model: String) -> Result<Arc<dyn TextFormatt
 #[cfg(feature = "openai-compat")]
 #[allow(clippy::unnecessary_wraps)]
 fn build_oa_ollama(cfg: &Polish, model: String) -> Result<Arc<dyn TextFormatter>> {
-    // Ollama doesn't need an API key; the endpoint is the local URL stored
+    // Ollama / llama.cpp-server don't need an API key; the endpoint is the local URL stored
     // in the cloud.api_key_ref slot when configured. Fall back to the
     // upstream default.
-    let endpoint = cfg
-        .cloud
-        .as_ref()
-        .map(|c| c.api_key_ref.clone())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "http://localhost:11434/v1/chat/completions".to_string());
-    Ok(Arc::new(crate::openai_compat::OpenAiCompat::ollama(endpoint, model)))
+    Ok(Arc::new(crate::openai_compat::OpenAiCompat::ollama(local_openai_endpoint(cfg), model)))
 }
 
 #[cfg(not(feature = "openai-compat"))]
@@ -184,15 +200,36 @@ fn build_anthropic(_: String, _: String) -> Result<Arc<dyn TextFormatter>> {
 }
 
 #[cfg(feature = "llama-local")]
-#[allow(clippy::unnecessary_wraps)]
 fn build_local(cfg: &Polish, polish_models_dir: &Path) -> Result<Arc<dyn TextFormatter>> {
+    if is_gemma_model(&cfg.local.model) {
+        return build_gemma_local_server(cfg);
+    }
     Ok(Arc::new(crate::llama_local::LlamaLocal::new(
         resolve_local_model_path(cfg, polish_models_dir),
         cfg.local.context,
     )))
 }
 
-#[cfg(not(feature = "llama-local"))]
+#[cfg(all(not(feature = "llama-local"), feature = "openai-compat"))]
+fn build_local(cfg: &Polish, _: &Path) -> Result<Arc<dyn TextFormatter>> {
+    if is_gemma_model(&cfg.local.model) {
+        return build_gemma_local_server(cfg);
+    }
+    Err(anyhow!(
+        "local LLM requested but this binary was built without the \
+         `llama-local` feature; rebuild with `cargo build --features llama-local` \
+         or pick Gemma/local-server or a cloud polish backend in `fono setup`"
+    ))
+}
+
+#[cfg(feature = "openai-compat")]
+#[allow(clippy::unnecessary_wraps)]
+fn build_gemma_local_server(cfg: &Polish) -> Result<Arc<dyn TextFormatter>> {
+    let model = local_openai_model(cfg);
+    Ok(Arc::new(crate::openai_compat::OpenAiCompat::ollama(local_openai_endpoint(cfg), model)))
+}
+
+#[cfg(all(not(feature = "llama-local"), not(feature = "openai-compat")))]
 fn build_local(_: &Polish, _: &Path) -> Result<Arc<dyn TextFormatter>> {
     Err(anyhow!(
         "local LLM requested but this binary was built without the \
@@ -232,5 +269,13 @@ mod tests {
         let dir = Path::new("/var/lib/fono/polish");
         let p = resolve_local_model_path(&cfg, dir);
         assert_eq!(p, std::path::PathBuf::from("/var/lib/fono/polish/qwen3.5-2b.gguf"));
+    }
+
+    #[test]
+    fn gemma_local_config_uses_server_model_and_endpoint() {
+        let cfg = LlmCfg::default();
+        assert!(is_gemma_model(&cfg.local.model));
+        assert_eq!(local_openai_model(&cfg), DEFAULT_POLISH_LOCAL_MODEL);
+        assert_eq!(local_openai_endpoint(&cfg), "http://localhost:11434/v1/chat/completions");
     }
 }

@@ -21,9 +21,14 @@ mod sse;
 
 #[cfg(feature = "anthropic")]
 pub mod anthropic_chat;
+#[cfg(feature = "llama-local")]
+pub mod llama_local;
 #[cfg(feature = "openai-compat")]
 pub mod openai_compat_chat;
 
 pub use factory::build_assistant;
 pub use history::{ChatRole, ChatTurn, ConversationHistory, ToolCall};
-pub use traits::{Assistant, AssistantContext, ScreenCaptureFn, TokenDelta, ToolEvent};
+pub use traits::{
+    Assistant, AssistantCacheTrigger, AssistantContext, AssistantPromptCacheSnapshot,
+    AssistantPromptCacheWarmup, ScreenCaptureFn, TokenDelta, ToolEvent,
+};

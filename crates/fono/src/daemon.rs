@@ -2922,6 +2922,7 @@ impl WyomingControl {
 /// so a LAN peer can't run up cloud bills by voice-shopping (option B
 /// of the design discussion).
 fn wyoming_tts_voices(config: &Config) -> Vec<fono_net::wyoming::server::AdvertisedVoice> {
+    #[cfg(feature = "tts-local")]
     use fono_core::config::TtsBackend;
     match config.tts.backend {
         #[cfg(feature = "tts-local")]

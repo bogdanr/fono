@@ -29,9 +29,11 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
+use fono_core::turn_trace::current_span;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use ort::value::Tensor;
+use serde_json::json;
 
 use crate::traits::{TextToSpeech, TtsAudio};
 
@@ -296,7 +298,9 @@ impl TextToSpeech for KokoroLocal {
         if text.trim().is_empty() {
             return Ok(TtsAudio { pcm: Vec::new(), sample_rate: SAMPLE_RATE });
         }
+        let tokenize_span = current_span("tts.kokoro_tokenize", "assistant.tts", "tts");
         let tokens = self.voice.text_to_tokens(text)?;
+        tokenize_span.finish(json!({ "chars": text.chars().count(), "tokens": tokens.len() }));
         if tokens.is_empty() {
             return Ok(TtsAudio { pcm: Vec::new(), sample_rate: SAMPLE_RATE });
         }
@@ -305,11 +309,13 @@ impl TextToSpeech for KokoroLocal {
         let input_name = self.input_name.clone();
         let output_name = self.output_name.clone();
         // ONNX inference is CPU-bound and blocking; keep it off the async runtime.
+        let inference_span = current_span("tts.kokoro_onnx_run", "assistant.tts", "tts");
         let pcm = tokio::task::spawn_blocking(move || {
             Self::run_inference(&session, &input_name, &output_name, tokens, style)
         })
         .await
         .context("kokoro inference task")??;
+        inference_span.finish(json!({ "samples": pcm.len(), "sample_rate": SAMPLE_RATE }));
         Ok(TtsAudio { pcm, sample_rate: SAMPLE_RATE })
     }
 

@@ -25,10 +25,12 @@ use fono_assistant::{
     Assistant, AssistantContext, ConversationHistory, ScreenCaptureFn, ToolEvent,
 };
 use fono_audio::AudioPlayback;
+use fono_core::turn_trace::TurnTrace;
 use fono_hotkey::HotkeyAction;
 use fono_stt::SpeechToText;
 use fono_tts::{SentenceSplitter, TextToSpeech};
 use futures::stream::StreamExt;
+use serde_json::json;
 use tokio::sync::{mpsc, Mutex, Notify};
 use tracing::{debug, info, warn};
 
@@ -124,6 +126,9 @@ pub struct AssistantTurnInputs {
     /// `GrabberProbe` in the F8 voice loop when `prefer_vision` is
     /// true and the backend is vision-capable.
     pub screen_capture_fn: Option<ScreenCaptureFn>,
+    /// Runtime-only active-window context captured at assistant hotkey press.
+    /// Local backends can cache this independently from stable system prompts.
+    pub active_window_context: Option<String>,
 }
 
 /// Run one assistant turn: STT the captured PCM, push the user turn
@@ -154,10 +159,18 @@ pub async fn run_assistant_turn(
         pre_transcribed,
         prefer_vision,
         screen_capture_fn,
+        active_window_context,
     } = inputs;
 
     // Turn-wide metrics. Populated as the pump progresses; emitted
-    // as a single `assistant:` INFO line on the success path.
+    // as a single `assistant:` INFO line on the success path. When
+    // `FONO_ASSISTANT_TRACE` is set, also write a Chrome Trace Event JSON
+    // waterfall for the turn.
+    let trace = TurnTrace::start_from_env();
+    let _trace_guard = trace.as_ref().map(TurnTrace::make_current);
+    if let Some(t) = &trace {
+        t.instant("turn.start", "assistant", "assistant-pump", json!({ "turn_id": t.id() }));
+    }
     let turn_started = std::time::Instant::now();
     let mut metrics = AssistantTurnMetrics { language: language.clone(), ..Default::default() };
 
@@ -169,7 +182,18 @@ pub async fn run_assistant_turn(
         let trimmed = text.trim().to_string();
         if trimmed.is_empty() {
             debug!(target: "fono::assistant", "skip: empty pre-transcribed text");
+            if let Some(t) = &trace {
+                t.finish(json!({ "aborted": true, "reason": "empty_pre_transcribed" }));
+            }
             return Ok(false);
+        }
+        if let Some(t) = &trace {
+            t.instant(
+                "stt.pre_transcribed",
+                "assistant.stt",
+                "stt",
+                json!({ "chars": trimmed.chars().count() }),
+            );
         }
         debug!(
             target: "fono::assistant",
@@ -179,6 +203,9 @@ pub async fn run_assistant_turn(
     } else {
         if pcm.is_empty() {
             debug!(target: "fono::assistant", "skip: empty PCM");
+            if let Some(t) = &trace {
+                t.finish(json!({ "aborted": true, "reason": "empty_pcm" }));
+            }
             return Ok(false);
         }
         let stt_started = std::time::Instant::now();
@@ -186,6 +213,17 @@ pub async fn run_assistant_turn(
             biased;
             () = notify.notified() => {
                 debug!(target: "fono::assistant", "cancelled before STT");
+                if let Some(t) = &trace {
+                    t.duration_between(
+                        "stt.transcribe",
+                        "assistant.stt",
+                        "stt",
+                        stt_started,
+                        std::time::Instant::now(),
+                        json!({ "cancelled": true }),
+                    );
+                    t.finish(json!({ "aborted": true, "reason": "cancelled_before_stt" }));
+                }
                 return Ok(false);
             }
             r = stt.transcribe(&pcm, sample_rate, language.as_deref()) => r?,
@@ -193,9 +231,34 @@ pub async fn run_assistant_turn(
         let trimmed = transcription.text.trim().to_string();
         if trimmed.is_empty() {
             debug!(target: "fono::assistant", "skip: empty transcript");
+            if let Some(t) = &trace {
+                t.duration_between(
+                    "stt.transcribe",
+                    "assistant.stt",
+                    "stt",
+                    stt_started,
+                    std::time::Instant::now(),
+                    json!({ "empty": true }),
+                );
+                t.finish(json!({ "aborted": true, "reason": "empty_transcript" }));
+            }
             return Ok(false);
         }
         let stt_ms = stt_started.elapsed().as_millis() as u64;
+        if let Some(t) = &trace {
+            t.duration_between(
+                "stt.transcribe",
+                "assistant.stt",
+                "stt",
+                stt_started,
+                std::time::Instant::now(),
+                json!({
+                    "chars_out": trimmed.chars().count(),
+                    "language": transcription.language.as_deref().unwrap_or(""),
+                    "sample_rate": sample_rate,
+                }),
+            );
+        }
         metrics.stt_ms = Some(stt_ms);
         // Prefer the language the STT engine actually detected over the
         // configured hint (which is `None` in auto-detect mode and would
@@ -211,17 +274,39 @@ pub async fn run_assistant_turn(
         trimmed
     };
     metrics.user_chars = user_text.chars().count();
+    if let Some(t) = &trace {
+        t.instant(
+            "user.text",
+            "assistant",
+            "assistant-pump",
+            json!({ "chars": metrics.user_chars }),
+        );
+    }
 
     // 2. Build context from history (prune-on-snapshot) + push user turn.
     let history_snapshot = {
+        let history_started = std::time::Instant::now();
         let mut s = state.lock().await;
         s.history.push_user(user_text.clone());
-        s.history.snapshot()
+        let snapshot = s.history.snapshot();
+        drop(s);
+        if let Some(t) = &trace {
+            t.duration_between(
+                "history.snapshot",
+                "assistant",
+                "assistant-pump",
+                history_started,
+                std::time::Instant::now(),
+                json!({ "turns": snapshot.len() }),
+            );
+        }
+        snapshot
     };
     let ctx = AssistantContext {
         system_prompt,
         language,
         history: history_snapshot,
+        active_window_context,
         screen_capture: screen_capture_fn,
         prefer_vision,
     };
@@ -232,10 +317,33 @@ pub async fn run_assistant_turn(
         biased;
         () = notify.notified() => {
             debug!(target: "fono::assistant", "cancelled before LLM");
+            if let Some(t) = &trace {
+                t.duration_between(
+                    "llm.reply_stream_open",
+                    "assistant.llm",
+                    "llm",
+                    llm_started,
+                    std::time::Instant::now(),
+                    json!({ "cancelled": true, "provider": assistant.name() }),
+                );
+                t.finish(json!({ "aborted": true, "reason": "cancelled_before_llm" }));
+            }
             return Ok(false);
         }
         r = assistant.reply_stream(&user_text, &ctx) => match r {
-            Ok(d) => d,
+            Ok(d) => {
+                if let Some(t) = &trace {
+                    t.duration_between(
+                        "llm.reply_stream_open",
+                        "assistant.llm",
+                        "llm",
+                        llm_started,
+                        std::time::Instant::now(),
+                        json!({ "provider": assistant.name() }),
+                    );
+                }
+                d
+            }
             Err(e) => {
                 // Assistant backend refused to even open the
                 // stream — typically auth (bad key) or network
@@ -257,6 +365,17 @@ pub async fn run_assistant_turn(
                         &err_text,
                     );
                 }
+                if let Some(t) = &trace {
+                    t.duration_between(
+                        "llm.reply_stream_open",
+                        "assistant.llm",
+                        "llm",
+                        llm_started,
+                        std::time::Instant::now(),
+                        json!({ "error": err_text, "provider": assistant.name() }),
+                    );
+                    t.finish(json!({ "aborted": true, "reason": "llm_open_error" }));
+                }
                 return Err(e);
             }
         },
@@ -264,6 +383,7 @@ pub async fn run_assistant_turn(
 
     // 4. Lazily ensure a playback handle exists.
     {
+        let playback_started = std::time::Instant::now();
         let mut s = state.lock().await;
         if s.playback.is_none() {
             match AudioPlayback::new(None) {
@@ -276,6 +396,16 @@ pub async fn run_assistant_turn(
                     );
                 }
             }
+        }
+        if let Some(t) = &trace {
+            t.duration_between(
+                "audio.playback_ensure",
+                "assistant.audio",
+                "audio",
+                playback_started,
+                std::time::Instant::now(),
+                json!({ "available": s.playback.is_some() }),
+            );
         }
     }
 
@@ -300,6 +430,9 @@ pub async fn run_assistant_turn(
     // aborted one. `notify_triggered` always returns false (Tokio's
     // Notify has no non-await probe), so we track abort explicitly.
     let mut aborted_mid_stream = false;
+    let mut delta_index: u64 = 0;
+    let mut last_llm_delta_at: Option<std::time::Instant> = None;
+    let mut llm_stream_done_at: Option<std::time::Instant> = None;
 
     // Voice routing hint for the local (and Cartesia) TTS backends: the
     // language the STT engine actually detected for this turn (falling back to
@@ -313,11 +446,20 @@ pub async fn run_assistant_turn(
             () = notify.notified() => {
                 debug!(target: "fono::assistant", "cancelled mid-stream");
                 aborted_mid_stream = true;
+                if let Some(t) = &trace {
+                    t.instant(
+                        "llm.stream_cancelled",
+                        "assistant.llm",
+                        "llm",
+                        json!({ "delta_index": delta_index }),
+                    );
+                }
                 break;
             }
             n = deltas.next() => n,
         };
         let Some(item) = next else {
+            llm_stream_done_at = Some(std::time::Instant::now());
             break;
         };
         let delta = match item {
@@ -342,9 +484,33 @@ pub async fn run_assistant_turn(
                         &err_text,
                     );
                 }
+                if let Some(t) = &trace {
+                    t.instant(
+                        "llm.stream_error",
+                        "assistant.llm",
+                        "llm",
+                        json!({ "delta_index": delta_index, "error": err_text }),
+                    );
+                }
                 break;
             }
         };
+        let delta_chars = delta.text.chars().count();
+        last_llm_delta_at = Some(std::time::Instant::now());
+        if let Some(t) = &trace {
+            t.instant(
+                "llm.delta",
+                "assistant.llm",
+                "llm",
+                json!({
+                    "index": delta_index,
+                    "chars": delta_chars,
+                    "cumulative_chars": full_reply.chars().count() + delta_chars,
+                    "tool_event": delta.tool_event.is_some(),
+                }),
+            );
+        }
+        delta_index = delta_index.saturating_add(1);
         // First LLM delta — model is generating but the
         // `SentenceSplitter` is still buffering until a full
         // sentence emerges and the TTS HTTP roundtrip hasn't even
@@ -361,6 +527,14 @@ pub async fn run_assistant_turn(
                 llm_ttfb_ms = metrics.llm_ttfb_ms,
                 "first LLM delta — overlay: THINKING → SYNTHESISING"
             );
+            if let Some(t) = &trace {
+                t.instant(
+                    "llm.first_delta",
+                    "assistant.llm",
+                    "llm",
+                    json!({ "ttfb_ms": metrics.llm_ttfb_ms }),
+                );
+            }
             if let Some(o) = overlay.as_ref() {
                 o.set_state(fono_overlay::OverlayState::AssistantSynthesising);
             }
@@ -388,8 +562,38 @@ pub async fn run_assistant_turn(
             continue;
         }
         full_reply.push_str(&delta.text);
-        for sentence in splitter.push(&delta.text) {
-            if synth_and_enqueue(&state, &tts, &sentence, tts_lang.as_deref(), &notify).await {
+        let split_started = std::time::Instant::now();
+        let sentences = splitter.push(&delta.text);
+        if let Some(t) = &trace {
+            t.duration_between(
+                "splitter.push",
+                "assistant.splitter",
+                "splitter",
+                split_started,
+                std::time::Instant::now(),
+                json!({ "delta_chars": delta_chars, "sentences_ready": sentences.len() }),
+            );
+        }
+        for sentence in sentences {
+            let sentence_index = metrics.sentences.saturating_add(1);
+            if let Some(t) = &trace {
+                t.instant(
+                    "splitter.sentence_ready",
+                    "assistant.splitter",
+                    "splitter",
+                    json!({ "sentence_index": sentence_index, "chars": sentence.chars().count() }),
+                );
+            }
+            if synth_and_enqueue(
+                &state,
+                &tts,
+                &sentence,
+                tts_lang.as_deref(),
+                sentence_index,
+                &notify,
+            )
+            .await
+            {
                 any_audio = true;
                 metrics.sentences = metrics.sentences.saturating_add(1);
                 let now = std::time::Instant::now();
@@ -424,11 +628,50 @@ pub async fn run_assistant_turn(
         }
     }
 
-    metrics.llm_total_ms = llm_started.elapsed().as_millis() as u64;
+    metrics.llm_total_ms = last_llm_delta_at.or(llm_stream_done_at).map_or_else(
+        || llm_started.elapsed().as_millis() as u64,
+        |at| at.duration_since(llm_started).as_millis() as u64,
+    );
+    if let Some(t) = &trace {
+        let stream_ended = llm_stream_done_at.unwrap_or_else(std::time::Instant::now);
+        t.duration_between(
+            "llm.stream_drain",
+            "assistant.llm",
+            "llm",
+            llm_started,
+            stream_ended,
+            json!({
+                "deltas": delta_index,
+                "reply_chars": full_reply.chars().count(),
+                "llm_total_ms": metrics.llm_total_ms,
+                "aborted": aborted_mid_stream,
+            }),
+        );
+    }
 
     if !aborted_mid_stream {
         if let Some(tail) = splitter.flush() {
-            if synth_and_enqueue(&state, &tts, &tail, tts_lang.as_deref(), &notify).await {
+            let flush_started = std::time::Instant::now();
+            let sentence_index = metrics.sentences.saturating_add(1);
+            if let Some(t) = &trace {
+                t.instant(
+                    "splitter.flush_tail",
+                    "assistant.splitter",
+                    "splitter",
+                    json!({ "sentence_index": sentence_index, "chars": tail.chars().count() }),
+                );
+                t.duration_between(
+                    "splitter.flush",
+                    "assistant.splitter",
+                    "splitter",
+                    flush_started,
+                    std::time::Instant::now(),
+                    json!({ "tail": true }),
+                );
+            }
+            if synth_and_enqueue(&state, &tts, &tail, tts_lang.as_deref(), sentence_index, &notify)
+                .await
+            {
                 any_audio = true;
                 metrics.sentences = metrics.sentences.saturating_add(1);
                 last_audio_at = Some(std::time::Instant::now());
@@ -507,11 +750,13 @@ pub async fn run_assistant_turn(
         if !pb.is_idle() {
             let drain_started = std::time::Instant::now();
             let timeout = std::time::Duration::from_secs(60);
+            let mut drain_reason = "idle";
             loop {
                 tokio::select! {
                     biased;
                     () = notify.notified() => {
                         debug!(target: "fono::assistant", "drain-poll: cancelled");
+                        drain_reason = "cancelled";
                         break;
                     }
                     () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
@@ -528,23 +773,48 @@ pub async fn run_assistant_turn(
                                 target: "fono::assistant",
                                 "drain-poll exceeded 60 s; forcing ProcessingDone (wedged playback handle?)"
                             );
+                            drain_reason = "timeout";
                             break;
                         }
                     }
                 }
             }
+            if let Some(t) = &trace {
+                t.duration_between(
+                    "playback.drain",
+                    "assistant.playback",
+                    "playback",
+                    drain_started,
+                    std::time::Instant::now(),
+                    json!({ "reason": drain_reason }),
+                );
+            }
         }
+    }
+    if let Some(t) = &trace {
+        t.finish(json!({
+            "aborted": metrics.aborted,
+            "played_audio": any_audio,
+            "total_ms": metrics.total_ms,
+            "llm_ttfb_ms": metrics.llm_ttfb_ms,
+            "llm_total_ms": metrics.llm_total_ms,
+            "tts_ttfa_ms": metrics.tts_ttfa_ms,
+            "sentences": metrics.sentences,
+            "reply_chars": metrics.reply_chars,
+        }));
     }
     Ok(any_audio)
 }
 
 /// Single-sentence helper. Synthesises and enqueues into the active
 /// playback handle. Returns `true` on success.
+#[allow(clippy::too_many_lines)]
 async fn synth_and_enqueue(
     state: &Arc<Mutex<AssistantSessionState>>,
     tts: &Arc<dyn TextToSpeech>,
     sentence: &str,
     lang: Option<&str>,
+    sentence_index: u32,
     notify: &Arc<Notify>,
 ) -> bool {
     if sentence.trim().is_empty() {
@@ -555,10 +825,36 @@ async fn synth_and_enqueue(
         biased;
         () = notify.notified() => {
             debug!(target: "fono::assistant", "cancelled before TTS synth");
+            if let Some(t) = TurnTrace::current() {
+                t.instant(
+                    "tts.synthesize_cancelled",
+                    "assistant.tts",
+                    "tts",
+                    json!({ "sentence_index": sentence_index }),
+                );
+            }
             return false;
         }
         r = tts.synthesize(sentence, None, lang) => match r {
-            Ok(a) => a,
+            Ok(a) => {
+                if let Some(t) = TurnTrace::current() {
+                    t.duration_between(
+                        "tts.synthesize",
+                        "assistant.tts",
+                        "tts",
+                        synth_started,
+                        std::time::Instant::now(),
+                        json!({
+                            "sentence_index": sentence_index,
+                            "provider": tts.name(),
+                            "chars": sentence.chars().count(),
+                            "sample_rate": a.sample_rate,
+                            "samples": a.pcm.len(),
+                        }),
+                    );
+                }
+                a
+            }
             Err(e) => {
                 warn!(target: "fono::assistant", error = %e, "TTS synth failed");
                 // Surface auth/network failures once per session.
@@ -596,6 +892,21 @@ async fn synth_and_enqueue(
                         .unwrap_or_else(|| truncate(&err_text, 240).to_string());
                     fono_stt::rate_limit_notify::notify_once(tts.name(), &body);
                 }
+                if let Some(t) = TurnTrace::current() {
+                    t.duration_between(
+                        "tts.synthesize",
+                        "assistant.tts",
+                        "tts",
+                        synth_started,
+                        std::time::Instant::now(),
+                        json!({
+                            "sentence_index": sentence_index,
+                            "provider": tts.name(),
+                            "chars": sentence.chars().count(),
+                            "error": err_text,
+                        }),
+                    );
+                }
                 return false;
             }
         },
@@ -616,9 +927,30 @@ async fn synth_and_enqueue(
     let Some(pb) = pb_handle else {
         return false;
     };
+    let enqueue_started = std::time::Instant::now();
     if let Err(e) = pb.enqueue(audio.pcm, audio.sample_rate) {
         warn!(target: "fono::assistant", error = %e, "enqueue failed");
+        if let Some(t) = TurnTrace::current() {
+            t.duration_between(
+                "audio.enqueue",
+                "assistant.audio",
+                "audio",
+                enqueue_started,
+                std::time::Instant::now(),
+                json!({ "sentence_index": sentence_index, "error": e.to_string() }),
+            );
+        }
         return false;
+    }
+    if let Some(t) = TurnTrace::current() {
+        t.duration_between(
+            "audio.enqueue",
+            "assistant.audio",
+            "audio",
+            enqueue_started,
+            std::time::Instant::now(),
+            json!({ "sentence_index": sentence_index }),
+        );
     }
     true
 }

@@ -46,6 +46,7 @@ use fono_core::providers::{
 use fono_core::{Paths, Secrets};
 use fono_stt::registry::{ModelInfo, WHISPER_MODELS};
 use std::time::Duration;
+use tokio::task::JoinHandle;
 
 pub async fn run(paths: &Paths) -> Result<()> {
     println!(
@@ -80,9 +81,14 @@ pub async fn run(paths: &Paths) -> Result<()> {
     let path_choice = pick_path(&theme, tier, &snap)?;
 
     let mut config = Config::default();
+    let mut download_task: Option<JoinHandle<()>> = None;
 
     match path_choice {
-        PathChoice::Local => configure_local(&theme, &mut config, &mut secrets, &snap).await?,
+        PathChoice::Local => {
+            configure_local(&theme, &mut config, &mut secrets, &snap).await?;
+            prompt_optional_cloud_key(&theme, &mut secrets).await?;
+            download_task = spawn_model_downloads(paths, &config);
+        }
         PathChoice::Cloud => configure_cloud(&theme, &mut config, &mut secrets, &snap).await?,
         PathChoice::Customize => {
             configure_customize(&theme, &mut config, &mut secrets, &snap).await?;
@@ -93,6 +99,9 @@ pub async fn run(paths: &Paths) -> Result<()> {
     // pipeline above (the assistant uses its own backend selection
     // and a TTS layer that doesn't exist on the dictation path).
     configure_assistant(&theme, &mut config, &mut secrets).await?;
+    if download_task.is_none() {
+        download_task = spawn_model_downloads(paths, &config);
+    }
 
     // MCP server is enabled by default — no wizard prompt needed.
     // Users who want to disable it can run `fono use mcp-server off`
@@ -107,13 +116,12 @@ pub async fn run(paths: &Paths) -> Result<()> {
     // unconditionally; users override via pavucontrol / GNOME / KDE
     // sound settings or the tray Microphone submenu at runtime.)
 
-    // If the user chose any local backend (STT or LLM), download the
-    // model(s) now (silently — re-checked on every daemon start).
-    // Failures are non-fatal: the daemon will retry on next launch.
-    if config.stt.backend == SttBackend::Local || config.polish.backend == PolishBackend::Local {
-        if let Err(e) = crate::models::ensure_models(paths, &config).await {
-            eprintln!("  (model download failed: {e:#} — the daemon will retry on next start)");
-        }
+    // Local model downloads start in the background as soon as the
+    // wizard has enough information to know what is needed. Wait here
+    // only before the optional local latency probe so the probe can load
+    // a verified model instead of racing the cache fill.
+    if let Some(task) = download_task.take() {
+        let _ = task.await;
     }
     if config.stt.backend == SttBackend::Local {
         // R3.1 — in-wizard latency probe. Run a 3-second synthetic clip
@@ -193,11 +201,6 @@ fn is_primary_candidate(entry: &CloudProvider) -> bool {
 /// those with a wired factory should appear in the assistant picker.
 fn is_assistant_wired(entry: &CloudProvider) -> bool {
     entry.assistant.is_some() && parse_assistant_backend(entry.id).is_some() && entry.id != "gemini"
-}
-
-/// Catalogue entries with a wired assistant chat factory.
-fn assistant_candidates() -> Vec<&'static CloudProvider> {
-    CLOUD_PROVIDERS.iter().filter(|p| is_assistant_wired(p)).collect()
 }
 
 /// Header labels for the primary-cloud-provider picker's capability
@@ -509,6 +512,7 @@ fn tts_short_label(b: &TtsBackend) -> &'static str {
     }
 }
 
+#[cfg(test)]
 /// Human-readable chat-model label for the assistant picker table.
 /// Falls back to the raw catalogue `text_model` string when an entry
 /// is not in the hand-curated table — so a new catalogue entry never
@@ -715,7 +719,14 @@ async fn configure_assistant(
         "  Press {} to ask a question and hear the answer through your speakers.",
         config.hotkeys.assistant
     );
-    println!("  Independent of dictation cleanup — different model, different key.");
+    println!(
+        "  Independent of dictation cleanup — Gemma E2B runs locally when you choose local chat."
+    );
+
+    if config.assistant.enabled && config.assistant.backend == AssistantBackend::Ollama {
+        println!("  Voice assistant enabled — local Gemma E2B chat + local voice.");
+        return Ok(());
+    }
 
     // Fast path — when the primary cloud provider (inferred from the
     // currently-selected polish backend) covers assistant chat, auto-enable
@@ -774,13 +785,15 @@ async fn configure_assistant(
         }
     }
 
-    // Local-LLM users: no catalogue primary matches the current LLM
-    // backend. Keep the Confirm so they can decline.
+    // Local-LLM users: offer the shared local Gemma E2B assistant first.
+    // Cleanup may be skipped or cloud-backed on slow hardware, but local
+    // assistant remains available because it is interactive and benchmarked
+    // as acceptable even on older CPU-only machines.
     let want = Confirm::with_theme(theme)
-        .with_prompt("Enable the voice assistant?")
-        .default(false)
+        .with_prompt("Enable the local Gemma E2B voice assistant?")
+        .default(true)
         .interact()
-        .unwrap_or(false);
+        .unwrap_or(true);
     if !want {
         config.assistant.enabled = false;
         config.assistant.backend = AssistantBackend::None;
@@ -788,73 +801,12 @@ async fn configure_assistant(
         // existing TTS backend they still want for future opt-in.
         return Ok(());
     }
-
-    // ── Assistant chat backend (catalogue-driven) ─────────────────
-    let candidates = assistant_candidates();
-    // Order: providers with key already in `secrets.toml` first; among
-    // each subgroup keep catalogue order so OpenAI/Anthropic/etc. lead.
-    let (with_key, without_key): (Vec<_>, Vec<_>) =
-        candidates.into_iter().partition(|p| secrets.has_in_file(p.key_env));
-    let ordered: Vec<&'static CloudProvider> =
-        with_key.iter().chain(without_key.iter()).copied().collect();
-
-    // Render as an aligned three-column table (Provider | Model |
-    // Key). The header is printed once via `println!` so it scrolls
-    // with the prompt; the `Select` items carry only the rows + the
-    // Skip escape hatch.
-    let (rows, header) = assistant_picker_rows(&ordered, secrets);
-    println!();
-    println!("  {header}");
-    let mut labels = rows;
-    labels.push("Skip — disable assistant".into());
-    let chat_idx = Select::with_theme(theme)
-        .with_prompt("Pick an assistant chat backend")
-        .items(&labels)
-        .default(0)
-        .interact()?;
-    if chat_idx == ordered.len() {
-        config.assistant.enabled = false;
-        config.assistant.backend = AssistantBackend::None;
-        return Ok(());
-    }
-    let entry = ordered[chat_idx];
-    let adef = entry.assistant.expect("candidate has assistant");
-    prompt_or_reuse_key(theme, secrets, entry.key_env, entry.display_name, entry.console_url)
-        .await?;
-    let backend =
-        parse_assistant_backend(entry.id).context("catalogue assistant id should parse")?;
-    config.assistant.enabled = true;
-    config.assistant.backend = backend;
-    config.assistant.cloud = Some(AssistantCloud {
-        provider: entry.id.into(),
-        api_key_ref: entry.key_env.into(),
-        model: adef.text_model.into(),
-    });
-
-    // Extras (vision + web search) default on at the config layer
-    // — see `Assistant::default()`. No prompt here.
-
-    // ── TTS auto-pick / picker ────────────────────────────────────
-    // If the user's assistant key also covers TTS (e.g. they picked
-    // OpenAI for chat and OpenAI also offers TTS), reuse the same
-    // provider/key for the spoken reply — no second prompt. Falls
-    // through to the explicit TTS picker only when the assistant
-    // provider has no TTS capability AND configure_cloud didn't set
-    // one earlier.
-    if !tts_already_set {
-        if entry.tts.is_some() && parse_tts_backend(entry.id).is_some() {
-            apply_secondary_tts(config, entry);
-            println!(
-                "  TTS: {} (same key as the assistant — no extra prompt).",
-                entry.display_name
-            );
-        } else {
-            pick_tts_for_assistant(theme, config, secrets).await?;
-        }
-    }
+    enable_local_assistant_with_voice(config);
+    println!("  Voice assistant enabled — local Gemma E2B chat.");
     Ok(())
 }
 
+#[cfg(test)]
 /// Build the rendered rows + header for the slow-path assistant chat
 /// picker. Columns: provider, human-readable model name, key status.
 /// Widths are computed from the longest entry so future catalogue
@@ -1049,21 +1001,68 @@ async fn configure_local(
         1 => configure_cloud_llm(theme, config, secrets).await?,
         _ => configure_local_llm(config, snap),
     }
+    // Local run now defaults to the complete offline experience: local
+    // STT, local assistant chat, and local voice replies. The only
+    // remaining cloud-related prompt is optional key seeding for easy
+    // switching later.
+    enable_local_assistant_with_voice(config);
     Ok(())
 }
 
-/// Build the LLM-cleanup-choice menu items in the standard order
-/// (Skip, Cloud, Local) with the "— recommended" suffix attached
-/// only to the entry the wizard actively wants the user to pick.
-/// Local gets the recommendation when the host has hardware acceleration
-/// or high-end CPU headroom; otherwise Cloud picks up the suffix. Skip
-/// never carries the suffix — it's the safe default but not "the wizard's
-/// pick".
+async fn prompt_optional_cloud_key(theme: &ColorfulTheme, secrets: &mut Secrets) -> Result<()> {
+    let add_key = Confirm::with_theme(theme)
+        .with_prompt("Add a cloud API key now so you can switch providers later?")
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+    if !add_key {
+        return Ok(());
+    }
+    let pick = pick_primary_cloud_provider(theme, secrets, &Config::default())?;
+    let PrimaryPick::Catalogued(entry) = pick else {
+        return Ok(());
+    };
+    prompt_or_reuse_key(theme, secrets, entry.key_env, entry.display_name, entry.console_url).await
+}
+
+fn enable_local_assistant_with_voice(config: &mut Config) {
+    config.assistant.enabled = true;
+    config.assistant.backend = AssistantBackend::Ollama;
+    config.assistant.local.model = DEFAULT_POLISH_LOCAL_MODEL.into();
+    config.assistant.cloud = None;
+    config.tts.backend = TtsBackend::Local;
+    config.tts.voice.clear();
+}
+
+fn spawn_model_downloads(paths: &Paths, config: &Config) -> Option<JoinHandle<()>> {
+    let needs_download = config.stt.backend == SttBackend::Local
+        || config.polish.backend == PolishBackend::Local
+        || local_assistant_selected(config)
+        || matches!(config.tts.backend, TtsBackend::Local);
+    if !needs_download {
+        return None;
+    }
+    let paths = paths.clone();
+    let config = config.clone();
+    Some(tokio::spawn(async move {
+        if let Err(e) = crate::models::ensure_models(&paths, &config).await {
+            eprintln!("  (model download failed: {e:#} — the daemon will retry on next start)");
+        }
+    }))
+}
+
+// Standard ordering (Skip, Cloud, Local) with a recommendation marker.
+// Gemma E2B is the only default local LLM; hardware tiering decides whether
+// local cleanup is recommended, not which model is selected.
 fn build_polish_options(snap: &HardwareSnapshot) -> Vec<String> {
     let model = default_local_polish_model(snap);
     let local_model_label = local_polish_model_label(model);
     let local_recommended = should_use_high_tier_local_polish(snap);
-    let local_label = format!("Local polish ({local_model_label}, private, offline)");
+    let local_label = if local_recommended {
+        format!("Local polish ({local_model_label}, private, offline) — recommended")
+    } else {
+        format!("Local polish ({local_model_label}, private, offline; faster hardware recommended)")
+    };
     let cloud_label = if local_recommended {
         "Cloud polish (Cerebras / Groq / OpenAI / Anthropic — needs key)"
     } else {
@@ -1074,15 +1073,12 @@ fn build_polish_options(snap: &HardwareSnapshot) -> Vec<String> {
 
 /// Pick the local cleanup model without showing a second model menu.
 ///
-/// `qwen3.5-2b` is reserved for hosts with LLM acceleration or clearly
-/// high-end CPU-only headroom; everyone else gets the smaller default.
+/// Keep the hardware-tier hook intact for future model choices, but all current
+/// local LLM tiers use Gemma E2B. Cleanup enablement/recommendation remains
+/// hardware-dependent in [`build_polish_options`].
 fn default_local_polish_model(snap: &HardwareSnapshot) -> &'static str {
-    let inference_snap = local_polish_inference_snapshot(snap);
-    if should_use_high_tier_local_polish(&inference_snap) {
-        "qwen3.5-2b"
-    } else {
-        DEFAULT_POLISH_LOCAL_MODEL
-    }
+    let _ = should_use_high_tier_local_polish(&local_polish_inference_snapshot(snap));
+    DEFAULT_POLISH_LOCAL_MODEL
 }
 
 fn local_polish_inference_snapshot(snap: &HardwareSnapshot) -> HardwareSnapshot {
@@ -1095,6 +1091,7 @@ fn should_use_high_tier_local_polish(snap: &HardwareSnapshot) -> bool {
 
 fn local_polish_model_label(model: &str) -> &'static str {
     match model {
+        "gemma-4-e2b" => "Gemma 4 E2B",
         "qwen3.5-2b" => "Qwen3.5 2B",
         "qwen3.5-0.8b" => "Qwen3.5 0.8B",
         _ => "local LLM",
@@ -1723,7 +1720,15 @@ fn configure_local_llm(config: &mut Config, snap: &HardwareSnapshot) {
     config.polish.enabled = true;
     config.polish.local =
         PolishLocal { model: default_local_polish_model(snap).into(), ..PolishLocal::default() };
-    config.polish.cloud = None;
+    config.polish.cloud = Some(PolishCloud {
+        provider: "ollama".into(),
+        api_key_ref: "http://localhost:11434/v1/chat/completions".into(),
+        model: config.polish.local.model.clone(),
+    });
+}
+
+fn local_assistant_selected(config: &Config) -> bool {
+    config.assistant.enabled && config.assistant.backend == AssistantBackend::Ollama
 }
 
 async fn configure_cloud_stt(
@@ -2148,27 +2153,22 @@ mod tests {
     #[test]
     fn polish_options_name_automatic_local_model() {
         let modest = build_polish_options(&snap(8, 16, 200, true));
-        assert!(modest.iter().any(|label| label.contains("Qwen3.5 0.8B")), "{modest:?}");
-        assert!(modest.iter().all(|label| !label.contains("qwen2.5")), "{modest:?}");
+        assert!(modest.iter().any(|label| label.contains("Gemma 4 E2B")), "{modest:?}");
+        assert!(modest.iter().all(|label| !label.contains("Qwen")), "{modest:?}");
 
         let high_end = build_polish_options(&snap(12, 32, 200, true));
-        assert!(high_end.iter().any(|label| label.contains("Qwen3.5 2B")), "{high_end:?}");
-        assert!(high_end.iter().all(|label| !label.contains("qwen2.5")), "{high_end:?}");
+        assert!(high_end.iter().any(|label| label.contains("Gemma 4 E2B")), "{high_end:?}");
+        assert!(high_end.iter().all(|label| !label.contains("Qwen")), "{high_end:?}");
     }
 
     #[test]
-    fn local_polish_model_selection_respects_build_variant_inference_path() {
-        assert_eq!(default_local_polish_model(&snap(8, 16, 200, true)), "qwen3.5-0.8b");
-        assert_eq!(default_local_polish_model(&snap(12, 32, 200, true)), "qwen3.5-2b");
+    fn local_polish_model_selection_preserves_tier_hook_but_selects_gemma() {
+        assert_eq!(default_local_polish_model(&snap(8, 16, 200, true)), "gemma-4-e2b");
+        assert_eq!(default_local_polish_model(&snap(12, 32, 200, true)), "gemma-4-e2b");
 
         let mut gpu_snap = snap(8, 16, 200, true);
         gpu_snap.host_gpu = HostGpu::Integrated;
-        let expected = if matches!(crate::variant::VARIANT, crate::variant::Variant::Gpu) {
-            "qwen3.5-2b"
-        } else {
-            "qwen3.5-0.8b"
-        };
-        assert_eq!(default_local_polish_model(&gpu_snap), expected);
+        assert_eq!(default_local_polish_model(&gpu_snap), "gemma-4-e2b");
     }
 
     #[test]
