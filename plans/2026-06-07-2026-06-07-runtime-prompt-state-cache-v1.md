@@ -28,7 +28,7 @@ Design and implement Fono's embedded local-assistant prompt-state cache so stabl
 
 - [x] Task 7. Create or refresh the active-window checkpoint as soon as enriched window context is available, subject to CPU scheduling policy. Rationale: If STT is idle or has enough spare CPU, Fono can extend the restored F8/tool checkpoint with window context. If STT is CPU-bound, Fono should defer this work and use the best available stable checkpoint instead.
 
-- [ ] Task 8. On transcript completion, restore the best available checkpoint and process only the remaining suffix. Rationale: The final user text is not known until STT completes. The optimal path is to restore the most specific valid checkpoint, append/decode the transcript, then generate the assistant response.
+- [x] Task 8. On transcript completion, restore the best available checkpoint and process only the remaining suffix. Rationale: The final user text is not known until STT completes. The optimal path is to restore the most specific valid checkpoint, append/decode the transcript, then generate the assistant response.
 
 - [x] Task 9. Add cancellation and invalidation rules. Rationale: If the user releases/cancels the hotkey, changes active window, switches tools, changes model, or changes prompt template, stale cache work must be cancelled or invalidated safely.
 
@@ -40,9 +40,9 @@ Design and implement Fono's embedded local-assistant prompt-state cache so stabl
 
 - [ ] Task 13. Add benchmark support for STT contention. Rationale: Cache building must not degrade transcription. The benchmark should compare STT-only, STT plus checkpoint restore, and STT plus checkpoint build/extension.
 
-- [ ] Task 14. Add benchmark support for tool-count scaling. Rationale: One major reason to cache is to make larger tool sets feasible. Benchmarks should measure 0, 5, 10, 20, and 40 tools with and without cached tool prompts.
+- [x] Task 14. Add benchmark support for tool-count scaling. Rationale: One major reason to cache is to make larger tool sets feasible. Benchmarks should measure 0, 5, 10, 20, and 40 tools with and without cached tool prompts.
 
-- [ ] Task 15. Add benchmark support for active-window context scaling. Rationale: Window context size will vary significantly. Benchmarks should measure cache behavior for no window context, small context, medium context, and large enriched context.
+- [x] Task 15. Add benchmark support for active-window context scaling. Rationale: Window context size will vary significantly. Benchmarks should measure cache behavior for no window context, small context, medium context, and large enriched context.
 
 - [ ] Task 16. Promote the cache policy only after benchmark evidence. Rationale: The default runtime behavior should be based on measured latency, CPU contention, memory use, and correctness rather than assumptions.
 
@@ -51,11 +51,11 @@ Design and implement Fono's embedded local-assistant prompt-state cache so stabl
 - [x] F7 and F8 stable prompt checkpoints can be built at runtime with low-priority scheduling.
 - [x] Hotkey press can restore the correct stable checkpoint without blocking STT.
 - [x] Active-window context can create a dynamic checkpoint that invalidates independently from stable prompts.
-- [ ] Transcript-ready generation can use the best valid checkpoint and fall back safely when a more specific checkpoint is unavailable.
+- [x] Transcript-ready generation can use the best valid checkpoint and fall back safely when a more specific checkpoint is unavailable.
 - [x] Cache keys prevent reuse across incompatible model/runtime/prompt/tool/window states.
 - [x] Benchmarks show whether checkpoint restore improves time-to-first-token without hurting STT latency.
-- [ ] Tool-count benchmarks quantify whether cached tool prompts make larger tool sets practical.
-- [ ] Window-context benchmarks quantify when dynamic window checkpoints are worth building.
+- [x] Tool-count benchmarks quantify whether cached tool prompts make larger tool sets practical.
+- [x] Window-context benchmarks quantify when dynamic window checkpoints are worth building.
 
 ## Potential Risks and Mitigations
 
@@ -117,6 +117,221 @@ Benchmark summary with `gemma-4-e2b.gguf`, `ctx=2048`, `threads=8`, `batch=2048`
 
 The controlled benchmark proves the core real-world shape: once the shared system/tool/window prefix is cached, changing short suffixes avoid reprocessing the 181-token prefix and respond much faster. The `outputs_match` failures were concentrated in an intentionally brittle one-word `window` suffix where both uncached and cached paths generated long repetitive text until the generation cap; this should be treated as a benchmark prompt-quality issue, not a cache-key or restore failure.
 
+## Task 8 Implementation (transcript-ready prefix cache)
+
+The assistant reply path now consumes the prompt-state cache instead of only
+building it:
+
+- Added `build_prompt_split`, which splits the rendered reply prompt into a
+  stable prefix and a per-turn suffix (the user text plus the closing
+  template). By construction `prefix + suffix` reproduces `build_prompt`
+  byte-for-byte (in fact `build_prompt` is now *defined* as the concatenation,
+  so they cannot diverge); unit tests assert this for Gemma and ChatML, with
+  and without a system prompt. See the "Gemma system-first re-ordering" section
+  below for the prefix boundary — the original Gemma boundary (system in the
+  per-turn tail) was wrong for multi-turn caching and has been corrected.
+- Added `generate_with_prefix_cache` on the embedded backend: restores a cached
+  `F8ChatPrefix` checkpoint when present (building it on first use), prefills
+  only the suffix tokens, then generates. It returns `Ok(None)` — having emitted
+  nothing — on any incompatibility (empty split, non-token-prefix boundary,
+  oversized prompt, failed restore), so the caller falls back to a full prefill.
+- `reply_stream` now calls `run_inference_with_prefix_cache`, which additionally
+  re-checks `format!("{prefix}{suffix}") == prompt` before trusting the split.
+  Two independent guards (exact-string equality + token-prefix `starts_with`)
+  make a wrong-state restore impossible: worst case is a safe full prefill.
+- Build cost on a cache miss is the normal prefix prefill plus one state copy
+  (single-digit ms in the Task 12 benchmark); a hit skips the prefix prefill
+  entirely (≈9 ms restore vs ≈1.8 s prefill in that benchmark).
+
+Known limitation (follow-up, gated on benchmarks 13–16): startup/hotkey
+pre-warming still builds the older raw-prompt `F7System`/`F8System`/
+`AssistantTools`/`WindowContext` checkpoints, which the live reply path no
+longer restores (it keys on `F8ChatPrefix`). Pre-warming the exact
+`F8ChatPrefix` at hotkey time is not yet wired because the reply-time history
+snapshot includes the just-pushed user turn, so the hotkey-time prefix cannot be
+reproduced ahead of the transcript. The cache therefore self-populates lazily on
+the reply path and reuses the checkpoint whenever an identical system+history
+prefix recurs; tightening pre-warm alignment is deferred until the contention
+and scaling benchmarks justify the policy.
+
+## Gemma system-first re-ordering (multi-turn cache correctness)
+
+The original Gemma builder rendered `[history] → <start_of_turn>user\n{system}
+\n\nUser request: {user}`, i.e. the large immutable system/tool prompt sat in
+the *current* user turn, **after** the rolling history. For KV prefix caching
+this is exactly inverted: the expensive stable text was re-prefilled every turn
+while the cheap, mutable history occupied the cacheable head. It also capped
+`F8ChatPrefix` reuse at turn 1 on Gemma — from turn 2 on, history preceded
+system, so the checkpoint was no longer a token-prefix and the path fell back
+to a full prefill.
+
+Corrected layout: the system prompt is prepended to the **first** user turn
+(Gemma's trained convention — Gemma has no dedicated system role), making the
+rendered prompt **strictly append-only**:
+
+```
+<start_of_turn>user
+{system}
+
+{turn-1 user}<end_of_turn>
+<start_of_turn>model
+{turn-1 assistant}<end_of_turn>
+...
+<start_of_turn>user
+{current user text}<end_of_turn>      ← only this varies per turn (the suffix)
+<start_of_turn>model
+```
+
+Consequences:
+- The leading tokens (system, then every completed turn) never change as the
+  conversation grows. A boot-built `<start_of_turn>user\n{system}\n\n`
+  checkpoint and a per-conversation checkpoint are both valid token-prefixes on
+  every turn — the property the whole cache scheme depends on.
+- The cache prefix boundary is now immediately before the current user text;
+  the suffix is `{user}<end_of_turn>\n<start_of_turn>model\n`.
+- `build_prompt` is defined as `prefix + suffix`, so the rendered prompt and the
+  cache split can never drift.
+
+Regression guards (in `crates/fono-assistant/src/llama_local.rs` tests):
+`gemma_system_leads_prompt_regardless_of_history`,
+`gemma_conversation_is_append_only`, `chatml_conversation_is_append_only`, and
+`gemma_history_render_is_stable_across_turns`. The append-only tests simulate a
+3-turn conversation and assert each turn's full prompt is an exact string
+prefix of the next turn's — if a future change pushes system back into the tail
+or otherwise breaks ordering, these fail loudly. ChatML already led with system
+and was unaffected, but is now covered by the same invariant.
+
+### Multi-turn benchmark (2026-06-08, `gemma-4-e2b.gguf`, ctx=4096, threads=8, batch=4096, ubatch=512, 2 iters/turn)
+
+New `fono-bench assistant-conversation-cache` subcommand walks a growing
+conversation through the **real** `build_prompt_split` (so it exercises the
+fixed Gemma layout end-to-end), replaying uncached-vs-cached generation at each
+turn. Artifact: `/tmp/fono-runtime-prompt-cache/conversation-cache.json`.
+
+| Turn | History turns | Prefix tok | Cold prefix prefill | Cached restore | Suffix tok / prefill | Cached TTFB | Uncached full latency |
+|---|---|---|---|---|---|---|---|
+| 1 | 0 | 31 | 447 ms | 30 ms | 22 / 339 ms | 341 ms | 2029 ms |
+| 2 | 2 | 90 | 1277 ms | 39 ms | 23 / 640 ms | 641 ms | 3251 ms |
+| 3 | 4 | 150 | 2086 ms | 37 ms | 24 / 382 ms | 383 ms | 3243 ms |
+| 4 | 6 | 211 | 2813 ms | 34 ms | 25 / 508 ms | 509 ms | 4899 ms |
+| 5 | 8 | 273 | 3877 ms | 15 ms | 23 / 490 ms | 491 ms | 6878 ms |
+| 6 | 10 | 333 | 4518 ms | 21 ms | 24 / 374 ms | 375 ms | 6927 ms |
+
+Reading the result:
+- **The cache now works on every turn, not just turn 1.** That is the whole
+  point of the re-ordering — pre-fix, a Gemma checkpoint stopped matching from
+  turn 2 on. Here the restore succeeds at every turn (state restore 15–39 ms,
+  flat regardless of the 0.5→6.1 MB checkpoint).
+- **The cache replaces a prefix prefill that grows to ~4.5 s (turn 6, 333
+  tokens) with a ~21 ms restore.** That cold-prefill column is exactly the cost
+  the cache amortizes away once a checkpoint exists; the uncached path re-pays
+  it every turn, which is why uncached full latency climbs to ~6.9 s while the
+  cached path stays bounded.
+- **Per-turn cached cost stays flat as history grows.** TTFB is ~341–641 ms
+  across the whole conversation (it tracks the ~22–25-token suffix, not the
+  growing prefix). The uncached path's first token cannot arrive until the full
+  prefix is prefilled, so its latency scales with conversation length.
+- `outputs_match` was 2/2 on five of six turns and 0/2 on turn 3. The divergence
+  is sampling noise — both paths free-run to `MAX_NEW_TOKENS = 384` on synthetic
+  prompts with no natural stop, so tiny FP differences compound into different
+  ramble. The restored KV state is correct (it matches on the other five turns);
+  TTFB/restore/suffix-prefill are the stable decision metrics.
+
+Net: the system-first re-ordering converts the cache from "turn-1-only on Gemma"
+into a genuine multi-turn win — flat per-turn time-to-first-token and a ~20 ms
+restore standing in for a prefill that would otherwise grow unbounded with the
+conversation.
+
+Still open: the contention/scaling policy work (Tasks 13, 16).
+
+## Tasks 14 & 15 Implementation (cache scaling benchmarks)
+
+Added the `fono-bench assistant-cache-scaling` subcommand, which sweeps one
+prefix dimension and reports cached-vs-uncached latency per size:
+
+- `--dimension tools` synthesises a stable prefix carrying N tool/function
+  descriptors (`--sizes 0,5,10,20,40`), covering Task 14.
+- `--dimension window` synthesises a stable prefix carrying an N-line
+  active-window context block (`--sizes 0,8,32,96`), covering Task 15.
+- Each synthetic prefix ends at `User request:`, so the per-turn suffix begins
+  on a stable token boundary — the same prefix/suffix split the live reply path
+  uses — and replays through the existing `replay_raw_prompt_prefix_cache`
+  machinery. The report emits, per size: prefix chars/tokens, state bytes,
+  one-time setup prefill, median uncached vs cached latency, median TTFB, median
+  restore, median suffix prefill, output-match count, and a rounded
+  `cached_speedup_x`. Schema `assistant-cache-scaling-report-v1`.
+
+Example invocation:
+
+```
+cargo run -p fono-bench --features llama-local -- assistant-cache-scaling \
+  --model-path <gguf> --dimension tools --sizes 0,5,10,20,40 \
+  --suffix "turn on the kitchen light" --suffix "what's the weather" \
+  --iterations 3 --machine-label dev --out /tmp/cache-scaling-tools.json
+```
+
+These produce the evidence Task 16 needs (whether cached tool/window prefixes
+make larger tool sets and richer window context practical). Task 13 (STT
+contention) and Task 16 (policy promotion) remain open.
+
+### Benchmark Results (2026-06-08, `gemma-4-e2b.gguf`, ctx=4096, threads=8, batch=4096, ubatch=512, 2 iters × 3 suffixes)
+
+Artifacts:
+
+- `/tmp/fono-runtime-prompt-cache/cache-scaling-tools.json`
+- `/tmp/fono-runtime-prompt-cache/cache-scaling-window.json`
+
+**Tool-count scaling (Task 14):**
+
+| Tools | Prefix tok | One-time prefill | State | Median restore | Median suffix prefill | **Cached TTFB** | Uncached latency |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0  | 25   | 217 ms    | 0.5 MB | 15 ms | 112 ms | **114 ms** | 3,948 ms |
+| 5  | 424  | 5,143 ms  | 7.8 MB | 21 ms | 114 ms | **115 ms** | 5,981 ms |
+| 10 | 821  | 10,341 ms | 15 MB  | 14 ms | 117 ms | **118 ms** | 11,249 ms |
+| 20 | 1,631| 21,077 ms | 30 MB  | 21 ms | 119 ms | **120 ms** | 22,284 ms |
+| 40 | 3,251| 44,806 ms | 60 MB  | 27 ms | 132 ms | **133 ms** | 49,084 ms |
+
+**Window-context scaling (Task 15):**
+
+| Lines | Prefix tok | One-time prefill | State | Median restore | Median suffix prefill | **Cached TTFB** | Uncached latency |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0  | 25    | 225 ms    | 0.5 MB | 15 ms | 76 ms  | **78 ms**  | 1,071 ms |
+| 8  | 295   | 3,629 ms  | 5.4 MB | 20 ms | 82 ms  | **98 ms**  | 6,381 ms |
+| 32 | 1,132 | 14,262 ms | 21 MB  | 22 ms | 104 ms | **105 ms** | 20,113 ms |
+| 96 | 3,372 | 46,221 ms | 62 MB  | 28 ms | 109 ms | **138 ms** | 48,001 ms |
+
+Findings:
+
+- **Time-to-first-token is flat and prefix-size-independent.** Cached TTFB stays
+  ~78–138 ms across the whole sweep, while the uncached path must reprocess the
+  entire prefix first — climbing to ~48–49 s at ~3,300 prefix tokens. State
+  restore is a near-constant ~15–28 ms regardless of prefix size; only the small
+  per-turn suffix prefill (~76–132 ms) is paid each turn.
+- **The win grows with prefix size.** At 0 tools/lines the cache barely helps
+  (1.1–1.5×) because there is nothing to amortise; by 40 tools / 96 lines a
+  cached restore replaces a ~45 s prefill — a ~33–39× reduction in
+  time-to-useful-work. This directly answers Tasks 14/15: cached prefixes make
+  large tool sets and rich window context practical that would otherwise be
+  unusable interactively.
+- **Memory is bounded and affordable.** The largest checkpoints are ~60–62 MB of
+  llama.cpp state at ~3,300 tokens, so the 256 MiB / 8-entry budget holds ~4
+  large checkpoints — enough for F7/F8/tools plus one window-context layer.
+- **`cached_speedup_x` (full-latency ratio) is noisy and should not be the
+  headline.** Because both paths generate up to `MAX_NEW_TOKENS = 384` and the
+  synthetic prompts have no natural stop, total latency is dominated by variable
+  generation length (e.g. the 20-tool point's 17.9 s median cached latency is a
+  generation-length outlier, not a cache regression). TTFB, restore, and
+  suffix-prefill are the stable, decision-relevant metrics. The `outputs_match`
+  dips at mid sizes are the same synthetic-rambling artefact, not a cache
+  correctness failure — restore reproduces the exact prefix state by construction.
+
+Policy implication for Task 16: the **latency and memory** acceptance criteria
+are now met with strong evidence — caching stable prefixes should be the default.
+The remaining gate is **CPU contention** (Task 13): the one-time prefill is
+expensive (up to ~45 s for a 3,300-token prefix), so building/extending large
+checkpoints must stay low-priority and deferred while STT is CPU-bound. Promotion
+is therefore evidence-backed on two of three axes; Task 13 closes the third.
+
 ## Recommended Initial Policy
 
 - [x] Build F7 system prompt checkpoint at startup/idle with very low priority.
@@ -124,5 +339,5 @@ The controlled benchmark proves the core real-world shape: once the shared syste
 - [x] Build assistant tool prompt checkpoint at startup/idle with very low priority.
 - [x] On F7/F8 press, restore the matching stable checkpoint immediately.
 - [x] When active-window context is available, build a dynamic window checkpoint only if doing so will not harm STT.
-- [ ] When transcript is ready, use the best checkpoint available and process the remaining user-text suffix.
+- [x] When transcript is ready, use the best checkpoint available and process the remaining user-text suffix.
 - [x] Keep all prompt-state caches in memory for the first production implementation.

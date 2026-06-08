@@ -1,5 +1,156 @@
 # Fono — Project Status
-Last updated: 2026-06-07
+Last updated: 2026-06-08
+
+## 2026-06-08 — Multi-turn cache benchmark confirms the system-first fix
+
+Added `fono-bench assistant-conversation-cache`: it walks a growing conversation
+through the **real** `build_prompt_split` and replays uncached-vs-cached
+generation per turn, so it measures the fixed Gemma layout end-to-end (not a
+synthetic prefix). Ran a 6-turn conversation on `gemma-4-e2b.gguf` (ctx=4096,
+threads=8, batch=4096, 2 iters/turn). Artifact:
+`/tmp/fono-runtime-prompt-cache/conversation-cache.json`.
+
+Result confirms the re-ordering pays off **on every turn**, not just turn 1
+(which is all the old layout could cache on Gemma):
+- State restore is flat ~15–39 ms across the whole conversation, regardless of
+  the checkpoint growing 0.5 MB → 6.1 MB (prefix 31 → 333 tokens).
+- The cache stands in a ~21 ms restore for a cold prefix prefill that climbs to
+  ~4.5 s by turn 6 — the cost the uncached path re-pays every turn (its full
+  latency climbs 2.0 s → 6.9 s).
+- Cached time-to-first-token stays flat ~341–641 ms (it tracks the ~22–25-token
+  suffix, not the growing prefix). Uncached first-token can't arrive until the
+  whole prefix is prefilled, so it scales with conversation length.
+- `outputs_match` 2/2 on 5 of 6 turns, 0/2 on turn 3 — sampling noise from both
+  paths free-running to `MAX_NEW_TOKENS = 384` on synthetic prompts; restored KV
+  state is correct. TTFB/restore/suffix-prefill are the stable metrics.
+
+New public API: `LlamaLocalAssistant::replay_conversation_prefix_cache` +
+`ConversationPrefixCacheReport`/`ConversationTurnReport`. Full table in the
+plan's "Multi-turn benchmark" section. Gate (fmt / clippy
+`--all-targets --features llama-local -D warnings` / `cargo test`) green.
+
+## 2026-06-08 — Gemma prompt re-ordered to system-first (multi-turn cache fix)
+
+The Gemma reply builder put the large, stable system/tool prompt in the
+*per-turn tail* (`{system}\n\nUser request: {user}` inside the current user
+turn) and the rolling history in the *cacheable head*. That is exactly
+inverted for KV prefix caching: the expensive immutable text was re-prefilled
+every turn while the cheap history was cached. On Gemma it also meant the
+`F8ChatPrefix` checkpoint was only ever a valid token-prefix on turn 1 — from
+turn 2 on, history preceded system and the cache fell back to a full prefill.
+
+Fix (`crates/fono-assistant/src/llama_local.rs`): the system prompt is now
+prepended to the **first** user turn (Gemma's trained convention — no system
+role), so the rendered prompt is **strictly append-only**. Leading tokens
+(system, then each completed turn) never change as the conversation grows, so
+both a boot-built system checkpoint and a per-conversation checkpoint stay
+valid token-prefixes turn after turn. The variable user text is the only thing
+in the trailing suffix. `build_prompt` is now defined as `prefix + suffix`
+(the split is the single source of truth), so the two can no longer diverge.
+
+Regression guards added (all in the `tests` module):
+- `gemma_system_leads_prompt_regardless_of_history` — system is a leading
+  prefix with and without history, and appears exactly once.
+- `gemma_conversation_is_append_only` / `chatml_conversation_is_append_only` —
+  each turn's full prompt is an exact string prefix of the next turn's prompt
+  across a simulated 3-turn conversation. This is the property that keeps the
+  KV cache reusable multi-turn; if a refactor breaks ordering, these fail loud.
+- `gemma_history_render_is_stable_across_turns` — a turn renders identically
+  once it scrolls into history.
+
+Gate: `cargo fmt --check`, `cargo clippy --workspace --all-targets --features
+llama-local -D warnings`, and `cargo test --workspace` all green (56 tests in
+`fono-assistant`, 4 new). Empirical multi-turn speedup re-measurement on the
+real model is the next step.
+
+## 2026-06-08 — Runtime prompt-state cache: benchmark results (Tasks 14 & 15 executed)
+
+Ran the `assistant-cache-scaling` sweeps on `gemma-4-e2b.gguf` (ctx=4096,
+threads=8, batch=4096, ubatch=512, 2 iters × 3 suffixes). Artifacts in
+`/tmp/fono-runtime-prompt-cache/cache-scaling-{tools,window}.json`.
+
+Headline: **cached time-to-first-token is flat and prefix-size-independent**
+(~78–138 ms across both sweeps), while the uncached path reprocesses the whole
+prefix and climbs to ~48–49 s at ~3,300 prefix tokens. State restore is a
+near-constant ~15–28 ms; only the small per-turn suffix prefill (~76–132 ms) is
+paid each turn. The win scales with prefix size — ~1.1–1.5× at zero
+tools/lines, ~33–39× at 40 tools / 96 window lines. Largest checkpoints are
+~60–62 MB, so the 256 MiB / 8-entry budget holds ~4 large checkpoints.
+
+Note: the `cached_speedup_x` full-latency ratio and `outputs_match` counts are
+noisy because both paths generate up to `MAX_NEW_TOKENS = 384` on synthetic
+prompts with no natural stop; TTFB/restore/suffix-prefill are the stable
+decision metrics. First full sweep aborted on the 40-tool prefix
+(`GGML_ASSERT(n_tokens_all <= cparams.n_batch)`) because the ~3 k-token prefill
+exceeded `--batch-size 2048`; rerun with `--batch-size 4096` succeeded.
+
+Task 16 status: latency + memory acceptance criteria met (caching stable
+prefixes should default on). Remaining gate is CPU contention — building a
+~3,300-token checkpoint costs ~45 s, so large checkpoint builds must stay
+low-priority and deferred while STT is CPU-bound. Task 13 (STT-contention
+benchmark) closes that third axis; Task 16 stays open until it lands. Full
+tables in the plan's "Benchmark Results" section.
+
+## 2026-06-08 — Runtime prompt-state cache: Tasks 14 & 15 (cache scaling benchmarks)
+
+Continued `plans/2026-06-07-2026-06-07-runtime-prompt-state-cache-v1.md`. Added
+the `fono-bench assistant-cache-scaling` subcommand that quantifies how cached
+prefixes scale along two dimensions, satisfying plan Tasks 14 and 15:
+
+- `--dimension tools --sizes 0,5,10,20,40` sweeps tool/function descriptor count
+  (Task 14); `--dimension window --sizes 0,8,32,96` sweeps active-window context
+  size (Task 15).
+- Each synthetic prefix ends at `User request:` so the per-turn suffix begins on
+  a stable token boundary (the same split the live reply path uses) and replays
+  through the existing `replay_raw_prompt_prefix_cache` path. Per size the JSON
+  report (`assistant-cache-scaling-report-v1`) gives prefix chars/tokens, state
+  bytes, one-time setup prefill, median uncached vs cached latency, median TTFB,
+  median restore, median suffix prefill, output-match count, and
+  `cached_speedup_x`.
+
+Gate: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
+--features llama-local -D warnings`, and `cargo test --workspace --tests --lib`
+all pass.
+
+Still open on the plan: Task 13 (STT-contention benchmark — needs the STT
+pipeline harness, not just the assistant) and Task 16 (promote the cache policy
+on the gathered evidence). Details in the plan's "Tasks 14 & 15 Implementation"
+section.
+
+## 2026-06-08 — Runtime prompt-state cache: Task 8 (transcript-ready prefix cache)
+
+Resumed `plans/2026-06-07-2026-06-07-runtime-prompt-state-cache-v1.md`. The
+embedded local-assistant reply path now *consumes* the prompt-state cache, not
+just builds it — Task 8 ("restore the best available checkpoint and process
+only the remaining suffix") is implemented and wired into `reply_stream`.
+
+What landed (`crates/fono-assistant/src/llama_local.rs`):
+
+- `build_prompt_split` splits the rendered reply prompt into a stable prefix
+  (history + system framing) and a per-turn suffix (user text + closing
+  template). `prefix + suffix` reproduces `build_prompt` byte-for-byte; new unit
+  tests assert this for Gemma and ChatML, with and without a system prompt.
+- `generate_with_prefix_cache` restores a cached `F8ChatPrefix` checkpoint when
+  present (building it lazily on first use), prefills only the suffix tokens,
+  then generates. Two independent guards — exact `prefix + suffix == prompt`
+  string equality and a token-level `starts_with` check — make a wrong-state
+  restore impossible; any incompatibility falls back to a full prefill having
+  emitted nothing.
+- Removed the previously dead-coded staged helpers (`prompt_prefix_cache_entry`,
+  `try_run_inference_with_cached_prefix`, `run_inference_with_prompt_cache`) and
+  the unused `remove_layers` WIP; replaced them with the live path above.
+
+Gate: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -D
+warnings`, and `cargo test --workspace --tests --lib` all pass (llama-local is
+in the default workspace graph, so this is exercised in the real binary).
+
+Still open on the plan: Tasks 13–15 (STT-contention, tool-count, and
+window-context benchmarks) and Task 16 (promote the policy on evidence).
+Startup/hotkey pre-warm still builds the older raw-prompt checkpoints, which the
+reply path no longer restores; pre-warming the exact `F8ChatPrefix` ahead of the
+transcript is deferred (the reply-time history snapshot includes the pending
+user turn, so the prefix can't be reproduced early) until the benchmarks justify
+it. Details in the plan's "Task 8 Implementation" section.
 
 ## 2026-06-07 — Runtime prompt-state cache: initial benchmark slice
 

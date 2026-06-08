@@ -83,6 +83,10 @@ enum Cmd {
     AssistantReplay(AssistantReplayArgs),
     /// Benchmark an embedded llama.cpp cached prompt prefix with changing suffixes.
     AssistantPrefixCache(AssistantPrefixCacheArgs),
+    /// Sweep cached-prefix savings across tool-count or window-context size.
+    AssistantCacheScaling(AssistantCacheScalingArgs),
+    /// Replay a growing multi-turn conversation to measure cached prefix reuse.
+    AssistantConversationCache(AssistantConversationCacheArgs),
     /// Simulated Home Assistant light-control tool-use benchmark.
     AssistantToolUse(AssistantToolUseArgs),
     /// Extract the first captured assistant prompt from a trace JSON.
@@ -395,6 +399,140 @@ struct AssistantPrefixCacheArgs {
     #[arg(long)]
     out: Option<PathBuf>,
 }
+
+/// Scaling dimension for the `assistant-cache-scaling` benchmark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CacheScalingDimension {
+    /// Vary the number of tool/function descriptors in the cached prefix
+    /// (plan task 14).
+    Tools,
+    /// Vary the size of the active-window context block in the cached prefix
+    /// (plan task 15).
+    Window,
+}
+
+#[cfg(feature = "llama-local")]
+impl CacheScalingDimension {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Tools => "tools",
+            Self::Window => "window",
+        }
+    }
+}
+
+#[derive(Debug, Parser)]
+struct AssistantCacheScalingArgs {
+    /// Local GGUF model path for embedded llama.cpp replay.
+    #[arg(long)]
+    model_path: PathBuf,
+
+    /// Which prefix dimension to scale: tool count or window-context size.
+    #[arg(long, value_enum)]
+    dimension: CacheScalingDimension,
+
+    /// Comma-separated sizes to sweep. For `tools` this is the tool count
+    /// (e.g. 0,5,10,20,40); for `window` it is the number of synthetic
+    /// window-context lines (e.g. 0,8,32,96).
+    #[arg(long, value_delimiter = ',', required = true)]
+    sizes: Vec<usize>,
+
+    /// Variable user-request suffix. Pass multiple times to model changing
+    /// requests against the same cached prefix.
+    #[arg(long, required = true)]
+    suffix: Vec<String>,
+
+    /// llama.cpp context size.
+    #[arg(long, default_value_t = 4096)]
+    ctx_size: u32,
+
+    /// llama.cpp worker threads. Defaults to available parallelism.
+    #[arg(long)]
+    threads: Option<i32>,
+
+    /// llama.cpp logical batch size. Defaults to ctx size.
+    #[arg(long)]
+    batch_size: Option<u32>,
+
+    /// llama.cpp physical micro-batch size. Defaults to llama.cpp's internal default.
+    #[arg(long)]
+    ubatch_size: Option<u32>,
+
+    /// Run the suffix set this many times per size.
+    #[arg(long, default_value_t = 1)]
+    iterations: usize,
+
+    /// Human-readable machine label stored in the report.
+    #[arg(long)]
+    machine_label: Option<String>,
+
+    /// Pretty-print the JSON report to stdout.
+    #[arg(long, default_value_t = true)]
+    pretty: bool,
+
+    /// Optional path to write the report.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+struct AssistantConversationCacheArgs {
+    /// Local GGUF model path for embedded llama.cpp replay.
+    #[arg(long)]
+    model_path: PathBuf,
+
+    /// System prompt placed at the head of the conversation (cached prefix).
+    #[arg(
+        long,
+        default_value = "You are Fono, a local voice assistant. Answer concisely and call a tool only when needed."
+    )]
+    system_prompt: String,
+
+    /// User turn text. Pass multiple times; the conversation grows by one
+    /// exchange per turn (turn N caches system + N-1 prior exchanges).
+    #[arg(long = "turn", required = true)]
+    turns: Vec<String>,
+
+    /// Canned assistant reply appended to history after each turn so the cached
+    /// prefix grows realistically. Length affects per-turn prefix growth.
+    #[arg(
+        long,
+        default_value = "Okay, I've taken care of that for you. Let me know if you need anything else."
+    )]
+    assistant_reply: String,
+
+    /// llama.cpp context size.
+    #[arg(long, default_value_t = 4096)]
+    ctx_size: u32,
+
+    /// llama.cpp worker threads. Defaults to available parallelism.
+    #[arg(long)]
+    threads: Option<i32>,
+
+    /// llama.cpp logical batch size. Defaults to ctx size.
+    #[arg(long)]
+    batch_size: Option<u32>,
+
+    /// llama.cpp physical micro-batch size. Defaults to llama.cpp's internal default.
+    #[arg(long)]
+    ubatch_size: Option<u32>,
+
+    /// Run each turn this many times.
+    #[arg(long, default_value_t = 1)]
+    iterations: usize,
+
+    /// Human-readable machine label stored in the report.
+    #[arg(long)]
+    machine_label: Option<String>,
+
+    /// Pretty-print the JSON report to stdout.
+    #[arg(long, default_value_t = true)]
+    pretty: bool,
+
+    /// Optional path to write the report.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
 #[derive(Debug, Parser)]
 struct ExtractTracePromptArgs {
     /// Assistant Chrome Trace / Perfetto JSON file.
@@ -527,6 +665,8 @@ async fn main() -> Result<()> {
         Cmd::AssistantFactual(a) => run_assistant_factual_cmd(a).await,
         Cmd::AssistantReplay(a) => run_assistant_replay_cmd(a).await,
         Cmd::AssistantPrefixCache(a) => run_assistant_prefix_cache_cmd(a).await,
+        Cmd::AssistantCacheScaling(a) => run_assistant_cache_scaling_cmd(a).await,
+        Cmd::AssistantConversationCache(a) => run_assistant_conversation_cache_cmd(a).await,
         Cmd::AssistantToolUse(a) => run_assistant_tool_use_cmd(a).await,
         Cmd::ExtractTracePrompt(a) => run_extract_trace_prompt_cmd(a).await,
         Cmd::Equivalence(a) => run_equivalence(a).await,
@@ -948,6 +1088,384 @@ async fn run_assistant_prefix_cache_cmd(args: AssistantPrefixCacheArgs) -> Resul
         let _ = args;
         Err(anyhow!(
             "compiled without --features llama-local; rebuild with `cargo run -p fono-bench --features llama-local -- assistant-prefix-cache ...`"
+        ))
+    }
+}
+
+#[cfg(feature = "llama-local")]
+#[derive(Serialize)]
+struct CacheScalingReport {
+    schema_version: &'static str,
+    provider: String,
+    model: String,
+    dimension: String,
+    runtime: BTreeMap<String, String>,
+    machine_label: Option<String>,
+    iterations: usize,
+    suffix_count: usize,
+    points: Vec<CacheScalingPoint>,
+}
+
+#[cfg(feature = "llama-local")]
+#[derive(Serialize)]
+struct CacheScalingPoint {
+    /// Tool count or window-context line count for this point.
+    size: usize,
+    prefix_chars: usize,
+    prefix_tokens: usize,
+    state_bytes: usize,
+    setup_prefill_ms: u64,
+    run_count: usize,
+    outputs_match_count: usize,
+    median_uncached_latency_ms: u64,
+    median_cached_latency_ms: u64,
+    median_cached_time_to_first_token_ms: Option<u64>,
+    median_state_restore_ms: u64,
+    median_suffix_prefill_ms: u64,
+    /// `median_uncached / median_cached`, rounded to two decimals.
+    cached_speedup_x: f64,
+}
+
+#[cfg(feature = "llama-local")]
+fn median_u64(mut values: Vec<u64>) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    values[values.len() / 2]
+}
+
+/// Build a synthetic stable prefix whose size scales along one dimension. The
+/// prefix always ends at `User request:` so the per-turn suffix (` <request>`)
+/// begins on a stable token boundary, matching the assistant reply split.
+#[cfg(feature = "llama-local")]
+fn synthesize_scaling_prefix(dimension: CacheScalingDimension, size: usize) -> String {
+    let mut s = String::from(
+        "You are Fono, a local voice assistant. Answer concisely and call a tool only when needed.\n",
+    );
+    match dimension {
+        CacheScalingDimension::Tools => {
+            if size > 0 {
+                s.push_str("\nAvailable tools:\n");
+                for i in 1..=size {
+                    s.push_str(&format!(
+                        "\nTool: tool_{i}\nDescription: Perform operation {i} on a named target with optional parameters.\nParameters:\n  - target (string, required): the entity to act on.\n  - mode (string, optional): one of \"fast\", \"balanced\", \"thorough\".\n  - dry_run (boolean, optional): when true, only simulate the action.\n"
+                    ));
+                }
+            }
+        }
+        CacheScalingDimension::Window => {
+            if size > 0 {
+                s.push_str(
+                    "\nActive window context:\nWindow title: Project Workspace — Code Editor\n",
+                );
+                for i in 1..=size {
+                    s.push_str(&format!(
+                        "Line {i}: fn process_item_{i}(value: i64) -> i64 {{ value.wrapping_mul({i}) }}\n"
+                    ));
+                }
+            }
+        }
+    }
+    s.push_str("\n\nUser request:");
+    s
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_assistant_cache_scaling_cmd(args: AssistantCacheScalingArgs) -> Result<()> {
+    #[cfg(feature = "llama-local")]
+    {
+        use fono_assistant::llama_local::LlamaLocalAssistant;
+        use fono_assistant::Assistant;
+
+        if !args.model_path.exists() {
+            return Err(anyhow!("llama.cpp GGUF model not found at {}", args.model_path.display()));
+        }
+        if args.sizes.is_empty() {
+            return Err(anyhow!("--sizes requires at least one value"));
+        }
+        let threads = match args.threads {
+            Some(t) if t > 0 => t,
+            Some(t) => return Err(anyhow!("--threads must be positive, got {t}")),
+            None => std::thread::available_parallelism()
+                .map(|n| i32::try_from(n.get()).unwrap_or(4))
+                .unwrap_or(4),
+        };
+        let assistant = LlamaLocalAssistant::with_runtime_options(
+            &args.model_path,
+            args.ctx_size,
+            threads,
+            args.batch_size,
+            args.ubatch_size,
+        );
+        assistant.prewarm().await?;
+        // Suffixes must begin on the stable boundary after `User request:`; add
+        // the separating space when the caller did not.
+        let suffixes: Vec<String> = args
+            .suffix
+            .iter()
+            .map(|s| if s.starts_with(' ') { s.clone() } else { format!(" {s}") })
+            .collect();
+        let mut points = Vec::with_capacity(args.sizes.len());
+        for &size in &args.sizes {
+            let prefix = synthesize_scaling_prefix(args.dimension, size);
+            let report = assistant
+                .replay_raw_prompt_prefix_cache(
+                    prefix.clone(),
+                    suffixes.clone(),
+                    args.iterations.max(1),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "cache-scaling replay failed for {} size {size}",
+                        args.dimension.as_str()
+                    )
+                })?;
+            let median_uncached =
+                median_u64(report.runs.iter().map(|r| r.uncached_latency_ms).collect());
+            let median_cached =
+                median_u64(report.runs.iter().map(|r| r.cached_latency_ms).collect());
+            let ttfb: Vec<u64> =
+                report.runs.iter().filter_map(|r| r.cached_time_to_first_token_ms).collect();
+            let speedup = if median_cached == 0 {
+                0.0
+            } else {
+                (median_uncached as f64 / median_cached as f64 * 100.0).round() / 100.0
+            };
+            info!(
+                "cache-scaling {} size={size}: prefix {} tok, cached {median_cached}ms vs uncached {median_uncached}ms ({speedup}x)",
+                args.dimension.as_str(),
+                report.prefix_tokens
+            );
+            points.push(CacheScalingPoint {
+                size,
+                prefix_chars: prefix.chars().count(),
+                prefix_tokens: report.prefix_tokens,
+                state_bytes: report.state_bytes,
+                setup_prefill_ms: report.setup_prefill_ms,
+                run_count: report.runs.len(),
+                outputs_match_count: report.runs.iter().filter(|r| r.outputs_match).count(),
+                median_uncached_latency_ms: median_uncached,
+                median_cached_latency_ms: median_cached,
+                median_cached_time_to_first_token_ms: if ttfb.is_empty() {
+                    None
+                } else {
+                    Some(median_u64(ttfb))
+                },
+                median_state_restore_ms: median_u64(
+                    report.runs.iter().map(|r| r.state_restore_ms).collect(),
+                ),
+                median_suffix_prefill_ms: median_u64(
+                    report.runs.iter().map(|r| r.suffix_prefill_ms).collect(),
+                ),
+                cached_speedup_x: speedup,
+            });
+        }
+        let model =
+            args.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or("llama-cpp").to_string();
+        let runtime = assistant_runtime_metadata(AssistantRuntimeMetadataOptions {
+            provider: LlmProvider::LlamaCpp,
+            llama: LlamaRuntimeOptions {
+                model_path: Some(&args.model_path),
+                ctx_size: args.ctx_size,
+                threads: args.threads,
+                batch_size: args.batch_size,
+                ubatch_size: args.ubatch_size,
+            },
+            system_prompt: Some("cache-scaling"),
+            history_turns: 0,
+        });
+        let report = CacheScalingReport {
+            schema_version: "assistant-cache-scaling-report-v1",
+            provider: "llama-cpp".to_string(),
+            model,
+            dimension: args.dimension.as_str().to_string(),
+            runtime,
+            machine_label: args.machine_label.clone(),
+            iterations: args.iterations.max(1),
+            suffix_count: suffixes.len(),
+            points,
+        };
+        let payload = if args.pretty {
+            serde_json::to_string_pretty(&report)?
+        } else {
+            serde_json::to_string(&report)?
+        };
+        if let Some(path) = &args.out {
+            std::fs::write(path, &payload)
+                .with_context(|| format!("write cache-scaling report {}", path.display()))?;
+            info!("wrote assistant-cache-scaling report to {}", path.display());
+        }
+        println!("{payload}");
+        Ok(())
+    }
+    #[cfg(not(feature = "llama-local"))]
+    {
+        let _ = args;
+        Err(anyhow!(
+            "compiled without --features llama-local; rebuild with `cargo run -p fono-bench --features llama-local -- assistant-cache-scaling ...`"
+        ))
+    }
+}
+
+#[cfg(feature = "llama-local")]
+#[derive(Serialize)]
+struct ConversationCacheReport {
+    schema_version: &'static str,
+    provider: String,
+    model: String,
+    runtime: BTreeMap<String, String>,
+    machine_label: Option<String>,
+    iterations: usize,
+    turn_count: usize,
+    turns: Vec<ConversationCachePoint>,
+}
+
+#[cfg(feature = "llama-local")]
+#[derive(Serialize)]
+struct ConversationCachePoint {
+    /// 1-based conversation turn index.
+    turn_index: usize,
+    /// Number of history turns (user + assistant) preceding this turn.
+    history_turns: usize,
+    /// Tokens in the cached prefix (system + history). Grows every turn.
+    prefix_tokens: usize,
+    /// Tokens in the per-turn suffix (the current user text + closing template).
+    suffix_tokens: usize,
+    /// Bytes of KV state copied for this turn's checkpoint.
+    state_bytes: usize,
+    /// One-time cost to prefill this turn's (growing) prefix from cold.
+    setup_prefill_ms: u64,
+    run_count: usize,
+    outputs_match_count: usize,
+    median_uncached_latency_ms: u64,
+    median_cached_latency_ms: u64,
+    median_cached_time_to_first_token_ms: Option<u64>,
+    median_state_restore_ms: u64,
+    median_suffix_prefill_ms: u64,
+    /// `median_uncached / median_cached`, rounded to two decimals.
+    cached_speedup_x: f64,
+}
+
+async fn run_assistant_conversation_cache_cmd(args: AssistantConversationCacheArgs) -> Result<()> {
+    #[cfg(feature = "llama-local")]
+    {
+        use fono_assistant::llama_local::LlamaLocalAssistant;
+        use fono_assistant::Assistant;
+
+        if !args.model_path.exists() {
+            return Err(anyhow!("llama.cpp GGUF model not found at {}", args.model_path.display()));
+        }
+        if args.turns.is_empty() {
+            return Err(anyhow!("--turn requires at least one value"));
+        }
+        let threads = match args.threads {
+            Some(t) if t > 0 => t,
+            Some(t) => return Err(anyhow!("--threads must be positive, got {t}")),
+            None => std::thread::available_parallelism()
+                .map(|n| i32::try_from(n.get()).unwrap_or(4))
+                .unwrap_or(4),
+        };
+        let assistant = LlamaLocalAssistant::with_runtime_options(
+            &args.model_path,
+            args.ctx_size,
+            threads,
+            args.batch_size,
+            args.ubatch_size,
+        );
+        assistant.prewarm().await?;
+        let report = assistant
+            .replay_conversation_prefix_cache(
+                args.system_prompt.clone(),
+                args.turns.clone(),
+                args.assistant_reply.clone(),
+                args.iterations.max(1),
+            )
+            .await
+            .context("conversation prefix-cache replay failed")?;
+
+        let mut points = Vec::with_capacity(report.turns.len());
+        for turn in &report.turns {
+            let median_uncached =
+                median_u64(turn.runs.iter().map(|r| r.uncached_latency_ms).collect());
+            let median_cached = median_u64(turn.runs.iter().map(|r| r.cached_latency_ms).collect());
+            let ttfb: Vec<u64> =
+                turn.runs.iter().filter_map(|r| r.cached_time_to_first_token_ms).collect();
+            let speedup = if median_cached == 0 {
+                0.0
+            } else {
+                (median_uncached as f64 / median_cached as f64 * 100.0).round() / 100.0
+            };
+            info!(
+                "conversation-cache turn={} history={}: prefix {} tok, cached {median_cached}ms vs uncached {median_uncached}ms ({speedup}x)",
+                turn.turn_index, turn.history_turns, turn.prefix_tokens
+            );
+            points.push(ConversationCachePoint {
+                turn_index: turn.turn_index,
+                history_turns: turn.history_turns,
+                prefix_tokens: turn.prefix_tokens,
+                suffix_tokens: turn.suffix_tokens,
+                state_bytes: turn.state_bytes,
+                setup_prefill_ms: turn.setup_prefill_ms,
+                run_count: turn.runs.len(),
+                outputs_match_count: turn.runs.iter().filter(|r| r.outputs_match).count(),
+                median_uncached_latency_ms: median_uncached,
+                median_cached_latency_ms: median_cached,
+                median_cached_time_to_first_token_ms: if ttfb.is_empty() {
+                    None
+                } else {
+                    Some(median_u64(ttfb))
+                },
+                median_state_restore_ms: median_u64(
+                    turn.runs.iter().map(|r| r.state_restore_ms).collect(),
+                ),
+                median_suffix_prefill_ms: median_u64(
+                    turn.runs.iter().map(|r| r.suffix_prefill_ms).collect(),
+                ),
+                cached_speedup_x: speedup,
+            });
+        }
+        let runtime = assistant_runtime_metadata(AssistantRuntimeMetadataOptions {
+            provider: LlmProvider::LlamaCpp,
+            llama: LlamaRuntimeOptions {
+                model_path: Some(&args.model_path),
+                ctx_size: args.ctx_size,
+                threads: args.threads,
+                batch_size: args.batch_size,
+                ubatch_size: args.ubatch_size,
+            },
+            system_prompt: Some(&args.system_prompt),
+            history_turns: 0,
+        });
+        let out = ConversationCacheReport {
+            schema_version: "assistant-conversation-cache-report-v1",
+            provider: "llama-cpp".to_string(),
+            model: report.model_name,
+            runtime,
+            machine_label: args.machine_label.clone(),
+            iterations: args.iterations.max(1),
+            turn_count: points.len(),
+            turns: points,
+        };
+        let payload = if args.pretty {
+            serde_json::to_string_pretty(&out)?
+        } else {
+            serde_json::to_string(&out)?
+        };
+        if let Some(path) = &args.out {
+            std::fs::write(path, &payload)
+                .with_context(|| format!("write conversation-cache report {}", path.display()))?;
+            info!("wrote assistant-conversation-cache report to {}", path.display());
+        }
+        println!("{payload}");
+        Ok(())
+    }
+    #[cfg(not(feature = "llama-local"))]
+    {
+        let _ = args;
+        Err(anyhow!(
+            "compiled without --features llama-local; rebuild with `cargo run -p fono-bench --features llama-local -- assistant-conversation-cache ...`"
         ))
     }
 }

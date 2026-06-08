@@ -128,12 +128,33 @@ pub struct RawPromptPrefixCacheReport {
     pub runs: Vec<RawPromptPrefixCacheRun>,
 }
 
+/// Per-turn result of a simulated multi-turn conversation replay. Captures how
+/// the cached prefix grows (and the per-turn cached cost stays flat) as history
+/// accumulates.
+#[derive(Debug, Clone)]
+pub struct ConversationTurnReport {
+    pub turn_index: usize,
+    pub history_turns: usize,
+    pub prefix_tokens: usize,
+    pub suffix_tokens: usize,
+    pub state_bytes: usize,
+    pub setup_prefill_ms: u64,
+    pub runs: Vec<RawPromptPrefixCacheRun>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConversationPrefixCacheReport {
+    pub model_name: String,
+    pub turns: Vec<ConversationTurnReport>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PromptStateCacheLayer {
     F7System,
     F8System,
     AssistantTools,
     WindowContext,
+    F8ChatPrefix,
     BenchmarkPrefix,
     ExactPrompt,
 }
@@ -145,6 +166,7 @@ impl PromptStateCacheLayer {
             Self::F8System => "f8_system",
             Self::AssistantTools => "assistant_tools",
             Self::WindowContext => "window_context",
+            Self::F8ChatPrefix => "f8_chat_prefix",
             Self::BenchmarkPrefix => "benchmark_prefix",
             Self::ExactPrompt => "exact_prompt",
         }
@@ -336,32 +358,134 @@ impl LlamaLocalAssistant {
         Ok(())
     }
 
-    /// Look up a cached stable-prefix checkpoint for the live reply path.
-    ///
-    /// Part of the staged Task 8 generation-time prefix-cache path. Not yet
-    /// wired into [`Self::reply_stream`]: the stable checkpoints are currently
-    /// built from raw prompt text, which is not a token-prefix of the
-    /// chat-templated reply prompt, so restore-and-suffix would always fall
-    /// back. Kept ready for benchmark-driven promotion (plan tasks 8/16).
-    #[allow(dead_code)]
-    fn prompt_prefix_cache_entry(
+    /// Task 8 generation-time prefix cache. Restores a cached prefix checkpoint
+    /// when one exists (building it on first use), then prefills only the
+    /// per-turn suffix before generating. Returns `Ok(None)` — having emitted
+    /// nothing — whenever the split cannot be reused safely (empty prefix/suffix,
+    /// token-boundary mismatch, oversized prompt, or a failed restore) so the
+    /// caller can fall back to a full prefill.
+    #[allow(clippy::too_many_lines)]
+    fn generate_with_prefix_cache<F>(
         &self,
         model: &LlamaModel,
-        layer: PromptStateCacheLayer,
         prefix: &str,
-    ) -> Result<Option<(PromptStateCacheEntry, PromptStateCacheKey)>> {
+        suffix: &str,
+        layer: PromptStateCacheLayer,
+        on_delta: F,
+    ) -> Result<Option<String>>
+    where
+        F: FnMut(String) -> Result<bool>,
+    {
+        if prefix.is_empty() || suffix.is_empty() {
+            return Ok(None);
+        }
         let prefix_tokens =
-            model.str_to_token(prefix, AddBos::Always).context("tokenize prompt prefix")?;
+            model.str_to_token(prefix, AddBos::Always).context("tokenize cached prefix")?;
         if prefix_tokens.is_empty() {
             return Ok(None);
         }
-        let key = self.prompt_state_cache_key(layer, prefix, &prefix_tokens)?;
-        let entry = self
-            .prompt_state_cache
-            .lock()
-            .map_err(|_| anyhow!("llama-local prompt-state cache mutex poisoned"))?
-            .get(&key);
-        Ok(entry.map(|entry| (entry, key)))
+        let full_prompt = format!("{prefix}{suffix}");
+        let full_tokens =
+            model.str_to_token(&full_prompt, AddBos::Always).context("tokenize cached prompt")?;
+        if !full_tokens.starts_with(&prefix_tokens) {
+            debug!(
+                layer = layer.as_str(),
+                "prompt-state cache token split incompatible; falling back"
+            );
+            return Ok(None);
+        }
+        let suffix_tokens = &full_tokens[prefix_tokens.len()..];
+        if suffix_tokens.is_empty() {
+            return Ok(None);
+        }
+        if full_tokens.len() + MAX_NEW_TOKENS as usize >= self.context_size as usize {
+            debug!(
+                layer = layer.as_str(),
+                tokens = full_tokens.len(),
+                ctx = self.context_size,
+                "prompt-state cache prompt too large; falling back"
+            );
+            return Ok(None);
+        }
+        let key = self.prompt_state_cache_key(layer.clone(), prefix, &prefix_tokens)?;
+        let cached = {
+            let mut cache = self
+                .prompt_state_cache
+                .lock()
+                .map_err(|_| anyhow!("llama-local prompt-state cache mutex poisoned"))?;
+            cache.get(&key)
+        };
+        let mut ctx = self.new_context(model, "llm.prompt_cache_context_created")?;
+        if let Some(entry) = cached {
+            let restore_started = Instant::now();
+            let restored_bytes = unsafe { ctx.set_state_data(&entry.state) };
+            if restored_bytes == 0 {
+                warn!(
+                    layer = layer.as_str(),
+                    "llama.cpp failed to restore prompt-state cache; falling back"
+                );
+                return Ok(None);
+            }
+            current_instant(
+                "llm.prompt_cache_restored",
+                "assistant.llm",
+                "llm",
+                json!({
+                    "layer": layer.as_str(),
+                    "cache_key": key.stable_id(),
+                    "state_bytes": entry.state.len(),
+                    "restored_bytes": restored_bytes,
+                    "restore_ms": restore_started.elapsed().as_millis() as u64,
+                    "suffix_tokens": suffix_tokens.len(),
+                }),
+            );
+        } else {
+            let build_started = Instant::now();
+            self.prefill_tokens(
+                &mut ctx,
+                &prefix_tokens,
+                0,
+                false,
+                "llm.prompt_cache_build_prefill",
+            )?;
+            let state = copy_context_state(&ctx)?;
+            let state_bytes = state.len();
+            {
+                let mut cache = self
+                    .prompt_state_cache
+                    .lock()
+                    .map_err(|_| anyhow!("llama-local prompt-state cache mutex poisoned"))?;
+                cache
+                    .insert(key, PromptStateCacheEntry { state, token_count: prefix_tokens.len() });
+            }
+            current_instant(
+                "llm.prompt_cache_built",
+                "assistant.llm",
+                "llm",
+                json!({
+                    "layer": layer.as_str(),
+                    "prefix_tokens": prefix_tokens.len(),
+                    "state_bytes": state_bytes,
+                    "elapsed_ms": build_started.elapsed().as_millis() as u64,
+                }),
+            );
+        }
+        self.prefill_tokens(
+            &mut ctx,
+            suffix_tokens,
+            prefix_tokens.len() as i32,
+            true,
+            "llm.prompt_cache_suffix_prefill",
+        )?;
+        let generation = generate_from_prefilled_context(
+            model,
+            &mut ctx,
+            full_tokens.len() as i32,
+            (suffix_tokens.len() - 1) as i32,
+            None,
+            on_delta,
+        )?;
+        Ok(Some(generation.text.trim().to_string()))
     }
 
     fn build_prompt_prefix_cache(
@@ -427,86 +551,6 @@ impl LlamaLocalAssistant {
         Ok(())
     }
 
-    /// Staged Task 8 generation-time path (see [`Self::prompt_prefix_cache_entry`]).
-    #[allow(dead_code)]
-    fn try_run_inference_with_cached_prefix<F>(
-        &self,
-        model: &LlamaModel,
-        prefix: &str,
-        suffix: &str,
-        layer: PromptStateCacheLayer,
-        on_delta: F,
-    ) -> Result<Option<String>>
-    where
-        F: FnMut(String) -> Result<bool>,
-    {
-        let Some((entry, key)) = self.prompt_prefix_cache_entry(model, layer.clone(), prefix)?
-        else {
-            current_instant(
-                "llm.prompt_cache_miss",
-                "assistant.llm",
-                "llm",
-                json!({ "layer": layer.as_str() }),
-            );
-            return Ok(None);
-        };
-        let full_prompt = format!("{prefix}{suffix}");
-        let full_tokens =
-            model.str_to_token(&full_prompt, AddBos::Always).context("tokenize cached prompt")?;
-        let prefix_tokens =
-            model.str_to_token(prefix, AddBos::Always).context("tokenize cached prefix")?;
-        if entry.token_count != prefix_tokens.len() || !full_tokens.starts_with(&prefix_tokens) {
-            debug!(
-                layer = layer.as_str(),
-                cached_tokens = entry.token_count,
-                prefix_tokens = prefix_tokens.len(),
-                "prompt-state cache token split incompatible; falling back"
-            );
-            return Ok(None);
-        }
-        let suffix_tokens = &full_tokens[prefix_tokens.len()..];
-        if suffix_tokens.is_empty() {
-            return Ok(None);
-        }
-        let restore_started = Instant::now();
-        let mut ctx = self.new_context(model, "llm.prompt_cache_context_created")?;
-        let restored_bytes = unsafe { ctx.set_state_data(&entry.state) };
-        let restore_ms = restore_started.elapsed().as_millis() as u64;
-        if restored_bytes == 0 {
-            warn!(layer = layer.as_str(), "llama.cpp failed to restore prompt-state cache");
-            return Ok(None);
-        }
-        current_instant(
-            "llm.prompt_cache_restored",
-            "assistant.llm",
-            "llm",
-            json!({
-                "layer": layer.as_str(),
-                "cache_key": key.stable_id(),
-                "state_bytes": entry.state.len(),
-                "restored_bytes": restored_bytes,
-                "restore_ms": restore_ms,
-                "suffix_tokens": suffix_tokens.len(),
-            }),
-        );
-        self.prefill_tokens(
-            &mut ctx,
-            suffix_tokens,
-            prefix_tokens.len() as i32,
-            true,
-            "llm.prompt_cache_suffix_prefill",
-        )?;
-        let generation = generate_from_prefilled_context(
-            model,
-            &mut ctx,
-            full_tokens.len() as i32,
-            (suffix_tokens.len() - 1) as i32,
-            None,
-            on_delta,
-        )?;
-        Ok(Some(generation.text.trim().to_string()))
-    }
-
     #[allow(clippy::too_many_lines)]
     fn run_inference<F>(&self, prompt: &str, on_delta: F) -> Result<String>
     where
@@ -517,9 +561,10 @@ impl LlamaLocalAssistant {
         self.run_inference_with_model(model, prompt, on_delta)
     }
 
-    /// Staged Task 8 generation-time path (see [`Self::prompt_prefix_cache_entry`]).
-    #[allow(dead_code)]
-    fn run_inference_with_prompt_cache<F>(
+    /// Reply generation with the Task 8 prefix cache. Only attempts the cached
+    /// path when the split reproduces the full prompt byte-for-byte; on any
+    /// incompatibility it falls back to a full prefill having emitted nothing.
+    fn run_inference_with_prefix_cache<F>(
         &self,
         prompt: &str,
         prefix: &str,
@@ -532,10 +577,12 @@ impl LlamaLocalAssistant {
     {
         let guard = self.state.lock().map_err(|_| anyhow!("llama-local mutex poisoned"))?;
         let model = guard.as_ref().ok_or_else(|| anyhow!("llama-local model not loaded"))?;
-        if let Some(text) =
-            self.try_run_inference_with_cached_prefix(model, prefix, suffix, layer, &mut on_delta)?
-        {
-            return Ok(text);
+        if format!("{prefix}{suffix}") == prompt {
+            if let Some(text) =
+                self.generate_with_prefix_cache(model, prefix, suffix, layer, &mut on_delta)?
+            {
+                return Ok(text);
+            }
         }
         self.run_inference_with_model(model, prompt, on_delta)
     }
@@ -936,6 +983,77 @@ impl LlamaLocalAssistant {
             setup_prefill_ms,
             runs,
         })
+    }
+
+    /// Benchmark the multi-turn prefix cache through the *real* reply-prompt
+    /// splitter ([`build_prompt_split`]). Simulates a conversation that grows by
+    /// one `(user, assistant)` exchange per turn: at turn `t` the history holds
+    /// the first `t` exchanges, the cache prefix is the system block plus that
+    /// history, and the suffix is the current user text. Each turn replays
+    /// uncached-vs-cached generation. This is the end-to-end evidence that the
+    /// system-first, append-only Gemma layout keeps per-turn cached cost flat
+    /// (restore + small suffix prefill) while the uncached path scales with the
+    /// whole growing prefix.
+    pub async fn replay_conversation_prefix_cache(
+        &self,
+        system_prompt: String,
+        user_turns: Vec<String>,
+        assistant_reply: String,
+        iterations: usize,
+    ) -> Result<ConversationPrefixCacheReport> {
+        let me = self.clone_thin();
+        let model_name =
+            self.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
+        tokio::task::spawn_blocking(move || -> Result<ConversationPrefixCacheReport> {
+            me.ensure_loaded()?;
+            if user_turns.is_empty() {
+                return Err(anyhow!("conversation replay requires at least one user turn"));
+            }
+            let mut turns = Vec::with_capacity(user_turns.len());
+            for (t, user) in user_turns.iter().enumerate() {
+                let mut history: Vec<crate::history::ChatTurn> = Vec::with_capacity(t * 2);
+                for prior in user_turns.iter().take(t) {
+                    history.push(crate::history::ChatTurn {
+                        role: ChatRole::User,
+                        content: prior.clone(),
+                        at: Instant::now(),
+                        tool_calls: Vec::new(),
+                        tool_call_id: None,
+                    });
+                    history.push(crate::history::ChatTurn {
+                        role: ChatRole::Assistant,
+                        content: assistant_reply.clone(),
+                        at: Instant::now(),
+                        tool_calls: Vec::new(),
+                        tool_call_id: None,
+                    });
+                }
+                let ctx = AssistantContext {
+                    system_prompt: system_prompt.clone(),
+                    history,
+                    ..AssistantContext::default()
+                };
+                let (prefix, suffix) = build_prompt_split(&ctx, user, &model_name);
+                let report = me.run_prefix_cache_replay(
+                    &prefix,
+                    std::slice::from_ref(&suffix),
+                    iterations.max(1),
+                )?;
+                let suffix_tokens = report.runs.first().map_or(0, |r| r.suffix_tokens);
+                turns.push(ConversationTurnReport {
+                    turn_index: t + 1,
+                    history_turns: t * 2,
+                    prefix_tokens: report.prefix_tokens,
+                    suffix_tokens,
+                    state_bytes: report.state_bytes,
+                    setup_prefill_ms: report.setup_prefill_ms,
+                    runs: report.runs,
+                });
+            }
+            Ok(ConversationPrefixCacheReport { model_name, turns })
+        })
+        .await
+        .context("local assistant conversation prefix-cache replay join")?
     }
 
     fn new_context<'model>(
@@ -1408,32 +1526,13 @@ fn longest_marker_prefix_suffix(text: &str, marker: &str) -> Option<usize> {
     (1..=max).rev().find(|&len| text.ends_with(&marker[..len]))
 }
 
+/// Render the full reply prompt. Defined as the concatenation of the cache
+/// split (`prefix + suffix`) so the two can never diverge — the prefix/suffix
+/// split is the single source of truth for prompt layout.
 fn build_prompt(ctx: &AssistantContext, user_text: &str, model_name: &str) -> String {
-    if model_name.to_ascii_lowercase().contains("gemma") {
-        build_gemma_prompt(ctx, user_text)
-    } else {
-        build_chatml_prompt(ctx, user_text)
-    }
-}
-
-fn build_gemma_prompt(ctx: &AssistantContext, user_text: &str) -> String {
-    let mut s = String::new();
-    let system = ctx.system_prompt.trim();
-    let current_user = if system.is_empty() {
-        user_text.to_string()
-    } else {
-        format!("{system}\n\nUser request: {user_text}")
-    };
-    for turn in &ctx.history {
-        match turn.role {
-            ChatRole::User => push_gemma_turn(&mut s, "user", &turn.content),
-            ChatRole::Assistant => push_gemma_turn(&mut s, "model", &turn.content),
-            ChatRole::System => push_gemma_turn(&mut s, "user", &turn.content),
-            ChatRole::Tool => {}
-        }
-    }
-    push_gemma_turn(&mut s, "user", &current_user);
-    s.push_str("<start_of_turn>model\n");
+    let (prefix, suffix) = build_prompt_split(ctx, user_text, model_name);
+    let mut s = prefix;
+    s.push_str(&suffix);
     s
 }
 
@@ -1448,12 +1547,72 @@ fn push_gemma_turn(buf: &mut String, role: &str, content: &str) {
     buf.push_str("<end_of_turn>\n");
 }
 
-fn build_chatml_prompt(ctx: &AssistantContext, user_text: &str) -> String {
-    let mut s = String::new();
+/// Split the reply prompt into a stable prefix and a per-turn suffix for the
+/// Task 8 prefix cache. The stable prefix is everything up to (but not
+/// including) the variable user text; the suffix carries the user text plus the
+/// closing template. By construction `format!("{prefix}{suffix}")` reproduces
+/// [`build_prompt`] for the same inputs (asserted in tests), and the runtime
+/// cache path re-checks that equality before trusting the split.
+fn build_prompt_split(
+    ctx: &AssistantContext,
+    user_text: &str,
+    model_name: &str,
+) -> (String, String) {
+    if model_name.to_ascii_lowercase().contains("gemma") {
+        build_gemma_prompt_split(ctx, user_text)
+    } else {
+        build_chatml_prompt_split(ctx, user_text)
+    }
+}
+
+fn build_gemma_prompt_split(ctx: &AssistantContext, user_text: &str) -> (String, String) {
+    // Gemma has no dedicated system role, so the system prompt is prepended to
+    // the FIRST user turn (Gemma's trained convention). This keeps the rendered
+    // prompt strictly append-only: the leading tokens — system, then each
+    // completed turn — never change as the conversation grows, so a boot-built
+    // system checkpoint and a per-conversation checkpoint both stay valid as
+    // token-prefixes turn after turn. Anything volatile (the current user text)
+    // lives only in the trailing suffix.
+    let system = ctx.system_prompt.trim();
+    let mut prefix = String::new();
+    let mut system_emitted = false;
+
+    for turn in &ctx.history {
+        match turn.role {
+            ChatRole::User | ChatRole::System => {
+                let content = turn.content.trim();
+                if content.is_empty() {
+                    continue;
+                }
+                if !system_emitted && !system.is_empty() {
+                    push_gemma_turn(&mut prefix, "user", &format!("{system}\n\n{content}"));
+                    system_emitted = true;
+                } else {
+                    push_gemma_turn(&mut prefix, "user", content);
+                }
+            }
+            ChatRole::Assistant => push_gemma_turn(&mut prefix, "model", &turn.content),
+            ChatRole::Tool => {}
+        }
+    }
+
+    prefix.push_str("<start_of_turn>user\n");
+    if !system_emitted && !system.is_empty() {
+        // No prior user turn carried the system prompt, so it leads the current
+        // turn. It stays in the (cacheable) prefix; only the user text varies.
+        prefix.push_str(system);
+        prefix.push_str("\n\n");
+    }
+    let suffix = format!("{}<end_of_turn>\n<start_of_turn>model\n", user_text.trim());
+    (prefix, suffix)
+}
+
+fn build_chatml_prompt_split(ctx: &AssistantContext, user_text: &str) -> (String, String) {
+    let mut prefix = String::new();
     if !ctx.system_prompt.trim().is_empty() {
-        s.push_str("<|im_start|>system\n");
-        s.push_str(ctx.system_prompt.trim());
-        s.push_str("<|im_end|>\n");
+        prefix.push_str("<|im_start|>system\n");
+        prefix.push_str(ctx.system_prompt.trim());
+        prefix.push_str("<|im_end|>\n");
     }
     for turn in &ctx.history {
         let role = match turn.role {
@@ -1465,16 +1624,15 @@ fn build_chatml_prompt(ctx: &AssistantContext, user_text: &str) -> String {
         if turn.content.trim().is_empty() {
             continue;
         }
-        s.push_str("<|im_start|>");
-        s.push_str(role);
-        s.push('\n');
-        s.push_str(turn.content.trim());
-        s.push_str("<|im_end|>\n");
+        prefix.push_str("<|im_start|>");
+        prefix.push_str(role);
+        prefix.push('\n');
+        prefix.push_str(turn.content.trim());
+        prefix.push_str("<|im_end|>\n");
     }
-    s.push_str("<|im_start|>user\n");
-    s.push_str(user_text.trim());
-    s.push_str("<|im_end|>\n<|im_start|>assistant\n");
-    s
+    prefix.push_str("<|im_start|>user\n");
+    let suffix = format!("{}<|im_end|>\n<|im_start|>assistant\n", user_text.trim());
+    (prefix, suffix)
 }
 
 #[async_trait]
@@ -1486,6 +1644,7 @@ impl Assistant for LlamaLocalAssistant {
     ) -> Result<BoxStream<'static, Result<TokenDelta>>> {
         let model_name = self.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
         let prompt = build_prompt(ctx, user_text, model_name);
+        let (cache_prefix, cache_suffix) = build_prompt_split(ctx, user_text, model_name);
         current_instant(
             "llm.prompt_built",
             "assistant.llm",
@@ -1509,14 +1668,20 @@ impl Assistant for LlamaLocalAssistant {
             let mut deltas_emitted = 0_u32;
             let result = (|| -> Result<String> {
                 me.ensure_loaded()?;
-                me.run_inference(&prompt, |delta| {
-                    let delta = delta.trim_start_matches('\u{feff}').to_string();
-                    if delta.is_empty() {
-                        return Ok(true);
-                    }
-                    deltas_emitted = deltas_emitted.saturating_add(1);
-                    Ok(tx.blocking_send(Ok(TokenDelta::text(delta))).is_ok())
-                })
+                me.run_inference_with_prefix_cache(
+                    &prompt,
+                    &cache_prefix,
+                    &cache_suffix,
+                    PromptStateCacheLayer::F8ChatPrefix,
+                    |delta| {
+                        let delta = delta.trim_start_matches('\u{feff}').to_string();
+                        if delta.is_empty() {
+                            return Ok(true);
+                        }
+                        deltas_emitted = deltas_emitted.saturating_add(1);
+                        Ok(tx.blocking_send(Ok(TokenDelta::text(delta))).is_ok())
+                    },
+                )
             })();
             let elapsed_ms = started.elapsed().as_millis() as u64;
             match result {
@@ -1648,6 +1813,7 @@ fn env_bool(value: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::ChatTurn;
 
     #[test]
     fn gemma_prompt_uses_gemma_turn_markers() {
@@ -1666,6 +1832,180 @@ mod tests {
         let p = build_prompt(&ctx, "hello", "qwen3.5-0.8b");
         assert!(p.contains("<|im_start|>system\nBe concise.<|im_end|>"));
         assert!(p.ends_with("<|im_start|>assistant\n"));
+    }
+
+    fn turn(role: ChatRole, content: &str) -> ChatTurn {
+        ChatTurn {
+            role,
+            content: content.to_string(),
+            at: Instant::now(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn prompt_split_reproduces_full_prompt() {
+        let cases = [
+            ("gemma-4-e2b-it-Q4_K_M", "Be concise.", " spaced user text "),
+            ("gemma-4-e2b-it-Q4_K_M", "", "no system here"),
+            ("qwen3.5-0.8b", "Be concise.", " hello world "),
+            ("qwen3.5-0.8b", "", "no system chatml"),
+        ];
+        for (model, system, user) in cases {
+            let ctx = AssistantContext {
+                system_prompt: system.into(),
+                history: vec![
+                    turn(ChatRole::User, "first question"),
+                    turn(ChatRole::Assistant, "first answer"),
+                ],
+                ..AssistantContext::default()
+            };
+            let full = build_prompt(&ctx, user, model);
+            let (prefix, suffix) = build_prompt_split(&ctx, user, model);
+            assert_eq!(
+                format!("{prefix}{suffix}"),
+                full,
+                "split must reproduce the full prompt for model={model:?} system={system:?}"
+            );
+            assert!(!prefix.is_empty(), "prefix should be non-empty for {model:?}");
+            assert!(!suffix.is_empty(), "suffix should be non-empty for {model:?}");
+        }
+    }
+
+    #[test]
+    fn gemma_split_keeps_system_in_prefix() {
+        let ctx = AssistantContext {
+            system_prompt: "You are a helpful assistant.".into(),
+            ..AssistantContext::default()
+        };
+        let (prefix, suffix) = build_prompt_split(&ctx, "what time is it", "gemma-4-e2b-it");
+        // System leads the prompt and stays entirely in the cacheable prefix;
+        // only the variable user text lands in the suffix.
+        assert!(prefix.starts_with("<start_of_turn>user\nYou are a helpful assistant.\n\n"));
+        assert!(prefix.ends_with("\n\n"));
+        assert!(!suffix.contains("You are a helpful assistant."));
+        assert_eq!(suffix, "what time is it<end_of_turn>\n<start_of_turn>model\n");
+    }
+
+    #[test]
+    fn gemma_system_leads_prompt_regardless_of_history() {
+        // The whole cache scheme rests on the system prompt being a *leading*
+        // token prefix. If a refactor ever pushes it back into the per-turn
+        // tail (the old, un-cacheable layout), this fails loudly.
+        let boot = "<start_of_turn>user\nYou are Fono.\n\n";
+        let no_history = AssistantContext {
+            system_prompt: "You are Fono.".into(),
+            ..AssistantContext::default()
+        };
+        let with_history = AssistantContext {
+            system_prompt: "You are Fono.".into(),
+            history: vec![
+                turn(ChatRole::User, "turn one"),
+                turn(ChatRole::Assistant, "reply one"),
+                turn(ChatRole::User, "turn two"),
+                turn(ChatRole::Assistant, "reply two"),
+            ],
+            ..AssistantContext::default()
+        };
+        for ctx in [&no_history, &with_history] {
+            let full = build_prompt(ctx, "current question", "gemma-4-e2b-it");
+            assert!(
+                full.starts_with(boot),
+                "boot system prefix must lead every gemma prompt; got: {}",
+                &full[..boot.len().min(full.len())]
+            );
+        }
+        // The system prompt must appear exactly once even with history.
+        let full = build_prompt(&with_history, "current question", "gemma-4-e2b-it");
+        assert_eq!(full.matches("You are Fono.").count(), 1);
+    }
+
+    #[test]
+    fn gemma_conversation_is_append_only() {
+        // Append-only invariant: each turn's full prompt must be an exact string
+        // prefix of the next turn's prompt. The only thing the model appends
+        // between turns is its own reply plus the next turn's framing — nothing
+        // earlier is ever rewritten. This is the property that makes the KV
+        // prefix cache reusable across a multi-turn Gemma conversation; if it
+        // breaks, the cache silently degrades to full prefills every turn.
+        let model = "gemma-4-e2b-it";
+        let system = "You are Fono, a terse assistant.";
+        let exchanges = [
+            ("turn the lights on", "Done."),
+            ("now dim them to fifty percent", "Dimmed to 50%."),
+            ("what's the time", "It is 4pm."),
+        ];
+
+        let mut history: Vec<ChatTurn> = Vec::new();
+        let mut prev_prompt: Option<String> = None;
+        for (user, assistant) in exchanges {
+            let ctx = AssistantContext {
+                system_prompt: system.into(),
+                history: history.clone(),
+                ..AssistantContext::default()
+            };
+            let prompt = build_prompt(&ctx, user, model);
+            if let Some(prev) = &prev_prompt {
+                assert!(
+                    prompt.starts_with(prev),
+                    "turn prompt must extend the previous turn's prompt verbatim.\nprev:\n{prev}\nnext:\n{prompt}"
+                );
+            }
+            // Advance the rolling history exactly as the daemon would.
+            history.push(turn(ChatRole::User, user));
+            history.push(turn(ChatRole::Assistant, assistant));
+            prev_prompt = Some(prompt);
+        }
+    }
+
+    #[test]
+    fn chatml_conversation_is_append_only() {
+        let model = "qwen3.5-0.8b";
+        let system = "You are Fono.";
+        let exchanges = [("first", "one"), ("second", "two"), ("third", "three")];
+        let mut history: Vec<ChatTurn> = Vec::new();
+        let mut prev_prompt: Option<String> = None;
+        for (user, assistant) in exchanges {
+            let ctx = AssistantContext {
+                system_prompt: system.into(),
+                history: history.clone(),
+                ..AssistantContext::default()
+            };
+            let prompt = build_prompt(&ctx, user, model);
+            if let Some(prev) = &prev_prompt {
+                assert!(prompt.starts_with(prev), "chatml prompt must be append-only");
+            }
+            history.push(turn(ChatRole::User, user));
+            history.push(turn(ChatRole::Assistant, assistant));
+            prev_prompt = Some(prompt);
+        }
+    }
+
+    #[test]
+    fn gemma_history_render_is_stable_across_turns() {
+        // A turn that has scrolled into history must render byte-for-byte the
+        // same as it did when it was the current turn (modulo the appended
+        // model reply). This is what guarantees the cached KV for turn N is a
+        // valid prefix for turn N+1.
+        let model = "gemma-4-e2b-it";
+        let system = "You are Fono.";
+
+        // Turn 1: empty history, "hello" is the current user text.
+        let ctx1 = AssistantContext { system_prompt: system.into(), ..AssistantContext::default() };
+        let prompt1 = build_prompt(&ctx1, "hello", model);
+
+        // Turn 2: "hello"/"hi" now in history.
+        let ctx2 = AssistantContext {
+            system_prompt: system.into(),
+            history: vec![turn(ChatRole::User, "hello"), turn(ChatRole::Assistant, "hi")],
+            ..AssistantContext::default()
+        };
+        let prompt2 = build_prompt(&ctx2, "again", model);
+
+        // Everything prompt1 emitted up to the model-open tag is reproduced
+        // verbatim at the head of prompt2.
+        assert!(prompt2.starts_with(&prompt1), "history render drifted between turns");
     }
 
     #[test]
