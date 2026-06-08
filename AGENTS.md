@@ -73,8 +73,11 @@ Target users: Linux desktop (i3 / sway / KDE / GNOME, X11 and Wayland), Windows,
   on line 1.
 - Do **NOT** add dependencies without updating `deny.toml` and verifying the licenses
   are compatible with GPL-3.0.
-- Do **NOT** add Llama-family or Gemma models as defaults — their licenses are not
-  OSI-approved. Opt-in only. (See `docs/decisions/0004-default-models.md`.)
+- Do **NOT** add Llama-family or non-OSI/custom-license Gemma models as defaults.
+  Gemma models may be defaults only when the specific artifact and its upstream base
+  model are published under an OSI-approved, GPL-3.0-compatible license such as
+  Apache-2.0, with no extra use restrictions. Other Llama/Gemma variants remain
+  opt-in only. (See `docs/decisions/0004-default-models.md`.)
 - Do **NOT** run `git push` unless the user explicitly says to push. Commit and report
   what is staged; wait for the push instruction.
 - Batch related doc/plan changes into a **single commit**. Do not make multiple

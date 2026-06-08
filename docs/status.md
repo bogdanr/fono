@@ -1,5 +1,90 @@
 # Fono — Project Status
-Last updated: 2026-06-03
+Last updated: 2026-06-07
+
+## 2026-06-07 — Runtime prompt-state cache: initial benchmark slice
+
+Started `plans/2026-06-07-2026-06-07-runtime-prompt-state-cache-v1.md`.
+This slice added the embedded local-assistant prompt-state cache foundation and a
+real-world-shaped benchmark for a cached stable prefix with changing suffixes.
+
+What landed:
+
+- Embedded cache layer types for F7 system, F8 system, assistant tools,
+  active-window context, benchmark prefixes, and exact prompts.
+- Strict cache keys derived from cache layer, model/runtime identity, prompt
+  SHA-256, token SHA-256, and token count.
+- A bounded in-memory LRU prompt-state cache for the embedded `llama.cpp` backend
+  with an initial 8-entry / 256 MiB budget.
+- `fono-bench assistant-prefix-cache`, which prefills one stable prefix once,
+  saves the llama.cpp state, restores it for multiple changing suffixes, and
+  compares cached vs uncached latency/output.
+
+Benchmark run:
+
+| Metric | Result |
+|---|---:|
+| Artifact | `/tmp/fono-runtime-prompt-cache/prefix-cache-controlled-release.json` |
+| Prefix size | 783 chars / 181 tokens |
+| State size | 3,340,938 bytes |
+| One-time prefix prefill | 1,836 ms |
+| Median restore | 9 ms |
+| Median suffix prefill | 147 ms |
+| Median cached TTFB | 227 ms |
+| Median cached latency | 485 ms |
+| Median uncached latency | 2,989 ms |
+| Exact output matches | 6 / 9 |
+
+Verification run:
+
+| Step | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo check -p fono-bench --features llama-local` | clean |
+| `cargo clippy -p fono-assistant --features llama-local --all-targets -- -D warnings` | clean |
+| `cargo clippy -p fono-bench --features llama-local --all-targets --no-deps -- -D warnings` | clean |
+
+Next steps: wire low-priority startup warming for stable F7/F8/tool checkpoints,
+add hotkey/window-context restore/extension policy, then add STT-contention,
+tool-count, and window-context scaling benchmarks before enabling any production
+default policy.
+
+## 2026-06-07 — Local assistant runtime parity: exact prompt replay
+
+Resumed and completed `plans/2026-06-07-local-assistant-runtime-parity-v1.md`.
+The benchmark harness can now compare byte-for-byte captured F8 assistant
+prompts across Fono's embedded `llama.cpp` assistant runtime and local
+OpenAI-compatible server runtimes.
+
+What landed:
+
+- `fono-bench extract-trace-prompt` reads a Chrome Trace / Perfetto JSON file,
+  extracts the first event with `args.prompt`, and writes that prompt to a file
+  or stdout while reporting prompt length and SHA-256.
+- `fono-bench assistant-replay` accepts either a prompt file or trace file,
+  records prompt source/length/SHA-256, and emits an
+  `assistant-replay-report-v1` JSON report.
+- Embedded replay uses the local assistant raw-prompt streaming helper, preserving
+  TTFB and delta-count measurements for the in-process `llama.cpp` path.
+- HTTP replay sends the raw prompt as a single user message to an
+  OpenAI-compatible chat-completions endpoint with streaming enabled, then
+  records total latency, time to first token, delta count, output length, and
+  output text.
+- Clippy cleanup folded the assistant build/runtime metadata argument lists into
+  small option structs instead of suppressing `too_many_arguments`.
+
+Verification run:
+
+| Step | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo check -p fono-bench --features llama-local` | clean |
+| `cargo test -p fono-bench --features llama-local --lib --bins --tests` | green |
+| `cargo clippy -p fono-bench --features llama-local --all-targets --no-deps -- -D warnings` | clean |
+| `cargo clippy -p fono-assistant --features llama-local --all-targets -- -D warnings` | clean |
+
+The next runtime-parity step is to run paired embedded/server replays against the
+same extracted prompt and compare TTFB, total latency, delta count, output, and
+server-side prompt/eval stats where available.
 
 ## 2026-06-03 — Phase 4.1: Kokoro local English TTS (engine + router split)
 

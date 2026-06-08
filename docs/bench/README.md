@@ -93,6 +93,22 @@ Inspect the diff carefully. Verdict changes mean **either** a real
 quality regression in the harness or a fixture / threshold tweak
 landing in the same PR. Both deserve a callout in the PR description.
 
+### Local assistant tool-use benchmarks
+
+`fono-bench assistant-tool-use` measures whether assistant models can safely map
+voice requests to a simulated Home Assistant light-control tool. The benchmark is
+for model selection only: it uses a fake inventory and fake tool results, never a
+real Home Assistant endpoint.
+
+Local models are highly sensitive to prompt size. Large OpenAI-style tool schemas
+and long inventories can dominate prompt-evaluation time, making tool use appear
+10–20× slower than short factual answers even when reasoning is disabled. Keep
+local tool schemas short, constrain the tool surface to allow-listed actions, and
+record first-turn tool-selection latency separately from post-tool confirmation
+latency.
+
+---
+
 ### Flapping fixtures
 
 If a per-PR run of `tiny.en` produces a verdict that differs from the
