@@ -15,7 +15,9 @@ pub const APP_NAME: &str = "fono";
 /// without needing `XDG_STATE_HOME` overrides.
 pub const SYSTEM_IPC_SOCKET: &str = "/var/lib/fono/fono.sock";
 
-/// Canonical log file. Single-user-box assumption (see `log_file()`).
+/// Canonical log file. Owned by the installing (target) user, mode
+/// 0600 (see `log_file()`); other users' fono processes fall back to
+/// `/dev/null`.
 pub const LOG_FILE: &str = "/var/log/fono.log";
 
 /// Resolved absolute paths for every file Fono touches.
@@ -126,9 +128,11 @@ impl Paths {
         }
     }
 
-    /// Single shared log file. Single-user-box assumption: one
-    /// canonical path, world-writable so any fono process (XDG
-    /// autostart, manual `fono`, `sudo fono`) can append to it.
+    /// Single canonical log file. `fono install` creates it owned by
+    /// the target user with mode 0600 — it can carry focused-window
+    /// classes/titles, so it must not be readable (or poisonable) by
+    /// other local users. Processes that cannot write it append to
+    /// `/dev/null` instead.
     #[must_use]
     pub fn log_file(&self) -> PathBuf {
         PathBuf::from(LOG_FILE)

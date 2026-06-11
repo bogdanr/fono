@@ -59,12 +59,20 @@ pub struct HistoryDb {
 
 impl HistoryDb {
     /// Open (or create) the DB at `path` and apply migrations.
+    ///
+    /// On Unix the database file (and any pre-existing WAL/SHM sidecars)
+    /// is clamped to owner-only `0600`: it holds every transcription the
+    /// user has ever dictated, so it must never be readable by other
+    /// local users. SQLite derives sidecar permissions from the main DB
+    /// file, so tightening the main file before WAL mode engages covers
+    /// freshly-created sidecars too.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .map_err(|source| crate::error::Error::Io { path: dir.to_path_buf(), source })?;
         }
         let conn = Connection::open(path)?;
+        restrict_to_owner(path);
         let db = Self { conn };
         db.migrate()?;
         Ok(db)
@@ -264,6 +272,31 @@ pub fn redact(text: &str) -> String {
     SECRET_RE.replace_all(text, "[REDACTED]").into_owned()
 }
 
+/// Best-effort clamp of the history DB (and any WAL/SHM sidecars left by
+/// an earlier run) to owner-only permissions. Failure is non-fatal — a
+/// read-only FS or exotic mount must not break history — but the common
+/// case (default 0644 from the process umask) is tightened to 0600.
+fn restrict_to_owner(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::Permissions::from_mode(0o600);
+        let _ = std::fs::set_permissions(path, mode.clone());
+        for suffix in ["-wal", "-shm"] {
+            let mut os = path.as_os_str().to_owned();
+            os.push(suffix);
+            let sidecar = std::path::PathBuf::from(os);
+            if sidecar.exists() {
+                let _ = std::fs::set_permissions(&sidecar, mode.clone());
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +321,20 @@ mod tests {
         let rec = &db.recent(1).unwrap()[0];
         assert!(rec.raw.contains("[REDACTED]"));
         assert!(!rec.raw.contains("sk-abcdefghijklmnopqrstuv"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_clamps_db_file_to_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.sqlite");
+        // Pre-create world-readable (simulates a DB from before the clamp).
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _db = HistoryDb::open(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "history db must be owner-only, got {mode:o}");
     }
 
     #[test]

@@ -24,6 +24,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Privacy hardening on shared machines.** The transcription history
+  database (`history.sqlite`) is now clamped to owner-only permissions
+  (0600) every time it is opened — it holds everything you have ever
+  dictated and was previously created with the default umask (typically
+  world-readable). And `/var/log/fono.log` is no longer created
+  world-writable (0666): `fono install` now creates it owned by the
+  installing user with mode 0600, so other local users can neither read
+  usage details (focused-window classes/titles) nor poison/truncate the
+  log. Fono processes run by other users fall back to `/dev/null` for
+  logging, as before.
+- Local LLM cleanup (`[polish].backend = "local"`) now runs the **embedded**
+  `llama-cpp-2` engine on a local GGUF, as intended — it no longer silently
+  routes any Gemma-named model to an Ollama HTTP server. The old behaviour
+  meant the default local setup (model `gemma-4-e2b`) POSTed to
+  `http://localhost:11434`, 404'd on a model Ollama didn't have, and fell back
+  to injecting the raw transcript with no notification — so cleanup appeared to
+  do nothing. The factory's `is_gemma_model` special-case has been removed; a
+  missing local GGUF now fails loudly with a one-shot notification pointing at
+  `fono models install <model>`, and the setup wizard's "local polish" choice
+  no longer writes a stale Ollama `[polish.cloud]` block. An Ollama /
+  OpenAI-compatible server is reachable only via the explicit
+  `backend = "ollama"` config. As a consequence of routing polish through the
+  embedded engine, both the cleanup and voice-assistant paths now share a
+  single process-wide `LlamaBackend` (in `fono-core`); previously each crate
+  initialised llama.cpp independently, and once polish also went embedded the
+  second initialiser panicked — surfacing as `llama-local mutex poisoned` on
+  whichever path ran second (typically the assistant stream after a dictation
+  turn).
 - Local TTS now speaks each reply in the matching voice. Previously a bilingual
   user heard every reply in their primary language's voice — a Romanian reply
   read aloud by the English voice (wrong phonemes, wrong accent). The local

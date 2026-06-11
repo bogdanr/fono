@@ -819,9 +819,9 @@ fn run_install_desktop() -> Result<()> {
     // Completions
     write_completions(BIN_PATH);
 
-    // Pre-create the shared log file 0666 so any fono process (XDG
-    // autostart, manual `fono`, `sudo fono`) can append. Single-user
-    // box; failure is non-fatal.
+    // Pre-create the log file owned by the target user, mode 0600, so
+    // their daemon (XDG autostart, manual `fono`) can append while other
+    // local users can neither read nor write it. Failure is non-fatal.
     if let Err(e) = ensure_log_file() {
         tracing::warn!("could not pre-create {}: {e}", fono_core::paths::LOG_FILE);
     }
@@ -989,12 +989,26 @@ fn resolve_target_user() -> Option<String> {
     None
 }
 
-/// Create `/var/log/fono.log` 0666 so any user can append to it.
+/// Create `/var/log/fono.log` owned by the target user, mode 0600.
+///
+/// The daemon runs as the (sudo-invoking) target user, so the file is
+/// chowned to `$SUDO_UID:$SUDO_GID` when present and kept root-owned
+/// otherwise. Owner-only mode replaces the old world-writable 0666:
+/// the log can carry focused-window classes/titles and other usage
+/// detail, so other local users must not be able to read it — and a
+/// world-writable file in /var/log invites poisoning/truncation. Any
+/// other user's fono process simply falls back to `/dev/null` via the
+/// `[ -w "$LOG" ]` guard in the autostart shell command.
 fn ensure_log_file() -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let path = fono_core::paths::LOG_FILE;
     let _ = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))
+    let uid = std::env::var("SUDO_UID").ok().and_then(|v| v.parse::<u32>().ok());
+    let gid = std::env::var("SUDO_GID").ok().and_then(|v| v.parse::<u32>().ok());
+    if uid.is_some() || gid.is_some() {
+        std::os::unix::fs::chown(path, uid, gid)?;
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
 /// Ask any already-running fono daemon to exit, so the autostart that
