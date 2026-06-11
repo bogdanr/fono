@@ -13,6 +13,7 @@ pub mod locale;
 pub mod notify;
 pub mod openrouter_attribution;
 pub mod paths;
+pub mod prompt_cache;
 pub mod provider_catalog;
 pub mod providers;
 pub mod screen_capture;
@@ -21,6 +22,9 @@ pub mod turn_trace;
 
 #[cfg(feature = "budget")]
 pub mod budget;
+
+#[cfg(feature = "llama-local")]
+pub mod llama_backend;
 
 #[cfg(feature = "vulkan-probe")]
 pub mod vulkan_probe;

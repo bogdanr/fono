@@ -21,7 +21,7 @@ default = ["openai-compat", "anthropic"]
 # OpenRouter, Ollama. SSE streaming via reqwest's `stream` feature.
 openai-compat = ["dep:reqwest", "dep:fono-http"]
 # Embedded llama.cpp local assistant for GGUF chat models.
-llama-local = ["dep:llama-cpp-2", "dep:encoding_rs"]
+llama-local = ["dep:llama-cpp-2", "dep:encoding_rs", "fono-core/llama-local"]
 # Hardware acceleration features — forward to llama-cpp-2 / its sys
 # crate. Off by default; mirrors `fono-polish`'s local LLM acceleration story.
 accel-cuda = ["llama-local", "llama-cpp-2/cuda"]

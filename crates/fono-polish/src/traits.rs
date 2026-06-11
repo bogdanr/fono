@@ -31,6 +31,34 @@ impl FormatContext {
     /// Build the system prompt to send to the LLM.
     #[must_use]
     pub fn system_prompt(&self) -> String {
+        let mut s = self.base_system_prompt_unterminated();
+        if let Some(sfx) = &self.rule_suffix {
+            s.push_str(sfx);
+            s.push_str("\n\n");
+        }
+        if let Some(directive) = self.language_directive() {
+            s.push_str(&directive);
+            s.push_str("\n\n");
+        }
+        s.trim_end().to_string()
+    }
+
+    /// The context-independent base of the system prompt: the configured main +
+    /// advanced + dictionary instructions, with no per-app `rule_suffix` and no
+    /// per-utterance language directive. This is identical regardless of which
+    /// app the user is dictating into, so it is the natural *pinnable* prefix
+    /// for the F7 prompt-state cache: built once, reused for every dictation,
+    /// and a token-prefix of the full `system_prompt()` for any context.
+    #[must_use]
+    pub fn base_system_prompt(&self) -> String {
+        self.base_system_prompt_unterminated().trim_end().to_string()
+    }
+
+    /// The base sections each terminated with `\n\n` (not trimmed), so that
+    /// appending the rule suffix / language directive reproduces the exact
+    /// layout `system_prompt()` emits — and so `base_system_prompt()` (trimmed)
+    /// is a genuine textual prefix of the full system prompt.
+    fn base_system_prompt_unterminated(&self) -> String {
         let mut s = String::new();
         if !self.main_prompt.is_empty() {
             s.push_str(&self.main_prompt);
@@ -45,15 +73,7 @@ impl FormatContext {
             s.push_str(&self.dictionary.join(", "));
             s.push_str("\n\n");
         }
-        if let Some(sfx) = &self.rule_suffix {
-            s.push_str(sfx);
-            s.push_str("\n\n");
-        }
-        if let Some(directive) = self.language_directive() {
-            s.push_str(&directive);
-            s.push_str("\n\n");
-        }
-        s.trim_end().to_string()
+        s
     }
 
     /// Build the language directive appended to the system prompt.
@@ -172,6 +192,31 @@ pub fn looks_like_clarification(out: &str) -> bool {
         return false;
     }
     TELLS.iter().any(|t| lower.contains(t))
+}
+
+/// Heuristic: did the cleanup degenerate into a bare chat-template role token
+/// instead of cleaned text?
+///
+/// Small local cleanup models — notably the gemma cleanup GGUF — occasionally
+/// emit just `model` (the role tag that opens the assistant turn) as their
+/// **entire** output. Observed specifically on the warm prompt-state-cache
+/// restore path, where llama.cpp's KV-state save/restore is not bit-exact and
+/// greedy decoding amplifies the drift into the single most-likely template
+/// token. Injecting that would replace the user's dictation with the literal
+/// word "model", so callers treat a hit as a failure and fall back to the raw
+/// transcript (and/or retry with a cold full prefill).
+///
+/// Precise by construction: fires only when the whole trimmed output is
+/// exactly one of the chat-template role words AND the input was not that word
+/// (so legitimately dictating "model" still round-trips).
+#[must_use]
+pub fn looks_like_degenerate_cleanup(raw: &str, out: &str) -> bool {
+    const ROLE_TOKENS: &[&str] = &["model", "assistant", "user", "system"];
+    let out_norm = out.trim().to_ascii_lowercase();
+    if out_norm.is_empty() {
+        return false;
+    }
+    ROLE_TOKENS.contains(&out_norm.as_str()) && raw.trim().to_ascii_lowercase() != out_norm
 }
 
 /// Heuristic: did a cleanup model change the transcript's language instead of
@@ -346,6 +391,32 @@ pub trait TextFormatter: Send + Sync {
         Ok(())
     }
 
+    /// Optional startup prompt-state cache warmup. Embedded local backends
+    /// build (and pin) the context-independent base prefix checkpoint so the
+    /// first cleanup after launch doesn't pay the multi-second base prefill on
+    /// the hotkey path. `base_system` is the context-independent system prompt
+    /// (`FormatContext::base_system_prompt()` — main + advanced + dictionary,
+    /// no per-app rule suffix or per-utterance language directive), so the
+    /// prewarmed key matches the base the live `format()` path restores. Cloud
+    /// backends ignore it.
+    async fn prewarm_prompt_cache(&self, _base_system: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Optional speculative per-app context-cache warmup, fired at record-start
+    /// (concurrent with capture + STT). `full_system` is the complete system
+    /// prompt for the focused app and one candidate language — i.e. exactly what
+    /// [`FormatContext::system_prompt`] yields at turn time. Embedded local
+    /// backends build (and cache) the F7Context prefix checkpoint for it so the
+    /// *first* dictation into a freshly-focused window restores the whole prefix
+    /// instead of decoding the per-app + language directive tokens on the hotkey
+    /// path. Idempotent and best-effort; cloud backends ignore it. The caller
+    /// fans this out across the candidate languages so whichever one STT detects
+    /// lands on a warm checkpoint.
+    async fn prewarm_context_cache(&self, _full_system: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// True for backends that run entirely on the local machine
     /// (llama.cpp, future Ollama). Cloud backends (OpenAI-compat,
     /// Anthropic, Groq, Cerebras, OpenRouter) leave this at the
@@ -423,6 +494,27 @@ mod tests {
     fn detector_ignores_leading_whitespace_and_punctuation() {
         let s = "\n  \"It seems like you're missing context. Could you provide more details?\"";
         assert!(looks_like_clarification(s));
+    }
+
+    #[test]
+    fn flags_bare_role_token_output() {
+        // The observed gemma degeneration: the whole output is the role tag.
+        for out in ["model", "MODEL", " model ", "\nmodel\n", "assistant", "user", "system"] {
+            assert!(
+                looks_like_degenerate_cleanup("ținem minte că cifra secretul este trei", out),
+                "should flag bare role token: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_flag_legitimate_role_word_dictation() {
+        // Dictating the word itself must round-trip — no false positive.
+        assert!(!looks_like_degenerate_cleanup("model", "model"));
+        assert!(!looks_like_degenerate_cleanup("Model", "model"));
+        assert!(!looks_like_degenerate_cleanup("the model is fast", "The model is fast."));
+        assert!(!looks_like_degenerate_cleanup("anything", ""));
+        assert!(!looks_like_degenerate_cleanup("anything", "the secret number is three"));
     }
 
     #[test]
@@ -600,5 +692,36 @@ mod tests {
         );
         assert!(!sp.contains("SOURCE_LANGUAGE:"), "no source contract without STT language: {sp}");
         assert!(!sp.contains("It is most likely"), "no soft hint when language is None: {sp}");
+    }
+
+    #[test]
+    fn base_system_prompt_is_a_prefix_of_full_system_prompt() {
+        let ctx = FormatContext {
+            main_prompt: "Clean up the transcript.".into(),
+            advanced_prompt: "Keep it terse.".into(),
+            dictionary: vec!["Fono".into(), "llama.cpp".into()],
+            rule_suffix: Some("You are dictating into a terminal.".into()),
+            language: Some("ro".into()),
+            ..Default::default()
+        };
+        let base = ctx.base_system_prompt();
+        let full = ctx.system_prompt();
+        assert!(!base.is_empty());
+        assert!(
+            full.starts_with(&base),
+            "base must be a textual prefix of the full system prompt so the cached \
+             base checkpoint is reusable\n base: {base:?}\n full: {full:?}"
+        );
+        // The per-context and per-utterance parts live only in the full prompt.
+        assert!(base != full);
+        assert!(full.contains("terminal"));
+        assert!(!base.contains("terminal"));
+    }
+
+    #[test]
+    fn base_system_prompt_equals_full_when_no_context_or_language() {
+        let ctx =
+            FormatContext { main_prompt: "Clean up the transcript.".into(), ..Default::default() };
+        assert_eq!(ctx.base_system_prompt(), ctx.system_prompt());
     }
 }

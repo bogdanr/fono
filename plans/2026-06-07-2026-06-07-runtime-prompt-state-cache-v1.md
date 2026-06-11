@@ -341,3 +341,106 @@ is therefore evidence-backed on two of three axes; Task 13 closes the third.
 - [x] When active-window context is available, build a dynamic window checkpoint only if doing so will not harm STT.
 - [x] When transcript is ready, use the best checkpoint available and process the remaining user-text suffix.
 - [x] Keep all prompt-state caches in memory for the first production implementation.
+
+## Design Revision v2 — Simplified Layered Cache (2026-06-08, LOCKED)
+
+This revision supersedes the window-context portions of the original plan after a
+design review with the maintainer. Two scope decisions drive it:
+
+1. **The assistant (F8) will NOT use active-window context in its prompt.** The
+   `active_window_context` capture in `crates/fono/src/session.rs:223` and the
+   `WindowContext` cache layer are therefore vestigial for the reply path. (The
+   string is still captured and may feed other features, but it does not enter
+   the assistant prompt and is not a cache layer we build/restore for F8.) This
+   removes the "Option A vs B" placement question entirely — there is nothing
+   volatile to place between system+tools and history.
+2. **Transcription (F7) will NOT use the per-utterance language directive in the
+   cached path.** Its suffix is just the transcript.
+
+### The unified model — both paths are the same shape
+
+| | F7 transcription (polish) | F8 assistant |
+|---|---|---|
+| **Pinned base** (context-independent, prewarmed, never evicted) | `main + advanced + dictionary` | `system + tools` |
+| **Recurring middle layer** | `rule_suffix` (app context: CLI / editor / browser / terminal-agent) | conversation history (grows within the 5-min session) |
+| **Volatile suffix** (decoded fresh each turn) | transcript | request |
+
+Both prompts are already (or will be) **append-only / prefix-ordered**: the
+stable base leads, the recurring layer is appended, the volatile suffix is last.
+F8's Gemma builder was already fixed to be system-first; F7's polish prompt is
+naturally ordered this way (`crates/fono-polish/src/traits.rs:33-57`).
+
+### Why this is correct for KV prefix caching
+
+Each checkpoint is an independent, fully-serialized copy of llama.cpp state
+(`copy_state_data` → `Vec<u8>`; restore via `set_state_data` into a fresh
+context). Entries do not reference each other, so eviction of one never
+corrupts another, and a miss is only a latency cost (rebuild via prefill), never
+a correctness risk — guarded by exact `prefix+suffix == prompt` string equality
+plus a token-level `starts_with` check.
+
+### New work items (v2)
+
+- [x] Task 17. **Pinning.** Protect the *currently active* F8 `system+tools`
+  base and F7 base (`main+advanced+dictionary`) checkpoints from LRU eviction,
+  keyed to the active prompt/runtime identity. When the prompt/model changes,
+  release the stale pin and pin the new base. Rationale: these are the smallest,
+  most-reused, prewarmed entries; evicting one drops the next use back to a cold
+  prefill (up to ~45 s for a large tool prompt). Pinning converts "usually warm
+  under LRU" into a hard guarantee at the cost of ≤2 bounded slots.
+  *Done: `PromptStateCache::insert_pinned` + `PromptStateCacheLayer::is_pinnable`
+  (F7System/F8System/AssistantTools); `evict_over_budget` skips pinned entries
+  and only the most-recent snapshot of a pinnable layer stays pinned (stale pin
+  released on prompt change). Wired into `build_prompt_prefix_cache`. Covered by
+  unit tests in `fono-core::prompt_cache`.*
+
+- [x] Task 18. **Shared cache machinery.** Lift `PromptStateCache` /
+  `PromptStateCacheKey` / `PromptStateCacheEntry` out of `fono-assistant` into a
+  location usable by both the assistant and the polish (F7) backend (e.g. a
+  shared module/crate), rather than duplicating. The polish backend
+  (`crates/fono-polish/src/llama_local.rs`) currently has NO prompt-state cache:
+  `format()` builds the full prompt fresh and runs cold every dictation.
+  *Done: extracted into `crates/fono-core/src/prompt_cache.rs` as a
+  llama-agnostic data structure (LRU + byte budget + pinning, opaque
+  `Vec<u8>` state blobs, no `llama-cpp-2` dependency). `fono-assistant` now
+  imports it and keeps only the llama.cpp glue (key fingerprint, build/restore).
+  7 unit tests in fono-core. The `F7Context` layer was added for Task 20.*
+
+- [x] Task 19. **F7 restore-and-suffix.** Ported the llama.cpp build/restore
+  glue into the polish backend (`crates/fono-polish/src/llama_local.rs`),
+  guarded by the same exact-string (`prefix+suffix == prompt`) + token-prefix
+  (`full_tokens.starts_with(prefix_tokens)`) checks as F8 so a miss is only
+  slower, never wrong. `format()` now splits the ChatML prompt
+  (`build_chatml_prompt_split_*`), and `run_inference_cached` restores the
+  deepest matching checkpoint and decodes only the transcript suffix; on any
+  incompatibility it falls back to a full prefill. The pinned base
+  (`<|im_start|>system\n{base_system}`) is built lazily on first use and
+  pinned, then reused for every dictation. Split-reproduction and
+  base-is-a-prefix regression tests added.*
+
+- [x] Task 20. **F7 per-context (app) layer.** The full system prefix
+  (`base + rule_suffix[context]`, plus any language directive present in the
+  rendered `system_prompt()`) is cached under the `F7Context` layer, keyed by
+  the prompt + token fingerprint — so each focused-app context gets its own
+  checkpoint, restored exactly on the next dictation into that app. Contexts
+  are few and recurring and each `rule_suffix` is small, so these checkpoints
+  are cheap and hit constantly. `FormatContext::base_system_prompt()` exposes
+  the pinnable base distinct from the per-context full prompt.
+
+- [x] Task 21. **Longest-prefix matching.** `PromptStateCache::find_longest_prefix`
+  (in `fono-core`) returns the deepest cached entry whose recorded token
+  sequence is a *proper* token-prefix of the new prompt, scoped by runtime +
+  layer set. The F7 path uses it on an exact-key miss: a fresh per-context
+  prefix still restores the pinned base and decodes only the per-context delta
+  instead of a cold prefill. Graceful fallback chain: exact F7Context hit →
+  longest-prefix (pinned base) → cold. Pinning guarantees the floor is never
+  colder than the base after warmup. 3 dedicated unit tests in fono-core
+  (deepest-match, proper-prefix+runtime scoping, tokenless entries ignored).
+
+### Sequencing
+
+17 (pinning, safe, self-contained) → 18 (shared machinery) → 19 (F7 restore) →
+20 (F7 per-context) → 21 (longest-prefix). Run the fmt/clippy/test gate after
+each. Task 13 (STT contention) is now largely designed away: the only heavy
+prefill is the one-time base build at startup/idle; per-turn work is restore +
+small-suffix decode after STT completes.

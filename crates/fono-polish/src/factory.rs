@@ -102,24 +102,13 @@ pub fn build_polish(
     .map(Some)
 }
 
+#[cfg(feature = "openai-compat")]
 fn local_openai_endpoint(cfg: &Polish) -> String {
     cfg.cloud
         .as_ref()
         .map(|c| c.api_key_ref.clone())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "http://localhost:11434/v1/chat/completions".to_string())
-}
-
-fn local_openai_model(cfg: &Polish) -> String {
-    cfg.cloud
-        .as_ref()
-        .map(|c| c.model.clone())
-        .filter(|m| !m.is_empty())
-        .unwrap_or_else(|| cfg.local.model.clone())
-}
-
-fn is_gemma_model(model: &str) -> bool {
-    model.to_ascii_lowercase().contains("gemma")
 }
 
 /// Resolve the model name in `cfg.local.model` to a `<polish_models_dir>/<name>.gguf`
@@ -199,42 +188,32 @@ fn build_anthropic(_: String, _: String) -> Result<Arc<dyn TextFormatter>> {
     Err(anyhow!("Anthropic LLM not compiled in (enable the `anthropic` feature on `fono-polish`)"))
 }
 
+// `PolishBackend::Local` always means the embedded `llama-cpp-2` engine
+// running a local GGUF — never an Ollama / OpenAI-compatible *server*.
+// The server path is reached only via the explicit `PolishBackend::Ollama`
+// backend (see `build_oa_ollama`). This mirrors the assistant factory
+// (`fono-assistant/src/factory.rs` `build_embedded_local`); a missing
+// model file fails loudly with `fono models install` guidance rather than
+// silently degrading to no cleanup.
 #[cfg(feature = "llama-local")]
 fn build_local(cfg: &Polish, polish_models_dir: &Path) -> Result<Arc<dyn TextFormatter>> {
-    if is_gemma_model(&cfg.local.model) {
-        return build_gemma_local_server(cfg);
+    let model_path = resolve_local_model_path(cfg, polish_models_dir);
+    if !model_path.exists() {
+        return Err(anyhow!(
+            "local polish model not found at {model_path:?}; run `fono models install {}` \
+             or pick a cloud/Ollama polish backend in `fono setup`",
+            cfg.local.model
+        ));
     }
-    Ok(Arc::new(crate::llama_local::LlamaLocal::new(
-        resolve_local_model_path(cfg, polish_models_dir),
-        cfg.local.context,
-    )))
+    Ok(Arc::new(crate::llama_local::LlamaLocal::new(model_path, cfg.local.context)))
 }
 
-#[cfg(all(not(feature = "llama-local"), feature = "openai-compat"))]
-fn build_local(cfg: &Polish, _: &Path) -> Result<Arc<dyn TextFormatter>> {
-    if is_gemma_model(&cfg.local.model) {
-        return build_gemma_local_server(cfg);
-    }
-    Err(anyhow!(
-        "local LLM requested but this binary was built without the \
-         `llama-local` feature; rebuild with `cargo build --features llama-local` \
-         or pick Gemma/local-server or a cloud polish backend in `fono setup`"
-    ))
-}
-
-#[cfg(feature = "openai-compat")]
-#[allow(clippy::unnecessary_wraps)]
-fn build_gemma_local_server(cfg: &Polish) -> Result<Arc<dyn TextFormatter>> {
-    let model = local_openai_model(cfg);
-    Ok(Arc::new(crate::openai_compat::OpenAiCompat::ollama(local_openai_endpoint(cfg), model)))
-}
-
-#[cfg(all(not(feature = "llama-local"), not(feature = "openai-compat")))]
+#[cfg(not(feature = "llama-local"))]
 fn build_local(_: &Polish, _: &Path) -> Result<Arc<dyn TextFormatter>> {
     Err(anyhow!(
-        "local LLM requested but this binary was built without the \
+        "local polish requested but this binary was built without the \
          `llama-local` feature; rebuild with `cargo build --features llama-local` \
-         or pick a cloud polish backend in `fono setup`"
+         or pick a cloud/Ollama polish backend in `fono setup`"
     ))
 }
 
@@ -271,11 +250,51 @@ mod tests {
         assert_eq!(p, std::path::PathBuf::from("/var/lib/fono/polish/qwen3.5-2b.gguf"));
     }
 
+    // `backend = local` with the default (Gemma) model must resolve to
+    // the embedded engine, NOT an Ollama HTTP client. With a nonexistent
+    // models dir (and regardless of the `llama-local` feature) it must
+    // fail loudly rather than silently producing a server-backed
+    // formatter. Regression guard for the "local cleanup silently POSTs
+    // to localhost:11434" bug.
     #[test]
-    fn gemma_local_config_uses_server_model_and_endpoint() {
-        let cfg = LlmCfg::default();
-        assert!(is_gemma_model(&cfg.local.model));
-        assert_eq!(local_openai_model(&cfg), DEFAULT_POLISH_LOCAL_MODEL);
-        assert_eq!(local_openai_endpoint(&cfg), "http://localhost:11434/v1/chat/completions");
+    fn local_polish_uses_embedded_model_by_default() {
+        let cfg = LlmCfg {
+            enabled: true,
+            backend: PolishBackend::Local,
+            local: fono_core::config::PolishLocal {
+                model: DEFAULT_POLISH_LOCAL_MODEL.into(),
+                ..fono_core::config::PolishLocal::default()
+            },
+            // A stale Ollama cloud block must NOT activate a server when
+            // the backend is `local`.
+            cloud: Some(fono_core::config::PolishCloud {
+                provider: "ollama".into(),
+                api_key_ref: "http://localhost:11434/v1/chat/completions".into(),
+                model: DEFAULT_POLISH_LOCAL_MODEL.into(),
+            }),
+            ..LlmCfg::default()
+        };
+        let s = Secrets::default();
+        assert!(build_polish(&cfg, &s, Path::new("/this/path/does/not/exist")).is_err());
+    }
+
+    // The Ollama / OpenAI-compatible server path is reached only via the
+    // explicit `PolishBackend::Ollama` backend, and builds without any
+    // local model file on disk.
+    #[cfg(feature = "openai-compat")]
+    #[test]
+    fn explicit_ollama_server_still_builds() {
+        let cfg = LlmCfg {
+            enabled: true,
+            backend: PolishBackend::Ollama,
+            cloud: Some(fono_core::config::PolishCloud {
+                provider: "ollama".into(),
+                api_key_ref: "http://localhost:11434/v1/chat/completions".into(),
+                model: "gemma3:1b".into(),
+            }),
+            ..LlmCfg::default()
+        };
+        let s = Secrets::default();
+        assert!(build_polish(&cfg, &s, Path::new("/this/path/does/not/exist")).unwrap().is_some());
     }
 }

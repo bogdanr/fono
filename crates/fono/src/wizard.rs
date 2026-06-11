@@ -1720,11 +1720,11 @@ fn configure_local_llm(config: &mut Config, snap: &HardwareSnapshot) {
     config.polish.enabled = true;
     config.polish.local =
         PolishLocal { model: default_local_polish_model(snap).into(), ..PolishLocal::default() };
-    config.polish.cloud = Some(PolishCloud {
-        provider: "ollama".into(),
-        api_key_ref: "http://localhost:11434/v1/chat/completions".into(),
-        model: config.polish.local.model.clone(),
-    });
+    // `local` means the embedded llama.cpp engine, not an Ollama server.
+    // Leave the cloud block empty so `build_polish` loads the local GGUF
+    // (mirrors `enable_local_assistant_with_voice`). An Ollama / OpenAI-
+    // compatible server is opt-in via `backend = "ollama"`.
+    config.polish.cloud = None;
 }
 
 fn local_assistant_selected(config: &Config) -> bool {
@@ -2282,6 +2282,19 @@ mod tests {
     }
 
     // ── build_local_stt_shortlist ────────────────────────────────────────
+
+    // The local-polish wizard choice must produce an embedded-local
+    // config (no Ollama cloud block), so `build_polish` loads the local
+    // GGUF instead of POSTing to a server. Regression guard for the
+    // "local cleanup silently routed to Ollama" bug.
+    #[test]
+    fn configure_local_llm_leaves_polish_cloud_empty() {
+        let mut config = Config::default();
+        configure_local_llm(&mut config, &snap(12, 32, 200, true));
+        assert_eq!(config.polish.backend, PolishBackend::Local);
+        assert!(config.polish.enabled);
+        assert!(config.polish.cloud.is_none(), "local polish must not write an Ollama cloud block");
+    }
 
     #[test]
     fn shortlist_english_only_excludes_multilingual() {

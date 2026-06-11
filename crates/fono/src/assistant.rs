@@ -183,7 +183,11 @@ pub async fn run_assistant_turn(
         if trimmed.is_empty() {
             debug!(target: "fono::assistant", "skip: empty pre-transcribed text");
             if let Some(t) = &trace {
-                t.finish(json!({ "aborted": true, "reason": "empty_pre_transcribed" }));
+                t.finish(json!({
+                    "aborted": true,
+                    "reason": "empty_pre_transcribed",
+                    "summary": t.cache_scoreboard(),
+                }));
             }
             return Ok(false);
         }
@@ -204,7 +208,11 @@ pub async fn run_assistant_turn(
         if pcm.is_empty() {
             debug!(target: "fono::assistant", "skip: empty PCM");
             if let Some(t) = &trace {
-                t.finish(json!({ "aborted": true, "reason": "empty_pcm" }));
+                t.finish(json!({
+                    "aborted": true,
+                    "reason": "empty_pcm",
+                    "summary": t.cache_scoreboard(),
+                }));
             }
             return Ok(false);
         }
@@ -222,7 +230,11 @@ pub async fn run_assistant_turn(
                         std::time::Instant::now(),
                         json!({ "cancelled": true }),
                     );
-                    t.finish(json!({ "aborted": true, "reason": "cancelled_before_stt" }));
+                    t.finish(json!({
+                        "aborted": true,
+                        "reason": "cancelled_before_stt",
+                        "summary": t.cache_scoreboard(),
+                    }));
                 }
                 return Ok(false);
             }
@@ -240,7 +252,11 @@ pub async fn run_assistant_turn(
                     std::time::Instant::now(),
                     json!({ "empty": true }),
                 );
-                t.finish(json!({ "aborted": true, "reason": "empty_transcript" }));
+                t.finish(json!({
+                    "aborted": true,
+                    "reason": "empty_transcript",
+                    "summary": t.cache_scoreboard(),
+                }));
             }
             return Ok(false);
         }
@@ -283,12 +299,22 @@ pub async fn run_assistant_turn(
         );
     }
 
-    // 2. Build context from history (prune-on-snapshot) + push user turn.
+    // 2. Build context from the *completed* history, then record the current
+    //    user turn so it persists for the NEXT turn. The snapshot MUST exclude
+    //    the in-flight user turn: every backend's prompt/message builder treats
+    //    `user_text` as the current turn and renders it itself (the local
+    //    builder via the trailing turn marker + suffix; the cloud builders via a
+    //    final user message). Including the current turn in `ctx.history` too
+    //    would (a) duplicate the user's message in the prompt sent to the model
+    //    and (b) make each turn's cached prompt-state prefix end in a volatile
+    //    `<start_of_turn>user\n` marker that the next turn overwrites with the
+    //    model reply, defeating prompt-state cache reuse (only the static system
+    //    base could ever be restored, so prefill grew with every turn).
     let history_snapshot = {
         let history_started = std::time::Instant::now();
         let mut s = state.lock().await;
-        s.history.push_user(user_text.clone());
         let snapshot = s.history.snapshot();
+        s.history.push_user(user_text.clone());
         drop(s);
         if let Some(t) = &trace {
             t.duration_between(
@@ -326,7 +352,11 @@ pub async fn run_assistant_turn(
                     std::time::Instant::now(),
                     json!({ "cancelled": true, "provider": assistant.name() }),
                 );
-                t.finish(json!({ "aborted": true, "reason": "cancelled_before_llm" }));
+                t.finish(json!({
+                    "aborted": true,
+                    "reason": "cancelled_before_llm",
+                    "summary": t.cache_scoreboard(),
+                }));
             }
             return Ok(false);
         }
@@ -374,7 +404,11 @@ pub async fn run_assistant_turn(
                         std::time::Instant::now(),
                         json!({ "error": err_text, "provider": assistant.name() }),
                     );
-                    t.finish(json!({ "aborted": true, "reason": "llm_open_error" }));
+                    t.finish(json!({
+                        "aborted": true,
+                        "reason": "llm_open_error",
+                        "summary": t.cache_scoreboard(),
+                    }));
                 }
                 return Err(e);
             }
@@ -801,6 +835,7 @@ pub async fn run_assistant_turn(
             "tts_ttfa_ms": metrics.tts_ttfa_ms,
             "sentences": metrics.sentences,
             "reply_chars": metrics.reply_chars,
+            "summary": t.cache_scoreboard(),
         }));
     }
     Ok(any_audio)

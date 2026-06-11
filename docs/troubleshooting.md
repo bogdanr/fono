@@ -121,6 +121,36 @@ For per-phase debug logging (the individual `STT:`, `first LLM delta`,
 `first audio queued` lines that used to appear at INFO level) run with
 `RUST_LOG=fono::assistant=debug`.
 
+### Deep dive: per-turn performance traces
+
+When the INFO summary isn't enough — "why was this turn slow?" — run the
+daemon with `FONO_ASSISTANT_TRACE` pointing at a directory:
+
+```sh
+FONO_ASSISTANT_TRACE=/tmp/fono-traces fono
+```
+
+Every dictation turn, assistant turn, and daemon startup then writes a
+Chrome Trace Event JSON file (`dictation-*.json`, `assistant-*.json`,
+`startup-*.json`) into that directory. Open it in `chrome://tracing`,
+[Perfetto](https://ui.perfetto.dev), or `about:tracing` to see the full
+waterfall: audio capture, STT, polish, LLM prefill/decode (including
+prompt-cache hits, misses, and restores), tool calls, TTS, and injection,
+each on its own lane with timings. The final `turn.finish` event carries a
+cache scoreboard (`cache_hits`, `cache_misses`, `cold_prefills`,
+`bytes_restored`) — the headline number for prompt-cache diagnostics.
+
+Pointing the variable at a path ending in `.json` writes a single trace to
+that exact file instead. Setting it empty, to `0`, or to `false` disables
+tracing.
+
+> **Privacy note:** traces include the full prompt text — your dictated
+> words, the transcript being cleaned, and the assistant conversation — so
+> treat trace files like the history database. Set
+> `FONO_ASSISTANT_TRACE_PROMPT=0` to omit prompt text from traces, and
+> prefer a private directory over a world-readable `/tmp` path on shared
+> machines. Tracing is off unless `FONO_ASSISTANT_TRACE` is set.
+
 ## Hotkey doesn't fire
 
 ### X11 (i3, KDE-X11, GNOME-X11, Xfce)

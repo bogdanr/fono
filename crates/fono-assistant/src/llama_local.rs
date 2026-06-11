@@ -7,19 +7,18 @@
 
 #![allow(clippy::significant_drop_tightening)]
 
-use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, Once, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use fono_core::turn_trace::{current_instant, current_span};
+use fono_core::llama_backend::{backend, shared_model};
+use fono_core::turn_trace::{current_instant, current_span, record_cache_mutation, CACHE_LANE};
 use futures::stream::{BoxStream, StreamExt};
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::context::LlamaContext;
-use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
@@ -51,23 +50,11 @@ const STOP_MARKERS: &[&str] = &[
     "</s>",
 ];
 
-static LLAMA_LOG_INIT: Once = Once::new();
-
-fn init_llama_logging() {
-    LLAMA_LOG_INIT.call_once(|| {
-        llama_cpp_2::send_logs_to_tracing(llama_cpp_2::LogOptions::default());
-    });
-}
-
-fn backend() -> &'static LlamaBackend {
-    static BACKEND: OnceLock<LlamaBackend> = OnceLock::new();
-    BACKEND.get_or_init(|| {
-        init_llama_logging();
-        LlamaBackend::init().expect(
-            "LlamaBackend::init() failed — another library has already initialised llama.cpp",
-        )
-    })
-}
+// The process-wide `LlamaBackend` singleton and the `llama_cpp_2 →
+// tracing` log redirector both live in `fono_core::llama_backend` so
+// the assistant (voice chat) and polish (cleanup) embedded-LLM paths
+// share ONE `LlamaBackend::init()`. A second init in the same process
+// panics — see that module's docs.
 
 pub struct LlamaLocalAssistant {
     model_path: PathBuf,
@@ -75,7 +62,7 @@ pub struct LlamaLocalAssistant {
     threads: i32,
     batch_size: Option<u32>,
     ubatch_size: Option<u32>,
-    state: Arc<Mutex<Option<LlamaModel>>>,
+    state: Arc<Mutex<Option<Arc<LlamaModel>>>>,
     prompt_state_cache: Arc<Mutex<PromptStateCache>>,
 }
 
@@ -148,122 +135,14 @@ pub struct ConversationPrefixCacheReport {
     pub turns: Vec<ConversationTurnReport>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum PromptStateCacheLayer {
-    F7System,
-    F8System,
-    AssistantTools,
-    WindowContext,
-    F8ChatPrefix,
-    BenchmarkPrefix,
-    ExactPrompt,
-}
-
-impl PromptStateCacheLayer {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::F7System => "f7_system",
-            Self::F8System => "f8_system",
-            Self::AssistantTools => "assistant_tools",
-            Self::WindowContext => "window_context",
-            Self::F8ChatPrefix => "f8_chat_prefix",
-            Self::BenchmarkPrefix => "benchmark_prefix",
-            Self::ExactPrompt => "exact_prompt",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PromptStateCacheKey {
-    layer: PromptStateCacheLayer,
-    runtime_sha256: String,
-    prompt_sha256: String,
-    token_sha256: String,
-    token_count: usize,
-}
-
-impl PromptStateCacheKey {
-    fn stable_id(&self) -> String {
-        format!(
-            "{:?}:runtime={}:prompt={}:tokens={}:count={}",
-            self.layer,
-            self.runtime_sha256,
-            self.prompt_sha256,
-            self.token_sha256,
-            self.token_count
-        )
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PromptStateCacheEntry {
-    state: Vec<u8>,
-    token_count: usize,
-}
-
-#[derive(Debug)]
-struct PromptStateCache {
-    max_entries: usize,
-    max_bytes: usize,
-    bytes: usize,
-    entries: HashMap<PromptStateCacheKey, PromptStateCacheEntry>,
-    lru: VecDeque<PromptStateCacheKey>,
-}
-
-impl Default for PromptStateCache {
-    fn default() -> Self {
-        Self {
-            max_entries: 8,
-            max_bytes: 256 * 1024 * 1024,
-            bytes: 0,
-            entries: HashMap::new(),
-            lru: VecDeque::new(),
-        }
-    }
-}
-
-impl PromptStateCache {
-    fn insert(&mut self, key: PromptStateCacheKey, entry: PromptStateCacheEntry) {
-        if let Some(old) = self.entries.remove(&key) {
-            self.bytes = self.bytes.saturating_sub(old.state.len());
-            self.lru.retain(|existing| existing != &key);
-        }
-        self.bytes = self.bytes.saturating_add(entry.state.len());
-        self.lru.push_back(key.clone());
-        self.entries.insert(key, entry);
-        self.evict_over_budget();
-    }
-
-    fn get(&mut self, key: &PromptStateCacheKey) -> Option<PromptStateCacheEntry> {
-        let entry = self.entries.get(key).cloned()?;
-        self.lru.retain(|existing| existing != key);
-        self.lru.push_back(key.clone());
-        Some(entry)
-    }
-
-    fn contains(&mut self, key: &PromptStateCacheKey) -> bool {
-        self.get(key).is_some()
-    }
-
-    fn remove_layer(&mut self, layer: PromptStateCacheLayer) {
-        let removed: Vec<_> = self.entries.keys().filter(|k| k.layer == layer).cloned().collect();
-        for key in removed {
-            if let Some(entry) = self.entries.remove(&key) {
-                self.bytes = self.bytes.saturating_sub(entry.state.len());
-            }
-            self.lru.retain(|existing| existing != &key);
-        }
-    }
-
-    fn evict_over_budget(&mut self) {
-        while self.entries.len() > self.max_entries || self.bytes > self.max_bytes {
-            let Some(key) = self.lru.pop_front() else { break };
-            if let Some(entry) = self.entries.remove(&key) {
-                self.bytes = self.bytes.saturating_sub(entry.state.len());
-            }
-        }
-    }
-}
+// The bounded prompt-state cache (LRU + byte budget + pinning) lives in
+// `fono-core` so both the assistant (F8) and polish (F7) embedded backends can
+// share it. This crate keeps only the llama.cpp-specific glue: building a
+// checkpoint by prefilling tokens into a context, restoring one, and computing
+// the content-fingerprint key.
+use fono_core::prompt_cache::{
+    PromptStateCache, PromptStateCacheEntry, PromptStateCacheKey, PromptStateCacheLayer,
+};
 
 impl LlamaLocalAssistant {
     pub fn new(model_path: impl Into<PathBuf>, context_size: u32) -> Self {
@@ -327,12 +206,12 @@ impl LlamaLocalAssistant {
             ));
         }
         let started = Instant::now();
-        let model = LlamaModel::load_from_file(
-            backend(),
-            &self.model_path,
-            &LlamaModelParams::default(),
-        )
-        .with_context(|| format!("loading assistant GGUF model from {:?}", self.model_path))?;
+        // Shared, process-wide weights: polish (F7) and the assistant (F8)
+        // resolve their local GGUF from the same directory, so when both use
+        // the same model (the default `gemma-4-e2b`) they share ONE
+        // `LlamaModel` rather than each loading a ~3.2 GB copy. See
+        // `fono_core::llama_backend::shared_model`.
+        let model = shared_model(&self.model_path, &LlamaModelParams::default())?;
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let model_name = self.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
         let size_mb =
@@ -377,11 +256,13 @@ impl LlamaLocalAssistant {
         F: FnMut(String) -> Result<bool>,
     {
         if prefix.is_empty() || suffix.is_empty() {
+            cold_prefill(layer.as_str(), "empty_prefix_or_suffix");
             return Ok(None);
         }
         let prefix_tokens =
             model.str_to_token(prefix, AddBos::Always).context("tokenize cached prefix")?;
         if prefix_tokens.is_empty() {
+            cold_prefill(layer.as_str(), "empty_prefix_tokens");
             return Ok(None);
         }
         let full_prompt = format!("{prefix}{suffix}");
@@ -392,10 +273,12 @@ impl LlamaLocalAssistant {
                 layer = layer.as_str(),
                 "prompt-state cache token split incompatible; falling back"
             );
+            cold_prefill(layer.as_str(), "token_split_incompatible");
             return Ok(None);
         }
         let suffix_tokens = &full_tokens[prefix_tokens.len()..];
         if suffix_tokens.is_empty() {
+            cold_prefill(layer.as_str(), "empty_suffix_tokens");
             return Ok(None);
         }
         if full_tokens.len() + MAX_NEW_TOKENS as usize >= self.context_size as usize {
@@ -405,6 +288,7 @@ impl LlamaLocalAssistant {
                 ctx = self.context_size,
                 "prompt-state cache prompt too large; falling back"
             );
+            cold_prefill(layer.as_str(), "prompt_too_large");
             return Ok(None);
         }
         let key = self.prompt_state_cache_key(layer.clone(), prefix, &prefix_tokens)?;
@@ -413,7 +297,21 @@ impl LlamaLocalAssistant {
                 .prompt_state_cache
                 .lock()
                 .map_err(|_| anyhow!("llama-local prompt-state cache mutex poisoned"))?;
-            cache.get(&key)
+            let entry = cache.get(&key);
+            current_instant(
+                "llm.prompt_cache_lookup",
+                "cache",
+                CACHE_LANE,
+                json!({
+                    "layer": layer.as_str(),
+                    "cache_key": key.stable_id(),
+                    "hit": entry.is_some(),
+                    "token_count": prefix_tokens.len(),
+                    "cache_entries": cache.len(),
+                    "cache_bytes": cache.bytes(),
+                }),
+            );
+            entry
         };
         let mut ctx = self.new_context(model, "llm.prompt_cache_context_created")?;
         if let Some(entry) = cached {
@@ -424,8 +322,20 @@ impl LlamaLocalAssistant {
                     layer = layer.as_str(),
                     "llama.cpp failed to restore prompt-state cache; falling back"
                 );
+                cold_prefill(layer.as_str(), "restore_failed");
                 return Ok(None);
             }
+            current_instant(
+                "llm.prompt_cache_prefix_match",
+                "cache",
+                CACHE_LANE,
+                json!({
+                    "matched_layer": layer.as_str(),
+                    "matched_tokens": entry.token_count,
+                    "total_tokens": full_tokens.len(),
+                    "decoded_suffix_tokens": suffix_tokens.len(),
+                }),
+            );
             current_instant(
                 "llm.prompt_cache_restored",
                 "assistant.llm",
@@ -440,35 +350,91 @@ impl LlamaLocalAssistant {
                 }),
             );
         } else {
-            let build_started = Instant::now();
-            self.prefill_tokens(
-                &mut ctx,
-                &prefix_tokens,
-                0,
-                false,
-                "llm.prompt_cache_build_prefill",
-            )?;
-            let state = copy_context_state(&ctx)?;
-            let state_bytes = state.len();
-            {
+            // Exact-key miss. Before paying a full cold prefill from scratch,
+            // restore the deepest cached prefix that is a token-prefix of this
+            // prompt — a prior turn's `F8ChatPrefix` checkpoint (the prompt is
+            // append-only, so turn N's prefix is a prefix of turn N+1's) or the
+            // pinned `F8System` base — and prefill only the remaining prefix
+            // tokens. Mirrors the F7 polish longest-prefix path.
+            // (`AssistantTools` is prewarmed but is not a prompt prefix, so it
+            // is intentionally excluded from the candidate layers.)
+            let runtime = key.runtime_sha256().to_string();
+            let longest = {
                 let mut cache = self
                     .prompt_state_cache
                     .lock()
                     .map_err(|_| anyhow!("llama-local prompt-state cache mutex poisoned"))?;
-                cache
-                    .insert(key, PromptStateCacheEntry { state, token_count: prefix_tokens.len() });
+                let hit_key = cache.find_longest_prefix(
+                    &runtime,
+                    &[PromptStateCacheLayer::F8ChatPrefix, PromptStateCacheLayer::F8System],
+                    &token_ids(&prefix_tokens),
+                );
+                hit_key.and_then(|hk| cache.get(&hk).map(|entry| (hk, entry)))
+            };
+            let mut start = 0_usize;
+            let mut matched = false;
+            if let Some((hit_key, entry)) = longest {
+                let restore_started = Instant::now();
+                let restored_bytes = unsafe { ctx.set_state_data(&entry.state) };
+                if restored_bytes == 0 {
+                    warn!(
+                        layer = layer.as_str(),
+                        "llama.cpp failed to restore longest-prefix state; cold-prefilling"
+                    );
+                    ctx = self.new_context(model, "llm.prompt_cache_context_created")?;
+                } else {
+                    start = entry.token_count.min(prefix_tokens.len());
+                    matched = true;
+                    current_instant(
+                        "llm.prompt_cache_prefix_match",
+                        "cache",
+                        CACHE_LANE,
+                        json!({
+                            "matched_layer": hit_key.layer().as_str(),
+                            "matched_tokens": entry.token_count,
+                            "total_tokens": full_tokens.len(),
+                            "decoded_prefix_tokens": prefix_tokens.len().saturating_sub(start),
+                            "decoded_suffix_tokens": suffix_tokens.len(),
+                        }),
+                    );
+                    current_instant(
+                        "llm.prompt_cache_restored",
+                        "assistant.llm",
+                        "llm",
+                        json!({
+                            "layer": hit_key.layer().as_str(),
+                            "cache_key": hit_key.stable_id(),
+                            "state_bytes": entry.state.len(),
+                            "restored_bytes": restored_bytes,
+                            "restore_ms": restore_started.elapsed().as_millis() as u64,
+                            "suffix_tokens": suffix_tokens.len(),
+                        }),
+                    );
+                }
             }
-            current_instant(
-                "llm.prompt_cache_built",
-                "assistant.llm",
-                "llm",
-                json!({
-                    "layer": layer.as_str(),
-                    "prefix_tokens": prefix_tokens.len(),
-                    "state_bytes": state_bytes,
-                    "elapsed_ms": build_started.elapsed().as_millis() as u64,
-                }),
-            );
+            if !matched {
+                cold_prefill(layer.as_str(), "no_prefix_match");
+            }
+            if start < prefix_tokens.len() {
+                self.prefill_tokens(
+                    &mut ctx,
+                    &prefix_tokens[start..],
+                    start as i32,
+                    false,
+                    "llm.prompt_cache_build_prefill",
+                )?;
+            }
+            // NOTE: we intentionally do NOT checkpoint the pre-suffix prefix
+            // here. The post-generation "completed turn" checkpoint below is
+            // always a deeper superset of it (system + history + this user +
+            // reply vs. just system + history + this user), and the traces
+            // confirm `find_longest_prefix` always selects that deeper entry —
+            // the pre-suffix checkpoint was never the winner. Storing it would
+            // burn a cache slot and an O(history) `copy_context_state` every
+            // turn for nothing. On the rare degenerate turn where no
+            // completed-turn checkpoint is stored (empty/near-empty reply), the
+            // next turn gracefully falls back to the prior turn's completed-turn
+            // checkpoint or the pinned base.
         }
         self.prefill_tokens(
             &mut ctx,
@@ -485,6 +451,92 @@ impl LlamaLocalAssistant {
             None,
             on_delta,
         )?;
+        // Option C: checkpoint the POST-generation state so the next turn can
+        // restore the completed exchange (system + history + this user + reply)
+        // instead of re-prefilling user_N + reply_N.
+        //
+        // Subtlety (proven empirically, 2026-06-09): the KV cache holds the
+        // *sampled* token ids, but next turn the same reply text re-tokenizes as
+        // part of a longer prompt. BPE merges the final reply token with the
+        // following turn-closer (`<end_of_turn>` / `<|im_end|>`), so the raw
+        // generated sequence is NOT a token-prefix of the next turn's prompt —
+        // it misses by the trailing token(s) and `find_longest_prefix` rejects
+        // the whole entry (the bug we observed: completed-turn checkpoints never
+        // matched). The same hazard covers leading-space and any mid-reply
+        // divergence between sampled and canonical tokenization.
+        //
+        // Fix: store only the longest prefix of the generated sequence that the
+        // next turn reproduces verbatim — the common prefix with the canonical
+        // "completed turn" rendering (reply trimmed + the template closer, i.e.
+        // exactly how this turn appears in the next turn's history). Truncate
+        // the KV cache to that length so the saved state's position count equals
+        // the recorded token count — the invariant every other checkpoint holds
+        // (restore sets n_past to the token count, then prefills the new turn
+        // into free cells). Cells past the boundary would be stale anyway.
+        if !generation.tokens.is_empty() {
+            let mut combined: Vec<llama_cpp_2::token::LlamaToken> =
+                Vec::with_capacity(full_tokens.len() + generation.tokens.len());
+            combined.extend_from_slice(&full_tokens);
+            combined.extend_from_slice(&generation.tokens);
+            let closer = if full_prompt.contains("<start_of_turn>") {
+                "<end_of_turn>\n"
+            } else {
+                "<|im_end|>\n"
+            };
+            let canonical = format!("{full_prompt}{}{closer}", generation.text.trim());
+            let reusable_len = model
+                .str_to_token(&canonical, AddBos::Always)
+                .ok()
+                .map_or(0, |canon| common_prefix_len(&combined, &canon))
+                .min(combined.len());
+            // Only worth storing if it covers reply tokens beyond the
+            // pre-generation prefix (already checkpointed above), and leaves
+            // room for the next turn's framing + generation budget.
+            if reusable_len > full_tokens.len()
+                && reusable_len + MAX_NEW_TOKENS as usize <= self.context_size as usize
+            {
+                // Drop KV cells at positions >= reusable_len so the serialized
+                // state covers exactly `reusable_len` positions.
+                let truncated = reusable_len == combined.len()
+                    || ctx.clear_kv_cache_seq(Some(0), Some(reusable_len as u32), None).is_ok();
+                if truncated {
+                    if let Ok(post_state) = copy_context_state(&ctx) {
+                        let reusable = &combined[..reusable_len];
+                        if let Ok(post_key) = self.prompt_state_cache_key(
+                            PromptStateCacheLayer::F8ChatPrefix,
+                            &canonical,
+                            reusable,
+                        ) {
+                            let post_bytes = post_state.len();
+                            if let Ok(mut cache) = self.prompt_state_cache.lock() {
+                                let report = cache.insert(
+                                    post_key,
+                                    PromptStateCacheEntry::with_tokens(
+                                        post_state,
+                                        token_ids(reusable),
+                                    ),
+                                );
+                                record_cache_mutation(&report);
+                            }
+                            current_instant(
+                                "llm.prompt_cache_completed_turn",
+                                "cache",
+                                CACHE_LANE,
+                                json!({
+                                    "layer": layer.as_str(),
+                                    "prefix_tokens": full_tokens.len(),
+                                    "reply_tokens": generation.tokens.len(),
+                                    "reusable_tokens": reusable_len,
+                                    "dropped_tail_tokens": combined.len() - reusable_len,
+                                    "total_tokens": combined.len(),
+                                    "state_bytes": post_bytes,
+                                }),
+                            );
+                        }
+                    }
+                }
+            }
+        }
         Ok(Some(generation.text.trim().to_string()))
     }
 
@@ -536,7 +588,13 @@ impl LlamaLocalAssistant {
             .prompt_state_cache
             .lock()
             .map_err(|_| anyhow!("llama-local prompt-state cache mutex poisoned"))?;
-        cache.insert(key, PromptStateCacheEntry { state, token_count: prefix_tokens.len() });
+        let entry = PromptStateCacheEntry::with_tokens(state, token_ids(&prefix_tokens));
+        let report = if layer.is_pinnable() {
+            cache.insert_pinned(key, entry)
+        } else {
+            cache.insert(key, entry)
+        };
+        record_cache_mutation(&report);
         current_instant(
             "llm.prompt_cache_built",
             "assistant.llm",
@@ -583,6 +641,8 @@ impl LlamaLocalAssistant {
             {
                 return Ok(text);
             }
+        } else {
+            cold_prefill(layer.as_str(), "prompt_split_mismatch");
         }
         self.run_inference_with_model(model, prompt, on_delta)
     }
@@ -828,8 +888,7 @@ impl LlamaLocalAssistant {
             )?;
             let setup_prefill_ms = prefill_started.elapsed().as_millis() as u64;
             let state = copy_context_state(&setup_ctx)?;
-            let entry =
-                PromptStateCacheEntry { state: state.clone(), token_count: prefix_tokens.len() };
+            let entry = PromptStateCacheEntry::new(state.clone(), prefix_tokens.len());
             let mut cache = self
                 .prompt_state_cache
                 .lock()
@@ -1146,13 +1205,13 @@ impl LlamaLocalAssistant {
             self.batch_size.unwrap_or(self.context_size),
             self.ubatch_size.map_or_else(|| "auto".to_string(), |v| v.to_string())
         );
-        Ok(PromptStateCacheKey {
+        Ok(PromptStateCacheKey::new(
             layer,
-            runtime_sha256: sha256_text(&runtime_identity),
-            prompt_sha256: sha256_text(prompt),
-            token_sha256: sha256_tokens(tokens),
-            token_count: tokens.len(),
-        })
+            sha256_text(&runtime_identity),
+            sha256_text(prompt),
+            sha256_tokens(tokens),
+            tokens.len(),
+        ))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1319,60 +1378,69 @@ impl LlamaLocalAssistant {
         })
     }
 
-    /// Build the stable F7/F8/tool prompt-state checkpoints from a startup/idle
-    /// warmup request. Each prompt is prefilled once and its llama.cpp state is
-    /// stored in the in-memory LRU so a later hotkey press only pays the cheap
-    /// restore. Missing or empty prompts are skipped. Plan task 4.
+    /// Build the stable F8 system + tool prompt-state checkpoints from a
+    /// startup/idle warmup request. Each prompt is prefilled once and its
+    /// llama.cpp state is stored in the in-memory LRU so a later hotkey press
+    /// only pays the cheap restore. Missing or empty prompts are skipped.
+    ///
+    /// Only the F8 family is warmed: the live reply path restores the F8 base
+    /// (via longest-prefix matching) and never the F7 cleanup base — F7 polish
+    /// runs on a separate backend with its own cache, so the old `F7System`
+    /// warmup on this backend was dead work and has been removed.
     fn build_stable_prompt_caches(&self, warmup: &AssistantPromptCacheWarmup) -> Result<()> {
         let guard = self.state.lock().map_err(|_| anyhow!("llama-local mutex poisoned"))?;
         let model = guard.as_ref().ok_or_else(|| anyhow!("llama-local model not loaded"))?;
-        for (layer, prompt) in [
-            (PromptStateCacheLayer::F7System, warmup.f7_system_prompt.as_deref()),
-            (PromptStateCacheLayer::F8System, warmup.f8_system_prompt.as_deref()),
-            (PromptStateCacheLayer::AssistantTools, warmup.assistant_tool_prompt.as_deref()),
-        ] {
-            if let Some(prompt) = prompt.filter(|s| !s.trim().is_empty()) {
-                self.build_prompt_prefix_cache(model, layer, prompt)?;
-            }
+        let model_name = self.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        // The F8 system base is framed into the chat template so it is a true
+        // token prefix of the live F8ChatPrefix prompt (mirrors the F7 base).
+        if let Some(system) = warmup.f8_system_prompt.as_deref().filter(|s| !s.trim().is_empty()) {
+            let base = assistant_base_prefix(system, model_name);
+            self.build_prompt_prefix_cache(model, PromptStateCacheLayer::F8System, &base)?;
+        }
+        if let Some(tools) =
+            warmup.assistant_tool_prompt.as_deref().filter(|s| !s.trim().is_empty())
+        {
+            self.build_prompt_prefix_cache(model, PromptStateCacheLayer::AssistantTools, tools)?;
         }
         Ok(())
     }
 
-    /// Hotkey-time cache preparation. Ensures the matching stable F7/F8
-    /// checkpoint exists (building it if startup warming hasn't run yet — the
-    /// build is a no-op cache hit when it has), then, when active-window context
-    /// is available, rebuilds the dynamic window-context checkpoint. The window
-    /// layer is invalidated first so a window change can never restore stale
-    /// context (plan tasks 5–7/9).
+    /// Hotkey-time cache preparation. Ensures the stable F8 base checkpoint
+    /// exists (building it framed into the chat template if startup warming
+    /// hasn't run yet — a no-op cache hit when it has) so the live reply path
+    /// can restore it via longest-prefix matching.
+    ///
+    /// Only the F8 trigger warms anything here: F7 polish runs on a separate
+    /// backend, and the deprecated dynamic `WindowContext` checkpoint (the
+    /// assistant no longer injects window context) was never restored, so both
+    /// have been removed as confirmed-dead work.
     fn prepare_turn_prompt_caches(&self, snapshot: &AssistantPromptCacheSnapshot) -> Result<()> {
+        if snapshot.trigger != AssistantCacheTrigger::F8 {
+            return Ok(());
+        }
+        if snapshot.system_prompt.trim().is_empty() {
+            return Ok(());
+        }
         let guard = self.state.lock().map_err(|_| anyhow!("llama-local mutex poisoned"))?;
         let model = guard.as_ref().ok_or_else(|| anyhow!("llama-local model not loaded"))?;
-        let stable_layer = match snapshot.trigger {
-            AssistantCacheTrigger::F7 => PromptStateCacheLayer::F7System,
-            AssistantCacheTrigger::F8 => PromptStateCacheLayer::F8System,
-        };
-        if !snapshot.system_prompt.trim().is_empty() {
-            self.build_prompt_prefix_cache(model, stable_layer, &snapshot.system_prompt)?;
-        }
-        if let Some(window) =
-            snapshot.active_window_context.as_deref().filter(|s| !s.trim().is_empty())
-        {
-            let combined = if snapshot.system_prompt.trim().is_empty() {
-                window.trim().to_string()
-            } else {
-                format!("{}\n\n{}", snapshot.system_prompt.trim(), window.trim())
-            };
-            {
-                let mut cache = self
-                    .prompt_state_cache
-                    .lock()
-                    .map_err(|_| anyhow!("llama-local prompt-state cache mutex poisoned"))?;
-                cache.remove_layer(PromptStateCacheLayer::WindowContext);
-            }
-            self.build_prompt_prefix_cache(model, PromptStateCacheLayer::WindowContext, &combined)?;
-        }
+        let model_name = self.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        let base = assistant_base_prefix(&snapshot.system_prompt, model_name);
+        self.build_prompt_prefix_cache(model, PromptStateCacheLayer::F8System, &base)?;
         Ok(())
     }
+}
+
+/// Emit a `llm.prompt_cache_cold_prefill` instant on the `cache` lane recording
+/// why the prefix-cache fast path was abandoned in favour of a full prefill. The
+/// dominance of these events on the F8 path is the evidence for the A.3 wiring
+/// mismatch (the live reply path never restores the prewarmed base).
+fn cold_prefill(layer: &str, reason: &str) {
+    current_instant(
+        "llm.prompt_cache_cold_prefill",
+        "cache",
+        CACHE_LANE,
+        json!({ "layer": layer, "reason": reason }),
+    );
 }
 
 fn copy_context_state(ctx: &LlamaContext<'_>) -> Result<Vec<u8>> {
@@ -1396,9 +1464,33 @@ fn sha256_tokens(tokens: &[llama_cpp_2::token::LlamaToken]) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Flatten llama tokens to their raw i32 ids for `PromptStateCacheEntry::with_tokens`
+/// so cached checkpoints can participate in longest-prefix matching.
+fn token_ids(tokens: &[llama_cpp_2::token::LlamaToken]) -> Vec<i32> {
+    tokens.iter().map(|t| t.0).collect()
+}
+
+/// Length of the leading run where two token sequences agree by id. Used to
+/// trim a post-generation checkpoint to the prefix the next turn reproduces
+/// verbatim (sampled tokens can diverge from the canonical re-tokenization at
+/// the reply/turn-closer boundary).
+fn common_prefix_len(
+    a: &[llama_cpp_2::token::LlamaToken],
+    b: &[llama_cpp_2::token::LlamaToken],
+) -> usize {
+    a.iter().zip(b.iter()).take_while(|(x, y)| x.0 == y.0).count()
+}
+
 struct GenerationResult {
     text: String,
     elapsed_ms: u64,
+    /// Content tokens actually decoded into the context KV, in order (the
+    /// stop token is excluded — it breaks before being decoded). Lets the
+    /// prefix-cache path checkpoint the *post-generation* state (system +
+    /// history + this turn's user + reply) so the next turn can restore the
+    /// completed exchange instead of re-prefilling it. See Option C in
+    /// `plans/2026-06-09-f8-current-turn-double-count-cache-fix-v1.md`.
+    tokens: Vec<llama_cpp_2::token::LlamaToken>,
 }
 
 fn generate_from_prefilled_context<F>(
@@ -1423,6 +1515,7 @@ where
     let mut decoder = encoding_rs::UTF_8.new_decoder();
     let decode_started = Instant::now();
     let mut generated_tokens = 0_u32;
+    let mut decoded_tokens: Vec<llama_cpp_2::token::LlamaToken> = Vec::new();
     let mut stop_reason = "max_tokens";
     let mut batch = LlamaBatch::new(1, 1);
     for n_cur in (start_pos..).take(MAX_NEW_TOKENS as usize) {
@@ -1470,6 +1563,7 @@ where
         batch.add(token, n_cur, &[0], true).context("decode batch.add")?;
         sample_idx = 0;
         ctx.decode(&mut batch).context("decode loop")?;
+        decoded_tokens.push(token);
     }
     if stop_reason != "receiver_dropped" && emitted_len < out.len() {
         let delta = out[emitted_len..].to_string();
@@ -1494,7 +1588,7 @@ where
             "stop_reason": stop_reason,
         }),
     );
-    Ok(GenerationResult { text: out, elapsed_ms })
+    Ok(GenerationResult { text: out, elapsed_ms, tokens: decoded_tokens })
 }
 
 fn single_token(model: &LlamaModel, text: &str) -> Option<llama_cpp_2::token::LlamaToken> {
@@ -1633,6 +1727,25 @@ fn build_chatml_prompt_split(ctx: &AssistantContext, user_text: &str) -> (String
     prefix.push_str("<|im_start|>user\n");
     let suffix = format!("{}<|im_end|>\n<|im_start|>assistant\n", user_text.trim());
     (prefix, suffix)
+}
+
+/// The context-independent F8 base: the system prompt wrapped in the model's
+/// chat framing up to (but not including) any variable content. By construction
+/// it is a genuine textual prefix of the live [`build_prompt_split`] prefix for
+/// any history (the system block always leads — asserted in tests), so the
+/// pinned base checkpoint can be restored via longest-prefix matching and only
+/// the per-turn remainder decoded instead of cold-prefilling from scratch.
+/// Empty when there is no system prompt. Mirrors the F7 polish `chatml_base_prefix`.
+fn assistant_base_prefix(system: &str, model_name: &str) -> String {
+    let system = system.trim();
+    if system.is_empty() {
+        return String::new();
+    }
+    if model_name.to_ascii_lowercase().contains("gemma") {
+        format!("<start_of_turn>user\n{system}")
+    } else {
+        format!("<|im_start|>system\n{system}")
+    }
 }
 
 #[async_trait]
@@ -1874,6 +1987,50 @@ mod tests {
     }
 
     #[test]
+    fn assistant_base_prefix_leads_chat_prefix() {
+        // Workstream C: the prewarmed F8System base must be a textual prefix of
+        // the live F8ChatPrefix prompt prefix for any history, otherwise
+        // `find_longest_prefix` can never restore it and every turn cold-prefills
+        // from scratch. (Token-level matching is guarded at runtime by
+        // `full_tokens.starts_with(prefix)`; this asserts the string-level
+        // invariant a prompt-layout change would break.) Mirrors the F7 polish
+        // `base_prefix_is_textual_prefix_of_full_prefix` test.
+        let system = "You are Fono, a terse assistant.";
+        for model in ["gemma-4-e2b-it-Q4_K_M", "qwen3.5-0.8b"] {
+            let base = assistant_base_prefix(system, model);
+            assert!(!base.is_empty(), "base should be non-empty for {model:?}");
+
+            // No history: the base leads the current-turn prefix.
+            let no_history =
+                AssistantContext { system_prompt: system.into(), ..AssistantContext::default() };
+            let (prefix, _) = build_prompt_split(&no_history, "hello", model);
+            assert!(
+                prefix.starts_with(&base),
+                "base must lead the chat prefix (no history) for {model:?}\n base: {base:?}\n prefix: {prefix:?}"
+            );
+
+            // With history: the system block still leads, so the base is still a
+            // prefix and remains restorable as the conversation grows.
+            let with_history = AssistantContext {
+                system_prompt: system.into(),
+                history: vec![
+                    turn(ChatRole::User, "first question"),
+                    turn(ChatRole::Assistant, "first answer"),
+                ],
+                ..AssistantContext::default()
+            };
+            let (prefix2, _) = build_prompt_split(&with_history, "again", model);
+            assert!(
+                prefix2.starts_with(&base),
+                "base must lead the chat prefix (with history) for {model:?}\n base: {base:?}\n prefix: {prefix2:?}"
+            );
+        }
+
+        // Empty system prompt -> empty base (nothing to pin).
+        assert!(assistant_base_prefix("   ", "gemma-4-e2b-it").is_empty());
+    }
+
+    #[test]
     fn gemma_split_keeps_system_in_prefix() {
         let ctx = AssistantContext {
             system_prompt: "You are a helpful assistant.".into(),
@@ -1983,6 +2140,23 @@ mod tests {
     }
 
     #[test]
+    fn common_prefix_len_stops_at_first_divergent_token() {
+        use llama_cpp_2::token::LlamaToken as T;
+        let tok = |ids: &[i32]| ids.iter().map(|i| T(*i)).collect::<Vec<_>>();
+        // Identical sequences: full overlap.
+        assert_eq!(common_prefix_len(&tok(&[1, 2, 3]), &tok(&[1, 2, 3])), 3);
+        // Divergence at the last token (the reply/closer merge case): the
+        // shared run is everything up to the divergent tail, which is exactly
+        // what the completed-turn checkpoint must store.
+        assert_eq!(common_prefix_len(&tok(&[1, 2, 3, 99]), &tok(&[1, 2, 3, 4, 5])), 3);
+        // One is a strict prefix of the other.
+        assert_eq!(common_prefix_len(&tok(&[1, 2]), &tok(&[1, 2, 3, 4])), 2);
+        // Immediate divergence / empty input.
+        assert_eq!(common_prefix_len(&tok(&[9]), &tok(&[1])), 0);
+        assert_eq!(common_prefix_len(&tok(&[]), &tok(&[1, 2])), 0);
+    }
+
+    #[test]
     fn gemma_history_render_is_stable_across_turns() {
         // A turn that has scrolled into history must render byte-for-byte the
         // same as it did when it was the current turn (modulo the appended
@@ -2006,6 +2180,59 @@ mod tests {
         // Everything prompt1 emitted up to the model-open tag is reproduced
         // verbatim at the head of prompt2.
         assert!(prompt2.starts_with(&prompt1), "history render drifted between turns");
+    }
+
+    #[test]
+    fn cached_prefix_nests_across_turns_under_daemon_flow() {
+        // Regression for the current-turn double-count bug (2026-06-09): the
+        // daemon snapshots COMPLETED history (excluding the in-flight user turn)
+        // and passes the current turn as `user_text`
+        // (`crates/fono/src/assistant.rs`). Under that contract every turn's
+        // cache prefix must be a string-prefix of the next turn's prefix, so
+        // `find_longest_prefix` can restore the prior checkpoint and prefill
+        // only the new exchange. The old bug pushed the user turn into
+        // `ctx.history` *before* snapshotting, so the prefix ended in a volatile
+        // `<start_of_turn>user\n` marker that the next turn overwrote with the
+        // model reply (`<start_of_turn>model\n...`) — nesting broke and only the
+        // static system base could ever be restored. This test reproduces the
+        // exact push/snapshot ordering and is model-free (the divergence is
+        // structural, visible at the string level).
+        use crate::history::ConversationHistory;
+        let exchanges = [
+            ("what's the weather", "I can't check live weather."),
+            ("set a timer for ten minutes", "Timer set."),
+            ("make it fifteen", "Updated to fifteen minutes."),
+        ];
+        for model in ["gemma-4-e2b-it", "qwen3.5-0.8b"] {
+            let system = "You are a concise voice assistant.";
+            let mut hist = ConversationHistory::default();
+            let mut prev_prefix: Option<String> = None;
+            for (user, assistant) in exchanges {
+                // Daemon order: snapshot COMPLETED history, then record the user.
+                let snapshot = hist.snapshot();
+                hist.push_user((*user).to_string());
+                let ctx = AssistantContext {
+                    system_prompt: system.into(),
+                    history: snapshot,
+                    ..AssistantContext::default()
+                };
+                let (prefix, _suffix) = build_prompt_split(&ctx, user, model);
+                if let Some(prev) = &prev_prefix {
+                    assert!(
+                        prefix.starts_with(prev),
+                        "cache prefix must extend the previous turn's prefix for {model:?}.\nprev: {prev:?}\nnext: {prefix:?}"
+                    );
+                }
+                // The in-flight user text lives only in the suffix, never the
+                // cached prefix — asserts the double-count is gone.
+                assert!(
+                    !prefix.contains(user),
+                    "current user text leaked into the cached prefix for {model:?}: {prefix:?}"
+                );
+                prev_prefix = Some(prefix);
+                hist.push_assistant((*assistant).to_string());
+            }
+        }
     }
 
     #[test]

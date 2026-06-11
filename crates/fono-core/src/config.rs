@@ -256,7 +256,7 @@ impl Default for Audio {
             sample_rate: 16000,
             vad_backend: "silero".into(),
             trim_silence: true,
-            auto_stop_silence_ms: 5_000,
+            auto_stop_silence_ms: 3_000,
         }
     }
 }

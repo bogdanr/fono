@@ -1,5 +1,340 @@
 # Fono — Project Status
-Last updated: 2026-06-08
+Last updated: 2026-06-09
+
+## 2026-06-09 — F7 polish: control-token stop (the definitive cleanup fix)
+
+The repetition-penalty fix (below) stopped the verbatim *text* loop but a fresh
+trace still showed garbage: `polish 2001ms … 20 → 5 chars`, output `model`. The
+penalty had collapsed the old 256-token `<start_of_turn>model…` loop down to a
+single `model`, but the underlying stop-detection was still broken.
+
+**Definitive root cause (proven against the real `gemma-4-e2b.gguf`).** A
+throwaway tokenizer/generation probe over the actual model file showed this
+GGUF's control tokens are **non-standard**:
+- token **105** renders as `<|turn>` — `control = true`, `eog = false` (the
+  start-of-turn opener; renders **empty** under `special = false`).
+- token **106** renders as `<turn|>` — `control = true`, `eog = true` (the
+  end-of-turn closer).
+- tokens 107/108 are `\n` / `\n\n` — `control = false` (ordinary text).
+
+So the hand-rolled literals `<start_of_turn>` / `<end_of_turn>` tokenize as
+**plain text** on this vocab and never match the model's real markers — both for
+prompting and for stop detection. `single_token("<end_of_turn>")` returned
+`None`, making **every** literal-string stop check dead code. The model emitted
+its real opener (105, empty render) → `model`, with nothing to stop it; `is_eog`
+alone would also have missed 105. The native chat template (option B) is not a
+viable workaround here: `apply_chat_template` fails with `FfiError(-1)` on this
+model's tool-enabled Jinja template.
+
+**Fix.** `generate_from_prefilled` now stops on **any token tagged
+`LlamaTokenAttr::Control`** (`model.token_attr(token).contains(Control)`),
+replacing the dead `single_token` literal checks (helper removed). This is
+model-agnostic and correct by construction — a single-shot cleanup must never
+emit a turn marker, BOS/EOS, or end-of-generation token — and it catches 105,
+106, eos and bos while letting newline tokens (107/108) flow. The repetition
+penalty (for pure-text loops that emit no control token) and the textual
+`first_stop_marker` scan (for markers that round-trip as plain text) remain as
+complementary safety nets. Probe-confirmed: clean self-termination at ~23 tokens
+in ~1.5 s on this model.
+
+Latency unchanged from the note below: this is correctness, not speed. Embedded
+CPU decode (~10–15 tok/s) puts a typical cleanup at ~1.5–3 s; sub-1s needs the
+GPU build or the local-server / ollama polish backend. Gate green: `cargo fmt
+--all -- --check`, `cargo clippy --workspace --all-targets --features
+llama-local -- -D warnings`, `cargo test --workspace --tests --lib --features
+llama-local` (0 failures). Not committed.
+
+## 2026-06-09 — F7 polish: Gemma template support (fixes looping cleanup output)
+
+A trace + log run surfaced a serious functional bug on the embedded polish path:
+with a **Gemma** model configured for local polish, cleanup output looped the
+same (correctly cleaned) sentence ~17× until the 256-token cap — `polish 28523ms
+[app+adv] 34 → 645 chars`. Correct-text-repeated was the tell: the model cleaned
+fine but never received a stop signal.
+
+**Root cause.** The embedded polish backend (`crates/fono-polish/src/llama_local.rs`)
+only ever emitted the **ChatML** template (`<|im_start|>…<|im_end|>`) and only
+stopped on `eos` / `<|im_end|>`. Gemma uses `<start_of_turn>…<end_of_turn>` and
+never emits `<|im_end|>`, so greedy decoding ran to `MAX_NEW_TOKENS`. This
+surfaced now because Gemma polish previously routed to the ollama HTTP backend
+(which applies Gemma's own template); a recent change wired Gemma into the
+embedded `LlamaLocal` path, which had no Gemma support. The assistant backend
+already dispatches Gemma vs ChatML by model name — polish did not.
+
+**Fix.** Made the polish backend template-aware, mirroring the assistant:
+- `template_for_model` + `build_prompt_split_for_model` dispatch Gemma vs ChatML
+  (Qwen3 thinking-suppression preserved) by model-name substring.
+- `build_gemma_prompt_split` renders `<start_of_turn>user\n{system}\n\n` /
+  `{transcript}<end_of_turn>\n<start_of_turn>model\n` (Gemma has no system role,
+  so the system prompt leads the user turn).
+- `generate_from_prefilled` now also stops on `<end_of_turn>` (via a new
+  `single_token` helper used for both stop markers).
+- `base_prefix_for_model` frames the pinned base prefix to match the active
+  template (`<start_of_turn>user\n{base}` for Gemma), so the prewarmed F7 base
+  remains a genuine token-prefix of the live prompt; `format()` and
+  `prewarm_prompt_cache` both route through it.
+- New model-free tests: Gemma/Qwen template dispatch, Gemma split round-trip,
+  Gemma base-prefix nesting.
+
+**Follow-up (same session) — runaway-generation guard.** A trace after the
+template fix showed the cache working perfectly (restored the 426-token Gemma
+base, `cache_hits: 1`) but generation still ran ~24.6 s to the 256-token cap,
+emitting a `<start_of_turn>`+`model` loop (the opener renders empty under
+`special = false`, so the visible output was bare `model` lines). The loop never
+closed with `<end_of_turn>`. Fix: `generate_from_prefilled` now also stops on
+`<start_of_turn>` (a single-shot cleanup must never open a new turn) and runs a
+textual `first_stop_marker` scan over the template markers as belt-and-braces
+(for models that emit markers as plain text). Bounds runtime and prevents
+injecting the looped output. NOTE: gemma-4-e2b at q4 appeared to degenerate from
+the first generated token on this cleanup prompt under greedy decoding — the
+guard stops the runaway, but if a model degenerates immediately the cleanup
+falls back to raw text; a ChatML cleanup model (Qwen/SmolLM) or a cloud polish
+backend is the better choice for low-tier local hardware.
+
+Gate green: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets
+--features llama-local -- -D warnings`, `cargo test --workspace --tests --lib
+--features llama-local` (0 failures). Not committed.
+
+**Follow-up (same session) — repetition-penalty sampler (the actual root cause).**
+The "degenerates from the first token" note above was wrong. A later trace showed
+the embedded polish path producing the *correctly cleaned* sentence and then
+repeating it verbatim ~6× until the 256-token cap — correct content, infinite
+verbatim loop. Root cause: the embedded `LlamaLocal` cleanup sampler was bare
+`LlamaSampler::greedy()` with **no repetition penalty**. Cleanup output closely
+mirrors the input transcript, the worst case for greedy decoding: once the model
+reproduces the near-echo input it keeps reproducing it and never emits
+`<end_of_turn>`. The Gemma cleanup that "worked in benchmarks" ran through the
+ollama/server path, which applies the model's default sampling stack (top_p +
+repeat penalty); the embedded path never did. Fix: `generate_from_prefilled` now
+uses `chain_simple([penalties(PENALTY_LAST_N=128, PENALTY_REPEAT=1.3, 0.0, 0.0),
+greedy()])`. The penalty sampler only sees tokens passed to `sampler.accept()`,
+and we accept *only generated* tokens (prefill uses `ctx.decode`), so it
+penalises the model for repeating its own output without penalising faithful
+reproduction of the transcript; output stays deterministic (argmax of penalised
+logits). The `<start_of_turn>`/`<end_of_turn>`/`first_stop_marker` stops remain as
+the safety net.
+
+Latency caveat: this fixes correctness (23 s loop → one clean pass) but the
+embedded CPU decode rate (~10–11 tok/s in traces) puts a ~35-token cleanup at
+~1.5–3 s. Sub-1s cleanup (the ~0.55 s benchmark) was the local OpenAI-compatible
+server path, not embedded — see `plans/2026-06-07-local-assistant-runtime-parity-v1.md`.
+For sub-1s: use the GPU build, the local server / ollama polish backend, or close
+the documented embedded-vs-server parity gap. Gate green (fmt, clippy
+`--features llama-local -D warnings`, workspace tests, 0 failures). Not committed.
+
+## 2026-06-09 — F8 cache: real root cause found (current-turn double-count) + flat-prefill fix
+
+The 2026-06-09 longest-prefix work below made the machinery fire but a follow-up
+trace run (`/tmp/fono-traces`, ~09:5x) showed it only ever restored the **static
+78-token `f8_system` base** — never a prior turn's `F8ChatPrefix` checkpoint — so
+prefill (and TTFB) still grew with conversation length (turn 4: 250 prefilled
+tokens, 3003 ms TTFB). Investigated and found the true root cause; the earlier
+"framing fix" addressed only the base.
+
+**Investigation (conclusive, tokenizer-level).** A throwaway probe loaded the
+real Gemma tokenizer (`ggml-vocab-gemma-4.gguf`, vocab-only) and replicated the
+exact live store/lookup comparison. Clean append-only history nests perfectly
+(boundary-merge hypothesis **disproven**); replicating the live daemon flow
+breaks nesting every turn, diverging at the same place — the stored prefix ends
+in tokens for `<start_of_turn>user\n` while the next turn has
+`<start_of_turn>model\n{reply}…` there.
+
+**Root cause.** `crates/fono/src/assistant.rs` pushed the current user turn into
+`ConversationHistory` **before** snapshotting, so `ctx.history` already ended
+with the in-flight turn — *and* the same text was passed as `user_text`. Every
+backend's builder (`build_*_prompt_split` for local, `build_initial_messages` /
+the anthropic message loop for cloud) treats `user_text` as the current turn and
+renders it itself, so the user message was **double-counted** in the prompt, and
+the local cache prefix ended in a volatile `<start_of_turn>user\n` marker that
+the next turn overwrote with the model reply — defeating all prefix reuse.
+
+**Fix (Option A — correctness + flat prefill).** Snapshot the **completed**
+history first, then record the user turn for the next turn
+(`crates/fono/src/assistant.rs`). `ctx.history` now excludes the in-flight turn,
+matching the contract every backend builder already assumed (cloud backends
+needed no change — they were fed bad input). This removes the duplicate user
+message **and** restores prefix nesting: turn N+1 now restores turn N's
+`F8ChatPrefix` checkpoint and prefills only the new exchange (flat per-turn cost,
+independent of conversation length).
+
+**Fix (Option C — skip re-prefilling the reply).** `generate_with_prefix_cache`
+(`crates/fono-assistant/src/llama_local.rs`) now also checkpoints the
+**post-generation** KV state (system + history + this turn's user + reply),
+emitting `llm.prompt_cache_completed_turn`, so the next turn restores the whole
+completed exchange and prefills only the new turn's framing.
+
+**Correction (2026-06-09, later trace run).** The first cut of Option C stored the
+raw sampled tokens and never matched — a trace run showed every turn still
+restoring only the static 78-token `f8_system` base, with prefill/TTFB growing
+(turn 4: 250 prefilled tokens, 3003 ms TTFB). A tokenizer probe pinned the cause:
+the KV holds the *sampled* token ids, but next turn the reply re-tokenizes as part
+of a longer prompt and BPE **merges the final reply token with the turn-closer**
+(`<end_of_turn>` / `<|im_end|>`). So the stored sequence missed being a token
+prefix by its trailing token(s), and `find_longest_prefix` rejected the whole
+entry. (The leading-space hypothesis was disproven — divergence is at the tail.)
+The salvage: store only the longest prefix of the generated sequence that the next
+turn reproduces verbatim — the common prefix (`common_prefix_len`) with the
+canonical "completed turn" rendering (reply trimmed + closer) — and truncate the
+KV cache to that length via `clear_kv_cache_seq` so the saved state's position
+count equals the recorded token count (the invariant every other checkpoint
+holds). The trace now reports `reusable_tokens` / `dropped_tail_tokens`.
+`generate_from_prefilled_context` returns the decoded reply tokens to enable this.
+
+New regression tests (model-free): `cached_prefix_nests_across_turns_under_daemon_flow`
+reproduces the exact push/snapshot ordering and asserts each turn's cache prefix
+is a string-prefix of the next turn's (and that the current user text never leaks
+into the prefix), for Gemma + ChatML; `common_prefix_len_stops_at_first_divergent_token`
+locks the trim-to-shared-prefix behaviour. Both fail under the old logic.
+
+**Pending verification.** The Option C salvage performs KV-cache surgery
+(`clear_kv_cache_seq` + state save) that cannot be exercised in CI (no full model,
+only the vocab-only GGUF). Verify on a real model: a trace run should show
+`llm.prompt_cache_completed_turn` with `dropped_tail_tokens` ≈ 1, then turn N+1
+restoring a `matched_tokens` count that *grows* with conversation length while
+prefill stays flat.
+
+Gate green: `cargo fmt --all -- --check`; `cargo clippy --workspace
+--all-targets --features llama-local -- -D warnings`; `cargo test --workspace
+--tests --lib`. Plan: `plans/2026-06-09-f8-current-turn-double-count-cache-fix-v1.md`.
+Verify empirically by re-recording traces: turn 2+ should show
+`llm.prompt_cache_restored` with a growing `matched_tokens` (not a flat 78) and
+`llm_ttfb_ms` no longer growing with history.
+
+## 2026-06-09 — Cache trace gaps closed + F8 cold-prefill fixed via longest-prefix restore
+
+Acted on the first real trace run (`/tmp/fono-traces`, 2026-06-09 ~08:39–08:41),
+which proved the F8 assistant cache was missing on **every** turn: each assistant
+turn did an exact-key lookup only, missed, and cold-prefilled the whole prompt
+from `start_pos=0` (`built` 974 ms / 1714 ms on turns 3/4 as history grew), while
+the bases pinned at startup sat unused. No `prompt_cache_prefix_match` /
+`prompt_cache_restored` ever fired on the assistant path.
+
+- **Workstream A — assistant `turn.finish` scoreboard.** Folded
+  `trace.cache_scoreboard()` into the `summary` of the assistant pump's
+  `turn.finish` args (all exits, including early aborts) in
+  `crates/fono/src/assistant.rs`, matching the dictation/startup paths so the
+  most important path now ends with the `{cache_hits, cache_misses,
+  cold_prefills, bytes_restored}` headline metric.
+- **Workstream B — dictation STT/polish trace events.** Held the dictation
+  `TurnTrace` current across the whole post-`key.release` pipeline (STT → polish
+  → inject) in `crates/fono/src/session.rs` and added an `stt` lane span around
+  the transcribe call, so the existing `polish.*` cache instrumentation
+  (`crates/fono-polish/src/llama_local.rs`) finally records and the dictation
+  waterfall shows STT timing instead of an empty gap.
+- **Workstream C — the real fix (F8 cold-prefill → base restore).** The
+  assistant live path (`generate_with_prefix_cache`,
+  `crates/fono-assistant/src/llama_local.rs`) now mirrors the F7 polish design:
+  - Every assistant checkpoint is inserted **with recorded tokens**
+    (`PromptStateCacheEntry::with_tokens`) — both the live `F8ChatPrefix` build
+    and the startup/hotkey prewarm — so they can participate in longest-prefix
+    matching. Previously they used `::new` (no tokens) and were reachable by
+    exact key only.
+  - On an exact-key miss the path now calls
+    `PromptStateCache::find_longest_prefix` over `[F8ChatPrefix, F8System]`,
+    restores the deepest cached prefix (a prior turn's chat prefix — the prompt
+    is append-only — or the pinned system base), emits
+    `llm.prompt_cache_prefix_match` + `llm.prompt_cache_restored`, and prefills
+    only the remaining tokens (`start_pos = matched_len`). A full cold prefill +
+    `cold_prefill("no_prefix_match")` happens only when nothing matches.
+  - **Framing fix:** the prewarmed `F8System` base was the *bare* `prompt_main`
+    text, which is **not** a token-prefix of the live chat prompt (the chat
+    prompt wraps the system block in `<start_of_turn>user\n…` / `<|im_start|>
+    system\n…`). The new `assistant_base_prefix()` frames the base into the
+    model's chat template — exactly mirroring the F7 `chatml_base_prefix` — so it
+    is a genuine textual (and, modulo tokenizer boundaries the runtime guard
+    catches, token) prefix. A new unit test
+    (`assistant_base_prefix_leads_chat_prefix`) asserts this for Gemma + ChatML,
+    with and without history, so a future prompt-layout change fails loud.
+  - **Dead prewarm removed:** the deprecated `WindowContext` rebuild and the
+    `F7System` warmup on the *assistant* backend (F7 polish runs on its own
+    backend; the live reply path never restores either) are gone. The hotkey
+    prepare now warms only the F8 base; an F7 trigger is a no-op there. The
+    `F8System` and `AssistantTools` prewarm are kept.
+
+`crates/fono-core/src/prompt_cache.rs` stays llama-agnostic (only its existing
+`with_tokens` / `find_longest_prefix` public API is used; no new deps). Net
+effect: turn 2+ restores a base (~tens of ms) instead of cold-prefilling the
+whole growing prompt, and the assistant `turn.finish` scoreboard shows a
+prefix-restore rather than a cold prefill every turn.
+
+Gate green: `cargo fmt --all -- --check`; `cargo clippy --workspace
+--all-targets --features llama-local -- -D warnings`; `cargo test --workspace
+--tests --lib`. New test: `fono-assistant` `assistant_base_prefix_leads_chat_prefix`.
+
+## 2026-06-08 — F7 prefix cache: restore-and-suffix + per-context + longest-prefix (plan tasks 19–21)
+
+Completed the F7 (transcription cleanup) side of the layered cache design. The
+polish backend had **no** prompt-state cache before this: `format()` built the
+full prompt fresh and ran a cold prefill on every dictation.
+
+- **F7 restore-and-suffix (Task 19).** Ported the llama.cpp build/restore glue
+  into `crates/fono-polish/src/llama_local.rs`, mirroring the F8 reply path.
+  `format()` splits the ChatML prompt into a stable prefix + transcript suffix
+  (`build_chatml_prompt_split_*`); `run_inference_cached` restores the deepest
+  matching checkpoint and decodes only the suffix. Two independent guards —
+  exact `prefix+suffix == prompt` string equality and a token-level
+  `starts_with` — make a wrong-state restore impossible; worst case is a safe
+  full prefill. The pinned base `<|im_start|>system\n{base_system}` is built
+  lazily on first use and pinned, then reused for every dictation.
+- **F7 per-context layer (Task 20).** The full per-app system prefix
+  (`base + rule_suffix[context]`) is cached under the new `F7Context` layer,
+  keyed by content fingerprint, so each focused-app context (CLI / editor /
+  browser / terminal-agent) gets its own checkpoint restored exactly on the
+  next dictation into that app. `FormatContext::base_system_prompt()` exposes
+  the pinnable, context-independent base distinct from the full prompt.
+- **Longest-prefix matching (Task 21).** `PromptStateCache::find_longest_prefix`
+  (fono-core) returns the deepest cached entry whose recorded tokens are a
+  *proper* token-prefix of a new prompt, scoped by runtime + layer set. On an
+  exact-key miss the F7 path restores the pinned base and decodes only the
+  per-context delta instead of a cold prefill. Fallback chain: exact F7Context
+  hit → longest-prefix (pinned base) → cold.
+
+Per-utterance language directive and assistant window context remain dropped
+from the cached prefixes per the design discussion.
+
+Gate green: fmt, clippy `--workspace --all-targets --features llama-local
+-D warnings`, `cargo test --workspace`. New tests: fono-core prompt_cache 10
+(3 longest-prefix), fono-polish 44 (split-reproduction, base-is-a-prefix),
+fono-polish traits base_system_prompt prefix invariants.
+
+**Still open:** Task 13/16 quantification — an end-to-end F7/F8 cache-on vs
+cache-off benchmark on the real model to put numbers on the warm-dictation win
+(the machinery and guards are in; this is measurement, deferred to a hardware
+run).
+
+## 2026-06-08 — Cache pinning + shared machinery (plan tasks 17–18)
+
+Executed the first two items of the v2 cache design (layered, per-context
+caching with pinned bases).
+
+- **Pinning (Task 17).** Context-independent base prefixes — the F7 cleanup
+  base, the F8 system prompt, the tool prompt — are now protected from LRU
+  eviction. `PromptStateCache::insert_pinned` marks them; `evict_over_budget`
+  skips pinned keys and stops rather than dropping a protected checkpoint. Only
+  the most-recent snapshot of a pinnable layer stays pinned: when the active
+  prompt/runtime changes (new key) the stale pin is released so it ages out.
+  This converts "usually warm under LRU" into a hard guarantee that the next use
+  of a base is never a cold prefill, at the cost of ≤3 bounded slots.
+- **Shared machinery (Task 18).** Lifted the whole bounded cache
+  (`PromptStateCache`, key, entry, layer, LRU + byte budget + pinning) out of
+  `fono-assistant` into `crates/fono-core/src/prompt_cache.rs` as a
+  **llama-agnostic** data structure: it stores opaque `Vec<u8>` state blobs and
+  carries no `llama-cpp-2` dependency, so the polish (F7) backend can reuse it
+  without duplication. `fono-assistant` now imports it and keeps only the
+  llama.cpp glue (content-fingerprint key, build/restore by prefilling tokens).
+  Added an `F7Context` layer for the upcoming per-context (app) cache.
+
+7 unit tests in `fono-core::prompt_cache` (LRU order, touch-bumps-MRU, byte
+budget, pinned survives entry-count + byte-budget eviction, repin releases stale
+pin, remove_layer clears pin). Gate green: fmt, clippy
+`--workspace --all-targets --features llama-local -D warnings`, `cargo test`
+(fono-core + fono-assistant 56).
+
+**Next slice:** Task 19 (port the llama.cpp build/restore glue into the polish
+backend and wire F7 restore-and-suffix), Task 20 (F7 per-context layer keyed by
+the classifier bucket), Task 21 (longest-prefix matching). The design is locked
+in the plan; assistant window context and the F7 language directive are both
+dropped from the cached prefixes per the design discussion.
 
 ## 2026-06-08 — Multi-turn cache benchmark confirms the system-first fix
 

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Local AI got noticeably snappier on repeat use.** The embedded
+  llama.cpp engine now keeps reusable checkpoints of the prompts it has
+  already processed (the cleanup instructions, the assistant's system
+  prompt, your running conversation), so warm dictations and follow-up
+  assistant turns skip re-crunching all of that and only process what's
+  new. Time-to-first-token stays flat as a conversation grows instead of
+  climbing with every turn; restoring a saved checkpoint takes tens of
+  milliseconds where a cold re-read of a long conversation took seconds.
+  Cleanup also gets a per-app checkpoint, so dictating into your editor,
+  browser, or terminal each reuses its own warmed-up state.
 - English dictation read-back now uses **Kokoro**, a higher-quality local
   voice, while every other language keeps using Piper. Four English voices
   ship — `af_heart` (the default), `af_bella`, `af_nicole` (American) and
@@ -24,6 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Local cleanup with a Gemma model no longer loops or runs away.** Three
+  compounding bugs made the embedded engine repeat a (correctly cleaned)
+  sentence until a token cap — turning a 1-second cleanup into a 25-second
+  one that injected garbage. The engine now renders Gemma's own prompt
+  format instead of assuming ChatML, stops generation on any
+  control/end-of-turn token (model-agnostic, so models with non-standard
+  vocabularies stop correctly too), and applies a repetition penalty to its
+  own output so near-echo cleanups can't lock into a verbatim loop.
 - **Privacy hardening on shared machines.** The transcription history
   database (`history.sqlite`) is now clamped to owner-only permissions
   (0600) every time it is opened — it holds everything you have ever
@@ -74,6 +92,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was silent); these comma-below codepoints are now folded onto their cedilla
   equivalents (`ş`/`ţ`) before phonemization, as the upstream C library does
   internally.
+
+### Changed
+
+- **Hands-free recording stops a little sooner.** The default auto-stop
+  silence window dropped from 5 s to 3 s, so dictation commits faster
+  after you stop talking. Set `[audio].auto_stop_silence_ms` to keep a
+  longer pause budget.
 
 ## [0.9.1] — 2026-05-29
 

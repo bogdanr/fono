@@ -16,6 +16,11 @@ workspace = true
 default = []
 # Live-dictation budget controller + provider price table. Plan R12.
 budget = []
+# Shared process-wide llama.cpp backend singleton. Enabled transitively
+# by `fono-polish`/`fono-assistant`'s own `llama-local` features so both
+# embedded-LLM paths share one `LlamaBackend::init()` (a second init in
+# the same process panics — see `src/llama_backend.rs`).
+llama-local = ["dep:llama-cpp-2"]
 # Runtime detection of Vulkan loader + physical devices via `ash`'s
 # `loaded` (dlopen) backend. Off by default so the workspace's many
 # fono-core consumers don't pull `ash` + `libloading` transitively;
@@ -50,6 +55,7 @@ rusqlite = { workspace = true }
 regex = { workspace = true }
 once_cell = { workspace = true }
 ash = { workspace = true, optional = true }
+llama-cpp-2 = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

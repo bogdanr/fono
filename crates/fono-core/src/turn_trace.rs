@@ -1,12 +1,29 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Lightweight opt-in assistant turn timeline recorder.
+//! Lightweight opt-in turn timeline recorder.
 //!
-//! Set `FONO_ASSISTANT_TRACE=/path/to/dir` to write one Chrome Trace Event JSON
-//! file per assistant turn. Open the file in `chrome://tracing` or Perfetto to
-//! inspect the STT → LLM → TTS → playback waterfall.
+//! Set `FONO_ASSISTANT_TRACE=/path/to/dir` to write Chrome Trace Event JSON
+//! files. Open them in `chrome://tracing` or Perfetto to inspect the
+//! keys → STT → polish/LLM → TTS → playback waterfall and the prompt-cache
+//! decisions taken along the way.
+//!
+//! Three kinds of trace file are emitted (the env var may also point at an
+//! explicit `.json` path, in which case that path is used verbatim):
+//!
+//! * `dictation-<id>.json` — one per F7 plain-dictation/polish turn; started at
+//!   key-press time so the `keys` lane precedes STT.
+//! * `assistant-<id>.json` — one per F8 assistant turn (`run_assistant_turn`).
+//! * `startup-<id>.json` — one for the daemon's startup prewarm batch
+//!   (`spawn_warmups`), written once every warmup task completes.
+//!
+//! Lanes (Chrome Trace `tid`s) are fixed; see [`KEYS_LANE`] for the taxonomy.
+//! Lower-level crates emit via the ambient [`current_span`]/[`current_instant`]
+//! helpers once a trace is installed with [`TurnTrace::make_current`], so they
+//! never need a diagnostic parameter threaded through their public traits.
+//! The cache scoreboard ([`TurnTrace::cache_scoreboard`]) rolls the recorded
+//! cache events into `turn.finish` args for a one-glance hit/miss summary.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -16,6 +33,43 @@ use tracing::warn;
 
 static NEXT_TRACE_ID: AtomicU64 = AtomicU64::new(1);
 static CURRENT_TRACE: OnceLock<Mutex<Option<Weak<Inner>>>> = OnceLock::new();
+/// Hot-path fast guard: `true` only while a trace is installed as
+/// process-current. The per-token instant/span helpers ([`current_span`],
+/// [`current_instant`], [`TurnTrace::current`]) load this with a single relaxed
+/// atomic and bail before touching the [`CURRENT_TRACE`] mutex, so a normal
+/// (untraced) dictation or assistant turn pays nothing for the instrumentation
+/// sprinkled through the STT/LLM/TTS inner loops. Flipped on by
+/// [`TurnTrace::make_current`] and back off when the guard drops.
+static TRACE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Stable trace lane (Chrome Trace `tid`) names. Both the F7 (plain dictation /
+/// polish) and F8 (assistant) paths render into the same fixed set of lanes so
+/// a loaded trace always shows the pipeline in the same top-to-bottom order:
+///
+/// | lane            | stage                                                  |
+/// |-----------------|--------------------------------------------------------|
+/// | `keys`          | key press/release + hotkey FSM transitions             |
+/// | `stt`           | speech-to-text                                         |
+/// | `f7-polish`     | F7 plain-dictation cleanup (`polish.*`)                |
+/// | `llm`           | F8 assistant generation (`assistant.llm`)              |
+/// | `tts`           | text-to-speech synthesis                               |
+/// | `playback`      | audio playback                                         |
+/// | `cache`         | prompt-state (KV) cache decisions for both F7 and F8   |
+/// | `warmup`        | startup prewarm (startup trace file only)              |
+/// | `assistant-pump`| turn lifecycle (`turn.start` / `turn.finish`)          |
+pub const KEYS_LANE: &str = "keys";
+/// See [`KEYS_LANE`] for the full lane taxonomy.
+pub const STT_LANE: &str = "stt";
+/// See [`KEYS_LANE`] for the full lane taxonomy.
+pub const POLISH_LANE: &str = "f7-polish";
+/// See [`KEYS_LANE`] for the full lane taxonomy.
+pub const LLM_LANE: &str = "llm";
+/// See [`KEYS_LANE`] for the full lane taxonomy.
+pub const CACHE_LANE: &str = "cache";
+/// See [`KEYS_LANE`] for the full lane taxonomy.
+pub const WARMUP_LANE: &str = "warmup";
+/// See [`KEYS_LANE`] for the full lane taxonomy.
+pub const PUMP_LANE: &str = "assistant-pump";
 
 /// Cloneable handle for recording one assistant turn timeline.
 #[derive(Clone)]
@@ -69,18 +123,34 @@ impl TurnTrace {
     /// Start a trace if `FONO_ASSISTANT_TRACE` is set.
     #[must_use]
     pub fn start_from_env() -> Option<Self> {
+        Self::start_from_env_named("assistant")
+    }
+
+    /// Start a trace if `FONO_ASSISTANT_TRACE` is set, writing to a file whose
+    /// name begins with `prefix` (e.g. `assistant-…`, `dictation-…`,
+    /// `startup-…`). When the env var points at an explicit `.json` path the
+    /// prefix is ignored and that path is used verbatim.
+    #[must_use]
+    pub fn start_from_env_named(prefix: &'static str) -> Option<Self> {
         let raw = std::env::var("FONO_ASSISTANT_TRACE").ok()?.trim().to_string();
         if raw.is_empty() || raw == "0" || raw.eq_ignore_ascii_case("false") {
             return None;
         }
-        Some(Self::start_in(Path::new(&raw)))
+        Some(Self::start_in_named(Path::new(&raw), prefix))
     }
 
     /// Start a trace in a directory or at an explicit JSON path.
     #[must_use]
     pub fn start_in(base: &Path) -> Self {
+        Self::start_in_named(base, "assistant")
+    }
+
+    /// Start a trace in a directory (using `prefix` for the generated file name)
+    /// or at an explicit JSON path.
+    #[must_use]
+    pub fn start_in_named(base: &Path, prefix: &'static str) -> Self {
         let id = NEXT_TRACE_ID.fetch_add(1, Ordering::Relaxed);
-        let path = trace_path(base, id);
+        let path = trace_path(base, prefix, id);
         Self {
             inner: Arc::new(Inner {
                 id,
@@ -111,12 +181,19 @@ impl TurnTrace {
             .lock()
             .expect("turn trace current mutex poisoned")
             .replace(Arc::downgrade(&self.inner));
+        TRACE_ACTIVE.store(true, Ordering::Release);
         CurrentTraceGuard { previous }
     }
 
     /// Return the process-current trace, if tracing is enabled for this turn.
     #[must_use]
     pub fn current() -> Option<Self> {
+        // Hot path: one relaxed load short-circuits the mutex when no trace is
+        // installed. This is what keeps the inner-loop `current_instant`
+        // (per-token) and `current_span` calls free on untraced turns.
+        if !TRACE_ACTIVE.load(Ordering::Acquire) {
+            return None;
+        }
         let slot = CURRENT_TRACE.get()?;
         let guard = slot.lock().expect("turn trace current mutex poisoned");
         guard.as_ref().and_then(Weak::upgrade).map(|inner| Self { inner })
@@ -204,6 +281,38 @@ impl TurnTrace {
         }
     }
 
+    /// Roll up the cache events recorded so far into a one-glance scoreboard:
+    /// `{cache_hits, cache_misses, cold_prefills, bytes_restored}`. A **hit** is
+    /// any turn that restored cached state — exact-key OR longest-prefix — i.e.
+    /// a `*prompt_cache_restored` event; a **miss** is a genuine
+    /// `*prompt_cache_cold_prefill` (nothing reusable). The exact-key
+    /// `prompt_cache_lookup` probe missing is NOT a miss on its own: the
+    /// longest-prefix fallback usually restores anyway, so counting it would
+    /// understate the cache. Works for both the F7 and F8 lanes.
+    #[must_use]
+    pub fn cache_scoreboard(&self) -> Value {
+        let events = self.inner.events.lock().expect("turn trace events mutex poisoned");
+        let mut hits = 0_u64;
+        let mut cold_prefills = 0_u64;
+        let mut bytes_restored = 0_u64;
+        for ev in events.iter() {
+            if ev.name.ends_with("prompt_cache_restored") {
+                hits += 1;
+                bytes_restored +=
+                    ev.args.get("restored_bytes").and_then(Value::as_u64).unwrap_or(0);
+            } else if ev.name.ends_with("prompt_cache_cold_prefill") {
+                cold_prefills += 1;
+            }
+        }
+        drop(events);
+        json!({
+            "cache_hits": hits,
+            "cache_misses": cold_prefills,
+            "cold_prefills": cold_prefills,
+            "bytes_restored": bytes_restored,
+        })
+    }
+
     fn push_event(&self, event: TraceEvent) {
         self.inner.events.lock().expect("turn trace events mutex poisoned").push(event);
     }
@@ -224,7 +333,11 @@ impl Drop for CurrentTraceGuard {
     fn drop(&mut self) {
         let slot = CURRENT_TRACE.get_or_init(|| Mutex::new(None));
         let mut guard = slot.lock().expect("turn trace current mutex poisoned");
-        *guard = self.previous.take();
+        let previous = self.previous.take();
+        // Keep the fast guard truthful: only stay active if a parent trace is
+        // still installed underneath us.
+        TRACE_ACTIVE.store(previous.is_some(), Ordering::Release);
+        *guard = previous;
     }
 }
 
@@ -284,10 +397,98 @@ pub fn current_instant(name: &str, cat: &str, tid: &str, args: Value) {
     }
 }
 
-fn trace_path(base: &Path, id: u64) -> PathBuf {
+/// Emit `llm.prompt_cache_evicted` / `llm.prompt_cache_pinned` instants on the
+/// `cache` lane from a [`CacheMutationReport`](crate::prompt_cache::CacheMutationReport).
+///
+/// This is the bridge that lets the llama-agnostic `prompt_cache` data structure
+/// surface eviction/pinning churn to the waterfall: the cache returns the facts,
+/// the backend caller hands them here, and the trace event is written from this
+/// (still llama-free) module. No-op when tracing is disabled for the turn.
+pub fn record_cache_mutation(report: &crate::prompt_cache::CacheMutationReport) {
+    if report.evicted.is_empty() && report.pruned.is_empty() && report.pinned.is_none() {
+        return;
+    }
+    let Some(trace) = TurnTrace::current() else {
+        return;
+    };
+    for ev in &report.evicted {
+        trace.instant(
+            "llm.prompt_cache_evicted",
+            "cache",
+            CACHE_LANE,
+            json!({
+                "layer": ev.layer.as_str(),
+                "token_count": ev.token_count,
+                "bytes": ev.bytes,
+            }),
+        );
+    }
+    for ev in &report.pruned {
+        trace.instant(
+            "llm.prompt_cache_pruned",
+            "cache",
+            CACHE_LANE,
+            json!({
+                "layer": ev.layer.as_str(),
+                "token_count": ev.token_count,
+                "bytes": ev.bytes,
+            }),
+        );
+    }
+    if let Some(layer) = &report.pinned {
+        trace.instant(
+            "llm.prompt_cache_pinned",
+            "cache",
+            CACHE_LANE,
+            json!({
+                "layer": layer.as_str(),
+                "pin_released": report.pin_released.as_ref().map(crate::prompt_cache::PromptStateCacheLayer::as_str),
+            }),
+        );
+    }
+}
+
+fn trace_path(base: &Path, prefix: &str, id: u64) -> PathBuf {
     if base.extension().is_some_and(|ext| ext == "json") {
         return base.to_path_buf();
     }
     let epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-    base.join(format!("assistant-{epoch}-{id:04}.json"))
+    base.join(format!("{prefix}-{epoch}-{id:04}.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scoreboard_counts_prefix_restore_as_hit_not_miss() {
+        // A live F8 turn: the exact-key lookup misses, but the longest-prefix
+        // fallback restores. That is a HIT, not a miss.
+        let trace = TurnTrace::start_in(Path::new("/tmp"));
+        trace.instant("llm.prompt_cache_lookup", "cache", "cache", json!({ "hit": false }));
+        trace.instant("llm.prompt_cache_prefix_match", "cache", "cache", json!({}));
+        trace.instant(
+            "llm.prompt_cache_restored",
+            "assistant.llm",
+            "llm",
+            json!({ "restored_bytes": 4096 }),
+        );
+        let board = trace.cache_scoreboard();
+        assert_eq!(board["cache_hits"], 1);
+        assert_eq!(board["cache_misses"], 0);
+        assert_eq!(board["cold_prefills"], 0);
+        assert_eq!(board["bytes_restored"], 4096);
+    }
+
+    #[test]
+    fn scoreboard_counts_cold_prefill_as_miss() {
+        let trace = TurnTrace::start_in(Path::new("/tmp"));
+        trace.instant("llm.prompt_cache_lookup", "cache", "cache", json!({ "hit": false }));
+        trace.instant("llm.prompt_cache_cold_prefill", "cache", "cache", json!({}));
+        let board = trace.cache_scoreboard();
+        assert_eq!(board["cache_hits"], 0);
+        assert_eq!(board["cache_misses"], 1);
+        assert_eq!(board["cold_prefills"], 1);
+        assert_eq!(board["bytes_restored"], 0);
+    }
 }

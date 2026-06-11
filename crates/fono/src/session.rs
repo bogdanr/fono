@@ -27,9 +27,10 @@ use fono_audio::{
 };
 use fono_core::config::{Config, ContextRule};
 use fono_core::history::{HistoryDb, Transcription as HistoryRow};
+use fono_core::turn_trace::{TurnTrace, KEYS_LANE, PUMP_LANE, STT_LANE, WARMUP_LANE};
 use fono_core::{Paths, Secrets};
 use fono_hotkey::{HotkeyAction, RecordingMode};
-use fono_inject::{ContextClassifier, FocusInfo};
+use fono_inject::{ContextClassifier, ContextProfile, FocusInfo};
 #[cfg(feature = "interactive")]
 use fono_overlay::PolishingPhase;
 use fono_polish::{FormatContext, TextFormatter};
@@ -37,6 +38,7 @@ use fono_polish::{FormatContext, TextFormatter};
 use fono_stt::StreamingStt;
 use fono_stt::{SpeechToText, TranscribeOptions};
 use fono_tts::TextToSpeech;
+use serde_json::json;
 use std::sync::Mutex as StdMutex;
 use std::thread::JoinHandle;
 use tokio::sync::{mpsc, Mutex, Notify};
@@ -50,6 +52,12 @@ pub const MIN_RECORDING: Duration = Duration::from_millis(300);
 
 const POLISH_WALK_MIN: Duration = Duration::from_secs(1);
 const POLISH_WALK_MAX: Duration = Duration::from_secs(5);
+
+/// Upper bound on how many candidate-language F7Context prefixes the
+/// record-start prewarm builds speculatively. Each is one prefill on the
+/// shared local model, serialised against the others; capping keeps a long
+/// configured locale list from spawning an unbounded prefill train under STT.
+const MAX_POLISH_PREWARM_LANGS: usize = 3;
 
 fn polish_walk_duration(recording_duration: Duration) -> Duration {
     (recording_duration / 2).clamp(POLISH_WALK_MIN, POLISH_WALK_MAX)
@@ -220,14 +228,7 @@ fn f7_polish_prompt_for_cache(config: &Config) -> String {
 
 const ASSISTANT_SCREEN_TOOL_PROMPT: &str = "Assistant tool schema: fono_screen captures the focused window or a user-selected screen region when the user asks about visible on-screen content. Call it only when the answer needs current pixels.";
 
-fn assistant_window_context_for_cache(focus_info: &FocusInfo) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(class) = focus_info.window_class.as_deref().filter(|s| !s.trim().is_empty()) {
-        parts.push(format!("Active app class: {class}"));
-    }
-    if let Some(title) = focus_info.window_title.as_deref().filter(|s| !s.trim().is_empty()) {
-        parts.push(format!("Active window title: {title}"));
-    }
+fn classify_focus_profile(focus_info: &FocusInfo) -> Option<ContextProfile> {
     let mut profile = ContextClassifier::classify(
         focus_info.window_class.as_deref(),
         focus_info.window_title.as_deref(),
@@ -242,7 +243,18 @@ fn assistant_window_context_for_cache(focus_info: &FocusInfo) -> Option<String> 
             }
         }
     }
-    if let Some(profile) = profile {
+    profile
+}
+
+fn assistant_window_context_for_cache(focus_info: &FocusInfo) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(class) = focus_info.window_class.as_deref().filter(|s| !s.trim().is_empty()) {
+        parts.push(format!("Active app class: {class}"));
+    }
+    if let Some(title) = focus_info.window_title.as_deref().filter(|s| !s.trim().is_empty()) {
+        parts.push(format!("Active window title: {title}"));
+    }
+    if let Some(profile) = classify_focus_profile(focus_info) {
         parts.push(format!("Context profile: {}", profile.name));
         if let Some(agent) = profile.detected_agent {
             parts.push(format!("Detected coding agent: {agent:?}"));
@@ -270,6 +282,12 @@ struct CaptureSession {
     /// recording (e.g. when an overlay surface or a focus-follows-mouse
     /// move steals it mid-utterance).
     focus_info: FocusInfo,
+    /// Press-time turn trace (when `FONO_ASSISTANT_TRACE` is set). Created in
+    /// `on_start_recording` so the `keys` lane press event precedes all STT
+    /// work, carried into the pipeline, made current there, and finished once
+    /// the pipeline completes. `None` for the assistant batch path (which owns
+    /// its own trace in `run_assistant_turn`) and whenever tracing is disabled.
+    trace: Option<TurnTrace>,
     /// AbortHandle for the audio-level ticker that feeds the standalone
     /// waveform overlay. `None` when no overlay is attached.
     #[cfg(feature = "interactive")]
@@ -628,7 +646,23 @@ impl SessionOrchestrator {
             match fono_polish::build_polish(&config.polish, secrets, &paths.polish_models_dir()) {
                 Ok(opt) => opt,
                 Err(e) => {
-                    warn!("polish backend unavailable; continuing without cleanup: {e:#}");
+                    let err_text = format!("{e:#}");
+                    warn!("polish backend unavailable; continuing without cleanup: {err_text}");
+                    // Surface the degraded state once (deduped). Without
+                    // this the user gets silently un-cleaned dictation —
+                    // exactly the failure mode that made the local-model
+                    // misroute so hard to diagnose. Classify so cloud
+                    // auth/network/key failures get tailored copy; a
+                    // missing local GGUF falls through to the generic
+                    // "polish failed … run `fono models install`" body.
+                    let provider = fono_core::providers::polish_backend_str(&config.polish.backend);
+                    let class = fono_core::critical_notify::classify(&err_text);
+                    fono_core::critical_notify::notify(
+                        fono_core::critical_notify::Stage::Polish,
+                        provider,
+                        class,
+                        &err_text,
+                    );
                     None
                 }
             };
@@ -1737,8 +1771,35 @@ impl SessionOrchestrator {
     /// Latency plan tasks L2 (whisper mmap), L3 (HTTP keep-alive),
     /// L5 (inject binary page-cache).
     fn spawn_warmups(&self) {
+        // Startup prewarm timeline (Phase 4). Written to its own
+        // `startup-*.json` file (same `FONO_ASSISTANT_TRACE` env var) so it
+        // doesn't collide with per-turn dictation/assistant traces. Each
+        // warmup task records a `warmup` lane duration on a clone of the
+        // handle; a coordinator task finishes the file once all are done.
+        let trace = TurnTrace::start_from_env_named("startup");
+        if let Some(t) = &trace {
+            t.instant(
+                "turn.start",
+                "assistant",
+                PUMP_LANE,
+                json!({ "turn_id": t.id(), "path": "startup" }),
+            );
+        }
+        let mut warmup_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        // Serialise the two CPU-bound local-LLM prewarms (the polish F7 base
+        // prefix build and the assistant F8 prompt-cache prefill). Both default
+        // to the same gemma model but are loaded as two independent llama.cpp
+        // instances, and each prefill spins up `threads` worker threads. Run
+        // concurrently on an N-core box that is 2N llama threads fighting over N
+        // cores: the startup waterfall showed a 78-token prefill taking 11s and
+        // the 426-token polish base 15s, all overlapping. A single permit lets
+        // whichever starts first prefill at full core count, then the other —
+        // turning ~17s of thrash into back-to-back full-speed prefills. STT/TTS/
+        // inject warmups stay concurrent; they hit unrelated subsystems.
+        let llm_warmup_gate = Arc::new(tokio::sync::Semaphore::new(1));
         let stt = self.current_stt();
-        tokio::spawn(async move {
+        let stt_trace = trace.clone();
+        warmup_handles.push(tokio::spawn(async move {
             let started = Instant::now();
             match stt.prewarm().await {
                 Ok(()) => debug!(
@@ -1748,37 +1809,22 @@ impl SessionOrchestrator {
                 ),
                 Err(e) => debug!("warmup: stt {} prewarm skipped: {e:#}", stt.name()),
             }
-        });
-        if let Some(polish) = self.current_llm() {
-            tokio::spawn(async move {
-                let started = Instant::now();
-                match polish.prewarm().await {
-                    Ok(()) => debug!(
-                        "warmup: polish {} ready in {}ms",
-                        polish.name(),
-                        started.elapsed().as_millis()
-                    ),
-                    Err(e) => debug!("warmup: polish {} prewarm skipped: {e:#}", polish.name()),
-                }
-            });
+            if let Some(t) = &stt_trace {
+                t.duration_between(
+                    "warmup.stt",
+                    "warmup",
+                    "warmup:stt",
+                    started,
+                    Instant::now(),
+                    json!({ "backend": stt.name() }),
+                );
+            }
+        }));
+        if let Some(h) = self.spawn_polish_warmup(trace.as_ref(), &llm_warmup_gate) {
+            warmup_handles.push(h);
         }
-        if let Some(assistant) = self.current_assistant() {
-            let warmup = assistant_cache_warmup(&self.current_config());
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(250)).await;
-                let started = Instant::now();
-                match assistant.prewarm_prompt_caches(warmup).await {
-                    Ok(()) => debug!(
-                        "warmup: assistant {} prompt caches ready in {}ms",
-                        assistant.name(),
-                        started.elapsed().as_millis()
-                    ),
-                    Err(e) => debug!(
-                        "warmup: assistant {} prompt-cache prewarm skipped: {e:#}",
-                        assistant.name()
-                    ),
-                }
-            });
+        if let Some(h) = self.spawn_assistant_warmup(trace.as_ref(), &llm_warmup_gate) {
+            warmup_handles.push(h);
         }
         // TTS prewarm matters for Cartesia: it pre-resolves a native
         // voice per non-English configured language via `/voices?…`
@@ -1787,7 +1833,8 @@ impl SessionOrchestrator {
         // here too (Deepgram, Wyoming, OpenAI-compat). Errors are
         // non-fatal; the per-call code paths self-heal.
         if let Some(tts) = self.current_tts() {
-            tokio::spawn(async move {
+            let tts_trace = trace.clone();
+            warmup_handles.push(tokio::spawn(async move {
                 let started = Instant::now();
                 match tts.prewarm().await {
                     Ok(()) => debug!(
@@ -1797,7 +1844,17 @@ impl SessionOrchestrator {
                     ),
                     Err(e) => warn!("warmup: tts {} prewarm failed: {e:#}", tts.name()),
                 }
-            });
+                if let Some(t) = &tts_trace {
+                    t.duration_between(
+                        "warmup.tts",
+                        "warmup",
+                        "warmup:tts",
+                        started,
+                        Instant::now(),
+                        json!({ "backend": tts.name() }),
+                    );
+                }
+            }));
         }
         // Inject backend warmup runs on a blocking thread because the
         // probe shells out to `wtype --version` / `ydotool --version`.
@@ -1805,6 +1862,116 @@ impl SessionOrchestrator {
             Ok(name) => debug!("warmup: inject backend = {name}"),
             Err(e) => debug!("warmup: inject backend probe failed: {e:#}"),
         });
+        // Coordinator: once every async warmup completes, write the startup
+        // trace file. Fire-and-forget; if no trace is active this is a no-op.
+        if let Some(t) = trace {
+            tokio::spawn(async move {
+                for h in warmup_handles {
+                    let _ = h.await;
+                }
+                t.finish(json!({ "path": "startup", "summary": t.cache_scoreboard() }));
+            });
+        }
+    }
+
+    /// Spawn the polish (cleanup) prewarm task on the startup trace, if a
+    /// polish backend is configured. Loads the model and, for embedded local
+    /// backends, builds + pins the F7 base prefix checkpoint so the first
+    /// cleanup after launch doesn't pay the multi-second base prefill on the
+    /// hotkey path. Returns the join handle so the warmup coordinator can await
+    /// it before finalizing the trace file.
+    fn spawn_polish_warmup(
+        &self,
+        trace: Option<&TurnTrace>,
+        gate: &Arc<tokio::sync::Semaphore>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let polish = self.current_llm()?;
+        let polish_trace = trace.cloned();
+        // Context-independent base system prompt (main + advanced + dictionary),
+        // built identically to the live dictation path so the prewarmed F7 base
+        // checkpoint is a cache hit at turn time. App context and language are
+        // irrelevant: `base_system_prompt()` strips the rule suffix and language
+        // directive.
+        let polish_base = build_format_context(&self.current_config(), None, None, None, None)
+            .base_system_prompt();
+        let gate = Arc::clone(gate);
+        Some(tokio::spawn(async move {
+            // Hold the local-LLM warmup permit across load + prefill so this
+            // doesn't oversubscribe the CPU against the assistant prewarm.
+            let _permit = gate.acquire_owned().await.ok();
+            let started = Instant::now();
+            match polish.prewarm().await {
+                Ok(()) => debug!(
+                    "warmup: polish {} ready in {}ms",
+                    polish.name(),
+                    started.elapsed().as_millis()
+                ),
+                Err(e) => debug!("warmup: polish {} prewarm skipped: {e:#}", polish.name()),
+            }
+            // Build + pin the F7 base prefix checkpoint. No-op for cloud backends.
+            if let Err(e) = polish.prewarm_prompt_cache(&polish_base).await {
+                debug!("warmup: polish {} prompt-cache prewarm skipped: {e:#}", polish.name());
+            }
+            if let Some(t) = &polish_trace {
+                t.duration_between(
+                    "warmup.polish",
+                    "warmup",
+                    "warmup:polish",
+                    started,
+                    Instant::now(),
+                    json!({ "backend": polish.name() }),
+                );
+            }
+        }))
+    }
+
+    /// Spawn the assistant prompt-cache prewarm task on the startup trace, if an
+    /// assistant backend is configured. Returns the join handle so the warmup
+    /// coordinator can await it before finalizing the trace file.
+    fn spawn_assistant_warmup(
+        &self,
+        trace: Option<&TurnTrace>,
+        gate: &Arc<tokio::sync::Semaphore>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let assistant = self.current_assistant()?;
+        let warmup = assistant_cache_warmup(&self.current_config());
+        let assistant_trace = trace.cloned();
+        let gate = Arc::clone(gate);
+        Some(tokio::spawn(async move {
+            // Install the startup trace as process-current so the cache
+            // build/restore instants emitted deep inside the backend land
+            // on the warmup file.
+            let _guard = assistant_trace.as_ref().map(TurnTrace::make_current);
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            // Serialise against the polish prewarm (see `spawn_warmups`): take
+            // the permit only around the heavy load + prefill, after the
+            // stagger sleep, so whichever local model prefills first gets the
+            // whole CPU.
+            let _permit = gate.acquire_owned().await.ok();
+            let started = Instant::now();
+            let result = assistant.prewarm_prompt_caches(warmup).await;
+            match &result {
+                Ok(()) => debug!(
+                    "warmup: assistant {} prompt caches ready in {}ms",
+                    assistant.name(),
+                    started.elapsed().as_millis()
+                ),
+                Err(e) => debug!(
+                    "warmup: assistant {} prompt-cache prewarm skipped: {e:#}",
+                    assistant.name()
+                ),
+            }
+            if let Some(t) = &assistant_trace {
+                t.duration_between(
+                    "warmup.assistant_prompt_caches",
+                    "warmup",
+                    WARMUP_LANE,
+                    started,
+                    Instant::now(),
+                    json!({ "backend": assistant.name(), "ok": result.is_ok() }),
+                );
+            }
+        }))
     }
 
     /// Wire pre-built components together. Used by both [`Self::new`]
@@ -1927,6 +2094,31 @@ impl SessionOrchestrator {
             title = ?focus_info.window_title,
             "capture: focus snapshot at press"
         );
+        // Start the per-turn trace at press time so the `keys` lane press
+        // event precedes all STT work (Phase 3). Recorded directly on the
+        // handle here; the pipeline makes it current later for the STT/polish
+        // cache events. Plain F7 dictation now produces a trace file.
+        let trace = TurnTrace::start_from_env_named("dictation");
+        if let Some(t) = &trace {
+            t.instant(
+                "turn.start",
+                "assistant",
+                "assistant-pump",
+                json!({ "turn_id": t.id(), "path": "dictation" }),
+            );
+            t.instant(
+                "key.press",
+                "keys",
+                KEYS_LANE,
+                json!({ "trigger": "F7", "from_state": "idle", "to_state": "recording", "mode": format!("{mode:?}") }),
+            );
+            t.instant(
+                "fsm.transition",
+                "keys",
+                KEYS_LANE,
+                json!({ "trigger": "F7", "from_state": "idle", "to_state": "recording" }),
+            );
+        }
         if let Some(assistant) = self.current_assistant() {
             let history = Vec::new();
             Self::prepare_assistant_prompt_cache(
@@ -1936,8 +2128,15 @@ impl SessionOrchestrator {
                 f7_polish_prompt_for_cache(&cfg),
                 focus_info.clone(),
                 cfg.assistant.prefer_vision,
+                trace.clone(),
             );
         }
+
+        // Speculatively warm the polish per-app + language F7Context prefix now,
+        // concurrent with capture + STT, so the first dictation into this window
+        // restores the whole prefix instead of decoding the ~1.3 s of per-app +
+        // language-directive tokens on the hotkey path.
+        self.spawn_polish_context_prewarm(&focus_info, &cfg, trace.clone());
 
         // Standalone-waveform overlay: spawn the level ticker that
         // feeds bars/pulse RMS or oscilloscope sample snapshots, and
@@ -1970,6 +2169,7 @@ impl SessionOrchestrator {
             join: Some(join),
             started_at: Instant::now(),
             focus_info,
+            trace,
             #[cfg(feature = "interactive")]
             level_task,
             #[cfg(feature = "interactive")]
@@ -2030,16 +2230,34 @@ impl SessionOrchestrator {
         let polish_label_anim: Option<tokio::task::AbortHandle> = None;
         #[cfg(not(feature = "interactive"))]
         let polish_waveform_anim: Option<tokio::task::AbortHandle> = None;
-        // Pull the press-time focus snapshot out before consuming the
-        // session in the blocking stop/drain below.
+        // Pull the press-time focus snapshot and turn trace out before
+        // consuming the session in the blocking stop/drain below.
         let focus_info = session.focus_info.clone();
+        let trace = session.trace.clone();
         let (samples, elapsed) =
             tokio::task::spawn_blocking(move || session.stop_and_drain()).await.unwrap_or_default();
         let capture_ms = elapsed.as_millis() as u64;
         debug!("recording stopped: {capture_ms} ms / {} samples", samples.len());
+        if let Some(t) = &trace {
+            t.instant(
+                "key.release",
+                "keys",
+                KEYS_LANE,
+                json!({ "trigger": "F7", "from_state": "recording", "to_state": "processing", "capture_ms": capture_ms }),
+            );
+            t.instant(
+                "fsm.transition",
+                "keys",
+                KEYS_LANE,
+                json!({ "trigger": "F7", "from_state": "recording", "to_state": "processing" }),
+            );
+        }
 
         if elapsed < MIN_RECORDING || samples.is_empty() {
             warn!("recording too short ({capture_ms} ms); skipping STT");
+            if let Some(t) = &trace {
+                t.finish(json!({ "path": "dictation", "aborted": true, "reason": "too_short", "summary": t.cache_scoreboard() }));
+            }
             #[cfg(feature = "interactive")]
             if cfg.overlay.waveform && !cfg.live_preview() {
                 if let Some(t) = polish_label_anim {
@@ -2062,6 +2280,7 @@ impl SessionOrchestrator {
             polish_label_anim,
             polish_waveform_anim,
             focus_info,
+            trace,
         );
     }
 
@@ -2187,6 +2406,7 @@ impl SessionOrchestrator {
                             cfg.assistant.prompt_main.clone(),
                             focus_info.clone(),
                             cfg.assistant.prefer_vision,
+                            None,
                         );
                     }
                     let session = self.build_live_capture_pipeline(
@@ -2262,6 +2482,7 @@ impl SessionOrchestrator {
                 cfg.assistant.prompt_main.clone(),
                 focus_info.clone(),
                 cfg.assistant.prefer_vision,
+                None,
             );
         }
         // Reuse the dictation-side waveform overlay for the assistant
@@ -2297,6 +2518,8 @@ impl SessionOrchestrator {
             join: Some(join),
             started_at: Instant::now(),
             focus_info,
+            // Assistant batch path owns its own trace in `run_assistant_turn`.
+            trace: None,
             #[cfg(feature = "interactive")]
             level_task,
             #[cfg(feature = "interactive")]
@@ -2635,6 +2858,7 @@ impl SessionOrchestrator {
         system_prompt: String,
         focus_info: FocusInfo,
         prefer_vision: bool,
+        trace: Option<TurnTrace>,
     ) {
         let snapshot = AssistantPromptCacheSnapshot {
             trigger,
@@ -2644,8 +2868,126 @@ impl SessionOrchestrator {
             prefer_vision,
         };
         tokio::spawn(async move {
-            if let Err(e) = assistant.prepare_prompt_cache_for_turn(snapshot).await {
+            // Surface the hotkey-time prepare fire-and-forget on the timeline
+            // (Phase 3). Recorded directly on the handle — not via the ambient
+            // current-trace — to avoid racing the global slot with the pipeline.
+            let prepare_started = Instant::now();
+            let result = assistant.prepare_prompt_cache_for_turn(snapshot).await;
+            if let Some(t) = &trace {
+                t.duration_between(
+                    "cache.prepare_for_turn",
+                    "cache",
+                    "cache",
+                    prepare_started,
+                    Instant::now(),
+                    json!({ "ok": result.is_ok() }),
+                );
+            }
+            if let Err(e) = result {
                 debug!("assistant prompt-cache preparation skipped: {e:#}");
+            }
+        });
+    }
+
+    /// Speculatively warm the polish F7Context prefix for the focused app at
+    /// record-start, concurrent with capture + STT, so the *first* dictation
+    /// into a freshly-focused window restores the whole per-app + language
+    /// prefix instead of decoding it on the hotkey path (the ~1.3 s cold cost
+    /// in the dictation trace). Fans out across the candidate languages —
+    /// whichever STT detects lands on a warm checkpoint. Fire-and-forget; cloud
+    /// backends are skipped (the prewarm is a no-op for them anyway).
+    fn spawn_polish_context_prewarm(
+        &self,
+        focus_info: &FocusInfo,
+        cfg: &Config,
+        trace: Option<TurnTrace>,
+    ) {
+        let Some(polish) = self.current_llm() else { return };
+        // Only embedded local backends maintain a prompt-state cache; cloud
+        // backends would just pay an HTTP round-trip for nothing.
+        if !polish.is_local() {
+            return;
+        }
+        // Build the exact focused-window context now, immediately after the
+        // press-time focus snapshot. This includes terminal /proc enrichment
+        // when available, so the speculative prompt matches the eventual
+        // post-STT prompt instead of warming an under-enriched variant.
+        let profile = classify_focus_profile(focus_info);
+        // Candidate source languages STT may report — same source the live
+        // `build_format_context` feeds into `candidate_languages`. Bounded so a
+        // long locale list can't spawn an unbounded prefill train under STT.
+        let candidates = if cfg.stt.local.languages.is_empty() {
+            &cfg.general.languages
+        } else {
+            &cfg.stt.local.languages
+        };
+        let mut langs: Vec<Option<String>> =
+            candidates.iter().take(MAX_POLISH_PREWARM_LANGS).map(|l| Some(l.clone())).collect();
+        // With an ambiguous set STT may also report no language (the live path
+        // then emits the candidate-set directive); warm that variant too.
+        if langs.len() != 1 {
+            langs.push(None);
+        }
+        if langs.is_empty() {
+            return;
+        }
+
+        let app_class = focus_info.window_class.clone();
+        let app_title = focus_info.window_title.clone();
+        let cfg = cfg.clone();
+        let contexts: Vec<(Option<String>, String)> = langs
+            .into_iter()
+            .map(|lang| {
+                // Per-app builtin suffix computed for a prose (non-command)
+                // transcript: terminals suppress their transforming suffix
+                // without a command-like transcript, so an empty raw is the
+                // right speculative guess and matches the common dictation case.
+                let builtin = gated_builtin_suffix(profile.as_ref(), "", lang.as_deref());
+                let full_system = build_format_context(
+                    &cfg,
+                    app_class.as_deref(),
+                    app_title.as_deref(),
+                    lang.as_deref(),
+                    builtin,
+                )
+                .system_prompt();
+                (lang, full_system)
+            })
+            .collect();
+        if let Some(t) = &trace {
+            t.instant(
+                "polish.context_prewarm_scheduled",
+                "polish",
+                "f7-polish",
+                json!({
+                    "variants": contexts.len(),
+                    "app_class": app_class.as_deref().unwrap_or(""),
+                    "app_title": app_title.as_deref().unwrap_or(""),
+                }),
+            );
+        }
+        tokio::spawn(async move {
+            for (lang, full_system) in contexts {
+                let started = Instant::now();
+                let result = polish.prewarm_context_cache(&full_system).await;
+                let ended = Instant::now();
+                if let Some(t) = &trace {
+                    t.duration_between(
+                        "polish.context_prewarm",
+                        "polish",
+                        "f7-polish",
+                        started,
+                        ended,
+                        json!({
+                            "ok": result.is_ok(),
+                            "language": lang.as_deref().unwrap_or("auto"),
+                            "system_chars": full_system.chars().count(),
+                        }),
+                    );
+                }
+                if let Err(e) = result {
+                    debug!("polish context-cache prewarm skipped (lang={lang:?}): {e:#}");
+                }
             }
         });
     }
@@ -2679,6 +3021,7 @@ impl SessionOrchestrator {
         polish_label_anim: Option<tokio::task::AbortHandle>,
         polish_waveform_anim: Option<tokio::task::AbortHandle>,
         focus_info: FocusInfo,
+        trace: Option<TurnTrace>,
     ) {
         let stt = self.current_stt();
         let polish = self.current_llm();
@@ -2704,6 +3047,10 @@ impl SessionOrchestrator {
 
         in_flight.store(true, Ordering::SeqCst);
         tokio::spawn(async move {
+            // Install the press-time trace as process-current for the
+            // duration of this pipeline so the STT + F7 polish + cache
+            // events recorded by the lower-level crates land on it.
+            let _trace_guard = trace.as_ref().map(TurnTrace::make_current);
             let mut polish_label_anim = polish_label_anim;
             // H.1: focus_info was captured at hotkey-press time in
             // `on_start_recording` and threaded through `CaptureSession`.
@@ -2754,6 +3101,14 @@ impl SessionOrchestrator {
                 o.set_state(fono_overlay::OverlayState::Hidden);
             }
             in_flight.store(false, Ordering::SeqCst);
+            if let Some(t) = &trace {
+                let aborted = !matches!(&outcome, PipelineOutcome::Completed { .. });
+                t.finish(json!({
+                    "path": "dictation",
+                    "aborted": aborted,
+                    "summary": t.cache_scoreboard(),
+                }));
+            }
             let _ = action_tx.send(HotkeyAction::ProcessingDone);
         });
     }
@@ -3398,29 +3753,7 @@ async fn run_pipeline(
     // (before STT) so it's a snapshot of the window active at or
     // immediately after hotkey press. It is used for both STT and polish
     // so the context is consistent across the whole pipeline.
-    let mut ctx_profile = ContextClassifier::classify(
-        focus_info.window_class.as_deref(),
-        focus_info.window_title.as_deref(),
-    );
-    // Phase C: /proc terminal enrichment when we have a PID.
-    if ctx_profile.as_ref().is_some_and(|p| p.is_terminal) {
-        if let Some(pid) = focus_info.window_pid {
-            if fono_inject::proc_enrichment_available() {
-                let term_ctx = fono_inject::terminal_context(pid);
-                tracing::debug!(target: "fono::context", ?term_ctx, "/proc terminal enrichment");
-                if let Some(ref mut profile) = ctx_profile {
-                    ContextClassifier::enrich_terminal(profile, &term_ctx);
-                }
-            } else {
-                tracing::debug!(target: "fono::context", "/proc enrichment unavailable on this platform");
-            }
-        } else {
-            tracing::debug!(
-                target: "fono::context",
-                "terminal matched but no window PID available — skipping /proc enrichment"
-            );
-        }
-    }
+    let ctx_profile = classify_focus_profile(&focus_info);
     if let Some(ref p) = ctx_profile {
         tracing::debug!(
             target: "fono::context",
@@ -3447,11 +3780,41 @@ async fn run_pipeline(
             .map(str::to_string),
     };
     let stt_result = stt.transcribe_with_opts(&pcm_for_stt, sample_rate, &stt_opts).await;
+    let stt_ended = Instant::now();
     metrics.stt_ms = stt_started.elapsed().as_millis() as u64;
     let trans = match stt_result {
-        Ok(t) => t,
+        Ok(t) => {
+            // `stt` lane span on the dictation waterfall (Workstream B),
+            // mirroring the assistant `stt.transcribe` span. Recorded via the
+            // ambient current-trace installed by `spawn_pipeline`.
+            if let Some(tr) = TurnTrace::current() {
+                tr.duration_between(
+                    "stt.transcribe",
+                    "stt",
+                    STT_LANE,
+                    stt_started,
+                    stt_ended,
+                    json!({
+                        "chars_out": t.text.trim().chars().count(),
+                        "language": t.language.as_deref().unwrap_or(""),
+                        "sample_rate": sample_rate,
+                    }),
+                );
+            }
+            t
+        }
         Err(e) => {
             let err_text = format!("STT {}: {e:#}", stt.name());
+            if let Some(tr) = TurnTrace::current() {
+                tr.duration_between(
+                    "stt.transcribe",
+                    "stt",
+                    STT_LANE,
+                    stt_started,
+                    stt_ended,
+                    json!({ "error": err_text, "sample_rate": sample_rate }),
+                );
+            }
             // Critical pipeline failure — also fire a desktop
             // notification (not just `error!`). Dedup is per
             // (stage, provider, class) so a stuck/expired API key

@@ -245,13 +245,26 @@ tick) — opt in freely.
 
 | Backend            | Type         | Default model                 | API key env var        |
 |--------------------|--------------|-------------------------------|------------------------|
-| Llama local        | local GGUF   | `qwen2.5-1.5b-instruct` (q4_k_m) | —                    |
+| `local`            | embedded GGUF (llama.cpp) | `gemma-4-e2b` (q4_0) | —                  |
+| `ollama`           | local/remote HTTP server (manual) | `[polish.cloud].model` | — |
 | Cerebras           | cloud HTTP   | `llama-3.3-70b`               | `CEREBRAS_API_KEY`     |
 | Groq               | cloud HTTP   | `llama-3.3-70b-versatile`     | `GROQ_API_KEY`         |
 | OpenAI-compatible  | cloud HTTP   | `gpt-4o-mini` (configurable)  | `OPENAI_API_KEY`       |
 | Anthropic          | cloud HTTP   | `claude-3-5-haiku-latest`     | `ANTHROPIC_API_KEY`    |
 
-GGUF model files land in `~/.cache/fono/models/polish/`. The `enabled` flag in
+`backend = "local"` always runs the **embedded** `llama-cpp-2` engine on a
+local GGUF — it never talks to an Ollama server. The GGUF is downloaded to
+`~/.cache/fono/models/polish/<model>.gguf` on first run; if it is missing,
+Fono surfaces a one-shot notification pointing at `fono models install
+<model>` and injects the raw transcript until the model is present.
+
+To use an Ollama (or any OpenAI-compatible) **server** for cleanup instead,
+set `backend = "ollama"` and point `[polish.cloud].api_key_ref` at the
+endpoint URL (default `http://localhost:11434/v1/chat/completions`) with the
+served model in `[polish.cloud].model`. This is a manual opt-in; the setup
+wizard never configures a server for the "local polish" choice.
+
+The `enabled` flag in
 `[polish]` can be set to `false` to skip cleanup entirely — in which case Fono
 types the raw STT output verbatim.
 
