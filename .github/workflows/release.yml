@@ -255,9 +255,12 @@ jobs:
             # their repo is a tiny ~100 KB loader-dev stub); the actual
             # Vulkan headers live in `vulkan-headers`. Without it,
             # CMake's FindVulkan fails with
-            # `missing: Vulkan_INCLUDE_DIR`.
+            # `missing: Vulkan_INCLUDE_DIR`. The updated llama.cpp
+            # submodule (ggml-vulkan) now also `find_package(SPIRV-Headers)`
+            # at configure time, so pull `spirv-headers` too — without it
+            # CMake aborts with "Could not find SPIRV-HeadersConfig.cmake".
             sudo apt-get install -y -qq \
-              vulkan-headers libvulkan-dev glslang-tools shaderc
+              vulkan-headers libvulkan-dev glslang-tools shaderc spirv-headers
             command -v glslc
             glslc --version | head -1
             ls /usr/include/vulkan/vulkan.h

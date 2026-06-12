@@ -3602,7 +3602,7 @@ impl SessionOrchestrator {
                     llm_ms = outcome.elapsed_ms;
                     if outcome.injected {
                         live_stream_injected = true;
-                        live_stream_backend = outcome.backend.clone();
+                        live_stream_backend.clone_from(&outcome.backend);
                         live_stream_clip = outcome.clipboard_populated;
                         live_stream_inject_ms = outcome.inject_ms;
                         live_ttfi_ms = outcome.ttfi_ms;
@@ -4021,7 +4021,7 @@ async fn run_pipeline(
             metrics.llm_ms = outcome.elapsed_ms;
             if outcome.injected {
                 stream_injected = true;
-                stream_backend = outcome.backend.clone();
+                stream_backend.clone_from(&outcome.backend);
                 stream_clip_populated = outcome.clipboard_populated;
                 stream_inject_ms = outcome.inject_ms;
                 metrics.time_to_first_inject_ms = outcome.ttfi_ms;
@@ -4323,7 +4323,7 @@ const FLUSH_INTERVAL: Duration = Duration::from_millis(200);
 /// On a mid-stream injector or decode error AFTER injection began, the already
 /// typed text is kept (never re-injected, never overwritten with raw) and the
 /// accumulated prefix is returned with `injected = true`.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
 async fn stream_cleanup_and_inject(
     polish: &dyn TextFormatter,
     raw: &str,

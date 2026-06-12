@@ -1931,7 +1931,7 @@ fn replay_api_key(provider: LlmProvider, override_env: Option<&str>) -> Result<O
 }
 
 fn provider_label(provider: LlmProvider) -> String {
-    format!("{:?}", provider).to_ascii_lowercase()
+    format!("{provider:?}").to_ascii_lowercase()
 }
 
 async fn run_assistant_tool_use_cmd(args: AssistantToolUseArgs) -> Result<()> {
