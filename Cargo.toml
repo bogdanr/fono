@@ -21,6 +21,9 @@ members = [
     "crates/fono-net",
     "crates/fono-mcp-server",
 ]
+# The crates.io publish stub shares the `fono` package name and must not be part
+# of the workspace build/test graph (see packaging/crates-io/Cargo.toml).
+exclude = ["packaging/crates-io"]
 
 [workspace.package]
 version = "0.10.0"

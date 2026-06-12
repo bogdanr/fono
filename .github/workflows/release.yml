@@ -695,3 +695,51 @@ jobs:
           generate_release_notes: true
           body_path: release/RELEASE_NOTES.md
           files: release/*
+
+  publish-crate:
+    name: Publish crates.io stub (binstall metadata)
+    needs: [release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set stub version from tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Publishing fono stub version ${VERSION}"
+          # Replace the placeholder version line in the stub manifest.
+          sed -i -E "0,/^version = \".*\"/s//version = \"${VERSION}\"/" \
+            packaging/crates-io/Cargo.toml
+
+      - name: Use project README for the crates.io page
+        shell: bash
+        # The crates.io page renders the package README; publish the real
+        # project README so the listing doubles as a product page.
+        run: cp README.md packaging/crates-io/README.md
+
+      - name: Publish to crates.io
+        working-directory: packaging/crates-io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        # --allow-dirty: the version line and README are edited in-place.
+        # Idempotent: skip if this version is already published so a re-run
+        # (or a manual publish) does not fail the release on a duplicate.
+        #
+        # NOTE: the GitHub Release this points at is created as a DRAFT above.
+        # `cargo binstall fono` can only download the binary assets once that
+        # draft release is published — publishing the crate just makes the
+        # name + version + binstall metadata resolvable.
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          if curl -fsS "https://crates.io/api/v1/crates/fono/${VERSION}" >/dev/null 2>&1; then
+            echo "fono ${VERSION} is already on crates.io; skipping publish."
+          else
+            cargo publish --allow-dirty
+          fi

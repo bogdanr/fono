@@ -14,7 +14,7 @@ The home page is [fono.page](https://fono.page).
 <table width="100%">
 <tr>
 <td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#personal-vocabulary--voice-correction">Personal vocabulary &amp; voice correction</a></strong><br>Teach Fono once that "Phono" means "Fono" — it sticks forever, deterministically, before the text ever hits the cursor.<br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#wake-word-activation">Wake-word activation</a></strong><br>Say the magic word — Fono wakes and starts dictating. No hotkey, no hands.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".</td>
-<td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#hover-context-injection">Hover-context injection</a></strong> <em>(experimental)</em><br>Terminal hovered → shell prompts. Code editor hovered → identifier casing.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#realtime-voice-assistant">Realtime voice assistant</a></strong><br>OpenAI Realtime and Gemini Live: F8 speaks straight to the model, single WebSocket, sub-second time-to-first-audio.<br><br><strong><a href="#better-wayland-hotkeys">Better Wayland hotkeys</a></strong><br>Auto-register via the <code>GlobalShortcuts</code> portal when available.<br><br><strong><a href="#macos-and-windows">macOS + Windows</a></strong><br>Native platform integrations.<br><br><strong><a href="#shared-ggml-size-reclaim-spike">Shared ggml size-reclaim spike</a></strong><br>Investigate replacing the linker workaround with one source-level ggml runtime to reclaim about 7 MiB.</td>
+<td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#self-hosted-modelship-backend">Self-hosted Modelship backend</a></strong><br>One box on your LAN runs the LLM, speech-to-text, text-to-speech, and embeddings — every Fono desktop points at it, fully local.<br><br><strong><a href="#hover-context-injection">Hover-context injection</a></strong> <em>(experimental)</em><br>Terminal hovered → shell prompts. Code editor hovered → identifier casing.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#realtime-voice-assistant">Realtime voice assistant</a></strong><br>OpenAI Realtime and Gemini Live: F8 speaks straight to the model, single WebSocket, sub-second time-to-first-audio.<br><br><strong><a href="#better-wayland-hotkeys">Better Wayland hotkeys</a></strong><br>Auto-register via the <code>GlobalShortcuts</code> portal when available.<br><br><strong><a href="#macos-and-windows">macOS + Windows</a></strong><br>Native platform integrations.<br><br><strong><a href="#shared-ggml-size-reclaim-spike">Shared ggml size-reclaim spike</a></strong><br>Investigate replacing the linker workaround with one source-level ggml runtime to reclaim about 7 MiB.</td>
 </tr>
 </table>
 
@@ -147,6 +147,21 @@ Fono already runs as a daemon with a Unix-socket IPC layer — every CLI subcomm
 is exposing that same interface over HTTP, so scripts, editor plugins, and tools that
 are not MCP-capable can drive Fono without any special tooling. This is a thin shim
 over the existing IPC surface, independent of the MCP work.
+
+### Self-hosted Modelship backend
+
+> One box on your LAN runs the whole stack. Fono just points at it.
+
+Fono already speaks the OpenAI-compatible API for STT, cleanup, the assistant, and
+TTS. [Modelship](https://github.com/alez007/modelship) (Apache-2.0) is a self-hosted,
+multi-model inference server that runs an LLM, speech-to-text, text-to-speech, and
+embeddings simultaneously behind a single OpenAI-compatible endpoint, with per-model
+GPU/CPU allocation. The next step is making Modelship a first-class target: point every
+Fono stage at one Modelship server on your LAN from a single base URL, so a household
+or office runs all the heavy models on one machine while every desktop dictates against
+it — fully local, no cloud, no per-desktop GPU. The wizard learns to detect a Modelship
+server (it already advertises its models via `GET /v1/models`) and offers a one-key
+setup that wires STT, polish, assistant, and TTS at once.
 
 ### Voice actions
 
