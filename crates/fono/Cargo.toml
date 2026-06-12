@@ -59,7 +59,6 @@ interactive = [
     "fono-audio/streaming",
     "fono-overlay/real-window",
     "fono-core/budget",
-    "dep:futures",
     "dep:tokio-stream",
 ]
 # X11 key injection via enigo (libxdo). Keep opt-in: requires `libxdo`
@@ -121,7 +120,7 @@ crossbeam-channel = { workspace = true }
 tempfile = { workspace = true }
 once_cell = { workspace = true }
 regex = { workspace = true }
-futures = { workspace = true, optional = true }
+futures = { workspace = true }
 tokio-stream = { workspace = true, optional = true }
 # Real-input FFT for the `fft` and `heatmap` waveform styles. Small
 # (no_std-capable) and cheap; only invoked from the level-ticker task

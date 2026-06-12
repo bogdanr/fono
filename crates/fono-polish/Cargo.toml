@@ -17,7 +17,7 @@ default = ["cerebras", "openai-compat"]
 cerebras = ["dep:reqwest", "dep:fono-http"]
 openai-compat = ["dep:reqwest", "dep:fono-http"]
 anthropic = ["dep:reqwest", "dep:fono-http"]
-llama-local = ["dep:llama-cpp-2", "dep:encoding_rs", "dep:sha2", "dep:hex", "fono-core/llama-local"]
+llama-local = ["dep:llama-cpp-2", "dep:encoding_rs", "dep:sha2", "dep:hex", "dep:tokio-stream", "fono-core/llama-local"]
 # Hardware acceleration features — forward to llama-cpp-2 / its sys
 # crate. Off by default; same opt-in story as `fono-stt`'s `accel-*`.
 # Both crates' ggml is statically linked together (deduped at link
@@ -34,6 +34,7 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
+futures = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -47,3 +48,6 @@ encoding_rs = { version = "0.8", optional = true }
 # Prompt-state cache key hashing (F7 prefix cache); only with llama-local.
 sha2 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
+# Bridges the local backend's mpsc decode channel into a `BoxStream` for
+# `format_stream`; only needed with llama-local.
+tokio-stream = { workspace = true, optional = true }

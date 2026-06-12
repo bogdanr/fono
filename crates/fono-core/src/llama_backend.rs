@@ -95,3 +95,37 @@ pub fn shared_model(path: &Path, params: &LlamaModelParams) -> Result<Arc<LlamaM
     drop(map);
     Ok(model)
 }
+
+/// Default llama.cpp decode thread count: all available logical cores
+/// (clamped to a sane minimum of 4 when the platform can't report).
+///
+/// Used by the one-shot (non-streaming) inference paths, which have no
+/// concurrent consumer to share the machine with and so want every core.
+#[must_use]
+pub fn decode_threads() -> i32 {
+    std::thread::available_parallelism().map(|n| i32::try_from(n.get()).unwrap_or(4)).unwrap_or(4)
+}
+
+/// Decode thread count that **reserves one core** for a concurrent streaming
+/// consumer (F7 streaming text injection, F8 streaming TTS synthesis).
+///
+/// llama.cpp CPU decode is barrier-synchronized across all of its threads on
+/// every token. When a streaming consumer runs on the same fully saturated
+/// machine — waking roughly once per decoded token to drain the channel, run
+/// gate checks, and call the injector / TTS — it preempts a decode thread, and
+/// every *other* decode thread then stalls at the per-token barrier waiting
+/// for it. Measured on an 8-core host this dragged generation from ~22 tok/s
+/// (no concurrent consumer) down to ~13–15 tok/s; reserving one core for the
+/// consumer recovered it to ~26 tok/s.
+///
+/// Falls back to the full count on ≤2-core hosts, where reserving a core would
+/// halve decode throughput and hurt more than the contention it avoids.
+#[must_use]
+pub fn streaming_decode_threads() -> i32 {
+    let all = decode_threads();
+    if all > 2 {
+        all - 1
+    } else {
+        all
+    }
+}

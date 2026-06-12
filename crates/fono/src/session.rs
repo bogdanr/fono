@@ -27,17 +27,24 @@ use fono_audio::{
 };
 use fono_core::config::{Config, ContextRule};
 use fono_core::history::{HistoryDb, Transcription as HistoryRow};
-use fono_core::turn_trace::{TurnTrace, KEYS_LANE, PUMP_LANE, STT_LANE, WARMUP_LANE};
+use fono_core::turn_trace::{
+    current_instant, current_span, TurnTrace, INJECT_LANE, KEYS_LANE, PUMP_LANE, STT_LANE,
+    WARMUP_LANE,
+};
 use fono_core::{Paths, Secrets};
 use fono_hotkey::{HotkeyAction, RecordingMode};
 use fono_inject::{ContextClassifier, ContextProfile, FocusInfo};
 #[cfg(feature = "interactive")]
 use fono_overlay::PolishingPhase;
-use fono_polish::{FormatContext, TextFormatter};
+use fono_polish::{
+    has_enough_text_for_language_guard, looks_like_clarification, looks_like_degenerate_cleanup,
+    looks_like_translated_cleanup, FormatContext, TextFormatter,
+};
 #[cfg(feature = "interactive")]
 use fono_stt::StreamingStt;
 use fono_stt::{SpeechToText, TranscribeOptions};
 use fono_tts::TextToSpeech;
+use futures::StreamExt;
 use serde_json::json;
 use std::sync::Mutex as StdMutex;
 use std::thread::JoinHandle;
@@ -386,6 +393,14 @@ pub struct PipelineMetrics {
     /// Short identifier of the inject backend actually used
     /// (e.g. `"xtest-type"`, `"wtype"`, `"clipboard/xclip"`).
     pub inject_backend: String,
+    /// Time-to-first-injected-character (TTFI) in milliseconds for the
+    /// streaming local-cleanup path: measured from the moment the cleanup
+    /// stream begins to the first character committed to the cursor. `0` on
+    /// every non-streaming run (cloud cleanup, one-shot local cleanup, no
+    /// polish, short-utterance skip) — those inject the whole text at once and
+    /// the `inject_ms` leg already covers it. Streaming cuts this from the full
+    /// multi-second decode to ~1–3 s on long local dictations.
+    pub time_to_first_inject_ms: u64,
 }
 
 /// Outcome classification for one tool call observed during an
@@ -482,6 +497,17 @@ pub enum PipelineOutcome {
 /// is a short identifier surfaced in the `pipeline:` summary log line.
 pub trait Injector: Send + Sync + 'static {
     fn inject(&self, text: &str) -> Result<(bool, String)>;
+
+    /// Whether this injector types incrementally at the cursor, so streaming
+    /// word-by-word injection makes sense. Clipboard-fallback injectors return
+    /// `false`: each `inject` call overwrites the clipboard, so streaming would
+    /// leave only the last word visible. Defaults to `true` (every real
+    /// key-injection backend appends at the cursor and so types incrementally);
+    /// [`RealInjector`] overrides it to `false` when no key-injection backend
+    /// is available and dictation would fall back to the clipboard.
+    fn supports_streaming(&self) -> bool {
+        true
+    }
 }
 
 /// Default injector — calls into [`fono_inject::type_text_with_outcome`]
@@ -530,6 +556,16 @@ impl Injector for RealInjector {
                 Ok((true, format!("clipboard/{tool}")))
             }
         }
+    }
+
+    fn supports_streaming(&self) -> bool {
+        // When no key-injection backend is available the dictation falls back
+        // to the clipboard (`InjectOutcome::Clipboard`), where each write
+        // overwrites the previous one — streaming word-by-word would leave only
+        // the last word. Detecting `Injector::None` up front (the GNOME-Wayland
+        // clipboard-first default, or a host with no wtype/ydotool/xdotool/
+        // xtest) keeps the orchestrator on the one-shot path in that case.
+        !matches!(fono_inject::Injector::detect(), fono_inject::Injector::None)
     }
 }
 
@@ -3514,6 +3550,12 @@ impl SessionOrchestrator {
         let mut llm_label_for_log: Option<String> = None;
         let mut live_ctx_tag = String::new();
         let trans_language: Option<String> = None; // live STT path: language not yet surfaced
+                                                   // Streaming-injection bookkeeping (plan v3), mirror of the batch path.
+        let mut live_stream_injected = false;
+        let mut live_stream_backend = String::new();
+        let mut live_stream_clip = false;
+        let mut live_stream_inject_ms = 0_u64;
+        let mut live_ttfi_ms = 0_u64;
         let cleaned = if cfg.interactive.cleanup_on_finalize {
             if let Some(polish) = self.current_llm() {
                 // Show "polishing…" so the user knows we haven't
@@ -3542,54 +3584,89 @@ impl SessionOrchestrator {
                 );
                 live_ctx_tag = build_ctx_tag(&ctx, app_class.as_deref());
                 llm_label_for_log = Some(polish.name().to_string());
-                match polish.format(&raw, &ctx).await {
-                    Ok(c) => {
-                        llm_ms = llm_started.elapsed().as_millis() as u64;
-                        let trimmed = c.trim().to_string();
-                        let raw_chars = raw.chars().count();
-                        let new_chars = trimmed.chars().count();
-                        let diff = i64::try_from(new_chars).unwrap_or(0)
-                            - i64::try_from(raw_chars).unwrap_or(0);
+                // Streaming local cleanup (plan v3): same gate as the batch
+                // path. Stream the cleaned text into the cursor word-by-word
+                // when the backend is local, the flag is on, and the injector
+                // types incrementally.
+                let stream_eligible = cfg.polish.stream_injection
+                    && polish.is_local()
+                    && self.injector.supports_streaming();
+                if stream_eligible {
+                    let outcome = stream_cleanup_and_inject(
+                        polish.as_ref(),
+                        &raw,
+                        &ctx,
+                        self.injector.as_ref(),
+                    )
+                    .await;
+                    llm_ms = outcome.elapsed_ms;
+                    if outcome.injected {
+                        live_stream_injected = true;
+                        live_stream_backend = outcome.backend.clone();
+                        live_stream_clip = outcome.clipboard_populated;
+                        live_stream_inject_ms = outcome.inject_ms;
+                        live_ttfi_ms = outcome.ttfi_ms;
                         debug!(
-                            "polish: {} {}ms  {} → {} chars ({:+})",
+                            "live-dictation: {} streamed+injected {}ms (ttfi {}ms)",
                             polish.name(),
                             llm_ms,
-                            raw_chars,
-                            new_chars,
-                            diff
+                            outcome.ttfi_ms
                         );
-                        if trimmed.is_empty() {
-                            None
-                        } else {
-                            Some(trimmed)
-                        }
-                    }
-                    Err(e) => {
-                        llm_ms = llm_started.elapsed().as_millis() as u64;
-                        warn!("live-dictation: polish failed after {llm_ms}ms: {e:#}");
-                        // Mirror the batch path: surface auth or
-                        // network failures once per session so the
-                        // user notices the expired key / offline
-                        // endpoint. Transient `Other` errors stay
-                        // silent (raw transcript still injected).
-                        // Global cascade cap prevents piling on top
-                        // of an earlier STT notification.
-                        let err_text = format!("{e:#}");
-                        let class = fono_core::critical_notify::classify(&err_text);
-                        if matches!(
-                            class,
-                            fono_core::critical_notify::ErrorClass::Auth
-                                | fono_core::critical_notify::ErrorClass::Network
-                                | fono_core::critical_notify::ErrorClass::TermsRequired
-                        ) {
-                            fono_core::critical_notify::notify(
-                                fono_core::critical_notify::Stage::Polish,
-                                polish.name(),
-                                class,
-                                &err_text,
-                            );
-                        }
+                        outcome.cleaned
+                    } else {
+                        debug!("live-dictation: {} stream gate fell back to raw", polish.name());
                         None
+                    }
+                } else {
+                    match polish.format(&raw, &ctx).await {
+                        Ok(c) => {
+                            llm_ms = llm_started.elapsed().as_millis() as u64;
+                            let trimmed = c.trim().to_string();
+                            let raw_chars = raw.chars().count();
+                            let new_chars = trimmed.chars().count();
+                            let diff = i64::try_from(new_chars).unwrap_or(0)
+                                - i64::try_from(raw_chars).unwrap_or(0);
+                            debug!(
+                                "polish: {} {}ms  {} → {} chars ({:+})",
+                                polish.name(),
+                                llm_ms,
+                                raw_chars,
+                                new_chars,
+                                diff
+                            );
+                            if trimmed.is_empty() {
+                                None
+                            } else {
+                                Some(trimmed)
+                            }
+                        }
+                        Err(e) => {
+                            llm_ms = llm_started.elapsed().as_millis() as u64;
+                            warn!("live-dictation: polish failed after {llm_ms}ms: {e:#}");
+                            // Mirror the batch path: surface auth or
+                            // network failures once per session so the
+                            // user notices the expired key / offline
+                            // endpoint. Transient `Other` errors stay
+                            // silent (raw transcript still injected).
+                            // Global cascade cap prevents piling on top
+                            // of an earlier STT notification.
+                            let err_text = format!("{e:#}");
+                            let class = fono_core::critical_notify::classify(&err_text);
+                            if matches!(
+                                class,
+                                fono_core::critical_notify::ErrorClass::Auth
+                                    | fono_core::critical_notify::ErrorClass::Network
+                                    | fono_core::critical_notify::ErrorClass::TermsRequired
+                            ) {
+                                fono_core::critical_notify::notify(
+                                    fono_core::critical_notify::Stage::Polish,
+                                    polish.name(),
+                                    class,
+                                    &err_text,
+                                );
+                            }
+                            None
+                        }
                     }
                 }
             } else {
@@ -3611,22 +3688,30 @@ impl SessionOrchestrator {
             o.update_text(final_text.clone());
         }
 
-        // Inject — best-effort, same as the batch path.
-        let inject_started = Instant::now();
-        let injector = Arc::clone(&self.injector);
-        let final_for_inject = final_text.clone();
-        let (clipboard_already_populated, live_inject_backend) =
-            tokio::task::spawn_blocking(move || injector.inject(&final_for_inject))
-                .await
-                .ok()
-                .and_then(std::result::Result::ok)
-                .unwrap_or_else(|| (false, "unknown".to_string()));
+        // Inject — best-effort, same as the batch path. When the streaming
+        // path already typed the cleaned text into the cursor, skip the
+        // one-shot inject and reuse its recorded backend / timing.
+        let (clipboard_already_populated, live_inject_backend, inject_ms) = if live_stream_injected
+        {
+            (live_stream_clip, live_stream_backend.clone(), live_stream_inject_ms)
+        } else {
+            let inject_started = Instant::now();
+            let injector = Arc::clone(&self.injector);
+            let final_for_inject = final_text.clone();
+            let (clip, backend) =
+                tokio::task::spawn_blocking(move || injector.inject(&final_for_inject))
+                    .await
+                    .ok()
+                    .and_then(std::result::Result::ok)
+                    .unwrap_or_else(|| (false, "unknown".to_string()));
+            (clip, backend, inject_started.elapsed().as_millis() as u64)
+        };
         if cfg.general.also_copy_to_clipboard && !clipboard_already_populated {
             if let Err(e) = fono_inject::copy_to_clipboard(&final_text) {
                 warn!("live-dictation: clipboard copy failed: {e:#}");
             }
         }
-        let inject_ms = inject_started.elapsed().as_millis() as u64;
+        let _ = live_ttfi_ms;
 
         // Mirror the batch summary at `session.rs:684-696` so live and
         // batch dictations produce structurally-identical operator
@@ -3873,6 +3958,13 @@ async fn run_pipeline(
     let word_count = raw.split_whitespace().count() as u32;
     let skip_short =
         config.polish.skip_if_words_lt > 0 && word_count < config.polish.skip_if_words_lt;
+    // Streaming-injection bookkeeping (plan v3): set when the local cleanup
+    // backend streamed its output and already typed it incrementally, so the
+    // shared inject block below is skipped.
+    let mut stream_injected = false;
+    let mut stream_backend = String::new();
+    let mut stream_clip_populated = false;
+    let mut stream_inject_ms = 0_u64;
     let cleaned = if skip_short {
         // Latency plan L9 — short utterances rarely need cleanup;
         // skipping the LLM saves 150–800 ms.
@@ -3915,55 +4007,94 @@ async fn run_pipeline(
         );
         tracing::debug!(target: "fono::pipeline", "polish.input: {raw:?}");
         let llm_started = Instant::now();
-        match polish_backend.format(&raw, &ctx).await {
-            Ok(c) => {
-                metrics.llm_ms = llm_started.elapsed().as_millis() as u64;
-                let trimmed = c.trim().to_string();
-                let raw_chars = raw.chars().count();
-                let new_chars = trimmed.chars().count();
-                let diff =
-                    i64::try_from(new_chars).unwrap_or(0) - i64::try_from(raw_chars).unwrap_or(0);
+        // Streaming local cleanup (plan v3): when the active polish backend is
+        // local, the flag is on, and the injector types incrementally at the
+        // cursor (not the clipboard fallback), stream the cleaned text into the
+        // cursor word-by-word behind a first-sentence guard gate instead of
+        // waiting for the whole decode. Cloud backends, clipboard-fallback
+        // sessions, and (above) short utterances stay on the one-shot path.
+        let stream_eligible = config.polish.stream_injection
+            && polish_backend.is_local()
+            && injector.supports_streaming();
+        if stream_eligible {
+            let outcome = stream_cleanup_and_inject(polish_backend, &raw, &ctx, injector).await;
+            metrics.llm_ms = outcome.elapsed_ms;
+            if outcome.injected {
+                stream_injected = true;
+                stream_backend = outcome.backend.clone();
+                stream_clip_populated = outcome.clipboard_populated;
+                stream_inject_ms = outcome.inject_ms;
+                metrics.time_to_first_inject_ms = outcome.ttfi_ms;
                 debug!(
-                    "polish: {} {}ms  {} → {} chars ({:+})",
+                    "polish: {} streamed+injected {}ms (ttfi {}ms)",
                     polish_backend.name(),
                     metrics.llm_ms,
-                    raw_chars,
-                    new_chars,
-                    diff
+                    outcome.ttfi_ms
                 );
-                tracing::debug!(target: "fono::pipeline", "polish.output: {trimmed:?}");
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed)
-                }
-            }
-            Err(e) => {
-                metrics.llm_ms = llm_started.elapsed().as_millis() as u64;
-                warn!("polish: {} failed after {}ms: {e:#}", polish_backend.name(), metrics.llm_ms);
-                // Surface user-actionable failures (auth or network)
-                // once per session. Transient `Other` failures stay
-                // silent — the raw STT text is still injected below
-                // so the dictation isn't lost; a desktop popup on
-                // every flaky 5xx would just be noise. The global
-                // cascade cap in critical_notify ensures we never
-                // pile up notifications when STT already fired.
-                let err_text = format!("{e:#}");
-                let class = fono_core::critical_notify::classify(&err_text);
-                if matches!(
-                    class,
-                    fono_core::critical_notify::ErrorClass::Auth
-                        | fono_core::critical_notify::ErrorClass::Network
-                        | fono_core::critical_notify::ErrorClass::TermsRequired
-                ) {
-                    fono_core::critical_notify::notify(
-                        fono_core::critical_notify::Stage::Polish,
-                        polish_backend.name(),
-                        class,
-                        &err_text,
-                    );
-                }
+                tracing::debug!(target: "fono::pipeline", "polish.output(streamed): {:?}", outcome.cleaned);
+                outcome.cleaned
+            } else {
+                // Gate fired (clarification / degenerate / translated prefix)
+                // or the stream produced nothing usable: nothing was typed —
+                // fall back to the raw transcript via the shared inject block.
+                debug!("polish: {} stream gate fell back to raw", polish_backend.name());
                 None
+            }
+        } else {
+            match polish_backend.format(&raw, &ctx).await {
+                Ok(c) => {
+                    metrics.llm_ms = llm_started.elapsed().as_millis() as u64;
+                    let trimmed = c.trim().to_string();
+                    let raw_chars = raw.chars().count();
+                    let new_chars = trimmed.chars().count();
+                    let diff = i64::try_from(new_chars).unwrap_or(0)
+                        - i64::try_from(raw_chars).unwrap_or(0);
+                    debug!(
+                        "polish: {} {}ms  {} → {} chars ({:+})",
+                        polish_backend.name(),
+                        metrics.llm_ms,
+                        raw_chars,
+                        new_chars,
+                        diff
+                    );
+                    tracing::debug!(target: "fono::pipeline", "polish.output: {trimmed:?}");
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed)
+                    }
+                }
+                Err(e) => {
+                    metrics.llm_ms = llm_started.elapsed().as_millis() as u64;
+                    warn!(
+                        "polish: {} failed after {}ms: {e:#}",
+                        polish_backend.name(),
+                        metrics.llm_ms
+                    );
+                    // Surface user-actionable failures (auth or network)
+                    // once per session. Transient `Other` failures stay
+                    // silent — the raw STT text is still injected below
+                    // so the dictation isn't lost; a desktop popup on
+                    // every flaky 5xx would just be noise. The global
+                    // cascade cap in critical_notify ensures we never
+                    // pile up notifications when STT already fired.
+                    let err_text = format!("{e:#}");
+                    let class = fono_core::critical_notify::classify(&err_text);
+                    if matches!(
+                        class,
+                        fono_core::critical_notify::ErrorClass::Auth
+                            | fono_core::critical_notify::ErrorClass::Network
+                            | fono_core::critical_notify::ErrorClass::TermsRequired
+                    ) {
+                        fono_core::critical_notify::notify(
+                            fono_core::critical_notify::Stage::Polish,
+                            polish_backend.name(),
+                            class,
+                            &err_text,
+                        );
+                    }
+                    None
+                }
             }
         }
     } else {
@@ -3974,30 +4105,40 @@ async fn run_pipeline(
     metrics.final_chars = final_text.chars().count();
 
     // ---- Inject -----------------------------------------------------
-    let inject_started = Instant::now();
-    let clipboard_already_populated = match injector.inject(&final_text) {
-        Ok((populated, backend)) => {
-            metrics.inject_backend = backend;
-            populated
-        }
-        Err(e) => {
-            warn!("inject failed: {e:#}");
-            // Critical: the user just dictated something and now
-            // has nothing on screen. Surface this once per session
-            // (the cascade cap means it stays silent if STT/LLM
-            // already notified).
-            let err_text = format!("{e:#}");
-            fono_core::critical_notify::notify(
-                fono_core::critical_notify::Stage::Inject,
-                "injector",
-                fono_core::critical_notify::classify(&err_text),
-                &err_text,
-            );
-            metrics.inject_backend = "failed".to_string();
-            false
-        }
+    // When the local streaming path already typed the cleaned text into the
+    // cursor word-by-word, skip the one-shot inject entirely — re-injecting
+    // would duplicate every character. Reuse its recorded backend / timing.
+    let clipboard_already_populated = if stream_injected {
+        metrics.inject_backend = stream_backend;
+        metrics.inject_ms = stream_inject_ms;
+        stream_clip_populated
+    } else {
+        let inject_started = Instant::now();
+        let populated = match injector.inject(&final_text) {
+            Ok((populated, backend)) => {
+                metrics.inject_backend = backend;
+                populated
+            }
+            Err(e) => {
+                warn!("inject failed: {e:#}");
+                // Critical: the user just dictated something and now
+                // has nothing on screen. Surface this once per session
+                // (the cascade cap means it stays silent if STT/LLM
+                // already notified).
+                let err_text = format!("{e:#}");
+                fono_core::critical_notify::notify(
+                    fono_core::critical_notify::Stage::Inject,
+                    "injector",
+                    fono_core::critical_notify::classify(&err_text),
+                    &err_text,
+                );
+                metrics.inject_backend = "failed".to_string();
+                false
+            }
+        };
+        metrics.inject_ms = inject_started.elapsed().as_millis() as u64;
+        populated
     };
-    metrics.inject_ms = inject_started.elapsed().as_millis() as u64;
     debug!("inject: {}ms via {}", metrics.inject_ms, metrics.inject_backend);
     tracing::debug!(target: "fono::pipeline", "inject.text: {final_text:?}");
 
@@ -4046,6 +4187,358 @@ async fn run_pipeline(
     }
 
     PipelineOutcome::Completed { raw, cleaned, metrics }
+}
+
+/// Outcome of a streaming-cleanup-with-incremental-injection attempt
+/// ([`stream_cleanup_and_inject`]).
+#[derive(Debug, Default)]
+struct StreamCleanupOutcome {
+    /// Full accumulated streamed text, trimmed. `None` when a guard fired, the
+    /// stream errored before producing a usable prefix, or it yielded nothing
+    /// — the caller falls back to the raw transcript on the one-shot inject
+    /// path.
+    cleaned: Option<String>,
+    /// `true` once text has been committed to the cursor inside the sink. When
+    /// set, the caller MUST NOT inject again (not even the raw fallback):
+    /// partial output is already typed and re-injecting would duplicate it.
+    injected: bool,
+    /// Inject backend name actually used (empty when nothing was injected).
+    backend: String,
+    /// Whether the injector already populated the clipboard (clipboard
+    /// fallback) — the caller skips the redundant `also_copy_to_clipboard`.
+    clipboard_populated: bool,
+    /// Time-to-first-injected-char in ms (0 when nothing was injected).
+    ttfi_ms: u64,
+    /// Wall-clock from cleanup-stream start to stream end / injection
+    /// completion — used as `llm_ms` for the streaming path.
+    elapsed_ms: u64,
+    /// Wall-clock from the first injected char to injection completion — used
+    /// as `inject_ms` for the streaming path. 0 when nothing was injected.
+    inject_ms: u64,
+}
+
+/// True when `text` contains a sentence-ending punctuation mark (`.`/`!`/`?`)
+/// followed by ASCII whitespace or the end of the buffer. Used by the
+/// first-sentence gate alongside [`has_enough_text_for_language_guard`]: a
+/// false positive (e.g. inside `e.g.`) only means the guards run a few tokens
+/// earlier, which is harmless.
+fn has_sentence_boundary(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    for (i, &c) in bytes.iter().enumerate() {
+        if matches!(c, b'.' | b'!' | b'?') {
+            match bytes.get(i + 1) {
+                None => return true,
+                Some(n) if n.is_ascii_whitespace() => return true,
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+/// Word-boundary injection sink. Buffers an incremental text stream and
+/// releases only *complete* words plus their separators, holding back the
+/// trailing (possibly-partial) word and any trailing whitespace until a later
+/// chunk completes it or the stream ends. Guarantees the cursor never sees a
+/// partial word/token mid-stream and never a dangling trailing newline/space.
+///
+/// The concatenation of every [`push`](WordSink::push) return value followed
+/// by [`flush`](WordSink::flush) equals the input with leading/trailing
+/// whitespace trimmed (internal whitespace preserved exactly).
+#[derive(Debug, Default)]
+struct WordSink {
+    carry: String,
+    /// Set once the first non-whitespace char has been seen, so leading
+    /// whitespace from the model's first token is trimmed (matching the
+    /// non-streaming `format()` path, which returns `out.trim()`).
+    started: bool,
+}
+
+impl WordSink {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append `text`; return the slice now safe to inject (complete words with
+    /// their separators, never a trailing partial word, never trailing
+    /// whitespace).
+    fn push(&mut self, text: &str) -> String {
+        let to_add = if self.started {
+            text
+        } else {
+            let trimmed = text.trim_start();
+            if trimmed.is_empty() {
+                return String::new();
+            }
+            self.started = true;
+            trimmed
+        };
+        self.carry.push_str(to_add);
+        // Hold back the trailing whitespace run plus the final (partial) word:
+        // strip trailing whitespace, then split before the last remaining
+        // whitespace char. Everything before that boundary is complete words
+        // and is safe to emit; the held suffix (whitespace + last word) waits
+        // for more input or `flush`.
+        let trimmed_end = self.carry.trim_end_matches(char::is_whitespace);
+        match trimmed_end.rfind(char::is_whitespace) {
+            Some(ws_idx) => {
+                let flushed: String = self.carry[..ws_idx].to_string();
+                self.carry.drain(..ws_idx);
+                flushed
+            }
+            None => String::new(),
+        }
+    }
+
+    /// Emit the held trailing word at stream end, with trailing whitespace
+    /// trimmed.
+    fn flush(&mut self) -> String {
+        let out = std::mem::take(&mut self.carry).trim_end().to_string();
+        self.started = false;
+        out
+    }
+}
+
+/// Minimum interval between incremental text injections during streaming
+/// cleanup. The per-word key-injection backends (`wtype`/`ydotool`/`xdotool`)
+/// spawn a process per call, so coalescing decoded words into ~5 injections a
+/// second keeps that cost negligible without the user perceiving lag.
+const FLUSH_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Stream the local cleanup model's output and inject it incrementally,
+/// applying the first-sentence guard gate before any text reaches the cursor.
+///
+/// Flow (plan v3 Tasks 3–4 + 6):
+///  1. Buffer incoming chunks until BOTH a sentence boundary is seen AND the
+///     buffered text satisfies the translation-guard minimum, OR the stream
+///     ends/errors.
+///  2. Run all three cleanup guards on the buffered prefix. If ANY fires,
+///     discard the stream and inject NOTHING — the caller falls back to the
+///     raw transcript (zero cleaned chars typed), identical to the one-shot
+///     polish-failure path.
+///  3. Otherwise inject the buffered prefix, then flush each completed word as
+///     it decodes. The full accumulated text is returned for the history row
+///     and clipboard copy so those artefacts equal a non-streaming run.
+///
+/// On a mid-stream injector or decode error AFTER injection began, the already
+/// typed text is kept (never re-injected, never overwritten with raw) and the
+/// accumulated prefix is returned with `injected = true`.
+#[allow(clippy::too_many_lines)]
+async fn stream_cleanup_and_inject(
+    polish: &dyn TextFormatter,
+    raw: &str,
+    ctx: &FormatContext,
+    injector: &dyn Injector,
+) -> StreamCleanupOutcome {
+    let started = Instant::now();
+    let mut stream = match polish.format_stream(raw, ctx).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("polish: {} stream init failed: {e:#}", polish.name());
+            return StreamCleanupOutcome {
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                ..Default::default()
+            };
+        }
+    };
+
+    // ---- Phase 1: buffer to the first-sentence gate ------------------
+    let mut buf = String::new();
+    let mut stream_done = false;
+    loop {
+        if has_sentence_boundary(&buf) && has_enough_text_for_language_guard(buf.trim()) {
+            break;
+        }
+        match stream.next().await {
+            Some(Ok(chunk)) => buf.push_str(&chunk),
+            Some(Err(e)) => {
+                if buf.trim().is_empty() {
+                    warn!("polish: {} stream errored before any output: {e:#}", polish.name());
+                    return StreamCleanupOutcome {
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                        ..Default::default()
+                    };
+                }
+                warn!(
+                    "polish: {} stream errored mid-prefix ({e:#}); gating on the partial prefix",
+                    polish.name()
+                );
+                stream_done = true;
+                break;
+            }
+            None => {
+                stream_done = true;
+                break;
+            }
+        }
+    }
+
+    // ---- Phase 2: run all three guards on the buffered prefix --------
+    let prefix = buf.trim();
+    if prefix.is_empty() {
+        return StreamCleanupOutcome {
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            ..Default::default()
+        };
+    }
+    if looks_like_clarification(prefix)
+        || looks_like_degenerate_cleanup(raw, prefix)
+        || looks_like_translated_cleanup(raw, prefix, ctx)
+    {
+        debug!(
+            "polish: {} streamed prefix tripped a cleanup guard; discarding stream, falling back to raw",
+            polish.name()
+        );
+        return StreamCleanupOutcome {
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            ..Default::default()
+        };
+    }
+
+    // ---- Phase 3: gate passed → inject prefix, then stream words -----
+    let mut sink = WordSink::new();
+    let mut full = String::new();
+    let mut backend = String::new();
+    let mut clipboard_populated = false;
+    let mut ttfi_ms = 0_u64;
+    let mut inject_started: Option<Instant> = None;
+    // Coalesce decoded words and inject at most once per FLUSH_INTERVAL (the
+    // per-word key-injection backends spawn a process per call). The model
+    // decodes into an unbounded channel, so this cadence never throttles
+    // generation — it only smooths injection.
+    let mut pending = String::new();
+    let mut last_inject: Option<Instant> = None;
+    // Injection-cost counters. Each `injector.inject` call gets its own span on
+    // the `f7-inject` lane (visible running concurrently with `polish.generate`
+    // on `f7-polish`), and a `polish.stream_inject_summary` instant rolls up
+    // the per-event mean so the cost of typing is measurable rather than
+    // inferred. All trace calls short-circuit to no-ops on untraced turns.
+    let mut inject_events = 0_u32;
+    let mut inject_busy_us = 0_u128;
+    let mut chars_injected = 0_usize;
+
+    // Closure-free helper: inject `s` (if non-empty), recording TTFI/backend.
+    macro_rules! emit {
+        ($s:expr) => {{
+            let s: String = $s;
+            if !s.is_empty() {
+                let chunk_chars = s.chars().count();
+                let span = current_span("polish.inject_chunk", "inject", INJECT_LANE);
+                let ev_started = Instant::now();
+                let res = injector.inject(&s);
+                let event_us = ev_started.elapsed().as_micros();
+                inject_events += 1;
+                inject_busy_us += event_us;
+                chars_injected += chunk_chars;
+                span.finish(json!({
+                    "chars": chunk_chars,
+                    "seq": inject_events,
+                    "event_us": event_us as u64,
+                }));
+                match res {
+                    Ok((populated, b)) => {
+                        if inject_started.is_none() {
+                            inject_started = Some(Instant::now());
+                            ttfi_ms = started.elapsed().as_millis() as u64;
+                            clipboard_populated = populated;
+                            backend = b;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "polish: {} streaming inject failed mid-stream: {e:#}",
+                            polish.name()
+                        );
+                        // Keep what was already typed; do not re-inject raw.
+                        let inject_ms =
+                            inject_started.map_or(0, |t| t.elapsed().as_millis() as u64);
+                        return StreamCleanupOutcome {
+                            cleaned: Some(full.trim().to_string()).filter(|s| !s.is_empty()),
+                            injected: inject_started.is_some(),
+                            backend: if backend.is_empty() {
+                                "failed".to_string()
+                            } else {
+                                backend
+                            },
+                            clipboard_populated,
+                            ttfi_ms,
+                            elapsed_ms: started.elapsed().as_millis() as u64,
+                            inject_ms,
+                        };
+                    }
+                }
+            }
+        }};
+    }
+
+    // Inject `pending` when the cadence allows (always on the first call so
+    // the gate prefix lands immediately and TTFI stays low) or when `force`d
+    // at stream end. Whole-word boundaries are guaranteed by `WordSink`.
+    macro_rules! flush_pending {
+        ($force:expr) => {{
+            let due = last_inject.is_none_or(|t| t.elapsed() >= FLUSH_INTERVAL);
+            if !pending.is_empty() && ($force || due) {
+                emit!(std::mem::take(&mut pending));
+                last_inject = Some(Instant::now());
+            }
+        }};
+    }
+
+    full.push_str(buf.trim_start());
+    pending.push_str(&sink.push(buf.trim_start()));
+    flush_pending!(true);
+
+    // Continue draining the stream (unless it already ended/errored).
+    if !stream_done {
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) => {
+                    full.push_str(&chunk);
+                    pending.push_str(&sink.push(&chunk));
+                    flush_pending!(false);
+                }
+                Err(e) => {
+                    warn!(
+                        "polish: {} stream errored after injection began ({e:#}); keeping typed text",
+                        polish.name()
+                    );
+                    break;
+                }
+            }
+        }
+    }
+    pending.push_str(&sink.flush());
+    if !pending.is_empty() {
+        emit!(std::mem::take(&mut pending));
+    }
+
+    let inject_ms = inject_started.map_or(0, |t| t.elapsed().as_millis() as u64);
+    if inject_events > 0 {
+        current_instant(
+            "polish.stream_inject_summary",
+            "inject",
+            INJECT_LANE,
+            json!({
+                "events": inject_events,
+                "chars": chars_injected,
+                "busy_ms": (inject_busy_us / 1000) as u64,
+                "mean_event_us": (inject_busy_us / u128::from(inject_events)) as u64,
+                "ttfi_ms": ttfi_ms,
+                "inject_ms": inject_ms,
+                "backend": backend,
+            }),
+        );
+    }
+    let full = full.trim().to_string();
+    StreamCleanupOutcome {
+        cleaned: if full.is_empty() { None } else { Some(full) },
+        injected: inject_started.is_some(),
+        backend,
+        clipboard_populated,
+        ttfi_ms,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        inject_ms,
+    }
 }
 
 fn lang_for(config: &Config) -> Option<String> {
@@ -4440,8 +4933,15 @@ fn format_pipeline_summary(m: &PipelineMetrics) -> String {
         format!("polish {pol} [{}] {} → {} chars", m.ctx_tag, m.raw_chars, m.final_chars)
     };
     let inject = fmt_ms(m.inject_ms, warn_ms::INJECT);
+    // Surface the streaming time-to-first-injected-char when the local
+    // streaming path was used (0 on every one-shot run).
+    let ttfi = if m.time_to_first_inject_ms > 0 {
+        format!(" ttfi={}ms", m.time_to_first_inject_ms)
+    } else {
+        String::new()
+    };
     format!(
-        "pipeline: {capture} trim={}ms | {lang} | stt {stt} {} chars | {polish_seg} | inject {} {inject}",
+        "pipeline: {capture} trim={}ms | {lang} | stt {stt} {} chars | {polish_seg} | inject {} {inject}{ttfi}",
         m.trim_ms,
         m.raw_chars,
         m.inject_backend,
@@ -4561,6 +5061,8 @@ pub fn orchestrator_for_test(
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
+
     use super::*;
 
     #[test]
@@ -4784,5 +5286,192 @@ mod tests {
         let line = format_assistant_summary(&m);
         assert!(line.ends_with("| aborted"), "got: {line}");
         assert!(line.contains("tts none"), "got: {line}");
+    }
+
+    // ---- Streaming-cleanup injection (plan v3) ----------------------
+
+    /// Drive a [`WordSink`] with a list of chunks, returning the ordered
+    /// sequence of non-empty emissions (push results then a final flush).
+    fn drive_sink(chunks: &[&str]) -> Vec<String> {
+        let mut sink = WordSink::new();
+        let mut out = Vec::new();
+        for c in chunks {
+            let s = sink.push(c);
+            if !s.is_empty() {
+                out.push(s);
+            }
+        }
+        let tail = sink.flush();
+        if !tail.is_empty() {
+            out.push(tail);
+        }
+        out
+    }
+
+    #[test]
+    fn word_sink_emits_only_whole_words_in_order() {
+        // A word ("output") split across two chunks must never be emitted
+        // partially: the first chunk holds it back, the second completes it.
+        let emissions = drive_sink(&["hello wor", "ld this is out", "put text here"]);
+        let joined: String = emissions.concat();
+        assert_eq!(joined, "hello world this is output text here");
+        // Every emission boundary must fall on whitespace — i.e. no emission
+        // ends in the middle of a word (the next emission would then start
+        // mid-word). Reconstruct word list and ensure none was split.
+        for e in &emissions {
+            assert!(!e.is_empty());
+        }
+        // No emission may contain a leading/trailing partial of a word that
+        // also appears split: assert the concatenation tokenizes identically.
+        let words: Vec<&str> = joined.split_whitespace().collect();
+        assert_eq!(words, vec!["hello", "world", "this", "is", "output", "text", "here"]);
+    }
+
+    #[test]
+    fn word_sink_trims_leading_and_trailing_whitespace() {
+        let emissions = drive_sink(&["   leading", " and trailing words   "]);
+        let joined: String = emissions.concat();
+        assert_eq!(joined, "leading and trailing words");
+    }
+
+    #[test]
+    fn word_sink_single_token_held_until_flush() {
+        // One word with no whitespace is held until flush.
+        let mut sink = WordSink::new();
+        assert_eq!(sink.push("hello"), "");
+        assert_eq!(sink.flush(), "hello");
+    }
+
+    #[test]
+    fn sentence_boundary_detection() {
+        assert!(has_sentence_boundary("Hello world. More"));
+        assert!(has_sentence_boundary("Done!"));
+        assert!(has_sentence_boundary("Really?"));
+        assert!(!has_sentence_boundary("no terminator yet"));
+        assert!(!has_sentence_boundary("decimal 3.14 inline"));
+    }
+
+    /// Minimal streaming formatter that yields scripted chunks. `local`
+    /// controls `is_local()` so the orchestrator's streaming gate fires.
+    struct ScriptedStream {
+        chunks: Vec<String>,
+        local: bool,
+    }
+
+    #[async_trait]
+    impl TextFormatter for ScriptedStream {
+        async fn format(&self, _raw: &str, _ctx: &FormatContext) -> Result<String> {
+            Ok(self.chunks.concat().trim().to_string())
+        }
+        fn name(&self) -> &'static str {
+            "scripted-stream"
+        }
+        async fn format_stream(
+            &self,
+            _raw: &str,
+            _ctx: &FormatContext,
+        ) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
+            let items: Vec<Result<String>> = self.chunks.iter().cloned().map(Ok).collect();
+            Ok(futures::stream::iter(items).boxed())
+        }
+        fn is_local(&self) -> bool {
+            self.local
+        }
+    }
+
+    /// Injector that records the ordered sequence of injected strings.
+    struct RecordingInjector(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl Injector for RecordingInjector {
+        fn inject(&self, text: &str) -> Result<(bool, String)> {
+            self.0.lock().unwrap().push(text.to_string());
+            Ok((false, "recording".to_string()))
+        }
+    }
+
+    async fn run_gate(raw: &str, chunks: &[&str]) -> (StreamCleanupOutcome, Vec<String>) {
+        let fmt = ScriptedStream {
+            chunks: chunks.iter().map(|s| (*s).to_string()).collect(),
+            local: true,
+        };
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let injector = RecordingInjector(std::sync::Arc::clone(&recorded));
+        let ctx = FormatContext::default();
+        let outcome = stream_cleanup_and_inject(&fmt, raw, &ctx, &injector).await;
+        let seq = recorded.lock().unwrap().clone();
+        (outcome, seq)
+    }
+
+    #[tokio::test]
+    async fn gate_passes_clean_prefix_and_streams_all_words() {
+        let (outcome, seq) = run_gate(
+            "this is the raw transcript that we dictated",
+            &[
+                "This is the cleaned transcript ",
+                "output here. And then ",
+                "some more words follow afterwards.",
+            ],
+        )
+        .await;
+        assert!(outcome.injected, "clean prefix must stream");
+        let full = outcome.cleaned.expect("clean prefix yields cleaned text");
+        assert_eq!(
+            full,
+            "This is the cleaned transcript output here. And then some more words follow afterwards."
+        );
+        // The injected deltas concatenate to exactly the cleaned text.
+        let joined: String = seq.concat();
+        assert_eq!(joined, full);
+        assert!(seq.len() > 1, "streaming must emit more than one delta: {seq:?}");
+    }
+
+    #[tokio::test]
+    async fn gate_clarification_prefix_injects_nothing() {
+        let (outcome, seq) = run_gate(
+            "the response is this and that",
+            &[
+                "It seems like you're describing a situation, ",
+                "but the details are incomplete here.",
+            ],
+        )
+        .await;
+        assert!(!outcome.injected, "clarification prefix must not inject");
+        assert!(outcome.cleaned.is_none());
+        assert!(seq.is_empty(), "no cleaned deltas may leak to the injector: {seq:?}");
+    }
+
+    #[tokio::test]
+    async fn gate_degenerate_role_token_injects_nothing() {
+        let (outcome, seq) = run_gate("the response is this and that today", &["model"]).await;
+        assert!(!outcome.injected);
+        assert!(outcome.cleaned.is_none());
+        assert!(seq.is_empty(), "degenerate role token must not be typed: {seq:?}");
+    }
+
+    #[tokio::test]
+    async fn gate_translated_prefix_injects_nothing() {
+        // Romanian output for an English source must trip the translation
+        // guard and inject nothing.
+        let fmt = ScriptedStream {
+            chunks: vec![
+                "Aș vrea să merg acasă astăzi ".to_string(),
+                "pentru că este foarte târziu deja.".to_string(),
+            ],
+            local: true,
+        };
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let injector = RecordingInjector(std::sync::Arc::clone(&recorded));
+        let ctx = FormatContext { language: Some("en".into()), ..Default::default() };
+        let outcome = stream_cleanup_and_inject(
+            &fmt,
+            "I would like to go home today because it is very late already",
+            &ctx,
+            &injector,
+        )
+        .await;
+        let seq = recorded.lock().unwrap().clone();
+        assert!(!outcome.injected, "translated prefix must not inject");
+        assert!(outcome.cleaned.is_none());
+        assert!(seq.is_empty(), "translated output must not leak to the injector: {seq:?}");
     }
 }

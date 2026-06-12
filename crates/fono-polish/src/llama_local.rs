@@ -30,7 +30,10 @@ use fono_core::llama_backend::{backend, shared_model};
 use fono_core::prompt_cache::{
     PromptStateCache, PromptStateCacheEntry, PromptStateCacheKey, PromptStateCacheLayer,
 };
-use fono_core::turn_trace::{current_instant, current_span, record_cache_mutation, POLISH_LANE};
+use fono_core::turn_trace::{
+    current_instant, current_span, generation_span_args, record_cache_mutation, POLISH_LANE,
+};
+use futures::stream::{BoxStream, StreamExt};
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_batch::LlamaBatch;
@@ -41,6 +44,8 @@ use llama_cpp_2::token::LlamaToken;
 use llama_cpp_2::token_type::LlamaTokenAttr;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, info, warn};
 
 use crate::traits::{
@@ -96,7 +101,7 @@ pub struct LlamaLocal {
 
 impl LlamaLocal {
     pub fn new(model_path: impl Into<PathBuf>, context_size: u32) -> Self {
-        Self::with_threads(model_path, context_size, num_threads())
+        Self::with_threads(model_path, context_size, fono_core::llama_backend::decode_threads())
     }
 
     pub fn with_threads(model_path: impl Into<PathBuf>, context_size: u32, threads: i32) -> Self {
@@ -207,11 +212,20 @@ impl LlamaLocal {
     /// Greedy generation from an already-prefilled context. `start_pos` is the
     /// absolute position of the first generated token; `first_sample_idx` is the
     /// batch index holding the logits to sample the first token from.
+    ///
+    /// `on_piece` is invoked with each chunk of decoded text as soon as it is
+    /// known not to be part of an incomplete stop marker — see
+    /// [`safe_stream_end`]. The full accumulated (trimmed) string is still
+    /// returned, so non-streaming callers pass a no-op closure and get
+    /// behaviour identical to the pre-streaming implementation. Streaming
+    /// callers ([`LlamaLocal::format_stream`]) forward each chunk over a
+    /// channel for incremental word injection.
     fn generate_from_prefilled(
         model: &LlamaModel,
         ctx: &mut LlamaContext<'_>,
         start_pos: i32,
         first_sample_idx: i32,
+        on_piece: &mut dyn FnMut(&str),
     ) -> Result<String> {
         // Greedy decoding with a repetition penalty over generated tokens only
         // (see PENALTY_* docs): deterministic and faithful, but escapes the
@@ -241,36 +255,87 @@ impl LlamaLocal {
         // `Control` attribute catches all of these (105, 106, eos, bos) while
         // letting ordinary newline tokens (107 = `\n`, 108 = `\n\n`) through.
         let mut out = String::new();
+        let mut emitted_len = 0_usize;
         let mut sample_idx = first_sample_idx;
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut batch = LlamaBatch::new(1, 1);
+        // Generation-throughput counters, mirroring the assistant
+        // `llm.local_streaming_inference` span so the waterfall reports real
+        // tok/s instead of forcing a chars÷4 estimate. `tokens` counts decoded
+        // tokens (greedy = one per step), `deltas` counts `on_piece` flushes,
+        // and `ttft_ms` is the latency to the first decoded token.
+        let gen_started = Instant::now();
+        let mut tokens_generated = 0_u32;
+        let mut deltas = 0_u32;
+        let mut ttft_ms = 0_u64;
+        let mut stop_reason = "max_tokens";
         for n_cur in (start_pos..).take(MAX_NEW_TOKENS as usize) {
             let token = sampler.sample(ctx, sample_idx);
             sampler.accept(token);
             if model.token_attr(token).contains(LlamaTokenAttr::Control) {
+                stop_reason = "control_token";
                 break;
             }
+            if tokens_generated == 0 {
+                ttft_ms = gen_started.elapsed().as_millis() as u64;
+            }
+            tokens_generated += 1;
             // `special = false` keeps any marker that slips through from
             // round-tripping into user-visible output.
             let piece = model.token_to_piece(token, &mut decoder, false, None).unwrap_or_default();
             out.push_str(&piece);
             // Belt-and-braces: if a template marker round-tripped as plain text
-            // (rather than a registered control token), truncate at the first.
+            // (rather than a registered control token), emit the prose before
+            // it, truncate at the first occurrence, and stop.
             if let Some(idx) = first_stop_marker(&out) {
+                if idx > emitted_len {
+                    on_piece(&out[emitted_len..idx]);
+                    deltas += 1;
+                }
                 out.truncate(idx);
+                emitted_len = out.len();
+                stop_reason = "stop_marker";
                 break;
+            }
+            // Stream only bytes that cannot be the start of a not-yet-complete
+            // stop marker, so a marker split across several token pieces is
+            // never partially injected into the cursor.
+            let safe_end = safe_stream_end(&out);
+            if safe_end > emitted_len {
+                on_piece(&out[emitted_len..safe_end]);
+                deltas += 1;
+                emitted_len = safe_end;
             }
             batch.clear();
             batch.add(token, n_cur, &[0], true).context("decode batch.add")?;
             sample_idx = 0;
             ctx.decode(&mut batch).context("decode loop")?;
         }
+        // Flush any held-back tail that turned out not to be a stop marker.
+        if emitted_len < out.len() {
+            on_piece(&out[emitted_len..]);
+            deltas += 1;
+        }
         let out = out.trim().to_string();
-        span.finish(json!({ "chars": out.len(), "start_pos": start_pos }));
+        let gen_ms = gen_started.elapsed().as_millis() as u64;
+        span.finish(generation_span_args(
+            tokens_generated,
+            out.chars().count(),
+            deltas,
+            ttft_ms,
+            gen_ms,
+            start_pos,
+            stop_reason,
+        ));
         Ok(out)
     }
 
-    fn run_inference_with_model(&self, model: &LlamaModel, prompt: &str) -> Result<String> {
+    fn run_inference_with_model(
+        &self,
+        model: &LlamaModel,
+        prompt: &str,
+        on_piece: &mut dyn FnMut(&str),
+    ) -> Result<String> {
         let mut ctx = self.new_context(model)?;
         let tokens = model.str_to_token(prompt, AddBos::Always).context("tokenize prompt")?;
         if tokens.len() as u32 + (MAX_NEW_TOKENS as u32) >= self.context_size {
@@ -284,7 +349,13 @@ impl LlamaLocal {
         }
         let last_prefill_idx = tokens.len() as i32 - 1;
         self.prefill_tokens(&mut ctx, &tokens, 0, true)?;
-        Self::generate_from_prefilled(model, &mut ctx, tokens.len() as i32, last_prefill_idx)
+        Self::generate_from_prefilled(
+            model,
+            &mut ctx,
+            tokens.len() as i32,
+            last_prefill_idx,
+            on_piece,
+        )
     }
 
     /// Build a runtime+content cache key for `prefix`. Mirrors the assistant
@@ -378,6 +449,7 @@ impl LlamaLocal {
     /// cached state into a fresh context and decode only the suffix. Returns
     /// `Ok(Some(text))` on a hit, `Ok(None)` to fall through to the
     /// longest-prefix miss path (including when a state restore fails).
+    #[allow(clippy::too_many_arguments)]
     fn try_exact_context_hit(
         &self,
         model: &LlamaModel,
@@ -386,6 +458,7 @@ impl LlamaLocal {
         prefix_tokens: &[LlamaToken],
         suffix_tokens: &[LlamaToken],
         full_tokens: &[LlamaToken],
+        on_piece: &mut dyn FnMut(&str),
     ) -> Result<Option<String>> {
         let exact = {
             let mut cache = self
@@ -445,6 +518,7 @@ impl LlamaLocal {
             &mut ctx,
             full_tokens.len() as i32,
             (suffix_tokens.len() - 1) as i32,
+            on_piece,
         )?;
         debug!(layer = "f7_context", "F7 prefix cache hit (exact)");
         Ok(Some(text))
@@ -462,6 +536,7 @@ impl LlamaLocal {
         base: &str,
         full_prefix: &str,
         suffix: &str,
+        on_piece: &mut dyn FnMut(&str),
     ) -> Result<Option<String>> {
         let layer_str = PromptStateCacheLayer::F7Context.as_str();
         if full_prefix.is_empty() || suffix.is_empty() {
@@ -503,6 +578,7 @@ impl LlamaLocal {
             &prefix_tokens,
             suffix_tokens,
             &full_tokens,
+            on_piece,
         )? {
             return Ok(Some(text));
         }
@@ -518,6 +594,7 @@ impl LlamaLocal {
             &mut ctx,
             full_tokens.len() as i32,
             (suffix_tokens.len() - 1) as i32,
+            on_piece,
         )?;
         Ok(Some(text))
     }
@@ -631,17 +708,20 @@ impl LlamaLocal {
         base: &str,
         full_prefix: &str,
         suffix: &str,
+        on_piece: &mut dyn FnMut(&str),
     ) -> Result<String> {
         let guard = self.state.lock().map_err(|_| anyhow!("llama-local mutex poisoned"))?;
         let model = guard.as_ref().ok_or_else(|| anyhow!("llama-local model not loaded"))?;
         if format!("{full_prefix}{suffix}") == prompt {
-            if let Some(text) = self.generate_with_prefix_cache(model, base, full_prefix, suffix)? {
+            if let Some(text) =
+                self.generate_with_prefix_cache(model, base, full_prefix, suffix, on_piece)?
+            {
                 return Ok(text);
             }
         } else {
             polish_cold_prefill(PromptStateCacheLayer::F7Context.as_str(), "prompt_split_mismatch");
         }
-        self.run_inference_with_model(model, prompt)
+        self.run_inference_with_model(model, prompt, on_piece)
     }
 
     /// Cleanup via a cold full prefill, bypassing the prefix cache entirely.
@@ -649,10 +729,14 @@ impl LlamaLocal {
     /// degenerate result (e.g. the bare token `model`): a fresh context + full
     /// prefill recomputes the prompt deterministically without relying on a
     /// restored KV state, which is the path that drifts.
-    fn run_inference_uncached(&self, prompt: &str) -> Result<String> {
+    fn run_inference_uncached(
+        &self,
+        prompt: &str,
+        on_piece: &mut dyn FnMut(&str),
+    ) -> Result<String> {
         let guard = self.state.lock().map_err(|_| anyhow!("llama-local mutex poisoned"))?;
         let model = guard.as_ref().ok_or_else(|| anyhow!("llama-local model not loaded"))?;
-        self.run_inference_with_model(model, prompt)
+        self.run_inference_with_model(model, prompt, on_piece)
     }
 
     /// Speculatively build (and cache) the F7Context checkpoint for
@@ -726,6 +810,29 @@ const STOP_MARKERS: &[&str] =
 
 fn first_stop_marker(text: &str) -> Option<usize> {
     STOP_MARKERS.iter().filter_map(|marker| text.find(marker)).min()
+}
+
+/// Byte offset up to which `text` can be streamed without risking emitting a
+/// partial stop marker. Holds back the longest suffix of `text` that is also a
+/// non-empty prefix of any [`STOP_MARKERS`] entry, so a marker split across
+/// several token pieces (e.g. `<end` then `_of_turn>`) is never partially
+/// injected into the cursor. Mirrors the assistant backend's `safe_stream_end`.
+fn safe_stream_end(text: &str) -> usize {
+    let keep = STOP_MARKERS
+        .iter()
+        .filter_map(|marker| longest_marker_prefix_suffix(text, marker))
+        .max()
+        .unwrap_or(0);
+    text.len().saturating_sub(keep)
+}
+
+/// Length of the longest suffix of `text` that is a proper non-empty prefix of
+/// `marker`. `None` when there is no overlap.
+fn longest_marker_prefix_suffix(text: &str, marker: &str) -> Option<usize> {
+    let max = text.len().min(marker.len().saturating_sub(1));
+    (1..=max)
+        .rev()
+        .find(|&len| text.is_char_boundary(text.len() - len) && text.ends_with(&marker[..len]))
 }
 
 fn copy_context_state(ctx: &LlamaContext<'_>) -> Result<Vec<u8>> {
@@ -900,7 +1007,8 @@ impl TextFormatter for LlamaLocal {
         let started = Instant::now();
         let text = tokio::task::spawn_blocking(move || -> Result<String> {
             me.ensure_loaded()?;
-            let first = me.run_inference_cached(&prompt, &base, &prefix, &suffix)?;
+            let mut noop = |_: &str| {};
+            let first = me.run_inference_cached(&prompt, &base, &prefix, &suffix, &mut noop)?;
             // The warm prompt-state-cache restore path occasionally degenerates
             // into a bare chat-role token (e.g. "model"): llama.cpp's KV-state
             // restore is not bit-exact and greedy decoding amplifies the drift.
@@ -909,7 +1017,7 @@ impl TextFormatter for LlamaLocal {
             // guard still rejects → raw if the retry also degenerates.
             if looks_like_degenerate_cleanup(&raw_for_retry, &first) {
                 warn!(output = %first, "llama-local cleanup degenerated on the cached path; retrying with a cold full prefill");
-                return me.run_inference_uncached(&prompt);
+                return me.run_inference_uncached(&prompt, &mut noop);
             }
             Ok(first)
         })
@@ -950,6 +1058,56 @@ impl TextFormatter for LlamaLocal {
 
     fn name(&self) -> &'static str {
         "llama-local"
+    }
+
+    /// Stream each decoded token piece over a channel so the orchestrator can
+    /// inject words incrementally during the multi-second CPU cleanup. Shares
+    /// the exact decode core (`run_inference_cached` → `generate_from_prefilled`)
+    /// with [`Self::format`], so the prompt-state cache, sampler, stop-sequence
+    /// handling, and `MAX_NEW_TOKENS` cap are identical. The degenerate
+    /// cold-reprefill retry that `format()` applies is intentionally skipped
+    /// here: a degenerate prefix is caught by the orchestrator's first-sentence
+    /// guard gate, which falls back to the raw transcript. The cleanup guards
+    /// are NOT applied inside this method — the caller runs them on the
+    /// buffered prefix before committing any text to the cursor.
+    async fn format_stream(
+        &self,
+        raw: &str,
+        ctx: &FormatContext,
+    ) -> Result<BoxStream<'static, Result<String>>> {
+        let model_name = self.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        let user = user_prompt(raw);
+        let (prefix, suffix) =
+            build_prompt_split_for_model(&ctx.system_prompt(), &user, model_name);
+        let prompt = format!("{prefix}{suffix}");
+        let base = base_prefix_for_model(&ctx.base_system_prompt(), model_name);
+        let me = self.clone_thin();
+        // Unbounded so the blocking decode thread is NEVER paced by the
+        // injector. A bounded channel coupled CPU decode to per-word text
+        // injection: once the buffer filled, every `send` blocked the decode
+        // loop until the orchestrator typed a word, dragging generation from
+        // ~22 tok/s down to ~8 tok/s. With an unbounded channel decode runs
+        // flat-out and the orchestrator drains (and batches) at its own pace.
+        let (tx, rx) = mpsc::unbounded_channel::<Result<String>>();
+        tokio::task::spawn_blocking(move || {
+            let result = (|| -> Result<String> {
+                me.ensure_loaded()?;
+                let tx_pieces = tx.clone();
+                let mut on_piece = move |piece: &str| {
+                    if !piece.is_empty() {
+                        // A closed receiver (orchestrator dropped the stream on a
+                        // guard hit / cancel) just means no one is listening; the
+                        // decode finishes normally and is discarded.
+                        let _ = tx_pieces.send(Ok(piece.to_string()));
+                    }
+                };
+                me.run_inference_cached(&prompt, &base, &prefix, &suffix, &mut on_piece)
+            })();
+            if let Err(e) = result {
+                let _ = tx.send(Err(e));
+            }
+        });
+        Ok(UnboundedReceiverStream::new(rx).boxed())
     }
 
     fn is_local(&self) -> bool {
@@ -1030,10 +1188,6 @@ fn lower_current_thread_priority_for_prewarm() {
 
 #[cfg(not(target_os = "linux"))]
 fn lower_current_thread_priority_for_prewarm() {}
-
-fn num_threads() -> i32 {
-    std::thread::available_parallelism().map(|n| i32::try_from(n.get()).unwrap_or(4)).unwrap_or(4)
-}
 
 #[cfg(test)]
 mod tests {

@@ -230,7 +230,17 @@ fn build_embedded_local(
             cfg.local.model
         ));
     }
-    Ok(Arc::new(crate::llama_local::LlamaLocalAssistant::new(model_path, cfg.local.context)))
+    // The assistant streams token deltas concurrently with TTS synthesis (a
+    // heavy CPU consumer) on the normal voice-reply path, so reserve one core
+    // for that consumer to avoid the per-token barrier stall that throttles a
+    // fully-saturated decode (see `streaming_decode_threads`; the same trick
+    // recovered F7 dictation from ~13 to ~26 tok/s). Falls back to all cores on
+    // ≤2-core hosts.
+    Ok(Arc::new(crate::llama_local::LlamaLocalAssistant::with_threads(
+        model_path,
+        cfg.local.context,
+        fono_core::llama_backend::streaming_decode_threads(),
+    )))
 }
 
 #[cfg(not(feature = "llama-local"))]

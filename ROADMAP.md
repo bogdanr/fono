@@ -13,12 +13,20 @@ The home page is [fono.page](https://fono.page).
 
 <table width="100%">
 <tr>
-<td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#personal-vocabulary--voice-correction">Personal vocabulary &amp; voice correction</a></strong><br>Teach Fono once that "Phono" means "Fono" — it sticks forever, deterministically, before the text ever hits the cursor.<br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#wake-word-activation">Wake-word activation</a></strong><br>Say the magic word — Fono wakes and starts dictating. No hotkey, no hands.<br><br><strong><a href="#local-text-to-speech--home-assistant-voice-server">Local text-to-speech + Home Assistant voice server</a></strong><br>Speak any of your languages locally — Kokoro where it shines, Piper everywhere else (including Romanian). The same engine answers Home Assistant over Wyoming, no Python sidecar.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".</td>
+<td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#personal-vocabulary--voice-correction">Personal vocabulary &amp; voice correction</a></strong><br>Teach Fono once that "Phono" means "Fono" — it sticks forever, deterministically, before the text ever hits the cursor.<br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#wake-word-activation">Wake-word activation</a></strong><br>Say the magic word — Fono wakes and starts dictating. No hotkey, no hands.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".</td>
 <td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#hover-context-injection">Hover-context injection</a></strong> <em>(experimental)</em><br>Terminal hovered → shell prompts. Code editor hovered → identifier casing.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#realtime-voice-assistant">Realtime voice assistant</a></strong><br>OpenAI Realtime and Gemini Live: F8 speaks straight to the model, single WebSocket, sub-second time-to-first-audio.<br><br><strong><a href="#better-wayland-hotkeys">Better Wayland hotkeys</a></strong><br>Auto-register via the <code>GlobalShortcuts</code> portal when available.<br><br><strong><a href="#macos-and-windows">macOS + Windows</a></strong><br>Native platform integrations.<br><br><strong><a href="#shared-ggml-size-reclaim-spike">Shared ggml size-reclaim spike</a></strong><br>Investigate replacing the linker workaround with one source-level ggml runtime to reclaim about 7 MiB.</td>
 </tr>
 </table>
 
 ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge)
+
+**[v0.10.0 — Faster local AI, local voice out of the box](#shipped)**  
+The embedded engine reuses prompt checkpoints so warm dictations and assistant
+turns stay quick, offline Piper/Kokoro text-to-speech ships in the default
+binary, and local AI cleanup now types into the cursor word-by-word instead of
+making you wait for the whole pass. The speed work is written up in
+[Making local LLM fast](https://bogdan.nimblex.net/programming/2026/06/10/making-local-llm-fast.html).
+*(2026-06-12)*
 
 **[v0.9.1 — See your screen, dictate in any language](#shipped)**  
 The voice assistant and your coding agents can now look at your screen when you
@@ -99,32 +107,6 @@ Always-on hands-free mode: Fono idles with a tiny wake-word detector (powered by
 core. Say the magic word and Fono wakes up and starts dictating — no hotkey, no
 reaching for the keyboard. When you stop speaking it goes back to sleep. The wake-word
 model runs locally; your audio never leaves the machine while idle.
-
-### Local text-to-speech + Home Assistant voice server
-
-> Hear your assistant in your own language, locally. Then let Home Assistant
-> hear it too.
-
-Fono will speak back without a cloud call and without a separate Python sidecar.
-Two engines, one automatic router: **Kokoro** for the nine locales it speaks
-natively (American / British English, Spanish, French, Hindi, Italian, Japanese,
-Brazilian Portuguese, Mandarin) where its prosody is best in class, and **Piper**
-for everything else — Romanian, Polish, German, Dutch, Russian, Turkish, and the
-long tail of European, Slavic, and Asian languages. Voices and language data
-download on first use, like the Whisper models do today; the binary stays
-self-contained.
-
-The same local engine becomes a **Wyoming-protocol TTS server**, autodiscovered
-by Home Assistant over mDNS. One Fono daemon on the LAN replaces
-`wyoming-piper` (and, for the languages Kokoro covers, dramatically improves on
-it) as your house's voice. ASR and TTS can run side-by-side on the same
-listener; a headless `sudo fono install --server` box becomes a complete
-HA-voice endpoint with one config flag.
-
-Local TTS ships as a third release variant (`fono-tts-vX.Y.Z-x86_64`, target
-≤ 32 MiB) alongside the existing CPU and GPU builds. `fono update` picks the
-right one automatically. Plan:
-`plans/2026-05-25-local-tts-piper-kokoro-and-wyoming-server-v1.md`.
 
 ### Talk over the assistant
 
@@ -251,6 +233,32 @@ tracks the opportunity at roughly **~7 MiB** reclaimed.
 ## Shipped
 
 Newest first.
+
+- ![v0.10.0](https://img.shields.io/badge/v0.10.0-2026--06--12-blue?style=flat-square)
+  **Faster local AI, local voice out of the box, and cleanup that types
+  as it thinks.** The embedded llama.cpp engine now keeps reusable
+  checkpoints of the prompts it has already processed — the cleanup
+  instructions, the assistant's system prompt, your running conversation —
+  so warm dictations and follow-up assistant turns skip re-crunching all of
+  it and process only what's new. Time-to-first-token stays flat as a
+  conversation grows instead of climbing every turn. Local text-to-speech
+  now ships built into the `cpu` and `gpu` binaries by default: offline
+  Piper across 42 voices / 38 languages, with **Kokoro** providing a
+  higher-quality voice for English (four voices sharing one model). And
+  local AI cleanup streams into the cursor word-by-word as the model
+  decodes — first words in about one to three seconds on a long dictation
+  instead of after the whole pass — while still running every safety check
+  on the first sentence before a character is typed. The prompt-cache speed
+  work is written up in
+  [Making local LLM fast](https://bogdan.nimblex.net/programming/2026/06/10/making-local-llm-fast.html).
+
+  Fixes: local cleanup with a Gemma model no longer loops or runs away;
+  `[polish].backend = "local"` runs the embedded engine instead of silently
+  routing Gemma models to an Ollama HTTP server; the transcription history
+  database and `/var/log/fono.log` are clamped to owner-only permissions on
+  shared machines; and several local-TTS language/voice-selection bugs are
+  closed. Hands-free recording now auto-stops after 3 s of silence (was 5 s).
+  *(2026-06-12)*
 
 - ![v0.9.1](https://img.shields.io/badge/v0.9.1-2026--05--29-blue?style=flat-square)
   **See your screen, dictate in any language.** The F8 voice
@@ -637,6 +645,7 @@ Newest first.
 [v0.6.1]: https://github.com/bogdanr/fono/releases/tag/v0.6.1
 [v0.7.0]: https://github.com/bogdanr/fono/releases/tag/v0.7.0
 [v0.7.1]: https://github.com/bogdanr/fono/releases/tag/v0.7.1
+[v0.10.0]: https://github.com/bogdanr/fono/releases/tag/v0.10.0
 [v0.9.1]: https://github.com/bogdanr/fono/releases/tag/v0.9.1
 [v0.9.0]: https://github.com/bogdanr/fono/releases/tag/v0.9.0
 [v0.8.2]: https://github.com/bogdanr/fono/releases/tag/v0.8.2

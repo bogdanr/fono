@@ -1,5 +1,31 @@
 # Fono — Project Status
-Last updated: 2026-06-09
+Last updated: 2026-06-12
+
+## 2026-06-12 — v0.10.0 release prep + streaming local cleanup injection
+
+Landed `plans/2026-06-12-streaming-cleanup-injection-v3.md`: local AI cleanup
+now streams into the cursor word-by-word as the embedded model decodes, instead
+of waiting for the whole pass. `TextFormatter` gains a `format_stream` default
+(one-shot wrapper; only `LlamaLocal` overrides), the orchestrator buffers to a
+first-sentence gate, runs all three cleanup guards on the buffered prefix, then
+flushes whole words after the gate. Auto-falls-back to one-shot for cloud
+backends, short utterances, and clipboard-fallback sessions. New
+`[polish].stream_injection` flag (default `true`). Supporting changes:
+`streaming_decode_threads()` reserves one core for the streaming consumer to
+avoid the per-token barrier stall (recovered F7 ~13→26 tok/s; same trick wired
+into the assistant), and the F8 decode loop now emits a single `llm.generate`
+span with `ttft_ms`/`deltas` (per-token instants gated behind
+`FONO_TRACE_TOKENS`).
+
+Release: graduated the CHANGELOG `[Unreleased]` section to **`## [0.10.0] —
+2026-06-12`**, bumped `[workspace.package] version` to `0.10.0`, and refreshed
+`ROADMAP.md` (new Recently-shipped highlight + Shipped entry; moved the local
+TTS roadmap item into Shipped). Version decision: stay on `0.x` (`0.10.0`, not
+`1.0.0`) — the release is additive features/fixes and still adds config keys;
+`1.0` is reserved for a stability commitment (cross-platform / preview-feature
+graduation).
+
+Pre-commit gate: see the verification block staged with the commit.
 
 ## 2026-06-09 — F7 polish: control-token stop (the definitive cleanup fix)
 

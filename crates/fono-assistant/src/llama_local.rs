@@ -15,7 +15,9 @@ use std::time::Instant;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use fono_core::llama_backend::{backend, shared_model};
-use fono_core::turn_trace::{current_instant, current_span, record_cache_mutation, CACHE_LANE};
+use fono_core::turn_trace::{
+    current_instant, current_span, generation_span_args, record_cache_mutation, CACHE_LANE,
+};
 use futures::stream::{BoxStream, StreamExt};
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::context::LlamaContext;
@@ -1513,8 +1515,17 @@ where
     let mut sample_idx = first_sample_idx;
     let mut next_token = first_token_override;
     let mut decoder = encoding_rs::UTF_8.new_decoder();
+    // Slice the autoregressive decode loop onto the `llm` lane as a single
+    // `llm.generate` span carrying the canonical generation schema
+    // ([`generation_span_args`]), so the F8 waterfall reports `tok_per_sec` /
+    // `ttft_ms` directly — at parity with the F7 `polish.generate` span —
+    // instead of forcing the reader to infer them from a separate instant.
+    let gen_span = current_span("llm.generate", "assistant.llm", "llm");
     let decode_started = Instant::now();
     let mut generated_tokens = 0_u32;
+    let mut deltas = 0_u32;
+    let mut ttft_ms = 0_u64;
+    let token_trace = token_trace_enabled();
     let mut decoded_tokens: Vec<llama_cpp_2::token::LlamaToken> = Vec::new();
     let mut stop_reason = "max_tokens";
     let mut batch = LlamaBatch::new(1, 1);
@@ -1527,6 +1538,9 @@ where
         }
         let piece = model.token_to_piece(token, &mut decoder, false, None).unwrap_or_default();
         out.push_str(&piece);
+        if generated_tokens == 0 {
+            ttft_ms = decode_started.elapsed().as_millis() as u64;
+        }
         generated_tokens = generated_tokens.saturating_add(1);
         if let Some((stop_at, marker)) = first_stop_marker(&out) {
             if stop_at > emitted_len {
@@ -1535,6 +1549,7 @@ where
                     stop_reason = "receiver_dropped";
                     break;
                 }
+                deltas += 1;
             }
             out.truncate(stop_at);
             stop_reason = marker;
@@ -1547,18 +1562,25 @@ where
                 stop_reason = "receiver_dropped";
                 break;
             }
+            deltas += 1;
             emitted_len = safe_end;
         }
-        current_instant(
-            "llm.decode_token",
-            "assistant.llm",
-            "llm",
-            json!({
-                "index": generated_tokens,
-                "piece_chars": piece.chars().count(),
-                "cumulative_chars": out.chars().count(),
-            }),
-        );
+        // Per-token instant is verbose and costs a mutex+alloc on the hot
+        // decode thread for EVERY token, so it is gated behind
+        // `FONO_TRACE_TOKENS` (default off). The `llm.generate` span's
+        // `deltas`/`ttft_ms` already capture decode cadence for normal traces.
+        if token_trace {
+            current_instant(
+                "llm.decode_token",
+                "assistant.llm",
+                "llm",
+                json!({
+                    "index": generated_tokens,
+                    "piece_chars": piece.chars().count(),
+                    "cumulative_chars": out.chars().count(),
+                }),
+            );
+        }
         batch.clear();
         batch.add(token, n_cur, &[0], true).context("decode batch.add")?;
         sample_idx = 0;
@@ -1567,27 +1589,22 @@ where
     }
     if stop_reason != "receiver_dropped" && emitted_len < out.len() {
         let delta = out[emitted_len..].to_string();
-        if !on_delta(delta)? {
+        if on_delta(delta)? {
+            deltas += 1;
+        } else {
             stop_reason = "receiver_dropped";
         }
     }
     let elapsed_ms = decode_started.elapsed().as_millis() as u64;
-    current_instant(
-        "llm.decode_done",
-        "assistant.llm",
-        "llm",
-        json!({
-            "generated_tokens": generated_tokens,
-            "reply_chars": out.chars().count(),
-            "elapsed_ms": elapsed_ms,
-            "tokens_per_second": if elapsed_ms == 0 {
-                0.0
-            } else {
-                f64::from(generated_tokens) / (elapsed_ms as f64 / 1000.0)
-            },
-            "stop_reason": stop_reason,
-        }),
-    );
+    gen_span.finish(generation_span_args(
+        generated_tokens,
+        out.chars().count(),
+        deltas,
+        ttft_ms,
+        elapsed_ms,
+        start_pos,
+        stop_reason,
+    ));
     Ok(GenerationResult { text: out, elapsed_ms, tokens: decoded_tokens })
 }
 
@@ -1887,7 +1904,21 @@ impl Assistant for LlamaLocalAssistant {
 }
 
 fn num_threads() -> i32 {
-    std::thread::available_parallelism().map(|n| i32::try_from(n.get()).unwrap_or(4)).unwrap_or(4)
+    fono_core::llama_backend::decode_threads()
+}
+
+/// Whether the verbose per-token `llm.decode_token` instant is emitted.
+///
+/// Off by default: that instant fires for every decoded token (a mutex lock +
+/// JSON alloc on the hot decode thread) and the `llm.generate` span already
+/// carries `deltas`/`ttft_ms`/`tok_per_sec`, so normal traces don't need it.
+/// Set `FONO_TRACE_TOKENS=1` to opt into per-token granularity. Cached so the
+/// env var is read once, not per token.
+fn token_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("FONO_TRACE_TOKENS").ok().and_then(|v| env_bool(&v)).unwrap_or(false)
+    })
 }
 
 fn sha256_text(text: &str) -> String {

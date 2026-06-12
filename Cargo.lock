@@ -1253,7 +1253,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "fono"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1297,7 +1297,7 @@ dependencies = [
 
 [[package]]
 name = "fono-assistant"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1320,7 +1320,7 @@ dependencies = [
 
 [[package]]
 name = "fono-audio"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "cpal",
@@ -1333,7 +1333,7 @@ dependencies = [
 
 [[package]]
 name = "fono-bench"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "fono-core"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "ash",
@@ -1380,7 +1380,7 @@ dependencies = [
 
 [[package]]
 name = "fono-download"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "fono-core",
@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "fono-hotkey"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -1414,7 +1414,7 @@ dependencies = [
 
 [[package]]
 name = "fono-http"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1428,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "fono-inject"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1443,7 +1443,7 @@ dependencies = [
 
 [[package]]
 name = "fono-ipc"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "fono-mcp-server"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1478,7 +1478,7 @@ dependencies = [
 
 [[package]]
 name = "fono-net"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "fono-net-codec"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1507,7 +1507,7 @@ dependencies = [
 
 [[package]]
 name = "fono-overlay"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "ab_glyph",
  "fono-core",
@@ -1524,13 +1524,14 @@ dependencies = [
 
 [[package]]
 name = "fono-polish"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "encoding_rs",
  "fono-core",
  "fono-http",
+ "futures",
  "hex",
  "llama-cpp-2",
  "reqwest",
@@ -1539,13 +1540,14 @@ dependencies = [
  "sha2",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
  "tracing",
  "whatlang",
 ]
 
 [[package]]
 name = "fono-stt"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1567,7 +1569,7 @@ dependencies = [
 
 [[package]]
 name = "fono-tray"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "fono-core",
@@ -1578,7 +1580,7 @@ dependencies = [
 
 [[package]]
 name = "fono-tts"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1602,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "fono-update"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "fono-core",

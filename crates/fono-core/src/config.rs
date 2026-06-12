@@ -497,6 +497,19 @@ pub struct Polish {
     /// for any sentence-shaped utterance while short-circuiting one-
     /// and two-word captures regardless of which backend is active.
     pub skip_if_words_lt: u32,
+    /// Stream the LOCAL cleanup model's output into text injection word by
+    /// word instead of waiting for the whole cleaned string. Meaningful only
+    /// for the local backend (cloud backends are one-shot and sub-second);
+    /// it is automatically ignored when the active polish backend is not
+    /// local, when the injector resolved to the clipboard fallback (each
+    /// inject would overwrite the clipboard), and for short utterances skipped
+    /// via `skip_if_words_lt`. On a long local dictation it cuts
+    /// time-to-first-injected-word from the whole 7–20 s decode to ~1–3 s,
+    /// then types continuously as the model decodes. All three cleanup guards
+    /// still run on the first buffered sentence before any text is committed,
+    /// so a clarification / degenerate / translated output still falls back to
+    /// the raw transcript with nothing typed. Default `true`.
+    pub stream_injection: bool,
 }
 
 impl Default for Polish {
@@ -512,6 +525,7 @@ impl Default for Polish {
             cloud: None,
             prompt: Prompt::default(),
             skip_if_words_lt: 3,
+            stream_injection: true,
         }
     }
 }
@@ -776,10 +790,7 @@ pub struct AssistantCloud {
 /// for low time-to-first-audio: short answers, plain prose, no
 /// markdown / lists / code that the TTS layer would have to skip.
 pub const fn default_assistant_prompt() -> &'static str {
-    "You are a concise voice assistant. Reply in 1-3 sentences unless the user explicitly asks \
-for detail. Spoken plain prose only — no markdown, no bullet lists, no code blocks, no headings. \
-If you would normally include code or a structured list, describe it briefly in spoken language \
-instead. Match the user's language."
+    "You are a concise voice assistant. Reply in 1-4 sentences unless the user explicitly asks for detail. Spoken plain prose only — no markdown, no bullet lists, no code blocks, no headings. If you would normally include code or a structured list, describe it briefly in spoken language instead. Match the user's language."
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

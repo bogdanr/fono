@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::stream::{BoxStream, StreamExt};
 use whatlang::{Detector, Lang};
 
 #[derive(Debug, Clone, Default)]
@@ -286,7 +287,8 @@ fn candidate_whatlangs(codes: &[String]) -> Vec<Lang> {
     out
 }
 
-fn has_enough_text_for_language_guard(text: &str) -> bool {
+#[must_use]
+pub fn has_enough_text_for_language_guard(text: &str) -> bool {
     let alpha_chars = text.chars().filter(|c| c.is_alphabetic()).count();
     let words = text.split(|c: char| !c.is_alphabetic()).filter(|w| !w.is_empty()).count();
     let non_ascii_alpha_chars = text.chars().filter(|c| c.is_alphabetic() && !c.is_ascii()).count();
@@ -384,6 +386,31 @@ fn lang_base(lang: &str) -> &str {
 pub trait TextFormatter: Send + Sync {
     async fn format(&self, raw: &str, ctx: &FormatContext) -> Result<String>;
     fn name(&self) -> &'static str;
+
+    /// Stream the cleaned text as a sequence of incremental chunks.
+    ///
+    /// The default implementation calls [`Self::format`] and yields the whole
+    /// cleaned string as a single chunk, so cloud backends (and any other
+    /// formatter that does not override this) behave byte-identically to the
+    /// one-shot path. Only the local llama.cpp backend overrides this to emit
+    /// each decoded token piece as it is produced, so the orchestrator can
+    /// inject words incrementally during a multi-second CPU cleanup. Mirrors
+    /// the spirit of `fono_assistant::Assistant::reply_stream`.
+    ///
+    /// Callers MUST still apply the cleanup guards
+    /// ([`looks_like_clarification`], [`looks_like_degenerate_cleanup`],
+    /// [`looks_like_translated_cleanup`]) themselves on the buffered prefix —
+    /// the streaming path deliberately does NOT apply them inside the backend,
+    /// because the guards need to run on the assembled prefix before any text
+    /// is committed to the cursor.
+    async fn format_stream(
+        &self,
+        raw: &str,
+        ctx: &FormatContext,
+    ) -> Result<BoxStream<'static, Result<String>>> {
+        let text = self.format(raw, ctx).await?;
+        Ok(futures::stream::once(async move { Ok(text) }).boxed())
+    }
 
     /// Optional best-effort warmup. See `SpeechToText::prewarm`. Latency
     /// plan L3 / L10.

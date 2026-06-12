@@ -205,7 +205,20 @@ fn build_local(cfg: &Polish, polish_models_dir: &Path) -> Result<Arc<dyn TextFor
             cfg.local.model
         ));
     }
-    Ok(Arc::new(crate::llama_local::LlamaLocal::new(model_path, cfg.local.context)))
+    // Streaming injection runs a consumer task concurrently with the
+    // barrier-synchronized llama decode, so reserve one core for it (see
+    // `streaming_decode_threads`); the one-shot path has no concurrent consumer
+    // and keeps every core via `LlamaLocal::new`.
+    let backend = if cfg.stream_injection {
+        crate::llama_local::LlamaLocal::with_threads(
+            model_path,
+            cfg.local.context,
+            fono_core::llama_backend::streaming_decode_threads(),
+        )
+    } else {
+        crate::llama_local::LlamaLocal::new(model_path, cfg.local.context)
+    };
+    Ok(Arc::new(backend))
 }
 
 #[cfg(not(feature = "llama-local"))]

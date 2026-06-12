@@ -51,6 +51,7 @@ static TRACE_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// | `keys`          | key press/release + hotkey FSM transitions             |
 /// | `stt`           | speech-to-text                                         |
 /// | `f7-polish`     | F7 plain-dictation cleanup (`polish.*`)                |
+/// | `f7-inject`     | F7 streaming text injection (`polish.inject_*`)        |
 /// | `llm`           | F8 assistant generation (`assistant.llm`)              |
 /// | `tts`           | text-to-speech synthesis                               |
 /// | `playback`      | audio playback                                         |
@@ -62,6 +63,11 @@ pub const KEYS_LANE: &str = "keys";
 pub const STT_LANE: &str = "stt";
 /// See [`KEYS_LANE`] for the full lane taxonomy.
 pub const POLISH_LANE: &str = "f7-polish";
+/// Streaming text-injection lane, rendered directly under [`POLISH_LANE`] so
+/// per-chunk injection cost is visible running *concurrently* with cleanup
+/// generation (the two compete for CPU during local streaming dictation).
+/// See [`KEYS_LANE`] for the full lane taxonomy.
+pub const INJECT_LANE: &str = "f7-inject";
 /// See [`KEYS_LANE`] for the full lane taxonomy.
 pub const LLM_LANE: &str = "llm";
 /// See [`KEYS_LANE`] for the full lane taxonomy.
@@ -448,6 +454,59 @@ pub fn record_cache_mutation(report: &crate::prompt_cache::CacheMutationReport) 
     }
 }
 
+/// Compute decode throughput in tokens/second, rounded to one decimal place.
+///
+/// Shared by the F7 (`polish.generate`) and F8 (`llm.generate`) paths so both
+/// report `tok_per_sec` identically (same formula, same rounding). Returns
+/// `0.0` for a zero-length generation window to avoid a divide-by-zero.
+#[must_use]
+pub fn tokens_per_second(tokens: u32, gen_ms: u64) -> f64 {
+    if gen_ms == 0 {
+        return 0.0;
+    }
+    let raw = f64::from(tokens) * 1000.0 / gen_ms as f64;
+    (raw * 10.0).round() / 10.0
+}
+
+/// Build the canonical generation-span arg object shared by the F7 polish and
+/// F8 assistant LLM phases.
+///
+/// Having one constructor is the single source of truth for the generation
+/// metric schema, so the two paths can never silently drift apart. Both emit a
+/// single duration span (`polish.generate` / `llm.generate`) carrying exactly
+/// these keys:
+///
+/// * `tokens` — decoded tokens (greedy ⇒ one per step)
+/// * `chars` — `char`-count of the decoded text (NOT byte length)
+/// * `deltas` — number of streamed pieces / `on_token` flushes
+/// * `ttft_ms` — time-to-first-token latency
+/// * `gen_ms` — generation wall-clock
+/// * `tok_per_sec` — [`tokens_per_second`] over `tokens`/`gen_ms`
+/// * `start_pos` — KV-cache position generation began at
+/// * `stop_reason` — why the loop ended (`eos`, `stop_seq`, `max_tokens`, …)
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn generation_span_args(
+    tokens: u32,
+    chars: usize,
+    deltas: u32,
+    ttft_ms: u64,
+    gen_ms: u64,
+    start_pos: i32,
+    stop_reason: &str,
+) -> Value {
+    json!({
+        "tokens": tokens,
+        "chars": chars,
+        "deltas": deltas,
+        "ttft_ms": ttft_ms,
+        "gen_ms": gen_ms,
+        "tok_per_sec": tokens_per_second(tokens, gen_ms),
+        "start_pos": start_pos,
+        "stop_reason": stop_reason,
+    })
+}
+
 fn trace_path(base: &Path, prefix: &str, id: u64) -> PathBuf {
     if base.extension().is_some_and(|ext| ext == "json") {
         return base.to_path_buf();
@@ -490,5 +549,28 @@ mod tests {
         assert_eq!(board["cache_misses"], 1);
         assert_eq!(board["cold_prefills"], 1);
         assert_eq!(board["bytes_restored"], 0);
+    }
+
+    #[test]
+    fn tokens_per_second_rounds_to_one_decimal() {
+        assert!((tokens_per_second(0, 0) - 0.0).abs() < f64::EPSILON);
+        assert!((tokens_per_second(57, 0) - 0.0).abs() < f64::EPSILON);
+        // 57 tokens in 2195 ms = 25.968… → 26.0
+        assert!((tokens_per_second(57, 2195) - 26.0).abs() < f64::EPSILON);
+        // 56 tokens in 3606 ms = 15.529… → 15.5
+        assert!((tokens_per_second(56, 3606) - 15.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn generation_span_args_carries_canonical_schema() {
+        let args = generation_span_args(57, 240, 57, 12, 2195, 119, "eos");
+        assert_eq!(args["tokens"], 57);
+        assert_eq!(args["chars"], 240);
+        assert_eq!(args["deltas"], 57);
+        assert_eq!(args["ttft_ms"], 12);
+        assert_eq!(args["gen_ms"], 2195);
+        assert!((args["tok_per_sec"].as_f64().unwrap() - 26.0).abs() < f64::EPSILON);
+        assert_eq!(args["start_pos"], 119);
+        assert_eq!(args["stop_reason"], "eos");
     }
 }

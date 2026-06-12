@@ -5,10 +5,31 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.10.0] — 2026-06-12
+
+Faster local AI, local text-to-speech out of the box, and cleanup that types
+as it thinks. The embedded engine now reuses prompt checkpoints so warm
+dictations and follow-up assistant turns stay quick, offline Piper/Kokoro TTS
+ships in the default binary, and local AI cleanup streams into the cursor
+word-by-word instead of making you wait for the whole pass. Plus the usual
+round of fixes — Gemma cleanup no longer loops, and history/log files are
+locked down on shared machines.
 
 ### Added
 
+- **Local AI cleanup now types as it thinks.** When cleanup runs on the
+  embedded local model, the cleaned text streams into the cursor word by
+  word as the model decodes it, instead of making you wait for the whole
+  pass before anything appears. On a long dictation the first words land in
+  about one to three seconds rather than after the full seven-to-twenty-second
+  decode, then keep flowing continuously. All of the existing safety checks
+  still run on the first sentence before a single character is typed — a
+  clarifying-question, degenerate, or wrongly-translated cleanup still falls
+  back to your raw transcript with nothing typed. It applies only to the
+  local backend (cloud cleanup is already sub-second and one-shot) and turns
+  itself off automatically for short utterances and clipboard-fallback
+  sessions. On by default; set `[polish].stream_injection = false` to keep
+  the old wait-for-the-whole-thing behaviour.
 - **Local AI got noticeably snappier on repeat use.** The embedded
   llama.cpp engine now keeps reusable checkpoints of the prompts it has
   already processed (the cleanup instructions, the assistant's system
@@ -18,7 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   climbing with every turn; restoring a saved checkpoint takes tens of
   milliseconds where a cold re-read of a long conversation took seconds.
   Cleanup also gets a per-app checkpoint, so dictating into your editor,
-  browser, or terminal each reuses its own warmed-up state.
+  browser, or terminal each reuses its own warmed-up state. The how and the
+  measured numbers are written up in
+  [Making local LLM fast](https://bogdan.nimblex.net/programming/2026/06/10/making-local-llm-fast.html).
 - English dictation read-back now uses **Kokoro**, a higher-quality local
   voice, while every other language keeps using Piper. Four English voices
   ship — `af_heart` (the default), `af_bella`, `af_nicole` (American) and
@@ -2385,7 +2408,8 @@ feature and ships fully wired in v0.2.
 - Local LLM cleanup (Qwen / SmolLM) is opt-in / preview.
 - Real `winit + softbuffer` overlay window is a stub (event channel only).
 
-[Unreleased]: https://github.com/bogdanr/fono/compare/v0.9.0...HEAD
+[0.10.0]: https://github.com/bogdanr/fono/compare/v0.9.1...v0.10.0
+[0.9.1]: https://github.com/bogdanr/fono/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/bogdanr/fono/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/bogdanr/fono/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/bogdanr/fono/compare/v0.8.0...v0.8.1
