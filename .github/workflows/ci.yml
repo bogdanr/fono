@@ -31,6 +31,12 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Fetch git dependencies (our llama-cpp-rs fork) via the system git
+  # binary instead of libgit2. libgit2's HTTPS transport intermittently
+  # dies with `code=Eof (-20)` against github.com from Actions runners,
+  # which repeatedly broke the llama-cpp-2 fetch on tagged builds; the
+  # git CLI retries and authenticates more reliably.
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
 
 jobs:
   test:

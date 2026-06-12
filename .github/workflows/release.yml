@@ -23,6 +23,12 @@ env:
   # deprecation warnings emitted by actions/{checkout,upload-artifact,
   # download-artifact} and softprops/action-gh-release).
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Fetch git dependencies (our llama-cpp-rs fork) via the system git
+  # binary instead of libgit2. libgit2's HTTPS transport intermittently
+  # dies with `code=Eof (-20)` against github.com from Actions runners,
+  # which repeatedly broke the llama-cpp-2 fetch on tagged builds; the
+  # git CLI retries and authenticates more reliably.
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
 
 # Signing with minisign is optional: if the repo secret MINISIGN_KEY is set
 # (along with MINISIGN_PASSWORD), the release job will sign SHA256SUMS and
