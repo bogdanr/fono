@@ -315,7 +315,9 @@ mod tests {
             ("af_heart", "en-us"),
             ("af_bella", "en-us"),
             ("af_nicole", "en-us"),
+            ("am_michael", "en-us"),
             ("bf_emma", "en-gb"),
+            ("bm_lewis", "en-gb"),
         ] {
             let v = by_name(name).unwrap().unwrap_or_else(|| panic!("{name} present"));
             assert_eq!(v.engine, "kokoro");

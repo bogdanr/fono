@@ -194,6 +194,42 @@
       }
     },
     {
+      "name": "am_michael",
+      "engine": "kokoro",
+      "language": "en",
+      "espeak_voice": "en-us",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "kokoro-v1.0-q8f16.ort",
+        "sha256": "65143671df8bf52331652798c9871c7c4fd44a0cc16a864399df48e03d0e4dd7",
+        "size": 93914104
+      },
+      "style": {
+        "file": "am_michael.style.bin",
+        "sha256": "1d1f21dd8da39c30705cd4c75d039d265e9bc4a2a93ed09bc9e1b1225eb95ba1",
+        "size": 522240
+      }
+    },
+    {
+      "name": "bm_lewis",
+      "engine": "kokoro",
+      "language": "en",
+      "espeak_voice": "en-gb",
+      "ort_version": "1.24.2",
+      "release_tag": "ort-1.24.2",
+      "model": {
+        "file": "kokoro-v1.0-q8f16.ort",
+        "sha256": "65143671df8bf52331652798c9871c7c4fd44a0cc16a864399df48e03d0e4dd7",
+        "size": 93914104
+      },
+      "style": {
+        "file": "bm_lewis.style.bin",
+        "sha256": "b8f671cef828c30e66fdf0b0756a76bba58f6bb3398cbbf27058642acbcedb97",
+        "size": 522240
+      }
+    },
+    {
       "name": "en_US-amy-medium",
       "engine": "piper",
       "language": "en",
