@@ -105,6 +105,17 @@ pub struct TtsDefaults {
     /// runtime probes anywhere yet; this flag is reserved for later
     /// phases that may want to verify endpoint availability.
     pub runtime_probe: bool,
+    /// True when this provider's TTS only renders intelligible **English**
+    /// — i.e. feeding it text in another language produces an English
+    /// phonemization of foreign words (gibberish), not speech in that
+    /// language. Defaults to `false` (multilingual) so a new provider is
+    /// only ever constrained by an explicit opt-in; forgetting to set it
+    /// fails safe to the current "speak whatever the cloud returns"
+    /// behaviour. When `true` **and** the local ONNX engine is compiled
+    /// in, `fono-tts` transparently routes non-English utterances to the
+    /// local multilingual voice instead (see
+    /// `fono_tts::english_only_fallback`).
+    pub english_only: bool,
 }
 
 /// Wire-level shape of a provider's TTS API.
@@ -135,6 +146,56 @@ pub enum TtsEndpoint {
     Cartesia,
     /// Deepgram's `POST /v1/speak` endpoint.
     Deepgram,
+    /// Speechmatics' preview `POST /generate/<voice>` endpoint. The
+    /// client appends the voice id to `base_url` and requests
+    /// `?output_format=pcm_16000` (raw int16 LE mono @ 16 kHz).
+    Speechmatics {
+        /// Base URL up to (not including) `/generate/<voice>`.
+        base_url: &'static str,
+    },
+    /// ElevenLabs' `POST /v1/text-to-speech/<voice_id>` endpoint. The
+    /// client appends the voice id to the path and requests
+    /// `?output_format=pcm_24000` (raw int16 LE mono @ 24 kHz). Library
+    /// and professional voices are plan-gated (free-tier keys get HTTP
+    /// 402); the catalogue default is a premade voice. See
+    /// `docs/providers.md`.
+    ElevenLabs,
+}
+
+/// How an API key is attached to a key-validation request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyAuth {
+    /// `Authorization: Bearer <key>`.
+    Bearer,
+    /// A named header carrying the bare key (e.g. `x-api-key: <key>`).
+    Header(&'static str),
+    /// A named header carrying `"<prefix> <key>"` (e.g.
+    /// `Authorization: Token <key>` for Deepgram).
+    HeaderPrefixed {
+        /// Header name.
+        header: &'static str,
+        /// Literal prefix prepended to the key (no trailing space; one
+        /// space is inserted between prefix and key).
+        prefix: &'static str,
+    },
+    /// The key is a URL query parameter (e.g. `?key=<key>` for Gemini).
+    QueryParam(&'static str),
+}
+
+/// Metadata for validating a provider API key. The wizard issues a
+/// `GET url` with the key attached per [`auth`](Self::auth) plus every
+/// pair in [`extra_headers`](Self::extra_headers); an HTTP 2xx response
+/// means the key is valid. `None` on a [`CloudProvider`] means the key
+/// is saved unvalidated (no probe endpoint configured).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyValidation {
+    /// Endpoint to probe with a `GET` request.
+    pub url: &'static str,
+    /// How to attach the API key to the request.
+    pub auth: KeyAuth,
+    /// Extra static headers attached to every probe (e.g. an API
+    /// version pin or OpenRouter attribution headers).
+    pub extra_headers: &'static [(&'static str, &'static str)],
 }
 
 /// One cloud provider entry in the catalogue.
@@ -160,6 +221,9 @@ pub struct CloudProvider {
     pub assistant: Option<AssistantDefaults>,
     /// TTS capability.
     pub tts: Option<TtsDefaults>,
+    /// API-key validation metadata. `None` ⇒ the wizard saves the key
+    /// without probing (the unwired STT stubs azure/google/nemotron).
+    pub key_validation: Option<KeyValidation>,
 }
 
 /// Canonical capability catalogue. Order matches the wizard's
@@ -172,6 +236,11 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Flagship multimodal models with native web search and TTS.",
         console_url: "https://platform.openai.com/api-keys",
         key_env: "OPENAI_API_KEY",
+        key_validation: Some(KeyValidation {
+            url: "https://api.openai.com/v1/models",
+            auth: KeyAuth::Bearer,
+            extra_headers: &[],
+        }),
         stt: Some(SttDefaults { model: "whisper-1" }),
         polish: Some(PolishDefaults { model: "gpt-5.4-nano" }),
         // TODO: re-enable web search when fono-assistant migrates the
@@ -198,6 +267,8 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
                 stream_format: Some("audio"),
             },
             runtime_probe: false,
+            // OpenAI's TTS models are multilingual.
+            english_only: false,
         }),
     },
     // ----- Groq --------------------------------------------------------
@@ -207,8 +278,13 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Lowest-latency cloud STT and OpenAI-compat LLM hosting.",
         console_url: "https://console.groq.com/keys",
         key_env: "GROQ_API_KEY",
+        key_validation: Some(KeyValidation {
+            url: "https://api.groq.com/openai/v1/models",
+            auth: KeyAuth::Bearer,
+            extra_headers: &[],
+        }),
         stt: Some(SttDefaults { model: "whisper-large-v3-turbo" }),
-        polish: Some(PolishDefaults { model: "openai/gpt-oss-20b" }),
+        polish: Some(PolishDefaults { model: "openai/gpt-oss-120b" }),
         assistant: Some(AssistantDefaults {
             text_model: "openai/gpt-oss-120b",
             // Groq currently exposes no vision-capable model Fono is
@@ -255,6 +331,8 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
                 stream_format: None,
             },
             runtime_probe: false,
+            // Groq hosts Canopy Labs Orpheus `…-english`: English-only.
+            english_only: true,
         }),
     },
     // ----- Anthropic ---------------------------------------------------
@@ -264,6 +342,11 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Claude family with vision and native web-search tool.",
         console_url: "https://console.anthropic.com/settings/keys",
         key_env: "ANTHROPIC_API_KEY",
+        key_validation: Some(KeyValidation {
+            url: "https://api.anthropic.com/v1/models",
+            auth: KeyAuth::Header("x-api-key"),
+            extra_headers: &[("anthropic-version", "2023-06-01")],
+        }),
         stt: None,
         polish: Some(PolishDefaults {
             // TODO: verify against Anthropic's current model list — the
@@ -290,6 +373,11 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Wafer-scale inference for the lowest-latency polish.",
         console_url: "https://cloud.cerebras.ai/platform/keys",
         key_env: "CEREBRAS_API_KEY",
+        key_validation: Some(KeyValidation {
+            url: "https://api.cerebras.ai/v1/models",
+            auth: KeyAuth::Bearer,
+            extra_headers: &[],
+        }),
         stt: None,
         polish: Some(PolishDefaults { model: "gpt-oss-120b" }),
         assistant: Some(AssistantDefaults {
@@ -310,6 +398,11 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Gemini Flash (polish only — chat client not wired yet).",
         console_url: "https://aistudio.google.com/app/apikey",
         key_env: "GEMINI_API_KEY",
+        key_validation: Some(KeyValidation {
+            url: "https://generativelanguage.googleapis.com/v1beta/models",
+            auth: KeyAuth::QueryParam("key"),
+            extra_headers: &[],
+        }),
         stt: None,
         polish: Some(PolishDefaults { model: "gemini-1.5-flash" }),
         assistant: None,
@@ -322,6 +415,15 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Unified gateway across hundreds of model providers.",
         console_url: "https://openrouter.ai/keys",
         key_env: "OPENROUTER_API_KEY",
+        key_validation: Some(KeyValidation {
+            url: "https://openrouter.ai/api/v1/auth/key",
+            auth: KeyAuth::Bearer,
+            extra_headers: &[
+                ("HTTP-Referer", crate::openrouter_attribution::REFERER),
+                ("X-OpenRouter-Title", crate::openrouter_attribution::TITLE),
+                ("X-OpenRouter-Categories", crate::openrouter_attribution::CATEGORIES),
+            ],
+        }),
         stt: Some(SttDefaults {
             // OpenRouter proxies OpenAI-compatible
             // `POST /v1/audio/transcriptions` to upstream providers;
@@ -360,6 +462,8 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
                 stream_format: None,
             },
             runtime_probe: false,
+            // Grok Voice TTS renders several languages; not English-only.
+            english_only: false,
         }),
     },
     // ----- Deepgram ----------------------------------------------------
@@ -369,6 +473,11 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Real-time Nova STT and Aura voice TTS.",
         console_url: "https://console.deepgram.com/",
         key_env: "DEEPGRAM_API_KEY",
+        key_validation: Some(KeyValidation {
+            url: "https://api.deepgram.com/v1/projects",
+            auth: KeyAuth::HeaderPrefixed { header: "Authorization", prefix: "Token" },
+            extra_headers: &[],
+        }),
         stt: Some(SttDefaults { model: "nova-3" }),
         polish: None,
         assistant: None,
@@ -380,6 +489,9 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             default_voice: "",
             endpoint: TtsEndpoint::Deepgram,
             runtime_probe: false,
+            // Aura-2 ships voices in several languages (the model id
+            // carries the locale, e.g. `…-en`/`…-es`); not English-only.
+            english_only: false,
         }),
     },
     // ----- AssemblyAI --------------------------------------------------
@@ -389,6 +501,11 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "High-accuracy STT with rich post-processing options.",
         console_url: "https://www.assemblyai.com/app/account",
         key_env: "ASSEMBLYAI_API_KEY",
+        key_validation: Some(KeyValidation {
+            url: "https://api.assemblyai.com/v2/transcript",
+            auth: KeyAuth::Header("Authorization"),
+            extra_headers: &[],
+        }),
         stt: Some(SttDefaults { model: "best" }),
         polish: None,
         assistant: None,
@@ -401,6 +518,11 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Sonic ultra-low-latency speech models (STT + TTS).",
         console_url: "https://play.cartesia.ai/keys",
         key_env: "CARTESIA_API_KEY",
+        key_validation: Some(KeyValidation {
+            url: "https://api.cartesia.ai/voices",
+            auth: KeyAuth::Header("X-Api-Key"),
+            extra_headers: &[("Cartesia-Version", "2026-03-01")],
+        }),
         // Cartesia's batch endpoint (`POST /stt`) requires the
         // `ink-whisper` family of models; `ink-2` is reachable only
         // via the realtime WebSocket endpoint
@@ -416,11 +538,52 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             default_voice: "a0e99841-438c-4a64-b679-ae501e7d6091",
             endpoint: TtsEndpoint::Cartesia,
             runtime_probe: false,
+            // Cartesia Sonic is multilingual.
+            english_only: false,
+        }),
+    },
+    // ----- ElevenLabs (STT Scribe + TTS Eleven v3) --------------------
+    CloudProvider {
+        id: "elevenlabs",
+        display_name: "ElevenLabs",
+        tagline: "Scribe speech-to-text plus the expressive Eleven v3 voice model.",
+        console_url: "https://elevenlabs.io/app/settings/api-keys",
+        key_env: "ELEVENLABS_API_KEY",
+        key_validation: Some(KeyValidation {
+            url: "https://api.elevenlabs.io/v1/models",
+            auth: KeyAuth::Header("xi-api-key"),
+            extra_headers: &[],
+        }),
+        // Scribe is ElevenLabs' batch speech-to-text model
+        // (`POST /v1/speech-to-text`, multipart `model_id` + `file`).
+        stt: Some(SttDefaults { model: "scribe_v1" }),
+        polish: None,
+        assistant: None,
+        tts: Some(TtsDefaults {
+            // Eleven v3 — the expressive flagship voice model. The
+            // client posts plain dictation text; v3's audio-tag /
+            // IPA prompting features (see ElevenLabs' v3 best-
+            // practices) are available to users who type them into
+            // the assistant reply, but Fono adds none itself.
+            model: "eleven_v3",
+            // "Sarah" — a *current* default premade voice present in
+            // every account (including new free-tier ones), so it
+            // synthesises via the API without a paid plan. Multilingual,
+            // so it serves every configured language. NOTE: do NOT use
+            // the legacy "Rachel" id (`21m00Tcm4TlvDq8ikWAM`) from the
+            // v3 docs examples — it is a *library* voice absent from
+            // modern accounts, and the API rejects it for free users
+            // with `402 paid_plan_required` ("Free users cannot use
+            // library voices via the API"). Verified 2026-06-15.
+            default_voice: "EXAVITQu4vr4xnSDxMaL",
+            endpoint: TtsEndpoint::ElevenLabs,
+            runtime_probe: false,
+            // Eleven v3 renders 70+ languages — not English-only.
+            english_only: false,
         }),
     },
     // ----- Azure (STT-only stub) --------------------------------------
     // Azure / Speechmatics / Google / Nemotron exist as `SttBackend`
-    // variants but are not yet wired in `fono-stt::factory`. They are
     // included here so the "no orphans" unit test (test 4) sees every
     // cloud variant in at least one catalogue entry. Display strings
     // are placeholders until the providers are first-classed.
@@ -430,25 +593,46 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Azure Cognitive Services Speech-to-Text (planned).",
         console_url: "https://portal.azure.com/",
         key_env: "AZURE_API_KEY",
+        key_validation: None,
         stt: Some(SttDefaults { model: "whisper" }),
         polish: None,
         assistant: None,
         tts: None,
     },
-    // ----- Speechmatics (STT-only stub) -------------------------------
+    // ----- Speechmatics (STT realtime + TTS preview) ------------------
     CloudProvider {
         id: "speechmatics",
         display_name: "Speechmatics",
-        tagline: "Speechmatics real-time and batch STT (planned).",
-        console_url: "https://portal.speechmatics.com/",
+        tagline: "Speechmatics realtime speech-to-text and preview text-to-speech.",
+        console_url: "https://portal.speechmatics.com/settings/api-keys",
         key_env: "SPEECHMATICS_API_KEY",
-        stt: Some(SttDefaults {
-            // No specific entry yet; generic Whisper fallback.
-            model: "whisper-large-v3",
+        key_validation: Some(KeyValidation {
+            url: "https://asr.api.speechmatics.com/v2/jobs?limit=1",
+            auth: KeyAuth::Bearer,
+            extra_headers: &[],
         }),
+        // Speechmatics' realtime API selects accuracy via an
+        // "operating point" rather than a model name; `enhanced` is the
+        // higher-accuracy default. The STT client treats this string as
+        // the `operating_point` in its `transcription_config`.
+        stt: Some(SttDefaults { model: "enhanced" }),
         polish: None,
         assistant: None,
-        tts: None,
+        tts: Some(TtsDefaults {
+            // Speechmatics' TTS preview has no model selector; the voice
+            // is chosen via the URL path. The client ignores this field
+            // — it exists only to satisfy the non-empty-model catalogue
+            // invariant and to label the preview service.
+            model: "preview",
+            // English (UK) female preview voice.
+            default_voice: "sarah",
+            endpoint: TtsEndpoint::Speechmatics {
+                base_url: "https://preview.tts.speechmatics.com",
+            },
+            runtime_probe: false,
+            // The Speechmatics TTS preview is English-only.
+            english_only: true,
+        }),
     },
     // ----- Google (STT-only stub) -------------------------------------
     CloudProvider {
@@ -457,6 +641,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "Google Cloud Speech-to-Text (planned).",
         console_url: "https://console.cloud.google.com/",
         key_env: "GOOGLE_API_KEY",
+        key_validation: None,
         stt: Some(SttDefaults { model: "default" }),
         polish: None,
         assistant: None,
@@ -469,6 +654,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tagline: "NVIDIA Nemotron speech models (planned).",
         console_url: "https://build.nvidia.com/",
         key_env: "NEMOTRON_API_KEY",
+        key_validation: None,
         stt: Some(SttDefaults {
             // No specific entry yet; generic Whisper fallback.
             model: "whisper-large-v3",
@@ -484,6 +670,17 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
 #[must_use]
 pub fn find(id: &str) -> Option<&'static CloudProvider> {
     CLOUD_PROVIDERS.iter().find(|p| p.id == id)
+}
+
+/// True when the given TTS backend only renders intelligible English
+/// (see [`TtsDefaults::english_only`]). Non-cloud backends (`None`,
+/// `Wyoming`, `Local`) and any backend without a catalogue TTS entry
+/// resolve to `false` — they are either multilingual or handle language
+/// routing themselves.
+#[must_use]
+pub fn tts_backend_english_only(backend: &crate::config::TtsBackend) -> bool {
+    let id = crate::providers::tts_backend_str(backend);
+    find(id).and_then(|p| p.tts.as_ref()).is_some_and(|t| t.english_only)
 }
 
 /// Construct a `(stt, polish)` pair from a catalogue entry, mapping the
@@ -759,5 +956,69 @@ mod tests {
             assert_eq!(adef.multimodal_model, *mm, "multimodal_model drift for {id}");
             assert_eq!(adef.web_search, *ws, "web_search drift for {id}");
         }
+    }
+
+    /// Every entry that exposes a real (non-stub) capability must carry
+    /// `key_validation` so the wizard never falls back to the
+    /// "no validation endpoint configured" path. The three unwired STT
+    /// stubs (azure/google/nemotron) are explicitly allowed `None`.
+    #[test]
+    fn key_validation_present_for_wired_providers() {
+        const UNWIRED_STUBS: &[&str] = &["azure", "google", "nemotron"];
+        for p in CLOUD_PROVIDERS {
+            if UNWIRED_STUBS.contains(&p.id) {
+                assert!(
+                    p.key_validation.is_none(),
+                    "{} is an unwired stub and should not carry key_validation",
+                    p.id
+                );
+                continue;
+            }
+            let has_capability =
+                p.stt.is_some() || p.polish.is_some() || p.assistant.is_some() || p.tts.is_some();
+            assert!(has_capability, "{} declares no capability", p.id);
+            assert!(
+                p.key_validation.is_some(),
+                "{} exposes a capability but has no key_validation metadata",
+                p.id
+            );
+        }
+    }
+
+    /// Pin the `english_only` flag per TTS provider so a casual catalogue
+    /// edit can't silently flip a multilingual voice to English-only (which
+    /// would needlessly route foreign text to the local engine) or vice
+    /// versa (which would resurface the gibberish bug). Update this test
+    /// together with the corresponding doc note in `docs/providers.md`.
+    #[test]
+    fn tts_english_only_pinned() {
+        let cases: &[(&str, bool)] = &[
+            ("openai", false),
+            ("groq", true),
+            ("openrouter", false),
+            ("deepgram", false),
+            ("cartesia", false),
+            ("speechmatics", true),
+            ("elevenlabs", false),
+        ];
+        for (id, expected) in cases {
+            let entry = find(id).unwrap_or_else(|| panic!("missing catalogue entry for {id}"));
+            let tts = entry.tts.unwrap_or_else(|| panic!("{id} has no TTS defaults"));
+            assert_eq!(tts.english_only, *expected, "english_only drift for {id}");
+        }
+    }
+
+    /// The `tts_backend_english_only` helper must agree with the catalogue
+    /// and resolve non-cloud backends to `false`.
+    #[test]
+    fn tts_backend_english_only_matches_catalogue() {
+        assert!(tts_backend_english_only(&TtsBackend::Groq));
+        assert!(tts_backend_english_only(&TtsBackend::Speechmatics));
+        assert!(!tts_backend_english_only(&TtsBackend::OpenAI));
+        assert!(!tts_backend_english_only(&TtsBackend::Cartesia));
+        // Non-cloud backends have no catalogue TTS entry → false.
+        assert!(!tts_backend_english_only(&TtsBackend::None));
+        assert!(!tts_backend_english_only(&TtsBackend::Wyoming));
+        assert!(!tts_backend_english_only(&TtsBackend::Local));
     }
 }

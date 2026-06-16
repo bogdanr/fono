@@ -112,6 +112,7 @@ impl LocalRouter {
             hint = lang.unwrap_or(""),
             detected = detected.as_deref().unwrap_or(""),
             chosen_lang = chosen.as_deref().unwrap_or(""),
+            engine = %voice.engine,
             voice = %voice.name,
             "local TTS voice selection",
         );
@@ -248,7 +249,7 @@ pub fn resolve_voice_for_lang(default_voice: &Voice, pinned: bool, lang: Option<
 /// model plus a per-voice style pack; Piper voices use a `.ort` model plus a
 /// `.onnx.json` config sidecar. A missing asset yields an actionable error
 /// (the daemon downloads voices at startup; see `ensure_local_tts`).
-fn load_engine(voices_dir: &Path, voice: &Voice) -> Result<Arc<dyn TextToSpeech>> {
+pub(crate) fn load_engine(voices_dir: &Path, voice: &Voice) -> Result<Arc<dyn TextToSpeech>> {
     let model_path = voices_dir.join(&voice.model.file);
     if !model_path.is_file() {
         return Err(not_downloaded(voice, voices_dir));
@@ -326,7 +327,11 @@ impl TextToSpeech for LocalRouter {
     }
 
     fn name(&self) -> &'static str {
-        "piper-local"
+        // The router dispatches to whichever engine (Piper or Kokoro)
+        // owns the chosen voice, so a "piper-"prefixed name would be a
+        // misnomer for Kokoro synthesis. The per-call engine is logged
+        // separately on the "local TTS voice selection" line.
+        "local"
     }
 
     fn native_sample_rate(&self) -> u32 {

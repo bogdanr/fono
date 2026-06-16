@@ -36,7 +36,7 @@ path = "src/main.rs"
 default = ["tray", "local-models", "llama-local", "interactive", "tts-local"]
 tray = ["fono-tray/tray-backend"]
 local-models = ["fono-stt/whisper-local"]
-llama-local = ["fono-polish/llama-local", "fono-assistant/llama-local"]
+llama-local = ["fono-polish/llama-local", "fono-assistant/llama-local", "fono-mcp-server/llama-local"]
 # Hardware acceleration features — fan out to the matching opt-in
 # features on `fono-stt` and `fono-polish`, which themselves forward to
 # `whisper-rs`/`llama-cpp-2`. Off by default because they require the
@@ -79,7 +79,7 @@ tts-local = ["fono-tts/tts-local"]
 fono-core = { path = "../fono-core", features = ["vulkan-probe"] }
 fono-audio = { path = "../fono-audio" }
 fono-http = { path = "../fono-http" }
-fono-stt = { path = "../fono-stt", features = ["groq", "openai", "openrouter", "deepgram", "cartesia", "wyoming"] }
+fono-stt = { path = "../fono-stt", features = ["groq", "openai", "openrouter", "deepgram", "cartesia", "speechmatics", "elevenlabs", "wyoming"] }
 # Default builds ship every cloud backend wired in the catalogue —
 # fono-stt: Groq/OpenAI/Deepgram (+ Wyoming LAN); fono-polish:
 # Cerebras/OpenAI-compat/Anthropic; fono-tts: all five hosted
@@ -88,7 +88,7 @@ fono-stt = { path = "../fono-stt", features = ["groq", "openai", "openrouter", "
 # every catalogued provider without recompiling. Each feature only
 # adds an HTTP client (reqwest is already pulled in transitively); no
 # native deps.
-fono-tts = { path = "../fono-tts", features = ["wyoming", "openai", "groq", "openrouter", "cartesia", "deepgram"] }
+fono-tts = { path = "../fono-tts", features = ["wyoming", "openai", "groq", "openrouter", "cartesia", "deepgram", "speechmatics", "elevenlabs"] }
 fono-polish = { path = "../fono-polish", features = ["cerebras", "openai-compat", "anthropic"] }
 fono-assistant = { path = "../fono-assistant" }
 fono-hotkey = { path = "../fono-hotkey" }

@@ -26,6 +26,15 @@ groq = ["dep:reqwest", "dep:fono-http"]
 openrouter = ["dep:reqwest", "dep:fono-http"]
 cartesia = ["dep:reqwest", "dep:fono-http"]
 deepgram = ["dep:reqwest", "dep:fono-http"]
+# ElevenLabs TTS — bespoke `POST /v1/text-to-speech/<voice>` REST
+# client, default model Eleven v3. Raw `pcm_24000` output requires a
+# paid ElevenLabs plan. Just needs reqwest + the catalogue, like
+# Deepgram.
+elevenlabs = ["dep:reqwest", "dep:fono-http"]
+# Speechmatics TTS (preview) — bespoke `POST /generate/<voice>` REST
+# client; English-only during the preview. Just needs reqwest + the
+# catalogue, like Deepgram.
+speechmatics = ["dep:reqwest", "dep:fono-http"]
 # LAN Wyoming TTS server.
 wyoming = ["dep:fono-net-codec"]
 # Local ONNX voice engine (Piper now; Kokoro/VAD/wake-word later) on the

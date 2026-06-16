@@ -9,6 +9,9 @@ Cargo.lock.bak
 # Local scratch / large support files (models, prebuilt libs, venv)
 /tmp/
 
+# Generated Jekyll site output (docs/ is the source; _site is built)
+/_site/
+
 # IDE / editor
 .idea/
 .vscode/

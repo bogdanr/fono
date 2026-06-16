@@ -26,6 +26,9 @@ pub mod budget;
 #[cfg(feature = "llama-local")]
 pub mod llama_backend;
 
+#[cfg(feature = "llama-local")]
+pub mod llama_gen;
+
 #[cfg(feature = "vulkan-probe")]
 pub mod vulkan_probe;
 

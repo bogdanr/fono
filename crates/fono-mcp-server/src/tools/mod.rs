@@ -12,6 +12,7 @@ pub mod confirm;
 pub mod listen;
 pub mod screen;
 pub mod speak;
+pub mod summarize;
 
 // ── Context ───────────────────────────────────────────────────────────────────
 
@@ -105,14 +106,16 @@ impl ToolRegistry {
     }
 
     /// Build the standard Fono tool set: `fono.speak`, `fono.listen`,
-    /// `fono.confirm`. Takes a reference to the context so each tool
-    /// can clone the parts it needs.
+    /// `fono.confirm`, `fono.screen`, `fono.summarize`. Takes a
+    /// reference to the context so each tool can clone the parts it
+    /// needs.
     pub fn default_with_context(ctx: &McpContext) -> Self {
         let mut reg = Self::new();
         reg.register(speak::SpeakTool::new(ctx));
         reg.register(listen::ListenTool::new(ctx));
         reg.register(confirm::ConfirmTool::new(ctx));
         reg.register(screen::ScreenTool::new(ctx));
+        reg.register(summarize::SummarizeTool::new(ctx));
         reg
     }
 

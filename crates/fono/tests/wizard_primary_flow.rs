@@ -69,9 +69,10 @@ fn primary_groq_covers_full_stack_with_one_key() {
     assert!(secrets.has_in_file("GROQ_API_KEY"));
 }
 
-/// 3. Primary = Anthropic → LLM + Assistant land on Anthropic; STT
-///    stays at default (local) because Anthropic has no transcription
-///    capability; TTS comes from a secondary Cartesia entry. Two
+/// 3. Primary = Anthropic → LLM + Assistant land on Anthropic; STT and
+///    TTS lean on local because Anthropic has no transcription or
+///    speech capability (amended design). The user can still opt into a
+///    secondary Cartesia TTS, which overrides the local fallback. Two
 ///    secrets entries total.
 #[test]
 fn primary_anthropic_secondary_cartesia_tts() {
@@ -83,11 +84,11 @@ fn primary_anthropic_secondary_cartesia_tts() {
     assert!(seed_primary_secret(&mut secrets, anthropic, "sk-ant-test"));
     apply_primary_provider(&mut cfg, anthropic);
 
-    // Anthropic doesn't ship STT or TTS — those slots stay at default.
+    // Anthropic doesn't ship STT or TTS — those slots lean on local.
     assert_eq!(cfg.stt.backend, SttBackend::Local);
     assert_eq!(cfg.polish.backend, PolishBackend::Anthropic);
     assert_eq!(cfg.assistant.backend, AssistantBackend::Anthropic);
-    assert_eq!(cfg.tts.backend, TtsBackend::None);
+    assert_eq!(cfg.tts.backend, TtsBackend::Local);
 
     // User opts into Cartesia TTS as a secondary.
     assert!(seed_primary_secret(&mut secrets, cartesia, "cart-test"));
@@ -165,8 +166,10 @@ fn primary_cartesia_covers_stt_and_tts_with_one_key() {
     let tts_cloud = cfg.tts.cloud.as_ref().expect("cartesia tts.cloud set");
     assert_eq!(tts_cloud.api_key_ref, "CARTESIA_API_KEY");
 
-    // Cartesia ships neither polish nor assistant; defaults preserved.
-    assert!(!cfg.polish.enabled);
+    // Cartesia ships no polish → lean on local (embedded GGUF cleanup,
+    // enabled). It ships no assistant → that stays optional/disabled.
+    assert!(cfg.polish.enabled);
+    assert_eq!(cfg.polish.backend, PolishBackend::Local);
     assert!(!cfg.assistant.enabled);
 
     assert_eq!(secrets.keys.len(), 1);

@@ -29,6 +29,17 @@ deepgram = ["dep:reqwest", "dep:fono-http", "dep:tokio-tungstenite"]
 # Groq's `warm_client` + `encode_wav` helpers, so the feature pulls
 # `groq` in transitively (matches `openrouter`).
 cartesia = ["dep:reqwest", "dep:fono-http", "groq"]
+# ElevenLabs STT — batch Scribe (`POST /v1/speech-to-text`, multipart
+# `model_id` + `file`). Reuses Groq's `warm_client` + `encode_wav`
+# helpers, so the feature pulls `groq` in transitively (matches
+# `cartesia` / `openrouter`).
+elevenlabs = ["dep:reqwest", "dep:fono-http", "groq"]
+# Speechmatics STT — native realtime WebSocket client
+# (`wss://<region>.rt.speechmatics.com/v2`) driven one-shot for the
+# batch `transcribe` path. Pulls `tokio-tungstenite` (the WS client,
+# shared with Deepgram streaming) and `futures` (Sink/Stream ext
+# traits). No `reqwest` — the realtime socket is the only transport.
+speechmatics = ["dep:tokio-tungstenite", "dep:futures"]
 # Local whisper — opt-in because it vendors whisper.cpp (C++ build).
 whisper-local = ["dep:whisper-rs"]
 # Wyoming STT client — talks to wyoming-faster-whisper / fono-server /

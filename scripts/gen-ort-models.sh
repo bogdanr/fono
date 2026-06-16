@@ -27,6 +27,17 @@
 #   MODELS_DIR=calibration/voice-models OUT_DIR=calibration/voice-models/ort \
 #     sh scripts/gen-ort-models.sh
 #
+# IMPORTANT — the emitted ops.config MUST be the union of EVERY shipped voice
+# model: all Piper voices in crates/fono-tts/voices/catalog.json PLUS Kokoro
+# (English) PLUS any other ONNX model the binary loads (Silero VAD, …). The
+# minimal onnxruntime build compiles ONLY the operators this config lists, so a
+# config generated from a SUBSET silently ships a runtime that cannot load the
+# omitted models. This bit us once: a Piper-only config produced a lib missing
+# Kokoro's `Greater`(opset-13) kernel, and every English (Kokoro) synthesis
+# failed with "Could not find an implementation for Greater(13) node". Populate
+# MODELS_DIR with the FULL set before running; the Kokoro guard below refuses a
+# partial run unless you set ALLOW_PARTIAL=1 for ad-hoc single-model inspection.
+#
 # Prereqs (host tooling, NOT shipped — see docs/providers.md):
 #   - python3 with a venv: `pip install onnxruntime==1.24.2`
 #   - curl (only needed for the first-run Piper seed download)
@@ -36,6 +47,8 @@ ORT_PY_VERSION="${ORT_PY_VERSION:-1.24.2}"
 MODELS_DIR="${MODELS_DIR:-calibration/voice-models}"
 OUT_DIR="${OUT_DIR:-${MODELS_DIR}/ort}"
 PYTHON="${PYTHON:-python3}"
+# Set ALLOW_PARTIAL=1 to skip the full-set guards (single-model inspection).
+ALLOW_PARTIAL="${ALLOW_PARTIAL:-0}"
 
 # Seed voice: the Romanian Piper voice Phase 2 ships first. Pinned to the
 # rhasspy/piper-voices HF repo. SHA-256 is checked by `fono-download` at
@@ -97,6 +110,24 @@ if [ -z "$CONFIG_SRC" ]; then
     exit 5
 fi
 cp "$CONFIG_SRC" "$OUT_DIR/ops.config"
+
+# --- 4. Regression guard: refuse a partial (non-union) operator config -----
+# Kokoro is the model with the broadest operator footprint; its `Greater`
+# (opset 13) kernel is the canonical marker that distinguishes a full-union
+# config from a Piper-only one. If Kokoro's op is absent, the build would
+# reproduce the shipped-lib regression, so fail loudly instead.
+if [ "$ALLOW_PARTIAL" != "1" ]; then
+    if ! grep -Eq '(^|;|,)Greater($|;|,|\{)' "$OUT_DIR/ops.config"; then
+        echo "ERROR: generated ops.config lacks the Kokoro 'Greater'(13) op." >&2
+        echo "       MODELS_DIR ($MODELS_DIR) is missing Kokoro and/or other" >&2
+        echo "       shipped models — this would build a runtime that cannot" >&2
+        echo "       load them (the Kokoro 'Greater(13)' regression)." >&2
+        echo "       Populate MODELS_DIR with the FULL shipped set (every" >&2
+        echo "       catalog.json Piper voice + Kokoro), or set ALLOW_PARTIAL=1" >&2
+        echo "       for a deliberate single-model inspection run." >&2
+        exit 7
+    fi
+fi
 
 echo "----"
 echo "ORT models:  $OUT_DIR/*.ort"

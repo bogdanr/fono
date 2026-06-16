@@ -88,6 +88,11 @@ fn stage_user_label(stage: Stage) -> &'static str {
 pub enum ErrorClass {
     /// HTTP 401 / 403 — user must update their API key.
     Auth,
+    /// HTTP 402 — the provider accepted the key but the request needs a
+    /// paid plan (e.g. ElevenLabs `paid_plan_required` when a free key
+    /// targets a Voice-Library / professional voice). User-actionable:
+    /// pick a free-tier-usable resource or upgrade.
+    PaymentRequired,
     /// HTTP 429 — already surfaced by `fono_stt::rate_limit_notify`;
     /// the critical-notify path is a no-op for this class.
     RateLimit,
@@ -125,6 +130,16 @@ pub fn classify(err_msg: &str) -> ErrorClass {
     }
     if contains_status(err_msg, 401) || contains_status(err_msg, 403) {
         return ErrorClass::Auth;
+    }
+    // HTTP 402 / typed payment codes — the key is valid but the
+    // resource needs a paid plan. Detected before the generic `Other`
+    // bucket so the user gets actionable copy (e.g. "pick a different
+    // voice or upgrade") instead of a silent failure.
+    if contains_status(err_msg, 402)
+        || err_msg.to_ascii_lowercase().contains("payment_required")
+        || err_msg.to_ascii_lowercase().contains("paid_plan_required")
+    {
+        return ErrorClass::PaymentRequired;
     }
     // Anthropic surfaces auth failures as `authentication_error` in
     // the typed body; OpenAI's `expired_api_key` / `invalid_api_key`
@@ -363,7 +378,11 @@ pub fn notify_actionable(
     let class = classify(details);
     let fired = matches!(
         class,
-        ErrorClass::Auth | ErrorClass::Network | ErrorClass::TermsRequired | ErrorClass::MissingKey
+        ErrorClass::Auth
+            | ErrorClass::PaymentRequired
+            | ErrorClass::Network
+            | ErrorClass::TermsRequired
+            | ErrorClass::MissingKey
     ) && notify(stage, provider, class, details);
     (class, fired)
 }
@@ -523,6 +542,23 @@ fn render(
                 format!("{hint}{consequence}")
             })
         }
+        (Stage::Tts, ErrorClass::PaymentRequired) => (
+            format!("Fono — TTS needs a paid plan ({provider})"),
+            format!(
+                "{provider} accepted the key but this voice/model needs a paid plan \
+                 (HTTP 402). Reply not spoken. Pick a free-tier voice with \
+                 `[tts].voice` (premade voices work on free keys; Voice-Library and \
+                 professional voices don't), or upgrade the plan."
+            ),
+        ),
+        (stage, ErrorClass::PaymentRequired) => (
+            format!("Fono — {} needs a paid plan ({provider})", stage_user_label(stage)),
+            format!(
+                "{provider} accepted the key but this request needs a paid plan \
+                 (HTTP 402): {details}. Switch to a free-tier-usable model/voice or \
+                 upgrade the plan."
+            ),
+        ),
         (Stage::Inject, _) => (
             format!("Fono — text injection failed ({provider})"),
             format!(
@@ -570,6 +606,21 @@ mod tests {
         // limit must win.
         let msg = "groq STT 429 Too Many Requests: {\"error\":{\"message\":\"Rate limit\"}}";
         assert_eq!(classify(msg), ErrorClass::RateLimit);
+    }
+
+    #[test]
+    fn classify_elevenlabs_402_is_payment_required() {
+        // Verbatim ElevenLabs error when a free-tier key requests a
+        // library voice. Must route to PaymentRequired, not Other/Auth.
+        let msg = r#"ElevenLabs TTS 402 Payment Required: {"detail":{"status":"paid_plan_required","message":"Free users cannot use library voices via the API."}}"#;
+        assert_eq!(classify(msg), ErrorClass::PaymentRequired);
+    }
+
+    #[test]
+    fn classify_payment_required_does_not_shadow_auth() {
+        // A 401 that happens to mention upgrading must stay Auth.
+        let msg = "ElevenLabs TTS 401 Unauthorized: invalid api key; upgrade your plan";
+        assert_eq!(classify(msg), ErrorClass::Auth);
     }
 
     #[test]

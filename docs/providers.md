@@ -26,14 +26,25 @@ rationale.
 | **Cartesia**   | ✓   | —           | —              | —                            | —                                | ✓ Sonic-3.5               |
 | **Deepgram**   | ✓   | —           | —              | —                            | —                                | ✓ Aura-2                  |
 | **AssemblyAI** | ✓   | —           | —              | —                            | —                                | —                         |
+| **Speechmatics** | ✓ | —           | —              | —                            | —                                | ✓ preview (English)       |
+| **ElevenLabs** | ✓   | —           | —              | —                            | —                                | ✓ Eleven v3               |
 
-Picking OpenAI or Groq as the primary cloud provider configures every
-capability in that row from a single key prompt; picking Anthropic or
-Cerebras configures polish + Assistant and asks an opt-in secondary
-question for STT and/or TTS, defaulting to providers whose keys are
-already in `secrets.toml`. Five providers can drive the assistant
-end-to-end today: OpenAI, Groq, Anthropic + any cloud TTS, Cerebras +
-any cloud TTS, and OpenRouter.
+Picking any cloud provider as the *primary* now walks its whole row:
+every capability the provider covers with a wired backend is taken
+from the catalogue, and every capability it doesn't cover transparently
+leans on the local backend (local Whisper for STT, embedded GGUF for
+cleanup, on-device Piper/Kokoro for TTS). The primary picker therefore
+lists **every** provider with at least one wired capability — including
+speech-only ones like Speechmatics, Deepgram, AssemblyAI, and Cartesia
+— not just the LLM-capable rows. Assistant chat stays opt-in. Five
+providers can drive the assistant end-to-end today: OpenAI, Groq,
+Anthropic + any cloud TTS, Cerebras + any cloud TTS, and OpenRouter.
+
+The wizard's cloud STT picker, cloud LLM/cleanup picker, and API-key
+reachability validation are generated entirely from this catalogue
+(each entry carries a `key_validation` probe descriptor). Adding a new
+provider is a single `CLOUD_PROVIDERS` edit — it then surfaces in every
+wizard list and validates its key with no changes to the wizard code.
 
 ## Switching providers (no daemon restart)
 
@@ -126,6 +137,8 @@ retries once automatically on a stall.
 | Deepgram      | cloud WS   | `nova-2`, `nova-3`                     | `DEEPGRAM_API_KEY`    | yes |
 | Cartesia      | cloud HTTP | `ink-whisper` (batch only; `ink-2` is realtime-only and arrives in a Phase 2 streaming slice) | `CARTESIA_API_KEY`    | no  |
 | AssemblyAI    | cloud HTTP | `best`, `nano`                         | `ASSEMBLYAI_API_KEY`  | yes |
+| Speechmatics  | cloud WS   | `enhanced`, `standard` (accuracy tiers) | `SPEECHMATICS_API_KEY` | yes |
+| ElevenLabs    | cloud HTTP | `scribe_v1` (Scribe; batch only) | `ELEVENLABS_API_KEY`  | no  |
 
 Whisper model files land in `~/.cache/fono/models/whisper/ggml-<name><suffix>.bin`
 where `<suffix>` is empty for fp16 or `-q5_1` / `-q8_0` for the
@@ -241,6 +254,62 @@ request. That makes the streaming path *cheaper* than Groq's
 pseudo-stream (which re-uploads the trailing window on every cadence
 tick) — opt in freely.
 
+### Speechmatics STT (realtime WebSocket)
+
+Speechmatics has no batch-vs-stream split that matters for
+push-to-talk: Fono opens the realtime endpoint at
+`wss://eu.rt.speechmatics.com/v2`, sends a `StartRecognition`
+message, streams the buffered capture as binary `AddAudio` frames,
+then `EndOfStream`, and collects the `AddTranscript` finals as the
+buffer drains. This reuses the same `tokio-tungstenite` dependency
+the Deepgram streaming path already pulls in — no new crates.
+
+```toml
+[stt]
+backend = "speechmatics"
+
+[stt.cloud]
+provider = "speechmatics"
+api_key_ref = "SPEECHMATICS_API_KEY"
+```
+
+Auth header gotcha: Speechmatics uses `Authorization: Bearer <key>`
+on the WebSocket handshake — the **opposite** of Deepgram's literal
+`Token` prefix. A unit test pins the `Bearer` form so a copy-paste
+from the Deepgram client can't regress it.
+
+The `model` knob selects the accuracy tier via the realtime
+`operating_point` (`enhanced` for best accuracy, `standard` for
+lower latency/cost). Region is the EU realtime host by default; set
+a different `[stt.cloud]` endpoint to target another region.
+
+### ElevenLabs STT (Scribe)
+
+ElevenLabs' Scribe model transcribes via a batch
+`POST https://api.elevenlabs.io/v1/speech-to-text` multipart upload:
+`model_id` (`scribe_v1`) plus the buffered capture as a `file` part.
+A forced language goes in the optional `language_code` form field
+(ISO 639-1/3), not a query parameter. Auth is the `xi-api-key: <key>`
+header.
+
+```toml
+[stt]
+backend = "elevenlabs"
+
+[stt.cloud]
+provider = "elevenlabs"
+api_key_ref = "ELEVENLABS_API_KEY"
+```
+
+Scribe returns `{ language_code, language_probability, text, words }`
+with **no** per-segment confidence scores, so — like Cartesia's
+`ink-whisper` — Fono cannot run the Whisper-style logprob rerun or the
+silence-hallucination filter. When `general.cloud_rerun_on_language_mismatch
+= true` the backend logs a single warning per process to flag the
+degradation and otherwise accepts the detected response. Scribe also
+has no equivalent of Whisper's `prompt` field; any `[stt.prompts]`
+entries are accepted for forward compatibility but unused on the wire.
+
 ## polish
 
 | Backend            | Type         | Default model                 | API key env var        |
@@ -326,6 +395,8 @@ assistant audio works without an OpenAI key.
 | OpenRouter    | cloud HTTP | `openai/tts-1`      | `https://openrouter.ai/api/v1/audio/speech`            | `Authorization: Bearer <k>`  |
 | Cartesia      | cloud HTTP | `sonic-3.5`         | `https://api.cartesia.ai/tts/bytes`                    | `X-API-Key: <k>`             |
 | Deepgram      | cloud HTTP | `aura-2-thalia-en`  | `https://api.deepgram.com/v1/speak`                    | `Authorization: Token <k>`   |
+| Speechmatics  | cloud HTTP | preview (voice in URL) | `https://preview.tts.speechmatics.com/generate/<voice>` | `Authorization: Bearer <k>`  |
+| ElevenLabs    | cloud HTTP | `eleven_v3` (voice in URL) | `https://api.elevenlabs.io/v1/text-to-speech/<voice>` | `xi-api-key: <k>`            |
 
 `CARTESIA_API_KEY` and `DEEPGRAM_API_KEY` may already be in
 `secrets.toml` from STT usage — the assistant reuses them, so flipping
@@ -474,6 +545,81 @@ Deepgram's `POST /v1/speak` endpoint at
 is `aura-2-thalia-en` (English, female, calm). Response is linear16
 PCM at 24 kHz. Auth header is `Authorization: Token <DEEPGRAM_API_KEY>`
 (the literal word `Token`, not `Bearer` — a frequent confusion).
+
+### Speechmatics TTS (preview)
+
+Speechmatics' preview TTS endpoint at
+`https://preview.tts.speechmatics.com/generate/<voice>` takes a JSON
+body of the shape `{"text": "..."}` and returns raw signed 16-bit
+little-endian PCM at 16 kHz. The voice is chosen via the URL path —
+there is no model selector. Auth header is
+`Authorization: Bearer <SPEECHMATICS_API_KEY>` (the same `Bearer`
+form as the STT socket).
+
+Limitation: the preview service is **English-only** with four voices
+(`sarah`, `theo`, `megan`, `jack`); the default is `sarah`. Set
+`[tts].voice` to pick another. This is a documented preview
+limitation, not a bug — broaden voice/language coverage when
+Speechmatics promotes the endpoint out of preview.
+
+### ElevenLabs TTS (Eleven v3)
+
+ElevenLabs synthesises via
+`POST https://api.elevenlabs.io/v1/text-to-speech/<voice_id>?output_format=pcm_24000`
+with a JSON body of `{"text": "...", "model_id": "eleven_v3"}` and the
+`xi-api-key: <ELEVENLABS_API_KEY>` header. The **voice is the path
+segment** (not a body/query field); the catalogue default is
+`EXAVITQu4vr4xnSDxMaL` ("Sarah" — a current default premade voice
+present in every account, multilingual, and usable on the free tier).
+Set `[tts].voice` to a different voice id to pin another speaker. The
+response is raw signed 16-bit little-endian PCM at 24 kHz.
+
+Eleven v3 is the expressive flagship model: it understands inline
+**audio tags** like `[whispers]`, `[laughs]`, or `[excited]` and IPA
+pronunciation hints for emotional/phonetic control (see the
+[v3 prompting best-practices](https://elevenlabs.io/docs/overview/capabilities/text-to-speech/best-practices#prompting-eleven-v3)).
+Fono posts plain dictation text and adds none of these itself, but
+tags typed into an assistant reply pass through verbatim.
+
+Plan note: the **free tier can use this API** (you get a monthly
+character quota), but only with voices your account actually owns —
+the *default premade* voices and any you add to "My Voices". Voices
+from the shared **Voice Library** (and *professional*/cloned voices)
+require a paid plan and are rejected for free users with
+`402 paid_plan_required` ("Free users cannot use library voices via
+the API"). The catalogue default ("Sarah") is a premade voice, so it
+works out of the box; if you pin `[tts].voice` to a library voice on a
+free key you'll get that 402. Eleven v3 renders 70+ languages, so it
+is **not** flagged English-only.
+
+### English-only voices and the automatic local fallback
+
+Some cloud voices only render intelligible English: Groq's Orpheus
+`…-english`, the Speechmatics preview above, and Deepgram's
+`aura-2-…-en` voices. Sending them non-English text yields an English
+phonemization of the foreign words — gibberish, not speech in that
+language. The capability catalogue flags these backends with a single
+`english_only` boolean (it defaults to `false`, so any unflagged or
+newly-added provider is treated as multilingual — the historical
+behaviour).
+
+When the active backend is flagged English-only and an utterance is
+reliably non-English, Fono transparently synthesizes that one
+utterance with the local multilingual Piper voice for its language
+instead of the cloud backend. English (or text whose language can't be
+determined) still goes to the cloud voice unchanged, so the common
+path is untouched and pays no detection cost. The utterance's language
+is taken from the signal Fono already has where one exists (e.g. the
+assistant's transcribed language) and otherwise detected with the
+bundled `whatlang` trigram classifier — no model files, well under a
+millisecond, and run only for English-only backends.
+
+This requires a local TTS voice to fall back to: build Fono with the
+`tts-local` feature, and have (or let Fono download) a catalogue voice
+for the target language. When no local engine is available, the
+non-English utterance is skipped with a single warning rather than
+spoken as gibberish. There is no configuration for any of this — it is
+automatic and only engages for English-only backends.
 
 ## Assistant capabilities
 

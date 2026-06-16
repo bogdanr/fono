@@ -15,6 +15,10 @@ use std::time::Instant;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use fono_core::llama_backend::{backend, shared_model};
+use fono_core::llama_gen::{
+    first_stop_marker, generation_sampler, is_control_token, safe_stream_end, turn_markers,
+    warn_on_template_vocab_mismatch, TurnMarkers,
+};
 use fono_core::turn_trace::{
     current_instant, current_span, generation_span_args, record_cache_mutation, CACHE_LANE,
 };
@@ -39,18 +43,26 @@ use crate::traits::{
 
 const MAX_NEW_TOKENS: i32 = 384;
 const MIN_CTX: u32 = 512;
+
+/// Per-request generation knobs threaded into the prefix-cache decode path.
+/// Bundled so the cache fns stay under clippy's argument limit and the two
+/// flags travel together.
+#[derive(Clone, Copy)]
+struct GenParams {
+    /// Cap on generated tokens (already clamped to [`MAX_NEW_TOKENS`]).
+    max_new_tokens: i32,
+    /// Empty-history request (e.g. `fono.summarize`): cache only the shared
+    /// system-prompt prefix, never a payload-specific completed-turn
+    /// checkpoint. See [`LlamaLocalAssistant::generate_with_prefix_cache`].
+    one_shot: bool,
+}
 const DEFAULT_BATCH_SIZE: u32 = 2048;
 const DEFAULT_UBATCH_SIZE: u32 = 512;
 const STREAM_CHANNEL_CAPACITY: usize = 32;
-const STOP_MARKERS: &[&str] = &[
-    "<end_of_turn>",
-    "<start_of_turn>",
-    "<|im_end|>",
-    "<|end|>",
-    "<|eot_id|>",
-    "<|endoftext|>",
-    "</s>",
-];
+// Sampler, stop predicate, and textual stop-marker scan are the shared
+// generation policy in `fono_core::llama_gen` (one definition for the
+// polish + assistant embedded backends — see that module's docs for the
+// gemma-4-e2b control-token evidence and the repetition-loop rationale).
 
 // The process-wide `LlamaBackend` singleton and the `llama_cpp_2 →
 // tracing` log redirector both live in `fono_core::llama_backend` so
@@ -216,6 +228,10 @@ impl LlamaLocalAssistant {
         let model = shared_model(&self.model_path, &LlamaModelParams::default())?;
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let model_name = self.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+        // Load-time tripwire: warn when the selected hand-rolled template's
+        // markers do not resolve to control tokens in this vocabulary (the
+        // gemma-4-e2b anomaly) or the name matches no known family.
+        warn_on_template_vocab_mismatch(&model, model_name);
         let size_mb =
             std::fs::metadata(&self.model_path).map(|m| m.len() / (1024 * 1024)).unwrap_or(0);
         info!(
@@ -252,6 +268,7 @@ impl LlamaLocalAssistant {
         prefix: &str,
         suffix: &str,
         layer: PromptStateCacheLayer,
+        params: GenParams,
         on_delta: F,
     ) -> Result<Option<String>>
     where
@@ -283,7 +300,7 @@ impl LlamaLocalAssistant {
             cold_prefill(layer.as_str(), "empty_suffix_tokens");
             return Ok(None);
         }
-        if full_tokens.len() + MAX_NEW_TOKENS as usize >= self.context_size as usize {
+        if full_tokens.len() + params.max_new_tokens.max(0) as usize >= self.context_size as usize {
             debug!(
                 layer = layer.as_str(),
                 tokens = full_tokens.len(),
@@ -426,17 +443,51 @@ impl LlamaLocalAssistant {
                     "llm.prompt_cache_build_prefill",
                 )?;
             }
-            // NOTE: we intentionally do NOT checkpoint the pre-suffix prefix
-            // here. The post-generation "completed turn" checkpoint below is
-            // always a deeper superset of it (system + history + this user +
-            // reply vs. just system + history + this user), and the traces
-            // confirm `find_longest_prefix` always selects that deeper entry —
-            // the pre-suffix checkpoint was never the winner. Storing it would
-            // burn a cache slot and an O(history) `copy_context_state` every
-            // turn for nothing. On the rare degenerate turn where no
-            // completed-turn checkpoint is stored (empty/near-empty reply), the
-            // next turn gracefully falls back to the prior turn's completed-turn
-            // checkpoint or the pinned base.
+            // Checkpoint the pre-suffix prefix ONLY for one-shot requests on a
+            // fully cold prefill. For a one-shot prompt (empty history: the
+            // `fono.summarize` path — constant system prompt, varying payload)
+            // this shared-prefix entry is the ONLY thing the next request can
+            // reuse: the completed-turn checkpoint below embeds this request's
+            // payload + reply and never prefixes a different payload, and —
+            // worse — because it is a deeper token-superset of this prefix it
+            // would prune this very entry on insert (subsumption). So for
+            // one-shot we store the prefix here and SKIP the completed-turn
+            // checkpoint, leaving the warm system-prompt prefix as the entry
+            // the next summary restores. Without this, every summary
+            // re-prefills the full system prompt.
+            //
+            // For the F8 chat loop (history grows) we do the opposite: the
+            // completed-turn checkpoint IS a token-prefix of the next turn and
+            // is the superior entry, so storing this shallower prefix would be
+            // pure waste (it gets pruned by the completed-turn insert anyway).
+            // Hence the `one_shot` gate. `F8ChatPrefix` is not pinnable, so a
+            // normal LRU entry — non-users of summarize lose nothing.
+            if params.one_shot && !matched {
+                if let Ok(prefix_state) = copy_context_state(&ctx) {
+                    let state_bytes = prefix_state.len();
+                    if let Ok(mut cache) = self.prompt_state_cache.lock() {
+                        let report = cache.insert(
+                            key.clone(),
+                            PromptStateCacheEntry::with_tokens(
+                                prefix_state,
+                                token_ids(&prefix_tokens),
+                            ),
+                        );
+                        record_cache_mutation(&report);
+                    }
+                    current_instant(
+                        "llm.prompt_cache_prefix_stored",
+                        "cache",
+                        CACHE_LANE,
+                        json!({
+                            "layer": layer.as_str(),
+                            "cache_key": key.stable_id(),
+                            "token_count": prefix_tokens.len(),
+                            "state_bytes": state_bytes,
+                        }),
+                    );
+                }
+            }
         }
         self.prefill_tokens(
             &mut ctx,
@@ -451,6 +502,7 @@ impl LlamaLocalAssistant {
             full_tokens.len() as i32,
             (suffix_tokens.len() - 1) as i32,
             None,
+            params.max_new_tokens,
             on_delta,
         )?;
         // Option C: checkpoint the POST-generation state so the next turn can
@@ -475,17 +527,27 @@ impl LlamaLocalAssistant {
         // the recorded token count — the invariant every other checkpoint holds
         // (restore sets n_past to the token count, then prefills the new turn
         // into free cells). Cells past the boundary would be stale anyway.
-        if !generation.tokens.is_empty() {
+        //
+        // Skipped for one-shot requests (empty history): the completed-turn
+        // checkpoint embeds this request's payload + reply, so it can never
+        // prefix the next (different-payload) summary, and storing it would
+        // prune the shared system-prompt prefix we just checkpointed above
+        // (it is a deeper token-superset). See the `one_shot` rationale there.
+        if !params.one_shot && !generation.tokens.is_empty() {
             let mut combined: Vec<llama_cpp_2::token::LlamaToken> =
                 Vec::with_capacity(full_tokens.len() + generation.tokens.len());
             combined.extend_from_slice(&full_tokens);
             combined.extend_from_slice(&generation.tokens);
-            let closer = if full_prompt.contains("<start_of_turn>") {
-                "<end_of_turn>\n"
-            } else {
-                "<|im_end|>\n"
-            };
-            let canonical = format!("{full_prompt}{}{closer}", generation.text.trim());
+            // Reconstruct THIS turn exactly as the next turn's history will spell
+            // it: the trimmed reply plus the model's real close marker. Derive the
+            // marker from the model so the gemma-4 line closes with `<turn|>`
+            // rather than the literal `<end_of_turn>` it does not register — if it
+            // diverged from the live prompt, completed-turn checkpoints would stop
+            // matching and every turn would cold-prefill.
+            let model_name =
+                self.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+            let closer = turn_markers(model_name).close;
+            let canonical = format!("{full_prompt}{}{closer}\n", generation.text.trim());
             let reusable_len = model
                 .str_to_token(&canonical, AddBos::Always)
                 .ok()
@@ -618,7 +680,7 @@ impl LlamaLocalAssistant {
     {
         let guard = self.state.lock().map_err(|_| anyhow!("llama-local mutex poisoned"))?;
         let model = guard.as_ref().ok_or_else(|| anyhow!("llama-local model not loaded"))?;
-        self.run_inference_with_model(model, prompt, on_delta)
+        self.run_inference_with_model(model, prompt, MAX_NEW_TOKENS, on_delta)
     }
 
     /// Reply generation with the Task 8 prefix cache. Only attempts the cached
@@ -630,6 +692,7 @@ impl LlamaLocalAssistant {
         prefix: &str,
         suffix: &str,
         layer: PromptStateCacheLayer,
+        params: GenParams,
         mut on_delta: F,
     ) -> Result<String>
     where
@@ -638,15 +701,20 @@ impl LlamaLocalAssistant {
         let guard = self.state.lock().map_err(|_| anyhow!("llama-local mutex poisoned"))?;
         let model = guard.as_ref().ok_or_else(|| anyhow!("llama-local model not loaded"))?;
         if format!("{prefix}{suffix}") == prompt {
-            if let Some(text) =
-                self.generate_with_prefix_cache(model, prefix, suffix, layer, &mut on_delta)?
-            {
+            if let Some(text) = self.generate_with_prefix_cache(
+                model,
+                prefix,
+                suffix,
+                layer,
+                params,
+                &mut on_delta,
+            )? {
                 return Ok(text);
             }
         } else {
             cold_prefill(layer.as_str(), "prompt_split_mismatch");
         }
-        self.run_inference_with_model(model, prompt, on_delta)
+        self.run_inference_with_model(model, prompt, params.max_new_tokens, on_delta)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -654,6 +722,7 @@ impl LlamaLocalAssistant {
         &self,
         model: &LlamaModel,
         prompt: &str,
+        max_new_tokens: i32,
         on_delta: F,
     ) -> Result<String>
     where
@@ -723,6 +792,7 @@ impl LlamaLocalAssistant {
             tokens.len() as i32,
             last_prefill_idx,
             None,
+            max_new_tokens,
             on_delta,
         )?;
         Ok(generation.text.trim().to_string())
@@ -943,7 +1013,9 @@ impl LlamaLocalAssistant {
 
                 let uncached_started = Instant::now();
                 let uncached_output =
-                    self.run_inference_with_model(model, &full_prompt, |_| Ok(true))?;
+                    self.run_inference_with_model(model, &full_prompt, MAX_NEW_TOKENS, |_| {
+                        Ok(true)
+                    })?;
                 let uncached_latency_ms = uncached_started.elapsed().as_millis() as u64;
 
                 let restore_started = Instant::now();
@@ -985,6 +1057,7 @@ impl LlamaLocalAssistant {
                     (prefix_tokens.len() + suffix_tokens.len()) as i32,
                     (suffix_tokens.len() - 1) as i32,
                     None,
+                    MAX_NEW_TOKENS,
                     |delta| {
                         if first_token_ms.is_none() {
                             first_token_ms = Some(cached_started.elapsed().as_millis() as u64);
@@ -1333,6 +1406,7 @@ impl LlamaLocalAssistant {
                 tokens.len() as i32,
                 last_prefill_idx,
                 Some(first_token),
+                MAX_NEW_TOKENS,
                 |delta| {
                     if first_token_ms.is_none() {
                         first_token_ms = Some(started.elapsed().as_millis() as u64);
@@ -1501,15 +1575,17 @@ fn generate_from_prefilled_context<F>(
     start_pos: i32,
     first_sample_idx: i32,
     first_token_override: Option<llama_cpp_2::token::LlamaToken>,
+    max_new_tokens: i32,
     mut on_delta: F,
 ) -> Result<GenerationResult>
 where
     F: FnMut(String) -> Result<bool>,
 {
-    let mut sampler = LlamaSampler::greedy();
+    // Shared generation policy: repetition penalty over generated tokens
+    // only, feeding greedy. Deterministic; breaks the verbatim-repetition
+    // attractor (see `fono_core::llama_gen` for the evidence).
+    let mut sampler = generation_sampler();
     let eos = model.token_eos();
-    let end_of_turn = single_token(model, "<end_of_turn>");
-    let im_end = single_token(model, "<|im_end|>");
     let mut out = String::new();
     let mut emitted_len = 0_usize;
     let mut sample_idx = first_sample_idx;
@@ -1529,11 +1605,15 @@ where
     let mut decoded_tokens: Vec<llama_cpp_2::token::LlamaToken> = Vec::new();
     let mut stop_reason = "max_tokens";
     let mut batch = LlamaBatch::new(1, 1);
-    for n_cur in (start_pos..).take(MAX_NEW_TOKENS as usize) {
+    for n_cur in (start_pos..).take(max_new_tokens.max(1) as usize) {
         let token = next_token.take().unwrap_or_else(|| sampler.sample(ctx, sample_idx));
         sampler.accept(token);
-        if token == eos || Some(token) == end_of_turn || Some(token) == im_end {
-            stop_reason = "eos";
+        // Model-agnostic stop: any token this vocabulary tags as Control ends
+        // the turn, however the marker is spelled (gemma-4-e2b ships `<turn|>`,
+        // not `<end_of_turn>` — literal lookups were dead code; see
+        // `fono_core::llama_gen`).
+        if token == eos || is_control_token(model, token) {
+            stop_reason = if token == eos { "eos" } else { "control_token" };
             break;
         }
         let piece = model.token_to_piece(token, &mut decoder, false, None).unwrap_or_default();
@@ -1608,35 +1688,6 @@ where
     Ok(GenerationResult { text: out, elapsed_ms, tokens: decoded_tokens })
 }
 
-fn single_token(model: &LlamaModel, text: &str) -> Option<llama_cpp_2::token::LlamaToken> {
-    model
-        .str_to_token(text, AddBos::Never)
-        .ok()
-        .filter(|v| v.len() == 1)
-        .and_then(|v| v.into_iter().next())
-}
-
-fn first_stop_marker(text: &str) -> Option<(usize, &'static str)> {
-    STOP_MARKERS
-        .iter()
-        .filter_map(|marker| text.find(marker).map(|idx| (idx, *marker)))
-        .min_by_key(|(idx, _)| *idx)
-}
-
-fn safe_stream_end(text: &str) -> usize {
-    let keep = STOP_MARKERS
-        .iter()
-        .filter_map(|marker| longest_marker_prefix_suffix(text, marker))
-        .max()
-        .unwrap_or(0);
-    text.len().saturating_sub(keep)
-}
-
-fn longest_marker_prefix_suffix(text: &str, marker: &str) -> Option<usize> {
-    let max = text.len().min(marker.len().saturating_sub(1));
-    (1..=max).rev().find(|&len| text.ends_with(&marker[..len]))
-}
-
 /// Render the full reply prompt. Defined as the concatenation of the cache
 /// split (`prefix + suffix`) so the two can never diverge — the prefix/suffix
 /// split is the single source of truth for prompt layout.
@@ -1647,15 +1698,16 @@ fn build_prompt(ctx: &AssistantContext, user_text: &str, model_name: &str) -> St
     s
 }
 
-fn push_gemma_turn(buf: &mut String, role: &str, content: &str) {
+fn push_gemma_turn(buf: &mut String, role: &str, content: &str, markers: TurnMarkers) {
     if content.trim().is_empty() {
         return;
     }
-    buf.push_str("<start_of_turn>");
+    buf.push_str(markers.open);
     buf.push_str(role);
     buf.push('\n');
     buf.push_str(content.trim());
-    buf.push_str("<end_of_turn>\n");
+    buf.push_str(markers.close);
+    buf.push('\n');
 }
 
 /// Split the reply prompt into a stable prefix and a per-turn suffix for the
@@ -1670,13 +1722,17 @@ fn build_prompt_split(
     model_name: &str,
 ) -> (String, String) {
     if model_name.to_ascii_lowercase().contains("gemma") {
-        build_gemma_prompt_split(ctx, user_text)
+        build_gemma_prompt_split(ctx, user_text, turn_markers(model_name))
     } else {
         build_chatml_prompt_split(ctx, user_text)
     }
 }
 
-fn build_gemma_prompt_split(ctx: &AssistantContext, user_text: &str) -> (String, String) {
+fn build_gemma_prompt_split(
+    ctx: &AssistantContext,
+    user_text: &str,
+    markers: TurnMarkers,
+) -> (String, String) {
     // Gemma has no dedicated system role, so the system prompt is prepended to
     // the FIRST user turn (Gemma's trained convention). This keeps the rendered
     // prompt strictly append-only: the leading tokens — system, then each
@@ -1696,25 +1752,31 @@ fn build_gemma_prompt_split(ctx: &AssistantContext, user_text: &str) -> (String,
                     continue;
                 }
                 if !system_emitted && !system.is_empty() {
-                    push_gemma_turn(&mut prefix, "user", &format!("{system}\n\n{content}"));
+                    push_gemma_turn(
+                        &mut prefix,
+                        "user",
+                        &format!("{system}\n\n{content}"),
+                        markers,
+                    );
                     system_emitted = true;
                 } else {
-                    push_gemma_turn(&mut prefix, "user", content);
+                    push_gemma_turn(&mut prefix, "user", content, markers);
                 }
             }
-            ChatRole::Assistant => push_gemma_turn(&mut prefix, "model", &turn.content),
+            ChatRole::Assistant => push_gemma_turn(&mut prefix, "model", &turn.content, markers),
             ChatRole::Tool => {}
         }
     }
 
-    prefix.push_str("<start_of_turn>user\n");
+    prefix.push_str(markers.open);
+    prefix.push_str("user\n");
     if !system_emitted && !system.is_empty() {
         // No prior user turn carried the system prompt, so it leads the current
         // turn. It stays in the (cacheable) prefix; only the user text varies.
         prefix.push_str(system);
         prefix.push_str("\n\n");
     }
-    let suffix = format!("{}<end_of_turn>\n<start_of_turn>model\n", user_text.trim());
+    let suffix = format!("{}{}\n{}model\n", user_text.trim(), markers.close, markers.open);
     (prefix, suffix)
 }
 
@@ -1759,7 +1821,7 @@ fn assistant_base_prefix(system: &str, model_name: &str) -> String {
         return String::new();
     }
     if model_name.to_ascii_lowercase().contains("gemma") {
-        format!("<start_of_turn>user\n{system}")
+        format!("{}user\n{system}", turn_markers(model_name).open)
     } else {
         format!("<|im_start|>system\n{system}")
     }
@@ -1791,6 +1853,17 @@ impl Assistant for LlamaLocalAssistant {
             }),
         );
         let me = self.clone_thin();
+        // Per-request generation budget: short-form callers (e.g. notification
+        // summaries) cap the reply well below the global default so a
+        // degenerate run is bounded by seconds, not the full 384-token budget.
+        let max_new_tokens = ctx
+            .max_new_tokens
+            .and_then(|n| i32::try_from(n).ok())
+            .map_or(MAX_NEW_TOKENS, |n| n.clamp(1, MAX_NEW_TOKENS));
+        // One-shot (empty history) requests — the `fono.summarize` path — cache
+        // only the shared system-prompt prefix, not a payload-specific
+        // completed-turn checkpoint (see `generate_with_prefix_cache`).
+        let gen_params = GenParams { max_new_tokens, one_shot: ctx.history.is_empty() };
         let started = Instant::now();
         let (tx, rx) = mpsc::channel::<Result<TokenDelta>>(STREAM_CHANNEL_CAPACITY);
         tokio::task::spawn_blocking(move || {
@@ -1803,6 +1876,7 @@ impl Assistant for LlamaLocalAssistant {
                     &cache_prefix,
                     &cache_suffix,
                     PromptStateCacheLayer::F8ChatPrefix,
+                    gen_params,
                     |delta| {
                         let delta = delta.trim_start_matches('\u{feff}').to_string();
                         if delta.is_empty() {
@@ -1963,10 +2037,23 @@ mod tests {
     fn gemma_prompt_uses_gemma_turn_markers() {
         let ctx =
             AssistantContext { system_prompt: "Be concise.".into(), ..AssistantContext::default() };
+        // The default gemma-4 line ships non-standard control-token markers.
         let p = build_prompt(&ctx, "hello", "gemma-4-e2b-it-Q4_K_M");
+        assert!(p.contains("<|turn>user\nBe concise."));
+        assert!(p.ends_with("<|turn>model\n"));
+        assert!(!p.contains("<|im_start|>"));
+        assert!(!p.contains("<start_of_turn>"));
+    }
+
+    #[test]
+    fn standard_gemma_keeps_classic_turn_markers() {
+        let ctx =
+            AssistantContext { system_prompt: "Be concise.".into(), ..AssistantContext::default() };
+        // Older Gemma builds still spell their markers the classic way.
+        let p = build_prompt(&ctx, "hello", "gemma-2-2b-it");
         assert!(p.contains("<start_of_turn>user\nBe concise."));
         assert!(p.ends_with("<start_of_turn>model\n"));
-        assert!(!p.contains("<|im_start|>"));
+        assert!(!p.contains("<|turn>"));
     }
 
     #[test]
@@ -2070,10 +2157,10 @@ mod tests {
         let (prefix, suffix) = build_prompt_split(&ctx, "what time is it", "gemma-4-e2b-it");
         // System leads the prompt and stays entirely in the cacheable prefix;
         // only the variable user text lands in the suffix.
-        assert!(prefix.starts_with("<start_of_turn>user\nYou are a helpful assistant.\n\n"));
+        assert!(prefix.starts_with("<|turn>user\nYou are a helpful assistant.\n\n"));
         assert!(prefix.ends_with("\n\n"));
         assert!(!suffix.contains("You are a helpful assistant."));
-        assert_eq!(suffix, "what time is it<end_of_turn>\n<start_of_turn>model\n");
+        assert_eq!(suffix, "what time is it<turn|>\n<|turn>model\n");
     }
 
     #[test]
@@ -2081,7 +2168,7 @@ mod tests {
         // The whole cache scheme rests on the system prompt being a *leading*
         // token prefix. If a refactor ever pushes it back into the per-turn
         // tail (the old, un-cacheable layout), this fails loudly.
-        let boot = "<start_of_turn>user\nYou are Fono.\n\n";
+        let boot = "<|turn>user\nYou are Fono.\n\n";
         let no_history = AssistantContext {
             system_prompt: "You are Fono.".into(),
             ..AssistantContext::default()
@@ -2279,6 +2366,130 @@ mod tests {
         let m = LlamaLocalAssistant::new("/this/path/does/not/exist.gguf", 1024);
         let e = m.ensure_loaded().unwrap_err().to_string();
         assert!(e.contains("local assistant model not found"), "got: {e}");
+    }
+
+    /// Live two-turn conversation through the real `reply_stream` prefix-cache
+    /// path, asserting the post-generation "completed turn" checkpoint stored
+    /// on turn 1 is actually matched and restored on turn 2. Guards the
+    /// canonical-closer interplay (`generate_with_prefix_cache` renders the
+    /// turn closer textually) against decoding-policy changes — specifically
+    /// the shared Control-attribute stop, which on `gemma-4-e2b` stops on a
+    /// token the hand-rolled template spells differently.
+    #[tokio::test]
+    #[ignore = "requires FONO_TEST_ASSISTANT_GGUF=/path/to/chat-model.gguf"]
+    async fn completed_turn_checkpoint_is_restored_next_turn() {
+        use fono_core::turn_trace::TurnTrace;
+        use futures::StreamExt;
+
+        let model_path = std::env::var_os("FONO_TEST_ASSISTANT_GGUF")
+            .expect("set FONO_TEST_ASSISTANT_GGUF=/path/to/chat-model.gguf");
+        let context = std::env::var("FONO_TEST_ASSISTANT_CTX")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(4096);
+        let assistant = LlamaLocalAssistant::new(model_path, context);
+
+        let trace_dir =
+            std::env::temp_dir().join(format!("fono-cache-test-{}", std::process::id()));
+        let trace = TurnTrace::start_in(&trace_dir);
+        let guard = trace.make_current();
+
+        let system = "You are Fono, a terse assistant. Reply with one short sentence.";
+        let mut history: Vec<ChatTurn> = Vec::new();
+        for user in ["turn the lights on", "now dim them to fifty percent"] {
+            let ctx = AssistantContext {
+                system_prompt: system.into(),
+                history: history.clone(),
+                ..AssistantContext::default()
+            };
+            let mut stream = assistant.reply_stream(user, &ctx).await.expect("reply_stream");
+            let mut text = String::new();
+            while let Some(delta) = stream.next().await {
+                text.push_str(&delta.expect("token delta").text);
+            }
+            assert!(!text.trim().is_empty(), "empty reply for {user:?}");
+            history.push(turn(ChatRole::User, user));
+            history.push(turn(ChatRole::Assistant, &text));
+        }
+
+        guard.clear();
+        trace.finish(serde_json::json!({}));
+        let raw = std::fs::read_to_string(trace.path()).expect("read trace file");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("parse trace JSON");
+        let events = parsed["traceEvents"].as_array().expect("traceEvents array");
+        // Turn 1 must store a completed-turn checkpoint (the canonical closer
+        // rendering must overlap the sampled reply beyond the prompt)...
+        assert!(
+            events.iter().any(|e| e["name"] == "llm.prompt_cache_completed_turn"),
+            "no completed-turn checkpoint stored; canonical closer no longer overlaps the reply"
+        );
+        // ...and turn 2 must restore it via longest-prefix matching.
+        assert!(
+            events.iter().any(|e| e["name"] == "llm.prompt_cache_prefix_match"
+                && e["args"]["matched_layer"] == "f8_chat_prefix"),
+            "turn 2 never matched the completed-turn (f8_chat_prefix) checkpoint"
+        );
+    }
+
+    /// Live regression for the `fono.summarize` reuse pattern: the SAME
+    /// system prompt with empty history but varying user text on every call.
+    /// The first call is a cold prefill that must store the pre-suffix prefix
+    /// (system prompt) checkpoint; the second must restore it instead of
+    /// re-prefilling the whole system prompt. Without the cold-prefill
+    /// checkpoint store, every summary pays the full system-prompt prefill.
+    ///
+    /// Run the live cache tests with `--test-threads=1`: two models loading
+    /// concurrently contend on the shared llama backend and skew the trace.
+    #[tokio::test]
+    #[ignore = "requires FONO_TEST_ASSISTANT_GGUF=/path/to/chat-model.gguf"]
+    async fn repeated_prefix_prompt_restores_cached_system_prefix() {
+        use fono_core::turn_trace::TurnTrace;
+        use futures::StreamExt;
+
+        let model_path = std::env::var_os("FONO_TEST_ASSISTANT_GGUF")
+            .expect("set FONO_TEST_ASSISTANT_GGUF=/path/to/chat-model.gguf");
+        let context = std::env::var("FONO_TEST_ASSISTANT_CTX")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(4096);
+        let assistant = LlamaLocalAssistant::new(model_path, context);
+
+        let trace_dir =
+            std::env::temp_dir().join(format!("fono-summarize-cache-{}", std::process::id()));
+        let trace = TurnTrace::start_in(&trace_dir);
+        let guard = trace.make_current();
+
+        let system = "You summarize notifications. Reply with one short spoken sentence.";
+        for user in ["Mihai reports a failed deploy.", "Ana asks about the staging build."] {
+            let ctx = AssistantContext {
+                system_prompt: system.into(),
+                max_new_tokens: Some(48),
+                ..AssistantContext::default()
+            };
+            let mut stream = assistant.reply_stream(user, &ctx).await.expect("reply_stream");
+            let mut text = String::new();
+            while let Some(delta) = stream.next().await {
+                text.push_str(&delta.expect("token delta").text);
+            }
+            assert!(!text.trim().is_empty(), "empty reply for {user:?}");
+        }
+
+        guard.clear();
+        trace.finish(serde_json::json!({}));
+        let raw = std::fs::read_to_string(trace.path()).expect("read trace file");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("parse trace JSON");
+        let events = parsed["traceEvents"].as_array().expect("traceEvents array");
+        // Call 1 (cold) must store the pre-suffix system-prompt checkpoint...
+        assert!(
+            events.iter().any(|e| e["name"] == "llm.prompt_cache_prefix_stored"),
+            "cold call never stored the pre-suffix prefix checkpoint"
+        );
+        // ...and call 2 must restore it (the varying user text lives only in
+        // the suffix, so the system-prompt prefix is identical token-for-token).
+        assert!(
+            events.iter().any(|e| e["name"] == "llm.prompt_cache_prefix_match"),
+            "second summary never restored the cached system-prompt prefix"
+        );
     }
 
     #[tokio::test]

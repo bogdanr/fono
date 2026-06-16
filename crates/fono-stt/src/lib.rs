@@ -20,6 +20,8 @@ pub mod cartesia;
 pub mod deepgram;
 #[cfg(all(feature = "deepgram", feature = "streaming"))]
 pub mod deepgram_streaming;
+#[cfg(feature = "elevenlabs")]
+pub mod elevenlabs;
 #[cfg(feature = "groq")]
 pub mod groq;
 #[cfg(all(feature = "groq", feature = "streaming"))]
@@ -28,6 +30,8 @@ pub mod groq_streaming;
 pub mod openai;
 #[cfg(feature = "openrouter")]
 pub mod openrouter;
+#[cfg(feature = "speechmatics")]
+pub mod speechmatics;
 #[cfg(feature = "whisper-local")]
 pub mod whisper_local;
 #[cfg(feature = "wyoming")]

@@ -20,17 +20,24 @@ pub mod traits;
 pub mod cartesia;
 #[cfg(feature = "deepgram")]
 pub mod deepgram;
+#[cfg(feature = "elevenlabs")]
+pub mod elevenlabs;
 #[cfg(any(
     feature = "openai",
     feature = "groq",
     feature = "openrouter",
     feature = "cartesia",
-    feature = "deepgram"
+    feature = "deepgram",
+    feature = "elevenlabs"
 ))]
 pub mod openai_compat;
+#[cfg(feature = "speechmatics")]
+pub mod speechmatics;
 #[cfg(feature = "wyoming")]
 pub mod wyoming;
 
+#[cfg(feature = "tts-local")]
+pub mod english_only_fallback;
 #[cfg(feature = "tts-local")]
 pub mod espeak;
 #[cfg(feature = "tts-local")]

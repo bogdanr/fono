@@ -176,6 +176,18 @@ relevance_filter = "heuristic"
 # returning the most recent one regardless. Prevents an infinite
 # wait in pathological environments.
 relevance_max_rejections = 2
+
+# System-prompt override for `fono.summarize` (MCP tool) and
+# `fono summarize` (CLI). Empty/omitted — use the built-in
+# prompt: 1-2 spoken sentences saying who wants what; never read raw
+# logs or long content aloud; mention attachments briefly by kind.
+# Requires a configured `[assistant]` backend.
+# A failed summarize request is retried once on the configured
+# backend, then tried once on the first other backend with a usable
+# API key (canonical env vars: CEREBRAS_API_KEY, GROQ_API_KEY, …) or
+# local model. Cloud requests time out fast (10 s to first byte);
+# the local backend keeps a long budget (60 s) for model load.
+# summarize_prompt = ""
 ```
 
 The 1.5 s LLM-classifier timeout is hardcoded in

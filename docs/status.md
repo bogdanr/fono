@@ -1,5 +1,105 @@
 # Fono — Project Status
-Last updated: 2026-06-12
+Last updated: 2026-06-15
+
+## 2026-06-15 — TTS: automatic local fallback for English-only cloud voices
+
+Executed `plans/2026-06-15-tts-language-capability-mismatch-v2.md`. English-only
+cloud voices (Groq Orpheus `…-english`, Speechmatics preview, Deepgram
+`aura-2-…-en`) phonemized non-English text as gibberish. Fixed with minimal
+surface area: one catalogue boolean, no new config knobs, negligible latency on
+the common path.
+
+- New `english_only: bool` on `TtsDefaults`
+  (`crates/fono-core/src/provider_catalog.rs:118`), default `false` so a new or
+  unflagged provider fails safe as multilingual. Set `true` on Groq and
+  Speechmatics; pinned per-provider by `tts_english_only_pinned` plus a
+  `tts_backend_english_only_matches_catalogue` helper test.
+- New `tts_backend_english_only(&TtsBackend) -> bool` helper
+  (`crates/fono-core/src/provider_catalog.rs:635`) so consumers don't duplicate
+  the lookup.
+- New `crates/fono-tts/src/english_only_fallback.rs`: `EnglishOnlyFallback`
+  wraps an English-only cloud backend. Per utterance it resolves the language
+  (caller's hint, else `whatlang` constrained to `general.languages`); English
+  or inconclusive text goes to the cloud backend unchanged (zero behaviour
+  change on the common path), reliably non-English text is synthesized by the
+  local multilingual Piper voice for that language (lazily built + cached). When
+  no local engine is available it warns once and skips the utterance (empty PCM)
+  rather than speaking gibberish.
+- Factory wires it at one chokepoint: `maybe_wrap_english_only`
+  (`crates/fono-tts/src/factory.rs:69`) wraps the built backend only when
+  `tts-local` is compiled in and the catalogue flags the backend English-only;
+  otherwise the cloud backend is returned as-is. Because the wrapper lives at
+  the `synthesize` boundary, all callers (assistant, `fono speak --stream`, MCP
+  `speak_text`) are covered without per-path plumbing.
+- `load_engine` exposed `pub(crate)` from `local_router.rs` for reuse by the
+  wrapper.
+- Tests: catalogue pins; `route_language` (English→cloud, Romanian→local,
+  hint-driven when detection inconclusive); synthesize paths (English→primary,
+  non-English→skip-when-local-unavailable, empty→passthrough). Docs:
+  `docs/providers.md` new "English-only voices and the automatic local fallback"
+  section; CHANGELOG Unreleased entry.
+- Gate: fmt + clippy + tests.
+
+## 2026-06-13 — Summarize: cache the local system-prompt prefix across calls
+
+Follow-up to the refusal/repetition fix below. The `fono.summarize` path on the
+local backend was paying the full system-prompt prefill on every call: the MCP
+tool rebuilt the assistant per request, and even within one process the prompt
+cache evicted the shared prefix.
+
+- The summarize MCP tool now holds the built assistant in a process-lifetime
+  `OnceCell`, so the model and its prompt-state cache survive across calls
+  instead of being dropped after each summary.
+- One-shot requests (empty history — the summarize shape) now store *only* the
+  shared system-prompt prefix checkpoint and skip the payload-specific
+  completed-turn checkpoint. Previously the deeper completed-turn entry (which
+  embeds that call's payload+reply, useless to the next differing payload)
+  pruned the system-prefix entry we actually want to reuse. Threaded as
+  `GenParams { max_new_tokens, one_shot }` through the prefix-cache decode path
+  (kept under clippy's argument limit, both flags travel together).
+- F8 multi-turn chat is unchanged: non-empty history still stores and restores
+  the completed-turn checkpoint.
+- New live regression test (ignored, model-gated):
+  `repeated_prefix_prompt_restores_cached_system_prefix` proves call 2 reuses
+  call 1's system prefix. Run the live cache tests with `--test-threads=1` (two
+  models contend on the shared llama backend otherwise). Gate green: fmt,
+  clippy (incl. `--features llama-local`), workspace tests. Not committed.
+
+## 2026-06-12 — Summarize refusal/repetition fix: shared local generation policy
+
+Executed `plans/2026-06-12-summarize-refusal-mitigation-v3.md` (all 12 tasks).
+Root cause of the `fono summarize` 13 s refusal loop on local gemma-4-e2b: the
+assistant backend never received the two F7 polish decode fixes — its stop
+checks were dead code on this vocab (non-standard `<|turn>`/`<turn|>` control
+tokens) and it sampled with bare greedy, so a safety refusal repeated verbatim
+to the 384-token cap.
+
+Fix, structurally shared so the next model switch can't reintroduce it in one
+backend only:
+- New `fono-core::llama_gen` module: deterministic `penalties(128, 1.3) +
+  greedy` sampler chain, Control-attr stop predicate, textual stop-marker scan,
+  UTF-8-safe stream split, and `warn_on_template_vocab_mismatch` — a load-time
+  tripwire that warns when a template marker doesn't tokenize to a single
+  control token (fires twice on gemma-4-e2b, silent on standard vocabs). Both
+  the assistant and polish local backends now consume the same symbols.
+- `AssistantContext.max_new_tokens`: optional per-request cap (clamped to the
+  backend budget); summarize sets 96 so even a worst-case degenerate run is
+  bounded to seconds. Cloud backends ignore it; F7/F8 chat unchanged (`None`).
+- Summarize hardening: `default_summarize_prompt` now frames the model as a
+  neutral relay with an explicit no-refusal directive; `summarize_with`
+  collapses consecutive duplicate sentences and degrades a bare refusal to a
+  deterministic metadata fallback ("Bogdan sent a message in test.").
+- Prefix-cache interplay verified: live two-turn checkpoint store/restore test
+  (ignored, model-gated) plus replay benches pass; `outputs_match` holds under
+  penalized greedy.
+
+Repro result: the profane payload now yields one neutral sentence in ~3.7 s
+wall (incl. model load) with a control-token stop. Deferred follow-up (in the
+plan's execution notes): render via the GGUF's embedded `tokenizer.chat_template`
+to fully replace name-substring template dispatch — needs its own design pass
+to preserve the prompt-state cache's textual prefix/suffix invariants. Gate
+green: fmt, clippy (incl. `--features llama-local`), workspace tests. Not
+committed.
 
 ## 2026-06-12 — v0.10.0 release prep + streaming local cleanup injection
 

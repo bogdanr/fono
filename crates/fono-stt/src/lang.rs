@@ -156,14 +156,18 @@ fn normalise_codes(codes: &[String]) -> Vec<String> {
     out
 }
 
-/// Normalise a Whisper language identifier (alpha-2 code or full English
-/// name) to its alpha-2 form for `LanguageSelection::contains` checks.
+/// Normalise a detected language identifier (alpha-2 code, alpha-3
+/// ISO 639-2/3 code, or full English name) to its alpha-2 form for
+/// `LanguageSelection::contains` checks.
 ///
 /// Cloud STT `verbose_json` responses echo `language` as the full English
-/// name (`"english"`, `"russian"`, `"bulgarian"`), while user configs and
-/// `LanguageSelection::AllowList` use the alpha-2 code (`"en"`, `"ru"`,
-/// `"bg"`). Without normalisation, the post-validation gate would never
-/// fire because `"bulgarian" != "bg"`.
+/// name (`"english"`, `"russian"`, `"bulgarian"`), while ElevenLabs Scribe
+/// returns alpha-3 ISO 639-2/3 codes (`"eng"`, `"ron"`, `"deu"`); user
+/// configs and `LanguageSelection::AllowList` use the alpha-2 code (`"en"`,
+/// `"ru"`, `"bg"`). Without normalisation, the post-validation gate would
+/// never fire because `"bulgarian" != "bg"` and the language-mismatch
+/// warning would spuriously trip on every Scribe transcription because
+/// `"ron" != "ro"`.
 ///
 /// Unknown names pass through lowercased as-is — safe default: an
 /// unrecognised name will not match the allow-list, so the rerun gate
@@ -172,8 +176,13 @@ fn normalise_codes(codes: &[String]) -> Vec<String> {
 #[allow(clippy::too_many_lines)]
 pub fn whisper_lang_to_code(s: &str) -> String {
     let lc = s.trim().to_ascii_lowercase();
-    if lc.len() <= 3 {
+    if lc.len() == 2 {
         return lc;
+    }
+    if lc.len() == 3 {
+        // ISO 639-2/3 alpha-3 → alpha-2. Codes with no alpha-2 form
+        // (e.g. `haw`, `yue`) and unknown triplets pass through as-is.
+        return iso639_3_to_1(&lc).map_or_else(|| lc.clone(), str::to_string);
     }
     let code = match lc.as_str() {
         "english" => "en",
@@ -281,6 +290,121 @@ pub fn whisper_lang_to_code(s: &str) -> String {
     code.to_string()
 }
 
+/// Map an alpha-3 ISO 639-2/3 language code to its alpha-2 ISO 639-1
+/// form, covering the language universe Fono supports (the Whisper +
+/// ElevenLabs Scribe set). Both bibliographic (B) and terminological
+/// (T) 639-2 variants are accepted where they differ (e.g. `ger`/`deu`
+/// for German, `rum`/`ron` for Romanian).
+///
+/// Returns `None` for codes that have no alpha-2 form (e.g. `haw`,
+/// `yue`) or that are not recognised; callers keep the input as-is.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn iso639_3_to_1(code: &str) -> Option<&'static str> {
+    let c = match code.trim().to_ascii_lowercase().as_str() {
+        "eng" => "en",
+        "zho" | "chi" | "cmn" => "zh",
+        "deu" | "ger" => "de",
+        "spa" => "es",
+        "rus" => "ru",
+        "kor" => "ko",
+        "fra" | "fre" => "fr",
+        "jpn" => "ja",
+        "por" => "pt",
+        "tur" => "tr",
+        "pol" => "pl",
+        "cat" => "ca",
+        "nld" | "dut" => "nl",
+        "ara" => "ar",
+        "swe" => "sv",
+        "ita" => "it",
+        "ind" => "id",
+        "hin" => "hi",
+        "fin" => "fi",
+        "vie" => "vi",
+        "heb" => "he",
+        "ukr" => "uk",
+        "ell" | "gre" => "el",
+        "msa" | "may" => "ms",
+        "ces" | "cze" => "cs",
+        "ron" | "rum" => "ro",
+        "dan" => "da",
+        "hun" => "hu",
+        "tam" => "ta",
+        "nor" => "no",
+        "tha" => "th",
+        "urd" => "ur",
+        "hrv" => "hr",
+        "bul" => "bg",
+        "lit" => "lt",
+        "lat" => "la",
+        "mri" | "mao" => "mi",
+        "mal" => "ml",
+        "cym" | "wel" => "cy",
+        "slk" | "slo" => "sk",
+        "tel" => "te",
+        "fas" | "per" => "fa",
+        "lav" => "lv",
+        "ben" => "bn",
+        "srp" => "sr",
+        "aze" => "az",
+        "slv" => "sl",
+        "kan" => "kn",
+        "est" => "et",
+        "mkd" | "mac" => "mk",
+        "bre" => "br",
+        "eus" | "baq" => "eu",
+        "isl" | "ice" => "is",
+        "hye" | "arm" => "hy",
+        "nep" => "ne",
+        "mon" => "mn",
+        "bos" => "bs",
+        "kaz" => "kk",
+        "sqi" | "alb" => "sq",
+        "swa" => "sw",
+        "glg" => "gl",
+        "mar" => "mr",
+        "pan" => "pa",
+        "sin" => "si",
+        "khm" => "km",
+        "sna" => "sn",
+        "yor" => "yo",
+        "som" => "so",
+        "afr" => "af",
+        "oci" => "oc",
+        "kat" | "geo" => "ka",
+        "bel" => "be",
+        "tgk" => "tg",
+        "snd" => "sd",
+        "guj" => "gu",
+        "amh" => "am",
+        "yid" => "yi",
+        "lao" => "lo",
+        "uzb" => "uz",
+        "fao" => "fo",
+        "hat" => "ht",
+        "pus" => "ps",
+        "tuk" => "tk",
+        "nno" => "nn",
+        "mlt" => "mt",
+        "san" => "sa",
+        "ltz" => "lb",
+        "mya" | "bur" => "my",
+        "bod" | "tib" => "bo",
+        "tgl" => "tl",
+        "mlg" => "mg",
+        "asm" => "as",
+        "tat" => "tt",
+        "lin" => "ln",
+        "hau" => "ha",
+        "bak" => "ba",
+        "jav" => "jw",
+        "sun" => "su",
+        _ => return None,
+    };
+    Some(c)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,5 +479,49 @@ mod tests {
         assert!(a.is_auto());
         let same = base.clone().with_override(None);
         assert_eq!(same, base);
+    }
+
+    #[test]
+    fn iso639_3_alpha3_codes_normalise_to_alpha2() {
+        // ElevenLabs Scribe emits alpha-3; these must collapse so the
+        // allow-list gate and the downstream TTS hint see alpha-2.
+        assert_eq!(whisper_lang_to_code("ron"), "ro");
+        assert_eq!(whisper_lang_to_code("eng"), "en");
+        assert_eq!(whisper_lang_to_code("deu"), "de");
+        assert_eq!(whisper_lang_to_code("FRA"), "fr");
+        // Bibliographic 639-2 variants resolve too.
+        assert_eq!(whisper_lang_to_code("ger"), "de");
+        assert_eq!(whisper_lang_to_code("rum"), "ro");
+    }
+
+    #[test]
+    fn alpha2_and_full_names_still_normalise() {
+        // Regression guard: the alpha-3 branch must not break the
+        // existing alpha-2 passthrough or English-name mapping.
+        assert_eq!(whisper_lang_to_code("ro"), "ro");
+        assert_eq!(whisper_lang_to_code("EN"), "en");
+        assert_eq!(whisper_lang_to_code("romanian"), "ro");
+        assert_eq!(whisper_lang_to_code("bulgarian"), "bg");
+    }
+
+    #[test]
+    fn alpha3_without_alpha2_passes_through() {
+        // No alpha-2 form exists — keep the input rather than guess.
+        assert_eq!(whisper_lang_to_code("haw"), "haw");
+        assert_eq!(whisper_lang_to_code("yue"), "yue");
+        // Unknown triplet is preserved (conservative: won't match the
+        // allow-list, so the mismatch gate fires).
+        assert_eq!(whisper_lang_to_code("xyz"), "xyz");
+        assert_eq!(iso639_3_to_1("xyz"), None);
+        assert_eq!(iso639_3_to_1("ron"), Some("ro"));
+    }
+
+    #[test]
+    fn allow_list_accepts_normalised_alpha3() {
+        // The exact failure from the bug report: Scribe returns "ron",
+        // allow-list is ["ro", "en"]; the mismatch warning must NOT fire.
+        let s = LanguageSelection::AllowList(vec!["ro".into(), "en".into()]);
+        assert!(s.contains(&whisper_lang_to_code("ron")));
+        assert!(s.contains(&whisper_lang_to_code("eng")));
     }
 }

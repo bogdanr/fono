@@ -27,6 +27,10 @@ use std::time::Instant;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use fono_core::llama_backend::{backend, shared_model};
+use fono_core::llama_gen::{
+    first_stop_marker, generation_sampler, is_control_token, safe_stream_end, turn_markers,
+    warn_on_template_vocab_mismatch, TurnMarkers,
+};
 use fono_core::prompt_cache::{
     PromptStateCache, PromptStateCacheEntry, PromptStateCacheKey, PromptStateCacheLayer,
 };
@@ -39,9 +43,7 @@ use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
-use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
-use llama_cpp_2::token_type::LlamaTokenAttr;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
@@ -62,21 +64,13 @@ const MAX_NEW_TOKENS: i32 = 256;
 /// Default n_ctx fallback if the caller passes 0 / a sub-512 value.
 const MIN_CTX: u32 = 512;
 
-// Repetition-penalty parameters for the cleanup sampler. Cleanup output closely
-// mirrors the input transcript — exactly the condition where pure greedy
-// decoding degenerates into an infinite verbatim loop: once the model
-// reproduces the (near-echo) input, the highest-probability continuation is to
-// reproduce it AGAIN, so it never emits `<end_of_turn>` and runs to the token
-// cap (we saw a cleaned sentence repeated ~6× = 23s + garbage on Gemma).
-//
-// llama.cpp's penalty sampler only sees tokens passed to `sampler.accept()`,
-// and we accept ONLY generated tokens (prefill uses `ctx.decode`). So the
-// penalty discourages the model from repeating ITS OWN output WITHOUT
-// penalising faithful reproduction of the transcript that lives in the prompt.
-// A modest `repeat = 1.3` over the recent window breaks the loop while staying
-// deterministic: greedy still picks the argmax of the penalised logits.
-const PENALTY_LAST_N: i32 = 128;
-const PENALTY_REPEAT: f32 = 1.3;
+// The sampler (repetition penalty over generated tokens only, feeding
+// greedy), the Control-attribute stop predicate, and the textual
+// stop-marker scan are the shared generation policy in
+// `fono_core::llama_gen` — one definition for the polish + assistant
+// embedded backends. The Gemma verbatim-repetition evidence (a cleaned
+// sentence repeated ~6× = 23s + garbage) and the gemma-4-e2b control-token
+// anomaly are documented there.
 
 // The process-wide `LlamaBackend` singleton lives in
 // `fono_core::llama_backend` so the polish (cleanup) and assistant
@@ -155,6 +149,10 @@ impl LlamaLocal {
         // the default tracing filter so they don't crowd this line.
         let elapsed_ms = t.elapsed().as_millis() as u64;
         let model_name = self.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+        // Load-time tripwire: warn when the selected hand-rolled template's
+        // markers do not resolve to control tokens in this vocabulary (the
+        // gemma-4-e2b anomaly) or the name matches no known family.
+        warn_on_template_vocab_mismatch(&model, model_name);
         let size_mb =
             std::fs::metadata(&self.model_path).map(|m| m.len() / (1024 * 1024)).unwrap_or(0);
         info!(
@@ -227,13 +225,11 @@ impl LlamaLocal {
         first_sample_idx: i32,
         on_piece: &mut dyn FnMut(&str),
     ) -> Result<String> {
-        // Greedy decoding with a repetition penalty over generated tokens only
-        // (see PENALTY_* docs): deterministic and faithful, but escapes the
-        // verbatim self-repetition loop bare greedy falls into on cleanup.
-        let mut sampler = LlamaSampler::chain_simple([
-            LlamaSampler::penalties(PENALTY_LAST_N, PENALTY_REPEAT, 0.0, 0.0),
-            LlamaSampler::greedy(),
-        ]);
+        // Shared generation policy: repetition penalty over generated tokens
+        // only, feeding greedy — deterministic, but escapes the verbatim
+        // self-repetition loop bare greedy falls into on cleanup. See
+        // `fono_core::llama_gen`.
+        let mut sampler = generation_sampler();
         // Slice the autoregressive decode loop onto the f7-polish lane so the
         // generation cost (distinct from prefill) is visible in the waterfall,
         // mirroring the assistant `llm.local_streaming_inference` span.
@@ -241,19 +237,9 @@ impl LlamaLocal {
         // Stop on ANY control token. A single-shot cleanup must never emit a
         // turn marker, BOS/EOS, or an end-of-generation token — so we stop the
         // moment the model samples a token tagged `LlamaTokenAttr::Control`,
-        // regardless of how that marker is spelled in this model's vocabulary.
-        //
-        // This is deliberately model-agnostic instead of matching literal
-        // strings: `gemma-4-e2b`'s turn markers are NOT the standard
-        // `<start_of_turn>` / `<end_of_turn>` — they tokenize as `<|turn>`
-        // (id 105, control, NOT eog) and `<turn|>` (id 106, control + eog).
-        // The old `single_token("<end_of_turn>")` lookups returned `None` on
-        // this vocab (the literals tokenize as plain text), so every stop check
-        // was dead code: the model emitted its real opener (105, which renders
-        // empty under `special = false`) and looped `model\n…`, or its closer
-        // (106) and the literal `<end_of_turn>` text leaked into output. The
-        // `Control` attribute catches all of these (105, 106, eos, bos) while
-        // letting ordinary newline tokens (107 = `\n`, 108 = `\n\n`) through.
+        // regardless of how that marker is spelled in this model's vocabulary
+        // (the gemma-4-e2b `<|turn>`/`<turn|>` evidence lives in
+        // `fono_core::llama_gen`).
         let mut out = String::new();
         let mut emitted_len = 0_usize;
         let mut sample_idx = first_sample_idx;
@@ -272,7 +258,7 @@ impl LlamaLocal {
         for n_cur in (start_pos..).take(MAX_NEW_TOKENS as usize) {
             let token = sampler.sample(ctx, sample_idx);
             sampler.accept(token);
-            if model.token_attr(token).contains(LlamaTokenAttr::Control) {
+            if is_control_token(model, token) {
                 stop_reason = "control_token";
                 break;
             }
@@ -287,7 +273,7 @@ impl LlamaLocal {
             // Belt-and-braces: if a template marker round-tripped as plain text
             // (rather than a registered control token), emit the prose before
             // it, truncate at the first occurrence, and stop.
-            if let Some(idx) = first_stop_marker(&out) {
+            if let Some((idx, _marker)) = first_stop_marker(&out) {
                 if idx > emitted_len {
                     on_piece(&out[emitted_len..idx]);
                     deltas += 1;
@@ -801,40 +787,6 @@ fn token_ids(tokens: &[LlamaToken]) -> Vec<i32> {
     tokens.iter().map(|t| t.0).collect()
 }
 
-/// Chat-template turn markers that must never appear in cleanup output. If a
-/// model emits one as plain text (because its tokenizer doesn't register it as
-/// a special token, so the single-token stop checks can't fire), generation is
-/// truncated at the first occurrence. Mirrors the assistant backend.
-const STOP_MARKERS: &[&str] =
-    &["<end_of_turn>", "<start_of_turn>", "<|im_end|>", "<|endoftext|>", "</s>"];
-
-fn first_stop_marker(text: &str) -> Option<usize> {
-    STOP_MARKERS.iter().filter_map(|marker| text.find(marker)).min()
-}
-
-/// Byte offset up to which `text` can be streamed without risking emitting a
-/// partial stop marker. Holds back the longest suffix of `text` that is also a
-/// non-empty prefix of any [`STOP_MARKERS`] entry, so a marker split across
-/// several token pieces (e.g. `<end` then `_of_turn>`) is never partially
-/// injected into the cursor. Mirrors the assistant backend's `safe_stream_end`.
-fn safe_stream_end(text: &str) -> usize {
-    let keep = STOP_MARKERS
-        .iter()
-        .filter_map(|marker| longest_marker_prefix_suffix(text, marker))
-        .max()
-        .unwrap_or(0);
-    text.len().saturating_sub(keep)
-}
-
-/// Length of the longest suffix of `text` that is a proper non-empty prefix of
-/// `marker`. `None` when there is no overlap.
-fn longest_marker_prefix_suffix(text: &str, marker: &str) -> Option<usize> {
-    let max = text.len().min(marker.len().saturating_sub(1));
-    (1..=max)
-        .rev()
-        .find(|&len| text.is_char_boundary(text.len() - len) && text.ends_with(&marker[..len]))
-}
-
 fn copy_context_state(ctx: &LlamaContext<'_>) -> Result<Vec<u8>> {
     let state_bytes = ctx.get_state_size();
     let mut state = vec![0_u8; state_bytes];
@@ -920,7 +872,7 @@ fn template_for_model(model_name: &str) -> PromptTemplate {
 /// output to the token cap.
 fn build_prompt_split_for_model(system: &str, user: &str, model_name: &str) -> (String, String) {
     match template_for_model(model_name) {
-        PromptTemplate::Gemma => build_gemma_prompt_split(system, user),
+        PromptTemplate::Gemma => build_gemma_prompt_split(system, user, turn_markers(model_name)),
         PromptTemplate::ChatMl { disable_thinking } => {
             build_chatml_prompt_split_with_options(system, user, disable_thinking)
         }
@@ -929,17 +881,19 @@ fn build_prompt_split_for_model(system: &str, user: &str, model_name: &str) -> (
 
 /// Gemma cleanup prompt split. Gemma has no system role, so the system prompt
 /// leads the single user turn (Gemma's trained convention). The stable prefix
-/// is `<start_of_turn>user\n{system}\n\n`; the suffix carries the transcript
-/// plus the model-turn opener.
-fn build_gemma_prompt_split(system: &str, user: &str) -> (String, String) {
+/// is `{open}user\n{system}\n\n`; the suffix carries the transcript plus the
+/// model-turn opener. `markers` selects the spelling this model registers as
+/// control tokens (the gemma-4 line differs from the rest of the family).
+fn build_gemma_prompt_split(system: &str, user: &str, markers: TurnMarkers) -> (String, String) {
     let system = system.trim();
     let mut prefix = String::with_capacity(system.len() + 32);
-    prefix.push_str("<start_of_turn>user\n");
+    prefix.push_str(markers.open);
+    prefix.push_str("user\n");
     if !system.is_empty() {
         prefix.push_str(system);
         prefix.push_str("\n\n");
     }
-    let suffix = format!("{}<end_of_turn>\n<start_of_turn>model\n", user.trim());
+    let suffix = format!("{}{}\n{}model\n", user.trim(), markers.close, markers.open);
     (prefix, suffix)
 }
 
@@ -988,7 +942,7 @@ fn base_prefix_for_model(base_system: &str, model_name: &str) -> String {
         return String::new();
     }
     match template_for_model(model_name) {
-        PromptTemplate::Gemma => format!("<start_of_turn>user\n{base}"),
+        PromptTemplate::Gemma => format!("{}user\n{base}", turn_markers(model_name).open),
         PromptTemplate::ChatMl { .. } => chatml_base_prefix(base),
     }
 }
@@ -1223,11 +1177,20 @@ mod tests {
 
     #[test]
     fn gemma_model_uses_gemma_template() {
+        // The default gemma-4 line ships non-standard control-token markers.
         let (prefix, suffix) =
             build_prompt_split_for_model("be terse", "hello world", "gemma-4-e2b");
+        assert!(prefix.starts_with("<|turn>user\nbe terse\n\n"));
+        assert_eq!(suffix, "hello world<turn|>\n<|turn>model\n");
+        assert!(!prefix.contains("<|im_start|>"));
+    }
+
+    #[test]
+    fn standard_gemma_model_keeps_classic_markers() {
+        let (prefix, suffix) =
+            build_prompt_split_for_model("be terse", "hello world", "gemma-2-2b");
         assert!(prefix.starts_with("<start_of_turn>user\nbe terse\n\n"));
         assert_eq!(suffix, "hello world<end_of_turn>\n<start_of_turn>model\n");
-        assert!(!prefix.contains("<|im_start|>"));
     }
 
     #[test]
@@ -1239,7 +1202,8 @@ mod tests {
 
     #[test]
     fn gemma_split_reproduces_full_prompt() {
-        let (prefix, suffix) = build_gemma_prompt_split("be terse", "hello world");
+        let (prefix, suffix) =
+            build_gemma_prompt_split("be terse", "hello world", TurnMarkers::GEMMA);
         assert_eq!(
             format!("{prefix}{suffix}"),
             "<start_of_turn>user\nbe terse\n\nhello world<end_of_turn>\n<start_of_turn>model\n"
@@ -1256,7 +1220,7 @@ mod tests {
         let base = base_prefix_for_model(base_system, "gemma-4-e2b");
         let (full_prefix, _suffix) =
             build_prompt_split_for_model(&full_system, "hi", "gemma-4-e2b");
-        assert_eq!(base, "<start_of_turn>user\nClean up the transcript.");
+        assert_eq!(base, "<|turn>user\nClean up the transcript.");
         assert!(
             full_prefix.starts_with(&base),
             "gemma base must be a textual prefix of the full prefix\n base: {base:?}\n full: {full_prefix:?}"
@@ -1268,10 +1232,10 @@ mod tests {
         assert_eq!(first_stop_marker("clean text"), None);
         // The opener mid-stream (model degenerating into a new turn) truncates.
         let s = "Cleaned sentence.<start_of_turn>model";
-        assert_eq!(first_stop_marker(s), Some("Cleaned sentence.".len()));
+        assert_eq!(first_stop_marker(s), Some(("Cleaned sentence.".len(), "<start_of_turn>")));
         // Earliest of several wins.
         let s2 = "a<|im_end|>b<end_of_turn>";
-        assert_eq!(first_stop_marker(s2), Some(1));
+        assert_eq!(first_stop_marker(s2), Some((1, "<|im_end|>")));
     }
 
     #[test]

@@ -17,7 +17,9 @@ use fono_core::config::{Tts, TtsBackend};
     feature = "groq",
     feature = "openrouter",
     feature = "cartesia",
-    feature = "deepgram"
+    feature = "deepgram",
+    feature = "elevenlabs",
+    feature = "speechmatics"
 ))]
 use fono_core::providers::tts_key_env;
 #[allow(unused_imports)]
@@ -35,7 +37,9 @@ use crate::traits::TextToSpeech;
         feature = "groq",
         feature = "openrouter",
         feature = "cartesia",
-        feature = "deepgram"
+        feature = "deepgram",
+        feature = "elevenlabs",
+        feature = "speechmatics"
     )),
     allow(unused_variables)
 )]
@@ -45,16 +49,50 @@ pub fn build_tts(
     languages: &[String],
     voices_dir: &Path,
 ) -> Result<Option<Arc<dyn TextToSpeech>>> {
-    match cfg.backend {
-        TtsBackend::None => Ok(None),
-        TtsBackend::Wyoming => build_wyoming(cfg).map(Some),
-        TtsBackend::OpenAI => build_openai(cfg, secrets).map(Some),
-        TtsBackend::Groq => build_groq(cfg, secrets).map(Some),
-        TtsBackend::OpenRouter => build_openrouter(cfg, secrets).map(Some),
-        TtsBackend::Cartesia => build_cartesia(cfg, secrets, languages).map(Some),
-        TtsBackend::Deepgram => build_deepgram(cfg, secrets).map(Some),
-        TtsBackend::Local => build_local(cfg, languages, voices_dir).map(Some),
+    let primary: Arc<dyn TextToSpeech> = match cfg.backend {
+        TtsBackend::None => return Ok(None),
+        TtsBackend::Wyoming => build_wyoming(cfg)?,
+        TtsBackend::OpenAI => build_openai(cfg, secrets)?,
+        TtsBackend::Groq => build_groq(cfg, secrets)?,
+        TtsBackend::OpenRouter => build_openrouter(cfg, secrets)?,
+        TtsBackend::Cartesia => build_cartesia(cfg, secrets, languages)?,
+        TtsBackend::Deepgram => build_deepgram(cfg, secrets)?,
+        TtsBackend::ElevenLabs => build_elevenlabs(cfg, secrets)?,
+        TtsBackend::Speechmatics => build_speechmatics(cfg, secrets)?,
+        TtsBackend::Local => build_local(cfg, languages, voices_dir)?,
+    };
+    Ok(Some(maybe_wrap_english_only(primary, cfg, languages, voices_dir)))
+}
+
+/// Wrap an English-only cloud backend so non-English utterances are routed to
+/// the local multilingual voice instead of being phonemized as gibberish
+/// (see [`crate::english_only_fallback`]). Only the `tts-local` build has a
+/// local engine to fall back to; without it the backend is returned as-is.
+#[cfg(feature = "tts-local")]
+fn maybe_wrap_english_only(
+    primary: Arc<dyn TextToSpeech>,
+    cfg: &Tts,
+    languages: &[String],
+    voices_dir: &Path,
+) -> Arc<dyn TextToSpeech> {
+    if fono_core::provider_catalog::tts_backend_english_only(&cfg.backend) {
+        let base_url = (!cfg.local.base_url.is_empty()).then(|| cfg.local.base_url.clone());
+        Arc::new(crate::english_only_fallback::EnglishOnlyFallback::new(
+            primary, voices_dir, base_url, languages,
+        ))
+    } else {
+        primary
     }
+}
+
+#[cfg(not(feature = "tts-local"))]
+fn maybe_wrap_english_only(
+    primary: Arc<dyn TextToSpeech>,
+    _cfg: &Tts,
+    _languages: &[String],
+    _voices_dir: &Path,
+) -> Arc<dyn TextToSpeech> {
+    primary
 }
 
 /// Build the on-device Piper engine(s) from cached voices. The `.ort`
@@ -139,7 +177,9 @@ fn build_wyoming(_cfg: &Tts) -> Result<Arc<dyn TextToSpeech>> {
     feature = "groq",
     feature = "openrouter",
     feature = "cartesia",
-    feature = "deepgram"
+    feature = "deepgram",
+    feature = "elevenlabs",
+    feature = "speechmatics"
 ))]
 fn resolve_cloud(cfg: &Tts, backend: &TtsBackend) -> (String, Option<String>, Option<String>) {
     let canonical = tts_key_env(backend);
@@ -162,7 +202,9 @@ fn resolve_cloud(cfg: &Tts, backend: &TtsBackend) -> (String, Option<String>, Op
     feature = "groq",
     feature = "openrouter",
     feature = "cartesia",
-    feature = "deepgram"
+    feature = "deepgram",
+    feature = "elevenlabs",
+    feature = "speechmatics"
 ))]
 fn resolve_voice(cfg: &Tts, voice_override: Option<String>) -> Option<String> {
     if cfg.voice.is_empty() {
@@ -177,7 +219,9 @@ fn resolve_voice(cfg: &Tts, voice_override: Option<String>) -> Option<String> {
     feature = "groq",
     feature = "openrouter",
     feature = "cartesia",
-    feature = "deepgram"
+    feature = "deepgram",
+    feature = "elevenlabs",
+    feature = "speechmatics"
 ))]
 fn resolve_key(key_ref: &str, backend: &TtsBackend, secrets: &Secrets) -> Result<String> {
     secrets.resolve(key_ref).ok_or_else(|| {
@@ -187,6 +231,8 @@ fn resolve_key(key_ref: &str, backend: &TtsBackend, secrets: &Secrets) -> Result
             TtsBackend::OpenRouter => "OpenRouter",
             TtsBackend::Cartesia => "Cartesia",
             TtsBackend::Deepgram => "Deepgram",
+            TtsBackend::ElevenLabs => "ElevenLabs",
+            TtsBackend::Speechmatics => "Speechmatics",
             _ => "TTS",
         };
         anyhow!(
@@ -294,6 +340,34 @@ fn build_deepgram(cfg: &Tts, secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>>
 #[cfg(not(feature = "deepgram"))]
 fn build_deepgram(_cfg: &Tts, _secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
     Err(anyhow!("Deepgram TTS not compiled in (enable the `deepgram` feature on `fono-tts`)"))
+}
+
+#[cfg(feature = "elevenlabs")]
+fn build_elevenlabs(cfg: &Tts, secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
+    let (key_ref, model_override, voice_override) = resolve_cloud(cfg, &TtsBackend::ElevenLabs);
+    let key = resolve_key(&key_ref, &TtsBackend::ElevenLabs, secrets)?;
+    let voice = resolve_voice(cfg, voice_override);
+    Ok(Arc::new(crate::elevenlabs::ElevenLabsTts::new(key, model_override, voice)))
+}
+
+#[cfg(not(feature = "elevenlabs"))]
+fn build_elevenlabs(_cfg: &Tts, _secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
+    Err(anyhow!("ElevenLabs TTS not compiled in (enable the `elevenlabs` feature on `fono-tts`)"))
+}
+
+#[cfg(feature = "speechmatics")]
+fn build_speechmatics(cfg: &Tts, secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
+    let (key_ref, _model_override, voice_override) = resolve_cloud(cfg, &TtsBackend::Speechmatics);
+    let key = resolve_key(&key_ref, &TtsBackend::Speechmatics, secrets)?;
+    let voice = resolve_voice(cfg, voice_override);
+    Ok(Arc::new(crate::speechmatics::SpeechmaticsTts::new(key, voice)))
+}
+
+#[cfg(not(feature = "speechmatics"))]
+fn build_speechmatics(_cfg: &Tts, _secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
+    Err(anyhow!(
+        "Speechmatics TTS not compiled in (enable the `speechmatics` feature on `fono-tts`)"
+    ))
 }
 
 #[cfg(test)]
@@ -413,6 +487,48 @@ mod tests {
         let mut secrets = Secrets::default();
         secrets.insert("DEEPGRAM_API_KEY", "dg-test");
         assert!(build_tts(&cfg, &secrets, &[], std::path::Path::new("")).unwrap().is_some());
+    }
+
+    #[cfg(feature = "elevenlabs")]
+    #[test]
+    fn elevenlabs_with_key_succeeds() {
+        let cfg = TtsCfg { backend: TtsBackend::ElevenLabs, ..TtsCfg::default() };
+        let mut secrets = Secrets::default();
+        secrets.insert("ELEVENLABS_API_KEY", "sk-test");
+        let tts = build_tts(&cfg, &secrets, &[], std::path::Path::new("")).unwrap().unwrap();
+        assert_eq!(tts.name(), "elevenlabs");
+    }
+
+    #[cfg(feature = "elevenlabs")]
+    #[test]
+    fn elevenlabs_missing_key_errors_clearly() {
+        let cfg = TtsCfg { backend: TtsBackend::ElevenLabs, ..TtsCfg::default() };
+        let err = build_tts(&cfg, &Secrets::default(), &[], std::path::Path::new(""))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("ELEVENLABS_API_KEY") && err.contains("fono keys add"), "{err}");
+    }
+
+    #[cfg(feature = "speechmatics")]
+    #[test]
+    fn speechmatics_with_key_succeeds() {
+        let cfg = TtsCfg { backend: TtsBackend::Speechmatics, ..TtsCfg::default() };
+        let mut secrets = Secrets::default();
+        secrets.insert("SPEECHMATICS_API_KEY", "sm-test");
+        let tts = build_tts(&cfg, &secrets, &[], std::path::Path::new("")).unwrap().unwrap();
+        assert_eq!(tts.name(), "speechmatics");
+    }
+
+    #[cfg(feature = "speechmatics")]
+    #[test]
+    fn speechmatics_missing_key_errors_clearly() {
+        let cfg = TtsCfg { backend: TtsBackend::Speechmatics, ..TtsCfg::default() };
+        let err = build_tts(&cfg, &Secrets::default(), &[], std::path::Path::new(""))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("SPEECHMATICS_API_KEY") && err.contains("fono keys add"), "{err}");
     }
 
     #[cfg(feature = "groq")]

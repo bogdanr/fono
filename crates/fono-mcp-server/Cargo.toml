@@ -7,6 +7,12 @@ license.workspace = true
 authors.workspace = true
 description = "MCP server for Fono — exposes fono.speak, fono.listen, fono.confirm over stdio"
 
+[features]
+# Embedded llama.cpp local assistant backend for `fono.summarize`.
+# Forwarded from the `fono` binary's `llama-local` feature so the MCP
+# server's assistant backend support matches the daemon's.
+llama-local = ["fono-assistant/llama-local"]
+
 [dependencies]
 anyhow = { workspace = true }
 serde = { workspace = true }
@@ -15,7 +21,9 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
+futures = { workspace = true }
 fono-core = { path = "../fono-core" }
+fono-assistant = { path = "../fono-assistant" }
 fono-tts = { path = "../fono-tts" }
 fono-stt = { path = "../fono-stt" }
 fono-audio = { path = "../fono-audio" }

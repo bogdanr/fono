@@ -122,6 +122,11 @@ pub struct AssistantContext {
     /// `fono_screen` tool descriptor in every request. Users opt in
     /// with `[assistant].prefer_vision = true`.
     pub prefer_vision: bool,
+    /// Optional per-request cap on generated tokens. When `Some`, local
+    /// backends clamp it to their global budget; `None` keeps the
+    /// backend default. Used by short-form tasks (e.g. notification
+    /// summaries) that never need a long reply.
+    pub max_new_tokens: Option<u32>,
 }
 
 impl std::fmt::Debug for AssistantContext {
@@ -133,6 +138,7 @@ impl std::fmt::Debug for AssistantContext {
             .field("active_window_context", &self.active_window_context)
             .field("screen_capture", &self.screen_capture.is_some())
             .field("prefer_vision", &self.prefer_vision)
+            .field("max_new_tokens", &self.max_new_tokens)
             .finish()
     }
 }

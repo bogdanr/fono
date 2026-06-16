@@ -11,6 +11,7 @@
 pub mod protocol;
 pub mod relevance;
 pub mod server;
+pub mod summarize;
 pub mod tools;
 pub mod transport;
 pub mod voice_io;

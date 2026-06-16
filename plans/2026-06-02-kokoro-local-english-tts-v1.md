@@ -144,7 +144,7 @@ proceeding.
   loader needs no `.npy`/zip parser. Rationale: the minimal runtime loads only
   `.ort` and no public hub hosts it; the model is shared across all four voices.
   **Gated on:** valid `gh` auth for `bogdanr` (token currently invalid).
-- [ ] B2. **Required for Kokoro:** the currently-hosted `libonnxruntime` is
+- [~] B2. **Required for Kokoro:** the currently-hosted `libonnxruntime` is
   built from the **Piper-only** op set and cannot load Kokoro. Rebuild the
   minimal runtime from the **unioned (Piper + Kokoro q8f16)** ops config
   (`scripts/build-onnxruntime-minimal.sh` with the Phase-A `qunion-ops.config`)
@@ -153,13 +153,40 @@ proceeding.
   — upload each `libonnxruntime-<triple>.a.xz` to the
   `onnxruntime-1.24.2` release (or a fresh ABI tag), and re-pin every
   `sha_for_triple` row in `scripts/fetch-onnxruntime.sh:51-69` from the updated
-  `sha-<triple>.txt`. **Gated on:** a **manual cross-host rebuild** of the three
-  non-Linux triples — `ci.yml`/`release.yml` only *fetch* the prebuilt archive
-  (`fetch-onnxruntime.sh`), there is **no CI workflow that builds it**; the
-  hosted libs were produced per-host by hand. Only Linux x64 is buildable on the
-  dev host (built + verified in Phase A). Not urgent: Kokoro is not wired into
-  the catalog/engine until Phase C–E, so the shipped Piper-only runtime is fine
-  until the union runtime is rolled out across all four triples together.
+  `sha-<triple>.txt`.
+  **Progress 2026-06-15:**
+  - **Root cause refined.** The mirror's build input
+    (`fono-voice/onnxruntime/ops.config`, fed to `--include_ops_by_config` by
+    `fono-voice/.github/workflows/build-onnxruntime.yml`) was *not* simply
+    Piper-only — it was an incomplete union **missing `Greater`(13) + `If`**
+    (so Kokoro q8f16 failed to load), while a separately-generated fono config
+    was conversely **missing `LSTM` + `MatMulInteger`** needed by some Piper
+    voices. Neither was a complete superset.
+  - **True union built + committed.** `scripts/merge-ort-configs.py` (new)
+    unions both per-set configs — operators AND per-op type constraints — into
+    the complete set (verified to contain `Greater`, `If`, `LSTM`,
+    `MatMulInteger`, parsed back through onnxruntime's own
+    `reduced_build_config_parser`). The union is committed to both
+    `fono-voice/onnxruntime/ops.config` (the build input) and the fono mirror
+    copy `calibration/voice-models/ort/ops.config`. `scripts/gen-ort-models.sh`
+    gained a `Greater`(13) regression guard so a future partial run fails loudly.
+  - **Linux x86_64 rolled out + verified.** Rebuilt the lib from the union
+    config (50.4 MiB `.a`, no size regression), published to the mirror
+    (`onnxruntime-1.24.2`, `--clobber`), re-pinned `sha_for_triple()` x64 row to
+    `28c7dca4…`, and verified from a **clean** `fetch-onnxruntime.sh` that Kokoro
+    English synthesis succeeds with no `Greater(13)` error.
+  - **The "no CI workflow that builds it" gate is already solved upstream:**
+    `fono-voice/.github/workflows/build-onnxruntime.yml` builds all five triples
+    from the vendored `onnxruntime/ops.config` and publishes them using the
+    mirror's **own `GITHUB_TOKEN`** — no cross-repo secret needed. (An earlier
+    duplicate workflow added to the fono repo was removed as redundant.)
+  - **Remaining (gated on the user):** push the fono-voice config commit
+    (`9caf214`, staged locally) to `main`, run **build-onnxruntime** from the
+    Actions tab (`ort_version=1.24.2`, `release_tag=onnxruntime-1.24.2`), then
+    re-pin the `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`,
+    `x86_64-apple-darwin`, `x86_64-pc-windows-msvc` rows in
+    `scripts/fetch-onnxruntime.sh` from each `sha-<triple>.txt` the workflow
+    attaches (x64 is already done and live).
   **B1 done 2026-06-02:** model `kokoro-v1.0-q8f16.ort` + the four `.style.bin`
   packs + merged `SHA256SUMS` (89 entries, Piper preserved) published to the
   live `ort-1.24.2` release and public-download/checksum verified.

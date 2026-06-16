@@ -325,6 +325,40 @@ pub enum Cmd {
         #[command(subcommand)]
         action: SpeakCmd,
     },
+    /// Read notification content from stdin, summarize it into 1-2 spoken
+    /// sentences via the configured assistant backend, and speak the summary
+    /// through the configured TTS backend (unless `--silent`).
+    ///
+    /// The raw input (chat message, log dump, alert) is summarized, never
+    /// read aloud verbatim. By default stdin is treated as raw text; with
+    /// `--json`, stdin is parsed as the same JSON payload accepted by the
+    /// `fono.summarize` MCP tool.
+    ///
+    /// Example: `echo "Mihai: staging deploy fails after migration" | fono summarize --sender Mihai`
+    Summarize {
+        /// Parse stdin as a JSON payload (same schema as the
+        /// `fono.summarize` MCP tool) instead of raw text.
+        #[arg(long)]
+        json: bool,
+        /// Sender display name attached to the notification.
+        #[arg(long)]
+        sender: Option<String>,
+        /// Chat / channel name attached to the notification.
+        #[arg(long)]
+        chat: Option<String>,
+        /// Originating application label (e.g. `chat-cli`).
+        #[arg(long)]
+        source: Option<String>,
+        /// Extra instructions appended to the summarization prompt.
+        #[arg(long)]
+        instructions: Option<String>,
+        /// TTS voice override (backend-specific).
+        #[arg(long)]
+        voice: Option<String>,
+        /// Print the summary to stdout and skip TTS playback.
+        #[arg(long)]
+        silent: bool,
+    },
     /// Run Fono as an MCP (Model Context Protocol) server over stdio.
     ///
     /// Exposes three voice tools: `fono.speak`, `fono.listen`, and
@@ -627,6 +661,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         Some(Cmd::Speak { action }) => match action {
             SpeakCmd::Stream => crate::speak_stream::run(&paths).await,
         },
+        Some(Cmd::Summarize { json, sender, chat, source, instructions, voice, silent }) => {
+            summarize_cmd(&paths, json, sender, chat, source, instructions, voice, silent).await
+        }
         Some(Cmd::Mcp { action }) => match action {
             McpCmd::Serve => {
                 let cfg = fono_core::Config::load(&paths.config_file())?;
@@ -669,6 +706,93 @@ async fn ipc_simple(paths: &Paths, req: Request) -> Result<()> {
         Ok(Response::McpListenCancelled) => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+/// `fono summarize` — read notification content from stdin,
+/// summarize it via the configured `[assistant]` backend, and speak
+/// (or, with `--silent`, only print) the 1-2 sentence summary.
+///
+/// Shares `fono_mcp_server::summarize` with the `fono.summarize`
+/// MCP tool, so both transports produce identical summaries for
+/// identical payloads by construction. Flag overrides (`--sender`,
+/// `--chat`, `--source`, `--instructions`) apply in both raw and
+/// `--json` modes, taking precedence over payload fields.
+#[allow(clippy::too_many_arguments)]
+async fn summarize_cmd(
+    paths: &Paths,
+    json: bool,
+    sender: Option<String>,
+    chat: Option<String>,
+    source: Option<String>,
+    instructions: Option<String>,
+    voice: Option<String>,
+    silent: bool,
+) -> Result<()> {
+    use std::io::Read;
+
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input).context("read stdin")?;
+    if input.trim().is_empty() {
+        anyhow::bail!(
+            "no input on stdin — pipe the notification content, e.g. \
+             `echo \"Mihai: build failed\" | fono summarize`"
+        );
+    }
+
+    let mut payload = if json {
+        serde_json::from_str::<fono_mcp_server::summarize::SummarizePayload>(&input)
+            .context("parse stdin as `fono.summarize` JSON payload")?
+    } else {
+        fono_mcp_server::summarize::SummarizePayload { message_text: input, ..Default::default() }
+    };
+    if let Some(s) = sender {
+        payload.sender_name = s;
+    }
+    if let Some(c) = chat {
+        payload.chat_name = c;
+    }
+    if let Some(s) = source {
+        payload.source_app = s;
+    }
+    if let Some(i) = instructions {
+        payload.instructions = i;
+    }
+
+    let cfg = fono_core::Config::load(&paths.config_file())?;
+    let secrets = fono_core::Secrets::load(&paths.secrets_file()).unwrap_or_default();
+
+    let summary =
+        fono_mcp_server::summarize::summarize(&cfg, &secrets, &paths.polish_models_dir(), &payload)
+            .await?;
+
+    println!("{summary}");
+    if silent {
+        return Ok(());
+    }
+    // `fono summarize` is typically driven headlessly by a notifier /
+    // the `fono.summarize` MCP tool, so a failure on stderr is usually
+    // invisible. Surface actionable TTS failures (key rejected, 402
+    // paid-plan, network, missing key) as a desktop notification the
+    // same way the daemon assistant path does, then still propagate the
+    // error for the exit code / any attached terminal.
+    let spoken = fono_mcp_server::voice_io::speak_text(
+        &cfg,
+        &secrets,
+        &summary,
+        voice.as_deref(),
+        &paths.client_ipc_socket_candidates(),
+    )
+    .await;
+    if let Err(e) = &spoken {
+        let err_text = format!("{e:#}");
+        let provider = fono_core::providers::tts_backend_str(&cfg.tts.backend);
+        fono_core::critical_notify::notify_actionable(
+            fono_core::critical_notify::Stage::Tts,
+            provider,
+            &err_text,
+        );
+    }
+    spoken
 }
 
 /// `fono discover [--json]` — print the daemon's live mDNS registry.
@@ -1422,7 +1546,7 @@ async fn use_cmd(paths: &Paths, action: UseCmd) -> Result<()> {
             let b = parse_tts_backend(&backend).ok_or_else(|| {
                 anyhow::anyhow!(
                     "unknown TTS backend {backend:?}; try none, local, wyoming, openai, \
-                     groq, openrouter, cartesia, deepgram"
+                     groq, openrouter, cartesia, deepgram, speechmatics"
                 )
             })?;
             set_active_tts(&mut cfg, b.clone(), uri);
@@ -2139,6 +2263,62 @@ mod tests {
             let s = v.as_filter();
             s.parse::<Targets>()
                 .unwrap_or_else(|e| panic!("Verbosity::{v:?} filter {s:?} failed to parse: {e}"));
+        }
+    }
+
+    /// `fono summarize` raw-text mode: all field flags land in
+    /// the right payload slots and `--json` stays off by default.
+    #[test]
+    fn summarize_parses_raw_mode_flags() {
+        use clap::Parser as _;
+        let cli = Cli::try_parse_from([
+            "fono",
+            "summarize",
+            "--sender",
+            "Mihai",
+            "--chat",
+            "Backend Alerts",
+            "--source",
+            "chat-cli",
+            "--instructions",
+            "Mention urgency.",
+            "--voice",
+            "alloy",
+            "--silent",
+        ])
+        .expect("raw-mode flags must parse");
+        match cli.cmd {
+            Some(Cmd::Summarize { json, sender, chat, source, instructions, voice, silent }) => {
+                assert!(!json);
+                assert!(silent);
+                assert_eq!(sender.as_deref(), Some("Mihai"));
+                assert_eq!(chat.as_deref(), Some("Backend Alerts"));
+                assert_eq!(source.as_deref(), Some("chat-cli"));
+                assert_eq!(instructions.as_deref(), Some("Mention urgency."));
+                assert_eq!(voice.as_deref(), Some("alloy"));
+            }
+            other => panic!("expected Summarize, got {other:?}"),
+        }
+    }
+
+    /// `fono summarize --json`: JSON mode parses with no field
+    /// flags and all overrides default to off/None.
+    #[test]
+    fn summarize_parses_json_mode() {
+        use clap::Parser as _;
+        let cli =
+            Cli::try_parse_from(["fono", "summarize", "--json"]).expect("json mode must parse");
+        match cli.cmd {
+            Some(Cmd::Summarize { json, sender, chat, source, instructions, voice, silent }) => {
+                assert!(json);
+                assert!(!silent);
+                assert!(sender.is_none());
+                assert!(chat.is_none());
+                assert!(source.is_none());
+                assert!(instructions.is_none());
+                assert!(voice.is_none());
+            }
+            other => panic!("expected Summarize, got {other:?}"),
         }
     }
 }

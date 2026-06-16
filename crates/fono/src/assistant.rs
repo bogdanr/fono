@@ -335,6 +335,7 @@ pub async fn run_assistant_turn(
         active_window_context,
         screen_capture: screen_capture_fn,
         prefer_vision,
+        max_new_tokens: None,
     };
 
     // 3. Open the LLM stream.
@@ -385,6 +386,7 @@ pub async fn run_assistant_turn(
                 if matches!(
                     class,
                     fono_core::critical_notify::ErrorClass::Auth
+                        | fono_core::critical_notify::ErrorClass::PaymentRequired
                         | fono_core::critical_notify::ErrorClass::Network
                         | fono_core::critical_notify::ErrorClass::TermsRequired
                 ) {
@@ -508,6 +510,7 @@ pub async fn run_assistant_turn(
                 if matches!(
                     class,
                     fono_core::critical_notify::ErrorClass::Auth
+                        | fono_core::critical_notify::ErrorClass::PaymentRequired
                         | fono_core::critical_notify::ErrorClass::Network
                         | fono_core::critical_notify::ErrorClass::TermsRequired
                 ) {
@@ -902,6 +905,7 @@ async fn synth_and_enqueue(
                 if matches!(
                     class,
                     fono_core::critical_notify::ErrorClass::Auth
+                        | fono_core::critical_notify::ErrorClass::PaymentRequired
                         | fono_core::critical_notify::ErrorClass::Network
                         | fono_core::critical_notify::ErrorClass::TermsRequired
                 ) {
@@ -948,6 +952,7 @@ async fn synth_and_enqueue(
     };
     debug!(
         target: "fono::assistant",
+        provider = tts.name(),
         ms = synth_started.elapsed().as_millis() as u64,
         rate = audio.sample_rate,
         samples = audio.pcm.len(),

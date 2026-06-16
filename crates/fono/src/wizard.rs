@@ -38,7 +38,9 @@ use fono_core::config::{
 };
 use fono_core::hwcheck::{HardwareSnapshot, HostGpu, LocalTier};
 use fono_core::locale::detect_user_languages_ranked;
-use fono_core::provider_catalog::{CloudProvider, WebSearchSupport, CLOUD_PROVIDERS};
+use fono_core::provider_catalog::{
+    CloudProvider, KeyAuth, KeyValidation, WebSearchSupport, CLOUD_PROVIDERS,
+};
 use fono_core::providers::{
     configured_tts_backends, parse_assistant_backend, parse_polish_backend, parse_stt_backend,
     parse_tts_backend,
@@ -178,23 +180,47 @@ enum PrimaryPick {
     Customize,
 }
 
-/// A catalogue provider is a viable *primary* pick if it offers LLM
-/// cleanup (the substrate every assistant + dictation flow needs) AND
-/// its factory wiring is complete. The Gemini LLM + assistant clients
-/// are not yet implemented (see `fono-polish::factory` / `fono-assistant::factory`)
-/// so Gemini is excluded — surfacing it would let the wizard pick a
-/// configuration that fails at runtime.
+/// Whether the catalogue entry's STT capability is actually wired in
+/// `fono-stt::factory`. azure/google/nemotron exist as `SttBackend`
+/// variants (and carry catalogue `SttDefaults`) but are unwired stubs
+/// — the factory returns "not yet implemented" for them — so they are
+/// excluded everywhere the wizard offers STT.
+fn is_stt_wired(entry: &CloudProvider) -> bool {
+    entry.stt.is_some()
+        && parse_stt_backend(entry.id).is_some()
+        && !matches!(entry.id, "azure" | "google" | "nemotron")
+}
+
+/// Whether the catalogue entry's polish capability is actually wired in
+/// `fono-polish::factory`. The Gemini polish client is not implemented
+/// (the factory returns "not yet implemented") so Gemini is excluded.
+fn is_polish_wired(entry: &CloudProvider) -> bool {
+    entry.polish.is_some() && parse_polish_backend(entry.id).is_some() && entry.id != "gemini"
+}
+
+/// Whether the catalogue entry's TTS capability is actually wired in
+/// `fono-tts::factory`. Every catalogue TTS entry today has a wired
+/// backend, but the predicate keeps the wizard honest if a future
+/// entry pre-declares TTS metadata before the factory arm lands.
+fn is_tts_wired(entry: &CloudProvider) -> bool {
+    entry.tts.is_some() && parse_tts_backend(entry.id).is_some()
+}
+
+/// A catalogue provider is a viable *primary* pick if it has **at least
+/// one wired capability** (STT, polish, assistant, or TTS). This is the
+/// amended design (user override): the matrix lists every cloud provider
+/// Fono can actually drive — including speech-only providers like
+/// Speechmatics, Deepgram, AssemblyAI, and Cartesia — rather than only
+/// the polish-capable ones. Providers whose only capabilities are unwired
+/// stubs (azure/google/nemotron STT, gemini polish) never qualify, so the
+/// wizard can't pick a configuration that fails at runtime. Missing
+/// capabilities on the chosen primary fall back to local backends (see
+/// [`apply_primary_provider`] / [`configure_cloud`]).
 fn is_primary_candidate(entry: &CloudProvider) -> bool {
-    if entry.polish.is_none() {
-        return false;
-    }
-    if parse_polish_backend(entry.id).is_none() {
-        return false;
-    }
-    if entry.id == "gemini" {
-        return false;
-    }
-    true
+    is_stt_wired(entry)
+        || is_polish_wired(entry)
+        || is_assistant_wired(entry)
+        || is_tts_wired(entry)
 }
 
 /// The catalogue advertises an assistant for several providers; only
@@ -348,56 +374,79 @@ fn pick_primary_cloud_provider(
 }
 
 /// Phase D1 — pure helper that walks a catalogue entry and fills
-/// every capability the entry offers into `config`. Mirrors the
-/// outcome of [`configure_cloud`] + [`configure_assistant`]'s
-/// collapsed-Confirm path: STT, LLM, TTS, and Assistant chat all
-/// land on the primary provider when the entry supplies them.
+/// every capability into `config`. Amended design: the chosen primary
+/// drives every capability it covers **with a wired backend**; every
+/// other capability **leans on local** so the user always ends up with
+/// a complete, runnable configuration from one key.
+///
+/// * STT / polish / TTS: cloud default when [`is_stt_wired`] /
+///   [`is_polish_wired`] / [`is_tts_wired`] holds, otherwise the local
+///   backend default (local Whisper, embedded GGUF polish, local voice).
+/// * Assistant chat stays optional — it is only filled when
+///   [`is_assistant_wired`] holds and is never forced to local here.
 ///
 /// Pure — no I/O, no secrets touched. Callers handle the key prompt
 /// (or reuse) via [`seed_primary_secret`] / [`prompt_or_reuse_key`].
-///
-/// Skips capabilities the entry doesn't carry (e.g. Anthropic has no
-/// `stt`) and capabilities the runtime hasn't wired yet (Gemini
-/// chat). The assistant chat is only filled when
-/// [`is_assistant_wired`] returns true for the entry — same rule the
-/// wizard uses.
 pub fn apply_primary_provider(config: &mut Config, entry: &CloudProvider) {
-    if let Some(stt_def) = &entry.stt {
-        if let Some(backend) = parse_stt_backend(entry.id) {
-            config.stt = Stt {
-                backend,
-                local: SttLocal::default(),
-                cloud: Some(SttCloud {
-                    provider: entry.id.into(),
-                    api_key_ref: entry.key_env.into(),
-                    model: stt_def.model.into(),
-                }),
-                wyoming: None,
-                prompts: std::collections::HashMap::new(),
-            };
-        }
-    }
-    if let Some(polish_def) = &entry.polish {
-        if let Some(backend) = parse_polish_backend(entry.id) {
-            config.polish.enabled = true;
-            config.polish.backend = backend;
-            config.polish.cloud = Some(PolishCloud {
+    if is_stt_wired(entry) {
+        let stt_def = entry.stt.expect("is_stt_wired implies stt.is_some()");
+        let backend = parse_stt_backend(entry.id).expect("is_stt_wired implies parseable id");
+        config.stt = Stt {
+            backend,
+            local: SttLocal::default(),
+            cloud: Some(SttCloud {
                 provider: entry.id.into(),
                 api_key_ref: entry.key_env.into(),
-                model: polish_def.model.into(),
-            });
-        }
+                model: stt_def.model.into(),
+            }),
+            wyoming: None,
+            prompts: std::collections::HashMap::new(),
+        };
+    } else {
+        // Lean on local: default whisper model, no cloud block.
+        config.stt = Stt {
+            backend: SttBackend::Local,
+            local: SttLocal::default(),
+            cloud: None,
+            wyoming: None,
+            prompts: std::collections::HashMap::new(),
+        };
     }
-    if let Some(tts_def) = &entry.tts {
-        if let Some(backend) = parse_tts_backend(entry.id) {
-            config.tts.backend = backend;
-            config.tts.cloud = Some(TtsCloud {
-                provider: entry.id.into(),
-                api_key_ref: entry.key_env.into(),
-                model: tts_def.model.into(),
-            });
-            config.tts.voice = tts_def.default_voice.into();
-        }
+    if is_polish_wired(entry) {
+        let polish_def = entry.polish.expect("is_polish_wired implies polish.is_some()");
+        let backend = parse_polish_backend(entry.id).expect("is_polish_wired implies parseable id");
+        config.polish.enabled = true;
+        config.polish.backend = backend;
+        config.polish.cloud = Some(PolishCloud {
+            provider: entry.id.into(),
+            api_key_ref: entry.key_env.into(),
+            model: polish_def.model.into(),
+        });
+    } else {
+        // Lean on local: embedded GGUF cleanup (mirrors
+        // `configure_local_llm`); leave the cloud block empty so
+        // `build_polish` loads the local model.
+        config.polish.enabled = true;
+        config.polish.backend = PolishBackend::Local;
+        config.polish.local = PolishLocal::default();
+        config.polish.cloud = None;
+    }
+    if is_tts_wired(entry) {
+        let tts_def = entry.tts.expect("is_tts_wired implies tts.is_some()");
+        let backend = parse_tts_backend(entry.id).expect("is_tts_wired implies parseable id");
+        config.tts.backend = backend;
+        config.tts.cloud = Some(TtsCloud {
+            provider: entry.id.into(),
+            api_key_ref: entry.key_env.into(),
+            model: tts_def.model.into(),
+        });
+        config.tts.voice = tts_def.default_voice.into();
+    } else {
+        // Lean on local: on-device voice, empty voice id so the
+        // language router picks the per-language voice.
+        config.tts.backend = TtsBackend::Local;
+        config.tts.cloud = None;
+        config.tts.voice.clear();
     }
     if let Some(adef) = entry.assistant {
         if is_assistant_wired(entry) {
@@ -475,19 +524,10 @@ async fn prompt_or_reuse_key(
 }
 
 /// Look up the catalogue entry whose `key_env` matches `key_env`.
-/// Used by the Customize flow to recover the human-readable display
-/// name + console URL from a bare env-var name.
+/// Used by [`validate_cloud_key`] to recover a provider's validation
+/// metadata from a bare env-var name.
 fn catalogue_by_key_env(key_env: &str) -> Option<&'static CloudProvider> {
     CLOUD_PROVIDERS.iter().find(|p| p.key_env == key_env)
-}
-
-/// Convenience accessor for the Customize flow: given a `*_API_KEY`
-/// string, returns (display_name, console_url), falling back to the
-/// env-var name and an empty URL if the catalogue doesn't know it.
-fn catalogue_meta_for_key(key_env: &str) -> (&'static str, &'static str) {
-    catalogue_by_key_env(key_env)
-        .map(|p| (p.display_name, p.console_url))
-        .unwrap_or(("(unknown)", ""))
 }
 
 /// Catalogue entry matching the configured polish backend (used by the
@@ -506,6 +546,8 @@ fn tts_short_label(b: &TtsBackend) -> &'static str {
         TtsBackend::OpenRouter => "OpenRouter (OpenAI Mini TTS)",
         TtsBackend::Cartesia => "Cartesia",
         TtsBackend::Deepgram => "Deepgram",
+        TtsBackend::ElevenLabs => "ElevenLabs",
+        TtsBackend::Speechmatics => "Speechmatics",
         TtsBackend::Wyoming => "Wyoming",
         TtsBackend::Local => "Local voice",
         TtsBackend::None => "no",
@@ -1138,8 +1180,12 @@ async fn configure_cloud(
     prompt_or_reuse_key(theme, secrets, entry.key_env, entry.display_name, entry.console_url)
         .await?;
 
-    // Walk capabilities ----------------------------------------------
-    if let Some(stt_def) = &entry.stt {
+    // Walk capabilities — the chosen primary drives every capability it
+    // covers with a wired backend; every other capability leans on a
+    // local backend so the user ends up with a complete configuration
+    // from one key (amended design, mirrors `apply_primary_provider`).
+    if is_stt_wired(entry) {
+        let stt_def = entry.stt.expect("is_stt_wired implies stt.is_some()");
         let backend = parse_stt_backend(entry.id).context("catalogue STT id should parse")?;
         config.stt = Stt {
             backend,
@@ -1153,10 +1199,22 @@ async fn configure_cloud(
             prompts: std::collections::HashMap::new(),
         };
     } else {
-        offer_secondary_stt(theme, config, secrets).await?;
+        // Lean on local: a hardware-appropriate whisper model, no cloud
+        // block. The daemon downloads the model on first run.
+        config.stt = Stt {
+            backend: SttBackend::Local,
+            local: SttLocal {
+                model: recommend_local_stt_model_headless(snap).into(),
+                ..SttLocal::default()
+            },
+            cloud: None,
+            wyoming: None,
+            prompts: std::collections::HashMap::new(),
+        };
     }
 
-    if let Some(polish_def) = &entry.polish {
+    if is_polish_wired(entry) {
+        let polish_def = entry.polish.expect("is_polish_wired implies polish.is_some()");
         let backend = parse_polish_backend(entry.id).context("catalogue LLM id should parse")?;
         config.polish.enabled = true;
         config.polish.backend = backend;
@@ -1165,9 +1223,13 @@ async fn configure_cloud(
             api_key_ref: entry.key_env.into(),
             model: polish_def.model.into(),
         });
+    } else {
+        // Lean on local: embedded GGUF cleanup.
+        configure_local_llm(config, snap);
     }
 
-    if let Some(tts_def) = &entry.tts {
+    if is_tts_wired(entry) {
+        let tts_def = entry.tts.expect("is_tts_wired implies tts.is_some()");
         let backend = parse_tts_backend(entry.id).context("catalogue TTS id should parse")?;
         config.tts.backend = backend;
         config.tts.cloud = Some(TtsCloud {
@@ -1176,6 +1238,12 @@ async fn configure_cloud(
             model: tts_def.model.into(),
         });
         config.tts.voice = tts_def.default_voice.into();
+    } else {
+        // Lean on local: on-device voice, empty voice id so the
+        // language router picks the per-language voice.
+        config.tts.backend = TtsBackend::Local;
+        config.tts.cloud = None;
+        config.tts.voice.clear();
     }
     // Assistant chat is configured by `configure_assistant` (called
     // unconditionally from `run`), which inspects `config.polish.backend`
@@ -1184,66 +1252,6 @@ async fn configure_cloud(
 
     // Language picker (interactive-mode prompt removed — tray toggle handles it).
     config.general.languages = pick_languages(theme)?;
-    Ok(())
-}
-
-/// Secondary STT picker used when the primary cloud provider doesn't
-/// offer transcription (e.g. Anthropic, Cerebras). Lists every
-/// catalogue STT-capable provider, key-already-present first, plus a
-/// "Skip" entry that falls back to local Whisper.
-async fn offer_secondary_stt(
-    theme: &ColorfulTheme,
-    config: &mut Config,
-    secrets: &mut Secrets,
-) -> Result<()> {
-    let mut keyed: Vec<&'static CloudProvider> = Vec::new();
-    let mut unkeyed: Vec<&'static CloudProvider> = Vec::new();
-    for p in CLOUD_PROVIDERS {
-        if p.stt.is_none() || parse_stt_backend(p.id).is_none() {
-            continue;
-        }
-        if secrets.has_in_file(p.key_env) {
-            keyed.push(p);
-        } else {
-            unkeyed.push(p);
-        }
-    }
-    let ordered: Vec<&'static CloudProvider> =
-        keyed.iter().chain(unkeyed.iter()).copied().collect();
-    let mut labels: Vec<String> = Vec::new();
-    for p in &ordered {
-        let key_part =
-            if secrets.has_in_file(p.key_env) { "key already set" } else { "will ask for key" };
-        let model = p.stt.expect("filtered").model;
-        labels.push(format!("{} STT ({key_part}) — {}", p.display_name, model));
-    }
-    labels.push("Skip — fall back to local Whisper".into());
-    let default = if keyed.is_empty() { labels.len() - 1 } else { 0 };
-    let idx = Select::with_theme(theme)
-        .with_prompt("Add speech-to-text from another provider?")
-        .items(&labels)
-        .default(default)
-        .interact()?;
-    if idx == ordered.len() {
-        // Skip — leave stt as default (Local). The daemon will download
-        // the default model on first run.
-        return Ok(());
-    }
-    let entry = ordered[idx];
-    prompt_or_reuse_key(theme, secrets, entry.key_env, entry.display_name, entry.console_url)
-        .await?;
-    let backend = parse_stt_backend(entry.id).expect("filtered");
-    config.stt = Stt {
-        backend,
-        local: SttLocal::default(),
-        cloud: Some(SttCloud {
-            provider: entry.id.into(),
-            api_key_ref: entry.key_env.into(),
-            model: entry.stt.expect("filtered").model.into(),
-        }),
-        wyoming: None,
-        prompts: std::collections::HashMap::new(),
-    };
     Ok(())
 }
 
@@ -1736,39 +1744,45 @@ async fn configure_cloud_stt(
     config: &mut Config,
     secrets: &mut Secrets,
 ) -> Result<()> {
-    let stt_providers = &[
-        "Groq (whisper-large-v3-turbo, fastest) — recommended",
-        "OpenAI (whisper-1)",
-        "Deepgram (streaming)",
-        "Cartesia",
-        "AssemblyAI",
-    ];
+    // Catalogue-driven (mirrors `offer_secondary_stt`'s former filter):
+    // every wired cloud STT provider, in catalogue order. Adding a new
+    // STT provider to `CLOUD_PROVIDERS` surfaces it here automatically.
+    let providers: Vec<&'static CloudProvider> =
+        CLOUD_PROVIDERS.iter().filter(|p| is_stt_wired(p)).collect();
+    let labels: Vec<String> = providers
+        .iter()
+        .map(|p| {
+            let model = p.stt.expect("is_stt_wired implies stt.is_some()").model;
+            let label = format!("{} ({model})", p.display_name);
+            if p.id == "groq" {
+                format!("{label} — recommended")
+            } else {
+                label
+            }
+        })
+        .collect();
+    // Default cursor = Groq (fastest, recommended) when present.
+    let default = providers.iter().position(|p| p.id == "groq").unwrap_or(0);
     let stt_idx = Select::with_theme(theme)
         .with_prompt("Pick a cloud speech-to-text provider")
-        .items(stt_providers)
-        .default(0)
+        .items(&labels)
+        .default(default)
         .interact()?;
-    let (stt_backend, stt_key_name, stt_default_model) = match stt_idx {
-        0 => (SttBackend::Groq, "GROQ_API_KEY", "whisper-large-v3-turbo"),
-        1 => (SttBackend::OpenAI, "OPENAI_API_KEY", "whisper-1"),
-        2 => (SttBackend::Deepgram, "DEEPGRAM_API_KEY", "nova-3"),
-        3 => (SttBackend::Cartesia, "CARTESIA_API_KEY", "ink-whisper"),
-        _ => (SttBackend::AssemblyAI, "ASSEMBLYAI_API_KEY", "best"),
-    };
+    let entry = providers[stt_idx];
     // Phase B5: every cloud key prompt routes through prompt_or_reuse_key
     // so re-runs print one "reusing…" line instead of re-asking.
-    let (display, console) = catalogue_meta_for_key(stt_key_name);
-    prompt_or_reuse_key(theme, secrets, stt_key_name, display, console).await?;
+    prompt_or_reuse_key(theme, secrets, entry.key_env, entry.display_name, entry.console_url)
+        .await?;
 
-    config.stt.backend = stt_backend.clone();
+    config.stt.backend = parse_stt_backend(entry.id).context("catalogue STT id should parse")?;
     // Streaming for cloud Groq is auto-on whenever the user enabled
     // live mode (`[interactive].enabled = true`); there is no separate
     // per-backend opt-in. Wizard removed the third question in v0.3.5
     // (plan `2026-04-29-streaming-config-collapse-v1.md`).
     config.stt.cloud = Some(SttCloud {
-        provider: stt_key_name.trim_end_matches("_API_KEY").to_lowercase(),
-        api_key_ref: stt_key_name.into(),
-        model: stt_default_model.into(),
+        provider: entry.id.into(),
+        api_key_ref: entry.key_env.into(),
+        model: entry.stt.expect("is_stt_wired implies stt.is_some()").model.into(),
     });
     Ok(())
 }
@@ -1778,38 +1792,47 @@ async fn configure_cloud_llm(
     config: &mut Config,
     secrets: &mut Secrets,
 ) -> Result<()> {
-    let llm_providers = &[
-        "Cerebras (gpt-oss-120b, < 1s latency) — recommended",
-        "Groq (openai/gpt-oss-20b)",
-        "OpenAI (gpt-5.4-nano)",
-        "Anthropic (claude-haiku-4-5)",
-        "Skip polish",
-    ];
+    // Catalogue-driven: every wired cloud polish provider, in catalogue
+    // order, plus a trailing "Skip polish" entry.
+    let providers: Vec<&'static CloudProvider> =
+        CLOUD_PROVIDERS.iter().filter(|p| is_polish_wired(p)).collect();
+    let mut labels: Vec<String> = providers
+        .iter()
+        .map(|p| {
+            let model = p.polish.expect("is_polish_wired implies polish.is_some()").model;
+            let label = format!("{} ({model})", p.display_name);
+            if p.id == "cerebras" {
+                format!("{label} — recommended")
+            } else {
+                label
+            }
+        })
+        .collect();
+    labels.push("Skip polish".to_string());
+    let skip_idx = providers.len();
+    // Default cursor = Cerebras (recommended) when present.
+    let default = providers.iter().position(|p| p.id == "cerebras").unwrap_or(0);
     let llm_idx = Select::with_theme(theme)
         .with_prompt("Pick a cloud LLM for cleanup")
-        .items(llm_providers)
-        .default(0)
+        .items(&labels)
+        .default(default)
         .interact()?;
 
-    if llm_idx == 4 {
+    if llm_idx == skip_idx {
         config.polish.backend = PolishBackend::None;
         config.polish.enabled = false;
         return Ok(());
     }
-    let (backend, key_name, model) = match llm_idx {
-        0 => (PolishBackend::Cerebras, "CEREBRAS_API_KEY", "gpt-oss-120b"),
-        1 => (PolishBackend::Groq, "GROQ_API_KEY", "openai/gpt-oss-20b"),
-        2 => (PolishBackend::OpenAI, "OPENAI_API_KEY", "gpt-5.4-nano"),
-        _ => (PolishBackend::Anthropic, "ANTHROPIC_API_KEY", "claude-haiku-4-5-20251001"),
-    };
-    let (display, console) = catalogue_meta_for_key(key_name);
-    prompt_or_reuse_key(theme, secrets, key_name, display, console).await?;
-    config.polish.backend = backend;
+    let entry = providers[llm_idx];
+    prompt_or_reuse_key(theme, secrets, entry.key_env, entry.display_name, entry.console_url)
+        .await?;
+    config.polish.backend =
+        parse_polish_backend(entry.id).context("catalogue LLM id should parse")?;
     config.polish.enabled = true;
     config.polish.cloud = Some(PolishCloud {
-        provider: key_name.trim_end_matches("_API_KEY").to_lowercase(),
-        api_key_ref: key_name.into(),
-        model: model.into(),
+        provider: entry.id.into(),
+        api_key_ref: entry.key_env.into(),
+        model: entry.polish.expect("is_polish_wired implies polish.is_some()").model.into(),
     });
     Ok(())
 }
@@ -1851,61 +1874,23 @@ async fn prompt_api_key_with_validation(
     }
 }
 
-/// Probe the provider's `/v1/models` (or equivalent authed endpoint)
-/// with a 5 s timeout and assert a 2xx status. Returns `Err` on auth
-/// failure, network failure, or non-2xx response.
+/// Probe the provider's authed validation endpoint (from the catalogue's
+/// [`KeyValidation`] metadata) with a 5 s timeout and assert a 2xx status.
+/// Returns `Err` on auth failure, network failure, non-2xx response, or
+/// when the provider carries no validation metadata.
 async fn validate_cloud_key(key_name: &str, key: &str) -> Result<()> {
+    let Some(entry) = catalogue_by_key_env(key_name) else {
+        anyhow::bail!("no validation endpoint configured for {key_name}; key not validated")
+    };
+    let Some(validation) = entry.key_validation else {
+        anyhow::bail!("no validation endpoint configured for {key_name}; key not validated")
+    };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .user_agent("fono-wizard/0.1")
         .build()
         .context("build http client")?;
-    let req = match key_name {
-        "GROQ_API_KEY" => client.get("https://api.groq.com/openai/v1/models").bearer_auth(key),
-        "OPENAI_API_KEY" => client.get("https://api.openai.com/v1/models").bearer_auth(key),
-        "CEREBRAS_API_KEY" => client.get("https://api.cerebras.ai/v1/models").bearer_auth(key),
-        "OPENROUTER_API_KEY" => client
-            // OpenRouter's auth-check endpoint: returns 200 with the
-            // key's tier/credit metadata when authenticated, 401 when
-            // the key is invalid. Preferred over `/v1/models` because
-            // that route is unauthenticated on OpenRouter (it lists
-            // every available model regardless of key validity), so it
-            // can't actually verify the key.
-            //
-            // Attribution headers are attached here too so the first
-            // request a fresh user makes against OpenRouter already
-            // creates Fono's public app page (per
-            // <https://openrouter.ai/docs/app-attribution>: "without
-            // [HTTP-Referer], no app page will be created").
-            .get("https://openrouter.ai/api/v1/auth/key")
-            .bearer_auth(key)
-            .header("HTTP-Referer", fono_core::openrouter_attribution::REFERER)
-            .header("X-OpenRouter-Title", fono_core::openrouter_attribution::TITLE)
-            .header("X-OpenRouter-Categories", fono_core::openrouter_attribution::CATEGORIES),
-        "GEMINI_API_KEY" => client
-            // Gemini authenticates via `?key=` query parameter rather
-            // than a bearer header; the models list returns 200 for
-            // valid keys and 400/403 for invalid ones.
-            .get(format!("https://generativelanguage.googleapis.com/v1beta/models?key={key}")),
-        "ANTHROPIC_API_KEY" => client
-            .get("https://api.anthropic.com/v1/models")
-            .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01"),
-        "DEEPGRAM_API_KEY" => client
-            .get("https://api.deepgram.com/v1/projects")
-            .header("Authorization", format!("Token {key}")),
-        "ASSEMBLYAI_API_KEY" => {
-            client.get("https://api.assemblyai.com/v2/transcript").header("Authorization", key)
-        }
-        "CARTESIA_API_KEY" => client
-            .get("https://api.cartesia.ai/voices")
-            .header("X-Api-Key", key)
-            .header("Cartesia-Version", "2026-03-01"),
-        other => {
-            // Unknown provider — skip validation.
-            anyhow::bail!("no validation endpoint configured for {other}; key not validated")
-        }
-    };
+    let req = build_validation_request(&client, &validation, key);
     let resp = req.send().await.with_context(|| format!("connect to {key_name} provider"))?;
     let status = resp.status();
     let request_id = fono_http::provider_request_id(resp.headers())
@@ -1928,6 +1913,35 @@ async fn validate_cloud_key(key_name: &str, key: &str) -> Result<()> {
         anyhow::bail!("{status} (provider returned non-success)");
     }
     Ok(())
+}
+
+/// Build the `GET` request for a key-validation probe from catalogue
+/// [`KeyValidation`] metadata: the URL (with the key as a query param
+/// when [`KeyAuth::QueryParam`]), the auth header, and every extra
+/// header.
+fn build_validation_request(
+    client: &reqwest::Client,
+    validation: &KeyValidation,
+    key: &str,
+) -> reqwest::RequestBuilder {
+    let url = match validation.auth {
+        KeyAuth::QueryParam(param) => {
+            let sep = if validation.url.contains('?') { '&' } else { '?' };
+            format!("{}{sep}{param}={key}", validation.url)
+        }
+        _ => validation.url.to_string(),
+    };
+    let mut req = client.get(url);
+    req = match validation.auth {
+        KeyAuth::Bearer => req.bearer_auth(key),
+        KeyAuth::Header(h) => req.header(h, key),
+        KeyAuth::HeaderPrefixed { header, prefix } => req.header(header, format!("{prefix} {key}")),
+        KeyAuth::QueryParam(_) => req,
+    };
+    for (h, v) in validation.extra_headers {
+        req = req.header(*h, *v);
+    }
+    req
 }
 
 /// Prompt for an API key. If one already exists in `secrets`, ask whether
@@ -2526,25 +2540,43 @@ mod tests {
             .unwrap_or(0)
             .max("Customize".len())
             + 2;
-        assert_eq!(provider_col_width, 12);
+        assert_eq!(provider_col_width, 14);
 
         let header = primary_header(provider_col_width);
         assert_eq!(
             header,
-            "Provider    STT        LLM        Assistant  TTS        Vision     Search"
+            "Provider      STT        LLM        Assistant  TTS        Vision     Search"
         );
 
-        // Rows for the five primary candidates in catalogue order.
+        // Rows for every wired primary candidate in catalogue order.
+        // Amended design: speech-only providers (Deepgram, AssemblyAI,
+        // Cartesia, Speechmatics) now appear alongside the LLM-capable
+        // ones; the `·` glyph renders their missing capabilities.
         let rows: Vec<String> =
             candidates.iter().map(|p| primary_row(p, provider_col_width)).collect();
         assert_eq!(
             rows,
             vec![
-                "OpenAI      ✓          ✓          ✓          ✓          ✓          ·".to_string(),
-                "Groq        ✓          ✓          ✓          ✓          ·          ·".to_string(),
-                "Anthropic   ·          ✓          ✓          ·          ✓          ✓".to_string(),
-                "Cerebras    ·          ✓          ✓          ·          ·          ·".to_string(),
-                "OpenRouter  ✓          ✓          ✓          ✓          ·          ·".to_string(),
+                "OpenAI        ✓          ✓          ✓          ✓          ✓          ·"
+                    .to_string(),
+                "Groq          ✓          ✓          ✓          ✓          ·          ·"
+                    .to_string(),
+                "Anthropic     ·          ✓          ✓          ·          ✓          ✓"
+                    .to_string(),
+                "Cerebras      ·          ✓          ✓          ·          ·          ·"
+                    .to_string(),
+                "OpenRouter    ✓          ✓          ✓          ✓          ·          ·"
+                    .to_string(),
+                "Deepgram      ✓          ·          ·          ✓          ·          ·"
+                    .to_string(),
+                "AssemblyAI    ✓          ·          ·          ·          ·          ·"
+                    .to_string(),
+                "Cartesia      ✓          ·          ·          ✓          ·          ·"
+                    .to_string(),
+                "ElevenLabs    ✓          ·          ·          ✓          ·          ·"
+                    .to_string(),
+                "Speechmatics  ✓          ·          ·          ✓          ·          ·"
+                    .to_string(),
             ]
         );
 
@@ -2556,20 +2588,37 @@ mod tests {
             "Customize",
             width = provider_col_width
         );
-        assert_eq!(customize, "Customize   Pick a backend per capability");
+        assert_eq!(customize, "Customize     Pick a backend per capability");
     }
 
     #[test]
-    fn primary_candidates_exclude_gemini_and_stt_only() {
+    fn primary_candidates_include_every_wired_provider_exclude_stubs() {
         let ids: Vec<&str> = primary_candidates_vec().iter().map(|p| p.id).collect();
-        assert!(!ids.contains(&"gemini"), "Gemini must be excluded (factory unwired)");
-        assert!(!ids.contains(&"cartesia"), "Cartesia is STT-only → secondary, not primary");
-        assert!(!ids.contains(&"deepgram"), "Deepgram is STT-only → secondary, not primary");
-        assert!(!ids.contains(&"assemblyai"), "AssemblyAI is STT-only → secondary, not primary");
-        // The five LLM-capable providers DO appear:
-        for must in ["openai", "groq", "anthropic", "cerebras", "openrouter"] {
+        // Unwired stubs never qualify: gemini polish + azure/google/
+        // nemotron STT are not wired in the factories.
+        for stub in ["gemini", "azure", "google", "nemotron"] {
+            assert!(!ids.contains(&stub), "{stub} is unwired and must be excluded");
+        }
+        // Amended design: every provider with at least one wired
+        // capability appears — including the speech-only ones that used
+        // to be secondary-only (cartesia / deepgram / assemblyai /
+        // speechmatics).
+        for must in [
+            "openai",
+            "groq",
+            "anthropic",
+            "cerebras",
+            "openrouter",
+            "deepgram",
+            "assemblyai",
+            "cartesia",
+            "elevenlabs",
+            "speechmatics",
+        ] {
             assert!(ids.contains(&must), "{must} must be a primary candidate");
         }
+        // Exactly that set, nothing else.
+        assert_eq!(ids.len(), 10, "unexpected primary candidate set: {ids:?}");
     }
 
     /// Phase B Task B4. Pins the two-column layout of `pick_path`'s

@@ -930,6 +930,7 @@ mod tests {
             active_window_context: None,
             screen_capture: None,
             prefer_vision: false,
+            max_new_tokens: None,
         };
         let msgs = build_initial_messages(&ctx, "what now?");
         assert_eq!(msgs.len(), 4);
@@ -966,6 +967,7 @@ mod tests {
             active_window_context: None,
             screen_capture: None,
             prefer_vision: false,
+            max_new_tokens: None,
         };
         let msgs = build_initial_messages(&ctx, "and now?");
         // 4 history turns + new user.

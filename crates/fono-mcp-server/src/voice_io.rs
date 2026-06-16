@@ -261,14 +261,17 @@ impl Drop for McpActivityGuard {
     }
 }
 
-/// Connection-scoped guard for an MCP listen/confirm span.
+/// Connection-scoped guard for an MCP listen/confirm/speak span.
 ///
 /// Unlike [`McpActivityGuard`] (fire-and-forget `McpActivityStart` /
 /// `McpActivityEnd`), this guard holds an IPC connection open for the
-/// entire duration of the listen. Two properties follow from that:
+/// entire duration of the span. Two properties follow from that:
 ///
-/// 1. **Tray is always restored** — if the MCP server is killed
-///    mid-listen (Ctrl-C or crash), kernel-level socket cleanup closes
+/// 1. **Tray is always restored** — if the client process is killed
+///    mid-span (Ctrl-C or crash) *or exits immediately after the span*
+///    (short-lived CLI entry points like `fono summarize`, where a
+///    fire-and-forget End frame spawned during `Drop` would race
+///    runtime shutdown and lose), kernel-level socket cleanup closes
 ///    the connection and the daemon automatically decrements its depth
 ///    counter and restores the previous tray state.
 ///
@@ -276,10 +279,11 @@ impl Drop for McpActivityGuard {
 ///    daemon writes `Response::McpListenCancelled` to the open
 ///    connection. A background read task sets `cancelled` to `true`;
 ///    `capture_pcm_once` checks this flag every 50 ms and exits early.
+///    (Speaking spans don't poll the flag today.)
 ///
 /// Construction is best-effort: if no daemon is reachable the guard
 /// becomes a no-op and `cancelled` is always `false`.
-pub(crate) struct McpListenHoldGuard {
+pub(crate) struct McpActivityHoldGuard {
     /// Set to `true` when the daemon sends `Response::McpListenCancelled`
     /// (Escape key pressed while listening). `capture_pcm_once` polls
     /// this at 50 ms cadence.
@@ -293,7 +297,7 @@ pub(crate) struct McpListenHoldGuard {
     _read_task: Option<tokio::task::JoinHandle<()>>,
 }
 
-impl McpListenHoldGuard {
+impl McpActivityHoldGuard {
     /// Connect to the daemon, send `McpActivityHold`, wait for `Ok`,
     /// then hand the read half to a background watcher task. Returns a
     /// no-op guard when no daemon is reachable.
@@ -308,7 +312,7 @@ impl McpListenHoldGuard {
                 debug!(
                     target: "fono_mcp_server::voice_io",
                     error = %e,
-                    "McpListenHoldGuard: daemon unreachable; continuing without hold",
+                    "McpActivityHoldGuard: daemon unreachable; continuing without hold",
                 );
                 return Self { cancelled, _write_half: None, _read_task: None };
             }
@@ -319,7 +323,7 @@ impl McpListenHoldGuard {
             debug!(
                 target: "fono_mcp_server::voice_io",
                 error = %e,
-                "McpListenHoldGuard: send failed",
+                "McpActivityHoldGuard: send failed",
             );
             return Self { cancelled, _write_half: None, _read_task: None };
         }
@@ -329,7 +333,7 @@ impl McpListenHoldGuard {
                 debug!(
                     target: "fono_mcp_server::voice_io",
                     response = ?other.as_ref().ok(),
-                    "McpListenHoldGuard: unexpected ack; continuing without hold",
+                    "McpActivityHoldGuard: unexpected ack; continuing without hold",
                 );
                 return Self { cancelled, _write_half: None, _read_task: None };
             }
@@ -345,7 +349,7 @@ impl McpListenHoldGuard {
                         cancelled_clone.store(true, Ordering::Release);
                         debug!(
                             target: "fono_mcp_server::voice_io",
-                            "McpListenHoldGuard: received cancel from daemon",
+                            "McpActivityHoldGuard: received cancel from daemon",
                         );
                         break;
                     }
@@ -358,7 +362,7 @@ impl McpListenHoldGuard {
     }
 }
 
-impl Drop for McpListenHoldGuard {
+impl Drop for McpActivityHoldGuard {
     fn drop(&mut self) {
         if let Some(task) = self._read_task.take() {
             task.abort();
@@ -476,10 +480,17 @@ pub async fn speak_text(
     // Gate the tray guard on audio length: short prompts (< 1 s) skip
     // the amber flash to avoid flicker. The guard lives across the
     // playback drain loop and is dropped when this function returns.
+    //
+    // Connection-scoped (`McpActivityHold`) rather than fire-and-forget
+    // Start/End frames: short-lived CLI callers (`fono summarize`) exit
+    // right after this function returns, and an End frame spawned from
+    // `Drop` would race runtime shutdown and lose — leaving the daemon
+    // tray stuck amber. Closing the socket is handled by the kernel
+    // even on abrupt exit, so the daemon always restores the tray.
     let audio_secs =
         if audio.sample_rate > 0 { audio.pcm.len() as f64 / audio.sample_rate as f64 } else { 0.0 };
     let _activity_guard = if audio_secs >= 1.0 {
-        Some(McpActivityGuard::new(McpPhase::Speaking, daemon_ipc_candidates))
+        Some(McpActivityHoldGuard::acquire(McpPhase::Speaking, daemon_ipc_candidates).await)
     } else {
         None
     };
@@ -582,14 +593,15 @@ pub async fn listen_once(
 
     // Tray feedback: flip the daemon's tray icon to amber for the
     // duration of the listen span (across all utterances in the
-    // multi-utterance loop). The persistent `McpListenHoldGuard`
+    // multi-utterance loop). The persistent `McpActivityHoldGuard`
     // ensures the tray is always restored even when the MCP server
     // is killed (Ctrl-C) — the kernel closes the IPC connection and
     // the daemon's EOF handler decrements the depth counter. The guard
     // also carries the `cancelled` flag that flips to `true` when the
     // daemon forwards a `Response::McpListenCancelled` (Escape key).
     // Slice 7 of plan v7; upgraded to hold-based in the cancel-fix pass.
-    let hold_guard = McpListenHoldGuard::acquire(McpPhase::Listening, daemon_ipc_candidates).await;
+    let hold_guard =
+        McpActivityHoldGuard::acquire(McpPhase::Listening, daemon_ipc_candidates).await;
     let cancelled = Arc::clone(&hold_guard.cancelled);
 
     // Visual feedback for the duration of the (potentially multi-
@@ -755,7 +767,7 @@ pub async fn listen_once(
 /// across iterations by `listen_once`) is driven via the
 /// `forwarder`-side cb plus the 50 ms polling loop.
 ///
-/// `cancelled` is the [`McpListenHoldGuard::cancelled`] flag; the
+/// `cancelled` is the [`McpActivityHoldGuard::cancelled`] flag; the
 /// polling loop checks it every 50 ms. When `true` the function
 /// returns early with [`ListenStopReason::Cancelled`] so the caller
 /// can abort without transcribing the partial buffer.

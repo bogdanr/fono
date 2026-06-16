@@ -27,6 +27,7 @@ pub const fn stt_backend_str(b: &SttBackend) -> &'static str {
         SttBackend::Speechmatics => "speechmatics",
         SttBackend::Google => "google",
         SttBackend::Nemotron => "nemotron",
+        SttBackend::ElevenLabs => "elevenlabs",
         SttBackend::OpenRouter => "openrouter",
         SttBackend::Wyoming => "wyoming",
     }
@@ -47,6 +48,7 @@ pub fn parse_stt_backend(s: &str) -> Option<SttBackend> {
         "speechmatics" => Some(SttBackend::Speechmatics),
         "google" => Some(SttBackend::Google),
         "nemotron" => Some(SttBackend::Nemotron),
+        "elevenlabs" => Some(SttBackend::ElevenLabs),
         "openrouter" => Some(SttBackend::OpenRouter),
         "wyoming" => Some(SttBackend::Wyoming),
         _ => None,
@@ -101,6 +103,7 @@ pub const fn stt_key_env(b: &SttBackend) -> &'static str {
         SttBackend::Speechmatics => "SPEECHMATICS_API_KEY",
         SttBackend::Google => "GOOGLE_API_KEY",
         SttBackend::Nemotron => "NEMOTRON_API_KEY",
+        SttBackend::ElevenLabs => "ELEVENLABS_API_KEY",
         SttBackend::OpenRouter => "OPENROUTER_API_KEY",
         // Wyoming v1 has no in-band auth; an optional pre-shared token
         // is configured via `[stt.wyoming].auth_token_ref` instead.
@@ -142,6 +145,8 @@ pub const fn tts_backend_str(b: &TtsBackend) -> &'static str {
         TtsBackend::OpenRouter => "openrouter",
         TtsBackend::Cartesia => "cartesia",
         TtsBackend::Deepgram => "deepgram",
+        TtsBackend::Speechmatics => "speechmatics",
+        TtsBackend::ElevenLabs => "elevenlabs",
         TtsBackend::Local => "local",
     }
 }
@@ -156,6 +161,8 @@ pub fn parse_tts_backend(s: &str) -> Option<TtsBackend> {
         "openrouter" => Some(TtsBackend::OpenRouter),
         "cartesia" => Some(TtsBackend::Cartesia),
         "deepgram" => Some(TtsBackend::Deepgram),
+        "speechmatics" => Some(TtsBackend::Speechmatics),
+        "elevenlabs" => Some(TtsBackend::ElevenLabs),
         "local" => Some(TtsBackend::Local),
         _ => None,
     }
@@ -173,6 +180,8 @@ pub const fn tts_key_env(b: &TtsBackend) -> &'static str {
         TtsBackend::OpenRouter => "OPENROUTER_API_KEY",
         TtsBackend::Cartesia => "CARTESIA_API_KEY",
         TtsBackend::Deepgram => "DEEPGRAM_API_KEY",
+        TtsBackend::Speechmatics => "SPEECHMATICS_API_KEY",
+        TtsBackend::ElevenLabs => "ELEVENLABS_API_KEY",
     }
 }
 
@@ -185,6 +194,8 @@ pub const fn tts_requires_key(b: &TtsBackend) -> bool {
             | TtsBackend::OpenRouter
             | TtsBackend::Cartesia
             | TtsBackend::Deepgram
+            | TtsBackend::Speechmatics
+            | TtsBackend::ElevenLabs
     )
 }
 
@@ -268,7 +279,7 @@ pub fn cloud_pair(name: &str) -> Option<(SttBackend, PolishBackend)> {
 
 /// Iterator over every STT backend (for doctor enumeration etc.).
 #[must_use]
-pub fn all_stt_backends() -> [SttBackend; 12] {
+pub fn all_stt_backends() -> [SttBackend; 13] {
     [
         SttBackend::Local,
         SttBackend::Groq,
@@ -280,6 +291,7 @@ pub fn all_stt_backends() -> [SttBackend; 12] {
         SttBackend::Speechmatics,
         SttBackend::Google,
         SttBackend::Nemotron,
+        SttBackend::ElevenLabs,
         SttBackend::OpenRouter,
         SttBackend::Wyoming,
     ]
@@ -314,7 +326,7 @@ pub fn all_assistant_backends() -> [AssistantBackend; 7] {
 }
 
 #[must_use]
-pub fn all_tts_backends() -> [TtsBackend; 8] {
+pub fn all_tts_backends() -> [TtsBackend; 10] {
     [
         TtsBackend::None,
         TtsBackend::Wyoming,
@@ -323,6 +335,8 @@ pub fn all_tts_backends() -> [TtsBackend; 8] {
         TtsBackend::OpenRouter,
         TtsBackend::Cartesia,
         TtsBackend::Deepgram,
+        TtsBackend::Speechmatics,
+        TtsBackend::ElevenLabs,
         TtsBackend::Local,
     ]
 }

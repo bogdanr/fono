@@ -5,6 +5,62 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Automatic local fallback for English-only cloud TTS voices.** Some
+  cloud voices only render intelligible English (Groq's Orpheus
+  `…-english`, the Speechmatics TTS preview, Deepgram's `aura-2-…-en`
+  voices). Feeding them non-English text produced an English
+  phonemization of foreign words — gibberish, not speech in that
+  language. The capability catalogue now carries a single
+  `english_only` boolean per TTS provider (default `false`, so a new
+  provider fails safe as multilingual). When the active backend is
+  flagged English-only and an utterance is reliably non-English, Fono
+  transparently routes that one utterance to the local multilingual
+  Piper voice for its language (downloaded + cached on first use)
+  instead of the cloud backend; English or inconclusive text still
+  goes to the cloud voice unchanged, so the common path is untouched.
+  Language is taken from the known signal where it exists and otherwise
+  detected with the already-bundled `whatlang` trigram classifier
+  (no model files, sub-millisecond, run only for English-only
+  backends). When the local engine is unavailable (the `tts-local`
+  feature is off, or no catalogue voice exists for that language), the
+  utterance is skipped with a single warning rather than spoken as
+  gibberish. No new configuration keys.
+- **Speechmatics speech-to-text and text-to-speech.** Speechmatics is
+  now a first-class cloud backend for both directions. STT runs over
+  the realtime WebSocket (`wss://eu.rt.speechmatics.com/v2`) as a
+  one-shot round-trip — `StartRecognition`, buffered `AddAudio`
+  frames, `EndOfStream`, then collect the `AddTranscript` finals —
+  reusing the same `tokio-tungstenite` dependency the Deepgram
+  streaming path already pulls in, so no new crates and no `deny.toml`
+  churn. TTS uses the preview REST endpoint
+  (`https://preview.tts.speechmatics.com/generate/<voice>`) returning
+  16 kHz signed-16-bit PCM. Both surfaces authenticate with
+  `Authorization: Bearer <SPEECHMATICS_API_KEY>` (pinned by a unit
+  test so it can't regress to Deepgram's `Token` form). The TTS
+  preview is English-only with four voices (`sarah`, `theo`, `megan`,
+  `jack`, default `sarah`). Enable via `backend = "speechmatics"` in
+  `[stt]` / `[tts]`; the setup wizard, `fono doctor`, and the CLI
+  surface it automatically.
+
+### Changed
+
+- **Setup wizard provider lists and key validation are now catalogue-
+  driven.** The cloud speech-to-text picker, the cloud LLM/cleanup
+  picker, and the API-key reachability check are generated directly
+  from the capability catalogue (`CLOUD_PROVIDERS`) instead of
+  hand-maintained menus and per-provider probe arms. A new provider
+  now surfaces in every wizard list — and validates its key — with no
+  edits to the wizard. The primary "one key fills everything" matrix
+  also widened: it now lists every cloud provider with at least one
+  wired capability (including speech-only ones like Speechmatics,
+  Deepgram, AssemblyAI, and Cartesia), and any capability the chosen
+  provider doesn't cover transparently leans on the local backend
+  (local Whisper, embedded GGUF cleanup, on-device TTS).
+
 ## [0.10.0] — 2026-06-12
 
 Faster local AI, local text-to-speech out of the box, and cleanup that types

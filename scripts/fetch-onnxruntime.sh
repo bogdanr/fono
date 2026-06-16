@@ -51,19 +51,19 @@ fi
 sha_for_triple() {
 	case "$1" in
 	x86_64-unknown-linux-gnu)
-		echo "00032cc757f32f9129254821b3191d06bec806a1679c360c2ba02921ef2dd965"
+		echo "378b52faf5c33d1325cd25bcad8b725f05eeed9ecbb2f21bb640d6a6f4d2c9ef"
 		;;
 	aarch64-unknown-linux-gnu)
-		echo "c01c61f81b63d033df235d9f6d99b268e46a016572f6cff68d24d4700c8d3e9d"
+		echo "7bd1157fa3159eeaf126692734ab3e4e7dc779b9d884f3f03daec2dec1da2431"
 		;;
 	aarch64-apple-darwin)
-		echo "ca19517bfe21a17994fac7d9d0b4886b4f6242ed79bf746d2a5834cafb74f71b"
+		echo "d94892dd6c0fd6b613930e231e7e7572c9bf68b2de4f368a14e78abf9992b0e6"
 		;;
 	x86_64-apple-darwin)
-		echo "f2905a282639fa69908a2695883927fea19603f8dcc7fbc92a7d626a77771686"
+		echo "0c3b28a00dcb5da3dde946ca6e7ca3570aafe42345247f05c3b1ea89a94c95f6"
 		;;
 	x86_64-pc-windows-msvc)
-		echo "25e832c7d9e5a20cb228832f14d1909df562dd0fe49c7b4927a4a719603e7852"
+		echo "fcc34415d1ddce4fe4a341bdfe9a53750b72ff52910561a834eadd65b23acfd2"
 		;;
 	*)
 		echo ""

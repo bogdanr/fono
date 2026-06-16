@@ -53,7 +53,7 @@ gemini         ~/.gemini/settings.json        none         gemini
 ---
 
 
-MCP-capable coding agent can use it for speech input and audio output. The three tools
+MCP-capable coding agent can use it for speech input and audio output. The tools
 are:
 
 | Tool | Purpose |
@@ -61,6 +61,7 @@ are:
 | `fono.speak { text }` | Synthesise `text` and block until audio finishes. |
 | `fono.listen { prompt?, max_seconds? }` | Optionally speak `prompt`, then record until silence; returns transcript. |
 | `fono.confirm { question, choices, timeout_seconds? }` | Speak question + choices, listen for a spoken A/B/C answer; returns matched choice or `timeout`. |
+| `fono.summarize { message_text, sender_name?, chat_name?, silent?, … }` | Summarise an incoming notification (chat message, log, alert) into 1-2 spoken sentences via the configured `[assistant]` backend, then speak the summary (skipped with `silent: true`). Raw content is never read aloud verbatim. Failed requests are retried once on the same backend, then once on the first other backend with a usable key/model (cloud timeouts are short, local timeouts long). Returns the summary. |
 
 The integration is **agent-agnostic**: the same `fono mcp serve` process serves every
 agent. There is no per-agent code in Fono. Adding a new agent means adding a config

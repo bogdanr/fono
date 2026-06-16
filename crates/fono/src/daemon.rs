@@ -2070,7 +2070,9 @@ fn tts_menu_label(b: &fono_core::config::TtsBackend, secrets: &fono_core::Secret
         | TtsBackend::Groq
         | TtsBackend::OpenRouter
         | TtsBackend::Cartesia
-        | TtsBackend::Deepgram => {
+        | TtsBackend::Deepgram
+        | TtsBackend::ElevenLabs
+        | TtsBackend::Speechmatics => {
             let display = fono_core::provider_catalog::find(canonical)
                 .map_or_else(|| canonical.to_string(), |p| p.display_name.to_string());
             let has_key = secrets.has_in_file(fono_core::providers::tts_key_env(b));

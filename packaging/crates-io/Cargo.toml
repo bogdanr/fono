@@ -1,0 +1,44 @@
+# This package is intentionally NOT a workspace member. It is a lightweight
+# stub whose only job is to exist on crates.io so that `cargo binstall fono`
+# can resolve a version and read the binstall metadata below, then download the
+# prebuilt binary from the matching GitHub Release. It is never compiled by end
+# users and carries none of the real application's dependencies.
+#
+# The `version` is overwritten from the git tag by the release workflow before
+# publishing; the value committed here is only a placeholder.
+
+[package]
+name = "fono"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.82"
+license = "GPL-3.0-only"
+authors = ["Bogdan Rădulescu <bogdan@nimblex.net>"]
+description = "Lightweight native voice-dictation daemon and CLI."
+homepage = "https://fono.page"
+repository = "https://github.com/bogdanr/fono"
+readme = "README.md"
+keywords = ["voice", "dictation", "stt", "whisper", "polish"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+[[bin]]
+name = "fono"
+path = "src/main.rs"
+
+# cargo-binstall reads these from the published crate, then downloads the
+# matching GitHub Release asset. The release assets are BARE binaries (not
+# archives): the CPU variant is named `fono-vX.Y.Z-<arch>` (see
+# `.github/workflows/release.yml`), so `pkg-fmt = "bin"`. The GPU/Vulkan
+# variant is intentionally not the binstall default — it is opt-in via the
+# install one-liner / `fono update`. Release tags are `vX.Y.Z`.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/fono-v{ version }-{ target-arch }"
+pkg-fmt = "bin"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/fono-v{ version }-x86_64"
+pkg-fmt = "bin"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/fono-v{ version }-aarch64"
+pkg-fmt = "bin"

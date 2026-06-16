@@ -104,10 +104,15 @@ pub fn build_stt(
         SttBackend::OpenRouter => build_openrouter(cfg, secrets, languages, prompts, cloud_rerun),
         SttBackend::Cartesia => build_cartesia(cfg, secrets, languages, prompts, cloud_rerun),
         SttBackend::Deepgram => build_deepgram(cfg, secrets, languages, prompts, cloud_rerun),
+        SttBackend::ElevenLabs => build_elevenlabs(cfg, secrets, languages, prompts, cloud_rerun),
+        SttBackend::Speechmatics => {
+            build_speechmatics(cfg, secrets, languages, prompts, cloud_rerun)
+        }
         SttBackend::Wyoming => build_wyoming(cfg, secrets, languages),
         other => Err(anyhow!(
             "STT backend {other:?} is not yet implemented in this build; \
-             pick `groq`, `openai`, `openrouter`, `cartesia`, `deepgram`, `wyoming`, or `local` \
+             pick `groq`, `openai`, `openrouter`, `cartesia`, `deepgram`, `speechmatics`, \
+             `elevenlabs`, `wyoming`, or `local` \
              (rebuild with `--features whisper-local` for `local`)"
         )),
     }
@@ -370,6 +375,66 @@ fn build_deepgram(
     _: bool,
 ) -> Result<Arc<dyn SpeechToText>> {
     Err(anyhow!("Deepgram STT not compiled in (enable the `deepgram` feature on `fono-stt`)"))
+}
+
+#[cfg(feature = "elevenlabs")]
+fn build_elevenlabs(
+    cfg: &Stt,
+    secrets: &Secrets,
+    languages: Vec<String>,
+    prompts: std::collections::HashMap<String, String>,
+    cloud_rerun: bool,
+) -> Result<Arc<dyn SpeechToText>> {
+    let (key, model) = resolve_cloud(cfg, secrets, &SttBackend::ElevenLabs, "elevenlabs")?;
+    bootstrap_language_cache(&languages, crate::elevenlabs::BACKEND_KEY);
+    Ok(Arc::new(
+        crate::elevenlabs::ElevenLabsStt::with_model(key, model)
+            .with_languages(languages)
+            .with_prompts(prompts)
+            .with_cloud_rerun_on_mismatch(cloud_rerun),
+    ))
+}
+
+#[cfg(not(feature = "elevenlabs"))]
+fn build_elevenlabs(
+    _: &Stt,
+    _: &Secrets,
+    _: Vec<String>,
+    _: std::collections::HashMap<String, String>,
+    _: bool,
+) -> Result<Arc<dyn SpeechToText>> {
+    Err(anyhow!("ElevenLabs STT not compiled in (enable the `elevenlabs` feature on `fono-stt`)"))
+}
+
+#[cfg(feature = "speechmatics")]
+fn build_speechmatics(
+    cfg: &Stt,
+    secrets: &Secrets,
+    languages: Vec<String>,
+    prompts: std::collections::HashMap<String, String>,
+    cloud_rerun: bool,
+) -> Result<Arc<dyn SpeechToText>> {
+    let (key, model) = resolve_cloud(cfg, secrets, &SttBackend::Speechmatics, "speechmatics")?;
+    bootstrap_language_cache(&languages, crate::speechmatics::BACKEND_KEY);
+    Ok(Arc::new(
+        crate::speechmatics::SpeechmaticsStt::with_model(key, model)
+            .with_languages(languages)
+            .with_prompts(prompts)
+            .with_cloud_rerun_on_mismatch(cloud_rerun),
+    ))
+}
+
+#[cfg(not(feature = "speechmatics"))]
+fn build_speechmatics(
+    _: &Stt,
+    _: &Secrets,
+    _: Vec<String>,
+    _: std::collections::HashMap<String, String>,
+    _: bool,
+) -> Result<Arc<dyn SpeechToText>> {
+    Err(anyhow!(
+        "Speechmatics STT not compiled in (enable the `speechmatics` feature on `fono-stt`)"
+    ))
 }
 
 #[cfg(feature = "wyoming")]
@@ -667,6 +732,32 @@ mod tests {
         let err = build_stt(&cfg, &general, &secrets, &dir).err().unwrap().to_string();
         assert!(
             err.contains("DEEPGRAM_API_KEY") && err.contains("fono keys add"),
+            "error should mention env var and remediation: {err}"
+        );
+    }
+
+    #[cfg(feature = "speechmatics")]
+    #[test]
+    fn speechmatics_cloud_optional_with_env_key() {
+        let cfg = SttCfg { backend: SttBackend::Speechmatics, cloud: None, ..SttCfg::default() };
+        let general = fono_core::config::General::default();
+        let mut secrets = Secrets::default();
+        secrets.insert("SPEECHMATICS_API_KEY", "sm-test");
+        let dir = std::path::PathBuf::from("/tmp");
+        let stt = build_stt(&cfg, &general, &secrets, &dir).expect("speechmatics factory ok");
+        assert_eq!(stt.name(), "speechmatics");
+    }
+
+    #[cfg(feature = "speechmatics")]
+    #[test]
+    fn speechmatics_missing_key_yields_clear_error() {
+        let cfg = SttCfg { backend: SttBackend::Speechmatics, cloud: None, ..SttCfg::default() };
+        let general = fono_core::config::General::default();
+        let secrets = Secrets::default();
+        let dir = std::path::PathBuf::from("/tmp");
+        let err = build_stt(&cfg, &general, &secrets, &dir).err().unwrap().to_string();
+        assert!(
+            err.contains("SPEECHMATICS_API_KEY") && err.contains("fono keys add"),
             "error should mention env var and remediation: {err}"
         );
     }

@@ -280,7 +280,9 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 | fono_core::config::TtsBackend::Groq
                 | fono_core::config::TtsBackend::OpenRouter
                 | fono_core::config::TtsBackend::Cartesia
-                | fono_core::config::TtsBackend::Deepgram => {
+                | fono_core::config::TtsBackend::Deepgram
+                | fono_core::config::TtsBackend::ElevenLabs
+                | fono_core::config::TtsBackend::Speechmatics => {
                     if secrets.resolve(key_env).is_some() {
                         ok(&format!("{key_env} present"))
                     } else {
