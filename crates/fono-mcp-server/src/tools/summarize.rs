@@ -6,7 +6,7 @@
 //! is never read aloud verbatim.
 
 use async_trait::async_trait;
-use tracing::debug;
+use tracing::info;
 
 use crate::protocol::ToolCallResult;
 use crate::summarize::{build_primary_assistant, summarize_with_assistant, SummarizePayload};
@@ -137,15 +137,10 @@ impl Tool for SummarizeTool {
         }
         let voice = arguments.get("voice").and_then(|v| v.as_str()).map(String::from);
         let silent = arguments.get("silent").and_then(serde_json::Value::as_bool).unwrap_or(false);
-
-        debug!(
-            target: "fono_mcp_server::summarize",
-            text_len = payload.message_text.len(),
-            sender = %payload.sender_name,
-            chat = %payload.chat_name,
-            silent,
-            "fono.summarize called"
-        );
+        let assistant_backend =
+            fono_core::providers::assistant_backend_str(&self.cfg.assistant.backend);
+        let tts_backend = fono_core::providers::tts_backend_str(&self.cfg.tts.backend);
+        let text_len = payload.message_text.len();
 
         let assistant = match self
             .assistant
@@ -157,6 +152,7 @@ impl Tool for SummarizeTool {
             Ok(a) => std::sync::Arc::clone(a),
             Err(e) => return ToolCallResult::failure(format!("fono.summarize: {e:#}")),
         };
+        let summarize_started = std::time::Instant::now();
         let summary = match summarize_with_assistant(
             assistant.as_ref(),
             &self.cfg,
@@ -169,8 +165,19 @@ impl Tool for SummarizeTool {
             Ok(s) => s,
             Err(e) => return ToolCallResult::failure(format!("fono.summarize: {e:#}")),
         };
+        let summarize_ms = summarize_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
 
         if silent {
+            info!(
+                target: "fono_mcp_server::summarize",
+                assistant_backend,
+                text_len,
+                summarize_ms,
+                summary_len = summary.len(),
+                spoken = false,
+                ok = true,
+                "fono.summarize completed"
+            );
             return ToolCallResult::success(
                 serde_json::json!({ "spoken": false, "summary": summary }).to_string(),
             );
@@ -196,10 +203,43 @@ impl Tool for SummarizeTool {
         )
         .await
         {
-            Ok(()) => ToolCallResult::success(
-                serde_json::json!({ "spoken": true, "summary": summary }).to_string(),
-            ),
-            Err(e) => ToolCallResult::failure(format!("fono.summarize: {e:#}")),
+            Ok(timings) => {
+                info!(
+                    target: "fono_mcp_server::summarize",
+                    client = program.as_deref().unwrap_or(""),
+                    assistant_backend,
+                    tts_backend,
+                    voice = resolved.as_deref().unwrap_or(""),
+                    text_len,
+                    summarize_ms,
+                    tts_synth_ms = timings.synth_ms,
+                    playback_ms = timings.playback_ms,
+                    summary_len = summary.len(),
+                    spoken = true,
+                    ok = true,
+                    "fono.summarize completed"
+                );
+                ToolCallResult::success(
+                    serde_json::json!({ "spoken": true, "summary": summary }).to_string(),
+                )
+            }
+            Err(e) => {
+                info!(
+                    target: "fono_mcp_server::summarize",
+                    client = program.as_deref().unwrap_or(""),
+                    assistant_backend,
+                    tts_backend,
+                    voice = resolved.as_deref().unwrap_or(""),
+                    text_len,
+                    summarize_ms,
+                    summary_len = summary.len(),
+                    spoken = false,
+                    ok = false,
+                    error = %format!("{e:#}"),
+                    "fono.summarize completed"
+                );
+                ToolCallResult::failure(format!("fono.summarize: {e:#}"))
+            }
         }
     }
 }

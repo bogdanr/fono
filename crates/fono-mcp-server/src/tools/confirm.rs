@@ -15,7 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use fono_ipc::McpPhase;
 use fono_polish::TextFormatter;
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::protocol::ToolCallResult;
 use crate::tools::{ClientIdentityHandle, McpContext, PolishClassifierCache, Tool};
@@ -141,17 +141,13 @@ impl Tool for ConfirmTool {
             .map(|v| v.min(configured_timeout as u64) as u32)
             .unwrap_or(configured_timeout);
 
-        debug!(
-            target: "fono_mcp_server::confirm",
-            n_choices = choices.len(),
-            timeout,
-            "fono.confirm called"
-        );
+        let stt_backend = fono_core::providers::stt_backend_str(&self.cfg.stt.backend);
+        let tts_backend = fono_core::providers::tts_backend_str(&self.cfg.tts.backend);
 
         let utterance = compose_utterance(&question, &choices);
         let program = crate::tools::client_program(&self.client_identity);
         let voice = resolve_program_voice(&self.cfg, program.as_deref(), None);
-        if let Err(e) = speak_text(
+        let speak_timings = match speak_text(
             &self.cfg,
             &self.secrets,
             &utterance,
@@ -160,8 +156,9 @@ impl Tool for ConfirmTool {
         )
         .await
         {
-            return ToolCallResult::failure(format!("fono.confirm: TTS failed: {e:#}"));
-        }
+            Ok(t) => t,
+            Err(e) => return ToolCallResult::failure(format!("fono.confirm: TTS failed: {e:#}")),
+        };
 
         // Tray feedback: paint the "Confirming" phase across the
         // listen-and-match span. listen_once itself adds a nested
@@ -185,29 +182,66 @@ impl Tool for ConfirmTool {
         {
             Ok(o) => o,
             Err(e) => {
-                return ToolCallResult::failure(format!("fono.confirm: listen failed: {e:#}"))
+                info!(
+                    target: "fono_mcp_server::confirm",
+                    client = program.as_deref().unwrap_or(""),
+                    tts_backend,
+                    voice = voice.as_deref().unwrap_or(""),
+                    stt_backend,
+                    n_choices = choices.len(),
+                    tts_synth_ms = speak_timings.synth_ms,
+                    ok = false,
+                    error = %format!("{e:#}"),
+                    "fono.confirm completed"
+                );
+                return ToolCallResult::failure(format!("fono.confirm: listen failed: {e:#}"));
             }
         };
 
-        if outcome.transcript.is_empty() && outcome.reason == ListenStopReason::Cancelled {
-            return ToolCallResult::success("{\"choice\":\"cancelled\"}");
-        }
-        if outcome.transcript.is_empty() && outcome.reason == ListenStopReason::Timeout {
-            return ToolCallResult::success("{\"choice\":\"timeout\"}");
-        }
+        let (choice, result) =
+            if outcome.transcript.is_empty() && outcome.reason == ListenStopReason::Cancelled {
+                ("cancelled".to_string(), ToolCallResult::success("{\"choice\":\"cancelled\"}"))
+            } else if outcome.transcript.is_empty() && outcome.reason == ListenStopReason::Timeout {
+                ("timeout".to_string(), ToolCallResult::success("{\"choice\":\"timeout\"}"))
+            } else {
+                match match_choice(&outcome.transcript, &choices) {
+                    Some(c) => (
+                        c.clone(),
+                        ToolCallResult::success(
+                            serde_json::json!({ "choice": c, "transcript": outcome.transcript })
+                                .to_string(),
+                        ),
+                    ),
+                    None => (
+                        "unmatched".to_string(),
+                        ToolCallResult::success(
+                            serde_json::json!({
+                                "choice": "unmatched",
+                                "transcript": outcome.transcript,
+                            })
+                            .to_string(),
+                        ),
+                    ),
+                }
+            };
 
-        match match_choice(&outcome.transcript, &choices) {
-            Some(c) => ToolCallResult::success(
-                serde_json::json!({ "choice": c, "transcript": outcome.transcript }).to_string(),
-            ),
-            None => ToolCallResult::success(
-                serde_json::json!({
-                    "choice": "unmatched",
-                    "transcript": outcome.transcript,
-                })
-                .to_string(),
-            ),
-        }
+        info!(
+            target: "fono_mcp_server::confirm",
+            client = program.as_deref().unwrap_or(""),
+            tts_backend,
+            voice = voice.as_deref().unwrap_or(""),
+            stt_backend,
+            n_choices = choices.len(),
+            tts_synth_ms = speak_timings.synth_ms,
+            capture_ms = outcome.capture_ms,
+            stt_ms = outcome.stt_ms,
+            relevance_ms = outcome.relevance_ms,
+            duration_ms = outcome.duration_ms,
+            choice = %choice,
+            ok = true,
+            "fono.confirm completed"
+        );
+        result
     }
 }
 

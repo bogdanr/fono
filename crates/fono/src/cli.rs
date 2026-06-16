@@ -837,7 +837,8 @@ async fn summarize_cmd(
         resolved.as_deref(),
         &paths.client_ipc_socket_candidates(),
     )
-    .await;
+    .await
+    .map(|_| ());
     if let Err(e) = &spoken {
         let err_text = format!("{e:#}");
         let provider = fono_core::providers::tts_backend_str(&cfg.tts.backend);
@@ -982,6 +983,7 @@ async fn voices_cmd(paths: &Paths, action: VoicesCmd) -> Result<()> {
                 &paths.client_ipc_socket_candidates(),
             )
             .await
+            .map(|_| ())
         }
     }
 }

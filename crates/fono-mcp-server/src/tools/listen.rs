@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use fono_polish::TextFormatter;
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::protocol::ToolCallResult;
 use crate::tools::{ClientIdentityHandle, McpContext, PolishClassifierCache, Tool};
@@ -135,14 +135,8 @@ impl Tool for ListenTool {
             .unwrap_or(DEFAULT_MAX_SECONDS.min(self.cfg.mcp.listen_max_seconds));
         let prompt = arguments.get("prompt").and_then(|v| v.as_str()).map(str::to_owned);
         let context = arguments.get("context").and_then(|v| v.as_str()).map(str::to_owned);
-
-        debug!(
-            target: "fono_mcp_server::listen",
-            max_seconds,
-            has_prompt = prompt.is_some(),
-            has_context = context.is_some(),
-            "fono.listen called"
-        );
+        let program = crate::tools::client_program(&self.client_identity);
+        let stt_backend = fono_core::providers::stt_backend_str(&self.cfg.stt.backend);
 
         if let Some(text) = prompt.as_deref() {
             if !text.trim().is_empty() {
@@ -192,6 +186,21 @@ impl Tool for ListenTool {
                     ListenStopReason::Timeout => "timeout",
                     ListenStopReason::Cancelled => "cancelled",
                 };
+                info!(
+                    target: "fono_mcp_server::listen",
+                    client = program.as_deref().unwrap_or(""),
+                    stt_backend,
+                    max_seconds,
+                    capture_ms = outcome.capture_ms,
+                    stt_ms = outcome.stt_ms,
+                    relevance_ms = outcome.relevance_ms,
+                    duration_ms = outcome.duration_ms,
+                    reason,
+                    rejected_count = outcome.rejected_count,
+                    transcript_len = outcome.transcript.len(),
+                    ok = true,
+                    "fono.listen completed"
+                );
                 let body = serde_json::json!({
                     "transcript": outcome.transcript,
                     "duration_ms": outcome.duration_ms,
@@ -200,7 +209,18 @@ impl Tool for ListenTool {
                 });
                 ToolCallResult::success(body.to_string())
             }
-            Err(e) => ToolCallResult::failure(format!("fono.listen: {e:#}")),
+            Err(e) => {
+                info!(
+                    target: "fono_mcp_server::listen",
+                    client = program.as_deref().unwrap_or(""),
+                    stt_backend,
+                    max_seconds,
+                    ok = false,
+                    error = %format!("{e:#}"),
+                    "fono.listen completed"
+                );
+                ToolCallResult::failure(format!("fono.listen: {e:#}"))
+            }
         }
     }
 }

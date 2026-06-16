@@ -501,9 +501,26 @@ pub fn resolve_program_voice(
     })
 }
 
+/// Wall-clock breakdown of a single [`speak_text`] call, in
+/// milliseconds. Surfaced so callers can log how long synthesis vs
+/// playback took without re-instrumenting the path. Both are
+/// monotonic-clock measurements; `synth_ms` covers the TTS backend
+/// round-trip, `playback_ms` covers draining the audio through the
+/// output device.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SpeakTimings {
+    /// Milliseconds spent in `tts.synthesize` (cloud round-trip or
+    /// local inference).
+    pub synth_ms: u64,
+    /// Milliseconds spent draining the synthesised audio through the
+    /// playback queue (0 when the synthesised PCM was empty).
+    pub playback_ms: u64,
+}
+
 /// Synthesise `text` through the configured TTS backend and block until
 /// playback drains (or `120 s` elapses). Returns an error string suitable
-/// for `ToolCallResult::failure` when anything goes wrong.
+/// for `ToolCallResult::failure` when anything goes wrong. On success
+/// returns a [`SpeakTimings`] breakdown for logging.
 ///
 /// `voice` is an optional, already-resolved backend-specific voice id
 /// (see [`resolve_program_voice`]). `None` uses the backend default.
@@ -518,7 +535,7 @@ pub async fn speak_text(
     text: &str,
     voice: Option<&str>,
     daemon_ipc_candidates: &[std::path::PathBuf],
-) -> Result<()> {
+) -> Result<SpeakTimings> {
     let voices_dir = fono_core::Paths::resolve().map(|p| p.voices_dir()).unwrap_or_default();
     let tts = fono_tts::build_tts(&cfg.tts, secrets, &cfg.general.languages, &voices_dir)
         .context("TTS build failed")?
@@ -533,7 +550,9 @@ pub async fn speak_text(
         if cfg.tts.output_device.is_empty() { None } else { Some(cfg.tts.output_device.as_str()) };
     let playback = AudioPlayback::new(device).context("audio device open failed")?;
 
+    let synth_started = Instant::now();
     let audio = tts.synthesize(text, voice, None).await.context("TTS synthesis failed")?;
+    let synth_ms = synth_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     // Gate the tray guard on audio length: short prompts (< 1 s) skip
     // the amber flash to avoid flicker. The guard lives across the
     // playback drain loop and is dropped when this function returns.
@@ -558,7 +577,9 @@ pub async fn speak_text(
     // the daemon isn't reachable we accept overlapping playback (the
     // user has signed off on this fallback).
     let _slot_guard = SpeakSlotGuard::acquire(daemon_ipc_candidates).await;
-    if !audio.pcm.is_empty() {
+    let playback_started = Instant::now();
+    let had_audio = !audio.pcm.is_empty();
+    if had_audio {
         playback.enqueue(audio.pcm, audio.sample_rate).context("playback enqueue failed")?;
     }
 
@@ -570,7 +591,12 @@ pub async fn speak_text(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    Ok(())
+    let playback_ms = if had_audio {
+        playback_started.elapsed().as_millis().min(u64::MAX as u128) as u64
+    } else {
+        0
+    };
+    Ok(SpeakTimings { synth_ms, playback_ms })
 }
 
 /// Outcome of a single `listen_once` call.
@@ -592,6 +618,18 @@ pub struct ListenOutcome {
     /// `rejected_count` so coding agents can spot pathological
     /// environments.
     pub rejected_count: u32,
+    /// Cumulative milliseconds spent capturing audio (microphone open
+    /// → silence-commit / timeout) across every utterance in the
+    /// multi-utterance loop. Logging only; not surfaced to agents.
+    pub capture_ms: u64,
+    /// Cumulative milliseconds spent in `stt.transcribe` across every
+    /// utterance. Isolates STT latency from the time the user spent
+    /// speaking or thinking.
+    pub stt_ms: u64,
+    /// Cumulative milliseconds spent in the relevance filter
+    /// (heuristic + optional LLM classifier). `0` when the filter is
+    /// disabled.
+    pub relevance_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -690,6 +728,12 @@ pub async fn listen_once(
 
     let mut rejected_count: u32 = 0;
     let mut last_outcome: Option<(String, ListenStopReason, u64)> = None;
+    // Cumulative per-step timings across the multi-utterance loop,
+    // surfaced on the `fono.listen` / `fono.confirm` completion log line
+    // so a slow turn can be attributed to capture, STT, or the filter.
+    let mut capture_ms_acc: u64 = 0;
+    let mut stt_ms_acc: u64 = 0;
+    let mut relevance_ms_acc: u64 = 0;
 
     loop {
         // Bound the per-utterance capture by both the caller's
@@ -706,12 +750,21 @@ pub async fn listen_once(
                     elapsed.as_millis().min(u64::MAX as u128) as u64,
                 )
             });
-            return Ok(ListenOutcome { transcript, duration_ms: ms, reason, rejected_count });
+            return Ok(ListenOutcome {
+                transcript,
+                duration_ms: ms,
+                reason,
+                rejected_count,
+                capture_ms: capture_ms_acc,
+                stt_ms: stt_ms_acc,
+                relevance_ms: relevance_ms_acc,
+            });
         }
         let per_iter_secs = max_seconds.max(1).min(remaining.as_secs().max(1) as u32);
 
         let (pcm, reason, iter_ms) =
             capture_pcm_once(cfg, &overlay, per_iter_secs, &cancelled).await?;
+        capture_ms_acc = capture_ms_acc.saturating_add(iter_ms);
 
         // Propagate cancellation immediately — don't transcribe or filter,
         // just surface the early exit to the caller.
@@ -722,9 +775,13 @@ pub async fn listen_once(
                 duration_ms: total_ms,
                 reason,
                 rejected_count,
+                capture_ms: capture_ms_acc,
+                stt_ms: stt_ms_acc,
+                relevance_ms: relevance_ms_acc,
             });
         }
 
+        let stt_started = Instant::now();
         let transcript = if pcm.is_empty() {
             String::new()
         } else {
@@ -736,6 +793,8 @@ pub async fn listen_once(
                 }
             }
         };
+        stt_ms_acc = stt_ms_acc
+            .saturating_add(stt_started.elapsed().as_millis().min(u64::MAX as u128) as u64);
 
         // Total wall-clock so far (capture + STT for this iteration
         // plus everything that came before). Reported back to the
@@ -743,17 +802,33 @@ pub async fn listen_once(
         let total_ms = loop_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
 
         if !filter_enabled {
-            return Ok(ListenOutcome { transcript, duration_ms: total_ms, reason, rejected_count });
+            return Ok(ListenOutcome {
+                transcript,
+                duration_ms: total_ms,
+                reason,
+                rejected_count,
+                capture_ms: capture_ms_acc,
+                stt_ms: stt_ms_acc,
+                relevance_ms: relevance_ms_acc,
+            });
         }
 
         // Empty transcript + timeout = the user genuinely stayed
         // silent. Don't penalise that by looping forever; return
         // immediately so the agent can decide what to do.
         if transcript.is_empty() && matches!(reason, ListenStopReason::Timeout) {
-            return Ok(ListenOutcome { transcript, duration_ms: total_ms, reason, rejected_count });
+            return Ok(ListenOutcome {
+                transcript,
+                duration_ms: total_ms,
+                reason,
+                rejected_count,
+                capture_ms: capture_ms_acc,
+                stt_ms: stt_ms_acc,
+                relevance_ms: relevance_ms_acc,
+            });
         }
 
-        let _ = iter_ms; // capture duration available for future per-iteration metrics
+        let relevance_started = Instant::now();
         let heuristic_verdict = crate::relevance::evaluate_heuristic(&transcript, prompt);
         let verdict = match heuristic_verdict {
             // Heuristic accepted — escalate to the LLM classifier when
@@ -774,6 +849,8 @@ pub async fn listen_once(
             }
             v => v,
         };
+        relevance_ms_acc = relevance_ms_acc
+            .saturating_add(relevance_started.elapsed().as_millis().min(u64::MAX as u128) as u64);
         match verdict {
             crate::relevance::RelevanceVerdict::Accept => {
                 return Ok(ListenOutcome {
@@ -781,6 +858,9 @@ pub async fn listen_once(
                     duration_ms: total_ms,
                     reason,
                     rejected_count,
+                    capture_ms: capture_ms_acc,
+                    stt_ms: stt_ms_acc,
+                    relevance_ms: relevance_ms_acc,
                 });
             }
             crate::relevance::RelevanceVerdict::Reject(why) => {
@@ -803,6 +883,9 @@ pub async fn listen_once(
                         duration_ms: ms,
                         reason,
                         rejected_count,
+                        capture_ms: capture_ms_acc,
+                        stt_ms: stt_ms_acc,
+                        relevance_ms: relevance_ms_acc,
                     });
                 }
                 // Flash the `Ignoring` overlay state for ~700 ms so

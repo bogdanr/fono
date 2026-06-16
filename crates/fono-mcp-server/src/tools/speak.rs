@@ -3,7 +3,7 @@
 //! and play it back on the configured audio device.
 
 use async_trait::async_trait;
-use tracing::debug;
+use tracing::info;
 
 use crate::protocol::ToolCallResult;
 use crate::tools::{ClientIdentityHandle, McpContext, Tool};
@@ -69,14 +69,7 @@ impl Tool for SpeakTool {
         let voice = arguments.get("voice").and_then(|v| v.as_str()).map(String::from);
         let program = crate::tools::client_program(&self.client_identity);
         let resolved = resolve_program_voice(&self.cfg, program.as_deref(), voice.as_deref());
-
-        debug!(
-            target: "fono_mcp_server::speak",
-            text_len = text.len(),
-            program = program.as_deref().unwrap_or(""),
-            voice = resolved.as_deref().unwrap_or(""),
-            "fono.speak called"
-        );
+        let tts_backend = fono_core::providers::tts_backend_str(&self.cfg.tts.backend);
 
         match speak_text(
             &self.cfg,
@@ -87,8 +80,33 @@ impl Tool for SpeakTool {
         )
         .await
         {
-            Ok(()) => ToolCallResult::success("{\"spoken\": true}"),
-            Err(e) => ToolCallResult::failure(format!("fono.speak: {e:#}")),
+            Ok(timings) => {
+                info!(
+                    target: "fono_mcp_server::speak",
+                    client = program.as_deref().unwrap_or(""),
+                    tts_backend,
+                    voice = resolved.as_deref().unwrap_or(""),
+                    text_len = text.len(),
+                    synth_ms = timings.synth_ms,
+                    playback_ms = timings.playback_ms,
+                    ok = true,
+                    "fono.speak completed"
+                );
+                ToolCallResult::success("{\"spoken\": true}")
+            }
+            Err(e) => {
+                info!(
+                    target: "fono_mcp_server::speak",
+                    client = program.as_deref().unwrap_or(""),
+                    tts_backend,
+                    voice = resolved.as_deref().unwrap_or(""),
+                    text_len = text.len(),
+                    ok = false,
+                    error = %format!("{e:#}"),
+                    "fono.speak completed"
+                );
+                ToolCallResult::failure(format!("fono.speak: {e:#}"))
+            }
         }
     }
 }
