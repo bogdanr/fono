@@ -1145,6 +1145,43 @@ pub struct McpServer {
     /// who-wants-what, never read raw logs/long content aloud.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub summarize_prompt: String,
+    /// Per-program voice assignments, keyed by a normalised program
+    /// name (the MCP `clientInfo.name`, or `source_app` for
+    /// `fono.summarize`). The value is a positional palette label
+    /// (`"female 1"`, `"male 2"`), the literal `"auto"`, or a raw
+    /// backend voice id. Empty (default) ⇒ every program is resolved
+    /// automatically (when `auto_assign_voices`) or falls back to the
+    /// backend default. Labels are resolved against the *active*
+    /// backend's palette on each call, so a stale entry degrades to
+    /// auto rather than erroring.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub voices: std::collections::BTreeMap<String, String>,
+    /// Global gender preference for automatic voice assignment and the
+    /// voice picker. One of `"male"`, `"female"`, or `"any"` (default).
+    /// Filters the palette before a program is assigned a voice; an
+    /// explicit per-call voice or a manual `voices` pin still wins.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub voice_gender: String,
+    /// Whether programs without an explicit `voices` pin are given a
+    /// stable, automatically assigned palette voice (deterministic hash
+    /// of the program name onto the gender-filtered palette). Default
+    /// `true`. When `false`, unpinned programs use the backend default
+    /// voice.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub auto_assign_voices: bool,
+}
+
+/// Default provider for `auto_assign_voices` (and any other bool that
+/// defaults to `true`).
+fn default_true() -> bool {
+    true
+}
+
+/// `skip_serializing_if` predicate: omit a `true`-valued bool whose
+/// default is `true`, so a default config does not grow the key.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde requires `&T`
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 impl Default for McpServer {
@@ -1157,6 +1194,9 @@ impl Default for McpServer {
             relevance_filter: "heuristic".to_string(),
             relevance_max_rejections: 2,
             summarize_prompt: String::new(),
+            voices: std::collections::BTreeMap::new(),
+            voice_gender: String::new(),
+            auto_assign_voices: true,
         }
     }
 }
@@ -1433,6 +1473,39 @@ pub(crate) fn atomic_write(path: &Path, data: &[u8], _mode: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_voice_defaults_and_roundtrip() {
+        // Defaults: empty maps, no gender preference, auto-assign on.
+        let d = McpServer::default();
+        assert!(d.voices.is_empty());
+        assert!(d.voice_gender.is_empty());
+        assert!(d.auto_assign_voices);
+        assert!(d.is_default());
+
+        // A default McpServer must not emit any of the new keys.
+        let toml = toml::to_string(&d).unwrap();
+        assert!(!toml.contains("voices"), "default should omit voices: {toml}");
+        assert!(!toml.contains("voice_gender"), "default should omit voice_gender: {toml}");
+        assert!(!toml.contains("auto_assign_voices"), "default true must be skipped: {toml}");
+
+        // A config that omits the new keys deserialises to the defaults.
+        let parsed: McpServer = toml::from_str("enabled = true\n").unwrap();
+        assert!(parsed.auto_assign_voices, "missing key ⇒ default true");
+        assert!(parsed.voices.is_empty());
+
+        // Explicit assignments round-trip.
+        let mut m = McpServer::default();
+        m.voices.insert("coach".into(), "male 1".into());
+        m.voice_gender = "female".into();
+        m.auto_assign_voices = false;
+        assert!(!m.is_default());
+        let s = toml::to_string(&m).unwrap();
+        let back: McpServer = toml::from_str(&s).unwrap();
+        assert_eq!(back.voices.get("coach").map(String::as_str), Some("male 1"));
+        assert_eq!(back.voice_gender, "female");
+        assert!(!back.auto_assign_voices);
+    }
 
     #[test]
     fn roundtrip_default() {

@@ -13,6 +13,11 @@ description = "MCP server for Fono — exposes fono.speak, fono.listen, fono.con
 # server's assistant backend support matches the daemon's.
 llama-local = ["fono-assistant/llama-local"]
 
+# On-device ONNX TTS (Kokoro/Piper). Forwarded from the `fono` binary's
+# `tts-local` feature so the MCP server can build the active backend's
+# local voice palette for per-program voice resolution.
+tts-local = ["fono-tts/tts-local"]
+
 [dependencies]
 anyhow = { workspace = true }
 serde = { workspace = true }

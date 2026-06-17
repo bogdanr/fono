@@ -23,6 +23,7 @@
 
 use crate::config::{PolishBackend, SttBackend};
 use crate::providers::{parse_polish_backend, parse_stt_backend};
+use crate::voice_palette::{Gender, PaletteEntry};
 
 /// Defaults for a provider's speech-to-text capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +99,12 @@ pub struct TtsDefaults {
     pub model: &'static str,
     /// Default voice id / name.
     pub default_voice: &'static str,
+    /// Curated, gender-tagged voice palette (≤10) for per-program voices.
+    /// The user addresses these by positional gendered label ("Female 1",
+    /// "Male 2") via `fono voices`; the cryptic backend id lives only here.
+    /// May be empty for a provider whose voice ids cannot be enumerated
+    /// safely yet (the resolver then falls back to `default_voice`).
+    pub voices: &'static [PaletteEntry],
     /// Endpoint shape (which client to instantiate, plus base URL).
     pub endpoint: TtsEndpoint,
     /// Whether the doctor should runtime-probe the provider's TTS
@@ -256,6 +263,17 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tts: Some(TtsDefaults {
             model: "tts-1",
             default_voice: "alloy",
+            // The six voices supported by `tts-1`. Gender labels follow
+            // OpenAI's commonly attributed presentation; `alloy` is the
+            // neutral default.
+            voices: &[
+                PaletteEntry { backend_id: "nova", gender: Gender::Female },
+                PaletteEntry { backend_id: "shimmer", gender: Gender::Female },
+                PaletteEntry { backend_id: "alloy", gender: Gender::Neutral },
+                PaletteEntry { backend_id: "echo", gender: Gender::Male },
+                PaletteEntry { backend_id: "fable", gender: Gender::Male },
+                PaletteEntry { backend_id: "onyx", gender: Gender::Male },
+            ],
             endpoint: TtsEndpoint::OpenAiCompat {
                 base_url: "https://api.openai.com/v1",
                 response_format: "pcm",
@@ -319,6 +337,17 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // sample for Orpheus).
             model: "canopylabs/orpheus-v1-english",
             default_voice: "hannah",
+            // Groq's curated Orpheus six-voice set (see the model note
+            // above). Sending an upstream-only Orpheus voice 400s, so the
+            // palette is exactly Groq's hosted set.
+            voices: &[
+                PaletteEntry { backend_id: "hannah", gender: Gender::Female },
+                PaletteEntry { backend_id: "autumn", gender: Gender::Female },
+                PaletteEntry { backend_id: "diana", gender: Gender::Female },
+                PaletteEntry { backend_id: "austin", gender: Gender::Male },
+                PaletteEntry { backend_id: "daniel", gender: Gender::Male },
+                PaletteEntry { backend_id: "troy", gender: Gender::Male },
+            ],
             endpoint: TtsEndpoint::OpenAiCompat {
                 base_url: "https://api.groq.com/openai/v1",
                 // Groq's Orpheus deployment rejects `pcm` with
@@ -452,6 +481,12 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // of `config.toml`.
             model: "x-ai/grok-voice-tts-1.0",
             default_voice: "ara",
+            // Only the default Grok voice is pinned here; the wider voice
+            // set is not reliably enumerable through OpenRouter yet, so the
+            // palette stays minimal and the resolver falls back to the
+            // default (no per-program distinctness on this backend until
+            // auto-discovery lands).
+            voices: &[PaletteEntry { backend_id: "ara", gender: Gender::Female }],
             endpoint: TtsEndpoint::OpenAiCompat {
                 base_url: "https://openrouter.ai/api/v1",
                 response_format: "pcm",
@@ -487,6 +522,16 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // (e.g. `aura-2-thalia-en` *is* the voice). Keep an empty
             // default_voice rather than duplicating the model id.
             default_voice: "",
+            // Deepgram selects a voice via the `model` parameter, so each
+            // palette id is a full Aura-2 model id. The resolver maps a
+            // chosen palette voice onto the request `model` for this
+            // backend.
+            voices: &[
+                PaletteEntry { backend_id: "aura-2-thalia-en", gender: Gender::Female },
+                PaletteEntry { backend_id: "aura-2-andromeda-en", gender: Gender::Female },
+                PaletteEntry { backend_id: "aura-2-apollo-en", gender: Gender::Male },
+                PaletteEntry { backend_id: "aura-2-arcas-en", gender: Gender::Male },
+            ],
             endpoint: TtsEndpoint::Deepgram,
             runtime_probe: false,
             // Aura-2 ships voices in several languages (the model id
@@ -536,6 +581,13 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             model: "sonic-3.5",
             // Cartesia's "Sonic English Female" preset voice id.
             default_voice: "a0e99841-438c-4a64-b679-ae501e7d6091",
+            // Only the default preset is pinned; Cartesia voice ids are
+            // account-scoped UUIDs best refreshed by the optional
+            // `/voices` auto-discovery probe rather than hard-coded.
+            voices: &[PaletteEntry {
+                backend_id: "a0e99841-438c-4a64-b679-ae501e7d6091",
+                gender: Gender::Female,
+            }],
             endpoint: TtsEndpoint::Cartesia,
             runtime_probe: false,
             // Cartesia Sonic is multilingual.
@@ -576,6 +628,17 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // with `402 paid_plan_required` ("Free users cannot use
             // library voices via the API"). Verified 2026-06-15.
             default_voice: "EXAVITQu4vr4xnSDxMaL",
+            // Standard premade voices present in every account (including
+            // free tier) so they synthesise without a paid plan. Library
+            // voices are intentionally excluded (they 402 for free keys).
+            voices: &[
+                PaletteEntry { backend_id: "EXAVITQu4vr4xnSDxMaL", gender: Gender::Female }, // Sarah
+                PaletteEntry { backend_id: "XB0fDUnXU5powFXDhCwa", gender: Gender::Female }, // Charlotte
+                PaletteEntry { backend_id: "Xb7hH8MSUJpSbSDYk0k2", gender: Gender::Female }, // Alice
+                PaletteEntry { backend_id: "JBFqnCBsd6RMkjVDRZzb", gender: Gender::Male }, // George
+                PaletteEntry { backend_id: "TX3LPaxmHKxFdv7VOQHJ", gender: Gender::Male }, // Liam
+                PaletteEntry { backend_id: "CwhRBWXzGAHq8TQ4Fs17", gender: Gender::Male }, // Roger
+            ],
             endpoint: TtsEndpoint::ElevenLabs,
             runtime_probe: false,
             // Eleven v3 renders 70+ languages — not English-only.
@@ -626,6 +689,9 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             model: "preview",
             // English (UK) female preview voice.
             default_voice: "sarah",
+            // The preview exposes a single documented voice; pin it and
+            // let the resolver fall back to the default.
+            voices: &[PaletteEntry { backend_id: "sarah", gender: Gender::Female }],
             endpoint: TtsEndpoint::Speechmatics {
                 base_url: "https://preview.tts.speechmatics.com",
             },
@@ -681,6 +747,17 @@ pub fn find(id: &str) -> Option<&'static CloudProvider> {
 pub fn tts_backend_english_only(backend: &crate::config::TtsBackend) -> bool {
     let id = crate::providers::tts_backend_str(backend);
     find(id).and_then(|p| p.tts.as_ref()).is_some_and(|t| t.english_only)
+}
+
+/// The curated voice palette for a cloud TTS provider id, as an owned
+/// runtime [`Palette`](crate::voice_palette::Palette). Empty when the id has
+/// no catalogue TTS entry or no curated voices.
+#[must_use]
+pub fn tts_palette(id: &str) -> crate::voice_palette::Palette {
+    find(id)
+        .and_then(|p| p.tts.as_ref())
+        .map(|t| crate::voice_palette::Palette::from_entries(t.voices))
+        .unwrap_or_default()
 }
 
 /// Construct a `(stt, polish)` pair from a catalogue entry, mapping the
@@ -1020,5 +1097,55 @@ mod tests {
         assert!(!tts_backend_english_only(&TtsBackend::None));
         assert!(!tts_backend_english_only(&TtsBackend::Wyoming));
         assert!(!tts_backend_english_only(&TtsBackend::Local));
+    }
+
+    /// Every TTS palette must be well-formed: unique non-empty ids, and a
+    /// non-empty `default_voice` must itself be a palette member (so a
+    /// gender filter never hides the documented default).
+    #[test]
+    fn tts_palettes_are_well_formed() {
+        for p in CLOUD_PROVIDERS {
+            let Some(tts) = p.tts else { continue };
+            let mut seen = std::collections::BTreeSet::new();
+            for v in tts.voices {
+                assert!(!v.backend_id.is_empty(), "{}: empty palette voice id", p.id);
+                assert!(
+                    seen.insert(v.backend_id),
+                    "{}: duplicate palette voice {}",
+                    p.id,
+                    v.backend_id
+                );
+            }
+            if !tts.voices.is_empty() && !tts.default_voice.is_empty() {
+                assert!(
+                    tts.voices.iter().any(|v| v.backend_id == tts.default_voice),
+                    "{}: default_voice {} is not in the palette",
+                    p.id,
+                    tts.default_voice
+                );
+            }
+        }
+    }
+
+    /// Pin per-provider palette sizes so a casual catalogue edit can't
+    /// silently change the addressable voice set. Update together with the
+    /// palette and `docs/providers.md`.
+    #[test]
+    fn tts_palette_sizes_pinned() {
+        let cases: &[(&str, usize)] = &[
+            ("openai", 6),
+            ("groq", 6),
+            ("openrouter", 1),
+            ("deepgram", 4),
+            ("cartesia", 1),
+            ("elevenlabs", 6),
+            ("speechmatics", 1),
+        ];
+        for (id, len) in cases {
+            let tts = find(id).unwrap_or_else(|| panic!("missing {id}")).tts.unwrap();
+            assert_eq!(tts.voices.len(), *len, "palette size drift for {id}");
+            // The runtime palette helper must agree.
+            assert_eq!(tts_palette(id).voices().len(), *len, "tts_palette size drift for {id}");
+        }
     }
 }

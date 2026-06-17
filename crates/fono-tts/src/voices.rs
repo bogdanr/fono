@@ -17,6 +17,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use fono_core::voice_palette::{Gender, Palette, PaletteVoice};
 use serde::Deserialize;
 
 /// Default mirror base URL: the `fono-voice` repo's release-download root.
@@ -74,6 +75,36 @@ pub struct Voice {
     /// [`crate::espeak::canonical_lang`]).
     #[serde(default)]
     pub espeak_voice: Option<String>,
+    /// Optional explicit perceived gender (`"female"`/`"male"`/`"neutral"`).
+    /// When unset it is derived for Kokoro voices from the `a?_`/`b?_`
+    /// naming convention (see [`Voice::gender`]); Piper voices default to
+    /// neutral unless declared.
+    #[serde(default)]
+    pub gender: Option<String>,
+}
+
+impl Voice {
+    /// Perceived gender for this voice, for the friendly voice palette.
+    ///
+    /// Uses the explicit `gender` field when present; otherwise derives it
+    /// for Kokoro voices from their naming convention — the second letter
+    /// of the name encodes gender (`f` female, `m` male), e.g. `af_heart`,
+    /// `am_michael`, `bf_emma`, `bm_lewis`. Anything else is
+    /// [`Gender::Neutral`].
+    #[must_use]
+    pub fn gender(&self) -> Gender {
+        if let Some(g) = self.gender.as_deref().and_then(Gender::parse) {
+            return g;
+        }
+        if self.engine == "kokoro" {
+            match self.name.as_bytes().get(1) {
+                Some(b'f') => return Gender::Female,
+                Some(b'm') => return Gender::Male,
+                _ => {}
+            }
+        }
+        Gender::Neutral
+    }
 }
 
 /// A downloadable, SHA-256-pinned asset.
@@ -138,6 +169,30 @@ pub fn by_name(name: &str) -> Result<Option<Voice>> {
 /// the raw lookup.
 pub fn for_language(language: &str) -> Result<Option<Voice>> {
     Ok(catalog()?.into_iter().find(|v| v.language == language))
+}
+
+/// Build the local voice palette for the given active base languages
+/// (e.g. `["en", "ro"]`). Mirrors the engine policy — Kokoro voices for
+/// English, the Piper voice(s) for every other language — so the palette
+/// contains exactly the voices a user could actually be routed to, each
+/// tagged with its [`Gender`]. An empty `languages` slice includes every
+/// catalog language. Order follows the catalog, which determines the
+/// positional labels ("Female 1", "Male 2", …).
+pub fn local_palette(languages: &[&str]) -> Result<Palette> {
+    let voices = catalog()?;
+    let mut out = Vec::new();
+    for v in &voices {
+        let active = languages.is_empty() || languages.contains(&v.language.as_str());
+        if !active {
+            continue;
+        }
+        // Kokoro for English, Piper for the rest (ADR 0033).
+        let engine_ok = if v.language == "en" { v.engine == "kokoro" } else { v.engine == "piper" };
+        if engine_ok {
+            out.push(PaletteVoice::new(v.name.clone(), v.gender()));
+        }
+    }
+    Ok(Palette::new(out))
 }
 
 /// All espeak-ng dictionaries declared in the catalog.
@@ -342,6 +397,45 @@ mod tests {
             .map(|v| v.model.file)
             .collect();
         assert_eq!(models.len(), 1, "every Kokoro voice must point at the same shared model");
+    }
+
+    #[test]
+    fn kokoro_gender_is_derived_from_naming_convention() {
+        for (name, expected) in [
+            ("af_heart", Gender::Female),
+            ("af_bella", Gender::Female),
+            ("af_nicole", Gender::Female),
+            ("bf_emma", Gender::Female),
+            ("am_michael", Gender::Male),
+            ("bm_lewis", Gender::Male),
+        ] {
+            let v = by_name(name).unwrap().unwrap_or_else(|| panic!("{name} present"));
+            assert_eq!(v.gender(), expected, "derived gender for {name}");
+        }
+        // Piper voices have no naming convention → neutral.
+        let piper = by_name("ro_RO-mihai-medium").unwrap().unwrap();
+        assert_eq!(piper.gender(), Gender::Neutral);
+    }
+
+    #[test]
+    fn local_palette_for_english_is_kokoro_and_gender_labelled() {
+        let palette = local_palette(&["en"]).unwrap();
+        // Six Kokoro voices, no Piper English voices.
+        let ids: Vec<&str> = palette.voices().iter().map(|v| v.backend_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["af_heart", "af_bella", "af_nicole", "bf_emma", "am_michael", "bm_lewis"]
+        );
+        // Positional gendered labels resolve back to intrinsic ids.
+        assert_eq!(palette.by_label("Female 1").unwrap().backend_id, "af_heart");
+        assert_eq!(palette.by_label("Male 1").unwrap().backend_id, "am_michael");
+        assert_eq!(palette.by_label("Male 2").unwrap().backend_id, "bm_lewis");
+        assert_eq!(palette.by_label("Female 4").unwrap().backend_id, "bf_emma");
+        // Romanian (Piper) contributes a single neutral voice.
+        let ro = local_palette(&["ro"]).unwrap();
+        assert_eq!(ro.voices().len(), 1);
+        assert_eq!(ro.voices()[0].backend_id, "ro_RO-mihai-medium");
+        assert_eq!(ro.voices()[0].gender, Gender::Neutral);
     }
 
     #[test]

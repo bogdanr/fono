@@ -10,8 +10,8 @@ use tracing::debug;
 
 use crate::protocol::ToolCallResult;
 use crate::summarize::{build_primary_assistant, summarize_with_assistant, SummarizePayload};
-use crate::tools::{McpContext, Tool};
-use crate::voice_io::speak_text;
+use crate::tools::{ClientIdentityHandle, McpContext, Tool};
+use crate::voice_io::{resolve_program_voice, speak_text};
 
 /// `fono.summarize` tool.
 ///
@@ -25,6 +25,7 @@ pub struct SummarizeTool {
     secrets: fono_core::Secrets,
     polish_models_dir: std::path::PathBuf,
     daemon_ipc_candidates: Vec<std::path::PathBuf>,
+    client_identity: ClientIdentityHandle,
     /// Primary assistant, built lazily on the first call and reused for
     /// the lifetime of the (long-lived) MCP server process. For the
     /// embedded local backend this keeps the model loaded and the
@@ -41,6 +42,7 @@ impl SummarizeTool {
             secrets: ctx.secrets.clone(),
             polish_models_dir: ctx.polish_models_dir.clone(),
             daemon_ipc_candidates: ctx.daemon_ipc_candidates.clone(),
+            client_identity: ctx.client_identity.clone(),
             assistant: tokio::sync::OnceCell::new(),
         }
     }
@@ -174,11 +176,22 @@ impl Tool for SummarizeTool {
             );
         }
 
+        // For notifications the per-program identity is `source_app`
+        // (the program that raised the notification), falling back to
+        // the MCP client identity when the caller omitted it. An
+        // explicit `voice` argument still wins over both.
+        let program = if payload.source_app.trim().is_empty() {
+            crate::tools::client_program(&self.client_identity)
+        } else {
+            Some(payload.source_app.trim().to_string())
+        };
+        let resolved = resolve_program_voice(&self.cfg, program.as_deref(), voice.as_deref());
+
         match speak_text(
             &self.cfg,
             &self.secrets,
             &summary,
-            voice.as_deref(),
+            resolved.as_deref(),
             &self.daemon_ipc_candidates,
         )
         .await
@@ -204,6 +217,7 @@ mod tests {
             polish_models_dir: std::path::PathBuf::from("/tmp/fono-test-polish"),
             polish_classifier_cache: McpContext::new_classifier_cache(),
             daemon_ipc_candidates: Vec::new(),
+            client_identity: McpContext::new_client_identity(),
         }
     }
 

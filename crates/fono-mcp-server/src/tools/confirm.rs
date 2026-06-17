@@ -18,8 +18,11 @@ use fono_polish::TextFormatter;
 use tracing::debug;
 
 use crate::protocol::ToolCallResult;
-use crate::tools::{McpContext, PolishClassifierCache, Tool};
-use crate::voice_io::{listen_once, match_choice, speak_text, ListenStopReason, McpActivityGuard};
+use crate::tools::{ClientIdentityHandle, McpContext, PolishClassifierCache, Tool};
+use crate::voice_io::{
+    listen_once, match_choice, resolve_program_voice, speak_text, ListenStopReason,
+    McpActivityGuard,
+};
 
 /// `fono.confirm` tool.
 pub struct ConfirmTool {
@@ -29,6 +32,7 @@ pub struct ConfirmTool {
     polish_models_dir: PathBuf,
     polish_classifier_cache: PolishClassifierCache,
     daemon_ipc_candidates: Vec<PathBuf>,
+    client_identity: ClientIdentityHandle,
 }
 
 impl ConfirmTool {
@@ -40,6 +44,7 @@ impl ConfirmTool {
             polish_models_dir: ctx.polish_models_dir.clone(),
             polish_classifier_cache: ctx.polish_classifier_cache.clone(),
             daemon_ipc_candidates: ctx.daemon_ipc_candidates.clone(),
+            client_identity: ctx.client_identity.clone(),
         }
     }
 
@@ -144,9 +149,16 @@ impl Tool for ConfirmTool {
         );
 
         let utterance = compose_utterance(&question, &choices);
-        if let Err(e) =
-            speak_text(&self.cfg, &self.secrets, &utterance, None, &self.daemon_ipc_candidates)
-                .await
+        let program = crate::tools::client_program(&self.client_identity);
+        let voice = resolve_program_voice(&self.cfg, program.as_deref(), None);
+        if let Err(e) = speak_text(
+            &self.cfg,
+            &self.secrets,
+            &utterance,
+            voice.as_deref(),
+            &self.daemon_ipc_candidates,
+        )
+        .await
         {
             return ToolCallResult::failure(format!("fono.confirm: TTS failed: {e:#}"));
         }

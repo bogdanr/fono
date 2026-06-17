@@ -49,14 +49,18 @@ impl DeepgramTts {
     }
 
     /// Resolved POST URL with model + encoding + sample-rate query
-    /// parameters baked in. Exposed for tests.
+    /// parameters baked in, using the configured model. Exposed for tests.
     #[must_use]
     pub fn speech_url(&self) -> String {
-        format!(
-            "{BASE_ENDPOINT}?model={model}&encoding=linear16&sample_rate={rate}",
-            model = self.model,
-            rate = NATIVE_RATE
-        )
+        self.speech_url_for(&self.model)
+    }
+
+    /// Resolved POST URL for an explicit `model` (Deepgram selects the
+    /// voice via the `model` query parameter, so a per-call voice
+    /// override is just a different model). Exposed for tests.
+    #[must_use]
+    pub fn speech_url_for(&self, model: &str) -> String {
+        format!("{BASE_ENDPOINT}?model={model}&encoding=linear16&sample_rate={NATIVE_RATE}")
     }
 
     /// Build the JSON body for `synthesize`. Exposed for tests.
@@ -85,16 +89,20 @@ impl TextToSpeech for DeepgramTts {
     async fn synthesize(
         &self,
         text: &str,
-        _voice: Option<&str>,
+        voice: Option<&str>,
         _lang: Option<&str>,
     ) -> Result<TtsAudio> {
         if text.is_empty() {
             return Ok(TtsAudio { pcm: Vec::new(), sample_rate: NATIVE_RATE });
         }
+        // Deepgram picks the voice via the `model` query parameter, so an
+        // explicit per-call voice override is simply a different model
+        // (e.g. `aura-2-apollo-en`). Fall back to the configured model.
+        let model = voice.map(str::trim).filter(|v| !v.is_empty()).unwrap_or(self.model.as_str());
         let body = self.build_request_body(text);
         let resp = self
             .client
-            .post(self.speech_url())
+            .post(self.speech_url_for(model))
             .header("Authorization", format!("Token {}", self.api_key))
             .json(&body)
             .send()
@@ -175,5 +183,21 @@ mod tests {
         let audio = c.synthesize("", None, None).await.unwrap();
         assert!(audio.pcm.is_empty());
         assert_eq!(audio.sample_rate, NATIVE_RATE);
+    }
+
+    #[test]
+    fn per_call_voice_override_selects_a_different_model() {
+        // Deepgram picks the voice via the `model` query param, so a
+        // per-call voice override must change the request URL — this is
+        // the regression behind `fono voices preview aura-2-apollo-en`
+        // playing the default voice.
+        let c = DeepgramTts::new("dg-test", None);
+        assert_eq!(c.model(), "aura-2-thalia-en");
+        let url = c.speech_url_for("aura-2-apollo-en");
+        assert_eq!(
+            url,
+            "https://api.deepgram.com/v1/speak?model=aura-2-apollo-en&encoding=linear16&sample_rate=24000"
+        );
+        assert_ne!(url, c.speech_url(), "override must differ from the default-model URL");
     }
 }

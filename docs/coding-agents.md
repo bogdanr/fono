@@ -67,6 +67,12 @@ The integration is **agent-agnostic**: the same `fono mcp serve` process serves 
 agent. There is no per-agent code in Fono. Adding a new agent means adding a config
 snippet — no Fono changes needed.
 
+Each connecting agent is identified by its MCP `clientInfo.name`, so Fono can speak
+with a **different voice per program** — the coding agent, a chat notifier, and a coach
+each get a distinct, stable voice. Voices are picked automatically and addressed by
+friendly positional labels (`Female 1`, `Male 2`); see
+[configuration.md](configuration.md#per-program-voices) and `fono voices list`.
+
 ---
 
 ## Dictate-in, pipe-speak-out

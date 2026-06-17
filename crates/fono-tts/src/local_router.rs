@@ -86,9 +86,36 @@ impl LocalRouter {
     /// — constrained to the configured `langs` for accuracy — and fall back to
     /// the caller's hint only when detection is inconclusive (e.g. a reply too
     /// short to fingerprint), then to the default voice.
-    fn voice_for(&self, text: &str, lang: Option<&str>) -> Voice {
+    fn voice_for(&self, text: &str, voice: Option<&str>, lang: Option<&str>) -> Voice {
         if self.pinned {
             return self.default_voice.clone();
+        }
+        // An explicit per-call voice name (the resolver's chosen palette
+        // voice, e.g. "am_michael") overrides language routing when it
+        // names a real catalog voice. An empty or unknown name falls
+        // through to the language-based selection below.
+        if let Some(name) = voice.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(v) = resolve_explicit_voice(Some(name)) {
+                current_instant(
+                    "tts.voice_select",
+                    "assistant.tts",
+                    "tts",
+                    json!({ "explicit": name, "voice": v.name, "engine": v.engine }),
+                );
+                tracing::debug!(
+                    target: "fono_tts::local_router",
+                    explicit = name,
+                    engine = %v.engine,
+                    voice = %v.name,
+                    "local TTS explicit voice override",
+                );
+                return v;
+            }
+            tracing::debug!(
+                target: "fono_tts::local_router",
+                explicit = name,
+                "explicit voice not in catalog — falling back to language routing",
+            );
         }
         let detected = detect_base_lang(text, &self.langs);
         let chosen = detected
@@ -244,6 +271,16 @@ pub fn resolve_voice_for_lang(default_voice: &Voice, pinned: bool, lang: Option<
     crate::voices::for_language(&lang).ok().flatten().unwrap_or_else(|| default_voice.clone())
 }
 
+/// Resolve an explicit per-call voice name (the resolver's chosen
+/// palette voice, e.g. `"am_michael"`) to its catalog [`Voice`]. Empty
+/// or unknown names yield `None`, so the caller falls back to language
+/// routing. Pure (catalog lookup only) and unit-testable.
+#[must_use]
+pub fn resolve_explicit_voice(voice: Option<&str>) -> Option<Voice> {
+    let name = voice.map(str::trim).filter(|s| !s.is_empty())?;
+    crate::voices::by_name(name).ok().flatten()
+}
+
 /// Load the engine for a voice from its cached assets under `voices_dir`,
 /// dispatching on `voice.engine`: Kokoro voices (English) use a shared `.ort`
 /// model plus a per-voice style pack; Piper voices use a `.ort` model plus a
@@ -304,14 +341,14 @@ impl TextToSpeech for LocalRouter {
     async fn synthesize(
         &self,
         text: &str,
-        _voice: Option<&str>,
+        voice_override: Option<&str>,
         lang: Option<&str>,
     ) -> Result<TtsAudio> {
         if text.trim().is_empty() {
             return Ok(TtsAudio { pcm: Vec::new(), sample_rate: self.native_rate });
         }
         let route_span = current_span("tts.local_router", "assistant.tts", "tts");
-        let voice = self.voice_for(text, lang);
+        let voice = self.voice_for(text, voice_override, lang);
         let engine = self.engine_for(&voice)?;
         // The chosen engine owns the voice; its own `synthesize` does the
         // phonemize + ONNX inference (off the async runtime via spawn_blocking).
@@ -455,5 +492,20 @@ mod tests {
         assert_eq!(whatlang_for_base("zh"), Some(Lang::Cmn));
         assert!(whatlang_for_base("eu").is_none());
         assert!(whatlang_for_base("xx").is_none());
+    }
+
+    #[test]
+    fn explicit_voice_resolves_known_catalog_name() {
+        // A real Kokoro male voice resolves to its catalog entry.
+        let v = resolve_explicit_voice(Some("am_michael")).expect("am_michael is in the catalog");
+        assert_eq!(v.name, "am_michael");
+        assert_eq!(v.engine, "kokoro");
+    }
+
+    #[test]
+    fn explicit_voice_unknown_or_empty_is_none() {
+        assert!(resolve_explicit_voice(Some("definitely-not-a-voice")).is_none());
+        assert!(resolve_explicit_voice(Some("   ")).is_none());
+        assert!(resolve_explicit_voice(None).is_none());
     }
 }

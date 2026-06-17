@@ -15,8 +15,8 @@ use fono_polish::TextFormatter;
 use tracing::debug;
 
 use crate::protocol::ToolCallResult;
-use crate::tools::{McpContext, PolishClassifierCache, Tool};
-use crate::voice_io::{listen_once, speak_text, ListenStopReason};
+use crate::tools::{ClientIdentityHandle, McpContext, PolishClassifierCache, Tool};
+use crate::voice_io::{listen_once, resolve_program_voice, speak_text, ListenStopReason};
 
 /// Default cap on a single recording (in seconds) when the caller does
 /// not pass `max_seconds`. Mirrors the value advertised in the tool
@@ -31,6 +31,7 @@ pub struct ListenTool {
     polish_models_dir: PathBuf,
     polish_classifier_cache: PolishClassifierCache,
     daemon_ipc_candidates: Vec<PathBuf>,
+    client_identity: ClientIdentityHandle,
 }
 
 impl ListenTool {
@@ -42,6 +43,7 @@ impl ListenTool {
             polish_models_dir: ctx.polish_models_dir.clone(),
             polish_classifier_cache: ctx.polish_classifier_cache.clone(),
             daemon_ipc_candidates: ctx.daemon_ipc_candidates.clone(),
+            client_identity: ctx.client_identity.clone(),
         }
     }
 
@@ -151,9 +153,19 @@ impl Tool for ListenTool {
                 // microphone-open phase. If the user can already hear
                 // the agent speaking, painting a "RECORDING" panel on
                 // top of that is just noise.
-                if let Err(e) =
-                    speak_text(&self.cfg, &self.secrets, text, None, &self.daemon_ipc_candidates)
-                        .await
+                if let Err(e) = speak_text(
+                    &self.cfg,
+                    &self.secrets,
+                    text,
+                    resolve_program_voice(
+                        &self.cfg,
+                        crate::tools::client_program(&self.client_identity).as_deref(),
+                        None,
+                    )
+                    .as_deref(),
+                    &self.daemon_ipc_candidates,
+                )
+                .await
                 {
                     return ToolCallResult::failure(format!(
                         "fono.listen: prompt TTS failed: {e:#}"

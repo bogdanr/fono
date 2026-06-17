@@ -203,6 +203,69 @@ duration of any `fono.listen`, `fono.speak`, or `fono.confirm` call,
 then restores whatever it was showing before. See
 [coding-agents.md](coding-agents.md#what-you-see-and-hear-during-an-mcp-voice-turn).
 
+### Per-program voices
+
+Fono can speak with a **different voice per program**, so you can tell
+at a glance whether it was the coding agent, the chat notifier, or a
+coach talking. Every voice path — `fono.speak`, `fono.listen` and
+`fono.confirm` (the spoken prompt), `fono.summarize`, and the
+`fono summarize` CLI — resolves a voice for the calling program.
+
+Voices are addressed by **positional gendered labels** — `Female 1`,
+`Male 2` — never the cryptic, backend-specific ids (`alloy`, an
+ElevenLabs/Cartesia UUID, `af_heart`). Each TTS backend exposes a short
+curated palette; the label is just a stable position *within a gender*,
+so an existing voice (e.g. Kokoro's `af_heart`, or the new male English
+voices `am_michael` / `bm_lewis`) keeps its intrinsic name and is merely
+*addressed* by label. Run `fono voices list` to see the active backend's
+palette with each label, its intrinsic id, and gender.
+
+```toml
+[mcp]
+# Optional global gender preference that filters automatic assignment.
+# "male", "female", or "" / "any" (no preference). Manual pins and an
+# explicit per-call voice always bypass this filter.
+voice_gender = ""
+
+# Give every unpinned program a stable, automatically-assigned voice
+# (the program name is hashed onto the gender-filtered palette, so a
+# program keeps the same voice across restarts). Default true.
+auto_assign_voices = true
+
+# Manual per-program pins. The key is the program identity — the MCP
+# clientInfo.name, or the notification source_app for fono.summarize.
+# The value is a positional label, the literal "auto", or a raw
+# backend voice id. Manage these with `fono voices set/unset` rather
+# than editing by hand.
+# [mcp.voices]
+# "chat-cli" = "female 1"
+# "coding-agent" = "male 2"
+```
+
+Resolution precedence, highest first:
+
+1. An explicit per-call `voice` argument (the tool arg / `--voice`).
+2. A manual `[mcp.voices]` pin for the program.
+3. Automatic stable assignment (when `auto_assign_voices = true`).
+4. The backend default voice.
+
+A pin that names a slot the active backend doesn't have (e.g. after you
+switch backends) degrades gracefully to automatic assignment rather than
+erroring. Manage everything through the guided CLI:
+
+```console
+$ fono voices list                      # palette + pins + preferences
+$ fono voices set chat-cli "female 1"   # pin a program to a voice
+$ fono voices preview "male 2"          # audition a voice
+$ fono voices gender female             # global gender preference
+$ fono voices unset chat-cli            # revert a program to automatic
+```
+
+Per-call voice override is honoured by all cloud backends and by the
+local on-device backend. Note the local English palette ships female
+voices plus two males (`am_michael` US, `bm_lewis` UK); other languages
+expose whatever the on-device catalog provides.
+
 ## Hotkeys
 
 ```toml

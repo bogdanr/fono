@@ -444,12 +444,69 @@ impl SpeakSlotGuard {
     }
 }
 
+/// Build the active TTS backend's voice palette (curated, gender-tagged
+/// voices). Cloud backends read their curated list from the provider
+/// catalogue; the local backend derives its palette from the on-device
+/// voice catalog for the user's configured languages. Returns an empty
+/// palette when TTS is disabled or the backend has no curated voices —
+/// the resolver then falls back to the backend default voice.
+#[must_use]
+pub fn active_palette(cfg: &Config) -> fono_core::voice_palette::Palette {
+    use fono_core::config::TtsBackend;
+    match cfg.tts.backend {
+        TtsBackend::None => fono_core::voice_palette::Palette::default(),
+        TtsBackend::Local => local_palette(cfg),
+        ref other => {
+            let id = fono_core::providers::tts_backend_str(other);
+            fono_core::provider_catalog::tts_palette(id)
+        }
+    }
+}
+
+#[cfg(feature = "tts-local")]
+fn local_palette(cfg: &Config) -> fono_core::voice_palette::Palette {
+    // Normalise configured languages to base codes (the catalog keys on
+    // `en`, `ro`, …) before asking for the gendered local palette.
+    let langs: Vec<String> =
+        cfg.general.languages.iter().map(|l| fono_tts::local_router::base_lang(l)).collect();
+    let refs: Vec<&str> = langs.iter().map(String::as_str).collect();
+    fono_tts::voices::local_palette(&refs).unwrap_or_default()
+}
+
+#[cfg(not(feature = "tts-local"))]
+fn local_palette(_cfg: &Config) -> fono_core::voice_palette::Palette {
+    fono_core::voice_palette::Palette::default()
+}
+
+/// Resolve which backend voice a given program should speak with, per
+/// the shared precedence (explicit per-call voice → manual `[mcp.voices]`
+/// pin → stable automatic assignment → backend default). `program` is
+/// the normalised caller identity (MCP `clientInfo.name`, or
+/// `source_app` for `fono.summarize`); `explicit` is the per-call
+/// `voice` argument. Returns `None` to use the backend default voice.
+#[must_use]
+pub fn resolve_program_voice(
+    cfg: &Config,
+    program: Option<&str>,
+    explicit: Option<&str>,
+) -> Option<String> {
+    let palette = active_palette(cfg);
+    fono_core::voice_resolver::resolve_voice(&fono_core::voice_resolver::VoiceQuery {
+        palette: &palette,
+        program: program.map(str::trim).filter(|s| !s.is_empty()),
+        explicit: explicit.map(str::trim).filter(|s| !s.is_empty()),
+        pins: &cfg.mcp.voices,
+        voice_gender: &cfg.mcp.voice_gender,
+        auto_assign: cfg.mcp.auto_assign_voices,
+    })
+}
+
 /// Synthesise `text` through the configured TTS backend and block until
 /// playback drains (or `120 s` elapses). Returns an error string suitable
 /// for `ToolCallResult::failure` when anything goes wrong.
 ///
-/// `voice` is an optional backend-specific voice override.
-///
+/// `voice` is an optional, already-resolved backend-specific voice id
+/// (see [`resolve_program_voice`]). `None` uses the backend default.
 /// `daemon_ipc_candidates` enables the tray-feedback channel: if any
 /// of the listed sockets accepts an IPC connection, the daemon flips
 /// its tray to amber for the duration of playback. The guard is

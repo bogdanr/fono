@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use tracing::debug;
 
 use crate::protocol::ToolCallResult;
-use crate::tools::{McpContext, Tool};
-use crate::voice_io::speak_text;
+use crate::tools::{ClientIdentityHandle, McpContext, Tool};
+use crate::voice_io::{resolve_program_voice, speak_text};
 
 /// `fono.speak` tool.
 ///
@@ -18,6 +18,7 @@ pub struct SpeakTool {
     cfg: fono_core::config::Config,
     secrets: fono_core::Secrets,
     daemon_ipc_candidates: Vec<std::path::PathBuf>,
+    client_identity: ClientIdentityHandle,
 }
 
 impl SpeakTool {
@@ -26,6 +27,7 @@ impl SpeakTool {
             cfg: ctx.cfg.clone(),
             secrets: ctx.secrets.clone(),
             daemon_ipc_candidates: ctx.daemon_ipc_candidates.clone(),
+            client_identity: ctx.client_identity.clone(),
         }
     }
 }
@@ -65,14 +67,22 @@ impl Tool for SpeakTool {
             _ => return ToolCallResult::failure("fono.speak: missing or empty `text` argument"),
         };
         let voice = arguments.get("voice").and_then(|v| v.as_str()).map(String::from);
+        let program = crate::tools::client_program(&self.client_identity);
+        let resolved = resolve_program_voice(&self.cfg, program.as_deref(), voice.as_deref());
 
-        debug!(target: "fono_mcp_server::speak", text_len = text.len(), "fono.speak called");
+        debug!(
+            target: "fono_mcp_server::speak",
+            text_len = text.len(),
+            program = program.as_deref().unwrap_or(""),
+            voice = resolved.as_deref().unwrap_or(""),
+            "fono.speak called"
+        );
 
         match speak_text(
             &self.cfg,
             &self.secrets,
             &text,
-            voice.as_deref(),
+            resolved.as_deref(),
             &self.daemon_ipc_candidates,
         )
         .await

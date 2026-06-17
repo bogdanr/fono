@@ -1,5 +1,42 @@
 # Fono — Project Status
-Last updated: 2026-06-15
+Last updated: 2026-06-16
+
+## 2026-06-16 — Per-program TTS voices (palette + gender + positional labels)
+
+Executing `plans/2026-06-16-per-program-tts-voices-v4.md`. Fono now speaks with a
+distinct, stable voice per calling program (coding agent vs. chat notifier vs. coach),
+addressed by friendly positional gendered labels (`Female 1`, `Male 2`) instead of
+cryptic backend-specific ids. Done so far (Tasks 1–9, 11):
+
+- **Voices (Task 3b)** — added two male English Kokoro voices `am_michael` (en-us) and
+  `bm_lewis` (en-gb), closing the all-female English local gap. Style packs published to
+  the `fono-voice` `ort-1.24.2` release (byte-identical to upstream
+  onnx-community/Kokoro-82M-v1.0-ONNX tensors); catalog + manifest + README indexed.
+- **Palette (Tasks 1, 2, 3a)** — new `fono-core::voice_palette` (`Gender`, `PaletteVoice`,
+  `PaletteEntry`, `Palette` with positional per-gender label render/parse). Cloud palette
+  baked into `provider_catalog` per provider; local palette derived from the on-device
+  catalog with a per-voice `gender` field (Kokoro derived from the `a?_`/`b?_` naming).
+- **Identity (Task 4)** — the MCP `initialize` handshake's `clientInfo.name`, previously
+  discarded, is captured into a shared `ClientIdentityHandle` and threaded through every
+  tool.
+- **Config (Task 5)** — `[mcp]` gains `voices` (program→label map), `voice_gender`, and
+  `auto_assign_voices` (default true; skipped on serialize at default).
+- **Resolver (Task 6)** — pure `fono-core::voice_resolver`: explicit voice → manual pin →
+  stable FNV-1a auto-assignment (gender-filtered) → backend default; stale pins degrade to
+  auto. 14 unit tests.
+- **Wiring (Task 7)** — `voice_io::active_palette` + `resolve_program_voice` wired into
+  `fono.speak`/`listen`/`confirm`/`summarize` and the `fono summarize` CLI (summarize keys
+  on `source_app`, falling back to the MCP client identity).
+- **Local override (Task 8)** — `LocalRouter` now honours an explicit per-call voice via
+  `resolve_explicit_voice`, so on-device users get per-program voices too.
+- **CLI (Task 9)** — `fono voices list/set/unset/gender/preview` manage everything by
+  label, validated against the active backend.
+- **Docs (Task 11)** — `docs/configuration.md` per-program-voices section;
+  `docs/coding-agents.md` note. Resolver/palette/local-override unit tests landed with
+  their respective tasks.
+
+Remaining: Task 10 (optional cloud voice auto-discovery) is deferred. All commits staged
+locally, signed off, **not pushed**.
 
 ## 2026-06-15 — TTS: automatic local fallback for English-only cloud voices
 

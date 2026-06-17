@@ -73,7 +73,7 @@ enigo = ["fono-inject/enigo-backend"]
 # local TTS out of the box. Building (any profile) requires `ORT_LIB_LOCATION`
 # to point at the pinned `libonnxruntime.a` — `scripts/fetch-onnxruntime.sh`
 # provides it.
-tts-local = ["fono-tts/tts-local"]
+tts-local = ["fono-tts/tts-local", "fono-mcp-server/tts-local"]
 
 [dependencies]
 fono-core = { path = "../fono-core", features = ["vulkan-probe"] }

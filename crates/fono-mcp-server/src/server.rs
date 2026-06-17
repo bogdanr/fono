@@ -57,6 +57,25 @@ impl McpServer {
             };
             if msg.method == "initialize" {
                 let id = msg.id.unwrap_or(serde_json::Value::Null);
+                // Capture the client identity (clientInfo.name/version) so
+                // the voice resolver can assign a per-program voice. Best
+                // effort: a missing or malformed clientInfo just leaves the
+                // identity empty (falls back to default voice resolution).
+                if let Some(params) = msg
+                    .params
+                    .and_then(|p| serde_json::from_value::<protocol::InitializeParams>(p).ok())
+                {
+                    if let Some(info) = params.client_info {
+                        let identity: crate::tools::ClientIdentity = info.into();
+                        info!(
+                            target: "fono_mcp_server",
+                            client = %identity.name,
+                            version = identity.version.as_deref().unwrap_or("?"),
+                            "MCP client identified"
+                        );
+                        self.registry.set_client_identity(identity);
+                    }
+                }
                 let result = InitializeResult {
                     protocol_version: "2024-11-05".into(),
                     capabilities: Capabilities::default(),
@@ -275,8 +294,34 @@ mod tests {
             polish_models_dir: std::path::PathBuf::from("/tmp/fono-test-polish"),
             polish_classifier_cache: McpContext::new_classifier_cache(),
             daemon_ipc_candidates: Vec::new(),
+            client_identity: McpContext::new_client_identity(),
         };
         // MCP server is enabled by default (stdio only, no network exposure).
         assert!(ctx.cfg.mcp.enabled);
+    }
+
+    #[tokio::test]
+    async fn initialize_captures_client_identity() {
+        let mut transport = MemTransport::new();
+        transport.push_msg(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"coach","version":"2.1"}}}"#,
+        );
+        transport.push_msg(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+
+        let mut registry = ToolRegistry::new();
+        registry.register(EchoTool);
+        // Keep a handle to the shared identity slot to inspect after run.
+        let identity = registry.client_identity_handle();
+        let mut server = McpServer::new(Box::new(transport), registry);
+        server.run().await.expect("server should complete");
+
+        let captured = identity.read().unwrap().clone();
+        assert_eq!(
+            captured,
+            Some(crate::tools::ClientIdentity {
+                name: "coach".into(),
+                version: Some("2.1".into()),
+            })
+        );
     }
 }

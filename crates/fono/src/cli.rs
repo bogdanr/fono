@@ -359,10 +359,21 @@ pub enum Cmd {
         #[arg(long)]
         silent: bool,
     },
+    /// Manage per-program TTS voices: list the active backend's voice
+    /// palette, pin a program to a voice, set a gender preference, or
+    /// preview a voice.
+    ///
+    /// Voices are addressed by positional gendered labels ("Female 1",
+    /// "Male 2") so you never touch the cryptic backend-specific ids.
+    /// Example: `fono voices set chat-cli "male 1"`
+    Voices {
+        #[command(subcommand)]
+        action: VoicesCmd,
+    },
     /// Run Fono as an MCP (Model Context Protocol) server over stdio.
     ///
-    /// Exposes three voice tools: `fono.speak`, `fono.listen`, and
-    /// `fono.confirm`. The server is disabled by default; enable it
+    /// Exposes voice tools: `fono.speak`, `fono.listen`, `fono.confirm`,
+    /// and `fono.summarize`. The server is disabled by default; enable it
     /// with `fono use mcp-server on`. Only stdio transport is available
     /// in v1; SSE/HTTP transport follows in v2.
     Mcp {
@@ -533,6 +544,40 @@ pub enum McpCmd {
     Serve,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum VoicesCmd {
+    /// List the active TTS backend's voice palette (positional gendered
+    /// labels with the intrinsic voice name beside each), the current
+    /// per-program pins, and the gender preference.
+    List,
+    /// Pin a program to a voice. PROGRAM is the MCP `clientInfo.name` or
+    /// the notification `source_app`; LABEL is a palette label
+    /// ("female 1"), the literal "auto", or a raw backend voice id.
+    Set {
+        /// Program identity (MCP client name or notification source_app).
+        program: String,
+        /// Palette label ("male 1"), "auto", or a raw backend voice id.
+        label: String,
+    },
+    /// Remove a program's voice pin (it reverts to automatic assignment).
+    Unset {
+        /// Program identity to clear.
+        program: String,
+    },
+    /// Set the global gender preference that filters automatic
+    /// assignment: `male`, `female`, or `any` (clears the preference).
+    Gender {
+        /// One of `male`, `female`, `any`.
+        gender: String,
+    },
+    /// Speak a short sample through a palette voice so you can hear it
+    /// before pinning. LABEL is a palette label or a raw backend id.
+    Preview {
+        /// Palette label ("female 1") or a raw backend voice id.
+        label: String,
+    },
+}
+
 #[allow(clippy::large_stack_frames, clippy::too_many_lines, clippy::cognitive_complexity)]
 pub async fn run(cli: Cli) -> Result<()> {
     let paths = Paths::resolve().context("resolve XDG paths")?;
@@ -664,6 +709,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Some(Cmd::Summarize { json, sender, chat, source, instructions, voice, silent }) => {
             summarize_cmd(&paths, json, sender, chat, source, instructions, voice, silent).await
         }
+        Some(Cmd::Voices { action }) => voices_cmd(&paths, action).await,
         Some(Cmd::Mcp { action }) => match action {
             McpCmd::Serve => {
                 let cfg = fono_core::Config::load(&paths.config_file())?;
@@ -681,6 +727,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     polish_models_dir: paths.polish_models_dir(),
                     polish_classifier_cache: fono_mcp_server::McpContext::new_classifier_cache(),
                     daemon_ipc_candidates: paths.client_ipc_socket_candidates(),
+                    client_identity: fono_mcp_server::McpContext::new_client_identity(),
                 };
                 let registry = fono_mcp_server::ToolRegistry::default_with_context(&ctx);
                 let transport = fono_mcp_server::StdioTransport::new();
@@ -769,6 +816,14 @@ async fn summarize_cmd(
     if silent {
         return Ok(());
     }
+    // Resolve the per-program voice from `source_app` (and the explicit
+    // `--voice` override, which still wins) so a CLI-driven notifier
+    // gets the same per-program voice the MCP tool would. Falls back to
+    // the backend default when nothing matches.
+    let program =
+        if payload.source_app.trim().is_empty() { None } else { Some(payload.source_app.trim()) };
+    let resolved =
+        fono_mcp_server::voice_io::resolve_program_voice(&cfg, program, voice.as_deref());
     // `fono summarize` is typically driven headlessly by a notifier /
     // the `fono.summarize` MCP tool, so a failure on stderr is usually
     // invisible. Surface actionable TTS failures (key rejected, 402
@@ -779,7 +834,7 @@ async fn summarize_cmd(
         &cfg,
         &secrets,
         &summary,
-        voice.as_deref(),
+        resolved.as_deref(),
         &paths.client_ipc_socket_candidates(),
     )
     .await;
@@ -793,6 +848,142 @@ async fn summarize_cmd(
         );
     }
     spoken
+}
+
+/// `fono voices …` — inspect and manage per-program TTS voices.
+///
+/// All addressing is by positional gendered label ("Female 1", "Male 2")
+/// against the **active** TTS backend's palette, so the user never deals
+/// with cryptic backend-specific voice ids.
+#[allow(clippy::too_many_lines)]
+async fn voices_cmd(paths: &Paths, action: VoicesCmd) -> Result<()> {
+    use fono_core::voice_palette::Gender;
+
+    let path = paths.config_file();
+    let mut cfg = Config::load(&path)?;
+    let backend = fono_core::providers::tts_backend_str(&cfg.tts.backend);
+
+    match action {
+        VoicesCmd::List => {
+            let palette = fono_mcp_server::voice_io::active_palette(&cfg);
+            println!("Active TTS backend: {backend}");
+            if palette.is_empty() {
+                println!(
+                    "\nNo curated voice palette for this backend — programs use the backend \
+                     default voice."
+                );
+            } else {
+                println!("\nVoice palette (address voices by the label on the left):");
+                for (label, voice) in palette.labelled() {
+                    println!("  {label:<10}  {}  [{}]", voice.backend_id, voice.gender);
+                }
+            }
+            let pref = cfg.mcp.voice_gender.trim();
+            println!(
+                "\nGender preference: {}",
+                if pref.is_empty() { "any (no preference)" } else { pref }
+            );
+            println!(
+                "Automatic assignment: {}",
+                if cfg.mcp.auto_assign_voices { "on" } else { "off" }
+            );
+            if cfg.mcp.voices.is_empty() {
+                println!("\nNo per-program pins. Unpinned programs get a stable automatic voice.");
+            } else {
+                println!("\nPer-program pins:");
+                for (program, label) in &cfg.mcp.voices {
+                    println!("  {program:<20}  {label}");
+                }
+            }
+            Ok(())
+        }
+        VoicesCmd::Set { program, label } => {
+            let program = program.trim().to_string();
+            if program.is_empty() {
+                anyhow::bail!("program name must not be empty");
+            }
+            let palette = fono_mcp_server::voice_io::active_palette(&cfg);
+            let stored = if label.trim().eq_ignore_ascii_case("auto") {
+                "auto".to_string()
+            } else if let Some((gender, position)) = fono_core::voice_palette::parse_label(&label) {
+                // Positional label: validate the slot exists on the active
+                // backend and store a canonical, re-readable form.
+                if palette.by_label(&label).is_none() {
+                    anyhow::bail!(
+                        "no voice {:?} on the {backend} backend — run `fono voices list` to see \
+                         the available labels",
+                        fono_core::voice_palette::positional_label(gender, position)
+                    );
+                }
+                fono_core::voice_palette::positional_label(gender, position)
+            } else {
+                // Treat as a raw backend id. Warn (don't fail) when it's
+                // not in the curated palette — power users may pin an
+                // off-palette id the backend still accepts.
+                if !palette.is_empty() && palette.by_backend_id(label.trim()).is_none() {
+                    eprintln!(
+                        "warning: {:?} is not a positional label or a curated palette voice for \
+                         the {backend} backend; pinning it as a raw backend id",
+                        label.trim()
+                    );
+                }
+                label.trim().to_string()
+            };
+            cfg.mcp.voices.insert(program.clone(), stored.clone());
+            cfg.save(&path)?;
+            println!("Pinned {program:?} → {stored:?} (backend: {backend}).");
+            Ok(())
+        }
+        VoicesCmd::Unset { program } => {
+            let program = program.trim();
+            if cfg.mcp.voices.remove(program).is_some() {
+                cfg.save(&path)?;
+                println!("Removed pin for {program:?}; it now uses automatic assignment.");
+            } else {
+                println!("No pin for {program:?}; nothing to remove.");
+            }
+            Ok(())
+        }
+        VoicesCmd::Gender { gender } => {
+            let g = gender.trim();
+            if g.eq_ignore_ascii_case("any") || g.is_empty() {
+                cfg.mcp.voice_gender.clear();
+                cfg.save(&path)?;
+                println!("Cleared gender preference (any).");
+            } else {
+                let parsed = Gender::parse(g).ok_or_else(|| {
+                    anyhow::anyhow!("unknown gender {gender:?}; use male, female, or any")
+                })?;
+                cfg.mcp.voice_gender = parsed.as_str().to_string();
+                cfg.save(&path)?;
+                println!("Gender preference set to {}.", parsed.as_str());
+            }
+            Ok(())
+        }
+        VoicesCmd::Preview { label } => {
+            let secrets = fono_core::Secrets::load(&paths.secrets_file()).unwrap_or_default();
+            // Reuse the resolver so a positional label, "auto", or a raw id
+            // all map exactly as they would at speak time.
+            let resolved = fono_mcp_server::voice_io::resolve_program_voice(
+                &cfg,
+                Some("fono-voices-preview"),
+                Some(label.trim()),
+            );
+            let sample = format!("This is the {} voice on the {backend} backend.", label.trim());
+            println!(
+                "Previewing {label:?} → {}",
+                resolved.as_deref().unwrap_or("(backend default)")
+            );
+            fono_mcp_server::voice_io::speak_text(
+                &cfg,
+                &secrets,
+                &sample,
+                resolved.as_deref(),
+                &paths.client_ipc_socket_candidates(),
+            )
+            .await
+        }
+    }
 }
 
 /// `fono discover [--json]` — print the daemon's live mDNS registry.
