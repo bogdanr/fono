@@ -6,7 +6,10 @@
 //! ([`fono::wizard::apply_primary_provider`] and friends) rather than
 //! driving `dialoguer` end-to-end, so they run without a TTY.
 
-use fono::wizard::{apply_primary_provider, apply_secondary_tts, seed_primary_secret};
+use fono::wizard::{
+    apply_primary_provider, apply_secondary_tts, enable_local_assistant_with_voice,
+    seed_primary_secret,
+};
 use fono_core::config::{
     AssistantBackend, Config, PolishBackend, SttBackend, TtsBackend, TtsWyoming,
 };
@@ -174,6 +177,68 @@ fn primary_cartesia_covers_stt_and_tts_with_one_key() {
 
     assert_eq!(secrets.keys.len(), 1);
     assert!(secrets.has_in_file("CARTESIA_API_KEY"));
+}
+
+/// 6. Speech-only primary providers keep their cloud TTS selection when
+///    the user accepts the local assistant prompt. This covers the first-run
+///    wizard fallout where `enable_local_assistant_with_voice` used to
+///    overwrite `[tts].backend` with `local` after the cloud provider walk.
+#[test]
+fn local_assistant_preserves_elevenlabs_tts() {
+    let entry = find("elevenlabs").expect("elevenlabs catalogue entry");
+    let mut cfg = Config::default();
+
+    apply_primary_provider(&mut cfg, entry);
+    assert_eq!(cfg.stt.backend, SttBackend::ElevenLabs);
+    assert_eq!(cfg.tts.backend, TtsBackend::ElevenLabs);
+    let before_cloud = cfg.tts.cloud.clone().expect("elevenlabs tts.cloud set");
+    let before_voice = cfg.tts.voice.clone();
+
+    enable_local_assistant_with_voice(&mut cfg);
+
+    assert!(cfg.assistant.enabled);
+    assert_eq!(cfg.assistant.backend, AssistantBackend::Ollama);
+    assert_eq!(cfg.tts.backend, TtsBackend::ElevenLabs);
+    assert_eq!(cfg.tts.cloud.as_ref(), Some(&before_cloud));
+    assert_eq!(cfg.tts.voice, before_voice);
+}
+
+/// 7. Same regression guard for another speech-only cloud provider: Cartesia
+///    has STT + TTS but no assistant backend, so it follows the same wizard
+///    path as ElevenLabs.
+#[test]
+fn local_assistant_preserves_cartesia_tts() {
+    let entry = find("cartesia").expect("cartesia catalogue entry");
+    let mut cfg = Config::default();
+
+    apply_primary_provider(&mut cfg, entry);
+    assert_eq!(cfg.stt.backend, SttBackend::Cartesia);
+    assert_eq!(cfg.tts.backend, TtsBackend::Cartesia);
+    let before_cloud = cfg.tts.cloud.clone().expect("cartesia tts.cloud set");
+    let before_voice = cfg.tts.voice.clone();
+
+    enable_local_assistant_with_voice(&mut cfg);
+
+    assert!(cfg.assistant.enabled);
+    assert_eq!(cfg.assistant.backend, AssistantBackend::Ollama);
+    assert_eq!(cfg.tts.backend, TtsBackend::Cartesia);
+    assert_eq!(cfg.tts.cloud.as_ref(), Some(&before_cloud));
+    assert_eq!(cfg.tts.voice, before_voice);
+}
+
+/// 8. Local-only setup still gets local assistant audio when no earlier TTS
+///    backend exists.
+#[test]
+fn local_assistant_fills_local_tts_when_none_selected() {
+    let mut cfg = Config::default();
+
+    enable_local_assistant_with_voice(&mut cfg);
+
+    assert!(cfg.assistant.enabled);
+    assert_eq!(cfg.assistant.backend, AssistantBackend::Ollama);
+    assert_eq!(cfg.tts.backend, TtsBackend::Local);
+    assert!(cfg.tts.cloud.is_none());
+    assert!(cfg.tts.voice.is_empty());
 }
 
 /// D2 — Customize-flow regression guard. A config carrying

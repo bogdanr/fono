@@ -576,6 +576,14 @@ pub enum VoicesCmd {
         /// Palette label ("female 1") or a raw backend voice id.
         label: String,
     },
+    /// Probe the active cloud backend's live voice catalogue and cache a
+    /// refreshed, gender-labelled palette (capped to a short list). Safe
+    /// to run anytime: on any failure the current palette is left intact.
+    Discover {
+        /// Emit the discovered palette as JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[allow(clippy::large_stack_frames, clippy::too_many_lines, clippy::cognitive_complexity)]
@@ -866,6 +874,12 @@ async fn voices_cmd(paths: &Paths, action: VoicesCmd) -> Result<()> {
 
     match action {
         VoicesCmd::List => {
+            // Lazy refresh: if discovery is enabled and the active cloud
+            // backend's cache is missing or older than the staleness window,
+            // do a short, bounded probe before listing. Fail-safe — any error
+            // (or no key/descriptor) just falls through to the existing
+            // curated / cached palette.
+            maybe_refresh_for_list(paths, &cfg, backend).await;
             let palette = fono_mcp_server::voice_io::active_palette(&cfg);
             println!("Active TTS backend: {backend}");
             if palette.is_empty() {
@@ -984,6 +998,160 @@ async fn voices_cmd(paths: &Paths, action: VoicesCmd) -> Result<()> {
             )
             .await
             .map(|_| ())
+        }
+        VoicesCmd::Discover { json } => voices_discover(paths, &cfg, backend, json).await,
+    }
+}
+
+/// Outcome of a voice-discovery refresh attempt. Distinguishes the
+/// non-error "nothing to do" cases (no descriptor / no key) from a successful
+/// refresh so callers can tailor their messaging.
+pub(crate) enum RefreshOutcome {
+    /// The backend has no discovery descriptor (e.g. OpenAI's fixed voice set).
+    NoDescriptor,
+    /// No API key could be resolved for the backend.
+    NoKey { key_ref: String },
+    /// A fresh palette was discovered and written to the cache.
+    Refreshed(fono_core::voice_discovery::DiscoveredVoices),
+}
+
+/// Lazy-refresh timeout for `fono voices list` — kept short so listing stays
+/// responsive; a slow provider falls back to the curated / cached palette.
+pub(crate) const LIST_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Probe the active cloud backend's live voice catalogue and persist a
+/// refreshed palette. Shared by the explicit `fono voices discover` command,
+/// the daemon-start background refresh, and the lazy `fono voices list`
+/// refresh. Fail-safe: a missing descriptor or key returns a non-error
+/// outcome; a failed probe returns `Err` and the caller keeps the existing
+/// cache untouched.
+pub(crate) async fn refresh_discovered_palette(
+    paths: &Paths,
+    cfg: &Config,
+    backend: &str,
+    timeout: std::time::Duration,
+) -> Result<RefreshOutcome> {
+    let Some(descriptor) = fono_core::provider_catalog::tts_discovery(backend) else {
+        return Ok(RefreshOutcome::NoDescriptor);
+    };
+    // Resolve the API key the same way the TTS factory does: an explicit
+    // `[tts.cloud].api_key_ref`, else the backend's canonical env var.
+    let key_ref = cfg
+        .tts
+        .cloud
+        .as_ref()
+        .map(|c| c.api_key_ref.clone())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| fono_core::providers::tts_key_env(&cfg.tts.backend).to_string());
+    let secrets = fono_core::Secrets::load(&paths.secrets_file()).unwrap_or_default();
+    let Some(key) = secrets.resolve(&key_ref) else {
+        return Ok(RefreshOutcome::NoKey { key_ref });
+    };
+    let palette = fono_tts::discovery::discover_palette_capped(
+        &descriptor,
+        &key,
+        fono_core::voice_discovery::MAX_DISCOVERED_VOICES,
+        timeout,
+    )
+    .await?;
+    let record = fono_core::voice_discovery::DiscoveredVoices::from_palette(
+        backend,
+        &palette,
+        fono_core::voice_discovery::now_unix(),
+    );
+    record
+        .save(&paths.cache_dir)
+        .with_context(|| format!("save discovered-voices cache for {backend}"))?;
+    Ok(RefreshOutcome::Refreshed(record))
+}
+
+/// Lazy refresh for `fono voices list`: probe the backend only when discovery
+/// is enabled and the cache is missing or older than
+/// [`DISCOVERY_MAX_AGE_SECS`](fono_core::voice_discovery::DISCOVERY_MAX_AGE_SECS).
+/// Best-effort and quiet on the happy path; prints a one-line note while
+/// refreshing and a one-line warning on failure, then lets the caller fall
+/// back to the curated / cached palette.
+async fn maybe_refresh_for_list(paths: &Paths, cfg: &Config, backend: &str) {
+    if !cfg.tts.voice_discovery {
+        return;
+    }
+    if fono_core::provider_catalog::tts_discovery(backend).is_none() {
+        return; // backend has no discoverable catalogue (e.g. OpenAI)
+    }
+    // Only refresh when the cache is missing or stale; a fresh cache is used
+    // as-is so listing stays instant.
+    if let Some(cached) =
+        fono_core::voice_discovery::DiscoveredVoices::load(&paths.cache_dir, backend)
+    {
+        if !cached.is_stale(
+            fono_core::voice_discovery::now_unix(),
+            fono_core::voice_discovery::DISCOVERY_MAX_AGE_SECS,
+        ) {
+            return;
+        }
+    }
+    eprintln!("Refreshing {backend} voice list (cache missing or >24h old)…");
+    match refresh_discovered_palette(paths, cfg, backend, LIST_REFRESH_TIMEOUT).await {
+        Ok(RefreshOutcome::Refreshed(_)) => {}
+        Ok(_) => {} // no key/descriptor: silently keep the existing palette
+        Err(e) => eprintln!("voice-list refresh failed ({e:#}); showing the existing palette."),
+    }
+}
+
+/// `fono voices discover` — probe the active cloud backend's live voice
+/// catalogue and persist a refreshed palette. Fail-safe by design: a
+/// backend with no discovery descriptor, a missing key, or a failed probe
+/// all leave the existing (curated or last-discovered) palette untouched.
+async fn voices_discover(paths: &Paths, cfg: &Config, backend: &str, json: bool) -> Result<()> {
+    match refresh_discovered_palette(
+        paths,
+        cfg,
+        backend,
+        fono_tts::discovery::DEFAULT_DISCOVERY_TIMEOUT,
+    )
+    .await
+    {
+        Ok(RefreshOutcome::NoDescriptor) => {
+            println!(
+                "The {backend} backend has no discoverable voice list; it uses its curated \
+                 palette. Nothing to do."
+            );
+            Ok(())
+        }
+        Ok(RefreshOutcome::NoKey { key_ref }) => {
+            anyhow::bail!(
+                "no API key for {backend} (looked up {key_ref:?} in secrets.toml / environment); \
+                 run `fono keys add {key_ref}` first"
+            );
+        }
+        Ok(RefreshOutcome::Refreshed(record)) => {
+            let palette = record.to_palette();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&record)?);
+            } else {
+                println!(
+                    "Discovered {} voice(s) for {backend} (cached; address them by the label \
+                     on the left):",
+                    palette.voices().len()
+                );
+                for (label, voice) in palette.labelled() {
+                    println!("  {label:<10}  {}  [{}]", voice.backend_id, voice.gender);
+                }
+                println!(
+                    "\nThis palette is now active for {backend}. Re-run `fono voices discover` \
+                     to refresh, or pin a program with `fono voices set`."
+                );
+            }
+            Ok(())
+        }
+        Err(e) => {
+            // Fail-safe: never touch the cache, never error out the user's
+            // workflow — just report and keep the current palette.
+            eprintln!("voice discovery failed for {backend}: {e:#}");
+            eprintln!(
+                "Keeping the current palette (curated or last discovered); nothing was changed."
+            );
+            Ok(())
         }
     }
 }

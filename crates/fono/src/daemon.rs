@@ -126,6 +126,38 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     let secrets = Secrets::load(&paths.secrets_file()).context("load secrets")?;
     print_banner(paths, &config, verbosity);
 
+    // Best-effort, non-blocking voice-discovery refresh at daemon start.
+    // Keeps the active cloud backend's voice palette fresh without delaying
+    // startup; any failure (no key, network, provider error) is logged at
+    // debug and leaves the existing cache untouched. The lazy `fono voices
+    // list` refresh (>24h) complements this for long-lived daemons.
+    if config.tts.voice_discovery {
+        let backend = fono_core::providers::tts_backend_str(&config.tts.backend).to_string();
+        if fono_core::provider_catalog::tts_discovery(&backend).is_some() {
+            let paths_bg = paths.clone();
+            let cfg_bg = Arc::clone(&config);
+            tokio::spawn(async move {
+                match crate::cli::refresh_discovered_palette(
+                    &paths_bg,
+                    &cfg_bg,
+                    &backend,
+                    fono_tts::discovery::DEFAULT_DISCOVERY_TIMEOUT,
+                )
+                .await
+                {
+                    Ok(crate::cli::RefreshOutcome::Refreshed(r)) => {
+                        info!(
+                            "voice discovery: refreshed {} voice(s) for {backend}",
+                            r.voices.len()
+                        );
+                    }
+                    Ok(_) => debug!("voice discovery: nothing to refresh for {backend}"),
+                    Err(e) => debug!("voice discovery refresh failed for {backend}: {e:#}"),
+                }
+            });
+        }
+    }
+
     // Single-instance guard: probe the IPC socket. If a previous
     // daemon is alive it answers `connect()`; bail before we
     // duplicate it. Stale sockets (ConnectionRefused / ENOENT) and

@@ -56,9 +56,11 @@ impl Gender {
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "female" | "f" | "woman" | "w" => Some(Self::Female),
-            "male" | "m" | "man" => Some(Self::Male),
-            "neutral" | "n" | "any" | "neuter" => Some(Self::Neutral),
+            "female" | "f" | "woman" | "w" | "feminine" => Some(Self::Female),
+            "male" | "m" | "man" | "masculine" => Some(Self::Male),
+            "neutral" | "n" | "any" | "neuter" | "gender_neutral" | "genderless" => {
+                Some(Self::Neutral)
+            }
             _ => None,
         }
     }
@@ -238,6 +240,10 @@ mod tests {
         assert_eq!(Gender::parse("f"), Some(Gender::Female));
         assert_eq!(Gender::parse("m"), Some(Gender::Male));
         assert_eq!(Gender::parse("any"), Some(Gender::Neutral));
+        // Provider-specific synonyms (e.g. Cartesia uses these).
+        assert_eq!(Gender::parse("feminine"), Some(Gender::Female));
+        assert_eq!(Gender::parse("Masculine"), Some(Gender::Male));
+        assert_eq!(Gender::parse("gender_neutral"), Some(Gender::Neutral));
         assert_eq!(Gender::parse("zzz"), None);
     }
 

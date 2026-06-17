@@ -445,22 +445,62 @@ impl SpeakSlotGuard {
 }
 
 /// Build the active TTS backend's voice palette (curated, gender-tagged
-/// voices). Cloud backends read their curated list from the provider
-/// catalogue; the local backend derives its palette from the on-device
-/// voice catalog for the user's configured languages. Returns an empty
-/// palette when TTS is disabled or the backend has no curated voices —
-/// the resolver then falls back to the backend default voice.
+/// voices). Cloud backends prefer a locally cached autodiscovered palette
+/// (when `[tts].voice_discovery` is on and a cache exists), falling back to
+/// the curated catalogue list; the local backend derives its palette from
+/// the on-device voice catalog for the user's configured languages. Returns
+/// an empty palette when TTS is disabled or the backend has no voices — the
+/// resolver then falls back to the backend default voice.
 #[must_use]
 pub fn active_palette(cfg: &Config) -> fono_core::voice_palette::Palette {
+    active_palette_in(cfg, discovered_cache_dir().as_deref())
+}
+
+/// Resolve the discovered-voices cache root (`<cache_dir>`), or `None` when
+/// XDG paths can't be resolved. Kept best-effort so palette resolution never
+/// fails on a path error.
+fn discovered_cache_dir() -> Option<std::path::PathBuf> {
+    fono_core::paths::Paths::resolve().ok().map(|p| p.cache_dir)
+}
+
+/// [`active_palette`] with an explicit discovered-voices cache root (or
+/// `None` to skip the cache). Exposed for tests so the cache-preference and
+/// fallback behaviour can be exercised against a temp dir.
+#[must_use]
+pub fn active_palette_in(
+    cfg: &Config,
+    cache_dir: Option<&Path>,
+) -> fono_core::voice_palette::Palette {
     use fono_core::config::TtsBackend;
     match cfg.tts.backend {
         TtsBackend::None => fono_core::voice_palette::Palette::default(),
         TtsBackend::Local => local_palette(cfg),
         ref other => {
             let id = fono_core::providers::tts_backend_str(other);
-            fono_core::provider_catalog::tts_palette(id)
+            cloud_palette(cfg, id, cache_dir)
         }
     }
+}
+
+/// Cloud-backend palette: a fresh discovered cache (when enabled and present)
+/// wins, otherwise the curated catalogue palette. A missing/empty/corrupt
+/// cache transparently degrades to the curated list.
+fn cloud_palette(
+    cfg: &Config,
+    id: &str,
+    cache_dir: Option<&Path>,
+) -> fono_core::voice_palette::Palette {
+    if cfg.tts.voice_discovery {
+        if let Some(dir) = cache_dir {
+            if let Some(cached) = fono_core::voice_discovery::DiscoveredVoices::load(dir, id) {
+                let palette = cached.to_palette();
+                if !palette.is_empty() {
+                    return palette;
+                }
+            }
+        }
+    }
+    fono_core::provider_catalog::tts_palette(id)
 }
 
 #[cfg(feature = "tts-local")]
@@ -1477,5 +1517,68 @@ mod tests {
         // we never have room to walk — return 0 rather than panic.
         assert_eq!(compute_walk_progress(500.0, 500, 250), 0);
         assert_eq!(compute_walk_progress(2000.0, 1000, 250), 0);
+    }
+
+    mod palette_discovery {
+        use fono_core::config::{Config, TtsBackend};
+        use fono_core::voice_discovery::DiscoveredVoices;
+        use fono_core::voice_palette::{Gender, Palette, PaletteVoice};
+
+        use super::super::active_palette_in;
+
+        fn elevenlabs_cfg(voice_discovery: bool) -> Config {
+            let mut cfg = Config::default();
+            cfg.tts.backend = TtsBackend::ElevenLabs;
+            cfg.tts.voice_discovery = voice_discovery;
+            cfg
+        }
+
+        fn write_cache(dir: &std::path::Path, backend: &str, ids: &[(&str, Gender)]) {
+            let palette =
+                Palette::new(ids.iter().map(|(id, g)| PaletteVoice::new(*id, *g)).collect());
+            DiscoveredVoices::from_palette(backend, &palette, 1)
+                .save(dir)
+                .expect("save discovered cache");
+        }
+
+        #[test]
+        fn prefers_a_fresh_discovered_cache() {
+            let dir = tempfile::tempdir().unwrap();
+            write_cache(
+                dir.path(),
+                "elevenlabs",
+                &[("disc-female", Gender::Female), ("disc-male", Gender::Male)],
+            );
+            let palette = active_palette_in(&elevenlabs_cfg(true), Some(dir.path()));
+            let ids: Vec<_> = palette.voices().iter().map(|v| v.backend_id.clone()).collect();
+            assert_eq!(ids, vec!["disc-female", "disc-male"], "cache should win over curated");
+        }
+
+        #[test]
+        fn falls_back_to_curated_when_cache_absent() {
+            let dir = tempfile::tempdir().unwrap();
+            let palette = active_palette_in(&elevenlabs_cfg(true), Some(dir.path()));
+            // The curated ElevenLabs palette (6 premade voices) is used.
+            assert_eq!(palette.voices().len(), 6);
+            assert!(palette.by_backend_id("EXAVITQu4vr4xnSDxMaL").is_some());
+        }
+
+        #[test]
+        fn falls_back_to_curated_on_corrupt_cache() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = DiscoveredVoices::cache_path(dir.path(), "elevenlabs");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"{ not valid json").unwrap();
+            let palette = active_palette_in(&elevenlabs_cfg(true), Some(dir.path()));
+            assert_eq!(palette.voices().len(), 6, "corrupt cache must degrade to curated");
+        }
+
+        #[test]
+        fn disabled_toggle_ignores_cache() {
+            let dir = tempfile::tempdir().unwrap();
+            write_cache(dir.path(), "elevenlabs", &[("disc-female", Gender::Female)]);
+            let palette = active_palette_in(&elevenlabs_cfg(false), Some(dir.path()));
+            assert_eq!(palette.voices().len(), 6, "voice_discovery=false uses curated");
+        }
     }
 }

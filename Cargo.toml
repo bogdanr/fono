@@ -82,15 +82,17 @@ rubato = "0.15"
 
 # STT / LLM local engines
 whisper-rs = { version = "0.16", features = ["tracing_backend"] }
-# Pinned to our fork's `feature/static-runtime-linkage` branch via the
-# `[patch.crates-io]` section below until utilityai/llama-cpp-rs#1015
-# and the follow-up static-runtime linkage work merge. `default-features =
-# false` drops the `common` feature, which strips the unused llama.cpp
-# `common/` static library (`libcommon.a` ~14 MB + wrapper archive ~10 MB)
-# plus the OpenAI-compat / chat-template / JSON-schema-to-grammar code
-# paths from the build. We keep OpenMP for local LLM performance, but link
-# libgomp statically so `cargo build --release -p fono` does not produce a
-# runtime `libgomp.so.1` dependency. `static-stdcxx` also puts a static
+# Both of our patches landed upstream and ship in the current crates.io
+# release: the `common` opt-out (utilityai/llama-cpp-rs#1015) and the
+# `static-openmp` static-runtime linkage feature. The fork and the
+# `[patch.crates-io]` block are gone; we now track the published crate.
+# `default-features = false` drops the `common` feature, which strips the
+# unused llama.cpp `common/` static library (`libcommon.a` ~14 MB +
+# wrapper archive ~10 MB) plus the OpenAI-compat / chat-template /
+# JSON-schema-to-grammar code paths from the build. We keep OpenMP for
+# local LLM performance, but link libgomp statically so
+# `cargo build --release -p fono` does not produce a runtime
+# `libgomp.so.1` dependency. `static-stdcxx` also puts a static
 # `libstdc++` on the link line early enough for GNU ld to satisfy C++
 # references from both llama.cpp and whisper.cpp without retaining a
 # dynamic `libstdc++.so.6` `NEEDED` entry.
@@ -228,15 +230,6 @@ non_std_lazy_statics = "allow"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
-
-# Pin both `llama-cpp-2` and its `-sys` crate to our fork branch that
-# adds opt-out `common` plus static GNU runtime linkage cargo features.
-# PR upstream for `common` is https://github.com/utilityai/llama-cpp-rs/pull/1015;
-# this `[patch]` block goes away once both changes merge. Both crates must
-# point at the same revision so cargo resolves the workspace consistently.
-[patch.crates-io]
-llama-cpp-2 = { git = "https://github.com/bogdanr/llama-cpp-rs.git", branch = "feature/static-runtime-linkage" }
-llama-cpp-sys-2 = { git = "https://github.com/bogdanr/llama-cpp-rs.git", branch = "feature/static-runtime-linkage" }
 
 # Default release profile: stripped + thin-LTO. Trades ~30s of extra build
 # time for cross-crate inlining without sacrificing the dev iteration loop.

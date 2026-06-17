@@ -395,6 +395,14 @@ pub struct Tts {
     /// downloaded + cached on first use (ADR 0033).
     #[serde(default)]
     pub local: TtsLocal,
+    /// Whether `fono voices` and the per-program resolver consult the
+    /// locally cached, autodiscovered voice palette for the active cloud
+    /// backend (refreshed by `fono voices discover`). Default `true`.
+    /// When `false`, only the curated catalogue palette is used. The
+    /// cache is read-only here and any read error silently falls back to
+    /// the curated palette, so this never blocks speech.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub voice_discovery: bool,
 }
 
 impl Default for Tts {
@@ -406,6 +414,7 @@ impl Default for Tts {
             cloud: None,
             wyoming: None,
             local: TtsLocal::default(),
+            voice_discovery: true,
         }
     }
 }

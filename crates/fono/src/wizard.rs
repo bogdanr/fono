@@ -39,7 +39,7 @@ use fono_core::config::{
 use fono_core::hwcheck::{HardwareSnapshot, HostGpu, LocalTier};
 use fono_core::locale::detect_user_languages_ranked;
 use fono_core::provider_catalog::{
-    CloudProvider, KeyAuth, KeyValidation, WebSearchSupport, CLOUD_PROVIDERS,
+    CloudProvider, KeyValidation, WebSearchSupport, CLOUD_PROVIDERS,
 };
 use fono_core::providers::{
     configured_tts_backends, parse_assistant_backend, parse_polish_backend, parse_stt_backend,
@@ -1044,9 +1044,8 @@ async fn configure_local(
         _ => configure_local_llm(config, snap),
     }
     // Local run now defaults to the complete offline experience: local
-    // STT, local assistant chat, and local voice replies. The only
-    // remaining cloud-related prompt is optional key seeding for easy
-    // switching later.
+    // STT, local assistant chat, and local voice replies. The helper
+    // only fills local TTS when no TTS backend was chosen earlier.
     enable_local_assistant_with_voice(config);
     Ok(())
 }
@@ -1067,13 +1066,21 @@ async fn prompt_optional_cloud_key(theme: &ColorfulTheme, secrets: &mut Secrets)
     prompt_or_reuse_key(theme, secrets, entry.key_env, entry.display_name, entry.console_url).await
 }
 
-fn enable_local_assistant_with_voice(config: &mut Config) {
+/// Enable the built-in local assistant chat. If the wizard already selected
+/// a TTS backend earlier (for example a speech-only primary cloud provider
+/// such as ElevenLabs or Cartesia), preserve it instead of silently
+/// switching assistant audio to the local voice. Only fill in local TTS
+/// when no TTS backend has been chosen yet.
+pub fn enable_local_assistant_with_voice(config: &mut Config) {
     config.assistant.enabled = true;
     config.assistant.backend = AssistantBackend::Ollama;
     config.assistant.local.model = DEFAULT_POLISH_LOCAL_MODEL.into();
     config.assistant.cloud = None;
-    config.tts.backend = TtsBackend::Local;
-    config.tts.voice.clear();
+    if config.tts.backend == TtsBackend::None {
+        config.tts.backend = TtsBackend::Local;
+        config.tts.cloud = None;
+        config.tts.voice.clear();
+    }
 }
 
 fn spawn_model_downloads(paths: &Paths, config: &Config) -> Option<JoinHandle<()>> {
@@ -1916,30 +1923,23 @@ async fn validate_cloud_key(key_name: &str, key: &str) -> Result<()> {
 }
 
 /// Build the `GET` request for a key-validation probe from catalogue
-/// [`KeyValidation`] metadata: the URL (with the key as a query param
-/// when [`KeyAuth::QueryParam`]), the auth header, and every extra
-/// header.
+/// [`KeyValidation`] metadata, via the shared
+/// [`fono_core::provider_catalog::build_auth_get`] helper so the
+/// key-validation and voice-discovery probes attach keys identically.
 fn build_validation_request(
     client: &reqwest::Client,
     validation: &KeyValidation,
     key: &str,
 ) -> reqwest::RequestBuilder {
-    let url = match validation.auth {
-        KeyAuth::QueryParam(param) => {
-            let sep = if validation.url.contains('?') { '&' } else { '?' };
-            format!("{}{sep}{param}={key}", validation.url)
-        }
-        _ => validation.url.to_string(),
-    };
+    let (url, headers) = fono_core::provider_catalog::build_auth_get(
+        validation.url,
+        validation.auth,
+        key,
+        validation.extra_headers,
+    );
     let mut req = client.get(url);
-    req = match validation.auth {
-        KeyAuth::Bearer => req.bearer_auth(key),
-        KeyAuth::Header(h) => req.header(h, key),
-        KeyAuth::HeaderPrefixed { header, prefix } => req.header(header, format!("{prefix} {key}")),
-        KeyAuth::QueryParam(_) => req,
-    };
-    for (h, v) in validation.extra_headers {
-        req = req.header(*h, *v);
+    for (h, v) in headers {
+        req = req.header(h, v);
     }
     req
 }

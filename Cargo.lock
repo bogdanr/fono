@@ -1149,7 +1149,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1473,6 +1473,7 @@ dependencies = [
  "realfft",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2212,7 +2213,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2433,8 +2434,9 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "llama-cpp-2"
-version = "0.1.146"
-source = "git+https://github.com/bogdanr/llama-cpp-rs.git?branch=feature/static-runtime-linkage#9089d154290214de9e299acade4a9464e61eac76"
+version = "0.1.150"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e82ec86fd73aaa7d8f4898cc4693410c217431506ba3237ea5c856127f49d84d"
 dependencies = [
  "encoding_rs",
  "enumflags2",
@@ -2446,8 +2448,9 @@ dependencies = [
 
 [[package]]
 name = "llama-cpp-sys-2"
-version = "0.1.146"
-source = "git+https://github.com/bogdanr/llama-cpp-rs.git?branch=feature/static-runtime-linkage#9089d154290214de9e299acade4a9464e61eac76"
+version = "0.1.150"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f67dab3ed2b68e4fc4a42471eac73e128ed2ee97bd10de66ddcc609dd5d838a0"
 dependencies = [
  "bindgen",
  "cc",
@@ -3800,7 +3803,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4226,7 +4229,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

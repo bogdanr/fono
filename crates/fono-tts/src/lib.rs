@@ -20,6 +20,16 @@ pub mod traits;
 pub mod cartesia;
 #[cfg(feature = "deepgram")]
 pub mod deepgram;
+#[cfg(any(
+    feature = "openai",
+    feature = "groq",
+    feature = "openrouter",
+    feature = "cartesia",
+    feature = "deepgram",
+    feature = "elevenlabs",
+    feature = "speechmatics"
+))]
+pub mod discovery;
 #[cfg(feature = "elevenlabs")]
 pub mod elevenlabs;
 #[cfg(any(

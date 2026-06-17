@@ -76,10 +76,10 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Pinned forks consumed via `[patch.crates-io]`. Each entry is
-# documented in the workspace `Cargo.toml`'s `[patch]` section with
-# a corresponding upstream PR link; remove the entry once the PR
-# merges and the patch is dropped.
-allow-git = [
-    "https://github.com/bogdanr/llama-cpp-rs.git",
-]
+# No forked git sources: the llama-cpp-rs patches (the `common` opt-out
+# from utilityai/llama-cpp-rs#1015 and the `static-openmp` runtime-linkage
+# feature) all landed upstream and ship in crates.io 0.1.147, so the
+# `[patch.crates-io]` block and its fork were dropped. Re-add an entry here
+# only if a future fork is consumed via `[patch]` in the workspace
+# `Cargo.toml`.
+allow-git = []

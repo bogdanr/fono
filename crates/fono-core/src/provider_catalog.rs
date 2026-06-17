@@ -112,6 +112,16 @@ pub struct TtsDefaults {
     /// runtime probes anywhere yet; this flag is reserved for later
     /// phases that may want to verify endpoint availability.
     pub runtime_probe: bool,
+    /// Declarative live-voice discovery descriptor. `Some` means the
+    /// provider exposes an enumerable voice list (e.g. ElevenLabs
+    /// `/v1/voices`, Cartesia `/voices`) that `fono voices discover` can
+    /// probe to refresh and expand this curated palette at runtime.
+    /// `None` (the default for every entry) means the provider has no
+    /// listable voice catalogue, so the curated `voices` above are the
+    /// only palette — discovery is simply skipped, never an error. See
+    /// [`VoiceDiscovery`]; this mirrors the [`KeyValidation`] pattern so
+    /// onboarding a new provider stays declarative.
+    pub discovery: Option<VoiceDiscovery>,
     /// True when this provider's TTS only renders intelligible **English**
     /// — i.e. feeding it text in another language produces an English
     /// phonemization of foreign words (gibberish), not speech in that
@@ -205,6 +215,101 @@ pub struct KeyValidation {
     pub extra_headers: &'static [(&'static str, &'static str)],
 }
 
+/// A custom parser for a provider whose voice-list JSON the declarative
+/// [`VoiceFieldMap`] cannot express. Takes the parsed response body and
+/// returns the raw voices; the engine then caps/balances them. Rare —
+/// the declarative map covers ElevenLabs and Cartesia — but keeps the
+/// mechanism universal for irregular future APIs.
+pub type VoiceParser = fn(&serde_json::Value) -> Vec<RawDiscoveredVoice>;
+
+/// A voice as read from a provider's discovery response, before it is
+/// capped/balanced into the runtime palette.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawDiscoveredVoice {
+    /// The backend-specific wire id the TTS client will send.
+    pub backend_id: String,
+    /// Optional human display name (for logging / `fono voices list`).
+    pub name: Option<String>,
+    /// Perceived gender; `Neutral` when the provider exposes none.
+    pub gender: crate::voice_palette::Gender,
+}
+
+/// How to read a provider's voice-list JSON declaratively. JSON pointers
+/// follow RFC 6901 (`serde_json::Value::pointer`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VoiceFieldMap {
+    /// JSON pointer to the array of voice objects within the response
+    /// body (e.g. `"/voices"` for ElevenLabs). `None` means the body is
+    /// itself the array (e.g. Cartesia returns a bare array).
+    pub array_pointer: Option<&'static str>,
+    /// Key within each voice object holding the backend voice id
+    /// (e.g. `"voice_id"`, `"id"`).
+    pub id_field: &'static str,
+    /// Optional key within each voice object holding a display name.
+    pub name_field: Option<&'static str>,
+    /// Optional JSON pointer, relative to each voice object, to the
+    /// gender token (e.g. `"/labels/gender"` for ElevenLabs, `"/gender"`
+    /// for Cartesia). Missing/unparseable ⇒ `Gender::Neutral`.
+    pub gender_pointer: Option<&'static str>,
+}
+
+/// Declarative descriptor for live voice discovery, modelled on
+/// [`KeyValidation`]: a `GET list_url` with the API key attached per
+/// [`auth`](Self::auth) plus every [`extra_headers`](Self::extra_headers)
+/// pair, whose JSON body is mapped via [`map`](Self::map) (or the
+/// [`custom`](Self::custom) escape hatch). Onboarding a new provider is
+/// therefore data, not code.
+#[derive(Debug, Clone, Copy)]
+pub struct VoiceDiscovery {
+    /// Endpoint to `GET` for the voice list.
+    pub list_url: &'static str,
+    /// How to attach the API key (reuses the key-validation auth model).
+    pub auth: KeyAuth,
+    /// Extra static headers (e.g. an API version pin).
+    pub extra_headers: &'static [(&'static str, &'static str)],
+    /// Declarative field map for the common case.
+    pub map: VoiceFieldMap,
+    /// Optional custom parser for an irregular response shape. When
+    /// `Some`, it takes precedence over [`map`](Self::map).
+    pub custom: Option<VoiceParser>,
+}
+
+/// Resolve a key-authenticated `GET` into a final URL plus the headers
+/// to attach. Shared by the wizard's key-validation probe and the voice
+/// discovery probe so the two never drift. Reqwest-free so it lives in
+/// `fono-core`; callers build their own request from the result.
+///
+/// For [`KeyAuth::QueryParam`] the key is appended to the URL; otherwise
+/// it is returned as a header. `extra_headers` are appended verbatim.
+#[must_use]
+pub fn build_auth_get(
+    url: &str,
+    auth: KeyAuth,
+    key: &str,
+    extra_headers: &[(&str, &str)],
+) -> (String, Vec<(String, String)>) {
+    let final_url = match auth {
+        KeyAuth::QueryParam(param) => {
+            let sep = if url.contains('?') { '&' } else { '?' };
+            format!("{url}{sep}{param}={key}")
+        }
+        _ => url.to_string(),
+    };
+    let mut headers: Vec<(String, String)> = Vec::new();
+    match auth {
+        KeyAuth::Bearer => headers.push(("Authorization".to_string(), format!("Bearer {key}"))),
+        KeyAuth::Header(h) => headers.push((h.to_string(), key.to_string())),
+        KeyAuth::HeaderPrefixed { header, prefix } => {
+            headers.push((header.to_string(), format!("{prefix} {key}")));
+        }
+        KeyAuth::QueryParam(_) => {}
+    }
+    for (h, v) in extra_headers {
+        headers.push(((*h).to_string(), (*v).to_string()));
+    }
+    (final_url, headers)
+}
+
 /// One cloud provider entry in the catalogue.
 #[derive(Debug, Clone, Copy)]
 pub struct CloudProvider {
@@ -285,6 +390,8 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
                 stream_format: Some("audio"),
             },
             runtime_probe: false,
+            // OpenAI's TTS voice set is fixed (no per-account listing endpoint).
+            discovery: None,
             // OpenAI's TTS models are multilingual.
             english_only: false,
         }),
@@ -360,6 +467,8 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
                 stream_format: None,
             },
             runtime_probe: false,
+            // Groq's hosted Orpheus voice set is fixed (no listing endpoint).
+            discovery: None,
             // Groq hosts Canopy Labs Orpheus `…-english`: English-only.
             english_only: true,
         }),
@@ -497,6 +606,8 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
                 stream_format: None,
             },
             runtime_probe: false,
+            // OpenRouter does not expose an enumerable TTS voice list yet.
+            discovery: None,
             // Grok Voice TTS renders several languages; not English-only.
             english_only: false,
         }),
@@ -534,6 +645,9 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             ],
             endpoint: TtsEndpoint::Deepgram,
             runtime_probe: false,
+            // Aura-2's voice set is a fixed catalogue of model ids; no
+            // per-account listing endpoint, so discovery is skipped.
+            discovery: None,
             // Aura-2 ships voices in several languages (the model id
             // carries the locale, e.g. `…-en`/`…-es`); not English-only.
             english_only: false,
@@ -590,6 +704,22 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             }],
             endpoint: TtsEndpoint::Cartesia,
             runtime_probe: false,
+            // Cartesia exposes account voices at `GET /voices` (a paginated
+            // envelope `{ "data": [ { id, name, gender } ], has_more,
+            // next_page }`; gender is `feminine`/`masculine`/`gender_neutral`).
+            // Reuses the same key auth + version header as key validation.
+            discovery: Some(VoiceDiscovery {
+                list_url: "https://api.cartesia.ai/voices",
+                auth: KeyAuth::Header("X-Api-Key"),
+                extra_headers: &[("Cartesia-Version", "2026-03-01")],
+                map: VoiceFieldMap {
+                    array_pointer: Some("/data"),
+                    id_field: "id",
+                    name_field: Some("name"),
+                    gender_pointer: Some("/gender"),
+                },
+                custom: None,
+            }),
             // Cartesia Sonic is multilingual.
             english_only: false,
         }),
@@ -641,6 +771,21 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             ],
             endpoint: TtsEndpoint::ElevenLabs,
             runtime_probe: false,
+            // ElevenLabs exposes account voices at `GET /v1/voices`
+            // (`{ "voices": [ { voice_id, name, labels: { gender } } ] }`).
+            // Reuses the `xi-api-key` auth from key validation.
+            discovery: Some(VoiceDiscovery {
+                list_url: "https://api.elevenlabs.io/v1/voices",
+                auth: KeyAuth::Header("xi-api-key"),
+                extra_headers: &[],
+                map: VoiceFieldMap {
+                    array_pointer: Some("/voices"),
+                    id_field: "voice_id",
+                    name_field: Some("name"),
+                    gender_pointer: Some("/labels/gender"),
+                },
+                custom: None,
+            }),
             // Eleven v3 renders 70+ languages — not English-only.
             english_only: false,
         }),
@@ -696,6 +841,8 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
                 base_url: "https://preview.tts.speechmatics.com",
             },
             runtime_probe: false,
+            // The Speechmatics TTS preview exposes a single fixed voice.
+            discovery: None,
             // The Speechmatics TTS preview is English-only.
             english_only: true,
         }),
@@ -758,6 +905,14 @@ pub fn tts_palette(id: &str) -> crate::voice_palette::Palette {
         .and_then(|p| p.tts.as_ref())
         .map(|t| crate::voice_palette::Palette::from_entries(t.voices))
         .unwrap_or_default()
+}
+
+/// The [`VoiceDiscovery`] descriptor for a cloud TTS provider id, if it
+/// exposes an enumerable voice list. `None` ⇒ the provider has no
+/// listable catalogue (discovery is skipped, never an error).
+#[must_use]
+pub fn tts_discovery(id: &str) -> Option<VoiceDiscovery> {
+    find(id).and_then(|p| p.tts.as_ref()).and_then(|t| t.discovery)
 }
 
 /// Construct a `(stt, polish)` pair from a catalogue entry, mapping the

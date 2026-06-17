@@ -266,6 +266,58 @@ local on-device backend. Note the local English palette ships female
 voices plus two males (`am_michael` US, `bm_lewis` UK); other languages
 expose whatever the on-device catalog provides.
 
+#### Discovering more voices
+
+A cloud backend's curated palette is short by design. When a provider
+exposes an enumerable voice catalogue, `fono voices discover` probes it
+and caches a refreshed, gender-labelled palette (capped to a short
+list) for the active backend:
+
+```console
+$ fono voices discover            # refresh the active backend's palette
+$ fono voices discover --json     # machine-readable output
+$ fono voices list                # the discovered palette is now active
+```
+
+This is **fail-safe**: discovery runs only when you ask for it, the
+result is cached under `~/.cache/fono/voices/discovered/<backend>.json`,
+and *any* failure (no network, rejected key, a provider with no voice
+list, malformed response) leaves the current palette untouched — it is
+never on the speech path. A backend with no discoverable catalogue (e.g.
+OpenAI, whose voice set is fixed) simply reports there is nothing to do.
+
+Discovery also refreshes **automatically**, still fail-safe and never on
+the speech path:
+
+- **At daemon start** — a single non-blocking probe of the active cloud
+  backend runs in the background (default ~10s timeout). Startup is never
+  delayed; on failure the cache is left as-is.
+- **On `fono voices list`** — if the cache is missing or older than 24h,
+  a short (~4s) refresh runs before listing, then falls back to the
+  curated / cached palette on any error. A fresh cache (<24h) is used
+  as-is so listing stays instant.
+
+Set `voice_discovery = false` to disable both the cache lookup and the
+automatic refreshes.
+
+Discovery is declarative: each provider entry in the catalogue carries
+an optional descriptor (list URL, key auth, and how to read each voice's
+id and gender from the JSON), modelled on the existing API-key
+validation metadata — so onboarding a new provider is data, not code.
+ElevenLabs (`/v1/voices`) and Cartesia (`/voices`) ship descriptors
+today.
+
+```toml
+[tts]
+# Consult the cached discovered palette for the active cloud backend and
+# refresh it automatically (background probe at daemon start; lazy >24h
+# refresh on `fono voices list`). Default true. Set false to use only the
+# curated catalogue palette and disable all automatic discovery. Reads are
+# best-effort; a missing or unreadable cache silently falls back to the
+# curated list.
+voice_discovery = true
+```
+
 ## Hotkeys
 
 ```toml
