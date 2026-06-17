@@ -94,9 +94,10 @@ pub fn build_polish(
             build_anthropic(k, m)
         }
         PolishBackend::Local => build_local(cfg, polish_models_dir),
-        PolishBackend::Gemini => Err(anyhow!(
-            "Gemini polish backend not yet implemented; pick cerebras/openai/anthropic"
-        )),
+        PolishBackend::Gemini => {
+            let (k, m) = resolve_cloud(cfg, secrets, &PolishBackend::Gemini, "gemini")?;
+            build_oa_gemini(k, m)
+        }
         PolishBackend::None => unreachable!(),
     }
     .map(Some)
@@ -148,6 +149,12 @@ fn build_oa_openrouter(key: String, model: String) -> Result<Arc<dyn TextFormatt
 
 #[cfg(feature = "openai-compat")]
 #[allow(clippy::unnecessary_wraps)]
+fn build_oa_gemini(key: String, model: String) -> Result<Arc<dyn TextFormatter>> {
+    Ok(Arc::new(crate::openai_compat::OpenAiCompat::gemini(key, model)))
+}
+
+#[cfg(feature = "openai-compat")]
+#[allow(clippy::unnecessary_wraps)]
 fn build_oa_ollama(cfg: &Polish, model: String) -> Result<Arc<dyn TextFormatter>> {
     // Ollama / llama.cpp-server don't need an API key; the endpoint is the local URL stored
     // in the cloud.api_key_ref slot when configured. Fall back to the
@@ -170,6 +177,11 @@ fn build_oa_openrouter(_: String, _: String) -> Result<Arc<dyn TextFormatter>> {
     Err(anyhow!(
         "OpenRouter LLM not compiled in (enable the `openai-compat` feature on `fono-polish`)"
     ))
+}
+
+#[cfg(not(feature = "openai-compat"))]
+fn build_oa_gemini(_: String, _: String) -> Result<Arc<dyn TextFormatter>> {
+    Err(anyhow!("Gemini LLM not compiled in (enable the `openai-compat` feature on `fono-polish`)"))
 }
 
 #[cfg(not(feature = "openai-compat"))]

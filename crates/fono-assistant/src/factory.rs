@@ -149,6 +149,7 @@ pub fn build_assistant(
         AssistantBackend::Groq => build_groq(cfg, secrets).map(Some),
         AssistantBackend::OpenAI => build_openai(cfg, secrets).map(Some),
         AssistantBackend::OpenRouter => build_openrouter(cfg, secrets).map(Some),
+        AssistantBackend::Gemini => build_gemini(cfg, secrets).map(Some),
         AssistantBackend::Ollama => build_ollama(cfg, assistant_models_dir).map(Some),
         AssistantBackend::Anthropic => build_anthropic(cfg, secrets).map(Some),
     }
@@ -188,6 +189,16 @@ fn build_openrouter(cfg: &AssistantCfg, secrets: &Secrets) -> Result<Arc<dyn Ass
         crate::openai_compat_chat::OpenAiCompatChat::openrouter(r.key, r.model)
             .with_web_search(r.web_search_tool),
     ))
+}
+
+#[cfg(feature = "openai-compat")]
+fn build_gemini(cfg: &AssistantCfg, secrets: &Secrets) -> Result<Arc<dyn Assistant>> {
+    let r = resolve_cloud(cfg, secrets, &AssistantBackend::Gemini, "gemini")?;
+    // Gemini's OpenAI-compatible surface does not accept the native
+    // `google_search` grounding tool, so we deliberately do not attach
+    // `r.web_search_tool` here (ADR 0034); native search is a follow-up
+    // on the `generateContent` endpoint.
+    Ok(Arc::new(crate::openai_compat_chat::OpenAiCompatChat::gemini(r.key, r.model)))
 }
 
 fn manual_local_server_endpoint(cfg: &AssistantCfg) -> Option<String> {
@@ -284,6 +295,12 @@ fn build_openai(_cfg: &AssistantCfg, _secrets: &Secrets) -> Result<Arc<dyn Assis
 }
 #[cfg(not(feature = "openai-compat"))]
 fn build_openrouter(_cfg: &AssistantCfg, _secrets: &Secrets) -> Result<Arc<dyn Assistant>> {
+    Err(anyhow!(
+        "OpenAI-compatible assistant backends not compiled in (enable the `openai-compat` feature on `fono-assistant`)"
+    ))
+}
+#[cfg(not(feature = "openai-compat"))]
+fn build_gemini(_cfg: &AssistantCfg, _secrets: &Secrets) -> Result<Arc<dyn Assistant>> {
     Err(anyhow!(
         "OpenAI-compatible assistant backends not compiled in (enable the `openai-compat` feature on `fono-assistant`)"
     ))

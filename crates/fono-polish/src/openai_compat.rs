@@ -63,6 +63,20 @@ impl OpenAiCompat {
         Self::new("https://openrouter.ai/api/v1/chat/completions", api_key, model, "openrouter")
     }
 
+    /// Gemini's OpenAI-compatible surface, reached with the single
+    /// `GEMINI_API_KEY` (`Authorization: Bearer <key>`). Lets the polish
+    /// path reuse this client instead of a bespoke `generateContent`
+    /// implementation. See
+    /// `docs/decisions/0034-google-via-gemini-single-key.md`.
+    pub fn gemini(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        Self::new(
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            api_key,
+            model,
+            "gemini",
+        )
+    }
+
     /// Ollama exposes an OpenAI-compatible endpoint on `/v1/chat/completions`
     /// by default; `endpoint` should point at the local instance.
     pub fn ollama(endpoint: impl Into<String>, model: impl Into<String>) -> Self {
@@ -205,7 +219,14 @@ impl TextFormatter for OpenAiCompat {
     async fn format(&self, raw: &str, ctx: &FormatContext) -> Result<String> {
         let system = ctx.system_prompt();
         let user = user_prompt(raw);
-        let reasoning = is_reasoning_model(&self.model);
+        // Gemini 3.x Flash enables "thinking" by default, which inflates
+        // latency and can eat the token budget before any visible content
+        // (the same failure mode as the gpt-oss reasoning models). On the
+        // OpenAI-compat surface `reasoning_effort: "low"` pins it to the
+        // lowest level — thinking can't be disabled entirely on 3.x models.
+        // Treat Gemini as a reasoning backend so it gets the low effort, the
+        // dropped "\n\n" stop, and the larger token budget.
+        let reasoning = is_reasoning_model(&self.model) || self.backend_name == "gemini";
         let default_sampling_only = uses_default_sampling_only(self.backend_name, &self.model);
         let req = ChatReq {
             model: &self.model,
@@ -459,6 +480,20 @@ mod tests {
         assert!(is_local_backend("ollama"));
         assert!(!is_local_backend("groq"));
         assert!(!is_local_backend("openai"));
+    }
+
+    #[test]
+    fn gemini_backend_is_treated_as_reasoning() {
+        // Gemini's model name ("gemini-flash-lite-latest") is not caught by the
+        // family-substring matcher, so the backend-name override is what
+        // forces `reasoning_effort: "low"` and the dropped "\n\n" stop. Mirror
+        // the `format()` gate: reasoning = model-match OR backend == gemini.
+        let reasoning = is_reasoning_model("gemini-flash-lite-latest") || "gemini" == "gemini";
+        assert!(reasoning);
+        assert_eq!(reasoning.then_some("low"), Some("low"));
+        // Non-Gemini, non-reasoning backends stay off.
+        let plain = is_reasoning_model("llama3.1-8b") || "groq" == "gemini";
+        assert!(!plain);
     }
 
     #[test]

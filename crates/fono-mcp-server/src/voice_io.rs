@@ -590,6 +590,43 @@ pub async fn speak_text(
         if cfg.tts.output_device.is_empty() { None } else { Some(cfg.tts.output_device.as_str()) };
     let playback = AudioPlayback::new(device).context("audio device open failed")?;
 
+    // Streaming-capable cloud backends: pull PCM chunks and play them gaplessly
+    // as they arrive, cutting time-to-first-audio. Local and batch backends fall
+    // through to the synthesize + enqueue path below. We can't size the utterance
+    // up front here (the audio arrives incrementally), so the amber activity flash
+    // is taken unconditionally rather than gated on a >= 1 s length.
+    if tts.supports_streaming() {
+        let _activity_guard =
+            McpActivityHoldGuard::acquire(McpPhase::Speaking, daemon_ipc_candidates).await;
+        let _slot_guard = SpeakSlotGuard::acquire(daemon_ipc_candidates).await;
+        let synth_started = Instant::now();
+        let mut sink = fono_audio::LocalPlaybackSink::new(playback.clone());
+        let produced =
+            fono_tts::stream_utterance(tts.as_ref(), text, voice, None, &mut sink, || {})
+                .await
+                .context("streaming TTS failed")?;
+        // Synth and playback overlap when streaming, so `synth_ms` here measures
+        // the whole stream-and-push span rather than an isolated synth round-trip.
+        let synth_ms = synth_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let playback_started = Instant::now();
+        if produced {
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while !playback.is_idle() {
+                if Instant::now() >= deadline {
+                    warn!(target: "fono_mcp_server::voice_io", "playback drain timeout");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        let playback_ms = if produced {
+            playback_started.elapsed().as_millis().min(u64::MAX as u128) as u64
+        } else {
+            0
+        };
+        return Ok(SpeakTimings { synth_ms, playback_ms });
+    }
+
     let synth_started = Instant::now();
     let audio = tts.synthesize(text, voice, None).await.context("TTS synthesis failed")?;
     let synth_ms = synth_started.elapsed().as_millis().min(u64::MAX as u128) as u64;

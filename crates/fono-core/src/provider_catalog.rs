@@ -177,6 +177,11 @@ pub enum TtsEndpoint {
     /// 402); the catalogue default is a premade voice. See
     /// `docs/providers.md`.
     ElevenLabs,
+    /// Gemini native TTS: `POST /v1beta/models/<model>:generateContent`
+    /// with `responseModalities: ["AUDIO"]` and a `prebuiltVoiceConfig`
+    /// voice on a single `GEMINI_API_KEY`. Returns base64 int16 LE mono
+    /// PCM (24 kHz). Auth header `x-goog-api-key`. See ADR 0034.
+    Gemini,
 }
 
 /// How an API key is attached to a key-validation request.
@@ -527,13 +532,16 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
         tts: None,
     },
     // ----- Gemini ------------------------------------------------------
-    // Catalogue keeps the Gemini entry for the polish path
-    // (`PolishBackend::Gemini`); assistant chat / multimodal / search are
-    // unwired (no Gemini chat client yet) so `assistant` stays `None`.
+    // Single `GEMINI_API_KEY` (AI Studio), free tier — ADR 0034. Polish
+    // and the staged assistant reuse Gemini's OpenAI-compatible surface;
+    // `google_search` grounding is declared here but not injected by the
+    // compat client (native search is a follow-up). STT/TTS/Live land on
+    // the same key via the native `generateContent`/`BidiGenerateContent`
+    // endpoints.
     CloudProvider {
         id: "gemini",
         display_name: "Google Gemini",
-        tagline: "Gemini Flash (polish only — chat client not wired yet).",
+        tagline: "Gemini Flash on a single free-tier key (polish + assistant).",
         console_url: "https://aistudio.google.com/app/apikey",
         key_env: "GEMINI_API_KEY",
         key_validation: Some(KeyValidation {
@@ -541,10 +549,49 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             auth: KeyAuth::QueryParam("key"),
             extra_headers: &[],
         }),
-        stt: None,
-        polish: Some(PolishDefaults { model: "gemini-1.5-flash" }),
-        assistant: None,
-        tts: None,
+        stt: Some(SttDefaults { model: "gemini-flash-lite-latest" }),
+        polish: Some(PolishDefaults { model: "gemini-flash-lite-latest" }),
+        assistant: Some(AssistantDefaults {
+            text_model: "gemini-flash-lite-latest",
+            // The Flash family is multimodal (image input supported); the
+            // `-latest` alias tracks the current Flash-Lite model.
+            multimodal_model: Some("gemini-flash-lite-latest"),
+            // Native grounding tool; not wired through the OpenAI-compat
+            // staged client yet (see ADR 0034).
+            web_search: WebSearchSupport::NativeTool("google_search"),
+            badges: &[Badge::Polish, Badge::Assistant, Badge::Vision, Badge::Search, Badge::Fast],
+        }),
+        tts: Some(TtsDefaults {
+            // Native Gemini TTS model (`:generateContent` with an AUDIO
+            // response modality). 24 kHz mono PCM out.
+            model: "gemini-3.1-flash-tts-preview",
+            // `Kore` (firm, female) is Google's documented default prebuilt
+            // voice.
+            default_voice: "Kore",
+            // Curated, gender-balanced subset of the 30 prebuilt voices.
+            // The user addresses these by positional gendered label
+            // ("Female 1", "Male 2") via `fono voices`; the full list is
+            // not enumerable via an API, so this stays a static palette.
+            voices: &[
+                PaletteEntry { backend_id: "Kore", gender: Gender::Female },
+                PaletteEntry { backend_id: "Aoede", gender: Gender::Female },
+                PaletteEntry { backend_id: "Leda", gender: Gender::Female },
+                PaletteEntry { backend_id: "Zephyr", gender: Gender::Female },
+                PaletteEntry { backend_id: "Callirrhoe", gender: Gender::Female },
+                PaletteEntry { backend_id: "Puck", gender: Gender::Male },
+                PaletteEntry { backend_id: "Charon", gender: Gender::Male },
+                PaletteEntry { backend_id: "Fenrir", gender: Gender::Male },
+                PaletteEntry { backend_id: "Orus", gender: Gender::Male },
+                PaletteEntry { backend_id: "Enceladus", gender: Gender::Male },
+            ],
+            endpoint: TtsEndpoint::Gemini,
+            runtime_probe: false,
+            // The 30 prebuilt voices are a fixed set with no listing API.
+            discovery: None,
+            // Gemini TTS is multilingual (40+ languages incl. Romanian) and
+            // auto-detects the spoken language from the text.
+            english_only: false,
+        }),
     },
     // ----- OpenRouter --------------------------------------------------
     CloudProvider {

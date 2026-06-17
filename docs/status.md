@@ -1,5 +1,245 @@
 # Fono — Project Status
-Last updated: 2026-06-16
+Last updated: 2026-06-17
+
+## 2026-06-17 — Make record + playback obvious in turn traces
+
+The `playback` and `capture` lanes existed in the trace taxonomy
+(`turn_trace.rs`) but **nothing ever emitted on them**, so a `/tmp/fono-traces`
+waterfall showed only the high-level `stt`/`tts` synthesis spans — you couldn't
+see when audio actually *started reaching the device*. Instrumented the
+`fono-audio` workers (and the capture backends) to emit on those lanes via the
+ambient `current_instant` / `duration_between` helpers (no-op on untraced
+turns — one relaxed atomic load — so the hot path pays nothing).
+
+- **Playback lane** (`fono-audio/src/playback.rs`, both paplay and cpal
+  workers): `playback.play` span for one-shot clips; `playback.stream_open`,
+  `playback.first_audio` (the moment the player spawns on the first chunk),
+  and the closing `playback.stream` span for streaming sessions. The paplay
+  `StreamChunk` body was extracted into `handle_paplay_stream_chunk` to keep
+  `spawn_worker` under the 100-line clippy limit.
+- **Capture lane** (`fono-audio/src/capture.rs`, both process and cpal
+  backends): `capture.open` (mic/tool spawned) and `capture.first_frame` (first
+  PCM in).
+- **`capture.input`** instant on the assistant turn trace (`assistant.rs`):
+  device-level capture predates the turn's trace, so this surfaces the recorded
+  input bounds (samples / duration_ms) on the turn timeline, making the
+  record→STT→playback boundary obvious.
+- `serde_json` added to `fono-audio` for the trace args.
+
+Note: the `cpal-backend` feature carries pre-existing clippy debt (introduced
+with the C2 gapless-playback work and not caught because CI's clippy step runs
+default features only — paplay on Linux). The trace additions slightly grow the
+cpal `spawn_worker` line count, but that feature was already clippy-red on HEAD
+and is out of scope here. The default-feature gate is green.
+
+Pre-commit gate green: `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -D warnings` (default features, as CI), `cargo test --workspace
+--tests --lib`.
+
+## 2026-06-17 — Honest TTFA: fire first-audio mid-stream, not after the sentence
+
+A Gemini assistant turn still logged `tts 8324ms ttfa` despite the streaming
+work, because the metric (and the FSM/overlay flip to SPEAKING) only fired
+*after* `synth_and_stream` returned — i.e. after the **entire first sentence**
+finished streaming — rather than when the first PCM frame actually reached the
+device. The audio was already playing early; the number lied.
+
+- **`stream_utterance` now takes an `on_first_audio: FnMut()` callback**,
+  invoked exactly once the moment the prebuffer releases and the first PCM is
+  pushed to the sink (or on the tail flush for sub-prebuffer utterances). Two
+  new tests assert it fires exactly once with audio and never without.
+- **Assistant pump:** extracted a `FirstAudio` helper (idempotent, records TTFA
+  relative to LLM start, flips FSM + overlay to SPEAKING). Streaming sentences
+  fire it mid-stream via the callback; batch/local sentences fire it right
+  after the first successful enqueue. `metrics.tts_ttfa_ms` now reflects the
+  true time-to-first-frame.
+- Non-streaming call sites (`fono speak`, MCP `fono.speak`) pass a no-op `|| {}`.
+
+Pre-commit gate green: `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -D warnings`, `cargo test --workspace --tests --lib`.
+
+## 2026-06-17 — Gemini: drop prebuffer config, default 300 ms, switch to Flash-Lite
+
+Follow-up tuning after the C1–C5 streaming work:
+
+- **No prebuffer config.** Removed the `[tts] stream_prebuffer_ms` config field
+  (and its serde default/skip helpers). The streaming driver now uses a fixed
+  `DEFAULT_STREAM_PREBUFFER_MS = 300` constant in `fono-tts::streaming`. The
+  `prebuffer_ms` parameter was dropped from `stream_utterance` and all call
+  sites (assistant pump, `fono speak`, MCP `fono.speak`); `AssistantTurnInputs`
+  lost its `stream_prebuffer_ms` field. 300 ms (up from the old 200) gives a
+  little more jitter headroom.
+- **Default model → `gemini-flash-lite-latest`** for STT, polish, and the
+  staged assistant (text + multimodal), replacing `gemini-flash-latest`.
+  Flash-Lite is the lower-latency/cheaper tier of the Flash family and the
+  `-latest` alias tracks the current model. TTS stays
+  `gemini-3.1-flash-tts-preview`. Single source of truth is the `gemini`
+  catalogue entry; mirror sites (STT `DEFAULT_MODEL`, polish/assistant tests,
+  docs) updated.
+
+Pre-commit gate green: `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -D warnings`, `cargo test --workspace --tests --lib`.
+
+## 2026-06-17 — Latency: Gemini thinking knob + cloud streaming TTS (C1–C5)
+
+Two latency fixes after a Gemini assistant turn measured 24.5 s (`llm 4577ms
+ttfb`, `tts 10478ms ttfa`):
+
+**Thinking fix (committed separately, `411359d`).** `gemini-flash-latest`
+resolves to a Gemini 3.x Flash, which enables "thinking" by default — that
+reasoning ran before the first token and inflated TTFT from ~800 ms to ~4.5 s.
+On Gemini's OpenAI-compatible surface the knob is `reasoning_effort`; 3.x can't
+disable thinking, but `"low"` pins it to the minimum. Applied to both
+OpenAI-compat clients (polish treats `backend == "gemini"` as reasoning; the
+assistant adds a `ChatReq.reasoning_effort` field set to `"low"` for Gemini,
+`None` elsewhere).
+
+**Cloud streaming TTS (C1–C5 of
+`plans/2026-06-17-cloud-streaming-tts-v2.md`).** Play synthesised audio
+gaplessly as it arrives instead of waiting for the whole clip:
+
+- **C1** — `TtsChunk` + `synthesize_stream` (default wraps `synthesize`, one
+  chunk) + `supports_streaming` on the `TextToSpeech` trait. Batch/local
+  backends compile and behave unchanged.
+- **C2** — gapless streaming append path in `fono-audio` playback (paplay +
+  cpal backends): `begin_stream`/`push_stream`/`end_stream`, one resampler per
+  utterance, no drain-between-chunks gap. Batch `enqueue` preserved.
+- **C3** — `PcmSink` trait + `LocalPlaybackSink` in `fono-audio`
+  (`crates/fono-audio/src/sink.rs`) so the driver is transport-agnostic for
+  later server-mode network audio; both the daemon and MCP server reach it.
+- **C4** — fixed-prebuffer driver (`fono_tts::stream_utterance`) + config
+  `[tts] stream_prebuffer_ms` (default 200). Routed through the assistant pump,
+  `fono speak`, and the MCP `fono.speak` tool. `supports_streaming() == false`
+  ⇒ existing batch path.
+- **C5** — Gemini `streamGenerateContent?alt=sse` override: SSE decoder +
+  incremental `inlineData` PCM frames. Offline-tested; **live-verify with a
+  real key still pending** (the in-session key was rotated).
+
+Local engines stay batch (slow-machine RTF/underrun risk deferred to
+`plans/2026-06-17-general-streaming-tts-v1.md`). C6/C7 (Cartesia, Deepgram/
+ElevenLabs/OpenAI streaming overrides) remain pending.
+
+Pre-commit gate green: `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -D warnings`, `cargo test --workspace --tests --lib`.
+
+## 2026-06-17 — Gemini default models: `gemini-flash-latest` (STT/LLM) + TTS preview
+
+User directive: use the **documented `gemini-flash-latest` alias** for STT and
+the LLM capabilities (not a pinned, invented version string), and
+`gemini-3.1-flash-tts-preview` for TTS. Updated the single source of truth (the
+`gemini` entry in `crates/fono-core/src/provider_catalog.rs`):
+
+- **STT / polish / assistant text + multimodal** → `gemini-flash-latest`. The
+  `-latest` alias always resolves to the current Flash model, so there is no
+  version churn and no risk of an invented/incorrect pinned id.
+- **TTS** → `gemini-3.1-flash-tts-preview` (per the explicit instruction; the
+  slow `gemini-2.5-flash-preview-tts` was the cause of the ~4.3 s TTS
+  time-to-first-audio reported earlier).
+
+This supersedes the earlier same-day attempt that pinned `gemini-3.1-flash`
+for STT/LLM — that bare name was an unverified extrapolation and has been
+corrected to the alias.
+
+Mirror sites updated to match: `fono-stt::gemini` `DEFAULT_MODEL`,
+the `fono-tts::gemini` endpoint test, the `fono-polish::defaults` catalogue
+test, and every `docs/providers.md` reference (capability matrix, polish/TTS/
+assistant tables, wire-shape notes).
+
+Note: could not live-verify the TTS preview id — the `GEMINI_API_KEY` pasted
+earlier in-session has been rotated and now 401s on the model-list endpoint.
+`gemini-flash-latest` is a documented stable alias; the TTS id follows the
+explicit instruction. `fono doctor` reports the active id at runtime, so a
+mismatch surfaces immediately.
+
+Pre-commit gate green: `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -D warnings`, and `cargo test --workspace --tests --lib`.
+
+## 2026-06-17 — Google via Gemini API (single key): LLM polish + staged assistant + STT + native TTS
+
+Executing `plans/2026-06-17-google-via-gemini-single-key-stt-tts-llm-realtime-v2.md`.
+User decision: Google support is the **Gemini API (AI Studio)** on a **single
+`GEMINI_API_KEY` with a free tier** — not Google Cloud Speech. The Chirp /
+service-account / OAuth lane (and the planned `fono-net-google` crate) is dropped;
+everything consolidates onto the existing `gemini` catalogue entry.
+
+Landed this session (plan Sections A, E1, E2, C, D — all on the single key):
+
+- **ADR 0034** (`docs/decisions/0034-google-via-gemini-single-key.md`) records the
+  single-key/free-tier decision, why Cloud Speech was dropped, and the
+  OpenAI-compat-reuse-vs-bespoke-client split per capability.
+- **Polish (E1)** — replaced the runtime "Gemini polish not yet implemented" stub
+  with a real client: `OpenAiCompat::gemini()` targets Gemini's OpenAI-compatible
+  surface (`/v1beta/openai/chat/completions`, `Authorization: Bearer <key>`).
+  `crates/fono-polish/src/openai_compat.rs`, `crates/fono-polish/src/factory.rs`.
+  Polish default model bumped `gemini-1.5-flash` → `gemini-2.5-flash`.
+- **Staged assistant (E2)** — new `AssistantBackend::Gemini`
+  (`crates/fono-core/src/config.rs`), fully wired through
+  `crates/fono-core/src/providers.rs` (str/parse/key-env/all-list, 7→8),
+  the `gemini` catalogue entry gains `assistant: Some(..)` (text+multimodal
+  `gemini-2.5-flash`, `google_search` declared), `OpenAiCompatChat::gemini()`
+  constructor, `build_gemini()` factory arm, vision-capability check in
+  `crates/fono/src/session.rs`, and the MCP summarize `FALLBACK_ORDER` (6→7).
+  Note: the OpenAI-compat layer cannot inject Gemini's native `google_search`
+  grounding tool, so the staged path ships without native web search (ADR 0034
+  flags it as a follow-up on the `generateContent` endpoint).
+- **Docs (A3)** — `docs/providers.md` Gemini section (single key, free-tier
+  RPD/RPM + midnight-Pacific reset, preview-model caveat, STT batch/no-confidence
+  note); capability matrix + polish/assistant/TTS tables refreshed.
+- **STT (Section C)** — bespoke `fono-stt::gemini` audio-understanding client
+  (`generateContent`, transcribe-only prompt, `x-goog-api-key`, no per-segment
+  confidence, batch-only, one-shot rerun-unavailable warning). Added
+  `SttBackend::Gemini` (config + providers str/parse/key-env/all-list), the
+  `gemini` catalogue entry gains `stt: Some(..)` (`gemini-2.5-flash`), the
+  `gemini` feature on `fono-stt` (+ base64), and the factory build arm. 8 client
+  tests.
+- **TTS (Section D)** — bespoke `fono-tts::gemini` native-speech client
+  (`generateContent`, `responseModalities:["AUDIO"]`, base64 int16 LE → f32 PCM,
+  `mimeType` rate parse w/ 24 kHz fallback, voice in body via
+  `prebuiltVoiceConfig`). Added `TtsEndpoint::Gemini` + `TtsBackend::Gemini`
+  (config + providers str/parse/key-env/requires-key/all-list 10→11), the
+  `gemini` catalogue `tts: Some(..)` (`gemini-2.5-flash-preview-tts`, default
+  voice `Kore`, gender-balanced 10-voice palette, multilingual), the `gemini`
+  feature on `fono-tts` (+ base64, openai_compat warm-client gate), the factory
+  build arm, and Gemini arms in the doctor/daemon/wizard `TtsBackend` matches.
+  10 client tests.
+- **Wizard** — removed the now-stale `!= "gemini"` guards in `is_polish_wired` /
+  `is_assistant_wired` (E1/E2 wired both); Gemini now surfaces as a full
+  primary candidate (STT/LLM/Assistant/TTS/Vision/Search all ✓). Updated the
+  picker-table pin (col width 14→15, new "Google Gemini" row) and the
+  candidate-set tests.
+- **Assistant-turn STT errors now notify** — the STT stage inside
+  `run_assistant_turn` (`crates/fono/src/assistant.rs`) previously propagated a
+  backend failure raw (`r?`), so it surfaced only as a session-level `warn!`
+  with no desktop popup. It now mirrors the LLM-stage handling: classify the
+  error and fire one `critical_notify::notify(Stage::Stt, …)` for
+  Auth/Payment/Network/Terms classes (e.g. a Gemini `403 PERMISSION_DENIED`),
+  subject to the global session-cap suppression.
+- **Live-API verification (Gemini single key)** — ran the diagnostic curls with
+  a real `GEMINI_API_KEY`. `GET /v1beta/models` → **HTTP 200** (key authenticates,
+  request shape correct), but `POST …:generateContent` → **HTTP 403
+  PERMISSION_DENIED "Your project has been denied access. Please contact
+  support."** — reproduced with the user's *own* raw curl, proving this is a
+  Google account/project-side block (region/policy flag), **not** a Fono bug or
+  a malformed request (that would be 400). Our STT/TTS wire shapes are validated
+  to the extent the project allows; full content-generation verification awaits
+  an unblocked project/key.
+
+Pre-commit gate green: `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -D warnings`, and `cargo test --workspace --tests --lib` all pass.
+
+Remaining (clearly scoped in the v2 plan, not yet landed):
+
+- **Realtime + tools (Sections F, G)** — blocked on two unbuilt prerequisites:
+  the `fono-action` tool dispatcher (`voice-actions-via-mcp`) and the catalogue
+  `ModelEntry` reshape (realtime-v4 Phase 1). Then the Gemini Live
+  (`BidiGenerateContent`) client reusing the same dispatcher.
+- **Native web search (staged path)** — the OpenAI-compat layer can't inject
+  `google_search`; wiring it needs the native `generateContent` endpoint.
+- STT (C) and native TTS (D) are wired but their bespoke wire shapes are only
+  unit-tested offline; they still want one round of **live-API verification**
+  with a real key.
+
+All changes staged locally, signed off, **not pushed**.
 
 ## 2026-06-16 — Per-program TTS voices (palette + gender + positional labels)
 

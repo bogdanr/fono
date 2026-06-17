@@ -105,6 +105,7 @@ pub fn build_stt(
         SttBackend::Cartesia => build_cartesia(cfg, secrets, languages, prompts, cloud_rerun),
         SttBackend::Deepgram => build_deepgram(cfg, secrets, languages, prompts, cloud_rerun),
         SttBackend::ElevenLabs => build_elevenlabs(cfg, secrets, languages, prompts, cloud_rerun),
+        SttBackend::Gemini => build_gemini(cfg, secrets, languages, prompts, cloud_rerun),
         SttBackend::Speechmatics => {
             build_speechmatics(cfg, secrets, languages, prompts, cloud_rerun)
         }
@@ -404,6 +405,35 @@ fn build_elevenlabs(
     _: bool,
 ) -> Result<Arc<dyn SpeechToText>> {
     Err(anyhow!("ElevenLabs STT not compiled in (enable the `elevenlabs` feature on `fono-stt`)"))
+}
+
+#[cfg(feature = "gemini")]
+fn build_gemini(
+    cfg: &Stt,
+    secrets: &Secrets,
+    languages: Vec<String>,
+    prompts: std::collections::HashMap<String, String>,
+    cloud_rerun: bool,
+) -> Result<Arc<dyn SpeechToText>> {
+    let (key, model) = resolve_cloud(cfg, secrets, &SttBackend::Gemini, "gemini")?;
+    bootstrap_language_cache(&languages, crate::gemini::BACKEND_KEY);
+    Ok(Arc::new(
+        crate::gemini::GeminiStt::with_model(key, model)
+            .with_languages(languages)
+            .with_prompts(prompts)
+            .with_cloud_rerun_on_mismatch(cloud_rerun),
+    ))
+}
+
+#[cfg(not(feature = "gemini"))]
+fn build_gemini(
+    _: &Stt,
+    _: &Secrets,
+    _: Vec<String>,
+    _: std::collections::HashMap<String, String>,
+    _: bool,
+) -> Result<Arc<dyn SpeechToText>> {
+    Err(anyhow!("Gemini STT not compiled in (enable the `gemini` feature on `fono-stt`)"))
 }
 
 #[cfg(feature = "speechmatics")]

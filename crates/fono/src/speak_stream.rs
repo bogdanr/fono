@@ -59,6 +59,12 @@ pub async fn run(paths: &Paths) -> Result<()> {
 
     let playback = AudioPlayback::new(None).context("opening audio playback device")?;
 
+    // Streaming-capable cloud backends play each sentence as a gapless session
+    // (first audio before the whole sentence is synthesised); batch/local
+    // backends keep the synthesize + enqueue path.
+    let streaming = tts_arc.supports_streaming();
+    let mut sink = fono_audio::LocalPlaybackSink::new(playback.clone());
+
     // Bounded channel: when full the reader task stalls naturally.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(MAX_PENDING);
 
@@ -106,15 +112,33 @@ pub async fn run(paths: &Paths) -> Result<()> {
             sentence = &sentence[..sentence.len().min(60)],
             "synthesising"
         );
-        match tts_arc.synthesize(&sentence, None, None).await {
-            Ok(audio) if !audio.pcm.is_empty() => {
-                if let Err(e) = playback.enqueue(audio.pcm, audio.sample_rate) {
-                    warn!(target: "fono::speak_stream", error = %e, "playback enqueue failed");
+        if streaming {
+            match fono_tts::stream_utterance(
+                tts_arc.as_ref(),
+                &sentence,
+                None,
+                None,
+                &mut sink,
+                || {},
+            )
+            .await
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(target: "fono::speak_stream", error = %e, "TTS stream failed");
                 }
             }
-            Ok(_) => {} // empty PCM (silent TTS result) — skip
-            Err(e) => {
-                warn!(target: "fono::speak_stream", error = %e, "TTS synthesis failed");
+        } else {
+            match tts_arc.synthesize(&sentence, None, None).await {
+                Ok(audio) if !audio.pcm.is_empty() => {
+                    if let Err(e) = playback.enqueue(audio.pcm, audio.sample_rate) {
+                        warn!(target: "fono::speak_stream", error = %e, "playback enqueue failed");
+                    }
+                }
+                Ok(_) => {} // empty PCM (silent TTS result) — skip
+                Err(e) => {
+                    warn!(target: "fono::speak_stream", error = %e, "TTS synthesis failed");
+                }
             }
         }
     }

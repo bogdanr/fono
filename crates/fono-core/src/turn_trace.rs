@@ -49,16 +49,30 @@ static TRACE_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// | lane            | stage                                                  |
 /// |-----------------|--------------------------------------------------------|
 /// | `keys`          | key press/release + hotkey FSM transitions             |
+/// | `capture`       | microphone capture (`capture.*`)                       |
 /// | `stt`           | speech-to-text                                         |
 /// | `f7-polish`     | F7 plain-dictation cleanup (`polish.*`)                |
 /// | `f7-inject`     | F7 streaming text injection (`polish.inject_*`)        |
 /// | `llm`           | F8 assistant generation (`assistant.llm`)              |
+/// | `splitter`      | sentence splitting between LLM and TTS (`splitter.*`)  |
 /// | `tts`           | text-to-speech synthesis                               |
-/// | `playback`      | audio playback                                         |
+/// | `playback`      | audio playback at the device (`playback.*`)            |
 /// | `cache`         | prompt-state (KV) cache decisions for both F7 and F8   |
 /// | `warmup`        | startup prewarm (startup trace file only)              |
 /// | `assistant-pump`| turn lifecycle (`turn.start` / `turn.finish`)          |
+///
+/// The `capture` and `playback` lanes are emitted by the `fono-audio` crate's
+/// recording and playback workers via the ambient [`current_instant`] /
+/// [`current_span`] helpers, so the trace shows the *device-level* moments
+/// (mic opened, first PCM captured; player spawned, first audio out, drained)
+/// rather than only the higher-level STT/TTS spans.
 pub const KEYS_LANE: &str = "keys";
+/// See [`KEYS_LANE`] for the full lane taxonomy.
+pub const CAPTURE_LANE: &str = "capture";
+/// See [`KEYS_LANE`] for the full lane taxonomy.
+pub const TTS_LANE: &str = "tts";
+/// See [`KEYS_LANE`] for the full lane taxonomy.
+pub const PLAYBACK_LANE: &str = "playback";
 /// See [`KEYS_LANE`] for the full lane taxonomy.
 pub const STT_LANE: &str = "stt";
 /// See [`KEYS_LANE`] for the full lane taxonomy.
@@ -71,11 +85,32 @@ pub const INJECT_LANE: &str = "f7-inject";
 /// See [`KEYS_LANE`] for the full lane taxonomy.
 pub const LLM_LANE: &str = "llm";
 /// See [`KEYS_LANE`] for the full lane taxonomy.
+pub const SPLITTER_LANE: &str = "splitter";
+/// See [`KEYS_LANE`] for the full lane taxonomy.
 pub const CACHE_LANE: &str = "cache";
 /// See [`KEYS_LANE`] for the full lane taxonomy.
 pub const WARMUP_LANE: &str = "warmup";
 /// See [`KEYS_LANE`] for the full lane taxonomy.
 pub const PUMP_LANE: &str = "assistant-pump";
+
+/// Canonical top-to-bottom lane order used when emitting Chrome `thread_name`
+/// / `thread_sort_index` metadata. Lanes not listed here sort after these, in
+/// first-seen order. This is what makes a loaded trace render the pipeline as
+/// a clean waterfall instead of hashed thread ids in arbitrary order.
+const LANE_ORDER: &[&str] = &[
+    KEYS_LANE,
+    CAPTURE_LANE,
+    STT_LANE,
+    POLISH_LANE,
+    INJECT_LANE,
+    LLM_LANE,
+    SPLITTER_LANE,
+    TTS_LANE,
+    PLAYBACK_LANE,
+    CACHE_LANE,
+    WARMUP_LANE,
+    PUMP_LANE,
+];
 
 /// Cloneable handle for recording one assistant turn timeline.
 #[derive(Clone)]
@@ -258,17 +293,26 @@ impl TurnTrace {
 
     /// Write the trace file. Safe to call once at turn end.
     pub fn finish(&self, args: Value) {
-        self.instant("turn.finish", "assistant", "assistant-pump", args);
+        self.instant("turn.finish", "assistant", PUMP_LANE, args);
         if let Some(parent) = self.inner.path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 warn!(target: "fono::trace", path = %parent.display(), error = %e, "failed to create trace directory");
                 return;
             }
         }
-        let trace_events =
+        let mut trace_events =
             self.inner.events.lock().expect("turn trace events mutex poisoned").clone();
+        // Chronological order so the raw JSON reads top-to-bottom like the
+        // timeline (Perfetto re-sorts anyway; this is for humans reading the
+        // file). `sort_by_key` is stable, so same-`ts` events keep insertion order.
+        trace_events.sort_by_key(|e| e.ts);
+        // Name + order the lanes. Without this Perfetto labels lanes with hashed
+        // thread ids ("stt 46340") in arbitrary order; these one-shot metadata
+        // events turn them into named lanes rendered as a pipeline waterfall.
+        let mut events = metadata_events(&trace_events);
+        events.extend(trace_events.iter().filter_map(|e| serde_json::to_value(e).ok()));
         let payload = json!({
-            "traceEvents": trace_events,
+            "traceEvents": events,
             "displayTimeUnit": "ms",
             "metadata": {
                 "name": "fono assistant turn",
@@ -505,6 +549,33 @@ pub fn generation_span_args(
         "start_pos": start_pos,
         "stop_reason": stop_reason,
     })
+}
+
+/// Build Chrome `process_name` / `thread_name` / `thread_sort_index` metadata
+/// events for every lane present in `events`, ordered per [`LANE_ORDER`] (any
+/// lane not listed there sorts after, in first-seen order). Emitting these once
+/// at turn end is what turns Perfetto's hashed "stt 46340" labels into named
+/// lanes drawn as a top-to-bottom pipeline. Pure function of the recorded
+/// lanes; no timing impact.
+fn metadata_events(events: &[TraceEvent]) -> Vec<Value> {
+    let mut lanes: Vec<&str> = Vec::new();
+    for want in LANE_ORDER {
+        if events.iter().any(|e| e.tid == *want) {
+            lanes.push(want);
+        }
+    }
+    for e in events {
+        if !lanes.contains(&e.tid.as_str()) {
+            lanes.push(&e.tid);
+        }
+    }
+    let mut meta =
+        vec![json!({ "name": "process_name", "ph": "M", "pid": 1, "args": { "name": "fono" } })];
+    for (sort_index, tid) in lanes.iter().enumerate() {
+        meta.push(json!({ "name": "thread_name", "ph": "M", "pid": 1, "tid": tid, "args": { "name": tid } }));
+        meta.push(json!({ "name": "thread_sort_index", "ph": "M", "pid": 1, "tid": tid, "args": { "sort_index": sort_index } }));
+    }
+    meta
 }
 
 fn trace_path(base: &Path, prefix: &str, id: u64) -> PathBuf {

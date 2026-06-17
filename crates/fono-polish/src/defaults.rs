@@ -34,7 +34,7 @@ mod tests {
         assert_eq!(default_cloud_model("openai"), "gpt-5.4-nano");
         assert_eq!(default_cloud_model("anthropic"), "claude-haiku-4-5-20251001");
         assert_eq!(default_cloud_model("openrouter"), "openai/gpt-5.4-nano");
-        assert_eq!(default_cloud_model("gemini"), "gemini-1.5-flash");
+        assert_eq!(default_cloud_model("gemini"), "gemini-flash-lite-latest");
     }
 
     #[test]

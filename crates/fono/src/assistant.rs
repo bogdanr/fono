@@ -18,6 +18,7 @@
 //! `on_assistant_hold_release`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -217,6 +218,23 @@ pub async fn run_assistant_turn(
             return Ok(false);
         }
         let stt_started = std::time::Instant::now();
+        if let Some(t) = &trace {
+            // Device-level capture (mic open, first frame) happens before this
+            // turn's trace exists, so surface the *recorded input* bounds on the
+            // capture lane here — its width is the audio the user actually
+            // recorded, making the record→STT→playback boundary obvious.
+            let duration_ms = if sample_rate > 0 {
+                (pcm.len() as f64 / f64::from(sample_rate) * 1000.0).round() as u64
+            } else {
+                0
+            };
+            t.instant(
+                "capture.input",
+                "capture",
+                fono_core::turn_trace::CAPTURE_LANE,
+                json!({ "samples": pcm.len(), "sample_rate": sample_rate, "duration_ms": duration_ms }),
+            );
+        }
         let transcription = tokio::select! {
             biased;
             () = notify.notified() => {
@@ -238,7 +256,50 @@ pub async fn run_assistant_turn(
                 }
                 return Ok(false);
             }
-            r = stt.transcribe(&pcm, sample_rate, language.as_deref()) => r?,
+            r = stt.transcribe(&pcm, sample_rate, language.as_deref()) => match r {
+                Ok(t) => t,
+                Err(e) => {
+                    // STT backend failed before producing a transcript —
+                    // typically auth (bad / project-denied key, e.g. a Gemini
+                    // 403 PERMISSION_DENIED), payment, network, or terms.
+                    // Mirror the LLM-stage handling below so the user gets one
+                    // desktop notification instead of a silent `warn!` at the
+                    // session level; the global session cap suppresses any
+                    // cascading popups.
+                    let err_text = format!("{e:#}");
+                    let class = fono_core::critical_notify::classify(&err_text);
+                    if matches!(
+                        class,
+                        fono_core::critical_notify::ErrorClass::Auth
+                            | fono_core::critical_notify::ErrorClass::PaymentRequired
+                            | fono_core::critical_notify::ErrorClass::Network
+                            | fono_core::critical_notify::ErrorClass::TermsRequired
+                    ) {
+                        fono_core::critical_notify::notify(
+                            fono_core::critical_notify::Stage::Stt,
+                            stt.name(),
+                            class,
+                            &err_text,
+                        );
+                    }
+                    if let Some(t) = &trace {
+                        t.duration_between(
+                            "stt.transcribe",
+                            "assistant.stt",
+                            "stt",
+                            stt_started,
+                            std::time::Instant::now(),
+                            json!({ "error": err_text }),
+                        );
+                        t.finish(json!({
+                            "aborted": true,
+                            "reason": "stt_error",
+                            "summary": t.cache_scoreboard(),
+                        }));
+                    }
+                    return Err(e);
+                }
+            },
         };
         let trimmed = transcription.text.trim().to_string();
         if trimmed.is_empty() {
@@ -435,9 +496,9 @@ pub async fn run_assistant_turn(
         }
         if let Some(t) = &trace {
             t.duration_between(
-                "audio.playback_ensure",
-                "assistant.audio",
-                "audio",
+                "playback.ensure",
+                "assistant.playback",
+                fono_core::turn_trace::PLAYBACK_LANE,
                 playback_started,
                 std::time::Instant::now(),
                 json!({ "available": s.playback.is_some() }),
@@ -449,10 +510,12 @@ pub async fn run_assistant_turn(
     let mut splitter = SentenceSplitter::new();
     let mut full_reply = String::new();
     let mut any_audio = false;
-    let mut first_audio_at: Option<std::time::Instant> = None;
     let mut last_audio_at: Option<std::time::Instant> = None;
-    let mut speaking_announced = false;
     let mut synthesising_announced = false;
+    // Fired once at the true first audio frame (mid-stream for streaming
+    // backends; right after the first enqueue for batch ones): records the
+    // honest TTFA and flips the FSM/overlay to SPEAKING.
+    let first_audio = FirstAudio::new(llm_started, &action_tx, overlay.as_ref());
     // Tool events observed on the stream. Recorded into history
     // after the turn finishes so subsequent turns can echo the
     // tool-call exchange back to the model. None ⇒ no tool used.
@@ -605,7 +668,7 @@ pub async fn run_assistant_turn(
             t.duration_between(
                 "splitter.push",
                 "assistant.splitter",
-                "splitter",
+                fono_core::turn_trace::SPLITTER_LANE,
                 split_started,
                 std::time::Instant::now(),
                 json!({ "delta_chars": delta_chars, "sentences_ready": sentences.len() }),
@@ -617,7 +680,7 @@ pub async fn run_assistant_turn(
                 t.instant(
                     "splitter.sentence_ready",
                     "assistant.splitter",
-                    "splitter",
+                    fono_core::turn_trace::SPLITTER_LANE,
                     json!({ "sentence_index": sentence_index, "chars": sentence.chars().count() }),
                 );
             }
@@ -628,33 +691,17 @@ pub async fn run_assistant_turn(
                 tts_lang.as_deref(),
                 sentence_index,
                 &notify,
+                &first_audio,
             )
             .await
             {
                 any_audio = true;
                 metrics.sentences = metrics.sentences.saturating_add(1);
-                let now = std::time::Instant::now();
-                last_audio_at = Some(now);
-                if first_audio_at.is_none() {
-                    first_audio_at = Some(now);
-                    metrics.tts_ttfa_ms = Some(llm_started.elapsed().as_millis() as u64);
-                    debug!(
-                        target: "fono::assistant",
-                        ttfa_ms = metrics.tts_ttfa_ms.unwrap_or(0),
-                        "first audio queued"
-                    );
-                    // FSM `AssistantThinking → AssistantSpeaking` +
-                    // overlay SYNTHESISING → SPEAKING. This is the
-                    // moment the user actually starts hearing the
-                    // reply.
-                    if !speaking_announced {
-                        speaking_announced = true;
-                        let _ = action_tx.send(HotkeyAction::AssistantSpeakingStarted);
-                        if let Some(o) = overlay.as_ref() {
-                            o.set_state(fono_overlay::OverlayState::AssistantSpeaking);
-                        }
-                    }
-                }
+                last_audio_at = Some(std::time::Instant::now());
+                // Streaming backends already fired mid-stream (via the
+                // `stream_utterance` callback) the moment the first frame
+                // reached the device; batch backends fire here. Idempotent.
+                first_audio.fire();
             }
             if notify_triggered(&notify) {
                 break;
@@ -694,37 +741,37 @@ pub async fn run_assistant_turn(
                 t.instant(
                     "splitter.flush_tail",
                     "assistant.splitter",
-                    "splitter",
+                    fono_core::turn_trace::SPLITTER_LANE,
                     json!({ "sentence_index": sentence_index, "chars": tail.chars().count() }),
                 );
                 t.duration_between(
                     "splitter.flush",
                     "assistant.splitter",
-                    "splitter",
+                    fono_core::turn_trace::SPLITTER_LANE,
                     flush_started,
                     std::time::Instant::now(),
                     json!({ "tail": true }),
                 );
             }
-            if synth_and_enqueue(&state, &tts, &tail, tts_lang.as_deref(), sentence_index, &notify)
-                .await
+            if synth_and_enqueue(
+                &state,
+                &tts,
+                &tail,
+                tts_lang.as_deref(),
+                sentence_index,
+                &notify,
+                &first_audio,
+            )
+            .await
             {
                 any_audio = true;
                 metrics.sentences = metrics.sentences.saturating_add(1);
                 last_audio_at = Some(std::time::Instant::now());
-                // Belt-and-braces: a tail flush that arrives without
-                // any preceding delta is impossible (the splitter is
-                // empty until `push`ed), but if a future refactor
-                // ever ends up here without having announced
-                // SPEAKING, we still want the FSM/overlay flipped
-                // before audio actually plays. We're past the delta
-                // loop, so no need to flip `speaking_announced` itself.
-                if !speaking_announced {
-                    let _ = action_tx.send(HotkeyAction::AssistantSpeakingStarted);
-                    if let Some(o) = overlay.as_ref() {
-                        o.set_state(fono_overlay::OverlayState::AssistantSpeaking);
-                    }
-                }
+                // Belt-and-braces: a tail flush without any preceding delta is
+                // impossible (the splitter is empty until `push`ed), but if a
+                // future refactor ever ends up here we still want SPEAKING
+                // flipped before audio plays. Idempotent.
+                first_audio.fire();
             }
         }
     }
@@ -755,6 +802,7 @@ pub async fn run_assistant_turn(
         }
     }
 
+    metrics.tts_ttfa_ms = first_audio.ttfa_ms();
     metrics.reply_chars = full_reply.chars().count();
     metrics.aborted = aborted_mid_stream;
     // Total = STT start → last audio queued (drain not included).
@@ -784,10 +832,10 @@ pub async fn run_assistant_turn(
         s.playback.clone()
     };
     if let Some(pb) = playback_handle {
+        let drain_started = std::time::Instant::now();
+        let mut drain_reason = "idle";
         if !pb.is_idle() {
-            let drain_started = std::time::Instant::now();
             let timeout = std::time::Duration::from_secs(60);
-            let mut drain_reason = "idle";
             loop {
                 tokio::select! {
                     biased;
@@ -816,16 +864,19 @@ pub async fn run_assistant_turn(
                     }
                 }
             }
-            if let Some(t) = &trace {
-                t.duration_between(
-                    "playback.drain",
-                    "assistant.playback",
-                    "playback",
-                    drain_started,
-                    std::time::Instant::now(),
-                    json!({ "reason": drain_reason }),
-                );
-            }
+        }
+        // Always record the drain span (zero-width when playback was already
+        // idle) so the post-TTS tail between last audio and turn end is never
+        // unexplained whitespace on the timeline.
+        if let Some(t) = &trace {
+            t.duration_between(
+                "playback.drain",
+                "assistant.playback",
+                fono_core::turn_trace::PLAYBACK_LANE,
+                drain_started,
+                std::time::Instant::now(),
+                json!({ "reason": drain_reason }),
+            );
         }
     }
     if let Some(t) = &trace {
@@ -844,6 +895,58 @@ pub async fn run_assistant_turn(
     Ok(any_audio)
 }
 
+/// Per-turn first-audio signal. [`Self::fire`] is invoked at the *true* moment
+/// the first PCM frame reaches the device — mid-stream for streaming TTS
+/// backends (via the `stream_utterance` callback), or right after the first
+/// enqueue for batch backends. It is idempotent (fires once per turn), records
+/// the time-to-first-audio relative to LLM start, and flips the FSM + overlay
+/// to SPEAKING. Borrows `action_tx`/`overlay` for the whole turn.
+struct FirstAudio<'a> {
+    llm_started: std::time::Instant,
+    action_tx: &'a mpsc::UnboundedSender<HotkeyAction>,
+    overlay: Option<&'a fono_overlay::OverlayHandle>,
+    fired: AtomicBool,
+    ttfa_cell: AtomicU64,
+}
+
+impl<'a> FirstAudio<'a> {
+    fn new(
+        llm_started: std::time::Instant,
+        action_tx: &'a mpsc::UnboundedSender<HotkeyAction>,
+        overlay: Option<&'a fono_overlay::OverlayHandle>,
+    ) -> Self {
+        Self {
+            llm_started,
+            action_tx,
+            overlay,
+            fired: AtomicBool::new(false),
+            ttfa_cell: AtomicU64::new(u64::MAX),
+        }
+    }
+
+    /// Fire once. Safe to call from any sentence / either path; only the first
+    /// call records TTFA and announces SPEAKING.
+    fn fire(&self) {
+        if !self.fired.swap(true, Ordering::SeqCst) {
+            let ttfa = self.llm_started.elapsed().as_millis() as u64;
+            self.ttfa_cell.store(ttfa, Ordering::SeqCst);
+            debug!(target: "fono::assistant", ttfa_ms = ttfa, "first audio");
+            let _ = self.action_tx.send(HotkeyAction::AssistantSpeakingStarted);
+            if let Some(o) = self.overlay {
+                o.set_state(fono_overlay::OverlayState::AssistantSpeaking);
+            }
+        }
+    }
+
+    /// Recorded time-to-first-audio in ms, or `None` if no audio ever played.
+    fn ttfa_ms(&self) -> Option<u64> {
+        match self.ttfa_cell.load(Ordering::SeqCst) {
+            u64::MAX => None,
+            v => Some(v),
+        }
+    }
+}
+
 /// Single-sentence helper. Synthesises and enqueues into the active
 /// playback handle. Returns `true` on success.
 #[allow(clippy::too_many_lines)]
@@ -854,9 +957,17 @@ async fn synth_and_enqueue(
     lang: Option<&str>,
     sentence_index: u32,
     notify: &Arc<Notify>,
+    first_audio: &FirstAudio<'_>,
 ) -> bool {
     if sentence.trim().is_empty() {
         return false;
+    }
+    // Streaming-capable cloud backends play each sentence as a gapless
+    // intra-utterance session, cutting time-to-first-audio. Batch/local
+    // backends fall through to the synthesize + enqueue path below.
+    if tts.supports_streaming() {
+        return synth_and_stream(state, tts, sentence, lang, sentence_index, notify, first_audio)
+            .await;
     }
     let synth_started = std::time::Instant::now();
     let audio = tokio::select! {
@@ -867,7 +978,7 @@ async fn synth_and_enqueue(
                 t.instant(
                     "tts.synthesize_cancelled",
                     "assistant.tts",
-                    "tts",
+                    fono_core::turn_trace::TTS_LANE,
                     json!({ "sentence_index": sentence_index }),
                 );
             }
@@ -973,8 +1084,8 @@ async fn synth_and_enqueue(
         if let Some(t) = TurnTrace::current() {
             t.duration_between(
                 "audio.enqueue",
-                "assistant.audio",
-                "audio",
+                "assistant.playback",
+                fono_core::turn_trace::PLAYBACK_LANE,
                 enqueue_started,
                 std::time::Instant::now(),
                 json!({ "sentence_index": sentence_index, "error": e.to_string() }),
@@ -985,14 +1096,104 @@ async fn synth_and_enqueue(
     if let Some(t) = TurnTrace::current() {
         t.duration_between(
             "audio.enqueue",
-            "assistant.audio",
-            "audio",
+            "assistant.playback",
+            fono_core::turn_trace::PLAYBACK_LANE,
             enqueue_started,
             std::time::Instant::now(),
             json!({ "sentence_index": sentence_index }),
         );
     }
     true
+}
+
+/// Streaming counterpart of [`synth_and_enqueue`] for backends that report
+/// `supports_streaming()`. Drives one sentence through
+/// [`fono_tts::stream_utterance`] into a [`LocalPlaybackSink`], so the first
+/// audio plays before the whole sentence is synthesised. Cancellation
+/// (Escape / barge-in) is handled by racing the stream against `notify`; on
+/// cancel the sink is aborted (which stops the playback worker). Returns `true`
+/// if any audio was produced.
+async fn synth_and_stream(
+    state: &Arc<Mutex<AssistantSessionState>>,
+    tts: &Arc<dyn TextToSpeech>,
+    sentence: &str,
+    lang: Option<&str>,
+    sentence_index: u32,
+    notify: &Arc<Notify>,
+    first_audio: &FirstAudio<'_>,
+) -> bool {
+    use fono_tts::PcmSink as _;
+
+    let pb_handle = {
+        let s = state.lock().await;
+        s.playback.clone()
+    };
+    let Some(pb) = pb_handle else {
+        return false;
+    };
+    let synth_started = std::time::Instant::now();
+    let mut sink = fono_audio::LocalPlaybackSink::new(pb);
+    let result = tokio::select! {
+        biased;
+        () = notify.notified() => {
+            debug!(target: "fono::assistant", "cancelled during TTS stream");
+            let _ = sink.abort().await;
+            return false;
+        }
+        r = fono_tts::stream_utterance(
+            tts.as_ref(),
+            sentence,
+            None,
+            lang,
+            &mut sink,
+            || first_audio.fire(),
+        ) => r,
+    };
+    match result {
+        Ok(any_audio) => {
+            if let Some(t) = TurnTrace::current() {
+                t.duration_between(
+                    "tts.synthesize_stream",
+                    "assistant.tts",
+                    fono_core::turn_trace::TTS_LANE,
+                    synth_started,
+                    std::time::Instant::now(),
+                    json!({
+                        "sentence_index": sentence_index,
+                        "provider": tts.name(),
+                        "chars": sentence.chars().count(),
+                        "streamed": true,
+                        "produced_audio": any_audio,
+                    }),
+                );
+            }
+            any_audio
+        }
+        Err(e) => {
+            warn!(target: "fono::assistant", error = %e, "TTS stream failed");
+            let err_text = format!("{e:#}");
+            let class = fono_core::critical_notify::classify(&err_text);
+            if matches!(
+                class,
+                fono_core::critical_notify::ErrorClass::Auth
+                    | fono_core::critical_notify::ErrorClass::PaymentRequired
+                    | fono_core::critical_notify::ErrorClass::Network
+                    | fono_core::critical_notify::ErrorClass::TermsRequired
+            ) {
+                fono_core::critical_notify::notify(
+                    fono_core::critical_notify::Stage::Tts,
+                    tts.name(),
+                    class,
+                    &err_text,
+                );
+            } else if matches!(class, fono_core::critical_notify::ErrorClass::RateLimit) {
+                let body = extract_json_message(&err_text)
+                    .unwrap_or_else(|| truncate(&err_text, 240).to_string());
+                fono_stt::rate_limit_notify::notify_once(tts.name(), &body);
+            }
+            false
+        }
+    }
 }
 
 /// Pull the human-readable `message` out of a provider error blob

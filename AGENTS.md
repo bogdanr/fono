@@ -73,6 +73,15 @@ Target users: Linux desktop (i3 / sway / KDE / GNOME, X11 and Wayland), Windows,
   on line 1.
 - Do **NOT** add dependencies without updating `deny.toml` and verifying the licenses
   are compatible with GPL-3.0.
+- **Binary size is the top priority.** Do **NOT** introduce a dependency that is
+  *new to the project* — i.e. a crate not already present in `Cargo.lock` /
+  the binary's dependency graph — without flagging it first and getting explicit
+  sign-off, because it grows the shipped single binary (the size budget is
+  enforced by the CI size-budget gate). When you do flag one, state the expected
+  size impact. Adding an *already-present* dependency as a new edge (e.g. a crate
+  the binary already links transitively) is net-zero on binary size and does
+  **not** need flagging — just proceed. Check with
+  `cargo tree -p fono -i <crate>` if unsure whether a crate is already in the graph.
 - Do **NOT** add Llama-family or non-OSI/custom-license Gemma models as defaults.
   Gemma models may be defaults only when the specific artifact and its upstream base
   model are published under an OSI-approved, GPL-3.0-compatible license such as

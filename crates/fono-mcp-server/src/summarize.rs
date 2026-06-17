@@ -68,11 +68,12 @@ fn llm_timeouts(backend: &AssistantBackend) -> (Duration, Duration) {
 /// last (always "works" offline but is slow and weakest at instruction
 /// following). The configured backend is excluded by
 /// [`fallback_candidates`].
-const FALLBACK_ORDER: [AssistantBackend; 6] = [
+const FALLBACK_ORDER: [AssistantBackend; 7] = [
     AssistantBackend::Cerebras,
     AssistantBackend::Groq,
     AssistantBackend::OpenAI,
     AssistantBackend::OpenRouter,
+    AssistantBackend::Gemini,
     AssistantBackend::Anthropic,
     AssistantBackend::Ollama,
 ];

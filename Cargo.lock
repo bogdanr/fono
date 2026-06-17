@@ -1323,9 +1323,11 @@ name = "fono-audio"
 version = "0.10.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "cpal",
  "fono-core",
  "rubato",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -1587,11 +1589,14 @@ version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "espeak-ng",
+ "fono-audio",
  "fono-core",
  "fono-download",
  "fono-http",
  "fono-net-codec",
+ "futures",
  "hex",
  "ort",
  "reqwest",
@@ -1601,6 +1606,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
  "tracing",
  "whatlang",
 ]

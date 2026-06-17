@@ -14,6 +14,7 @@
 pub mod defaults;
 pub mod factory;
 pub mod sentence_split;
+pub mod streaming;
 pub mod traits;
 
 #[cfg(feature = "cartesia")]
@@ -32,13 +33,16 @@ pub mod deepgram;
 pub mod discovery;
 #[cfg(feature = "elevenlabs")]
 pub mod elevenlabs;
+#[cfg(feature = "gemini")]
+pub mod gemini;
 #[cfg(any(
     feature = "openai",
     feature = "groq",
     feature = "openrouter",
     feature = "cartesia",
     feature = "deepgram",
-    feature = "elevenlabs"
+    feature = "elevenlabs",
+    feature = "gemini"
 ))]
 pub mod openai_compat;
 #[cfg(feature = "speechmatics")]
@@ -63,4 +67,5 @@ pub mod voices;
 
 pub use factory::build_tts;
 pub use sentence_split::SentenceSplitter;
-pub use traits::{TextToSpeech, TtsAudio};
+pub use streaming::{stream_utterance, PcmSink};
+pub use traits::{TextToSpeech, TtsAudio, TtsChunk};

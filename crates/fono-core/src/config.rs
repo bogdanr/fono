@@ -304,6 +304,12 @@ pub enum SttBackend {
     /// ElevenLabs Scribe (`scribe_v1`) batch speech-to-text
     /// (`POST /v1/speech-to-text`). Configure via `[stt.cloud]`.
     ElevenLabs,
+    /// Google Gemini audio-understanding STT (`generateContent`) on a
+    /// single `GEMINI_API_KEY`, free tier (ADR 0034). Batch only;
+    /// prompt-driven transcription with no per-segment confidence.
+    /// Distinct from [`SttBackend::Google`] (Cloud Speech, service
+    /// account). Configure via `[stt.cloud]`.
+    Gemini,
     /// OpenRouter — proxies OpenAI-compatible
     /// `POST /v1/audio/transcriptions` to upstream providers
     /// (Groq Whisper, Google Chirp, …). Selects the route via the
@@ -446,6 +452,12 @@ pub enum TtsBackend {
     /// model Eleven v3 (`eleven_v3`). Raw PCM output requires a paid
     /// ElevenLabs plan. Configure via `[tts.cloud]`.
     ElevenLabs,
+    /// Gemini native TTS via `:generateContent` with
+    /// `responseModalities: ["AUDIO"]` on a single `GEMINI_API_KEY`
+    /// (free tier). 24 kHz mono PCM, 30 prebuilt voices, multilingual
+    /// (auto-detects the spoken language). Configure via `[tts.cloud]`
+    /// (ADR 0034).
+    Gemini,
     /// On-device ONNX voice engine (Piper now; Kokoro later) on the
     /// statically-linked `ort` runtime. Requires the `tts-local` build
     /// feature. Configure via `[tts.local]`; the voice downloads from
@@ -774,6 +786,11 @@ pub enum AssistantBackend {
     Groq,
     Cerebras,
     OpenRouter,
+    /// Google Gemini via the OpenAI-compatible surface
+    /// (`/v1beta/openai/chat/completions`), single `GEMINI_API_KEY`,
+    /// free tier (ADR 0034). `google_search` grounding is not exposed
+    /// through the compat layer; native search is a follow-up.
+    Gemini,
     Ollama,
 }
 
@@ -1373,7 +1390,8 @@ impl Config {
             | TtsBackend::Cartesia
             | TtsBackend::Deepgram
             | TtsBackend::Speechmatics
-            | TtsBackend::ElevenLabs => {
+            | TtsBackend::ElevenLabs
+            | TtsBackend::Gemini => {
                 let env = crate::providers::tts_key_env(&self.tts.backend);
                 !env.is_empty() && secrets.has_in_file(env)
             }

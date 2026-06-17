@@ -47,6 +47,22 @@ impl Default for CaptureConfig {
     }
 }
 
+/// Emit a `capture`-lane instant on the process-current turn trace, if one is
+/// installed. No-op on untraced turns (a single relaxed atomic load), so the
+/// capture hot path pays nothing. Surfaces the device-level recording moments
+/// (mic process spawned, first PCM frame in) so a trace makes the
+/// record→playback boundary obvious instead of only showing the STT span. See
+/// [`fono_core::turn_trace`].
+#[cfg(any(all(target_os = "linux", not(feature = "cpal-backend")), feature = "cpal-backend"))]
+fn trace_capture_instant(name: &str, args: serde_json::Value) {
+    fono_core::turn_trace::current_instant(
+        name,
+        "capture",
+        fono_core::turn_trace::CAPTURE_LANE,
+        args,
+    );
+}
+
 /// Shared PCM buffer (f32 mono @ `target_sample_rate`).
 #[derive(Debug, Default)]
 pub struct RecordingBuffer {
@@ -201,6 +217,7 @@ where
     F: FnMut(&[f32]) + Send + 'static,
 {
     let (mut child, tool) = spawn_capture_tool(target_rate)?;
+    trace_capture_instant("capture.open", serde_json::json!({ "tool": tool, "rate": target_rate }));
     let mut stdout = child
         .stdout
         .take()
@@ -211,6 +228,7 @@ where
         .spawn(move || {
             let mut buf = [0_u8; 8192];
             let mut pending = Vec::<u8>::new();
+            let mut first_frame = true;
             loop {
                 match stdout.read(&mut buf) {
                     Ok(0) => break,
@@ -223,6 +241,13 @@ where
                         let pcm = s16le_to_f32(&pending[..even_len]);
                         pending.drain(..even_len);
                         if !pcm.is_empty() {
+                            if first_frame {
+                                first_frame = false;
+                                trace_capture_instant(
+                                    "capture.first_frame",
+                                    serde_json::json!({ "tool": tool, "samples": pcm.len() }),
+                                );
+                            }
                             forward(&pcm);
                         }
                     }
@@ -409,6 +434,22 @@ where
     let fmt = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
 
+    // Wrap the caller's forward so the first PCM frame to actually reach the
+    // pipeline emits a `capture.first_frame` marker on the trace, mirroring the
+    // process-capture path. Only one match arm below runs, so moving this
+    // wrapper into each is sound.
+    let mut first_frame = true;
+    let mut forward = move |pcm: &[f32]| {
+        if first_frame {
+            first_frame = false;
+            trace_capture_instant(
+                "capture.first_frame",
+                serde_json::json!({ "backend": "cpal", "samples": pcm.len() }),
+            );
+        }
+        forward(pcm);
+    };
+
     let stream = match fmt {
         SampleFormat::F32 => device.build_input_stream(
             &config,
@@ -461,6 +502,10 @@ where
     };
 
     stream.play()?;
+    trace_capture_instant(
+        "capture.open",
+        serde_json::json!({ "backend": "cpal", "rate": target_rate, "device_rate": device_rate }),
+    );
     Ok(stream)
 }
 

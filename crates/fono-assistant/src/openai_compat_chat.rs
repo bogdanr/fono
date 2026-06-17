@@ -124,6 +124,17 @@ impl OpenAiCompatChat {
         Self::new("https://openrouter.ai/api/v1/chat/completions", api_key, model, "openrouter")
     }
 
+    /// Gemini via its OpenAI-compatible surface, single `GEMINI_API_KEY`
+    /// (`Authorization: Bearer <key>`), free tier (ADR 0034).
+    pub fn gemini(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        Self::new(
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            api_key,
+            model,
+            "gemini",
+        )
+    }
+
     pub fn ollama(endpoint: impl Into<String>, model: impl Into<String>) -> Self {
         Self::new(endpoint, "", model, "ollama")
     }
@@ -163,6 +174,14 @@ struct ChatReq {
     #[serde(rename = "max_completion_tokens")]
     max_tokens: u32,
     stream: bool,
+    /// Gemini 3.x Flash enables "thinking" by default, which inflates
+    /// time-to-first-token (the assistant's dominant latency). On the
+    /// OpenAI-compat surface `reasoning_effort: "low"` pins it to the lowest
+    /// level (3.x can't disable thinking entirely). Sent only for Gemini;
+    /// other cloud backends keep their default and local Ollama uses
+    /// `think: false` below instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
     /// Local OpenAI-compatible servers default thinking-capable models
     /// (Qwen3.x, DeepSeek-R1, etc.) to hidden reasoning. The assistant
     /// should speak the final answer only, so local endpoints get both
@@ -639,6 +658,17 @@ fn assistant_token_budget(backend_name: &str) -> u32 {
     }
 }
 
+/// Reasoning effort to send for `backend_name`, if any.
+///
+/// Gemini 3.x Flash thinks by default and that dominates assistant
+/// time-to-first-token; `reasoning_effort: "low"` pins it to the lowest level
+/// the model allows (thinking can't be disabled entirely on 3.x). Other cloud
+/// backends are left at their server default, and local Ollama uses
+/// `think: false` instead, so they get `None` here.
+fn reasoning_effort_for(backend_name: &str) -> Option<&'static str> {
+    (backend_name == "gemini").then_some("low")
+}
+
 /// Outcome of one pump: the buffered content (when buffering was
 /// enabled) and the accumulated tool call (if any).
 struct PumpResult {
@@ -668,6 +698,7 @@ impl ChatRunner {
             top_p: (!uses_default_sampling_only(self.backend_name, &self.model)).then_some(0.9),
             max_tokens: assistant_token_budget(self.backend_name),
             stream: true,
+            reasoning_effort: reasoning_effort_for(self.backend_name),
             think: is_local_backend(self.backend_name).then_some(false),
             chat_template_kwargs: is_local_backend(self.backend_name).then_some(
                 serde_json::json!({
@@ -1053,6 +1084,43 @@ mod tests {
     }
 
     #[test]
+    fn gemini_sends_low_reasoning_effort_others_omit_it() {
+        assert_eq!(reasoning_effort_for("gemini"), Some("low"));
+        assert_eq!(reasoning_effort_for("groq"), None);
+        assert_eq!(reasoning_effort_for("ollama"), None);
+
+        let req = ChatReq {
+            model: "gemini-flash-lite-latest".into(),
+            messages: Vec::new(),
+            temperature: Some(0.5),
+            top_p: Some(0.9),
+            max_tokens: 1024,
+            stream: true,
+            reasoning_effort: reasoning_effort_for("gemini"),
+            think: None,
+            chat_template_kwargs: None,
+            tools: None,
+        };
+        let body = serde_json::to_string(&req).unwrap();
+        assert!(body.contains("\"reasoning_effort\":\"low\""), "body: {body}");
+
+        let plain = ChatReq {
+            model: "llama-3.3-70b".into(),
+            messages: Vec::new(),
+            temperature: Some(0.5),
+            top_p: Some(0.9),
+            max_tokens: 1024,
+            stream: true,
+            reasoning_effort: reasoning_effort_for("groq"),
+            think: None,
+            chat_template_kwargs: None,
+            tools: None,
+        };
+        let plain_body = serde_json::to_string(&plain).unwrap();
+        assert!(!plain_body.contains("reasoning_effort"), "body: {plain_body}");
+    }
+
+    #[test]
     fn local_request_serializes_thinking_disabled() {
         let req = ChatReq {
             model: "qwen3.5-4b".into(),
@@ -1061,6 +1129,7 @@ mod tests {
             top_p: Some(0.9),
             max_tokens: assistant_token_budget("ollama"),
             stream: true,
+            reasoning_effort: None,
             think: Some(false),
             chat_template_kwargs: Some(serde_json::json!({ "enable_thinking": false })),
             tools: None,
@@ -1081,6 +1150,7 @@ mod tests {
             top_p: Some(0.9),
             max_tokens: 1024,
             stream: true,
+            reasoning_effort: None,
             think: None,
             chat_template_kwargs: None,
             tools: None,
@@ -1098,6 +1168,7 @@ mod tests {
             top_p: Some(0.9),
             max_tokens: 1024,
             stream: true,
+            reasoning_effort: None,
             think: None,
             chat_template_kwargs: None,
             tools: Some(build_screen_tool()),

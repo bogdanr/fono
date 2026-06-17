@@ -192,10 +192,10 @@ fn is_stt_wired(entry: &CloudProvider) -> bool {
 }
 
 /// Whether the catalogue entry's polish capability is actually wired in
-/// `fono-polish::factory`. The Gemini polish client is not implemented
-/// (the factory returns "not yet implemented") so Gemini is excluded.
+/// `fono-polish::factory`. The Gemini polish client is wired via the
+/// OpenAI-compatible endpoint (ADR 0034), so Gemini qualifies.
 fn is_polish_wired(entry: &CloudProvider) -> bool {
-    entry.polish.is_some() && parse_polish_backend(entry.id).is_some() && entry.id != "gemini"
+    entry.polish.is_some() && parse_polish_backend(entry.id).is_some()
 }
 
 /// Whether the catalogue entry's TTS capability is actually wired in
@@ -212,7 +212,7 @@ fn is_tts_wired(entry: &CloudProvider) -> bool {
 /// Fono can actually drive — including speech-only providers like
 /// Speechmatics, Deepgram, AssemblyAI, and Cartesia — rather than only
 /// the polish-capable ones. Providers whose only capabilities are unwired
-/// stubs (azure/google/nemotron STT, gemini polish) never qualify, so the
+/// stubs (azure/google/nemotron STT) never qualify, so the
 /// wizard can't pick a configuration that fails at runtime. Missing
 /// capabilities on the chosen primary fall back to local backends (see
 /// [`apply_primary_provider`] / [`configure_cloud`]).
@@ -226,7 +226,7 @@ fn is_primary_candidate(entry: &CloudProvider) -> bool {
 /// The catalogue advertises an assistant for several providers; only
 /// those with a wired factory should appear in the assistant picker.
 fn is_assistant_wired(entry: &CloudProvider) -> bool {
-    entry.assistant.is_some() && parse_assistant_backend(entry.id).is_some() && entry.id != "gemini"
+    entry.assistant.is_some() && parse_assistant_backend(entry.id).is_some()
 }
 
 /// Header labels for the primary-cloud-provider picker's capability
@@ -548,6 +548,7 @@ fn tts_short_label(b: &TtsBackend) -> &'static str {
         TtsBackend::Deepgram => "Deepgram",
         TtsBackend::ElevenLabs => "ElevenLabs",
         TtsBackend::Speechmatics => "Speechmatics",
+        TtsBackend::Gemini => "Gemini",
         TtsBackend::Wyoming => "Wyoming",
         TtsBackend::Local => "Local voice",
         TtsBackend::None => "no",
@@ -565,7 +566,7 @@ fn humanize_chat_model(entry: &CloudProvider) -> String {
         "anthropic" => Some("Claude Haiku 4.5"),
         "groq" => Some("GPT-OSS 120B"),
         "cerebras" => Some("Qwen 3 235B"),
-        "gemini" => Some("Gemini 1.5 Flash"),
+        "gemini" => Some("Gemini 2.5 Flash"),
         "openrouter" => Some("Claude Haiku 4.5 (via OpenRouter)"),
         _ => None,
     };
@@ -2540,12 +2541,12 @@ mod tests {
             .unwrap_or(0)
             .max("Customize".len())
             + 2;
-        assert_eq!(provider_col_width, 14);
+        assert_eq!(provider_col_width, 15);
 
         let header = primary_header(provider_col_width);
         assert_eq!(
             header,
-            "Provider      STT        LLM        Assistant  TTS        Vision     Search"
+            "Provider       STT        LLM        Assistant  TTS        Vision     Search"
         );
 
         // Rows for every wired primary candidate in catalogue order.
@@ -2557,25 +2558,27 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                "OpenAI        ✓          ✓          ✓          ✓          ✓          ·"
+                "OpenAI         ✓          ✓          ✓          ✓          ✓          ·"
                     .to_string(),
-                "Groq          ✓          ✓          ✓          ✓          ·          ·"
+                "Groq           ✓          ✓          ✓          ✓          ·          ·"
                     .to_string(),
-                "Anthropic     ·          ✓          ✓          ·          ✓          ✓"
+                "Anthropic      ·          ✓          ✓          ·          ✓          ✓"
                     .to_string(),
-                "Cerebras      ·          ✓          ✓          ·          ·          ·"
+                "Cerebras       ·          ✓          ✓          ·          ·          ·"
                     .to_string(),
-                "OpenRouter    ✓          ✓          ✓          ✓          ·          ·"
+                "Google Gemini  ✓          ✓          ✓          ✓          ✓          ✓"
                     .to_string(),
-                "Deepgram      ✓          ·          ·          ✓          ·          ·"
+                "OpenRouter     ✓          ✓          ✓          ✓          ·          ·"
                     .to_string(),
-                "AssemblyAI    ✓          ·          ·          ·          ·          ·"
+                "Deepgram       ✓          ·          ·          ✓          ·          ·"
                     .to_string(),
-                "Cartesia      ✓          ·          ·          ✓          ·          ·"
+                "AssemblyAI     ✓          ·          ·          ·          ·          ·"
                     .to_string(),
-                "ElevenLabs    ✓          ·          ·          ✓          ·          ·"
+                "Cartesia       ✓          ·          ·          ✓          ·          ·"
                     .to_string(),
-                "Speechmatics  ✓          ·          ·          ✓          ·          ·"
+                "ElevenLabs     ✓          ·          ·          ✓          ·          ·"
+                    .to_string(),
+                "Speechmatics   ✓          ·          ·          ✓          ·          ·"
                     .to_string(),
             ]
         );
@@ -2588,26 +2591,28 @@ mod tests {
             "Customize",
             width = provider_col_width
         );
-        assert_eq!(customize, "Customize     Pick a backend per capability");
+        assert_eq!(customize, "Customize      Pick a backend per capability");
     }
 
     #[test]
     fn primary_candidates_include_every_wired_provider_exclude_stubs() {
         let ids: Vec<&str> = primary_candidates_vec().iter().map(|p| p.id).collect();
-        // Unwired stubs never qualify: gemini polish + azure/google/
-        // nemotron STT are not wired in the factories.
-        for stub in ["gemini", "azure", "google", "nemotron"] {
+        // Unwired stubs never qualify: azure/google/nemotron STT are not
+        // wired in the factories.
+        for stub in ["azure", "google", "nemotron"] {
             assert!(!ids.contains(&stub), "{stub} is unwired and must be excluded");
         }
         // Amended design: every provider with at least one wired
         // capability appears — including the speech-only ones that used
         // to be secondary-only (cartesia / deepgram / assemblyai /
-        // speechmatics).
+        // speechmatics) and Gemini (STT/polish/assistant/TTS all wired
+        // on the single key, ADR 0034).
         for must in [
             "openai",
             "groq",
             "anthropic",
             "cerebras",
+            "gemini",
             "openrouter",
             "deepgram",
             "assemblyai",
@@ -2618,7 +2623,7 @@ mod tests {
             assert!(ids.contains(&must), "{must} must be a primary candidate");
         }
         // Exactly that set, nothing else.
-        assert_eq!(ids.len(), 10, "unexpected primary candidate set: {ids:?}");
+        assert_eq!(ids.len(), 11, "unexpected primary candidate set: {ids:?}");
     }
 
     /// Phase B Task B4. Pins the two-column layout of `pick_path`'s

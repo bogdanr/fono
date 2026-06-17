@@ -15,6 +15,7 @@ pub mod playback;
 pub mod pulse;
 pub mod resample;
 pub mod silence_watch;
+pub mod sink;
 pub mod trim;
 pub mod vad;
 pub mod wpctl;
@@ -28,6 +29,7 @@ pub use capture::{
 pub use envelope::{dbfs_to_rms, rms_to_dbfs, EnvelopeConfig, EnvelopeFollower, EnvelopeSnapshot};
 pub use playback::{AudioPlayback, PlaybackError};
 pub use silence_watch::{SilenceEvent, SilenceState, SilenceWatch, SilenceWatchConfig};
+pub use sink::{LocalPlaybackSink, PcmSink};
 pub use trim::{trim_silence, TrimConfig};
 pub use vad::{SileroVad, Vad, VadDecision, WebRtcVadStub};
 

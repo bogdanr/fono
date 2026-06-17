@@ -22,6 +22,8 @@ pub mod deepgram;
 pub mod deepgram_streaming;
 #[cfg(feature = "elevenlabs")]
 pub mod elevenlabs;
+#[cfg(feature = "gemini")]
+pub mod gemini;
 #[cfg(feature = "groq")]
 pub mod groq;
 #[cfg(all(feature = "groq", feature = "streaming"))]

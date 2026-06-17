@@ -34,6 +34,11 @@ cartesia = ["dep:reqwest", "dep:fono-http", "groq"]
 # helpers, so the feature pulls `groq` in transitively (matches
 # `cartesia` / `openrouter`).
 elevenlabs = ["dep:reqwest", "dep:fono-http", "groq"]
+# Gemini STT — batch audio-understanding (`POST /v1beta/models/<model>
+# :generateContent`, inline base64 WAV) on a single GEMINI_API_KEY (ADR
+# 0034). Reuses Groq's `warm_client` + `encode_wav` helpers (pulls `groq`)
+# and base64 for the inline payload (matches `openrouter`).
+gemini = ["dep:reqwest", "dep:fono-http", "dep:base64", "groq"]
 # Speechmatics STT — native realtime WebSocket client
 # (`wss://<region>.rt.speechmatics.com/v2`) driven one-shot for the
 # batch `transcribe` path. Pulls `tokio-tungstenite` (the WS client,

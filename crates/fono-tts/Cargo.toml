@@ -35,6 +35,11 @@ elevenlabs = ["dep:reqwest", "dep:fono-http"]
 # client; English-only during the preview. Just needs reqwest + the
 # catalogue, like Deepgram.
 speechmatics = ["dep:reqwest", "dep:fono-http"]
+# Gemini native TTS — bespoke `:generateContent` with
+# `responseModalities: ["AUDIO"]` on a single GEMINI_API_KEY (ADR 0034).
+# Returns base64 int16 PCM, so it needs base64 in addition to the shared
+# reqwest/fono-http/openai_compat warm-client helpers.
+gemini = ["dep:reqwest", "dep:fono-http", "dep:base64"]
 # LAN Wyoming TTS server.
 wyoming = ["dep:fono-net-codec"]
 # Local ONNX voice engine (Piper now; Kokoro/VAD/wake-word later) on the
@@ -56,15 +61,19 @@ tts-local = [
 
 [dependencies]
 fono-core = { path = "../fono-core" }
+fono-audio = { path = "../fono-audio" }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
+futures = { workspace = true }
+tokio-stream = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true, optional = true }
 fono-http = { path = "../fono-http", optional = true }
+base64 = { version = "0.22", optional = true }
 fono-net-codec = { path = "../fono-net-codec", optional = true }
 ort = { workspace = true, optional = true }
 espeak-ng = { workspace = true, optional = true }

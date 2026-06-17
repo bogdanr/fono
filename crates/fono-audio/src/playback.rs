@@ -86,6 +86,21 @@ enum Cmd {
         pcm: Vec<f32>,
         sample_rate: u32,
     },
+    /// Open a gapless streaming session. The worker plays subsequent
+    /// [`Cmd::StreamChunk`]s of the same utterance back-to-back without the
+    /// drain-between-`Play` gap, then closes on [`Cmd::StreamEnd`]. Counts as a
+    /// single pending unit (incremented when the session opens, decremented
+    /// when it ends or is aborted). The output device / resampler is created
+    /// lazily from the first chunk's sample rate.
+    StreamBegin,
+    /// One slice of the open streaming session's utterance.
+    StreamChunk {
+        pcm: Vec<f32>,
+        sample_rate: u32,
+    },
+    /// Close the open streaming session: flush remaining audio, then mark the
+    /// pending unit done.
+    StreamEnd,
     /// Drain queued Play commands without playing them and reset the
     /// abort flag, then resume normal operation. The worker stays
     /// alive — to actually shut it down, drop the
@@ -143,6 +158,49 @@ impl AudioPlayback {
         self.pending.store(0, Ordering::SeqCst);
     }
 
+    /// Open a gapless streaming session for one utterance.
+    ///
+    /// Follow with one or more [`Self::push_stream`] calls and a final
+    /// [`Self::end_stream`]. Unlike [`Self::enqueue`] (one process / one
+    /// drain-gated `Play` per utterance), chunks of a session play back-to-back
+    /// with no inserted silence, so intra-utterance streaming TTS keeps audio
+    /// continuous. The session counts as a single pending unit for
+    /// [`Self::is_idle`]. A [`LEAD_IN_MS`] silent head is written once, before
+    /// the first chunk.
+    pub fn begin_stream(&self) -> Result<()> {
+        self.pending.fetch_add(1, Ordering::SeqCst);
+        self.tx
+            .send(Cmd::StreamBegin)
+            .map_err(|_| PlaybackError::Closed)
+            .context("audio playback worker stopped")?;
+        Ok(())
+    }
+
+    /// Append one chunk of PCM to the open streaming session. Empty input is a
+    /// no-op. `sample_rate` should be constant across a session; the first
+    /// chunk's rate fixes the output stream / resampler.
+    pub fn push_stream(&self, pcm: Vec<f32>, sample_rate: u32) -> Result<()> {
+        if pcm.is_empty() {
+            return Ok(());
+        }
+        self.tx
+            .send(Cmd::StreamChunk { pcm, sample_rate })
+            .map_err(|_| PlaybackError::Closed)
+            .context("audio playback worker stopped")?;
+        Ok(())
+    }
+
+    /// Close the open streaming session and let its audio drain. After this the
+    /// session's pending unit clears once playback finishes (poll
+    /// [`Self::is_idle`]).
+    pub fn end_stream(&self) -> Result<()> {
+        self.tx
+            .send(Cmd::StreamEnd)
+            .map_err(|_| PlaybackError::Closed)
+            .context("audio playback worker stopped")?;
+        Ok(())
+    }
+
     /// True when no utterances are queued and none are currently
     /// playing. The orchestrator polls this to decide when to fire
     /// `ProcessingDone`.
@@ -157,6 +215,38 @@ impl AudioPlayback {
     }
 }
 
+/// Emit a `playback`-lane instant on the process-current turn trace, if one is
+/// installed. No-op on untraced turns (a single relaxed atomic load), so the
+/// hot path pays nothing. Lets the trace show device-level playback moments
+/// (player spawned, first audio out) instead of only the higher-level `tts`
+/// synthesis spans — see [`fono_core::turn_trace`].
+#[cfg(any(all(target_os = "linux", not(feature = "cpal-backend")), feature = "cpal-backend"))]
+fn trace_playback_instant(name: &str, args: serde_json::Value) {
+    fono_core::turn_trace::current_instant(
+        name,
+        "playback",
+        fono_core::turn_trace::PLAYBACK_LANE,
+        args,
+    );
+}
+
+/// Emit a `playback`-lane duration span ending now, if a turn trace is current.
+/// Renders as a bar whose left edge is when audio actually started reaching the
+/// device. No-op on untraced turns.
+#[cfg(any(all(target_os = "linux", not(feature = "cpal-backend")), feature = "cpal-backend"))]
+fn trace_playback_span(name: &str, started: std::time::Instant, args: serde_json::Value) {
+    if let Some(t) = fono_core::turn_trace::TurnTrace::current() {
+        t.duration_between(
+            name,
+            "playback",
+            fono_core::turn_trace::PLAYBACK_LANE,
+            started,
+            std::time::Instant::now(),
+            args,
+        );
+    }
+}
+
 // ---------------------------------------------------------------------
 // Linux / pulse subprocess backend (default for the static-musl ship).
 // ---------------------------------------------------------------------
@@ -164,9 +254,26 @@ impl AudioPlayback {
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
 const PAPLAY_CHUNK_BYTES: usize = 16 * 1024;
 
+/// Convert mono `f32` PCM (-1.0..1.0) to signed 16-bit little-endian bytes,
+/// the wire format `pw-play --format=s16` / `paplay --format=s16le` expect.
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
-async fn play_via_paplay(pcm: &[f32], rate: u32, stop: &AtomicBool) -> Result<()> {
-    use std::io::Write;
+fn pcm_to_s16le(pcm: &[f32]) -> Vec<u8> {
+    pcm.iter()
+        .flat_map(|s| {
+            let i = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+            i.to_le_bytes()
+        })
+        .collect()
+}
+
+/// Spawn a raw-PCM player (`pw-play`, falling back to `paplay`) reading mono
+/// s16 from stdin at `rate`. Returns the child, its piped stdin, and the tool
+/// name. Used by both the per-utterance [`play_via_paplay`] path and the
+/// gapless streaming session.
+#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+fn spawn_player(
+    rate: u32,
+) -> Result<(std::process::Child, std::process::ChildStdin, &'static str)> {
     use std::process::{Command, Stdio};
     let (mut child, tool) = match Command::new("pw-play")
         .arg("--raw")
@@ -207,14 +314,15 @@ async fn play_via_paplay(pcm: &[f32], rate: u32, stop: &AtomicBool) -> Result<()
             }
         }
     };
-    let mut stdin = child.stdin.take().with_context(|| format!("{tool} stdin"))?;
-    let bytes: Vec<u8> = pcm
-        .iter()
-        .flat_map(|s| {
-            let i = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-            i.to_le_bytes()
-        })
-        .collect();
+    let stdin = child.stdin.take().with_context(|| format!("{tool} stdin"))?;
+    Ok((child, stdin, tool))
+}
+
+#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+async fn play_via_paplay(pcm: &[f32], rate: u32, stop: &AtomicBool) -> Result<()> {
+    use std::io::Write;
+    let (mut child, mut stdin, tool) = spawn_player(rate)?;
+    let bytes = pcm_to_s16le(pcm);
     // Write in chunks so we can check the stop flag periodically;
     // a typical sentence is ~2 s of audio (~88 KB at 22 kHz int16),
     // so a 16 KB chunk gives 4-8 stop checks per utterance.
@@ -242,6 +350,98 @@ async fn play_via_paplay(pcm: &[f32], rate: u32, stop: &AtomicBool) -> Result<()
     Ok(())
 }
 
+/// State of an open gapless streaming session on the paplay backend. The player
+/// process is spawned lazily on the first chunk (its `--rate` needs the chunk's
+/// sample rate). `lead_in_written` ensures the silent head is written exactly
+/// once, before the first real audio.
+#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+struct PaplayStream {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    tool: &'static str,
+    rate: u32,
+    lead_in_written: bool,
+}
+
+#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+impl PaplayStream {
+    fn kill(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    fn finish(mut self) {
+        drop(self.stdin);
+        if let Ok(status) = self.child.wait() {
+            if !status.success() {
+                warn!(
+                    target: "fono::audio::playback",
+                    code = ?status.code(),
+                    tool = self.tool,
+                    "{} exited non-zero (stream)", self.tool
+                );
+            }
+        }
+    }
+
+    /// Write one PCM chunk to the player's stdin. On the first chunk, prepend
+    /// the [`LEAD_IN_MS`] silent head once. Returns `Err` if the write fails
+    /// (the player exited / the pipe broke) so the worker can drop the session.
+    fn push(&mut self, pcm: &[f32]) -> std::io::Result<()> {
+        use std::io::Write;
+        if !self.lead_in_written {
+            let lead = (u64::from(self.rate) * u64::from(LEAD_IN_MS) / 1000) as usize;
+            if lead > 0 {
+                self.stdin.write_all(&vec![0u8; lead * 2])?;
+            }
+            self.lead_in_written = true;
+        }
+        self.stdin.write_all(&pcm_to_s16le(pcm))
+    }
+}
+
+#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+/// Handle one streaming PCM chunk for the paplay backend: lazily spawn the
+/// player on the first chunk (emitting the `playback.first_audio` marker and
+/// recording `stream_started` for the closing span) and push the PCM.
+fn handle_paplay_stream_chunk(
+    session: &mut Option<PaplayStream>,
+    stream_started: &mut Option<std::time::Instant>,
+    pcm: &[f32],
+    sample_rate: u32,
+) {
+    if session.is_none() {
+        match spawn_player(sample_rate) {
+            Ok((child, stdin, tool)) => {
+                *session = Some(PaplayStream {
+                    child,
+                    stdin,
+                    tool,
+                    rate: sample_rate,
+                    lead_in_written: false,
+                });
+                *stream_started = Some(std::time::Instant::now());
+                trace_playback_instant(
+                    "playback.first_audio",
+                    serde_json::json!({ "backend": "paplay", "sample_rate": sample_rate, "streaming": true }),
+                );
+            }
+            Err(e) => {
+                warn!(target: "fono::audio::playback", error = %e, "paplay stream spawn failed");
+                return;
+            }
+        }
+    }
+    if let Some(s) = session.as_mut() {
+        if let Err(e) = s.push(pcm) {
+            warn!(target: "fono::audio::playback", error = %e, "paplay stream write failed");
+            if let Some(s) = session.take() {
+                s.kill();
+            }
+        }
+    }
+}
+
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
 fn spawn_worker(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Cmd>,
@@ -257,6 +457,11 @@ fn spawn_worker(
                 .build()
                 .expect("playback runtime");
             rt.block_on(async move {
+                let mut session: Option<PaplayStream> = None;
+                // Wall-clock of the first audio frame written to the device for
+                // the open streaming session, used to close the `playback.stream`
+                // trace span on StreamEnd.
+                let mut stream_started: Option<std::time::Instant> = None;
                 while let Some(cmd) = rx.recv().await {
                     match cmd {
                         Cmd::Drain => {
@@ -269,6 +474,10 @@ fn spawn_worker(
                                     pending.fetch_sub(1, Ordering::SeqCst);
                                 }
                             }
+                            // Abort any open streaming session too.
+                            if let Some(s) = session.take() {
+                                s.kill();
+                            }
                             // Reset abort flag so subsequent Play
                             // commands run normally.
                             stop.store(false, Ordering::SeqCst);
@@ -280,12 +489,57 @@ fn spawn_worker(
                                 pending.fetch_sub(1, Ordering::SeqCst);
                                 continue;
                             }
+                            let samples = pcm.len();
+                            let play_started = std::time::Instant::now();
                             if let Err(e) = play_via_paplay(&pcm, sample_rate, &stop).await {
                                 warn!(target: "fono::audio::playback", error = %e, "paplay failed");
                             }
+                            trace_playback_span(
+                                "playback.play",
+                                play_started,
+                                serde_json::json!({ "backend": "paplay", "samples": samples, "sample_rate": sample_rate }),
+                            );
                             // Always decrement so the orchestrator's
                             // is_idle() polling makes progress even on
                             // playback errors.
+                            pending.fetch_sub(1, Ordering::SeqCst);
+                        }
+                        Cmd::StreamBegin => {
+                            // The player is spawned lazily on the first chunk
+                            // (its --rate needs the chunk's sample rate); just
+                            // mark that a session is open by clearing any stale
+                            // one.
+                            if let Some(s) = session.take() {
+                                s.kill();
+                            }
+                            stream_started = None;
+                            trace_playback_instant(
+                                "playback.stream_open",
+                                serde_json::json!({ "backend": "paplay" }),
+                            );
+                        }
+                        Cmd::StreamChunk { pcm, sample_rate } => {
+                            if AudioPlayback::is_stopping(&stop) {
+                                continue;
+                            }
+                            handle_paplay_stream_chunk(
+                                &mut session,
+                                &mut stream_started,
+                                &pcm,
+                                sample_rate,
+                            );
+                        }
+                        Cmd::StreamEnd => {
+                            if let Some(s) = session.take() {
+                                s.finish();
+                            }
+                            if let Some(start) = stream_started.take() {
+                                trace_playback_span(
+                                    "playback.stream",
+                                    start,
+                                    serde_json::json!({ "backend": "paplay", "streaming": true }),
+                                );
+                            }
                             pending.fetch_sub(1, Ordering::SeqCst);
                         }
                     }
@@ -299,6 +553,35 @@ fn spawn_worker(
 // ---------------------------------------------------------------------
 // cpal backend (non-Linux + opt-in Linux).
 // ---------------------------------------------------------------------
+
+/// Resample one mono `f32` chunk from `sample_rate` to `device_rate`, reusing
+/// (or lazily creating) the resampler in `slot`. Returns `None` only if
+/// resampler init fails. A matching rate is a passthrough.
+#[cfg(feature = "cpal-backend")]
+fn cpal_resample(
+    slot: &mut Option<(u32, crate::resample::Resampler)>,
+    pcm: Vec<f32>,
+    sample_rate: u32,
+    device_rate: u32,
+) -> Option<Vec<f32>> {
+    if sample_rate == device_rate {
+        return Some(pcm);
+    }
+    let r = match slot {
+        Some((r_in, r)) if *r_in == sample_rate => r,
+        _ => match crate::resample::Resampler::new(sample_rate, device_rate) {
+            Ok(r) => {
+                *slot = Some((sample_rate, r));
+                &mut slot.as_mut().unwrap().1
+            }
+            Err(e) => {
+                warn!(target: "fono::audio::playback", error = %e, "resampler init failed");
+                return None;
+            }
+        },
+    };
+    Some(r.process(&pcm))
+}
 
 #[cfg(feature = "cpal-backend")]
 fn spawn_worker(
@@ -329,7 +612,9 @@ fn spawn_worker(
         .spawn(move || {
             // The cpal callback drains a producer-consumer ring of
             // f32 samples. Sized for ~2 s of 48 kHz mono audio.
-            let ring = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<f32>::with_capacity(96_000)));
+            let ring = Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::<f32>::with_capacity(96_000),
+            ));
             let in_flight = Arc::new(AtomicUsize::new(0));
             let ring_cb = ring.clone();
             let in_flight_cb = in_flight.clone();
@@ -369,6 +654,10 @@ fn spawn_worker(
                 .expect("playback runtime");
             rt.block_on(async move {
                 let mut resampler: Option<(u32, crate::resample::Resampler)> = None;
+                // Wall-clock of the first chunk pushed to the always-draining
+                // ring for the open streaming session; closes the
+                // `playback.stream` trace span on StreamEnd.
+                let mut stream_started: Option<std::time::Instant> = None;
                 while let Some(cmd) = rx.recv().await {
                     match cmd {
                         Cmd::Drain => {
@@ -390,31 +679,19 @@ fn spawn_worker(
                                 pending.fetch_sub(1, Ordering::SeqCst);
                                 continue;
                             }
-                            let resampled = if sample_rate == device_rate {
-                                pcm
-                            } else {
-                                let r = match &mut resampler {
-                                    Some((r_in, r)) if *r_in == sample_rate => r,
-                                    _ => {
-                                        match crate::resample::Resampler::new(sample_rate, device_rate) {
-                                            Ok(r) => {
-                                                resampler = Some((sample_rate, r));
-                                                &mut resampler.as_mut().unwrap().1
-                                            }
-                                            Err(e) => {
-                                                warn!(target: "fono::audio::playback", error = %e, "resampler init failed");
-                                                pending.fetch_sub(1, Ordering::SeqCst);
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                };
-                                let mut out = r.process(&pcm);
-                                // Drain any leftovers the rubato impl left
-                                // hanging — for short clips the leftover is
-                                // a couple ms; emit it at the very end.
-                                out.extend(std::iter::repeat(0.0).take(0));
-                                out
+                            let samples = pcm.len();
+                            let play_started = std::time::Instant::now();
+                            let resampled = match cpal_resample(
+                                &mut resampler,
+                                pcm,
+                                sample_rate,
+                                device_rate,
+                            ) {
+                                Some(r) => r,
+                                None => {
+                                    pending.fetch_sub(1, Ordering::SeqCst);
+                                    continue;
+                                }
                             };
                             // Duplicate mono to N channels so a stereo
                             // device plays the same content on both.
@@ -440,6 +717,74 @@ fn spawn_worker(
                                     break;
                                 }
                                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            }
+                            trace_playback_span(
+                                "playback.play",
+                                play_started,
+                                serde_json::json!({ "backend": "cpal", "samples": samples, "sample_rate": sample_rate }),
+                            );
+                            pending.fetch_sub(1, Ordering::SeqCst);
+                        }
+                        Cmd::StreamBegin => {
+                            // The persistent cpal stream already plays the ring
+                            // gaplessly, so a session needs no setup beyond the
+                            // pending unit begin_stream() already counted.
+                            stream_started = None;
+                            trace_playback_instant(
+                                "playback.stream_open",
+                                serde_json::json!({ "backend": "cpal" }),
+                            );
+                        }
+                        Cmd::StreamChunk { pcm, sample_rate } => {
+                            if AudioPlayback::is_stopping(&stop) {
+                                continue;
+                            }
+                            if stream_started.is_none() {
+                                stream_started = Some(std::time::Instant::now());
+                                trace_playback_instant(
+                                    "playback.first_audio",
+                                    serde_json::json!({ "backend": "cpal", "sample_rate": sample_rate, "streaming": true }),
+                                );
+                            }
+                            let resampled = match cpal_resample(
+                                &mut resampler,
+                                pcm,
+                                sample_rate,
+                                device_rate,
+                            ) {
+                                Some(r) => r,
+                                None => continue,
+                            };
+                            // Append straight to the ring — the callback drains
+                            // it continuously, so chunks of one utterance play
+                            // back-to-back with no inter-chunk gap.
+                            let mut q = ring.lock().expect("playback ring poisoned");
+                            for s in resampled {
+                                for _ in 0..channels {
+                                    q.push_back(s);
+                                }
+                            }
+                            in_flight.store(q.len(), Ordering::SeqCst);
+                        }
+                        Cmd::StreamEnd => {
+                            // Wait for the ring to drain, mirroring the Play
+                            // arm, then clear the session's pending unit.
+                            loop {
+                                if AudioPlayback::is_stopping(&stop) {
+                                    ring.lock().expect("playback ring poisoned").clear();
+                                    break;
+                                }
+                                if in_flight.load(Ordering::SeqCst) == 0 {
+                                    break;
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            }
+                            if let Some(start) = stream_started.take() {
+                                trace_playback_span(
+                                    "playback.stream",
+                                    start,
+                                    serde_json::json!({ "backend": "cpal", "streaming": true }),
+                                );
                             }
                             pending.fetch_sub(1, Ordering::SeqCst);
                         }

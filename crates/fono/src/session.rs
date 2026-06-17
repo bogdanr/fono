@@ -195,6 +195,7 @@ fn backend_is_vision_capable(backend: &fono_core::config::AssistantBackend) -> b
         AssistantBackend::Groq => "groq",
         AssistantBackend::Cerebras => "cerebras",
         AssistantBackend::OpenRouter => "openrouter",
+        AssistantBackend::Gemini => "gemini",
         AssistantBackend::Ollama | AssistantBackend::None => return false,
     };
     fono_core::provider_catalog::find(id)

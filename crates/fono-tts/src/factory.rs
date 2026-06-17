@@ -19,7 +19,8 @@ use fono_core::config::{Tts, TtsBackend};
     feature = "cartesia",
     feature = "deepgram",
     feature = "elevenlabs",
-    feature = "speechmatics"
+    feature = "speechmatics",
+    feature = "gemini"
 ))]
 use fono_core::providers::tts_key_env;
 #[allow(unused_imports)]
@@ -39,7 +40,8 @@ use crate::traits::TextToSpeech;
         feature = "cartesia",
         feature = "deepgram",
         feature = "elevenlabs",
-        feature = "speechmatics"
+        feature = "speechmatics",
+        feature = "gemini"
     )),
     allow(unused_variables)
 )]
@@ -59,6 +61,7 @@ pub fn build_tts(
         TtsBackend::Deepgram => build_deepgram(cfg, secrets)?,
         TtsBackend::ElevenLabs => build_elevenlabs(cfg, secrets)?,
         TtsBackend::Speechmatics => build_speechmatics(cfg, secrets)?,
+        TtsBackend::Gemini => build_gemini(cfg, secrets)?,
         TtsBackend::Local => build_local(cfg, languages, voices_dir)?,
     };
     Ok(Some(maybe_wrap_english_only(primary, cfg, languages, voices_dir)))
@@ -179,7 +182,8 @@ fn build_wyoming(_cfg: &Tts) -> Result<Arc<dyn TextToSpeech>> {
     feature = "cartesia",
     feature = "deepgram",
     feature = "elevenlabs",
-    feature = "speechmatics"
+    feature = "speechmatics",
+    feature = "gemini"
 ))]
 fn resolve_cloud(cfg: &Tts, backend: &TtsBackend) -> (String, Option<String>, Option<String>) {
     let canonical = tts_key_env(backend);
@@ -204,7 +208,8 @@ fn resolve_cloud(cfg: &Tts, backend: &TtsBackend) -> (String, Option<String>, Op
     feature = "cartesia",
     feature = "deepgram",
     feature = "elevenlabs",
-    feature = "speechmatics"
+    feature = "speechmatics",
+    feature = "gemini"
 ))]
 fn resolve_voice(cfg: &Tts, voice_override: Option<String>) -> Option<String> {
     if cfg.voice.is_empty() {
@@ -221,7 +226,8 @@ fn resolve_voice(cfg: &Tts, voice_override: Option<String>) -> Option<String> {
     feature = "cartesia",
     feature = "deepgram",
     feature = "elevenlabs",
-    feature = "speechmatics"
+    feature = "speechmatics",
+    feature = "gemini"
 ))]
 fn resolve_key(key_ref: &str, backend: &TtsBackend, secrets: &Secrets) -> Result<String> {
     secrets.resolve(key_ref).ok_or_else(|| {
@@ -233,6 +239,7 @@ fn resolve_key(key_ref: &str, backend: &TtsBackend, secrets: &Secrets) -> Result
             TtsBackend::Deepgram => "Deepgram",
             TtsBackend::ElevenLabs => "ElevenLabs",
             TtsBackend::Speechmatics => "Speechmatics",
+            TtsBackend::Gemini => "Gemini",
             _ => "TTS",
         };
         anyhow!(
@@ -368,6 +375,19 @@ fn build_speechmatics(_cfg: &Tts, _secrets: &Secrets) -> Result<Arc<dyn TextToSp
     Err(anyhow!(
         "Speechmatics TTS not compiled in (enable the `speechmatics` feature on `fono-tts`)"
     ))
+}
+
+#[cfg(feature = "gemini")]
+fn build_gemini(cfg: &Tts, secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
+    let (key_ref, model_override, voice_override) = resolve_cloud(cfg, &TtsBackend::Gemini);
+    let key = resolve_key(&key_ref, &TtsBackend::Gemini, secrets)?;
+    let voice = resolve_voice(cfg, voice_override);
+    Ok(Arc::new(crate::gemini::GeminiTts::new(key, model_override, voice)))
+}
+
+#[cfg(not(feature = "gemini"))]
+fn build_gemini(_cfg: &Tts, _secrets: &Secrets) -> Result<Arc<dyn TextToSpeech>> {
+    Err(anyhow!("Gemini TTS not compiled in (enable the `gemini` feature on `fono-tts`)"))
 }
 
 #[cfg(test)]

@@ -21,7 +21,7 @@ rationale.
 | **Groq**       | ✓   | ✓           | ✓              | —                            | —                                | ✓ Orpheus                 |
 | **Anthropic**  | —   | ✓           | ✓              | ✓ (Claude Haiku 4.5)         | ✓ `web_search_20250305`          | —                         |
 | **Cerebras**   | —   | ✓           | ✓              | —                            | —                                | —                         |
-| **Gemini**     | —   | ✓           | — *(planned)*  | — *(planned)*                | — *(planned)*                    | —                         |
+| **Gemini**     | ✓   | ✓           | ✓              | ✓ (`gemini-flash-lite-latest`) | native `google_search` *(not wired)* | ✓ native (24 kHz, 30 voices) |
 | **OpenRouter** | ✓   | ✓           | ✓              | *(route-dependent)*          | *(route-dependent)*              | ✓ OpenAI Mini TTS         |
 | **Cartesia**   | ✓   | —           | —              | —                            | —                                | ✓ Sonic-3.5               |
 | **Deepgram**   | ✓   | —           | —              | —                            | —                                | ✓ Aura-2                  |
@@ -320,6 +320,7 @@ entries are accepted for forward compatibility but unused on the wire.
 | Groq               | cloud HTTP   | `llama-3.3-70b-versatile`     | `GROQ_API_KEY`         |
 | OpenAI-compatible  | cloud HTTP   | `gpt-4o-mini` (configurable)  | `OPENAI_API_KEY`       |
 | Anthropic          | cloud HTTP   | `claude-3-5-haiku-latest`     | `ANTHROPIC_API_KEY`    |
+| Gemini             | cloud HTTP (OpenAI-compat) | `gemini-flash-lite-latest` | `GEMINI_API_KEY`       |
 
 `backend = "local"` always runs the **embedded** `llama-cpp-2` engine on a
 local GGUF — it never talks to an Ollama server. The GGUF is downloaded to
@@ -336,6 +337,55 @@ wizard never configures a server for the "local polish" choice.
 The `enabled` flag in
 `[polish]` can be set to `false` to skip cleanup entirely — in which case Fono
 types the raw STT output verbatim.
+
+### Gemini (single key, free tier)
+
+Google support in Fono is the **Gemini API** (Google AI Studio), not Google
+Cloud Speech. A single `GEMINI_API_KEY` from
+<https://aistudio.google.com/apikey> configures every Gemini capability, and it
+works on Google's **free tier** — no billing account, just an active project.
+See [ADR 0034](decisions/0034-google-via-gemini-single-key.md) for the rationale
+(and why the Cloud Speech / Chirp service-account path was dropped).
+
+```toml
+[polish]
+backend = "gemini"          # gemini-flash-lite-latest via the OpenAI-compatible surface
+```
+
+Polish, STT, the staged assistant chat, and native TTS are all wired today on
+the single key; the realtime (Live API) assistant is the remaining follow-up.
+Polish and the staged assistant reuse Gemini's OpenAI-compatible endpoint
+(`/v1beta/openai/chat/completions`, `Authorization: Bearer <key>`); STT, TTS, and
+Live use the native `generateContent` / `BidiGenerateContent` surfaces
+(`x-goog-api-key: <key>`).
+
+**TTS.** `[tts] backend = "gemini"` uses the native
+`gemini-3.1-flash-tts-preview` model (`generateContent` with
+`responseModalities: ["AUDIO"]`), returning 24 kHz mono PCM. There are 30
+prebuilt voices (`Kore`, `Puck`, `Charon`, …); Fono curates a gender-balanced
+subset of ten into the positional voice palette (`fono voices`), default
+`Kore`. Gemini TTS is multilingual (40+ languages incl. Romanian) and
+auto-detects the spoken language from the text, so it is **not** wrapped by the
+English-only local fallback.
+
+**Streaming TTS.** Gemini TTS streams via `streamGenerateContent?alt=sse`:
+Fono plays each PCM frame gaplessly as it arrives instead of waiting for the
+whole clip, cutting assistant time-to-first-audio. Streaming is automatic for
+streaming-capable cloud backends (the assistant pump, `fono speak`, and the MCP
+`fono.speak` tool all use it); local engines and batch-only cloud backends keep
+the synthesize-then-enqueue path unchanged. A small fixed jitter buffer
+(300 ms, not configurable) is held back before the first frame so the device
+never underruns mid-utterance.
+
+**Free-tier limits.** Each model has its own requests-per-minute (RPM),
+tokens-per-minute (TPM), and requests-per-day (RPD) caps; the daily counts reset
+at **midnight Pacific**. A burst of dictation or a long assistant session can hit
+the RPD wall — Fono surfaces the 429 as an actionable error and keeps running.
+The TTS and Live models are **Preview**; their model ids and wire shapes may
+change, so they live only in the catalogue and `fono doctor` reports the active
+id. Gemini STT is prompt-driven transcription (no per-segment confidence,
+batch-only), so it is an opt-in choice rather than the default — streaming
+dictation (F7) stays on the dedicated streaming STT backends.
 
 ### Short-utterance handling and clarification refusals
 
@@ -397,6 +447,7 @@ assistant audio works without an OpenAI key.
 | Deepgram      | cloud HTTP | `aura-2-thalia-en`  | `https://api.deepgram.com/v1/speak`                    | `Authorization: Token <k>`   |
 | Speechmatics  | cloud HTTP | preview (voice in URL) | `https://preview.tts.speechmatics.com/generate/<voice>` | `Authorization: Bearer <k>`  |
 | ElevenLabs    | cloud HTTP | `eleven_v3` (voice in URL) | `https://api.elevenlabs.io/v1/text-to-speech/<voice>` | `xi-api-key: <k>`            |
+| Gemini        | cloud HTTP | `gemini-3.1-flash-tts-preview` (voice in body) | `https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent` | `x-goog-api-key: <k>` |
 
 `CARTESIA_API_KEY` and `DEEPGRAM_API_KEY` may already be in
 `secrets.toml` from STT usage — the assistant reuses them, so flipping
@@ -592,6 +643,33 @@ works out of the box; if you pin `[tts].voice` to a library voice on a
 free key you'll get that 402. Eleven v3 renders 70+ languages, so it
 is **not** flagged English-only.
 
+### Gemini TTS (native, single key)
+
+Gemini synthesises via
+`POST https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent`
+with the `x-goog-api-key: <GEMINI_API_KEY>` header and a body of
+`{"contents":[{"parts":[{"text":"..."}]}], "generationConfig":{
+"responseModalities":["AUDIO"], "speechConfig":{"voiceConfig":{
+"prebuiltVoiceConfig":{"voiceName":"Kore"}}}}}`. The **voice is a body
+field** (`voiceName`), and the catalogue default model is
+`gemini-3.1-flash-tts-preview`. The response carries base64 raw signed
+16-bit little-endian PCM in `candidates[0].content.parts[0].inlineData`;
+the companion `mimeType` (`audio/L16;codec=pcm;rate=24000`) is parsed for
+the sample rate, defaulting to 24 kHz.
+
+There are 30 prebuilt voices (`Kore`, `Puck`, `Charon`, `Aoede`,
+`Fenrir`, …); Fono curates a gender-balanced subset of ten into the
+positional voice palette, default `Kore`. A per-call `[tts].voice`
+override (or `fono voices`) selects any voice by name. Gemini TTS renders
+40+ languages and auto-detects the spoken language from the text, so it
+is **not** flagged English-only. The TTS model is **Preview** — its id
+and wire shape may change — so it lives only in the catalogue.
+
+For low-latency playback Gemini overrides `synthesize_stream` to call the
+same model with `:streamGenerateContent?alt=sse`, decoding each SSE event's
+`inlineData` PCM frame and pushing it to the gapless playback session as it
+arrives (see *Streaming TTS* above).
+
 ### English-only voices and the automatic local fallback
 
 Some cloud voices only render intelligible English: Groq's Orpheus
@@ -632,7 +710,7 @@ full design.
 |------------|-----------------------------------------|--------------------------------------|
 | OpenAI     | `gpt-5.4-mini` (same as text default)   | `web_search_preview`                 |
 | Anthropic  | `claude-haiku-4-5-20251001`             | `web_search_20250305`                |
-| Gemini     | `gemini-1.5-flash`                      | `google_search` *(not yet wired)*    |
+| Gemini     | `gemini-flash-lite-latest`              | `google_search` *(not yet wired)*    |
 | Groq       | —                                       | —                                    |
 | Cerebras   | —                                       | —                                    |
 | OpenRouter | *(route-dependent — deferred)*          | *(route-dependent — deferred)*       |
