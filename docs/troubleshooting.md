@@ -91,7 +91,7 @@ INFO assistant: 4823ms | en | stt 580ms 14 chars in | llm 234ms ttfb / 2103ms 31
 | `[fono_screen 1284ms]` | **Optional.** Tool name + exec time. Multiple tools comma-separated. Omitted entirely on text-only turns. |
 | `tts 420ms ttfa / 8 sent` | Time-to-first-audio queued for playback + number of sentences synthesised |
 | `tts none` | No audio produced (cancelled before TTS, empty reply) |
-| `| aborted` (tail) | Turn was cancelled mid-stream (Esc, F9 toggle, hotkey re-press) |
+| `| aborted` (tail) | Turn was cancelled mid-stream (Esc, toggle off, hotkey re-press) |
 
 **Tool outcome tags** (the `[…]` segment, only present when tools were used):
 

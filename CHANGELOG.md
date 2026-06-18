@@ -5,10 +5,86 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.11.0] — 2026-06-18
+
+A realtime voice assistant, one-key Google Gemini, and gapless cloud speech.
+Fono can now hold a spoken conversation over the Gemini Live WebSocket — with
+memory of earlier turns and an optional look at your screen — a single Gemini
+API key drives speech-to-text, cleanup, the assistant, and text-to-speech end
+to end, and cloud voices stream back gaplessly instead of arriving a sentence
+at a time. Plus universal cloud-voice autodiscovery, per-program voices,
+ElevenLabs and Speechmatics backends, two new male English Kokoro voices, and
+turn traces you can actually read.
 
 ### Added
 
+- **Realtime voice assistant over the Gemini Live WebSocket.** Alongside
+  the existing staged pipeline (record → STT → chat → TTS), the assistant
+  hotkey can now drive an end-to-end realtime path backed by the Gemini
+  Live API: audio streams up as you speak and the spoken reply streams
+  back over one WebSocket session. The session seeds the rolling
+  conversation history so it remembers earlier turns instead of opening
+  amnesiac each press, and — when vision is enabled and the backend is
+  vision-capable — it sends a one-shot screenshot of the focused window
+  before the mic audio so the model can see what you're looking at. The
+  realtime turn is fed a live mic-frame stream rather than a finished
+  buffer, the groundwork for upload overlapping the hold. Barge-in
+  interrupts an in-flight reply. Selected via a realtime profile in the
+  capability catalogue (ADR 0035); discoverable from the setup wizard and
+  `fono doctor`.
+- **Single-key Google Gemini provider.** One Gemini API key now drives the
+  whole pipeline — speech-to-text, LLM cleanup, the staged assistant, and
+  native Gemini text-to-speech. Default cloud models use the 3.x flash
+  family via the `gemini-flash-latest` alias (and `flash-lite-latest` for
+  low-latency turns) rather than pinned ids, with `reasoning_effort=low`
+  to trim thinking latency. Surfaced automatically by the wizard, doctor,
+  and CLI.
+- **Gapless cloud text-to-speech.** Cloud voices now stream back over SSE
+  and play continuously instead of arriving one sentence at a time, with a
+  small fixed (~300 ms) prebuffer to smooth start-up. Time-to-first-audio
+  is reported at the first PCM frame rather than at sentence end.
+- **Universal, fail-safe cloud voice autodiscovery.** The short curated
+  cloud voice palettes can now be expanded by probing a provider's live
+  voice catalogue on demand, driven by a single declarative descriptor so
+  providers are onboarded with data rather than code. The probe never runs
+  on the speech path: the daemon fires one non-blocking background refresh
+  of the active backend at start (~10 s timeout), `fono voices list` does a
+  short lazy refresh when the cache is missing or older than 24 h, and a
+  new `fono voices discover` refreshes on demand. Any error falls back to
+  the curated/cached palette, capped to a deterministic, gender-balanced
+  subset. ElevenLabs and Cartesia ship with discovery descriptors; toggle
+  with `[tts].voice_discovery` (default on).
+- **Per-program text-to-speech voices.** Different calling programs can
+  speak in different, stable voices chosen from friendly positional
+  gendered labels ("Female 1", "Male 2") instead of cryptic backend ids. A
+  single shared resolver feeds every speech path (`speak`, `listen`,
+  `confirm`, `summarize`, and the CLI); precedence runs explicit per-call
+  voice → manual `[mcp.voices]` pin → stable automatic assignment → backend
+  default, with a stale pin degrading to auto rather than erroring.
+  Automatic assignment hashes the normalised program name onto the
+  gender-filtered palette so a program keeps its voice across restarts.
+  Managed with `fono voices` (list / set / unset / gender / preview) and
+  the `[mcp]` keys `voices`, `voice_gender`, and `auto_assign_voices`.
+- **ElevenLabs speech-to-text and text-to-speech.** ElevenLabs Scribe
+  (STT) and Eleven v3 (TTS) are wired end to end — catalogue, config,
+  setup wizard, doctor, and factories. The free tier works with a premade
+  voice; the default is "Sarah".
+- **Speechmatics speech-to-text and text-to-speech.** Speechmatics is
+  now a first-class cloud backend for both directions. STT runs over
+  the realtime WebSocket (`wss://eu.rt.speechmatics.com/v2`) as a
+  one-shot round-trip — `StartRecognition`, buffered `AddAudio`
+  frames, `EndOfStream`, then collect the `AddTranscript` finals —
+  reusing the same `tokio-tungstenite` dependency the Deepgram
+  streaming path already pulls in, so no new crates and no `deny.toml`
+  churn. TTS uses the preview REST endpoint
+  (`https://preview.tts.speechmatics.com/generate/<voice>`) returning
+  16 kHz signed-16-bit PCM. Both surfaces authenticate with
+  `Authorization: Bearer <SPEECHMATICS_API_KEY>` (pinned by a unit
+  test so it can't regress to Deepgram's `Token` form). The TTS
+  preview is English-only with four voices (`sarah`, `theo`, `megan`,
+  `jack`, default `sarah`). Enable via `backend = "speechmatics"` in
+  `[stt]` / `[tts]`; the setup wizard, `fono doctor`, and the CLI
+  surface it automatically.
 - **Automatic local fallback for English-only cloud TTS voices.** Some
   cloud voices only render intelligible English (Groq's Orpheus
   `…-english`, the Speechmatics TTS preview, Deepgram's `aura-2-…-en`
@@ -29,22 +105,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   feature is off, or no catalogue voice exists for that language), the
   utterance is skipped with a single warning rather than spoken as
   gibberish. No new configuration keys.
-- **Speechmatics speech-to-text and text-to-speech.** Speechmatics is
-  now a first-class cloud backend for both directions. STT runs over
-  the realtime WebSocket (`wss://eu.rt.speechmatics.com/v2`) as a
-  one-shot round-trip — `StartRecognition`, buffered `AddAudio`
-  frames, `EndOfStream`, then collect the `AddTranscript` finals —
-  reusing the same `tokio-tungstenite` dependency the Deepgram
-  streaming path already pulls in, so no new crates and no `deny.toml`
-  churn. TTS uses the preview REST endpoint
-  (`https://preview.tts.speechmatics.com/generate/<voice>`) returning
-  16 kHz signed-16-bit PCM. Both surfaces authenticate with
-  `Authorization: Bearer <SPEECHMATICS_API_KEY>` (pinned by a unit
-  test so it can't regress to Deepgram's `Token` form). The TTS
-  preview is English-only with four voices (`sarah`, `theo`, `megan`,
-  `jack`, default `sarah`). Enable via `backend = "speechmatics"` in
-  `[stt]` / `[tts]`; the setup wizard, `fono doctor`, and the CLI
-  surface it automatically.
+- **Two male English Kokoro voices.** `am_michael` (en-US) and
+  `bm_lewis` (en-GB) join the local catalogue, closing the all-female
+  English gap. Both reuse the existing `kokoro-v1.0-q8f16.ort` model
+  with byte-identical upstream style packs.
+- **Readable turn traces.** The Perfetto turn-trace output is now a
+  legible top-to-bottom waterfall: capture and playback lanes are
+  emitted, lanes are named and ordered via process/thread metadata (no
+  more hashed `stt 46340` ids in arbitrary order), events are written
+  chronologically, and the post-TTS drain span is always recorded so
+  the tail is never unexplained whitespace. All trace work is one-shot
+  at turn end — no hot-path cost.
+- **Richer MCP tool logs.** Each MCP tool call now emits a single
+  completion-time line carrying backend, voice, client, outcome, and a
+  per-step latency breakdown (synth / playback / capture / STT /
+  relevance, as applicable for `speak` / `listen` / `confirm` /
+  `summarize`), replacing the previous pre-call debug breadcrumb. No
+  transcript or summary bodies are logged — only lengths.
 
 ### Changed
 
@@ -60,6 +137,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Deepgram, AssemblyAI, and Cartesia), and any capability the chosen
   provider doesn't cover transparently leans on the local backend
   (local Whisper, embedded GGUF cleanup, on-device TTS).
+- **Default cloud models moved to the Gemini 3.x flash family.** New
+  Gemini configs use the `gemini-flash-latest` alias for STT/LLM and
+  `flash-lite-latest` for low-latency turns, rather than pinned model
+  ids.
+
+### Fixed
+
+- **Barge-in now works while the assistant is still thinking.**
+  Pressing the assistant hotkey during an in-flight reply — whether it
+  is thinking or already speaking — stops the current reply and starts
+  a fresh recording in one atomic step, with conversation history
+  preserved. Previously a re-press while merely thinking was dropped,
+  and the speaking-state restart could race itself back to idle,
+  stranding the capture with no overlay.
+- **First realtime turn no longer pays the full handshake latency.**
+  The Gemini Live client now warms DNS, TCP, TLS, and the WebSocket
+  upgrade off the hot path, so the first assistant press does not wait
+  on the whole connection setup. The prewarm opens and immediately
+  closes the upgrade connection without sending a setup message, so no
+  model turn starts and no quota is consumed.
+- **Kokoro local voices failed to load with a "Greater(13) node"
+  error** on Linux, macOS, and Windows. The bundled ONNX Runtime is
+  rebuilt from the complete operator set covering every shipped voice
+  (Piper + Kokoro), with a guard so the operator set can never silently
+  regress to a partial build again. Logs now show which engine actually
+  spoke (Piper vs Kokoro) and which provider handled each synthesis.
+- **Payment-required (HTTP 402) cloud failures are now visible.** They
+  surface as a desktop notification with actionable advice instead of
+  failing silently.
+- **Three-letter language codes from cloud transcripts** (e.g. `ron`,
+  `eng`) are normalised to two-letter codes, fixing spurious
+  "banned language" warnings and wrong downstream voice hints.
 
 ## [0.10.0] — 2026-06-12
 

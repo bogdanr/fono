@@ -1,6 +1,40 @@
 # Fono — Project Status
 Last updated: 2026-06-18
 
+## 2026-06-18 — Release 0.11.0
+
+Cut the **0.11.0** release. Workspace version bumped `0.10.0 → 0.11.0`;
+`CHANGELOG.md` `[Unreleased]` promoted to `## [0.11.0] — 2026-06-18` with the
+full feature set (realtime Gemini Live assistant, single-key Gemini provider,
+gapless cloud TTS, universal voice autodiscovery, per-program voices,
+ElevenLabs + Speechmatics backends, two male English Kokoro voices, readable
+turn traces, richer MCP logs) plus a `### Fixed` section (thinking-state
+barge-in, Gemini Live prewarm, Kokoro operator-set load failure, HTTP-402
+notification, 3-letter language-code normalisation). `ROADMAP.md` updated: the
+realtime-voice-assistant item moved from *On the horizon* into *Shipped* under
+v0.11.0, the recently-shipped badge list gained v0.11.0.
+
+Final WIP folded into the release commit:
+
+- **Gemini Live prewarm.** `GeminiLive` now implements `prewarm` — warms DNS +
+  TCP + TLS + the WebSocket upgrade off the hot path, opening and immediately
+  closing the upgrade connection without a setup message (no model turn, no
+  quota). It was the only voice client missing the cheap-probe prewarm every
+  STT/TTS client already has.
+- **Atomic barge-in restart.** New `HotkeyEvent::RestartAssistant`: a re-press
+  of the assistant hotkey while a reply is *thinking or speaking* stops the
+  in-flight reply and starts a fresh recording in one step, history preserved.
+  Replaces the old `StopAssistantPlayback` + `StartAssistant` pair, whose
+  `ProcessingDone` raced the new `AssistantRecording` state back to `Idle`.
+  Now also covers the thinking state, not just speaking.
+
+Docs hygiene: scrubbed stale **F9 / F10** references from active code and
+docs (the FSM/parse comments, the parser doc example and test, the
+troubleshooting trace-tag table). Historical release records that narrate the
+migration *away* from F9/F10 (the v0.7.1 / v0.2.0 / v0.1.0 CHANGELOG and
+ROADMAP entries, the Debian changelog, archived `plans/closed/`, and earlier
+status-log sessions) were left intact as dated records.
+
 ## 2026-06-18 — Realtime: screen vision on the Gemini Live path
 
 Second half of the maintainer's request (the first half — staged Gemini

@@ -404,6 +404,26 @@ impl RealtimeAssistant for GeminiLive {
     fn native_input_rate(&self) -> u32 {
         self.input_rate
     }
+
+    /// Warm DNS + TCP + TLS + the WebSocket upgrade to the Live endpoint off
+    /// the hot path, so the first F8 press does not pay the full handshake
+    /// latency. Opens the upgrade connection and immediately closes it without
+    /// sending the setup message — no model turn is started and no quota is
+    /// consumed. Mirrors the cheap-probe `prewarm` every STT/TTS client already
+    /// implements; `GeminiLive` was the only voice client missing it.
+    async fn prewarm(&self) -> Result<()> {
+        let url = format!("{base}?key={key}", base = self.ws_url, key = self.api_key);
+        let request = url
+            .as_str()
+            .into_client_request()
+            .context("building Gemini Live WS prewarm request")?;
+        let (mut ws, _resp) = tokio_tungstenite::connect_async(request)
+            .await
+            .context("Gemini Live WS prewarm connect failed")?;
+        // Close cleanly; warming the connection path is the whole point.
+        let _ = ws.close(None).await;
+        Ok(())
+    }
 }
 
 /// Reader task body: translate `serverContent` frames to [`RealtimeEvent`]s

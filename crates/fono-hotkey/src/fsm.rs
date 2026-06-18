@@ -5,8 +5,9 @@
 //! `LiveDictating` → `Processing`), the voice assistant
 //! (`AssistantRecording` → `AssistantThinking` → `AssistantSpeaking`),
 //! and MCP-driven tool calls (`McpDriven`).
-//! Guards keep them mutually exclusive so a stray F10 mid-dictation —
-//! or vice versa — is ignored rather than mixing buffers.
+//! Guards keep them mutually exclusive so a stray assistant press
+//! mid-dictation — or vice versa — is ignored rather than mixing
+//! buffers.
 
 use tokio::sync::mpsc;
 
@@ -42,10 +43,21 @@ pub enum HotkeyEvent {
     /// captured audio and kicks off the streaming pump.
     StopAssistant,
     /// User asked to interrupt an in-flight assistant reply (Escape
-    /// while speaking, second F10 press, tray "Stop"). The
+    /// while speaking, second assistant press, tray "Stop"). The
     /// orchestrator drops the audio queue and aborts the LLM stream.
     /// History is preserved.
     StopAssistantPlayback,
+    /// Barge-in: the user pressed the assistant hotkey while a reply
+    /// was thinking or speaking. The orchestrator must stop the
+    /// in-flight reply AND immediately start a fresh assistant
+    /// recording — atomically, as one step. This is deliberately a
+    /// *single* event rather than `StopAssistantPlayback` followed by
+    /// `StartAssistant`: the stop path emits `ProcessingDone`, which
+    /// would race the new recording's `AssistantRecording` state and
+    /// flip the FSM back to `Idle`, leaving the capture running with
+    /// no overlay and rejecting the next press. History is preserved
+    /// so the new turn carries conversation context.
+    RestartAssistant,
     /// An MCP tool call started; the tray should show the active badge.
     McpToolStarted(ToolKind),
     /// The user barged in (F7 / F8 / Escape) while an MCP tool was
@@ -79,7 +91,7 @@ pub enum State {
     /// orchestrator decides which start variant to dispatch).
     LiveDictating(RecordingMode),
     Processing,
-    /// Voice assistant: F10 held, audio capture in progress.
+    /// Voice assistant: assistant hotkey held, audio capture in progress.
     AssistantRecording,
     /// Voice assistant: STT + LLM streaming, before first audio
     /// chunk is queued for playback. Distinguishable from
@@ -223,12 +235,18 @@ impl RecordingFsm {
                 let _ = self.tx.send(HotkeyEvent::StopAssistantPlayback);
                 State::Idle
             }
-            // Re-press F10 mid-reply: barge-in. Stop the current
-            // playback, start a new recording. History is preserved
-            // so the next turn carries context.
-            (State::AssistantSpeaking, HotkeyAction::AssistantPressed) => {
-                let _ = self.tx.send(HotkeyEvent::StopAssistantPlayback);
-                let _ = self.tx.send(HotkeyEvent::StartAssistant);
+            // Re-press the assistant hotkey mid-reply: barge-in. Stop the in-flight
+            // reply (thinking or speaking) and start a new recording
+            // in one atomic step. History is preserved so the next
+            // turn carries context. Routing through the single
+            // `RestartAssistant` event avoids the stop-path's
+            // `ProcessingDone` racing the new `AssistantRecording`
+            // state.
+            (
+                State::AssistantThinking | State::AssistantSpeaking,
+                HotkeyAction::AssistantPressed,
+            ) => {
+                let _ = self.tx.send(HotkeyEvent::RestartAssistant);
                 State::AssistantRecording
             }
             // The pump emits ProcessingDone when both stream and
@@ -380,11 +398,27 @@ mod tests {
         fsm.dispatch(HotkeyAction::AssistantSpeakingStarted);
         // Drain the prior events.
         while rx.try_recv().is_ok() {}
-        // A fresh press while speaking → stop playback + start
-        // recording (history preserved).
+        // A fresh press while speaking → single atomic restart
+        // (stop in-flight reply + start a new recording). History
+        // preserved. A single event avoids the stop-path's
+        // ProcessingDone racing the new AssistantRecording state.
         assert_eq!(fsm.dispatch(HotkeyAction::AssistantPressed), State::AssistantRecording);
-        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StopAssistantPlayback);
-        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StartAssistant);
+        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::RestartAssistant);
+        assert!(rx.try_recv().is_err()); // no second event
+    }
+
+    #[test]
+    fn assistant_press_during_thinking_barges_in() {
+        let (mut fsm, mut rx) = RecordingFsm::new();
+        fsm.dispatch(HotkeyAction::AssistantPressed);
+        fsm.dispatch(HotkeyAction::AssistantReleased);
+        assert_eq!(fsm.state(), State::AssistantThinking);
+        while rx.try_recv().is_ok() {}
+        // Pressing the assistant hotkey while the reply is still
+        // thinking (no audio yet) also barges in.
+        assert_eq!(fsm.dispatch(HotkeyAction::AssistantPressed), State::AssistantRecording);
+        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::RestartAssistant);
+        assert!(rx.try_recv().is_err());
     }
 
     /// Toggle-mode assistant flow: two `AssistantPressed` events drive

@@ -14,11 +14,18 @@ The home page is [fono.page](https://fono.page).
 <table width="100%">
 <tr>
 <td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#personal-vocabulary--voice-correction">Personal vocabulary &amp; voice correction</a></strong><br>Teach Fono once that "Phono" means "Fono" — it sticks forever, deterministically, before the text ever hits the cursor.<br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#wake-word-activation">Wake-word activation</a></strong><br>Say the magic word — Fono wakes and starts dictating. No hotkey, no hands.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".</td>
-<td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#self-hosted-modelship-backend">Self-hosted Modelship backend</a></strong><br>One box on your LAN runs the LLM, speech-to-text, text-to-speech, and embeddings — every Fono desktop points at it, fully local.<br><br><strong><a href="#hover-context-injection">Hover-context injection</a></strong> <em>(experimental)</em><br>Terminal hovered → shell prompts. Code editor hovered → identifier casing.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#realtime-voice-assistant">Realtime voice assistant</a></strong><br>OpenAI Realtime and Gemini Live: F8 speaks straight to the model, single WebSocket, sub-second time-to-first-audio.<br><br><strong><a href="#better-wayland-hotkeys">Better Wayland hotkeys</a></strong><br>Auto-register via the <code>GlobalShortcuts</code> portal when available.<br><br><strong><a href="#macos-and-windows">macOS + Windows</a></strong><br>Native platform integrations.<br><br><strong><a href="#shared-ggml-size-reclaim-spike">Shared ggml size-reclaim spike</a></strong><br>Investigate replacing the linker workaround with one source-level ggml runtime to reclaim about 7 MiB.</td>
+<td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#self-hosted-modelship-backend">Self-hosted Modelship backend</a></strong><br>One box on your LAN runs the LLM, speech-to-text, text-to-speech, and embeddings — every Fono desktop points at it, fully local.<br><br><strong><a href="#hover-context-injection">Hover-context injection</a></strong> <em>(experimental)</em><br>Terminal hovered → shell prompts. Code editor hovered → identifier casing.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#better-wayland-hotkeys">Better Wayland hotkeys</a></strong><br>Auto-register via the <code>GlobalShortcuts</code> portal when available.<br><br><strong><a href="#macos-and-windows">macOS + Windows</a></strong><br>Native platform integrations.<br><br><strong><a href="#shared-ggml-size-reclaim-spike">Shared ggml size-reclaim spike</a></strong><br>Investigate replacing the linker workaround with one source-level ggml runtime to reclaim about 7 MiB.</td>
 </tr>
 </table>
 
 ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge)
+
+**[v0.11.0 — Realtime voice assistant + one-key Gemini](#shipped)**  
+Hold a spoken conversation straight over the Gemini Live WebSocket — with memory
+of earlier turns and an optional look at your screen — drive the whole pipeline
+with a single Google Gemini key, and hear cloud voices stream back gaplessly.
+Plus universal cloud-voice autodiscovery, per-program voices, and ElevenLabs and
+Speechmatics backends. *(2026-06-18)*
 
 **[v0.10.0 — Faster local AI, local voice out of the box](#shipped)**  
 The embedded engine reuses prompt checkpoints so warm dictations and assistant
@@ -188,36 +195,9 @@ wired in from day one so dangerous actions ("delete every file in Downloads")
 can later require a spoken "yes" or a hotkey tap before they fire. v1 ships
 with confirmation off by default; the UX layers on later without schema churn.
 
-Concrete plan: `plans/2026-05-22-voice-actions-via-mcp-v1.md`. Strict
-prerequisite for the [Realtime voice assistant](#realtime-voice-assistant) so
-realtime and staged paths gain voice actions in lockstep.
-
-### Realtime voice assistant
-
-> Skip the relay race. Talk straight to the model.
-
-Today the F8 assistant runs a relay: speech-to-text, then a chat LLM, then
-text-to-speech, then the speaker — four stages, each waiting on the last. For
-users on OpenAI or Google Gemini, the model itself can do the whole exchange
-in one WebSocket: you speak, it hears you, it speaks back.
-
-When the configured assistant model is a **realtime model** (OpenAI Realtime,
-Gemini Live), pressing F8 opens a single bidirectional connection and bypasses
-the staged pipeline entirely for that turn — F7 dictation is untouched.
-Expected time-to-first-audio drops from ~1.5–3 s to **~500–900 ms** depending
-on geography. Function calling works identically to the staged path: the same
-`[assistant.tools]` config, the same Home Assistant integration, the same
-dispatcher — so [voice actions](#voice-actions) work just as well over
-realtime as over the regular pipeline.
-
-Realtime audio is expensive (often 5–25× the cost of equivalent text tokens),
-so Fono defaults to the **mini** tier on each provider and labels each option
-with its cost multiplier in the wizard. The full preview tier is opt-in for
-users who explicitly want it.
-
-Concrete plan: `plans/2026-05-25-realtime-end-to-end-assistant-v4.md`. Blocked
-on [Voice actions](#voice-actions) landing first so that voice actions are
-available from day one on both paths.
+Concrete plan: `plans/2026-05-22-voice-actions-via-mcp-v1.md`. Once it lands,
+voice actions apply in lockstep to both the staged pipeline and the realtime
+assistant.
 
 ### Better Wayland hotkeys
 
@@ -248,6 +228,31 @@ tracks the opportunity at roughly **~7 MiB** reclaimed.
 ## Shipped
 
 Newest first.
+
+- ![v0.11.0](https://img.shields.io/badge/v0.11.0-2026--06--18-blue?style=flat-square)
+  **Realtime voice assistant, one-key Google Gemini, and gapless cloud
+  speech.** The assistant hotkey can now talk straight to the model over
+  the Gemini Live WebSocket instead of running the staged speech-to-text →
+  chat → text-to-speech relay: audio streams up as you speak and the spoken
+  reply streams back over one session, with memory of earlier turns and an
+  optional one-shot look at the focused window when vision is enabled. A
+  single Google Gemini API key now drives the whole pipeline — speech-to-text,
+  cleanup, the assistant, and native Gemini text-to-speech — and cloud
+  voices stream back gaplessly instead of arriving a sentence at a time.
+
+  Plus: universal, fail-safe cloud-voice autodiscovery (probe a provider's
+  live catalogue on demand, never on the speech path); per-program voices so
+  different apps speak in different, stable voices chosen from friendly
+  gendered labels; ElevenLabs (Scribe + Eleven v3) and Speechmatics as
+  first-class cloud backends; two male English Kokoro voices; an automatic
+  local fallback when an English-only cloud voice is handed non-English
+  text; and turn traces you can actually read.
+
+  Fixes: barge-in now works while the assistant is still thinking, not just
+  while speaking; the first realtime turn no longer pays the full WebSocket
+  handshake latency; Kokoro local voices no longer fail to load with a
+  "Greater(13) node" error; payment-required cloud failures surface as a
+  notification instead of failing silently. *(2026-06-18)*
 
 - ![v0.10.0](https://img.shields.io/badge/v0.10.0-2026--06--12-blue?style=flat-square)
   **Faster local AI, local voice out of the box, and cleanup that types
