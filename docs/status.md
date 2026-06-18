@@ -1,6 +1,48 @@
 # Fono — Project Status
 Last updated: 2026-06-18
 
+## 2026-06-18 — Realtime: seed conversation history into Gemini Live sessions
+
+Second live finding: the Live assistant worked but had **no memory of earlier
+turns** — each F8 press opened an amnesiac session. Root cause:
+`open_session` received `ctx.history` but `build_setup_json` only consumed
+`system_prompt` + `voice`, so the rolling history was silently dropped on the
+floor.
+
+Fix (verified against the Live API reference, not guessed — the mediaChunks
+lesson applies):
+
+- `build_setup_json` gains a `seed_history: bool` that adds
+  `historyConfig.initialHistoryInClientContent: true` to the setup message.
+  The API requires this flag before it will accept `clientContent` seeding.
+- New `build_client_content_json(turns)` maps the rolling history onto a
+  `clientContent` message (`turns: [{role, parts:[{text}]}], turnComplete:
+  true`). `User -> "user"`, `Assistant -> "model"`; `System` (lives in
+  `systemInstruction`) and `Tool` (no Path-B equivalent) turns and empty-text
+  turns are skipped.
+- `open_session` maps `ctx.history`, and when non-empty: flags the setup,
+  then after `setupComplete` sends the `clientContent` seed once (before any
+  `realtimeInput` audio). Per the reference, a seed with `turnComplete: true`
+  is recorded as context **without** triggering a reply, so the reader stays
+  one-shot on the real audio turn. Empty history keeps the previous path
+  unchanged (no `historyConfig`, no seed message).
+- Four new offline tests: historyConfig presence/absence, role mapping +
+  skip rules + ordering, empty-history shape.
+
+Still wants live confirmation that multi-turn memory actually lands, but the
+wire shape now matches the documented seeding contract.
+
+Also clarified (no code change) the second half of the same request — screen
+vision for Gemini. The **staged** Gemini path already supports `fono_screen`:
+`build_gemini` builds an `OpenAiCompatChat`, whose `reply_stream` gates the
+screen tool on `prefer_vision && screen_capture.is_some()` (backend-agnostic).
+So staged Gemini vision works today with `[assistant].prefer_vision = true`.
+The **realtime** Live path is the real gap (Path B shipped tools-less); adding
+screen vision there is a separate increment (Live video-frame input or
+tool-calling), scoped as a follow-up.
+
+Gate green: fmt --check, clippy -D warnings, workspace tests.
+
 ## 2026-06-18 — Realtime: fix deprecated realtimeInput.mediaChunks (first live finding)
 
 First real live-API result from the Gemini Live path (maintainer set

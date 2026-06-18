@@ -44,6 +44,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
+use crate::history::{ChatRole, ChatTurn};
 use crate::traits::{AssistantContext, RealtimeAssistant, RealtimeEvent, RealtimeSession};
 
 /// Mic-input channel depth (PCM frames). Bounded so a stalled socket applies
@@ -93,8 +94,19 @@ impl GeminiLive {
 /// `model` is normalised to a `models/<id>` resource name (the API rejects a
 /// bare id). When `system_prompt` is empty the `systemInstruction` field is
 /// omitted entirely.
+///
+/// When `seed_history` is true, `historyConfig.initialHistoryInClientContent`
+/// is set so the server accepts a follow-up `clientContent` message carrying
+/// the prior conversation (see [`build_client_content_json`]). Without this
+/// flag the Live API rejects `clientContent` seeding, and the session starts
+/// with no memory of earlier turns.
 #[must_use]
-pub fn build_setup_json(model: &str, system_prompt: &str, voice: &str) -> serde_json::Value {
+pub fn build_setup_json(
+    model: &str,
+    system_prompt: &str,
+    voice: &str,
+    seed_history: bool,
+) -> serde_json::Value {
     let model_field =
         if model.starts_with("models/") { model.to_string() } else { format!("models/{model}") };
     let mut setup = json!({
@@ -111,7 +123,41 @@ pub fn build_setup_json(model: &str, system_prompt: &str, voice: &str) -> serde_
     if !system_prompt.is_empty() {
         setup["systemInstruction"] = json!({ "parts": [{ "text": system_prompt }] });
     }
+    if seed_history {
+        setup["historyConfig"] = json!({ "initialHistoryInClientContent": true });
+    }
     json!({ "setup": setup })
+}
+
+/// Map one rolling-history [`ChatTurn`] onto a Live `Content` value, or `None`
+/// when the turn has no Live equivalent. `System` turns live in
+/// `systemInstruction` and `Tool` turns have no place under Path B (no
+/// function calling), so both are skipped, as are empty-text turns.
+fn turn_to_live(turn: &ChatTurn) -> Option<serde_json::Value> {
+    let role = match turn.role {
+        ChatRole::User => "user",
+        ChatRole::Assistant => "model",
+        ChatRole::System | ChatRole::Tool => return None,
+    };
+    if turn.content.is_empty() {
+        return None;
+    }
+    Some(json!({ "role": role, "parts": [{ "text": turn.content }] }))
+}
+
+/// Build the `clientContent` message that seeds prior conversation into a
+/// freshly-opened Live session. Sent once, after `setupComplete` and before
+/// any `realtimeInput` audio, with `turnComplete: true` so the server records
+/// it as context **without** triggering a model reply. Exposed for tests.
+#[must_use]
+pub fn build_client_content_json(turns: &[ChatTurn]) -> serde_json::Value {
+    let live_turns: Vec<serde_json::Value> = turns.iter().filter_map(turn_to_live).collect();
+    json!({
+        "clientContent": {
+            "turns": live_turns,
+            "turnComplete": true,
+        }
+    })
 }
 
 /// Build a `realtimeInput` audio chunk message. `rate` is stamped into the
@@ -241,8 +287,12 @@ impl RealtimeAssistant for GeminiLive {
             .context("Gemini Live WS connect failed")?;
         let (mut write, mut read) = ws.split();
 
-        // 1. Send setup.
-        let setup = build_setup_json(&self.model, &ctx.system_prompt, &self.voice);
+        // 1. Send setup. If there is prior conversation to seed, flag it here
+        // so the server will accept the follow-up `clientContent` message.
+        let client_content = build_client_content_json(&ctx.history);
+        let seed_history =
+            client_content["clientContent"]["turns"].as_array().is_some_and(|t| !t.is_empty());
+        let setup = build_setup_json(&self.model, &ctx.system_prompt, &self.voice, seed_history);
         write
             .send(Message::Text(setup.to_string()))
             .await
@@ -267,6 +317,16 @@ impl RealtimeAssistant for GeminiLive {
                 Ok(None) => return Err(anyhow!("Gemini Live WS closed before setupComplete")),
                 Err(_) => return Err(anyhow!("Gemini Live: timed out waiting for setupComplete")),
             }
+        }
+
+        // 3. Seed prior conversation (if any) as initial history. Sent with
+        // `turnComplete: true`; the server records it as context and does not
+        // reply, so the reader stays one-shot on the real (audio) turn.
+        if seed_history {
+            write
+                .send(Message::Text(client_content.to_string()))
+                .await
+                .context("Gemini Live: seeding conversation history")?;
         }
 
         let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>(AUDIO_IN_CAPACITY);
@@ -414,7 +474,7 @@ mod tests {
 
     #[test]
     fn setup_json_has_audio_modality_and_voice() {
-        let v = build_setup_json("gemini-3.1-flash-live-preview", "Be terse.", "Kore");
+        let v = build_setup_json("gemini-3.1-flash-live-preview", "Be terse.", "Kore", false);
         let setup = &v["setup"];
         assert_eq!(setup["model"], "models/gemini-3.1-flash-live-preview");
         assert_eq!(setup["generationConfig"]["responseModalities"][0], "AUDIO");
@@ -427,20 +487,62 @@ mod tests {
         // Transcription on both lanes so we can recover user + assistant text.
         assert!(setup.get("inputAudioTranscription").is_some());
         assert!(setup.get("outputAudioTranscription").is_some());
+        // No history to seed → no historyConfig.
+        assert!(setup.get("historyConfig").is_none());
     }
 
     #[test]
     fn setup_json_normalises_bare_and_prefixed_model() {
-        let bare = build_setup_json("gemini-x", "", "Puck");
+        let bare = build_setup_json("gemini-x", "", "Puck", false);
         assert_eq!(bare["setup"]["model"], "models/gemini-x");
-        let prefixed = build_setup_json("models/gemini-x", "", "Puck");
+        let prefixed = build_setup_json("models/gemini-x", "", "Puck", false);
         assert_eq!(prefixed["setup"]["model"], "models/gemini-x");
     }
 
     #[test]
     fn setup_json_omits_empty_system_instruction() {
-        let v = build_setup_json("gemini-x", "", "Kore");
+        let v = build_setup_json("gemini-x", "", "Kore", false);
         assert!(v["setup"].get("systemInstruction").is_none());
+    }
+
+    #[test]
+    fn setup_json_sets_history_config_when_seeding() {
+        let v = build_setup_json("gemini-x", "", "Kore", true);
+        assert_eq!(v["setup"]["historyConfig"]["initialHistoryInClientContent"], true);
+    }
+
+    #[test]
+    fn client_content_maps_user_and_assistant_turns() {
+        let now = std::time::Instant::now();
+        let mk = |role: ChatRole, content: &str| ChatTurn {
+            role,
+            content: content.to_string(),
+            at: now,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        };
+        let turns = [
+            mk(ChatRole::System, "ignored"),
+            mk(ChatRole::User, "hi there"),
+            mk(ChatRole::Assistant, "hello back"),
+            mk(ChatRole::Assistant, ""), // empty → dropped
+        ];
+        let v = build_client_content_json(&turns);
+        let cc = &v["clientContent"];
+        assert_eq!(cc["turnComplete"], true);
+        let arr = cc["turns"].as_array().expect("turns array");
+        // System + empty dropped; user + assistant kept, in order.
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["role"], "user");
+        assert_eq!(arr[0]["parts"][0]["text"], "hi there");
+        assert_eq!(arr[1]["role"], "model");
+        assert_eq!(arr[1]["parts"][0]["text"], "hello back");
+    }
+
+    #[test]
+    fn client_content_empty_for_no_seedable_turns() {
+        let v = build_client_content_json(&[]);
+        assert!(v["clientContent"]["turns"].as_array().unwrap().is_empty());
     }
 
     #[test]
