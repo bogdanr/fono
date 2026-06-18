@@ -152,6 +152,15 @@ pub struct RealtimeTurnInputs {
     /// audio frame.
     pub action_tx: mpsc::UnboundedSender<HotkeyAction>,
     pub overlay: Option<fono_overlay::OverlayHandle>,
+    /// Whether to send a screenshot frame with the realtime session
+    /// (from `[assistant].prefer_vision`). When true and a capture
+    /// callback is present, `open_session` grabs the screen once and
+    /// sends it as a `realtimeInput.video` frame before the mic audio.
+    pub prefer_vision: bool,
+    /// Optional screen-capture callback. Built from a `GrabberProbe`
+    /// in the F8 voice loop when `prefer_vision` is true and the
+    /// backend is vision-capable. Mirrors the staged turn's field.
+    pub screen_capture_fn: Option<ScreenCaptureFn>,
     /// Runtime-only active-window context captured at hotkey press.
     pub active_window_context: Option<String>,
 }
@@ -1366,6 +1375,8 @@ pub async fn run_realtime_turn(
         language,
         action_tx,
         overlay,
+        prefer_vision,
+        screen_capture_fn,
         active_window_context,
     } = inputs;
 
@@ -1401,8 +1412,8 @@ pub async fn run_realtime_turn(
         language: language.clone(),
         history: history_snapshot,
         active_window_context,
-        screen_capture: None,
-        prefer_vision: false,
+        screen_capture: screen_capture_fn,
+        prefer_vision,
         max_new_tokens: None,
     };
 

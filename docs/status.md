@@ -1,6 +1,35 @@
 # Fono — Project Status
 Last updated: 2026-06-18
 
+## 2026-06-18 — Realtime: screen vision on the Gemini Live path
+
+Second half of the maintainer's request (the first half — staged Gemini
+`fono_screen` — already worked: `build_gemini` builds an `OpenAiCompatChat`
+whose `reply_stream` gates the screen tool on `prefer_vision &&
+screen_capture.is_some()`, backend-agnostic). The realtime Live path,
+however, shipped tools-less under Path B and hardcoded `screen_capture: None,
+prefer_vision: false`, so the `open_session` vision frame never fired.
+
+Wired the screenshot through to the Live session:
+
+- `RealtimeTurnInputs` gains `prefer_vision: bool` + `screen_capture_fn:
+  Option<ScreenCaptureFn>`, mirroring the staged `AssistantTurnInputs`.
+- `run_realtime_turn` now populates `ctx.screen_capture` / `ctx.prefer_vision`
+  from those inputs instead of the hardcoded `None`/`false`.
+- The `session.rs` realtime branch builds the same `GrabberProbe`-based
+  capture closure as the staged branch (gated on `prefer_vision &&
+  backend_is_vision_capable`) and threads it in.
+- `open_session` (already present from the prior increment) grabs the focused
+  window via the closure, encodes it as a `realtimeInput.video` PNG blob
+  (verified wire shape), and sends it once before any mic audio. Capture
+  failures are non-fatal — the turn proceeds without vision.
+
+Wire shape (`realtimeInput.video` image blob) verified against the Live API
+reference; one live confirmation that the model uses the frame still wanted.
+
+Pre-commit gate green: fmt --check, clippy -D warnings, workspace tests (34
+suites).
+
 ## 2026-06-18 — Realtime: seed conversation history into Gemini Live sessions
 
 Second live finding: the Live assistant worked but had **no memory of earlier

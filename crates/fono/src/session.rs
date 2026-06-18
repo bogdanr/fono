@@ -2761,6 +2761,24 @@ impl SessionOrchestrator {
             }
             let active_window_context =
                 assistant_focus_info.as_ref().and_then(assistant_window_context_for_cache);
+            // Build the screen-capture closure when prefer_vision is on
+            // and the backend is vision-capable, mirroring the staged
+            // path below. When present, the Live session sends one
+            // screenshot frame (realtimeInput.video) before mic audio.
+            let rt_prefer_vision = cfg.assistant.prefer_vision;
+            let rt_screen_capture_fn: Option<fono_assistant::ScreenCaptureFn> =
+                if rt_prefer_vision && backend_is_vision_capable(&cfg.assistant.backend) {
+                    use fono_core::screen_capture::GrabberProbe;
+                    use fono_inject::focus::detect_focus;
+                    let probe = GrabberProbe::detect();
+                    Some(Arc::new(move |mode| {
+                        let fi = detect_focus().ok();
+                        let wm_class = fi.and_then(|f| f.window_class);
+                        probe.capture(mode, wm_class.as_deref())
+                    }))
+                } else {
+                    None
+                };
             let inputs = RealtimeTurnInputs {
                 pcm,
                 sample_rate: self.capture_cfg.target_sample_rate,
@@ -2769,6 +2787,8 @@ impl SessionOrchestrator {
                 language: cfg.general.language_override().map(str::to_string),
                 action_tx: self.action_tx.clone(),
                 overlay: self.overlay.read().ok().and_then(|g| g.clone()),
+                prefer_vision: rt_prefer_vision,
+                screen_capture_fn: rt_screen_capture_fn,
                 active_window_context,
             };
             let state_for_task = self.assistant_session.clone();

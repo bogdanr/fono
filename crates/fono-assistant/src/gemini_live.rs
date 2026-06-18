@@ -24,6 +24,11 @@
 //!    parts → `Audio`, output transcription → `AssistantTextDelta`, input
 //!    transcription → `UserTextFinal`, `turnComplete` → `Done` (then stop).
 //!
+//! When the user has opted into vision (`prefer_vision`) and a screen-capture
+//! backend is available, a single screenshot of the focused window is sent as
+//! a `realtimeInput.video` frame right after setup (before audio) so the model
+//! can answer questions about what is on screen for this turn.
+//!
 //! Tool-calling is intentionally absent (Path B: audio loop first). A
 //! `toolCall` server message plus a tool-response client message will be added
 //! when `fono-action` lands.
@@ -44,8 +49,12 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
+use fono_core::screen_capture::CaptureMode;
+
 use crate::history::{ChatRole, ChatTurn};
-use crate::traits::{AssistantContext, RealtimeAssistant, RealtimeEvent, RealtimeSession};
+use crate::traits::{
+    AssistantContext, RealtimeAssistant, RealtimeEvent, RealtimeSession, ScreenCaptureFn,
+};
 
 /// Mic-input channel depth (PCM frames). Bounded so a stalled socket applies
 /// backpressure to the capture path rather than growing unboundedly.
@@ -158,6 +167,38 @@ pub fn build_client_content_json(turns: &[ChatTurn]) -> serde_json::Value {
             "turnComplete": true,
         }
     })
+}
+
+/// Build a `realtimeInput.video` frame carrying a single still image (PNG).
+/// Gemini Live ingests video as individual image blobs; one screenshot per
+/// turn gives the model visual context for the spoken question. Exposed for
+/// tests.
+#[must_use]
+pub fn encode_video_frame(png_bytes: &[u8]) -> serde_json::Value {
+    let data = BASE64.encode(png_bytes);
+    json!({
+        "realtimeInput": {
+            "video": { "mimeType": "image/png", "data": data }
+        }
+    })
+}
+
+/// Run the (blocking) screen-capture closure off the async runtime and return
+/// the captured PNG bytes, or `None` when capture is unavailable, blocked by
+/// the privacy gate, cancelled, or fails. A capture failure is never fatal to
+/// the session — the turn simply proceeds without vision.
+async fn capture_screen_png(capture: ScreenCaptureFn) -> Option<Vec<u8>> {
+    match tokio::task::spawn_blocking(move || capture(CaptureMode::Automatic)).await {
+        Ok(Ok(img)) => Some(img.png_bytes),
+        Ok(Err(e)) => {
+            tracing::debug!("gemini live: screen capture skipped: {e}");
+            None
+        }
+        Err(e) => {
+            tracing::debug!("gemini live: screen capture task panicked: {e}");
+            None
+        }
+    }
 }
 
 /// Build a `realtimeInput` audio chunk message. `rate` is stamped into the
@@ -327,6 +368,22 @@ impl RealtimeAssistant for GeminiLive {
                 .send(Message::Text(client_content.to_string()))
                 .await
                 .context("Gemini Live: seeding conversation history")?;
+        }
+
+        // 4. Optional screen vision: when the user opted into vision and a
+        // capture backend is available, grab the focused window and send it as
+        // a single `realtimeInput.video` frame before any audio, so the visual
+        // context is in place when the model processes the spoken question.
+        // Capture failures are non-fatal — the turn proceeds without vision.
+        if ctx.prefer_vision {
+            if let Some(capture) = ctx.screen_capture.clone() {
+                if let Some(png) = capture_screen_png(capture).await {
+                    let frame = encode_video_frame(&png);
+                    if let Err(e) = write.send(Message::Text(frame.to_string())).await {
+                        tracing::warn!("gemini live: video frame send error: {e:#}");
+                    }
+                }
+            }
         }
 
         let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>(AUDIO_IN_CAPACITY);
@@ -554,6 +611,17 @@ mod tests {
         // 3 samples × 2 bytes = 6 bytes → base64 of 6 bytes is 8 chars.
         let decoded = BASE64.decode(data).expect("valid base64");
         assert_eq!(decoded.len(), 6);
+    }
+
+    #[test]
+    fn video_frame_carries_png_base64() {
+        let png = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        let v = encode_video_frame(&png);
+        let frame = &v["realtimeInput"]["video"];
+        assert_eq!(frame["mimeType"], "image/png");
+        let data = frame["data"].as_str().expect("data string");
+        let decoded = BASE64.decode(data).expect("valid base64");
+        assert_eq!(decoded, png);
     }
 
     #[test]
