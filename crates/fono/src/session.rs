@@ -2780,7 +2780,10 @@ impl SessionOrchestrator {
                     None
                 };
             let inputs = RealtimeTurnInputs {
-                pcm,
+                frames: crate::assistant::buffered_frame_stream(
+                    &pcm,
+                    self.capture_cfg.target_sample_rate,
+                ),
                 sample_rate: self.capture_cfg.target_sample_rate,
                 realtime,
                 system_prompt: cfg.assistant.prompt_main.clone(),

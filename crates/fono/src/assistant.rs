@@ -140,9 +140,14 @@ pub struct AssistantTurnInputs {
 /// over one WebSocket session.
 #[cfg(feature = "realtime")]
 pub struct RealtimeTurnInputs {
-    /// Captured mic PCM for this push-to-talk turn. Resampled to the
-    /// backend's [`RealtimeAssistant::native_input_rate`] before send.
-    pub pcm: Vec<f32>,
+    /// Source of captured mic PCM frames (mono f32 at `sample_rate`)
+    /// for this push-to-talk turn. Each frame is resampled to the
+    /// backend's [`RealtimeAssistant::native_input_rate`] and pushed
+    /// into the live session as it arrives; the turn ends when the
+    /// stream closes. For the buffered (record-then-send) path the
+    /// call site wraps a finished `Vec<f32>` via [`buffered_frame_stream`];
+    /// for live mic streaming the capture forwarder feeds it directly.
+    pub frames: mpsc::UnboundedReceiver<Vec<f32>>,
     pub sample_rate: u32,
     pub realtime: Arc<dyn RealtimeAssistant>,
     pub system_prompt: String,
@@ -1325,33 +1330,105 @@ async fn open_realtime_or_notify(
     }
 }
 
-/// Resample the captured mic PCM to the model's native rate, stream it
-/// in ~50 ms chunks, then drop the sender to signal end-of-input (the
-/// client emits `audioStreamEnd`). Records `realtime.audio_sent`.
+/// Forward captured mic frames into the live session as they arrive:
+/// pull each frame from `frames`, resample it to the model's native
+/// rate (identity for Gemini's 16 kHz), push it into `audio_in`, and
+/// drop `audio_in` when the stream closes — the client turns that into
+/// an `audioStreamEnd` (end-of-utterance). Works identically for the
+/// buffered adapter (all frames already queued) and live capture
+/// (frames trickle in during the F8 hold). Records streaming markers
+/// on the `capture` lane so a trace waterfall shows upload overlapping
+/// the hold.
 #[cfg(feature = "realtime")]
-async fn send_mic_to_session(
+async fn forward_mic_stream(
     audio_in: mpsc::Sender<Vec<f32>>,
-    pcm: &[f32],
+    first: Vec<f32>,
+    mut frames: mpsc::UnboundedReceiver<Vec<f32>>,
     sample_rate: u32,
     native: u32,
     trace: Option<&TurnTrace>,
 ) {
-    let resampled = resample_linear(pcm, sample_rate, native);
-    let frame = (native as usize / 20).max(1); // ~50 ms chunks
-    for chunk in resampled.chunks(frame) {
-        if audio_in.send(chunk.to_vec()).await.is_err() {
+    let mut total = 0usize;
+    let mut first_sent = false;
+    // `first` is the already-peeked leading frame (the caller used it to
+    // skip empty utterances); process it before draining the rest.
+    let mut next = Some(first);
+    loop {
+        let frame = match next.take() {
+            Some(f) => f,
+            None => match frames.recv().await {
+                Some(f) => f,
+                None => break,
+            },
+        };
+        if frame.is_empty() {
+            continue;
+        }
+        let resampled = resample_linear(&frame, sample_rate, native);
+        total += resampled.len();
+        if !first_sent {
+            first_sent = true;
+            if let Some(t) = trace {
+                t.instant(
+                    "realtime.first_frame_sent",
+                    "capture",
+                    fono_core::turn_trace::CAPTURE_LANE,
+                    json!({ "sample_rate": native }),
+                );
+            }
+        }
+        if audio_in.send(resampled).await.is_err() {
             break;
         }
     }
     drop(audio_in);
     if let Some(t) = trace {
         t.instant(
-            "realtime.audio_sent",
+            "realtime.input_closed",
             "capture",
             fono_core::turn_trace::CAPTURE_LANE,
-            json!({ "samples": resampled.len(), "sample_rate": native }),
+            json!({ "samples": total, "sample_rate": native }),
         );
     }
+}
+
+/// Pull the first non-empty frame from a mic stream, returning it plus
+/// the (still-open) receiver for the remaining frames. Returns `None`
+/// if the stream closes before any audio arrives — the orchestrator
+/// treats that as an empty utterance and skips the turn (preserving the
+/// old `pcm.is_empty()` guard). Frames captured while we await keep
+/// queuing in the unbounded channel, so nothing is lost.
+#[cfg(feature = "realtime")]
+async fn peek_first_frame(
+    mut frames: mpsc::UnboundedReceiver<Vec<f32>>,
+) -> Option<(Vec<f32>, mpsc::UnboundedReceiver<Vec<f32>>)> {
+    while let Some(f) = frames.recv().await {
+        if !f.is_empty() {
+            return Some((f, frames));
+        }
+    }
+    None
+}
+
+/// Adapt a finished `Vec<f32>` (the record-then-send path) into the
+/// same frame stream the live path uses: chunk the clip into ~50 ms
+/// frames at the capture rate and push them through an unbounded
+/// channel, then drop the sender to close the stream. This keeps the
+/// buffered turn behaving byte-for-byte as before (a degenerate
+/// stream) and is the safe fallback when live capture-on-press is
+/// unavailable. Synchronous (no spawn / no runtime needed) thanks to
+/// the unbounded channel, so it is unit-testable.
+#[cfg(feature = "realtime")]
+pub fn buffered_frame_stream(pcm: &[f32], sample_rate: u32) -> mpsc::UnboundedReceiver<Vec<f32>> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let frame = (sample_rate as usize / 20).max(1); // ~50 ms chunks
+    for chunk in pcm.chunks(frame) {
+        if tx.send(chunk.to_vec()).is_err() {
+            break;
+        }
+    }
+    // tx dropped here → the stream closes once all frames are drained.
+    rx
 }
 
 /// One assistant turn over the realtime / speech-to-speech path
@@ -1368,7 +1445,7 @@ pub async fn run_realtime_turn(
     notify: Arc<Notify>,
 ) -> Result<bool> {
     let RealtimeTurnInputs {
-        pcm,
+        frames,
         sample_rate,
         realtime,
         system_prompt,
@@ -1393,13 +1470,18 @@ pub async fn run_realtime_turn(
     let turn_started = std::time::Instant::now();
     let mut metrics = AssistantTurnMetrics { language: language.clone(), ..Default::default() };
 
-    if pcm.is_empty() {
-        debug!(target: "fono::assistant", "realtime skip: empty PCM");
+    // Wait for the first mic frame before doing any work. If the stream
+    // closes with no audio (instantaneous press/release), skip the turn
+    // without opening a session — preserving the old empty-PCM guard.
+    // Frames captured during this await keep queuing in the unbounded
+    // channel, so live streaming loses nothing.
+    let Some((first_frame, frames)) = peek_first_frame(frames).await else {
+        debug!(target: "fono::assistant", "realtime skip: empty mic stream");
         if let Some(t) = &trace {
             t.finish(json!({ "aborted": true, "reason": "empty_pcm" }));
         }
         return Ok(false);
-    }
+    };
 
     // Seed the session with the completed history (the current user
     // turn is transcribed by the model and pushed afterwards).
@@ -1436,10 +1518,11 @@ pub async fn run_realtime_turn(
         }
     }
 
-    // Send the captured mic audio then close input. One-shot
-    // push-to-talk: live mic streaming during hold is a follow-up.
+    // Stream the captured mic audio in (frame-by-frame), then close
+    // input. The buffered adapter feeds all frames at once; live
+    // capture trickles them during the F8 hold — same code path.
     let native = realtime.native_input_rate();
-    send_mic_to_session(audio_in, &pcm, sample_rate, native, trace.as_ref()).await;
+    forward_mic_stream(audio_in, first_frame, frames, sample_rate, native, trace.as_ref()).await;
 
     // Drive the reply: play audio, accumulate transcripts.
     let first_audio = FirstAudio::new(turn_started, &action_tx, overlay.as_ref());
@@ -1685,5 +1768,51 @@ mod tests {
     fn truncate_appends_ellipsis_on_overflow() {
         let out = truncate("abcdefghij", 5);
         assert_eq!(out, "abcd…");
+    }
+
+    #[cfg(feature = "realtime")]
+    #[test]
+    fn buffered_frame_stream_chunks_at_50ms_and_closes() {
+        use super::buffered_frame_stream;
+        // 16 kHz → 50 ms frame = 800 samples. 2000 samples → 800,800,400.
+        let pcm = vec![0.5f32; 2000];
+        let mut rx = buffered_frame_stream(&pcm, 16_000);
+        let mut sizes = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            sizes.push(frame.len());
+        }
+        assert_eq!(sizes, vec![800, 800, 400]);
+        // Sender dropped → stream is closed (next recv would yield None).
+        assert!(matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)));
+    }
+
+    #[cfg(feature = "realtime")]
+    #[test]
+    fn buffered_frame_stream_empty_pcm_is_immediately_closed() {
+        use super::buffered_frame_stream;
+        let mut rx = buffered_frame_stream(&[], 16_000);
+        assert!(matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)));
+    }
+
+    #[cfg(feature = "realtime")]
+    #[tokio::test]
+    async fn peek_first_frame_skips_empties_and_preserves_remainder() {
+        use super::{buffered_frame_stream, peek_first_frame};
+        let pcm = vec![0.25f32; 1600]; // 16 kHz → 800,800
+        let rx = buffered_frame_stream(&pcm, 16_000);
+        let (first, mut rest) = peek_first_frame(rx).await.expect("first frame present");
+        assert_eq!(first.len(), 800);
+        // The remaining frame is still queued (nothing lost on peek).
+        let next = rest.recv().await.expect("second frame present");
+        assert_eq!(next.len(), 800);
+        assert!(rest.recv().await.is_none(), "stream closes after all frames");
+    }
+
+    #[cfg(feature = "realtime")]
+    #[tokio::test]
+    async fn peek_first_frame_returns_none_on_empty_stream() {
+        use super::{buffered_frame_stream, peek_first_frame};
+        let rx = buffered_frame_stream(&[], 16_000);
+        assert!(peek_first_frame(rx).await.is_none());
     }
 }
