@@ -750,6 +750,34 @@ fn assistant_extras_summary(
     }
 }
 
+/// When the chosen assistant provider advertises a Gemini Live realtime
+/// profile, offer to switch the assistant into realtime speech-to-speech
+/// mode. On accept, points `[assistant.cloud].model` at the catalogue's
+/// realtime profile model (the opt-in id the factory keys on). Returns
+/// `true` when realtime was selected, so the caller skips the staged TTS
+/// picker — the Live session produces its own continuous-voice audio.
+fn offer_realtime(
+    theme: &ColorfulTheme,
+    entry: &CloudProvider,
+    cloud: &mut AssistantCloud,
+) -> bool {
+    let Some(profile) = entry.assistant.and_then(|a| a.realtime) else {
+        return false;
+    };
+    let want = Confirm::with_theme(theme)
+        .with_prompt(
+            "Use realtime speech-to-speech? Lower latency and one consistent voice \
+             for the whole reply (Preview).",
+        )
+        .default(true)
+        .interact()
+        .unwrap_or(false);
+    if want {
+        cloud.model = profile.model.into();
+    }
+    want
+}
+
 #[allow(clippy::too_many_lines)]
 async fn configure_assistant(
     theme: &ColorfulTheme,
@@ -795,6 +823,26 @@ async fn configure_assistant(
                     api_key_ref: entry.key_env.into(),
                     model: adef.text_model.into(),
                 });
+                // Offer realtime speech-to-speech when the provider
+                // advertises a Gemini Live profile. On accept it repoints
+                // the cloud model at the realtime id and produces its own
+                // continuous-voice audio, so the staged TTS picker is moot.
+                let realtime = config
+                    .assistant
+                    .cloud
+                    .as_mut()
+                    .is_some_and(|c| offer_realtime(theme, entry, c));
+                if realtime {
+                    println!(
+                        "  Voice assistant enabled — {} realtime speech-to-speech.",
+                        entry.display_name
+                    );
+                    println!(
+                        "  Press {} to ask a question and hear the reply.",
+                        config.hotkeys.assistant
+                    );
+                    return Ok(());
+                }
                 // Key was prompted/reused in `configure_cloud`.
                 let tts_label = if tts_already_set {
                     tts_short_label(&config.tts.backend).to_string()

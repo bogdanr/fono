@@ -21,14 +21,19 @@ mod sse;
 
 #[cfg(feature = "anthropic")]
 pub mod anthropic_chat;
+#[cfg(feature = "realtime")]
+pub mod gemini_live;
 #[cfg(feature = "llama-local")]
 pub mod llama_local;
 #[cfg(feature = "openai-compat")]
 pub mod openai_compat_chat;
 
-pub use factory::build_assistant;
+pub use factory::{build_assistant, build_assistant_handle, AssistantHandle};
+#[cfg(feature = "realtime")]
+pub use gemini_live::GeminiLive;
 pub use history::{ChatRole, ChatTurn, ConversationHistory, ToolCall};
 pub use traits::{
     Assistant, AssistantCacheTrigger, AssistantContext, AssistantPromptCacheSnapshot,
-    AssistantPromptCacheWarmup, ScreenCaptureFn, TokenDelta, ToolEvent,
+    AssistantPromptCacheWarmup, RealtimeAssistant, RealtimeEvent, RealtimeSession, ScreenCaptureFn,
+    TokenDelta, ToolEvent,
 };

@@ -16,7 +16,7 @@ workspace = true
 # Cloud chat clients ship in default builds. Each cloud feature is
 # gated independently so a user can keep the binary small if they
 # only run one provider.
-default = ["openai-compat", "anthropic"]
+default = ["openai-compat", "anthropic", "realtime"]
 # OpenAI-compatible chat completions: covers Cerebras, Groq, OpenAI,
 # OpenRouter, Ollama. SSE streaming via reqwest's `stream` feature.
 openai-compat = ["dep:reqwest", "dep:fono-http"]
@@ -30,6 +30,10 @@ accel-vulkan = ["llama-local", "llama-cpp-2/vulkan"]
 accel-rocm = ["llama-local", "llama-cpp-2/rocm"]
 # Anthropic Messages API streaming.
 anthropic = ["dep:reqwest", "dep:fono-http"]
+# Realtime / speech-to-speech backends (Gemini Live BidiGenerateContent over
+# WebSocket). `tokio-tungstenite` is already in the binary graph via
+# fono-stt/fono-net/fono-mcp-server, so this edge is net-zero on binary size.
+realtime = ["dep:tokio-tungstenite"]
 
 [dependencies]
 fono-core = { path = "../fono-core" }
@@ -48,6 +52,7 @@ reqwest = { workspace = true, optional = true }
 fono-http = { path = "../fono-http", optional = true }
 llama-cpp-2 = { workspace = true, optional = true }
 encoding_rs = { version = "0.8", optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
 base64 = "0.22"
 
 [dev-dependencies]

@@ -182,3 +182,84 @@ pub trait Assistant: Send + Sync {
         Ok(())
     }
 }
+
+/// One event emitted by a [`RealtimeSession`] as the model streams its
+/// reply. The realtime (speech-to-speech) path bypasses the staged
+/// STT → LLM → TTS pipeline: the model owns VAD, transcription, and
+/// audio synthesis, emitting these events over a single WebSocket.
+///
+/// Tool-calling is **not** represented here yet — the first realtime
+/// slice (Gemini Live audio loop) ships without tools. A
+/// `ToolCallRequested` variant plus a tool-result submission channel on
+/// [`RealtimeSession`] will be added when `fono-action` lands, matching
+/// the session-handle design in the realtime plan.
+#[derive(Debug, Clone)]
+pub enum RealtimeEvent {
+    /// A chunk of reply audio as mono f32 PCM at `sample_rate` Hz.
+    Audio { pcm: Vec<f32>, sample_rate: u32 },
+    /// Incremental transcript of the model's spoken reply (for history
+    /// / on-screen display). May arrive interleaved with `Audio`.
+    AssistantTextDelta(String),
+    /// Final transcript of the user's utterance, as recognised by the
+    /// model's own input transcription. Pushed to history as the user
+    /// turn.
+    UserTextFinal(String),
+    /// The model detected the user barging in (VAD on the model side)
+    /// and is discarding the rest of its current spoken reply. The
+    /// consumer must immediately drop any buffered/queued reply audio so
+    /// playback stops at once — Gemini Live signals this with
+    /// `serverContent.interrupted: true`. Reply text already received
+    /// for the interrupted turn is left as-is (the model stops
+    /// extending it).
+    Interrupted,
+    /// The model finished its turn. The consumer flushes history and
+    /// waits for playback to drain.
+    Done,
+}
+
+/// An open realtime session: a live WebSocket to a speech-to-speech
+/// model. The caller forwards mic PCM into [`audio_in`](Self::audio_in)
+/// and consumes reply events from [`events`](Self::events). Dropping the
+/// struct closes the underlying WebSocket (the client's `Drop`/task
+/// teardown sends a Close frame and aborts the reader).
+pub struct RealtimeSession {
+    /// Mic input sink: mono f32 PCM frames at the model's expected input
+    /// rate (see [`RealtimeAssistant::native_input_rate`]). Closing the
+    /// sender signals end-of-input for the current utterance.
+    pub audio_in: tokio::sync::mpsc::Sender<Vec<f32>>,
+    /// Reply event stream. Ends (yields `None`) when the session closes.
+    pub events: BoxStream<'static, Result<RealtimeEvent>>,
+}
+
+impl std::fmt::Debug for RealtimeSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RealtimeSession")
+            .field("audio_in_closed", &self.audio_in.is_closed())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A realtime / speech-to-speech assistant backend. Implementors open a
+/// bidirectional WebSocket where the model ingests the user's mic audio
+/// and streams reply audio back directly. Selected (over the staged
+/// [`Assistant`]) when the configured model matches a provider's
+/// `RealtimeProfile` in the catalogue.
+#[async_trait]
+pub trait RealtimeAssistant: Send + Sync {
+    /// Open a fresh realtime session. `ctx` supplies the system prompt,
+    /// language, and rolling history used to seed the model's setup
+    /// message.
+    async fn open_session(&self, ctx: &AssistantContext) -> Result<RealtimeSession>;
+
+    /// Backend identifier for history / logging.
+    fn name(&self) -> &'static str;
+
+    /// PCM sample rate (Hz) the model expects on the mic-input stream.
+    /// The capture path resamples to this before forwarding.
+    fn native_input_rate(&self) -> u32;
+
+    /// Optional best-effort warmup (e.g. a cheap pre-connect). Non-fatal.
+    async fn prewarm(&self) -> Result<()> {
+        Ok(())
+    }
+}

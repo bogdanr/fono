@@ -17,9 +17,11 @@ use std::sync::RwLock as StdRwLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+#[cfg(feature = "realtime")]
+use fono_assistant::RealtimeAssistant;
 use fono_assistant::{
-    Assistant, AssistantCacheTrigger, AssistantPromptCacheSnapshot, AssistantPromptCacheWarmup,
-    ConversationHistory,
+    Assistant, AssistantCacheTrigger, AssistantHandle, AssistantPromptCacheSnapshot,
+    AssistantPromptCacheWarmup, ConversationHistory,
 };
 use fono_audio::{
     AudioCapture, CaptureConfig, EnvelopeConfig, EnvelopeFollower, RecordingBuffer, SilenceEvent,
@@ -52,6 +54,8 @@ use tokio::sync::{mpsc, Mutex, Notify};
 use tracing::{debug, error, info, warn};
 
 use crate::assistant::{run_assistant_turn, AssistantSessionState, AssistantTurnInputs};
+#[cfg(feature = "realtime")]
+use crate::assistant::{run_realtime_turn, RealtimeTurnInputs};
 
 /// Minimum duration of audio that will be passed to STT. Anything
 /// shorter is treated as a misfire.
@@ -608,6 +612,14 @@ pub struct SessionOrchestrator {
     /// Streaming chat backend for the assistant. `None` when
     /// `[assistant]` is disabled or the factory failed.
     assistant_backend: Arc<StdRwLock<Option<Arc<dyn Assistant>>>>,
+    /// Realtime (speech-to-speech) assistant backend, selected when
+    /// `[assistant.cloud].model` matches the catalogue's Gemini Live
+    /// profile. When `Some`, F8 dispatches to
+    /// [`crate::assistant::run_realtime_turn`] instead of the staged
+    /// STT → LLM → TTS pump — one continuous voice, sub-second first
+    /// audio. `None` for every staged configuration.
+    #[cfg(feature = "realtime")]
+    realtime_backend: Arc<StdRwLock<Option<Arc<dyn RealtimeAssistant>>>>,
     /// Per-orchestrator assistant runtime state: rolling history,
     /// cancellation `Notify`, and lazy [`fono_audio::AudioPlayback`]
     /// handle. Shared with the pump task spawned in
@@ -715,7 +727,7 @@ impl SessionOrchestrator {
                 None
             }
         };
-        let assistant_backend = match fono_assistant::build_assistant(
+        let assistant_handle = match fono_assistant::build_assistant_handle(
             &config.assistant,
             secrets,
             &paths.polish_models_dir(),
@@ -742,12 +754,25 @@ impl SessionOrchestrator {
         orch.paths = Some(Arc::new(paths.clone()));
         orch.held_flags = held_flags;
         // Populate the assistant-side slots. Both are optional —
-        // F8 surfaces a notification when either is missing.
+        // F8 surfaces a notification when either is missing. The
+        // handle routes to the staged or the realtime slot depending
+        // on whether `[assistant.cloud].model` selected Gemini Live.
         if let Ok(mut g) = orch.tts.write() {
             *g = tts;
         }
-        if let Ok(mut g) = orch.assistant_backend.write() {
-            *g = assistant_backend;
+        match assistant_handle {
+            Some(AssistantHandle::Staged(a)) => {
+                if let Ok(mut g) = orch.assistant_backend.write() {
+                    *g = Some(a);
+                }
+            }
+            #[cfg(feature = "realtime")]
+            Some(AssistantHandle::Realtime(r)) => {
+                if let Ok(mut g) = orch.realtime_backend.write() {
+                    *g = Some(r);
+                }
+            }
+            None => {}
         }
         // Populate the streaming-STT slot when this build supports
         // interactive mode. Errors are non-fatal — the live path
@@ -909,7 +934,7 @@ impl SessionOrchestrator {
                 None
             }
         };
-        let new_assistant = match fono_assistant::build_assistant(
+        let new_assistant_handle = match fono_assistant::build_assistant_handle(
             &cfg.assistant,
             &secrets,
             &paths.polish_models_dir(),
@@ -963,8 +988,37 @@ impl SessionOrchestrator {
         if let Ok(mut guard) = self.tts.write() {
             *guard = new_tts;
         }
-        if let Ok(mut guard) = self.assistant_backend.write() {
-            *guard = new_assistant;
+        // Route the rebuilt assistant into the staged or realtime
+        // slot, clearing the other so a config change that flips
+        // between staged and Gemini Live takes effect on reload.
+        match new_assistant_handle {
+            Some(AssistantHandle::Staged(a)) => {
+                if let Ok(mut guard) = self.assistant_backend.write() {
+                    *guard = Some(a);
+                }
+                #[cfg(feature = "realtime")]
+                if let Ok(mut guard) = self.realtime_backend.write() {
+                    *guard = None;
+                }
+            }
+            #[cfg(feature = "realtime")]
+            Some(AssistantHandle::Realtime(r)) => {
+                if let Ok(mut guard) = self.realtime_backend.write() {
+                    *guard = Some(r);
+                }
+                if let Ok(mut guard) = self.assistant_backend.write() {
+                    *guard = None;
+                }
+            }
+            None => {
+                if let Ok(mut guard) = self.assistant_backend.write() {
+                    *guard = None;
+                }
+                #[cfg(feature = "realtime")]
+                if let Ok(mut guard) = self.realtime_backend.write() {
+                    *guard = None;
+                }
+            }
         }
         // Re-tune the rolling history window to match the freshly-
         // loaded config.
@@ -2034,6 +2088,8 @@ impl SessionOrchestrator {
             polish: Arc::new(StdRwLock::new(polish)),
             tts: Arc::new(StdRwLock::new(None)),
             assistant_backend: Arc::new(StdRwLock::new(None)),
+            #[cfg(feature = "realtime")]
+            realtime_backend: Arc::new(StdRwLock::new(None)),
             assistant_session: Arc::new(Mutex::new(AssistantSessionState::new(
                 ConversationHistory::new(history_window, history_max),
             ))),
@@ -2682,6 +2738,45 @@ impl SessionOrchestrator {
             return;
         }
         let cfg = self.current_config();
+        // Realtime (speech-to-speech) short-circuit: when Gemini Live is
+        // selected, skip the staged STT→LLM→TTS pipeline entirely and run
+        // one continuous bidirectional turn. Fixes the two problems the
+        // staged Gemini path cannot — per-sentence voice drift and
+        // ~6 s/sentence batch-TTS latency — because Live emits one
+        // continuous voice incrementally as it is generated.
+        #[cfg(feature = "realtime")]
+        if let Some(realtime) = self.current_realtime() {
+            if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
+                o.set_state(fono_overlay::OverlayState::AssistantThinking);
+            }
+            #[cfg(feature = "interactive")]
+            let thinking_task = self.spawn_thinking_animation_task(&cfg);
+            #[cfg(not(feature = "interactive"))]
+            let thinking_task: Option<tokio::task::AbortHandle> = None;
+            let overlay_for_task = self.overlay.read().ok().and_then(|g| g.clone());
+            let notify = Arc::new(Notify::new());
+            {
+                let mut s = self.assistant_session.lock().await;
+                s.current_turn = Some(notify.clone());
+            }
+            let active_window_context =
+                assistant_focus_info.as_ref().and_then(assistant_window_context_for_cache);
+            let inputs = RealtimeTurnInputs {
+                pcm,
+                sample_rate: self.capture_cfg.target_sample_rate,
+                realtime,
+                system_prompt: cfg.assistant.prompt_main.clone(),
+                language: cfg.general.language_override().map(str::to_string),
+                action_tx: self.action_tx.clone(),
+                overlay: self.overlay.read().ok().and_then(|g| g.clone()),
+                active_window_context,
+            };
+            let state_for_task = self.assistant_session.clone();
+            let notify_for_task = notify.clone();
+            let turn_fut = Box::pin(run_realtime_turn(state_for_task, inputs, notify_for_task));
+            self.spawn_assistant_pump(turn_fut, notify, thinking_task, overlay_for_task);
+            return;
+        }
         let stt = self.current_stt();
         let assistant = self.current_assistant();
         let tts = self.current_tts();
@@ -2771,35 +2866,9 @@ impl SessionOrchestrator {
             active_window_context,
         };
         let state_for_task = self.assistant_session.clone();
-        let action_tx = self.action_tx.clone();
         let notify_for_task = notify.clone();
-        let state_for_clear = state_for_task.clone();
-        tokio::spawn(async move {
-            if let Err(e) = run_assistant_turn(state_for_task, inputs, notify_for_task).await {
-                warn!("assistant turn failed: {e:#}");
-            }
-            // Clear the current_turn slot so a fresh press doesn't
-            // think a stale pump is still running.
-            {
-                let mut s = state_for_clear.lock().await;
-                if let Some(active) = s.current_turn.as_ref() {
-                    if Arc::ptr_eq(active, &notify) {
-                        s.current_turn = None;
-                    }
-                }
-            }
-            // Stop the thinking animation and hide the overlay —
-            // the pump is done, the user has heard (or aborted)
-            // the reply.
-            if let Some(t) = thinking_task {
-                t.abort();
-            }
-            if let Some(o) = overlay_for_task {
-                o.set_state(fono_overlay::OverlayState::Hidden);
-            }
-            // Tell the FSM we're idle.
-            let _ = action_tx.send(HotkeyAction::ProcessingDone);
-        });
+        let turn_fut = Box::pin(run_assistant_turn(state_for_task, inputs, notify_for_task));
+        self.spawn_assistant_pump(turn_fut, notify, thinking_task, overlay_for_task);
     }
 
     /// Hide the standalone-waveform overlay. Best-effort — silently
@@ -2876,6 +2945,50 @@ impl SessionOrchestrator {
 
     fn current_assistant(&self) -> Option<Arc<dyn Assistant>> {
         self.assistant_backend.read().expect("assistant lock poisoned").clone()
+    }
+
+    /// The realtime (speech-to-speech) backend, when one is loaded.
+    /// `Some` only when `[assistant.cloud].model` selected Gemini Live.
+    #[cfg(feature = "realtime")]
+    fn current_realtime(&self) -> Option<Arc<dyn RealtimeAssistant>> {
+        self.realtime_backend.read().expect("realtime lock poisoned").clone()
+    }
+
+    /// Spawn the detached pump task for one assistant turn (staged or
+    /// realtime) and wire the shared completion teardown: clear the
+    /// current-turn slot (only if it still points at *this* turn), stop
+    /// the thinking animation, hide the overlay, and tell the FSM we're
+    /// idle. `turn_fut` is the boxed pump future for whichever path was
+    /// chosen.
+    fn spawn_assistant_pump(
+        &self,
+        turn_fut: std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool>> + Send>>,
+        notify: Arc<Notify>,
+        thinking_task: Option<tokio::task::AbortHandle>,
+        overlay_for_task: Option<fono_overlay::OverlayHandle>,
+    ) {
+        let state_for_clear = self.assistant_session.clone();
+        let action_tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = turn_fut.await {
+                warn!("assistant turn failed: {e:#}");
+            }
+            {
+                let mut s = state_for_clear.lock().await;
+                if let Some(active) = s.current_turn.as_ref() {
+                    if Arc::ptr_eq(active, &notify) {
+                        s.current_turn = None;
+                    }
+                }
+            }
+            if let Some(t) = thinking_task {
+                t.abort();
+            }
+            if let Some(o) = overlay_for_task {
+                o.set_state(fono_overlay::OverlayState::Hidden);
+            }
+            let _ = action_tx.send(HotkeyAction::ProcessingDone);
+        });
     }
 
     fn current_tts(&self) -> Option<Arc<dyn TextToSpeech>> {

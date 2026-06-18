@@ -352,8 +352,8 @@ See [ADR 0034](decisions/0034-google-via-gemini-single-key.md) for the rationale
 backend = "gemini"          # gemini-flash-lite-latest via the OpenAI-compatible surface
 ```
 
-Polish, STT, the staged assistant chat, and native TTS are all wired today on
-the single key; the realtime (Live API) assistant is the remaining follow-up.
+Polish, STT, the staged assistant chat, native TTS, and the realtime (Live API)
+assistant are all wired today on the single key.
 Polish and the staged assistant reuse Gemini's OpenAI-compatible endpoint
 (`/v1beta/openai/chat/completions`, `Authorization: Bearer <key>`); STT, TTS, and
 Live use the native `generateContent` / `BidiGenerateContent` surfaces
@@ -376,6 +376,20 @@ streaming-capable cloud backends (the assistant pump, `fono speak`, and the MCP
 the synthesize-then-enqueue path unchanged. A small fixed jitter buffer
 (300 ms, not configurable) is held back before the first frame so the device
 never underruns mid-utterance.
+
+**Realtime (speech-to-speech).** Setting `[assistant.cloud].model` to the
+catalogue's Gemini Live model (the wizard offers this as "realtime
+speech-to-speech" when you pick Gemini for the assistant) switches the F8
+assistant from the staged STT→LLM→TTS pipeline to a single Gemini Live
+`BidiGenerateContent` WebSocket. The model synthesises the whole reply as **one
+continuous voice** (no per-sentence drift) and streams audio back
+**incrementally** (sub-second first audio), fixing the two problems the staged
+Gemini TTS path cannot — see
+[ADR 0035](decisions/0035-realtime-assistant-gemini-live.md). It is **opt-in by
+model id**: the default Gemini assistant stays staged. Push-to-talk is one-shot
+for now (capture on release, then stream in); tool-calling is deliberately
+absent until the `fono-action` dispatcher lands. `fono doctor` shows
+`assistant: … (realtime speech-to-speech)` when it is active.
 
 **Free-tier limits.** Each model has its own requests-per-minute (RPM),
 tokens-per-minute (TPM), and requests-per-day (RPD) caps; the daily counts reset

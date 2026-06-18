@@ -33,8 +33,13 @@ path = "src/main.rs"
 # at it — run `scripts/fetch-onnxruntime.sh` first (CI does this
 # automatically; see `.github/workflows/ci.yml` + `release.yml`):
 #   export ORT_LIB_LOCATION="$(sh scripts/fetch-onnxruntime.sh)"
-default = ["tray", "local-models", "llama-local", "interactive", "tts-local"]
+default = ["tray", "local-models", "llama-local", "interactive", "tts-local", "realtime"]
 tray = ["fono-tray/tray-backend"]
+# Realtime / speech-to-speech assistant (Gemini Live WebSocket). Forwards
+# to `fono-assistant/realtime`. Default-on; the Live client's WebSocket
+# dependency (tokio-tungstenite) is already in the binary graph, so this
+# is net-zero on binary size.
+realtime = ["fono-assistant/realtime"]
 local-models = ["fono-stt/whisper-local"]
 llama-local = ["fono-polish/llama-local", "fono-assistant/llama-local", "fono-mcp-server/llama-local"]
 # Hardware acceleration features — fan out to the matching opt-in

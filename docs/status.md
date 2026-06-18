@@ -1,5 +1,211 @@
 # Fono — Project Status
-Last updated: 2026-06-17
+Last updated: 2026-06-18
+
+## 2026-06-18 — Realtime: fix deprecated realtimeInput.mediaChunks (first live finding)
+
+First real live-API result from the Gemini Live path (maintainer set
+`[assistant.cloud].model = "gemini-3.1-flash-live-preview"` and ran a turn).
+The WebSocket closed immediately with:
+
+> `realtime_input.media_chunks is deprecated. Use audio, video, or text instead.`
+
+This is exactly the wire-shape class the offline tests cannot catch. The
+writer serialised mic PCM as `realtimeInput.mediaChunks: [ {mimeType, data} ]`;
+the current Live API expects a single Blob at `realtimeInput.audio:
+{mimeType, data}`. Fixed `encode_audio_chunk` (and its doc comment + test) in
+`gemini_live.rs`. `audioStreamEnd` was not flagged and is unchanged. Setup,
+reader, and event mapping were not implicated by this error; further live
+verification still pending for the response half.
+
+Gate green: fmt --check, clippy -D warnings, workspace tests.
+
+## 2026-06-18 — Realtime: switch Live model to gemini-3.1-flash-live-preview
+
+Per maintainer directive, switched the Gemini Live realtime profile from
+`gemini-2.5-flash-native-audio-preview-09-2025` to
+**`gemini-3.1-flash-live-preview`** (catalogue `RealtimeProfile::model`;
+`gemini-2.0-flash-live-001` remains the known-GA 404 fallback). Audited
+`gemini_live.rs` against the 3.1 Flash Live docs and confirmed we are **not**
+doing anything the migration warns against:
+
+- **Multi-part events** — the 3.1 docs warn a single `serverContent` event can
+  carry audio *and* transcript parts simultaneously. Our reader already loops
+  `for part in mt.parts` (handling inline audio + text per part) and reads
+  `outputTranscription` in the same event, so no content is dropped.
+- **Thinking** — 3.1 uses `thinkingLevel` (not 2.5's `thinkingBudget`) and
+  defaults to minimal for lowest latency. Our setup sets neither field, so we
+  inherit the low-latency default and avoid sending the wrong (2.5) knob.
+- **Proactive audio / affective dialogue / async function calling** — not set
+  (tools are deferred under Path B anyway), so nothing to remove.
+
+Wire shapes still want one live round (key rotated). Gate green: fmt, clippy
+(`-D warnings`), workspace tests (34 suites).
+
+### Chirp 3 HD for regular TTS — flagged, NOT implemented (decision needed)
+
+Investigated the request to use **Chirp 3 HD** for batch TTS. Finding: Chirp 3
+HD is **not** part of the Gemini API — it is a **Google Cloud Text-to-Speech**
+product (`texttospeech.googleapis.com`). Its free allowance (≈1M bytes/month)
+is a *billing-tier* free quota that still requires a **GCP project with a
+billing account attached** (credit card), unlike the AI Studio
+`GEMINI_API_KEY` free tier which needs **no billing**. Adopting it would
+re-introduce the exact Chirp/Cloud lane dropped in ADR 0034 and violate the
+project's core "single key, no billing" requirement. Left unimplemented pending
+a maintainer decision; the all-Gemini alternative is to keep
+`gemini-3.1-flash-tts-preview` for batch TTS and use Gemini Live for
+low-latency spoken replies.
+
+## 2026-06-17 — Realtime assistant (Gemini Live), Path B inc.5a: barge-in interrupt
+
+Landed the **safe, offline-testable slice of barge-in**: handling Gemini
+Live's `serverContent.interrupted` signal. When the model's own VAD detects
+the user speaking over the reply, it discards the rest of its spoken turn —
+the client now forwards that as a new `RealtimeEvent::Interrupted`, and the
+reply driver (`drive_realtime_reply`) aborts the playback sink immediately so
+Fono stops talking over the user. A later `Audio` frame re-opens the gapless
+session for a fresh reply. Two offline parse tests (`interrupted:true` parses;
+defaults `false` when absent); fono-assistant realtime suite now 67 (+2).
+
+**Deferred (inc.5b — needs a live key + a clear owner):** the heavier half of
+Inc5 — *live-hold streaming* (open the Live session on F8 **press** and bridge
+the cpal capture callback into `audio_in` frame-by-frame during the hold,
+rather than buffering and sending the whole utterance after release). That
+re-architects the interactive capture pipeline in `session.rs` and its
+mid-stream/interrupt wire semantics can't be verified with the rotated key, so
+it stays a documented follow-up. The current one-shot push-to-talk realtime
+path (inc.4) already delivers the user's core win: one continuous voice + a
+streaming reply, no per-sentence drift, no 6 s batch-TTS wait.
+
+Pre-commit gate green: fmt --check, clippy -D warnings, workspace tests.
+
+## 2026-06-17 — Realtime assistant (Gemini Live), Path B inc.1: catalogue + trait
+
+Starting the **realtime / speech-to-speech assistant** arc to fix the two
+remaining Gemini voice problems the staged path can't: per-sentence voice
+drift and ~6 s/sentence batch-TTS latency (Gemini delivers each
+`generateContent` TTS call as one terminal block — confirmed in a trace —
+so streaming has nothing to release early). The Live API
+(`BidiGenerateContent` WebSocket) synthesises the whole reply as one
+continuous stream and emits audio incrementally, fixing both.
+
+**Path B** (chosen with the user): land the **audio loop first**, defer
+tool-calling until `fono-action` exists. Sequenced as increments behind the
+pre-commit gate; the WebSocket protocol can't be live-verified (key rotated)
+so wire shapes are offline-unit-tested and flagged for live verification —
+same posture as the STT/TTS clients.
+
+De-risk: **`tokio-tungstenite` is already in the binary graph** (via
+`fono-stt`/`fono-net`/`fono-mcp-server`), so the Live client's WebSocket
+dependency is net-zero on binary size — no new dependency.
+
+**Increment 1 (this commit) — foundation, fully offline:**
+- Catalogue (`provider_catalog.rs`): new `RealtimeProfile` struct +
+  `RealtimeProtocol` enum + `Badge::Realtime`; additive
+  `AssistantDefaults.realtime: Option<RealtimeProfile>` (no reshape of the
+  existing `text_model`/`multimodal_model` slots — all other providers get
+  `None`). Gemini gains a Gemini Live profile (16 kHz in / 24 kHz out). Model
+  id `gemini-2.5-flash-native-audio-preview-09-2025` **needs live
+  verification** (`gemini-2.0-flash-live-001` is the known-GA fallback);
+  it's a single catalogue const and `fono doctor` surfaces the active id.
+- Two catalogue invariant tests: realtime profiles are well-formed (wss URL,
+  non-zero rates) and badge-consistent; Gemini keeps its Live profile.
+- Trait (`fono-assistant/traits.rs`): `RealtimeAssistant` trait,
+  `RealtimeSession` (mic-in mpsc + reply `events` stream), `RealtimeEvent`
+  (`Audio`/`AssistantTextDelta`/`UserTextFinal`/`Done`). Tools deliberately
+  absent for Path B; doc-noted as the `fono-action` follow-up.
+
+Remaining increments: gemini_live.rs WS client → factory `AssistantHandle`
+dispatch → orchestrator F8 short-circuit + `run_realtime_turn` → raw PCM
+capture streaming → wizard/doctor/CLI/ADR.
+
+**Increment 2 (this commit) — Gemini Live WebSocket client, offline-tested:**
+- New `fono-assistant/src/gemini_live.rs` behind a `realtime` feature (in
+  `default`). `tokio-tungstenite` added as an optional dep — net-zero (already
+  in the graph). `GeminiLive` implements `RealtimeAssistant`: connects with
+  `?key=` on the upgrade, sends the `setup` message
+  (`responseModalities:["AUDIO"]`, voice, system instruction, input+output
+  transcription), waits for `setupComplete` (bounded), then runs a reader task
+  (`serverContent` → `RealtimeEvent`: inline PCM → `Audio`, output
+  transcription → `AssistantTextDelta`, input transcription → `UserTextFinal`,
+  `turnComplete` → `Done`, one-shot) and a writer task (mic PCM →
+  `realtimeInput.mediaChunks`, `audioStreamEnd` on `audio_in` close).
+- Mirrors the Deepgram-streaming idioms: manual `IntoClientRequest`, split
+  read/write tasks, `serde(default)` envelope for forward-compat. Handles
+  Gemini Live's quirk of sending JSON over **binary** frames. Reader/writer
+  loops extracted to generic free fns to stay under the clippy line limit.
+- 14 offline tests: setup-JSON shape (modality/voice/system/transcription,
+  bare↔prefixed model, empty-prompt omission), audio-chunk encode,
+  audioStreamEnd, PCM s16le round-trip + clamp, inline-PCM decode, rate parse,
+  serverContent/setupComplete/turnComplete parse, unknown-kind tolerance.
+- Wire shapes still **need live verification** (key rotated) — same posture.
+
+Remaining: factory `AssistantHandle` dispatch → orchestrator F8 short-circuit
++ `run_realtime_turn` → raw PCM capture streaming → wizard/doctor/CLI/ADR.
+
+**Increment 3 (this commit) — factory `AssistantHandle` dispatch, offline-tested:**
+- New `AssistantHandle` enum in `fono-assistant/src/factory.rs`: `Staged(Arc<dyn
+  Assistant>)` (every backend, the default) and `Realtime(Arc<dyn
+  RealtimeAssistant>)` (gated on the `realtime` feature).
+- `build_assistant_handle(cfg, secrets, dir)` dispatches: when the backend is
+  Gemini **and** `[assistant.cloud].model` equals the catalogue's
+  `RealtimeProfile::model`, it builds a `GeminiLive` client (key resolved from
+  `api_key_ref`/`GEMINI_API_KEY`, reply voice = Gemini TTS `default_voice` →
+  `Kore`) and returns `Realtime`; otherwise it delegates to `build_assistant`
+  and wraps in `Staged`. `build_assistant` is unchanged (still used by MCP /
+  examples).
+- Selection is opt-in by model id: a blank/default model stays staged, so
+  existing Gemini users are unaffected. Non-Gemini backends never select
+  realtime even if the model string matches.
+- 5 dispatch tests: realtime model → `Realtime`; default/no-cloud → `Staged`;
+  non-Gemini + realtime id → `Staged`; missing key → clear `fono keys add`
+  error.
+
+Remaining: orchestrator F8 short-circuit + `run_realtime_turn` → raw PCM
+capture streaming → wizard/doctor/CLI/ADR.
+
+**Increment 4 (this commit) — orchestrator F8 short-circuit, end-to-end:**
+- `session.rs`: store the realtime backend in a new `realtime_backend` slot
+  (populated by `build_assistant_handle` in `new()`/`reload()`), add
+  `current_realtime()`, and short-circuit `on_assistant_hold_release`: when a
+  realtime backend is loaded, build `RealtimeTurnInputs` and dispatch
+  `run_realtime_turn` *before* the staged STT/LLM/TTS path (which would
+  otherwise warn "backend missing" because the staged slot is empty in
+  realtime mode). Extracted the shared pump teardown into
+  `spawn_assistant_pump` so both paths reuse the same clear-slot / stop-
+  animation / hide-overlay / FSM-idle epilogue.
+- `assistant.rs`: `run_realtime_turn` opens the Live session (errors
+  classify+notify via `open_realtime_or_notify`), lazily ensures playback,
+  resamples the captured mic PCM to the model's `native_input_rate` and streams
+  it in ~50 ms chunks (`send_mic_to_session`, one-shot push-to-talk), then
+  drives the reply through `drive_realtime_reply`: a `LocalPlaybackSink`
+  gaplessly plays reply audio as it arrives, `FirstAudio` reports honest TTFA
+  on the first frame, transcripts accumulate into history, and `notify`
+  cancellation (Escape) aborts the sink. Emits the same `assistant:` summary
+  line as the staged path.
+- `fono` crate gains a `realtime` feature forwarding to
+  `fono-assistant/realtime` (in `default`).
+
+Remaining: raw PCM live capture streaming (mic during hold, not one-shot) →
+wizard/doctor/CLI/ADR.
+
+**Increment 6 (this commit) — discoverability: wizard, doctor, ADR, docs:**
+- ADR 0035 records the Path B decision (audio loop first, tools deferred),
+  the opt-in-by-model-id selection, the additive catalogue profile, and the
+  net-zero WebSocket dependency.
+- Wizard: when the chosen assistant provider advertises a Gemini Live profile,
+  the fast path now offers "realtime speech-to-speech" (`offer_realtime`,
+  default yes). On accept it repoints `[assistant.cloud].model` at the
+  catalogue realtime id and skips the staged TTS picker (Live produces its own
+  continuous-voice audio).
+- Doctor: the assistant probe now goes through `build_assistant_handle` and
+  labels the active mode — `assistant: … (staged)` vs
+  `assistant: … (realtime speech-to-speech)`.
+- `docs/providers.md`: new "Realtime (speech-to-speech)" subsection under the
+  Gemini section; the capability line now lists realtime as wired.
+
+Remaining: Increment 5 — raw PCM live mic streaming *during* hold (barge-in /
+true full-duplex), an optimisation on top of the working one-shot path; and
+the `fono-action` tool dispatcher to bring tool-calling to the realtime path.
 
 ## 2026-06-17 — Make record + playback obvious in turn traces
 

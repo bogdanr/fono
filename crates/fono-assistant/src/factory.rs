@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use fono_core::config::{Assistant as AssistantCfg, AssistantBackend};
-#[cfg(any(feature = "openai-compat", feature = "anthropic"))]
+#[cfg(any(feature = "openai-compat", feature = "anthropic", feature = "realtime"))]
 use fono_core::provider_catalog;
 #[cfg(any(feature = "openai-compat", feature = "anthropic"))]
 use fono_core::provider_catalog::WebSearchSupport;
@@ -21,6 +21,8 @@ use fono_core::providers::assistant_key_env;
 use fono_core::Secrets;
 
 use crate::traits::Assistant;
+#[cfg(feature = "realtime")]
+use crate::traits::RealtimeAssistant;
 
 /// Resolved cloud-assistant parameters: the secret key, the chosen
 /// model (text or multimodal depending on `[assistant].prefer_vision`)
@@ -130,6 +132,108 @@ fn default_cloud_model(provider: &str) -> &'static str {
         return fono_core::config::DEFAULT_POLISH_LOCAL_MODEL;
     }
     provider_catalog::find(provider).and_then(|p| p.assistant.as_ref()).map_or("", |a| a.text_model)
+}
+
+/// A built assistant, in one of two execution shapes:
+///
+/// * [`AssistantHandle::Staged`] — the classic STT → LLM → TTS pipeline
+///   (every backend, and the default for Gemini).
+/// * [`AssistantHandle::Realtime`] — a single bidirectional
+///   speech-to-speech WebSocket session (selected only when the
+///   configured Gemini model equals the catalogue's
+///   [`RealtimeProfile`](fono_core::provider_catalog::RealtimeProfile)
+///   model). Fixes the staged path's per-sentence voice drift and
+///   ~6 s/sentence batch-TTS latency.
+pub enum AssistantHandle {
+    /// Staged STT → LLM → TTS assistant.
+    Staged(Arc<dyn Assistant>),
+    /// Realtime speech-to-speech assistant (Gemini Live).
+    #[cfg(feature = "realtime")]
+    Realtime(Arc<dyn RealtimeAssistant>),
+}
+
+/// Resolve the assistant to either a staged or a realtime handle.
+///
+/// Returns `Ok(None)` when the assistant is disabled or the backend is
+/// `none`. The realtime path is chosen only when the backend is Gemini
+/// **and** the configured `[assistant.cloud].model` equals the
+/// catalogue's realtime profile model; otherwise this delegates to
+/// [`build_assistant`] and wraps the result in
+/// [`AssistantHandle::Staged`].
+pub fn build_assistant_handle(
+    cfg: &AssistantCfg,
+    secrets: &Secrets,
+    assistant_models_dir: &Path,
+) -> Result<Option<AssistantHandle>> {
+    if !cfg.enabled || matches!(cfg.backend, AssistantBackend::None) {
+        return Ok(None);
+    }
+    #[cfg(feature = "realtime")]
+    {
+        if let Some(profile) = realtime_selection(cfg) {
+            return build_gemini_realtime(cfg, secrets, profile)
+                .map(|a| Some(AssistantHandle::Realtime(a)));
+        }
+    }
+    build_assistant(cfg, secrets, assistant_models_dir).map(|opt| opt.map(AssistantHandle::Staged))
+}
+
+/// Return the Gemini realtime profile when the configured assistant
+/// selects it: backend is Gemini and `[assistant.cloud].model` matches
+/// the catalogue's `RealtimeProfile::model`. A blank/default model (the
+/// staged text model) yields `None`.
+#[cfg(feature = "realtime")]
+fn realtime_selection(cfg: &AssistantCfg) -> Option<provider_catalog::RealtimeProfile> {
+    if !matches!(cfg.backend, AssistantBackend::Gemini) {
+        return None;
+    }
+    let model = cfg.cloud.as_ref().map(|c| c.model.trim()).filter(|m| !m.is_empty())?;
+    let profile = provider_catalog::find("gemini")?.assistant.as_ref()?.realtime?;
+    (profile.model == model).then_some(profile)
+}
+
+/// Resolve the Gemini API key for the realtime client, honouring an
+/// explicit `[assistant.cloud].api_key_ref` and falling back to the
+/// canonical `GEMINI_API_KEY`.
+#[cfg(feature = "realtime")]
+fn resolve_gemini_key(cfg: &AssistantCfg, secrets: &Secrets) -> Result<String> {
+    let key_ref = cfg
+        .cloud
+        .as_ref()
+        .map(|c| c.api_key_ref.trim())
+        .filter(|r| !r.is_empty())
+        .map_or_else(|| "GEMINI_API_KEY".to_string(), ToString::to_string);
+    secrets.resolve(&key_ref).ok_or_else(|| {
+        anyhow!(
+            "gemini realtime assistant API key {key_ref:?} not found in secrets.toml or \
+             environment; run `fono keys add {key_ref}` to add it"
+        )
+    })
+}
+
+/// Build the Gemini Live realtime client from the catalogue profile.
+/// The reply voice is the catalogue's Gemini TTS `default_voice`
+/// (falling back to `Kore`).
+#[cfg(feature = "realtime")]
+fn build_gemini_realtime(
+    cfg: &AssistantCfg,
+    secrets: &Secrets,
+    profile: provider_catalog::RealtimeProfile,
+) -> Result<Arc<dyn RealtimeAssistant>> {
+    let key = resolve_gemini_key(cfg, secrets)?;
+    let voice = provider_catalog::find("gemini")
+        .and_then(|e| e.tts.as_ref())
+        .map(|t| t.default_voice)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("Kore");
+    Ok(Arc::new(crate::gemini_live::GeminiLive::new(
+        key,
+        profile.model,
+        profile.ws_url,
+        voice,
+        profile.input_sample_rate,
+        profile.output_sample_rate,
+    )))
 }
 
 /// Construct an assistant backend from `cfg`. Returns `Ok(None)` for
@@ -520,5 +624,93 @@ mod tests {
         // Groq's catalogue entry advertises WebSearchSupport::None —
         // toggle is a no-op there.
         assert!(r.web_search_tool.is_none());
+    }
+
+    // ── Realtime dispatch (Path B) ────────────────────────────────
+    #[cfg(feature = "realtime")]
+    fn gemini_realtime_model() -> &'static str {
+        provider_catalog::find("gemini")
+            .unwrap()
+            .assistant
+            .as_ref()
+            .unwrap()
+            .realtime
+            .unwrap()
+            .model
+    }
+
+    #[cfg(feature = "realtime")]
+    #[test]
+    fn realtime_model_selects_realtime_handle() {
+        let cfg = AssistantCfg {
+            enabled: true,
+            backend: AssistantBackend::Gemini,
+            cloud: Some(AssistantCloud {
+                provider: "gemini".into(),
+                api_key_ref: String::new(),
+                model: gemini_realtime_model().into(),
+            }),
+            ..AssistantCfg::default()
+        };
+        let mut secrets = Secrets::default();
+        secrets.insert("GEMINI_API_KEY", "test-key");
+        let handle = build_assistant_handle(&cfg, &secrets, Path::new(".")).unwrap().unwrap();
+        assert!(matches!(handle, AssistantHandle::Realtime(_)));
+    }
+
+    #[cfg(feature = "realtime")]
+    #[test]
+    fn realtime_model_without_key_errors_clearly() {
+        let cfg = AssistantCfg {
+            enabled: true,
+            backend: AssistantBackend::Gemini,
+            cloud: Some(AssistantCloud {
+                provider: "gemini".into(),
+                api_key_ref: String::new(),
+                model: gemini_realtime_model().into(),
+            }),
+            ..AssistantCfg::default()
+        };
+        let err = build_assistant_handle(&cfg, &Secrets::default(), Path::new("."))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("GEMINI_API_KEY") && err.contains("fono keys add"), "{err}");
+    }
+
+    #[cfg(all(feature = "realtime", feature = "openai-compat"))]
+    #[test]
+    fn default_gemini_model_selects_staged() {
+        let cfg = AssistantCfg {
+            enabled: true,
+            backend: AssistantBackend::Gemini,
+            cloud: None,
+            ..AssistantCfg::default()
+        };
+        let mut secrets = Secrets::default();
+        secrets.insert("GEMINI_API_KEY", "test-key");
+        let handle = build_assistant_handle(&cfg, &secrets, Path::new(".")).unwrap().unwrap();
+        assert!(matches!(handle, AssistantHandle::Staged(_)));
+    }
+
+    #[cfg(all(feature = "realtime", feature = "openai-compat"))]
+    #[test]
+    fn non_gemini_backend_ignores_realtime_model() {
+        // Even with the realtime model id set, a non-Gemini backend
+        // never selects the realtime path.
+        let cfg = AssistantCfg {
+            enabled: true,
+            backend: AssistantBackend::OpenAI,
+            cloud: Some(AssistantCloud {
+                provider: "openai".into(),
+                api_key_ref: String::new(),
+                model: gemini_realtime_model().into(),
+            }),
+            ..AssistantCfg::default()
+        };
+        let mut secrets = Secrets::default();
+        secrets.insert("OPENAI_API_KEY", "sk-test");
+        let handle = build_assistant_handle(&cfg, &secrets, Path::new(".")).unwrap().unwrap();
+        assert!(matches!(handle, AssistantHandle::Staged(_)));
     }
 }

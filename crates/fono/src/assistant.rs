@@ -25,6 +25,8 @@ use anyhow::Result;
 use fono_assistant::{
     Assistant, AssistantContext, ConversationHistory, ScreenCaptureFn, ToolEvent,
 };
+#[cfg(feature = "realtime")]
+use fono_assistant::{RealtimeAssistant, RealtimeEvent, RealtimeSession};
 use fono_audio::AudioPlayback;
 use fono_core::turn_trace::TurnTrace;
 use fono_hotkey::HotkeyAction;
@@ -130,6 +132,43 @@ pub struct AssistantTurnInputs {
     /// Runtime-only active-window context captured at assistant hotkey press.
     /// Local backends can cache this independently from stable system prompts.
     pub active_window_context: Option<String>,
+}
+
+/// Inputs for [`run_realtime_turn`] — the speech-to-speech (Gemini
+/// Live) path. Unlike the staged turn there is no separate STT / TTS:
+/// the model ingests the captured mic PCM and streams reply audio back
+/// over one WebSocket session.
+#[cfg(feature = "realtime")]
+pub struct RealtimeTurnInputs {
+    /// Captured mic PCM for this push-to-talk turn. Resampled to the
+    /// backend's [`RealtimeAssistant::native_input_rate`] before send.
+    pub pcm: Vec<f32>,
+    pub sample_rate: u32,
+    pub realtime: Arc<dyn RealtimeAssistant>,
+    pub system_prompt: String,
+    pub language: Option<String>,
+    /// Same FSM channel as the staged path: the turn sends
+    /// [`HotkeyAction::AssistantSpeakingStarted`] on the first reply
+    /// audio frame.
+    pub action_tx: mpsc::UnboundedSender<HotkeyAction>,
+    pub overlay: Option<fono_overlay::OverlayHandle>,
+    /// Runtime-only active-window context captured at hotkey press.
+    pub active_window_context: Option<String>,
+}
+
+/// What one realtime reply produced. Mirrors the fields the staged
+/// turn tracks so the `assistant:` summary line renders consistently.
+#[cfg(feature = "realtime")]
+#[derive(Default)]
+struct RealtimeReply {
+    /// User utterance as transcribed by the model's own input
+    /// transcription (pushed as the user history turn).
+    user_text: Option<String>,
+    /// Incremental transcript of the spoken reply.
+    reply_text: String,
+    any_audio: bool,
+    aborted: bool,
+    last_audio_at: Option<std::time::Instant>,
 }
 
 /// Run one assistant turn: STT the captured PCM, push the user turn
@@ -1194,6 +1233,326 @@ async fn synth_and_stream(
             false
         }
     }
+}
+
+/// Resample mono `f32` PCM from `from` Hz to `to` Hz via linear
+/// interpolation. Returns the input untouched when the rates match or
+/// either is zero. Cheap and good enough for speech — the realtime mic
+/// path only ever down/up-samples by small integer-ish ratios (e.g.
+/// 16 kHz capture → 16 kHz model, or 48 kHz → 16 kHz).
+#[cfg(feature = "realtime")]
+fn resample_linear(pcm: &[f32], from: u32, to: u32) -> Vec<f32> {
+    if from == 0 || to == 0 || from == to || pcm.is_empty() {
+        return pcm.to_vec();
+    }
+    let ratio = f64::from(to) / f64::from(from);
+    let out_len = ((pcm.len() as f64) * ratio).round() as usize;
+    let mut out = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let src = (i as f64) / ratio;
+        let idx = src.floor() as usize;
+        let frac = src - src.floor();
+        let a = pcm.get(idx).copied().unwrap_or(0.0);
+        let b = pcm.get(idx + 1).copied().unwrap_or(a);
+        out.push((b - a).mul_add(frac as f32, a));
+    }
+    out
+}
+
+/// Open a realtime session, classifying + notifying on failure and
+/// recording the `realtime.open` span on the trace either way. Keeps
+/// `run_realtime_turn` under the line limit.
+#[cfg(feature = "realtime")]
+async fn open_realtime_or_notify(
+    realtime: &dyn RealtimeAssistant,
+    ctx: &AssistantContext,
+    trace: Option<&TurnTrace>,
+) -> Result<RealtimeSession> {
+    let open_started = std::time::Instant::now();
+    match realtime.open_session(ctx).await {
+        Ok(s) => {
+            if let Some(t) = trace {
+                t.duration_between(
+                    "realtime.open",
+                    "assistant",
+                    "assistant-pump",
+                    open_started,
+                    std::time::Instant::now(),
+                    json!({ "provider": realtime.name() }),
+                );
+            }
+            Ok(s)
+        }
+        Err(e) => {
+            let err_text = format!("{e:#}");
+            let class = fono_core::critical_notify::classify(&err_text);
+            if matches!(
+                class,
+                fono_core::critical_notify::ErrorClass::Auth
+                    | fono_core::critical_notify::ErrorClass::PaymentRequired
+                    | fono_core::critical_notify::ErrorClass::Network
+                    | fono_core::critical_notify::ErrorClass::TermsRequired
+            ) {
+                fono_core::critical_notify::notify(
+                    fono_core::critical_notify::Stage::Assistant,
+                    realtime.name(),
+                    class,
+                    &err_text,
+                );
+            }
+            if let Some(t) = trace {
+                t.duration_between(
+                    "realtime.open",
+                    "assistant",
+                    "assistant-pump",
+                    open_started,
+                    std::time::Instant::now(),
+                    json!({ "error": err_text }),
+                );
+                t.finish(json!({ "aborted": true, "reason": "realtime_open_error" }));
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Resample the captured mic PCM to the model's native rate, stream it
+/// in ~50 ms chunks, then drop the sender to signal end-of-input (the
+/// client emits `audioStreamEnd`). Records `realtime.audio_sent`.
+#[cfg(feature = "realtime")]
+async fn send_mic_to_session(
+    audio_in: mpsc::Sender<Vec<f32>>,
+    pcm: &[f32],
+    sample_rate: u32,
+    native: u32,
+    trace: Option<&TurnTrace>,
+) {
+    let resampled = resample_linear(pcm, sample_rate, native);
+    let frame = (native as usize / 20).max(1); // ~50 ms chunks
+    for chunk in resampled.chunks(frame) {
+        if audio_in.send(chunk.to_vec()).await.is_err() {
+            break;
+        }
+    }
+    drop(audio_in);
+    if let Some(t) = trace {
+        t.instant(
+            "realtime.audio_sent",
+            "capture",
+            fono_core::turn_trace::CAPTURE_LANE,
+            json!({ "samples": resampled.len(), "sample_rate": native }),
+        );
+    }
+}
+
+/// One assistant turn over the realtime / speech-to-speech path
+/// (Gemini Live). Opens a single WebSocket session, streams the
+/// captured mic PCM in (then closes input), and plays the model's
+/// reply audio back as one continuous gapless stream — which is what
+/// fixes the staged path's per-sentence voice drift and ~6 s/sentence
+/// batch-TTS latency. Cancellable via `notify`. Returns `Ok(true)` if
+/// any reply audio played.
+#[cfg(feature = "realtime")]
+pub async fn run_realtime_turn(
+    state: Arc<Mutex<AssistantSessionState>>,
+    inputs: RealtimeTurnInputs,
+    notify: Arc<Notify>,
+) -> Result<bool> {
+    let RealtimeTurnInputs {
+        pcm,
+        sample_rate,
+        realtime,
+        system_prompt,
+        language,
+        action_tx,
+        overlay,
+        active_window_context,
+    } = inputs;
+
+    let trace = TurnTrace::start_from_env();
+    let _trace_guard = trace.as_ref().map(TurnTrace::make_current);
+    if let Some(t) = &trace {
+        t.instant(
+            "turn.start",
+            "assistant",
+            "assistant-pump",
+            json!({ "turn_id": t.id(), "mode": "realtime" }),
+        );
+    }
+    let turn_started = std::time::Instant::now();
+    let mut metrics = AssistantTurnMetrics { language: language.clone(), ..Default::default() };
+
+    if pcm.is_empty() {
+        debug!(target: "fono::assistant", "realtime skip: empty PCM");
+        if let Some(t) = &trace {
+            t.finish(json!({ "aborted": true, "reason": "empty_pcm" }));
+        }
+        return Ok(false);
+    }
+
+    // Seed the session with the completed history (the current user
+    // turn is transcribed by the model and pushed afterwards).
+    let history_snapshot = {
+        let mut s = state.lock().await;
+        s.history.snapshot()
+    };
+    let ctx = AssistantContext {
+        system_prompt,
+        language: language.clone(),
+        history: history_snapshot,
+        active_window_context,
+        screen_capture: None,
+        prefer_vision: false,
+        max_new_tokens: None,
+    };
+
+    // Open the live session.
+    let RealtimeSession { audio_in, mut events } =
+        open_realtime_or_notify(realtime.as_ref(), &ctx, trace.as_ref()).await?;
+
+    // Lazily ensure playback exists (mirrors the staged path).
+    {
+        let mut s = state.lock().await;
+        if s.playback.is_none() {
+            match AudioPlayback::new(None) {
+                Ok(pb) => s.playback = Some(pb),
+                Err(e) => warn!(
+                    target: "fono::assistant",
+                    error = %e,
+                    "audio playback init failed; realtime reply will not be audible"
+                ),
+            }
+        }
+    }
+
+    // Send the captured mic audio then close input. One-shot
+    // push-to-talk: live mic streaming during hold is a follow-up.
+    let native = realtime.native_input_rate();
+    send_mic_to_session(audio_in, &pcm, sample_rate, native, trace.as_ref()).await;
+
+    // Drive the reply: play audio, accumulate transcripts.
+    let first_audio = FirstAudio::new(turn_started, &action_tx, overlay.as_ref());
+    let reply = drive_realtime_reply(&state, &mut events, &notify, &first_audio).await;
+
+    // Record both turns under a single lock.
+    {
+        let mut s = state.lock().await;
+        if let Some(u) = reply.user_text.as_ref().map(|u| u.trim()).filter(|u| !u.is_empty()) {
+            s.history.push_user(u.to_string());
+        }
+        if !reply.reply_text.trim().is_empty() {
+            s.history.push_assistant(reply.reply_text.trim().to_string());
+        }
+    }
+
+    metrics.user_chars = reply.user_text.as_deref().map_or(0, |u| u.trim().chars().count());
+    metrics.reply_chars = reply.reply_text.trim().chars().count();
+    metrics.tts_ttfa_ms = first_audio.ttfa_ms();
+    metrics.aborted = reply.aborted;
+    let total_anchor = reply.last_audio_at.unwrap_or_else(std::time::Instant::now);
+    metrics.total_ms = total_anchor.duration_since(turn_started).as_millis() as u64;
+    info!(target: "fono::assistant", "{}", format_assistant_summary(&metrics));
+
+    if let Some(t) = &trace {
+        t.finish(json!({
+            "aborted": reply.aborted,
+            "played_audio": reply.any_audio,
+            "total_ms": metrics.total_ms,
+            "tts_ttfa_ms": metrics.tts_ttfa_ms,
+            "reply_chars": metrics.reply_chars,
+            "mode": "realtime",
+        }));
+    }
+    Ok(reply.any_audio)
+}
+
+/// Consume the realtime event stream: play reply audio as one gapless
+/// session, accumulate the reply + user transcripts, and honour
+/// cancellation (Escape / barge-in). Returns what the reply produced.
+#[cfg(feature = "realtime")]
+async fn drive_realtime_reply(
+    state: &Arc<Mutex<AssistantSessionState>>,
+    events: &mut futures::stream::BoxStream<'static, anyhow::Result<RealtimeEvent>>,
+    notify: &Arc<Notify>,
+    first_audio: &FirstAudio<'_>,
+) -> RealtimeReply {
+    use fono_tts::PcmSink as _;
+
+    let pb_handle = {
+        let s = state.lock().await;
+        s.playback.clone()
+    };
+    let mut reply = RealtimeReply::default();
+    let Some(pb) = pb_handle else {
+        // No device — still drain events so history/transcripts are
+        // captured, but no audio can play.
+        while let Some(ev) = events.next().await {
+            match ev {
+                Ok(RealtimeEvent::AssistantTextDelta(s)) => reply.reply_text.push_str(&s),
+                Ok(RealtimeEvent::UserTextFinal(s)) => reply.user_text = Some(s),
+                Ok(RealtimeEvent::Done) | Err(_) => break,
+                Ok(RealtimeEvent::Audio { .. } | RealtimeEvent::Interrupted) => {}
+            }
+        }
+        return reply;
+    };
+    let mut sink = fono_audio::LocalPlaybackSink::new(pb);
+    let mut begun = false;
+    loop {
+        tokio::select! {
+            biased;
+            () = notify.notified() => {
+                debug!(target: "fono::assistant", "realtime cancelled");
+                reply.aborted = true;
+                if begun {
+                    let _ = sink.abort().await;
+                }
+                break;
+            }
+            ev = events.next() => {
+                match ev {
+                    None => break,
+                    Some(Err(e)) => {
+                        warn!(target: "fono::assistant", error = %e, "realtime stream error");
+                        reply.aborted = true;
+                        break;
+                    }
+                    Some(Ok(RealtimeEvent::Audio { pcm, sample_rate })) => {
+                        if !begun {
+                            if sink.begin().await.is_err() {
+                                reply.aborted = true;
+                                break;
+                            }
+                            begun = true;
+                        }
+                        first_audio.fire();
+                        if sink.push(pcm, sample_rate).await.is_ok() {
+                            reply.any_audio = true;
+                            reply.last_audio_at = Some(std::time::Instant::now());
+                        }
+                    }
+                    Some(Ok(RealtimeEvent::AssistantTextDelta(s))) => reply.reply_text.push_str(&s),
+                    Some(Ok(RealtimeEvent::UserTextFinal(s))) => reply.user_text = Some(s),
+                    Some(Ok(RealtimeEvent::Interrupted)) => {
+                        // Barge-in: the model discarded the rest of this
+                        // reply. Drop the queued/playing audio immediately so
+                        // we don't talk over the user. A later Audio frame (a
+                        // fresh reply) re-opens the gapless session.
+                        debug!(target: "fono::assistant", "realtime: barge-in interrupt");
+                        if begun {
+                            let _ = sink.abort().await;
+                            begun = false;
+                        }
+                    }
+                    Some(Ok(RealtimeEvent::Done)) => break,
+                }
+            }
+        }
+    }
+    if begun && !reply.aborted {
+        let _ = sink.end().await;
+    }
+    reply
 }
 
 /// Pull the human-readable `message` out of a provider error blob

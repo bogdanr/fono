@@ -176,8 +176,23 @@ pub async fn report(paths: &Paths) -> Result<String> {
             Ok(None) => writeln!(out, "  polish: {}", dim("disabled (cleanup off)"))?,
             Err(e) => writeln!(out, "  polish: {} {e:#}", bad("FAIL —"))?,
         }
-        match fono_assistant::build_assistant(&c.assistant, &secrets, &paths.polish_models_dir()) {
-            Ok(Some(a)) => writeln!(out, "  assistant: {} {}", a.name(), ok("ready"))?,
+        match fono_assistant::build_assistant_handle(
+            &c.assistant,
+            &secrets,
+            &paths.polish_models_dir(),
+        ) {
+            Ok(Some(fono_assistant::AssistantHandle::Staged(a))) => {
+                writeln!(out, "  assistant: {} {} (staged)", a.name(), ok("ready"))?;
+            }
+            #[cfg(feature = "realtime")]
+            Ok(Some(fono_assistant::AssistantHandle::Realtime(a))) => {
+                writeln!(
+                    out,
+                    "  assistant: {} {} (realtime speech-to-speech)",
+                    a.name(),
+                    ok("ready")
+                )?;
+            }
             Ok(None) => writeln!(out, "  assistant: {}", dim("disabled"))?,
             Err(e) => writeln!(out, "  assistant: {} {e:#}", bad("FAIL —"))?,
         }

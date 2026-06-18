@@ -54,8 +54,42 @@ pub struct AssistantDefaults {
     pub multimodal_model: Option<&'static str>,
     /// Native web-search support advertised by the provider.
     pub web_search: WebSearchSupport,
+    /// Realtime / speech-to-speech profile, when the provider exposes a
+    /// bidirectional voice WebSocket (e.g. Gemini Live). `None` means the
+    /// provider is staged-pipeline only. Selected via
+    /// `[assistant.cloud].model` matching `RealtimeProfile::model`.
+    pub realtime: Option<RealtimeProfile>,
     /// Capability badges to render in the wizard's provider picker.
     pub badges: &'static [Badge],
+}
+
+/// A provider's realtime (speech-to-speech) voice profile. When the
+/// configured assistant model equals [`RealtimeProfile::model`], the F8
+/// path opens a single bidirectional WebSocket instead of running the
+/// staged STT → LLM → TTS pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RealtimeProfile {
+    /// Realtime model id. Matched against `[assistant.cloud].model` to
+    /// decide staged vs realtime. Surfaced by `fono doctor`.
+    pub model: &'static str,
+    /// WebSocket endpoint base URL (key/query appended by the client).
+    pub ws_url: &'static str,
+    /// Which realtime wire protocol the client must speak.
+    pub protocol: RealtimeProtocol,
+    /// PCM sample rate the model expects on the mic-input stream (Hz).
+    pub input_sample_rate: u32,
+    /// PCM sample rate the model emits on the reply-audio stream (Hz).
+    pub output_sample_rate: u32,
+}
+
+/// Realtime wire protocols Fono can speak. Each maps to one client
+/// module in `fono-assistant`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealtimeProtocol {
+    /// Google Gemini Live `BidiGenerateContent` over WebSocket.
+    GeminiLive,
+    /// OpenAI Realtime API over WebSocket. (Reserved; not yet wired.)
+    OpenAiRealtime,
 }
 
 /// How the provider exposes a web-search tool to the assistant.
@@ -90,6 +124,8 @@ pub enum Badge {
     Reasoning,
     /// Provider is positioned as a low-latency / fast tier.
     Fast,
+    /// Provider exposes a realtime / speech-to-speech (WebSocket) model.
+    Realtime,
 }
 
 /// Defaults for a provider's text-to-speech capability.
@@ -368,6 +404,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // GPT-5.4 family is multimodal; reuse the assistant default.
             multimodal_model: Some("gpt-5.4-mini"),
             web_search: WebSearchSupport::None,
+            realtime: None,
             badges: &[Badge::Stt, Badge::Polish, Badge::Assistant, Badge::Tts, Badge::Vision],
         }),
         tts: Some(TtsDefaults {
@@ -431,6 +468,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // opt-in once we have a coherent search-via-model-swap
             // design (see docs/decisions/0024).
             web_search: WebSearchSupport::None,
+            realtime: None,
             badges: &[Badge::Stt, Badge::Polish, Badge::Assistant, Badge::Tts, Badge::Fast],
         }),
         tts: Some(TtsDefaults {
@@ -505,6 +543,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // Claude Haiku 4.5 is multimodal (image input supported).
             multimodal_model: Some("claude-haiku-4-5-20251001"),
             web_search: WebSearchSupport::NativeTool("web_search_20250305"),
+            realtime: None,
             badges: &[Badge::Polish, Badge::Assistant, Badge::Vision, Badge::Search],
         }),
         tts: None,
@@ -527,6 +566,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             text_model: "zai-glm-4.7",
             multimodal_model: None,
             web_search: WebSearchSupport::None,
+            realtime: None,
             badges: &[Badge::Polish, Badge::Assistant, Badge::Fast],
         }),
         tts: None,
@@ -559,7 +599,23 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // Native grounding tool; not wired through the OpenAI-compat
             // staged client yet (see ADR 0034).
             web_search: WebSearchSupport::NativeTool("google_search"),
-            badges: &[Badge::Polish, Badge::Assistant, Badge::Vision, Badge::Search, Badge::Fast],
+            // Gemini Live (BidiGenerateContent) speech-to-speech profile. F8
+            // opens one WebSocket; the model ingests mic PCM (16 kHz mono)
+            // and streams reply audio back (24 kHz mono) in one continuous
+            // voice — fixing both the per-sentence voice drift and the
+            // ~6 s/sentence batch-TTS latency of the staged Gemini path.
+            // NOTE: model id needs live verification against /v1beta/models
+            // (3.1 Flash Live preview); trivially swappable here, and
+            // `fono doctor` surfaces the active id. `gemini-2.0-flash-live-001`
+            // is the known-GA fallback if this preview id 404s.
+            realtime: Some(RealtimeProfile {
+                model: "gemini-3.1-flash-live-preview",
+                ws_url: "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent",
+                protocol: RealtimeProtocol::GeminiLive,
+                input_sample_rate: 16_000,
+                output_sample_rate: 24_000,
+            }),
+            badges: &[Badge::Polish, Badge::Assistant, Badge::Vision, Badge::Search, Badge::Fast, Badge::Realtime],
         }),
         tts: Some(TtsDefaults {
             // Native Gemini TTS model (`:generateContent` with an AUDIO
@@ -625,6 +681,7 @@ pub const CLOUD_PROVIDERS: &[CloudProvider] = &[
             // Web-search support is route-dependent; default to None
             // and let later phases enable per-route overrides.
             web_search: WebSearchSupport::None,
+            realtime: None,
             badges: &[Badge::Polish, Badge::Assistant, Badge::Tts],
         }),
         tts: Some(TtsDefaults {
@@ -1165,6 +1222,16 @@ mod tests {
                 if let Some(mm) = a.multimodal_model {
                     assert!(!mm.is_empty(), "{}: empty multimodal_model literal", p.id);
                 }
+                if let Some(rt) = &a.realtime {
+                    assert!(!rt.model.is_empty(), "{}: empty realtime model", p.id);
+                    assert!(
+                        rt.ws_url.starts_with("wss://"),
+                        "{}: realtime ws_url must be wss://",
+                        p.id
+                    );
+                    assert!(rt.input_sample_rate > 0, "{}: zero realtime input rate", p.id);
+                    assert!(rt.output_sample_rate > 0, "{}: zero realtime output rate", p.id);
+                }
                 count += 1;
             }
             if let Some(t) = &p.tts {
@@ -1175,6 +1242,35 @@ mod tests {
             }
         }
         assert!(count > 0, "no capabilities declared — catalogue is empty?");
+    }
+
+    /// Realtime invariants: any provider advertising a realtime profile
+    /// must carry the `Realtime` badge (so the wizard can surface it), and
+    /// Gemini specifically must expose a Gemini Live profile.
+    #[test]
+    fn realtime_profiles_are_consistent() {
+        let mut saw_gemini_realtime = false;
+        for p in CLOUD_PROVIDERS {
+            let Some(a) = &p.assistant else { continue };
+            if let Some(rt) = &a.realtime {
+                assert!(
+                    a.badges.contains(&Badge::Realtime),
+                    "{}: has a realtime profile but no Badge::Realtime",
+                    p.id
+                );
+                if p.id == "gemini" {
+                    saw_gemini_realtime = true;
+                    assert_eq!(rt.protocol, RealtimeProtocol::GeminiLive);
+                }
+            } else {
+                assert!(
+                    !a.badges.contains(&Badge::Realtime),
+                    "{}: carries Badge::Realtime but has no realtime profile",
+                    p.id
+                );
+            }
+        }
+        assert!(saw_gemini_realtime, "gemini lost its realtime profile");
     }
 
     /// Every entry must declare at least one capability — an entry
