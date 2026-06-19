@@ -201,8 +201,10 @@ jobs:
           # history: 20 MiB at v0.4.0 (18.08 MB) → 22 MiB at v0.7.1 →
           # 24 MiB at v0.9.0 (22.5 MB) → 26 MiB at 2026-06-02 when
           # `tts-local` became default (statically-linked onnxruntime,
-          # measured 24.45 MiB). Still well under the ≤32 MiB `cpu` cap
-          # (ADR 0022) and rejects accidental dependency drift. The
+          # measured 24.45 MiB) → 27 MiB at 2026-06-19 after v0.11.0
+          # added realtime/provider code while preserving OpenMP and keeping
+          # release-slim unwind tables disabled. Still well under the ≤32 MiB
+          # `cpu` cap (ADR 0022) and rejects accidental dependency drift. The
           # onnxruntime fetch step below pins `libonnxruntime.a` so the
           # `ort` link resolves; the 4-entry allowlist is unchanged because
           # onnxruntime + libstdc++ are statically embedded.
@@ -211,7 +213,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
             features: ""
-            budget_bytes: 27262976
+            budget_bytes: 28311552
             extra_needed: ""
             dynamic_linker: ld-linux-x86-64.so.2
           # GPU variant — Vulkan-enabled, ~66 MB. Adds `libvulkan.so.1`
@@ -234,15 +236,16 @@ jobs:
           # interpreter on aarch64 is `ld-linux-aarch64.so.1` and on
           # aarch64 it appears only in `PT_INTERP`, not `NEEDED`, so
           # the allowlist drops it; the universal libc/libm/libgcc_s
-          # triple still applies. Budget matches x86_64 CPU (26 MiB now
-          # that `tts-local` is default; the aarch64 `libonnxruntime.a`
-          # is hosted + pinned in `fetch-onnxruntime.sh`).
+          # triple still applies. Budget matches x86_64 CPU (27 MiB now
+          # that `tts-local` is default and v0.11.0 keeps realtime/provider
+          # work plus OpenMP inside the default CPU artefact; the aarch64
+          # `libonnxruntime.a` is hosted + pinned in `fetch-onnxruntime.sh`).
           - variant: cpu
             arch: aarch64
             target: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04-arm
             features: ""
-            budget_bytes: 27262976
+            budget_bytes: 28311552
             extra_needed: ""
             dynamic_linker: ld-linux-aarch64.so.1
     steps:

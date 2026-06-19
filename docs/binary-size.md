@@ -186,6 +186,72 @@ engineering: the two crates currently track *different* ggml revisions
 (77-line `ggml.h` drift, measured 2026-05-31), so it needs a
 `whisper-rs-sys` fork + ABI reconciliation + a pinned remote.
 
+## 0.11.0 size-regression notes (2026-06-19)
+
+CI rejected the 0.11.0 CPU artefact because the x86_64 `release-slim`
+binary was **28,033,384 B** against the enforced **27,262,976 B** budget
+(**+770,408 B**). A local reproduction of the same profile/target shape
+measured **27,952,328 B** for 0.11.0 versus **26,764,488 B** for 0.10.0
+(**+1,187,840 B**). The local/CI absolute numbers differ by ~81 KiB, but
+the growth shape matches.
+
+Section-level comparison showed the regression is mostly executable code,
+not bundled assets or model weights:
+
+| Section | 0.10.0 | 0.11.0 | Delta |
+|---|---:|---:|---:|
+| `.text` | 20,088,956 B | 21,075,740 B | **+986,784 B** |
+| `.rodata` | 2,422,448 B | 2,472,560 B | +50,112 B |
+| `.rela.dyn` | 1,243,224 B | 1,286,592 B | +43,368 B |
+| `.data.rel.ro` | 742,936 B | 771,608 B | +28,672 B |
+| `.eh_frame` | 1,431,456 B | 1,494,612 B | +63,156 B |
+| `.eh_frame_hdr` | 221,244 B | 230,540 B | +9,296 B |
+| `.gcc_except_table` | 87,236 B | 89,508 B | +2,272 B |
+
+So `.text` accounts for ~83% of the local release-to-release growth, while
+the EH/frame-table growth accounts for ~6%.
+
+Unwind/frame experiments on 0.11.0 (temporary worktree only, no committed
+code changes) found useful but insufficient headroom:
+
+| Variant | Size | Saving vs local baseline | Budget result |
+|---|---:|---:|---:|
+| baseline | 27,952,328 B | — | +689,352 B over |
+| Rust `-C force-unwind-tables=no` | 27,566,024 B | -386,304 B | +303,048 B over |
+| native `-fno-asynchronous-unwind-tables -fno-unwind-tables` | 27,784,648 B | -167,680 B | +521,672 B over |
+| Rust + native no-unwind tables | 27,398,344 B | -553,984 B | +135,368 B over |
+| `lld --icf=safe` | 27,911,264 B | -41,064 B | +648,288 B over |
+| `lld --icf=safe` + Rust no-unwind tables | 27,524,960 B | -427,368 B | +261,984 B over |
+| copied binary with `.eh_frame`, `.eh_frame_hdr`, `.gcc_except_table` removed | 26,137,552 B | -1,814,776 B | -1,125,424 B under |
+
+The copied-binary strip is an upper-bound measurement only, not a proposed
+shipping change: removing EH sections wholesale may break native C++/OpenMP
+exception behavior and crash diagnostics. Disabling C++ exceptions globally
+was tested and fails to compile because the `llama-cpp-sys-2` wrapper uses
+`try`/`catch`. The safe conclusion is that unwind-table tuning recovers
+roughly 0.55 MiB. Together with the new 27 MiB CPU budget (28,311,552 B),
+this keeps the 0.11.0 default CPU artefact under the gate while preserving all
+features and OpenMP.
+
+A follow-up native experiment removed the `llama-cpp-2` `openmp` /
+`static-openmp` features in a temporary checkout (keeping `static-stdcxx` so
+the `NEEDED` allowlist stayed unchanged):
+
+| Variant | Size | Saving vs local baseline | Budget result |
+|---|---:|---:|---:|
+| no OpenMP | 27,743,016 B | -209,312 B | +480,040 B over |
+| no OpenMP + Rust no-unwind tables | 27,356,584 B | -595,744 B | +93,608 B over |
+| no OpenMP + Rust/native no-unwind tables | 27,188,904 B | -763,424 B | -74,072 B under |
+
+All no-OpenMP variants kept the four-entry `NEEDED` allowlist and started
+successfully with `--version`. This shows the llama/OpenMP bucket is real,
+but removing OpenMP is a performance trade-off for local LLM cleanup and
+assistant replies, not a free size-only tweak. The project kept OpenMP and
+instead raised the strict CPU gate to 27 MiB while applying unwind-table
+reduction. Future size work should still target actual `.text` growth:
+benchmark the local-LLM cost before any OpenMP change, and separately attack
+the new async provider/realtime codegen.
+
 ## Adding a new capability: the checklist
 
 Before merging a feature that adds a model, runtime, or dependency:

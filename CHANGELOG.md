@@ -144,6 +144,11 @@ turn traces you can actually read.
 
 ### Fixed
 
+- **0.11.0 release artefacts fit the size gate again without dropping
+  features.** The `release-slim` build now disables unused Rust/native
+  unwind-table emission while keeping C++ exceptions and OpenMP, and the
+  strict CPU budget moves to 27 MiB — still below the accepted 32 MiB cap —
+  to cover the realtime/provider growth measured for this release.
 - **Barge-in now works while the assistant is still thinking.**
   Pressing the assistant hotkey during an in-flight reply — whether it
   is thinking or already speaking — stops the current reply and starts

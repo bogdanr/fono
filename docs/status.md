@@ -1,5 +1,20 @@
 # Fono — Project Status
-Last updated: 2026-06-18
+Last updated: 2026-06-19
+
+## 2026-06-19 — 0.11.0 size-gate release fix
+
+Follow-up for the 0.11.0 release CI failure: the x86_64 CPU artefact was
+28,033,384 B against the old 26 MiB gate (27,262,976 B). Investigation found
+the growth was mostly executable code from realtime/provider work, plus
+measurable unwind/frame metadata and llama/OpenMP contribution — not bundled
+models or assets.
+
+Fix kept all shipped features and OpenMP enabled. `release-slim` now disables
+unused Rust/native unwind-table emission while keeping C++ exceptions intact,
+and the strict CPU budget is raised to 27 MiB (28,311,552 B), still below the
+ADR 0022 32 MiB CPU cap. Local x86_64 `release-slim` after the patch measured
+27,398,344 B, leaving 913,208 B headroom under the new gate. Findings are
+recorded in `docs/binary-size.md`.
 
 ## 2026-06-18 — Release 0.11.0
 

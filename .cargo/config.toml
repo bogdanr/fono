@@ -37,6 +37,7 @@ rustflags = [
     "-C", "link-arg=-Wl,--allow-multiple-definition",
     "-C", "link-arg=-Wl,--gc-sections",
     "-C", "link-arg=-Wl,--as-needed",
+    "-C", "force-unwind-tables=no",
 ]
 
 [target.'cfg(all(target_os = "windows", target_env = "gnu"))']
@@ -48,7 +49,10 @@ rustflags = [
 # `-Os -ffunction-sections -fdata-sections` for the C/C++ compiles run by
 # `whisper-rs-sys` and `llama-cpp-sys-2` build scripts. Setting them via
 # `[env]` so they apply to every cmake/cc invocation in the workspace
-# without each sys crate's `build.rs` having to opt in.
+# without each sys crate's `build.rs` having to opt in. The
+# `-fno-{asynchronous-,}unwind-tables` pair keeps release artefacts from
+# retaining frame-unwind metadata that Fono does not use in normal execution;
+# C++ exceptions remain enabled because the llama wrapper uses `try`/`catch`.
 #
 # `-Os` trades ~5 % runtime perf for ~10 % code size on whisper.cpp /
 # llama.cpp; the autovectorised hot kernels are explicitly opted into
@@ -108,8 +112,8 @@ rustflags = [
 #    No effect on builds without `tts-local` (ort-sys never runs, and the
 #    fono-tts build script no-ops on that feature gate).
 ORT_CXX_STDLIB = "static:-bundle=stdc++"
-CFLAGS = "-Os -ffunction-sections -fdata-sections"
-CXXFLAGS = "-Os -ffunction-sections -fdata-sections"
+CFLAGS = "-Os -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables"
+CXXFLAGS = "-Os -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables"
 GGML_NATIVE = "OFF"
 GGML_AVX = "ON"
 GGML_AVX2 = "ON"
