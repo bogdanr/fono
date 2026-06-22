@@ -1,0 +1,4 @@
+# Docker images are built from a tiny temporary context assembled by
+# packaging/container/build-image.sh. Keep this guardrail conservative for
+# anyone who accidentally runs `docker build .` from the repository root.
+*

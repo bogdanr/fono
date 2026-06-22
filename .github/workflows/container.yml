@@ -1,0 +1,139 @@
+name: Container
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
+
+jobs:
+  build:
+    name: Build Vulkan image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Container images carry their own Debian Trixie runtime, so build on
+          # Ubuntu 24.04 here: its repositories provide glslc/libvulkan-dev for
+          # both amd64 and arm64 without the amd64-only LunarG Jammy repo.
+          - arch: amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: container-vulkan-${{ matrix.arch }}
+
+      - name: Install Linux build deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential clang cmake pkg-config libclang-dev \
+            libxdo-dev xz-utils \
+            libxkbcommon-dev libwayland-dev \
+            glslc glslang-tools libvulkan-dev spirv-headers
+          command -v glslc
+          glslc --version | head -1
+          ls /usr/include/vulkan/vulkan.h
+
+      - name: Fetch minimal onnxruntime static lib
+        run: |
+          set -euo pipefail
+          ort_dir="$(TARGET=${{ matrix.target }} sh scripts/fetch-onnxruntime.sh)"
+          echo "ORT_LIB_LOCATION=${ort_dir}" >> "$GITHUB_ENV"
+          echo "pinned ORT_LIB_LOCATION=${ort_dir}"
+
+      - name: Build Vulkan Fono binary
+        run: |
+          set -euo pipefail
+          cargo build --profile release-slim --target ${{ matrix.target }} -p fono --locked --features accel-vulkan
+          mkdir -p target/release-slim
+          cp target/${{ matrix.target }}/release-slim/fono target/release-slim/fono
+          ldd target/release-slim/fono | tee /tmp/fono-container-ldd.txt
+          grep -q 'libvulkan\.so\.1' /tmp/fono-container-ldd.txt
+
+      - name: Build container image
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          arch_image="${image}:build-${GITHUB_SHA}-${{ matrix.arch }}"
+          FONO_IMAGE="${arch_image}" FONO_LEGACY_SECCOMP_FALLBACK=never packaging/container/build-image.sh
+          docker run --rm "${arch_image}" --version
+          docker run --rm "${arch_image}" sh -c 'test -e /usr/lib/*/libvulkan.so.1 || test -e /usr/lib/libvulkan.so.1'
+          docker run --rm "${arch_image}" sh -c 'test -d /usr/share/vulkan/icd.d'
+          echo "FONO_ARCH_IMAGE=${arch_image}" >> "$GITHUB_ENV"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push architecture image
+        run: |
+          set -euo pipefail
+          docker push "${FONO_ARCH_IMAGE}"
+
+  publish:
+    name: Publish multi-arch Vulkan image
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    needs: build
+
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish manifest tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          amd64_image="${image}:build-${GITHUB_SHA}-amd64"
+          arm64_image="${image}:build-${GITHUB_SHA}-arm64"
+
+          tag_args=("-t" "${image}:vulkan")
+          if [ "${GITHUB_REF_TYPE}" = "branch" ] && [ "${GITHUB_REF_NAME}" = "main" ]; then
+            tag_args+=("-t" "${image}:latest")
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME}"
+            tag_args+=("-t" "${image}:${version}" "-t" "${image}:${version}-vulkan")
+          fi
+
+          docker buildx imagetools create "${tag_args[@]}" "${amd64_image}" "${arm64_image}"
+          docker buildx imagetools inspect "${image}:vulkan"

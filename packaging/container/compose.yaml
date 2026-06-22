@@ -1,0 +1,60 @@
+# Fono voice server — exposes Wyoming speech-to-text (and text-to-speech)
+# for Home Assistant, Rhasspy, and other Wyoming clients.
+#
+#   docker compose up -d
+#
+# First start downloads the chosen model into the named volume, then the
+# Wyoming endpoint answers on port 10300.
+
+services:
+  fono:
+    image: ghcr.io/bogdanr/fono:latest
+    container_name: fono
+    restart: unless-stopped
+    ports:
+      - "10300:10300"
+    volumes:
+      - fono-data:/data            # config, downloaded models, cache
+
+    # GPU acceleration: uncomment to transcribe on an Intel/AMD GPU
+    # NVIDIA: install the NVIDIA Container Toolkit and use its runtime instead.
+    # devices:
+    #   - /dev/dri:/dev/dri
+
+    environment:
+      # The config is regenerated from these variables on every start, so
+      # editing this file and running `docker compose up -d` applies changes.
+      FONO_CONTAINER_WRITE_CONFIG: always
+
+      # Languages to recognize — comma-separated BCP-47 codes.
+      FONO_LANGUAGES: "en,ro"
+
+      # Local Whisper model: "small" (fast, ~250 MB) or "large-v3-turbo"
+      # (most accurate, ~830 MB). Also valid: tiny, tiny.en, small.en.
+      FONO_STT_MODEL: small
+
+      # Cloud speech-to-text (optional) — replaces the local model. Set the
+      # backend and its API key; the model is chosen automatically. Backends:
+      # groq, openai, deepgram, gemini, elevenlabs, cartesia, speechmatics,
+      # openrouter.
+      # FONO_STT_BACKEND: groq
+      # GROQ_API_KEY: "sk-..."
+
+      # Text-to-speech (optional) — the same Wyoming endpoint also speaks, so
+      # Home Assistant can use it for TTS. Local voices are the default
+      # pick one with FONO_TTS_LOCAL_VOICE
+      #
+      # Cloud TTS instead — set the backend, a voice, and the API key.
+      # Backends: openai, gemini, elevenlabs, cartesia, deepgram, groq,
+      # openrouter, speechmatics.
+      # FONO_TTS_BACKEND: openai
+      # FONO_TTS_VOICE: alloy
+      # OPENAI_API_KEY: "sk-..."
+
+    # Older Docker seccomp profiles block Fono's worker threads. Uncomment
+    # only if the container fails to start.
+    # security_opt:
+    #   - seccomp=unconfined
+
+volumes:
+  fono-data:
