@@ -1,5 +1,25 @@
 # Fono — Project Status
-Last updated: 2026-06-19
+Last updated: 2026-06-22
+
+## 2026-06-22 — wire realtime prewarm into startup warmup
+
+The Gemini Live `prewarm` impl shipped in 0.11.0 (opens the WebSocket upgrade
+to the Live host and closes immediately, warming DNS+TCP+TLS+handshake with no
+setup sent, so no quota is consumed) but was never invoked — dead code. The
+realtime handle's `prewarm` is now spawned from `spawn_warmups` alongside the
+STT/TTS/polish/assistant warmups, feature-gated on `realtime`, via a new
+`spawn_realtime_warmup` helper that mirrors `spawn_assistant_warmup`
+(handle clone → spawn → `prewarm().await` → warmup-lane trace). The helper
+extraction also keeps `spawn_warmups` under the 100-line clippy limit.
+
+Effect: when an all-Gemini realtime turn is selected, the first F8 press no
+longer pays the full WebSocket-open latency cold — the connection path is
+warmed at startup like every other backend. No new dependencies
+(`tokio-tungstenite` already in the graph). This is part of the Part A
+live-mic-streaming arc (A1+A2 landed earlier as the frame-stream seam;
+capture-on-press A3+ remains the larger follow-up).
+
+Pre-commit gate green: fmt --check, clippy -D warnings, workspace tests.
 
 ## 2026-06-19 — 0.11.0 size-gate release fix
 

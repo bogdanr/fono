@@ -1947,6 +1947,10 @@ impl SessionOrchestrator {
                 }
             }));
         }
+        #[cfg(feature = "realtime")]
+        if let Some(h) = self.spawn_realtime_warmup(trace.as_ref()) {
+            warmup_handles.push(h);
+        }
         // Inject backend warmup runs on a blocking thread because the
         // probe shells out to `wtype --version` / `ydotool --version`.
         tokio::task::spawn_blocking(|| match fono_inject::warm_backend() {
@@ -2060,6 +2064,42 @@ impl SessionOrchestrator {
                     started,
                     Instant::now(),
                     json!({ "backend": assistant.name(), "ok": result.is_ok() }),
+                );
+            }
+        }))
+    }
+
+    /// Spawn the realtime (Gemini Live) prewarm task on the startup trace, if a
+    /// realtime assistant backend is selected. Opens and immediately closes the
+    /// Live WebSocket upgrade so the first F8 press doesn't pay the full
+    /// DNS+TCP+TLS+handshake latency on the hotkey path. No setup message is
+    /// sent, so no quota is consumed. Returns the join handle so the warmup
+    /// coordinator can await it before finalizing the trace file.
+    #[cfg(feature = "realtime")]
+    fn spawn_realtime_warmup(
+        &self,
+        trace: Option<&TurnTrace>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let realtime = self.current_realtime()?;
+        let realtime_trace = trace.cloned();
+        Some(tokio::spawn(async move {
+            let started = Instant::now();
+            match realtime.prewarm().await {
+                Ok(()) => debug!(
+                    "warmup: realtime {} ready in {}ms",
+                    realtime.name(),
+                    started.elapsed().as_millis()
+                ),
+                Err(e) => debug!("warmup: realtime {} prewarm skipped: {e:#}", realtime.name()),
+            }
+            if let Some(t) = &realtime_trace {
+                t.duration_between(
+                    "warmup.realtime",
+                    "warmup",
+                    WARMUP_LANE,
+                    started,
+                    Instant::now(),
+                    json!({ "backend": realtime.name() }),
                 );
             }
         }))
