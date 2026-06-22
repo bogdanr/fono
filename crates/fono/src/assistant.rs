@@ -26,8 +26,12 @@ use fono_assistant::{
     Assistant, AssistantContext, ConversationHistory, ScreenCaptureFn, ToolEvent,
 };
 #[cfg(feature = "realtime")]
-use fono_assistant::{RealtimeAssistant, RealtimeEvent, RealtimeSession};
+use fono_assistant::{RealtimeAssistant, RealtimeEvent, RealtimeMode, RealtimeSession};
 use fono_audio::AudioPlayback;
+#[cfg(feature = "realtime")]
+use fono_audio::{rms_to_dbfs, EnvelopeConfig, EnvelopeFollower};
+#[cfg(feature = "realtime")]
+use fono_audio::{AudioCapture, CaptureConfig, RecordingBuffer};
 use fono_core::turn_trace::TurnTrace;
 use fono_hotkey::HotkeyAction;
 use fono_stt::SpeechToText;
@@ -55,12 +59,26 @@ pub struct AssistantSessionState {
     pub history: ConversationHistory,
     pub current_turn: Option<Arc<Notify>>,
     pub playback: Option<AudioPlayback>,
+    /// Active full-duplex live-conversation session, when one is open.
+    /// `Some` between the F8-tap that entered live mode and the teardown
+    /// (second tap / Escape / idle / cap / provider-close). Distinct
+    /// from `current_turn` (the per-press PTT cancel handle): a live
+    /// session spans many turns. `None` for every push-to-talk and
+    /// staged configuration.
+    #[cfg(feature = "realtime")]
+    pub live: Option<LiveSessionHandle>,
 }
 
 impl AssistantSessionState {
     #[must_use]
     pub fn new(history: ConversationHistory) -> Self {
-        Self { history, current_turn: None, playback: None }
+        Self {
+            history,
+            current_turn: None,
+            playback: None,
+            #[cfg(feature = "realtime")]
+            live: None,
+        }
     }
 
     /// Notify the active pump to abort and ask the playback handle to
@@ -79,8 +97,28 @@ impl AssistantSessionState {
     /// [`Self::stop_current_turn`] instead.
     pub fn shutdown(&mut self) {
         self.stop_current_turn();
+        #[cfg(feature = "realtime")]
+        if let Some(live) = self.live.take() {
+            live.cancel.notify_one();
+            live.task.abort();
+        }
         self.playback = None;
     }
+}
+
+/// Handle to a running full-duplex live-conversation session. Held in
+/// [`AssistantSessionState::live`] for the session's lifetime.
+#[cfg(feature = "realtime")]
+pub struct LiveSessionHandle {
+    /// Signalled (via `notify_one`, so the wake is never lost) to tear
+    /// the live pump down on explicit exit (second tap / Escape).
+    pub cancel: Arc<Notify>,
+    /// The spawned pump task. Awaited (after `cancel`) or aborted on
+    /// teardown.
+    pub task: tokio::task::JoinHandle<()>,
+    /// When the session opened. Drives the max-session backstop and any
+    /// overlay elapsed meter.
+    pub started_at: std::time::Instant,
 }
 
 /// Inputs for [`run_assistant_turn`]. Cloning is cheap (everything is
@@ -1280,10 +1318,11 @@ fn resample_linear(pcm: &[f32], from: u32, to: u32) -> Vec<f32> {
 async fn open_realtime_or_notify(
     realtime: &dyn RealtimeAssistant,
     ctx: &AssistantContext,
+    mode: RealtimeMode,
     trace: Option<&TurnTrace>,
 ) -> Result<RealtimeSession> {
     let open_started = std::time::Instant::now();
-    match realtime.open_session(ctx).await {
+    match realtime.open_session(ctx, mode).await {
         Ok(s) => {
             if let Some(t) = trace {
                 t.duration_between(
@@ -1501,7 +1540,8 @@ pub async fn run_realtime_turn(
 
     // Open the live session.
     let RealtimeSession { audio_in, mut events } =
-        open_realtime_or_notify(realtime.as_ref(), &ctx, trace.as_ref()).await?;
+        open_realtime_or_notify(realtime.as_ref(), &ctx, RealtimeMode::PushToTalk, trace.as_ref())
+            .await?;
 
     // Lazily ensure playback exists (mirrors the staged path).
     {
@@ -1585,7 +1625,13 @@ async fn drive_realtime_reply(
                 Ok(RealtimeEvent::AssistantTextDelta(s)) => reply.reply_text.push_str(&s),
                 Ok(RealtimeEvent::UserTextFinal(s)) => reply.user_text = Some(s),
                 Ok(RealtimeEvent::Done) | Err(_) => break,
-                Ok(RealtimeEvent::Audio { .. } | RealtimeEvent::Interrupted) => {}
+                // `EndConversation` is full-duplex live-mode only; never
+                // emitted on the push-to-talk path.
+                Ok(
+                    RealtimeEvent::Audio { .. }
+                    | RealtimeEvent::Interrupted
+                    | RealtimeEvent::EndConversation,
+                ) => {}
             }
         }
         return reply;
@@ -1639,6 +1685,8 @@ async fn drive_realtime_reply(
                         }
                     }
                     Some(Ok(RealtimeEvent::Done)) => break,
+                    // Full-duplex live-mode only; never emitted in PTT.
+                    Some(Ok(RealtimeEvent::EndConversation)) => {}
                 }
             }
         }
@@ -1647,6 +1695,739 @@ async fn drive_realtime_reply(
         let _ = sink.end().await;
     }
     reply
+}
+
+// ── Full-duplex live conversation mode (F8 tap) ──────────────────────
+//
+// A single persistent speech-to-speech session that spans many turns,
+// distinct from the per-press one-shot [`run_realtime_turn`] (PTT). The
+// mic streams continuously, gated by the mute-while-speaking logic
+// proven in `examples/smoke_realtime_live.rs`: while the model holds
+// the floor (thinking + speaking) the forwarder drops mic frames so the
+// open mic cannot pick up — and re-transcribe — the model's own reply
+// audio. This is the shipped baseline; AEC + talk-over barge-in are out
+// of scope for this slice (see Part E of the design plan).
+
+/// Why a live session's pump loop stopped. Drives teardown: every
+/// reason except [`LiveExit::Explicit`] notifies the user and
+/// reconciles the FSM, because the explicit second-tap / Escape path is
+/// reconciled by the FSM itself and torn down by the orchestrator's
+/// exit handler.
+#[cfg(feature = "realtime")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveExit {
+    /// Second tap / Escape. The orchestrator's exit handler took the
+    /// session handle and the FSM is already `Idle`; the pump only
+    /// releases its own resources.
+    Explicit,
+    /// Local silence-watch closed the session: after a completed reply
+    /// the user stayed silent for `auto_stop_silence_ms`. Driven by the
+    /// capture forwarder's own envelope/VAD, not the provider, so it
+    /// fires even when the provider's server VAD is chattering.
+    Idle,
+    /// The model ended the conversation itself — it invoked the
+    /// `end_conversation` tool (full-duplex only), e.g. after the user
+    /// said goodbye. Surfaced as [`RealtimeEvent::EndConversation`].
+    EndedByModel,
+    /// `max_session_secs` wall-clock backstop reached.
+    MaxDuration,
+    /// The provider closed the socket (or the event stream errored).
+    /// No silent reconnect — drop to idle and require a fresh tap.
+    ProviderClosed,
+    /// The session (or its mic capture) could not be opened at all.
+    OpenFailed,
+}
+
+/// Inputs for [`run_live_session`]. The history is read from the shared
+/// [`AssistantSessionState`] inside the pump (so the live session
+/// carries prior conversation context), so it is not duplicated here.
+#[cfg(feature = "realtime")]
+pub struct LiveSessionInputs {
+    pub realtime: Arc<dyn RealtimeAssistant>,
+    pub system_prompt: String,
+    pub language: Option<String>,
+    /// FSM channel. The pump sends [`HotkeyAction::ProcessingDone`] when
+    /// it self-terminates (idle / cap / provider-close / open-failure)
+    /// to reconcile the FSM back to `Idle`.
+    pub action_tx: mpsc::UnboundedSender<HotkeyAction>,
+    pub overlay: Option<fono_overlay::OverlayHandle>,
+    /// Local-silence auto-close window, in milliseconds: after a reply
+    /// completes, this much continuous user silence closes the session
+    /// (with the `Pondering` walking-letter animation building up to
+    /// it). `0` disables silence-driven close. Sourced from
+    /// `[audio].auto_stop_silence_ms`.
+    pub auto_stop_silence_ms: u32,
+    /// Hard max-session backstop. `Duration::ZERO` disables it.
+    pub max_session: std::time::Duration,
+    pub active_window_context: Option<String>,
+    /// Shared rolling buffer feeding the audio visualisation. The
+    /// capture forwarder appends mic frames during the user's turn and
+    /// the pump appends reply PCM during the model's turn; the
+    /// [`waveform_task`](Self::waveform_task) ticker reads the tail and
+    /// pushes style-appropriate primitives to the overlay.
+    pub viz_buf: Arc<std::sync::Mutex<RecordingBuffer>>,
+    /// Abort handle for the style-aware waveform ticker the orchestrator
+    /// spawned against `viz_buf`. Aborted on teardown. `None` when the
+    /// overlay is disabled or the `interactive` feature is off.
+    pub waveform_task: Option<tokio::task::AbortHandle>,
+}
+
+/// Drive one persistent full-duplex live session to completion. Opens
+/// the session lazily (connect-on-demand), streams the mic
+/// continuously with the mute-while-speaking gate, plays each reply to
+/// completion, pushes both transcripts to history per turn, and loops
+/// until the session ends (explicit exit, idle, cap, or provider
+/// close). Spawned as a detached task by the orchestrator; teardown
+/// (including clearing the [`AssistantSessionState::live`] slot on
+/// self-termination) happens here.
+#[cfg(feature = "realtime")]
+#[allow(clippy::too_many_lines)]
+pub async fn run_live_session(
+    state: Arc<Mutex<AssistantSessionState>>,
+    inputs: LiveSessionInputs,
+    cancel: Arc<Notify>,
+) {
+    let LiveSessionInputs {
+        realtime,
+        system_prompt,
+        language,
+        action_tx,
+        overlay,
+        auto_stop_silence_ms,
+        max_session,
+        active_window_context,
+        viz_buf,
+        waveform_task,
+    } = inputs;
+
+    // Seed the session with the completed history (each user turn is
+    // transcribed by the model and pushed afterwards). Vision is
+    // intentionally not wired for live mode in this slice — it would
+    // only add a one-shot screenshot at open with no clear live-mode
+    // story; PTT keeps the vision path.
+    let history_snapshot = { state.lock().await.history.snapshot() };
+    let ctx = AssistantContext {
+        system_prompt,
+        language,
+        history: history_snapshot,
+        active_window_context,
+        screen_capture: None,
+        prefer_vision: false,
+        max_new_tokens: None,
+    };
+
+    // Connect on demand. On failure, classify + notify like the PTT
+    // open path, then self-terminate.
+    let session = match realtime.open_session(&ctx, RealtimeMode::FullDuplex).await {
+        Ok(s) => s,
+        Err(e) => {
+            let err_text = format!("{e:#}");
+            warn!(target: "fono::assistant", error = %err_text, "live: session open failed");
+            let class = fono_core::critical_notify::classify(&err_text);
+            if matches!(
+                class,
+                fono_core::critical_notify::ErrorClass::Auth
+                    | fono_core::critical_notify::ErrorClass::PaymentRequired
+                    | fono_core::critical_notify::ErrorClass::Network
+                    | fono_core::critical_notify::ErrorClass::TermsRequired
+            ) {
+                fono_core::critical_notify::notify(
+                    fono_core::critical_notify::Stage::Assistant,
+                    realtime.name(),
+                    class,
+                    &err_text,
+                );
+            }
+            finish_live(&state, &action_tx, overlay.as_ref(), LiveExit::OpenFailed).await;
+            return;
+        }
+    };
+    let RealtimeSession { audio_in, mut events } = session;
+    let native = realtime.native_input_rate();
+
+    // Lazily ensure playback exists (mirrors the PTT path).
+    {
+        let mut s = state.lock().await;
+        if s.playback.is_none() {
+            match AudioPlayback::new(None) {
+                Ok(pb) => s.playback = Some(pb),
+                Err(e) => warn!(
+                    target: "fono::assistant",
+                    error = %e,
+                    "audio playback init failed; live reply will not be audible"
+                ),
+            }
+        }
+    }
+
+    // Continuous mic capture with the mute-while-speaking gate. The
+    // capture handle (a cpal stream on some platforms) is `!Send`, so
+    // it lives on a dedicated thread and is stopped via a channel —
+    // mirroring the assistant push-to-talk capture. The forwarder
+    // pushes resampled frames into the session sink unless the gate
+    // (model holds the floor) is set, in which case the frame is
+    // dropped so the model cannot hear itself.
+    let mic_muted = Arc::new(AtomicBool::new(false));
+    // Set true only while the pump is waiting for the user *after* a
+    // completed reply; gates the local silence auto-close so a fresh
+    // session (or a user still formulating their first request) is
+    // never closed prematurely. Toggled by the pump's floor handlers.
+    let idle_armed = Arc::new(AtomicBool::new(false));
+    // Forwarder → pump signal: continuous user silence reached
+    // `auto_stop_silence_ms` while `idle_armed`. The pump selects on
+    // this to close with `LiveExit::Idle`.
+    let silence_commit = Arc::new(Notify::new());
+    let capture = match spawn_live_capture(LiveCaptureWiring {
+        native,
+        mic_sink: audio_in.clone(),
+        gate: Arc::clone(&mic_muted),
+        armed: Arc::clone(&idle_armed),
+        commit: Arc::clone(&silence_commit),
+        overlay: overlay.clone(),
+        viz_buf: Arc::clone(&viz_buf),
+        auto_stop_silence_ms,
+    }) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(target: "fono::assistant", error = %e, "live: mic capture failed to start");
+            drop(audio_in);
+            finish_live(&state, &action_tx, overlay.as_ref(), LiveExit::OpenFailed).await;
+            return;
+        }
+    };
+    let LiveCapture { thread: cap_thread, stop_tx: cap_stop_tx } = capture;
+
+    let session_open = std::time::Instant::now();
+
+    // Realtime-paced visualisation feeder (see `spawn_viz_pacer`): reply
+    // audio arrives in bursts far faster than realtime, so it is drained
+    // into `viz_buf` at playback pace during the model's turn rather than
+    // dumped straight in (which makes the waveform race ahead then stall).
+    let (viz_tx, viz_pace_task) = spawn_viz_pacer(Arc::clone(&viz_buf), Arc::clone(&mic_muted));
+
+    // The conversation opens on the user's turn: mic live, overlay green.
+    if let Some(o) = overlay.as_ref() {
+        o.set_state(fono_overlay::OverlayState::AssistantRecording { db: 0 });
+    }
+
+    let mut pump = LivePump {
+        state: &state,
+        events: &mut events,
+        cancel: &cancel,
+        overlay: overlay.as_ref(),
+        mic_muted: &mic_muted,
+        idle_armed: &idle_armed,
+        silence_commit: &silence_commit,
+        viz_tx: &viz_tx,
+        turns: 0,
+        max_session,
+        started_at: std::time::Instant::now(),
+    };
+    let exit = pump.run().await;
+    let turns = pump.turns;
+
+    info!(
+        target: "fono::assistant",
+        provider = realtime.name(),
+        reason = ?exit,
+        turns,
+        open_secs = format!("{:.1}", session_open.elapsed().as_secs_f32()),
+        "live conversation session closed"
+    );
+
+    // Teardown: stop the mic, close the input (client emits
+    // audioStreamEnd), drain playback. Dropping `events` (via the
+    // borrow ending) plus `audio_in` closes the socket.
+    viz_pace_task.abort();
+    if let Some(t) = &waveform_task {
+        t.abort();
+    }
+    drop(audio_in);
+    let _ = cap_stop_tx.send(());
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = cap_thread.join();
+    })
+    .await;
+    {
+        let s = state.lock().await;
+        if let Some(pb) = &s.playback {
+            pb.stop();
+        }
+    }
+
+    finish_live(&state, &action_tx, overlay.as_ref(), exit).await;
+}
+
+/// Live-mode capture thread handle: the dedicated capture thread plus the
+/// channel that signals it to stop and unwind on teardown.
+#[cfg(feature = "realtime")]
+struct LiveCapture {
+    thread: std::thread::JoinHandle<()>,
+    stop_tx: std::sync::mpsc::Sender<()>,
+}
+
+/// Wiring handed to [`spawn_live_capture`]: the model input sink plus the
+/// shared gates / overlay / visualisation buffer the per-frame forwarder
+/// consults.
+#[cfg(feature = "realtime")]
+struct LiveCaptureWiring {
+    native: u32,
+    mic_sink: tokio::sync::mpsc::Sender<Vec<f32>>,
+    gate: Arc<AtomicBool>,
+    armed: Arc<AtomicBool>,
+    commit: Arc<Notify>,
+    overlay: Option<fono_overlay::OverlayHandle>,
+    viz_buf: Arc<std::sync::Mutex<RecordingBuffer>>,
+    auto_stop_silence_ms: u32,
+}
+
+/// Per-frame state for the live-mode capture forwarder, pulled out of
+/// `run_live_session` so the hot path stays small. Each frame either feeds
+/// the model + visualisation (user's turn) or is dropped (model holds the
+/// floor), and drives the local-silence auto-close with the `Pondering`
+/// animation. The envelope follower persists across turns so the user's
+/// own voiced level stays calibrated.
+#[cfg(feature = "realtime")]
+struct LiveFrameProcessor {
+    native: u32,
+    auto_stop: f32,
+    mic_sink: tokio::sync::mpsc::Sender<Vec<f32>>,
+    gate: Arc<AtomicBool>,
+    armed: Arc<AtomicBool>,
+    commit: Arc<Notify>,
+    overlay: Option<fono_overlay::OverlayHandle>,
+    viz_buf: Arc<std::sync::Mutex<RecordingBuffer>>,
+    viz_max: usize,
+    env: EnvelopeFollower,
+    silence_ms: f32,
+    pondering: bool,
+}
+
+#[cfg(feature = "realtime")]
+impl LiveFrameProcessor {
+    /// Visual lead-in before the silence bar starts filling, in ms.
+    const PONDERING_VISUAL_MS: f32 = 1_000.0;
+    /// How far below the user's own voiced level counts as silence, in dB.
+    const SILENCE_GAP_DB: f32 = 12.0;
+
+    fn on_frame(&mut self, pcm: &[f32]) {
+        // Model holds the floor: drop the frame (mute-while-speaking) and
+        // reset local silence tracking so it restarts cleanly when the
+        // floor returns to the user.
+        if self.gate.load(Ordering::Relaxed) {
+            self.silence_ms = 0.0;
+            self.pondering = false;
+            return;
+        }
+        let _ = self.mic_sink.try_send(pcm.to_vec());
+        // Feed the visualisation: the style-aware ticker reads this rolling
+        // buffer. (During the model's turn the pump feeds reply PCM.)
+        if let Ok(mut b) = self.viz_buf.lock() {
+            b.push_rolling(pcm, self.viz_max);
+        }
+        self.env.push_frame(pcm);
+        // Silence-driven auto-close only while waiting for the user after a
+        // reply (and only when enabled).
+        if self.auto_stop <= 0.0 || !self.armed.load(Ordering::Relaxed) {
+            return;
+        }
+        let frame_ms =
+            if self.native > 0 { pcm.len() as f32 * 1000.0 / self.native as f32 } else { 0.0 };
+        let snap = self.env.snapshot();
+        let has_ref = snap.voiced_frames > 0;
+        let is_silent = !has_ref
+            || rms_to_dbfs(snap.inst_rms) < rms_to_dbfs(snap.voiced_rms) - Self::SILENCE_GAP_DB;
+        if !is_silent {
+            self.end_pondering();
+            self.silence_ms = 0.0;
+            return;
+        }
+        self.silence_ms += frame_ms;
+        if self.silence_ms >= Self::PONDERING_VISUAL_MS {
+            self.show_pondering();
+        }
+        if self.silence_ms >= self.auto_stop {
+            self.commit.notify_one();
+        }
+    }
+
+    /// Drive the `Pondering` walking-letter animation as the post-reply
+    /// silence builds toward the auto-close threshold.
+    fn show_pondering(&mut self) {
+        if let Some(o) = self.overlay.as_ref() {
+            let span = (self.auto_stop - Self::PONDERING_VISUAL_MS).max(1.0);
+            let progress = (((self.silence_ms - Self::PONDERING_VISUAL_MS) / span).clamp(0.0, 1.0)
+                * 10_000.0) as u16;
+            o.set_state(fono_overlay::OverlayState::AssistantPondering {
+                db: 0,
+                walk_progress: progress,
+            });
+        }
+        self.pondering = true;
+    }
+
+    /// The user resumed speaking: revert the overlay from `Pondering` back
+    /// to the green recording state.
+    fn end_pondering(&mut self) {
+        if self.pondering {
+            if let Some(o) = self.overlay.as_ref() {
+                o.set_state(fono_overlay::OverlayState::AssistantRecording { db: 0 });
+            }
+            self.pondering = false;
+        }
+    }
+}
+
+/// Spawn the continuous live-mode mic-capture thread and block until it
+/// confirms the stream started. The capture handle (a cpal stream on some
+/// platforms) is `!Send`, so it lives on a dedicated thread and is stopped
+/// via the returned [`LiveCapture::stop_tx`]. Returns `Err` if the thread
+/// could not be spawned or the stream failed to start.
+#[cfg(feature = "realtime")]
+fn spawn_live_capture(w: LiveCaptureWiring) -> std::result::Result<LiveCapture, String> {
+    let LiveCaptureWiring {
+        native,
+        mic_sink,
+        gate,
+        armed,
+        commit,
+        overlay,
+        viz_buf,
+        auto_stop_silence_ms,
+    } = w;
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<std::result::Result<(), String>>();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let thread = std::thread::Builder::new()
+        .name("fono-live-capture".into())
+        .spawn(move || {
+            let cap = AudioCapture::new(CaptureConfig { target_sample_rate: native });
+            let mut proc = LiveFrameProcessor {
+                native,
+                auto_stop: auto_stop_silence_ms as f32,
+                mic_sink,
+                gate,
+                armed,
+                commit,
+                overlay,
+                viz_buf,
+                // Keep ~1 s of recent mic audio for the visualisation ticker.
+                viz_max: native.max(1) as usize,
+                env: EnvelopeFollower::new(EnvelopeConfig {
+                    sample_rate: native,
+                    ..Default::default()
+                }),
+                silence_ms: 0.0,
+                pondering: false,
+            };
+            match cap.start_with_forwarder(move |pcm: &[f32]| proc.on_frame(pcm)) {
+                Ok(handle) => {
+                    let _ = started_tx.send(Ok(()));
+                    let _ = stop_rx.recv();
+                    drop(handle);
+                }
+                Err(e) => {
+                    let _ = started_tx.send(Err(format!("{e:#}")));
+                }
+            }
+        })
+        .map_err(|e| format!("{e:#}"))?;
+    match started_rx.recv() {
+        Ok(Ok(())) => Ok(LiveCapture { thread, stop_tx }),
+        other => {
+            let _ = stop_tx.send(());
+            let _ = thread.join();
+            Err(match other {
+                Ok(Err(e)) => e,
+                _ => "live capture thread exited before signalling start".to_string(),
+            })
+        }
+    }
+}
+
+/// Spawn the realtime-paced visualisation feeder. Reply audio arrives from
+/// the provider in bursts far faster than realtime; pushing it straight
+/// into the rolling viz buffer makes the ticker race ahead of the audible
+/// playback and then stall. This task drains the pump's chunks into
+/// `viz_buf` at playback pace (one quantum per tick), gated by `mic_muted`
+/// so it only owns the buffer during the model's turn — the mic forwarder
+/// owns it during the user's turn. When the model holds the floor but no
+/// audio is queued (thinking, or a pause), it feeds silence so the
+/// waveform decays to flat instead of freezing on a stale frame. Returns
+/// the sender the pump pushes `(pcm, rate)` chunks to and the task handle
+/// to abort on teardown.
+#[cfg(feature = "realtime")]
+fn spawn_viz_pacer(
+    viz_buf: Arc<std::sync::Mutex<RecordingBuffer>>,
+    mic_muted: Arc<AtomicBool>,
+) -> (tokio::sync::mpsc::UnboundedSender<(Vec<f32>, u32)>, tokio::task::JoinHandle<()>) {
+    let (viz_tx, mut viz_rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<f32>, u32)>();
+    let task = tokio::spawn(async move {
+        const VIZ_TICK_MS: u64 = 33;
+        let mut pending: std::collections::VecDeque<f32> = std::collections::VecDeque::new();
+        let mut rate = 24_000u32;
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(VIZ_TICK_MS));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                chunk = viz_rx.recv() => match chunk {
+                    Some((pcm, r)) => { rate = r.max(1); pending.extend(pcm); }
+                    None => break,
+                },
+                _ = tick.tick() => {
+                    // User's turn: the mic forwarder owns the viz buffer.
+                    if !mic_muted.load(Ordering::Relaxed) {
+                        pending.clear();
+                        continue;
+                    }
+                    let quantum = (rate as usize * VIZ_TICK_MS as usize / 1000).max(1);
+                    let frame: Vec<f32> = if pending.is_empty() {
+                        vec![0.0; quantum]
+                    } else {
+                        let take = quantum.min(pending.len());
+                        pending.drain(..take).collect()
+                    };
+                    if let Ok(mut b) = viz_buf.lock() {
+                        b.push_rolling(&frame, rate as usize);
+                    }
+                }
+            }
+        }
+    });
+    (viz_tx, task)
+}
+
+/// Borrowed context for the live event/timer loop. Kept as a struct so
+/// the loop body stays under clippy's argument-count limit.
+#[cfg(feature = "realtime")]
+struct LivePump<'a> {
+    state: &'a Arc<Mutex<AssistantSessionState>>,
+    events: &'a mut futures::stream::BoxStream<'static, anyhow::Result<RealtimeEvent>>,
+    cancel: &'a Arc<Notify>,
+    overlay: Option<&'a fono_overlay::OverlayHandle>,
+    /// Mute-while-speaking gate the capture forwarder consults. `true`
+    /// whenever the model holds the floor (thinking + speaking).
+    mic_muted: &'a Arc<AtomicBool>,
+    /// Armed (`true`) only while waiting for the user after a completed
+    /// reply; gates the forwarder's local silence auto-close.
+    idle_armed: &'a Arc<AtomicBool>,
+    /// Forwarder → pump silence-close signal. The forwarder fires it
+    /// after `auto_stop_silence_ms` of continuous post-reply silence.
+    silence_commit: &'a Arc<Notify>,
+    /// Sender to the realtime-paced visualisation feeder. The pump
+    /// forwards each reply-audio chunk here (cloned) during the model's
+    /// turn; the feeder task drains it into the shared viz buffer at
+    /// playback pace so audio-out animates smoothly instead of in
+    /// faster-than-realtime network bursts. See [`run_live_session`].
+    viz_tx: &'a tokio::sync::mpsc::UnboundedSender<(Vec<f32>, u32)>,
+    /// Completed turns (each `Done`), for the session-closed log line.
+    turns: u32,
+    max_session: std::time::Duration,
+    started_at: std::time::Instant,
+}
+
+#[cfg(feature = "realtime")]
+impl LivePump<'_> {
+    /// Give the floor to the model: mute the mic (drop the open-mic
+    /// echo of the reply) and paint the "waiting on first audio" amber
+    /// state. Idempotent within a turn.
+    fn give_floor_to_model(&self) {
+        // Stop arming the silence auto-close while the model speaks.
+        self.idle_armed.store(false, Ordering::Relaxed);
+        if !self.mic_muted.swap(true, Ordering::Relaxed) {
+            if let Some(o) = self.overlay {
+                o.set_state(fono_overlay::OverlayState::AssistantThinking);
+            }
+        }
+    }
+
+    /// Return the floor to the user: unmute the mic and paint the green
+    /// recording state. Called at each turn boundary (`Done`).
+    fn give_floor_to_user(&self) {
+        self.mic_muted.store(false, Ordering::Relaxed);
+        // A reply just completed: arm the local silence auto-close so a
+        // trailing silence (the user is done) closes the session.
+        self.idle_armed.store(true, Ordering::Relaxed);
+        if let Some(o) = self.overlay {
+            o.set_state(fono_overlay::OverlayState::AssistantRecording { db: 0 });
+        }
+    }
+
+    /// Run the multi-turn event/timer loop until the session ends.
+    async fn run(&mut self) -> LiveExit {
+        use fono_tts::PcmSink as _;
+
+        let pb_handle = { self.state.lock().await.playback.clone() };
+        let mut sink = pb_handle.map(fono_audio::LocalPlaybackSink::new);
+
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // Per-turn accumulators.
+        let mut reply_text = String::new();
+        let mut user_text: Option<String> = None;
+        let mut begun = false;
+        // Set when the model invokes `end_conversation`; the session
+        // closes (gracefully) once the current reply finishes.
+        let mut model_wants_end = false;
+
+        loop {
+            tokio::select! {
+                biased;
+                () = self.cancel.notified() => return LiveExit::Explicit,
+                () = self.silence_commit.notified() => return LiveExit::Idle,
+                _ = tick.tick() => {
+                    if !self.max_session.is_zero() && self.started_at.elapsed() >= self.max_session {
+                        return LiveExit::MaxDuration;
+                    }
+                }
+                ev = self.events.next() => {
+                    match ev {
+                        None => return LiveExit::ProviderClosed,
+                        Some(Err(e)) => {
+                            warn!(target: "fono::assistant", error = %e, "live: event stream error");
+                            return LiveExit::ProviderClosed;
+                        }
+                        Some(Ok(RealtimeEvent::Audio { pcm, sample_rate })) => {
+                            // First audio of this turn → model is speaking.
+                            self.give_floor_to_model();
+                            // Hand the chunk to the realtime-paced viz
+                            // feeder so audio-out animates at playback
+                            // pace (not the faster network arrival rate).
+                            let _ = self.viz_tx.send((pcm.clone(), sample_rate));
+                            if let Some(s) = sink.as_mut() {
+                                if !begun && s.begin().await.is_ok() {
+                                    begun = true;
+                                    if let Some(o) = self.overlay {
+                                        o.set_state(
+                                            fono_overlay::OverlayState::AssistantSpeaking,
+                                        );
+                                    }
+                                }
+                                if begun {
+                                    let _ = s.push(pcm, sample_rate).await;
+                                }
+                            }
+                        }
+                        Some(Ok(RealtimeEvent::AssistantTextDelta(s))) => reply_text.push_str(&s),
+                        Some(Ok(RealtimeEvent::UserTextFinal(s))) => {
+                            // The user finished speaking; the model now
+                            // owns the floor while it formulates a reply.
+                            self.give_floor_to_model();
+                            user_text = Some(s);
+                        }
+                        Some(Ok(RealtimeEvent::EndConversation)) => {
+                            // The model decided the conversation is over.
+                            // Finish any in-flight reply, then close. If
+                            // nothing is playing, close immediately.
+                            model_wants_end = true;
+                            if !begun {
+                                return LiveExit::EndedByModel;
+                            }
+                        }
+                        Some(Ok(RealtimeEvent::Interrupted)) => {
+                            // Barge-in (rare under mute-while-speaking):
+                            // drop queued reply audio; a later Audio frame
+                            // reopens the stream.
+                            if begun {
+                                if let Some(s) = sink.as_mut() {
+                                    let _ = s.abort().await;
+                                }
+                                begun = false;
+                            }
+                        }
+                        Some(Ok(RealtimeEvent::Done)) => {
+                            if begun {
+                                if let Some(s) = sink.as_mut() {
+                                    let _ = s.end().await;
+                                }
+                                begun = false;
+                            }
+                            // Commit both transcripts for the turn.
+                            {
+                                let mut st = self.state.lock().await;
+                                if let Some(u) = user_text
+                                    .take()
+                                    .map(|u| u.trim().to_string())
+                                    .filter(|u| !u.is_empty())
+                                {
+                                    st.history.push_user(u);
+                                }
+                                if !reply_text.trim().is_empty() {
+                                    st.history.push_assistant(reply_text.trim().to_string());
+                                }
+                            }
+                            reply_text.clear();
+                            self.turns = self.turns.saturating_add(1);
+                            // If the model asked to end, close now that the
+                            // reply has fully drained.
+                            if model_wants_end {
+                                return LiveExit::EndedByModel;
+                            }
+                            // Floor returns to the user for the next turn.
+                            self.give_floor_to_user();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Finalise a live session: hide the overlay and, for self-termination
+/// reasons, clear the persistent session slot, reconcile the FSM to
+/// `Idle`, and tell the user why the session ended. The explicit
+/// (second-tap / Escape) path is a no-op here — the orchestrator's exit
+/// handler owns that teardown.
+#[cfg(feature = "realtime")]
+async fn finish_live(
+    state: &Arc<Mutex<AssistantSessionState>>,
+    action_tx: &mpsc::UnboundedSender<HotkeyAction>,
+    overlay: Option<&fono_overlay::OverlayHandle>,
+    exit: LiveExit,
+) {
+    if let Some(o) = overlay {
+        o.set_state(fono_overlay::OverlayState::Hidden);
+    }
+    if exit == LiveExit::Explicit {
+        return;
+    }
+    // Self-termination: clear the slot so a fresh tap reopens, and drive
+    // the FSM back to Idle. Clearing drops this task's own JoinHandle,
+    // which merely detaches it (we are inside that task) — safe.
+    {
+        let mut s = state.lock().await;
+        s.live = None;
+    }
+    let _ = action_tx.send(HotkeyAction::ProcessingDone);
+    // Graceful, user-initiated ends (the user fell silent, or said
+    // goodbye and the model closed the conversation) are expected and
+    // need no notification — the overlay simply disappears. Only the
+    // unexpected / forced ends below are worth a desktop notification.
+    let (summary, body) = match exit {
+        LiveExit::Idle | LiveExit::EndedByModel => return,
+        LiveExit::MaxDuration => (
+            "Fono — live mode closed",
+            "Live conversation reached its time limit. Tap to start a new session.",
+        ),
+        LiveExit::ProviderClosed => (
+            "Fono — live mode ended",
+            "The realtime provider closed the session. Tap to reconnect.",
+        ),
+        LiveExit::OpenFailed => (
+            "Fono — live mode unavailable",
+            "Could not open a realtime session. Check your connection and API key, \
+             then tap to retry.",
+        ),
+        LiveExit::Explicit => return,
+    };
+    fono_core::notify::send(
+        summary,
+        body,
+        "dialog-information",
+        5_000,
+        fono_core::notify::Urgency::Normal,
+    );
 }
 
 /// Pull the human-readable `message` out of a provider error blob
@@ -1814,5 +2595,232 @@ mod tests {
         use super::{buffered_frame_stream, peek_first_frame};
         let rx = buffered_frame_stream(&[], 16_000);
         assert!(peek_first_frame(rx).await.is_none());
+    }
+
+    // PTT (push-to-talk) regression guard: the realtime reply pump must
+    // drain the model's reply until `Done` and then STOP — it waits for
+    // the model to finish, and does not consume anything past the turn
+    // boundary. This pins the contract the live-mode work (Parts C/D of
+    // `plans/2026-06-22-realtime-live-conversation-mode-v4.md`) must not
+    // silently regress. Uses the device-free drain path (playback None).
+    #[cfg(feature = "realtime")]
+    #[tokio::test]
+    async fn realtime_reply_drains_to_done_then_stops() {
+        use std::sync::Arc;
+
+        use fono_assistant::{ConversationHistory, RealtimeEvent};
+        use futures::StreamExt as _;
+        use tokio::sync::{Mutex, Notify};
+
+        use super::{drive_realtime_reply, AssistantSessionState, FirstAudio};
+
+        let state =
+            Arc::new(Mutex::new(AssistantSessionState::new(ConversationHistory::default())));
+        let events_vec: Vec<anyhow::Result<RealtimeEvent>> = vec![
+            Ok(RealtimeEvent::UserTextFinal("hi".into())),
+            Ok(RealtimeEvent::AssistantTextDelta("hel".into())),
+            Ok(RealtimeEvent::AssistantTextDelta("lo".into())),
+            Ok(RealtimeEvent::Done),
+            // Anything after `Done` belongs to no turn we are driving and
+            // must be left untouched.
+            Ok(RealtimeEvent::AssistantTextDelta("LEAK".into())),
+        ];
+        let mut events = futures::stream::iter(events_vec).boxed();
+        let notify = Arc::new(Notify::new());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let first_audio = FirstAudio::new(std::time::Instant::now(), &tx, None);
+
+        let reply = drive_realtime_reply(&state, &mut events, &notify, &first_audio).await;
+        assert_eq!(reply.reply_text, "hello", "reply transcript accumulates across deltas");
+        assert_eq!(reply.user_text.as_deref(), Some("hi"), "user transcript captured");
+        assert!(!reply.aborted, "a clean Done is not an abort");
+
+        // Stopped exactly at `Done`: the post-Done event is still queued.
+        match events.next().await {
+            Some(Ok(RealtimeEvent::AssistantTextDelta(s))) => {
+                assert_eq!(s, "LEAK", "pump stopped at Done without over-reading");
+            }
+            other => panic!("expected the leftover delta after Done, got {other:?}"),
+        }
+    }
+
+    // ── Live-mode pump tests (headless, no network / audio) ──────────
+    //
+    // The live pump's testable surface: turn-boundary history
+    // accumulation across many turns, the mute-while-speaking gate
+    // tracking floor ownership, the provider-close exit reason, and the
+    // explicit-cancel path. Audio playback is absent (playback `None`)
+    // so the `Audio` branch is exercised without a device.
+
+    #[cfg(feature = "realtime")]
+    fn live_pump_with<'a>(
+        state: &'a std::sync::Arc<tokio::sync::Mutex<super::AssistantSessionState>>,
+        events: &'a mut futures::stream::BoxStream<
+            'static,
+            anyhow::Result<fono_assistant::RealtimeEvent>,
+        >,
+        cancel: &'a std::sync::Arc<tokio::sync::Notify>,
+        mic_muted: &'a std::sync::Arc<std::sync::atomic::AtomicBool>,
+        idle_armed: &'a std::sync::Arc<std::sync::atomic::AtomicBool>,
+        silence_commit: &'a std::sync::Arc<tokio::sync::Notify>,
+        viz_tx: &'a tokio::sync::mpsc::UnboundedSender<(Vec<f32>, u32)>,
+    ) -> super::LivePump<'a> {
+        super::LivePump {
+            state,
+            events,
+            cancel,
+            overlay: None,
+            mic_muted,
+            idle_armed,
+            silence_commit,
+            viz_tx,
+            turns: 0,
+            // Timer disabled: drive the loop purely by the event script.
+            max_session: std::time::Duration::ZERO,
+            started_at: std::time::Instant::now(),
+        }
+    }
+
+    /// Multi-turn: each `Done` commits the user + assistant transcripts
+    /// for that turn, the loop continues for the next turn, and a closed
+    /// stream ends the session with `ProviderClosed`. The gate ends
+    /// un-muted (floor back to the user after the last `Done`).
+    #[cfg(feature = "realtime")]
+    #[tokio::test]
+    async fn live_pump_accumulates_history_across_turns() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        use fono_assistant::{ChatRole, ConversationHistory, RealtimeEvent};
+        use futures::StreamExt as _;
+        use tokio::sync::{Mutex, Notify};
+
+        let state =
+            Arc::new(Mutex::new(super::AssistantSessionState::new(ConversationHistory::default())));
+        let events_vec: Vec<anyhow::Result<RealtimeEvent>> = vec![
+            Ok(RealtimeEvent::UserTextFinal("hi".into())),
+            Ok(RealtimeEvent::AssistantTextDelta("hel".into())),
+            Ok(RealtimeEvent::AssistantTextDelta("lo".into())),
+            Ok(RealtimeEvent::Done),
+            Ok(RealtimeEvent::UserTextFinal("bye".into())),
+            Ok(RealtimeEvent::AssistantTextDelta("see ya".into())),
+            Ok(RealtimeEvent::Done),
+            // Stream then closes → provider-side close.
+        ];
+        let mut events = futures::stream::iter(events_vec).boxed();
+        let cancel = Arc::new(Notify::new());
+        let mic_muted = Arc::new(AtomicBool::new(false));
+        let idle_armed = Arc::new(AtomicBool::new(false));
+        let silence_commit = Arc::new(Notify::new());
+        let (viz_tx, _viz_rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<f32>, u32)>();
+
+        let exit = {
+            let mut pump = live_pump_with(
+                &state,
+                &mut events,
+                &cancel,
+                &mic_muted,
+                &idle_armed,
+                &silence_commit,
+                &viz_tx,
+            );
+            pump.run().await
+        };
+        assert_eq!(exit, super::LiveExit::ProviderClosed, "closed stream ends the session");
+        assert!(!mic_muted.load(Ordering::Relaxed), "floor back to user after the last Done");
+
+        let snap = { state.lock().await.history.snapshot() };
+        assert_eq!(snap.len(), 4, "two full turns → four history entries");
+        assert_eq!((snap[0].role, snap[0].content.as_str()), (ChatRole::User, "hi"));
+        assert_eq!((snap[1].role, snap[1].content.as_str()), (ChatRole::Assistant, "hello"));
+        assert_eq!((snap[2].role, snap[2].content.as_str()), (ChatRole::User, "bye"));
+        assert_eq!((snap[3].role, snap[3].content.as_str()), (ChatRole::Assistant, "see ya"));
+    }
+
+    /// The mute-while-speaking gate engages when the user's turn ends
+    /// (model takes the floor) and stays engaged until the turn `Done`.
+    /// A stream that closes mid-reply leaves the mic muted.
+    #[cfg(feature = "realtime")]
+    #[tokio::test]
+    async fn live_pump_mutes_mic_while_model_holds_floor() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        use fono_assistant::{ConversationHistory, RealtimeEvent};
+        use futures::StreamExt as _;
+        use tokio::sync::{Mutex, Notify};
+
+        let state =
+            Arc::new(Mutex::new(super::AssistantSessionState::new(ConversationHistory::default())));
+        // User finishes; model would start replying — stream closes
+        // before `Done`, so the model still holds the floor at exit.
+        let events_vec: Vec<anyhow::Result<RealtimeEvent>> =
+            vec![Ok(RealtimeEvent::UserTextFinal("hello".into()))];
+        let mut events = futures::stream::iter(events_vec).boxed();
+        let cancel = Arc::new(Notify::new());
+        let mic_muted = Arc::new(AtomicBool::new(false));
+        let idle_armed = Arc::new(AtomicBool::new(false));
+        let silence_commit = Arc::new(Notify::new());
+        let (viz_tx, _viz_rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<f32>, u32)>();
+
+        let exit = {
+            let mut pump = live_pump_with(
+                &state,
+                &mut events,
+                &cancel,
+                &mic_muted,
+                &idle_armed,
+                &silence_commit,
+                &viz_tx,
+            );
+            pump.run().await
+        };
+        assert_eq!(exit, super::LiveExit::ProviderClosed);
+        assert!(
+            mic_muted.load(Ordering::Relaxed),
+            "mic stays muted while the model holds the floor (no Done yet)"
+        );
+    }
+
+    /// An explicit cancel (second tap / Escape) ends the loop with
+    /// `Explicit` and takes priority over a pending event (biased select).
+    #[cfg(feature = "realtime")]
+    #[tokio::test]
+    async fn live_pump_cancel_exits_explicit() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        use fono_assistant::{ConversationHistory, RealtimeEvent};
+        use futures::StreamExt as _;
+        use tokio::sync::{Mutex, Notify};
+
+        let state =
+            Arc::new(Mutex::new(super::AssistantSessionState::new(ConversationHistory::default())));
+        let events_vec: Vec<anyhow::Result<RealtimeEvent>> =
+            vec![Ok(RealtimeEvent::AssistantTextDelta("never read".into()))];
+        let mut events = futures::stream::iter(events_vec).boxed();
+        let cancel = Arc::new(Notify::new());
+        // Pre-arm the cancel permit so the first `notified()` poll wins.
+        cancel.notify_one();
+        let mic_muted = Arc::new(AtomicBool::new(false));
+        let idle_armed = Arc::new(AtomicBool::new(false));
+        let silence_commit = Arc::new(Notify::new());
+        let (viz_tx, _viz_rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<f32>, u32)>();
+
+        let exit = {
+            let mut pump = live_pump_with(
+                &state,
+                &mut events,
+                &cancel,
+                &mic_muted,
+                &idle_armed,
+                &silence_commit,
+                &viz_tx,
+            );
+            pump.run().await
+        };
+        assert_eq!(exit, super::LiveExit::Explicit, "cancel wins over a queued event");
+        // The queued event was not consumed.
+        assert!(events.next().await.is_some(), "biased cancel left the event untouched");
     }
 }

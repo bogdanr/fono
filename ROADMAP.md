@@ -20,6 +20,14 @@ The home page is [fono.page](https://fono.page).
 
 ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge)
 
+**[v0.11.1 — Hands-free realtime conversation](#shipped)**  
+Tap the assistant hotkey to open one persistent realtime session and hold a
+natural, back-and-forth spoken conversation — the model hears when you stop and
+replies in its own voice, with no key between turns. The overlay shows whose turn
+it is and animates to the live audio, and the session closes itself on a short
+silence, a goodbye, or a hard cap so it never quietly burns cloud credits. The
+realtime path now connects strictly on demand. *(2026-06-22)*
+
 **[v0.11.0 — Realtime voice assistant + one-key Gemini](#shipped)**  
 Hold a spoken conversation straight over the Gemini Live WebSocket — with memory
 of earlier turns and an optional look at your screen — drive the whole pipeline
@@ -114,6 +122,20 @@ Always-on hands-free mode: Fono idles with a tiny wake-word detector (powered by
 core. Say the magic word and Fono wakes up and starts dictating — no hotkey, no
 reaching for the keyboard. When you stop speaking it goes back to sleep. The wake-word
 model runs locally; your audio never leaves the machine while idle.
+
+### OpenAI Realtime backend
+
+> The same hands-free conversation, on OpenAI's voice models.
+
+Live conversation mode is built provider-agnostic at the trait and catalogue
+layer, so adding a second realtime backend is a self-contained client, not a
+rearchitecture. OpenAI's Realtime API is the next provider to land: it speaks a
+different wire protocol (`session.update` + `response.create` instead of Gemini's
+`setupComplete` / `audioStreamEnd`) and runs at 24 kHz in and out, so it needs
+its own client module and an input resampler, both already scoped. Once it lands,
+tap-to-converse, the cost guardrails, the floor-ownership overlay, and the
+mute-while-speaking baseline all apply unchanged — you simply pick OpenAI as your
+assistant provider.
 
 ### Talk over the assistant
 
@@ -228,6 +250,24 @@ tracks the opportunity at roughly **~7 MiB** reclaimed.
 ## Shipped
 
 Newest first.
+
+- ![v0.11.1](https://img.shields.io/badge/v0.11.1-2026--06--22-blue?style=flat-square)
+  **Hands-free realtime conversation mode.** Tapping the assistant hotkey now
+  opens a first-class, back-and-forth spoken conversation with a realtime model
+  (Gemini Live today): talk, listen to the reply, and just keep talking — no key
+  press between turns, all over one persistent session. The on-screen overlay
+  shows whose turn it is and animates to the live audio — green while you speak,
+  sky-blue while the assistant does. The conversation ends on its own after a
+  short silence or when you say you're done, and instantly on a second tap or
+  Escape, so it never sits there running up cost. The session connects only when
+  you start it, never at startup. Holding the hotkey is unchanged: hold to talk,
+  release to hear the full reply. To stay clean on every desktop without echo
+  cancellation, the mic is muted while the model speaks, so you take turns rather
+  than talk over it — acoustic barge-in is the next upgrade.
+
+  Also removes the realtime startup prewarm shipped in 0.11.0: it only warmed
+  transient network caches that went stale within minutes, so realtime sessions
+  now connect strictly on demand at first use. *(2026-06-22)*
 
 - ![v0.11.0](https://img.shields.io/badge/v0.11.0-2026--06--18-blue?style=flat-square)
   **Realtime voice assistant, one-key Google Gemini, and gapless cloud

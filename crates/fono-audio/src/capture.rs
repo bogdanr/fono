@@ -103,6 +103,19 @@ impl RecordingBuffer {
             self.truncated = true;
         }
     }
+    /// Append `s`, then drop the oldest samples so at most `max_samples`
+    /// are retained — a fixed-size rolling window. Unlike [`push_slice`]
+    /// (which stops accepting once `cap_samples` is reached, for a
+    /// bounded *recording*), this never blocks new audio: it is for an
+    /// unbounded *stream* feeding a live visualisation, where only the
+    /// most recent window is ever read. Does not set `truncated`.
+    pub fn push_rolling(&mut self, s: &[f32], max_samples: usize) {
+        self.samples.extend_from_slice(s);
+        if self.samples.len() > max_samples {
+            let excess = self.samples.len() - max_samples;
+            self.samples.drain(..excess);
+        }
+    }
 }
 
 /// Capture orchestrator. Owns the platform stream/process and a shared buffer.

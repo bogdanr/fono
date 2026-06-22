@@ -46,6 +46,16 @@ pub struct KeyHeldFlags {
     pub dictation: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// True while the assistant key is physically held down.
     pub assistant: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// True when a **tap** (short press) of the assistant key should
+    /// enter/leave full-duplex live mode rather than fall through to
+    /// the legacy toggle behaviour. The orchestrator writes this on
+    /// startup/reload to mirror "a realtime assistant model is loaded
+    /// **and** `[assistant.realtime].live_mode = true`"; the listener
+    /// reads it on a tap-release to decide whether to emit
+    /// [`HotkeyAction::AssistantTapped`]. Shared (writer = orchestrator,
+    /// reader = listener thread) so a `fono use` / reload that swaps the
+    /// backend takes effect without re-spawning the listener.
+    pub assistant_live_available: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl KeyHeldFlags {

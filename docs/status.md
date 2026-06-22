@@ -1,25 +1,56 @@
 # Fono — Project Status
 Last updated: 2026-06-22
 
-## 2026-06-22 — wire realtime prewarm into startup warmup
+## 2026-06-22 — Realtime live conversation mode
 
-The Gemini Live `prewarm` impl shipped in 0.11.0 (opens the WebSocket upgrade
-to the Live host and closes immediately, warming DNS+TCP+TLS+handshake with no
-setup sent, so no quota is consumed) but was never invoked — dead code. The
-realtime handle's `prewarm` is now spawned from `spawn_warmups` alongside the
-STT/TTS/polish/assistant warmups, feature-gated on `realtime`, via a new
-`spawn_realtime_warmup` helper that mirrors `spawn_assistant_warmup`
-(handle clone → spawn → `prewarm().await` → warmup-lane trace). The helper
-extraction also keeps `spawn_warmups` under the 100-line clippy limit.
+Delivered tap-to-converse live mode for realtime providers (Gemini Live),
+implementing `plans/2026-06-22-realtime-live-conversation-mode-v4.md`. F8 now
+has two interaction modes:
 
-Effect: when an all-Gemini realtime turn is selected, the first F8 press no
-longer pays the full WebSocket-open latency cold — the connection path is
-warmed at startup like every other backend. No new dependencies
-(`tokio-tungstenite` already in the graph). This is part of the Part A
-live-mic-streaming arc (A1+A2 landed earlier as the frame-stream seam;
-capture-on-press A3+ remains the larger follow-up).
+- **Hold = push-to-talk** (preserved): buffer the held utterance, open the
+  session on release, play the full reply to completion, then close. Pinned by
+  regression tests so the live work can't silently change it.
+- **Tap = live conversation**: lazily opens one persistent full-duplex session
+  on demand (never at startup), streams the mic continuously, and runs many
+  turns over the one socket until you leave (second tap / Escape) or it
+  auto-closes. Server-side VAD owns the turn boundaries.
 
-Pre-commit gate green: fmt --check, clippy -D warnings, workspace tests.
+Behaviour:
+
+- **Mute-while-speaking baseline.** Without acoustic echo cancellation the open
+  mic re-captures the model's own audio and self-interrupts, so live mode gates
+  the mic while the model holds the floor — reliable hands-free multi-turn
+  conversation on any host. True talk-over barge-in needs AEC and is deferred to
+  `ROADMAP.md`.
+- **Floor-ownership overlay + real audio visualisation.** The overlay walks the
+  existing palette — green (you) → amber (model formulating) → blue (model
+  speaking) → green — and the configured waveform style animates from real audio
+  in **both** directions, fed at realtime pace so reply bursts don't race ahead
+  of playback.
+- **Two complementary auto-closes.** Trailing local silence
+  (`auto_stop_silence_ms`, reusing the dictation silence-watch + Pondering
+  animation) and a model-driven `end_conversation` tool call; a
+  `max_session_secs` cap is the backstop. Graceful ends are silent, unexpected
+  ends notify; one INFO line on open and one on close (reason / turns /
+  open-secs).
+
+Plumbing: a `RealtimeMode { PushToTalk, FullDuplex }` seam on
+`RealtimeAssistant::open_session`; a persistent `LiveSessionHandle` in
+`AssistantSessionState`; an FSM tap/hold gesture split gated by an
+`assistant_live_available` flag; a `[assistant.realtime]` config block. Kept
+provider-agnostic at the trait/catalogue layer (OpenAI Realtime client still
+planned). Realtime also no longer prewarms at startup — the dead prewarm
+scaffolding (warmup wiring + `GeminiLive::prewarm` + trait method) was removed in
+favour of strictly on-demand connect; a `## [Unreleased]` CHANGELOG section
+records that removal. `crates/fono/examples/smoke_realtime_live.rs` is a
+standalone live harness for exercising the realtime client without the daemon.
+
+Verified iteratively against live Gemini (headphones) during development. Gate
+green throughout: fmt, clippy (`--features realtime` + default-feature
+staged-path guardrail), `cargo test --workspace --lib --tests --features
+realtime` (new FSM / setup-JSON / reader / live-pump / config tests). No
+dependency changes. Not committed (holding per instruction); the AEC talk-over
+barge-in upgrade is tracked on the roadmap.
 
 ## 2026-06-19 — 0.11.0 size-gate release fix
 

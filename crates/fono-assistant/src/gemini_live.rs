@@ -29,9 +29,11 @@
 //! a `realtimeInput.video` frame right after setup (before audio) so the model
 //! can answer questions about what is on screen for this turn.
 //!
-//! Tool-calling is intentionally absent (Path B: audio loop first). A
-//! `toolCall` server message plus a tool-response client message will be added
-//! when `fono-action` lands.
+//! General tool-calling (for `fono-action`) is still absent (Path B: audio
+//! loop first). The one exception is full-duplex live mode, which declares a
+//! single `end_conversation` function and instructs the model to call it when
+//! the user signals they are done, so the session can close on intent and not
+//! only on silence (`toolCall` → [`RealtimeEvent::EndConversation`]).
 //!
 //! Increment 2 of the realtime arc; see the realtime design plan.
 
@@ -53,7 +55,8 @@ use fono_core::screen_capture::CaptureMode;
 
 use crate::history::{ChatRole, ChatTurn};
 use crate::traits::{
-    AssistantContext, RealtimeAssistant, RealtimeEvent, RealtimeSession, ScreenCaptureFn,
+    AssistantContext, RealtimeAssistant, RealtimeEvent, RealtimeMode, RealtimeSession,
+    ScreenCaptureFn,
 };
 
 /// Mic-input channel depth (PCM frames). Bounded so a stalled socket applies
@@ -62,6 +65,21 @@ const AUDIO_IN_CAPACITY: usize = 64;
 
 /// How long to wait for `setupComplete` after sending the setup message.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Name of the function the model is told to call when the conversation is
+/// over (full-duplex live mode only). A `toolCall` for this name maps to
+/// [`RealtimeEvent::EndConversation`].
+pub(crate) const END_CONVERSATION_FN: &str = "end_conversation";
+
+/// Appended to the system instruction in full-duplex live mode so the model
+/// closes the session on intent (user says goodbye / "that's all") rather than
+/// waiting for the silence timeout. Kept terse and language-neutral — the
+/// model speaks the user's language, so the cue is described, not enumerated.
+const END_CONVERSATION_GUIDANCE: &str = "This is a live, hands-free voice conversation. \
+When the user signals they are finished (e.g. says goodbye, thanks you and \
+indicates they need nothing more, or asks to stop), call the `end_conversation` \
+function to close the session. Do not call it while the user still has an open \
+request.";
 
 /// Gemini Live realtime client. One instance is reused across F8 presses;
 /// each [`open_session`](RealtimeAssistant::open_session) opens a fresh
@@ -115,6 +133,7 @@ pub fn build_setup_json(
     system_prompt: &str,
     voice: &str,
     seed_history: bool,
+    full_duplex: bool,
 ) -> serde_json::Value {
     let model_field =
         if model.starts_with("models/") { model.to_string() } else { format!("models/{model}") };
@@ -134,6 +153,51 @@ pub fn build_setup_json(
     }
     if seed_history {
         setup["historyConfig"] = json!({ "initialHistoryInClientContent": true });
+    }
+    if full_duplex {
+        // Full-duplex live mode: enable server-side automatic activity
+        // detection so the model endpoints turns itself, and let a fresh
+        // user activity start interrupt the model's reply (acoustic
+        // barge-in). Push-to-talk leaves this off and commits with
+        // `audioStreamEnd` instead.
+        //
+        // Sensitivity is deliberately damped. With a continuously open
+        // mic and `START_OF_ACTIVITY_INTERRUPTS`, default (high)
+        // sensitivity makes the model barge in on its own — breath,
+        // room noise, or the tail of the user's speech trips the VAD and
+        // discards the reply mid-sentence (observed even on headphones,
+        // where there is no echo). `START_SENSITIVITY_LOW` +
+        // `END_SENSITIVITY_LOW` require clearer onset/offset, and a
+        // longer `silenceDurationMs` stops the model endpointing the
+        // user prematurely. These are the knobs to revisit once AEC
+        // lands; they trade a touch of barge-in latency for not
+        // self-interrupting.
+        setup["realtimeInputConfig"] = json!({
+            "automaticActivityDetection": {
+                "startOfSpeechSensitivity": "START_SENSITIVITY_LOW",
+                "endOfSpeechSensitivity": "END_SENSITIVITY_LOW",
+                "prefixPaddingMs": 300,
+                "silenceDurationMs": 800,
+            },
+            "activityHandling": "START_OF_ACTIVITY_INTERRUPTS",
+        });
+        // Let the model close the session on intent ("goodbye", "that's
+        // all") via a single function call, in addition to the local
+        // silence timeout. Declare the tool and fold the how/when into
+        // the system instruction (creating one if the caller gave none).
+        setup["tools"] = json!([{
+            "functionDeclarations": [{
+                "name": END_CONVERSATION_FN,
+                "description": "End the live voice conversation when the user \
+                    indicates they are finished and need nothing more.",
+            }]
+        }]);
+        let guided = if system_prompt.is_empty() {
+            END_CONVERSATION_GUIDANCE.to_string()
+        } else {
+            format!("{system_prompt}\n\n{END_CONVERSATION_GUIDANCE}")
+        };
+        setup["systemInstruction"] = json!({ "parts": [{ "text": guided }] });
     }
     json!({ "setup": setup })
 }
@@ -263,6 +327,23 @@ struct ServerMessage {
     setup_complete: Option<serde_json::Value>,
     #[serde(default, rename = "serverContent")]
     server_content: Option<ServerContent>,
+    #[serde(default, rename = "toolCall")]
+    tool_call: Option<ToolCall>,
+}
+
+/// A `toolCall` server message: the model is invoking one or more declared
+/// functions. Live mode only declares `end_conversation`, so the reader only
+/// inspects the function names.
+#[derive(Deserialize, Debug, Default)]
+struct ToolCall {
+    #[serde(default, rename = "functionCalls")]
+    function_calls: Vec<FunctionCall>,
+}
+
+#[derive(Deserialize, Debug, Default)]
+struct FunctionCall {
+    #[serde(default)]
+    name: String,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -317,7 +398,11 @@ fn parse_server_frame(bytes: &[u8]) -> Option<ServerMessage> {
 
 #[async_trait]
 impl RealtimeAssistant for GeminiLive {
-    async fn open_session(&self, ctx: &AssistantContext) -> Result<RealtimeSession> {
+    async fn open_session(
+        &self,
+        ctx: &AssistantContext,
+        mode: RealtimeMode,
+    ) -> Result<RealtimeSession> {
         // Auth: Gemini Live takes the API key as a `?key=` query param on the
         // upgrade URL (there is no header form for the WS handshake).
         let url = format!("{base}?key={key}", base = self.ws_url, key = self.api_key);
@@ -333,7 +418,14 @@ impl RealtimeAssistant for GeminiLive {
         let client_content = build_client_content_json(&ctx.history);
         let seed_history =
             client_content["clientContent"]["turns"].as_array().is_some_and(|t| !t.is_empty());
-        let setup = build_setup_json(&self.model, &ctx.system_prompt, &self.voice, seed_history);
+        let full_duplex = matches!(mode, RealtimeMode::FullDuplex);
+        let setup = build_setup_json(
+            &self.model,
+            &ctx.system_prompt,
+            &self.voice,
+            seed_history,
+            full_duplex,
+        );
         write
             .send(Message::Text(setup.to_string()))
             .await
@@ -389,7 +481,7 @@ impl RealtimeAssistant for GeminiLive {
         let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>(AUDIO_IN_CAPACITY);
         let (ev_tx, ev_rx) = mpsc::unbounded_channel::<Result<RealtimeEvent>>();
 
-        tokio::spawn(run_reader(read, ev_tx, self.output_rate));
+        tokio::spawn(run_reader(read, ev_tx, self.output_rate, full_duplex));
         tokio::spawn(run_writer(write, audio_rx, self.input_rate));
 
         let events: BoxStream<'static, Result<RealtimeEvent>> =
@@ -404,26 +496,6 @@ impl RealtimeAssistant for GeminiLive {
     fn native_input_rate(&self) -> u32 {
         self.input_rate
     }
-
-    /// Warm DNS + TCP + TLS + the WebSocket upgrade to the Live endpoint off
-    /// the hot path, so the first F8 press does not pay the full handshake
-    /// latency. Opens the upgrade connection and immediately closes it without
-    /// sending the setup message — no model turn is started and no quota is
-    /// consumed. Mirrors the cheap-probe `prewarm` every STT/TTS client already
-    /// implements; `GeminiLive` was the only voice client missing it.
-    async fn prewarm(&self) -> Result<()> {
-        let url = format!("{base}?key={key}", base = self.ws_url, key = self.api_key);
-        let request = url
-            .as_str()
-            .into_client_request()
-            .context("building Gemini Live WS prewarm request")?;
-        let (mut ws, _resp) = tokio_tungstenite::connect_async(request)
-            .await
-            .context("Gemini Live WS prewarm connect failed")?;
-        // Close cleanly; warming the connection path is the whole point.
-        let _ = ws.close(None).await;
-        Ok(())
-    }
 }
 
 /// Reader task body: translate `serverContent` frames to [`RealtimeEvent`]s
@@ -433,6 +505,7 @@ async fn run_reader<R>(
     mut read: R,
     ev_tx: mpsc::UnboundedSender<Result<RealtimeEvent>>,
     output_rate: u32,
+    full_duplex: bool,
 ) where
     R: futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
         + Unpin
@@ -456,6 +529,18 @@ async fn run_reader<R>(
             }
         };
         let Some(msg) = parse_server_frame(&bytes) else { continue };
+
+        // Tool call: in live mode the model invokes `end_conversation` to
+        // close the session on intent. Emit the neutral event and keep
+        // reading so any in-flight reply audio still drains; the consumer
+        // closes the session. Sibling of `serverContent`, so check before
+        // the content guard below.
+        if let Some(tc) = &msg.tool_call {
+            if tc.function_calls.iter().any(|f| f.name == END_CONVERSATION_FN) {
+                let _ = ev_tx.send(Ok(RealtimeEvent::EndConversation));
+            }
+        }
+
         let Some(content) = msg.server_content else { continue };
 
         // Barge-in: the model's own VAD detected the user speaking over the
@@ -515,7 +600,16 @@ async fn run_reader<R>(
                     ev_tx.send(Ok(RealtimeEvent::UserTextFinal(std::mem::take(&mut input_buf))));
             }
             let _ = ev_tx.send(Ok(RealtimeEvent::Done));
-            break; // one-shot: one press = one user turn + one reply
+            if full_duplex {
+                // Live mode: one session spans many turns. `Done` is a
+                // turn boundary, not the end of the session — reset the
+                // per-turn state and keep reading. The model's own VAD
+                // opens the next user turn over the still-open mic.
+                user_emitted = false;
+                input_buf.clear();
+                continue;
+            }
+            break; // PTT one-shot: one press = one user turn + one reply
         }
     }
 }
@@ -551,7 +645,8 @@ mod tests {
 
     #[test]
     fn setup_json_has_audio_modality_and_voice() {
-        let v = build_setup_json("gemini-3.1-flash-live-preview", "Be terse.", "Kore", false);
+        let v =
+            build_setup_json("gemini-3.1-flash-live-preview", "Be terse.", "Kore", false, false);
         let setup = &v["setup"];
         assert_eq!(setup["model"], "models/gemini-3.1-flash-live-preview");
         assert_eq!(setup["generationConfig"]["responseModalities"][0], "AUDIO");
@@ -570,22 +665,167 @@ mod tests {
 
     #[test]
     fn setup_json_normalises_bare_and_prefixed_model() {
-        let bare = build_setup_json("gemini-x", "", "Puck", false);
+        let bare = build_setup_json("gemini-x", "", "Puck", false, false);
         assert_eq!(bare["setup"]["model"], "models/gemini-x");
-        let prefixed = build_setup_json("models/gemini-x", "", "Puck", false);
+        let prefixed = build_setup_json("models/gemini-x", "", "Puck", false, false);
         assert_eq!(prefixed["setup"]["model"], "models/gemini-x");
     }
 
     #[test]
     fn setup_json_omits_empty_system_instruction() {
-        let v = build_setup_json("gemini-x", "", "Kore", false);
+        let v = build_setup_json("gemini-x", "", "Kore", false, false);
         assert!(v["setup"].get("systemInstruction").is_none());
+    }
+
+    // PTT contract: the open-time setup must NOT enable server-side
+    // automatic activity detection. The push-to-talk path sends the whole
+    // buffered utterance and commits the turn with `audioStreamEnd`, so the
+    // model must not endpoint/reply mid-utterance on its own VAD. Server VAD
+    // belongs to the future full-duplex live mode, not PTT.
+    #[test]
+    fn setup_json_does_not_enable_server_vad() {
+        let v = build_setup_json("gemini-x", "Be terse.", "Kore", false, false);
+        let setup = &v["setup"];
+        assert!(
+            setup.get("realtimeInputConfig").is_none(),
+            "PTT must not configure realtimeInputConfig (server VAD)"
+        );
+        // Belt-and-braces: the literal toggle must be absent anywhere in the
+        // setup payload so PTT relies solely on audioStreamEnd to commit.
+        assert!(
+            !v.to_string().contains("automaticActivityDetection"),
+            "PTT setup must not enable automaticActivityDetection"
+        );
     }
 
     #[test]
     fn setup_json_sets_history_config_when_seeding() {
-        let v = build_setup_json("gemini-x", "", "Kore", true);
+        let v = build_setup_json("gemini-x", "", "Kore", true, false);
         assert_eq!(v["setup"]["historyConfig"]["initialHistoryInClientContent"], true);
+    }
+
+    // Full-duplex live mode: setup MUST enable server-side automatic activity
+    // detection so the model endpoints its own turns, and configure
+    // start-of-activity interruption so the user can barge in by speaking.
+    // Sensitivity is damped (LOW) so the model does not interrupt itself on
+    // breath / ambient noise over the continuously open mic.
+    #[test]
+    fn setup_json_enables_server_vad_in_full_duplex() {
+        let v = build_setup_json("gemini-x", "Be terse.", "Kore", false, true);
+        let rt = &v["setup"]["realtimeInputConfig"];
+        let aad = &rt["automaticActivityDetection"];
+        assert!(aad.is_object(), "full-duplex must enable server VAD");
+        assert_eq!(aad["startOfSpeechSensitivity"], "START_SENSITIVITY_LOW");
+        assert_eq!(aad["endOfSpeechSensitivity"], "END_SENSITIVITY_LOW");
+        assert_eq!(rt["activityHandling"], "START_OF_ACTIVITY_INTERRUPTS");
+    }
+
+    // Full-duplex declares the `end_conversation` tool and folds its usage
+    // into the system instruction so the model can close the session on
+    // intent; PTT declares neither.
+    #[test]
+    fn full_duplex_declares_end_conversation_tool_ptt_does_not() {
+        let live = build_setup_json("gemini-x", "Be terse.", "Kore", false, true);
+        let fns = &live["setup"]["tools"][0]["functionDeclarations"];
+        assert_eq!(fns[0]["name"], END_CONVERSATION_FN, "live mode must declare the tool");
+        let sys = live["setup"]["systemInstruction"]["parts"][0]["text"].as_str().unwrap();
+        assert!(sys.starts_with("Be terse."), "caller prompt must be preserved");
+        assert!(sys.contains(END_CONVERSATION_FN), "guidance must mention the tool");
+
+        let ptt = build_setup_json("gemini-x", "Be terse.", "Kore", false, false);
+        assert!(ptt["setup"]["tools"].is_null(), "PTT must not declare tools");
+    }
+
+    // A `toolCall` for `end_conversation` maps to a single `EndConversation`
+    // event; an unrelated tool name does not.
+    #[test]
+    fn reader_maps_end_conversation_tool_call_to_event() {
+        use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+        fn count_end(rx: &mut mpsc::UnboundedReceiver<Result<RealtimeEvent>>) -> usize {
+            let mut n = 0;
+            while let Ok(ev) = rx.try_recv() {
+                if matches!(ev, Ok(RealtimeEvent::EndConversation)) {
+                    n += 1;
+                }
+            }
+            n
+        }
+        let frames = |name: &str| -> Vec<Result<Message, WsError>> {
+            vec![
+                Ok(Message::Text(format!(
+                    r#"{{"toolCall":{{"functionCalls":[{{"name":"{name}"}}]}}}}"#
+                ))),
+                Ok(Message::Text(r#"{"serverContent":{"turnComplete":true}}"#.to_string())),
+            ]
+        };
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        futures::executor::block_on(run_reader(
+            futures::stream::iter(frames(END_CONVERSATION_FN)),
+            tx,
+            24_000,
+            true,
+        ));
+        assert_eq!(count_end(&mut rx), 1, "end_conversation tool call must emit the event");
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        futures::executor::block_on(run_reader(
+            futures::stream::iter(frames("some_other_tool")),
+            tx,
+            24_000,
+            true,
+        ));
+        assert_eq!(count_end(&mut rx), 0, "unrelated tool call must not end the session");
+    }
+
+    // The reader is one-shot for PTT (stop at the first `turnComplete`) but
+    // must span the whole session for full-duplex live mode (each
+    // `turnComplete` is just a turn boundary). Regression for the bug where a
+    // live session closed after a single turn.
+    #[test]
+    fn reader_loops_in_full_duplex_but_is_one_shot_for_ptt() {
+        use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+        fn count_dones(rx: &mut mpsc::UnboundedReceiver<Result<RealtimeEvent>>) -> usize {
+            let mut n = 0;
+            while let Ok(ev) = rx.try_recv() {
+                if matches!(ev, Ok(RealtimeEvent::Done)) {
+                    n += 1;
+                }
+            }
+            n
+        }
+        let two_turns = || -> Vec<Result<Message, WsError>> {
+            vec![
+                Ok(Message::Text(
+                    r#"{"serverContent":{"outputTranscription":{"text":"hi"}}}"#.to_string(),
+                )),
+                Ok(Message::Text(r#"{"serverContent":{"turnComplete":true}}"#.to_string())),
+                Ok(Message::Text(
+                    r#"{"serverContent":{"outputTranscription":{"text":"again"}}}"#.to_string(),
+                )),
+                Ok(Message::Text(r#"{"serverContent":{"turnComplete":true}}"#.to_string())),
+            ]
+        };
+
+        // Full-duplex: both turns read → two `Done` boundaries.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        futures::executor::block_on(run_reader(
+            futures::stream::iter(two_turns()),
+            tx,
+            24_000,
+            true,
+        ));
+        assert_eq!(count_dones(&mut rx), 2, "full-duplex reader must span multiple turns");
+
+        // PTT: stops at the first `turnComplete`; the second turn is ignored.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        futures::executor::block_on(run_reader(
+            futures::stream::iter(two_turns()),
+            tx,
+            24_000,
+            false,
+        ));
+        assert_eq!(count_dones(&mut rx), 1, "PTT reader is one-shot");
     }
 
     #[test]

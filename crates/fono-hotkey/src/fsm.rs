@@ -58,6 +58,20 @@ pub enum HotkeyEvent {
     /// no overlay and rejecting the next press. History is preserved
     /// so the new turn carries conversation context.
     RestartAssistant,
+    /// A **tap** of the assistant hotkey, while a realtime model is
+    /// loaded and live mode is enabled, asked to ENTER full-duplex live
+    /// conversation mode. The orchestrator tears down the nascent
+    /// push-to-talk capture started on the press, opens a persistent
+    /// speech-to-speech session, and begins continuous mic capture with
+    /// the mute-while-speaking gate. Distinct from `StartAssistant`
+    /// (the hold/PTT entry).
+    EnterAssistantLive,
+    /// A second tap / Escape asked to LEAVE live mode. The orchestrator
+    /// closes the persistent session and stops the mic. Also reconciled
+    /// by the FSM's `ProcessingDone` arm when the live pump
+    /// self-terminates (idle timeout, max-duration cap, provider-side
+    /// close).
+    ExitAssistantLive,
     /// An MCP tool call started; the tray should show the active badge.
     McpToolStarted(ToolKind),
     /// The user barged in (F7 / F8 / Escape) while an MCP tool was
@@ -100,6 +114,15 @@ pub enum State {
     AssistantThinking,
     /// Voice assistant: TTS audio is playing back (or queued).
     AssistantSpeaking,
+    /// Full-duplex live conversation mode is active: a persistent
+    /// speech-to-speech session is open, the mic is streaming
+    /// continuously (gated by the mute-while-speaking logic), and the
+    /// model owns turn boundaries. Entered from `AssistantRecording`
+    /// via [`HotkeyAction::AssistantTapped`] (the tap-release that
+    /// follows the entry press) and left via a second tap, Escape, or
+    /// the live pump self-terminating. The per-turn overlay colour
+    /// (green/amber/blue) is driven by the orchestrator, not the FSM.
+    AssistantLive,
 }
 
 /// Input actions the hotkey/ipc layers dispatch to the FSM.
@@ -124,6 +147,13 @@ pub enum HotkeyAction {
     AssistantPressed,
     /// Voice-assistant push-to-talk released.
     AssistantReleased,
+    /// A **tap** (short press) of the assistant hotkey was completed.
+    /// The hotkey listener emits this on the tap-release **only** when
+    /// `KeyHeldFlags::assistant_live_available` is set (a realtime model
+    /// is loaded and live mode is enabled); otherwise a tap keeps its
+    /// legacy no-op-on-release behaviour. Drives entering/leaving the
+    /// full-duplex live conversation mode.
+    AssistantTapped,
     /// Orchestrator signals that the first LLM delta has arrived (not
     /// the first synthesised audio chunk — TTS roundtrip can add
     /// hundreds of ms on top of LLM TTFB, and the overlay/tray should
@@ -259,6 +289,37 @@ impl RecordingFsm {
                 State::AssistantRecording | State::AssistantThinking | State::AssistantSpeaking,
                 HotkeyAction::ProcessingDone,
             ) => State::Idle,
+            // ── Full-duplex live mode ──────────────────────────────────────
+            // The entry press put us in AssistantRecording (and started a
+            // nascent PTT capture). The matching tap-release converts it
+            // to live mode: the orchestrator discards that capture and
+            // opens the persistent session.
+            (State::AssistantRecording, HotkeyAction::AssistantTapped) => {
+                let _ = self.tx.send(HotkeyEvent::EnterAssistantLive);
+                State::AssistantLive
+            }
+            // Second tap leaves live mode. The exit press is a no-op
+            // (stays AssistantLive); the tap-release that follows does
+            // the exit, so the gesture is symmetric with entry.
+            (State::AssistantLive, HotkeyAction::AssistantTapped) => {
+                let _ = self.tx.send(HotkeyEvent::ExitAssistantLive);
+                State::Idle
+            }
+            // The exit-tap's press (and any hold while live) is a no-op:
+            // live mode only leaves via the tap-release, Escape, or the
+            // pump self-terminating.
+            (State::AssistantLive, HotkeyAction::AssistantPressed) => State::AssistantLive,
+            // Escape leaves live mode.
+            (State::AssistantLive, HotkeyAction::CancelPressed) => {
+                let _ = self.tx.send(HotkeyEvent::ExitAssistantLive);
+                State::Idle
+            }
+            // The live pump self-terminated (idle timeout, max-duration
+            // cap, or provider-side close): the orchestrator emits
+            // ProcessingDone to return the FSM to Idle. (Teardown +
+            // notify is the orchestrator's job; this is just state
+            // reconciliation.)
+            (State::AssistantLive, HotkeyAction::ProcessingDone) => State::Idle,
             (_, HotkeyAction::ProcessingStarted) => State::Processing,
             (State::Processing, HotkeyAction::ProcessingDone) => State::Idle,
             // ── MCP-driven tool call ──────────────────────────────────────
@@ -435,6 +496,73 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StopAssistant);
         assert_eq!(fsm.dispatch(HotkeyAction::AssistantSpeakingStarted), State::AssistantSpeaking);
         assert_eq!(fsm.dispatch(HotkeyAction::ProcessingDone), State::Idle);
+    }
+
+    // ── Full-duplex live mode tests ──────────────────────────────────
+
+    /// Entry gesture: the press starts a (nascent) assistant recording,
+    /// and the tap-release converts it into live mode, emitting
+    /// `EnterAssistantLive` exactly once.
+    #[test]
+    fn assistant_tap_enters_live_mode() {
+        let (mut fsm, mut rx) = RecordingFsm::new();
+        assert_eq!(fsm.dispatch(HotkeyAction::AssistantPressed), State::AssistantRecording);
+        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StartAssistant);
+        assert_eq!(fsm.dispatch(HotkeyAction::AssistantTapped), State::AssistantLive);
+        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::EnterAssistantLive);
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// Exit gesture: while live, the press is a no-op and the
+    /// tap-release leaves live mode with a single `ExitAssistantLive`.
+    #[test]
+    fn second_tap_leaves_live_mode() {
+        let (mut fsm, mut rx) = RecordingFsm::new();
+        fsm.dispatch(HotkeyAction::AssistantPressed);
+        fsm.dispatch(HotkeyAction::AssistantTapped);
+        while rx.try_recv().is_ok() {}
+        // The exit-tap press must NOT change state or emit anything.
+        assert_eq!(fsm.dispatch(HotkeyAction::AssistantPressed), State::AssistantLive);
+        assert!(rx.try_recv().is_err());
+        // The matching tap-release exits.
+        assert_eq!(fsm.dispatch(HotkeyAction::AssistantTapped), State::Idle);
+        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::ExitAssistantLive);
+    }
+
+    /// Escape leaves live mode.
+    #[test]
+    fn escape_leaves_live_mode() {
+        let (mut fsm, mut rx) = RecordingFsm::new();
+        fsm.dispatch(HotkeyAction::AssistantPressed);
+        fsm.dispatch(HotkeyAction::AssistantTapped);
+        while rx.try_recv().is_ok() {}
+        assert_eq!(fsm.dispatch(HotkeyAction::CancelPressed), State::Idle);
+        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::ExitAssistantLive);
+    }
+
+    /// The live pump self-terminating (idle/cap/provider-close) drives
+    /// the FSM back to Idle via `ProcessingDone`.
+    #[test]
+    fn live_processing_done_returns_to_idle() {
+        let (mut fsm, mut rx) = RecordingFsm::new();
+        fsm.dispatch(HotkeyAction::AssistantPressed);
+        fsm.dispatch(HotkeyAction::AssistantTapped);
+        while rx.try_recv().is_ok() {}
+        assert_eq!(fsm.dispatch(HotkeyAction::ProcessingDone), State::Idle);
+        assert!(rx.try_recv().is_err(), "ProcessingDone reconciliation emits no event");
+    }
+
+    /// A hold (PTT) is unaffected by the live transitions: without an
+    /// `AssistantTapped`, press → release runs the normal PTT arc.
+    #[test]
+    fn assistant_hold_release_is_unchanged_by_live_arms() {
+        let (mut fsm, mut rx) = RecordingFsm::new();
+        assert_eq!(fsm.dispatch(HotkeyAction::AssistantPressed), State::AssistantRecording);
+        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StartAssistant);
+        // PTT hold-release synthesises a second AssistantPressed (the
+        // listener's behaviour), which stops capture — NOT AssistantTapped.
+        assert_eq!(fsm.dispatch(HotkeyAction::AssistantPressed), State::AssistantThinking);
+        assert_eq!(rx.try_recv().unwrap(), HotkeyEvent::StopAssistant);
     }
 
     #[test]

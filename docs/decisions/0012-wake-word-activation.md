@@ -36,6 +36,37 @@ network traffic" promise.
   keys (`eou_adaptive`, `resume_grace_ms` in `[interactive]`) but
   these are inert until the wake-word work lands.
 
+## Relationship to PipeWire AEC (when revisited)
+
+Wake-word has two modes with opposite acoustic needs, and only one of
+them touches the PipeWire echo-cancel work from
+`plans/2026-05-25-double-talk-barge-in-pipewire-aec-v1.md`:
+
+- **Idle always-on listening** (the headline feature: Fono idle,
+  nothing playing). There is no Fono playback to cancel, so AEC is a
+  no-op and must **not** be loaded. The detector reads the default
+  source directly. AEC also cannot help with the real idle challenge —
+  rejecting TV / music / non-wake speech — because the AEC sink only
+  carries Fono's *own* TTS; ambient audio never passes through it.
+  Idle wake-word must therefore work on every platform off the default
+  source and must **not** depend on AEC (which is Linux/PipeWire-only).
+- **Wake / interrupt while the assistant is speaking** is exactly the
+  "talk over the assistant" case AEC was built for. To detect a wake
+  phrase over Fono's own TTS, the TTS must be cancelled from the mic —
+  here wake-word **reuses** the AEC, consuming the same
+  `fono_aec_source_<pid>`.
+
+What is reusable is the **capture + detector seam**, not the
+echo-canceller itself. Barge-in ("read a source → envelope/VAD → fire
+`AssistantPressed`") and wake-word are the same shape with an energy
+VAD vs a KWS model swapped in as the trigger. The intent is to land
+that detector abstraction once (in the AEC slice) with interchangeable
+triggers, treat AEC as an optional upgrade engaged only while Fono is
+making noise, and account for the lifecycle mismatch (AEC is
+per-utterance and short-lived; wake-word listening is always-on, so the
+detector switches its input to the AEC source only while one exists and
+back to the default source otherwise).
+
 ## Surviving artefacts
 
 - `plans/2026-04-27-fono-interactive-v3.md:204`

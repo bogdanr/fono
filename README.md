@@ -112,6 +112,7 @@ Local-first, by design. With the default setup, audio and text never leave your 
 - [Quickstart](docs/quickstart.md) — first dictation, common follow-ups
 - [Configuration](docs/configuration.md) — every key in `config.toml`
 - [Provider matrix](docs/providers.md) — STT, polish, assistant, and TTS endpoints
+- [Home Assistant](docs/home-assistant.md) — run the Docker container as a Wyoming STT/TTS server
 - [Live dictation](docs/interactive.md) — streaming overlay, latency budget
 - [Troubleshooting](docs/troubleshooting.md) — symptom-first recipes
 

@@ -308,6 +308,10 @@ fn register(
 ///    [`LONG_PRESS_THRESHOLD`], emit a second `TogglePressed` /
 ///    `AssistantPressed` to stop recording (push-to-talk semantics).
 ///    Shorter presses leave recording latched on (toggle semantics).
+///    A short *assistant* press additionally emits
+///    [`HotkeyAction::AssistantTapped`] when
+///    [`KeyHeldFlags::assistant_live_available`] is set, so a tap can
+///    enter/leave full-duplex live mode.
 ///
 /// Cancel handling: a `CancelPressed` clears both press timestamps so
 /// that the eventual key-up (which may arrive long after the user hit
@@ -343,7 +347,16 @@ fn map_event(
             held_flags.assistant.store(false, Ordering::Relaxed);
             if let Some(t0) = assistant_press_at.take() {
                 if t0.elapsed() >= LONG_PRESS_THRESHOLD {
+                    // Long press = push-to-talk: synthesise the stop.
                     return vec![HotkeyAction::AssistantPressed];
+                }
+                // Short press = tap. When a realtime model + live mode
+                // are available the tap enters/leaves full-duplex live
+                // mode; otherwise it keeps the legacy toggle-latch
+                // behaviour (release does nothing, the next press
+                // stops). The press already emitted `AssistantPressed`.
+                if held_flags.assistant_live_available.load(Ordering::Relaxed) {
+                    return vec![HotkeyAction::AssistantTapped];
                 }
             }
             vec![]
@@ -412,6 +425,48 @@ mod tests {
         assert_eq!(released, vec![HotkeyAction::AssistantPressed]);
         assert!(a.is_none());
         assert!(!flags.assistant.load(Ordering::Relaxed));
+    }
+
+    /// When live mode is unavailable, an assistant tap (short press)
+    /// emits nothing on release — the legacy toggle-latch behaviour.
+    #[test]
+    fn assistant_tap_without_live_available_is_noop_on_release() {
+        let mut d = None;
+        let mut a = None;
+        let flags = KeyHeldFlags::new();
+        let pressed = map_event(Role::Assistant, HotKeyState::Pressed, &mut d, &mut a, &flags);
+        assert_eq!(pressed, vec![HotkeyAction::AssistantPressed]);
+        // Immediate (short) release with live unavailable: nothing.
+        let released = map_event(Role::Assistant, HotKeyState::Released, &mut d, &mut a, &flags);
+        assert!(released.is_empty(), "tap release must not emit when live unavailable");
+    }
+
+    /// With live mode available, an assistant tap emits `AssistantTapped`
+    /// on release so the orchestrator can enter/leave live mode.
+    #[test]
+    fn assistant_tap_with_live_available_emits_tapped() {
+        let mut d = None;
+        let mut a = None;
+        let flags = KeyHeldFlags::new();
+        flags.assistant_live_available.store(true, Ordering::Relaxed);
+        let pressed = map_event(Role::Assistant, HotKeyState::Pressed, &mut d, &mut a, &flags);
+        assert_eq!(pressed, vec![HotkeyAction::AssistantPressed]);
+        let released = map_event(Role::Assistant, HotKeyState::Released, &mut d, &mut a, &flags);
+        assert_eq!(released, vec![HotkeyAction::AssistantTapped]);
+    }
+
+    /// Live availability must NOT change the hold (PTT) path: a long
+    /// assistant press still synthesises the stop `AssistantPressed`,
+    /// never `AssistantTapped`.
+    #[test]
+    fn assistant_long_press_with_live_available_still_synthesises_stop() {
+        let mut d = None;
+        let mut a = Some(long_ago());
+        let flags = KeyHeldFlags::new();
+        flags.assistant.store(true, Ordering::Relaxed);
+        flags.assistant_live_available.store(true, Ordering::Relaxed);
+        let released = map_event(Role::Assistant, HotKeyState::Released, &mut d, &mut a, &flags);
+        assert_eq!(released, vec![HotkeyAction::AssistantPressed]);
     }
 
     #[test]

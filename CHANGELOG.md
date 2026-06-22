@@ -5,6 +5,30 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] — 2026-06-22
+
+Hands-free realtime conversation mode, and a leaner on-demand realtime
+connection path.
+
+- **Live conversation mode for the realtime assistant.** Tapping the
+  assistant hotkey now opens a hands-free, back-and-forth spoken
+  conversation: talk, listen to the reply, and just keep talking — no
+  key press between turns, all over one session. The on-screen overlay
+  shows whose turn it is and animates to the live audio — green while
+  you speak, blue while the assistant does. The conversation ends on its
+  own after a short silence or when you say you're done (or instantly on
+  a second tap / Escape), so it never sits there running up cost. Holding
+  the hotkey still works exactly as before: hold to talk, release to hear
+  the full reply. (Talking over the assistant to interrupt it needs
+  system echo cancellation and is coming next — see the roadmap.)
+- **Removed the realtime startup prewarm.** The Gemini Live startup
+  pre-connect shipped in 0.11.0 only warmed transient DNS/TCP/TLS/
+  WebSocket caches that go stale within minutes, so it delivered no
+  reliable latency gain once the daemon had been idle for a while — the
+  common case — while leaving dead code on the realtime path. It has
+  been removed; realtime sessions connect strictly on demand at first
+  use. Push-to-talk behaviour is unchanged.
+
 ## [0.11.0] — 2026-06-18
 
 A realtime voice assistant, one-key Google Gemini, and gapless cloud speech.

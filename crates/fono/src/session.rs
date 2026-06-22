@@ -774,6 +774,10 @@ impl SessionOrchestrator {
             }
             None => {}
         }
+        // Publish whether an assistant tap should enter live mode now
+        // that the realtime slot is wired.
+        #[cfg(feature = "realtime")]
+        orch.update_assistant_live_available();
         // Populate the streaming-STT slot when this build supports
         // interactive mode. Errors are non-fatal — the live path
         // gracefully falls back to batch when the slot is `None`.
@@ -1042,6 +1046,11 @@ impl SessionOrchestrator {
         if let Ok(mut guard) = self.config.write() {
             *guard = Arc::new(cfg);
         }
+        // Re-publish the live-mode tap availability against the freshly
+        // loaded backend + config (a reload may have swapped to/from a
+        // realtime model or toggled `[assistant.realtime].live_mode`).
+        #[cfg(feature = "realtime")]
+        self.update_assistant_live_available();
         // Re-prewarm the new backends so the first post-switch
         // dictation isn't cold (latency plan L3 still applies).
         self.spawn_warmups();
@@ -1141,6 +1150,7 @@ impl SessionOrchestrator {
         cfg: &Config,
         initial_state: fono_overlay::OverlayState,
         buffer: &Arc<StdMutex<RecordingBuffer>>,
+        sample_rate: u32,
     ) -> Option<tokio::task::AbortHandle> {
         // The live-preview gate only applies to the batch dictation
         // overlay — when the user picks Transcript style, F7 takes
@@ -1157,7 +1167,6 @@ impl SessionOrchestrator {
                 o.set_state(initial_state);
                 let style = cfg.overlay.style;
                 let buf = Arc::clone(buffer);
-                let sample_rate = self.capture_cfg.target_sample_rate;
                 let task = tokio::spawn(async move {
                     match style {
                         fono_core::config::WaveformStyle::Oscilloscope => {
@@ -1947,10 +1956,6 @@ impl SessionOrchestrator {
                 }
             }));
         }
-        #[cfg(feature = "realtime")]
-        if let Some(h) = self.spawn_realtime_warmup(trace.as_ref()) {
-            warmup_handles.push(h);
-        }
         // Inject backend warmup runs on a blocking thread because the
         // probe shells out to `wtype --version` / `ydotool --version`.
         tokio::task::spawn_blocking(|| match fono_inject::warm_backend() {
@@ -2064,42 +2069,6 @@ impl SessionOrchestrator {
                     started,
                     Instant::now(),
                     json!({ "backend": assistant.name(), "ok": result.is_ok() }),
-                );
-            }
-        }))
-    }
-
-    /// Spawn the realtime (Gemini Live) prewarm task on the startup trace, if a
-    /// realtime assistant backend is selected. Opens and immediately closes the
-    /// Live WebSocket upgrade so the first F8 press doesn't pay the full
-    /// DNS+TCP+TLS+handshake latency on the hotkey path. No setup message is
-    /// sent, so no quota is consumed. Returns the join handle so the warmup
-    /// coordinator can await it before finalizing the trace file.
-    #[cfg(feature = "realtime")]
-    fn spawn_realtime_warmup(
-        &self,
-        trace: Option<&TurnTrace>,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        let realtime = self.current_realtime()?;
-        let realtime_trace = trace.cloned();
-        Some(tokio::spawn(async move {
-            let started = Instant::now();
-            match realtime.prewarm().await {
-                Ok(()) => debug!(
-                    "warmup: realtime {} ready in {}ms",
-                    realtime.name(),
-                    started.elapsed().as_millis()
-                ),
-                Err(e) => debug!("warmup: realtime {} prewarm skipped: {e:#}", realtime.name()),
-            }
-            if let Some(t) = &realtime_trace {
-                t.duration_between(
-                    "warmup.realtime",
-                    "warmup",
-                    WARMUP_LANE,
-                    started,
-                    Instant::now(),
-                    json!({ "backend": realtime.name() }),
                 );
             }
         }))
@@ -2282,6 +2251,7 @@ impl SessionOrchestrator {
             &cfg,
             fono_overlay::OverlayState::Recording { db: 0 },
             &buffer,
+            self.capture_cfg.target_sample_rate,
         );
 
         // Silence-watch: drives the Recording ↔ Pondering overlay
@@ -2628,6 +2598,7 @@ impl SessionOrchestrator {
             &cfg,
             fono_overlay::OverlayState::AssistantRecording { db: 0 },
             &buffer,
+            self.capture_cfg.target_sample_rate,
         );
         // Pondering parity with dictation: drive the silence-watch
         // state machine so the assistant overlay flips
@@ -3008,6 +2979,150 @@ impl SessionOrchestrator {
 
     fn current_assistant(&self) -> Option<Arc<dyn Assistant>> {
         self.assistant_backend.read().expect("assistant lock poisoned").clone()
+    }
+
+    /// Recompute whether an assistant **tap** should enter full-duplex
+    /// live mode and publish it to the shared hotkey flag the listener
+    /// reads on a tap-release. True only when a realtime backend is
+    /// loaded **and** `[assistant.realtime].live_mode` is enabled.
+    /// Called after `new()` / `reload()` wiring so a `fono use` that
+    /// swaps the backend takes effect without re-spawning the listener.
+    #[cfg(feature = "realtime")]
+    fn update_assistant_live_available(&self) {
+        let avail =
+            self.current_realtime().is_some() && self.current_config().assistant.realtime.live_mode;
+        self.held_flags.assistant_live_available.store(avail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Enter full-duplex live conversation mode (F8 tap on a realtime
+    /// backend). Discards the nascent push-to-talk capture the entry
+    /// press started, then opens a persistent speech-to-speech session
+    /// that lives across many turns. The pump task is detached; its
+    /// handle is held in [`AssistantSessionState::live`] for teardown.
+    /// Idempotent — a duplicate enter while a session is open is ignored.
+    #[cfg(feature = "realtime")]
+    pub async fn on_assistant_live_enter(&self) {
+        // The entry press started a one-shot PTT capture; live mode does
+        // not use it. Tear it down before opening the live session.
+        self.discard_assistant_capture().await;
+
+        let Some(realtime) = self.current_realtime() else {
+            warn!("live enter requested but no realtime backend is loaded; ignoring");
+            let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
+            return;
+        };
+        let cfg = self.current_config();
+        // Shared rolling buffer feeding the audio visualisation. The
+        // capture forwarder writes mic frames into it during the user's
+        // turn; the pump writes reply PCM during the model's turn. One
+        // style-aware ticker (reused from the dictation path) reads the
+        // tail each tick and pushes the right primitive (samples / FFT /
+        // level) so both directions animate in the user's chosen style.
+        let viz_buf = Arc::new(StdMutex::new(RecordingBuffer::default()));
+        // The mic capture runs at the provider's native input rate, so
+        // tick the visualisation at that rate (reply audio is pushed as
+        // a rolling window too; its rate differs slightly, which only
+        // skews the FFT frequency axis cosmetically — the bars still
+        // track the voice).
+        let native_rate = realtime.native_input_rate();
+        #[cfg(feature = "interactive")]
+        let waveform_task = self.spawn_waveform_level_task(
+            &cfg,
+            fono_overlay::OverlayState::AssistantRecording { db: 0 },
+            &viz_buf,
+            native_rate,
+        );
+        #[cfg(not(feature = "interactive"))]
+        let waveform_task: Option<tokio::task::AbortHandle> = None;
+        let inputs = crate::assistant::LiveSessionInputs {
+            realtime,
+            system_prompt: cfg.assistant.prompt_main.clone(),
+            language: cfg.general.language_override().map(str::to_string),
+            action_tx: self.action_tx.clone(),
+            overlay: self.overlay.read().ok().and_then(|g| g.clone()),
+            auto_stop_silence_ms: cfg.audio.auto_stop_silence_ms,
+            max_session: Duration::from_secs(cfg.assistant.realtime.max_session_secs),
+            active_window_context: None,
+            viz_buf,
+            waveform_task,
+        };
+        let cancel = Arc::new(Notify::new());
+        // Hold the state lock across spawn + store so the pump (whose
+        // first action is to lock the state for the history snapshot)
+        // cannot run — and so cannot clear the slot on an early failure —
+        // until the handle is recorded. Resolves the spawn/store race.
+        let mut s = self.assistant_session.lock().await;
+        if s.live.is_some() {
+            warn!("live session already open; ignoring duplicate enter");
+            return;
+        }
+        let task = tokio::spawn(crate::assistant::run_live_session(
+            self.assistant_session.clone(),
+            inputs,
+            cancel.clone(),
+        ));
+        s.live =
+            Some(crate::assistant::LiveSessionHandle { cancel, task, started_at: Instant::now() });
+        drop(s);
+    }
+
+    /// Leave live mode explicitly (second tap / Escape). Takes the
+    /// session handle, signals the pump to stop, and awaits its
+    /// teardown. A no-op when no session is open (the pump already
+    /// self-terminated, e.g. idle/cap/provider-close).
+    #[cfg(feature = "realtime")]
+    pub async fn on_assistant_live_exit(&self) {
+        let handle = { self.assistant_session.lock().await.live.take() };
+        if let Some(h) = handle {
+            h.cancel.notify_one();
+            let _ = h.task.await;
+            info!("live conversation mode exited");
+        } else {
+            debug!("live exit requested but no session was open");
+        }
+        self.hide_assistant_overlay();
+    }
+
+    /// Tear down any in-flight assistant push-to-talk capture (batch or
+    /// streaming) without running a turn. Used when an entry press is
+    /// reclassified as a live-mode tap.
+    #[cfg(feature = "realtime")]
+    async fn discard_assistant_capture(&self) {
+        if self.current_config().general.auto_mute_system {
+            fono_audio::mute::set_default_sink_mute(false);
+        }
+        let taken = self.assistant_capture.lock().await.take();
+        if let Some(session) = taken {
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = session.stop_and_drain();
+            })
+            .await;
+        }
+        #[cfg(feature = "interactive")]
+        {
+            let live_taken = self.assistant_live_capture.lock().await.take();
+            if let Some(mut session) = live_taken {
+                if let Some(h) = session.silence_task.take() {
+                    h.abort();
+                }
+                let _ = session.capture_stop_tx.send(());
+                if let Some(j) = session.capture_join.take() {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = j.join();
+                    })
+                    .await;
+                }
+                if let Some(j) = session.bridge_join.take() {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = j.join();
+                    })
+                    .await;
+                }
+                session.run_join.abort();
+                let _ = session.drain_join.await;
+                let _ = session.run_join.await;
+            }
+        }
     }
 
     /// The realtime (speech-to-speech) backend, when one is loaded.

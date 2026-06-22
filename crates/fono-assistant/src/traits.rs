@@ -215,6 +215,13 @@ pub enum RealtimeEvent {
     /// The model finished its turn. The consumer flushes history and
     /// waits for playback to drain.
     Done,
+    /// The model decided the conversation is over (full-duplex live mode
+    /// only) — e.g. the user said goodbye / "that's all". Signalled via a
+    /// provider tool/function call the model is instructed to invoke
+    /// (Gemini Live `toolCall` for the `end_conversation` function). The
+    /// consumer should finish the current reply, then close the live
+    /// session gracefully. Never emitted in push-to-talk mode.
+    EndConversation,
 }
 
 /// An open realtime session: a live WebSocket to a speech-to-speech
@@ -239,6 +246,26 @@ impl std::fmt::Debug for RealtimeSession {
     }
 }
 
+/// How a realtime session handles turn-taking. Chosen per session, not
+/// per backend: the same provider client serves both gestures.
+///
+/// - [`PushToTalk`](Self::PushToTalk) — F8 *hold*. The caller streams one
+///   buffered utterance, signals end-of-input, and waits for a single
+///   reply. The client commits the turn explicitly (Gemini `audioStreamEnd`),
+///   so server-side activity detection is irrelevant and the mic is closed
+///   before the reply plays. Cheapest; no echo cancellation needed.
+/// - [`FullDuplex`](Self::FullDuplex) — F8 *tap* (live mode). Continuous mic
+///   for the session lifetime; the model owns turn boundaries via server VAD
+///   and the user can interrupt by speaking. Requires echo cancellation when
+///   played over speakers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealtimeMode {
+    /// One buffered utterance → one reply, mic closed during playback.
+    PushToTalk,
+    /// Continuous full-duplex conversation with server VAD + barge-in.
+    FullDuplex,
+}
+
 /// A realtime / speech-to-speech assistant backend. Implementors open a
 /// bidirectional WebSocket where the model ingests the user's mic audio
 /// and streams reply audio back directly. Selected (over the staged
@@ -248,8 +275,13 @@ impl std::fmt::Debug for RealtimeSession {
 pub trait RealtimeAssistant: Send + Sync {
     /// Open a fresh realtime session. `ctx` supplies the system prompt,
     /// language, and rolling history used to seed the model's setup
-    /// message.
-    async fn open_session(&self, ctx: &AssistantContext) -> Result<RealtimeSession>;
+    /// message. `mode` selects push-to-talk vs full-duplex turn-taking,
+    /// which the client maps onto its own wire config.
+    async fn open_session(
+        &self,
+        ctx: &AssistantContext,
+        mode: RealtimeMode,
+    ) -> Result<RealtimeSession>;
 
     /// Backend identifier for history / logging.
     fn name(&self) -> &'static str;
@@ -257,9 +289,4 @@ pub trait RealtimeAssistant: Send + Sync {
     /// PCM sample rate (Hz) the model expects on the mic-input stream.
     /// The capture path resamples to this before forwarding.
     fn native_input_rate(&self) -> u32;
-
-    /// Optional best-effort warmup (e.g. a cheap pre-connect). Non-fatal.
-    async fn prewarm(&self) -> Result<()> {
-        Ok(())
-    }
 }

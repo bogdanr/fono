@@ -665,13 +665,17 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                         HotkeyEvent::StartRecording(_)
                         | HotkeyEvent::StartLiveDictation(_)
                         | HotkeyEvent::StartAssistant
-                        | HotkeyEvent::RestartAssistant => {
+                        | HotkeyEvent::RestartAssistant
+                        // Keep Escape grabbed for the lifetime of a live
+                        // session so the user can exit it with Escape.
+                        | HotkeyEvent::EnterAssistantLive => {
                             let _ = ctrl.send(HotkeyControl::EnableCancel);
                         }
                         HotkeyEvent::StopRecording
                         | HotkeyEvent::StopLiveDictation
                         | HotkeyEvent::Cancel
-                        | HotkeyEvent::StopAssistantPlayback => {
+                        | HotkeyEvent::StopAssistantPlayback
+                        | HotkeyEvent::ExitAssistantLive => {
                             let _ = ctrl.send(HotkeyControl::DisableCancel);
                         }
                         HotkeyEvent::StopAssistant => {
@@ -711,6 +715,10 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                         // → green, same as a fresh assistant press.
                         HotkeyEvent::RestartAssistant => t.set_state(TrayState::Assistant),
                         HotkeyEvent::StopAssistant => t.set_state(TrayState::Processing),
+                        // Live conversation mode: amber while the
+                        // session is open; back to idle on exit.
+                        HotkeyEvent::EnterAssistantLive => t.set_state(TrayState::Assistant),
+                        HotkeyEvent::ExitAssistantLive => t.set_state(TrayState::Idle),
                         HotkeyEvent::McpToolStarted(_) => t.set_state(TrayState::Assistant),
                         HotkeyEvent::McpToolCancelled | HotkeyEvent::McpToolDone => {
                             t.set_state(TrayState::Idle);
@@ -728,6 +736,8 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                             | HotkeyEvent::StopAssistant
                             | HotkeyEvent::StopAssistantPlayback
                             | HotkeyEvent::RestartAssistant
+                            | HotkeyEvent::EnterAssistantLive
+                            | HotkeyEvent::ExitAssistantLive
                     ) {
                         let _ = action_tx_ev.send(HotkeyAction::ProcessingDone);
                         if let Some(t) = tray.as_ref().as_ref() {
@@ -865,6 +875,29 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                             if let Some(t) = tray.as_ref().as_ref() {
                                 t.set_state(TrayState::Idle);
                             }
+                            let _ = action_tx_ev.send(HotkeyAction::ProcessingDone);
+                        }
+                    }
+                    // Full-duplex live conversation mode (F8 tap on a
+                    // realtime backend). Awaited inline — like
+                    // `StartAssistant` — so the persistent session handle
+                    // is recorded before the next event (e.g. the
+                    // exit-tap) is dequeued, avoiding an enter/exit race.
+                    HotkeyEvent::EnterAssistantLive => {
+                        #[cfg(feature = "realtime")]
+                        o.on_assistant_live_enter().await;
+                        #[cfg(not(feature = "realtime"))]
+                        {
+                            let _ = o;
+                            let _ = action_tx_ev.send(HotkeyAction::ProcessingDone);
+                        }
+                    }
+                    HotkeyEvent::ExitAssistantLive => {
+                        #[cfg(feature = "realtime")]
+                        o.on_assistant_live_exit().await;
+                        #[cfg(not(feature = "realtime"))]
+                        {
+                            let _ = o;
                             let _ = action_tx_ev.send(HotkeyAction::ProcessingDone);
                         }
                     }

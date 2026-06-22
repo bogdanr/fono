@@ -68,6 +68,9 @@ sudo fono install --dry-run      # print the planned actions, write nothing
 STT server that Home Assistant, Rhasspy, or other Fono clients can
 auto-discover via mDNS and route transcription through.
 
+> Prefer Docker? See [home-assistant.md](home-assistant.md) for the
+> prebuilt multi-arch Wyoming STT/TTS container.
+
 The installer seeds `/etc/fono/config.toml` (only when no config exists
 yet) with the Wyoming listener already enabled on `0.0.0.0:10300`:
 

@@ -34,6 +34,6 @@ pub use gemini_live::GeminiLive;
 pub use history::{ChatRole, ChatTurn, ConversationHistory, ToolCall};
 pub use traits::{
     Assistant, AssistantCacheTrigger, AssistantContext, AssistantPromptCacheSnapshot,
-    AssistantPromptCacheWarmup, RealtimeAssistant, RealtimeEvent, RealtimeSession, ScreenCaptureFn,
-    TokenDelta, ToolEvent,
+    AssistantPromptCacheWarmup, RealtimeAssistant, RealtimeEvent, RealtimeMode, RealtimeSession,
+    ScreenCaptureFn, TokenDelta, ToolEvent,
 };

@@ -15,6 +15,8 @@ Start here, then drop into whichever page covers what you're after.
   `config.toml`, hotkey rebinding, secrets, XDG paths.
 - [providers.md](providers.md) — STT / polish / assistant / TTS
   matrices, per-provider quirks, the wizard.
+- [home-assistant.md](home-assistant.md) — run the Docker container as
+  a Wyoming STT/TTS server and connect Home Assistant.
 - [interactive.md](interactive.md) — live (streaming) dictation: how
   the overlay paints while you speak, the tuning knobs that survived
   the 2026-05-22 simplification.

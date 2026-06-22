@@ -431,6 +431,17 @@ MiB measured); this fits with a comfortable margin.
 - Pre-warm the AEC session at AssistantThinking entry to amortise
   load latency. Trigger on observed user complaints; defer until
   Phase 4 has dogfooded.
+- **Wake-word reuse (ADR 0012).** The barge-in capture+detector task
+  (`spawn_barge_in_watch_task`, Phase 2) is the seam wake-word will
+  share: "read a source → run a detector → fire an action", with an
+  energy VAD (barge-in) and a KWS model (wake-word) as interchangeable
+  triggers. Only the *wake-while-assistant-is-speaking* sub-case reuses
+  the AEC source; idle always-on wake-word reads the default source and
+  must not depend on AEC (it is Linux/PipeWire-only, and the AEC sink
+  carries only Fono's own TTS — it cannot reject ambient TV/music).
+  When this slice lands, prefer a detector abstraction with a pluggable
+  trigger over hard-coding the VAD, so the wake-word work doesn't have
+  to re-plumb capture. See `docs/decisions/0012-wake-word-activation.md`.
 
 ## Done when
 

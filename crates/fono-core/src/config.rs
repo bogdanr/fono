@@ -754,6 +754,43 @@ pub struct Assistant {
     /// API feature). Anthropic's `web_search_20250305` tool works on
     /// the Messages API.
     pub prefer_web_search: bool,
+    /// `[assistant.realtime]` — full-duplex live-conversation-mode
+    /// knobs. These govern **only** the F8-tap live mode (continuous
+    /// open mic, server VAD, one persistent speech-to-speech session);
+    /// the F8-hold push-to-talk realtime path and the staged path use
+    /// none of them.
+    pub realtime: AssistantRealtime,
+}
+
+/// `[assistant.realtime]` — live-mode (F8-tap full-duplex) settings.
+///
+/// All fields have `#[serde(default)]` semantics via the parent
+/// `#[serde(default)]` + this struct's [`Default`], so an absent block
+/// or any absent key falls back to the baked-in defaults. Push-to-talk
+/// (F8 hold) ignores this block entirely.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AssistantRealtime {
+    /// When `true`, a **tap** on the assistant hotkey enters/leaves the
+    /// full-duplex live conversation mode (only when the configured
+    /// assistant model is a realtime / speech-to-speech model). When
+    /// `false`, a tap keeps its legacy behaviour and live mode is never
+    /// entered. Default `true` so a realtime model is conversational
+    /// out of the box; the cost controls below keep it from running
+    /// away.
+    pub live_mode: bool,
+    /// Hard backstop on a single live session's wall-clock duration,
+    /// in seconds. The session closes + notifies when reached, even if
+    /// the conversation is active, so a forgotten session cannot bill
+    /// indefinitely. Keep at/below the provider's own session ceiling.
+    /// `0` disables the cap.
+    pub max_session_secs: u64,
+}
+
+impl Default for AssistantRealtime {
+    fn default() -> Self {
+        Self { live_mode: true, max_session_secs: 300 }
+    }
 }
 
 impl Default for Assistant {
@@ -768,6 +805,7 @@ impl Default for Assistant {
             history_max_turns: 12,
             prefer_vision: true,
             prefer_web_search: false,
+            realtime: AssistantRealtime::default(),
         }
     }
 }
@@ -1532,6 +1570,31 @@ mod tests {
         assert_eq!(back.voices.get("coach").map(String::as_str), Some("male 1"));
         assert_eq!(back.voice_gender, "female");
         assert!(!back.auto_assign_voices);
+    }
+
+    #[test]
+    fn assistant_realtime_defaults_and_parse() {
+        // Baked-in defaults: live mode on, 300 s cap. (Idle close is
+        // silence-driven via `audio.auto_stop_silence_ms`, not a timer here.)
+        let d = AssistantRealtime::default();
+        assert!(d.live_mode);
+        assert_eq!(d.max_session_secs, 300);
+
+        // An [assistant] block with no realtime sub-block inherits the
+        // defaults (the parent `#[serde(default)]` fills it in).
+        let a: Assistant = toml::from_str("enabled = true\n").unwrap();
+        assert_eq!(a.realtime, AssistantRealtime::default());
+
+        // Partial override: a single key is honoured, the rest default.
+        let a: Assistant =
+            toml::from_str("enabled = true\n[realtime]\nmax_session_secs = 90\n").unwrap();
+        assert_eq!(a.realtime.max_session_secs, 90);
+        assert!(a.realtime.live_mode);
+
+        // live_mode can be disabled to keep the legacy tap behaviour.
+        let a: Assistant =
+            toml::from_str("enabled = true\n[realtime]\nlive_mode = false\n").unwrap();
+        assert!(!a.realtime.live_mode);
     }
 
     #[test]
