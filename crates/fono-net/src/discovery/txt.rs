@@ -9,7 +9,7 @@
 //! |-----------|------------------|-----------------------------------------|
 //! | `proto`   | `wyoming/1`      | protocol family + revision              |
 //! | `version` | `0.4.0`          | server software version (diagnostic)    |
-//! | `caps`    | `stt,polish`        | comma-separated capability tags         |
+//! | `caps`    | `stt,wake`       | comma-separated capability tags         |
 //! | `model`   | `whisper-small`  | primary model hint (Wyoming only)       |
 //! | `auth`    | `token` / `none` | does the server require a bearer?       |
 //! | `path`    | `/fono/v1`       | WebSocket path (Fono-native only)       |

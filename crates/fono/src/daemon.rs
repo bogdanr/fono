@@ -220,6 +220,15 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     };
 
     // ---------------------------------------------------------------
+    // Always-on wake-word listener (Phases D/E). Off unless
+    // `[wakeword].enabled`. Owns a single capture stream that is held
+    // only while the FSM is Idle and dropped during any active session
+    // (suspend/resume below), and fires the configured `HotkeyAction`
+    // into the same `action_tx` as the physical hotkey on detection.
+    // ---------------------------------------------------------------
+    let wake = crate::wake::spawn(config.as_ref(), paths, action_tx.clone());
+
+    // ---------------------------------------------------------------
     // Global hotkey listener
     //
     // Skipped entirely on headless hosts (no `DISPLAY`, no
@@ -299,7 +308,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         mdns: discovery.as_ref().and_then(|d| d.daemon.clone()),
         registry: discovery_registry.clone(),
     };
-    wyoming_ctl.reconcile(&config, orchestrator.as_ref()).await;
+    wyoming_ctl.reconcile(&config, paths, orchestrator.as_ref()).await;
 
     // ---------------------------------------------------------------
     // Background update checker — hits GitHub releases once on startup
@@ -949,6 +958,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         let cancel_ctrl_disp = cancel_ctrl.clone();
         let mcp_activity_disp = Arc::clone(&mcp_activity);
         let mcp_cancel_tx_disp = Arc::clone(&mcp_cancel_tx);
+        let wake_disp = wake.clone();
         tokio::spawn(async move {
             while let Some(action) = action_rx.recv().await {
                 // Read `live_preview` straight from the orchestrator's
@@ -963,6 +973,10 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                 let action = translate_for_live_preview(action, live_preview_enabled);
                 let new_state = fsm.lock().await.dispatch(action);
                 tracing::debug!("hotkey: {action:?} -> {new_state:?}");
+                // Suspend/resume the wake-word listener so the mic is held
+                // only in Idle: any active/processing state drops the capture
+                // stream, returning to Idle re-opens it (Phase D).
+                wake_disp.set_idle(crate::wake::should_listen(new_state));
                 if matches!(action, HotkeyAction::ProcessingDone) {
                     if let Some(t) = tray.as_ref().as_ref() {
                         t.set_state(TrayState::Idle);
@@ -1038,6 +1052,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         let local_wyoming_fullname_for_dispatch = local_wyoming_fullname(&config);
         let orchestrator_for_tray = orchestrator.clone();
         let wyoming_ctl_for_tray = wyoming_ctl.clone();
+        let wake_tray = wake.clone();
         tokio::spawn(async move {
             while let Some(ta) = tray_rx.recv().await {
                 debug!("tray action: {ta:?}");
@@ -1142,22 +1157,54 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                         .await;
                     }
                     TrayAction::SetVadEnabled(v) => {
-                        // The schema stores VAD as a string (`"silero"`,
+                        // The schema stores VAD as a string (`"energy"`,
                         // `"off"`, possibly more in the future); the tray
                         // exposes it as a boolean for menu legibility.
-                        // Translate here. `"silero"` is the only enabled
-                        // backend today; future backends will need their
-                        // own tray entry rather than bundling under VAD.
+                        // Translate here. `"energy"` is the only enabled
+                        // backend today (the RMS gate); a neural VAD is not
+                        // wired yet and would get its own tray entry rather
+                        // than bundling under this toggle.
                         apply_pref_via_tray(
                             &paths,
                             orch_for_tray.as_ref(),
                             "vad_backend",
                             move |cfg| {
                                 cfg.audio.vad_backend =
-                                    if v { "silero".into() } else { "off".into() };
+                                    if v { "energy".into() } else { "off".into() };
                             },
                         )
                         .await;
+                    }
+                    TrayAction::SetWakeWordEnabled(v) => {
+                        // Persist the toggle, then reconcile the always-on
+                        // listener live (Phase D): enabling while Idle opens
+                        // the capture stream, disabling drops it — no daemon
+                        // restart. `apply_pref_via_tray` writes to disk and
+                        // reloads the orchestrator; `wake_tray.reload()` then
+                        // re-reads `[wakeword]` from disk and reconciles.
+                        apply_pref_via_tray(
+                            &paths,
+                            orch_for_tray.as_ref(),
+                            "wakeword_enabled",
+                            move |cfg| {
+                                cfg.wakeword.enabled = v;
+                                // First enable with no phrases configured:
+                                // seed a sensible default so the toggle has
+                                // an obvious, named effect rather than
+                                // silently doing nothing. Until the clean
+                                // `hey_fono` artifact ships we default to
+                                // `hey_jarvis` → Assistant.
+                                if v && cfg.wakeword.phrases.is_empty() {
+                                    cfg.wakeword.phrases.push(fono_core::config::WakePhrase {
+                                        model: "hey_jarvis".into(),
+                                        sensitivity: 0.5,
+                                        target: fono_core::config::WakeTarget::Assistant,
+                                    });
+                                }
+                            },
+                        )
+                        .await;
+                        wake_tray.reload();
                     }
                     TrayAction::SetAutoStopSilenceMs(ms) => {
                         apply_pref_via_tray(
@@ -1275,7 +1322,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                                     warn!("tray ToggleWyomingServer: save failed: {e:#}");
                                 } else {
                                     wyoming_ctl_for_tray
-                                        .reconcile(&cfg, orchestrator_for_tray.as_ref())
+                                        .reconcile(&cfg, &paths, orchestrator_for_tray.as_ref())
                                         .await;
                                     let running = wyoming_ctl_for_tray.is_running().await;
                                     info!(
@@ -1345,10 +1392,11 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                 let mcp_speak_slot = Arc::clone(&mcp_speak_slot);
                 let mcp_cancel_tx = Arc::clone(&mcp_cancel_tx);
                 let cancel_ctrl_for_ipc = cancel_ctrl.clone();
+                let wake_for_ipc = wake.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_client(
                         stream, fsm, action_tx, orch, registry, tray_for_ipc, mcp_activity,
-                        mcp_speak_slot, mcp_cancel_tx, cancel_ctrl_for_ipc,
+                        mcp_speak_slot, mcp_cancel_tx, cancel_ctrl_for_ipc, wake_for_ipc,
                     )
                     .await
                     {
@@ -1621,6 +1669,7 @@ async fn handle_client(
     mcp_speak_slot: Arc<tokio::sync::Mutex<()>>,
     mcp_cancel_tx: Arc<tokio::sync::broadcast::Sender<()>>,
     cancel_ctrl: Option<fono_hotkey::HotkeyControlSender>,
+    wake: crate::wake::WakeHandle,
 ) -> Result<()> {
     let req: Request = read_frame(&mut stream).await?;
     // Read live-preview from the orchestrator's post-reload config
@@ -1667,7 +1716,12 @@ async fn handle_client(
             // and atomically swaps the orchestrator's STT/LLM.
             match orchestrator.as_ref() {
                 Some(o) => match o.reload().await {
-                    Ok(summary) => Response::Text(summary),
+                    Ok(summary) => {
+                        // Reconcile the wake-word listener against the freshly
+                        // reloaded `[wakeword]` config (Phase D live reload).
+                        wake.reload();
+                        Response::Text(summary)
+                    }
                     Err(e) => Response::Error(format!("reload failed: {e:#}")),
                 },
                 None => Response::Error(
@@ -2510,14 +2564,42 @@ fn preferences_snapshot_from_disk(config_path: &std::path::Path) -> fono_tray::P
         auto_mute_system: cfg.general.auto_mute_system,
         also_copy_to_clipboard: cfg.general.also_copy_to_clipboard,
         startup_autostart: cfg.general.startup_autostart,
-        // Tray exposes VAD as a boolean. `"silero"` is the only enabled
-        // backend today; treat any other non-`"off"` value as "on" so
-        // future backends still light the menu correctly.
+        // Tray exposes VAD as a boolean. `"energy"` is the only enabled
+        // backend today; any non-`"off"` value counts as "on".
         vad_enabled: !cfg.audio.vad_backend.eq_ignore_ascii_case("off"),
+        wakeword_enabled: cfg.wakeword.enabled,
+        wake_phrases: cfg
+            .wakeword
+            .phrases
+            .iter()
+            .map(|p| {
+                let action = match p.target {
+                    fono_core::config::WakeTarget::Dictation => "Dictation",
+                    fono_core::config::WakeTarget::Assistant => "Assistant",
+                };
+                format!("\u{201c}{}\u{201d} \u{2192} {action}", prettify_wake_phrase(&p.model))
+            })
+            .collect(),
         auto_stop_silence_ms: cfg.audio.auto_stop_silence_ms,
         waveform_style,
         languages: cfg.general.languages.clone(),
     }
+}
+
+/// Prettify a wake-phrase model id for display, e.g. `"hey_jarvis"` →
+/// `"Hey Jarvis"`. Splits on underscores and title-cases each word.
+fn prettify_wake_phrase(model: &str) -> String {
+    model
+        .split('_')
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first.to_uppercase().collect::<String>() + chars.as_str()
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Map a `WaveformStyle` to its index in `fono_tray::WAVEFORM_STYLES`.
@@ -2981,12 +3063,17 @@ impl WyomingControl {
     /// Reconcile the running listener (and its mDNS advert) with
     /// `config.server.wyoming.enabled`, starting or stopping both in
     /// place. Idempotent: a no-op when already in the desired state.
-    async fn reconcile(&self, config: &Config, orch: Option<&Arc<SessionOrchestrator>>) {
+    async fn reconcile(
+        &self,
+        config: &Config,
+        paths: &Paths,
+        orch: Option<&Arc<SessionOrchestrator>>,
+    ) {
         let mut rt = self.rt.lock().await;
         let want = config.server.wyoming.enabled;
         let running = rt.server.is_some();
         if want && !running {
-            let handle = spawn_wyoming_server_if_enabled(config, orch).await;
+            let handle = spawn_wyoming_server_if_enabled(config, paths, orch).await;
             let started = handle.is_some();
             rt.server = handle;
             if started {
@@ -3034,6 +3121,32 @@ fn wyoming_tts_voices(config: &Config) -> Vec<fono_net::wyoming::server::Adverti
     }
 }
 
+/// Wake-word models advertised in `info.wake[].models`, derived from the
+/// active `[wakeword].phrases`. Falls back to the default "hey fono"
+/// model when the feature is enabled but no explicit phrases are listed,
+/// so the wake service always advertises at least one model. The spoken
+/// `phrase` is a best-effort readable form of the model id.
+fn wyoming_wake_models(config: &Config) -> Vec<fono_net::wyoming::server::AdvertisedWakeModel> {
+    let phrases: Vec<String> = if config.wakeword.phrases.is_empty() {
+        vec!["hey_fono".to_string()]
+    } else {
+        config.wakeword.phrases.iter().map(|p| p.model.clone()).collect()
+    };
+    phrases
+        .into_iter()
+        .map(|model| {
+            let phrase = model.replace('_', " ");
+            fono_net::wyoming::server::AdvertisedWakeModel {
+                name: model,
+                languages: config.general.languages.clone(),
+                phrase: Some(phrase),
+                description: Some("fono local wake-word detector".to_string()),
+                version: None,
+            }
+        })
+        .collect()
+}
+
 /// Spawn the LAN Wyoming server if `[server.wyoming].enabled = true`
 /// and the orchestrator is alive. Returns `None` when the server is
 /// disabled, the orchestrator is in degraded mode, or the listener
@@ -3043,6 +3156,7 @@ fn wyoming_tts_voices(config: &Config) -> Vec<fono_net::wyoming::server::Adverti
 /// `plans/2026-04-29-2026-04-29-client-server-wyoming-fono-and-mdns-v2.md`.
 async fn spawn_wyoming_server_if_enabled(
     config: &Config,
+    paths: &Paths,
     orchestrator: Option<&Arc<SessionOrchestrator>>,
 ) -> Option<fono_net::wyoming::server::WyomingServerHandle> {
     let cfg = &config.server.wyoming;
@@ -3068,6 +3182,14 @@ async fn spawn_wyoming_server_if_enabled(
     let serve_tts = orch.tts_snapshot().is_some();
     let tts_voices = if serve_tts { wyoming_tts_voices(config) } else { Vec::new() };
     let advertised_voice_count = tts_voices.len();
+    // Wake-word SERVER direction (Phase H): expose Fono's local detector over
+    // the Wyoming `Detection` protocol when `[wakeword].wyoming` is in server
+    // mode (enabled, no client uri). Audio stays on the machine — the server
+    // *is* the detector. Opt-in: empty `wake_models` means no wake service is
+    // advertised, so STT/TTS-only servers are unaffected.
+    let serve_wake =
+        config.wakeword.wyoming.as_ref().is_some_and(fono_core::config::WakeWyoming::is_server);
+    let wake_models = if serve_wake { wyoming_wake_models(config) } else { Vec::new() };
     let server_cfg = fono_net::wyoming::server::WyomingServerConfig {
         bind: cfg.bind.clone(),
         port: cfg.port,
@@ -3085,6 +3207,7 @@ async fn spawn_wyoming_server_if_enabled(
         }],
         loopback_only,
         tts_voices,
+        wake_models,
     };
 
     let orch_for_provider = Arc::clone(orch);
@@ -3104,6 +3227,18 @@ async fn spawn_wyoming_server_if_enabled(
         }
     } else {
         info!("Wyoming server: no [tts] backend configured; serving STT only");
+    }
+    if serve_wake {
+        // Bind a wake provider that builds the *same* detector as the local
+        // listener (Phase C/D) per connection, so the LAN wake service runs
+        // on-device. fono-net's `WakeProvider` is invoked once per accepted
+        // connection (wake sessions are stateful).
+        let wake_cfg = config.wakeword.clone();
+        let wake_paths = paths.clone();
+        let wake_provider: fono_net::wyoming::server::WakeProvider =
+            Arc::new(move || crate::wake::build_detector(&wake_cfg, &wake_paths));
+        server = server.with_wake(wake_provider);
+        info!("Wyoming server: wake-word detection service enabled (audio stays local)");
     }
     match server.start().await {
         Ok(handle) => {
@@ -3149,9 +3284,10 @@ async fn spawn_discovery_if_enabled() -> Option<DiscoveryRuntime> {
     let registry = fono_net::discovery::Registry::new();
     let browser = {
         let b = fono_net::discovery::Browser::new(daemon.clone(), registry.clone());
-        match b
-            .start(&[fono_net::discovery::PeerKind::Wyoming, fono_net::discovery::PeerKind::Fono])
-        {
+        // Fono-native discovery is reserved for the future WebSocket protocol;
+        // until that server is implemented, only browse Wyoming to avoid
+        // duplicate mDNS query churn and duplicate verbose logs.
+        match b.start(&[fono_net::discovery::PeerKind::Wyoming]) {
             Ok(handle) => {
                 info!("mDNS browser started");
                 Some(handle)
@@ -3168,12 +3304,18 @@ async fn spawn_discovery_if_enabled() -> Option<DiscoveryRuntime> {
 
 /// Capability tags advertised over mDNS for the Wyoming service.
 /// `stt` is always served; `tts` is added whenever a `[tts]` backend is
-/// configured, so Home Assistant discovers this daemon as a TTS
-/// provider too.
+/// configured, and `wake` is added when the Wyoming wake **server**
+/// direction is enabled (`[wakeword].wyoming` server mode), so Home
+/// Assistant discovers this daemon as an STT / TTS / wake provider as
+/// appropriate. The wake cap is gated on the server direction only —
+/// the opt-in client direction never advertises a wake service here.
 fn wyoming_caps(config: &Config) -> Vec<String> {
     let mut caps = vec!["stt".to_string()];
     if config.tts.backend != fono_core::config::TtsBackend::None {
         caps.push("tts".to_string());
+    }
+    if config.wakeword.wyoming.as_ref().is_some_and(fono_core::config::WakeWyoming::is_server) {
+        caps.push("wake".to_string());
     }
     caps
 }
@@ -3311,6 +3453,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn prettify_wake_phrase_title_cases_underscored_ids() {
+        assert_eq!(prettify_wake_phrase("hey_jarvis"), "Hey Jarvis");
+        assert_eq!(prettify_wake_phrase("hey_fono"), "Hey Fono");
+        assert_eq!(prettify_wake_phrase("alexa"), "Alexa");
+        assert_eq!(prettify_wake_phrase("hey_mycroft"), "Hey Mycroft");
+        assert_eq!(prettify_wake_phrase(""), "");
+    }
+
+    #[test]
     fn wyoming_caps_stt_only_by_default() {
         let cfg = Config::default();
         assert_eq!(wyoming_caps(&cfg), vec!["stt".to_string()]);
@@ -3321,6 +3472,24 @@ mod tests {
         let mut cfg = Config::default();
         cfg.tts.backend = fono_core::config::TtsBackend::OpenAI;
         assert_eq!(wyoming_caps(&cfg), vec!["stt".to_string(), "tts".to_string()]);
+    }
+
+    #[test]
+    fn wyoming_caps_adds_wake_only_for_server_direction() {
+        use fono_core::config::WakeWyoming;
+        // Server direction (enabled, no uri) advertises the wake cap.
+        let mut cfg = Config::default();
+        cfg.wakeword.wyoming = Some(WakeWyoming { enabled: true, uri: None });
+        assert_eq!(wyoming_caps(&cfg), vec!["stt".to_string(), "wake".to_string()]);
+
+        // Client direction (enabled + uri) must NOT advertise a wake service.
+        cfg.wakeword.wyoming =
+            Some(WakeWyoming { enabled: true, uri: Some("tcp://hass:10400".into()) });
+        assert_eq!(wyoming_caps(&cfg), vec!["stt".to_string()]);
+
+        // Disabled advertises nothing extra.
+        cfg.wakeword.wyoming = Some(WakeWyoming { enabled: false, uri: None });
+        assert_eq!(wyoming_caps(&cfg), vec!["stt".to_string()]);
     }
 
     /// Slim build: translation never fires regardless of config.

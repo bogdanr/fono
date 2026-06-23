@@ -23,7 +23,9 @@ use fono_core::{Config, Paths, Secrets};
 use fono_tts::SentenceSplitter;
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 /// Maximum sentences queued for synthesis. When the bounded channel
@@ -37,15 +39,17 @@ const MAX_PENDING: usize = 5;
 /// utterance.
 pub const MAX_SENTENCE_CHARS: usize = 200;
 
-/// Run `fono speak --stream`.
+/// Run `fono speak stream`.
 ///
-/// Loads the TTS backend from the user's config, then:
-/// 1. Spawns a reader task that reads stdin, sanitises markdown, and
-///    feeds sentences into a bounded channel (backpressure gate).
-/// 2. In the main task, consumes sentences from the channel, synthesises
-///    each one, and enqueues the resulting PCM for playback.
-/// 3. When stdin closes (EOF), waits for in-flight audio to drain.
-pub async fn run(paths: &Paths) -> Result<()> {
+/// Loads the TTS backend from the user's config, then reads stdin,
+/// sanitises markdown, and segments it into sentences. The synthesised
+/// audio is either **played** (default) or, when `out` is set, **written
+/// to a WAV file** (a directory — or a path ending in `/` — writes one
+/// `NNN.wav` per sentence; any other path concatenates the whole input
+/// into a single WAV). `voice` overrides the voice for this run
+/// (palette label, `"auto"`, or a raw backend id); when omitted the
+/// configured default is used.
+pub async fn run(paths: &Paths, out: Option<PathBuf>, voice: Option<String>) -> Result<()> {
     let cfg = Config::load(&paths.config_file())?;
     let secrets = Secrets::load(&paths.secrets_file()).unwrap_or_default();
 
@@ -54,8 +58,27 @@ pub async fn run(paths: &Paths) -> Result<()> {
             .context("loading TTS backend")?
             .context(
                 "TTS backend is disabled — set `[tts].backend` to a real provider \
-             (e.g. `fono use tts openai`) before using `fono speak --stream`",
+             (e.g. `fono use tts openai`) before using `fono speak stream`",
             )?;
+
+    // Resolve `--voice` to a backend voice id exactly as playback would at
+    // speak time. Only when the user passed one: with no override we keep
+    // the historical behaviour of letting the backend/config pick.
+    let voice_id = voice.as_deref().and_then(|v| {
+        fono_mcp_server::voice_io::resolve_program_voice(&cfg, Some("fono-speak"), Some(v))
+    });
+
+    // Reader task: stdin → markdown sanitiser → sentence splitter → channel.
+    // Shared by both the playback and file-output paths.
+    let (tx, mut rx) = mpsc::channel::<String>(MAX_PENDING);
+    let reader = spawn_stdin_reader(tx);
+
+    // File-output mode: synthesise to WAV(s) instead of playing.
+    if let Some(out_path) = out {
+        let res = synth_to_file(tts_arc.as_ref(), voice_id.as_deref(), &out_path, &mut rx).await;
+        let _ = reader.await;
+        return res;
+    }
 
     let playback = AudioPlayback::new(None).context("opening audio playback device")?;
 
@@ -64,43 +87,6 @@ pub async fn run(paths: &Paths) -> Result<()> {
     // backends keep the synthesize + enqueue path.
     let streaming = tts_arc.supports_streaming();
     let mut sink = fono_audio::LocalPlaybackSink::new(playback.clone());
-
-    // Bounded channel: when full the reader task stalls naturally.
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(MAX_PENDING);
-
-    // Reader task: stdin → markdown sanitiser → sentence splitter → channel.
-    let reader = tokio::spawn(async move {
-        let mut reader = BufReader::new(tokio::io::stdin());
-        let mut splitter = SentenceSplitter::new();
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let n = match reader.read_line(&mut line).await {
-                Ok(n) => n,
-                Err(e) => {
-                    warn!(target: "fono::speak_stream", error = %e, "stdin read error");
-                    break;
-                }
-            };
-            if n == 0 {
-                break; // EOF
-            }
-            let sanitised = sanitise_markdown(&line);
-            for sentence in splitter.push(&sanitised) {
-                for chunk in hard_cap_sentence(&sentence, MAX_SENTENCE_CHARS) {
-                    if tx.send(chunk).await.is_err() {
-                        return; // synthesis side dropped — exit cleanly
-                    }
-                }
-            }
-        }
-        // Flush the splitter at EOF — emit any trailing partial sentence.
-        if let Some(tail) = splitter.flush() {
-            for chunk in hard_cap_sentence(&tail, MAX_SENTENCE_CHARS) {
-                let _ = tx.send(chunk).await;
-            }
-        }
-    });
 
     // Main task: channel → synthesise → enqueue for playback.
     while let Some(sentence) = rx.recv().await {
@@ -116,7 +102,7 @@ pub async fn run(paths: &Paths) -> Result<()> {
             match fono_tts::stream_utterance(
                 tts_arc.as_ref(),
                 &sentence,
-                None,
+                voice_id.as_deref(),
                 None,
                 &mut sink,
                 || {},
@@ -129,7 +115,7 @@ pub async fn run(paths: &Paths) -> Result<()> {
                 }
             }
         } else {
-            match tts_arc.synthesize(&sentence, None, None).await {
+            match tts_arc.synthesize(&sentence, voice_id.as_deref(), None).await {
                 Ok(audio) if !audio.pcm.is_empty() => {
                     if let Err(e) = playback.enqueue(audio.pcm, audio.sample_rate) {
                         warn!(target: "fono::speak_stream", error = %e, "playback enqueue failed");
@@ -153,6 +139,130 @@ pub async fn run(paths: &Paths) -> Result<()> {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Ok(())
+}
+
+/// Spawn the stdin reader: stdin → markdown sanitiser → sentence splitter
+/// → bounded channel. The bounded channel applies backpressure; when full
+/// the reader stalls until the consumer drains a slot.
+fn spawn_stdin_reader(tx: mpsc::Sender<String>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(tokio::io::stdin());
+        let mut splitter = SentenceSplitter::new();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = match reader.read_line(&mut line).await {
+                Ok(n) => n,
+                Err(e) => {
+                    warn!(target: "fono::speak_stream", error = %e, "stdin read error");
+                    break;
+                }
+            };
+            if n == 0 {
+                break; // EOF
+            }
+            let sanitised = sanitise_markdown(&line);
+            for sentence in splitter.push(&sanitised) {
+                for chunk in hard_cap_sentence(&sentence, MAX_SENTENCE_CHARS) {
+                    if tx.send(chunk).await.is_err() {
+                        return; // consumer dropped — exit cleanly
+                    }
+                }
+            }
+        }
+        // Flush the splitter at EOF — emit any trailing partial sentence.
+        if let Some(tail) = splitter.flush() {
+            for chunk in hard_cap_sentence(&tail, MAX_SENTENCE_CHARS) {
+                let _ = tx.send(chunk).await;
+            }
+        }
+    })
+}
+
+/// Whether `out` should be treated as a directory (one WAV per sentence).
+/// True when it is an existing directory or the path ends in a path
+/// separator (so callers can force per-sentence output even before the
+/// directory exists).
+fn wants_dir_output(out: &Path) -> bool {
+    if out.is_dir() {
+        return true;
+    }
+    let s = out.to_string_lossy();
+    s.ends_with('/') || s.ends_with(std::path::MAIN_SEPARATOR)
+}
+
+/// Consume sentences from `rx`, synthesise each through `tts`, and write
+/// the audio to `out` as 16-bit mono WAV(s).
+///
+/// Directory mode writes one `NNN.wav` per sentence; single-file mode
+/// concatenates every sentence into one WAV. Uses the batch
+/// [`TextToSpeech::synthesize`] path (full PCM per utterance) regardless
+/// of whether the backend supports streaming.
+async fn synth_to_file(
+    tts: &dyn fono_tts::TextToSpeech,
+    voice: Option<&str>,
+    out: &Path,
+    rx: &mut mpsc::Receiver<String>,
+) -> Result<()> {
+    let dir_mode = wants_dir_output(out);
+    if dir_mode {
+        std::fs::create_dir_all(out)
+            .with_context(|| format!("creating output directory {}", out.display()))?;
+    } else if let Some(parent) = out.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent directory {}", parent.display()))?;
+        }
+    }
+
+    let mut accumulated: Vec<f32> = Vec::new();
+    let mut sample_rate: u32 = tts.native_sample_rate();
+    let mut idx = 0usize;
+    let mut wrote = 0usize;
+
+    while let Some(sentence) = rx.recv().await {
+        if sentence.trim().is_empty() {
+            continue;
+        }
+        debug!(
+            target: "fono::speak_stream",
+            sentence = &sentence[..sentence.len().min(60)],
+            "synthesising to file"
+        );
+        let audio = tts
+            .synthesize(&sentence, voice, None)
+            .await
+            .with_context(|| format!("synthesising {sentence:?}"))?;
+        if audio.pcm.is_empty() {
+            continue; // silent / empty result — skip
+        }
+        if dir_mode {
+            let path = out.join(format!("{idx:03}.wav"));
+            let bytes = fono_stt::groq::encode_wav(&audio.pcm, audio.sample_rate);
+            std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))?;
+            println!("wrote {}", path.display());
+            wrote += 1;
+            idx += 1;
+        } else {
+            sample_rate = audio.sample_rate;
+            accumulated.extend_from_slice(&audio.pcm);
+        }
+    }
+
+    if dir_mode {
+        if wrote == 0 {
+            anyhow::bail!("no audio synthesised (empty input?)");
+        }
+        println!("wrote {wrote} clip(s) to {}", out.display());
+    } else {
+        if accumulated.is_empty() {
+            anyhow::bail!("no audio synthesised (empty input?)");
+        }
+        let bytes = fono_stt::groq::encode_wav(&accumulated, sample_rate);
+        std::fs::write(out, bytes).with_context(|| format!("writing {}", out.display()))?;
+        println!("wrote {} ({} samples @ {sample_rate} Hz)", out.display(), accumulated.len());
     }
     Ok(())
 }
@@ -409,6 +519,21 @@ mod tests {
         let s = "x".repeat(200);
         let got = hard_cap_sentence(&s, 200);
         assert_eq!(got.len(), 1);
+    }
+
+    // ── File-output mode detection ──────────────────────────────────
+
+    #[test]
+    fn trailing_slash_means_dir_output() {
+        assert!(wants_dir_output(Path::new("clips/")));
+        assert!(wants_dir_output(Path::new("/tmp/out/")));
+    }
+
+    #[test]
+    fn plain_path_means_single_file() {
+        // A non-existent plain path (no trailing separator) is single-file.
+        assert!(!wants_dir_output(Path::new("house.wav")));
+        assert!(!wants_dir_output(Path::new("/tmp/some/house.wav")));
     }
 
     // ── Backpressure semantics ──────────────────────────────────────

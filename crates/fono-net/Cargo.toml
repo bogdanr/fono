@@ -31,6 +31,13 @@ discovery = ["dep:mdns-sd"]
 [dependencies]
 fono-core = { path = "../fono-core" }
 fono-net-codec = { path = "../fono-net-codec" }
+# Wake-word detector trait (`WakeWord`) driven by the Wyoming wake
+# *server* endpoint (Phase H). Default features only — the `WakeWord`
+# trait + energy stub are light; the heavy `wakeword-onnx` (`ort`) edge
+# is NOT pulled here. fono-audio is already in the binary's dependency
+# graph (via `fono`), so this edge is net-zero on shipped binary size
+# (AGENTS size rule).
+fono-audio = { path = "../fono-audio", default-features = false }
 fono-stt = { path = "../fono-stt", default-features = false }
 # TTS trait only — the Wyoming TTS *server* endpoint drives any
 # `Arc<dyn TextToSpeech>` (local engine, cloud, or a Wyoming-client

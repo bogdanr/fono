@@ -1,0 +1,9 @@
+# Wake-word training scratch + artifacts — never committed (see README).
+# The binary never ships these bytes; they are hosted + SHA-pinned separately.
+/work/
+/out/
+# Operator-supplied frozen Apache graphs (you place these; not downloaded).
+/graphs/
+# Auto-downloaded negative corpus (testing only) + any positives staged here.
+/negatives/
+/positives/

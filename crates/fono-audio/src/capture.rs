@@ -39,11 +39,27 @@ pub const SOFT_CAP: Duration = Duration::from_secs(2 * 60);
 pub struct CaptureConfig {
     /// Preferred sample rate (will resample if device doesn't support it).
     pub target_sample_rate: u32,
+    /// Optional named capture source to open instead of the system default.
+    ///
+    /// `None` (the default) reads the **default** source — this is the only
+    /// value the idle always-on paths ever use, which keeps capture
+    /// platform-agnostic and free of any AEC dependency (ADR 0012:45-52).
+    ///
+    /// `Some(name)` opens a specific PulseAudio/PipeWire source by name. The
+    /// sole intended caller is the wake-word detector's *wake-while-speaking*
+    /// sub-case, which may point at the per-utterance echo-cancel source
+    /// (`fono_aec_source_<pid>`) while Fono's TTS is playing and switch back
+    /// to `None` when it disappears (ADR 0012:53-68). No code in the tree
+    /// creates that source yet, so this field is an inert seam today. Honoured
+    /// only by the Linux process backend (`parec` `--device` / `pw-cat`
+    /// `--target`); the cpal backend always uses the default input device and
+    /// logs a warning if a source is requested.
+    pub source: Option<String>,
 }
 
 impl Default for CaptureConfig {
     fn default() -> Self {
-        Self { target_sample_rate: TARGET_SAMPLE_RATE }
+        Self { target_sample_rate: TARGET_SAMPLE_RATE, source: None }
     }
 }
 
@@ -185,7 +201,7 @@ impl AudioCapture {
     where
         F: FnMut(&[f32]) + Send + 'static,
     {
-        start_process_capture(self.cfg.target_sample_rate, forward)
+        start_process_capture(self.cfg.target_sample_rate, self.cfg.source.as_deref(), forward)
     }
 
     #[cfg(feature = "cpal-backend")]
@@ -193,6 +209,11 @@ impl AudioCapture {
     where
         F: FnMut(&[f32]) + Send + 'static,
     {
+        // cpal only ever opens the default input device; a named source
+        // (the wake-while-speaking AEC seam) is not representable here.
+        if self.cfg.source.is_some() {
+            warn!("capture(cpal): named source ignored; cpal uses the default input device");
+        }
         start_cpal_capture(self.cfg.target_sample_rate, forward)
     }
 
@@ -225,11 +246,15 @@ impl Drop for ProcessCapture {
 }
 
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
-fn start_process_capture<F>(target_rate: u32, mut forward: F) -> Result<ProcessCapture>
+fn start_process_capture<F>(
+    target_rate: u32,
+    source: Option<&str>,
+    mut forward: F,
+) -> Result<ProcessCapture>
 where
     F: FnMut(&[f32]) + Send + 'static,
 {
-    let (mut child, tool) = spawn_capture_tool(target_rate)?;
+    let (mut child, tool) = spawn_capture_tool(target_rate, source)?;
     trace_capture_instant("capture.open", serde_json::json!({ "tool": tool, "rate": target_rate }));
     let mut stdout = child
         .stdout
@@ -290,12 +315,12 @@ where
 /// Returns the spawned child plus a short tool name used in log/error
 /// messages.
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
-fn spawn_capture_tool(target_rate: u32) -> Result<(Child, &'static str)> {
-    match spawn_pw_cat(target_rate) {
+fn spawn_capture_tool(target_rate: u32, source: Option<&str>) -> Result<(Child, &'static str)> {
+    match spawn_pw_cat(target_rate, source) {
         Ok(c) => Ok((c, "pw-cat")),
         Err(pw_err) => {
             debug!("capture: pw-cat unavailable ({pw_err:#}); falling back to parec");
-            match spawn_parec(target_rate) {
+            match spawn_parec(target_rate, source) {
                 Ok(c) => Ok((c, "parec")),
                 Err(parec_err) => Err(anyhow::anyhow!(
                     "audio capture failed to start: no usable capture tool found. \
@@ -310,7 +335,7 @@ fn spawn_capture_tool(target_rate: u32) -> Result<(Child, &'static str)> {
 }
 
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
-fn spawn_parec(target_rate: u32) -> Result<Child> {
+fn spawn_parec(target_rate: u32, source: Option<&str>) -> Result<Child> {
     debug!("capture: spawning parec raw s16le mono at {target_rate} Hz (stdbuf -o0)");
     // `stdbuf -o0` defeats glibc's default 8 KB block-buffering on
     // pipe stdouts so PCM bytes reach the reader thread as soon as
@@ -337,6 +362,10 @@ fn spawn_parec(target_rate: u32) -> Result<Child> {
             // range.
             "--latency-msec=20",
         ])
+        // Phase I / ADR 0012: a named source is only ever supplied for the
+        // wake-while-speaking AEC sub-case (`fono_aec_source_<pid>`). Idle
+        // capture leaves this `None`, so parec reads the default source.
+        .args(source.map(|s| format!("--device={s}")).as_deref())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -369,14 +398,14 @@ fn spawn_parec(target_rate: u32) -> Result<Child> {
 /// `pw_cat_uses_stdbuf` regression test and the v0.9.x heatmap
 /// regression notes.
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
-fn spawn_pw_cat(target_rate: u32) -> Result<Child> {
+fn spawn_pw_cat(target_rate: u32, source: Option<&str>) -> Result<Child> {
     let rate_arg = format!("--rate={target_rate}");
-    let args = pw_cat_args(&rate_arg);
+    let args = pw_cat_args(&rate_arg, source);
     debug!("capture: spawning pw-cat raw s16 mono at {target_rate} Hz (stdbuf -o0)");
     Command::new("stdbuf")
         .arg("-o0")
         .arg("pw-cat")
-        .args(args)
+        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -385,27 +414,36 @@ fn spawn_pw_cat(target_rate: u32) -> Result<Child> {
 }
 
 /// Argument vector passed to `pw-cat --record`. Extracted so the
-/// regression test can assert the presence of `--raw` without having
-/// to spawn a real audio stack. `rate_arg` is the formatted
-/// `--rate=<N>` string supplied by the caller (the borrow keeps the
-/// returned slice tied to the caller's lifetime).
+/// regression test can assert the presence of `--raw` (and, when a
+/// named source is requested, `--target`) without having to spawn a
+/// real audio stack. `rate_arg` is the formatted `--rate=<N>` string
+/// supplied by the caller; `source` is the optional named capture
+/// source (see [`CaptureConfig::source`]) \u2014 `None` for the default.
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
-fn pw_cat_args(rate_arg: &str) -> [&str; 7] {
-    [
-        "--record",
+fn pw_cat_args(rate_arg: &str, source: Option<&str>) -> Vec<String> {
+    let mut args = vec![
+        "--record".to_string(),
         // `--raw` forces bare PCM on stdout. Without it pw-cat wraps
         // the stream in a container and Fono mis-reads the framing
         // bytes as samples — see the doc comment on `spawn_pw_cat`.
-        "--raw",
-        "--format=s16",
-        "--channels=1",
-        rate_arg,
+        "--raw".to_string(),
+        "--format=s16".to_string(),
+        "--channels=1".to_string(),
+        rate_arg.to_string(),
         // 20 ms latency — matches the parec configuration so the
         // waveform overlay and VAD timing behave identically
         // regardless of which backend ends up serving capture.
-        "--latency=20ms",
-        "-",
-    ]
+        "--latency=20ms".to_string(),
+    ];
+    // Phase I / ADR 0012: the optional named source (the wake-while-speaking
+    // AEC seam, `fono_aec_source_<pid>`) is inserted *before* the trailing
+    // `-` output filename so pw-cat parses it as a `--target` option. Idle
+    // capture passes `None`, leaving pw-cat on the default source.
+    if let Some(src) = source {
+        args.push(format!("--target={src}"));
+    }
+    args.push("-".to_string());
+    args
 }
 
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
@@ -580,9 +618,9 @@ mod tests {
         let rate = TARGET_SAMPLE_RATE;
         let rate_arg = format!("--rate={rate}");
         let pw_cmd = {
-            let args = pw_cat_args(&rate_arg);
+            let args = pw_cat_args(&rate_arg, None);
             let mut c = Command::new("stdbuf");
-            c.arg("-o0").arg("pw-cat").args(args);
+            c.arg("-o0").arg("pw-cat").args(&args);
             c
         };
         assert_eq!(pw_cmd.get_program(), "stdbuf");
@@ -619,16 +657,52 @@ mod tests {
     #[test]
     fn pw_cat_args_include_raw_flag() {
         let rate = format!("--rate={TARGET_SAMPLE_RATE}");
-        let args = pw_cat_args(&rate);
-        assert!(args.contains(&"--record"), "pw-cat must run in record mode: {args:?}");
+        let args = pw_cat_args(&rate, None);
+        let has = |needle: &str| args.iter().any(|a| a == needle);
+        assert!(has("--record"), "pw-cat must run in record mode: {args:?}");
         assert!(
-            args.contains(&"--raw"),
+            has("--raw"),
             "pw-cat must be invoked with --raw to emit bare s16le PCM on stdout; \
              without it the output is a container and Fono records noise: {args:?}"
         );
-        assert!(args.contains(&"--format=s16"), "pw-cat must request s16 format: {args:?}");
-        assert!(args.contains(&"--channels=1"), "pw-cat must request mono: {args:?}");
-        assert!(args.contains(&rate.as_str()), "pw-cat must carry rate arg {rate:?}: {args:?}");
+        assert!(has("--format=s16"), "pw-cat must request s16 format: {args:?}");
+        assert!(has("--channels=1"), "pw-cat must request mono: {args:?}");
+        assert!(has(&rate), "pw-cat must carry rate arg {rate:?}: {args:?}");
+    }
+
+    /// Phase I / ADR 0012: the default (idle) capture path passes no named
+    /// source, so neither `--device` (parec) nor `--target` (pw-cat) is
+    /// emitted — capture reads the system default source with no AEC. The
+    /// optional named source is the inert wake-while-speaking seam.
+    #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+    #[test]
+    fn default_capture_passes_no_named_source() {
+        let rate = format!("--rate={TARGET_SAMPLE_RATE}");
+        let args = pw_cat_args(&rate, None);
+        assert!(
+            !args.iter().any(|a| a.starts_with("--target")),
+            "idle/default capture must not target a named source: {args:?}"
+        );
+        // The trailing positional output filename must still be `-` (stdout).
+        assert_eq!(args.last().map(String::as_str), Some("-"));
+    }
+
+    /// Phase I / ADR 0012: when a named source *is* requested (the
+    /// wake-while-speaking AEC sub-case pointing at `fono_aec_source_<pid>`),
+    /// pw-cat must carry `--target=<source>` and it must precede the trailing
+    /// `-` output filename so it parses as an option, not the file.
+    #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
+    #[test]
+    fn named_source_emits_target_before_output() {
+        let rate = format!("--rate={TARGET_SAMPLE_RATE}");
+        let args = pw_cat_args(&rate, Some("fono_aec_source_4242"));
+        let target_pos = args.iter().position(|a| a == "--target=fono_aec_source_4242");
+        let dash_pos = args.iter().position(|a| a == "-");
+        assert!(target_pos.is_some(), "pw-cat must carry the --target arg: {args:?}");
+        assert!(
+            target_pos < dash_pos,
+            "--target must precede the trailing `-` output filename: {args:?}"
+        );
     }
 
     #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]

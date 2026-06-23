@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Voice-activity detection trait + backends.
 //!
-//! The `Silero` backend is scaffolded for ONNX wiring (via `ort`) in a
-//! follow-up patch — the trait and a trivial energy-threshold fallback
-//! (`WebRtcVadStub`) let the orchestrator compile today.
+//! Today the only backend is the trivial energy-threshold
+//! [`WebRtcVadStub`]; a neural VAD (e.g. Silero on `ort`) is a planned
+//! upgrade but is deliberately not wired yet.
 
 use anyhow::Result;
 
@@ -19,8 +19,8 @@ pub trait Vad: Send {
     fn classify(&mut self, frame: &[f32]) -> Result<VadDecision>;
 }
 
-/// Energy-threshold "VAD" used as the `webrtc` / `none` fallback when the
-/// Silero ONNX model isn't available. Far less accurate than Silero but
+/// Energy-threshold "VAD" — the `"energy"` backend that actually ships.
+/// Far less accurate than a neural VAD would be, but dependency-free and
 /// keeps the pipeline functional. Threshold tuned for typical mic input.
 pub struct WebRtcVadStub {
     pub threshold: f32,
@@ -36,15 +36,6 @@ impl Vad for WebRtcVadStub {
     fn classify(&mut self, frame: &[f32]) -> Result<VadDecision> {
         let energy = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len().max(1) as f32).sqrt();
         Ok(if energy >= self.threshold { VadDecision::Speech } else { VadDecision::Silence })
-    }
-}
-
-/// Placeholder for the Silero-ONNX backend. Returns `Silence` until wired.
-pub struct SileroVad;
-
-impl Vad for SileroVad {
-    fn classify(&mut self, _frame: &[f32]) -> Result<VadDecision> {
-        Ok(VadDecision::Silence)
     }
 }
 

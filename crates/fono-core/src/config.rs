@@ -25,6 +25,13 @@ pub struct Config {
     #[serde(default)]
     pub audio: Audio,
 
+    /// Wake-word activation ("hey fono, …"). Off by default; when enabled
+    /// the daemon runs an always-on detector that fires the configured
+    /// `HotkeyAction`. `#[serde(default)]` keeps existing configs loading
+    /// unchanged. Phase F of the wake-word plan.
+    #[serde(default)]
+    pub wakeword: WakeWord,
+
     #[serde(default)]
     pub stt: Stt,
 
@@ -87,6 +94,7 @@ impl Default for Config {
             general: General::default(),
             hotkeys: Hotkeys::default(),
             audio: Audio::default(),
+            wakeword: WakeWord::default(),
             stt: Stt::default(),
             tts: Tts::default(),
             polish: Polish::default(),
@@ -221,6 +229,9 @@ impl Default for Hotkeys {
 #[serde(default)]
 pub struct Audio {
     pub sample_rate: u32,
+    /// Voice-activity-detection backend. Accepted values: `"energy"`
+    /// (the RMS energy gate that ships today) and `"off"` (disabled).
+    /// A neural VAD is not wired yet.
     pub vad_backend: String,
     /// Trim leading/trailing silence before passing audio to STT.
     /// Latency plan L11/L12 — whisper compute scales linearly with
@@ -254,10 +265,137 @@ impl Default for Audio {
     fn default() -> Self {
         Self {
             sample_rate: 16000,
-            vad_backend: "silero".into(),
+            vad_backend: "energy".into(),
             trim_silence: true,
             auto_stop_silence_ms: 3_000,
         }
+    }
+}
+
+/// Always-on wake-word activation ("hey fono, …"). Disabled by default;
+/// when enabled the daemon runs the `fono-audio` `WakeWord` detector over the
+/// idle mic and synthesizes the configured `HotkeyAction` on a confirmed
+/// detection. Phase F of `plans/2026-06-23-wake-word-openwakeword-v2.md` —
+/// this is the config surface only; the listener lifecycle is Phase D.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WakeWord {
+    /// Master switch. `false` (default) means no capture stream is opened and
+    /// behaviour is identical to today.
+    pub enabled: bool,
+    /// Active wake phrases. Each maps a loaded classifier to a sensitivity and
+    /// a trigger target; multiple phrases share the one embedding backbone.
+    pub phrases: Vec<WakePhrase>,
+    /// Post-fire refractory window in milliseconds. After a confirmed
+    /// detection the listener ignores further fires for this long so one
+    /// utterance can't double-trigger and the suspend-on-session transition
+    /// (Phase D) races cleanly with the new session. Phase E.
+    pub refractory_ms: u64,
+    /// Optional Wyoming wake-word integration. Config shape only; behaviour is
+    /// Phase H and not implemented here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wyoming: Option<WakeWyoming>,
+}
+
+impl Default for WakeWord {
+    fn default() -> Self {
+        Self { enabled: false, phrases: Vec::new(), refractory_ms: 800, wyoming: None }
+    }
+}
+
+/// One active wake phrase / model entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WakePhrase {
+    /// Model / phrase id (e.g. `"hey_fono"`), keying the loaded classifier.
+    pub model: String,
+    /// Per-phrase score threshold (0..=1). Higher = fewer false accepts.
+    pub sensitivity: f32,
+    /// Which `HotkeyAction` this phrase synthesizes on detection.
+    pub target: WakeTarget,
+}
+
+impl Default for WakePhrase {
+    fn default() -> Self {
+        Self { model: "hey_fono".into(), sensitivity: 0.5, target: WakeTarget::default() }
+    }
+}
+
+/// Trigger target a wake phrase maps to. Mirrors the two `HotkeyAction`
+/// activation variants (dictation vs assistant).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WakeTarget {
+    /// Start dictation (the `TogglePressed` action). Default.
+    #[default]
+    Dictation,
+    /// Start the assistant (the `AssistantPressed` action).
+    Assistant,
+}
+
+/// Wyoming wake-word integration (Phase H of
+/// `plans/2026-06-23-wake-word-openwakeword-v2.md`). Two directions, one
+/// block:
+///
+/// - **Server (recommended, privacy-preserving):** `enabled = true` with
+///   **no** `uri`. Fono exposes its *local* detector over the Wyoming
+///   `Detection` protocol on the existing `[server.wyoming]` listener, so
+///   Home Assistant and other Wyoming consumers can use Fono as a
+///   drop-in wake service. Audio **stays on the machine** — Fono *is* the
+///   detector. This rides the `[server.wyoming]` listener, so that block
+///   must also be enabled for the wake service to be reachable.
+/// - **Client (opt-in only, NOT default):** `enabled = true` with a `uri`
+///   pointing at an external `wyoming-openwakeword` service. Fono's own
+///   activation is delegated to that box.
+///
+///   ⚠️ **PRIVACY WARNING:** the client direction **STREAMS IDLE MIC
+///   AUDIO OVER THE LAN** to the external service and therefore **BREAKS
+///   the "audio never leaves the machine while idle" guarantee**. It is
+///   never a default; it must be explicitly opted into, and `fono doctor`
+///   surfaces a prominent warning when it is active (see
+///   [`WakeWyoming::CLIENT_PRIVACY_WARNING`]).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WakeWyoming {
+    /// Enable Wyoming wake integration. `false` by default. With no `uri`
+    /// this selects the recommended **server** direction (Fono exposes its
+    /// local detector, audio stays local); with a `uri` it selects the
+    /// opt-in **client** direction (Fono streams idle mic audio to an
+    /// external service — see [`Self::CLIENT_PRIVACY_WARNING`]).
+    pub enabled: bool,
+    /// Optional external `wyoming-openwakeword` client URI (opt-in client
+    /// direction). `None` keeps detection fully on-device (server
+    /// direction). Setting this is what flips Fono into the
+    /// idle-audio-leaves-the-machine client mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+}
+
+impl WakeWyoming {
+    /// The loud, explicit privacy warning surfaced anywhere the opt-in
+    /// **client** direction is enabled (config comments, daemon logs, and
+    /// the Phase J `fono doctor` hook). Stated once here so every surface
+    /// shows the same wording.
+    pub const CLIENT_PRIVACY_WARNING: &'static str =
+        "Wyoming wake CLIENT mode is enabled: Fono is STREAMING IDLE MIC AUDIO OVER THE LAN \
+         to an external wyoming-openwakeword service. This BREAKS the \
+         \"audio never leaves the machine while idle\" guarantee. Use the SERVER direction \
+         (no uri) to keep detection on-device.";
+
+    /// `true` when configured as the opt-in **client** direction: enabled
+    /// with a non-empty external service `uri`. This is the
+    /// privacy-breaking mode (idle mic audio leaves the machine).
+    #[must_use]
+    pub fn is_client(&self) -> bool {
+        self.enabled && self.uri.as_deref().is_some_and(|u| !u.trim().is_empty())
+    }
+
+    /// `true` when configured as the recommended **server** direction:
+    /// enabled with no external `uri`. Fono exposes its local detector;
+    /// audio stays on the machine.
+    #[must_use]
+    pub fn is_server(&self) -> bool {
+        self.enabled && !self.is_client()
     }
 }
 
@@ -1570,6 +1708,88 @@ mod tests {
         assert_eq!(back.voices.get("coach").map(String::as_str), Some("male 1"));
         assert_eq!(back.voice_gender, "female");
         assert!(!back.auto_assign_voices);
+    }
+
+    #[test]
+    fn wakeword_absent_table_loads_disabled() {
+        // A whole config with no [wakeword] table must load with the feature
+        // off and the safe defaults — existing configs are unchanged.
+        let cfg: Config = toml::from_str("version = 1\n").unwrap();
+        assert!(!cfg.wakeword.enabled, "missing [wakeword] ⇒ disabled");
+        assert!(cfg.wakeword.phrases.is_empty());
+        assert!(cfg.wakeword.wyoming.is_none());
+    }
+
+    #[test]
+    fn wakeword_populated_roundtrips() {
+        let mut w = WakeWord { enabled: true, ..WakeWord::default() };
+        w.phrases.push(WakePhrase {
+            model: "hey_fono".into(),
+            sensitivity: 0.6,
+            target: WakeTarget::Dictation,
+        });
+        w.phrases.push(WakePhrase {
+            model: "hey_jarvis".into(),
+            sensitivity: 0.7,
+            target: WakeTarget::Assistant,
+        });
+        w.wyoming = Some(WakeWyoming { enabled: true, uri: Some("tcp://hass:10400".into()) });
+
+        let toml = toml::to_string(&w).unwrap();
+        let back: WakeWord = toml::from_str(&toml).unwrap();
+        assert!(back.enabled);
+        assert_eq!(back.phrases.len(), 2);
+        assert_eq!(back.phrases[0].model, "hey_fono");
+        assert_eq!(back.phrases[0].target, WakeTarget::Dictation);
+        assert_eq!(back.phrases[1].target, WakeTarget::Assistant);
+        assert!((back.phrases[1].sensitivity - 0.7).abs() < f32::EPSILON);
+        let wy = back.wyoming.expect("wyoming sub-block round-trips");
+        assert!(wy.enabled);
+        assert_eq!(wy.uri.as_deref(), Some("tcp://hass:10400"));
+
+        // WakeTarget serialises lowercase for legible TOML.
+        assert!(toml.contains("dictation"), "target should be lowercase: {toml}");
+        assert!(toml.contains("assistant"), "target should be lowercase: {toml}");
+    }
+
+    #[test]
+    fn wakeword_wyoming_client_path_is_default_off() {
+        // The opt-in, privacy-breaking CLIENT direction must never be on by
+        // default. A fresh config has no wyoming sub-block at all; a default
+        // sub-block is neither client nor server.
+        let cfg = Config::default();
+        assert!(cfg.wakeword.wyoming.is_none(), "no wyoming wake block by default");
+
+        let wy = WakeWyoming::default();
+        assert!(!wy.enabled, "wyoming wake disabled by default");
+        assert!(!wy.is_client(), "client mode off by default");
+        assert!(!wy.is_server(), "server mode off by default");
+    }
+
+    #[test]
+    fn wakeword_wyoming_direction_classification() {
+        // Server direction: enabled, no uri (audio stays local).
+        let server = WakeWyoming { enabled: true, uri: None };
+        assert!(server.is_server());
+        assert!(!server.is_client());
+
+        // An empty / whitespace uri is treated as "no uri" => still server.
+        let blank = WakeWyoming { enabled: true, uri: Some("  ".into()) };
+        assert!(blank.is_server());
+        assert!(!blank.is_client());
+
+        // Client direction: enabled + a real external uri (idle audio leaves).
+        let client = WakeWyoming { enabled: true, uri: Some("tcp://hass:10400".into()) };
+        assert!(client.is_client());
+        assert!(!client.is_server());
+
+        // Disabled is neither, even with a uri set.
+        let off = WakeWyoming { enabled: false, uri: Some("tcp://hass:10400".into()) };
+        assert!(!off.is_client());
+        assert!(!off.is_server());
+
+        // The privacy warning is loud and on-point.
+        assert!(WakeWyoming::CLIENT_PRIVACY_WARNING.contains("STREAMING IDLE MIC AUDIO"));
     }
 
     #[test]

@@ -48,22 +48,37 @@ fi
 # library, not the .xz). When the hosted libs are rebuilt (e.g. an ABI or
 # link-flag change such as the static-libstdc++ fix), re-pin every row from the
 # updated sha files: curl "$BASE_URL/$RELEASE_TAG/sha-<triple>.txt".
+#
+# WAKE-WORD REBUILD DONE (2026-06-24): the union ops.config
+# (calibration/voice-models/ort/ops.config) includes the openWakeWord ops for
+# the REAL upstream dscripka classifiers (hey_jarvis / alexa / hey_mycroft
+# v0.1) -- Gemm(13), LayerNormalization, GreaterOrEqual, Clip, plus the
+# melspectrogram/embedding ops (MaxPool, Log, Pow, ReduceMax, Max, Add, Div)
+# and the com.microsoft FusedGemm contrib op. An earlier rebuild used a
+# plain-MLP classifier whose op-set was too small (hey_jarvis.ort failed to
+# load with "Could not find an implementation for Gemm(13)"). All five triples
+# were rebuilt from the corrected config by fono-voice's build-onnxruntime
+# workflow and re-published under RELEASE_TAG, and the rows below are re-pinned
+# to the `raw_sha256` from each updated sha-<triple>.txt. These wake-capable
+# libs load the full wake `.ort` stack (melspectrogram + embedding + the real
+# upstream classifiers) as well as every voice model (the op-set is a superset
+# of the voice-only one).
 sha_for_triple() {
 	case "$1" in
 	x86_64-unknown-linux-gnu)
-		echo "378b52faf5c33d1325cd25bcad8b725f05eeed9ecbb2f21bb640d6a6f4d2c9ef"
+		echo "9fca53b7547bfb3650a0188785a8e40c6ccc45f1886c8ab0339f59fc16b33b6c"
 		;;
 	aarch64-unknown-linux-gnu)
-		echo "7bd1157fa3159eeaf126692734ab3e4e7dc779b9d884f3f03daec2dec1da2431"
+		echo "70670ec73073048e60aab4a7ae63eb684bb759f726e8543d4039ce0f37d63742"
 		;;
 	aarch64-apple-darwin)
-		echo "d94892dd6c0fd6b613930e231e7e7572c9bf68b2de4f368a14e78abf9992b0e6"
+		echo "b4f7ff29099d2861b60e19bb2818bed6961bc0753134d9b4075f26e38128d078"
 		;;
 	x86_64-apple-darwin)
-		echo "0c3b28a00dcb5da3dde946ca6e7ca3570aafe42345247f05c3b1ea89a94c95f6"
+		echo "057135b825efd9b4269c3d70ac035390d2849d2a78bf2d994dc142938470a873"
 		;;
 	x86_64-pc-windows-msvc)
-		echo "fcc34415d1ddce4fe4a341bdfe9a53750b72ff52910561a834eadd65b23acfd2"
+		echo "3619b39f339903600e477caa34a161d26bfc1e5593b3c98bcad3fbb39aebcd56"
 		;;
 	*)
 		echo ""

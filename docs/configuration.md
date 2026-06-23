@@ -44,6 +44,7 @@ field-level rustdoc comments. The user-facing sections are:
 | `[network]` | mDNS metadata overrides | — |
 | `[mcp]` | MCP server limits + voice-tool relevance filter | this file |
 | `[[context_rules]]` | Per-app prompt/behaviour overrides | this file |
+| `[wakeword]` | Always-on "hey fono" wake-word activation | below |
 
 ## Common knobs by example
 
@@ -335,6 +336,74 @@ key names (`Space`, `Tab`, `Return`, `Pause`, `ScrollLock`, `Insert`,
 ~1 s) toggles capture, a longer hold runs push-to-talk. The cancel key
 stops a recording in flight or shuts up an in-progress assistant reply.
 Leave `assistant` empty to disable the F8 hotkey.
+
+## `[wakeword]` — always-on wake word
+
+An optional always-on wake word: while Fono is idle it listens for a
+fixed phrase and, on a confirmed match, starts dictation or the assistant
+through the **same** path as the physical hotkey. It is **disabled by
+default** — with `enabled = false` no idle capture stream is ever opened
+and behaviour is identical to today.
+
+```toml
+[wakeword]
+enabled       = true        # master switch; false (default) opens no mic
+refractory_ms = 800         # ignore further fires this long after one fires
+
+# One block per active phrase. Multiple phrases share one backbone, so
+# extra phrases are nearly free.
+[[wakeword.phrases]]
+model       = "hey_fono"    # registry model id (see providers.md)
+sensitivity = 0.5           # 0..=1; higher = fewer false accepts
+target      = "dictation"   # "dictation" or "assistant"
+
+# Optional Wyoming integration (see below and home-assistant.md).
+# [wakeword.wyoming]
+# enabled = true            # no `uri` = local server direction (recommended)
+# uri     = "tcp://..."     # setting a `uri` = opt-in client direction (see warning)
+```
+
+**Phrases and the English-first limit.** Each phrase loads a fixed
+classifier keyed by `model`; matching is tied to that phrase and is
+**English-first** — it is wake-phrase detection, not free-form speech
+recognition. The built-in default is the clean-licence **`hey_fono`**
+("Hey Fono") model. The opt-in community phrases (`hey_jarvis`, `alexa`,
+`hey_mycroft`) are **NonCommercial**; Fono shows their licence notice when
+you pick one, then downloads — see
+[providers.md → Wake-word models](providers.md#wake-word-models).
+
+**Custom phrases.** A bespoke phrase is trained from Piper-synthetic
+positive samples plus openly-licensed negatives; the training pipeline
+that produces a clean-licence classifier is provided separately. A
+custom phrase id that is not in the registry resolves to `<id>.ort` in the
+wake-word model cache.
+
+**No AEC while idle.** The idle listener reads the system **default**
+microphone source with **no acoustic echo cancellation** — AEC only
+helps reject Fono's *own* TTS, which is silent while idle, so it cannot
+filter out ambient TV/music anyway.
+
+**Wyoming directions.** `[wakeword.wyoming]` exposes two directions:
+
+- **Server (recommended, audio stays local):** `enabled = true` with no
+  `uri`. Fono advertises its local detector as a Wyoming wake `Detection`
+  service over the `[server.wyoming]` listener — that block must also be
+  enabled. Audio never leaves the machine.
+- **Client (opt-in only):** `enabled = true` **plus** a `uri` to an
+  external `wyoming-openwakeword` service.
+
+  > ⚠️ The client direction **streams idle microphone audio over the
+  > LAN**, breaking the "audio never leaves the machine while idle"
+  > guarantee. It is never a default and `fono doctor` prints a prominent
+  > warning when it is active.
+
+Run `fono doctor` to see, at a glance, whether the wake word is enabled,
+which detector backend would run (the openWakeWord ONNX detector if the
+`wakeword-onnx` build feature is compiled in and the model files are
+cached, otherwise the energy stub), each phrase's target and licence, the
+default model's cache state, whether any configured phrase is a
+NonCommercial community model, and the
+Wyoming direction.
 
 ## Inject and clipboard
 

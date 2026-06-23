@@ -2100,7 +2100,7 @@ fn spawn_live_capture(w: LiveCaptureWiring) -> std::result::Result<LiveCapture, 
     let thread = std::thread::Builder::new()
         .name("fono-live-capture".into())
         .spawn(move || {
-            let cap = AudioCapture::new(CaptureConfig { target_sample_rate: native });
+            let cap = AudioCapture::new(CaptureConfig { target_sample_rate: native, source: None });
             let mut proc = LiveFrameProcessor {
                 native,
                 auto_stop: auto_stop_silence_ms as f32,

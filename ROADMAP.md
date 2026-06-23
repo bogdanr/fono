@@ -123,6 +123,17 @@ core. Say the magic word and Fono wakes up and starts dictating — no hotkey, n
 reaching for the keyboard. When you stop speaking it goes back to sleep. The wake-word
 model runs locally; your audio never leaves the machine while idle.
 
+**Status: implemented behind a default-off `[wakeword]` flag, awaiting the trained
+default model + a release.** The detector (openWakeWord on the existing local ONNX
+runtime — no new dependency, no size-budget hit), the always-on listener that suspends
+during any active session, the model registry with a clean Apache-2.0 default plus an
+opt-in community catalog (its NonCommercial license shown as a notice at download), the Wyoming wake Detection server (audio stays
+local) plus an opt-in client path (default-off, with a privacy warning), and
+`fono doctor` reporting have all landed. What remains before it ships in a tagged
+release: the default `hey_fono` model must be trained and hosted (the offline training
+pipeline exists; the registry SHAs are still the unpinned sentinel). Engine and policy
+rationale: [ADR 0012](docs/decisions/0012-wake-word-activation.md).
+
 ### OpenAI Realtime backend
 
 > The same hands-free conversation, on OpenAI's voice models.

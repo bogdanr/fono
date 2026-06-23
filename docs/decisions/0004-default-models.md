@@ -60,9 +60,17 @@ models, all license-clean:
   envelope).
 - **Zipformer transducer** (k2-fsa / sherpa) — Apache-2.0 (streaming
   STT, which whisper.cpp cannot do natively).
-- **Transducer KWS** (k2-fsa / sherpa) — Apache-2.0 (wake-word; chosen
-  over openWakeWord because a custom wake phrase is specified by tokens,
-  with no per-word model training). Names ADR 0012's deferred engine.
+- **Wake-word KWS** — **openWakeWord** on the existing minimal `ort`
+  runtime, with a clean Apache-2.0 default phrase model (`hey_fono`).
+  **This supersedes the earlier note here that named a k2-fsa / sherpa
+  transducer KWS as the wake-word engine** — see ADR 0012 (Accepted,
+  2026-06-23) for the reversal. The deciding factor was binary size:
+  sherpa-onnx would require a *second* full ONNX runtime (failing the
+  ADR 0022 size-gate and the four-entry `NEEDED` allowlist), whereas
+  openWakeWord adds only a handful of small ops to the shared runtime.
+  Upstream CC-BY-NC-SA community phrase models are opt-in / on-demand /
+  notice-on-download / never bundled — the same "opt-in only, never
+  default" carve-out applied to restricted models below.
 
 These are **opt-in capabilities** layered on the shared runtime as the
 stack grows; each new model must be added to the minimal-build

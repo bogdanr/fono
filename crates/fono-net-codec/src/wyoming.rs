@@ -3,10 +3,12 @@
 //!
 //! Mirrors the subset of <https://github.com/OHF-Voice/wyoming> we
 //! actually use: STT (audio + describe/info + transcribe + transcript,
-//! with optional streaming variants) and TTS (synthesize + audio-* on
-//! the response side). Wake / VAD / intent / handle / satellite / mic /
-//! snd events live one upstream version away and will land in
-//! follow-up slices.
+//! with optional streaming variants), TTS (synthesize + audio-* on
+//! the response side), and **wake** (detect + detection on the wake
+//! side — Phase H of the wake-word plan, letting Fono expose its local
+//! detector as a Wyoming wake service). VAD / intent / handle /
+//! satellite / mic / snd events live one upstream version away and will
+//! land in follow-up slices.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,6 +29,14 @@ pub const TRANSCRIPT_STOP: &str = "transcript-stop";
 /// Server replies with the standard `audio-start` / `audio-chunk`+ /
 /// `audio-stop` sequence (already typed above for the STT path).
 pub const SYNTHESIZE: &str = "synthesize";
+/// Client → server: start a wake-word detection session, optionally
+/// narrowing which wake names to listen for. The client then streams
+/// `audio-chunk` events; the server replies with a `detection` event
+/// each time a wake word fires.
+pub const DETECT: &str = "detect";
+/// Server → client: a wake word fired. Carries the detected name and an
+/// optional timestamp (ms into the audio stream).
+pub const DETECTION: &str = "detection";
 
 /// `audio-start` — open an audio stream with the agreed PCM format.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -170,6 +180,61 @@ pub struct TtsProgram {
     pub supports_synthesize_streaming: bool,
 }
 
+/// One wake-word model row in an `info.wake[].models` list. Mirrors
+/// [`AsrModel`] with an extra optional `phrase` — the spoken phrase the
+/// model fires on (e.g. `"hey fono"`), which upstream Wyoming wake
+/// services (openWakeWord, microWakeWord) surface so consumers can show
+/// the phrase in a picker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WakeModel {
+    pub name: String,
+    #[serde(default)]
+    pub languages: Vec<String>,
+    pub installed: bool,
+    pub attribution: Attribution,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phrase: Option<String>,
+}
+
+/// One wake service entry in `info.wake`. Mirrors [`AsrProgram`] /
+/// [`TtsProgram`]; lists the wake models the service can detect.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WakeProgram {
+    pub name: String,
+    pub attribution: Attribution,
+    pub installed: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    pub models: Vec<WakeModel>,
+}
+
+/// `detect` — client → server: begin a wake detection session, optionally
+/// restricting to a subset of wake `names`. Empty `names` means "listen
+/// for every model the service advertises".
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Detect {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<String>,
+}
+
+/// `detection` — server → client: a wake word fired. `name` is the model
+/// id that fired; `timestamp` is the optional millisecond offset into the
+/// audio stream; `speaker` is reserved for future per-speaker wake models.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Detection {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
+}
+
 /// Voice selector inside a `synthesize` request. All fields optional;
 /// `None` lets the server pick its default voice.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -214,7 +279,7 @@ pub struct Info {
     #[serde(default)]
     pub intent: Vec<Value>,
     #[serde(default)]
-    pub wake: Vec<Value>,
+    pub wake: Vec<WakeProgram>,
     #[serde(default)]
     pub mic: Vec<Value>,
     #[serde(default)]
@@ -362,5 +427,78 @@ mod tests {
         // present even when no TTS service is installed.
         let v = serde_json::to_value(Info::default()).unwrap();
         assert_eq!(v["tts"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn detection_round_trip() {
+        let event = Detection { name: "hey_fono".into(), timestamp: Some(1234), speaker: None };
+        let f = Frame::new(DETECTION).with_data(to_value(&event).unwrap());
+        let mut buf: Vec<u8> = Vec::new();
+        f.write_async(&mut buf).await.unwrap();
+        let mut reader = BufReader::new(buf.as_slice());
+        let parsed = Frame::read_async(&mut reader).await.unwrap();
+        assert_eq!(parsed.kind, DETECTION);
+        let back: Detection = serde_json::from_value(parsed.data).unwrap();
+        assert_eq!(back, event);
+    }
+
+    #[test]
+    fn detection_omits_optional_fields_when_absent() {
+        let event = Detection { name: "hey_fono".into(), timestamp: None, speaker: None };
+        let v = serde_json::to_value(&event).unwrap();
+        assert_eq!(v, json!({"name": "hey_fono"}));
+    }
+
+    #[test]
+    fn detect_omits_names_when_empty() {
+        let req = Detect::default();
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v, json!({}));
+    }
+
+    #[test]
+    fn detect_round_trips_names() {
+        let req = Detect { names: vec!["hey_fono".into(), "alexa".into()] };
+        let back: Detect = serde_json::from_value(serde_json::to_value(&req).unwrap()).unwrap();
+        assert_eq!(back, req);
+    }
+
+    #[test]
+    fn info_round_trip_with_wake_program() {
+        let info = Info {
+            wake: vec![WakeProgram {
+                name: "Fono".into(),
+                attribution: Attribution {
+                    name: "Fono".into(),
+                    url: "https://github.com/bogdanr/fono".into(),
+                },
+                installed: true,
+                description: Some("Fono wake-word detector".into()),
+                version: Some("0.0.0".into()),
+                models: vec![WakeModel {
+                    name: "hey_fono".into(),
+                    languages: vec!["en".into()],
+                    installed: true,
+                    attribution: Attribution {
+                        name: "Fono".into(),
+                        url: "https://github.com/bogdanr/fono".into(),
+                    },
+                    description: None,
+                    version: None,
+                    phrase: Some("hey fono".into()),
+                }],
+            }],
+            ..Info::default()
+        };
+        let v = serde_json::to_value(&info).unwrap();
+        let back: Info = serde_json::from_value(v).unwrap();
+        assert_eq!(back, info);
+    }
+
+    #[test]
+    fn info_default_has_empty_wake_vec() {
+        // HA's loader wants every service family present as an array.
+        let v = serde_json::to_value(Info::default()).unwrap();
+        assert_eq!(v["wake"], json!([]));
     }
 }

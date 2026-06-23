@@ -537,6 +537,155 @@ pub async fn report(paths: &Paths) -> Result<String> {
     }
 
     // ----------------------------------------------------------------
+    // Wake word — always-on "hey fono" activation (Phase J of
+    // plans/2026-06-23-wake-word-openwakeword-v2.md). Honest field
+    // reporting: enabled?, the detector backend that WOULD run, each
+    // phrase's target + license badge + cache state, the clean default
+    // model's cache state, NonCommercial consent, and the loud Wyoming
+    // client-direction privacy warning. Cheap + side-effect free: it only
+    // reads config and stats files (no network, no daemon, no model load).
+    // ----------------------------------------------------------------
+    if let Some(c) = cfg.as_ref() {
+        use fono_audio::wake_registry;
+        use fono_core::config::{WakeTarget, WakeWyoming};
+        let w = &c.wakeword;
+        writeln!(out, "{}", head("Wake word:"))?;
+        if w.enabled {
+            writeln!(out, "  enabled        : {}", ok("true"))?;
+
+            // Which detector backend would actually run. Reuses the registry's
+            // path resolution (no duplicated filename logic) and mirrors
+            // `wake::build_detector` / `try_load_onnx`: ONNX only when the
+            // feature is compiled AND every configured phrase's model files
+            // resolve on disk; otherwise the energy stub.
+            let any_phrases = !w.phrases.is_empty();
+            let inputs = WakeBackendInputs {
+                onnx_compiled: cfg!(feature = "wakeword-onnx"),
+                graphs_present: wake_graphs_present(&paths.cache_dir),
+                all_classifiers_present: any_phrases
+                    && w.phrases
+                        .iter()
+                        .all(|p| wake_classifier_path(&p.model, &paths.cache_dir).exists()),
+            };
+            match wake_backend(&inputs) {
+                WakeBackend::Onnx => {
+                    writeln!(out, "  backend        : {} (openWakeWord ONNX)", ok("ONNX"))?;
+                }
+                WakeBackend::EnergyStub => {
+                    let why = if !inputs.onnx_compiled {
+                        "wakeword-onnx feature not compiled into this build"
+                    } else if !any_phrases {
+                        "no phrases configured"
+                    } else if !inputs.graphs_present {
+                        "shared melspec/embedding graphs not yet downloaded"
+                    } else {
+                        "one or more phrase classifiers not yet downloaded"
+                    };
+                    writeln!(out, "  backend        : {} ({why})", warn("energy stub"))?;
+                }
+            }
+            if w.phrases.is_empty() {
+                writeln!(out, "  phrases        : {}", warn("none configured"))?;
+            } else {
+                writeln!(out, "  phrases:")?;
+                for p in &w.phrases {
+                    let entry = wake_registry::get(&p.model);
+                    let license = match entry {
+                        Some(e) if e.is_noncommercial() => warn(e.license.spdx()),
+                        Some(e) => dim(e.license.spdx()),
+                        None => dim("custom/unknown"),
+                    };
+                    let cache_state = if wake_classifier_path(&p.model, &paths.cache_dir).exists() {
+                        ok("cached")
+                    } else {
+                        dim("not downloaded")
+                    };
+                    let target = match p.target {
+                        WakeTarget::Dictation => "dictation",
+                        WakeTarget::Assistant => "assistant",
+                    };
+                    writeln!(
+                        out,
+                        "    {} {:<14} target={target:<10} sens={:.2}  {license}  {cache_state}",
+                        star(false),
+                        p.model,
+                        p.sensitivity,
+                    )?;
+                }
+            }
+
+            let default_cached = wake_registry::resolved_paths("hey_fono", &paths.cache_dir)
+                .is_some_and(|r| r.classifier.exists());
+            writeln!(
+                out,
+                "  default model  : hey_fono (Apache-2.0, clean license) {}",
+                if default_cached { ok("cached") } else { dim("not yet downloaded") }
+            )?;
+
+            // NonCommercial community models: no consent is stored — Fono
+            // notifies the user at download time and proceeds. Flag if any
+            // configured phrase resolves to a CC-BY-NC-SA model.
+            let nc_any = w.phrases.iter().any(|p| {
+                wake_registry::get(&p.model)
+                    .is_some_and(wake_registry::WakeModelEntry::is_noncommercial)
+            });
+            if nc_any {
+                writeln!(
+                    out,
+                    "  community model: {}",
+                    warn(
+                        "NonCommercial (CC-BY-NC-SA-4.0) — you are notified at download; \
+                         non-commercial use only"
+                    )
+                )?;
+            }
+
+            // Wyoming direction. The CLIENT path is the only one that leaks
+            // idle mic audio off the machine, so surface the shared
+            // CLIENT_PRIVACY_WARNING prominently in bold red. The SERVER path
+            // advertises Fono's *local* detector (audio stays local), but only
+            // when `[server.wyoming]` is also enabled to carry the listener.
+            match w.wyoming.as_ref() {
+                Some(wy) if wy.is_client() => {
+                    writeln!(
+                        out,
+                        "  Wyoming        : {} (idle mic audio leaves the machine)",
+                        bad("CLIENT — opt-in")
+                    )?;
+                    writeln!(out, "  {}", bad(WakeWyoming::CLIENT_PRIVACY_WARNING))?;
+                }
+                Some(wy) if wy.is_server() => {
+                    writeln!(
+                        out,
+                        "  Wyoming        : {} — advertises a local wake Detection service; \
+                         audio stays on this machine",
+                        ok("server")
+                    )?;
+                    if !c.server.wyoming.enabled {
+                        writeln!(
+                            out,
+                            "  {}",
+                            warn(
+                                "note: enable `[server.wyoming]` too — the wake service rides \
+                                  that listener and is unreachable without it"
+                            )
+                        )?;
+                    }
+                }
+                _ => writeln!(out, "  Wyoming        : {}", dim("off"))?,
+            }
+        } else {
+            writeln!(
+                out,
+                "  enabled        : {} {}",
+                dim("false"),
+                dim("(default — no idle mic stream is opened; enable with \
+                     `[wakeword].enabled = true`)")
+            )?;
+        }
+        writeln!(out)?;
+    }
+    // ----------------------------------------------------------------
     // Coding agents — MCP server status
     // ----------------------------------------------------------------
     if let Some(c) = cfg.as_ref() {
@@ -577,6 +726,59 @@ pub async fn report(paths: &Paths) -> Result<String> {
     Ok(out)
 }
 
+/// The detector backend `fono doctor` reports the daemon *would* build for an
+/// enabled `[wakeword]`. Pure mirror of `crate::wake::build_detector`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WakeBackend {
+    /// Real openWakeWord three-stage ONNX detector.
+    Onnx,
+    /// Energy/VAD fallback stub.
+    EnergyStub,
+}
+
+/// Inputs to [`wake_backend`] — the conditions the daemon's `build_detector`
+/// keys off, grouped to keep the decision pure and the signature readable.
+struct WakeBackendInputs {
+    /// The `wakeword-onnx` feature is compiled into this build.
+    onnx_compiled: bool,
+    /// The shared melspectrogram + embedding graphs are present on disk.
+    graphs_present: bool,
+    /// Every configured phrase's classifier file is present on disk (which
+    /// also implies at least one phrase is configured).
+    all_classifiers_present: bool,
+}
+
+/// Decide which wake detector backend would run, purely from the inputs the
+/// daemon's `build_detector` keys off. ONNX requires the feature compiled, the
+/// shared graphs present, and every classifier present (the last already
+/// implies a phrase is configured); anything missing falls back to the energy
+/// stub. Kept pure + tested so doctor and the real loader can never disagree.
+fn wake_backend(i: &WakeBackendInputs) -> WakeBackend {
+    if i.onnx_compiled && i.graphs_present && i.all_classifiers_present {
+        WakeBackend::Onnx
+    } else {
+        WakeBackend::EnergyStub
+    }
+}
+
+/// Resolve where a phrase's classifier file lives in the wake-word cache,
+/// reusing the registry's path resolution for known model ids and falling back
+/// to the `<id>.ort` convention the ONNX loader uses for custom phrases. No
+/// duplicated filename literals — the registry stays the single source.
+fn wake_classifier_path(model: &str, cache_dir: &std::path::Path) -> std::path::PathBuf {
+    match fono_audio::wake_registry::resolved_paths(model, cache_dir) {
+        Some(r) => r.classifier,
+        None => fono_audio::wake_registry::wakeword_dir(cache_dir).join(format!("{model}.ort")),
+    }
+}
+
+/// Whether the shared melspectrogram + embedding graphs are present on disk
+/// (both required before ONNX can load). Uses the registry's resolved paths.
+fn wake_graphs_present(cache_dir: &std::path::Path) -> bool {
+    fono_audio::wake_registry::resolved_paths("hey_fono", cache_dir)
+        .is_some_and(|r| r.melspec.exists() && r.embedding.exists())
+}
+
 /// Read up to the last `n` lines of `path`. Preserves embedded ANSI.
 fn tail_log(path: &std::path::Path, n: usize) -> std::io::Result<Vec<String>> {
     let data = std::fs::read_to_string(path)?;
@@ -611,4 +813,63 @@ fn which_in_path(tool: &str) -> bool {
         return false;
     };
     std::env::split_paths(&path).any(|p| p.join(tool).is_file())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ONNX is reported only when every precondition holds; missing any one
+    /// of {feature, graphs, classifiers} falls back to the stub — the exact
+    /// gate `wake::build_detector` applies.
+    #[test]
+    fn wake_backend_requires_all_preconditions() {
+        let decide = |onnx, graphs, classifiers| {
+            wake_backend(&WakeBackendInputs {
+                onnx_compiled: onnx,
+                graphs_present: graphs,
+                all_classifiers_present: classifiers,
+            })
+        };
+        assert_eq!(decide(true, true, true), WakeBackend::Onnx);
+        // Any single missing input drops to the stub.
+        assert_eq!(decide(false, true, true), WakeBackend::EnergyStub);
+        assert_eq!(decide(true, false, true), WakeBackend::EnergyStub);
+        assert_eq!(decide(true, true, false), WakeBackend::EnergyStub);
+        assert_eq!(decide(false, false, false), WakeBackend::EnergyStub);
+    }
+
+    /// A registry model resolves to its registered classifier basename
+    /// (`<id>.ort`); an unknown id falls back to the same `<id>.ort`
+    /// convention. Both land under the wake-word cache dir (no duplicated
+    /// filename literals).
+    #[test]
+    fn wake_classifier_path_uses_registry_then_falls_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = fono_audio::wake_registry::wakeword_dir(tmp.path());
+        // Known default model: registry-resolved basename.
+        assert_eq!(wake_classifier_path("hey_fono", tmp.path()), dir.join("hey_fono.ort"));
+        // Known community model: `.ort` conversion on the mirror (the loader
+        // contract is always `<id>.ort`).
+        assert_eq!(wake_classifier_path("hey_jarvis", tmp.path()), dir.join("hey_jarvis.ort"));
+        // Unknown / custom phrase: `<id>.ort` fallback.
+        assert_eq!(
+            wake_classifier_path("my_custom_phrase", tmp.path()),
+            dir.join("my_custom_phrase.ort")
+        );
+    }
+
+    /// Graphs are absent on a fresh cache and present only when both `.ort`
+    /// files exist.
+    #[test]
+    fn wake_graphs_present_needs_both_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!wake_graphs_present(tmp.path()), "fresh cache has no graphs");
+        let dir = fono_audio::wake_registry::wakeword_dir(tmp.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("melspectrogram.ort"), b"x").unwrap();
+        assert!(!wake_graphs_present(tmp.path()), "melspec alone is not enough");
+        std::fs::write(dir.join("embedding.ort"), b"x").unwrap();
+        assert!(wake_graphs_present(tmp.path()), "both graphs present");
+    }
 }

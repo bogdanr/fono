@@ -21,14 +21,28 @@ cpal-backend = ["dep:cpal"]
 # Voiced-frame broadcast stream + segment-boundary events used by the
 # live-dictation pipeline. Plan R2.
 streaming = []
+# openWakeWord ONNX detector (melspectrogram -> speech_embedding ->
+# per-phrase classifiers) on the shared `ort` runtime. `ort` is already in
+# the binary's dependency graph via `fono-tts`'s `tts-local`, so this edge
+# is net-zero on shipped binary size (AGENTS size rule). Off by default; the
+# energy stub keeps the pipeline functional with no model present.
+wakeword-onnx = ["dep:ort"]
 
 [dependencies]
 fono-core = { path = "../fono-core" }
+# Already in the binary's dependency graph (via `fono` and `fono-tts`), so this
+# edge is net-zero on shipped binary size (AGENTS size rule). Used by the
+# wake-word model registry's SHA-256-pinned fetch (`wake_registry`).
+fono-download = { path = "../fono-download" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde_json = { workspace = true }
 cpal = { workspace = true, optional = true }
+ort = { workspace = true, optional = true }
 rubato = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

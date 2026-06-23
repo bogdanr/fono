@@ -29,7 +29,7 @@ NVIDIA Jetson Orin Nano.
 
 ### docker compose (recommended)
 
-Grab [`packaging/container/compose.example.yaml`](../packaging/container/compose.example.yaml),
+Grab [`packaging/container/compose.yaml`](../packaging/container/compose.yaml),
 then:
 
 ```sh
@@ -77,6 +77,44 @@ Assistant core, so there is nothing to install on the HA side.
 > mDNS advertisement does not cross onto your LAN, so add it by IP/port
 > as above (this always works). If you want auto-discovery, run the
 > container with `network_mode: host`.
+
+## Wake word ("hey fono")
+
+Fono has an optional always-on wake word that triggers dictation or the
+assistant when you say a fixed phrase — no hotkey, no button. It is **off
+by default**; enable it in `[wakeword]` (see
+[configuration.md → `[wakeword]`](configuration.md#wakeword--always-on-wake-word)).
+The built-in clean-licence phrase is **"hey fono"**; the matcher is
+English-first and tied to whichever phrase model is loaded (it is not
+free-form speech).
+
+For Home Assistant there are **two Wyoming directions**, and which one you
+pick is a privacy decision:
+
+- **Server (recommended, audio stays local).** With `[wakeword].wyoming`
+  enabled and **no `uri`**, Fono advertises its *own* local detector as a
+  Wyoming wake service over the existing `[server.wyoming]` listener (TCP
+  `10300`). Home Assistant can then use Fono as a drop-in wake-word
+  provider for an Assist pipeline, and the wake detection runs **on the
+  Fono box — the microphone audio never leaves the machine**. The
+  `[server.wyoming]` listener must also be enabled to carry the service;
+  `fono doctor` reminds you if it is off.
+- **Client (opt-in only, NOT default).** With `[wakeword].wyoming`
+  enabled **and** a `uri` pointing at an external `wyoming-openwakeword`
+  service, Fono delegates wake detection to that box.
+
+  > ⚠️ **Privacy warning.** The client direction **streams idle
+  > microphone audio over the LAN** to the external service and therefore
+  > **breaks the "audio never leaves the machine while idle"
+  > guarantee**. It is never a default, must be explicitly opted into, and
+  > `fono doctor` prints a prominent warning whenever it is active. Prefer
+  > the server direction unless you have a specific reason to centralise
+  > wake detection elsewhere.
+
+To connect the server direction in Home Assistant, add the **Wyoming
+Protocol** integration pointing at the Fono host's `10300` (the same
+endpoint that serves STT/TTS) and select Fono as the wake-word provider
+in your Assist pipeline.
 
 ## GPU acceleration
 

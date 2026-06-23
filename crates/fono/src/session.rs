@@ -740,7 +740,8 @@ impl SessionOrchestrator {
         };
         let history =
             Arc::new(Mutex::new(HistoryDb::open(&paths.history_db()).context("open history db")?));
-        let capture_cfg = CaptureConfig { target_sample_rate: config.audio.sample_rate };
+        let capture_cfg =
+            CaptureConfig { target_sample_rate: config.audio.sample_rate, source: None };
         let mut orch = Self::with_parts(
             stt,
             polish,
@@ -2935,6 +2936,27 @@ impl SessionOrchestrator {
         if self.current_config().general.auto_mute_system {
             fono_audio::mute::set_default_sink_mute(false);
         }
+        // Tear down the *batch* assistant capture slot. The streaming
+        // slot handled below only exists when `live_preview()` is on;
+        // cloud-only / non-streaming configs record into
+        // `assistant_capture` instead. Without this teardown an Escape
+        // (or barge-in) left the batch `CaptureSession` — and its
+        // auto-stop silence-watch task — alive: the orphaned watcher
+        // would commit ~3 s later and emit a synthetic
+        // `AssistantPressed`, spuriously re-entering `AssistantRecording`
+        // from Idle (a phantom session with no overlay), while the
+        // still-occupied slot made every subsequent wake-word fire log
+        // "assistant capture already in progress; ignoring duplicate
+        // start" and never show the overlay. `stop_and_drain` aborts
+        // both the level and silence tasks, signals the capture thread
+        // to stop, and joins it.
+        let batch_taken = self.assistant_capture.lock().await.take();
+        if let Some(session) = batch_taken {
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = session.stop_and_drain();
+            })
+            .await;
+        }
         #[cfg(feature = "interactive")]
         {
             let live_taken = self.assistant_live_capture.lock().await.take();
@@ -3151,21 +3173,40 @@ impl SessionOrchestrator {
             if let Err(e) = turn_fut.await {
                 warn!("assistant turn failed: {e:#}");
             }
-            {
+            // Are we still the *current* turn? A barge-in / restart (or an
+            // Escape) calls `stop_current_turn`, which takes `current_turn`,
+            // and then immediately starts a fresh turn. If that happened
+            // while this future was finishing, this pump is now STALE: a
+            // newer turn (and its overlay) owns the screen. A stale pump
+            // must not touch the overlay or emit `ProcessingDone` — doing so
+            // hides the new turn's overlay and races its `AssistantRecording`
+            // state back to `Idle`, leaving a capture running with nothing on
+            // screen (the "assistant active, no overlay" bug).
+            let still_current = {
                 let mut s = state_for_clear.lock().await;
-                if let Some(active) = s.current_turn.as_ref() {
-                    if Arc::ptr_eq(active, &notify) {
+                match s.current_turn.as_ref() {
+                    Some(active) if Arc::ptr_eq(active, &notify) => {
                         s.current_turn = None;
+                        true
                     }
+                    _ => false,
                 }
-            }
+            };
+            // This turn's own animation ticker is always ours to stop.
             if let Some(t) = thinking_task {
                 t.abort();
             }
-            if let Some(o) = overlay_for_task {
-                o.set_state(fono_overlay::OverlayState::Hidden);
+            if still_current {
+                if let Some(o) = overlay_for_task {
+                    o.set_state(fono_overlay::OverlayState::Hidden);
+                }
+                let _ = action_tx.send(HotkeyAction::ProcessingDone);
+            } else {
+                debug!(
+                    "assistant pump: turn superseded before completion; \
+                     skipping overlay hide + ProcessingDone (a newer turn owns the screen)"
+                );
             }
-            let _ = action_tx.send(HotkeyAction::ProcessingDone);
         });
     }
 
@@ -3504,7 +3545,7 @@ impl SessionOrchestrator {
         // pump's broadcast frame budget aligned with whisper. The
         // capture stage resamples for us.
         let sample_rate = 16_000_u32;
-        let cap_cfg = CaptureConfig { target_sample_rate: sample_rate };
+        let cap_cfg = CaptureConfig { target_sample_rate: sample_rate, source: None };
 
         // ---- Spawn the capture thread ----------------------------
         // The cpal stream uses the new realtime forwarder API:

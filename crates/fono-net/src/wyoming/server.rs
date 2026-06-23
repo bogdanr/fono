@@ -30,10 +30,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use fono_audio::wakeword::WakeWord;
 use fono_net_codec::wyoming::{
-    AsrModel, AsrProgram, Attribution, AudioChunk, AudioStart, AudioStop, Info, Synthesize,
-    Transcribe, Transcript, TtsProgram, TtsVoice, AUDIO_CHUNK, AUDIO_START, AUDIO_STOP, DESCRIBE,
-    INFO, SYNTHESIZE, TRANSCRIBE, TRANSCRIPT,
+    AsrModel, AsrProgram, Attribution, AudioChunk, AudioStart, AudioStop, Detect, Detection, Info,
+    Synthesize, Transcribe, Transcript, TtsProgram, TtsVoice, WakeModel, WakeProgram, AUDIO_CHUNK,
+    AUDIO_START, AUDIO_STOP, DESCRIBE, DETECT, DETECTION, INFO, SYNTHESIZE, TRANSCRIBE, TRANSCRIPT,
 };
 use fono_net_codec::Frame;
 use fono_stt::traits::SpeechToText;
@@ -86,6 +87,30 @@ pub struct WyomingServerConfig {
     /// via [`WyomingServer::with_tts`]; advertisement and serving are
     /// kept in lockstep that way.
     pub tts_voices: Vec<AdvertisedVoice>,
+    /// Wake-word models advertised in `info.wake[].models`. Empty (the
+    /// default) means this listener advertises **no** wake service — the
+    /// wake direction is strictly opt-in, so existing STT/TTS-only
+    /// servers are unaffected. The daemon derives this from the active
+    /// `[wakeword]` phrases when it also binds a wake detector via
+    /// [`WyomingServer::with_wake`]; advertisement and detection are kept
+    /// in lockstep that way (the server *is* the detector — audio never
+    /// leaves the machine).
+    pub wake_models: Vec<AdvertisedWakeModel>,
+}
+
+/// One wake-word model surfaced via `info.wake[].models`. Derived by the
+/// daemon from the active `[wakeword]` phrases. The server keeps audio
+/// local: it advertises these and runs the local detector over streamed
+/// `audio-chunk` events, emitting a `detection` event on a fire.
+#[derive(Debug, Clone)]
+pub struct AdvertisedWakeModel {
+    pub name: String,
+    pub languages: Vec<String>,
+    /// Human-readable spoken phrase (e.g. `"hey fono"`), surfaced so
+    /// Wyoming consumers can show it in a picker.
+    pub phrase: Option<String>,
+    pub description: Option<String>,
+    pub version: Option<String>,
 }
 
 /// One model entry surfaced via `info.asr[].models`.
@@ -118,6 +143,7 @@ impl Default for WyomingServerConfig {
             models: Vec::new(),
             loopback_only: true,
             tts_voices: Vec::new(),
+            wake_models: Vec::new(),
         }
     }
 }
@@ -171,19 +197,33 @@ pub type SttProvider = Arc<dyn Fn() -> Arc<dyn SpeechToText> + Send + Sync>;
 /// advertises no `info.tts` service.
 pub type TtsProvider = Arc<dyn Fn() -> Arc<dyn TextToSpeech> + Send + Sync>;
 
+/// Provider closure for the wake-word detector, invoked once per accepted
+/// connection to obtain a **fresh** detector instance. A wake session is
+/// inherently stateful (the streaming melspectrogram/embedding ring lives
+/// in the detector), so each connection gets its own; the closure simply
+/// constructs one. When the server holds `None` it neither advertises a
+/// wake service nor answers `detect` — the wake direction is opt-in.
+///
+/// The detector runs **locally** inside the server process: the server
+/// *is* the wake detector, so audio stays on the machine. This is the
+/// recommended Wyoming wake integration (cf. the opt-in client direction,
+/// which would stream idle mic audio over the LAN).
+pub type WakeProvider = Arc<dyn Fn() -> Box<dyn WakeWord> + Send + Sync>;
+
 /// The server itself. Stateless beyond the config; one instance per
 /// `[server.wyoming]` block.
 pub struct WyomingServer {
     cfg: WyomingServerConfig,
     stt: SttProvider,
     tts: Option<TtsProvider>,
+    wake: Option<WakeProvider>,
 }
 
 impl WyomingServer {
     /// Build a server. Does not bind yet — call [`Self::start`].
     #[must_use]
     pub fn new(cfg: WyomingServerConfig, stt: SttProvider) -> Self {
-        Self { cfg, stt, tts: None }
+        Self { cfg, stt, tts: None, wake: None }
     }
 
     /// Convenience constructor for callers that want to pin a single
@@ -211,6 +251,20 @@ impl WyomingServer {
         self.with_tts(Arc::new(move || Arc::clone(&tts)))
     }
 
+    /// Bind a wake-word detector provider so this listener advertises a
+    /// `info.wake` service and answers wake sessions: it feeds streamed
+    /// `audio-chunk` PCM to a locally-run [`WakeWord`] detector and emits
+    /// a `detection` event on a fire. The closure is invoked once per
+    /// accepted connection to obtain a fresh detector (wake sessions are
+    /// stateful). Audio stays on the machine — the server *is* the
+    /// detector. Opt-in: with no provider bound, no wake service is
+    /// advertised and `detect` is ignored.
+    #[must_use]
+    pub fn with_wake(mut self, wake: WakeProvider) -> Self {
+        self.wake = Some(wake);
+        self
+    }
+
     /// Bind the listener and spawn the accept loop. Returns once the
     /// socket is listening so callers can `.local_addr()` immediately.
     pub async fn start(self) -> Result<WyomingServerHandle> {
@@ -230,6 +284,7 @@ impl WyomingServer {
         let cfg = Arc::new(self.cfg);
         let stt = self.stt;
         let tts = self.tts;
+        let wake = self.wake;
         let join = tokio::spawn(async move {
             // Bound mpsc just to give us a place to count active conns
             // and to provide a backpressure point if accept() outpaces
@@ -257,10 +312,11 @@ impl WyomingServer {
                                 let cfg2 = Arc::clone(&cfg);
                                 let stt_snapshot = (stt)();
                                 let tts_snapshot = tts.as_ref().map(|f| f());
+                                let wake_snapshot = wake.as_ref().map(|f| f());
                                 let slot_tx2 = slot_tx.clone();
                                 tokio::spawn(async move {
                                     let _slot = slot_tx2.try_send(()).ok();
-                                    if let Err(e) = handle_connection(sock, peer, cfg2, stt_snapshot, tts_snapshot).await {
+                                    if let Err(e) = handle_connection(sock, peer, cfg2, stt_snapshot, tts_snapshot, wake_snapshot).await {
                                         tracing::debug!(
                                             target: "fono::wyoming::server",
                                             %peer,
@@ -305,6 +361,7 @@ async fn handle_connection(
     cfg: Arc<WyomingServerConfig>,
     stt: Arc<dyn SpeechToText>,
     tts: Option<Arc<dyn TextToSpeech>>,
+    mut wake: Option<Box<dyn WakeWord>>,
 ) -> Result<()> {
     sock.set_nodelay(true).ok();
     let (read_half, mut write_half) = sock.into_split();
@@ -349,7 +406,13 @@ async fn handle_connection(
                     audio_started = true;
                 }
                 sample_rate = hdr.rate;
-                pcm_f32.extend(decode_pcm_le(&frame.payload, hdr.width, hdr.channels)?);
+                let samples = decode_pcm_le(&frame.payload, hdr.width, hdr.channels)?;
+                // Wake path (opt-in): feed the freshly-decoded samples to the
+                // locally-run detector and emit a `detection` event on a fire.
+                // The detector keeps audio on-device — the server *is* the
+                // wake word detector.
+                feed_wake(&mut wake, peer, &mut write_half, &samples).await?;
+                pcm_f32.extend(samples);
             }
             AUDIO_STOP => {
                 let _: AudioStop =
@@ -395,6 +458,10 @@ async fn handle_connection(
             SYNTHESIZE => {
                 dispatch_synthesize(peer, tts.as_ref(), &mut write_half, frame.data).await?;
             }
+            DETECT => {
+                let req: Detect = serde_json::from_value(frame.data).context("decoding detect")?;
+                log_detect_session(peer, wake.is_some(), &req);
+            }
             other => {
                 tracing::trace!(
                     target: "fono::wyoming::server",
@@ -404,6 +471,78 @@ async fn handle_connection(
             }
         }
     }
+}
+
+/// Log a wake `detect` session start. The optional `names` narrowing is
+/// accepted for protocol completeness; the bound detector already knows
+/// which phrases it loaded, so the streamed audio drives detection.
+fn log_detect_session(peer: SocketAddr, wake_bound: bool, req: &Detect) {
+    if wake_bound {
+        tracing::debug!(
+            target: "fono::wyoming::server",
+            %peer,
+            names = ?req.names,
+            "wake detect session started"
+        );
+    } else {
+        tracing::warn!(
+            target: "fono::wyoming::server",
+            %peer,
+            "detect requested but no wake detector is bound; ignoring"
+        );
+    }
+}
+
+/// Feed freshly-decoded mono `f32` samples to the locally-run wake
+/// detector (when one is bound) and emit a `detection` event on a fire.
+/// No-op when no detector is bound. The detector runs in-process so the
+/// audio never leaves the machine. Detector errors are logged and
+/// swallowed rather than tearing down the connection — a transient
+/// inference error must not kill a long-lived wake session.
+///
+/// NOTE (follow-up seam): the detector's `feed` is synchronous and, for
+/// the ONNX backend, CPU-bound (~one melspectrogram+embedding pass per
+/// 80 ms hop). It is called inline here; if a future high-throughput
+/// deployment shows it stalling the connection's task, move it behind a
+/// `spawn_blocking` worker (the detector is `Send`).
+async fn feed_wake<W>(
+    wake: &mut Option<Box<dyn WakeWord>>,
+    peer: SocketAddr,
+    write_half: &mut W,
+    samples: &[f32],
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let Some(detector) = wake.as_deref_mut() else { return Ok(()) };
+    match detector.feed(samples) {
+        Ok(decision) if decision.fired => {
+            let name = decision.phrase.unwrap_or_else(|| "wake".to_string());
+            tracing::info!(
+                target: "fono::wyoming::server",
+                %peer,
+                phrase = %name,
+                score = decision.score,
+                "wake word fired; emitting detection"
+            );
+            let event = Detection { name, timestamp: Some(unix_millis()), speaker: None };
+            Frame::new(DETECTION).with_data(to_value(&event)?).write_async(write_half).await?;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::debug!(target: "fono::wyoming::server", %peer, "wake detector error: {e:#}");
+        }
+    }
+    Ok(())
+}
+
+/// Milliseconds since the Unix epoch, saturating to 0 if the clock is
+/// before the epoch (never on a sane host).
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 async fn finish_transcription<W>(
@@ -641,7 +780,34 @@ fn build_info(cfg: &WyomingServerConfig) -> Info {
             supports_synthesize_streaming: false,
         }]
     };
-    Info { asr, tts, ..Info::default() }
+    // Advertise a wake program only when wake models are configured — an
+    // empty `wake` array means "no wake service" (the wake direction is
+    // opt-in; STT/TTS-only servers stay unaffected).
+    let wake = if cfg.wake_models.is_empty() {
+        Vec::new()
+    } else {
+        vec![WakeProgram {
+            name: cfg.server_name.clone(),
+            attribution: attribution.clone(),
+            installed: true,
+            description: Some("Fono wake-word detector".to_string()),
+            version: Some(cfg.server_version.clone()),
+            models: cfg
+                .wake_models
+                .iter()
+                .map(|m| WakeModel {
+                    name: m.name.clone(),
+                    languages: m.languages.clone(),
+                    installed: true,
+                    attribution: attribution.clone(),
+                    description: m.description.clone(),
+                    version: m.version.clone().or_else(|| Some(cfg.server_version.clone())),
+                    phrase: m.phrase.clone(),
+                })
+                .collect(),
+        }]
+    };
+    Info { asr, tts, wake, ..Info::default() }
 }
 
 #[cfg(test)]
@@ -813,5 +979,34 @@ mod tests {
         let info = build_info(&WyomingServerConfig::default());
         assert!(info.tts.is_empty(), "no voices configured => no tts program");
         assert!(!info.asr.is_empty(), "asr is always advertised");
+    }
+
+    #[test]
+    fn build_info_advertises_wake_models_when_configured() {
+        let cfg = WyomingServerConfig {
+            wake_models: vec![AdvertisedWakeModel {
+                name: "hey_fono".into(),
+                languages: vec!["en".into()],
+                phrase: Some("hey fono".into()),
+                description: Some("default clean-license model".into()),
+                version: None,
+            }],
+            ..WyomingServerConfig::default()
+        };
+        let info = build_info(&cfg);
+        assert_eq!(info.wake.len(), 1);
+        let prog = &info.wake[0];
+        assert_eq!(prog.name, "Fono");
+        assert!(prog.installed);
+        assert_eq!(prog.models.len(), 1);
+        assert_eq!(prog.models[0].name, "hey_fono");
+        assert_eq!(prog.models[0].phrase.as_deref(), Some("hey fono"));
+        assert_eq!(prog.models[0].attribution.name, "Fono");
+    }
+
+    #[test]
+    fn build_info_omits_wake_when_no_models() {
+        let info = build_info(&WyomingServerConfig::default());
+        assert!(info.wake.is_empty(), "no wake models configured => no wake program");
     }
 }

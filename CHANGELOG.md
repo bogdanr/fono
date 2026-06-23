@@ -5,6 +5,31 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Optional always-on wake-word activation (`[wakeword]`, default
+  off).** Fono can idle and listen for a spoken wake phrase, then start
+  dictation or the assistant on the same path the hotkey uses — no key,
+  no hands. Detection runs locally on the ONNX runtime already in the
+  binary via [openWakeWord](https://github.com/dscripka/openWakeWord),
+  so it adds no new dependency and no measurable size, and your audio
+  never leaves the machine while idle on the default path. The listener
+  suspends during any active recording or assistant turn and resumes
+  when Fono goes idle. Ships with a clean Apache-2.0 default phrase as
+  the only enabled model, plus an opt-in community phrase catalog that
+  is downloaded on demand, never bundled, and shows its NonCommercial
+  license as a notice when you pick one. Fono can also
+  serve wake detections to a Home Assistant voice pipeline over Wyoming
+  with audio staying on the machine, or — opt-in and off by default,
+  behind an explicit "idle mic audio leaves the machine over the LAN"
+  warning — forward audio to an external `wyoming-openwakeword` service.
+  `fono doctor` reports the wake-word configuration and that privacy
+  warning. The default wake-word model is not yet hosted, so the feature
+  stays off until you enable it with a model; engine and licensing
+  rationale is in ADR 0012.
+
 ## [0.11.1] — 2026-06-22
 
 Hands-free realtime conversation mode, and a leaner on-demand realtime

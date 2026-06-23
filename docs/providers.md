@@ -772,6 +772,63 @@ this host (auto-discovery via mDNS). The installer seeds a minimal
 [install.md → Server mode](install.md#server-mode-wyoming-stt-host) for
 the install, security, and key-management story.
 
+## Wake-word models
+
+The optional always-on wake word (`[wakeword]`, see
+[configuration.md](configuration.md#wakeword--always-on-wake-word)) loads
+small openWakeWord-style ONNX classifiers. Each phrase is a per-phrase
+classifier riding a shared melspectrogram graph and a frozen Google
+`speech_embedding` backbone, so adding extra phrases is nearly free. The
+registry is the single source of truth (`crates/fono-audio/src/wake_registry.rs`).
+
+There are **two classes** of model, and the distinction is a licensing
+one:
+
+| Model id | Phrase | Class | Licence | Notice? |
+|---|---|---|---|---|
+| `hey_fono` | "Hey Fono" | **default** | Apache-2.0 | none — shippable |
+| `hey_jarvis` | "Hey Jarvis" | community | CC-BY-NC-SA-4.0 | shown at download |
+| `alexa` | "Alexa" | community | CC-BY-NC-SA-4.0 | shown at download |
+| `hey_mycroft` | "Hey Mycroft" | community | CC-BY-NC-SA-4.0 | shown at download |
+
+**Default, clean-licence model.** `hey_fono` is a freshly-trained
+Apache-2.0 classifier (Apache melspectrogram + Apache Google embedding +
+Piper-synthetic positive samples + openly-licensed negatives). It carries
+**no usage restriction** and is the only model eligible to be a default or
+to be bundled in a release.
+
+**Opt-in NonCommercial community models.** The upstream openWakeWord
+phrases (`hey_jarvis`, `alexa`, `hey_mycroft`) are published under
+**CC-BY-NC-SA-4.0** — Attribution + **NonCommercial** + ShareAlike. Per
+the project's model-licensing policy they are **never a default and never
+bundled in the shipped artifact**. They download only when you explicitly
+pick one, and Fono **shows the NonCommercial licence notice** at that
+point so the choice is informed — the notice does not block the download,
+and nothing is recorded. `fono doctor` flags when a configured phrase is
+a NonCommercial community model. Both default and community models are
+SHA-256-verified on download.
+
+**Custom phrases.** To train your own clean-licence phrase, generate
+positive samples with [Piper](https://github.com/rhasspy/piper) synthetic
+text-to-speech and mix in openly-licensed negative audio; the training
+pipeline that produces a `.ort` classifier is provided separately. Drop
+the resulting `<id>.ort` into the wake-word model cache and reference it
+by id in `[[wakeword.phrases]]`. For a **private, non-shippable** custom
+phrase you can additionally synthesize positives across the cloud TTS
+providers you already have keys for (`CLOUD_TTS_PROVIDERS=openai,elevenlabs,
+groq,openrouter`), which greatly widens voice diversity. This is gated
+behind `CLOUD_TTS_ACCEPT_TERMS=1`, **never** permitted for the clean
+`hey_fono` default, and stamps the output as a PRIVATE model — cloud audio
+is proprietary and ToS-bound, so such a model must not be shipped. See
+[calibration/wakeword/README.md](../calibration/wakeword/README.md).
+
+**Wyoming and privacy.** Fono can act as a **local** Wyoming wake
+`Detection` service (server direction — audio stays on the machine) or,
+opt-in only, delegate detection to an external `wyoming-openwakeword`
+service (client direction, which **streams idle mic audio over the LAN**
+and triggers a prominent `fono doctor` warning). See
+[home-assistant.md → Wake word](home-assistant.md#wake-word-hey-fono).
+
 ## Screen capture
 
 Fono can capture screenshots to give agents and the voice assistant visual

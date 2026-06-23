@@ -176,6 +176,13 @@ pub struct PreferencesSnapshot {
     pub also_copy_to_clipboard: bool,
     pub startup_autostart: bool,
     pub vad_enabled: bool,
+    /// Whether always-on wake-word activation is enabled (`[wakeword].enabled`).
+    pub wakeword_enabled: bool,
+    /// Read-only, pre-formatted display lines for the active wake phrases,
+    /// each like `"Hey Jarvis" → Assistant`. Built by the daemon from
+    /// `[wakeword].phrases`; the tray only renders them as disabled info
+    /// rows under the toggle so the user always sees which keyword does what.
+    pub wake_phrases: Vec<String>,
     pub auto_stop_silence_ms: u32,
     pub waveform_style: u8,
     /// Currently-allowed language codes (BCP-47), in canonical order.
@@ -275,10 +282,16 @@ pub enum TrayAction {
     SetAlsoCopyToClipboard(bool),
     /// Toggle `general.startup_autostart`.
     SetStartupAutostart(bool),
-    /// Toggle VAD by flipping `audio.vad_backend` between `"silero"` (on)
+    /// Toggle VAD by flipping `audio.vad_backend` between `"energy"` (on)
     /// and `"off"`. The tray uses a boolean for menu legibility; the
     /// daemon translates back to the string field.
     SetVadEnabled(bool),
+    /// Toggle always-on wake-word activation by flipping
+    /// `wakeword.enabled`. Mirrors [`Self::SetVadEnabled`]: the tray exposes
+    /// a boolean for menu legibility and the daemon persists the flag. The
+    /// listener lifecycle (opening/closing the idle capture stream) is wired
+    /// separately — see the daemon's Phase-D handling.
+    SetWakeWordEnabled(bool),
     /// Set `audio.auto_stop_silence_ms` to one of the
     /// [`AUTO_STOP_PRESETS_MS`] presets. `0` disables auto-stop.
     SetAutoStopSilenceMs(u32),
@@ -1377,6 +1390,37 @@ mod backend {
             p.vad_enabled,
             TrayAction::SetVadEnabled,
         ));
+        items.push(prefs_check(
+            "Wake-word activation (always listening)",
+            p.wakeword_enabled,
+            TrayAction::SetWakeWordEnabled,
+        ));
+        // Read-only info rows naming which phrase triggers what. Only
+        // shown while enabled so the user always sees the live mapping
+        // (the editor itself is a later, non-tray surface).
+        if p.wakeword_enabled {
+            if p.wake_phrases.is_empty() {
+                items.push(
+                    StandardItem {
+                        label: "    (no wake phrase configured)".into(),
+                        enabled: false,
+                        ..Default::default()
+                    }
+                    .into(),
+                );
+            } else {
+                for line in &p.wake_phrases {
+                    items.push(
+                        StandardItem {
+                            label: format!("    {line}"),
+                            enabled: false,
+                            ..Default::default()
+                        }
+                        .into(),
+                    );
+                }
+            }
+        }
 
         items.push(MenuItem::Separator);
 

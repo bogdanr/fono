@@ -33,7 +33,7 @@ const EVICTION_TICK: Duration = Duration::from_secs(15);
 /// that get load-balanced away from Fono's socket by `SO_REUSEPORT`
 /// when another mDNS responder (e.g. `avahi-daemon`) is also bound
 /// to UDP 5353.
-pub(super) const REBROWSE_TICK: Duration = Duration::from_secs(60);
+pub(super) const REBROWSE_TICK: Duration = Duration::from_secs(180);
 
 /// Handle returned by [`Browser::start`]. Drop or call
 /// [`BrowserHandle::shutdown`] to stop the browse loop.

@@ -30,6 +30,7 @@ pub mod models;
 pub mod session;
 pub mod speak_stream;
 pub mod variant;
+pub mod wake;
 pub mod wizard;
 
 #[cfg(feature = "interactive")]

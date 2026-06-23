@@ -527,12 +527,33 @@ pub enum ModelsCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum SpeakCmd {
-    /// Read text from stdin and speak it through the configured TTS backend.
+    /// Read text from stdin and synthesise it through the configured TTS
+    /// backend — playing it, or (with `--out`) writing it to a WAV file.
     ///
-    /// Segments input into sentences, strips markdown formatting, and
-    /// synthesises each sentence for playback. Useful standalone as a
-    /// pipe: `echo "Hello. World." | fono speak --stream`
-    Stream,
+    /// Segments input into sentences and strips markdown formatting.
+    /// Useful standalone as a pipe: `echo "Hello. World." | fono speak stream`
+    ///
+    /// With `--out`, audio is written instead of played: a file path
+    /// concatenates the whole input into one WAV; an existing directory
+    /// (or a path ending in `/`) writes one numbered `NNN.wav` per
+    /// sentence. `--voice` overrides the voice for this run.
+    ///
+    /// Examples:
+    ///   `echo "house" | fono speak stream --voice "female 1" --out house.wav`
+    ///   `cat notes.txt | fono speak stream --out clips/`
+    Stream {
+        /// Write synthesised audio to this WAV file (or directory) instead
+        /// of playing it. A directory (or a path ending in `/`) writes one
+        /// `NNN.wav` per sentence; otherwise the whole input is written as
+        /// a single WAV.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        /// Voice override for this run: a palette label ("female 1"),
+        /// "auto", or a raw backend voice id. Defaults to the configured
+        /// voice when omitted.
+        #[arg(long)]
+        voice: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -712,7 +733,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Some(Cmd::Uninstall { dry_run }) => crate::install::run_uninstall(dry_run),
         Some(Cmd::Speak { action }) => match action {
-            SpeakCmd::Stream => crate::speak_stream::run(&paths).await,
+            SpeakCmd::Stream { out, voice } => crate::speak_stream::run(&paths, out, voice).await,
         },
         Some(Cmd::Summarize { json, sender, chat, source, instructions, voice, silent }) => {
             summarize_cmd(&paths, json, sender, chat, source, instructions, voice, silent).await
@@ -1417,7 +1438,7 @@ async fn record_cmd(
         return record_cmd_live(paths, &config, &secrets, max_seconds, no_inject).await;
     }
 
-    let cap_cfg = CaptureConfig { target_sample_rate: config.audio.sample_rate };
+    let cap_cfg = CaptureConfig { target_sample_rate: config.audio.sample_rate, source: None };
     let cap = AudioCapture::new(cap_cfg.clone());
     let handle = cap.start().context("start audio capture")?;
     eprintln!(
@@ -2456,6 +2477,7 @@ async fn record_cmd_live(
 
     let cap_cfg = CaptureConfig {
         target_sample_rate: 16_000, // streaming pipeline operates at 16 kHz
+        ..CaptureConfig::default()
     };
     let cap = AudioCapture::new(cap_cfg.clone());
     let handle = cap.start().context("start audio capture")?;

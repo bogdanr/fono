@@ -3,10 +3,8 @@
 //! `cpal`), resampling to 16 kHz mono f32, and a pluggable VAD trait. Phase 2
 //! of `docs/plans/2026-04-24-fono-design-v1.md`.
 //!
-//! Silero VAD (ONNX) and auto-mute integration are scaffolded here as
-//! pluggable interfaces; concrete ONNX wiring lands once `ort` is added to
-//! the `fono-audio` deps (requires the model blob to be vendored).
-
+//! The shipped VAD is the energy-threshold [`vad::WebRtcVadStub`]; a
+//! neural VAD (Silero on `ort`) is a planned upgrade, not yet wired.
 pub mod capture;
 pub mod devices;
 pub mod envelope;
@@ -18,6 +16,8 @@ pub mod silence_watch;
 pub mod sink;
 pub mod trim;
 pub mod vad;
+pub mod wake_registry;
+pub mod wakeword;
 pub mod wpctl;
 
 #[cfg(feature = "streaming")]
@@ -31,7 +31,9 @@ pub use playback::{AudioPlayback, PlaybackError};
 pub use silence_watch::{SilenceEvent, SilenceState, SilenceWatch, SilenceWatchConfig};
 pub use sink::{LocalPlaybackSink, PcmSink};
 pub use trim::{trim_silence, TrimConfig};
-pub use vad::{SileroVad, Vad, VadDecision, WebRtcVadStub};
+pub use vad::{Vad, VadDecision, WebRtcVadStub};
+pub use wake_registry::{ResolvedWakeModel, WakeLicense, WakeModelClass, WakeModelEntry};
+pub use wakeword::{EnergyWakeStub, HopBuffer, WakeDecision, WakeWord, HOP_SAMPLES};
 
 #[cfg(feature = "streaming")]
 pub use stream::{AudioFrameStream, FrameEvent, StreamConfig, DEFAULT_CAPACITY};

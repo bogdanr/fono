@@ -32,3 +32,6 @@ secrets.toml
 # Vim swap/undo files at repo root
 .*.un~
 *~
+
+# Wake-word training venv (host tooling; never committed)
+/.venv-wakeword/

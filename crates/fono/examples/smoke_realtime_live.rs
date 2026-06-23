@@ -170,7 +170,8 @@ mod realtime_live {
         // input rate for us. The forwarder runs on the capture thread,
         // so it must stay cheap: a non-blocking try_send that drops on
         // a full channel rather than blocking the audio thread.
-        let capture = AudioCapture::new(CaptureConfig { target_sample_rate: input_rate });
+        let capture =
+            AudioCapture::new(CaptureConfig { target_sample_rate: input_rate, source: None });
         let mic_sink = audio_in.clone();
         // Shared with the event loop: true while the model is producing
         // reply audio. When `--mute-while-speaking` is set, the forwarder

@@ -33,7 +33,7 @@ path = "src/main.rs"
 # at it — run `scripts/fetch-onnxruntime.sh` first (CI does this
 # automatically; see `.github/workflows/ci.yml` + `release.yml`):
 #   export ORT_LIB_LOCATION="$(sh scripts/fetch-onnxruntime.sh)"
-default = ["tray", "local-models", "llama-local", "interactive", "tts-local", "realtime"]
+default = ["tray", "local-models", "llama-local", "interactive", "tts-local", "realtime", "wakeword-onnx"]
 tray = ["fono-tray/tray-backend"]
 # Realtime / speech-to-speech assistant (Gemini Live WebSocket). Forwards
 # to `fono-assistant/realtime`. Default-on; the Live client's WebSocket
@@ -79,6 +79,25 @@ enigo = ["fono-inject/enigo-backend"]
 # to point at the pinned `libonnxruntime.a` — `scripts/fetch-onnxruntime.sh`
 # provides it.
 tts-local = ["fono-tts/tts-local", "fono-mcp-server/tts-local"]
+# Always-on wake-word ("hey fono") detection on the statically-linked `ort`
+# runtime. DEFAULT as of 2026-06-23: the shipped binary swaps in the real
+# openWakeWord ONNX detector (the energy/no-op stub remains the fallback when
+# no model is present). Forwards to `fono-audio/wakeword-onnx`. The Rust/runtime
+# cost is net-zero on the default binary (`ort` is already linked for
+# `tts-local`); the only delta is the small `OnnxWakeWord` code path plus the
+# wake-word ops now folded into the union `ops.config`
+# (calibration/voice-models/ort/ops.config: MaxPool, Log, Pow, ReduceMax, Max,
+# com.microsoft FusedGemm). For this to actually FIRE in a shipped artefact two
+# host/CI steps must accompany the release:
+#   1. Rebuild + re-host the minimal `libonnxruntime.a` for all 5 triples from
+#      the wake-augmented union ops.config and re-pin the SHAs in
+#      scripts/fetch-onnxruntime.sh. Until the hosted runtime carries the wake
+#      ops a wake `.ort` cannot load (the detector falls back to the stub) —
+#      the feature is simply inert, never broken.
+#   2. Train + upload a wake model (`hey_jarvis` for validation now; the clean
+#      Apache `hey_fono.ort` next) to the fono-voice mirror and pin it in
+#      `fono-audio::wake_registry`.
+wakeword-onnx = ["fono-audio/wakeword-onnx"]
 
 [dependencies]
 fono-core = { path = "../fono-core", features = ["vulkan-probe"] }
