@@ -13,12 +13,20 @@ The home page is [fono.page](https://fono.page).
 
 <table width="100%">
 <tr>
-<td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#personal-vocabulary--voice-correction">Personal vocabulary &amp; voice correction</a></strong><br>Teach Fono once that "Phono" means "Fono" — it sticks forever, deterministically, before the text ever hits the cursor.<br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#wake-word-activation">Wake-word activation</a></strong><br>Say the magic word — Fono wakes and starts dictating. No hotkey, no hands.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".</td>
+<td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#personal-vocabulary--voice-correction">Personal vocabulary &amp; voice correction</a></strong><br>Teach Fono once that "Phono" means "Fono" — it sticks forever, deterministically, before the text ever hits the cursor.<br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".</td>
 <td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#self-hosted-modelship-backend">Self-hosted Modelship backend</a></strong><br>One box on your LAN runs the LLM, speech-to-text, text-to-speech, and embeddings — every Fono desktop points at it, fully local.<br><br><strong><a href="#hover-context-injection">Hover-context injection</a></strong> <em>(experimental)</em><br>Terminal hovered → shell prompts. Code editor hovered → identifier casing.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#better-wayland-hotkeys">Better Wayland hotkeys</a></strong><br>Auto-register via the <code>GlobalShortcuts</code> portal when available.<br><br><strong><a href="#macos-and-windows">macOS + Windows</a></strong><br>Native platform integrations.<br><br><strong><a href="#shared-ggml-size-reclaim-spike">Shared ggml size-reclaim spike</a></strong><br>Investigate replacing the linker workaround with one source-level ggml runtime to reclaim about 7 MiB.</td>
 </tr>
 </table>
 
 ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge)
+
+**[v0.12.0 — Hands-free wake-word activation](#shipped)**  
+Idle, listen for a spoken wake phrase, and start dictating or talking to the
+assistant with no key and no hands — detection runs locally on the ONNX runtime
+already in the binary, so it adds no new dependency and no measurable size. When
+the LAN Wyoming server is on, Fono auto-serves wake detection over it, so Home
+Assistant discovers it as a drop-in wake-word provider with audio staying on the
+machine. *(2026-06-24)*
 
 **[v0.11.1 — Hands-free realtime conversation](#shipped)**  
 Tap the assistant hotkey to open one persistent realtime session and hold a
@@ -112,29 +120,6 @@ Fono will translate as it transcribes — the pipeline becomes
   live-dictation mode.
 - **One-shot CLI.** `fono translate <text> --to <code>` pipes any text through the
   configured translator without touching audio capture.
-
-### Wake-word activation
-
-> Just say the word.
-
-Always-on hands-free mode: Fono idles with a tiny wake-word detector (powered by
-[openWakeWord](https://github.com/dscripka/openWakeWord)) using a fraction of one CPU
-core. Say the magic word and Fono wakes up and starts dictating — no hotkey, no
-reaching for the keyboard. When you stop speaking it goes back to sleep. The wake-word
-model runs locally; your audio never leaves the machine while idle.
-
-**Status: implemented behind a default-off `[wakeword]` flag, awaiting the trained
-default model + a release.** The detector (openWakeWord on the existing local ONNX
-runtime — no new dependency, no size-budget hit), the always-on listener that suspends
-during any active session, the model registry with a clean Apache-2.0 default plus a
-community catalog (its NonCommercial license shown as a notice at download), the Wyoming wake Detection
-server — served **automatically whenever the LAN Wyoming server is enabled**, exactly like STT and TTS, with audio staying
-local — plus an opt-in client path (default-off, with a privacy warning), and
-`fono doctor` reporting have all landed. What remains before it ships in a tagged
-release: the default `hey_fono` model must be trained and hosted (the offline training
-pipeline exists; its registry SHA is still the unpinned sentinel, so the auto-served Wyoming path falls back to the
-community `hey_jarvis` model as a temporary default in the meantime). Engine and policy
-rationale: [ADR 0012](docs/decisions/0012-wake-word-activation.md).
 
 ### OpenAI Realtime backend
 
@@ -263,6 +248,33 @@ tracks the opportunity at roughly **~7 MiB** reclaimed.
 ## Shipped
 
 Newest first.
+
+- ![v0.12.0](https://img.shields.io/badge/v0.12.0-2026--06--24-blue?style=flat-square)
+  **Hands-free wake-word activation.** Fono can now idle and listen for a
+  spoken wake phrase, then start dictation or the assistant on the same path
+  the hotkey uses — no key, no hands. Detection runs locally on the ONNX
+  runtime already in the binary via
+  [openWakeWord](https://github.com/dscripka/openWakeWord), so it adds no new
+  dependency and no measurable size, and your audio never leaves the machine
+  while idle on the default path. The listener suspends during any active
+  recording or assistant turn and resumes when Fono goes idle. It ships with a
+  clean Apache-2.0 default phrase as the only enabled model, plus an opt-in
+  community phrase catalog that is downloaded on demand, never bundled, and
+  shows its NonCommercial license as a notice when you pick one. When the LAN
+  Wyoming server is enabled, Fono automatically serves wake detection over it —
+  exactly like it serves STT and TTS, with no extra switch — so Home Assistant
+  discovers Fono as a drop-in wake-word provider and detection runs on the Fono
+  box with audio staying on the machine. Behind an explicit "idle mic audio
+  leaves the machine over the LAN" warning, Fono can instead forward audio to an
+  external `wyoming-openwakeword` service, and `fono doctor` reports the
+  wake-word configuration and that privacy warning.
+
+  The clean-license `hey_fono` default model is not yet hosted, so the local
+  always-on listener stays off until you enable it; the auto-served Wyoming path
+  uses the community `hey_jarvis` model as a temporary fetchable default in the
+  meantime. An offline training pipeline for custom models ships alongside.
+  Engine and licensing rationale is in
+  [ADR 0012](docs/decisions/0012-wake-word-activation.md). *v0.12.0, 2026-06-24.*
 
 - ![v0.11.1](https://img.shields.io/badge/v0.11.1-2026--06--22-blue?style=flat-square)
   **Hands-free realtime conversation mode.** Tapping the assistant hotkey now

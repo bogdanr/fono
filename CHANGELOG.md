@@ -5,7 +5,12 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.12.0] — 2026-06-24
+
+Hands-free wake-word activation: idle, listen for a spoken phrase, and
+start dictation or the assistant with no key — locally, on the ONNX
+runtime already in the binary, and auto-served over Wyoming for Home
+Assistant.
 
 ### Added
 
