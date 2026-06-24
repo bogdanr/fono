@@ -12,6 +12,37 @@ by an allowlist of universal glibc-stack libs. ADR 0018
 carries the dedup invariant. ADR 0022 will supersede ADR 0018 once
 Task 1.2 lands.
 
+> **AMENDED 2026-06-24 — the source-shared-ggml reclaim is ≈ 0 MiB, not
+> ~7 MiB; Task 1.2 is deferred indefinitely as a size optimisation.**
+> A spike re-measured the duplicate on the canonical `release-slim`
+> `x86_64-unknown-linux-gnu` `cpu` artefact (26.60 MiB). A non-stripped
+> relink shows `ggml_init` defined **once**, **zero** duplicated ggml
+> globals, single-copy ggml `.text` ≈ 1.03 MiB. The `~7 MiB` figure
+> repeated below is an *archive-size* inheritance that does **not**
+> survive the link: `-ffunction-sections -fdata-sections` +
+> `-Wl,--gc-sections` already collect the loser ggml copy's sections, so
+> `--allow-multiple-definition` ships a single copy. **Every "~7 MiB
+> reclaim", "offset for ONNX", and "ADR 0022 supersedes ADR 0018 once
+> Task 1.2 lands" statement below is superseded by this measurement.**
+> ADR 0018 is now the **steady state**, not an interim kludge; Task 1.2's
+> only residual benefit is build time (ggml compiled twice), which the
+> size budget does not count. If revisited, the front-runner is
+> upstreaming `system-ggml` (llama-cpp-sys-2 already ships it; only a
+> `whisper-rs-sys` Codeberg fork/PR would remain) — triggered by
+> correctness or build-time needs, not size. See
+> `plans/2026-06-23-shared-ggml-size-reclaim-spike-v1.md` and
+> `docs/binary-size.md` §4.
+
+> **AMENDED 2026-06-24 (part 2) — `cpu` budget raised to 28 MiB, hard cap
+> lowered to 30 MiB.** The enforced `cpu` size-gate row moves from 27 MiB
+> to **28 MiB (29 360 128 B)** in `.github/workflows/ci.yml` (both the
+> x86_64 and aarch64 rows): wake-word work consumed the last of the 27 MiB
+> headroom and CI measured the artefact just over the line on its runner
+> toolchain (local builds were ~26.6 MiB). The hard `cpu` cap is tightened
+> from ≤ 32 MiB to **≤ 30 MiB**, leaving ~2 MiB of deliberate ceiling above
+> the enforced row. These figures supersede the 26/27 MiB budget and
+> ≤ 32 MiB cap stated elsewhere in this ADR. `gpu` is unchanged.
+
 The static-musl ship (Phase 2.4) is **deferred** — see "Rejected:
 static-musl with libgomp" in Trade-offs.
 

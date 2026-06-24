@@ -1,6 +1,40 @@
 # Fono — Project Status
 Last updated: 2026-06-24
 
+## 2026-06-24 — Shared-ggml size-reclaim spike → DEFER (reclaim ≈ 0 MiB)
+
+Executed `plans/2026-06-23-shared-ggml-size-reclaim-spike-v1.md`. Outcome:
+**defer the source-level shared-ggml dedup; keep the ADR 0018 link trick
+as steady state.**
+
+- **Phase A (re-baseline).** whisper-rs-sys 0.15.0 vendors whisper.cpp
+  **v1.8.3**; llama-cpp-sys-2 0.1.150's bundled ggml is the newer superset
+  (`ggml.h` 107927 B vs 102112 B). `struct ggml_tensor` is **byte-identical**
+  and all `GGML_MAX_*` match; `GGML_TYPE_COUNT` 40→42 is tail-appended
+  (safe). **Hazard:** `enum ggml_op` has a mid-enum insertion
+  (`GGML_OP_GATED_DELTA_NET` before `GGML_OP_UNARY`) shifting later op
+  values by +1 — already latent in today's mixed-survivor link, smoke-test
+  gated. **A3:** llama-cpp-sys-2 0.1.150 now ships a `system-ggml`
+  feature (`LLAMA_USE_SYSTEM_GGML`), new since the 2026-05-31 spike;
+  whisper-rs-sys still has no knob. **A4:** whisper-rs GitHub is an
+  archived mirror (live repo on Codeberg); issue #212 "Add USE_SYSTEM_GGML"
+  is open + unimplemented. The dedup is asymmetric — only the whisper side
+  needs forking.
+- **Phase B (measure).** Canonical `release-slim` `linux-gnu` `cpu` build:
+  **26.60 MiB**, four-entry `NEEDED`. A non-stripped relink shows
+  `ggml_init` defined **once**, **zero** duplicated ggml globals (561
+  distinct `ggml_` text symbols, each once); the only duplicated locals are
+  C++ template clones from onnxruntime/STL. **Realised duplicated-ggml
+  reclaim ≈ 0 MiB**, not ~7 MiB — `-ffunction-sections`/`-fdata-sections` +
+  `--gc-sections` already collect the loser copy. Risk #2 materialised.
+- **Decision (D).** Defer. A source-level shared ggml buys no binary size;
+  only build time (ggml compiled twice), which the size budget doesn't
+  count. Front-runner if ever revisited: upstream `system-ggml` (llama done;
+  whisper Codeberg PR), triggered by correctness/build-time, not size.
+- **Docs reconciled:** plan (findings + decision), `docs/binary-size.md` §4,
+  ADR 0022 (amendment + "~7 MiB superseded"), ADR 0018 (steady-state
+  amendment), `ROADMAP.md`. No code changes; link trick unchanged.
+
 ## 2026-06-24 — Wake reliability fixes + Wyoming wake parity
 
 Two-part session. **Part 1 — wake detection reliability.** openWakeWord

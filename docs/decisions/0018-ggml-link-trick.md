@@ -4,6 +4,18 @@
 
 Accepted 2026-04-27.
 
+> **AMENDED 2026-06-24 — this is the steady state, not an interim kludge.**
+> A spike (`plans/2026-06-23-shared-ggml-size-reclaim-spike-v1.md`)
+> measured the duplicated-ggml reclaim available to the source-level
+> shared-ggml replacement (ADR 0022 Task 1.2) at **≈ 0 MiB**: the shipped
+> `cpu` artefact already contains a single ggml copy because
+> `-ffunction-sections -fdata-sections` + `-Wl,--gc-sections` collect the
+> loser copy's per-function sections, leaving exactly one definition of
+> each `ggml_*` symbol. The earlier "~7 MiB" estimate was an archive-size
+> inheritance that does not survive the link. **ADR 0022 will not supersede
+> this ADR on size grounds; the link trick stays as the documented steady
+> state.** See `docs/binary-size.md` §4 and the ADR 0022 amendment.
+
 ## Context
 
 `whisper-rs-sys` and `llama-cpp-sys-2` each statically vendor their

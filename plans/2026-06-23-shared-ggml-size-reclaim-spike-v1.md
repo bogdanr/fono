@@ -66,7 +66,7 @@ estimate).
 
 ### Phase A — Re-baseline the facts on current versions
 
-- [ ] A1. Pin down the exact ggml provenance each crate vendors today.
+- [x] A1. Pin down the exact ggml provenance each crate vendors today.
   Locate the upstream ggml/whisper.cpp/llama.cpp SHA or release that
   `whisper-rs-sys 0.15.0` and `llama-cpp-sys-2 0.1.150` fetch or vendor
   (inspect each crate's `build.rs`, `CMakeLists`, submodule pin, or
@@ -74,35 +74,83 @@ estimate).
   drift was measured against a *fork*; the published `llama-cpp-2 0.1.150`
   may track a different ggml revision, changing the reconciliation scope.
 
-- [ ] A2. Re-diff `ggml.h` (and the backend headers — `ggml-backend.h`,
+- [x] A2. Re-diff `ggml.h` (and the backend headers — `ggml-backend.h`,
   `ggml-cpu.h`, any `ggml-vulkan.h`) between the two vendored copies.
   Quantify: line drift, added/removed/renamed public symbols, struct
   layout changes, enum value changes. Rationale: ABI compatibility of the
   *surviving* copy is the core risk; the link trick silently keeps one
   set, so any struct/enum drift is latent UB, not a link error.
 
-- [ ] A3. Confirm whether an external-ggml build knob now exists in
+- [x] A3. Confirm whether an external-ggml build knob now exists in
   either crate's `build.rs` (a `GGML_*` env, a cargo feature, or a
   `links`-key handoff). Re-verify the `whisper-rs-sys` finding (no `links`
   key, unconditional ggml build) on 0.15.0 and check `llama-cpp-sys-2`
   0.1.150 symmetrically. Rationale: a flag-flip path, if it appeared
   upstream since the last spike, collapses the whole effort.
 
-- [ ] A4. Survey upstream (`utilityai/llama-cpp-rs`,
+- [x] A4. Survey upstream (`utilityai/llama-cpp-rs`,
   `tazz4843/whisper-rs`) issues/PRs/branches for any existing
   external-ggml / shared-ggml / `system-ggml` work, and whether a
   standalone `ggml-sys` crate either crate could depend on now exists.
   Rationale: an upstreamed path is strictly preferable to a fork for
   maintenance; do not re-invent if upstream is already moving.
 
+### Phase A — Findings (2026-06-24)
+
+- **A1 provenance.** Both crate sources are in the registry cache.
+  whisper-rs-sys 0.15.0 vendors **whisper.cpp v1.8.3**
+  (`CMakeLists.txt:3`, crate vcs sha `7558e1b…`, repo now
+  `codeberg.org/tazz4843/whisper-rs`). llama-cpp-sys-2 0.1.150 vendors
+  llama.cpp at crate vcs sha `5459e4d…` (build number injected at CMake
+  configure time, not embedded in the package). Their bundled ggml copies
+  are **different revisions**: llama's is the newer superset
+  (`ggml.h` 107927 B vs whisper's 102112 B).
+- **A2 header drift.** `ggml.h` diff: 137 llama-added lines, 16 whisper-only
+  (all alignment/deprecation noise — every whisper-referenced symbol
+  survives, e.g. `ggml_add1` is now `GGML_DEPRECATED`-wrapped but the symbol
+  is intact). `ggml-backend.h` +73/-11, `ggml-cpu.h` +5/-0, `gguf.h` +10/-2.
+  Decisive ABI facts:
+  - `struct ggml_tensor` is **byte-identical** and all `GGML_MAX_*`
+    constants match (DIMS 4, SRC 10, OP_PARAMS 64, NAME 64) → tensor layout
+    is safe.
+  - `GGML_TYPE_COUNT` 40 → 42 (llama appends `GGML_TYPE_NVFP4=40`,
+    `GGML_TYPE_Q1_0=41`) — **additive at the tail**, existing type values
+    unchanged → safe.
+  - **Hazard:** `enum ggml_op` has a **mid-enum insertion** —
+    `GGML_OP_GATED_DELTA_NET` is added before `GGML_OP_UNARY`, shifting
+    `GGML_OP_UNARY` and every later op value (incl. `GGML_OP_COUNT`) by +1
+    in llama's copy. If whisper.cpp's compiled objects ever compare
+    `tensor->op` against an op constant ≥ `UNARY`, linking against llama's
+    ggml mis-dispatches → latent UB (Risk #1). Graph *construction* via ggml
+    API constructors is safe (op values live inside the surviving ggml.c);
+    only direct op-enum reads in whisper.cpp source are at risk. C4 runtime
+    smoke test is the gate.
+- **A3 build knobs.** whisper-rs-sys 0.15.0: **no external-ggml knob** —
+  `build.rs` unconditionally builds + statically links
+  `ggml`/`ggml-base`/`ggml-cpu` (`build.rs:312-315`); `links = "whisper"`,
+  no `links = "ggml"`. llama-cpp-sys-2 0.1.150: **now has a `system-ggml`
+  (and `system-ggml-static`) feature** — sets `LLAMA_USE_SYSTEM_GGML=ON`
+  (`build.rs:897-899`) so llama.cpp does `find_package(ggml)` against an
+  external ggml, then reads the found lib dirs from CMakeCache
+  (`build.rs:979-1005`). This is **new since the 2026-05-31 spike** and
+  collapses half the work onto the llama side.
+- **A4 upstream.** whisper-rs GitHub repo is an **archived mirror** (read-only
+  since 2025-07-30); the live repo is on Codeberg (robots-blocked from here).
+  Open GitHub issue **#212 "Add `USE_SYSTEM_GGML`" (Mar 2025) is still
+  unimplemented** — the feature is requested but absent from the shipped
+  0.15.0. Net: the dedup is **asymmetric** — llama side already supports
+  external ggml upstream; the whisper side has no support and must be
+  forked/patched (a Codeberg PR is the upstream exit, to be confirmed against
+  the live repo when the dedup plan is drafted).
+
 ### Phase B — Measure the real size prize
 
-- [ ] B1. Build the current canonical artefact
+- [x] B1. Build the current canonical artefact
   (`release-slim`, `linux-gnu`, default features) and capture its size +
   `NEEDED` set as the baseline. Rationale: anchors the win against a real
   number, matching the CI gate's measurement shape.
 
-- [ ] B2. Quantify the duplicated ggml `.text`/`.rodata` actually present
+- [x] B2. Quantify the duplicated ggml `.text`/`.rodata` actually present
   in the shipped binary — e.g. by comparing object/section sizes of the
   two ggml builds pre-link, or by a controlled single-engine vs.
   dual-engine link comparison. Rationale: the ~7 MiB figure is an
@@ -110,14 +158,53 @@ estimate).
   of the duplicate, so the *realised* reclaim could be materially smaller.
   This number decides whether the spike is worth shipping at all.
 
-- [ ] B3. Record the measured reclaim against the ADR 0022 ~7 MiB claim
+- [x] B3. Record the measured reclaim against the ADR 0022 ~7 MiB claim
   and note the resulting headroom under the `cpu` cap. Rationale: the
   cap has moved (≤ 32 MiB hard cap, 26-27 MiB enforced row); the offset's
   value depends on current headroom pressure.
 
+### Phase B — Findings (2026-06-24)
+
+Canonical build: `ORT_LIB_LOCATION=<pinned> cargo build -p fono
+--profile release-slim --target x86_64-unknown-linux-gnu` (default
+features), exactly the CI size-gate shape (`.github/workflows/ci.yml:332`).
+
+- **B1 baseline.** **27,892,632 bytes = 26.60 MiB** (under the 28,311,552 /
+  27 MiB `cpu` budget). `NEEDED` is exactly the four-entry allowlist
+  (`ld-linux-x86-64.so.2`, `libc.so.6`, `libgcc_s.so.1`, `libm.so.6`).
+  `.text` = 21,469,788 B.
+- **B2 — realised duplicate ≈ 0.** Relinked a non-stripped twin
+  (`--config profile.release-slim.strip=false`) and inspected the symbol
+  table:
+  - `ggml_init` is defined **exactly once**; **zero** duplicated *global*
+    text symbols across the whole binary; **zero** duplicated `ggml_` text
+    symbols (561 distinct, each once).
+  - The only duplicated *local* symbols are C++ template clones
+    (`.isra`/`.constprop`/`.partN`) from onnxruntime / `llama_sampler` /
+    gsl / STL — **none are ggml**.
+  - Single-copy ggml/quant kernel `.text` ≈ **1.03 MiB** (whole-binary
+    defined text ≈ 18.9 MiB / 30,288 symbols).
+  Root cause: `.cargo/config.toml:36-41` ships `-Wl,--gc-sections` +
+  `-Wl,--as-needed` and `[env] CFLAGS/CXXFLAGS` carry
+  `-ffunction-sections -fdata-sections`. `--allow-multiple-definition`
+  keeps the first definition of each duplicated ggml global; the loser
+  copy's per-function sections become unreferenced and `--gc-sections`
+  collects them. The duplicate is **already gone from the shipped binary**.
+- **B3 — vs the ADR 0022 ~7 MiB claim.** The ~7 MiB is an *archive-size*
+  inheritance (sum of the two sides' `libggml*.a`, ~2.4 MB each pre-link),
+  not a section measurement of the linked artefact. The **realised**
+  duplicated-ggml reclaim available to a source-level dedup is **≈ 0 MiB**.
+  Risk #2 in this plan has materialised: LTO/GC already prune the
+  duplicate. The only residual cost of the link trick is **build time**
+  (ggml is compiled twice), which is not a binary-size concern, so the
+  project's stated top priority is unaffected.
+
 ### Phase C — Evaluate the two source-level paths
 
-- [ ] C1. **Path 1 — fork `whisper-rs-sys` to drop bundled ggml and link
+Phase C is evaluated **on paper only** — with B2 showing a ≈ 0 MiB size
+win, prototyping (C4) is not justified. Recorded for the next attempt:
+
+- [x] C1. **Path 1 — fork `whisper-rs-sys` to drop bundled ggml and link
   llama's.** Sketch the patch: gate out whisper-rs-sys's ggml compile,
   resolve its ggml symbols against `llama-cpp-sys-2`'s build, reconcile
   link order. Identify ABI risks surfaced in A2 (whisper.cpp calling a
@@ -125,21 +212,34 @@ estimate).
   was the only path judged viable last time; validate it still is on
   current versions.
 
-- [ ] C2. **Path 2 — single shared ggml build both crates compile
+  *Eval:* eased by A3 (llama's `system-ggml` exists), but whisper-rs-sys
+  needs a fresh fork + the op-enum mid-insertion (A2) reconciled. Note the
+  *current* link already produces a **mixed-survivor** ggml (whisper's copy
+  wins common globals in link order; llama-only new symbols come from
+  llama's copy), so the ABI hazard is already latent today and
+  smoke-test-gated — a dedup would not improve correctness. Size win ≈ 0.
+- [x] C2. **Path 2 — single shared ggml build both crates compile
   against.** Sketch forking *both* sys crates onto one pinned
   `ggerganov/ggml` checkout (or a shared `ggml-sys`), bumping whisper.cpp
   and llama.cpp to revisions whose ggml is the same family. Rationale:
   cleaner ABI story (one source of truth) but doubles the fork-maintenance
   surface and may force version bumps that ripple into the Rust API.
 
-- [ ] C3. **Path 3 — upstream an `external-ggml` / `system-ggml` feature**
+  *Eval:* doubles the fork-maintenance surface for a ≈ 0 MiB win — worst
+  cost/benefit of the three.
+- [x] C3. **Path 3 — upstream an `external-ggml` / `system-ggml` feature**
   to whisper-rs-sys (and/or llama-cpp-sys-2). Assess feasibility, likely
   upstream receptiveness (informed by A4), and the interim
   `[patch.crates-io]` bridge while a PR is in flight. Rationale: lowest
   long-term maintenance; aligns with the project's prior success
   upstreaming the `common`-strip and static-runtime patches.
 
-- [ ] C4. **Prototype the chosen front-runner far enough to link.** Stand
+  *Eval:* the *preferred* path **if** the win were real — llama side is
+  already upstreamed (A3); only a whisper-rs-sys Codeberg PR would remain.
+  But with a ≈ 0 MiB binary-size win it is not worth the upstream effort
+  now.
+- [~] C4. **Prototype the chosen front-runner far enough to link.**
+  **Skipped** — Defer outcome (B2 ≈ 0 MiB); no prototype warranted. Stand
   up a local `[patch.crates-io]` fork implementing the most promising
   path, build the canonical artefact, and confirm: (a) it links, (b)
   `local_backends_coexist` passes, (c) `NEEDED` stays four-entry, (d) the
@@ -150,7 +250,7 @@ estimate).
 
 ### Phase D — Decide and document
 
-- [ ] D1. Produce the **go/defer recommendation** with the measured
+- [x] D1. Produce the **go/defer recommendation** with the measured
   reclaim (B2), the chosen path (C), ABI-reconciliation scope (A2), and
   the maintenance-tail estimate. Rationale: the spike's actual deliverable.
 
@@ -160,11 +260,37 @@ estimate).
   link-trick retirement path. Note: writing these is an *implementation*
   step requiring a build/implementation agent, not Muse.
 
-- [ ] D3. **If Defer:** update `docs/status.md`, `docs/binary-size.md:173-187`,
+- [x] D3. **If Defer:** update `docs/status.md`, `docs/binary-size.md:173-187`,
   and the ADR 0022 / ROADMAP estimate with the fresh measured findings so
   the next attempt starts from current facts, and keep the link trick as
   the documented steady state. Rationale: the prior spike's value decayed
   because the numbers were version-stale; refresh them regardless of outcome.
+
+## Decision (2026-06-24): DEFER
+
+**Recommendation: Defer the source-level shared-ggml dedup; keep the
+ADR 0018 link trick as the documented steady state.**
+
+- **Why.** The measured duplicated-ggml reclaim in the shipped
+  `release-slim` `linux-gnu` `cpu` artefact is **≈ 0 MiB** (B2), not the
+  inherited ~7 MiB. The existing `--allow-multiple-definition` +
+  `--gc-sections` + `-ffunction-sections/-fdata-sections` combination
+  already eliminates the duplicate copy at link time (`ggml_init` once,
+  zero duplicated ggml globals). The dedup's headline benefit does not
+  exist; only a build-time cost (ggml compiled twice) remains, which is
+  out of scope for the size budget.
+- **Path, if ever revisited (Go in future).** Path 3 (upstream
+  `system-ggml`) is the front-runner because llama-cpp-sys-2 already ships
+  it (A3); only a `whisper-rs-sys` Codeberg PR would remain. But the
+  trigger should be a *correctness* or *build-time* motivation, not size.
+- **ABI note.** The op-enum mid-insertion (`GGML_OP_GATED_DELTA_NET`
+  before `GGML_OP_UNARY`, A2) is a latent hazard in the *current* mixed
+  link too; it is smoke-test-gated (`local_backends_coexist`) and not made
+  better or worse by deferring.
+- **Doc reconciliation (D3).** `docs/binary-size.md` §4, ADR 0022's
+  Task 1.2 obligation, `docs/status.md`, and `ROADMAP.md` updated to the
+  measured ≈ 0 MiB figure; ADR 0018 stays **Active** as steady state
+  rather than "interim".
 
 ## Verification Criteria
 

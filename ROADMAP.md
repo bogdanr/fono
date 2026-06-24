@@ -14,7 +14,7 @@ The home page is [fono.page](https://fono.page).
 <table width="100%">
 <tr>
 <td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#personal-vocabulary--voice-correction">Personal vocabulary &amp; voice correction</a></strong><br>Teach Fono once that "Phono" means "Fono" — it sticks forever, deterministically, before the text ever hits the cursor.<br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".</td>
-<td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#self-hosted-modelship-backend">Self-hosted Modelship backend</a></strong><br>One box on your LAN runs the LLM, speech-to-text, text-to-speech, and embeddings — every Fono desktop points at it, fully local.<br><br><strong><a href="#hover-context-injection">Hover-context injection</a></strong> <em>(experimental)</em><br>Terminal hovered → shell prompts. Code editor hovered → identifier casing.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#better-wayland-hotkeys">Better Wayland hotkeys</a></strong><br>Auto-register via the <code>GlobalShortcuts</code> portal when available.<br><br><strong><a href="#macos-and-windows">macOS + Windows</a></strong><br>Native platform integrations.<br><br><strong><a href="#shared-ggml-size-reclaim-spike">Shared ggml size-reclaim spike</a></strong><br>Investigate replacing the linker workaround with one source-level ggml runtime to reclaim about 7 MiB.</td>
+<td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#self-hosted-modelship-backend">Self-hosted Modelship backend</a></strong><br>One box on your LAN runs the LLM, speech-to-text, text-to-speech, and embeddings — every Fono desktop points at it, fully local.<br><br><strong><a href="#hover-context-injection">Hover-context injection</a></strong> <em>(experimental)</em><br>Terminal hovered → shell prompts. Code editor hovered → identifier casing.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#better-wayland-hotkeys">Better Wayland hotkeys</a></strong><br>Auto-register via the <code>GlobalShortcuts</code> portal when available.<br><br><strong><a href="#macos-and-windows">macOS + Windows</a></strong><br>Native platform integrations.<br><br><strong><a href="#shared-ggml-size-reclaim-spike">Shared ggml size-reclaim spike</a></strong><br>Investigated whether one source-level ggml runtime could replace the linker workaround — measured outcome: the duplicate is already pruned at link time, so the reclaim is about zero. Deferred.</td>
 </tr>
 </table>
 
@@ -240,8 +240,17 @@ and `llama-cpp-sys-2`.
 
 This is a standalone spike, not part of the local TTS critical path: confirm the
 ABI/version reconciliation work, decide whether a forked or upstreamed sys-crate
-path is viable, and re-measure the expected binary-size win. ADR 0022 currently
-tracks the opportunity at roughly **~7 MiB** reclaimed.
+path is viable, and re-measure the expected binary-size win.
+
+**Outcome (2026-06-24): deferred — the reclaim is ≈ 0 MiB.** A direct
+measurement of the shipped `cpu` artefact found `ggml` is already present as a
+*single* copy: `-ffunction-sections`/`-fdata-sections` + `--gc-sections` collect
+the duplicate copy's sections at link time, so the `--allow-multiple-definition`
+trick (ADR 0018) ships only one `ggml`. The long-standing **~7 MiB** estimate was
+an archive-size inheritance that does not survive the link. The linker workaround
+is now the documented steady state; a source-level shared `ggml` would buy no
+binary size (only build time). See `docs/binary-size.md` §4 and
+`plans/2026-06-23-shared-ggml-size-reclaim-spike-v1.md`.
 
 ---
 

@@ -26,10 +26,10 @@ Everything below serves two non-negotiable invariants, enforced in CI
 
 1. **Size budget.** The canonical `cpu` artefact has a hard byte cap;
    1 byte over fails the build. Current caps (ADR 0022):
-   - `cpu`: **≤ 32 MiB** (was 20 MiB; raised for the ONNX voice stack,
-     re-measured after the minimal build + Piper landed — the minimal
-     ONNX runtime adds only ~2.1 MiB, so headroom is generous, and again
-     after the ggml dedup offset).
+   - `cpu`: **≤ 30 MiB** hard cap (was 20 MiB, then ≤ 32 MiB; lowered to
+     30 MiB on 2026-06-24). The **enforced gate row is 28 MiB**
+     (29 360 128 B) — see `.github/workflows/ci.yml`; the ~2 MiB gap to the
+     hard cap is deliberate ceiling.
    - `gpu` (Vulkan): **≤ 64 MiB**.
 2. **`NEEDED` allowlist.** `readelf -d` on the shipped binary must list
    **only** the universal glibc + libgcc ABI present on every desktop
@@ -119,7 +119,7 @@ build.sh --config MinSizeRel --build_shared_lib \
   only — the operator delta is dwarfed by shared infrastructure), and a
   `release-slim --features tts-local` glibc binary links in at **25.22 MiB**
   (up from the 24.45 MiB Piper-only baseline below), still well under the
-  32 MiB `cpu` cap with the four-entry `NEEDED` allowlist intact.
+  30 MiB `cpu` cap with the four-entry `NEEDED` allowlist intact.
 - The resulting static `libonnxruntime.a` is built in CI and pinned via
   the `ORT_LIB_LOCATION` env var, which turns off `ort`'s
   `download-binaries` (so builds are reproducible/offline and no
@@ -170,21 +170,33 @@ C/C++ dependencies (ggml, onnxruntime) want to pull `libstdc++.so.6`,
 full rationale). The `release-slim` profile sets `strip = "symbols"`,
 LTO, and `opt-level` for size.
 
-### 4. Deduplicate ggml — the offset for the ONNX addition
+### 4. Deduplicate ggml — measured ≈ 0 MiB win, deferred
 
-Today `whisper-rs-sys` and `llama-cpp-sys-2` each vendor their **own**
-copy of ggml; the `--allow-multiple-definition` trick (ADR 0018) keeps
-one and discards the duplicate, wasting **~7 MiB**. **Source-shared ggml**
-(ADR 0022 Phase 1 Task 1.2) patches both sys crates to compile against
-one shared ggml build, reclaiming that ~7 MiB and retiring the link
-trick.
+`whisper-rs-sys` and `llama-cpp-sys-2` each vendor their **own** copy of
+ggml; the `--allow-multiple-definition` trick (ADR 0018) keeps the first
+and discards the duplicate at link time.
 
-This is **scheduled after Piper ships, specifically to offset the ONNX
-addition** — it is no longer a prerequisite for anything, just the
-counterweight that keeps the `cpu` cap honest. The blocker is real
-engineering: the two crates currently track *different* ggml revisions
-(77-line `ggml.h` drift, measured 2026-05-31), so it needs a
-`whisper-rs-sys` fork + ABI reconciliation + a pinned remote.
+**The ~7 MiB once attributed to this duplicate is an archive-size
+inheritance, not a section measurement — and it does not survive the
+link.** Re-measured 2026-06-24 on the canonical `release-slim`
+`x86_64-unknown-linux-gnu` `cpu` artefact (26.60 MiB,
+`plans/2026-06-23-shared-ggml-size-reclaim-spike-v1.md`): a non-stripped
+relink shows `ggml_init` defined exactly **once**, **zero** duplicated
+ggml globals, and single-copy ggml/quant `.text` ≈ 1.03 MiB. The same
+`-ffunction-sections -fdata-sections` + `--gc-sections` that prune the
+stale `libstdc++` bulk (§2) also collect the loser ggml copy's
+per-function sections. **Realised reclaim from a source-level shared ggml
+≈ 0 MiB.**
+
+Consequence: **source-shared ggml (ADR 0022 Phase 1 Task 1.2) is
+deferred** — it buys no binary size. The only residual cost of the link
+trick is build time (ggml compiled twice), which the size budget does not
+count. If ever revisited, the front-runner is upstreaming a `system-ggml`
+feature: `llama-cpp-sys-2` already ships one, so only a `whisper-rs-sys`
+fork/PR (its upstream lives at `codeberg.org/tazz4843/whisper-rs`; the
+GitHub mirror is archived) would remain — but the trigger should be a
+correctness or build-time motivation, not size. ADR 0018 stays the
+documented steady state.
 
 ## 0.11.0 size-regression notes (2026-06-19)
 
