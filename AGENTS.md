@@ -55,6 +55,23 @@ Target users: Linux desktop (i3 / sway / KDE / GNOME, X11 and Wayland), Windows,
   → push fixup" loop. The agent is responsible for this gate; do not
   rely on the human to catch it.
 
+- **Size-budget gate (run before EVERY `git push`, and before every tag
+  / release):** `./tests/check.sh --size-budget`. This builds the
+  canonical ship artefact (`release-slim`, glibc `cpu`, default
+  features) and asserts the **exact** thing CI's `size-budget` job
+  asserts — binary ≤ the `cpu` budget (currently 28 MiB / 29,360,128 B)
+  and a four-entry `NEEDED` allowlist (libc, libm, libgcc_s, the dynamic
+  linker). The numbers live in lockstep with the `ci.yml` `cpu` matrix
+  rows; change them together. A green run here means the CI size gate
+  will pass — so binary growth never surprises us at CI time. The flag
+  runs **only** the size gate (it skips the fmt/build/clippy/test matrix
+  and does its own dedicated build), so it composes with the three
+  commands above. It pins `libonnxruntime.a` via `ORT_LIB_LOCATION`
+  exactly as CI (auto-resolving through `scripts/fetch-onnxruntime.sh`
+  when the env var is unset). If the binary is over budget, fix the
+  growth or, with sign-off, bump the `cpu` row in both `ci.yml` and
+  ADR 0022 (hard cap ≤ 30 MiB) — never silently exceed it.
+
   Style note: `rustfmt.toml` sets `use_small_heuristics = "Max"` so
   short fn calls / struct literals / if-else expressions stay on one
   line when they fit in `max_width = 100`. Compact code is preferred.
