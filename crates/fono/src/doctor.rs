@@ -614,11 +614,21 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 }
             }
 
-            let default_cached = wake_registry::resolved_paths("hey_fono", &paths.cache_dir)
+            // Runtime default model (the phrase served when none is
+            // configured — e.g. the auto-served Wyoming wake path). TEMPORARY:
+            // points at the community `hey_jarvis` until the clean Apache
+            // `hey_fono` artifact is trained + pinned.
+            let default_id = wake_registry::DEFAULT_WAKE_MODEL;
+            let default_cached = wake_registry::resolved_paths(default_id, &paths.cache_dir)
                 .is_some_and(|r| r.classifier.exists());
+            let default_badge = match wake_registry::get(default_id) {
+                Some(e) if e.is_noncommercial() => warn(e.license.spdx()),
+                Some(e) => dim(e.license.spdx()),
+                None => dim("unknown"),
+            };
             writeln!(
                 out,
-                "  default model  : hey_fono (Apache-2.0, clean license) {}",
+                "  default model  : {default_id}  {default_badge}  {}",
                 if default_cached { ok("cached") } else { dim("not yet downloaded") }
             )?;
 
@@ -640,39 +650,41 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 )?;
             }
 
-            // Wyoming direction. The CLIENT path is the only one that leaks
-            // idle mic audio off the machine, so surface the shared
-            // CLIENT_PRIVACY_WARNING prominently in bold red. The SERVER path
-            // advertises Fono's *local* detector (audio stays local), but only
-            // when `[server.wyoming]` is also enabled to carry the listener.
-            match w.wyoming.as_ref() {
-                Some(wy) if wy.is_client() => {
+            // Wyoming wake serving is automatic, mirroring STT/TTS: whenever
+            // the LAN server is enabled and this build can do wake detection,
+            // Fono advertises + serves its LOCAL detector (audio stays on the
+            // machine). The opt-in CLIENT direction (`[wakeword].wyoming` with
+            // a uri) is the only path that leaks idle mic audio off-box, so it
+            // gets the loud shared warning.
+            if cfg!(feature = "wakeword-onnx") {
+                if c.server.wyoming.enabled {
                     writeln!(
                         out,
-                        "  Wyoming        : {} (idle mic audio leaves the machine)",
-                        bad("CLIENT — opt-in")
+                        "  Wyoming        : {} — local wake Detection served automatically over \
+                         the LAN server; audio stays on this machine",
+                        ok("served")
                     )?;
-                    writeln!(out, "  {}", bad(WakeWyoming::CLIENT_PRIVACY_WARNING))?;
-                }
-                Some(wy) if wy.is_server() => {
+                } else {
                     writeln!(
                         out,
-                        "  Wyoming        : {} — advertises a local wake Detection service; \
-                         audio stays on this machine",
-                        ok("server")
+                        "  Wyoming        : {} (enable `[server.wyoming]` to share wake on the LAN)",
+                        dim("available")
                     )?;
-                    if !c.server.wyoming.enabled {
-                        writeln!(
-                            out,
-                            "  {}",
-                            warn(
-                                "note: enable `[server.wyoming]` too — the wake service rides \
-                                  that listener and is unreachable without it"
-                            )
-                        )?;
-                    }
                 }
-                _ => writeln!(out, "  Wyoming        : {}", dim("off"))?,
+            } else {
+                writeln!(
+                    out,
+                    "  Wyoming        : {}",
+                    dim("unavailable (wakeword-onnx not compiled into this build)")
+                )?;
+            }
+            if w.wyoming.as_ref().is_some_and(WakeWyoming::is_client) {
+                writeln!(
+                    out,
+                    "  Wyoming client : {} (idle mic audio leaves the machine)",
+                    bad("CLIENT — opt-in")
+                )?;
+                writeln!(out, "  {}", bad(WakeWyoming::CLIENT_PRIVACY_WARNING))?;
             }
         } else {
             writeln!(

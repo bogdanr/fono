@@ -291,8 +291,10 @@ pub struct WakeWord {
     /// utterance can't double-trigger and the suspend-on-session transition
     /// (Phase D) races cleanly with the new session. Phase E.
     pub refractory_ms: u64,
-    /// Optional Wyoming wake-word integration. Config shape only; behaviour is
-    /// Phase H and not implemented here.
+    /// Optional Wyoming wake **client** integration (opt-in; streams idle
+    /// mic audio off-box — see [`WakeWyoming`]). The privacy-preserving
+    /// server direction is automatic and configured under
+    /// `[server.wyoming]`, not here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wyoming: Option<WakeWyoming>,
 }
@@ -334,39 +336,38 @@ pub enum WakeTarget {
 }
 
 /// Wyoming wake-word integration (Phase H of
-/// `plans/2026-06-23-wake-word-openwakeword-v2.md`). Two directions, one
-/// block:
+/// `plans/2026-06-23-wake-word-openwakeword-v2.md`).
 ///
-/// - **Server (recommended, privacy-preserving):** `enabled = true` with
-///   **no** `uri`. Fono exposes its *local* detector over the Wyoming
-///   `Detection` protocol on the existing `[server.wyoming]` listener, so
-///   Home Assistant and other Wyoming consumers can use Fono as a
-///   drop-in wake service. Audio **stays on the machine** — Fono *is* the
-///   detector. This rides the `[server.wyoming]` listener, so that block
-///   must also be enabled for the wake service to be reachable.
-/// - **Client (opt-in only, NOT default):** `enabled = true` with a `uri`
-///   pointing at an external `wyoming-openwakeword` service. Fono's own
-///   activation is delegated to that box.
+/// The **server** direction (Fono exposing its local detector over the
+/// Wyoming `Detection` protocol) is **automatic** and needs no config
+/// here: whenever `[server.wyoming]` is enabled and this build can do
+/// wake detection, Fono advertises + serves its local detector exactly
+/// like it does STT and TTS. Audio stays on the machine — Fono *is* the
+/// detector.
 ///
-///   ⚠️ **PRIVACY WARNING:** the client direction **STREAMS IDLE MIC
-///   AUDIO OVER THE LAN** to the external service and therefore **BREAKS
-///   the "audio never leaves the machine while idle" guarantee**. It is
-///   never a default; it must be explicitly opted into, and `fono doctor`
-///   surfaces a prominent warning when it is active (see
-///   [`WakeWyoming::CLIENT_PRIVACY_WARNING`]).
+/// This block therefore exists for the **client direction only** (opt-in,
+/// NOT default): `enabled = true` with a `uri` pointing at an external
+/// `wyoming-openwakeword` service, delegating Fono's own activation to
+/// that box.
+///
+/// ⚠️ **PRIVACY WARNING:** the client direction **STREAMS IDLE MIC
+/// AUDIO OVER THE LAN** to the external service and therefore **BREAKS
+/// the "audio never leaves the machine while idle" guarantee**. It is
+/// never a default; it must be explicitly opted into, and `fono doctor`
+/// surfaces a prominent warning when it is active (see
+/// [`WakeWyoming::CLIENT_PRIVACY_WARNING`]).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WakeWyoming {
-    /// Enable Wyoming wake integration. `false` by default. With no `uri`
-    /// this selects the recommended **server** direction (Fono exposes its
-    /// local detector, audio stays local); with a `uri` it selects the
-    /// opt-in **client** direction (Fono streams idle mic audio to an
-    /// external service — see [`Self::CLIENT_PRIVACY_WARNING`]).
+    /// Enable the opt-in Wyoming wake **client** direction. `false` by
+    /// default. Only meaningful together with a `uri`; on its own it does
+    /// nothing (the privacy-preserving server direction is automatic and
+    /// lives under `[server.wyoming]`).
     pub enabled: bool,
-    /// Optional external `wyoming-openwakeword` client URI (opt-in client
-    /// direction). `None` keeps detection fully on-device (server
-    /// direction). Setting this is what flips Fono into the
-    /// idle-audio-leaves-the-machine client mode.
+    /// External `wyoming-openwakeword` client URI. Setting this together
+    /// with `enabled = true` flips Fono into the
+    /// idle-audio-leaves-the-machine client mode
+    /// (see [`Self::CLIENT_PRIVACY_WARNING`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
 }
@@ -388,14 +389,6 @@ impl WakeWyoming {
     #[must_use]
     pub fn is_client(&self) -> bool {
         self.enabled && self.uri.as_deref().is_some_and(|u| !u.trim().is_empty())
-    }
-
-    /// `true` when configured as the recommended **server** direction:
-    /// enabled with no external `uri`. Fono exposes its local detector;
-    /// audio stays on the machine.
-    #[must_use]
-    pub fn is_server(&self) -> bool {
-        self.enabled && !self.is_client()
     }
 }
 
@@ -1763,30 +1756,30 @@ mod tests {
         let wy = WakeWyoming::default();
         assert!(!wy.enabled, "wyoming wake disabled by default");
         assert!(!wy.is_client(), "client mode off by default");
-        assert!(!wy.is_server(), "server mode off by default");
     }
 
     #[test]
-    fn wakeword_wyoming_direction_classification() {
-        // Server direction: enabled, no uri (audio stays local).
-        let server = WakeWyoming { enabled: true, uri: None };
-        assert!(server.is_server());
-        assert!(!server.is_client());
+    fn wakeword_wyoming_client_classification() {
+        // The privacy-preserving server direction is automatic (gated by
+        // `[server.wyoming]` + build capability), so this block only ever
+        // describes the opt-in CLIENT direction.
 
-        // An empty / whitespace uri is treated as "no uri" => still server.
+        // Enabled without a uri is inert: the server direction does not live
+        // here, so this is *not* a client.
+        let no_uri = WakeWyoming { enabled: true, uri: None };
+        assert!(!no_uri.is_client());
+
+        // An empty / whitespace uri is treated as "no uri" => not a client.
         let blank = WakeWyoming { enabled: true, uri: Some("  ".into()) };
-        assert!(blank.is_server());
         assert!(!blank.is_client());
 
         // Client direction: enabled + a real external uri (idle audio leaves).
         let client = WakeWyoming { enabled: true, uri: Some("tcp://hass:10400".into()) };
         assert!(client.is_client());
-        assert!(!client.is_server());
 
-        // Disabled is neither, even with a uri set.
+        // Disabled is never a client, even with a uri set.
         let off = WakeWyoming { enabled: false, uri: Some("tcp://hass:10400".into()) };
         assert!(!off.is_client());
-        assert!(!off.is_server());
 
         // The privacy warning is loud and on-point.
         assert!(WakeWyoming::CLIENT_PRIVACY_WARNING.contains("STREAMING IDLE MIC AUDIO"));

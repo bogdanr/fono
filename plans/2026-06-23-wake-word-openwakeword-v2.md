@@ -236,7 +236,7 @@ Fono already ships.
 
 ### Phase H — Wyoming wake-word integration (OPTIONAL; may ship later)
 
-- [ ] **Server (recommended):** extend the existing Wyoming server
+- [x] **Server (recommended):** extend the existing Wyoming server
   (`crates/fono-net/src/wyoming/server.rs`) and codec
   (`crates/fono-net-codec/src/wyoming.rs`) to advertise a wake-word
   **`Detection`** service in its `info`/`describe` handshake and emit a
@@ -244,20 +244,31 @@ Fono already ships.
   `WakeWord` detector from Phase C. Rationale: lets Home Assistant and
   other Wyoming consumers use Fono as a drop-in wake service while audio
   stays local; aligns with `plans/2026-06-22-home-assistant-addon-v1.md`.
-- [ ] Advertise the wake service over the existing mDNS discovery
+  **Done (2026-06-24), upgraded to full STT/TTS parity:** serving is
+  **automatic and capability-gated** (`wake::detection_available()` —
+  the `wakeword-onnx` feature being compiled in, since a fetchable default
+  model always exists), not behind a `[wakeword].wyoming` server flag.
+  Fresh installs serve the runtime default via `effective_wake_config`;
+  the daemon background-fetches the served model's `.ort` even when the
+  local listener is off.
+- [x] Advertise the wake service over the existing mDNS discovery
   (`crates/fono-net/src/discovery/`) so HA auto-discovers it, mirroring
   how the STT/TTS Wyoming services are advertised. Rationale: zero-config
-  pairing parity with the existing services.
-- [ ] **Client (opt-in only, NOT default):** allow `[wakeword].wyoming`
+  pairing parity with the existing services. **Done: `wyoming_caps` adds
+  the `wake` cap under the same capability gate.**
+- [x] **Client (opt-in only, NOT default):** allow `[wakeword].wyoming`
   to point Fono's *own* activation at an external `wyoming-openwakeword`
   service, with config copy and `fono doctor` output that **explicitly
   warns this streams idle mic audio over the LAN and breaks the
   audio-never-leaves-the-machine-while-idle guarantee**. Rationale: some
   users (e.g. an HA-centric setup) want centralised detection; make the
-  privacy trade-off loud and opt-in, never silent.
-- [ ] Round-trip tests mirroring `crates/fono-net/tests/wyoming_server_round_trip.rs`
+  privacy trade-off loud and opt-in, never silent. **Done: `[wakeword].wyoming`
+  is now the client-only block (`is_server` removed); config/doctor carry
+  the `CLIENT_PRIVACY_WARNING`. The streaming transport itself is still a
+  follow-up seam.**
+- [x] Round-trip tests mirroring `crates/fono-net/tests/wyoming_server_round_trip.rs`
   for the new `Detection` message path. Rationale: protocol correctness
-  without external services.
+  without external services. **Done: `crates/fono-net/tests/wyoming_wake_round_trip.rs`.**
 
 ### Phase I — AEC relationship (idle vs. speaking)
 

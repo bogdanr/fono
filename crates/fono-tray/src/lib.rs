@@ -149,10 +149,11 @@ pub type McpEnabledProvider = Arc<dyn Fn() -> bool + Send + Sync>;
 /// Provider returning whether `[server.wyoming].enabled = true` in the
 /// user config. Polled on the same ~2 s cadence so the "Servers ▸
 /// Wyoming server" checkmark reflects external `config.toml` edits
-/// without a tray restart. The single switch governs both STT serving
-/// (always on when enabled) and TTS serving (added automatically when a
-/// `[tts]` backend is configured). The daemon's tray-action handler
-/// hot-reloads the LAN listener, so no restart is needed.
+/// without a tray restart. The single switch governs STT serving (always
+/// on when enabled), TTS serving (added automatically when a `[tts]` backend
+/// is configured), and wake-word serving (added automatically whenever the
+/// binary can do wake detection) — all over the one listener. The daemon's
+/// tray-action handler hot-reloads the LAN listener, so no restart is needed.
 pub type WyomingEnabledProvider = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// Snapshot view of the user-facing config fields surfaced in the
@@ -1279,7 +1280,7 @@ mod backend {
         );
         server_items.push(
             CheckmarkItem {
-                label: "Wyoming server (STT + TTS) — shares Fono on the LAN".into(),
+                label: "Wyoming server (STT + TTS + wake) — shares Fono on the LAN".into(),
                 checked: t.wyoming_server_enabled,
                 activate: send_action(TrayAction::ToggleWyomingServer),
                 ..Default::default()

@@ -88,33 +88,33 @@ The built-in clean-licence phrase is **"hey fono"**; the matcher is
 English-first and tied to whichever phrase model is loaded (it is not
 free-form speech).
 
-For Home Assistant there are **two Wyoming directions**, and which one you
-pick is a privacy decision:
+For Home Assistant, Fono's wake word works **exactly like its STT and
+TTS**: whenever the `[server.wyoming]` listener is enabled, Fono
+automatically advertises and serves its *own* local detector as a Wyoming
+wake `Detection` service over that listener (TCP `10300`). There is **no
+extra switch to flip** — turn the Wyoming server on and wake is offered
+alongside STT and TTS. Home Assistant can then use Fono as a drop-in
+wake-word provider for an Assist pipeline, and **the microphone audio
+never leaves the Fono box** — the server *is* the detector. Until the
+clean-licence "hey fono" model is published, the auto-served default
+phrase is **"hey jarvis"** (a community openWakeWord model).
 
-- **Server (recommended, audio stays local).** With `[wakeword].wyoming`
-  enabled and **no `uri`**, Fono advertises its *own* local detector as a
-  Wyoming wake service over the existing `[server.wyoming]` listener (TCP
-  `10300`). Home Assistant can then use Fono as a drop-in wake-word
-  provider for an Assist pipeline, and the wake detection runs **on the
-  Fono box — the microphone audio never leaves the machine**. The
-  `[server.wyoming]` listener must also be enabled to carry the service;
-  `fono doctor` reminds you if it is off.
-- **Client (opt-in only, NOT default).** With `[wakeword].wyoming`
-  enabled **and** a `uri` pointing at an external `wyoming-openwakeword`
-  service, Fono delegates wake detection to that box.
+To connect it in Home Assistant, add the **Wyoming Protocol** integration
+pointing at the Fono host's `10300` (the same endpoint that serves
+STT/TTS) and select Fono as the wake-word provider in your Assist
+pipeline.
 
-  > ⚠️ **Privacy warning.** The client direction **streams idle
-  > microphone audio over the LAN** to the external service and therefore
-  > **breaks the "audio never leaves the machine while idle"
-  > guarantee**. It is never a default, must be explicitly opted into, and
-  > `fono doctor` prints a prominent warning whenever it is active. Prefer
-  > the server direction unless you have a specific reason to centralise
-  > wake detection elsewhere.
-
-To connect the server direction in Home Assistant, add the **Wyoming
-Protocol** integration pointing at the Fono host's `10300` (the same
-endpoint that serves STT/TTS) and select Fono as the wake-word provider
-in your Assist pipeline.
+> **Opt-in client direction (NOT default).** With `[wakeword].wyoming`
+> enabled **and** a `uri` pointing at an external `wyoming-openwakeword`
+> service, Fono instead delegates *its own* activation to that box.
+>
+> > ⚠️ **Privacy warning.** The client direction **streams idle
+> > microphone audio over the LAN** to the external service and therefore
+> > **breaks the "audio never leaves the machine while idle"
+> > guarantee**. It is never a default, must be explicitly opted into, and
+> > `fono doctor` prints a prominent warning whenever it is active. Prefer
+> > the automatic server direction unless you have a specific reason to
+> > centralise wake detection elsewhere.
 
 ## GPU acceleration
 

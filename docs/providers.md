@@ -822,11 +822,13 @@ behind `CLOUD_TTS_ACCEPT_TERMS=1`, **never** permitted for the clean
 is proprietary and ToS-bound, so such a model must not be shipped. See
 [calibration/wakeword/README.md](../calibration/wakeword/README.md).
 
-**Wyoming and privacy.** Fono can act as a **local** Wyoming wake
-`Detection` service (server direction — audio stays on the machine) or,
-opt-in only, delegate detection to an external `wyoming-openwakeword`
-service (client direction, which **streams idle mic audio over the LAN**
-and triggers a prominent `fono doctor` warning). See
+**Wyoming and privacy.** Fono automatically serves its **local** detector
+as a Wyoming wake `Detection` service whenever `[server.wyoming]` is
+enabled — exactly like STT and TTS, with audio staying on the machine and
+no extra switch. Opt-in only, it can instead delegate detection to an
+external `wyoming-openwakeword` service (client direction, which
+**streams idle mic audio over the LAN** and triggers a prominent
+`fono doctor` warning). See
 [home-assistant.md → Wake word](home-assistant.md#wake-word-hey-fono).
 
 ## Screen capture

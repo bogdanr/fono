@@ -3127,14 +3127,14 @@ fn wyoming_tts_voices(config: &Config) -> Vec<fono_net::wyoming::server::Adverti
 /// so the wake service always advertises at least one model. The spoken
 /// `phrase` is a best-effort readable form of the model id.
 fn wyoming_wake_models(config: &Config) -> Vec<fono_net::wyoming::server::AdvertisedWakeModel> {
-    let phrases: Vec<String> = if config.wakeword.phrases.is_empty() {
-        vec!["hey_fono".to_string()]
-    } else {
-        config.wakeword.phrases.iter().map(|p| p.model.clone()).collect()
-    };
-    phrases
+    // Mirror exactly what the detector will run (crate::wake::effective_wake
+    // _phrases): the configured phrases, or the runtime default model when
+    // none are configured. Keeps the advertised `info.wake` list in lockstep
+    // with the bound detector.
+    crate::wake::effective_wake_phrases(&config.wakeword)
         .into_iter()
-        .map(|model| {
+        .map(|p| {
+            let model = p.model;
             let phrase = model.replace('_', " ");
             fono_net::wyoming::server::AdvertisedWakeModel {
                 name: model,
@@ -3182,13 +3182,16 @@ async fn spawn_wyoming_server_if_enabled(
     let serve_tts = orch.tts_snapshot().is_some();
     let tts_voices = if serve_tts { wyoming_tts_voices(config) } else { Vec::new() };
     let advertised_voice_count = tts_voices.len();
-    // Wake-word SERVER direction (Phase H): expose Fono's local detector over
-    // the Wyoming `Detection` protocol when `[wakeword].wyoming` is in server
-    // mode (enabled, no client uri). Audio stays on the machine — the server
-    // *is* the detector. Opt-in: empty `wake_models` means no wake service is
-    // advertised, so STT/TTS-only servers are unaffected.
-    let serve_wake =
-        config.wakeword.wyoming.as_ref().is_some_and(fono_core::config::WakeWyoming::is_server);
+    // Wake-word SERVER direction: expose Fono's local detector over the
+    // Wyoming `Detection` protocol automatically, exactly like STT (always)
+    // and TTS (whenever a backend is configured). Capability is a build-time
+    // fact — a fetchable default model always exists — so any binary that can
+    // do wake serves it the moment the Wyoming server is up, independent of
+    // the local always-on listener (`[wakeword].enabled`). Audio stays on the
+    // machine: the server *is* the detector. The privacy-breaking CLIENT
+    // direction (`[wakeword].wyoming` with a uri) is unrelated and never
+    // advertises a wake service here.
+    let serve_wake = crate::wake::detection_available();
     let wake_models = if serve_wake { wyoming_wake_models(config) } else { Vec::new() };
     let server_cfg = fono_net::wyoming::server::WyomingServerConfig {
         bind: cfg.bind.clone(),
@@ -3233,8 +3236,28 @@ async fn spawn_wyoming_server_if_enabled(
         // listener (Phase C/D) per connection, so the LAN wake service runs
         // on-device. fono-net's `WakeProvider` is invoked once per accepted
         // connection (wake sessions are stateful).
-        let wake_cfg = config.wakeword.clone();
+        // Build from the *effective* config so a fresh install with no
+        // `[wakeword].phrases` still serves the runtime default model.
+        let wake_cfg = crate::wake::effective_wake_config(&config.wakeword);
         let wake_paths = paths.clone();
+        // Ensure the served models' `.ort` files are cached even when the
+        // local always-on listener is disabled (it owns the other fetch
+        // path). Per-connection detectors built before the fetch completes
+        // fall back to the stub and recover on the next connection.
+        for phrase in &wake_cfg.phrases {
+            let id = phrase.model.clone();
+            let cache_dir = wake_paths.cache_dir.clone();
+            if fono_audio::wake_registry::resolved_paths(&id, &cache_dir).is_some_and(|r| {
+                !(r.melspec.exists() && r.embedding.exists() && r.classifier.exists())
+            }) {
+                tokio::spawn(async move {
+                    match fono_audio::wake_registry::fetch_model(&id, &cache_dir, None).await {
+                        Ok(_) => info!("Wyoming server: fetched wake model '{id}'"),
+                        Err(e) => warn!("Wyoming server: wake model '{id}' fetch failed: {e:#}"),
+                    }
+                });
+            }
+        }
         let wake_provider: fono_net::wyoming::server::WakeProvider =
             Arc::new(move || crate::wake::build_detector(&wake_cfg, &wake_paths));
         server = server.with_wake(wake_provider);
@@ -3304,17 +3327,18 @@ async fn spawn_discovery_if_enabled() -> Option<DiscoveryRuntime> {
 
 /// Capability tags advertised over mDNS for the Wyoming service.
 /// `stt` is always served; `tts` is added whenever a `[tts]` backend is
-/// configured, and `wake` is added when the Wyoming wake **server**
-/// direction is enabled (`[wakeword].wyoming` server mode), so Home
-/// Assistant discovers this daemon as an STT / TTS / wake provider as
-/// appropriate. The wake cap is gated on the server direction only —
-/// the opt-in client direction never advertises a wake service here.
+/// configured, and `wake` is added whenever this build can do wake
+/// detection (a fetchable default model always exists), exactly mirroring
+/// how STT/TTS are advertised. Home Assistant discovers this daemon as an
+/// STT / TTS / wake provider as appropriate. The served wake detector is
+/// local (audio stays on the machine); the opt-in client direction
+/// (`[wakeword].wyoming` with a uri) is unrelated and never advertised.
 fn wyoming_caps(config: &Config) -> Vec<String> {
     let mut caps = vec!["stt".to_string()];
     if config.tts.backend != fono_core::config::TtsBackend::None {
         caps.push("tts".to_string());
     }
-    if config.wakeword.wyoming.as_ref().is_some_and(fono_core::config::WakeWyoming::is_server) {
+    if crate::wake::detection_available() {
         caps.push("wake".to_string());
     }
     caps
@@ -3463,33 +3487,35 @@ mod tests {
 
     #[test]
     fn wyoming_caps_stt_only_by_default() {
+        // STT is always advertised; TTS only with a backend; wake only when
+        // this build can do detection. Filter the capability-gated wake cap so
+        // the assertion holds for both slim and wake-enabled builds.
         let cfg = Config::default();
-        assert_eq!(wyoming_caps(&cfg), vec!["stt".to_string()]);
+        let caps: Vec<String> = wyoming_caps(&cfg).into_iter().filter(|c| c != "wake").collect();
+        assert_eq!(caps, vec!["stt".to_string()]);
     }
 
     #[test]
     fn wyoming_caps_adds_tts_when_backend_configured() {
         let mut cfg = Config::default();
         cfg.tts.backend = fono_core::config::TtsBackend::OpenAI;
-        assert_eq!(wyoming_caps(&cfg), vec!["stt".to_string(), "tts".to_string()]);
+        let caps: Vec<String> = wyoming_caps(&cfg).into_iter().filter(|c| c != "wake").collect();
+        assert_eq!(caps, vec!["stt".to_string(), "tts".to_string()]);
     }
 
     #[test]
-    fn wyoming_caps_adds_wake_only_for_server_direction() {
-        use fono_core::config::WakeWyoming;
-        // Server direction (enabled, no uri) advertises the wake cap.
-        let mut cfg = Config::default();
-        cfg.wakeword.wyoming = Some(WakeWyoming { enabled: true, uri: None });
-        assert_eq!(wyoming_caps(&cfg), vec!["stt".to_string(), "wake".to_string()]);
-
-        // Client direction (enabled + uri) must NOT advertise a wake service.
-        cfg.wakeword.wyoming =
-            Some(WakeWyoming { enabled: true, uri: Some("tcp://hass:10400".into()) });
-        assert_eq!(wyoming_caps(&cfg), vec!["stt".to_string()]);
-
-        // Disabled advertises nothing extra.
-        cfg.wakeword.wyoming = Some(WakeWyoming { enabled: false, uri: None });
-        assert_eq!(wyoming_caps(&cfg), vec!["stt".to_string()]);
+    fn wyoming_caps_advertises_wake_by_capability_not_config() {
+        // Wake is now served automatically (like STT/TTS), gated purely on the
+        // build capability — not on any `[wakeword]` config switch. The cap is
+        // present exactly when this binary can do wake detection.
+        let cfg = Config::default();
+        let caps = wyoming_caps(&cfg);
+        assert!(caps.contains(&"stt".to_string()), "stt is always advertised");
+        assert_eq!(
+            caps.contains(&"wake".to_string()),
+            crate::wake::detection_available(),
+            "wake cap iff the binary can do wake detection"
+        );
     }
 
     /// Slim build: translation never fires regardless of config.

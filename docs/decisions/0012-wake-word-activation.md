@@ -112,6 +112,15 @@ events while **the audio stays on the local machine**. This direction
 preserves the idle-privacy promise and is the recommended LAN
 integration.
 
+> **Update (2026-06-24): server serving is automatic.** The server
+> direction is no longer behind its own `[wakeword].wyoming` switch.
+> Whenever `[server.wyoming]` is enabled and the build can do wake
+> detection (a fetchable default model always exists), Fono advertises
+> and serves its local detector automatically — exactly like it serves
+> STT and TTS — binding a per-connection local detector so audio stays
+> on the machine. `[wakeword].wyoming` now configures the **client**
+> direction only. The privacy reasoning below is unchanged.
+
 The Wyoming **client** direction — Fono forwarding idle mic audio to
 an external `wyoming-openwakeword` service over the LAN — is **opt-in
 and default-off**, behind an explicit privacy warning (surfaced in

@@ -20,15 +20,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when Fono goes idle. Ships with a clean Apache-2.0 default phrase as
   the only enabled model, plus an opt-in community phrase catalog that
   is downloaded on demand, never bundled, and shows its NonCommercial
-  license as a notice when you pick one. Fono can also
-  serve wake detections to a Home Assistant voice pipeline over Wyoming
-  with audio staying on the machine, or — opt-in and off by default,
+  license as a notice when you pick one. When the LAN Wyoming server is
+  enabled, Fono automatically serves wake detection over it — exactly
+  like it serves STT and TTS, with no extra switch — so Home Assistant
+  discovers Fono as a drop-in wake-word provider and detection runs on the
+  Fono box with audio staying on the machine. Opt-in and off by default,
   behind an explicit "idle mic audio leaves the machine over the LAN"
-  warning — forward audio to an external `wyoming-openwakeword` service.
-  `fono doctor` reports the wake-word configuration and that privacy
-  warning. The default wake-word model is not yet hosted, so the feature
-  stays off until you enable it with a model; engine and licensing
-  rationale is in ADR 0012.
+  warning, Fono can instead forward audio to an external
+  `wyoming-openwakeword` service. `fono doctor` reports the wake-word
+  configuration and that privacy warning. The clean-license `hey_fono`
+  default model is not yet hosted, so the local always-on listener stays
+  off until you enable it; the auto-served Wyoming path uses the community
+  `hey_jarvis` model as a temporary fetchable default in the meantime.
+  Engine and licensing rationale is in ADR 0012.
 
 ## [0.11.1] — 2026-06-22
 

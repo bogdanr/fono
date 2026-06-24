@@ -1,5 +1,42 @@
 # Fono — Project Status
-Last updated: 2026-06-22
+Last updated: 2026-06-24
+
+## 2026-06-24 — Wake reliability fixes + Wyoming wake parity
+
+Two-part session. **Part 1 — wake detection reliability.** openWakeWord
+detection was firing only intermittently. Root causes found and fixed, in
+order: (1) capture f32 was fed to the melspectrogram at ±1.0 instead of the
+int16 ±32768 scale the graph expects (~90 dB too quiet); (2) each 1280-sample
+hop was fed to the melspec in isolation, missing openWakeWord's 480-sample
+streaming lookback (5 frames/hop instead of 8, de-aligning the mel→embedding
+rings); (3) the streaming buffers were not primed, so every post-session mic
+re-open had a ~2 s dead zone; (4) `vad_pregate` was a pre-melspec frame-skipper
+that broke streaming continuity — first reworked into an output gate, then
+**removed entirely** (no backward-compat) once it was clear that for a streaming
+model the gate can only ever tie or lose against no-gate while saving no CPU.
+Also fixed two orchestration bugs surfaced along the way: a synchronous `armed`
+fire-gate to stop repeated wake phrases stacking sessions, and tearing down the
+batch `assistant_capture` slot on assistant stop (an orphaned silence-watch was
+emitting a phantom `AssistantPressed` ~3 s later, causing stacked sessions and a
+missing overlay). Scores now hit 0.8–0.9 and fire reliably.
+
+**Part 2 — Wyoming wake parity (Option B).** Made openWakeWord serve over the
+Wyoming server exactly like STT and TTS: automatic and capability-gated, with no
+separate switch. `serve_wake` and the mDNS `wake` cap are now gated on
+`wake::detection_available()` (the `wakeword-onnx` feature being compiled in —
+a fetchable default model always exists), independent of the local always-on
+listener `[wakeword].enabled`. A fresh install with no `[[wakeword.phrases]]`
+serves the runtime default model via `effective_wake_config`; the daemon
+background-fetches the model `.ort` files when serving even if the local
+listener is off. The Wyoming server binds a per-connection local detector, so
+audio stays on the machine. `DEFAULT_WAKE_MODEL = "hey_jarvis"` as a documented
+stopgap until the clean-licence `hey_fono` artifact is trained/pinned (SHA-pin
+guard test added). `[wakeword].wyoming` is demoted to **client-only** (the
+opt-in, privacy-breaking direction); `WakeWyoming::is_server` removed. Tray
+label now reads "Wyoming server (STT + TTS + wake)"; `fono doctor` reports
+automatic wake serving + the client-direction privacy warning; configuration /
+home-assistant / providers docs updated. Gate green: fmt, clippy
+(`interactive,wakeword-onnx`), workspace + featured tests.
 
 ## 2026-06-22 — Realtime live conversation mode
 

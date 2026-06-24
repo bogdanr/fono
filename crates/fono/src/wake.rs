@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fono_audio::{AudioCapture, CaptureConfig, CaptureStreamHandle, EnergyWakeStub, WakeWord};
-use fono_core::config::{WakeTarget, WakeWord as WakeWordCfg, WakeWyoming};
+use fono_core::config::{WakePhrase, WakeTarget, WakeWord as WakeWordCfg, WakeWyoming};
 use fono_core::{Config, Paths};
 use fono_hotkey::{HotkeyAction, State as FsmState};
 use tokio::sync::mpsc;
@@ -499,6 +499,44 @@ fn run_detector(
         }
     }
     debug!("wake: detector thread exiting");
+}
+
+/// Whether this build can serve wake-word detection at all. `true` when the
+/// `wakeword-onnx` feature is compiled in: a fetchable default model always
+/// exists ([`fono_audio::wake_registry::DEFAULT_WAKE_MODEL`]), so capability
+/// is purely a build-time fact — exactly mirroring how the Wyoming server
+/// treats "a TTS backend is configured" for TTS. Used by the daemon to decide
+/// whether to advertise + serve the Wyoming wake service automatically,
+/// independent of the local always-on listener (`[wakeword].enabled`).
+#[must_use]
+pub(crate) fn detection_available() -> bool {
+    cfg!(feature = "wakeword-onnx")
+}
+
+/// The wake phrases that will actually be served / detected: the user's
+/// configured `[wakeword].phrases`, or — when none are configured — a single
+/// default phrase keyed to [`fono_audio::wake_registry::DEFAULT_WAKE_MODEL`].
+///
+/// This is what makes the auto-served Wyoming wake path work on a fresh
+/// install (Option B parity with STT/TTS): with no `[wakeword]` config at all,
+/// Fono still advertises and detects a working default model.
+pub(crate) fn effective_wake_phrases(cfg: &WakeWordCfg) -> Vec<WakePhrase> {
+    if cfg.phrases.is_empty() {
+        vec![WakePhrase {
+            model: fono_audio::wake_registry::DEFAULT_WAKE_MODEL.to_string(),
+            sensitivity: WakePhrase::default().sensitivity,
+            target: WakeTarget::default(),
+        }]
+    } else {
+        cfg.phrases.clone()
+    }
+}
+
+/// A copy of `cfg` whose `phrases` are guaranteed non-empty (see
+/// [`effective_wake_phrases`]). Used to build a detector for the Wyoming wake
+/// service even when the user configured no phrases locally.
+pub(crate) fn effective_wake_config(cfg: &WakeWordCfg) -> WakeWordCfg {
+    WakeWordCfg { phrases: effective_wake_phrases(cfg), ..cfg.clone() }
 }
 
 /// Build the active detector. Uses [`EnergyWakeStub`] by default; only when the

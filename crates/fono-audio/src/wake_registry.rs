@@ -231,6 +231,22 @@ pub const WAKE_MODELS: &[WakeModelEntry] = &[
     },
 ];
 
+/// Runtime fallback phrase used when wake detection is needed but
+/// `[wakeword].phrases` is empty — notably the auto-served Wyoming wake
+/// service (which mirrors how STT/TTS are served whenever the binary can do
+/// them, regardless of local use).
+///
+/// **TEMPORARY policy exception.** The clean-license default is `hey_fono`
+/// ([`WakeModelClass::Default`], Apache-2.0), but its `.ort` artifact is not
+/// trained/hosted yet ([`UNPINNED`], unfetchable). Until Phase B ships it,
+/// the only model that actually loads out of the box is the community
+/// `hey_jarvis` conversion, so the runtime fallback points there. Note that
+/// `hey_jarvis` is **CC-BY-NC-SA-4.0 (NonCommercial)** — the fetch path
+/// surfaces [`license_notice`] when it is downloaded. This deliberately
+/// diverges from the "default must be clean-license" rule **only** as a
+/// stopgap; flip it back to `"hey_fono"` the moment that artifact is pinned.
+pub const DEFAULT_WAKE_MODEL: &str = "hey_jarvis";
+
 /// Look up an entry by id (exact match). Returns `None` for unknown ids;
 /// callers should point users at the model list.
 #[must_use]
@@ -493,6 +509,18 @@ mod tests {
             asset_url("https://example.test/dl", "ort-1.24.2", "hey_fono.ort"),
             "https://example.test/dl/ort-1.24.2/hey_fono.ort"
         );
+    }
+
+    #[test]
+    fn default_wake_model_is_registered_and_pinned() {
+        // The runtime fallback MUST resolve to a real, fetchable (pinned)
+        // registry entry — otherwise the auto-served Wyoming wake path would
+        // advertise a model whose `.ort` can never be obtained, silently
+        // falling back to the never-firing stub.
+        let entry = get(DEFAULT_WAKE_MODEL).expect("DEFAULT_WAKE_MODEL must be a registered id");
+        let pinned = entry.classifier.sha256.len() == 64
+            && !entry.classifier.sha256.chars().all(|c| c == '0');
+        assert!(pinned, "DEFAULT_WAKE_MODEL '{DEFAULT_WAKE_MODEL}' must be SHA-pinned/fetchable");
     }
 
     #[tokio::test]

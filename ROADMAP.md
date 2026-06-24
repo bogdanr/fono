@@ -126,12 +126,14 @@ model runs locally; your audio never leaves the machine while idle.
 **Status: implemented behind a default-off `[wakeword]` flag, awaiting the trained
 default model + a release.** The detector (openWakeWord on the existing local ONNX
 runtime — no new dependency, no size-budget hit), the always-on listener that suspends
-during any active session, the model registry with a clean Apache-2.0 default plus an
-opt-in community catalog (its NonCommercial license shown as a notice at download), the Wyoming wake Detection server (audio stays
-local) plus an opt-in client path (default-off, with a privacy warning), and
+during any active session, the model registry with a clean Apache-2.0 default plus a
+community catalog (its NonCommercial license shown as a notice at download), the Wyoming wake Detection
+server — served **automatically whenever the LAN Wyoming server is enabled**, exactly like STT and TTS, with audio staying
+local — plus an opt-in client path (default-off, with a privacy warning), and
 `fono doctor` reporting have all landed. What remains before it ships in a tagged
 release: the default `hey_fono` model must be trained and hosted (the offline training
-pipeline exists; the registry SHAs are still the unpinned sentinel). Engine and policy
+pipeline exists; its registry SHA is still the unpinned sentinel, so the auto-served Wyoming path falls back to the
+community `hey_jarvis` model as a temporary default in the meantime). Engine and policy
 rationale: [ADR 0012](docs/decisions/0012-wake-word-activation.md).
 
 ### OpenAI Realtime backend

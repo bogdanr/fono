@@ -357,10 +357,12 @@ model       = "hey_fono"    # registry model id (see providers.md)
 sensitivity = 0.5           # 0..=1; higher = fewer false accepts
 target      = "dictation"   # "dictation" or "assistant"
 
-# Optional Wyoming integration (see below and home-assistant.md).
+# Optional Wyoming CLIENT integration (opt-in; see below and
+# home-assistant.md). The privacy-preserving SERVER direction is
+# automatic — just enable `[server.wyoming]` — and needs nothing here.
 # [wakeword.wyoming]
-# enabled = true            # no `uri` = local server direction (recommended)
-# uri     = "tcp://..."     # setting a `uri` = opt-in client direction (see warning)
+# enabled = true            # only meaningful together with a `uri`
+# uri     = "tcp://..."     # opt-in client direction (see warning)
 ```
 
 **Phrases and the English-first limit.** Each phrase loads a fixed
@@ -383,27 +385,32 @@ microphone source with **no acoustic echo cancellation** — AEC only
 helps reject Fono's *own* TTS, which is silent while idle, so it cannot
 filter out ambient TV/music anyway.
 
-**Wyoming directions.** `[wakeword.wyoming]` exposes two directions:
+**Wyoming serving is automatic.** Fono's wake word is served over the
+LAN exactly like its STT and TTS: whenever `[server.wyoming]` is enabled
+and this build can do wake detection, Fono advertises and serves its
+**local** detector as a Wyoming wake `Detection` service — no extra
+switch. Audio never leaves the machine; the server *is* the detector. On
+a fresh install with no `[[wakeword.phrases]]` it serves the runtime
+default model (currently **`hey_jarvis`** until the clean-licence
+`hey_fono` artifact is published).
 
-- **Server (recommended, audio stays local):** `enabled = true` with no
-  `uri`. Fono advertises its local detector as a Wyoming wake `Detection`
-  service over the `[server.wyoming]` listener — that block must also be
-  enabled. Audio never leaves the machine.
-- **Client (opt-in only):** `enabled = true` **plus** a `uri` to an
-  external `wyoming-openwakeword` service.
+`[wakeword.wyoming]` therefore exists **only** for the opt-in **client**
+direction: `enabled = true` **plus** a `uri` to an external
+`wyoming-openwakeword` service, which delegates Fono's own activation to
+that box.
 
-  > ⚠️ The client direction **streams idle microphone audio over the
-  > LAN**, breaking the "audio never leaves the machine while idle"
-  > guarantee. It is never a default and `fono doctor` prints a prominent
-  > warning when it is active.
+> ⚠️ The client direction **streams idle microphone audio over the
+> LAN**, breaking the "audio never leaves the machine while idle"
+> guarantee. It is never a default and `fono doctor` prints a prominent
+> warning when it is active.
 
 Run `fono doctor` to see, at a glance, whether the wake word is enabled,
 which detector backend would run (the openWakeWord ONNX detector if the
 `wakeword-onnx` build feature is compiled in and the model files are
 cached, otherwise the energy stub), each phrase's target and licence, the
 default model's cache state, whether any configured phrase is a
-NonCommercial community model, and the
-Wyoming direction.
+NonCommercial community model, whether the wake service is served over
+Wyoming, and whether the opt-in Wyoming client direction is active.
 
 ## Inject and clipboard
 
