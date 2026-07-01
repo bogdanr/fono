@@ -176,6 +176,10 @@ pub async fn report(paths: &Paths) -> Result<String> {
             Ok(None) => writeln!(out, "  polish: {}", dim("disabled (cleanup off)"))?,
             Err(e) => writeln!(out, "  polish: {} {e:#}", bad("FAIL —"))?,
         }
+        // `mut` is only touched by the `realtime`-gated arm below; allow
+        // the unused-mut when that feature is compiled out.
+        #[allow(unused_mut)]
+        let mut assistant_realtime_only = false;
         match fono_assistant::build_assistant_handle(
             &c.assistant,
             &secrets,
@@ -186,6 +190,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
             }
             #[cfg(feature = "realtime")]
             Ok(Some(fono_assistant::AssistantHandle::Realtime(a))) => {
+                assistant_realtime_only = true;
                 writeln!(
                     out,
                     "  assistant: {} {} (realtime speech-to-speech)",
@@ -202,6 +207,52 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 writeln!(out, "  tts: {}", warn("disabled (assistant replies will be silent)"))?;
             }
             Err(e) => writeln!(out, "  tts: {} {e:#}", bad("FAIL —"))?,
+        }
+        // Local LLM inference server (OpenAI + Ollama HTTP API; ADR 0036).
+        // The served model tracks the active [assistant] backend, with a
+        // same-provider text fallback when that backend is realtime.
+        if c.server.llm.enabled {
+            let scope = if c.server.llm.bind == "127.0.0.1" || c.server.llm.bind == "::1" {
+                "loopback only"
+            } else {
+                "LAN-exposed"
+            };
+            let m = c.server.llm.model.trim();
+            let override_model = (!m.is_empty()).then_some(m);
+            let served = fono_assistant::server_assistant_model_name(&c.assistant, override_model);
+            let served = if served.is_empty() { "fono".to_string() } else { served };
+            // Proxy fast-lane (ADR 0036): OpenAI-compat cloud backends are
+            // forwarded verbatim (full tool/vision/parameter fidelity);
+            // everything else is adapted through the assistant trait.
+            let proxyable = c.assistant.enabled
+                && fono_assistant::chat_endpoint(&c.assistant.backend).is_some();
+            let mode = if proxyable {
+                "OpenAI surface proxied to the cloud provider (full tool/vision fidelity)"
+            } else {
+                "served via the local adapter"
+            };
+            writeln!(
+                out,
+                "  llm server: {} on {}:{} ({scope}); serving {served}; {mode}; OpenAI + Ollama API",
+                ok("enabled"),
+                c.server.llm.bind,
+                c.server.llm.port,
+            )?;
+            if assistant_realtime_only {
+                writeln!(
+                    out,
+                    "    {} the active assistant is realtime (speech-to-speech); the API \
+                     auto-serves the same provider's text model ({served}) instead — set \
+                     [server.llm].model to pin a different one.",
+                    dim("note:"),
+                )?;
+            }
+        } else {
+            writeln!(
+                out,
+                "  llm server: {} (enable `[server.llm]` to serve local inference over HTTP)",
+                dim("disabled"),
+            )?;
         }
         writeln!(out)?;
 

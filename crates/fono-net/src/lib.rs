@@ -14,3 +14,11 @@ pub mod wyoming;
 
 #[cfg(feature = "wyoming-server")]
 pub use wyoming::server::{WyomingServer, WyomingServerConfig, WyomingServerHandle};
+
+#[cfg(feature = "llm-server")]
+pub mod llm_server;
+
+#[cfg(feature = "llm-server")]
+pub use llm_server::{
+    AssistantProvider, LlmServer, LlmServerConfig, LlmServerHandle, UpstreamProvider,
+};

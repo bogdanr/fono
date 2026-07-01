@@ -1242,6 +1242,15 @@ pub struct Server {
     /// over one connection, so STT and TTS share a single on/off switch
     /// (`[server.wyoming].enabled`) and a single port.
     pub wyoming: ServerWyoming,
+    /// Local LLM inference server. Hosts the active `Arc<dyn Assistant>`
+    /// (embedded llama.cpp or a cloud backend) over an HTTP API that is
+    /// both **OpenAI-compatible** (`/v1/models`, `/v1/chat/completions`)
+    /// and **Ollama-native** (`/api/tags`, `/api/chat`), so editors,
+    /// Open WebUI, `llm`, LangChain, and Home Assistant's Ollama
+    /// conversation agent can all use Fono as a local inference backend.
+    /// Off by default; loopback-only unless `bind` is widened. See
+    /// ADR 0036.
+    pub llm: ServerLlm,
 }
 
 /// `[server.wyoming]` — coordinates of the LAN Wyoming server. The
@@ -1274,6 +1283,58 @@ impl Default for ServerWyoming {
             bind: "127.0.0.1".to_string(),
             port: 10_300,
             auth_token_ref: String::new(),
+        }
+    }
+}
+
+/// `[server.llm]` — coordinates of the local LLM inference server. The
+/// listener is **only** spawned when `enabled = true`. `bind` is the
+/// exposure control: keep the default loopback address for local-only
+/// serving, set `0.0.0.0` / `::` for all interfaces, or set a specific
+/// interface address to serve only that network. The default port
+/// `11434` is Ollama's, so existing Ollama/OpenAI client configs (and
+/// Home Assistant's Ollama integration) point at Fono unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ServerLlm {
+    /// Master switch. Default `false`.
+    pub enabled: bool,
+    /// Bind address. Default `"127.0.0.1"` (loopback only). Set to
+    /// `"0.0.0.0"` to accept LAN peers on every interface, or to a
+    /// specific interface address (`"192.168.1.5"`) to bind one NIC.
+    pub bind: String,
+    /// TCP port. Default `11434` (the de-facto Ollama port).
+    pub port: u16,
+    /// Optional pre-shared bearer token reference, resolved through
+    /// `secrets.toml` / env. Empty = no auth. When set, requests must
+    /// carry `Authorization: Bearer <token>`. The plaintext HTTP
+    /// transport offers no confidentiality — the token gates access,
+    /// not eavesdropping; use TLS/reverse-proxy for off-LAN exposure.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub auth_token_ref: String,
+    /// Optional model-name override for the assistant the server
+    /// exposes. Empty (default) = serve the active `[assistant]`
+    /// backend; and when that backend is a *realtime* speech-to-speech
+    /// model (e.g. Gemini Live) that the text chat API cannot expose,
+    /// automatically fall back to the same provider's default staged
+    /// **text** model (`gemini-flash-lite-latest` for Gemini), reusing
+    /// the same API key — so the API keeps working while voice stays on
+    /// the realtime model. Set a model id here to pin a specific staged
+    /// text model regardless of the primary assistant (e.g. keep Gemini
+    /// Live for voice while serving `gemini-2.5-flash` over the API).
+    /// See ADR 0036.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+}
+
+impl Default for ServerLlm {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: "127.0.0.1".to_string(),
+            port: 11_434,
+            auth_token_ref: String::new(),
+            model: String::new(),
         }
     }
 }
@@ -1823,6 +1884,43 @@ mod tests {
         assert_eq!(loaded.polish.local.model, DEFAULT_POLISH_LOCAL_MODEL);
         assert_eq!(loaded.polish.local.context, DEFAULT_POLISH_LOCAL_CONTEXT);
         assert_eq!(loaded.assistant.local.model, DEFAULT_POLISH_LOCAL_MODEL);
+    }
+
+    #[test]
+    fn server_llm_defaults_and_roundtrip() {
+        // Defaults: off, loopback, Ollama's port, no auth, no model
+        // override (serve the active assistant).
+        let d = ServerLlm::default();
+        assert!(!d.enabled);
+        assert_eq!(d.bind, "127.0.0.1");
+        assert_eq!(d.port, 11_434);
+        assert!(d.auth_token_ref.is_empty());
+        assert!(d.model.is_empty());
+
+        // A populated `[server.llm]` block round-trips through TOML,
+        // including the optional model override (ADR 0036 fallback pin).
+        let raw = r#"
+            version = 1
+            [server.llm]
+            enabled = true
+            bind = "0.0.0.0"
+            port = 12345
+            auth_token_ref = "FONO_LLM_TOKEN"
+            model = "gemini-2.5-flash"
+        "#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert!(cfg.server.llm.enabled);
+        assert_eq!(cfg.server.llm.bind, "0.0.0.0");
+        assert_eq!(cfg.server.llm.port, 12_345);
+        assert_eq!(cfg.server.llm.auth_token_ref, "FONO_LLM_TOKEN");
+        assert_eq!(cfg.server.llm.model, "gemini-2.5-flash");
+
+        // An empty model field is skipped on serialize (stays clean).
+        let reserialized = toml::to_string(&ServerLlm::default()).unwrap();
+        assert!(!reserialized.contains("model"), "empty model must not serialize: {reserialized}");
+
+        // Wyoming's port (10300) is independent of the LLM port.
+        assert_ne!(cfg.server.llm.port, cfg.server.wyoming.port);
     }
 
     #[test]

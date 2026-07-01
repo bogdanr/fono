@@ -20,6 +20,14 @@ The home page is [fono.page](https://fono.page).
 
 ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge)
 
+**[v0.13.0 — Share your model over a local API](#shipped)**  
+Turn on one switch and Fono serves the assistant you already have on a local,
+OpenAI- and Ollama-compatible HTTP API — so your editor, Open WebUI, `llm`,
+LangChain, and Home Assistant's Ollama agent all talk to it unchanged. Cloud
+backends pass straight through with full tool and vision fidelity, the key never
+leaving the machine, and a realtime voice model automatically serves its fast
+text sibling on the side. *(2026-07-01)*
+
 **[v0.12.0 — Hands-free wake-word activation](#shipped)**  
 Idle, listen for a spoken wake phrase, and start dictating or talking to the
 assistant with no key and no hands — detection runs locally on the ONNX runtime
@@ -190,6 +198,26 @@ it — fully local, no cloud, no per-desktop GPU. The wizard learns to detect a 
 server (it already advertises its models via `GET /v1/models`) and offers a one-key
 setup that wires STT, polish, assistant, and TTS at once.
 
+### Multi-provider routing for the local LLM server
+
+> One local endpoint, every provider you hold a key for. The model name picks
+> the backend.
+
+Fono exposes its configured assistant over a local, OpenAI- and Ollama-compatible
+HTTP API (port 11434), so editors, Open WebUI, `llm`, LangChain, and Home
+Assistant's Ollama conversation agent can drive Fono's models unchanged — a local
+embedded model, or a cloud backend passed through verbatim with full tool and
+vision fidelity, the key never leaving the daemon.
+
+The next step is a **model-based router**: with keys configured for several
+providers, a request naming `gpt-…` routes to OpenAI, `gemini-…` to Google,
+`claude-…` to Anthropic, and so on — one local endpoint that transparently fans
+out to whichever provider owns the requested model, each with its own key injected
+server-side, instead of serving only the single configured assistant. A default
+fallback model covers requests that name nothing, and an allowlist bounds which
+providers and models an exposed instance will relay so a shared box never becomes
+an open, cost-burning gateway.
+
 ### Voice actions
 
 > Stop asking. Start doing.
@@ -257,6 +285,33 @@ binary size (only build time). See `docs/binary-size.md` §4 and
 ## Shipped
 
 Newest first.
+
+- ![v0.13.0](https://img.shields.io/badge/v0.13.0-2026--07--01-blue?style=flat-square)
+  **Share your model over a local OpenAI- and Ollama-compatible API.** Flip on
+  `[server.llm]` — from the config or the tray — and Fono exposes whatever
+  assistant you have configured on a local HTTP endpoint that speaks both the
+  OpenAI (`/v1/chat/completions`, `/v1/models`) and Ollama-native (`/api/chat`,
+  `/api/tags`) formats, on Ollama's usual port 11434 so existing clients connect
+  unchanged. Editors, Open WebUI, `llm`, LangChain, and Home Assistant's Ollama
+  conversation agent can use Fono as their model backend out of the box. It
+  binds to loopback by default, takes an optional bearer token before you expose
+  it on the LAN, hot-reloads from the tray without a restart, and follows a
+  backend swap on the next request; `fono doctor` reports the served model and
+  Fono advertises the endpoint over mDNS.
+
+  When the model you serve is an OpenAI-compatible cloud provider (OpenAI,
+  Gemini, Groq, Cerebras, OpenRouter), Fono passes the request straight through
+  to the provider — injecting your stored key on the way out, keeping it on the
+  machine — so every model, tool/function call, and vision request works at full
+  fidelity, which is what lets Home Assistant drive smart-home devices through a
+  cloud model behind Fono. If your assistant is a realtime speech-to-speech
+  model (e.g. Gemini Live) that a text API can't expose, Fono automatically
+  serves the same provider's fast text model instead, so voice and the API both
+  work at once. A one-line-per-request debug log shows what was called, whether
+  it was local or proxied, the model, timing, tokens, and the calling app —
+  never any prompt or reply content. Design in
+  [ADR 0036](docs/decisions/0036-local-llm-server-openai-ollama.md).
+  *v0.13.0, 2026-07-01.*
 
 - ![v0.12.0](https://img.shields.io/badge/v0.12.0-2026--06--24-blue?style=flat-square)
   **Hands-free wake-word activation.** Fono can now idle and listen for a
@@ -745,3 +800,4 @@ Newest first.
 [v0.8.2]: https://github.com/bogdanr/fono/releases/tag/v0.8.2
 [v0.8.1]: https://github.com/bogdanr/fono/releases/tag/v0.8.1
 [v0.8.0]: https://github.com/bogdanr/fono/releases/tag/v0.8.0
+[v0.13.0]: https://github.com/bogdanr/fono/releases/tag/v0.13.0

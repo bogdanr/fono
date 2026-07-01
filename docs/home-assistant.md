@@ -116,6 +116,60 @@ pipeline.
 > > the automatic server direction unless you have a specific reason to
 > > centralise wake detection elsewhere.
 
+## Use Fono as a local LLM (Ollama conversation agent)
+
+Beyond STT/TTS, Fono can also act as the **language model** behind Home
+Assistant's Assist — controlling lights, scenes, and other exposed
+entities — by serving its configured assistant over an Ollama-compatible
+API (ADR 0036). Home Assistant's Ollama integration talks to Fono, the
+model emits tool calls, and Home Assistant executes them against its own
+entities.
+
+1. Enable the LLM server on the Fono host:
+
+   ```toml
+   [server.llm]
+   enabled = true
+   bind    = "0.0.0.0"    # reachable from Home Assistant
+   port    = 11434        # Ollama's default port
+   ```
+
+   (Or flip *Servers → Local LLM server* in the tray.) Make sure an
+   `[assistant]` backend is configured — that's the model Fono serves.
+
+2. In Home Assistant: **Settings → Devices & Services → Add Integration
+   → Ollama**, and point it at `http://<fono-host>:11434`. Pick the model
+   Fono advertises (run `fono doctor` on the host to see the served model
+   id), then select it as the conversation agent for an Assist pipeline
+   and expose the entities you want it to control.
+
+**Realtime assistants still work here.** If your Fono `[assistant]` is a
+realtime speech-to-speech model (e.g. Gemini Live) used for F8 voice,
+the text API automatically serves the same provider's fast text model
+(`gemini-flash-lite-latest` for Gemini, same key) so Home Assistant gets
+a capable text model without you changing anything. Pin a different one
+with `[server.llm].model` if you prefer. See
+[configuration.md → Serve local inference](configuration.md#serve-local-inference-over-http-openai--ollama-api).
+
+**Cloud tool-calling (device control).** For Home Assistant to control
+devices, the model must emit tool calls that HA executes. Today the
+Ollama `/api/chat` surface is served through Fono's adapter; robust
+tool-call passthrough for **cloud** models over the Ollama surface is the
+Phase 2 translate-proxy (see
+[`plans/2026-07-01-local-llm-server-cloud-proxy-v1.md`](../plans/2026-07-01-local-llm-server-cloud-proxy-v1.md)).
+Clients that speak the **OpenAI** surface (`/v1/chat/completions`)
+against a cloud `[assistant]` backend already get full tool-calling
+today, because those requests are proxied to the provider verbatim.
+
+> **Security.** Like the Wyoming listener, the LLM server has no
+> transport encryption; the optional `[server.llm].auth_token_ref` bearer
+> token gates access but not eavesdropping. Keep it on a trusted LAN or
+> behind a reverse proxy / firewall when binding beyond loopback. Note
+> that for a **cloud** `[assistant]` backend the OpenAI surface proxies
+> to the provider with your stored key injected — an unauthenticated
+> `0.0.0.0` instance is an open relay to your cloud account, so set the
+> bearer token before exposing it.
+
 ## GPU acceleration
 
 The image bundles the Vulkan loader and Mesa drivers but runs on the CPU

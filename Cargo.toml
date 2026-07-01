@@ -26,7 +26,7 @@ members = [
 exclude = ["packaging/crates-io"]
 
 [workspace.package]
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 rust-version = "1.82"
 license = "GPL-3.0-only"
@@ -72,6 +72,22 @@ directories = "5.0"
 # HTTP (rustls only — never OpenSSL)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "multipart", "http2"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+
+# HTTP *server* stack for the local LLM inference API (OpenAI- +
+# Ollama-compatible) served from `fono-net`, and the future web-config UI.
+# `hyper` + these helpers are ALREADY in the dependency graph via
+# `reqwest`'s client stack — verified with `cargo tree`: `hyper`,
+# `hyper-util`, `http-body-util`, and `bytes` are all present, while
+# `axum` and `matchit` are absent. Taking them as direct deps and turning
+# on hyper's `server` + `http1` features is therefore NET-ZERO on the
+# crate graph (no new crates, only additional already-compiled code
+# paths), so it does not trip the binary-size dependency rule. A
+# hand-rolled router keeps the surface tiny; axum was deliberately NOT
+# adopted (see ADR 0036). Gated behind `fono-net`'s `llm-server` feature.
+hyper = { version = "1.9", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1.7"
 
 # Persistence
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }

@@ -620,6 +620,22 @@ pub struct SessionOrchestrator {
     /// audio. `None` for every staged configuration.
     #[cfg(feature = "realtime")]
     realtime_backend: Arc<StdRwLock<Option<Arc<dyn RealtimeAssistant>>>>,
+    /// Assistant the local LLM server (ADR 0036) should expose when it
+    /// differs from the primary staged backend — i.e. an explicit
+    /// `[server.llm].model` override, or the same-provider text sibling
+    /// built when the primary `[assistant]` is a *realtime*
+    /// speech-to-speech model the text API can't serve (Gemini Live →
+    /// `gemini-flash-lite-latest`, same key). `None` means the server
+    /// reuses the primary staged assistant. Rebuilt on every `reload`
+    /// so a config swap is tracked without restarting the listener.
+    server_assistant_extra: Arc<StdRwLock<Option<Arc<dyn Assistant>>>>,
+    /// Cloud pass-through upstream for the local LLM server's OpenAI
+    /// surface (ADR 0036). `Some` when the served backend is an
+    /// OpenAI-compatible cloud provider (so requests are forwarded
+    /// verbatim for full tool/vision/parameter fidelity); `None` for
+    /// non-proxyable backends (local llama.cpp / Ollama / Anthropic).
+    /// Rebuilt on every `reload` alongside `server_assistant_extra`.
+    server_upstream: Arc<StdRwLock<Option<Arc<fono_assistant::CloudUpstream>>>>,
     /// Per-orchestrator assistant runtime state: rolling history,
     /// cancellation `Notify`, and lazy [`fono_audio::AudioPlayback`]
     /// handle. Shared with the pump task spawned in
@@ -774,6 +790,48 @@ impl SessionOrchestrator {
                 }
             }
             None => {}
+        }
+        // Build the LLM server's dedicated assistant when it needs one
+        // distinct from the primary staged backend — an explicit
+        // `[server.llm].model` override, or the same-provider staged
+        // text sibling when the primary is a realtime model the text
+        // API can't expose. `None` means the server reuses the primary
+        // staged assistant. Built regardless of `[server.llm].enabled`
+        // so the tray toggle can start the server in place without a
+        // full reload. See ADR 0036.
+        {
+            let m = config.server.llm.model.trim();
+            let override_model = (!m.is_empty()).then_some(m);
+            match fono_assistant::build_server_assistant_override(
+                &config.assistant,
+                override_model,
+                secrets,
+                &paths.polish_models_dir(),
+            ) {
+                Ok(Some(a)) => {
+                    if let Ok(mut g) = orch.server_assistant_extra.write() {
+                        *g = Some(a);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => warn!("LLM server assistant fallback unavailable: {e:#}"),
+            }
+        }
+        // Resolve the cloud pass-through upstream for the LLM server's
+        // OpenAI surface (ADR 0036). `Some` for OpenAI-compat cloud
+        // backends (proxy verbatim); `None` for non-proxyable backends
+        // (the server drives the assistant adapter instead).
+        {
+            let m = config.server.llm.model.trim();
+            let override_model = (!m.is_empty()).then_some(m);
+            match fono_assistant::cloud_chat_upstream(&config.assistant, override_model, secrets) {
+                Ok(up) => {
+                    if let Ok(mut g) = orch.server_upstream.write() {
+                        *g = up.map(Arc::new);
+                    }
+                }
+                Err(e) => warn!("LLM server proxy upstream unavailable: {e:#}"),
+            }
         }
         // Publish whether an assistant tap should enter live mode now
         // that the realtime slot is wired.
@@ -1025,6 +1083,46 @@ impl SessionOrchestrator {
                 }
             }
         }
+        // Rebuild the LLM server's dedicated assistant (override / the
+        // realtime→text-sibling fallback) so a config swap between
+        // staged and realtime — or a changed `[server.llm].model` —
+        // takes effect without restarting the listener. `None` clears
+        // the slot so the server falls back to reusing the primary
+        // staged assistant. See ADR 0036.
+        {
+            let m = cfg.server.llm.model.trim();
+            let override_model = (!m.is_empty()).then_some(m);
+            let rebuilt = match fono_assistant::build_server_assistant_override(
+                &cfg.assistant,
+                override_model,
+                &secrets,
+                &paths.polish_models_dir(),
+            ) {
+                Ok(opt) => opt,
+                Err(e) => {
+                    warn!("reload: LLM server assistant fallback unavailable: {e:#}");
+                    None
+                }
+            };
+            if let Ok(mut guard) = self.server_assistant_extra.write() {
+                *guard = rebuilt;
+            }
+            // Recompute the cloud proxy upstream alongside the fallback
+            // so a backend swap re-targets the LLM server's OpenAI
+            // surface without restarting the listener (ADR 0036).
+            let up =
+                match fono_assistant::cloud_chat_upstream(&cfg.assistant, override_model, &secrets)
+                {
+                    Ok(up) => up.map(Arc::new),
+                    Err(e) => {
+                        warn!("reload: LLM server proxy upstream unavailable: {e:#}");
+                        None
+                    }
+                };
+            if let Ok(mut guard) = self.server_upstream.write() {
+                *guard = up;
+            }
+        }
         // Re-tune the rolling history window to match the freshly-
         // loaded config.
         {
@@ -1109,6 +1207,72 @@ impl SessionOrchestrator {
     #[must_use]
     pub fn tts_snapshot(&self) -> Option<Arc<dyn TextToSpeech>> {
         self.current_tts()
+    }
+
+    /// Snapshot of the active assistant backend for the local LLM
+    /// server's `AssistantProvider`. `None` when no `[assistant]`
+    /// backend is configured (degraded / cloud-less state), surfaced by
+    /// the server as HTTP 503. Invoked once per accepted request so
+    /// `Reload`-driven backend swaps are tracked without restarting the
+    /// listener — the same posture as [`Self::stt_snapshot`] /
+    /// [`Self::tts_snapshot`].
+    #[must_use]
+    pub fn assistant_snapshot(&self) -> Option<Arc<dyn Assistant>> {
+        self.current_assistant()
+    }
+
+    /// Whether the active assistant is a *realtime* (speech-to-speech)
+    /// backend with no staged text backend loaded — i.e.
+    /// `[assistant.cloud].model` selected Gemini Live. The local LLM
+    /// server serves text chat-completions and cannot expose a
+    /// realtime backend, so it uses this to emit an accurate diagnostic
+    /// (rather than the misleading "no backend configured") and skip
+    /// starting. Always `false` when the `realtime` feature is off.
+    #[must_use]
+    pub fn assistant_is_realtime_only(&self) -> bool {
+        #[cfg(feature = "realtime")]
+        {
+            self.current_assistant().is_none() && self.current_realtime().is_some()
+        }
+        #[cfg(not(feature = "realtime"))]
+        {
+            false
+        }
+    }
+
+    /// Snapshot of the assistant the local LLM server (ADR 0036) should
+    /// serve. Prefers the dedicated server assistant — an explicit
+    /// `[server.llm].model` override, or the same-provider staged
+    /// **text** sibling built when the primary `[assistant]` is a
+    /// realtime speech-to-speech model the text API can't expose
+    /// (Gemini Live → `gemini-flash-lite-latest`, same key) — and
+    /// otherwise reuses the primary staged assistant. `None` only when
+    /// nothing can be served (no assistant configured, or the fallback
+    /// couldn't be built, e.g. a missing API key). Invoked once per
+    /// accepted request so `Reload`-driven swaps are tracked without
+    /// restarting the listener.
+    #[must_use]
+    pub fn server_assistant_snapshot(&self) -> Option<Arc<dyn Assistant>> {
+        if let Some(a) =
+            self.server_assistant_extra.read().ok().and_then(|g| g.as_ref().map(Arc::clone))
+        {
+            return Some(a);
+        }
+        self.current_assistant()
+    }
+
+    /// Snapshot of the cloud pass-through upstream for the LLM server's
+    /// OpenAI surface (ADR 0036). `Some` when the served backend is an
+    /// OpenAI-compatible cloud provider — the daemon forwards
+    /// `/v1/chat/completions` verbatim to it for full tool/vision/
+    /// parameter fidelity. `None` for non-proxyable backends (embedded
+    /// llama.cpp, Ollama, Anthropic), where the server drives the
+    /// assistant adapter from [`Self::server_assistant_snapshot`]
+    /// instead. Read once per request so `Reload`-driven backend swaps
+    /// re-target without restarting the listener.
+    #[must_use]
+    pub fn server_upstream_snapshot(&self) -> Option<Arc<fono_assistant::CloudUpstream>> {
+        self.server_upstream.read().ok().and_then(|g| g.as_ref().map(Arc::clone))
     }
 
     fn current_llm(&self) -> Option<Arc<dyn TextFormatter>> {
@@ -2100,6 +2264,8 @@ impl SessionOrchestrator {
             assistant_backend: Arc::new(StdRwLock::new(None)),
             #[cfg(feature = "realtime")]
             realtime_backend: Arc::new(StdRwLock::new(None)),
+            server_assistant_extra: Arc::new(StdRwLock::new(None)),
+            server_upstream: Arc::new(StdRwLock::new(None)),
             assistant_session: Arc::new(Mutex::new(AssistantSessionState::new(
                 ConversationHistory::new(history_window, history_max),
             ))),

@@ -61,6 +61,15 @@ fn is_local_backend(backend_name: &str) -> bool {
 /// crashed.
 const SSE_CHUNK_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Per-provider OpenAI-compatible `/chat/completions` endpoints live in
+/// [`crate::factory`] (always compiled) so the local LLM server's
+/// pass-through proxy can share them regardless of feature gates
+/// (ADR 0036).
+use crate::factory::{
+    CEREBRAS_CHAT_ENDPOINT, GEMINI_CHAT_ENDPOINT, GROQ_CHAT_ENDPOINT, OPENAI_CHAT_ENDPOINT,
+    OPENROUTER_CHAT_ENDPOINT,
+};
+
 pub struct OpenAiCompatChat {
     endpoint: String,
     models_endpoint: Option<String>,
@@ -109,30 +118,25 @@ impl OpenAiCompatChat {
     }
 
     pub fn cerebras(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::new("https://api.cerebras.ai/v1/chat/completions", api_key, model, "cerebras")
+        Self::new(CEREBRAS_CHAT_ENDPOINT, api_key, model, "cerebras")
     }
 
     pub fn groq(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::new("https://api.groq.com/openai/v1/chat/completions", api_key, model, "groq")
+        Self::new(GROQ_CHAT_ENDPOINT, api_key, model, "groq")
     }
 
     pub fn openai(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::new("https://api.openai.com/v1/chat/completions", api_key, model, "openai")
+        Self::new(OPENAI_CHAT_ENDPOINT, api_key, model, "openai")
     }
 
     pub fn openrouter(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::new("https://openrouter.ai/api/v1/chat/completions", api_key, model, "openrouter")
+        Self::new(OPENROUTER_CHAT_ENDPOINT, api_key, model, "openrouter")
     }
 
     /// Gemini via its OpenAI-compatible surface, single `GEMINI_API_KEY`
     /// (`Authorization: Bearer <key>`), free tier (ADR 0034).
     pub fn gemini(api_key: impl Into<String>, model: impl Into<String>) -> Self {
-        Self::new(
-            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-            api_key,
-            model,
-            "gemini",
-        )
+        Self::new(GEMINI_CHAT_ENDPOINT, api_key, model, "gemini")
     }
 
     pub fn ollama(endpoint: impl Into<String>, model: impl Into<String>) -> Self {

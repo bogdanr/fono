@@ -17,12 +17,18 @@ workspace = true
 # single passive multicast listener) and pairs with the server so the
 # default build is what an end-user wants. Slim / cloud-only builds
 # drop both via `default-features = false`.
-default = ["wyoming-server", "discovery"]
+default = ["wyoming-server", "discovery", "llm-server"]
 # Wyoming protocol server — accept LAN peers and drive an existing
 # `Arc<dyn SpeechToText>` (whisper-rs, cloud, …).
 wyoming-server = []
 # mDNS / DNS-SD browser + advertiser. Slice 4 of the network plan.
 discovery = ["dep:mdns-sd"]
+# Local LLM inference HTTP server — OpenAI- + Ollama-compatible endpoints
+# driving an existing `Arc<dyn Assistant>` (embedded llama.cpp, cloud, …).
+# Raw hyper, hand-rolled router, no axum (ADR 0036). The hyper/http-body
+# stack is already in the graph via reqwest, so this feature adds no new
+# crate; `fono-assistant` is likewise already linked in the binary.
+llm-server = ["dep:fono-assistant", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes", "dep:reqwest"]
 # Future slices wire these on:
 #   wyoming-client = []   # superseded by `fono-stt::wyoming` (Slice 2)
 #   fono-server   = []    # Fono-native server, Slice 6
@@ -44,6 +50,10 @@ fono-stt = { path = "../fono-stt", default-features = false }
 # backend). Default `wyoming` feature is light (pulls only the codec we
 # already depend on); no native/C++ deps.
 fono-tts = { path = "../fono-tts" }
+# Assistant trait (`Arc<dyn Assistant>`) driven by the `llm-server`
+# endpoint. Already in the binary's dependency graph (via `fono`), so
+# this edge is net-zero on shipped binary size (AGENTS size rule).
+fono-assistant = { path = "../fono-assistant", default-features = false, optional = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
@@ -53,9 +63,23 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+# HTTP server stack for the `llm-server` feature. All already in the
+# dependency graph via reqwest's client stack (net-zero — see the
+# workspace `Cargo.toml` note).
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+# Outbound HTTP client for the cloud pass-through proxy (ADR 0036). Already
+# in the dependency graph (fono-assistant / fono-stt use it), so this edge
+# is net-zero on shipped binary size (AGENTS size rule).
+reqwest = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Integration test exercises the real Wyoming client (Slice 2) against
 # the server in this crate, with a mock `SpeechToText` underneath.
 fono-stt = { path = "../fono-stt", features = ["wyoming"] }
+# LLM-server round-trip test builds a mock `Arc<dyn Assistant>`.
+fono-assistant = { path = "../fono-assistant", default-features = false }
+reqwest = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

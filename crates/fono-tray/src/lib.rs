@@ -156,6 +156,14 @@ pub type McpEnabledProvider = Arc<dyn Fn() -> bool + Send + Sync>;
 /// tray-action handler hot-reloads the LAN listener, so no restart is needed.
 pub type WyomingEnabledProvider = Arc<dyn Fn() -> bool + Send + Sync>;
 
+/// Provider returning whether `[server.llm].enabled = true` in the user
+/// config. Polled on the same ~2 s cadence so the "Servers ▸ Local LLM
+/// server" checkmark reflects external `config.toml` edits without a tray
+/// restart. The switch governs the OpenAI + Ollama HTTP API (both wire
+/// formats ride one listener; ADR 0036). The daemon's tray-action handler
+/// hot-reloads the listener in place, so no restart is needed.
+pub type LlmEnabledProvider = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// Snapshot view of the user-facing config fields surfaced in the
 /// "Preferences" submenu. Tracked as a flat struct so the 2 s poll
 /// can diff with `PartialEq` and only repaint when something moved.
@@ -332,6 +340,12 @@ pub enum TrayAction {
     /// backend is configured), since Wyoming multiplexes both over one
     /// connection.
     ToggleWyomingServer,
+    /// Toggle `[server.llm].enabled` from the tray. The daemon writes
+    /// the change to `config.toml` and hot-reloads the local LLM HTTP
+    /// listener in place — no restart required. The one switch governs
+    /// both the OpenAI and Ollama wire formats, which share the single
+    /// listener (ADR 0036).
+    ToggleLlmServer,
     Quit,
 }
 
@@ -424,6 +438,7 @@ pub fn spawn(
     preferences_provider: PreferencesProvider,
     mcp_enabled_provider: McpEnabledProvider,
     wyoming_enabled_provider: WyomingEnabledProvider,
+    llm_enabled_provider: LlmEnabledProvider,
 ) -> (Tray, mpsc::UnboundedReceiver<TrayAction>) {
     let shared = Arc::new(AtomicU8::new(TrayState::Idle as u8));
     let (action_tx, action_rx) = mpsc::unbounded_channel();
@@ -448,6 +463,7 @@ pub fn spawn(
             preferences_provider,
             mcp_enabled_provider,
             wyoming_enabled_provider,
+            llm_enabled_provider,
         );
         let state_tx = if started { Some(state_tx) } else { None };
         (Tray { shared_state: shared, state_tx }, action_rx)
@@ -467,9 +483,10 @@ pub fn spawn(
 mod backend {
     use super::{
         ActiveBackends, ActiveProvider, DiscoveredSttProvider, GpuUpgradeProvider,
-        McpEnabledProvider, MicrophonesProvider, PreferencesProvider, PreferencesSnapshot,
-        RecentProvider, TrayAction, TrayState, UpdateProvider, WyomingEnabledProvider,
-        AUTO_STOP_PRESETS_MS, LANGUAGE_SHORTLIST, RECENT_SLOTS, WAVEFORM_STYLES,
+        LlmEnabledProvider, McpEnabledProvider, MicrophonesProvider, PreferencesProvider,
+        PreferencesSnapshot, RecentProvider, TrayAction, TrayState, UpdateProvider,
+        WyomingEnabledProvider, AUTO_STOP_PRESETS_MS, LANGUAGE_SHORTLIST, RECENT_SLOTS,
+        WAVEFORM_STYLES,
     };
     use fono_core::notify::{self, Urgency};
     use ksni::{
@@ -532,6 +549,10 @@ mod backend {
         /// config. Reflected as a checkmark on the "Wyoming server"
         /// row of the unified "Servers" submenu.
         wyoming_server_enabled: bool,
+        /// Whether `[server.llm].enabled = true` in the user config.
+        /// Reflected as a checkmark on the "Local LLM server" row of
+        /// the unified "Servers" submenu.
+        llm_server_enabled: bool,
         actions: mpsc::UnboundedSender<TrayAction>,
     }
 
@@ -595,6 +616,7 @@ mod backend {
         preferences_provider: PreferencesProvider,
         mcp_enabled_provider: McpEnabledProvider,
         wyoming_enabled_provider: WyomingEnabledProvider,
+        llm_enabled_provider: LlmEnabledProvider,
     ) -> bool {
         // We need to be inside a tokio runtime to spawn the ksni
         // service; the daemon always is. Probe `Handle::try_current`
@@ -621,6 +643,7 @@ mod backend {
                 preferences_provider,
                 mcp_enabled_provider,
                 wyoming_enabled_provider,
+                llm_enabled_provider,
             )
             .await
             {
@@ -851,6 +874,7 @@ mod backend {
         preferences_provider: PreferencesProvider,
         mcp_enabled_provider: McpEnabledProvider,
         wyoming_enabled_provider: WyomingEnabledProvider,
+        llm_enabled_provider: LlmEnabledProvider,
     ) -> anyhow::Result<()> {
         // Make sure DBUS_SESSION_BUS_ADDRESS is set before zbus tries
         // to connect; zbus's pure-Rust discovery is stricter than
@@ -867,6 +891,7 @@ mod backend {
 
         let initial_mcp_enabled = mcp_enabled_provider();
         let initial_wyoming_enabled = wyoming_enabled_provider();
+        let initial_llm_enabled = llm_enabled_provider();
         let model = KsniTray {
             tooltip,
             state: TrayState::Idle,
@@ -883,6 +908,7 @@ mod backend {
             prefs: PreferencesSnapshot::default(),
             mcp_server_enabled: initial_mcp_enabled,
             wyoming_server_enabled: initial_wyoming_enabled,
+            llm_server_enabled: initial_llm_enabled,
             actions,
         };
 
@@ -918,6 +944,7 @@ mod backend {
         let mut last_prefs: PreferencesSnapshot = PreferencesSnapshot::default();
         let mut last_mcp_enabled: bool = initial_mcp_enabled;
         let mut last_wyoming_enabled: bool = initial_wyoming_enabled;
+        let mut last_llm_enabled: bool = initial_llm_enabled;
 
         loop {
             tokio::select! {
@@ -934,6 +961,7 @@ mod backend {
                     let prefs = preferences_provider();
                     let mcp_enabled = mcp_enabled_provider();
                     let wyoming_enabled = wyoming_enabled_provider();
+                    let llm_enabled = llm_enabled_provider();
 
                     let changed = recent != last_recent
                         || active != last_active
@@ -943,7 +971,8 @@ mod backend {
                         || mics != last_mics
                         || prefs != last_prefs
                         || mcp_enabled != last_mcp_enabled
-                        || wyoming_enabled != last_wyoming_enabled;
+                        || wyoming_enabled != last_wyoming_enabled
+                        || llm_enabled != last_llm_enabled;
                     if !changed {
                         continue;
                     }
@@ -956,6 +985,7 @@ mod backend {
                     last_prefs.clone_from(&prefs);
                     last_mcp_enabled = mcp_enabled;
                     last_wyoming_enabled = wyoming_enabled;
+                    last_llm_enabled = llm_enabled;
 
                     handle.update(move |t: &mut KsniTray| {
                         t.recent = recent;
@@ -967,6 +997,7 @@ mod backend {
                         t.prefs = prefs;
                         t.mcp_server_enabled = mcp_enabled;
                         t.wyoming_server_enabled = wyoming_enabled;
+                        t.llm_server_enabled = llm_enabled;
                     }).await;
                 }
                 else => break,
@@ -1283,6 +1314,15 @@ mod backend {
                 label: "Wyoming server (STT + TTS + wake) — shares Fono on the LAN".into(),
                 checked: t.wyoming_server_enabled,
                 activate: send_action(TrayAction::ToggleWyomingServer),
+                ..Default::default()
+            }
+            .into(),
+        );
+        server_items.push(
+            CheckmarkItem {
+                label: "Local LLM server (OpenAI + Ollama API) — shares Fono on the LAN".into(),
+                checked: t.llm_server_enabled,
+                activate: send_action(TrayAction::ToggleLlmServer),
                 ..Default::default()
             }
             .into(),

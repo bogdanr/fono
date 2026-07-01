@@ -40,7 +40,7 @@ field-level rustdoc comments. The user-facing sections are:
 | `[overlay]` | Waveform style; picking `transcript` enables live mode | [interactive.md](interactive.md) |
 | `[history]` | History DB retention, FTS5 settings | this file |
 | `[update]` | Auto-check toggle, release channel | [install.md](install.md) |
-| `[server]` | Wyoming-protocol STT server (LAN host mode) | [install.md](install.md) |
+| `[server]` | Wyoming STT/TTS host + local LLM API (OpenAI/Ollama) | [install.md](install.md), below |
 | `[network]` | mDNS metadata overrides | — |
 | `[mcp]` | MCP server limits + voice-tool relevance filter | this file |
 | `[[context_rules]]` | Per-app prompt/behaviour overrides | this file |
@@ -131,6 +131,91 @@ style = "transcript"        # bars | oscilloscope | fft | heatmap | transcript
 
 `[interactive]` tunes the streaming pipeline once it's on; most users
 never touch it. See [interactive.md](interactive.md).
+
+### Serve local inference over HTTP (OpenAI + Ollama API)
+
+Fono can expose whatever assistant you already have configured as a local
+HTTP endpoint that speaks **both** the OpenAI (`/v1/chat/completions`,
+`/v1/models`) and Ollama-native (`/api/chat`, `/api/tags`) wire formats.
+Editors, Open WebUI, `llm`, LangChain, and Home Assistant's Ollama
+conversation agent can then use Fono as a local model backend (ADR 0036).
+
+```toml
+[server.llm]
+enabled = true              # off by default
+bind    = "127.0.0.1"       # loopback only; "0.0.0.0" exposes it on the LAN
+port    = 11434             # Ollama's port, so existing clients connect unchanged
+# auth_token_ref = "FONO_LLM_TOKEN"   # optional bearer token (env/secrets ref)
+# model = ""                          # optional served-model override (see below)
+```
+
+Toggle it from the tray too (*Servers → Local LLM server*) — the listener
+starts/stops in place, no restart. The served model tracks whatever
+`[assistant]` backend is active, so a swap via `fono use assistant …`
+takes effect on the next request without restarting the listener.
+
+**Realtime assistants fall back automatically.** If your `[assistant]` is
+a *realtime* speech-to-speech model (e.g. Gemini Live) that the text chat
+API can't expose, Fono automatically serves the **same provider's default
+text model** instead — for Gemini that's `gemini-flash-lite-latest`,
+reusing the same API key. So you can keep Gemini Live driving your F8
+voice conversations *and* get a fast, cheap, smart text model on the API
+at the same time, with zero extra configuration. `fono doctor` prints the
+model that is actually being served.
+
+**Pin a specific model** with the optional `model` override. It wins over
+both the primary assistant and the realtime fallback — handy to keep
+Gemini Live for voice while serving a different Gemini text model over the
+API:
+
+```toml
+[server.llm]
+enabled = true
+model   = "gemini-2.5-flash"   # serve this regardless of the [assistant] model
+```
+
+The override uses the same provider and API key as `[assistant]`. Leave it
+empty (the default) to serve the active assistant with the automatic
+realtime fallback described above. See
+[home-assistant.md](home-assistant.md) for the Home Assistant wiring.
+
+**Cloud backends get full fidelity via pass-through.** When the served
+backend is an OpenAI-compatible **cloud** provider (OpenAI, Gemini, Groq,
+Cerebras, OpenRouter), Fono forwards your client's `/v1/chat/completions`
+request **straight to the provider** — injecting your stored API key on
+the way out — and streams the response back unchanged. This means every
+model the provider offers, plus tool/function-calling, vision, JSON mode,
+and every request parameter, work exactly as if you called the provider
+directly; there is nothing to configure and no per-feature gaps. `GET
+/v1/models` lists the provider's full catalogue, and the `model` your
+client requests is honoured verbatim (the `model` override above is only
+the *default* used when a client omits it). Backends that are not
+OpenAI-shaped — the local llama.cpp engine, Anthropic, and the
+Ollama-native `/api/*` surface — are served through Fono's built-in
+adapter instead. `fono doctor` shows which path is in effect.
+
+> **Security note:** because your client's requested model is honoured and
+> your provider key is injected outbound, exposing `[server.llm]` on
+> `0.0.0.0` **without** an `auth_token_ref` turns the box into an open
+> relay to your paid cloud account. Keep the loopback default, or set a
+> bearer token before binding to the LAN.
+
+**See who's calling the server.** At `debug` level the server prints one
+line per request on the `fono::llm::server` target — run the daemon with
+`--debug` (or `FONO_LOG=fono::llm::server=debug`) to see them:
+
+```text
+openai/chat 200  proxy→gemini  gemini-flash-lite-latest  stream  ttft=310ms total=1.84s  214tok @116/s  via ollama/0.3.3
+ollama/chat 200  adapt  qwen2.5-3b-instruct  stream  ttft=180ms total=3.90s  301tok @77/s  via Home Assistant/2024.12
+```
+
+Each line shows the endpoint + status, whether the request was proxied to
+a cloud provider (`proxy→…`) or served by the local adapter (`adapt`), the
+model, timing (time-to-first-token + total), an output-token count and
+throughput where available, and the client's `User-Agent` (`via …`) so you
+can tell callers apart on a shared port. The peer IP is appended for
+non-loopback callers. **Prompt and reply content are never logged** — the
+line is metadata only.
 
 ### Per-app context rules
 

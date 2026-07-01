@@ -5,6 +5,57 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] — 2026-07-01
+
+Fono can now share the AI model you already have configured with everything
+else on your machine and LAN: turn on one switch and Fono answers requests
+on a local, OpenAI- and Ollama-compatible HTTP API — so your editor, Open
+WebUI, `llm`, LangChain, and Home Assistant's Ollama conversation agent can
+all talk to Fono's model with no extra setup.
+
+### Added
+
+- **Serve your local model over a standard API (`[server.llm]`, default
+  off).** Flip it on — from the config file or the tray (*Servers → Local
+  LLM server*) — and Fono exposes whatever assistant you have configured on
+  a local HTTP endpoint that speaks **both** the OpenAI
+  (`/v1/chat/completions`, `/v1/models`) and Ollama-native (`/api/chat`,
+  `/api/tags`) formats, on Ollama's usual port `11434` so existing clients
+  connect unchanged. Editors, Open WebUI, `llm`, LangChain, and Home
+  Assistant's Ollama conversation agent can use Fono as their model backend
+  out of the box. It binds to loopback by default, takes an optional bearer
+  token before you expose it on the LAN, hot-reloads from the tray without a
+  restart, and follows a backend swap (`fono use assistant …`) on the next
+  request. `fono doctor` reports whether it's running and which model it
+  serves, and Fono advertises it over mDNS so other machines discover it.
+  Design and rationale in
+  [ADR 0036](docs/decisions/0036-local-llm-server-openai-ollama.md).
+- **Full cloud fidelity via pass-through.** When the model you serve is an
+  OpenAI-compatible cloud provider (OpenAI, Gemini, Groq, Cerebras,
+  OpenRouter), Fono forwards the request straight to the provider — injecting
+  your stored key on the way out and keeping it on the machine — and streams
+  the reply back unchanged. Every model the provider offers, plus
+  tool/function-calling, vision, and JSON mode, work exactly as if you called
+  the provider directly, with nothing to configure. This is what lets Home
+  Assistant drive smart-home devices through a cloud model behind Fono.
+- **A one-line request log.** Run the daemon with `--debug` (or
+  `FONO_LOG=fono::llm::server=debug`) and Fono prints one tidy line per
+  request: the endpoint and status, whether it was served locally or passed
+  through to a cloud provider, the model, timing (time-to-first-token and
+  total), an output-token count and throughput where available, and which app
+  made the call (from its `User-Agent`) so you can tell clients apart on a
+  shared port. Prompt and reply content are never logged.
+
+### Changed
+
+- **Realtime assistants keep working over the API automatically.** If your
+  assistant is a realtime speech-to-speech model (e.g. Gemini Live) that a
+  text chat API can't expose, Fono serves the **same provider's fast text
+  model** instead (for Gemini, `gemini-flash-lite-latest`), reusing the same
+  key — so you keep Gemini Live for voice *and* get a cheap, fast, smart text
+  model on the API at the same time, with zero extra configuration. An
+  optional `[server.llm].model` pins any specific model.
+
 ## [0.12.0] — 2026-06-24
 
 Hands-free wake-word activation: idle, listen for a spoken phrase, and

@@ -1,5 +1,161 @@
 # Fono — Project Status
-Last updated: 2026-06-24
+Last updated: 2026-07-01
+
+## 2026-07-01 — LLM server access log (one line per request)
+
+Added a single human-readable access line per LLM-server request, emitted
+at `debug` level on the existing `fono::llm::server` tracing target (so it
+inherits the daemon's `FONO_LOG` filtering — no new machinery, no new
+dependency, ~0.01 MiB). Content is **never** logged (metadata only), same
+privacy posture as the owner-only history DB.
+
+- **New `fono-net::llm_server::access_log` module:** `ReqLog` (built at
+  dispatch) finalises non-streaming requests via `finish`; streaming
+  requests hand a `StreamLog` to the body task via `defer`, which records
+  time-to-first-token + an output-token count (adapter path only) and emits
+  when the stream drains. Includes a compact `User-Agent` classifier
+  (`compact_ua` — friendly names for Home Assistant / Open WebUI / ollama /
+  OpenAI / httpx / curl etc., else first product token capped) and a
+  `provider_label` for the `proxy→<provider>` mode tag.
+- **Line shape:** `<surface>/<op> <status>  <mode>  <model>  [stream]
+  ttft=… total=…  <N>tok @<tps>/s  via <ua>  [<peer>]`. `mode` is
+  `proxy→<provider>` / `adapt` / `·`; `ttft` + token cluster appear only
+  when available (adapter deltas ≈ tokens; the proxy byte-relay omits the
+  count); `via <ua>` always shown (disambiguates clients on a shared local
+  port); `<peer>` shown only for non-loopback callers.
+- **Wiring:** peer `SocketAddr` threaded from `serve_conn` into `route()`;
+  UA captured + timing started at dispatch; the OpenAI/Ollama handlers set
+  mode+model and the streaming bodies (`messages.rs` SSE/NDJSON + `proxy.rs`
+  relay) emit the completion line.
+- **Tests:** 6 unit tests (UA classifier known/blank/fallback, provider
+  label, full streaming line shape, minimal non-stream line with peer shown).
+- **Gate green:** `cargo fmt --check`, `clippy --workspace --all-targets -D
+  warnings`, `cargo test --workspace` all pass. **Size budget:**
+  `./tests/check.sh --size-budget` = **21.82 MiB / 25 MiB** (glibc `cpu`,
+  four-entry NEEDED clean).
+- **Roadmap:** added **Multi-provider routing for the local LLM server** to
+  *On the horizon* in `ROADMAP.md` (model-name router across all keyed
+  providers, default-fallback model, allowlist).
+
+## 2026-07-01 — LLM server cloud pass-through proxy — Phase 1 shipped
+
+Executed Phase 1 (tasks 1.1–1.7) of
+`plans/2026-07-01-local-llm-server-cloud-proxy-v1.md`. When the served
+`[assistant]` backend is an **OpenAI-compatible cloud** provider (OpenAI,
+Gemini, Groq, Cerebras, OpenRouter), the LLM server's OpenAI surface now
+forwards the client's `/v1/chat/completions` request **verbatim** to the
+provider (injecting the stored key) and streams the response back
+unchanged — full model/tool/vision/parameter fidelity for free. Non-cloud
+backends (embedded llama.cpp, Anthropic, and the whole Ollama-native
+surface) keep using the built-in adapter. Recorded as **ADR 0036 decision 9**.
+
+- **`fono-assistant`:** centralised the per-provider `/chat/completions`
+  URLs into `chat_endpoint(backend)` (always-compiled in `factory.rs`; the
+  `OpenAiCompatChat` constructors now consume them) — the single "is this
+  backend proxyable?" decision point. Added `CloudUpstream` +
+  `cloud_chat_upstream(cfg, override, secrets)` which reuses `resolve_cloud`'s
+  key/model resolution; a Gemini-Live primary resolves through the
+  flash-lite fallback to Gemini's compat endpoint (still proxied, no local
+  client built).
+- **`fono-net::llm_server::proxy`:** `forward_chat` (SSE + JSON relay,
+  status/content-type preserved, default `model` injected only when the
+  client omits it, key injected outbound) and `forward_models` (surfaces the
+  provider's `/models` catalogue). Wired via a parallel `UpstreamProvider`
+  closure alongside `AssistantProvider` (simpler + non-breaking vs. the
+  plan's `ServeTarget` enum sketch); the OpenAI handlers check the upstream
+  first, else adapt. `reqwest` added as a `fono-net` dep (already in graph →
+  net-zero).
+- **Orchestrator:** new `server_upstream` slot + `server_upstream_snapshot()`,
+  computed in `new` and recomputed on `reload` alongside the assistant
+  fallback, so a backend swap re-targets the proxy without restarting the
+  listener.
+- **Diagnostics:** `fono doctor` LLM line now states whether the OpenAI
+  surface is proxied to the provider (full fidelity) or served via the local
+  adapter.
+- **Config:** `[server.llm]` **unchanged** — pass-through is automatic and
+  the client's requested `model` is honoured (server `model` is only the
+  omitted-field default). No new knobs.
+- **Docs:** `docs/configuration.md` (cloud pass-through subsection + open-relay
+  security note), `docs/home-assistant.md` (cloud tool-calling via the OpenAI
+  surface today; Ollama translate-proxy is Phase 2), ADR 0036 decision 9.
+- **Tests:** 5 new `fono-assistant` unit tests (`chat_endpoint` proxyable map;
+  `cloud_chat_upstream` for openai/gemini-live-fallback/override/anthropic/
+  disabled) + 3 new integration tests in `tests/llm_server_round_trip.rs`
+  against a mock upstream hyper server (client model forwarded verbatim + key
+  injected; default model injected when omitted; `/v1/models` surfaces the
+  upstream catalogue). Round-trip test now 13 cases.
+- **Gate green:** `cargo fmt --check`, `clippy --workspace --all-targets -D
+  warnings`, `cargo test --workspace` all pass. **Size budget:**
+  `./tests/check.sh --size-budget` = **21.81 MiB / 25 MiB** (glibc `cpu`,
+  four-entry NEEDED clean) — ~0.02 MiB growth, as projected (reqwest/hyper/
+  serde already present).
+- **Phase 2 (deferred):** optional `model_allowlist` for exposed instances,
+  and the Ollama-surface translate-proxy (Ollama↔OpenAI incl. `tools`) that
+  unlocks Home Assistant device control against a cloud model.
+
+## 2026-07-01 — Local LLM server (OpenAI + Ollama API) — Phase 1 MVP shipped
+
+Executed Phase 1 of `plans/2026-07-01-local-llm-openai-ollama-server-v1.md`
+(all of tasks 1.1–1.10). Fono can now serve its active `Arc<dyn Assistant>`
+(embedded llama.cpp or a cloud backend) over an HTTP API that is both
+**OpenAI-compatible** and **Ollama-native**, from one listener. Decision and
+rationale recorded in **ADR 0036**.
+
+- **Transport: raw `hyper 1.x`, no axum** (ADR 0036). `hyper`/`hyper-util`/
+  `http-body-util`/`bytes` are already in the graph via `reqwest`'s client
+  stack, so enabling hyper's `server`+`http1` features adds **no new crate**.
+  New `fono-net` feature `llm-server` (in default set); `fono-assistant`
+  added as a `fono-net` dep (net-zero — already in the binary graph).
+- **New module `fono-net::llm_server`** (`mod.rs` server/lifecycle/router/auth,
+  `messages.rs` shared message→`AssistantContext` split + reply-driver +
+  streaming-body builder, `openai.rs`, `ollama.rs`). Endpoints:
+  - OpenAI: `GET /v1/models`, `POST /v1/chat/completions` (SSE stream +
+    single JSON).
+  - Ollama: `GET /api/tags`, `POST /api/chat` (NDJSON stream + single JSON),
+    `GET /api/version`.
+  Both drive the one `Assistant::reply_stream`; a per-request
+  `AssistantProvider` closure tracks `Reload`-driven backend swaps without
+  restarting the listener.
+- **Config `[server.llm]`** (`ServerLlm`): off by default, `127.0.0.1` bind,
+  **port 11434** (Ollama's — drop-in for HA/Ollama clients), optional
+  `auth_token_ref` bearer. Mirrors `[server.wyoming]`.
+- **Daemon wiring:** `LlmControl`/`LlmRuntime` (hot-reloadable, mirrors
+  `WyomingControl`) with `reconcile`/`is_running`, startup spawn (held for
+  the daemon lifetime), `orchestrator.assistant_snapshot()` accessor, mDNS
+  `_ollama._tcp` advert (new `PeerKind::Ollama`), `fono doctor` LLM-server
+  line. **Tray toggle:** the unified "Servers" submenu gets a "Local LLM
+  server (OpenAI + Ollama API)" checkmark (`TrayAction::ToggleLlmServer`)
+  that flips `[server.llm].enabled` and hot-reloads the listener in place —
+  no daemon restart, same as the Wyoming toggle. Backend swaps stay hot via
+  the provider closure.
+- **Tests:** offline unit tests for both wire encoders (SSE `[DONE]`, NDJSON
+  `done:true`, message split, model/tags shapes) + a `reqwest` round-trip
+  integration test (`tests/llm_server_round_trip.rs`, 10 cases: models/tags,
+  chat stream+non-stream for both formats, 400/404/401). `[server.llm]`
+  config serde round-trip test.
+- **Gate green:** `cargo fmt --check`, `clippy --workspace --all-targets -D
+  warnings`, `cargo test --workspace` all pass. **Size budget:**
+  `./tests/check.sh --size-budget` = **21.79 MiB / 25 MiB** (`release-slim`
+  glibc `cpu`, four-entry NEEDED clean) — comfortably inside budget.
+- **Realtime backends fall back to a same-provider text sibling.** The LLM
+  server exposes a *text* chat-completions API and can't front a *realtime*
+  speech-to-speech backend directly. Instead of skipping, it now serves the
+  same provider's default staged **text** model (Gemini Live → the catalogue
+  `text_model`, `gemini-flash-lite-latest`), reusing the same API key — so a
+  user keeps Gemini Live for F8 voice *and* gets a fast/cheap/smart text model
+  on the API with zero config. Built in the orchestrator
+  (`fono_assistant::build_server_assistant_override` → new
+  `server_assistant_extra` slot; `server_assistant_snapshot()` prefers it,
+  else reuses the primary staged assistant) and rebuilt on reload. An optional
+  `[server.llm].model` override pins a specific staged model, winning over both
+  the primary and the fallback. `/v1/models`, `/api/tags`, `fono doctor`, and
+  the tray notification all report the model actually served. Rejected reusing
+  the `[polish]` cleanup model (wrong trait, typically too small for chat/tools).
+  Unit tests in `fono-assistant::factory` cover the resolver + model-name paths;
+  ADR 0036 updated (decision 8).
+- **Phase 2 (deferred):** tool/function-calling passthrough for the Home
+  Assistant device-control path (HA emits tool calls, HA executes them),
+  gated on whether that's a near-term target.
 
 ## 2026-06-24 — Shared-ggml size-reclaim spike → DEFER (reclaim ≈ 0 MiB)
 

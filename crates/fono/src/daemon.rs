@@ -311,6 +311,23 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     wyoming_ctl.reconcile(&config, paths, orchestrator.as_ref()).await;
 
     // ---------------------------------------------------------------
+    // Local LLM inference server (OpenAI + Ollama HTTP API; ADR 0036).
+    // Off by default; spawned after the hotkey grab so optional network
+    // serving does not hold up local dictation readiness. Held for the
+    // daemon's lifetime; dropping the handles closes the listener and
+    // fires the mDNS goodbye. Backend swaps (`fono use assistant …`) are
+    // tracked live via the per-request provider closure. Toggling
+    // `[server.llm].enabled` hot-reloads the listener in place via the
+    // tray (`ToggleLlmServer`) — no restart required, mirroring Wyoming.
+    // ---------------------------------------------------------------
+    let llm_ctl = LlmControl {
+        rt: Arc::new(tokio::sync::Mutex::new(LlmRuntime::default())),
+        mdns: discovery.as_ref().and_then(|d| d.daemon.clone()),
+        registry: discovery_registry.clone(),
+    };
+    llm_ctl.reconcile(&config, orchestrator.as_ref()).await;
+
+    // ---------------------------------------------------------------
     // Background update checker — hits GitHub releases once on startup
     // and surfaces the result through `update_status` so the tray menu
     // (and IPC consumers) can render an "Update to vX.Y.Z" entry.
@@ -652,6 +669,19 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                         .map(|c| c.server.wyoming.enabled)
                         .unwrap_or(false)
                 }) as fono_tray::WyomingEnabledProvider
+            },
+            {
+                // LLM-enabled provider: same shape as the Wyoming
+                // provider but reads `[server.llm].enabled`. Default to
+                // `false` on a read error since the listener is off by
+                // default — a missing config shouldn't render a
+                // misleading checkmark.
+                let config_path_for_llm = paths.config_file();
+                Arc::new(move || {
+                    fono_core::Config::load(&config_path_for_llm)
+                        .map(|c| c.server.llm.enabled)
+                        .unwrap_or(false)
+                }) as fono_tray::LlmEnabledProvider
             },
         );
         (Some(t), rx)
@@ -1052,6 +1082,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         let local_wyoming_fullname_for_dispatch = local_wyoming_fullname(&config);
         let orchestrator_for_tray = orchestrator.clone();
         let wyoming_ctl_for_tray = wyoming_ctl.clone();
+        let llm_ctl_for_tray = llm_ctl.clone();
         let wake_tray = wake.clone();
         tokio::spawn(async move {
             while let Some(ta) = tray_rx.recv().await {
@@ -1309,51 +1340,28 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                         }
                     }
                     TrayAction::ToggleWyomingServer => {
-                        // Flip `[server.wyoming].enabled`, persist, and
-                        // hot-reload the LAN listener in place (start or
-                        // stop) — no restart needed. The one switch
-                        // serves STT always and TTS automatically
-                        // whenever a `[tts]` backend is configured.
-                        match fono_core::Config::load(&paths.config_file()) {
-                            Ok(mut cfg) => {
-                                cfg.server.wyoming.enabled = !cfg.server.wyoming.enabled;
-                                let new_state = cfg.server.wyoming.enabled;
-                                if let Err(e) = cfg.save(&paths.config_file()) {
-                                    warn!("tray ToggleWyomingServer: save failed: {e:#}");
-                                } else {
-                                    wyoming_ctl_for_tray
-                                        .reconcile(&cfg, &paths, orchestrator_for_tray.as_ref())
-                                        .await;
-                                    let running = wyoming_ctl_for_tray.is_running().await;
-                                    info!(
-                                        enabled = new_state,
-                                        running, "Wyoming server toggled via tray (hot-reloaded)"
-                                    );
-                                    let body = if new_state && running {
-                                        "Wyoming server is live on the LAN — sharing \
-                                         speech-to-text, plus text-to-speech when a voice \
-                                         backend is configured."
-                                    } else if new_state {
-                                        "Wyoming server enabled, but the listener could not \
-                                         start — check the logs (no STT backend, or the port \
-                                         is busy)."
-                                    } else {
-                                        "Wyoming server stopped — Fono is no longer shared on \
-                                         the LAN."
-                                    };
-                                    fono_core::notify::send(
-                                        "Fono — Wyoming server",
-                                        body,
-                                        "network-server",
-                                        6_000,
-                                        fono_core::notify::Urgency::Normal,
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                warn!("tray ToggleWyomingServer: load config failed: {e:#}");
-                            }
-                        }
+                        // Box the future so its (Config-holding) stack
+                        // frame lives on the heap, keeping the enclosing
+                        // tray-dispatch async block under clippy's
+                        // `large_stack_frames` threshold.
+                        Box::pin(toggle_wyoming_server_via_tray(
+                            &paths,
+                            &wyoming_ctl_for_tray,
+                            orchestrator_for_tray.as_ref(),
+                        ))
+                        .await;
+                    }
+                    TrayAction::ToggleLlmServer => {
+                        // Box the future so its (Config-holding) stack
+                        // frame lives on the heap, keeping the enclosing
+                        // tray-dispatch async block under clippy's
+                        // `large_stack_frames` threshold.
+                        Box::pin(toggle_llm_server_via_tray(
+                            &paths,
+                            &llm_ctl_for_tray,
+                            orchestrator_for_tray.as_ref(),
+                        ))
+                        .await;
                     }
                 }
             }
@@ -3095,6 +3103,154 @@ impl WyomingControl {
     }
 }
 
+/// Hot-reloadable control for the local LLM inference server (OpenAI +
+/// Ollama HTTP API; ADR 0036). Mirrors [`WyomingControl`]: owns the live
+/// listener + mDNS advert handles behind a mutex so the tray toggle can
+/// start/stop the server in place without a daemon restart.
+#[derive(Clone)]
+struct LlmControl {
+    rt: Arc<tokio::sync::Mutex<LlmRuntime>>,
+    /// The shared mDNS service daemon, when discovery came up. Needed to
+    /// register/unregister the `_ollama._tcp` advert on toggle.
+    mdns: Option<mdns_sd::ServiceDaemon>,
+    /// The discovery registry, so the local peer can be (un)seeded as the
+    /// listener starts/stops.
+    registry: Option<fono_net::discovery::Registry>,
+}
+
+/// The live handles owned by an [`LlmControl`]. Both are `None` when the
+/// listener is stopped.
+#[derive(Default)]
+struct LlmRuntime {
+    server: Option<fono_net::LlmServerHandle>,
+    advert: Option<fono_net::discovery::advertiser::AdvertiserHandle>,
+}
+
+impl LlmControl {
+    /// Whether the LLM listener is currently running.
+    async fn is_running(&self) -> bool {
+        self.rt.lock().await.server.is_some()
+    }
+
+    /// Reconcile the running listener (and its mDNS advert) with
+    /// `config.server.llm.enabled`, starting or stopping both in place.
+    /// Idempotent: a no-op when already in the desired state.
+    async fn reconcile(&self, config: &Config, orch: Option<&Arc<SessionOrchestrator>>) {
+        let mut rt = self.rt.lock().await;
+        let want = config.server.llm.enabled;
+        let running = rt.server.is_some();
+        if want && !running {
+            let handle = spawn_llm_server_if_enabled(config, orch).await;
+            let started = handle.is_some();
+            rt.server = handle;
+            if started {
+                if let Some(daemon) = &self.mdns {
+                    if let Some((h, host)) = spawn_llm_advert(daemon, config) {
+                        if let Some(reg) = &self.registry {
+                            reg.upsert(local_llm_peer(config, &host, h.fullname()));
+                        }
+                        rt.advert = Some(h);
+                    }
+                }
+            }
+        } else if !want && running {
+            // Dropping both handles shuts the listener and fires the
+            // mDNS goodbye; in-flight connections finish naturally.
+            rt.server = None;
+            rt.advert = None;
+        }
+    }
+}
+
+/// Handle a tray `ToggleWyomingServer` action: flip
+/// `[server.wyoming].enabled`, persist, hot-reload the listener in place,
+/// and notify. Factored out (and `Box::pin`-ned at the call site) to keep
+/// the tray-dispatch async block's stack frame under clippy's
+/// `large_stack_frames` threshold. The one switch serves STT always and
+/// TTS automatically whenever a `[tts]` backend is configured.
+async fn toggle_wyoming_server_via_tray(
+    paths: &Paths,
+    wyoming_ctl: &WyomingControl,
+    orch: Option<&Arc<SessionOrchestrator>>,
+) {
+    match fono_core::Config::load(&paths.config_file()) {
+        Ok(mut cfg) => {
+            cfg.server.wyoming.enabled = !cfg.server.wyoming.enabled;
+            let new_state = cfg.server.wyoming.enabled;
+            if let Err(e) = cfg.save(&paths.config_file()) {
+                warn!("tray ToggleWyomingServer: save failed: {e:#}");
+                return;
+            }
+            wyoming_ctl.reconcile(&cfg, paths, orch).await;
+            let running = wyoming_ctl.is_running().await;
+            info!(enabled = new_state, running, "Wyoming server toggled via tray (hot-reloaded)");
+            let body = if new_state && running {
+                "Wyoming server is live on the LAN — sharing speech-to-text, plus \
+                 text-to-speech when a voice backend is configured."
+            } else if new_state {
+                "Wyoming server enabled, but the listener could not start — check the logs \
+                 (no STT backend, or the port is busy)."
+            } else {
+                "Wyoming server stopped — Fono is no longer shared on the LAN."
+            };
+            fono_core::notify::send(
+                "Fono — Wyoming server",
+                body,
+                "network-server",
+                6_000,
+                fono_core::notify::Urgency::Normal,
+            );
+        }
+        Err(e) => warn!("tray ToggleWyomingServer: load config failed: {e:#}"),
+    }
+}
+
+/// Handle a tray `ToggleLlmServer` action: flip `[server.llm].enabled`,
+/// persist, hot-reload the listener in place, and notify. Factored out of
+/// the tray-dispatch closure to keep that async block's stack frame under
+/// clippy's `large_stack_frames` threshold (the closure already handles
+/// every other tray action inline).
+async fn toggle_llm_server_via_tray(
+    paths: &Paths,
+    llm_ctl: &LlmControl,
+    orch: Option<&Arc<SessionOrchestrator>>,
+) {
+    match fono_core::Config::load(&paths.config_file()) {
+        Ok(mut cfg) => {
+            cfg.server.llm.enabled = !cfg.server.llm.enabled;
+            let new_state = cfg.server.llm.enabled;
+            if let Err(e) = cfg.save(&paths.config_file()) {
+                warn!("tray ToggleLlmServer: save failed: {e:#}");
+                return;
+            }
+            llm_ctl.reconcile(&cfg, orch).await;
+            let running = llm_ctl.is_running().await;
+            info!(enabled = new_state, running, "LLM server toggled via tray (hot-reloaded)");
+            let body = if new_state && running {
+                "Local LLM server is live on the LAN — sharing a text assistant model \
+                 over the OpenAI and Ollama APIs."
+            } else if new_state && orch.is_some_and(|o| o.assistant_is_realtime_only()) {
+                "LLM server enabled, but the assistant is a realtime (speech-to-speech) \
+                 model and the same-provider text fallback couldn't start — add the \
+                 provider API key with `fono keys add`, or set [server.llm].model."
+            } else if new_state {
+                "LLM server enabled, but the listener could not start — check the logs (no \
+                 [assistant] backend configured, or the port is busy)."
+            } else {
+                "LLM server stopped — Fono is no longer shared on the LAN."
+            };
+            fono_core::notify::send(
+                "Fono — LLM server",
+                body,
+                "network-server",
+                6_000,
+                fono_core::notify::Urgency::Normal,
+            );
+        }
+        Err(e) => warn!("tray ToggleLlmServer: load config failed: {e:#}"),
+    }
+}
+
 /// Voices advertised in `info.tts[].voices`, derived from the active
 /// `[tts]` backend. Local (on-device) backends advertise the whole
 /// embedded catalog so Home Assistant can pick any installed voice at
@@ -3279,6 +3435,187 @@ async fn spawn_wyoming_server_if_enabled(
     }
 }
 
+/// The model id surfaced by the LLM server's `/v1/models` + `/api/tags`.
+/// Cosmetic: the server drives whichever assistant the orchestrator
+/// hands out regardless of the `model` field a client sends. Accounts
+/// for the `[server.llm].model` override and the realtime→text-sibling
+/// fallback (ADR 0036) — so a Gemini Live primary advertises the
+/// `gemini-flash-lite-latest` text model it actually serves — falling
+/// back to `"fono"` when nothing resolves.
+fn llm_model_name(config: &Config) -> String {
+    let m = config.server.llm.model.trim();
+    let override_model = (!m.is_empty()).then_some(m);
+    let name = fono_assistant::server_assistant_model_name(&config.assistant, override_model);
+    if name.is_empty() {
+        "fono".to_string()
+    } else {
+        name
+    }
+}
+
+/// Spawn the local LLM inference server if `[server.llm].enabled = true`
+/// and an assistant backend is configured. Returns `None` when the
+/// server is disabled, no assistant is available, or the listener fails
+/// to bind (failures are logged at `warn!` and never abort the daemon —
+/// dictation must keep working even if the LLM server can't come up).
+/// Mirrors [`spawn_wyoming_server_if_enabled`]. See ADR 0036.
+async fn spawn_llm_server_if_enabled(
+    config: &Config,
+    orchestrator: Option<&Arc<SessionOrchestrator>>,
+) -> Option<fono_net::LlmServerHandle> {
+    let cfg = &config.server.llm;
+    if !cfg.enabled {
+        return None;
+    }
+    let Some(orch) = orchestrator else {
+        warn!(
+            "[server.llm].enabled = true but the daemon is in degraded mode \
+             (no STT backend); skipping LLM server"
+        );
+        return None;
+    };
+    if orch.server_assistant_snapshot().is_none() {
+        if orch.assistant_is_realtime_only() {
+            warn!(
+                "[server.llm].enabled = true and the active [assistant] is a realtime \
+                 speech-to-speech model (e.g. Gemini Live), but the same-provider text \
+                 fallback could not be built — most likely a missing API key. Add the \
+                 provider key with `fono keys add`, or set [server.llm].model to a staged \
+                 text model; skipping LLM server"
+            );
+        } else {
+            warn!(
+                "[server.llm].enabled = true but no [assistant] backend is configured; \
+                 skipping LLM server (set [assistant].backend)"
+            );
+        }
+        return None;
+    }
+
+    let loopback_only = cfg.bind == "127.0.0.1" || cfg.bind == "::1";
+    let auth_token =
+        if cfg.auth_token_ref.is_empty() { None } else { std::env::var(&cfg.auth_token_ref).ok() };
+    let server_cfg = fono_net::LlmServerConfig {
+        bind: cfg.bind.clone(),
+        port: cfg.port,
+        auth_token,
+        model_name: llm_model_name(config),
+        server_version: env!("CARGO_PKG_VERSION").to_string(),
+        loopback_only,
+    };
+
+    // Provider closure invoked per request so `Reload`-driven assistant
+    // backend swaps are tracked without restarting the listener.
+    let orch_for_provider = Arc::clone(orch);
+    let provider: fono_net::AssistantProvider =
+        Arc::new(move || orch_for_provider.server_assistant_snapshot());
+    // Cloud pass-through upstream (ADR 0036): when the served backend is
+    // an OpenAI-compatible cloud provider the OpenAI surface forwards
+    // requests verbatim for full tool/vision/parameter fidelity. `None`
+    // for non-proxyable backends, where the assistant adapter drives.
+    let orch_for_upstream = Arc::clone(orch);
+    let upstream: fono_net::UpstreamProvider =
+        Arc::new(move || orch_for_upstream.server_upstream_snapshot());
+    let model = server_cfg.model_name.clone();
+    match fono_net::LlmServer::new(server_cfg, provider).with_upstream(upstream).start().await {
+        Ok(handle) => {
+            info!(
+                "LLM server listening on {} (model={model}, loopback_only={loopback_only}); \
+                 OpenAI + Ollama API",
+                handle.local_addr()
+            );
+            Some(handle)
+        }
+        Err(e) => {
+            warn!("LLM server failed to start: {e:#}");
+            None
+        }
+    }
+}
+
+/// Capability tags advertised over mDNS for the LLM service. Both wire
+/// formats ride the one listener, so both are advertised.
+fn llm_caps() -> Vec<String> {
+    vec!["openai".to_string(), "ollama".to_string()]
+}
+
+/// Register the mDNS `_ollama._tcp` advert for the LLM server. Mirrors
+/// [`spawn_wyoming_advert`]; returns the handle plus the short hostname
+/// used to seed the local registry entry.
+fn spawn_llm_advert(
+    daemon: &mdns_sd::ServiceDaemon,
+    config: &Config,
+) -> Option<(fono_net::discovery::advertiser::AdvertiserHandle, String)> {
+    let cfg = &config.server.llm;
+    let Some(host) = hostname() else {
+        warn!("mdns: cannot determine hostname; skipping LLM advertise");
+        return None;
+    };
+    let instance = if config.network.instance_name.is_empty() {
+        format!("fono-{host}")
+    } else {
+        config.network.instance_name.clone()
+    };
+    let mdns_host = if host.contains('.') { host.clone() } else { format!("{host}.local") };
+    let spec = fono_net::discovery::advertiser::AdvertiseSpec {
+        kind: fono_net::discovery::PeerKind::Ollama,
+        instance_name: instance,
+        hostname: mdns_host,
+        port: cfg.port,
+        addresses: vec![],
+        proto: "ollama/1".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        caps: llm_caps(),
+        model: Some(llm_model_name(config)),
+        auth_required: !cfg.auth_token_ref.is_empty(),
+        path: None,
+    };
+    let advertiser = fono_net::discovery::Advertiser::new(daemon.clone());
+    match advertiser.register(spec) {
+        Ok(h) => {
+            info!("mDNS advertising _ollama._tcp on port {} as {}", cfg.port, h.fullname());
+            Some((h, host))
+        }
+        Err(e) => {
+            warn!("mdns llm advertise failed: {e:#}");
+            None
+        }
+    }
+}
+
+/// Build the [`fono_net::discovery::DiscoveredPeer`] for the
+/// locally-running LLM service so `fono discover` shows it immediately.
+/// Mirrors [`local_wyoming_peer`].
+fn local_llm_peer(
+    config: &Config,
+    short_host: &str,
+    fullname: &str,
+) -> fono_net::discovery::DiscoveredPeer {
+    use fono_net::discovery::{DiscoveredPeer, PeerKind, OLLAMA_SERVICE_TYPE};
+    use std::time::Instant;
+    let hostname = format!("{short_host}.local.");
+    let name = fullname
+        .strip_suffix(OLLAMA_SERVICE_TYPE)
+        .and_then(|s| s.strip_suffix('.'))
+        .unwrap_or(fullname)
+        .to_string();
+    DiscoveredPeer {
+        kind: PeerKind::Ollama,
+        fullname: fullname.to_string(),
+        name,
+        hostname,
+        address: None,
+        port: config.server.llm.port,
+        proto: "ollama/1".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        caps: llm_caps(),
+        model: Some(llm_model_name(config)),
+        auth_required: !config.server.llm.auth_token_ref.is_empty(),
+        path: None,
+        last_seen: Instant::now(),
+    }
+}
+
 /// Live discovery runtime: shared registry, browser, and (optional)
 /// advertisers. Held by the daemon for its lifetime so the goodbye
 /// packets fire when it exits.
@@ -3455,6 +3792,7 @@ fn snapshot_discovered(registry: &fono_net::discovery::Registry) -> Vec<fono_ipc
             kind: match p.kind {
                 fono_net::discovery::PeerKind::Wyoming => "wyoming".into(),
                 fono_net::discovery::PeerKind::Fono => "fono".into(),
+                fono_net::discovery::PeerKind::Ollama => "ollama".into(),
             },
             fullname: p.fullname,
             name: p.name,

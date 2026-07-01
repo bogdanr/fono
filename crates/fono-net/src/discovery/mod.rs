@@ -37,6 +37,12 @@ pub const WYOMING_SERVICE_TYPE: &str = "_wyoming._tcp.local.";
 /// Fono-native service type (Slice 5/6 — WebSocket).
 pub const FONO_SERVICE_TYPE: &str = "_fono._tcp.local.";
 
+/// Local LLM inference service type. `_ollama._tcp` is the de-facto
+/// record for Ollama-compatible HTTP endpoints; Fono advertises it when
+/// `[server.llm].enabled` so `fono discover` (and Ollama-aware tooling)
+/// can locate the OpenAI/Ollama API. See ADR 0036.
+pub const OLLAMA_SERVICE_TYPE: &str = "_ollama._tcp.local.";
+
 /// Peers older than this are evicted from the registry on every
 /// browser tick. Sized to comfortably exceed several browser
 /// re-query cycles (see `browser::REBROWSE_TICK`) so a co-resident
@@ -53,6 +59,9 @@ pub enum PeerKind {
     /// `_fono._tcp.local.` — speaks the Fono-native protocol over
     /// WebSocket. Slice 5/6.
     Fono,
+    /// `_ollama._tcp.local.` — an OpenAI/Ollama-compatible local LLM
+    /// inference HTTP endpoint (Fono's `[server.llm]`). See ADR 0036.
+    Ollama,
 }
 
 impl PeerKind {
@@ -62,6 +71,7 @@ impl PeerKind {
         match self {
             Self::Wyoming => WYOMING_SERVICE_TYPE,
             Self::Fono => FONO_SERVICE_TYPE,
+            Self::Ollama => OLLAMA_SERVICE_TYPE,
         }
     }
 
@@ -71,6 +81,7 @@ impl PeerKind {
         match ty {
             WYOMING_SERVICE_TYPE => Some(Self::Wyoming),
             FONO_SERVICE_TYPE => Some(Self::Fono),
+            OLLAMA_SERVICE_TYPE => Some(Self::Ollama),
             _ => None,
         }
     }
@@ -133,6 +144,8 @@ impl DiscoveredPeer {
             (PeerKind::Wyoming, Some(model)) => format!("Wyoming · {host} ({model})"),
             (PeerKind::Wyoming, None) => format!("Wyoming · {host}"),
             (PeerKind::Fono, _) => format!("Fono server · {host}"),
+            (PeerKind::Ollama, Some(model)) => format!("LLM · {host} ({model})"),
+            (PeerKind::Ollama, None) => format!("LLM · {host}"),
         }
     }
 }
