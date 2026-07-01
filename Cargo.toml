@@ -256,3 +256,14 @@ codegen-units = 1
 lto = "fat"
 panic = "abort"
 strip = "symbols"
+# Optimise Rust codegen for size, not speed. This shrinks the shipped
+# binary by ~5 MiB (measured 2026-07-01: 26.60 → 21.64 MiB,
+# x86_64-unknown-linux-gnu, default features) with the four-entry NEEDED
+# allowlist intact. It touches ONLY the Rust glue (async providers,
+# realtime, tokio/reqwest/serde, the ort/whisper-rs/llama-cpp-2 bindings)
+# — the inference hot paths are C/C++ compiled by cc/cmake with their own
+# flags (`-Os` scaffolding + cmake-gated high-opt kernels, see
+# `.cargo/config.toml`), so STT/LLM/TTS throughput is unaffected. `"z"`
+# saves a further ~1.25 MiB but disables Rust-side auto-vectorisation more
+# aggressively; `"s"` is the safe sweet spot.
+opt-level = "s"

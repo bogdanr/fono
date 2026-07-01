@@ -26,9 +26,10 @@ Everything below serves two non-negotiable invariants, enforced in CI
 
 1. **Size budget.** The canonical `cpu` artefact has a hard byte cap;
    1 byte over fails the build. Current caps (ADR 0022):
-   - `cpu`: **≤ 30 MiB** hard cap (was 20 MiB, then ≤ 32 MiB; lowered to
-     30 MiB on 2026-06-24). The **enforced gate row is 28 MiB**
-     (29 360 128 B) — see `.github/workflows/ci.yml`; the ~2 MiB gap to the
+   - `cpu`: **≤ 28 MiB** hard cap (was 20 MiB, then ≤ 32 MiB, then
+     ≤ 30 MiB; lowered to 28 MiB on 2026-07-01 when `release-slim` adopted
+     `opt-level = "s"`). The **enforced gate row is 25 MiB**
+     (26 214 400 B) — see `.github/workflows/ci.yml`; the ~3 MiB gap to the
      hard cap is deliberate ceiling.
    - `gpu` (Vulkan): **≤ 64 MiB**.
 2. **`NEEDED` allowlist.** `readelf -d` on the shipped binary must list
@@ -118,8 +119,10 @@ build.sh --config MinSizeRel --build_shared_lib \
   union `libonnxruntime.a` is ~50.4 MiB on disk (up from ~50.3 MiB Piper-
   only — the operator delta is dwarfed by shared infrastructure), and a
   `release-slim --features tts-local` glibc binary links in at **25.22 MiB**
-  (up from the 24.45 MiB Piper-only baseline below), still well under the
-  30 MiB `cpu` cap with the four-entry `NEEDED` allowlist intact.
+  (up from the 24.45 MiB Piper-only baseline below), comfortably within the
+  `cpu` cap with the four-entry `NEEDED` allowlist intact. (These figures
+  predate the 2026-07-01 `opt-level = "s"` switch — see §2 — which cut the
+  shipped binary to 21.64 MiB.)
 - The resulting static `libonnxruntime.a` is built in CI and pinned via
   the `ORT_LIB_LOCATION` env var, which turns off `ort`'s
   `download-binaries` (so builds are reproducible/offline and no
@@ -131,7 +134,43 @@ build.sh --config MinSizeRel --build_shared_lib \
 > fail to load — that is the signal to regenerate, not to switch back to
 > the full runtime.
 
-### 2. Static C++/runtime linkage — protect the `NEEDED` allowlist
+### 2. Rust codegen — optimize for size (`opt-level = "s"`)
+
+The `release-slim` profile sets `opt-level = "s"` (`Cargo.toml`), telling
+LLVM to optimise Rust codegen for **size, not speed**. This is one of the
+largest single levers: measured 2026-07-01 on `x86_64-unknown-linux-gnu`
+(default features), it drops the shipped binary from **26.60 MiB to
+21.64 MiB (−4.96 MiB)** and `.text` from 21.47 MiB to 16.65 MiB, with the
+four-entry `NEEDED` allowlist intact.
+
+The saving is **duplicated Rust machine code, not features**. Fono's
+async-heavy glue (tokio/reqwest/serde, the `ort` / `whisper-rs` /
+`llama-cpp-2` bindings, the provider/realtime/streaming code) is heavily
+generic, so `opt-level = 3` monomorphises it and then aggressively
+inlines and unrolls each copy. `"s"` keeps the real optimisations but
+suppresses the size-inflating ones.
+
+**Inference speed is unaffected.** The compute-bound work — Whisper,
+llama, ggml, onnxruntime — is C/C++ compiled by `cc`/`cmake` with its own
+flags (`-Os` scaffolding + cmake-gated high-opt vectorised kernels, see
+`.cargo/config.toml`); Rust `opt-level` never touches it. `"s"` only
+affects the Rust glue, which is I/O- or orchestration-bound and typically
+lands within a few percent of `"3"` (often faster via better I-cache
+behaviour). Measured ladder (x86_64, default features):
+
+| `opt-level` | Size | Δ vs `3` |
+|---|---:|---:|
+| `3` (speed, old default) | 26.60 MiB | — |
+| `2` (speed) | 25.99 MiB | −0.61 MiB |
+| **`"s"` (size, shipped)** | **21.64 MiB** | **−4.96 MiB** |
+| `"z"` (min size) | 20.39 MiB | −6.51 MiB |
+
+`2` and `3` are both *speed* settings, so `2` barely helps; the cliff is
+the jump to the size family. `"z"` saves ~1.25 MiB more but disables
+Rust-side loop vectorisation — a real risk to any Rust numeric loop — so
+`"s"` is the shipped sweet spot.
+
+### 3. Static C++/runtime linkage — protect the `NEEDED` allowlist
 
 C/C++ dependencies (ggml, onnxruntime) want to pull `libstdc++.so.6`,
 `libgomp.so.1`, etc. dynamically. Fono forces them static:
@@ -162,7 +201,7 @@ C/C++ dependencies (ggml, onnxruntime) want to pull `libstdc++.so.6`,
 - Linker flags live in `.cargo/config.toml`: `--gc-sections`,
   `--as-needed`, and (legacy) `--allow-multiple-definition`.
 
-### 3. Dead-code elimination
+### 4. Dead-code elimination
 
 `-Os -ffunction-sections -fdata-sections` on the C/C++ side +
 `-Wl,--gc-sections` on the link drops unused arch kernels and helpers.
@@ -170,7 +209,7 @@ C/C++ dependencies (ggml, onnxruntime) want to pull `libstdc++.so.6`,
 full rationale). The `release-slim` profile sets `strip = "symbols"`,
 LTO, and `opt-level` for size.
 
-### 4. Deduplicate ggml — measured ≈ 0 MiB win, deferred
+### 5. Deduplicate ggml — measured ≈ 0 MiB win, deferred
 
 `whisper-rs-sys` and `llama-cpp-sys-2` each vendor their **own** copy of
 ggml; the `--allow-multiple-definition` trick (ADR 0018) keeps the first
@@ -184,7 +223,7 @@ link.** Re-measured 2026-06-24 on the canonical `release-slim`
 relink shows `ggml_init` defined exactly **once**, **zero** duplicated
 ggml globals, and single-copy ggml/quant `.text` ≈ 1.03 MiB. The same
 `-ffunction-sections -fdata-sections` + `--gc-sections` that prune the
-stale `libstdc++` bulk (§2) also collect the loser ggml copy's
+stale `libstdc++` bulk (§3) also collect the loser ggml copy's
 per-function sections. **Realised reclaim from a source-level shared ggml
 ≈ 0 MiB.**
 

@@ -59,7 +59,7 @@ Target users: Linux desktop (i3 / sway / KDE / GNOME, X11 and Wayland), Windows,
   / release):** `./tests/check.sh --size-budget`. This builds the
   canonical ship artefact (`release-slim`, glibc `cpu`, default
   features) and asserts the **exact** thing CI's `size-budget` job
-  asserts — binary ≤ the `cpu` budget (currently 28 MiB / 29,360,128 B)
+  asserts — binary ≤ the `cpu` budget (currently 25 MiB / 26,214,400 B)
   and a four-entry `NEEDED` allowlist (libc, libm, libgcc_s, the dynamic
   linker). The numbers live in lockstep with the `ci.yml` `cpu` matrix
   rows; change them together. A green run here means the CI size gate
@@ -70,7 +70,7 @@ Target users: Linux desktop (i3 / sway / KDE / GNOME, X11 and Wayland), Windows,
   exactly as CI (auto-resolving through `scripts/fetch-onnxruntime.sh`
   when the env var is unset). If the binary is over budget, fix the
   growth or, with sign-off, bump the `cpu` row in both `ci.yml` and
-  ADR 0022 (hard cap ≤ 30 MiB) — never silently exceed it.
+  ADR 0022 (hard cap ≤ 28 MiB) — never silently exceed it.
 
   Style note: `rustfmt.toml` sets `use_small_heuristics = "Max"` so
   short fn calls / struct literals / if-else expressions stay on one

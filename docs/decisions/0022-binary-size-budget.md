@@ -43,6 +43,26 @@ Task 1.2 lands.
 > the enforced row. These figures supersede the 26/27 MiB budget and
 > ≤ 32 MiB cap stated elsewhere in this ADR. `gpu` is unchanged.
 
+> **AMENDED 2026-07-01 — `release-slim` adopts `opt-level = "s"`; `cpu`
+> budget tightened to 25 MiB, hard cap to 28 MiB.** The `release-slim`
+> profile previously inherited `opt-level = 3` (speed) from `release`;
+> it now sets **`opt-level = "s"`** (size) in `Cargo.toml`. Measured
+> 2026-07-01 on `x86_64-unknown-linux-gnu` (default features), this drops
+> the shipped artefact from **26.60 MiB to 21.64 MiB (−4.96 MiB)** with
+> the four-entry `NEEDED` allowlist intact and **no feature loss** — the
+> saving is duplicated Rust glue codegen, and the C/C++ inference core
+> (whisper/llama/ggml/onnxruntime, compiled with its own `-Os`/cmake
+> flags) is untouched, so inference throughput is unchanged. The measured
+> ladder: `3` = 26.60, `2` = 25.99, `"s"` = 21.64, `"z"` = 20.39 MiB;
+> `"z"` was rejected as it disables Rust loop vectorisation. To bank the
+> win, the enforced `cpu` size-gate row moves from **28 MiB to 25 MiB
+> (26 214 400 B)** in `.github/workflows/ci.yml` (both x86_64 and aarch64
+> rows), and the hard `cpu` cap from **≤ 30 MiB to ≤ 28 MiB**, preserving
+> a ~3 MiB gap above the enforced row for CI toolchain variance and the
+> aarch64 artefact. These figures supersede the 28 MiB budget / ≤ 30 MiB
+> cap of the 2026-06-24 amendment. `gpu` is unchanged. See
+> `docs/binary-size.md` §2.
+
 The static-musl ship (Phase 2.4) is **deferred** — see "Rejected:
 static-musl with libgomp" in Trade-offs.
 

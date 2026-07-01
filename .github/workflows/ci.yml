@@ -204,8 +204,13 @@ jobs:
           # measured 24.45 MiB) → 27 MiB at 2026-06-19 after v0.11.0
           # added realtime/provider code while preserving OpenMP and keeping
           # release-slim unwind tables disabled → 28 MiB at 2026-06-24 after
-          # wake-word additions consumed the last of the 27 MiB headroom. Still
-          # well under the ≤30 MiB `cpu` cap (ADR 0022) and rejects accidental
+          # wake-word additions consumed the last of the 27 MiB headroom →
+          # tightened to 25 MiB at 2026-07-01 after `release-slim` adopted
+          # `opt-level = "s"` (Rust codegen for size; inference is C/C++ and
+          # unaffected), which dropped the local x86_64 artefact from 26.60 to
+          # 21.64 MiB. 25 MiB banks ~3 MiB of that ~5 MiB win while leaving
+          # headroom for CI toolchain variance and the aarch64 row; the hard
+          # `cpu` cap fell to ≤28 MiB (ADR 0022). Rejects accidental
           # dependency drift. The
           # onnxruntime fetch step below pins `libonnxruntime.a` so the
           # `ort` link resolves; the 4-entry allowlist is unchanged because
@@ -215,7 +220,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
             features: ""
-            budget_bytes: 29360128
+            budget_bytes: 26214400
             extra_needed: ""
             dynamic_linker: ld-linux-x86-64.so.2
           # GPU variant — Vulkan-enabled, ~66 MB. Adds `libvulkan.so.1`
@@ -238,16 +243,17 @@ jobs:
           # interpreter on aarch64 is `ld-linux-aarch64.so.1` and on
           # aarch64 it appears only in `PT_INTERP`, not `NEEDED`, so
           # the allowlist drops it; the universal libc/libm/libgcc_s
-          # triple still applies. Budget matches x86_64 CPU (28 MiB now
-          # that `tts-local` is default and v0.11.0 keeps realtime/provider
-          # work plus OpenMP inside the default CPU artefact; the aarch64
-          # `libonnxruntime.a` is hosted + pinned in `fetch-onnxruntime.sh`).
+          # triple still applies. Budget matches x86_64 CPU (25 MiB after
+          # `release-slim` adopted `opt-level = "s"` on 2026-07-01; the
+          # aarch64 `libonnxruntime.a` is hosted + pinned in
+          # `fetch-onnxruntime.sh`). If the aarch64 `"s"` artefact measures
+          # higher than this row in CI, bump only this row — don't loosen x86_64.
           - variant: cpu
             arch: aarch64
             target: aarch64-unknown-linux-gnu
             runner: ubuntu-22.04-arm
             features: ""
-            budget_bytes: 29360128
+            budget_bytes: 26214400
             extra_needed: ""
             dynamic_linker: ld-linux-aarch64.so.1
     steps:

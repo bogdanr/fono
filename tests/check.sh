@@ -11,7 +11,7 @@
 #   ./tests/check.sh --quick        # default-features only, skip clippy and the slow integration tests
 #   ./tests/check.sh --no-test      # skip the test phase (build + clippy only)
 #   ./tests/check.sh --slim         # cloud-only slim build instead of default features
-#   ./tests/check.sh --size-budget  # ONLY the CI size gate: release-slim glibc cpu, assert ≤ 28 MiB + 4-entry NEEDED (skips the matrix)
+#   ./tests/check.sh --size-budget  # ONLY the CI size gate: release-slim glibc cpu, assert ≤ 25 MiB + 4-entry NEEDED (skips the matrix)
 #   ./tests/check.sh --help         # this message
 #
 # Exit code: 0 if every step passes; non-zero on the first failure
@@ -177,7 +177,7 @@ fi  # end of fmt/build/clippy/test matrix (skipped under --size-budget)
 # `x86_64-unknown-linux-gnu` (or `aarch64` on arm hosts), default features
 # (which include `tts-local`) — and asserts exactly what the
 # `.github/workflows/ci.yml` `size-budget` job asserts:
-#   - binary size ≤ the `cpu` budget (28 MiB / 29 360 128 B)
+#   - binary size ≤ the `cpu` budget (25 MiB / 26 214 400 B)
 #   - `readelf -d` NEEDED set ⊆ the universal four-entry glibc allowlist
 #     (libc, libm, libgcc_s, the dynamic linker) — any extra entry fails
 #
@@ -194,7 +194,7 @@ if [[ "$SIZE_BUDGET" == true ]]; then
     step "size-budget gate (release-slim, glibc cpu — mirrors ci.yml)"
 
     # Keep in lockstep with .github/workflows/ci.yml `size-budget` `cpu` rows.
-    BUDGET_BYTES=29360128     # 28 MiB
+    BUDGET_BYTES=26214400     # 25 MiB
 
     ARCH=$(uname -m)
     case "$ARCH" in
@@ -271,5 +271,5 @@ if [[ "$SIZE_BUDGET" == true ]]; then
         printf '    %s\n' $ACTUAL_NEEDED
     fi
 
-    green "Size-budget gate passed (${TARGET}, ≤ 28 MiB, NEEDED allowlist clean) — CI size gate will pass."
+    green "Size-budget gate passed (${TARGET}, ≤ 25 MiB, NEEDED allowlist clean) — CI size gate will pass."
 fi
