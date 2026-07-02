@@ -1052,10 +1052,10 @@ pub enum WaveformStyle {
     /// Live streaming transcription preview. Renders the words the
     /// STT backend is producing in realtime, replacing them with the
     /// finalised text as each segment closes. Requires a streaming-
-    /// capable STT backend (local Whisper, or Groq); cloud backends
-    /// without a streaming impl (OpenAI / Anthropic / Cerebras /
-    /// OpenRouter) fall back to a one-line placeholder during
-    /// recording and the final transcript on inject.
+    /// capable STT backend (local Whisper, Groq, or Deepgram); other
+    /// backends fall back to the batch pipeline with the default
+    /// audio visualisation for the session plus a one-time desktop
+    /// notification explaining why.
     ///
     /// Heavier than the other styles: local Whisper re-decodes the
     /// trailing audio window every `chunk_ms_steady` ms (CPU /

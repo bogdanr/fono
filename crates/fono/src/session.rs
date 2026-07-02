@@ -673,6 +673,22 @@ pub struct SessionOrchestrator {
     /// spawn at startup.
     #[cfg(feature = "interactive")]
     overlay: Arc<StdRwLock<Option<fono_overlay::OverlayHandle>>>,
+    /// True while a live-dictation press is being serviced by the
+    /// *batch* pipeline because the current STT backend has no
+    /// streaming implementation (or the streaming factory failed).
+    /// The batch overlay show-gates treat this as "not live preview"
+    /// so the fallback session still gets the standard waveform panel
+    /// (with the renderer temporarily swapped off `Transcript` to the
+    /// default visualisation) instead of a blank screen. Cleared on
+    /// every terminal outcome of the batch pipeline.
+    #[cfg(feature = "interactive")]
+    live_fallback: Arc<AtomicBool>,
+    /// One-shot latch for the "live transcript unavailable" desktop
+    /// notification, so repeated F7 presses don't spam the user.
+    /// Re-armed on [`Self::reload`] — a backend or style switch
+    /// changes the answer.
+    #[cfg(feature = "interactive")]
+    live_fallback_notified: Arc<AtomicBool>,
     pipeline_in_flight: Arc<AtomicBool>,
     config: Arc<StdRwLock<Arc<Config>>>,
     /// Resolved XDG paths; used by [`Self::reload`] to re-read config
@@ -1046,6 +1062,10 @@ impl SessionOrchestrator {
             if let Ok(mut guard) = self.streaming_stt.write() {
                 *guard = new_streaming;
             }
+            // Re-arm the one-shot "live transcript unavailable"
+            // notification: a reload can change the backend or the
+            // overlay style, so the fallback answer may differ now.
+            self.live_fallback_notified.store(false, Ordering::Relaxed);
         }
         if let Ok(mut guard) = self.polish.write() {
             *guard = new_polish;
@@ -1327,12 +1347,28 @@ impl SessionOrchestrator {
         // (different state, different colour, different label).
         let is_assistant =
             matches!(initial_state, fono_overlay::OverlayState::AssistantRecording { .. });
-        let want_waveform = cfg.overlay.waveform && (is_assistant || !cfg.live_preview());
+        let want_waveform =
+            (is_assistant && cfg.overlay.waveform) || self.batch_overlay_ui_active(cfg);
         let handle = self.overlay.read().ok().and_then(|g| g.clone());
         match (want_waveform, handle) {
             (true, Some(o)) => {
+                // Live-fallback session under Transcript style: the
+                // transcript panel has nothing to render without a
+                // streaming backend, so swap the renderer to the
+                // default audio visualisation for this session. The
+                // terminal hide restores Transcript (invisible while
+                // hidden). Dictation-only — the assistant path keeps
+                // its existing behaviour.
+                let style = if !is_assistant
+                    && cfg.overlay.style == fono_core::config::WaveformStyle::Transcript
+                {
+                    let fallback_style = fono_core::config::WaveformStyle::default();
+                    o.set_waveform_style(fallback_style);
+                    fallback_style
+                } else {
+                    cfg.overlay.style
+                };
                 o.set_state(initial_state);
-                let style = cfg.overlay.style;
                 let buf = Arc::clone(buffer);
                 let task = tokio::spawn(async move {
                     match style {
@@ -2281,6 +2317,10 @@ impl SessionOrchestrator {
             assistant_live_capture: Arc::new(Mutex::new(None)),
             #[cfg(feature = "interactive")]
             overlay: Arc::new(StdRwLock::new(None)),
+            #[cfg(feature = "interactive")]
+            live_fallback: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "interactive")]
+            live_fallback_notified: Arc::new(AtomicBool::new(false)),
             pipeline_in_flight: Arc::new(AtomicBool::new(false)),
             config: Arc::new(StdRwLock::new(config)),
             paths: None,
@@ -2470,7 +2510,7 @@ impl SessionOrchestrator {
         // the batch path.
         #[cfg(feature = "interactive")]
         let polish_label_anim: Option<tokio::task::AbortHandle> = {
-            if cfg.overlay.waveform && !cfg.live_preview() {
+            if self.batch_overlay_ui_active(&cfg) {
                 let stt_local = self.current_stt().is_local();
                 let llm_local = cfg.interactive.cleanup_on_finalize
                     && self.current_llm().is_some_and(|l| l.is_local());
@@ -2531,15 +2571,30 @@ impl SessionOrchestrator {
                 t.finish(json!({ "path": "dictation", "aborted": true, "reason": "too_short", "summary": t.cache_scoreboard() }));
             }
             #[cfg(feature = "interactive")]
-            if cfg.overlay.waveform && !cfg.live_preview() {
+            {
                 if let Some(t) = polish_label_anim {
                     t.abort();
                 }
                 if let Some(t) = polish_waveform_anim {
                     t.abort();
                 }
+                // Hide unconditionally — deliberately NOT gated on
+                // `!cfg.live_preview()`. When the batch path runs as
+                // the live-dictation fallback (Transcript style + a
+                // non-streaming STT backend) the toggle-mode silence
+                // watch may have shown the Pondering panel; a hide
+                // gated on `!live_preview()` would leave it on screen
+                // forever. Hiding is idempotent, and no live pipeline
+                // can be active here (this batch session owned the
+                // capture slot).
                 if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
                     o.set_state(fono_overlay::OverlayState::Hidden);
+                    // Live-fallback session done: restore the user's
+                    // Transcript style (swapped to the default viz at
+                    // session start) while the panel is hidden.
+                    if self.live_fallback.swap(false, Ordering::Relaxed) {
+                        o.set_waveform_style(cfg.overlay.style);
+                    }
                 }
             }
             let _ = self.action_tx.send(HotkeyAction::ProcessingDone);
@@ -2570,11 +2625,18 @@ impl SessionOrchestrator {
                 fono_audio::mute::set_default_sink_mute(false);
             }
             // Standalone-waveform overlay: hide immediately on cancel
-            // (no pipeline phase follows).
+            // (no pipeline phase follows). Unconditional — see the
+            // batch-fallback note in `on_stop_recording`: under
+            // Transcript style the silence watch may have shown the
+            // panel even though the batch path never explicitly
+            // "owned" it.
             #[cfg(feature = "interactive")]
-            if cfg.overlay.waveform && !cfg.live_preview() {
-                if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
-                    o.set_state(fono_overlay::OverlayState::Hidden);
+            if let Some(o) = self.overlay.read().ok().and_then(|g| g.clone()) {
+                o.set_state(fono_overlay::OverlayState::Hidden);
+                // Restore Transcript style if this was a live-fallback
+                // session (see `spawn_waveform_level_task`).
+                if self.live_fallback.swap(false, Ordering::Relaxed) {
+                    o.set_waveform_style(cfg.overlay.style);
                 }
             }
             info!("recording cancelled by user");
@@ -3573,12 +3635,26 @@ impl SessionOrchestrator {
         // overlay was already shifted to `Processing` in
         // `on_stop_recording`; we just clear it back to `Hidden` on
         // every terminal outcome.
+        //
+        // Two handles, on purpose:
+        // - `overlay_hide` (unconditional) is used only for the
+        //   terminal `Hidden` transition. The batch pipeline can run
+        //   as the live-dictation *fallback* (Transcript style + a
+        //   non-streaming STT backend), where the toggle-mode silence
+        //   watch pushes Recording/Pondering states onto the panel;
+        //   gating the terminal hide on `!live_preview()` left the
+        //   panel stuck on screen forever in that combination.
+        // - `overlay` (gated) drives the in-pipeline state
+        //   transitions (Processing / Polishing / final-text) on the
+        //   plain batch path only; the live path owns its own
+        //   transitions.
         #[cfg(feature = "interactive")]
-        let overlay = if config.overlay.waveform && !config.live_preview() {
-            self.overlay.read().ok().and_then(|g| g.clone())
-        } else {
-            None
-        };
+        let overlay_hide = self.overlay.read().ok().and_then(|g| g.clone());
+        #[cfg(feature = "interactive")]
+        let live_fallback = Arc::clone(&self.live_fallback);
+        #[cfg(feature = "interactive")]
+        let overlay =
+            if self.batch_overlay_ui_active(&config) { overlay_hide.clone() } else { None };
         #[cfg(not(feature = "interactive"))]
         let overlay: Option<fono_overlay::OverlayHandle> = None;
 
@@ -3634,8 +3710,15 @@ impl SessionOrchestrator {
             #[cfg(not(feature = "interactive"))]
             drop(polish_waveform_anim);
             #[cfg(feature = "interactive")]
-            if let Some(o) = overlay {
+            if let Some(o) = overlay_hide {
                 o.set_state(fono_overlay::OverlayState::Hidden);
+                // Restore Transcript style if this was a live-fallback
+                // session (see `spawn_waveform_level_task`). The swap
+                // happens while the panel is hidden, so the user never
+                // sees the style flip.
+                if live_fallback.swap(false, Ordering::Relaxed) {
+                    o.set_waveform_style(config.overlay.style);
+                }
             }
             in_flight.store(false, Ordering::SeqCst);
             if let Some(t) = &trace {
@@ -3689,6 +3772,14 @@ impl SessionOrchestrator {
     /// the batch path. Slice A wiring follow-up.
     fn current_streaming_stt(&self) -> Option<Arc<dyn StreamingStt>> {
         self.streaming_stt.read().expect("streaming_stt lock poisoned").clone()
+    }
+
+    /// True when the batch dictation pipeline should drive the
+    /// standalone-waveform overlay: either live preview is off (plain
+    /// batch mode), or the live path fell back to batch for this
+    /// session because the backend can't stream ([`Self::live_fallback`]).
+    fn batch_overlay_ui_active(&self, cfg: &Config) -> bool {
+        cfg.overlay.waveform && (!cfg.live_preview() || self.live_fallback.load(Ordering::Relaxed))
     }
 
     /// Build a streaming-STT-backed capture pipeline with the supplied
@@ -3875,13 +3966,36 @@ impl SessionOrchestrator {
         fono_core::critical_notify::reset_session_flag();
         tracing::debug!("live dictation: starting capture (mode={mode:?})");
         let Some(streaming) = self.current_streaming_stt() else {
+            let backend = self.current_stt().name();
             warn!(
-                "live-dictation: no streaming-capable STT backend currently loaded \
-                 (set `[stt].backend = \"local\"` or wait for Slice B); \
-                 falling back to batch path"
+                "live-dictation: STT backend {backend:?} has no streaming support — live \
+                 transcript preview currently needs `[stt].backend` set to \
+                 \"local\", \"groq\", or \"deepgram\"; falling back to batch path"
             );
+            // Fallback UX: run the batch pipeline with the standard
+            // waveform overlay (the show-gates honour this flag via
+            // `batch_overlay_ui_active`) and tell the user why — once,
+            // not on every press. The latch is re-armed on `reload()`.
+            self.live_fallback.store(true, Ordering::Relaxed);
+            if !self.live_fallback_notified.swap(true, Ordering::Relaxed) {
+                fono_core::notify::send(
+                    "Fono — live transcript unavailable",
+                    &format!(
+                        "The {backend} STT backend doesn't support live streaming yet. \
+                         Recording with the standard visualisation instead; your \
+                         transcript is typed when you stop."
+                    ),
+                    "dialog-information",
+                    6_000,
+                    fono_core::notify::Urgency::Normal,
+                );
+            }
             return self.on_start_recording(mode).await;
         };
+        // A real streaming session is starting; make sure no stale
+        // fallback flag survives (e.g. after a mid-session `reload`
+        // swapped in a streaming-capable backend).
+        self.live_fallback.store(false, Ordering::Relaxed);
         if self.pipeline_in_flight.load(Ordering::SeqCst) {
             warn!("live-dictation requested while previous pipeline still running; ignoring");
             return Ok(());
@@ -4483,16 +4597,17 @@ async fn run_pipeline(
     } else if let Some(polish_backend) = polish {
         #[cfg(feature = "interactive")]
         if let Some(o) = overlay.filter(|_| polish_label_anim.is_some()) {
-            if config.overlay.waveform && !config.live_preview() {
-                if let Some(t) = polish_label_anim.take() {
-                    t.abort();
-                }
-                *polish_label_anim = Some(spawn_polishing_phase_task_for_handle(
-                    o.clone(),
-                    PolishingPhase::Cleanup,
-                    polish_walk_duration,
-                ));
+            // `overlay` is only `Some` when the batch overlay UI is
+            // active for this session (including the live-fallback
+            // case), so no further live-preview gating is needed.
+            if let Some(t) = polish_label_anim.take() {
+                t.abort();
             }
+            *polish_label_anim = Some(spawn_polishing_phase_task_for_handle(
+                o.clone(),
+                PolishingPhase::Cleanup,
+                polish_walk_duration,
+            ));
         }
         let builtin_suffix =
             gated_builtin_suffix(ctx_profile.as_ref(), &raw, trans.language.as_deref());

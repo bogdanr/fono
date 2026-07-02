@@ -551,8 +551,9 @@ pub fn build_streaming_stt(
             if live_preview {
                 let label = fono_core::providers::stt_backend_str(other);
                 tracing::warn!(
-                    "streaming STT not yet supported for backend {label}; \
-                     live dictation will fall back to batch"
+                    "streaming STT not yet supported for backend {label} — live \
+                     transcript preview currently needs `local`, `groq`, or \
+                     `deepgram`; live dictation will fall back to batch"
                 );
             }
             Ok(None)
