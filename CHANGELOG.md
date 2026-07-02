@@ -5,6 +5,24 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] — 2026-07-02
+
+A maintenance release on top of 0.13.0: smaller downloads and a security
+update to a core dependency. No behaviour changes.
+
+### Changed
+
+- **Smaller binaries.** The shipped executables are trimmed further by hiding
+  redundant static-archive exports and stripping debug info from the bundled
+  GPU shaders, so downloads and on-disk size shrink with no change in
+  functionality.
+
+### Security
+
+- Updated `anyhow` to 1.0.103, which fixes an upstream soundness issue in
+  `Error::downcast_mut()`
+  ([RUSTSEC-2026-0190](https://rustsec.org/advisories/RUSTSEC-2026-0190)).
+
 ## [0.13.0] — 2026-07-01
 
 Fono can now share the AI model you already have configured with everything

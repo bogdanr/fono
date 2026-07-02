@@ -801,3 +801,4 @@ Newest first.
 [v0.8.1]: https://github.com/bogdanr/fono/releases/tag/v0.8.1
 [v0.8.0]: https://github.com/bogdanr/fono/releases/tag/v0.8.0
 [v0.13.0]: https://github.com/bogdanr/fono/releases/tag/v0.13.0
+[v0.13.1]: https://github.com/bogdanr/fono/releases/tag/v0.13.1
