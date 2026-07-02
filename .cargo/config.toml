@@ -40,20 +40,21 @@ rustflags = [
     "-C", "force-unwind-tables=no",
     # `--exclude-libs,ALL` hides symbols that static archives (libstdc++.a,
     # libgomp.a, libonnxruntime.a, the ggml archives) would otherwise leak
-    # into the executable's dynamic export table. Measured 2026-07-02 on the
-    # `gpu` (accel-vulkan) release-slim artefact: ~1,011 exported symbols
-    # (985 of them libstdc++ `__cxa_*`/demangler) drop to 0, and together
-    # with `--hash-style=gnu` below the binary shrinks by 934,344 B
-    # (-0.89 MiB) — .dynsym/.dynstr/.hash/.gnu.version shrink and
-    # `--gc-sections` can additionally collect the now-unexported C++
-    # demangler. Nothing consumes these exports: fono is a standalone
-    # executable, never dlopen'd, and proc-macro dylibs export their
-    # registrar from object files, not archives. NEEDED allowlist verified
-    # unchanged on both variants.
+    # into the executable's dynamic export table, and `--hash-style=gnu`
+    # drops the legacy SysV `.hash` section. IMPORTANT SCOPE NOTE
+    # (verified 2026-07-02 against the released v0.13.0/v0.13.1 binaries):
+    # the Ubuntu release runners already produce export-clean (1 symbol),
+    # gnu-hash-only binaries, so these two flags change NOTHING in the
+    # shipped artefacts. They exist to pin that behaviour across host
+    # toolchains: on the NimbleX dev box the same build leaked ~1,011
+    # exports (985 libstdc++ `__cxa_*`/demangler) plus a ~40 KiB SysV
+    # `.hash`, costing 934,344 B (−0.89 MiB once flagged) on the local
+    # `gpu` artefact and ~0.9 MiB on the local `cpu` one. With the flags,
+    # local size measurements track what CI actually ships. Nothing
+    # consumes the exports either way (fono is never dlopen'd; proc-macro
+    # dylibs export their registrar from object files, not archives).
+    # NEEDED allowlist verified unchanged on both variants.
     "-C", "link-arg=-Wl,--exclude-libs,ALL",
-    # Emit only the GNU hash section (glibc has used it since 2.5, 2006);
-    # the default "both" also writes a legacy SysV `.hash` (~40 KiB here)
-    # that nothing on a glibc target reads.
     "-C", "link-arg=-Wl,--hash-style=gnu",
 ]
 

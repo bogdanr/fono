@@ -224,8 +224,13 @@ jobs:
           # build.rs does not `rerun-if-env-changed=GGML_*`, so an unchanged
           # cache key would silently reuse a stale `-march=native` build of
           # whisper.cpp from a previous CI run. Bump this suffix any time the
-          # GGML ISA flag set in `.cargo/config.toml` changes.
-          key: ${{ matrix.target }}-${{ matrix.os }}-${{ matrix.variant }}-portable
+          # GGML ISA flag set in `.cargo/config.toml` changes — or any time
+          # the shader toolchain changes (the same staleness bit the glslc
+          # `spirv-opt --strip-debug` shim below in v0.13.1: the warm cache
+          # reused the pre-shim ggml-vulkan shader objects, so the shipped
+          # gpu binary did not shrink; `-shaderstrip1` forces the one cold
+          # rebuild that regenerates the blobs through the shim).
+          key: ${{ matrix.target }}-${{ matrix.os }}-${{ matrix.variant }}-portable-shaderstrip1
 
       - name: Install Linux build deps
         # GPU variant adds Vulkan headers + the `shaderc` SPIR-V

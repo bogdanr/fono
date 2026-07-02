@@ -1,6 +1,63 @@
 # Fono — Project Status
 Last updated: 2026-07-02
 
+## 2026-07-02 — Roadmap audit + tidy (two stale horizon items cleared)
+
+Audited `ROADMAP.md` against the tree; two "On the horizon" items were already
+done and have been reconciled (docs-only change, no code):
+
+- **Better Wayland hotkeys → Shipped (v0.8.1).** The
+  `org.freedesktop.portal.GlobalShortcuts` backend
+  (`crates/fono-hotkey/src/portal.rs`) has auto-registered the dictation +
+  assistant hotkeys since commit `a3c7fe3` (2026-05-19; first tag v0.8.1, per
+  `git tag --contains`). Removed from the horizon table + section; added a
+  v0.8.1-badged Shipped entry.
+- **Shared ggml size-reclaim spike → Shipped list as a closed investigation.**
+  Outcome (deferred, reclaim ≈ 0 MiB, 2026-06-24) was already recorded but the
+  item still sat under On the horizon; moved to the Shipped list with an
+  `investigation` badge, section + table cell removed.
+- **Hover-context injection** gained a real body section (the table's anchor
+  was dangling): notes the focused-window half shipped in v0.8.2 and scopes the
+  remainder as pointer-hover context.
+- **Local REST API** section now notes the v0.13.0 `hyper` listener in
+  `fono-net` is the HTTP foundation; remaining work is exposing IPC verbs.
+
+Verified genuinely-unbuilt items (no vocabulary CLI/pass, no translate stage,
+no OpenAI Realtime client, no AEC talk-over, no MCP client / voice actions,
+no Modelship, no LLM-server model router). Next-work shortlist discussed with
+the maintainer: personal vocabulary (highest daily value, plan
+`plans/2026-06-03-correction-with-memory-v2.md`), voice actions via MCP
+(biggest capability jump, plan `plans/2026-05-22-voice-actions-via-mcp-v1.md`),
+multi-provider LLM-server routing, AEC barge-in.
+
+## 2026-07-02 — v0.13.1 size-lever post-mortem: CI artefacts did NOT shrink; fixes landed
+
+Inspected the released v0.13.1 binaries against v0.13.0 and found the
+morning's two size levers changed nothing in what CI ships (cpu x86_64
+byte-count identical at 23,192,712 B; gpu +4,096 B). Two distinct causes,
+both now corrected:
+
+- **Lever 1 (`--exclude-libs,ALL` + `--hash-style=gnu`) is inert on the
+  release runners.** The released v0.13.0 binary *already* has exactly
+  1 exported symbol and gnu-hash only — the ~1,011-export / SysV-hash
+  bloat the lever removed is a NimbleX dev-box toolchain artefact, not a
+  CI one. The flags stay (they pin the invariant across host toolchains
+  and make local measurements track CI), but the docs/comments now state
+  the scope honestly: local-only ~0.9 MiB, shipped artefacts unchanged
+  (`.cargo/config.toml`, `docs/binary-size.md` §6).
+- **Lever 2 (glslc `spirv-opt --strip-debug` shim) never executed.** The
+  Swatinem rust-cache key was unchanged, so the release job reused the
+  pre-shim ggml-vulkan shader objects and the generator never re-ran.
+  Bumped the cache-key suffix to `-portable-shaderstrip1` in
+  `release.yml` so the next release does one cold rebuild through the
+  shim; the measured −0.75 MiB gpu shrink should materialise then. Rule
+  recorded in the cache-key comment: bump the suffix whenever the shader
+  toolchain changes.
+- **Follow-up owed:** the 0.13.1 changelog's "smaller binaries" claim is
+  only true for the anyhow/aarch64 noise (−12 KiB) until the next
+  release actually re-generates the shaders; the next release notes
+  should carry the real gpu number.
+
 ## 2026-07-02 — GPU (Vulkan) binary size audit + two zero-capability-loss levers
 
 Audited the `gpu` (accel-vulkan) release-slim x86_64 artefact

@@ -306,18 +306,21 @@ the new async provider/realtime codegen.
 ### 6. Executable hygiene — hidden exports + GNU-only hash (2026-07-02)
 
 Static archives (libstdc++.a, libgomp.a, libonnxruntime.a, the ggml
-archives) leak their default-visibility symbols into the executable's
-dynamic export table — measured at ~1,011 exported symbols on the `gpu`
-artefact, 985 of them libstdc++ (`__cxa_*`, the C++ demangler). Nothing
-consumes them: fono is a standalone executable, never dlopen'd. The
-linux-gnu rustflags in `.cargo/config.toml` therefore add
-`-Wl,--exclude-libs,ALL` (hides archive symbols, which also lets
-`--gc-sections` collect the now-unexported demangler) and
-`-Wl,--hash-style=gnu` (drops the legacy SysV `.hash` section that
-nothing on a glibc target reads). Measured 2026-07-02 on the `gpu`
-(accel-vulkan) release-slim x86_64 artefact: **−934,344 B (−0.89 MiB)**,
-exports 1,011 → 0, `NEEDED` allowlist unchanged on both variants. The
-CPU artefact shrinks by a similar amount (same mechanism, same archives).
+archives) can leak their default-visibility symbols into the executable's
+dynamic export table. The linux-gnu rustflags in `.cargo/config.toml` add
+`-Wl,--exclude-libs,ALL` and `-Wl,--hash-style=gnu` to forbid that.
+
+**Scope caveat (measured 2026-07-02):** the Ubuntu release runners
+already produce export-clean (1 symbol), gnu-hash-only binaries —
+verified by inspecting the released v0.13.0/v0.13.1 artefacts — so these
+flags do **not** shrink what CI ships. Their value is pinning that
+behaviour across host toolchains: the NimbleX dev box leaked ~1,011
+exports (985 libstdc++ `__cxa_*`/demangler) plus a legacy SysV `.hash`,
+inflating *local* artefacts by ~0.9 MiB (gpu: −934,344 B once flagged;
+local cpu: 21.82 → 20.92 MiB). With the flags, local size measurements
+track CI's, and the invariant no longer depends on distro linker
+defaults. Nothing consumes the exports either way (fono is never
+dlopen'd). `NEEDED` allowlist unchanged on both variants.
 
 ## The `gpu` (Vulkan) variant: where its bytes live
 
@@ -346,7 +349,12 @@ Findings, so the next size pass does not re-litigate them:
   OpName/OpLine/OpSource only, semantics-neutral). The GPU matrix row in
   `.github/workflows/release.yml` shims `glslc` to apply it to every
   generated blob: measured **−785,052 B (−0.75 MiB)** across the
-  surviving set.
+  surviving set. **Post-mortem:** the v0.13.1 release shipped the shim
+  but its gpu binary did not shrink (+4,096 B vs v0.13.0) — the
+  Swatinem rust-cache reused the pre-shim ggml-vulkan shader objects, so
+  the generator (and therefore the shim) never re-ran. Fixed by bumping
+  the cache-key suffix (`-shaderstrip1`); any future change to the
+  shader toolchain must bump it again.
 - **Shader-variant pruning is off the table.** coopmat1/coopmat2
   (13.4 MB) and the MoE `matmul_id_*` family (18.6 MB) are all selected
   at runtime per GPU/model; dropping any of them drops hardware or
