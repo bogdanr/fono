@@ -260,10 +260,38 @@ jobs:
             # at configure time, so pull `spirv-headers` too — without it
             # CMake aborts with "Could not find SPIRV-HeadersConfig.cmake".
             sudo apt-get install -y -qq \
-              vulkan-headers libvulkan-dev glslang-tools shaderc spirv-headers
+              vulkan-headers libvulkan-dev glslang-tools shaderc spirv-headers \
+              spirv-tools
             command -v glslc
             glslc --version | head -1
             ls /usr/include/vulkan/vulkan.h
+            # Shim glslc so every generated SPIR-V blob is passed through
+            # `spirv-opt --strip-debug` before ggml-vulkan embeds it in the
+            # binary. Semantics-neutral (drops OpName/OpLine/OpSource debug
+            # instructions only) and — unlike re-enabling full `spirv-opt -O`
+            # on the coopmat/bf16/rope shaders — does not touch the upstream
+            # driver-bug workarounds that deliberately skip `-O` there.
+            # Measured 2026-07-02 on the surviving 1,551-blob shader set of
+            # the gpu artefact: −785,052 B (−0.75 MiB). Fail-open: if
+            # spirv-opt rejects a module, the unstripped output is kept.
+            sudo tee /usr/local/bin/glslc >/dev/null <<'WRAP'
+          #!/bin/sh
+          out=""; prev=""
+          for a in "$@"; do
+            [ "$prev" = "-o" ] && out="$a"
+            prev="$a"
+          done
+          /usr/bin/glslc "$@" || exit $?
+          if [ -n "$out" ] && [ -f "$out" ]; then
+            if spirv-opt --strip-debug "$out" -o "$out.strip" 2>/dev/null; then
+              mv "$out.strip" "$out"
+            else
+              rm -f "$out.strip"
+            fi
+          fi
+          WRAP
+            sudo chmod +x /usr/local/bin/glslc
+            command -v glslc   # must now resolve to the /usr/local/bin shim
           fi
 
       - name: Fetch minimal onnxruntime static lib (pin ORT_LIB_LOCATION)

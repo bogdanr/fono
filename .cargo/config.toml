@@ -38,6 +38,23 @@ rustflags = [
     "-C", "link-arg=-Wl,--gc-sections",
     "-C", "link-arg=-Wl,--as-needed",
     "-C", "force-unwind-tables=no",
+    # `--exclude-libs,ALL` hides symbols that static archives (libstdc++.a,
+    # libgomp.a, libonnxruntime.a, the ggml archives) would otherwise leak
+    # into the executable's dynamic export table. Measured 2026-07-02 on the
+    # `gpu` (accel-vulkan) release-slim artefact: ~1,011 exported symbols
+    # (985 of them libstdc++ `__cxa_*`/demangler) drop to 0, and together
+    # with `--hash-style=gnu` below the binary shrinks by 934,344 B
+    # (-0.89 MiB) — .dynsym/.dynstr/.hash/.gnu.version shrink and
+    # `--gc-sections` can additionally collect the now-unexported C++
+    # demangler. Nothing consumes these exports: fono is a standalone
+    # executable, never dlopen'd, and proc-macro dylibs export their
+    # registrar from object files, not archives. NEEDED allowlist verified
+    # unchanged on both variants.
+    "-C", "link-arg=-Wl,--exclude-libs,ALL",
+    # Emit only the GNU hash section (glibc has used it since 2.5, 2006);
+    # the default "both" also writes a legacy SysV `.hash` (~40 KiB here)
+    # that nothing on a glibc target reads.
+    "-C", "link-arg=-Wl,--hash-style=gnu",
 ]
 
 [target.'cfg(all(target_os = "windows", target_env = "gnu"))']

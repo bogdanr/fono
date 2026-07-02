@@ -303,6 +303,65 @@ reduction. Future size work should still target actual `.text` growth:
 benchmark the local-LLM cost before any OpenMP change, and separately attack
 the new async provider/realtime codegen.
 
+### 6. Executable hygiene — hidden exports + GNU-only hash (2026-07-02)
+
+Static archives (libstdc++.a, libgomp.a, libonnxruntime.a, the ggml
+archives) leak their default-visibility symbols into the executable's
+dynamic export table — measured at ~1,011 exported symbols on the `gpu`
+artefact, 985 of them libstdc++ (`__cxa_*`, the C++ demangler). Nothing
+consumes them: fono is a standalone executable, never dlopen'd. The
+linux-gnu rustflags in `.cargo/config.toml` therefore add
+`-Wl,--exclude-libs,ALL` (hides archive symbols, which also lets
+`--gc-sections` collect the now-unexported demangler) and
+`-Wl,--hash-style=gnu` (drops the legacy SysV `.hash` section that
+nothing on a glibc target reads). Measured 2026-07-02 on the `gpu`
+(accel-vulkan) release-slim x86_64 artefact: **−934,344 B (−0.89 MiB)**,
+exports 1,011 → 0, `NEEDED` allowlist unchanged on both variants. The
+CPU artefact shrinks by a similar amount (same mechanism, same archives).
+
+## The `gpu` (Vulkan) variant: where its bytes live
+
+Audited 2026-07-02 (v0.13.0, release-slim, x86_64 glibc, baseline
+60,961,144 B = 58.14 MiB):
+
+| Piece | Size |
+|---|---:|
+| `.rodata` — 1,551 embedded SPIR-V shader blobs | 36.55 MB |
+| `.text` | 18.08 MB |
+| `.rela.dyn` + `.eh_frame` + `.data.rel.ro` | ~2.9 MB |
+
+Findings, so the next size pass does not re-litigate them:
+
+- **The ggml-vulkan duplicate dedups cleanly.** whisper-rs-sys and
+  llama-cpp-sys-2 each generate a full shader set (2,280 / 2,317 blobs);
+  the ADR 0018 link trick + `--gc-sections` keep exactly one union
+  (1,693 survive, 0 duplicate symbols, 0 byte-identical blobs —
+  hash-verified). The surviving Vulkan backend code is whisper's copy.
+- **Shader optimisation is already on.** `vulkan-shaders-gen` runs
+  `glslc -O` (spirv-opt) on everything except the coopmat/bf16/rope
+  shaders, where upstream deliberately disables it to work around driver
+  bugs (llama.cpp #10734/#15344/#16860). Do **not** re-enable `-O`
+  there — that is a correctness risk, i.e. a capability loss.
+- **What *is* safe on those blobs: `spirv-opt --strip-debug`** (removes
+  OpName/OpLine/OpSource only, semantics-neutral). The GPU matrix row in
+  `.github/workflows/release.yml` shims `glslc` to apply it to every
+  generated blob: measured **−785,052 B (−0.75 MiB)** across the
+  surviving set.
+- **Shader-variant pruning is off the table.** coopmat1/coopmat2
+  (13.4 MB) and the MoE `matmul_id_*` family (18.6 MB) are all selected
+  at runtime per GPU/model; dropping any of them drops hardware or
+  model support.
+- **Not adopted:** `opt-level = "z"` on the GPU variant would save a
+  further measured 1,231,616 B (−1.17 MiB) but was rejected for the same
+  Rust-vectorisation reason as on `cpu` (§2), and per-variant codegen
+  divergence is undesirable. RELR packed relocations (~−1.2 MiB of
+  `.rela.dyn`) need glibc ≥ 2.36, above the Ubuntu 22.04 (2.35) floor.
+- **Future big fish:** compressing the SPIR-V payload at build time and
+  inflating once at Vulkan init would cut the 36.5 MB blob set to a
+  likely single-digit MB, but needs a ggml patch (ideally upstream) plus
+  a decompressor dependency — flag before attempting (new-to-graph dep
+  rule).
+
 ## Adding a new capability: the checklist
 
 Before merging a feature that adds a model, runtime, or dependency:

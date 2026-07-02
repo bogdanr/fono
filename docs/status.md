@@ -1,5 +1,36 @@
 # Fono — Project Status
-Last updated: 2026-07-01
+Last updated: 2026-07-02
+
+## 2026-07-02 — GPU (Vulkan) binary size audit + two zero-capability-loss levers
+
+Audited the `gpu` (accel-vulkan) release-slim x86_64 artefact
+(60,961,144 B = 58.14 MiB baseline) and shipped the two levers that cost
+nothing in features or hardware support (full findings in
+`docs/binary-size.md`, "The `gpu` (Vulkan) variant" section):
+
+- **Composition:** 36.55 MB is 1,551 embedded SPIR-V shader blobs,
+  18.08 MB `.text`, ~2.9 MB tables. The whisper/llama duplicate
+  ggml-vulkan builds already dedup perfectly at link time (0 duplicate
+  symbols, 0 byte-identical blobs); shader `-O` is already on except the
+  upstream coopmat/bf16/rope driver-bug exclusions.
+- **Lever 1 (wired, `.cargo/config.toml`):** `-Wl,--exclude-libs,ALL` +
+  `-Wl,--hash-style=gnu` — hides ~1,011 leaked static-archive exports
+  (985 libstdc++) and drops the legacy SysV hash. Measured
+  **−934,344 B (−0.89 MiB)** on `gpu`; NEEDED allowlist verified intact
+  on both variants, binary smoke-tested. CPU artefact shrinks similarly.
+- **Lever 2 (wired, `release.yml` GPU row):** `glslc` shim runs
+  `spirv-opt --strip-debug` (semantics-neutral) on every generated
+  blob — measured **−785,052 B (−0.75 MiB)** across the surviving set;
+  added `spirv-tools` to the GPU row's apt deps.
+- **Measured but not adopted:** GPU-only `opt-level="z"` (−1.17 MiB,
+  same vectorisation objection as on `cpu`); RELR (needs glibc ≥ 2.36,
+  above the 2.35 floor). **Future big fish:** compress the SPIR-V
+  payload (needs ggml patch + decompressor dep — flag first).
+- **Gate green:** `cargo fmt --check`, `clippy --workspace --all-targets
+  -D warnings`, `cargo test --workspace --tests --lib` (1,353 passed),
+  and `./tests/check.sh --size-budget` with the new flags =
+  **20.92 MiB / 25 MiB** (down from 21.82 MiB on 2026-07-01, −0.9 MiB
+  from lever 1; four-entry NEEDED clean).
 
 ## 2026-07-01 — LLM server access log (one line per request)
 
