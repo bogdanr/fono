@@ -5,6 +5,46 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] — 2026-07-02
+
+All of Fono's settings are now editable from your browser, and live
+transcript mode degrades gracefully when your STT backend can't stream.
+
+### Added
+
+- **Browser-based settings UI (`[server.web]`, default off).** Pick
+  *Settings…* in the tray — or run `fono config web` — and Fono opens a
+  searchable settings page in your browser: a nine-section accordion covering
+  every option, with live value summaries on each section, an
+  unsaved-changes bar that shows exactly what you edited before you save,
+  press-to-set hotkey capture, provider card grids for the STT / polish /
+  assistant / TTS backends, and dark/light themes. Saving applies
+  immediately — the daemon hot-reloads, no restart. API keys are write-only
+  through the page (you can set them, never read them back). The server
+  binds to loopback only (`127.0.0.1:10808`) and takes an optional bearer
+  token; it's plain embedded HTML/CSS/JS on the HTTP plumbing that shipped
+  in 0.13.0, so it adds no new dependencies and no measurable binary size.
+
+### Fixed
+
+- **Live transcript mode with a non-streaming STT backend no longer breaks
+  the overlay.** Live transcript preview needs a streaming-capable backend
+  (local Whisper, Groq, or Deepgram). With any other backend (e.g. Gemini),
+  the dictation hotkey falls back to the normal batch pipeline — but the
+  overlay could get stuck on screen permanently, and nothing told you why
+  there was no live text. Now the fallback session shows the standard audio
+  visualisation for the whole recording, a one-time notification explains
+  that the configured backend can't stream (and that your text is typed
+  when you stop), your Transcript preference is restored automatically
+  afterwards, and the overlay always clears when the session ends.
+
+### Removed
+
+- Three inert config keys: `[audio].sample_rate`, `[interactive].mode`, and
+  `[interactive].quality_floor` — each was a reserved knob with only one
+  implemented value. Existing config files keep working; the keys are
+  simply ignored and dropped on the next save.
+
 ## [0.13.1] — 2026-07-02
 
 A maintenance release on top of 0.13.0: smaller downloads and a security

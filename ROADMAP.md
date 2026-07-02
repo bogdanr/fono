@@ -20,6 +20,15 @@ The home page is [fono.page](https://fono.page).
 
 ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge)
 
+**[v0.14.0 — Settings in your browser](#shipped)**  
+Pick *Settings…* in the tray (or run `fono config web`) and every Fono option
+opens as a searchable page in your browser — live section summaries, an
+unsaved-changes bar, press-to-set hotkey capture, provider cards, dark and
+light themes. Saves hot-reload the daemon, keys are write-only, and the server
+stays loopback-only and off by default. Also: live transcript mode now degrades
+gracefully on non-streaming STT backends instead of wedging the overlay.
+*(2026-07-02)*
+
 **[v0.13.0 — Share your model over a local API](#shipped)**  
 Turn on one switch and Fono serves the assistant you already have on a local,
 OpenAI- and Ollama-compatible HTTP API — so your editor, Open WebUI, `llm`,
@@ -78,9 +87,6 @@ native aarch64 binary. *(2026-05-26)*
 
 **[v0.8.1 — Two more cloud providers](#shipped)**  
 Deepgram + Cartesia STT, headless install, pause UI polish. *(2026-05-23)*
-
-**[v0.8.0 — One-key cloud setup](#shipped)**  
-Live preview as a waveform style; four new TTS backends. *(2026-05-17)*
 
 [Full changelog ↓](#shipped)
 
@@ -271,6 +277,26 @@ system-tray app and native installer on Windows.
 ## Shipped
 
 Newest first.
+
+- ![v0.14.0](https://img.shields.io/badge/v0.14.0-2026--07--02-blue?style=flat-square)
+  **Browser-based settings UI.** Pick *Settings…* in the tray — or run
+  `fono config web` — and Fono opens a searchable settings page in your
+  browser: a nine-section accordion covering every option, with live value
+  summaries per section, an unsaved-changes bar that shows exactly what you
+  edited before you save, press-to-set hotkey capture, provider card grids
+  for the STT / polish / assistant / TTS backends, and dark/light themes.
+  Saves apply immediately via daemon hot-reload; API keys are write-only
+  through the page. The `[server.web]` listener is off by default, binds to
+  loopback only, takes an optional bearer token, and is plain embedded
+  HTML/CSS/JS on the HTTP plumbing from v0.13.0 — no new dependencies, no
+  measurable binary growth.
+
+  Also in this release: live transcript mode degrades gracefully when the
+  configured STT backend can't stream (e.g. Gemini) — the fallback session
+  shows the standard audio visualisation, a one-time notification explains
+  why there's no live text, and the overlay no longer gets stuck on screen.
+  Three inert config keys (`[audio].sample_rate`, `[interactive].mode`,
+  `[interactive].quality_floor`) were removed. *v0.14.0, 2026-07-02.*
 
 - ![v0.13.0](https://img.shields.io/badge/v0.13.0-2026--07--01-blue?style=flat-square)
   **Share your model over a local OpenAI- and Ollama-compatible API.** Flip on
@@ -811,3 +837,4 @@ Newest first.
 [v0.8.0]: https://github.com/bogdanr/fono/releases/tag/v0.8.0
 [v0.13.0]: https://github.com/bogdanr/fono/releases/tag/v0.13.0
 [v0.13.1]: https://github.com/bogdanr/fono/releases/tag/v0.13.1
+[v0.14.0]: https://github.com/bogdanr/fono/releases/tag/v0.14.0
