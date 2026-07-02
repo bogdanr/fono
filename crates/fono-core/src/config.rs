@@ -225,10 +225,15 @@ impl Default for Hotkeys {
     }
 }
 
+/// Fixed capture sample rate. Whisper (local and cloud alike) consumes
+/// 16 kHz mono; the capture layer resamples to this. This was a config
+/// key (`[audio].sample_rate`) until 2026-07; no code path ever honoured
+/// another rate end-to-end, so it is now a constant.
+pub const AUDIO_SAMPLE_RATE_HZ: u32 = 16_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Audio {
-    pub sample_rate: u32,
     /// Voice-activity-detection backend. Accepted values: `"energy"`
     /// (the RMS energy gate that ships today) and `"off"` (disabled).
     /// A neural VAD is not wired yet.
@@ -263,12 +268,7 @@ pub struct Audio {
 
 impl Default for Audio {
     fn default() -> Self {
-        Self {
-            sample_rate: 16000,
-            vad_backend: "energy".into(),
-            trim_silence: true,
-            auto_stop_silence_ms: 3_000,
-        }
+        Self { vad_backend: "energy".into(), trim_silence: true, auto_stop_silence_ms: 3_000 }
     }
 }
 
@@ -1242,6 +1242,13 @@ pub struct Server {
     /// over one connection, so STT and TTS share a single on/off switch
     /// (`[server.wyoming].enabled`) and a single port.
     pub wyoming: ServerWyoming,
+
+    /// Web settings UI. Serves the browser-based configuration screen
+    /// plus its small JSON API (`GET /config`, `PUT /config`,
+    /// `PUT /secret/{NAME}`) over HTTP. Off by default; loopback-only
+    /// unless `bind` is widened. Secrets are write-only over this
+    /// surface — responses only ever carry `set | not set` booleans.
+    pub web: ServerWeb,
     /// Local LLM inference server. Hosts the active `Arc<dyn Assistant>`
     /// (embedded llama.cpp or a cloud backend) over an HTTP API that is
     /// both **OpenAI-compatible** (`/v1/models`, `/v1/chat/completions`)
@@ -1335,6 +1342,39 @@ impl Default for ServerLlm {
             port: 11_434,
             auth_token_ref: String::new(),
             model: String::new(),
+        }
+    }
+}
+
+/// `[server.web]` — coordinates of the web settings UI server. The
+/// listener is **only** spawned when `enabled = true`. `bind` is the
+/// exposure control: keep the default loopback address for local-only
+/// serving; widening it beyond loopback requires an `auth_token_ref`
+/// to be of any use, since the settings surface can rewrite the whole
+/// config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ServerWeb {
+    /// Master switch. Default `false`.
+    pub enabled: bool,
+    /// Bind address. Default `"127.0.0.1"` (loopback only).
+    pub bind: String,
+    /// TCP port. Default `10808`.
+    pub port: u16,
+    /// Optional pre-shared bearer token reference, resolved through
+    /// `secrets.toml` / env. Empty = no auth (fine on loopback; unwise
+    /// on wider binds).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub auth_token_ref: String,
+}
+
+impl Default for ServerWeb {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: "127.0.0.1".to_string(),
+            port: 10_808,
+            auth_token_ref: String::new(),
         }
     }
 }
@@ -1481,15 +1521,7 @@ impl Network {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Interactive {
-    /// Quality floor under budget pressure. `"max"` (default) never
-    /// skips finalize; `"balanced"` may slow preview cadence;
-    /// `"aggressive"` may skip finalize on high-confidence segments.
-    pub quality_floor: String,
     // ----- v6 carryover knobs (R7.4 / R9.1) ---------------------------
-    /// Pipeline mode. `"hybrid"` (default) uses streaming preview +
-    /// finalize-on-segment-boundary + cleanup-on-finalize. Reserved
-    /// for Slice B variants (`"streaming-only"`, `"batch"`).
-    pub mode: String,
     /// Initial chunk window the streaming decoder waits before its
     /// first preview pass, in milliseconds. Smaller = lower TTFF,
     /// noisier early previews.
@@ -1531,8 +1563,6 @@ pub struct Interactive {
 impl Default for Interactive {
     fn default() -> Self {
         Self {
-            quality_floor: "max".into(),
-            mode: "hybrid".into(),
             chunk_ms_initial: 600,
             chunk_ms_steady: 1500,
             cleanup_on_finalize: true,
@@ -1960,9 +1990,37 @@ mod tests {
     }
 
     #[test]
-    fn interactive_keys_round_trip() {
+    fn server_web_defaults_and_roundtrip() {
+        // Defaults: off, loopback, port 10808, no auth.
+        let d = ServerWeb::default();
+        assert!(!d.enabled);
+        assert_eq!(d.bind, "127.0.0.1");
+        assert_eq!(d.port, 10_808);
+        assert!(d.auth_token_ref.is_empty());
+
         let raw = r#"
             version = 1
+            [server.web]
+            enabled = true
+            bind = "0.0.0.0"
+            port = 8080
+            auth_token_ref = "FONO_WEB_TOKEN"
+        "#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert!(cfg.server.web.enabled);
+        assert_eq!(cfg.server.web.bind, "0.0.0.0");
+        assert_eq!(cfg.server.web.port, 8080);
+        assert_eq!(cfg.server.web.auth_token_ref, "FONO_WEB_TOKEN");
+    }
+
+    #[test]
+    fn interactive_keys_round_trip() {
+        // Note: removed keys (`mode`, `quality_floor`, `[audio].sample_rate`)
+        // in an old config file are silently ignored — no parse error.
+        let raw = r#"
+            version = 1
+            [audio]
+            sample_rate = 48000
             [interactive]
             quality_floor = "balanced"
             mode = "hybrid"
@@ -1972,8 +2030,6 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(raw).expect("parse");
         let i = &cfg.interactive;
-        assert_eq!(i.quality_floor, "balanced");
-        assert_eq!(i.mode, "hybrid");
         assert_eq!(i.chunk_ms_initial, 700);
         assert_eq!(i.chunk_ms_steady, 1400);
         assert!(!i.cleanup_on_finalize);
@@ -1985,7 +2041,6 @@ mod tests {
         let cfg: Config = toml::from_str(raw).expect("parse");
         let d = Interactive::default();
         let i = &cfg.interactive;
-        assert_eq!(i.mode, d.mode);
         assert_eq!(i.chunk_ms_initial, d.chunk_ms_initial);
         assert_eq!(i.chunk_ms_steady, d.chunk_ms_steady);
         assert_eq!(i.cleanup_on_finalize, d.cleanup_on_finalize);

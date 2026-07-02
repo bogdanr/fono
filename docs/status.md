@@ -1,6 +1,43 @@
 # Fono — Project Status
 Last updated: 2026-07-02
 
+## 2026-07-02 — Web settings UI shipped (browser config screen, zero new crates)
+
+Implemented the full plan `plans/2026-07-02-web-config-ui-v2.md` — a
+browser-based settings page covering every user-relevant config option,
+based on the approved search-first accordion design handoff:
+
+- **Config simplification first:** removed `audio.sample_rate`,
+  `interactive.mode`, and `interactive.quality_floor` (reserved keys with a
+  single implemented value each; unknown keys in old files are simply
+  ignored — no back-compat per maintainer). `audio.vad_backend` stays (the
+  tray VAD toggle rides it). Docs updated (`docs/interactive.md`,
+  `docs/configuration.md`).
+- **New `[server.web]` block** (off by default, `127.0.0.1:10808`,
+  optional `auth_token_ref`) mirroring `ServerLlm`.
+- **`fono-net::web_settings`** — hand-rolled hyper server (ADR 0036
+  pattern, zero new crates): embedded `index.html`/`app.css`/`app.js`
+  via `include_str!`, `GET/PUT /api/config`, `GET /api/meta`,
+  `PUT /api/secret/{NAME}` (write-only; values never echoed), bearer
+  token + loopback-only peer guard, 1 MiB body cap.
+- **Frontend** ported from the handoff: 9-section accordion with live
+  summaries, dirty-diff unsaved bar, `/` search, hotkey capture,
+  provider card grids, master-toggle greying, dark/light themes,
+  schema-driven rendering in vanilla JS (~790 lines, no framework).
+- **Coverage test** (`config_coverage_ui_or_allowlist`) walks every leaf
+  of a fully-populated `Config` and asserts it's bound in `app.js` or on
+  a justified `FILE_ONLY` allow-list — new config keys can't silently
+  miss the UI.
+- **Entry points:** tray **Settings…** entry lazy-starts the listener
+  (persisting `enabled = true`) and opens the browser;
+  `fono config web` enables the flag, probes the port, and opens or
+  prints restart guidance. Daemon saves route through
+  `Config::save → orchestrator reload → wake reload` (same as `fono use`).
+- **Gates green:** fmt, clippy `-D warnings`, workspace tests
+  (incl. 5 new web_settings tests), size budget 21.22 MiB / 25 MiB.
+- Deferred: PUT etag/version guard for concurrent tray-vs-browser edits
+  (noted in the plan; disk re-read per request bounds the risk).
+
 ## 2026-07-02 — Roadmap audit + tidy (two stale horizon items cleared)
 
 Audited `ROADMAP.md` against the tree; two "On the horizon" items were already

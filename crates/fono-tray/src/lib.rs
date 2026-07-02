@@ -318,6 +318,11 @@ pub enum TrayAction {
     /// preferred terminal. Daemon shells out via `$TERMINAL` /
     /// xdg-terminal-exec.
     OpenSettingsTui,
+    /// Open the browser settings page (`[server.web]`). The daemon
+    /// lazily starts the web settings listener when it isn't running
+    /// (persisting `server.web.enabled = true`), then opens the page
+    /// via `xdg-open` / `open` / `explorer`.
+    OpenSettingsWeb,
     OpenConfig,
     /// Wipe the rolling assistant conversation history. Independent
     /// of the playback state; intended as a "fresh start" entry.
@@ -1369,6 +1374,14 @@ mod backend {
             );
         }
 
+        items.push(
+            StandardItem {
+                label: "Settings…".into(),
+                activate: send_action(TrayAction::OpenSettingsWeb),
+                ..Default::default()
+            }
+            .into(),
+        );
         items.push(
             StandardItem {
                 label: "Edit config".into(),

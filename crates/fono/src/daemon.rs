@@ -328,6 +328,20 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     llm_ctl.reconcile(&config, orchestrator.as_ref()).await;
 
     // ---------------------------------------------------------------
+    // Web settings UI server (plans/2026-07-02-web-config-ui-v2.md).
+    // Off by default; loopback-only unless `[server.web].bind` is
+    // widened. Serves the embedded browser settings page + JSON API.
+    // Config writes go through the same save → orchestrator reload →
+    // wake reload path as `fono use …`. The handle lives in a shared
+    // slot so the tray's "Settings…" entry can lazy-start the
+    // listener on first click; disabling `[server.web].enabled`
+    // afterwards needs a restart.
+    // ---------------------------------------------------------------
+    let web_settings: WebSettingsSlot = Arc::new(tokio::sync::Mutex::new(
+        spawn_web_settings_if_enabled(&config, paths, &secrets, orchestrator.as_ref(), &wake).await,
+    ));
+
+    // ---------------------------------------------------------------
     // Background update checker — hits GitHub releases once on startup
     // and surfaces the result through `update_status` so the tray menu
     // (and IPC consumers) can render an "Update to vX.Y.Z" entry.
@@ -1083,6 +1097,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         let orchestrator_for_tray = orchestrator.clone();
         let wyoming_ctl_for_tray = wyoming_ctl.clone();
         let llm_ctl_for_tray = llm_ctl.clone();
+        let web_ctl_for_tray = Arc::clone(&web_settings);
         let wake_tray = wake.clone();
         tokio::spawn(async move {
             while let Some(ta) = tray_rx.recv().await {
@@ -1309,6 +1324,17 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                     TrayAction::OpenSettingsTui => {
                         open_settings_tui();
                     }
+                    TrayAction::OpenSettingsWeb => {
+                        // Box the future for the same large_stack_frames
+                        // reason as the server toggles below.
+                        Box::pin(open_settings_web_via_tray(
+                            &paths,
+                            &web_ctl_for_tray,
+                            orchestrator_for_tray.as_ref(),
+                            &wake_tray,
+                        ))
+                        .await;
+                    }
                     TrayAction::AssistantForget => {
                         if let Some(o) = orchestrator_for_tray.as_ref() {
                             o.on_assistant_forget().await;
@@ -1444,10 +1470,9 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
     #[cfg(feature = "interactive")]
     {
         info!(
-            "live preview : {} (style={:?}, mode={})",
+            "live preview : {} (style={:?})",
             if config.live_preview() { "enabled" } else { "disabled" },
             config.overlay.style,
-            config.interactive.mode,
         );
     }
     #[cfg(not(feature = "interactive"))]
@@ -2058,6 +2083,23 @@ fn open_path(path: &std::path::Path) {
     match std::process::Command::new(cmd).arg(path).spawn() {
         Ok(_) => info!("opened {} via {cmd}", path.display()),
         Err(e) => warn!("failed to spawn {cmd} for {}: {e:#}", path.display()),
+    }
+}
+
+/// Open a URL in the default browser. Same launcher fallbacks as
+/// [`open_path`]; `explorer` and `open` both accept URLs. Also used by
+/// `fono config web` (`crate::cli`).
+pub(crate) fn open_url(url: &str) {
+    let cmd = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    match std::process::Command::new(cmd).arg(url).spawn() {
+        Ok(_) => info!("opened {url} via {cmd}"),
+        Err(e) => warn!("failed to spawn {cmd} for {url}: {e:#}"),
     }
 }
 
@@ -3531,6 +3573,241 @@ async fn spawn_llm_server_if_enabled(
             None
         }
     }
+}
+
+/// Shared slot holding the (lazily started) web settings server handle.
+/// The tray's "Settings…" entry starts the listener on demand.
+type WebSettingsSlot = Arc<tokio::sync::Mutex<Option<fono_net::WebSettingsHandle>>>;
+
+/// Spawn the web settings UI server if `[server.web].enabled = true`.
+/// Returns `None` when disabled or when the listener fails to bind
+/// (failures are logged at `warn!` and never abort the daemon).
+/// Mirrors [`spawn_llm_server_if_enabled`]; see
+/// `plans/2026-07-02-web-config-ui-v2.md`.
+///
+/// The hook closures re-read config/secrets from disk on every request
+/// (disk is the source of truth, same as the tray preference paths) and
+/// route saves through `Config::save` → `SessionOrchestrator::reload` →
+/// `WakeHandle::reload`, so a browser save behaves exactly like
+/// `fono use …` + `fono reload`.
+async fn spawn_web_settings_if_enabled(
+    config: &Config,
+    paths: &Paths,
+    secrets: &Secrets,
+    orchestrator: Option<&Arc<SessionOrchestrator>>,
+    wake: &crate::wake::WakeHandle,
+) -> Option<fono_net::WebSettingsHandle> {
+    if !config.server.web.enabled {
+        return None;
+    }
+    spawn_web_settings(config, paths, secrets, orchestrator, wake).await
+}
+
+/// Tray "Settings…" handler: lazy-start the web settings listener when
+/// it isn't running (persisting `server.web.enabled = true` so it
+/// survives restarts), then open the page in the default browser.
+async fn open_settings_web_via_tray(
+    paths: &Paths,
+    slot: &WebSettingsSlot,
+    orchestrator: Option<&Arc<SessionOrchestrator>>,
+    wake: &crate::wake::WakeHandle,
+) {
+    let mut guard = slot.lock().await;
+    if guard.is_none() {
+        let cfg = match Config::load(&paths.config_file()) {
+            Ok(mut cfg) => {
+                if !cfg.server.web.enabled {
+                    cfg.server.web.enabled = true;
+                    if let Err(e) = cfg.save(&paths.config_file()) {
+                        warn!("tray OpenSettingsWeb: save failed: {e:#}");
+                    }
+                }
+                cfg
+            }
+            Err(e) => {
+                warn!("tray OpenSettingsWeb: load config failed: {e:#}");
+                return;
+            }
+        };
+        let secrets = Secrets::load(&paths.secrets_file()).unwrap_or_default();
+        *guard = spawn_web_settings(&cfg, paths, &secrets, orchestrator, wake).await;
+    }
+    if let Some(handle) = guard.as_ref() {
+        open_url(&web_settings_url(&handle.local_addr()));
+    } else {
+        fono_core::notify::send(
+            "Fono — settings page failed to start",
+            "The web settings listener could not start. Check the log \
+             (`fono doctor -f`) and `[server.web]` in config.toml.",
+            "dialog-error",
+            8_000,
+            fono_core::notify::Urgency::Critical,
+        );
+    }
+}
+
+/// Browser URL for a web-settings listener address. Unspecified binds
+/// (`0.0.0.0` / `::`) aren't browsable — substitute loopback.
+fn web_settings_url(addr: &std::net::SocketAddr) -> String {
+    if addr.ip().is_unspecified() {
+        format!("http://127.0.0.1:{}/", addr.port())
+    } else {
+        format!("http://{addr}/")
+    }
+}
+
+/// Start the web settings server unconditionally (caller has already
+/// decided it should run).
+async fn spawn_web_settings(
+    config: &Config,
+    paths: &Paths,
+    secrets: &Secrets,
+    orchestrator: Option<&Arc<SessionOrchestrator>>,
+    wake: &crate::wake::WakeHandle,
+) -> Option<fono_net::WebSettingsHandle> {
+    let cfg = &config.server.web;
+    let loopback_only = cfg.bind == "127.0.0.1" || cfg.bind == "::1";
+    let auth_token =
+        if cfg.auth_token_ref.is_empty() { None } else { secrets.resolve(&cfg.auth_token_ref) };
+    if !loopback_only && auth_token.is_none() {
+        warn!(
+            "[server.web] is bound beyond loopback ({}) without a resolvable auth_token_ref — \
+             anyone on the network can rewrite the config; set [server.web].auth_token_ref",
+            cfg.bind
+        );
+    }
+    let server_cfg = fono_net::WebSettingsConfig {
+        bind: cfg.bind.clone(),
+        port: cfg.port,
+        auth_token,
+        loopback_only,
+    };
+    let hooks = web_settings_hooks(paths, orchestrator, wake);
+    match fono_net::WebSettingsServer::new(server_cfg, hooks).start().await {
+        Ok(handle) => {
+            info!(
+                "web settings UI listening on http://{} (loopback_only={loopback_only})",
+                handle.local_addr()
+            );
+            Some(handle)
+        }
+        Err(e) => {
+            warn!("web settings server failed to start: {e:#}");
+            None
+        }
+    }
+}
+
+/// Build the daemon-side hook closures for the web settings server:
+/// config read/write, write-only secret updates, and page metadata.
+/// Split out of [`spawn_web_settings`] to keep both under clippy's
+/// `too_many_lines`.
+fn web_settings_hooks(
+    paths: &Paths,
+    orchestrator: Option<&Arc<SessionOrchestrator>>,
+    wake: &crate::wake::WakeHandle,
+) -> fono_net::WebSettingsHooks {
+    let config_path = paths.config_file();
+    let secrets_path = paths.secrets_file();
+
+    let cp = config_path.clone();
+    let get_config: fono_net::web_settings::GetConfigFn = Arc::new(move || {
+        let cfg = Config::load(&cp).map_err(|e| format!("load config: {e}"))?;
+        serde_json::to_value(&cfg).map_err(|e| format!("serialize config: {e}"))
+    });
+
+    let cp = config_path.clone();
+    let orch = orchestrator.map(Arc::clone);
+    let wake_put = wake.clone();
+    let put_config: fono_net::web_settings::PutConfigFn = Arc::new(move |value| {
+        let cp = cp.clone();
+        let orch = orch.clone();
+        let wake = wake_put.clone();
+        Box::pin(async move {
+            let mut new_cfg: Config =
+                serde_json::from_value(value).map_err(|e| format!("invalid config: {e}"))?;
+            new_cfg.migrate().map_err(|e| format!("config migration: {e}"))?;
+            new_cfg.save(&cp).map_err(|e| format!("save config: {e}"))?;
+            info!("web settings: config saved via browser UI");
+            match orch.as_ref() {
+                Some(o) => match o.reload().await {
+                    Ok(summary) => {
+                        wake.reload();
+                        Ok(summary)
+                    }
+                    Err(e) => {
+                        Ok(format!("saved, but hot-reload failed: {e:#} (restart the daemon)"))
+                    }
+                },
+                None => Ok("saved; daemon is in degraded mode (restart to apply)".to_string()),
+            }
+        })
+    });
+
+    let sp = secrets_path.clone();
+    let orch = orchestrator.map(Arc::clone);
+    let wake_secret = wake.clone();
+    let set_secret: fono_net::web_settings::SetSecretFn = Arc::new(move |name, value| {
+        let mut s = Secrets::load(&sp).map_err(|e| format!("load secrets: {e}"))?;
+        if value.is_empty() {
+            s.keys.remove(name);
+        } else {
+            s.insert(name, value);
+        }
+        s.save(&sp).map_err(|e| format!("save secrets: {e}"))?;
+        info!(
+            "web settings: secret {name} {} via browser UI",
+            if value.is_empty() { "cleared" } else { "updated" }
+        );
+        // Background reload so a freshly added key takes effect without a
+        // separate save. Best-effort — the secret itself is already on disk.
+        if let Some(o) = orch.clone() {
+            let wake = wake_secret.clone();
+            tokio::spawn(async move {
+                match o.reload().await {
+                    Ok(_) => wake.reload(),
+                    Err(e) => warn!("web settings: reload after secret change failed: {e:#}"),
+                }
+            });
+        }
+        Ok(())
+    });
+
+    let cp = config_path;
+    let meta: fono_net::web_settings::MetaFn = Arc::new(move || {
+        use fono_core::providers as p;
+        let mut names = std::collections::BTreeSet::new();
+        for b in p::all_stt_backends() {
+            names.insert(p::stt_key_env(&b));
+        }
+        for b in p::all_polish_backends() {
+            names.insert(p::polish_key_env(&b));
+        }
+        for b in p::all_assistant_backends() {
+            names.insert(p::assistant_key_env(&b));
+        }
+        for b in p::all_tts_backends() {
+            names.insert(p::tts_key_env(&b));
+        }
+        names.remove("");
+        let secrets = Secrets::load(&secrets_path).unwrap_or_default();
+        let statuses: serde_json::Map<String, serde_json::Value> = names
+            .into_iter()
+            .map(|n| (n.to_string(), serde_json::Value::Bool(secrets.has_in_file(n))))
+            .collect();
+        serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "config_path": cp.display().to_string(),
+            "secrets": statuses,
+            "defaults": {
+                "polish_prompt_main": fono_core::config::default_prompt_main(),
+                "polish_prompt_advanced": fono_core::config::default_prompt_advanced(),
+                "assistant_prompt": fono_core::config::default_assistant_prompt(),
+            },
+        })
+    });
+
+    fono_net::WebSettingsHooks { get_config, put_config, set_secret, meta }
 }
 
 /// Capability tags advertised over mDNS for the LLM service. Both wire

@@ -30,7 +30,7 @@ field-level rustdoc comments. The user-facing sections are:
 |---|---|---|
 | `[general]` | Languages, autostart, system-mute, clipboard safety net | this file |
 | `[hotkeys]` | Dictation, cancel, assistant key bindings | below |
-| `[audio]` | Sample rate, VAD, silence trimming, auto-stop | this file |
+| `[audio]` | VAD, silence trimming, auto-stop | this file |
 | `[stt]` | Speech-to-text backend selection + per-backend config | [providers.md](providers.md) |
 | `[polish]` | Cleanup-pass backend selection + behaviour | [providers.md](providers.md) |
 | `[assistant]` | Voice-assistant chat backend + capability flags | [providers.md](providers.md) |
@@ -40,7 +40,7 @@ field-level rustdoc comments. The user-facing sections are:
 | `[overlay]` | Waveform style; picking `transcript` enables live mode | [interactive.md](interactive.md) |
 | `[history]` | History DB retention, FTS5 settings | this file |
 | `[update]` | Auto-check toggle, release channel | [install.md](install.md) |
-| `[server]` | Wyoming STT/TTS host + local LLM API (OpenAI/Ollama) | [install.md](install.md), below |
+| `[server]` | Wyoming STT/TTS host + local LLM API (OpenAI/Ollama) + web settings UI | [install.md](install.md), below |
 | `[network]` | mDNS metadata overrides | — |
 | `[mcp]` | MCP server limits + voice-tool relevance filter | this file |
 | `[[context_rules]]` | Per-app prompt/behaviour overrides | this file |
@@ -216,6 +216,40 @@ throughput where available, and the client's `User-Agent` (`via …`) so you
 can tell callers apart on a shared port. The peer IP is appended for
 non-loopback callers. **Prompt and reply content are never logged** — the
 line is metadata only.
+
+### Settings in the browser
+
+Every user-facing option in this file can also be edited from a local
+web page — a searchable accordion with one section per config area,
+live summaries, and write-only API-key fields (stored values are never
+sent to the browser). Open it with:
+
+```console
+$ fono config web        # enables [server.web] if needed, opens the browser
+```
+
+or via the tray's **Settings…** entry, which starts the listener on
+demand. The underlying block:
+
+```toml
+[server.web]
+enabled = false          # off by default; `fono config web` / tray flip it on
+bind    = "127.0.0.1"    # loopback only; non-loopback binds want a token
+port    = 10808
+# auth_token_ref = "FONO_WEB_TOKEN"   # bearer token (env/secrets ref);
+#                                     # required in practice beyond loopback
+```
+
+Saves go through the same atomic-write + hot-reload path as `fono use`,
+so changes apply immediately — no daemon restart. API keys entered on
+the page land in `secrets.toml`, never in `config.toml` or any HTTP
+response.
+
+> **Security note:** the page can rewrite your whole config and store
+> API keys. It refuses non-loopback peers while `bind` is loopback; if
+> you widen `bind`, set `auth_token_ref` first — the daemon warns
+> loudly otherwise. Turning the listener off again is a config edit
+> (`enabled = false`) plus a daemon restart.
 
 ### Per-app context rules
 

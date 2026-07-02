@@ -490,6 +490,13 @@ pub enum ConfigCmd {
     Show,
     /// Print the path to the config file.
     Path,
+    /// Open the browser settings page (enables `[server.web]` if needed).
+    ///
+    /// Persists `server.web.enabled = true`, then opens the page when
+    /// the daemon's listener is up. If the daemon isn't running (or
+    /// predates the setting), start/restart it first — or use the
+    /// tray's "Settings…" entry, which starts the listener on demand.
+    Web,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1309,8 +1316,54 @@ fn config_cmd(paths: &Paths, action: ConfigCmd) -> Result<()> {
                 return Err(anyhow::anyhow!("{editor} exited with {status}"));
             }
         }
+        ConfigCmd::Web => config_web_cmd(paths)?,
     }
     let _ = Secrets::load(&paths.secrets_file())?; // surface mode errors
+    Ok(())
+}
+
+/// `fono config web` — make sure `[server.web]` is enabled, then open
+/// the settings page in the default browser if the daemon's listener
+/// answers. The CLI cannot start the listener inside a running daemon;
+/// when the port is closed it prints what to do instead (restart the
+/// daemon, or use the tray's "Settings…" entry which lazy-starts it).
+fn config_web_cmd(paths: &Paths) -> Result<()> {
+    let mut cfg = Config::load(&paths.config_file())?;
+    if !cfg.server.web.enabled {
+        cfg.server.web.enabled = true;
+        cfg.save(&paths.config_file())?;
+        println!("Enabled [server.web] in {}", paths.config_file().display());
+    }
+    let web = &cfg.server.web;
+    let host = if web.bind == "0.0.0.0" || web.bind == "::" { "127.0.0.1" } else { &web.bind };
+    let token_query = if web.auth_token_ref.is_empty() {
+        String::new()
+    } else {
+        Secrets::load(&paths.secrets_file())?
+            .resolve(&web.auth_token_ref)
+            .map(|tok| format!("?token={tok}"))
+            .unwrap_or_default()
+    };
+    let url = format!("http://{host}:{}/{token_query}", web.port);
+    let listening = std::net::ToSocketAddrs::to_socket_addrs(&format!("{host}:{}", web.port))
+        .ok()
+        .and_then(|mut a| a.next())
+        .is_some_and(|addr| {
+            std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500))
+                .is_ok()
+        });
+    if listening {
+        println!("Opening {url}");
+        crate::daemon::open_url(&url);
+    } else {
+        println!(
+            "The settings page isn't listening on {host}:{} yet.\n\
+             Start (or restart) the daemon — `fono` — then rerun `fono config web`,\n\
+             or click \"Settings…\" in the tray menu, which starts it on demand.\n\
+             URL: {url}",
+            web.port
+        );
+    }
     Ok(())
 }
 
@@ -1438,7 +1491,8 @@ async fn record_cmd(
         return record_cmd_live(paths, &config, &secrets, max_seconds, no_inject).await;
     }
 
-    let cap_cfg = CaptureConfig { target_sample_rate: config.audio.sample_rate, source: None };
+    let cap_cfg =
+        CaptureConfig { target_sample_rate: fono_core::config::AUDIO_SAMPLE_RATE_HZ, source: None };
     let cap = AudioCapture::new(cap_cfg.clone());
     let handle = cap.start().context("start audio capture")?;
     eprintln!(

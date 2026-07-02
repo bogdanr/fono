@@ -64,7 +64,7 @@ behaviour. Most users never need to touch it; see the
 
 ```toml
 [interactive]
-quality_floor = "max"    # max | balanced | aggressive — budget-pressure floor
+chunk_ms_initial = 600   # window before the first preview pass (ms)
 ```
 
 The overlay style is re-read on every `Reload` IPC, so editing the file
@@ -161,16 +161,17 @@ defaults baked into `HeuristicConfig::default` in
 `resume_grace_ms` config keys (and the budget / session-cap knobs)
 were removed in the 2026-05-22 schema simplification because they were
 never plumbed from `[interactive]` into the live session. See
-`docs/decisions/0015-boundary-heuristics.md` for the rationale.
+`docs/decisions/0015-boundary-heuristics.md` for the rationale. The
+reserved `mode` and `quality_floor` keys followed in the 2026-07-02
+web-settings simplification — each only ever had a single implemented
+value.
 
 The surviving user-tunable knobs under `[interactive]`:
 
 | Key                              | Default                        | What it does                                                                                                          |
 | -------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
-| `mode`                           | `"hybrid"`                     | Pipeline mode. `"hybrid"` is the only value wired today; the field is kept so future variants can land without a config break. |
 | `chunk_ms_initial`               | `600`                          | Window the streaming decoder waits before the first preview pass. Smaller = lower TTFF, noisier early text.            |
 | `chunk_ms_steady`                | `1500`                         | Steady-state window between preview passes after the first.                                                           |
 | `cleanup_on_finalize`            | `true`                         | Run the polish pass once on the assembled transcript after the hotkey releases. Off = raw STT output is injected. |
-| `quality_floor`                  | `"max"`                        | Quality floor under budget pressure: `"max"` / `"balanced"` / `"aggressive"`.                                          |
 | `streaming_interval`             | `1.0`                          | Cloud streaming preview cadence in seconds. Clamped to `[0.5, 3.0]`; `> 3.0` disables the preview lane.                |
 | `hold_release_grace_ms`          | `150`                          | Drain window between hotkey release and cpal capture stop so trailing audio reaches the streaming STT.                 |

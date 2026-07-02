@@ -506,16 +506,6 @@ fn preview_display(transcript: &LiveTranscript, upd: &TranscriptUpdate) -> Strin
     s
 }
 
-/// Parse the `quality_floor` config string.
-#[must_use]
-pub fn parse_quality_floor(s: &str) -> QualityFloor {
-    match s.to_ascii_lowercase().as_str() {
-        "aggressive" => QualityFloor::Aggressive,
-        "balanced" => QualityFloor::Balanced,
-        _ => QualityFloor::Max,
-    }
-}
-
 // =====================================================================
 // Pure heuristic helpers (R2.5 / R7.3a). Kept module-private to make
 // the API surface small; tested via the in-module `mod tests` block.
@@ -694,14 +684,6 @@ mod tests {
         apply_update(&mut t, &u);
         assert!(t.committed.is_empty());
         assert_eq!(t.last_preview.as_deref(), Some("hi"));
-    }
-
-    #[test]
-    fn quality_floor_parser_falls_back_to_max() {
-        assert!(matches!(parse_quality_floor("max"), QualityFloor::Max));
-        assert!(matches!(parse_quality_floor("BALANCED"), QualityFloor::Balanced));
-        assert!(matches!(parse_quality_floor("Aggressive"), QualityFloor::Aggressive));
-        assert!(matches!(parse_quality_floor("nonsense"), QualityFloor::Max));
     }
 
     // ---------------- R2.5 / R7.3a heuristic isolation tests --------

@@ -17,7 +17,7 @@ workspace = true
 # single passive multicast listener) and pairs with the server so the
 # default build is what an end-user wants. Slim / cloud-only builds
 # drop both via `default-features = false`.
-default = ["wyoming-server", "discovery", "llm-server"]
+default = ["wyoming-server", "discovery", "llm-server", "web-settings"]
 # Wyoming protocol server — accept LAN peers and drive an existing
 # `Arc<dyn SpeechToText>` (whisper-rs, cloud, …).
 wyoming-server = []
@@ -29,6 +29,12 @@ discovery = ["dep:mdns-sd"]
 # stack is already in the graph via reqwest, so this feature adds no new
 # crate; `fono-assistant` is likewise already linked in the binary.
 llm-server = ["dep:fono-assistant", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes", "dep:reqwest"]
+# Web settings UI — serves the embedded browser settings page plus its
+# small JSON API (`GET/PUT /api/config`, `PUT /api/secret/{NAME}`).
+# Same raw-hyper stack as `llm-server` (ADR 0036): every crate is
+# already in the graph, so this feature adds no new dependency. The
+# embedded HTML/CSS/JS assets are a few tens of KB of `include_str!`.
+web-settings = ["dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes"]
 # Future slices wire these on:
 #   wyoming-client = []   # superseded by `fono-stt::wyoming` (Slice 2)
 #   fono-server   = []    # Fono-native server, Slice 6

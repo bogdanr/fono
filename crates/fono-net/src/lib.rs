@@ -22,3 +22,9 @@ pub mod llm_server;
 pub use llm_server::{
     AssistantProvider, LlmServer, LlmServerConfig, LlmServerHandle, UpstreamProvider,
 };
+
+#[cfg(feature = "web-settings")]
+pub mod web_settings;
+
+#[cfg(feature = "web-settings")]
+pub use web_settings::{WebSettingsConfig, WebSettingsHandle, WebSettingsHooks, WebSettingsServer};

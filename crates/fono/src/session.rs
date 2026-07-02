@@ -756,8 +756,10 @@ impl SessionOrchestrator {
         };
         let history =
             Arc::new(Mutex::new(HistoryDb::open(&paths.history_db()).context("open history db")?));
-        let capture_cfg =
-            CaptureConfig { target_sample_rate: config.audio.sample_rate, source: None };
+        let capture_cfg = CaptureConfig {
+            target_sample_rate: fono_core::config::AUDIO_SAMPLE_RATE_HZ,
+            source: None,
+        };
         let mut orch = Self::with_parts(
             stt,
             polish,
@@ -3784,7 +3786,10 @@ impl SessionOrchestrator {
         if let Some(o) = overlay.as_ref() {
             session = session.with_overlay(o.clone());
         }
-        let quality_floor = crate::live::parse_quality_floor(&cfg.interactive.quality_floor);
+        // Quality floor was a config knob (`[interactive].quality_floor`)
+        // until 2026-07; only `Max` was ever implemented, so it is now
+        // pinned (the `LiveSession` parameter stays for R12.5).
+        let quality_floor = fono_core::QualityFloor::Max;
 
         // ---- Spawn the run task ----------------------------------
         let run_join = tokio::spawn(session.run(frame_rx, quality_floor));
