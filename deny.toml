@@ -23,6 +23,11 @@ ignore = [
     "RUSTSEC-2025-0119", # gtk3-macros
     "RUSTSEC-2024-0370", # proc-macro-error (transitive, unmaintained)
     "RUSTSEC-2025-0141", # transitive unmaintained crate
+    # ttf-parser is unmaintained upstream (author stated no further fixes) but
+    # is pulled in transitively by the overlay font-rendering stack
+    # (cosmic-text/swash). No replacement is available; revisit if the font
+    # stack migrates off it.
+    "RUSTSEC-2026-0192", # ttf-parser (transitive, unmaintained)
 ]
 
 [licenses]

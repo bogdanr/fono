@@ -696,7 +696,7 @@ impl SessionOrchestrator {
     /// Returns an error if the STT factory fails — the daemon should
     /// still come up but in a "degraded" mode where hotkeys notify the
     /// user. LLM construction failure downgrades to "no cleanup".
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
     pub fn new(
         config: Arc<Config>,
         secrets: &Secrets,
@@ -944,7 +944,7 @@ impl SessionOrchestrator {
     /// Provider-switching plan task S11/S13.
     ///
     /// Returns a short human-readable summary (active backends).
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
     pub async fn reload(&self) -> Result<String> {
         let paths = self
             .paths
