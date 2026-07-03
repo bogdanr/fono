@@ -137,3 +137,33 @@ jobs:
 
           docker buildx imagetools create "${tag_args[@]}" "${amd64_image}" "${arm64_image}"
           docker buildx imagetools inspect "${image}:vulkan"
+
+  notify-addon:
+    name: Notify Home Assistant add-on repo
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: publish
+    # Only on release tags: the dispatch tells bogdanr/fono-hassio to open
+    # its version-bump PR, and its sync-version workflow pins the add-on to
+    # the `ghcr.io/bogdanr/fono:v<version>` tag published by the job above.
+    if: ${{ github.ref_type == 'tag' }}
+    steps:
+      - name: Dispatch fono-release event
+        env:
+          # Fine-grained PAT with contents:write on bogdanr/fono-hassio
+          # (GITHUB_TOKEN cannot dispatch cross-repo). When the secret is
+          # absent the step is a no-op so forks/tag rebuilds don't fail.
+          DISPATCH_TOKEN: ${{ secrets.FONO_HASSIO_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISPATCH_TOKEN:-}" ]; then
+            echo "FONO_HASSIO_DISPATCH_TOKEN not set — skipping add-on dispatch."
+            exit 0
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          curl -fsS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            https://api.github.com/repos/bogdanr/fono-hassio/dispatches \
+            -d "{\"event_type\":\"fono-release\",\"client_payload\":{\"version\":\"${version}\"}}"
+          echo "Dispatched fono-release ${version} to bogdanr/fono-hassio."

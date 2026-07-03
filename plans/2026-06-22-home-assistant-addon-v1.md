@@ -17,6 +17,29 @@ Wyoming Protocol integration). It does **not** change any Fono source code
 or the existing container/packaging. All new artifacts live in a **new,
 dedicated add-on repository**, not in this repo.
 
+## Progress — 2026-07-03 (housekeeping: pushed, pinned, dispatch wired)
+
+- The `fono-hassio` repo is **pushed** (`main` = `a9e4c94` on GitHub).
+- Bumped the add-on to **0.14.0** and pinned `build_from` to
+  `ghcr.io/bogdanr/fono:v0.14.0` (tag verified present on GHCR for both
+  arches), replacing the bootstrap `:latest` pin.
+- Fixed a latent bug in `sync-version.yml`: GHCR image tags are
+  v-prefixed (`v0.14.0`) but the sed pinned the bare version — the
+  automated bump would have referenced a nonexistent tag.
+- Added `fono/icon.png` (256×256, red mark) and `fono/logo.png`
+  (483×132, wordmark on brand cream) rendered from `assets/logo-*.svg`
+  (Task 6.2 done).
+- Wired Task 4.3: `container.yml` gained a `notify-addon` job that fires
+  `repository_dispatch` (`fono-release`, `client_payload.version`) at
+  `bogdanr/fono-hassio` after the multi-arch manifest publishes on a
+  release tag. Requires the `FONO_HASSIO_DISPATCH_TOKEN` secret (a
+  fine-grained PAT with contents:write on fono-hassio); no-op when
+  unset. **Action for the human: create the PAT and add the secret.**
+
+**Remaining:** 3.1 (GPU `/dev/dri` variant), 3.3 (custom AppArmor),
+3.5 (Supervisor Wyoming discovery), 5.1–5.8 (real HA OS testing — the
+real next step), 6.4–6.5 (community/brands listing).
+
 ## Progress — 2026-06-22 (scaffold landed)
 
 The add-on repository **`github.com/bogdanr/fono-hassio`** was created and
