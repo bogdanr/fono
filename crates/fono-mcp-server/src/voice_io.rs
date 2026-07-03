@@ -127,10 +127,14 @@ impl OverlayGuard {
     /// backend is a terminal sink).
     pub(crate) fn spawn(cfg: &Config) -> Self {
         static SHARED: OnceLock<Option<OverlayHandle>> = OnceLock::new();
+        // MCP listen never drives the streaming-STT preview, so the
+        // `Transcript` style has nothing to paint — fall back to an
+        // audio visualisation (see `effective_overlay_style`).
+        let style = effective_overlay_style(cfg);
         let handle = SHARED
-            .get_or_init(|| match spawn_overlay(cfg.overlay.style) {
+            .get_or_init(|| match spawn_overlay(style) {
                 Ok(h) => {
-                    h.set_waveform_style(cfg.overlay.style);
+                    h.set_waveform_style(style);
                     h.set_volume_bar(cfg.overlay.volume_bar);
                     Some(h)
                 }
@@ -148,7 +152,7 @@ impl OverlayGuard {
         // user edited config between listens. Cheap; both paths are
         // simple channel sends.
         if let Some(h) = handle.as_ref() {
-            h.set_waveform_style(cfg.overlay.style);
+            h.set_waveform_style(style);
             h.set_volume_bar(cfg.overlay.volume_bar);
         }
         Self { handle }
@@ -1161,7 +1165,10 @@ fn spawn_visualizer_task(
         return None;
     }
     let o = handle?;
-    let style = cfg.overlay.style;
+    // MCP listen has no streaming transcript to show, so a configured
+    // `Transcript` style degrades to the default audio visualisation
+    // rather than a static empty panel (see `effective_overlay_style`).
+    let style = effective_overlay_style(cfg);
     let buf = buffer;
     let task = tokio::spawn(async move {
         match style {
@@ -1290,6 +1297,24 @@ fn spawn_visualizer_task(
         }
     });
     Some(task.abort_handle())
+}
+
+/// Resolve the overlay waveform style to actually drive during an MCP
+/// listen. The `Transcript` style renders the streaming live-preview
+/// text panel, but `fono.listen` never runs the streaming-STT
+/// pipeline — so a literal `Transcript` would leave the user staring
+/// at a static, empty panel with no animation. Degrade it to the
+/// default audio visualisation ([`WaveformStyle::default`], currently
+/// `Fft`), mirroring the graceful fallback F7 dictation applies for
+/// non-streaming STT backends (commit `7bdbdd6`). Every other style
+/// is audio-driven and passes through unchanged.
+fn effective_overlay_style(cfg: &Config) -> fono_core::config::WaveformStyle {
+    let style = cfg.overlay.style;
+    if style.requires_streaming() {
+        fono_core::config::WaveformStyle::default()
+    } else {
+        style
+    }
 }
 
 /// Reconcile the user's `[audio].auto_stop_silence_ms` setting with the
@@ -1503,6 +1528,33 @@ mod tests {
         assert_eq!(match_choice("", &ch(&["A"])), None);
         assert_eq!(match_choice("a", &[]), None);
         assert_eq!(match_choice("...", &ch(&["A"])), None);
+    }
+
+    #[test]
+    fn effective_style_downgrades_transcript_to_default() {
+        use fono_core::config::WaveformStyle;
+        // Transcript needs the streaming-STT preview MCP listen never
+        // runs, so it must fall back to the default audio visualisation.
+        let mut cfg = Config::default();
+        cfg.overlay.style = WaveformStyle::Transcript;
+        assert_eq!(effective_overlay_style(&cfg), WaveformStyle::default());
+    }
+
+    #[test]
+    fn effective_style_passes_audio_styles_through() {
+        use fono_core::config::WaveformStyle;
+        for style in [
+            WaveformStyle::Bars,
+            WaveformStyle::Oscilloscope,
+            WaveformStyle::Fft,
+            WaveformStyle::Heatmap,
+            WaveformStyle::Terrain3d,
+            WaveformStyle::System360,
+        ] {
+            let mut cfg = Config::default();
+            cfg.overlay.style = style;
+            assert_eq!(effective_overlay_style(&cfg), style, "{style:?} must pass through");
+        }
     }
 
     #[test]
