@@ -1117,49 +1117,53 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                         debug!("tray: Pause hotkeys (not yet implemented)");
                     }
                     TrayAction::UseStt(idx) => {
-                        switch_stt_via_tray(
+                        // Box the future so its (Config-holding) stack
+                        // frame lives on the heap, keeping the enclosing
+                        // tray-dispatch async block under clippy's
+                        // `large_stack_frames` threshold.
+                        Box::pin(switch_stt_via_tray(
                             &paths,
                             orch_for_tray.as_ref(),
                             &stt_backends_for_dispatch,
                             idx,
-                        )
+                        ))
                         .await;
                     }
                     TrayAction::UseDiscoveredStt(idx) => {
-                        switch_discovered_stt_via_tray(
+                        Box::pin(switch_discovered_stt_via_tray(
                             &paths,
                             orch_for_tray.as_ref(),
                             discovered_registry_for_dispatch.as_ref(),
                             local_wyoming_fullname_for_dispatch.as_deref(),
                             idx,
-                        )
+                        ))
                         .await;
                     }
                     TrayAction::UsePolish(idx) => {
-                        switch_llm_via_tray(
+                        Box::pin(switch_llm_via_tray(
                             &paths,
                             orch_for_tray.as_ref(),
                             &llm_backends_for_dispatch,
                             idx,
-                        )
+                        ))
                         .await;
                     }
                     TrayAction::UseAssistant(idx) => {
-                        switch_assistant_via_tray(
+                        Box::pin(switch_assistant_via_tray(
                             &paths,
                             orch_for_tray.as_ref(),
                             &assistant_backends_for_dispatch,
                             idx,
-                        )
+                        ))
                         .await;
                     }
                     TrayAction::UseTts(idx) => {
-                        switch_tts_via_tray(
+                        Box::pin(switch_tts_via_tray(
                             &paths,
                             orch_for_tray.as_ref(),
                             &tts_backends_for_dispatch,
                             idx,
-                        )
+                        ))
                         .await;
                     }
                     TrayAction::ApplyUpdate | TrayAction::UpdateForGpuAcceleration => {

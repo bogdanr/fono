@@ -28,6 +28,16 @@ ignore = [
     # (cosmic-text/swash). No replacement is available; revisit if the font
     # stack migrates off it.
     "RUSTSEC-2026-0192", # ttf-parser (transitive, unmaintained)
+    # quick-xml 0.39.2 is pinned by wayland-scanner 0.31.10 (the latest
+    # release on crates.io), pulled in transitively by
+    # smithay-client-toolkit/wayland-client for the overlay's Wayland
+    # backend. wayland-scanner is a proc-macro that runs at *our* build
+    # time over the bundled, trusted Wayland protocol XML files -- it
+    # never parses attacker-controlled input at runtime, so the DoS/
+    # quadratic-parsing advisories below do not apply to how Fono uses
+    # it. Re-evaluate when wayland-scanner bumps its quick-xml pin.
+    "RUSTSEC-2026-0194", # quick-xml (transitive via wayland-scanner, build-time only)
+    "RUSTSEC-2026-0195", # quick-xml (transitive via wayland-scanner, build-time only)
 ]
 
 [licenses]
