@@ -51,12 +51,22 @@ backend-wlr = [
 [dependencies]
 fono-core = { path = "../fono-core" }
 tracing = { workspace = true }
-winit = { workspace = true, optional = true }
-softbuffer = { workspace = true, optional = true }
 # ab_glyph drives software glyph rendering for the renderer; required
 # by every backend that actually paints pixels (every backend except
 # noop).
 ab_glyph = { version = "0.2", optional = true }
+
+# The graphical backends are Linux display-server stacks (X11 via
+# winit/softbuffer, Wayland via smithay/wayland-*). They are declared
+# in a Linux-only target table so enabling `real-window` on macOS /
+# Windows compiles the crate without them (resolver v2 skips features
+# of target-inactive optional deps); the backend modules and the
+# `try_spawn` dispatch are cfg-gated to match. Native macOS / Windows
+# overlay backends are separate follow-ups (see the Windows port plan
+# Phase 10 and the macOS port plan).
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { workspace = true, optional = true }
+softbuffer = { workspace = true, optional = true }
 # Wayland-native backends. Pinned to SCTK 0.19 to match what winit
 # 0.30 already brings in transitively — keeps the lockfile graph
 # unified. wayland-protocols-wlr is direct only behind backend-wlr.

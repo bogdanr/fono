@@ -15,11 +15,16 @@
 //! All call sites in the workspace funnel through [`send`]; the previous
 //! ~40 direct `notify_rust::Notification::new()` invocations are gone.
 
+// `Command`/`Stdio` drive the Linux `notify-send` path only; the
+// macOS/Windows backends go through `notify-rust` (no subprocess).
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
+#[cfg(target_os = "linux")]
 use std::sync::OnceLock;
 
 /// Notification urgency. On Linux this maps to `notify-send --urgency`;
-/// on macOS / Windows it informs `notify-rust`'s hint table.
+/// macOS / Windows notifications have no urgency concept, so it is
+/// accepted and ignored there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Urgency {
     Low,
@@ -28,6 +33,9 @@ pub enum Urgency {
 }
 
 impl Urgency {
+    // Only the Linux `notify-send --urgency` wire format needs the
+    // string form (macOS/Windows backends have no urgency concept).
+    #[cfg(target_os = "linux")]
     fn as_str(self) -> &'static str {
         match self {
             Self::Low => "low",
@@ -95,18 +103,18 @@ fn send_linux(summary: &str, body: &str, icon: &str, timeout_ms: u32, urgency: U
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn send_via_notify_rust(summary: &str, body: &str, icon: &str, timeout_ms: u32, urgency: Urgency) {
-    use notify_rust::{Hint, Notification, Timeout};
-    let hint = match urgency {
-        Urgency::Low => Hint::Urgency(notify_rust::Urgency::Low),
-        Urgency::Normal => Hint::Urgency(notify_rust::Urgency::Normal),
-        Urgency::Critical => Hint::Urgency(notify_rust::Urgency::Critical),
-    };
+    use notify_rust::{Notification, Timeout};
+    // notify-rust's `hint()` (and the XDG urgency hint it carries) only
+    // exists on `cfg(all(unix, not(macos)))` — i.e. the Linux D-Bus
+    // backend, which Fono reaches via `notify-send` instead. The macOS
+    // (NSUserNotification) and Windows (toast) backends have no urgency
+    // concept, so it is consumed here without a wire equivalent.
+    let _ = urgency;
     match Notification::new()
         .summary(summary)
         .body(body)
         .icon(icon)
         .timeout(Timeout::Milliseconds(timeout_ms))
-        .hint(hint)
         .show()
     {
         Ok(_) => tracing::debug!("notify-rust: sent ({summary})"),
@@ -135,7 +143,6 @@ pub fn is_available() -> bool {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = OnceLock::<bool>::new();
         true
     }
 }

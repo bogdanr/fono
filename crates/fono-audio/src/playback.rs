@@ -28,6 +28,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+// `warn` is only used by the backend workers; without either backend
+// (e.g. macOS with default features) it would be an unused import.
+#[cfg(any(target_os = "linux", feature = "cpal-backend"))]
 use tracing::warn;
 
 /// Errors specific to the playback worker. Currently only used as a
@@ -81,6 +84,10 @@ fn with_lead_in(pcm: Vec<f32>, sample_rate: u32) -> Vec<f32> {
     out
 }
 
+// Without a backend (e.g. macOS with default features) the worker that
+// reads the PCM payloads is compiled out, so the fields are written but
+// never read.
+#[cfg_attr(not(any(target_os = "linux", feature = "cpal-backend")), allow(dead_code))]
 enum Cmd {
     Play {
         pcm: Vec<f32>,
@@ -210,6 +217,7 @@ impl AudioPlayback {
 
     /// True after [`Self::stop`] has been called. Worker checks this
     /// to abort early.
+    #[cfg(any(target_os = "linux", feature = "cpal-backend"))]
     fn is_stopping(stop: &AtomicBool) -> bool {
         stop.load(Ordering::SeqCst)
     }

@@ -15,7 +15,13 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+// `Context`/`debug`/`warn` are only used inside the two backend
+// implementations; without either backend (e.g. macOS with default
+// features) they would be unused imports.
+#[cfg(any(target_os = "linux", feature = "cpal-backend"))]
+use anyhow::Context;
+use anyhow::Result;
+#[cfg(any(target_os = "linux", feature = "cpal-backend"))]
 use tracing::{debug, warn};
 
 #[cfg(feature = "cpal-backend")]

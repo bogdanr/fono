@@ -1371,6 +1371,7 @@ dependencies = [
  "anyhow",
  "ash",
  "directories",
+ "libc",
  "llama-cpp-2",
  "notify-rust",
  "once_cell",

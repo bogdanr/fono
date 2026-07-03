@@ -1,6 +1,117 @@
 # Fono — Project Status
 Last updated: 2026-07-03
 
+## 2026-07-03 — macOS Phases 0–3 complete: tests green on darwin, headless smoke, CI row
+
+Third same-day session (`plans/2026-07-03-macos-port-v1.md`); Phases 0,
+1, 2 and 3 are now all complete.
+
+- **Task 0.7:** `scripts/mac-remote.sh` (push/check/build/test/cargo/sh
+  against the sandbox; host exclusively from `FONO_MAC_HOST`, no default)
+  + `docs/build-macos.md` (build requirements, remote loop, sandbox
+  layout, pinned platform paths, headless-smoke results, deferred-GUI
+  checklist). Lesson learned: rsync's `.gitignore` dir-merge filter did
+  **not** protect the remote `target/` from `--delete` — one push wiped
+  the build cache and the pinned onnxruntime lib; the script now has an
+  explicit `/target` exclude.
+- **Task 1.4:** darwin workspace check is zero-warning — cfg-gates on
+  cfg-shadowed Linux-only items in `fono-core` (locale), `fono-audio`
+  (capture/playback), `fono-inject` (terminal). Linux clippy unchanged.
+- **Task 1.5:** `cargo test --workspace --tests --lib` green on darwin
+  (36 suites, 0 failures). The run caught a **latent FFI bug**: hwcheck's
+  hand-rolled `struct statvfs` used the Linux all-u64 layout on every
+  unix, but Darwin's block counts are u32 — garbage product, multiply
+  overflow. Fixed with a per-OS layout + checked multiply. Also fixed
+  `read_meminfo`/`physical_cores` stubs (doctor claimed "0 GB RAM,
+  unsuitable" on the 64 GiB Mac): both now use Mach sysctls /
+  `host_statistics64` via a macOS-only `libc` edge (crate already in
+  every target's graph — net-zero binary size).
+- **Task 3.3 (headless smoke):** the full daemon starts and idles
+  headless; local TTS voices auto-download; `fono speak stream --out` +
+  `fono transcribe` round-trip works; Wyoming server listens and
+  advertises TTS + wake-word; doctor/history/hwprobe/use/voices all fine;
+  `record` and `test-inject` degrade gracefully with actionable errors.
+  **Risk 5 closed:** macOS uses the same XDG-style dotfile paths as Linux
+  (`~/.config/fono` etc.) — no `~/Library` drift.
+- **Phase 2:** non-blocking `macos-15` job added to `ci.yml`
+  (`continue-on-error: true`, `ORT_CXX_STDLIB=c++`, check `-D warnings`
+  + workspace tests — the exact commands proven green on the dev Mac).
+
+Next: Phase 4 (cpal audio on macOS) — the first phase with a deferred-GUI
+residue (mic TCC grant); its headless gate is compile + unit tests +
+graceful no-permission degradation.
+
+## 2026-07-03 — macOS release-slim binary builds and runs; Metal-only single-artefact decision
+
+Same-day follow-up to the bootstrap session below — plan Phase 3 Tasks
+3.1/3.2 done (`plans/2026-07-03-macos-port-v1.md`).
+
+- **Link fix:** the workspace `[env] ORT_CXX_STDLIB="static:-bundle=stdc++"`
+  (a Linux-GNU NEEDED-allowlist fix) leaks into darwin builds and makes
+  `ort-sys` emit `-lstdc++`, which ld64 can't find. Cargo `[env]` can't be
+  target-scoped, so darwin builds export `ORT_CXX_STDLIB=c++` in the
+  environment (inherited env beats `[env]`); recorded for the future CI and
+  release rows. No repo change needed for Linux.
+- **Sizes (release-slim, default features, arm64):** CPU-only 15.14 MiB;
+  `accel-metal` 15.79 MiB — **Metal costs only +0.65 MiB (+4.3 %)**. Both
+  run; dylib imports are system frameworks + libSystem/libc++/libiconv/
+  libobjc only; ad-hoc linker signature confirmed via `codesign -dv`.
+- **Benchmarks (30 s fixture, `fono transcribe --no-polish --stt local`):**
+  small q8_0 — CPU 1.51 s wall / 5.67 s user vs Metal 1.10 s / 0.17 s;
+  large-v3-turbo q8_0 — CPU 9.25 s / 39.68 s vs Metal **2.12 s / 0.23 s**
+  (4.3× faster, ~170× less CPU time). `fono models install` +
+  `fono transcribe` worked first try on the Mac (partial Task 3.3 smoke).
+- **Decision (user call, confirmed by the numbers): macOS ships one
+  variant only — Metal** — no cpu/gpu split; ggml falls back to its CPU
+  backend at runtime if Metal init fails. Eventual ship shape: a single
+  universal (lipo) binary of that one variant, once the
+  `x86_64-apple-darwin` onnxruntime pin exists. Recorded in the plan
+  (artefact-shape decision + Tasks 11.1/11.3).
+
+## 2026-07-03 — macOS port started: remote Mac bootstrapped, workspace checks green on darwin
+
+Kicked off the macOS port against a remote Mac Studio (arm64, macOS
+15.6, Xcode 26.1.1, SSH as root; address kept out of the repo — see
+`FONO_MAC_HOST` in the plan). New plan:
+`plans/2026-07-03-macos-port-v1.md` (mirrors the never-executed Windows
+port plan's phasing; Phases 0–1 largely executed same-day).
+
+- **Sandboxed remote dev env** — everything on the Mac lives under one
+  directory (`/var/root/fono-dev`: rustup + cargo homes, shallow repo
+  clone, standalone CMake 3.31.6, `env.sh`), so cleanup is a single
+  `rm -rf`. No brew formulae, no system-wide installs. Rust 1.88 via
+  `rust-toolchain.toml`.
+- **onnxruntime for `aarch64-apple-darwin`** — the hosted pin is correct,
+  but stock macOS lacks `xz`/`sha256sum`; provisioned the verified lib
+  from the Linux host and gave `scripts/fetch-onnxruntime.sh` a
+  `shasum -a 256` fallback so its fast path verifies on macOS. Landmine
+  documented in the script header: bsdtar's raw-xz mode silently
+  truncates the multi-stream `.xz` (34,240,800 of 34,326,760 bytes) —
+  never use it as an xz substitute.
+- **First darwin compile probe → only two front-line failures, both
+  fixed:**
+  1. `fono-core::notify` called `notify_rust::Notification::hint()`,
+     which only exists on `cfg(all(unix, not(macos)))` — the
+     macOS/Windows arm could never have compiled on either target.
+     Urgency is now accepted and ignored there (no such concept in
+     those backends).
+  2. `fono-overlay`'s graphical backends (winit/softbuffer/smithay/
+     wayland-*/rustix/libloading) are Linux display-server stacks
+     pulled in by `real-window`; moved them to a
+     `[target.'cfg(target_os = "linux")'.dependencies]` table and gated
+     the backend modules + `try_spawn` dispatch on
+     `all(feature, target_os = "linux")`. On macOS the selector offers
+     only `noop` until a native NSPanel backend lands (plan Phase 8).
+- **Result: `cargo check --workspace` green on `aarch64-apple-darwin`**
+  — all 19 crates, default features, llama.cpp + whisper.cpp compiled
+  by Xcode clang, `tts-local` linked against the pinned static
+  onnxruntime. ~20 dead-code warnings from cfg-shadowed Linux-only
+  helpers remain (plan Task 1.4); `cargo test` on darwin is Task 1.5.
+- **Gate green on Linux:** `cargo fmt --check`, `clippy --workspace
+  --all-targets -D warnings`, `cargo test --workspace --tests --lib`.
+  Overlay/notify changes are Linux-behaviour-neutral by construction
+  (target-table moves + cfg tightening only).
+
 ## 2026-07-03 — Personal vocabulary (deterministic correction) shipped
 
 Implemented `plans/2026-07-03-correction-with-memory-v3.md` (supersedes the

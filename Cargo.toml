@@ -183,6 +183,12 @@ winit = { version = "0.30", default-features = false, features = ["x11", "rwh_06
 softbuffer = "0.4"
 notify-rust = "4.11"
 
+# Raw OS bindings for the macOS hardware probe (sysctlbyname +
+# host_statistics64 in fono-core::hwcheck). Already in the dependency
+# graph on every target (dirs-sys, getrandom, …), so this edge adds no
+# binary size; it is only pulled directly by macOS builds.
+libc = "0.2"
+
 # Vulkan runtime probe used by the CPU variant to detect whether the
 # host has libvulkan.so.1 + at least one Vulkan-capable device, so the
 # upgrade UX (`fono doctor`, the wizard, the tray menu) can offer to

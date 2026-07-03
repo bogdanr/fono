@@ -424,9 +424,15 @@ pub fn default_host_gpu_for_platform() -> HostGpu {
 }
 
 /// Best-effort physical-core detection. Linux: parses `/proc/cpuinfo`.
-/// Other OSes: returns `None` and the caller falls back to halving
-/// `available_parallelism` (assume SMT siblings).
+/// macOS: `hw.physicalcpu` (M-series has no SMT, but the sysctl is
+/// authoritative either way). Other OSes: returns `None` and the caller
+/// falls back to halving `available_parallelism` (assume SMT siblings).
 fn physical_cores() -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        return sysctl_u64("hw.physicalcpu").and_then(|v| u32::try_from(v).ok());
+    }
+    #[cfg(not(target_os = "macos"))]
     if cfg!(target_os = "linux") {
         let s = std::fs::read_to_string("/proc/cpuinfo").ok()?;
         let mut seen: std::collections::BTreeSet<(u32, u32)> = std::collections::BTreeSet::new();
@@ -458,27 +464,105 @@ fn physical_cores() -> Option<u32> {
     }
 }
 
-/// `(total_bytes, available_bytes)` parsed from `/proc/meminfo`. Falls
-/// through to `(0, 0)` on non-Linux for now.
+/// `(total_bytes, available_bytes)` for the running host.
+///
+/// Linux parses `/proc/meminfo`; macOS asks Mach (`hw.memsize` +
+/// `host_statistics64`); other targets return `None` and the caller
+/// treats it as `(0, 0)`.
 fn read_meminfo() -> Option<(u64, u64)> {
-    if !cfg!(target_os = "linux") {
-        return None;
+    #[cfg(target_os = "macos")]
+    {
+        let total = sysctl_u64("hw.memsize")?;
+        return Some((total, macos_available_ram().unwrap_or(0)));
     }
-    let s = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let mut total_kb = 0u64;
-    let mut avail_kb = 0u64;
-    for line in s.lines() {
-        if let Some(rest) = line.strip_prefix("MemTotal:") {
-            total_kb = parse_kb(rest).unwrap_or(0);
-        } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
-            avail_kb = parse_kb(rest).unwrap_or(0);
+    #[cfg(not(target_os = "macos"))]
+    {
+        if !cfg!(target_os = "linux") {
+            return None;
         }
+        let s = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let mut total_kb = 0u64;
+        let mut avail_kb = 0u64;
+        for line in s.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                total_kb = parse_kb(rest).unwrap_or(0);
+            } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
+                avail_kb = parse_kb(rest).unwrap_or(0);
+            }
+        }
+        Some((total_kb * 1024, avail_kb * 1024))
     }
-    Some((total_kb * 1024, avail_kb * 1024))
 }
 
+#[cfg(not(target_os = "macos"))]
 fn parse_kb(s: &str) -> Option<u64> {
     s.trim().trim_end_matches("kB").trim().parse::<u64>().ok()
+}
+
+/// Read one integer sysctl by name. Darwin's integer sysctls are a mix
+/// of 32-bit (`hw.physicalcpu`) and 64-bit (`hw.memsize`) values, so
+/// the buffer accepts either width and widens.
+#[cfg(target_os = "macos")]
+fn sysctl_u64(name: &str) -> Option<u64> {
+    let cname = std::ffi::CString::new(name).ok()?;
+    let mut buf = [0u8; 8];
+    let mut len = buf.len();
+    // SAFETY: `cname` is null-terminated; `buf`/`len` describe a valid
+    // writable region and sysctlbyname never writes past `len`.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            cname.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    match len {
+        4 => Some(u64::from(u32::from_ne_bytes(buf[..4].try_into().ok()?))),
+        8 => Some(u64::from_ne_bytes(buf)),
+        _ => None,
+    }
+}
+
+/// Available RAM on macOS: free + inactive + purgeable pages, the
+/// closest Mach analogue of Linux's `MemAvailable` (memory the kernel
+/// can hand out without swapping). Page counts come from
+/// `host_statistics64`; the page size from `sysconf(_SC_PAGESIZE)`
+/// (16 KiB on Apple Silicon).
+#[cfg(target_os = "macos")]
+// libc deprecates its mach bindings in favour of the `mach2` crate, but
+// pulling a whole new crate for two calls to a stable, frozen kernel
+// ABI is not worth the dependency (binary-size rule); the symbols are
+// not going anywhere.
+#[allow(deprecated)]
+fn macos_available_ram() -> Option<u64> {
+    let mut stats = std::mem::MaybeUninit::<libc::vm_statistics64>::zeroed();
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    // SAFETY: `stats` is a fresh zeroed vm_statistics64 and `count`
+    // tells the kernel its size in integer_t units; host_statistics64
+    // fills at most that many.
+    let rc = unsafe {
+        libc::host_statistics64(
+            libc::mach_host_self(),
+            libc::HOST_VM_INFO64,
+            stats.as_mut_ptr().cast(),
+            &mut count,
+        )
+    };
+    if rc != libc::KERN_SUCCESS {
+        return None;
+    }
+    // SAFETY: KERN_SUCCESS means the struct was populated.
+    let s = unsafe { stats.assume_init() };
+    // SAFETY: trivial libc call, no pointers involved.
+    let page = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).ok()?;
+    let pages =
+        u64::from(s.free_count) + u64::from(s.inactive_count) + u64::from(s.purgeable_count);
+    pages.checked_mul(page)
 }
 
 /// Free bytes on the filesystem hosting `path`. Linux/Unix only;
@@ -499,7 +583,7 @@ fn free_disk_bytes(path: &Path) -> Option<u64> {
         }
         // SAFETY: rc == 0 means kernel populated the buffer.
         let s = unsafe { buf.assume_init() };
-        Some(s.f_bsize * s.f_bavail)
+        s.free_bytes()
     }
     #[cfg(not(unix))]
     {
@@ -508,7 +592,9 @@ fn free_disk_bytes(path: &Path) -> Option<u64> {
     }
 }
 
-#[cfg(unix)]
+/// Layout-compatible with glibc/musl `struct statvfs` on 64-bit Linux
+/// (all fields `unsigned long` = u64).
+#[cfg(all(unix, not(target_os = "macos")))]
 #[repr(C)]
 #[allow(non_camel_case_types)]
 struct libc_statvfs {
@@ -518,6 +604,48 @@ struct libc_statvfs {
     f_bfree: u64,
     f_bavail: u64,
     _padding: [u64; 11],
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+impl libc_statvfs {
+    /// POSIX: the fragment size `f_frsize` is the unit of the block
+    /// counts. Checked multiply guards against a nonsense-filled struct
+    /// on an untested libc rather than overflowing in release or
+    /// panicking in debug.
+    fn free_bytes(&self) -> Option<u64> {
+        self.f_frsize.checked_mul(self.f_bavail)
+    }
+}
+
+/// Layout-compatible with Darwin `struct statvfs` (`sys/statvfs.h`):
+/// `f_bsize`/`f_frsize` are `unsigned long` (u64), but the block and
+/// file counts are `fsblkcnt_t`/`fsfilcnt_t` = `unsigned int` (u32).
+/// Reading those through the Linux all-u64 layout produced garbage
+/// values whose product overflowed — caught by the live-probe test on
+/// the first darwin run.
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[allow(non_camel_case_types)]
+struct libc_statvfs {
+    f_bsize: u64,
+    f_frsize: u64,
+    f_blocks: u32,
+    f_bfree: u32,
+    f_bavail: u32,
+    f_files: u32,
+    f_ffree: u32,
+    f_favail: u32,
+    f_fsid: u64,
+    f_flag: u64,
+    f_namemax: u64,
+}
+
+#[cfg(target_os = "macos")]
+impl libc_statvfs {
+    /// Same contract as the Linux variant; the u32 counts widen first.
+    fn free_bytes(&self) -> Option<u64> {
+        self.f_frsize.checked_mul(u64::from(self.f_bavail))
+    }
 }
 
 #[cfg(unix)]

@@ -281,7 +281,9 @@ fn probe_localectl(acc: &mut Accumulator) {
     parse_localectl_block(&s, acc);
 }
 
-#[cfg(target_os = "linux")]
+// The localectl block parser is exercised by cross-platform unit tests,
+// so it stays compiled under `test` on every OS (pure text → signals).
+#[cfg(any(target_os = "linux", test))]
 fn parse_localectl_block(text: &str, acc: &mut Accumulator) {
     // `localectl status` prints System Locale as a block where
     // continuation lines surface (after `trim`) as bare `LC_*=…`.
@@ -478,6 +480,11 @@ fn probe_runtime_keyboard_linux(acc: &mut Accumulator) {
     }
 }
 
+// The XKB/locale parse helpers below are only *called* from the Linux
+// probes, but they are pure text functions with cross-platform unit
+// tests — hence `any(linux, test)` rather than `linux` (keeps the tests
+// running on darwin/windows without `allow(dead_code)`).
+#[cfg(any(target_os = "linux", test))]
 fn parse_setxkbmap_layouts(text: &str) -> Vec<String> {
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("layout:") {
@@ -487,6 +494,7 @@ fn parse_setxkbmap_layouts(text: &str) -> Vec<String> {
     Vec::new()
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn parse_gsettings_input_sources(text: &str) -> Vec<String> {
     // gsettings prints e.g.
     //   [('xkb', 'us'), ('xkb', 'ro+std'), ('ibus', 'pinyin')]
@@ -510,6 +518,7 @@ fn parse_gsettings_input_sources(text: &str) -> Vec<String> {
     out
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn parse_kxkbrc_layouts(text: &str) -> Vec<String> {
     let mut in_layout_section = false;
     let mut out = Vec::new();
@@ -538,6 +547,7 @@ fn parse_kxkbrc_layouts(text: &str) -> Vec<String> {
 /// Quoted values have their wrapping `"` / `'` stripped. Comment
 /// lines (`#`) and blanks are skipped. Returns an empty `Vec` on
 /// garbage input — never panics.
+#[cfg(any(target_os = "linux", test))]
 fn parse_locale_kv(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -757,6 +767,7 @@ fn country_to_langs(country_code: &str) -> &'static [&'static str] {
 /// X11/xkb layout code → predominant language. Layout variants in
 /// parentheses (e.g. `"us(intl)"`) and `+`-suffix forms
 /// (`"ro+std"`) are stripped before lookup.
+#[cfg(any(target_os = "linux", test))]
 const XKB_LAYOUT_LANGS: &[(&str, &str)] = &[
     ("us", "en"),
     ("gb", "en"),
@@ -802,6 +813,7 @@ const XKB_LAYOUT_LANGS: &[(&str, &str)] = &[
     ("ir", "fa"),
 ];
 
+#[cfg(any(target_os = "linux", test))]
 fn xkb_layout_to_lang(layout: &str) -> Option<&'static str> {
     // Strip variant parenthetical / `+`-suffix: `us(intl)` or
     // `ro+std` → `us` / `ro`.

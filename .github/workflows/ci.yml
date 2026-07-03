@@ -423,6 +423,43 @@ jobs:
           path: cargo-bloat-*.txt
           if-no-files-found: ignore
 
+  # macOS port (plans/2026-07-03-macos-port-v1.md, Phase 2). Non-blocking
+  # while the port is in progress: `continue-on-error` keeps the row
+  # visible in Actions without gating PRs. Promote to blocking once the
+  # darwin release artefact ships (plan Phase 11/12). arm64 runner
+  # (macos-15 = Apple Silicon); x86_64 waits on its onnxruntime pin.
+  macos:
+    name: Build & test (macos-15, non-blocking)
+    runs-on: macos-15
+    timeout-minutes: 35
+    continue-on-error: true
+    env:
+      # Cancel the workspace `[env] ORT_CXX_STDLIB="static:-bundle=stdc++"`
+      # (a Linux-GNU NEEDED-allowlist fix, cargo [env] cannot be
+      # target-scoped): ld64 has no libstdc++. See docs/build-macos.md.
+      ORT_CXX_STDLIB: c++
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fetch minimal onnxruntime static lib (pin ORT_LIB_LOCATION)
+        # macOS runners ship `xz` and `shasum`; the fetcher verifies the
+        # pinned aarch64-apple-darwin SHA-256 and prints the lib dir.
+        run: |
+          ort_dir="$(sh scripts/fetch-onnxruntime.sh)"
+          echo "ORT_LIB_LOCATION=${ort_dir}" >> "$GITHUB_ENV"
+          echo "pinned ORT_LIB_LOCATION=${ort_dir}"
+
+      - name: cargo check (workspace, zero warnings)
+        run: RUSTFLAGS="-D warnings" cargo check --workspace
+
+      - name: cargo test
+        run: cargo test --workspace --tests --lib
+
   deny:
     name: License & advisory audit
     runs-on: ubuntu-latest

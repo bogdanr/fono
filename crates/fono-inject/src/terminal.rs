@@ -10,7 +10,9 @@
 //! filesystem.  On other platforms [`terminal_context`] returns the default
 //! `TerminalContext` immediately.
 
-use crate::classifier::{CodingAgentKind, ProjectKind, TerminalContext};
+#[cfg(target_os = "linux")]
+use crate::classifier::CodingAgentKind;
+use crate::classifier::{ProjectKind, TerminalContext};
 
 // ── Capability gate (C.4) ─────────────────────────────────────────────────────
 
@@ -53,6 +55,7 @@ pub fn terminal_context(_terminal_pid: u32) -> TerminalContext {
 
 // ── Step 1: find shell child ──────────────────────────────────────────────────
 
+#[cfg(target_os = "linux")]
 const KNOWN_SHELLS: &[&str] = &["bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh", "nush"];
 
 /// Read `/proc/{pid}/task/{pid}/children` and return the parsed PIDs.
@@ -170,6 +173,7 @@ fn has_kubeconfig_in_environ(pid: u32) -> bool {
 
 // ── Step 3: coding-agent detection ───────────────────────────────────────────
 
+#[cfg(target_os = "linux")]
 const INTERPRETER_COMMS: &[&str] = &["node", "python3", "python", "deno"];
 
 /// Read `/proc/{pid}/cmdline`; returns argv split on NUL bytes.

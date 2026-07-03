@@ -383,25 +383,25 @@ pub fn spawn_overlay(style: WaveformStyle) -> std::io::Result<OverlayHandle> {
 fn try_spawn(id: BackendId, style: WaveformStyle) -> Result<SpawnedBackend, BackendError> {
     match id {
         BackendId::WlrLayerShell => {
-            #[cfg(feature = "backend-wlr")]
+            #[cfg(all(feature = "backend-wlr", target_os = "linux"))]
             {
                 crate::backends::wayland_layer_shell::try_spawn(style)
             }
-            #[cfg(not(feature = "backend-wlr"))]
+            #[cfg(not(all(feature = "backend-wlr", target_os = "linux")))]
             {
                 let _ = style;
-                Err(BackendError::NotAvailable("backend-wlr feature disabled".into()))
+                Err(BackendError::NotAvailable("backend-wlr not compiled for this target".into()))
             }
         }
         BackendId::X11OverrideRedirect => {
-            #[cfg(feature = "backend-x11")]
+            #[cfg(all(feature = "backend-x11", target_os = "linux"))]
             {
                 crate::backends::winit_x11::try_spawn(style)
             }
-            #[cfg(not(feature = "backend-x11"))]
+            #[cfg(not(all(feature = "backend-x11", target_os = "linux")))]
             {
                 let _ = style;
-                Err(BackendError::NotAvailable("backend-x11 feature disabled".into()))
+                Err(BackendError::NotAvailable("backend-x11 not compiled for this target".into()))
             }
         }
         BackendId::Noop => Ok(crate::backends::noop::spawn(style)),

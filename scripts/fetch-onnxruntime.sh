@@ -22,7 +22,10 @@
 # diagnostics go to stderr), so it composes directly into ORT_LIB_LOCATION.
 # Re-runs are cheap: an already-verified cached library is reused.
 #
-# Prereqs (host tooling, NOT shipped): curl, xz, sha256sum.
+# Prereqs (host tooling, NOT shipped): curl, xz, and sha256sum (or `shasum`,
+# the stock macOS equivalent). Note: bsdtar's raw-xz mode is NOT a substitute
+# for xz here — it silently truncates multi-stream .xz files (verified on
+# macOS 15: 34,240,800 of 34,326,760 bytes extracted, wrong SHA).
 set -eu
 
 ORT_VERSION="${ORT_VERSION:-1.24.2}"
@@ -114,10 +117,20 @@ URL="${BASE_URL}/${RELEASE_TAG}/${ASSET}"
 CACHE_DIR="${ORT_CACHE_DIR:-target/onnxruntime-${ORT_VERSION}/${TRIPLE}}"
 LIB_PATH="${CACHE_DIR}/${LIB_FILE}"
 
+sha256() {
+	# $1 = file -> hex digest on stdout. Prefers coreutils sha256sum,
+	# falls back to `shasum -a 256` (stock on macOS, which has no sha256sum).
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
 verify() {
 	# $1 = file, $2 = expected sha256 -> 0 if match
 	[ -f "$1" ] || return 1
-	got="$(sha256sum "$1" | cut -d' ' -f1)"
+	got="$(sha256 "$1")"
 	[ "${got}" = "$2" ]
 }
 
@@ -129,12 +142,16 @@ if verify "${LIB_PATH}" "${EXPECTED_SHA}"; then
 	exit 0
 fi
 
-for t in curl xz sha256sum; do
+for t in curl xz; do
 	command -v "$t" >/dev/null 2>&1 || {
 		echo "fetch-onnxruntime: missing required tool '$t'" >&2
 		exit 1
 	}
 done
+if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+	echo "fetch-onnxruntime: missing required tool 'sha256sum' (or 'shasum')" >&2
+	exit 1
+fi
 
 mkdir -p "${CACHE_DIR}"
 TMP_XZ="${CACHE_DIR}/${ASSET}.tmp"
@@ -147,7 +164,7 @@ xz -dc "${TMP_XZ}" > "${LIB_PATH}"
 rm -f "${TMP_XZ}"
 
 if ! verify "${LIB_PATH}" "${EXPECTED_SHA}"; then
-	got="$(sha256sum "${LIB_PATH}" | cut -d' ' -f1)"
+	got="$(sha256 "${LIB_PATH}")"
 	echo "fetch-onnxruntime: SHA-256 mismatch for ${LIB_PATH}" >&2
 	echo "  expected ${EXPECTED_SHA}" >&2
 	echo "  got      ${got}" >&2

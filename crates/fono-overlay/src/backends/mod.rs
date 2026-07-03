@@ -13,11 +13,17 @@
 
 pub mod noop;
 
-#[cfg(feature = "backend-x11")]
+// The graphical backends are Linux display-server stacks; their
+// crates are only declared for `cfg(target_os = "linux")` (see
+// Cargo.toml), so the modules are gated on feature AND target. On
+// macOS / Windows the selector only ever offers `noop` (no
+// WAYLAND_DISPLAY / DISPLAY) until native backends land.
+
+#[cfg(all(feature = "backend-x11", target_os = "linux"))]
 pub mod winit_x11;
 
-#[cfg(feature = "backend-wlr")]
+#[cfg(all(feature = "backend-wlr", target_os = "linux"))]
 pub mod wayland_layer_shell;
 
-#[cfg(feature = "backend-wlr")]
+#[cfg(all(feature = "backend-wlr", target_os = "linux"))]
 pub(crate) mod wayland_shm;
