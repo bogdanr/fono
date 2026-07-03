@@ -9,12 +9,18 @@ use tracing::{debug, warn};
 pub enum AudioStack {
     PipeWire,
     PulseAudio,
+    /// macOS. Always the active stack on darwin — there is no probing
+    /// to do; CoreAudio is the only game in town.
+    CoreAudio,
     Unknown,
 }
 
 /// Probe which control utility is available.
 #[must_use]
 pub fn detect() -> AudioStack {
+    if cfg!(target_os = "macos") {
+        return AudioStack::CoreAudio;
+    }
     if which("wpctl").is_some() {
         return AudioStack::PipeWire;
     }
@@ -42,6 +48,16 @@ pub fn set_default_sink_mute(muted: bool) {
         }
         AudioStack::PulseAudio => {
             run("pactl", &["set-sink-mute", "@DEFAULT_SINK@", flag]);
+        }
+        AudioStack::CoreAudio => {
+            // `osascript` ships with macOS; "output muted" is the
+            // system-wide output mute toggle.
+            let script = if muted {
+                "set volume output muted true"
+            } else {
+                "set volume output muted false"
+            };
+            run("osascript", &["-e", script]);
         }
         AudioStack::Unknown => {
             debug!("no known audio-control tool; skipping auto-mute");

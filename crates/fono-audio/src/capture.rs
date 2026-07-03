@@ -11,8 +11,10 @@ use std::io::Read;
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
+#[cfg(any(target_os = "linux", feature = "cpal-backend"))]
+use std::thread;
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
-use std::thread::{self, JoinHandle};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 // `Context`/`debug`/`warn` are only used inside the two backend
@@ -162,7 +164,7 @@ pub struct CaptureStreamHandle {
 #[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]
 type CaptureBackendHandle = ProcessCapture;
 #[cfg(feature = "cpal-backend")]
-type CaptureBackendHandle = cpal::Stream;
+type CaptureBackendHandle = CpalCapture;
 #[cfg(all(not(target_os = "linux"), not(feature = "cpal-backend")))]
 struct CaptureBackendHandle;
 
@@ -460,16 +462,98 @@ fn s16le_to_f32(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// Thread-confined cpal capture stream.
+///
+/// `cpal::Stream` is `!Send` (it wraps platform handles with thread
+/// affinity), but [`CaptureHandle`] / [`CaptureStreamHandle`] must be
+/// `Send` — the daemon and the MCP voice tools hold them across awaits
+/// on multi-threaded executors. So the stream never leaves the keeper
+/// thread that builds it: the handle only carries the (Send) stop
+/// channel. Dropping the handle drops the sender, the keeper's `recv`
+/// unblocks, and the stream is dropped on its owning thread.
 #[cfg(feature = "cpal-backend")]
-fn start_cpal_capture<F>(target_rate: u32, mut forward: F) -> Result<cpal::Stream>
+struct CpalCapture {
+    stop_tx: Option<std::sync::mpsc::Sender<()>>,
+    keeper: Option<thread::JoinHandle<()>>,
+}
+
+#[cfg(feature = "cpal-backend")]
+impl Drop for CpalCapture {
+    fn drop(&mut self) {
+        drop(self.stop_tx.take());
+        if let Some(k) = self.keeper.take() {
+            let _ = k.join();
+        }
+    }
+}
+
+/// Build + play the cpal input stream on a dedicated keeper thread and
+/// hand back a `Send` handle. Build errors are reported synchronously
+/// through the startup channel, so callers still get the real cause
+/// (`no default input device`, TCC denial surfacing as a build/play
+/// error, …) as the function's `Err`.
+#[cfg(feature = "cpal-backend")]
+fn start_cpal_capture<F>(target_rate: u32, forward: F) -> Result<CpalCapture>
+where
+    F: FnMut(&[f32]) + Send + 'static,
+{
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
+
+    let keeper = thread::Builder::new()
+        .name("fono-cpal-capture".into())
+        .spawn(move || {
+            let stream = match build_cpal_stream(target_rate, forward) {
+                Ok(s) => {
+                    let _ = ready_tx.send(Ok(()));
+                    s
+                }
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e));
+                    return;
+                }
+            };
+            // Park until every handle clone is gone (recv errs when the
+            // sender drops); the stream stays alive exactly that long.
+            let _ = stop_rx.recv();
+            drop(stream);
+        })
+        .context("spawn fono-cpal-capture keeper thread")?;
+
+    match ready_rx.recv() {
+        Ok(Ok(())) => Ok(CpalCapture { stop_tx: Some(stop_tx), keeper: Some(keeper) }),
+        Ok(Err(e)) => {
+            let _ = keeper.join();
+            Err(e)
+        }
+        Err(_) => {
+            let _ = keeper.join();
+            Err(anyhow::anyhow!("cpal capture keeper thread died during stream setup"))
+        }
+    }
+}
+
+#[cfg(feature = "cpal-backend")]
+fn build_cpal_stream<F>(target_rate: u32, mut forward: F) -> Result<cpal::Stream>
 where
     F: FnMut(&[f32]) + Send + 'static,
 {
     let host = cpal::default_host();
-    let device =
-        host.default_input_device().ok_or_else(|| anyhow::anyhow!("no default input device"))?;
+    // On macOS the two usual causes of failure here are missing mic
+    // hardware (Mac Studio / mini have none built in) and a denied
+    // Microphone permission — say so instead of the raw cpal error.
+    let hint = if cfg!(target_os = "macos") {
+        " (no microphone connected, or Microphone access denied in System Settings → Privacy & Security)"
+    } else {
+        ""
+    };
+    let device = host
+        .default_input_device()
+        .ok_or_else(|| anyhow::anyhow!("no default input device{hint}"))?;
 
-    let supported = device.default_input_config().context("default_input_config failed")?;
+    let supported = device
+        .default_input_config()
+        .with_context(|| format!("default_input_config failed{hint}"))?;
     debug!(
         "capture(cpal): device={:?} rate={} ch={} fmt={:?}",
         device.name(),
@@ -595,6 +679,19 @@ mod tests {
         b.push_slice(&[1.0; 100], 50);
         assert_eq!(b.len(), 50);
         assert!(b.was_truncated());
+    }
+
+    /// The daemon and the MCP voice tools hold capture handles across
+    /// awaits on multi-threaded executors, so every backend's handle
+    /// must be `Send`. Regression guard for the cpal backend, whose
+    /// `!Send` stream is confined to a keeper thread precisely for
+    /// this (a bare `cpal::Stream` handle breaks the whole workspace
+    /// on macOS, where cpal is the default backend).
+    #[test]
+    fn capture_handles_are_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<CaptureHandle>();
+        assert_send::<CaptureStreamHandle>();
     }
 
     #[test]

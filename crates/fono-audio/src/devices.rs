@@ -89,7 +89,9 @@ pub fn list_input_devices() -> Vec<InputDevice> {
                 v
             }
         }
-        crate::mute::AudioStack::Unknown => enumerate_cpal_inputs(),
+        crate::mute::AudioStack::CoreAudio | crate::mute::AudioStack::Unknown => {
+            enumerate_cpal_inputs()
+        }
     }
 }
 

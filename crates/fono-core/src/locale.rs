@@ -985,25 +985,9 @@ LC_NUMERIC='ro_RO.UTF-8'
       X11 Layout: us
 ";
         let mut acc = Accumulator::default();
-        // Wire the parser only on Linux builds.
-        #[cfg(target_os = "linux")]
+        // The parser is compiled under `any(target_os = "linux", test)`,
+        // so the real implementation is exercised on every OS.
         parse_localectl_block(fixture, &mut acc);
-        #[cfg(not(target_os = "linux"))]
-        {
-            // Emulate the parser on non-Linux by reusing
-            // push_locale directly so the test still has value.
-            for line in fixture.lines() {
-                let line = line.trim();
-                let line = line.strip_prefix("System Locale:").unwrap_or(line).trim();
-                if let Some(rest) = line.strip_prefix("LANG=") {
-                    push_locale(&mut acc, rest, SignalKind::SystemLang, 2);
-                } else if line.starts_with("LC_") {
-                    if let Some((_, v)) = line.split_once('=') {
-                        push_locale(&mut acc, v, SignalKind::FormatLocale, 2);
-                    }
-                }
-            }
-        }
         let out = acc.finalize();
         let ro = out.iter().find(|d| d.code == "ro").expect("ro detected");
         assert!(ro.reasons.contains(&SignalKind::FormatLocale));

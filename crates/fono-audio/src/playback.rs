@@ -592,6 +592,7 @@ fn cpal_resample(
 }
 
 #[cfg(feature = "cpal-backend")]
+#[allow(clippy::too_many_lines)] // one flat cmd loop per backend, mirroring the Linux worker
 fn spawn_worker(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Cmd>,
     pending: Arc<AtomicUsize>,
@@ -602,15 +603,18 @@ fn spawn_worker(
 
     // Pick device + format up front so caller errors come from `new`.
     let host = cpal::default_host();
-    let device = match device_name.as_deref() {
-        None => host.default_output_device(),
-        Some(name) => host
-            .output_devices()
-            .ok()
-            .and_then(|mut d| d.find(|d| d.name().map(|n| n == name).unwrap_or(false)))
-            .or_else(|| host.default_output_device()),
-    }
-    .context("no default cpal output device available")?;
+    let device = device_name
+        .as_deref()
+        .map_or_else(
+            || host.default_output_device(),
+            |name| {
+                host.output_devices()
+                    .ok()
+                    .and_then(|mut d| d.find(|d| d.name().map(|n| n == name).unwrap_or(false)))
+                    .or_else(|| host.default_output_device())
+            },
+        )
+        .context("no default cpal output device available")?;
     let supported = device.default_output_config().context("no default cpal output config")?;
     let device_rate = supported.sample_rate().0;
     let channels = supported.channels();
@@ -647,12 +651,9 @@ fn spawn_worker(
                     None,
                 )
                 .ok();
-            let stream = match stream {
-                Some(s) => s,
-                None => {
-                    warn!(target: "fono::audio::playback", "failed to build cpal output stream");
-                    return;
-                }
+            let Some(stream) = stream else {
+                warn!(target: "fono::audio::playback", "failed to build cpal output stream");
+                return;
             };
             stream.play().ok();
 
@@ -689,17 +690,11 @@ fn spawn_worker(
                             }
                             let samples = pcm.len();
                             let play_started = std::time::Instant::now();
-                            let resampled = match cpal_resample(
-                                &mut resampler,
-                                pcm,
-                                sample_rate,
-                                device_rate,
-                            ) {
-                                Some(r) => r,
-                                None => {
-                                    pending.fetch_sub(1, Ordering::SeqCst);
-                                    continue;
-                                }
+                            let Some(resampled) =
+                                cpal_resample(&mut resampler, pcm, sample_rate, device_rate)
+                            else {
+                                pending.fetch_sub(1, Ordering::SeqCst);
+                                continue;
                             };
                             // Duplicate mono to N channels so a stereo
                             // device plays the same content on both.
@@ -754,14 +749,10 @@ fn spawn_worker(
                                     serde_json::json!({ "backend": "cpal", "sample_rate": sample_rate, "streaming": true }),
                                 );
                             }
-                            let resampled = match cpal_resample(
-                                &mut resampler,
-                                pcm,
-                                sample_rate,
-                                device_rate,
-                            ) {
-                                Some(r) => r,
-                                None => continue,
+                            let Some(resampled) =
+                                cpal_resample(&mut resampler, pcm, sample_rate, device_rate)
+                            else {
+                                continue;
                             };
                             // Append straight to the ring — the callback drains
                             // it continuously, so chunks of one utterance play

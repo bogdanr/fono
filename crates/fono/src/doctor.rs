@@ -420,11 +420,16 @@ pub async fn report(paths: &Paths) -> Result<String> {
     let devices = fono_audio::devices::list_input_devices();
     writeln!(out, "{}", head("Audio inputs:"))?;
     if devices.is_empty() {
-        writeln!(
-            out,
-            "  {}",
-            bad("(no input devices reported — install `wireplumber` (wpctl) or `pulseaudio-utils` (pactl), or check that your microphone is plugged in)")
-        )?;
+        // Platform-appropriate recovery hint: the Linux advice
+        // (install pactl/wpctl) is meaningless on macOS, where the
+        // usual causes are no mic hardware (Mac Studio / mini) or a
+        // denied Microphone permission in System Settings.
+        let hint = if cfg!(target_os = "macos") {
+            "(no input devices reported — connect a microphone, and check System Settings → Privacy & Security → Microphone if capture fails)"
+        } else {
+            "(no input devices reported — install `wireplumber` (wpctl) or `pulseaudio-utils` (pactl), or check that your microphone is plugged in)"
+        };
+        writeln!(out, "  {}", bad(hint))?;
     } else {
         for d in &devices {
             let mark = star(d.is_default);

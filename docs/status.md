@@ -1,6 +1,43 @@
 # Fono — Project Status
 Last updated: 2026-07-03
 
+## 2026-07-03 — macOS Phase 4 complete: CoreAudio capture/playback via cpal
+
+Fourth same-day session (`plans/2026-07-03-macos-port-v1.md`); Phase 4
+is complete at the headless tier.
+
+- **Task 4.1:** `cpal-backend` is now default on macOS via a
+  `[target.'cfg(target_os = "macos")'.dependencies]` table in
+  `crates/fono/Cargo.toml` — target tables don't unify off-target, so
+  Linux stays byte-identical and `Cargo.lock` is unchanged. Two code
+  fixes this forced: (a) the cpal capture stream is `!Send` on macOS
+  (CoreAudio handles are thread-affine) — the stream now lives on a
+  dedicated keeper thread; (b) the 7 pre-existing clippy-debt lints in
+  the cpal playback worker (status.md 2026-06-17) are fixed
+  (`let…else`, `map_or_else`, one precedented `too_many_lines` allow).
+- **Tasks 4.2/4.3 (headless tier):** the dev Mac Studio has **no mic
+  hardware at all** (`system_profiler` lists only speakers), which
+  exercises the no-device failure path: `fono record` errors cleanly,
+  no hang. Capture errors and doctor's empty-inputs hint now name
+  System Settings → Privacy & Security → Microphone on macOS instead
+  of the Linux pactl/wpctl advice. Live-mic round-trip is on the
+  deferred-GUI checklist (needs a Mac that has a microphone).
+- **Task 4.4:** playback round-trip proven — `fono speak stream`
+  played synthesized speech to "Mac Studio Speakers" through the cpal
+  ring worker, rc=0.
+- **Task 4.5:** new `AudioStack::CoreAudio` variant: doctor reports
+  the real stack, input enumeration routes to cpal, and **auto-mute
+  now works on macOS** (system output mute via `osascript`, round-trip
+  verified headless).
+- Locale test cleanup: the localectl fixture test now calls the real
+  parser on every OS (it's compiled under `any(linux, test)`) instead
+  of a hand-inlined emulation.
+- Gates: Linux fmt/clippy (default + `cpal-backend`)/36 test suites
+  green; darwin clippy `-D warnings` clean + 36 suites, 0 failures.
+
+Next: Phase 5 (global hotkeys) — backend decision needs a size
+sign-off before any new dependency lands.
+
 ## 2026-07-03 — macOS Phases 0–3 complete: tests green on darwin, headless smoke, CI row
 
 Third same-day session (`plans/2026-07-03-macos-port-v1.md`); Phases 0,

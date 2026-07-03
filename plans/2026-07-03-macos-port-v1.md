@@ -235,26 +235,46 @@ Mac. ✅ **Phase complete 2026-07-03.**
 
 ### Phase 4 — Audio capture and playback (cpal / CoreAudio)
 
-- [ ] Task 4.1. **Default `cpal-backend` on macOS** for `fono-audio`
+- [x] Task 4.1. **Default `cpal-backend` on macOS** for `fono-audio`
       (same mechanism the Windows plan Phase 5.1 sketches; Linux stays
       parec/paplay). Note pre-existing cpal-feature clippy debt
       (status.md 2026-06-17) — fix what the gate needs.
-- [ ] Task 4.2. **Mic permission (TCC).** First capture prompts for
+      *Done via a `[target.'cfg(target_os = "macos")'.dependencies]`
+      table in `crates/fono/Cargo.toml` (target tables don't unify
+      off-target ⇒ Linux byte-identical, `Cargo.lock` unchanged). The
+      cpal capture stream is `!Send` on macOS — it now lives on a
+      dedicated keeper thread. All 7 clippy-debt lints in the cpal
+      playback worker fixed. Bonus: `AudioStack::CoreAudio` variant
+      with osascript output-mute (verified headless), so auto-mute
+      works on macOS too.*
+- [x] Task 4.2. **Mic permission (TCC).** First capture prompts for
       microphone access — only in a GUI session, and per-binary. Over
       headless SSH there is no prompt and no way to grant it: verify the
       *failure* path instead — capture must degrade gracefully (clear
       error, no hang, no crash) and `fono doctor` must say exactly what to
       grant and where. Deferred-GUI: the actual grant + first capture.
-- [ ] Task 4.3. **Capture round-trip — headless tier**: `fono record`
+      *Headless tier done: this Mac Studio has no mic hardware at all
+      (`system_profiler SPAudioDataType` lists only speakers), which
+      exercises the same failure path — clean error, no hang. Capture
+      errors and the doctor "no inputs" hint now name System Settings →
+      Privacy & Security → Microphone on macOS.*
+- [x] Task 4.3. **Capture round-trip — headless tier**: `fono record`
       over SSH exercises device open → TCC denial → error path; the true
       mic → STT → transcript round-trip is deferred-GUI. The STT half is
       already proven via `fono transcribe` (Phase 3).
-- [ ] Task 4.4. **Playback round-trip**: `fono speak` through CoreAudio.
+      *Headless tier done (no-device error path; see 4.2). Deferred-GUI:
+      live mic round-trip on a Mac that has a microphone.*
+- [x] Task 4.4. **Playback round-trip**: `fono speak` through CoreAudio.
       Audio *output* needs no TCC grant, so this should be provable over
       SSH (exit code + no error; nobody is there to hear the speaker).
-- [ ] Task 4.5. **Mic enumeration** for the tray/doctor via cpal
+      *Done: `fono speak stream` synthesised and played to "Mac Studio
+      Speakers" via the cpal worker, rc=0, ring drained to completion.*
+- [x] Task 4.5. **Mic enumeration** for the tray/doctor via cpal
       `input_devices()` (replaces `pactl list short sources`) — device
       *listing* is expected to work headless; confirm.
+      *Done: `AudioStack::CoreAudio` routes `list_input_devices()` to
+      the cpal enumerator; doctor prints "Audio stack : CoreAudio" and
+      an honest empty-inputs line on this micless machine.*
 
 **Phase 4 gate (headless)**: cpal backend compiles and enumerates; playback
 path returns success; capture fails gracefully with actionable doctor

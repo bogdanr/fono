@@ -111,10 +111,21 @@ features, debug build:
   and wake-word detection.
 - `fono history`, `config show|path`, `models install`, `use`,
   `voices list` — all functional.
-- Graceful degradation where it must: `fono record` errors with "audio
-  capture on this platform requires the fono-audio/cpal-backend
-  feature" (Phase 4 fixes that); `test-inject` reports
+- Graceful degradation where it must: `test-inject` reports
   `Detected key-injector: None` (Phase 6).
+
+### Phase 4 smoke (cpal / CoreAudio) — 2026-07-03
+
+- Playback: `fono speak stream` played synthesized speech to "Mac
+  Studio Speakers" through the cpal worker (rc=0, ring drained).
+- Capture: this Mac Studio has **no microphone hardware** at all
+  (`system_profiler SPAudioDataType` lists only speakers), so `fono
+  record` exercises the no-device failure path — clean error naming
+  System Settings → Privacy & Security → Microphone, no hang.
+- `fono doctor`: "Audio stack : CoreAudio", cpal-backed input
+  enumeration, macOS-specific empty-inputs hint.
+- Auto-mute: `AudioStack::CoreAudio` toggles the system output mute
+  via `osascript` — round-trip verified headless.
 
 ## Deferred-GUI checklist
 
@@ -126,7 +137,9 @@ macOS artefact is advertised as tested. Items accumulate as phases
 land:
 
 - [ ] Grant Microphone (TCC) on first capture; live `fono record` →
-  STT → transcript round-trip (plan Task 4.2/4.3).
+  STT → transcript round-trip (plan Task 4.2/4.3). Needs a Mac with a
+  microphone — the dev Mac Studio has none, so only the failure path
+  is verified.
 - [ ] Global hotkeys F7 / F8 / Esc fire in a GUI session (Phase 5).
 - [ ] Grant Accessibility (TCC); dictation lands at the cursor in
   TextEdit, Safari address bar, VS Code; per-app rules fire (Phase 6).
