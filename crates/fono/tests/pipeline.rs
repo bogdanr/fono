@@ -8,6 +8,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use fono_core::config::{Config, PolishBackend};
 use fono_core::history::HistoryDb;
+use fono_core::paths::Paths;
 use fono_polish::{FormatContext, TextFormatter};
 use fono_stt::{SpeechToText, Transcription};
 
@@ -416,4 +417,201 @@ async fn pipeline_adds_source_language_contract_when_stt_reports_language() {
         !sp.contains("It is most likely"),
         "known source language must not be a soft hint: {sp}"
     );
+}
+
+// ---- Personal vocabulary (ADR 0037, plan v3 Task 2.2) ----------------
+//
+// The four-way matrix from the plan is {batch, live} × {polish on, off}.
+// The batch half plus the v0.10 word-by-word streaming-cleanup path are
+// exercised end-to-end here through `run_oneshot`. The live half shares
+// the identical one-line hook (`load_vocabulary()` + `apply`) in
+// `on_stop_live_dictation`, which cannot be driven without a live
+// microphone session; its correctness is covered by the engine unit
+// tests in `fono-core::correction` plus compile-time signature parity.
+
+/// Root a `Paths` under `tmp` and write a `phono → Fono` vocabulary.
+fn seed_vocabulary(tmp: &std::path::Path) -> Arc<Paths> {
+    let paths = Paths::rooted_at(tmp);
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+    std::fs::write(
+        paths.vocabulary_file(),
+        "[[vocabulary]]\nfrom = [\"phono\", \"phone oh\"]\nto = \"Fono\"\n",
+    )
+    .unwrap();
+    Arc::new(paths)
+}
+
+/// polish OFF — the pure deterministic guarantee: corrected raw is what
+/// reaches the injector and the history row; substrings stay untouched.
+#[tokio::test]
+async fn pipeline_vocabulary_corrects_raw_without_polish() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("history.sqlite");
+
+    let stt: Arc<dyn SpeechToText> = Arc::new(FakeStt {
+        text: "i showed phono and the phonograph to everyone".into(),
+        lang: Some("en".into()),
+    });
+    let injected = Arc::new(Mutex::new(Vec::<String>::new()));
+    let injector = Arc::new(CapturingInjector(Arc::clone(&injected)));
+
+    let cfg = Arc::new(Config::default());
+    let (mut orch, _rx) =
+        orchestrator_for_test(stt, None, &db_path, cfg, injector, Arc::new(StubFocus));
+    orch.set_paths(seed_vocabulary(tmp.path()));
+
+    let outcome = orch.run_oneshot(vec![0.0_f32; 16_000], 1000).await;
+    match outcome {
+        PipelineOutcome::Completed { raw, .. } => {
+            assert_eq!(raw, "i showed Fono and the phonograph to everyone");
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+    assert_eq!(
+        injected.lock().unwrap().clone(),
+        vec!["i showed Fono and the phonograph to everyone".to_string()]
+    );
+    // History stores the corrected transcript (intended: it is what the
+    // user meant — noted in the ADR).
+    let db = HistoryDb::open(&db_path).unwrap();
+    let rows = db.recent(1).unwrap();
+    assert_eq!(rows[0].raw, "i showed Fono and the phonograph to everyone");
+}
+
+/// polish ON (one-shot) — the formatter must *receive* corrected text,
+/// and a formatter that re-introduces the mishearing is fixed again by
+/// the belt-and-suspenders pass on `final_text`.
+struct ReintroducingPolish;
+
+#[async_trait]
+impl TextFormatter for ReintroducingPolish {
+    async fn format(&self, raw: &str, _ctx: &FormatContext) -> Result<String> {
+        // Prove the corrected raw reached the LLM, then regress it —
+        // the pipeline's second pass must repair the output.
+        assert!(raw.contains("Fono"), "polish must receive corrected raw, got: {raw}");
+        Ok(raw.replace("Fono", "phono"))
+    }
+    fn name(&self) -> &'static str {
+        "reintroducing-polish"
+    }
+}
+
+#[tokio::test]
+async fn pipeline_vocabulary_survives_polish_reintroducing_mishearing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("history.sqlite");
+
+    let stt: Arc<dyn SpeechToText> = Arc::new(FakeStt {
+        text: "we ship phono to every desktop".into(),
+        lang: Some("en".into()),
+    });
+    let polish: Option<Arc<dyn TextFormatter>> = Some(Arc::new(ReintroducingPolish));
+    let injected = Arc::new(Mutex::new(Vec::<String>::new()));
+    let injector = Arc::new(CapturingInjector(Arc::clone(&injected)));
+
+    let mut cfg = Config::default();
+    cfg.polish.enabled = true;
+    cfg.polish.backend = PolishBackend::OpenAI;
+    cfg.polish.skip_if_words_lt = 0;
+    let cfg = Arc::new(cfg);
+
+    let (mut orch, _rx) = orchestrator_for_test(
+        stt,
+        polish,
+        &db_path,
+        Arc::clone(&cfg),
+        injector,
+        Arc::new(StubFocus),
+    );
+    orch.set_paths(seed_vocabulary(tmp.path()));
+
+    let outcome = orch.run_oneshot(vec![0.0_f32; 16_000], 1000).await;
+    match outcome {
+        PipelineOutcome::Completed { raw, cleaned, .. } => {
+            assert_eq!(raw, "we ship Fono to every desktop");
+            assert_eq!(cleaned.as_deref(), Some("we ship Fono to every desktop"));
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+    assert_eq!(injected.lock().unwrap().clone(), vec!["we ship Fono to every desktop".to_string()]);
+}
+
+/// polish ON (v0.10 word-by-word streaming inject) — the case v2 would
+/// have shipped broken: text is typed at the cursor before any final
+/// pass could run, so the upstream correction is the only chance.
+struct EchoStreamPolish;
+
+#[async_trait]
+impl TextFormatter for EchoStreamPolish {
+    async fn format(&self, raw: &str, _ctx: &FormatContext) -> Result<String> {
+        Ok(raw.trim().to_string())
+    }
+    fn name(&self) -> &'static str {
+        "echo-stream-polish"
+    }
+    async fn format_stream(
+        &self,
+        raw: &str,
+        _ctx: &FormatContext,
+    ) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
+        use futures::StreamExt as _;
+        // Echo the received raw word-by-word, mimicking a local model
+        // that preserves the proper nouns it is given.
+        let chunks: Vec<Result<String>> =
+            raw.split_inclusive(' ').map(|c| Ok(c.to_string())).collect();
+        Ok(futures::stream::iter(chunks).boxed())
+    }
+    fn is_local(&self) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn pipeline_vocabulary_reaches_streaming_cleanup_inject_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("history.sqlite");
+
+    let stt: Arc<dyn SpeechToText> = Arc::new(FakeStt {
+        text: "this is phono typing words at the cursor right now".into(),
+        lang: Some("en".into()),
+    });
+    let polish: Option<Arc<dyn TextFormatter>> = Some(Arc::new(EchoStreamPolish));
+    let injected = Arc::new(Mutex::new(Vec::<String>::new()));
+    let injector = Arc::new(CapturingInjector(Arc::clone(&injected)));
+
+    let mut cfg = Config::default();
+    cfg.polish.enabled = true;
+    cfg.polish.backend = PolishBackend::OpenAI;
+    cfg.polish.skip_if_words_lt = 0;
+    cfg.polish.stream_injection = true;
+    let cfg = Arc::new(cfg);
+
+    let (mut orch, _rx) = orchestrator_for_test(
+        stt,
+        polish,
+        &db_path,
+        Arc::clone(&cfg),
+        injector,
+        Arc::new(StubFocus),
+    );
+    orch.set_paths(seed_vocabulary(tmp.path()));
+
+    let outcome = orch.run_oneshot(vec![0.0_f32; 16_000], 1000).await;
+    let expected = "this is Fono typing words at the cursor right now";
+    match outcome {
+        PipelineOutcome::Completed { raw, cleaned, .. } => {
+            assert_eq!(raw, expected);
+            assert_eq!(cleaned.as_deref(), Some(expected));
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+    // The streamed deltas were typed at the cursor incrementally and
+    // must concatenate to the corrected text — no "phono" ever typed.
+    let captured = injected.lock().unwrap().clone();
+    let typed: String = captured.concat();
+    assert_eq!(typed, expected);
+    assert!(captured.len() > 1, "streaming must inject more than one delta: {captured:?}");
+    for delta in &captured {
+        assert!(!delta.to_lowercase().contains("phono"), "mishearing leaked: {delta}");
+    }
 }

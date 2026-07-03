@@ -158,6 +158,25 @@ pub async fn report(paths: &Paths) -> Result<String> {
     };
     writeln!(out)?;
 
+    // Personal vocabulary (ADR 0037): entry count / parse status.
+    {
+        let vpath = paths.vocabulary_file();
+        let state = if vpath.exists() {
+            match fono_core::correction::VocabularyFile::load(&vpath) {
+                Ok(f) => match f.to_table() {
+                    Ok(t) => ok(&format!("{} rule(s)", t.len())),
+                    Err(e) => bad(&format!("INVALID ({e}) — corrections disabled")),
+                },
+                Err(e) => bad(&format!("FAILED TO LOAD: {e}")),
+            }
+        } else {
+            "none (add with `fono vocabulary add <wrong> <right>`)".to_string()
+        };
+        writeln!(out, "{} {}", head("Vocabulary:"), state)?;
+        writeln!(out, "  file : {}", vpath.display())?;
+    }
+    writeln!(out)?;
+
     // ----------------------------------------------------------------
     // Backend factories — if the user picked a cloud backend, exercise
     // the factory so they see a clear "API key missing" or "feature

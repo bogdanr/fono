@@ -1,5 +1,39 @@
 # Fono — Project Status
-Last updated: 2026-07-02
+Last updated: 2026-07-03
+
+## 2026-07-03 — Personal vocabulary (deterministic correction) shipped
+
+Implemented `plans/2026-07-03-correction-with-memory-v3.md` (supersedes the
+v2 plan): a user-editable `~/.config/fono/vocabulary.toml` deterministically
+rewrites mishearings in every dictation before the text reaches the cursor.
+
+- **Architecture: correct the transcript, not the final text.** Pure
+  `correction::apply(text, &table)` runs on the raw STT result at the two
+  post-STT sites (batch + live), so one-shot inject, the v0.10 word-by-word
+  streaming inject, clipboard fallback, history, and overlay all see
+  corrected text for free. Belt-and-suspenders idempotent pass on the
+  non-streamed `final_text`.
+- **Engine** (`fono-core::correction`): whole-word/whole-phrase Unicode
+  matching, longest-match-first, case-insensitive with canonical-cased
+  output, idempotent by construction via two load-time checks (to/from
+  overlap, duplicate from). Malformed file → logged error, empty table,
+  no crash. No new crates; no new config keys (file presence is the
+  switch; reloaded per dictation — no hot-reload IPC).
+- **ADR 0037** locks the `vocabulary.toml` schema (`[[vocabulary]]`
+  entries, `from` list → `to` string).
+- **Surfaces:** `fono vocabulary add/remove/list` CLI; `fono doctor`
+  line (path, entry count, parse status); vocabulary section in the
+  browser settings page (`GET/PUT /api/vocabulary`, server-side
+  validation through the same loader); `docs/configuration.md` section.
+- **Tests:** exhaustive engine unit tests (substring safety, case
+  variants, multi-word, idempotency, validation rejections, diacritics)
+  plus pipeline integration tests covering {batch, live} × {polish
+  on/off} and the local streaming-cleanup path.
+- Seeded the first user entry: `phono → Fono` (round-trip verified via
+  the CLI).
+- Deferred (separate slices): `fono vocabulary suggest` history mining;
+  voice "fix that" hotkey.
+- **Gates green:** fmt, clippy `-D warnings`, workspace tests.
 
 ## 2026-07-02 — Web settings UI shipped (browser config screen, zero new crates)
 

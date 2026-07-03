@@ -72,6 +72,13 @@ pub type PutConfigFn = Arc<
 >;
 /// Write-only secret update: `(name, value)`. Empty value clears the entry.
 pub type SetSecretFn = Arc<dyn Fn(&str, &str) -> std::result::Result<(), String> + Send + Sync>;
+/// Read the personal vocabulary (`vocabulary.toml`) as JSON:
+/// `{"vocabulary": [{"from": […], "to": "…"}, …]}`.
+pub type GetVocabularyFn =
+    Arc<dyn Fn() -> std::result::Result<serde_json::Value, String> + Send + Sync>;
+/// Validate + persist a replacement vocabulary. Same shape as the getter.
+pub type PutVocabularyFn =
+    Arc<dyn Fn(serde_json::Value) -> std::result::Result<String, String> + Send + Sync>;
 /// Metadata for the page chrome: version, config path, secret statuses,
 /// prompt defaults.
 pub type MetaFn = Arc<dyn Fn() -> serde_json::Value + Send + Sync>;
@@ -83,6 +90,8 @@ pub struct WebSettingsHooks {
     pub get_config: GetConfigFn,
     pub put_config: PutConfigFn,
     pub set_secret: SetSecretFn,
+    pub get_vocabulary: GetVocabularyFn,
+    pub put_vocabulary: PutVocabularyFn,
     pub meta: MetaFn,
 }
 
@@ -269,6 +278,19 @@ async fn route(req: Request<Incoming>, ctx: ServerCtx) -> Response<ResBody> {
             }
         }
         (&Method::GET, "/api/meta") => json_ok(&(ctx.hooks.meta)()),
+        (&Method::GET, "/api/vocabulary") => match (ctx.hooks.get_vocabulary)() {
+            Ok(v) => json_ok(&v),
+            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        },
+        (&Method::PUT, "/api/vocabulary") => {
+            let Some(body) = read_json_body(req).await else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid or oversized JSON body");
+            };
+            match (ctx.hooks.put_vocabulary)(body) {
+                Ok(summary) => json_ok(&serde_json::json!({ "ok": true, "summary": summary })),
+                Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &e),
+            }
+        }
         (&Method::PUT, p) if p.starts_with("/api/secret/") => {
             let name = p.trim_start_matches("/api/secret/").to_owned();
             if !valid_secret_name(&name) {

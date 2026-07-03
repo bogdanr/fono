@@ -3777,8 +3777,26 @@ fn web_settings_hooks(
         Ok(())
     });
 
-    let cp = config_path;
-    let meta: fono_net::web_settings::MetaFn = Arc::new(move || {
+    let (get_vocabulary, put_vocabulary) = vocabulary_hooks(paths);
+    let meta = meta_hook(config_path, secrets_path);
+
+    fono_net::WebSettingsHooks {
+        get_config,
+        put_config,
+        set_secret,
+        get_vocabulary,
+        put_vocabulary,
+        meta,
+    }
+}
+
+/// Page-metadata hook for the web settings server. Split out of
+/// [`web_settings_hooks`] to keep it under clippy's `too_many_lines`.
+fn meta_hook(
+    config_path: std::path::PathBuf,
+    secrets_path: std::path::PathBuf,
+) -> fono_net::web_settings::MetaFn {
+    Arc::new(move || {
         use fono_core::providers as p;
         let mut names = std::collections::BTreeSet::new();
         for b in p::all_stt_backends() {
@@ -3801,7 +3819,7 @@ fn web_settings_hooks(
             .collect();
         serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
-            "config_path": cp.display().to_string(),
+            "config_path": config_path.display().to_string(),
             "secrets": statuses,
             "defaults": {
                 "polish_prompt_main": fono_core::config::default_prompt_main(),
@@ -3809,9 +3827,37 @@ fn web_settings_hooks(
                 "assistant_prompt": fono_core::config::default_assistant_prompt(),
             },
         })
+    })
+}
+
+/// Vocabulary read/write hooks for the web settings server. Split out of
+/// [`web_settings_hooks`] to keep it under clippy's `too_many_lines`.
+fn vocabulary_hooks(
+    paths: &Paths,
+) -> (fono_net::web_settings::GetVocabularyFn, fono_net::web_settings::PutVocabularyFn) {
+    let vp = paths.vocabulary_file();
+    let get_vocabulary: fono_net::web_settings::GetVocabularyFn = Arc::new(move || {
+        let file = fono_core::correction::VocabularyFile::load(&vp)
+            .map_err(|e| format!("load vocabulary: {e}"))?;
+        serde_json::to_value(&file).map_err(|e| format!("serialize vocabulary: {e}"))
     });
 
-    fono_net::WebSettingsHooks { get_config, put_config, set_secret, meta }
+    let vp = paths.vocabulary_file();
+    let put_vocabulary: fono_net::web_settings::PutVocabularyFn = Arc::new(move |value| {
+        let file: fono_core::correction::VocabularyFile =
+            serde_json::from_value(value).map_err(|e| format!("invalid vocabulary: {e}"))?;
+        // Same validation the dictation pipeline's loader applies.
+        let table = file.to_table()?;
+        if let Some(dir) = vp.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("create config dir: {e}"))?;
+        }
+        file.save(&vp).map_err(|e| format!("save vocabulary: {e}"))?;
+        info!("web settings: vocabulary saved via browser UI ({} rule(s))", table.len());
+        // No reload needed: the table is re-read at each dictation start.
+        Ok(format!("saved {} rule(s); active from the next dictation", table.len()))
+    });
+
+    (get_vocabulary, put_vocabulary)
 }
 
 /// Capability tags advertised over mDNS for the LLM service. Both wire

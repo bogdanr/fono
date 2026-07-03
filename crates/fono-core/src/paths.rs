@@ -69,6 +69,14 @@ impl Paths {
         self.config_dir.join("secrets.toml")
     }
 
+    /// Personal vocabulary for deterministic transcript correction
+    /// (ADR 0037). Lives beside `config.toml`; user-authored, never
+    /// auto-deleted.
+    #[must_use]
+    pub fn vocabulary_file(&self) -> PathBuf {
+        self.config_dir.join("vocabulary.toml")
+    }
+
     #[must_use]
     pub fn history_db(&self) -> PathBuf {
         self.data_dir.join("history.sqlite")

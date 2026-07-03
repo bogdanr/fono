@@ -11,6 +11,10 @@
 
 // ---------- state ----------
 let cfg = null, orig = null, meta = null;
+// Personal vocabulary (separate resource: GET/PUT /api/vocabulary).
+// `null` means it failed to load (malformed file) — editing is disabled
+// so a Save can never clobber a file the user needs to fix by hand.
+let vocab = null, vocabOrig = null;
 const TOKEN = new URLSearchParams(location.search).get('token') || '';
 
 async function api(path, opts = {}) {
@@ -57,6 +61,9 @@ function diffLeaves(a, b, out, pre) {
   if (JSON.stringify(a) !== JSON.stringify(b)) out.push(pre || '(root)');
 }
 function dirtyPaths() { const out = []; diffLeaves(orig, cfg, out, ''); return out; }
+function vocabDirty() {
+  return vocab != null && JSON.stringify(vocab) !== JSON.stringify(vocabOrig);
+}
 
 // ---------- provider metadata (mirrors fono-core providers.rs) ----------
 const ENV = {
@@ -388,6 +395,31 @@ const FONO_SECTIONS = [
     },
   },
   {
+    id: 'vocabulary', title: 'Vocabulary',
+    summary() {
+      if (vocab == null) return 'could not load';
+      const n = (vocab.vocabulary || []).length;
+      return n ? n + ' correction' + (n === 1 ? '' : 's') : 'none';
+    },
+    html() {
+      if (vocab == null) {
+        return '<p class="privacy-note">vocabulary.toml could not be read — fix or remove the file, then reload this page.</p>';
+      }
+      const entries = vocab.vocabulary || [];
+      const rows = entries.map((en, i) =>
+        '<div class="wake-row">'
+        + '<div><input class="input mono" data-vocab-from="' + i + '" value="' + esc((en.from || []).join(', ')) + '" placeholder="phono, phone oh" /></div>'
+        + '<div class="ctl"><span class="hint">→</span><input class="input mono" data-vocab-to="' + i + '" value="' + esc(en.to) + '" placeholder="Fono" style="width:150px" /></div>'
+        + '<button class="btn ghost" type="button" data-vocab-rm="' + i + '">Remove</button></div>').join('');
+      return row('Corrections', 'Deterministic fixes applied to every transcript before it reaches the cursor. '
+        + 'Left: the mishearings as speech-to-text writes them (comma-separated, case-insensitive; multi-word is fine). '
+        + 'Right: the spelling you want. Whole words only — a “phono” rule never touches “phonograph”. '
+        + 'Active from the next dictation.', '')
+        + rows
+        + '<div class="row master" style="border:0;padding-top:10px;"><div class="ctl"><button class="btn" type="button" data-vocab-add>+ Add correction</button></div></div>';
+    },
+  },
+  {
     id: 'assistant', title: 'Assistant',
     summary() {
       if (!gv('assistant.enabled', false)) return 'Off';
@@ -591,7 +623,7 @@ function afterChange(el, rerenderSection) {
   updateBar();
 }
 function updateBar() {
-  const n = dirtyPaths().length;
+  const n = dirtyPaths().length + (vocabDirty() ? 1 : 0);
   const bar = document.getElementById('unsaved');
   bar.hidden = n === 0;
   document.getElementById('dirtymsg').textContent = n + ' unsaved change' + (n === 1 ? '' : 's');
@@ -610,6 +642,17 @@ function boundPath(el) {
 // ---------- events ----------
 document.addEventListener('change', (e) => {
   const el = e.target;
+  if (el.dataset && el.dataset.vocabFrom !== undefined) {
+    vocab.vocabulary[+el.dataset.vocabFrom].from =
+      el.value.split(',').map((s) => s.trim()).filter(Boolean);
+    afterChange(el);
+    return;
+  }
+  if (el.dataset && el.dataset.vocabTo !== undefined) {
+    vocab.vocabulary[+el.dataset.vocabTo].to = el.value.trim();
+    afterChange(el);
+    return;
+  }
   if (!el.dataset || !el.dataset.bind) return;
   let v;
   switch (el.dataset.kind) {
@@ -632,7 +675,7 @@ document.addEventListener('input', (e) => {
 });
 
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-seg],[data-pick],[data-tag-rm],[data-wake-rm],[data-wake-add],[data-keycap],[data-reset],[data-key-edit],[data-key-clear],[data-key-save],[data-key-cancel]');
+  const t = e.target.closest('[data-seg],[data-pick],[data-tag-rm],[data-wake-rm],[data-wake-add],[data-vocab-rm],[data-vocab-add],[data-keycap],[data-reset],[data-key-edit],[data-key-clear],[data-key-save],[data-key-cancel]');
   if (!t) return;
   const secEl = t.closest('details.sec');
   const sec = secEl ? FONO_SECTIONS.find((s) => 'd-' + s.id === secEl.id) : null;
@@ -659,6 +702,19 @@ document.addEventListener('click', (e) => {
     arr.push({ model: 'hey_fono', sensitivity: 0.5, target: 'dictation' });
     set(cfg, 'wakeword.phrases', arr);
     afterChange(t, sec);
+    return;
+  }
+  if (t.dataset.vocabRm !== undefined && vocab) {
+    vocab.vocabulary.splice(parseInt(t.dataset.vocabRm, 10), 1);
+    if (sec) renderSection(sec);
+    updateBar();
+    return;
+  }
+  if (t.dataset.vocabAdd !== undefined && vocab) {
+    if (!Array.isArray(vocab.vocabulary)) vocab.vocabulary = [];
+    vocab.vocabulary.push({ from: [], to: '' });
+    if (sec) renderSection(sec);
+    updateBar();
     return;
   }
   if (t.dataset.keycap) { captureKey(t); return; }
@@ -750,15 +806,30 @@ async function putSecret(env, value, sec) {
 // ---------- save / discard ----------
 async function saveAll() {
   try {
-    const res = await api('/api/config', { method: 'PUT', body: JSON.stringify(cfg) });
-    orig = clone(cfg);
+    let summary = '';
+    if (dirtyPaths().length) {
+      const res = await api('/api/config', { method: 'PUT', body: JSON.stringify(cfg) });
+      orig = clone(cfg);
+      summary = res.summary || 'Saved';
+    }
+    if (vocabDirty()) {
+      const res = await api('/api/vocabulary', { method: 'PUT', body: JSON.stringify(vocab) });
+      vocabOrig = clone(vocab);
+      summary += (summary ? ' · ' : '') + ('vocabulary: ' + (res.summary || 'saved'));
+    }
     updateBar();
-    toast(res.summary || 'Saved');
+    toast(summary || 'Saved');
   } catch (err) {
     toast('Save failed: ' + err.message, true);
+    updateBar();
   }
 }
-function discardAll() { cfg = clone(orig); renderAll(); updateBar(); }
+function discardAll() {
+  cfg = clone(orig);
+  if (vocab != null) vocab = clone(vocabOrig);
+  renderAll();
+  updateBar();
+}
 
 let toastTimer = null;
 function toast(msg, isErr) {
@@ -792,8 +863,13 @@ async function init() {
   document.getElementById('savebtn').addEventListener('click', saveAll);
   document.getElementById('discardbtn').addEventListener('click', discardAll);
   try {
-    const [c, m] = await Promise.all([api('/api/config'), api('/api/meta')]);
+    const [c, m, v] = await Promise.all([
+      api('/api/config'),
+      api('/api/meta'),
+      api('/api/vocabulary').catch(() => null),
+    ]);
     cfg = c; orig = clone(c); meta = m;
+    vocab = v; vocabOrig = v == null ? null : clone(v);
     document.getElementById('verchip').textContent = 'settings \u00b7 v' + (meta.version || '');
     document.getElementById('cfgpath').textContent = meta.config_path || '';
     renderAll();

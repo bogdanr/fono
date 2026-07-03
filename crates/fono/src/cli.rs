@@ -233,6 +233,17 @@ pub enum Cmd {
         #[command(subcommand)]
         action: KeysCmd,
     },
+    /// Manage the personal vocabulary (`~/.config/fono/vocabulary.toml`).
+    ///
+    /// Deterministic transcript corrections: teach Fono once that a
+    /// mishearing (e.g. "phono") should always be written as the
+    /// canonical spelling ("Fono"). Applied to every dictation, with
+    /// any STT engine, polish on or off. Changes take effect on the
+    /// next dictation — no daemon restart needed.
+    Vocabulary {
+        #[command(subcommand)]
+        action: VocabularyCmd,
+    },
     /// Print shell completions (bash, zsh, fish, powershell, elvish).
     Completions {
         /// Target shell.
@@ -483,6 +494,28 @@ pub enum KeysCmd {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum VocabularyCmd {
+    /// List all vocabulary entries.
+    List,
+    /// Add a correction: `fono vocabulary add phono Fono`.
+    ///
+    /// If an entry for the same canonical spelling already exists, the
+    /// mishearing is appended to it. Multi-word mishearings are fine
+    /// (quote them: `fono vocabulary add "phone oh" Fono`).
+    Add {
+        /// The mishearing as STT writes it (case-insensitive).
+        wrong: String,
+        /// The canonical spelling to emit instead.
+        right: String,
+    },
+    /// Remove a mishearing: `fono vocabulary remove phono`.
+    Remove {
+        /// The mishearing to remove (case-insensitive).
+        wrong: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum ConfigCmd {
     /// Open the config file in `$EDITOR` (defaults to `nano`).
     Edit,
@@ -703,6 +736,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Some(Cmd::Use { action }) => use_cmd(&paths, action).await,
         Some(Cmd::Keys { action }) => keys_cmd(&paths, action).await,
+        Some(Cmd::Vocabulary { action }) => vocabulary_cmd(&paths, action),
         Some(Cmd::TestOverlay) => {
             test_overlay_cmd();
             Ok(())
@@ -2143,6 +2177,75 @@ async fn keys_cmd(paths: &Paths, action: KeysCmd) -> Result<()> {
             let secrets = Secrets::load(&secrets_path).unwrap_or_default();
             print_keys_list(&secrets);
             println!("\nFor live reachability probes, run `fono doctor`.");
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// `fono vocabulary …` — personal vocabulary (ADR 0037). Pure file
+// edits validated through the same loader the pipeline uses; the
+// daemon re-reads the file at each dictation start, so no reload IPC.
+// ---------------------------------------------------------------------
+
+fn vocabulary_cmd(paths: &Paths, action: VocabularyCmd) -> Result<()> {
+    use fono_core::correction::{VocabularyEntry, VocabularyFile};
+    let path = paths.vocabulary_file();
+    match action {
+        VocabularyCmd::List => {
+            let file = VocabularyFile::load(&path)?;
+            if let Err(e) = file.to_table() {
+                println!("warning: {} is invalid ({e}); corrections are disabled", path.display());
+            }
+            if file.vocabulary.is_empty() {
+                println!("no vocabulary entries ({})", path.display());
+                println!("add one with: fono vocabulary add <wrong> <right>");
+            } else {
+                println!("personal vocabulary ({}):", path.display());
+                for e in &file.vocabulary {
+                    println!("  {} → {}", e.from.join(", "), e.to);
+                }
+            }
+        }
+        VocabularyCmd::Add { wrong, right } => {
+            let mut file = VocabularyFile::load(&path)?;
+            match file.vocabulary.iter_mut().find(|e| e.to == right) {
+                Some(entry) => {
+                    if !entry.from.iter().any(|f| f.eq_ignore_ascii_case(&wrong)) {
+                        entry.from.push(wrong.clone());
+                    }
+                }
+                None => {
+                    file.vocabulary
+                        .push(VocabularyEntry { from: vec![wrong.clone()], to: right.clone() });
+                }
+            }
+            // Validate exactly as the pipeline loader will.
+            if let Err(e) = file.to_table() {
+                anyhow::bail!("refusing to save an invalid vocabulary: {e}");
+            }
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            file.save(&path)?;
+            println!("added: {wrong} → {right}");
+            println!("takes effect on the next dictation (no restart needed)");
+        }
+        VocabularyCmd::Remove { wrong } => {
+            let mut file = VocabularyFile::load(&path)?;
+            let mut removed = false;
+            for e in &mut file.vocabulary {
+                let before = e.from.len();
+                e.from.retain(|f| !f.eq_ignore_ascii_case(&wrong));
+                removed |= e.from.len() != before;
+            }
+            file.vocabulary.retain(|e| !e.from.is_empty());
+            if removed {
+                file.save(&path)?;
+                println!("removed: {wrong}");
+            } else {
+                println!("not found: {wrong}");
+            }
         }
     }
     Ok(())

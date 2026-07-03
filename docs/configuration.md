@@ -573,12 +573,53 @@ key, by setting `api_key_ref` in `[stt.cloud]` / `[polish.cloud]` /
 `"GROQ_API_KEY"`); the daemon reads `$GROQ_API_KEY` at request time and
 nothing touches disk. Useful for systemd `EnvironmentFile=` setups.
 
+## Personal vocabulary (`vocabulary.toml`)
+
+Deterministic transcript correction: teach Fono once that a mishearing
+should always come out as the canonical spelling, and every future
+dictation is fixed before the text reaches the cursor — with any STT
+engine, polish on or off, batch or live, including the word-by-word
+streaming inject. No model call, no network, no config keys.
+
+`~/.config/fono/vocabulary.toml` is a plain, hand-editable file:
+
+```toml
+[[vocabulary]]
+from = ["phono", "phone oh"]   # mishearings (case-insensitive)
+to   = "Fono"                  # canonical spelling always emitted
+```
+
+Or manage it via the CLI (or the browser settings page):
+
+```sh
+fono vocabulary add phono Fono        # add a correction
+fono vocabulary add "phone oh" Fono   # multi-word mishearing
+fono vocabulary list
+fono vocabulary remove phono
+```
+
+Semantics (see ADR 0037 for the full contract):
+
+- whole words / whole phrases only — “phonograph” is never touched;
+- matching is case-insensitive, output is your exact `to` casing;
+- multi-word phrases match across spaces or hyphens, never across
+  sentence punctuation;
+- longest match wins; substitutions run in a single pass and are
+  idempotent (validated at load — an invalid file disables corrections
+  with a warning in the log and in `fono doctor`, it never crashes).
+
+The file is re-read at the start of each dictation, so edits take
+effect immediately — no daemon restart. A missing or empty file is
+simply a no-op. The file is never auto-deleted or auto-modified;
+learning corrections stays opt-in.
+
 ## On-disk paths (XDG)
 
 | Kind | Path |
 |---|---|
 | Config | `$XDG_CONFIG_HOME/fono/config.toml` (default `~/.config/fono/config.toml`) |
 | Secrets | `$XDG_CONFIG_HOME/fono/secrets.toml` |
+| Vocabulary | `$XDG_CONFIG_HOME/fono/vocabulary.toml` |
 | Whisper models | `$XDG_CACHE_HOME/fono/models/whisper/` |
 | Polish models | `$XDG_CACHE_HOME/fono/models/polish/` |
 | History DB | `$XDG_DATA_HOME/fono/history.sqlite` |

@@ -2331,6 +2331,14 @@ impl SessionOrchestrator {
         }
     }
 
+    /// Point the orchestrator at a `Paths` root after construction.
+    /// Used by integration tests to exercise features that resolve
+    /// per-user files (e.g. `vocabulary.toml`) without going through
+    /// the full daemon constructor.
+    pub fn set_paths(&mut self, paths: Arc<Paths>) {
+        self.paths = Some(paths);
+    }
+
     /// Begin recording. Refuses if a previous pipeline is still running.
     #[allow(clippy::too_many_lines, clippy::suboptimal_flops, clippy::many_single_char_names)]
     pub async fn on_start_recording(&self, mode: RecordingMode) -> Result<()> {
@@ -3628,6 +3636,7 @@ impl SessionOrchestrator {
         let action_tx = self.action_tx.clone();
         let in_flight = Arc::clone(&self.pipeline_in_flight);
         let config = self.current_config();
+        let vocabulary = self.load_vocabulary();
         let injector = Arc::clone(&self.injector);
         let sample_rate = self.capture_cfg.target_sample_rate;
         // Standalone-waveform overlay: clone the handle so the pipeline
@@ -3679,6 +3688,7 @@ impl SessionOrchestrator {
                 polish.as_deref(),
                 &history,
                 &config,
+                &vocabulary,
                 injector.as_ref(),
                 focus_info,
                 overlay.as_ref(),
@@ -3740,6 +3750,7 @@ impl SessionOrchestrator {
         let stt = self.current_stt();
         let polish = self.current_llm();
         let config = self.current_config();
+        let vocabulary = self.load_vocabulary();
         // H.2: probe focus on a blocking thread so the async executor
         // doesn't stall on Wayland IPC / X11 calls.
         let focus = Arc::clone(&self.focus);
@@ -3754,6 +3765,7 @@ impl SessionOrchestrator {
             polish.as_deref(),
             &self.history,
             &config,
+            &vocabulary,
             self.injector.as_ref(),
             focus_info,
             None,
@@ -3761,6 +3773,18 @@ impl SessionOrchestrator {
             polish_walk_duration(Duration::from_millis(capture_ms)),
         )
         .await
+    }
+
+    /// Load the personal vocabulary (ADR 0037). Re-read per dictation —
+    /// the file is tiny and this is off the audio hot path — so
+    /// `fono vocabulary add` (or a web-UI edit) is picked up by the very
+    /// next dictation with no daemon reload. Orchestrators built without
+    /// `Paths` (tests) run on an empty, no-op table.
+    fn load_vocabulary(&self) -> fono_core::correction::VocabularyTable {
+        self.paths
+            .as_deref()
+            .map(|p| fono_core::correction::VocabularyTable::load_or_empty(&p.vocabulary_file()))
+            .unwrap_or_default()
     }
 }
 
@@ -4131,7 +4155,12 @@ impl SessionOrchestrator {
             }
         };
 
+        // Personal vocabulary (ADR 0037): same deterministic correction as
+        // the batch path, applied to the committed transcript before polish
+        // / inject / history so every consumer sees the canonical spelling.
+        let vocabulary = self.load_vocabulary();
         let raw = transcript.committed.trim().to_string();
+        let raw = if vocabulary.is_empty() { raw } else { vocabulary.apply(&raw) };
         if raw.is_empty() {
             warn!("live-dictation: empty transcript after {capture_ms} ms");
             // Empty-transcript microphone recovery hook (live path).
@@ -4416,6 +4445,7 @@ async fn run_pipeline(
     polish: Option<&dyn TextFormatter>,
     history: &Arc<Mutex<HistoryDb>>,
     config: &Config,
+    vocabulary: &fono_core::correction::VocabularyTable,
     injector: &dyn Injector,
     focus_info: FocusInfo,
     overlay: Option<&fono_overlay::OverlayHandle>,
@@ -4543,6 +4573,11 @@ async fn run_pipeline(
     // through. See `crates/fono-stt/src/streaming.rs:227`.
     let raw_pre_strip = trans.text.trim().to_string();
     let raw = fono_stt::strip_trailing_hallucinations(&raw_pre_strip);
+    // Personal vocabulary (ADR 0037): deterministic correction applied to
+    // the transcript itself, so polish, injection (one-shot *and* the
+    // word-by-word streaming path), clipboard, history, and the overlay
+    // all see the canonical spelling.
+    let raw = if vocabulary.is_empty() { raw } else { vocabulary.apply(&raw) };
     metrics.raw_chars = raw.chars().count();
     if raw.is_empty() {
         if raw_pre_strip.is_empty() {
@@ -4720,6 +4755,15 @@ async fn run_pipeline(
         None
     };
 
+    // Belt-and-suspenders vocabulary pass (idempotent): guards against the
+    // polish LLM re-introducing a mishearing. Applied to `cleaned` itself so
+    // injection, history, and the returned outcome stay consistent. The
+    // streamed-inject path has already typed its text and skips the one-shot
+    // inject below anyway.
+    let cleaned = match cleaned {
+        Some(c) if !vocabulary.is_empty() && !stream_injected => Some(vocabulary.apply(&c)),
+        other => other,
+    };
     let final_text = cleaned.as_deref().unwrap_or(&raw).to_string();
     metrics.final_chars = final_text.chars().count();
 
