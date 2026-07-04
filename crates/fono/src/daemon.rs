@@ -3071,6 +3071,16 @@ async fn apply_update_via_tray(update_status: Arc<RwLock<Option<fono_update::Upd
                 out.bytes,
                 out.sha256
             );
+            // macOS: re-seal the app bundle with the same local
+            // identity so the TCC Accessibility grant survives the
+            // swap. No-op elsewhere and for bare-binary installs.
+            match crate::install::resign_after_update(&out.installed_at, Some(&info.version)) {
+                Some(true) => info!("tray: re-signed Fono.app (stable identity, grants preserved)"),
+                Some(false) => {
+                    warn!("tray: re-signed Fono.app ad-hoc; Accessibility may need re-granting");
+                }
+                None => {}
+            }
             fono_core::notify::send(
                 "Fono — update installed",
                 &format!("Restarting into {} …", info.tag),

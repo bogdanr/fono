@@ -1,6 +1,36 @@
 # Fono — Project Status
 Last updated: 2026-07-04
 
+## 2026-07-04 — macOS Phase 10 complete: `fono update` with grant-preserving re-sign
+
+Phase 10 of `plans/2026-07-03-macos-port-v1.md` at the headless tier.
+Zero new crates; Linux update flow untouched.
+
+- **Asset naming (Task 10.1):** `fono-update` gained the
+  `current_asset_name()` darwin arm — `fono-vX.Y.Z-aarch64-apple-darwin`,
+  the single Metal variant per the Phase 3 artefact decision. No
+  cpu/gpu split on macOS, so the GPU-upgrade suggestion machinery is
+  Linux-only by construction; unit tests pin both facts.
+- **Grant-preserving self-replacement (Task 10.2):** after the updater
+  swaps the binary, both apply sites (CLI `fono update` and the
+  tray-triggered daemon path) call `install::resign_after_update()`,
+  which re-signs the enclosing `Fono.app` with the persistent
+  `fono-local-signing` identity. Bench-proven over SSH: the swap
+  breaks the bundle seal, the re-sign restores it, and
+  `codesign -d -r-` shows the designated requirement byte-identical
+  before/after — the one-time Accessibility grant survives every
+  update. Bare-binary installs skip the hook; re-sign failure warns
+  with the recovery path instead of failing the update.
+- **Headless smoke:** `fono update --check` resolves the darwin asset
+  name and truthfully reports that no release carries it yet (Phase 11
+  publishes the artefact). End-to-end swap-and-relaunch against a real
+  release is on the deferred checklist in `docs/build-macos.md`.
+- **Gates:** Linux fmt / clippy `-D warnings` / 36 test suites green
+  (Task 10.3); darwin clippy clean, fono + fono-update tests green.
+
+Next: Phase 11 — release workflow artefact (`release.yml` `macos-15`
+row, Metal variant), then Phase 12 (promote CI to gating).
+
 ## 2026-07-04 — macOS Phase 9 complete: install, autostart, permissions onboarding
 
 Phase 9 of `plans/2026-07-03-macos-port-v1.md` at the headless tier,

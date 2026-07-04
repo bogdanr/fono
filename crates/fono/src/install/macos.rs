@@ -90,8 +90,7 @@ fn log_file(home: &Path) -> PathBuf {
 /// Fono out of the Dock and Cmd+Tab (menu-bar app); the microphone
 /// usage string is mandatory for bundled apps — first mic access
 /// crashes without it.
-fn info_plist() -> String {
-    let version = env!("CARGO_PKG_VERSION");
+fn info_plist(version: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -475,6 +474,42 @@ fn sign_bundle(bundle: &Path, signing: Signing) -> Signing {
 // Public entry points
 // ---------------------------------------------------------------------
 
+/// The `.app` bundle root that `path` lives inside, if any.
+fn enclosing_bundle(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|a| a.extension().is_some_and(|e| e.eq_ignore_ascii_case("app")))
+        .map(Path::to_path_buf)
+}
+
+/// Re-sign the app bundle after `fono update` swapped the binary inside
+/// it (macOS port plan Task 10.2 / the update half of Task 11.4).
+///
+/// Replacing `Contents/MacOS/fono` invalidates the bundle's code
+/// signature; left broken, the next launch would fail TCC's
+/// designated-requirement re-check and silently void the Accessibility
+/// grant. Re-signing with the *same* local certificate (created by
+/// `fono install`) restores an identical designated requirement, so the
+/// grant survives. `new_version` (the tag just installed) refreshes the
+/// bundle's version strings before sealing — the requirement only pins
+/// bundle id + certificate, so this is grant-neutral.
+///
+/// Returns `None` when `installed_at` is a bare binary outside any
+/// `.app` bundle (nothing to re-sign — grants were never
+/// bundle-attributed), `Some(true)` when the stable local identity
+/// sealed the bundle, `Some(false)` on the ad-hoc fallback (macOS will
+/// ask the user to re-toggle Accessibility once).
+pub fn resign_after_update(installed_at: &Path, new_version: Option<&str>) -> Option<bool> {
+    let bundle = enclosing_bundle(installed_at)?;
+    if let Some(v) = new_version {
+        let plist = bundle.join("Contents").join("Info.plist");
+        if plist.exists() {
+            let _ = write_atomic(&plist, info_plist(v).as_bytes(), 0o644);
+        }
+    }
+    let want = if signing_identity_present() { Signing::LocalCert } else { Signing::AdHoc };
+    Some(sign_bundle(&bundle, want) == Signing::LocalCert)
+}
+
 pub fn run_install(mode: InstallModeArg, dry_run: bool) -> Result<()> {
     if mode == InstallModeArg::Server {
         bail!(
@@ -515,7 +550,11 @@ pub fn run_install(mode: InstallModeArg, dry_run: bool) -> Result<()> {
             .with_context(|| format!("read running binary at {}", src.display()))?;
         write_atomic(&bin, &bytes, 0o755)?;
     }
-    write_atomic(&bundle.join("Contents").join("Info.plist"), info_plist().as_bytes(), 0o644)?;
+    write_atomic(
+        &bundle.join("Contents").join("Info.plist"),
+        info_plist(env!("CARGO_PKG_VERSION")).as_bytes(),
+        0o644,
+    )?;
     eprintln!("  · {}", bundle.display());
 
     // 2. Stable signing identity + signature
@@ -774,7 +813,7 @@ mod tests {
 
     #[test]
     fn info_plist_carries_the_load_bearing_keys() {
-        let p = info_plist();
+        let p = info_plist(env!("CARGO_PKG_VERSION"));
         // Fixed bundle id — TCC grants key on it; never change.
         assert!(p.contains("<string>org.fono.app</string>"));
         // Menu-bar app: no Dock icon.
@@ -806,7 +845,7 @@ mod tests {
         if !try_run("plutil", &["-help"]) {
             return;
         }
-        for doc in [info_plist(), launch_agent_plist(Path::new("/Users/t"))] {
+        for doc in [info_plist("9.9.9"), launch_agent_plist(Path::new("/Users/t"))] {
             let tmp = tempfile::NamedTempFile::new().expect("tmp");
             std::fs::write(tmp.path(), doc).expect("write");
             assert!(try_run("plutil", &["-lint", &tmp.path().to_string_lossy()]));
@@ -817,5 +856,18 @@ mod tests {
     fn server_mode_is_refused() {
         let err = run_install(InstallModeArg::Server, true).unwrap_err();
         assert!(err.to_string().contains("Linux-only"));
+    }
+
+    /// Path logic for the update-time re-sign hook: binaries inside a
+    /// bundle resolve to the bundle root; bare binaries resolve to None.
+    #[test]
+    fn enclosing_bundle_detects_bundle_layout() {
+        let inside = Path::new("/Users/u/Applications/Fono.app/Contents/MacOS/fono");
+        assert_eq!(
+            enclosing_bundle(inside).as_deref(),
+            Some(Path::new("/Users/u/Applications/Fono.app"))
+        );
+        assert_eq!(enclosing_bundle(Path::new("/usr/local/bin/fono")), None);
+        assert_eq!(enclosing_bundle(Path::new("/Users/u/.cargo/bin/fono")), None);
     }
 }

@@ -218,6 +218,25 @@ features, debug build:
   symlink + `~/.cache/fono` removed; config, history, and the signing
   keychain kept (re-install reuses the same identity).
 
+### Phase 10 smoke (`fono update`) — 2026-07-04
+
+- `fono update --check` resolves the darwin asset name
+  (`fono-vX.Y.Z-aarch64-apple-darwin`, single Metal variant) and
+  reports truthfully that the latest release carries no matching
+  asset — correct until Phase 11 publishes one. The GPU-upgrade
+  suggestion machinery is Linux-only by construction (macOS ships one
+  variant).
+- **Update swap + re-sign sequence bench-proven** (the exact steps
+  `install::resign_after_update()` performs): swapping the binary
+  inside `Fono.app` breaks the bundle seal (`codesign --verify`
+  complains), `codesign --force --sign fono-local-signing` restores
+  it, `codesign --verify --deep` passes, and `codesign -d -r-` shows
+  the designated requirement **byte-identical** before/after — the
+  Accessibility grant therefore survives `fono update`.
+- Bare-binary installs (no `Fono.app` on the executable path) skip
+  the hook silently; a failed re-sign warns and points at the
+  re-grant + `fono install` recovery instead of failing the update.
+
 ## Deferred-GUI checklist
 
 The dev Mac is headless-only, so anything that needs a seated user —
@@ -260,3 +279,7 @@ land:
   `fono update` (or a re-install simulating one) — the grant must
   survive without re-toggling (stable designated requirement,
   Phase 9 / Task 11.4).
+- [ ] End-to-end `fono update` against a real published darwin release
+  asset (Phase 10; needs Phase 11's artefact): download, sha256
+  verify, in-place swap, automatic re-sign, relaunch — and the
+  Accessibility grant survives without re-toggling.

@@ -610,14 +610,37 @@ end-to-end. Linux install layer byte-identical (module split only).
 
 ### Phase 10 — `fono update` on macOS
 
-- [ ] Task 10.1. **Asset naming** via the `current_asset_name()` seam
-      (Windows plan Task 1.7): `fono-vX.Y.Z-aarch64-apple-darwin`.
-- [ ] Task 10.2. **Self-replacement**: plain rename works on macOS (unix
-      semantics) — but replacing a signed running binary invalidates the
-      ad-hoc signature cache; re-sign check + relaunch path verified.
-- [ ] Task 10.3. **Linux update flow regression check.**
+- [x] Task 10.1. **Asset naming** via the `current_asset_name()` seam
+      (Windows plan Task 1.7): darwin selects
+      `fono-vX.Y.Z-aarch64-apple-darwin` (single Metal variant — no
+      cpu/gpu split, matching the Phase 3 artefact decision, so the
+      GPU-upgrade suggestion machinery is Linux-only by construction).
+      Unit tests pin the darwin asset name and the absence of an
+      upgrade suggestion.
+- [x] Task 10.2. **Self-replacement**: unix rename semantics reused
+      unchanged; the darwin-only step is the post-swap **re-sign hook**
+      — after the updater swaps the binary, both apply sites (CLI
+      `fono update` and the tray-triggered daemon path) call
+      `install::resign_after_update()`, which re-signs the enclosing
+      `Fono.app` with the persistent `fono-local-signing` identity so
+      the designated requirement — and therefore the one-time
+      Accessibility grant — survives the update. Bench-proven over
+      SSH: swap breaks the bundle seal (`codesign --verify` fails),
+      the re-sign hook restores it, and `codesign -d -r-` is
+      byte-identical before/after. Bare-binary installs (no bundle)
+      skip the hook silently; a failed re-sign warns with the
+      re-grant + `fono install` recovery path instead of failing the
+      update.
+- [x] Task 10.3. **Linux update flow regression check** — the hook is
+      a no-op shim off darwin; fmt/clippy/36 suites green, updater
+      asset-selection tests unchanged.
 
-**Phase 10 gate**: `fono update` swaps the binary and relaunches on macOS.
+**Phase 10 gate**: met at the headless tier — `fono update --check`
+resolves the darwin asset name and reports truthfully (no darwin asset
+published until Phase 11); the swap + re-sign + verify sequence proven
+on the bench. The end-to-end swap-and-relaunch against a real
+published release lands with Phase 11's artefact and is noted on the
+deferred checklist in `docs/build-macos.md`.
 
 ### Phase 11 — Release workflow artefact
 

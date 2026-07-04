@@ -2518,6 +2518,18 @@ async fn update_cmd(
         println!("(dry-run; running binary unchanged)");
         return Ok(());
     }
+    // macOS: swapping the binary broke the bundle's code signature;
+    // re-seal with the same local identity so the TCC Accessibility
+    // grant (keyed to the designated requirement) survives the update.
+    // No-op on other platforms and for bare-binary installs.
+    match crate::install::resign_after_update(&outcome.installed_at, Some(&info.version)) {
+        Some(true) => println!("re-signed Fono.app (stable identity: permission grants preserved)"),
+        Some(false) => println!(
+            "warning: re-signed Fono.app ad-hoc — macOS may ask you to \
+             re-enable the Accessibility permission once"
+        ),
+        None => {}
+    }
     if no_restart {
         println!("restart fono to use the new binary");
         return Ok(());

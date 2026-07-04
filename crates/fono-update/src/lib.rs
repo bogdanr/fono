@@ -8,11 +8,14 @@
 //!
 //! ## Asset naming
 //!
-//! Releases publish a single uncompressed binary per arch named
-//! `fono-<tag>-<arch>` (e.g. `fono-v0.2.0-x86_64`), per
-//! `.github/workflows/release.yml` and the `install` script on the site
-//! branch. Distro-packaged assets (`.txz` / `.deb` / `.pkg.tar.zst`) are
-//! ignored — see [`is_package_managed`].
+//! Releases publish a single uncompressed binary per target. Linux
+//! assets are named `fono-<tag>-<arch>` (e.g. `fono-v0.2.0-x86_64`),
+//! per `.github/workflows/release.yml` and the `install` script on the
+//! site branch. macOS assets carry the full target triple to stay
+//! unambiguous next to the bare-arch Linux names in the same release:
+//! `fono-<tag>-<arch>-apple-darwin` (single Metal-accelerated variant —
+//! no cpu/gpu split on macOS). Distro-packaged assets (`.txz` / `.deb`
+//! / `.pkg.tar.zst`) are ignored — see [`is_package_managed`].
 //!
 //! ## Privacy
 //!
@@ -160,11 +163,17 @@ pub const GPU_ASSET_PREFIX: &str = "fono-gpu";
 /// Vulkan capability.
 pub fn asset_name_for(tag: &str, prefix: &str) -> Option<String> {
     let arch = current_arch()?;
-    // Linux-only today; the install script enforces the same.
-    if !cfg!(target_os = "linux") {
-        return None;
+    if cfg!(target_os = "linux") {
+        Some(format!("{prefix}-{tag}-{arch}"))
+    } else if cfg!(target_os = "macos") {
+        // Full target triple: distinguishes the darwin asset from the
+        // bare-arch Linux ones published in the same release. One
+        // Metal-accelerated variant only (macOS port plan, Phase 3
+        // artefact-shape decision), so no `fono-gpu` sibling exists.
+        Some(format!("{prefix}-{tag}-{arch}-apple-darwin"))
+    } else {
+        None
     }
-    Some(format!("{prefix}-{tag}-{arch}"))
 }
 
 /// Pick the right release-asset prefix for this host: GPU-enabled
@@ -183,6 +192,12 @@ pub fn asset_name_for(tag: &str, prefix: &str) -> Option<String> {
 /// result.
 #[must_use]
 pub fn desired_asset_prefix() -> &'static str {
+    // macOS ships a single Metal-accelerated variant (no cpu/gpu
+    // split), so the base prefix is always right and the Vulkan probe
+    // is meaningless there.
+    if cfg!(target_os = "macos") {
+        return CPU_ASSET_PREFIX;
+    }
     if fono_core::vulkan_probe::probe().is_usable() {
         GPU_ASSET_PREFIX
     } else {
@@ -784,6 +799,19 @@ mod tests {
             assert!(cpu.starts_with("fono-v1.2.3-"));
             let gpu = asset_name_for("v1.2.3", GPU_ASSET_PREFIX).unwrap();
             assert!(gpu.starts_with("fono-gpu-v1.2.3-"));
+        }
+    }
+
+    /// The darwin asset carries the full target triple and there is no
+    /// GPU sibling — the desired prefix short-circuits to the base one
+    /// regardless of any Vulkan runtime that may be lying around.
+    #[test]
+    fn asset_name_uses_target_triple_on_macos() {
+        if cfg!(target_os = "macos") {
+            let name = asset_name_for("v1.2.3", CPU_ASSET_PREFIX).unwrap();
+            assert!(name.starts_with("fono-v1.2.3-"));
+            assert!(name.ends_with("-apple-darwin"));
+            assert_eq!(desired_asset_prefix(), CPU_ASSET_PREFIX);
         }
     }
 

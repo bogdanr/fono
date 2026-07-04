@@ -28,7 +28,24 @@ pub use linux::{doctor_state, run_install, run_uninstall};
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::{doctor_state, run_install, run_uninstall};
+pub use macos::{doctor_state, resign_after_update, run_install, run_uninstall};
+
+/// Post-update hook: on macOS, re-seal the app bundle after `fono
+/// update` swapped the binary inside it, so the TCC Accessibility grant
+/// (keyed to the bundle's designated requirement) survives the update.
+/// On every other platform there is nothing to re-sign.
+///
+/// Returns `None` when nothing needed doing (non-macOS, or a bare
+/// binary outside any `.app` bundle), `Some(true)` when the stable
+/// local identity re-sealed the bundle, `Some(false)` on the ad-hoc
+/// fallback.
+#[cfg(not(target_os = "macos"))]
+pub fn resign_after_update(
+    _installed_at: &std::path::Path,
+    _new_version: Option<&str>,
+) -> Option<bool> {
+    None
+}
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod unsupported {
