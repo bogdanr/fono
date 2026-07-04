@@ -14,11 +14,21 @@ The home page is [fono.page](https://fono.page).
 <table width="100%">
 <tr>
 <td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#personal-vocabulary--voice-correction">Personal vocabulary &amp; voice correction</a></strong><br>Teach Fono once that "Phono" means "Fono" — it sticks forever, deterministically, before the text ever hits the cursor.<br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".</td>
-<td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#self-hosted-modelship-backend">Self-hosted Modelship backend</a></strong><br>One box on your LAN runs the LLM, speech-to-text, text-to-speech, and embeddings — every Fono desktop points at it, fully local.<br><br><strong><a href="#hover-context-injection">Hover-context injection</a></strong> <em>(experimental)</em><br>Terminal hovered → shell prompts. Code editor hovered → identifier casing.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#macos-and-windows">macOS + Windows</a></strong><br>Native platform integrations.</td>
+<td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#self-hosted-modelship-backend">Self-hosted Modelship backend</a></strong><br>One box on your LAN runs the LLM, speech-to-text, text-to-speech, and embeddings — every Fono desktop points at it, fully local.<br><br><strong><a href="#hover-context-injection">Hover-context injection</a></strong> <em>(experimental)</em><br>Terminal hovered → shell prompts. Code editor hovered → identifier casing.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#windows">Windows</a></strong><br>Native platform integration — macOS shipped in v0.15.0.</td>
 </tr>
 </table>
 
 ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge)
+
+**[v0.15.0 — macOS support](#shipped)**  
+Fono now runs on Apple Silicon Macs: dictation, the voice assistant, a native
+menu-bar icon with the full menu, the on-screen recording indicator, global
+hotkeys, cursor injection, and local text-to-speech, all Metal-accelerated.
+`fono install` sets up a self-signed app bundle and start-at-login with a
+guided one-time permissions flow — no Apple developer account needed, and the
+grant survives every update. Verified headless on remote Apple Silicon
+hardware; give it a try and file an issue with what you find.
+*(2026-07-04)*
 
 **[v0.14.0 — Settings in your browser](#shipped)**  
 Pick *Settings…* in the tray (or run `fono config web`) and every Fono option
@@ -267,17 +277,10 @@ windows). The remaining idea is keying the context on the window under the
 while referencing another. Plan sketch:
 `plans/2026-05-26-hover-context-injection-v1.md`.
 
-### macOS and Windows
+### Windows
 
-Native integrations for both platforms. **macOS is code-complete on `main`
-and ships with the next release**: menu-bar app, global hotkeys, native
-overlay, CoreAudio capture/playback with Metal-accelerated local
-transcription, and a one-command `fono install` that assembles a
-self-signed `Fono.app` whose one-time Accessibility grant survives every
-update — no Apple developer account involved. Verified headless on remote
-Apple Silicon hardware; a final manual pass on a physical display is the
-remaining step (`docs/build-macos.md`). Windows follows the same
-playbook: system-tray app and native installer
+Native integration following the same playbook as macOS (shipped in
+v0.15.0, see below): system-tray app and native installer
 (`plans/2026-05-26-windows-port-v1.md`).
 
 ---
@@ -285,6 +288,23 @@ playbook: system-tray app and native installer
 ## Shipped
 
 Newest first.
+
+- ![v0.15.0](https://img.shields.io/badge/v0.15.0-2026--07--04-blue?style=flat-square)
+  **macOS support (Apple Silicon, experimental).** Fono now runs on macOS:
+  dictation, the voice assistant, local and cloud providers, a native
+  menu-bar icon with the full menu, the on-screen recording indicator,
+  global hotkeys (no special permission needed), text injection at the
+  cursor, and local text-to-speech. Releases attach a single
+  Metal-accelerated `aarch64-apple-darwin` binary — GPU transcription is
+  ~4× faster than CPU at almost no size cost, so there is no separate CPU
+  download. `fono install` sets everything up per-user (no sudo): an app
+  bundle, start-at-login, and a guided one-time permissions flow — the
+  microphone and Accessibility grants are keyed to a stable local
+  signature, so they survive every `fono update` instead of breaking after
+  each one. The port was developed and verified on a headless remote Mac;
+  on-screen behaviour has not yet been eyeballed on a physical display —
+  see `docs/build-macos.md` for what's been checked so far.
+  *v0.15.0, 2026-07-04.*
 
 - ![v0.14.0](https://img.shields.io/badge/v0.14.0-2026--07--02-blue?style=flat-square)
   **Browser-based settings UI.** Pick *Settings…* in the tray — or run
