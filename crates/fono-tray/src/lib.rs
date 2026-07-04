@@ -503,8 +503,13 @@ mod backend_macos;
 
 // The main-thread pump is part of the binary's startup contract on
 // macOS: `fono::main` installs + runs it around the daemon thread.
+// `dispatch_main` lets other AppKit consumers (the overlay's NSPanel
+// backend) ship work to the same pump without depending on this
+// crate's internals.
 #[cfg(all(feature = "tray-backend", target_os = "macos"))]
-pub use backend_macos::{install_main_pump, run_main_pump, stop_main_pump, MainPumpJobs};
+pub use backend_macos::{
+    dispatch_main, install_main_pump, run_main_pump, stop_main_pump, MainPumpJobs,
+};
 
 // -------------------------------------------------------------------------
 // Real backend (pure-Rust SNI via `ksni`).

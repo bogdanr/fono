@@ -26,6 +26,7 @@ real-window = [
     "dep:ab_glyph",
     "backend-x11",
     "backend-wlr",
+    "backend-macos",
 ]
 
 # X11 + winit + softbuffer backend (the original carryover path).
@@ -46,6 +47,22 @@ backend-wlr = [
     "dep:wayland-protocols",
     "dep:wayland-protocols-wlr",
     "dep:rustix",
+]
+
+# Native macOS NSPanel backend (macOS port plan Phase 8): a
+# non-activating, click-through, always-on-top borderless panel
+# software-blitted from the shared renderer framebuffer via
+# NSBitmapImageRep. AppKit is main-thread-only, so the backend ships
+# render jobs to the process-wide main-thread pump that `fono::main`
+# installs on macOS (see `backends::macos::set_main_thread_dispatcher`).
+# The objc2 crates are declared in a darwin-only target table below;
+# the `dep:` entries are no-ops off-target, so enabling `real-window`
+# on Linux still compiles without them.
+backend-macos = [
+    "dep:ab_glyph",
+    "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-foundation",
 ]
 
 [dependencies]
@@ -88,3 +105,34 @@ rustix = { version = "0.38", default-features = false, features = ["event", "std
 # the backend selector falls through cleanly with an actionable message.
 # Already in the dep graph via winit's transitive `ash`/wgpu paths.
 libloading = { version = "0.8", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# NSPanel overlay backend (macOS port plan Phase 8). All three crates
+# are already in Cargo.lock at these exact versions via fono-tray's
+# NSStatusItem renderer and fono-inject's focus prober — no
+# new-to-project crates, zero Linux cost (target tables do not unify
+# off-target).
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", default-features = false, optional = true, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSBitmapImageRep",
+    "NSColor",
+    "NSControl",
+    "NSGraphics",
+    "NSImage",
+    "NSImageRep",
+    "NSImageView",
+    "NSPanel",
+    "NSResponder",
+    "NSScreen",
+    "NSView",
+    "NSWindow",
+] }
+objc2-foundation = { version = "0.3", default-features = false, optional = true, features = [
+    "std",
+    "NSGeometry",
+    "NSObjCRuntime",
+    "NSString",
+    "NSThread",
+] }

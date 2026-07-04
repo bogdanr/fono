@@ -1,6 +1,71 @@
 # Fono — Project Status
 Last updated: 2026-07-04
 
+## 2026-07-04 — macOS main-thread pump made event-driven (GCD main queue)
+
+Follow-up to Phases 7–8, answering "why is the overlay capped at
+~10 fps?": the cap was an artefact of the pump's 100 ms polling
+`NSTimer`, not anything fundamental. The pump now ships jobs through
+libdispatch's main queue (`dispatch_async_f` — two symbols from
+libSystem, zero new crates), which the `NSApplication` run loop drains
+as jobs arrive. Delivery is event-driven, matching the Linux backends'
+waker model:
+
+- **Overlay:** blit jobs run within the run loop's next turnaround, so
+  the panel repaints at the producers' cadence (≈20–30 fps level/FFT
+  ticks) instead of 10 fps; the newest-wins mailbox now only coalesces
+  when the main thread is genuinely busy (e.g. menu tracking).
+- **Tray:** menu repaints land immediately after the 2 s poll diff
+  instead of up to 100 ms later.
+- **Code shrank:** the `FonoPump` NSObject subclass, its `NSTimer`,
+  and the job channel are gone; `install_main_pump` is now just an
+  atomic installed/exited flag pair gating `dispatch`, so headless /
+  non-daemon degradation semantics are unchanged (verified over SSH).
+- The deferred-GUI smoothness caveat in `docs/build-macos.md` and the
+  plan's Task 8.1 note were updated accordingly.
+
+## 2026-07-04 — macOS Phase 8 complete: NSPanel overlay backend
+
+The recording indicator now has a native macOS surface; Phase 8 is
+complete at the headless tier. Zero new crates (objc2* were already
+darwin edges of the graph).
+
+- **New `fono-overlay::backends::macos`:** a borderless,
+  non-activating, click-through, always-on-top `NSPanel`
+  (`NSStatusWindowLevel`, all Spaces, excluded from the window
+  cycler, clear background, no shadow) blitted from the same software
+  renderer every other backend uses. A `fono-overlay-mac` worker
+  thread owns the `RendererState` + command channel (identical
+  command handling to the winit backend) and renders ARGB frames;
+  the AppKit main thread wraps them via `NSBitmapImageRep` →
+  `NSImage` → `NSImageView` and positions the panel bottom-centred
+  (Cocoa's bottom-left origin maps `BOTTOM_OFFSET` directly). Frames
+  cross threads through a newest-wins single-slot mailbox, so a slow
+  pump tick skips straight to the latest frame instead of queueing.
+  Backing scale is probed from `NSScreen` at spawn and re-synced from
+  panel truth on every blit (retina maps 1 buffer px : 1 device px).
+- **Selector:** the macOS candidate table `[MacPanel, Noop]` and the
+  `mac|macos|mac-panel|nspanel` env aliases (landed with the Phase 8
+  prep) are now backed by a real spawn; `fono doctor` reports the
+  `mac-panel` capability row.
+- **Wiring without a dependency edge:** `fono-overlay` doesn't depend
+  on `fono-tray`; `fono::main` installs the tray pump's
+  `dispatch_main` into `backends::macos::set_main_thread_dispatcher`
+  at daemon startup. Headless / non-daemon invocations never install
+  a dispatcher, so `try_spawn` returns a clean `NotAvailable` and the
+  selector falls to `noop` — verified over SSH (daemon log shows the
+  documented fall-through; dictation unaffected).
+- **Gates:** Linux fmt / clippy `-D warnings` (default +
+  `real-window`) / 36 test suites green, `Cargo.lock` gains
+  darwin-scoped edges only; darwin clippy clean, 36 suites 0 failed,
+  `fono` builds, doctor + daemon smoke over SSH.
+- **Deferred-GUI:** visible painting, click-through, focus/dock
+  checks, retina sharpness, and smoothness (the pump's 100 ms timer
+  caps the panel at ~10 fps) — recorded in `docs/build-macos.md`.
+
+Next: Phase 9 — install/autostart (LaunchAgent) + permissions
+onboarding, or Phase 2's CI row hardening; both headless-provable.
+
 ## 2026-07-04 — macOS Phase 7 complete: native menu-bar tray (NSStatusItem)
 
 Task 7.3 lands the macOS renderer over the shared menu model; Phase 7

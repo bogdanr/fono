@@ -438,11 +438,13 @@ already-present packages).
       renderer, mirror of the ksni one) with a target/action bridge
       (`NSMenuItem` tag → `TrayAction` registry, swapped atomically per
       render). Main-thread pump: `fono::main()` on darwin — daemon
-      invocation in a graphical session only — installs a job channel,
-      moves the daemon to a worker thread, and parks the real main
-      thread in `NSApplication::run()` with the `Accessory` activation
-      policy (no Dock icon) + a 100 ms `NSTimer` draining boxed
-      closures with a `MainThreadMarker`; the same pump is the Phase 8
+      invocation in a graphical session only — moves the daemon to a
+      worker thread and parks the real main thread in
+      `NSApplication::run()` with the `Accessory` activation policy
+      (no Dock icon); jobs ship via libdispatch's main queue
+      (`dispatch_async_f`, part of libSystem — zero crates), which the
+      run loop drains as they arrive, so delivery is event-driven
+      rather than timer-polled; the same pump is the Phase 8
       overlay's host. Poll/diff loop stays on tokio, identical cadence
       to ksni; unchanged ticks ship nothing. Icon: deliberately NOT a
       template image — the tint carries FSM state (same
@@ -462,24 +464,56 @@ unchanged.
 
 ### Phase 8 — Overlay backend (NSPanel)
 
-- [ ] Task 8.1. **New `crates/fono-overlay/src/backends/macos.rs`**:
+- [x] Task 8.1. **New `crates/fono-overlay/src/backends/macos.rs`**:
       non-activating, click-through, always-on-top borderless panel
       (`NSPanel` + `nonactivatingPanel`, `ignoresMouseEvents`, status-bar
       window level), software-rendered from the existing `renderer`
       framebuffer (CGImage/CALayer blit). Same `try_spawn` contract.
-- [ ] Task 8.2. **Extend `BackendId` + `candidate_list`** with a macOS row
+      *Done 2026-07-04: a `fono-overlay-mac` worker thread owns the
+      `RendererState` + `OverlayCmd` channel (same command handling as
+      the winit backend) and renders each frame into an owned ARGB
+      `Vec<u32>`; frames go to the AppKit main thread through a
+      newest-wins single-slot mailbox so the pump can never back up.
+      The main-thread blit wraps the buffer via `NSBitmapImageRep` →
+      `NSImage` → `NSImageView` (image sized in points so retina maps
+      1 buffer px : 1 device px); the panel is Borderless +
+      NonactivatingPanel, level 25 (`NSStatusWindowLevel`),
+      `ignoresMouseEvents`, clear background, no shadow, CanJoinAllSpaces
+      + Stationary + IgnoresCycle, bottom-centred on its screen (Cocoa's
+      bottom-left origin maps `BOTTOM_OFFSET` directly). The backing
+      scale is probed from `NSScreen` at spawn and kept in sync from
+      panel truth on every blit. `fono-overlay` does not depend on
+      `fono-tray`: the binary wires the pump's `dispatch_main` into
+      `backends::macos::set_main_thread_dispatcher` at daemon startup.
+      Blit jobs ride the GCD main queue, so the panel repaints at the
+      producers' cadence (≈20–30 fps level/FFT ticks) — the run loop
+      drains jobs as they arrive; the mailbox only coalesces when the
+      main thread is genuinely busy (e.g. menu tracking).*
+- [x] Task 8.2. **Extend `BackendId` + `candidate_list`** with a macOS row
       (macOS ⇒ `[MacPanel, Noop]`); `FONO_OVERLAY_BACKEND=mac|noop`
       aliases. Linux table unchanged (selection tests updated).
-- [ ] Task 8.3. **Headless tier**: selector chooses `MacPanel` → spawn
+      *Done 2026-07-04 (landed with the Phase 8 prep commit): `HostOs`
+      discriminator keeps the per-OS tables unit-testable from every
+      platform; `mac|macos|mac-panel|nspanel` parse aliases; doctor's
+      probe + capability rows cover `mac-panel`.*
+- [x] Task 8.3. **Headless tier**: selector chooses `MacPanel` → spawn
       fails without WindowServer → falls through to `Noop` (mirrors the
       Linux no-display path); selection unit tests cover the macOS table.
       **Deferred-GUI**: click-through, no focus steal, no Dock/Cmd-Tab
       presence, correct positioning on the primary display.
+      *Headless answer 2026-07-04: over SSH the daemon takes the plain
+      (no-pump) path, so `try_spawn` returns `NotAvailable("AppKit
+      main-thread pump not installed…")` and the selector logs the fall
+      to `noop` — no WindowServer probe needed, the pump-installed check
+      subsumes it.*
 
 **Phase 8 gate (headless)**: overlay compiles, candidate table tested,
 WindowServer-less fallback to noop verified over SSH. **Deferred-GUI**:
 overlay actually painting during recording. Linux wlr/X11/noop backends
-unchanged.
+unchanged. *Gate met 2026-07-04: darwin clippy `-D warnings` clean, 36
+test suites 0 failed, daemon smoke shows `mac-panel` skipped → `noop`;
+Linux fmt/clippy/36 suites green, `Cargo.lock` gains darwin-scoped
+edges only (objc2* already in the graph).*
 
 ### Phase 9 — Install, autostart, permissions onboarding
 

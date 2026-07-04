@@ -10,14 +10,15 @@
 //! - [`wayland_layer_shell`] — `backend-wlr` feature. Primary
 //!   Wayland path on every compositor that implements
 //!   `zwlr_layer_shell_v1` (sway, hyprland, KDE Wayland, COSMIC, …).
+//! - [`macos`] — `backend-macos` feature. Native NSPanel path on
+//!   macOS, blitting the shared software renderer via the AppKit
+//!   main-thread pump installed by `fono::main`.
 
 pub mod noop;
 
-// The graphical backends are Linux display-server stacks; their
+// The Linux graphical backends are display-server stacks; their
 // crates are only declared for `cfg(target_os = "linux")` (see
-// Cargo.toml), so the modules are gated on feature AND target. On
-// macOS / Windows the selector only ever offers `noop` (no
-// WAYLAND_DISPLAY / DISPLAY) until native backends land.
+// Cargo.toml), so the modules are gated on feature AND target.
 
 #[cfg(all(feature = "backend-x11", target_os = "linux"))]
 pub mod winit_x11;
@@ -27,3 +28,6 @@ pub mod wayland_layer_shell;
 
 #[cfg(all(feature = "backend-wlr", target_os = "linux"))]
 pub(crate) mod wayland_shm;
+
+#[cfg(all(feature = "backend-macos", target_os = "macos"))]
+pub mod macos;

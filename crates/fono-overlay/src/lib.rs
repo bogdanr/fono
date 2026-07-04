@@ -204,10 +204,20 @@ impl Overlay {
 // is always compiled so the noop backend + selection logic are
 // available even in the slim build.
 
-#[cfg(any(feature = "real-window", feature = "backend-x11", feature = "backend-wlr"))]
+#[cfg(any(
+    feature = "real-window",
+    feature = "backend-x11",
+    feature = "backend-wlr",
+    feature = "backend-macos"
+))]
 pub mod renderer;
 
-#[cfg(any(feature = "real-window", feature = "backend-x11", feature = "backend-wlr"))]
+#[cfg(any(
+    feature = "real-window",
+    feature = "backend-x11",
+    feature = "backend-wlr",
+    feature = "backend-macos"
+))]
 pub mod r3d;
 
 pub mod backend;
@@ -257,6 +267,8 @@ mod tests {
     fn backend_id_parses_known_overrides() {
         assert_eq!(BackendId::parse("wlr"), Some(BackendId::WlrLayerShell));
         assert_eq!(BackendId::parse("x11"), Some(BackendId::X11OverrideRedirect));
+        assert_eq!(BackendId::parse("mac"), Some(BackendId::MacPanel));
+        assert_eq!(BackendId::parse("nspanel"), Some(BackendId::MacPanel));
         assert_eq!(BackendId::parse("noop"), Some(BackendId::Noop));
         assert_eq!(BackendId::parse("not-a-backend"), None);
         // The retired wayland-xdg backend's old aliases now fall
@@ -278,19 +290,20 @@ mod tests {
         // No DISPLAY — Xwayland disabled. Layer-shell first, then
         // noop. The xdg_toplevel fallback was retired (2026-05-20)
         // because it could not deliver a usable panel UX on Mutter.
-        let picks = backend::pick_backend_with(None, |k| k == "WAYLAND_DISPLAY");
+        let picks =
+            backend::pick_backend_with(None, backend::HostOs::Linux, |k| k == "WAYLAND_DISPLAY");
         assert_eq!(picks, vec![BackendId::WlrLayerShell, BackendId::Noop]);
     }
 
     #[test]
     fn selection_uses_x11_when_only_display_set() {
-        let picks = backend::pick_backend_with(None, |k| k == "DISPLAY");
+        let picks = backend::pick_backend_with(None, backend::HostOs::Linux, |k| k == "DISPLAY");
         assert_eq!(picks, vec![BackendId::X11OverrideRedirect, BackendId::Noop]);
     }
 
     #[test]
     fn selection_falls_back_to_noop_with_no_session() {
-        let picks = backend::pick_backend_with(None, |_| false);
+        let picks = backend::pick_backend_with(None, backend::HostOs::Linux, |_| false);
         assert_eq!(picks, vec![BackendId::Noop]);
     }
 
@@ -302,21 +315,45 @@ mod tests {
         // fall through to the X11 override-redirect backend running
         // under Xwayland — which Mutter honours (client-positioned,
         // on-top, not in Alt+Tab).
-        let picks = backend::pick_backend_with(None, |k| k == "WAYLAND_DISPLAY" || k == "DISPLAY");
+        let picks = backend::pick_backend_with(None, backend::HostOs::Linux, |k| {
+            k == "WAYLAND_DISPLAY" || k == "DISPLAY"
+        });
         assert_eq!(
             picks,
             vec![BackendId::WlrLayerShell, BackendId::X11OverrideRedirect, BackendId::Noop]
         );
     }
+
+    #[test]
+    fn selection_macos_offers_panel_then_noop() {
+        // macOS has exactly one display server, so env vars carry no
+        // signal — the table is fixed and viability is decided by the
+        // panel backend's own pump check at spawn time. A stray
+        // DISPLAY (XQuartz installed) must not change the table.
+        let picks = backend::pick_backend_with(None, backend::HostOs::MacOs, |_| false);
+        assert_eq!(picks, vec![BackendId::MacPanel, BackendId::Noop]);
+        let picks = backend::pick_backend_with(None, backend::HostOs::MacOs, |k| k == "DISPLAY");
+        assert_eq!(picks, vec![BackendId::MacPanel, BackendId::Noop]);
+    }
+
+    #[test]
+    fn selection_other_os_is_noop_only() {
+        let picks = backend::pick_backend_with(None, backend::HostOs::Other, |_| true);
+        assert_eq!(picks, vec![BackendId::Noop]);
+    }
+
     #[test]
     fn forced_backend_override_short_circuits_selection() {
         // FONO_OVERLAY_BACKEND=noop wins regardless of the env probe.
-        let picks = backend::pick_backend_with(Some("noop"), |_| true);
+        let picks = backend::pick_backend_with(Some("noop"), backend::HostOs::Linux, |_| true);
         assert_eq!(picks, vec![BackendId::Noop, BackendId::Noop]);
-        let picks = backend::pick_backend_with(Some("wlr"), |_| false);
+        let picks = backend::pick_backend_with(Some("wlr"), backend::HostOs::Linux, |_| false);
         assert_eq!(picks, vec![BackendId::WlrLayerShell, BackendId::Noop]);
+        // FONO_OVERLAY_BACKEND=noop works on macOS too (kill switch).
+        let picks = backend::pick_backend_with(Some("noop"), backend::HostOs::MacOs, |_| false);
+        assert_eq!(picks, vec![BackendId::Noop, BackendId::Noop]);
         // Unknown value falls through to automatic selection.
-        let picks = backend::pick_backend_with(Some("garbage"), |_| false);
+        let picks = backend::pick_backend_with(Some("garbage"), backend::HostOs::Linux, |_| false);
         assert_eq!(picks, vec![BackendId::Noop]);
     }
 }

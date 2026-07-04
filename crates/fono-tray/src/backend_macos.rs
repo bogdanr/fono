@@ -15,8 +15,11 @@
 //!   only) calls [`install_main_pump`] **before** spawning the daemon
 //!   thread, then parks the real main thread in [`run_main_pump`] —
 //!   an `NSApplication` with the `Accessory` activation policy (no
-//!   Dock icon) plus a 100 ms `NSTimer` that drains a channel of
-//!   boxed closures and runs them with a [`MainThreadMarker`].
+//!   Dock icon). Jobs travel on libdispatch's **main queue**
+//!   (`dispatch_async_f`), which the AppKit run loop drains as they
+//!   arrive — delivery is event-driven, not polled, so a menu repaint
+//!   or an overlay blit runs within the loop's next turnaround
+//!   instead of waiting for a timer tick.
 //! * [`spawn`] (called from the daemon like every other backend) keeps
 //!   the provider-polling loop on tokio — identical cadence and
 //!   diffing to the ksni backend — and, whenever something changed,
@@ -37,11 +40,10 @@
 //! menu row covers that intent.
 
 use std::cell::RefCell;
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::OnceLock;
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
 use objc2::{
     define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly,
 };
@@ -69,99 +71,110 @@ use super::{
 /// [`MainThreadMarker`].
 type Job = Box<dyn FnOnce(MainThreadMarker) + Send>;
 
-/// Opaque receiving end returned by [`install_main_pump`] and consumed
-/// by [`run_main_pump`]. Newtype so the channel plumbing stays private.
-pub struct MainPumpJobs(Receiver<Job>);
+/// Opaque token returned by [`install_main_pump`] and consumed by
+/// [`run_main_pump`]. Zero-sized: jobs ride libdispatch's main queue,
+/// so there is no channel to carry — the token only enforces the
+/// install-then-run handshake at the type level.
+pub struct MainPumpJobs(());
 
-/// Global sending end. `OnceLock` because the pump is installed at
-/// most once per process (by `fono`'s `main()` before the daemon
-/// thread starts); everything else only ever reads it.
-static JOBS: OnceLock<Sender<Job>> = OnceLock::new();
+/// Set by [`install_main_pump`]. Gates [`dispatch`]: without it
+/// (headless / non-daemon invocations) jobs are refused so callers
+/// can degrade gracefully instead of enqueueing work that never runs.
+static PUMP_INSTALLED: AtomicBool = AtomicBool::new(false);
 
-/// How often the pump timer drains the job channel. 100 ms keeps menu
-/// repaints comfortably ahead of the 2 s provider poll while costing
-/// nothing measurable (an empty `try_recv` per tick).
-const PUMP_INTERVAL_SECS: f64 = 0.1;
+/// Set when [`run_main_pump`] returns (daemon shutdown). Refuses late
+/// dispatches whose jobs would otherwise queue up forever.
+static PUMP_EXITED: AtomicBool = AtomicBool::new(false);
 
-/// Install the main-thread job channel. Must be called **before** the
-/// daemon thread starts (so tray spawn can never race the install) and
+// libdispatch (GCD) — lives in libSystem, which every macOS binary
+// links: no new crates, no extra link flags. The AppKit run loop
+// drains the main queue as jobs arrive, so delivery is event-driven —
+// the overlay repaints at the producers' cadence (20–30 fps level/FFT
+// ticks) instead of the 10 fps a 100 ms polling timer allowed.
+#[repr(C)]
+struct DispatchQueueS {
+    _priv: [u8; 0],
+}
+
+extern "C" {
+    /// The immortal main-queue object (`dispatch_get_main_queue()` is
+    /// a macro that takes this static's address).
+    static _dispatch_main_q: DispatchQueueS;
+    fn dispatch_async_f(
+        queue: *const DispatchQueueS,
+        context: *mut c_void,
+        work: extern "C" fn(*mut c_void),
+    );
+}
+
+/// Trampoline: rebox the [`Job`] shipped through libdispatch and run
+/// it. The main queue guarantees main-thread execution; the marker
+/// probe is belt-and-braces.
+extern "C" fn run_job(context: *mut c_void) {
+    // SAFETY: `context` is the `Box::into_raw` of exactly one
+    // `Box<Job>` produced by `dispatch`; libdispatch delivers it
+    // exactly once.
+    let job = unsafe { Box::from_raw(context.cast::<Job>()) };
+    if let Some(mtm) = MainThreadMarker::new() {
+        job(mtm);
+    }
+}
+
+/// Mark the pump as installed. Must be called **before** the daemon
+/// thread starts (so tray spawn can never race the install) and
 /// followed by [`run_main_pump`] on the main thread. Returns `None` if
 /// a pump was already installed (double daemon start — caller bails).
+/// Jobs dispatched between install and run queue on the main dispatch
+/// queue and execute as soon as the run loop starts.
 #[must_use]
 pub fn install_main_pump() -> Option<MainPumpJobs> {
-    let (tx, rx) = channel::<Job>();
-    JOBS.set(tx).ok()?;
-    Some(MainPumpJobs(rx))
+    if PUMP_INSTALLED.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+    Some(MainPumpJobs(()))
 }
 
-/// Ship a closure to the main thread. Returns `false` when no pump is
-/// installed (headless / non-daemon invocations) or the pump exited.
+/// Ship a closure to the main thread via the main dispatch queue.
+/// Returns `false` when no pump is installed (headless / non-daemon
+/// invocations) or the pump exited.
 fn dispatch(job: impl FnOnce(MainThreadMarker) + Send + 'static) -> bool {
-    JOBS.get().is_some_and(|tx| tx.send(Box::new(job)).is_ok())
+    if !PUMP_INSTALLED.load(Ordering::SeqCst) || PUMP_EXITED.load(Ordering::SeqCst) {
+        return false;
+    }
+    let job: Box<Job> = Box::new(Box::new(job));
+    // SAFETY: `_dispatch_main_q` is libdispatch's process-lifetime
+    // main-queue object; `run_job` reboxes `context` exactly once.
+    unsafe { dispatch_async_f(&raw const _dispatch_main_q, Box::into_raw(job).cast(), run_job) };
+    true
 }
 
-/// Ivars for the pump object: the receiving end of the job channel.
-struct PumpIvars {
-    jobs: Receiver<Job>,
-}
-
-define_class!(
-    // SAFETY: NSObject has no subclassing requirements and FonoPump
-    // does not implement Drop.
-    #[unsafe(super(NSObject))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "FonoPump"]
-    #[ivars = PumpIvars]
-    struct FonoPump;
-
-    impl FonoPump {
-        #[unsafe(method(tick:))]
-        fn tick(&self, _timer: &AnyObject) {
-            let mtm = MainThreadMarker::from(self);
-            while let Ok(job) = self.ivars().jobs.try_recv() {
-                job(mtm);
-            }
-        }
-    }
-);
-
-impl FonoPump {
-    fn new(mtm: MainThreadMarker, jobs: Receiver<Job>) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(PumpIvars { jobs });
-        // SAFETY: plain NSObject init.
-        unsafe { msg_send![super(this), init] }
-    }
+/// Public dispatch seam for other AppKit consumers in the process
+/// (the overlay's NSPanel backend): ship a plain closure to the pump.
+/// The closure runs on the main thread with the run loop pumping; it
+/// can obtain its own `MainThreadMarker` cheaply via
+/// `MainThreadMarker::new()`. Returns `false` when no pump is
+/// installed (headless / non-daemon invocations) or the pump exited.
+pub fn dispatch_main(job: Box<dyn FnOnce() + Send>) -> bool {
+    dispatch(move |_mtm| job())
 }
 
 /// Park the calling thread (which MUST be the process main thread) in
-/// the AppKit run loop, executing jobs shipped via the channel from
-/// [`install_main_pump`]. Returns when [`stop_main_pump`] runs.
+/// the AppKit run loop, executing jobs shipped via [`dispatch`] /
+/// [`dispatch_main`]. Returns when [`stop_main_pump`] runs.
 ///
 /// The `Accessory` activation policy keeps fono out of the Dock and
 /// the Cmd+Tab switcher — it exists only as a menu-bar item, matching
 /// every other dictation utility on the platform.
-pub fn run_main_pump(jobs: MainPumpJobs) {
+pub fn run_main_pump(_token: MainPumpJobs) {
     let Some(mtm) = MainThreadMarker::new() else {
         tracing::error!("run_main_pump called off the main thread — tray disabled");
         return;
     };
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-
-    let pump = FonoPump::new(mtm, jobs.0);
-    // Schedule on the main run loop. Retained by the run loop while
-    // scheduled; we keep our own handle alive across `app.run()` too.
-    let _timer: Retained<objc2_foundation::NSTimer> = unsafe {
-        objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
-            PUMP_INTERVAL_SECS,
-            &pump,
-            sel!(tick:),
-            None,
-            true,
-        )
-    };
-    tracing::debug!("tray: AppKit main-thread pump running");
+    tracing::debug!("tray: AppKit main-thread pump running (GCD main queue)");
     app.run();
+    PUMP_EXITED.store(true, Ordering::SeqCst);
     tracing::debug!("tray: AppKit main-thread pump stopped");
 }
 
@@ -470,7 +483,7 @@ pub fn spawn(
         tracing::warn!("tray backend skipped: no current tokio runtime");
         return false;
     }
-    if JOBS.get().is_none() {
+    if !PUMP_INSTALLED.load(Ordering::SeqCst) {
         // Not launched through the daemon path in a graphical session
         // (`fono::main` only installs the pump there), so there is no
         // main thread to render AppKit on. Same graceful no-tray mode

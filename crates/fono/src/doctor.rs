@@ -514,12 +514,14 @@ pub async fn report(paths: &Paths) -> Result<String> {
         use fono_overlay::{BackendCapabilities, BackendId};
         let (id, reason) = fono_overlay::backend::probe_selection();
         let caps = match id {
-            BackendId::WlrLayerShell | BackendId::X11OverrideRedirect => BackendCapabilities {
-                transparency: true,
-                client_positioning: true,
-                focus_passthrough: true,
-                click_passthrough: true,
-            },
+            BackendId::WlrLayerShell | BackendId::X11OverrideRedirect | BackendId::MacPanel => {
+                BackendCapabilities {
+                    transparency: true,
+                    client_positioning: true,
+                    focus_passthrough: true,
+                    click_passthrough: true,
+                }
+            }
             BackendId::Noop => BackendCapabilities {
                 transparency: false,
                 client_positioning: false,

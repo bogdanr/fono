@@ -55,6 +55,12 @@ pub enum BackendId {
     /// Mutter honours override-redirect placement and excludes the
     /// surface from Alt+Tab.
     X11OverrideRedirect,
+    /// `mac-panel` — native macOS backend: a non-activating,
+    /// click-through, always-on-top borderless `NSPanel` blitted
+    /// from the shared software renderer. Requires the AppKit
+    /// main-thread pump that `fono::main` installs for daemon
+    /// invocations in a graphical session.
+    MacPanel,
     /// `noop` — silent in-process stub. Terminal fallback that
     /// always succeeds so the daemon never aborts on a missing
     /// graphics environment.
@@ -66,6 +72,7 @@ impl BackendId {
         match self {
             Self::WlrLayerShell => "wlr-layer-shell",
             Self::X11OverrideRedirect => "x11-override-redirect",
+            Self::MacPanel => "mac-panel",
             Self::Noop => "noop",
         }
     }
@@ -76,6 +83,7 @@ impl BackendId {
         match s.to_ascii_lowercase().as_str() {
             "wlr" | "wlr-layer-shell" | "layer-shell" => Some(Self::WlrLayerShell),
             "x11" | "x11-override-redirect" => Some(Self::X11OverrideRedirect),
+            "mac" | "macos" | "mac-panel" | "nspanel" => Some(Self::MacPanel),
             "noop" | "none" | "off" => Some(Self::Noop),
             _ => None,
         }
@@ -281,16 +289,55 @@ impl OverlayHandle {
 //  Backend selection
 // ---------------------------------------------------------------------------
 
+/// Host-OS discriminator for the candidate table. A plain enum (not
+/// `cfg`) so the per-OS tables stay unit-testable from every
+/// platform's CI run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostOs {
+    Linux,
+    MacOs,
+    /// Anything else (Windows until its port lands, BSDs, …): only
+    /// the noop terminal sink is offered.
+    Other,
+}
+
+impl HostOs {
+    const fn current() -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            Self::Linux
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Self::MacOs
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            Self::Other
+        }
+    }
+}
+
 /// Compute the ordered candidate list for the current session, per
 /// the plan §3 selection table.
 fn candidate_list() -> Vec<BackendId> {
-    candidate_list_with(|k| std::env::var_os(k).is_some())
+    candidate_list_with(HostOs::current(), |k| std::env::var_os(k).is_some())
 }
 
-/// Test seam: same logic as [`candidate_list`] but with an injectable
-/// env-lookup predicate. `env_present("WAYLAND_DISPLAY") == true`
-/// emulates a Wayland session, `env_present("DISPLAY")` an X11 one.
-fn candidate_list_with(env_present: impl Fn(&str) -> bool) -> Vec<BackendId> {
+/// Test seam: same logic as [`candidate_list`] but with the host OS
+/// and env-lookup injectable. On Linux,
+/// `env_present("WAYLAND_DISPLAY") == true` emulates a Wayland
+/// session, `env_present("DISPLAY")` an X11 one. On macOS the env
+/// vars carry no signal (there is exactly one display server); the
+/// panel backend's own spawn check — is the AppKit main-thread pump
+/// installed? — decides viability at runtime.
+fn candidate_list_with(os: HostOs, env_present: impl Fn(&str) -> bool) -> Vec<BackendId> {
+    if os == HostOs::MacOs {
+        return vec![BackendId::MacPanel, BackendId::Noop];
+    }
+    if os == HostOs::Other {
+        return vec![BackendId::Noop];
+    }
     let wayland = env_present("WAYLAND_DISPLAY");
     let x11 = env_present("DISPLAY");
     match (wayland, x11) {
@@ -320,17 +367,18 @@ fn candidate_list_with(env_present: impl Fn(&str) -> bool) -> Vec<BackendId> {
 }
 
 /// Test seam: simulate the env-driven first-pick that [`spawn_overlay`]
-/// would use, with both `FONO_OVERLAY_BACKEND` and the
-/// `WAYLAND_DISPLAY` / `DISPLAY` lookup injected. Returns the
+/// would use, with the host OS, `FONO_OVERLAY_BACKEND`, and the
+/// `WAYLAND_DISPLAY` / `DISPLAY` lookup all injected. Returns the
 /// candidate sequence (not the actually-spawned one — we don't try
 /// any backend here, so this is safe to call from tests).
 #[doc(hidden)]
 pub fn pick_backend_with(
     forced: Option<&str>,
+    os: HostOs,
     env_present: impl Fn(&str) -> bool,
 ) -> Vec<BackendId> {
     let forced = forced.and_then(BackendId::parse);
-    forced.map_or_else(|| candidate_list_with(env_present), |b| vec![b, BackendId::Noop])
+    forced.map_or_else(|| candidate_list_with(os, env_present), |b| vec![b, BackendId::Noop])
 }
 
 /// Spawn the overlay using the best available backend for the
@@ -404,6 +452,17 @@ fn try_spawn(id: BackendId, style: WaveformStyle) -> Result<SpawnedBackend, Back
                 Err(BackendError::NotAvailable("backend-x11 not compiled for this target".into()))
             }
         }
+        BackendId::MacPanel => {
+            #[cfg(all(feature = "backend-macos", target_os = "macos"))]
+            {
+                crate::backends::macos::try_spawn(style)
+            }
+            #[cfg(not(all(feature = "backend-macos", target_os = "macos")))]
+            {
+                let _ = style;
+                Err(BackendError::NotAvailable("backend-macos not compiled for this target".into()))
+            }
+        }
         BackendId::Noop => Ok(crate::backends::noop::spawn(style)),
     }
 }
@@ -427,6 +486,7 @@ pub fn probe_selection() -> (BackendId, &'static str) {
             "Wayland + layer-shell preferred (falls through to Xwayland on GNOME / Mutter)"
         }
         BackendId::X11OverrideRedirect => "X11 (or Xwayland on Wayland sessions)",
+        BackendId::MacPanel => "macOS (NSPanel; needs the AppKit main-thread pump)",
         BackendId::Noop => "no graphics session detected",
     };
     (first, reason)

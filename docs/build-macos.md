@@ -162,14 +162,32 @@ features, debug build:
   `NSMenu` interpreter (`fono-tray::backend_macos`). Zero new crates.
 - Main-thread pump: on darwin, a daemon invocation in a graphical
   session parks the real main thread in `NSApplication::run()`
-  (Accessory activation policy — no Dock icon, no Cmd+Tab entry) and
-  drains tray/overlay render jobs via a 100 ms timer; the daemon runs
-  on a worker thread.
+  (Accessory activation policy — no Dock icon, no Cmd+Tab entry);
+  tray/overlay render jobs arrive event-driven via libdispatch's main
+  queue; the daemon runs on a worker thread.
 - Headless degradation verified over SSH: `is_graphical_session()` is
   false → no pump installed → daemon logs
   `tray icon    : skipped (headless: no graphical session)` and keeps
   running (STT warmup, mDNS, servers all normal). Non-daemon
   subcommands never install the pump.
+
+### Phase 8 smoke (NSPanel overlay) — 2026-07-04
+
+- Overlay backend `mac-panel`: a borderless, non-activating,
+  click-through, always-on-top `NSPanel` (level 25, all Spaces,
+  excluded from the window cycler), software-blitted from the same
+  renderer as Linux. A worker thread renders ARGB frames; the AppKit
+  main thread blits them via `NSBitmapImageRep` → `NSImageView`
+  through a newest-wins mailbox, event-driven on the GCD main queue
+  (repaints at the producers' ≈20–30 fps cadence). Zero new crates
+  (objc2* already in the graph).
+- `fono doctor` probe: `Overlay : mac-panel (transparency=yes
+  positioning=client focus-passthrough=yes click-passthrough=yes)`.
+- Headless degradation verified over SSH: no pump installed →
+  `mac-panel` skipped (`AppKit main-thread pump not installed`) →
+  selector falls to `noop`; daemon unaffected.
+- `FONO_OVERLAY_BACKEND=mac|macos|mac-panel|nspanel` forces the
+  backend; `noop|none|off` disables, same as Linux.
 
 ## Deferred-GUI checklist
 
@@ -200,6 +218,9 @@ land:
   no Dock icon / no Cmd+Tab entry (Accessory policy), tooltip shows
   the FSM state line.
 - [ ] Overlay paints during recording: click-through, no focus steal,
-  no Dock/Cmd-Tab presence, correct positioning (Phase 8).
+  no Dock/Cmd-Tab presence, bottom-centred on the primary display,
+  correct retina sharpness (scale sync), and smooth animation —
+  frames arrive event-driven via the GCD main queue at the producers'
+  ≈20–30 fps cadence (Phase 8).
 - [ ] `fono install` → logout/login → daemon + menu-bar icon running
   (Phase 9).

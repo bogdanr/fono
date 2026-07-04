@@ -57,6 +57,12 @@ fn macos_daemon_main(args: cli::Cli) -> Result<()> {
         anyhow::bail!("AppKit main-thread pump installed twice — daemon started twice in-process");
     };
 
+    // Hand the overlay's NSPanel backend a way to reach the same
+    // pump. fono-overlay deliberately doesn't depend on fono-tray;
+    // the binary owns this one-line wiring instead.
+    #[cfg(feature = "interactive")]
+    fono_overlay::backends::macos::set_main_thread_dispatcher(Box::new(fono_tray::dispatch_main));
+
     let daemon = std::thread::Builder::new().name("fono-daemon".into()).spawn(move || {
         // Stop the pump when the daemon finishes — including on panic
         // (Drop runs during unwind), so the main thread never hangs in
