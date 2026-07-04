@@ -168,3 +168,9 @@ tempfile = { workspace = true }
 # (CoreAudio/AudioToolbox).
 [target.'cfg(target_os = "macos")'.dependencies]
 fono-audio = { path = "../fono-audio", features = ["cpal-backend"] }
+# CGEvent text injection on macOS (plan Task 6.1): enigo is the only
+# keystroke path there (wtype/ydotool/xdotool are Linux tools). The
+# feature stays opt-in on Linux (libxdo dev headers not guaranteed);
+# enigo's darwin deps (core-graphics, icrate, objc2) are already in
+# Cargo.lock, so this adds no new-to-project crates.
+fono-inject = { path = "../fono-inject", features = ["enigo-backend"] }

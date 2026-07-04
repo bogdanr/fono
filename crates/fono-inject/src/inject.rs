@@ -65,7 +65,36 @@ impl Injector {
     /// user pastes with Ctrl+V. Power users opt in via
     /// `fono use inject xdotool`. Every other session (KDE-Wayland,
     /// wlroots, X11) keeps the previous behaviour.
+    ///
+    /// macOS: enigo (CGEvent) is the only keystroke backend — the
+    /// Linux display-server probes and subprocess tools carry no
+    /// signal there — so auto-detect short-circuits to it (clipboard
+    /// fallback when the feature is off). CGEvent posting requires the
+    /// Accessibility permission (TCC); denial degrades to the
+    /// clipboard fallback in [`type_text_with_outcome`].
     fn detect_auto() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            #[cfg(feature = "enigo-backend")]
+            {
+                Self::Enigo
+            }
+            #[cfg(not(feature = "enigo-backend"))]
+            {
+                Self::None
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self::detect_auto_unix_desktop()
+        }
+    }
+
+    /// Linux/BSD display-server auto-detection (the historical
+    /// `detect_auto` body). Not compiled on macOS, where none of the
+    /// probed environment variables or subprocess tools exist.
+    #[cfg(not(target_os = "macos"))]
+    fn detect_auto_unix_desktop() -> Self {
         let wayland = std::env::var("XDG_SESSION_TYPE").map(|v| v == "wayland").unwrap_or(false)
             || std::env::var("WAYLAND_DISPLAY").is_ok();
 
@@ -119,7 +148,7 @@ impl Injector {
         #[cfg(feature = "enigo-backend")]
         {
             // Last resort: enigo can sometimes work via libei.
-            return Self::Enigo;
+            Self::Enigo
         }
         #[cfg(not(feature = "enigo-backend"))]
         {
@@ -137,20 +166,30 @@ impl Injector {
             Self::Xdotool => inject_subprocess("xdotool", &["type", "--delay", "0", "--", text]),
             #[cfg(feature = "x11-paste")]
             Self::XtestType => crate::xtest_type::type_via_xtest(text),
-            Self::None => Err(anyhow!(
-                "no text-injection backend available; on X11 set DISPLAY so the built-in \
-                 xtest-type backend can connect, or install wtype/ydotool/xdotool, \
-                 or enable the enigo-backend feature"
-            )),
+            Self::None => Err(anyhow!("{NO_BACKEND_HINT}")),
         }
     }
 }
+
+/// Platform-appropriate "no injection backend" guidance. The Linux text
+/// names the X11/Wayland tools; on macOS the only knobs are the
+/// Accessibility grant (for enigo/CGEvent) and the clipboard.
+const NO_BACKEND_HINT: &str = if cfg!(target_os = "macos") {
+    "no text-injection backend available; grant fono the Accessibility \
+     permission in System Settings → Privacy & Security → Accessibility \
+     (dictations fall back to the clipboard — paste with Cmd+V)"
+} else {
+    "no text-injection backend available; on X11 set DISPLAY so the built-in \
+     xtest-type backend can connect, or install wtype/ydotool/xdotool, \
+     or enable the enigo-backend feature"
+};
 
 /// Returns true iff the current session is GNOME on Wayland (Mutter).
 /// Used to gate the clipboard-first default in [`Injector::detect_auto`].
 /// Matches the same desktop tokens as `crates/fono/src/install.rs` so
 /// the installer's session-aware package recommendation and the
 /// runtime injector default stay in sync.
+#[cfg(not(target_os = "macos"))]
 fn is_gnome_wayland_session() -> bool {
     let cur = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_ascii_lowercase();
     let sess = std::env::var("XDG_SESSION_DESKTOP").unwrap_or_default().to_ascii_lowercase();
@@ -210,12 +249,19 @@ pub fn type_text_with_outcome(text: &str) -> Result<InjectOutcome> {
         })),
         Err(key_err) => match copy_to_clipboard(text) {
             Ok(tool) => Ok(InjectOutcome::Clipboard(tool)),
-            Err(clip_err) => Err(anyhow!(
-                "key injection failed ({key_err}) and clipboard fallback \
-                 failed ({clip_err}); on X11 ensure DISPLAY is exported so \
-                 xtest-type can connect, or install wtype/ydotool/xclip/wl-clipboard \
-                 or enable the enigo-backend feature"
-            )),
+            Err(clip_err) => Err(if cfg!(target_os = "macos") {
+                anyhow!(
+                    "key injection failed ({key_err}) and clipboard fallback \
+                     failed ({clip_err})"
+                )
+            } else {
+                anyhow!(
+                    "key injection failed ({key_err}) and clipboard fallback \
+                     failed ({clip_err}); on X11 ensure DISPLAY is exported so \
+                     xtest-type can connect, or install wtype/ydotool/xclip/wl-clipboard \
+                     or enable the enigo-backend feature"
+                )
+            }),
         },
     }
 }
@@ -267,15 +313,25 @@ pub fn copy_to_clipboard(text: &str) -> Result<&'static str> {
     }
     let errs: Vec<String> =
         outcomes.into_iter().map(|o| format!("{}: {}", o.tool, o.detail)).collect();
-    Err(anyhow!(
-        "no clipboard backend worked. The native (arboard) backend failed and \
-         no fallback tool succeeded either. Diagnostics: [{}]. \
-         Native arboard requires either `wl_data_control_manager_v1` / \
-         `zwlr_data_control_manager_v1` (Wayland) or a reachable X server. \
-         If you must rely on a subprocess tool, install `wl-clipboard`, \
-         `xclip`, or `xsel`.",
-        if errs.is_empty() { "no clipboard tools installed".into() } else { errs.join(" | ") }
-    ))
+    let diagnostics =
+        if errs.is_empty() { "no clipboard tools installed".to_owned() } else { errs.join(" | ") };
+    if cfg!(target_os = "macos") {
+        Err(anyhow!(
+            "no clipboard backend worked. The native (NSPasteboard via arboard) \
+             backend failed and `pbcopy` did too. Diagnostics: [{diagnostics}]. \
+             Both need a logged-in user session (the pasteboard daemon is \
+             per-login) — over headless SSH the clipboard is unavailable."
+        ))
+    } else {
+        Err(anyhow!(
+            "no clipboard backend worked. The native (arboard) backend failed and \
+             no fallback tool succeeded either. Diagnostics: [{diagnostics}]. \
+             Native arboard requires either `wl_data_control_manager_v1` / \
+             `zwlr_data_control_manager_v1` (Wayland) or a reachable X server. \
+             If you must rely on a subprocess tool, install `wl-clipboard`, \
+             `xclip`, or `xsel`."
+        ))
+    }
 }
 
 /// Native clipboard write via the in-process `arboard` crate.
@@ -351,14 +407,22 @@ pub fn copy_to_clipboard_all(text: &str) -> Vec<ClipboardAttempt> {
     // Each tuple is (tool, args, target_label, requires_env). We write to
     // BOTH the Wayland and X11 clipboards (and CLIPBOARD + PRIMARY on X11)
     // so any clipboard manager (clipit, Klipper, parcellite, copyq) catches
-    // the entry regardless of which selection it watches.
-    let candidates: &[(&str, &[&str], &str, &str)] = &[
-        ("wl-copy", &[], "wayland", "WAYLAND_DISPLAY"),
-        ("xclip", &["-selection", "clipboard"], "clipboard", "DISPLAY"),
-        ("xsel", &["--clipboard", "--input"], "clipboard", "DISPLAY"),
-        ("xclip", &["-selection", "primary"], "primary", "DISPLAY"),
-        ("xsel", &["--primary", "--input"], "primary", "DISPLAY"),
-    ];
+    // the entry regardless of which selection it watches. An empty
+    // requires_env means the tool needs no session environment (pbcopy
+    // talks to the per-user pboard daemon, not a display server).
+    let candidates: &[(&str, &[&str], &str, &str)] = if cfg!(target_os = "macos") {
+        // pbcopy ships with macOS; NSPasteboard has a single general
+        // pasteboard (no CLIPBOARD/PRIMARY split).
+        &[("pbcopy", &[], "clipboard", "")]
+    } else {
+        &[
+            ("wl-copy", &[], "wayland", "WAYLAND_DISPLAY"),
+            ("xclip", &["-selection", "clipboard"], "clipboard", "DISPLAY"),
+            ("xsel", &["--clipboard", "--input"], "clipboard", "DISPLAY"),
+            ("xclip", &["-selection", "primary"], "primary", "DISPLAY"),
+            ("xsel", &["--primary", "--input"], "primary", "DISPLAY"),
+        ]
+    };
 
     let mut out = Vec::new();
     let mut tools_seen = std::collections::HashSet::new();
@@ -376,7 +440,7 @@ pub fn copy_to_clipboard_all(text: &str) -> Vec<ClipboardAttempt> {
             }
             continue;
         }
-        if std::env::var(env_required).is_err() {
+        if !env_required.is_empty() && std::env::var(env_required).is_err() {
             out.push(ClipboardAttempt {
                 tool,
                 target,
@@ -504,11 +568,7 @@ pub fn warm_backend() -> Result<&'static str> {
             let _ = crate::xtest_type::xtest_type_available();
             Ok("xtest-type")
         }
-        Injector::None => Err(anyhow!(
-            "no text-injection backend available — on X11 the built-in xtest-type \
-             backend should work when DISPLAY is set; otherwise install \
-             `wtype`/`ydotool`/`xdotool` on Linux, or enable the enigo-backend feature"
-        )),
+        Injector::None => Err(anyhow!("{NO_BACKEND_HINT}")),
     }
 }
 
@@ -527,9 +587,24 @@ fn inject_subprocess(cmd: &str, args: &[&str]) -> Result<()> {
 #[cfg(feature = "enigo-backend")]
 fn inject_enigo(text: &str) -> Result<()> {
     use enigo::{Enigo, Keyboard, Settings};
-    let mut en = Enigo::new(&Settings::default()).map_err(|e| anyhow!("enigo init failed: {e}"))?;
-    en.text(text).map_err(|e| anyhow!("enigo text failed: {e}"))?;
+    let mut en = Enigo::new(&Settings::default())
+        .map_err(|e| anyhow!("enigo init failed: {e}{}", a11y_hint()))?;
+    en.text(text).map_err(|e| anyhow!("enigo text failed: {e}{}", a11y_hint()))?;
     Ok(())
+}
+
+/// Platform hint appended to enigo failures. On macOS the overwhelmingly
+/// likely cause is a missing Accessibility grant (TCC) — CGEvent posting
+/// is denied until the user approves fono. Empty on other targets.
+#[cfg(feature = "enigo-backend")]
+fn a11y_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "; grant fono the Accessibility permission in System Settings → \
+         Privacy & Security → Accessibility, then retry (dictations fall \
+         back to the clipboard until then — paste with Cmd+V)"
+    } else {
+        ""
+    }
 }
 
 fn which(tool: &str) -> Option<std::path::PathBuf> {

@@ -321,27 +321,56 @@ a console session).
 
 ### Phase 6 — Text injection + focus detection
 
-- [ ] Task 6.1. **enigo on macOS** (CGEvent). The `enigo-backend` feature
-      already exists in `fono-inject`; enable it for macOS builds and add a
-      `#[cfg(target_os = "macos")]` branch in `detect_auto` (no
-      Wayland/X11 probes). Requires the Accessibility permission (TCC).
-- [ ] Task 6.2. **Clipboard fallback**: `arboard` supports macOS; drop its
-      Linux-only `wayland-data-control` feature into a target table so the
-      mac build gets the NSPasteboard backend.
-- [ ] Task 6.3. **Focus detection**: NSWorkspace `frontmostApplication`
-      (objc2 — flag; it's the standard Rust↔ObjC bridge) behind the same
-      seam the Windows plan's Phase 9 trait split defines. Wire app names
-      into the existing per-app classifier with mac-flavoured rules
-      (`Terminal`, `iTerm2`, `Code`, `Safari`, …).
-- [ ] Task 6.4. **Headless tier**: `fono test-inject` over SSH exercises
-      the cascade → Accessibility denial → clipboard fallback → error
-      reporting. **Deferred-GUI**: verification against three apps
-      (TextEdit, Safari address bar, VS Code).
+- [x] Task 6.1. **enigo on macOS** (CGEvent). The existing `enigo-backend`
+      feature is now default on macOS via a target table in
+      `crates/fono/Cargo.toml`; enigo's darwin deps (core-graphics,
+      icrate, objc2 0.5) were already in `Cargo.lock` — no new-to-project
+      crates, zero Linux cost. `detect_auto` short-circuits to enigo on
+      darwin (clipboard-only when the feature is off); the Linux
+      display-server cascade moved to a `not(macos)` fn. Bench finding
+      recorded: `Enigo::new()` + `text()` **return Ok even over headless
+      SSH as root** — CGEventPost accepts the events; whether keystrokes
+      *land* needs the deferred-GUI pass, and the un-grantable-headless
+      Accessibility denial path could therefore not be triggered from
+      SSH. Error strings for enigo failures and the no-backend case name
+      System Settings → Privacy & Security → Accessibility on macOS.
+- [x] Task 6.2. **Clipboard fallback.** No target-table move needed:
+      arboard's `wayland-data-control` feature only activates
+      target-gated deps inside arboard itself — on darwin it compiles to
+      the NSPasteboard backend (verified: darwin tree pulls only objc2
+      crates). Added `pbcopy` as the macOS subprocess fallback (ships
+      with the OS; needs no display env) and `pbpaste` to test-inject's
+      readback. Bench finding: **both NSPasteboard and pbcopy need a
+      logged-in user session** — over headless SSH as root they fail
+      cleanly (pboard daemon is per-login); the macOS clipboard error
+      message now says exactly that.
+- [x] Task 6.3. **Focus detection**: `NSWorkspace.frontmostApplication`
+      via objc2-app-kit (already in `Cargo.lock` at the exact version
+      through arboard's darwin backend — net-zero, no flag needed).
+      Populates `window_class` with the localized app name (bundle-id
+      fallback) and `window_pid`; window *titles* need Screen Recording
+      TCC and are deliberately left `None`. Classifier gained
+      mac-flavoured classes (Terminal, iTerm2, ghostty, Warp, Safari,
+      Google Chrome, Brave Browser, Microsoft Edge, Mail, Messages,
+      Telegram); "Code"/"Slack"/"Discord" already matched
+      case-insensitively. Headless: returns an empty `FocusInfo` (no
+      frontmost app without WindowServer), never an error.
+- [x] Task 6.4. **Headless tier**: `fono test-inject` over SSH exercised
+      the cascade both ways — default (enigo accepted, pbcopy denied
+      with per-tool diagnostics) and `FONO_INJECT_BACKEND=none` (full
+      documented-order degradation: no backend → arboard fails → pbcopy
+      fails → combined error with macOS guidance). **Deferred-GUI**:
+      verification against three apps (TextEdit, Safari address bar,
+      VS Code).
 
-**Phase 6 gate (headless)**: inject cascade compiles, degrades in the
-documented order, and doctor explains the Accessibility grant.
-**Deferred-GUI**: dictation landing at the cursor in the reference apps;
-per-app rules firing. Linux inject cascade unchanged.
+**Phase 6 gate (headless)**: PASSED — inject cascade compiles, degrades
+in the documented order, and the error strings explain the Accessibility
+grant. **Deferred-GUI**: dictation landing at the cursor in the reference
+apps; per-app rules firing; the actual Accessibility-denial UX (headless
+CGEventPost accepts events, so denial can only be observed in a GUI
+session). Linux inject cascade unchanged (fmt/clippy in both feature
+configs/36 suites green; `Cargo.lock` gained only edges to
+already-present packages).
 
 ### Phase 7 — Menu-bar (tray) icon
 

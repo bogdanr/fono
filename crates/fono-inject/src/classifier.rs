@@ -268,6 +268,11 @@ pub static BUILTIN_RULES: &[BuiltinRule] = &[
             "lxterminal",
             "sakura",
             "rxvt-unicode",
+            // macOS localized app names (NSWorkspace.frontmostApplication).
+            "Terminal",
+            "iTerm2",
+            "ghostty",
+            "Warp",
         ],
         title_fragments: &[],
         profile: terminal_profile,
@@ -298,19 +303,35 @@ pub static BUILTIN_RULES: &[BuiltinRule] = &[
             "librewolf",
             "falkon",
             "epiphany",
+            // macOS localized app names.
+            "Safari",
+            "Google Chrome",
+            "Brave Browser",
+            "Microsoft Edge",
         ],
         title_fragments: &[],
         profile: browser_profile,
     },
     // Email clients
     BuiltinRule {
-        classes: &["thunderbird", "evolution", "kmail", "geary"],
+        classes: &["thunderbird", "evolution", "kmail", "geary", "Mail"],
         title_fragments: &[],
         profile: email_profile,
     },
     // Chat / messaging
     BuiltinRule {
-        classes: &["slack", "discord", "telegram-desktop", "signal-desktop", "element", "fractal"],
+        classes: &[
+            "slack",
+            "discord",
+            "telegram-desktop",
+            "signal-desktop",
+            "element",
+            "fractal",
+            // macOS localized app names ("Slack"/"Discord" already match
+            // case-insensitively; these two differ).
+            "Messages",
+            "Telegram",
+        ],
         title_fragments: &[],
         profile: chat_profile,
     },

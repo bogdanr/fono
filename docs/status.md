@@ -1,6 +1,48 @@
 # Fono — Project Status
 Last updated: 2026-07-03
 
+## 2026-07-03 — macOS Phase 6 complete: text injection + focus via enigo/AppKit
+
+Sixth same-day session (`plans/2026-07-03-macos-port-v1.md`); Phase 6
+is complete at the headless tier.
+
+- **Task 6.1 (dep check):** `enigo`'s darwin backend rides on
+  `core-graphics`/`icrate`/`objc2` — all already in `Cargo.lock`, so
+  no new-to-project crates. The focus prober adds darwin-only edges to
+  the already-present `objc2-app-kit`/`objc2-foundation` (plus
+  app-kit's `libc` feature for `processIdentifier`); the Linux
+  artefact's graph is untouched (target-scoped tables).
+- **Task 6.2:** `enigo-backend` is now default on macOS (target table
+  in `crates/fono/Cargo.toml`, mirroring Phase 4's cpal pattern), and
+  `detect_auto` short-circuits to Enigo on darwin (display env vars
+  carry no signal). Injection errors name **System Settings → Privacy
+  & Security → Accessibility** and note the clipboard fallback;
+  clipboard failure messages are platform-appropriate (NSPasteboard +
+  `pbcopy` on macOS instead of the wl-copy/xclip Linux-isms), as is
+  the `Injector::None` explanation.
+- **Task 6.3 (focus):** new darwin branch in `focus.rs` asks
+  `NSWorkspace.frontmostApplication` for the frontmost app's
+  name/bundle-id/pid (no Accessibility permission needed for
+  app-level focus). Classifier gains macOS terminal bundle ids
+  (Terminal, iTerm2, Alacritty, kitty, WezTerm, Ghostty…) so the
+  terminal-vs-GUI injection rules work there.
+- **Task 6.4 / headless-gate answers recorded:** over headless SSH as
+  root, `Enigo::new()` + `text()` **return Ok** (CGEventPost accepts
+  events without a session — the Accessibility denial path is
+  unobservable from SSH and moves to the deferred-GUI checklist);
+  NSPasteboard/`pbcopy` **fail cleanly** (pasteboard daemon is
+  per-login) with per-tool diagnostics; frontmost-app probe returns an
+  empty `FocusInfo`, no error. `fono test-inject` gained `pbpaste`
+  readback and a truthful macOS message when the pasteboard daemon is
+  absent.
+- **Task 6.5:** Linux regression — fmt/clippy (default and
+  `enigo-backend`)/36 suites green; darwin clippy clean, 36 suites,
+  0 failures.
+
+Next: Phase 7 (menu-bar tray) — backend decision (`tray-icon` vs
+objc2 shim) needs the size sign-off; headless tier is graceful
+no-WindowServer degradation.
+
 ## 2026-07-03 — macOS Phase 5 complete: global hotkeys via Carbon, zero new deps
 
 Fifth same-day session (`plans/2026-07-03-macos-port-v1.md`); Phase 5

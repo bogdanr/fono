@@ -139,6 +139,22 @@ features, debug build:
   skips the listener with a clear log line; on a console session it
   would select the `macos` (Carbon) backend.
 
+### Phase 6 smoke (text injection / focus) — 2026-07-03
+
+- Injector: `enigo` (CGEvent) is the macOS default; `fono test-inject`
+  detects it and `Enigo::new()`/`text()` **return Ok even over
+  headless SSH as root** — CGEventPost accepts the events, so the
+  Accessibility-denial path cannot be triggered from SSH (deferred to
+  the GUI pass, along with whether keystrokes actually land).
+- Clipboard: NSPasteboard (arboard) and `pbcopy` both **fail cleanly
+  over headless SSH** — the pasteboard daemon is per-login — with
+  per-tool diagnostics and a macOS-specific error message.
+  `FONO_INJECT_BACKEND=none` exercised the full documented-order
+  degradation. `pbpaste` readback is wired into test-inject.
+- Focus: `NSWorkspace.frontmostApplication` returns no app headless →
+  empty `FocusInfo`, no error, matching the graceful-degradation
+  contract.
+
 ## Deferred-GUI checklist
 
 The dev Mac is headless-only, so anything that needs a seated user —
@@ -157,6 +173,12 @@ land:
   untested).
 - [ ] Grant Accessibility (TCC); dictation lands at the cursor in
   TextEdit, Safari address bar, VS Code; per-app rules fire (Phase 6).
+  Note: headless CGEventPost *accepts* events without the grant, so
+  also verify the denial UX (deny the grant, confirm the clipboard
+  fallback + notification) — it is unobservable over SSH.
+- [ ] Clipboard round-trip in a logged-in session: dictation →
+  NSPasteboard via arboard → Cmd+V paste; `fono test-inject` readback
+  via pbpaste MATCHES (Phase 6; headless SSH has no pboard daemon).
 - [ ] Menu-bar icon visible with working menu (Phase 7).
 - [ ] Overlay paints during recording: click-through, no focus steal,
   no Dock/Cmd-Tab presence, correct positioning (Phase 8).

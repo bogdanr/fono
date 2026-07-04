@@ -43,3 +43,19 @@ arboard = { version = "3.6", default-features = false, features = ["wayland-data
 # (Mutter / GNOME-Wayland does not implement this protocol as of GNOME 46,
 # so a `which("wtype")` check is not enough — wtype silently no-ops there).
 wayland-client = "0.31"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# NSWorkspace.frontmostApplication for focus detection (plan Task 6.3).
+# Both crates are already in Cargo.lock at these exact versions via
+# arboard's darwin backend — no new-to-project crates, zero Linux cost
+# (target tables do not unify off-target).
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "libc",
+    "NSWorkspace",
+    "NSRunningApplication",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSString",
+] }

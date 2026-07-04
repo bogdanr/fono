@@ -2381,39 +2381,31 @@ fn test_inject_cmd(text: &str, no_inject: bool, no_clipboard: bool) {
             },
             started.elapsed().as_millis()
         );
-        if let Some(readback) = readback_clipboard() {
+        if let Some((tool, readback)) = readback_clipboard() {
             let ok = readback.trim() == text;
             println!(
-                "      readback: {} ({} bytes via {})",
+                "      readback: {} ({} bytes via {tool})",
                 if ok { "MATCHES" } else { "DIFFERS" },
                 readback.trim().len(),
-                if which("wl-paste").is_some() {
-                    "wl-paste"
-                } else if which("xclip").is_some() {
-                    "xclip -o"
-                } else {
-                    "xsel -o"
-                }
             );
+        } else if cfg!(target_os = "macos") {
+            // pbpaste always ships with macOS; if it failed there is no
+            // per-login pasteboard daemon (e.g. headless SSH session).
+            println!("      readback: pbpaste failed (no pasteboard daemon in this session?)");
         } else {
             println!("      readback: no read-tool installed (install wl-paste or xclip)");
         }
     }
 }
 
-fn which(cmd: &str) -> Option<std::path::PathBuf> {
-    std::env::var_os("PATH")?
-        .to_string_lossy()
-        .split(':')
-        .map(|d| std::path::Path::new(d).join(cmd))
-        .find(|p| p.is_file())
-}
-
-/// Best-effort readback of the X11/Wayland clipboard for verification.
-/// Returns None when no read tool is available.
-fn readback_clipboard() -> Option<String> {
+/// Best-effort readback of the system clipboard for verification.
+/// Returns the tool used and its output; `None` when no read tool is
+/// available. `pbpaste` ships with macOS, so on that platform readback
+/// always works.
+fn readback_clipboard() -> Option<(&'static str, String)> {
     use std::process::{Command, Stdio};
     let candidates: &[(&str, &[&str])] = &[
+        ("pbpaste", &[]),
         ("wl-paste", &["--no-newline"]),
         ("xclip", &["-selection", "clipboard", "-o"]),
         ("xsel", &["--clipboard", "--output"]),
@@ -2430,7 +2422,7 @@ fn readback_clipboard() -> Option<String> {
             continue;
         };
         if out.status.success() {
-            return Some(String::from_utf8_lossy(&out.stdout).to_string());
+            return Some((tool, String::from_utf8_lossy(&out.stdout).to_string()));
         }
     }
     None
