@@ -205,6 +205,26 @@ jobs:
             variant: cpu
             asset_prefix: fono
             features: ""
+          # macOS (plans/2026-07-03-macos-port-v1.md, Phase 11): a single
+          # Metal-accelerated arm64 binary — no cpu/gpu split, per the
+          # Phase 3 artefact decision (+0.65 MiB over CPU-only for a
+          # 4.3x faster large-v3-turbo; ggml falls back to its CPU
+          # backend at runtime if Metal can't initialise). The asset
+          # carries the full target triple (`fono-vX.Y.Z-aarch64-apple-
+          # darwin`) to stay unambiguous next to the bare-arch Linux
+          # names — `fono-update::asset_name_for` must agree. Raw binary
+          # + .sha256 only (no bundle in CI: `fono install` assembles and
+          # self-signs Fono.app locally so the Accessibility grant is
+          # keyed to the user's own stable identity; nothing to sign or
+          # notarise here, no secrets). x86_64 / universal-lipo waits on
+          # the x86_64-apple-darwin onnxruntime pin (plan Task 11.3).
+          - target: aarch64-apple-darwin
+            os: macos-15
+            cross: false
+            archive: none
+            variant: metal
+            asset_prefix: fono
+            features: accel-metal
     steps:
       - uses: actions/checkout@v5
 
@@ -235,7 +255,10 @@ jobs:
       - name: Install Linux build deps
         # GPU variant adds Vulkan headers + the `shaderc` SPIR-V
         # compiler (`glslc`) that ggml-vulkan's CMake requires to
-        # build its 150+ shaders at compile time.
+        # build its 150+ shaders at compile time. macOS needs nothing:
+        # the runner image ships Xcode clang + cmake, and the vendored
+        # whisper.cpp/llama.cpp build with them out of the box.
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
@@ -305,10 +328,19 @@ jobs:
         # embedded; NEEDED stays the 4-entry allowlist). Pull the per-triple
         # archive from the fono-voice release mirror, SHA-256 verified, and
         # pin ORT_LIB_LOCATION — the `ort` build never touches the CDN.
+        # (macOS runners ship `xz` + `shasum`; the script handles both.)
         run: |
           ort_dir="$(TARGET=${{ matrix.target }} sh scripts/fetch-onnxruntime.sh)"
           echo "ORT_LIB_LOCATION=${ort_dir}" >> "$GITHUB_ENV"
           echo "pinned ORT_LIB_LOCATION=${ort_dir}"
+
+      - name: Set macOS C++ stdlib for ort-sys
+        # Cancel the workspace `[env] ORT_CXX_STDLIB="static:-bundle=stdc++"`
+        # (a Linux-GNU NEEDED-allowlist fix; cargo [env] cannot be
+        # target-scoped): ld64 has no libstdc++. Inherited env beats
+        # [env]. Mirrors the ci.yml macos job; see docs/build-macos.md.
+        if: runner.os == 'macOS'
+        run: echo "ORT_CXX_STDLIB=c++" >> "$GITHUB_ENV"
 
       - name: Build (portable AVX2 baseline)
         # `GGML_NATIVE=OFF` + explicit AVX2/FMA/F16C/BMI2 are inherited from
@@ -357,6 +389,27 @@ jobs:
           fi
           echo "${needed}"
 
+      - name: Verify macOS dylib imports
+        # Mach-O analogue of the NEEDED gate: the static-link posture
+        # carries over, so every LC_LOAD_DYLIB must be a system
+        # framework or a /usr/lib system library (libSystem, libc++,
+        # libobjc). Anything else (Homebrew paths, @rpath) means a
+        # dependency leaked in and the binary would break on machines
+        # without it. Bench-verified allowlist: docs/build-macos.md.
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release-slim/${BIN_NAME}"
+          imports="$(otool -L "${bin}" | tail -n +2 | awk '{print $1}')"
+          bad="$(grep -Ev '^(/System/Library/Frameworks/|/usr/lib/)' <<<"${imports}" || true)"
+          if [ -n "${bad}" ]; then
+            echo "Unexpected dylib imports in ${bin}:"
+            echo "${bad}"
+            exit 1
+          fi
+          echo "${imports}"
+
       - name: Stage release binary + internal staging tarball
         shell: bash
         run: |
@@ -366,7 +419,12 @@ jobs:
           asset_prefix="${{ matrix.asset_prefix }}"
           variant="${{ matrix.variant }}"
           # Map cargo target triple -> short arch label used in release names.
+          # Darwin keeps the full triple (matched first — the bare
+          # `aarch64-*` arm would otherwise collide with the Linux
+          # aarch64 asset name); `fono-update::asset_name_for` relies
+          # on this exact shape.
           case "${target}" in
+            *-apple-darwin) arch="${target}" ;;
             x86_64-*)   arch=x86_64 ;;
             aarch64-*)  arch=aarch64 ;;
             *)          arch="${target}" ;;
@@ -655,6 +713,7 @@ jobs:
           # bare binaries, plus the distro packages (CPU only ships those).
           find artifacts -type f \
             \( -name "fono-v*-x86_64" -o -name "fono-v*-aarch64" -o -name "fono-v*-x86_64.exe" \
+               -o -name "fono-v*-aarch64-apple-darwin" \
                -o -name "fono-gpu-v*-x86_64" -o -name "fono-gpu-v*-aarch64" \
                -o -name "*.deb" -o -name "*.pkg.tar.zst" -o -name "*.txz" -o -name "*.lzm" \) \
             -exec cp {} release/ \;
@@ -665,6 +724,7 @@ jobs:
           # the streamed SHA-256 against this sidecar and refuses to
           # apply on mismatch. See crates/fono-update/src/lib.rs:462.
           for f in fono-v*-x86_64 fono-v*-aarch64 fono-v*-x86_64.exe \
+                   fono-v*-aarch64-apple-darwin \
                    fono-gpu-v*-x86_64 fono-gpu-v*-aarch64 \
                    *.deb *.pkg.tar.zst *.txz *.lzm; do
             [ -e "$f" ] || continue

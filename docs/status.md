@@ -1,6 +1,47 @@
 # Fono — Project Status
 Last updated: 2026-07-04
 
+## 2026-07-04 — macOS Phase 11 complete: release workflow ships the darwin asset
+
+Phase 11 of `plans/2026-07-03-macos-port-v1.md`. The next `v*` tag will
+publish the first macOS release asset automatically; every
+workflow-side piece was dry-run on the bench.
+
+- **`release.yml` row (Task 11.1):** `macos-15` runner joined the build
+  matrix — single **Metal** variant (`--features accel-metal`, per the
+  Phase 3 artefact decision), `aarch64-apple-darwin`, pinned
+  onnxruntime via `scripts/fetch-onnxruntime.sh`, `ORT_CXX_STDLIB=c++`
+  (cancels the workspace `[env]` Linux-ism). Linux-only steps (apt
+  deps, ELF `NEEDED` gate, size budget) gated on `runner.os == 'Linux'`;
+  a new Mach-O gate asserts every `LC_LOAD_DYLIB` import is a system
+  framework or `/usr/lib` system library. Asset:
+  `fono-vX.Y.Z-aarch64-apple-darwin` + `.sha256`, included in
+  `SHA256SUMS` — exactly the name Phase 10's updater resolves (darwin
+  matched before the bare `aarch64-*` arm so it never collides with
+  the Linux arm asset).
+- **Bench dry-run:** the exact step sequence produced a 15.40 MiB
+  (16,143,328 B) artefact; the dylib gate passed verbatim (17 imports,
+  all allowlisted, incl. Metal/MetalKit/AppKit); the artefact
+  transcribed the English fixture correctly on Metal with
+  `large-v3-turbo`.
+- **Docs (Task 11.2):** README "other ways to install" gained the
+  macOS row (download + `fono install`, honest headless-tested
+  caveat); CHANGELOG `[Unreleased]` section describes the port in
+  user-facing terms; `docs/build-macos.md` gained the Phase 11
+  dry-run section.
+- **Universal binary (Task 11.3):** stays deferred on the
+  `x86_64-apple-darwin` onnxruntime pin; arm64-only until then
+  (decision recorded in the plan).
+- **Task 11.4 closed:** all three pieces of the zero-cost grant-once
+  pipeline are now live — install-side signing (Phase 9), the update
+  re-sign hook (Phase 10), and the unsigned-asset release plumbing
+  (this phase). No secrets in CI.
+
+Gates: Linux fmt / clippy `-D warnings` / workspace tests green
+(workflow + docs only — no Rust changes); darwin release build + smoke
+over SSH. Remaining: Phase 12 (promote the CI row to gating + macOS
+size budget) and the deferred-GUI checklist.
+
 ## 2026-07-04 — macOS Phase 10 complete: `fono update` with grant-preserving re-sign
 
 Phase 10 of `plans/2026-07-03-macos-port-v1.md` at the headless tier.

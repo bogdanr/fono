@@ -103,7 +103,8 @@ Local-first, by design. With the default setup, audio and text never leave your 
 ## Other ways to install
 
 - **Distro packages.** `.deb`, `.pkg.tar.zst`, and `.txz` files are built by CI and attached to each [release](https://github.com/bogdanr/fono/releases/latest). They are not regularly tested — file an issue if one misbehaves.
-- **macOS and Windows.** Planned, not shipping yet. See the [roadmap](ROADMAP.md).
+- **macOS (Apple Silicon, experimental).** Each release attaches a Metal-accelerated `fono-vX.Y.Z-aarch64-apple-darwin` binary. Download it, `chmod +x`, and run `fono install` — it assembles a `Fono.app`, sets up start-at-login, and walks you through the two one-time permission grants (microphone, Accessibility), which then survive updates. Ported and tested headless; not yet verified on a physical Mac with a display — details in [docs/build-macos.md](docs/build-macos.md).
+- **Windows.** Planned, not shipping yet. See the [roadmap](ROADMAP.md).
 
 ## Documentation
 

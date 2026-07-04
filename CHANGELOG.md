@@ -5,6 +5,26 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **macOS support (Apple Silicon, experimental).** Fono now runs on
+  macOS: dictation, the voice assistant, local and cloud providers,
+  a native menu-bar icon with the full menu, the on-screen recording
+  indicator, global hotkeys (no special permission needed), text
+  injection at the cursor, and local text-to-speech. Releases attach a
+  single Metal-accelerated `aarch64-apple-darwin` binary — GPU
+  transcription is ~4× faster than CPU at almost no size cost, so
+  there is no separate CPU download. `fono install` sets everything up
+  per-user (no sudo): an app bundle, start-at-login, and a guided
+  one-time permissions flow — the microphone and Accessibility grants
+  are keyed to a stable local signature, so they survive every
+  `fono update` instead of breaking after each one. Caveat: the port
+  was developed and verified on a headless Mac; on-screen behaviour
+  (menu bar, overlay, permission prompts) has not yet been eyeballed
+  on a physical display — see `docs/build-macos.md` for the checklist.
+
 ## [0.14.0] — 2026-07-02
 
 All of Fono's settings are now editable from your browser, and live

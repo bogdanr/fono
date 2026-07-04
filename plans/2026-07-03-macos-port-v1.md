@@ -644,26 +644,41 @@ deferred checklist in `docs/build-macos.md`.
 
 ### Phase 11 — Release workflow artefact
 
-- [ ] Task 11.1. **`release.yml` row**: `macos-15` runner, the single
+- [x] Task 11.1. **`release.yml` row**: `macos-15` runner, the single
       **Metal** variant (`--features accel-metal`, per the artefact-shape
       decision), `aarch64-apple-darwin`, fetch-onnxruntime,
       `ORT_CXX_STDLIB=c++`, release-slim build, asset + `.sha256`,
-      `SHA256SUMS` inclusion, ELF-only steps skipped.
-- [ ] Task 11.2. **Docs**: README install table row; `docs/build-macos.md`
-      complete; CHANGELOG entry.
-- [ ] Task 11.3. **Universal binary deferred**: the decided ship shape is a
+      `SHA256SUMS` inclusion, ELF-only steps skipped (Linux deps and
+      NEEDED gate now `if: runner.os == 'Linux'`; a Mach-O analogue
+      verifies every `LC_LOAD_DYLIB` is a system framework or
+      `/usr/lib` system library). The asset keeps the full triple
+      (`fono-vX.Y.Z-aarch64-apple-darwin`; the darwin arm is matched
+      before the bare `aarch64-*` one to avoid colliding with the
+      Linux arm asset). Dry-run on the bench 2026-07-04: release-slim
+      + accel-metal + `ORT_CXX_STDLIB=c++` builds (15.40 MiB), the
+      exact dylib gate passes (17 imports, all allowlisted incl.
+      Metal/MetalKit/AppKit), and the artefact transcribes the
+      fixture correctly on Metal.
+- [x] Task 11.2. **Docs**: README "other ways to install" row (download +
+      `fono install`, honest headless-tested caveat); CHANGELOG
+      `[Unreleased]` section for the port; `docs/build-macos.md` carries
+      the per-phase smoke log + deferred-GUI checklist.
+- [x] Task 11.3. **Universal binary deferred** (decision recorded): the
+      decided ship shape is a
       single universal (lipo) binary of the one Metal variant — x86_64 +
       aarch64, ~2× asset size (~32 MiB), normal for mac distribution.
       Blocked on the `x86_64-apple-darwin` onnxruntime pin (still unbuilt
       on the mirror); arm64-only until then. ggml's runtime CPU-backend
       fallback covers Intel Macs where the Metal backend can't initialize.
-- [ ] Task 11.4. **Grant-once signing pipeline, zero-cost posture** (the
-      mechanism behind Task 9.3's "grant survives updates"). *Install
-      side landed with Phase 9* — the cert/keychain/bundle/sign steps
-      below are live in `crates/fono/src/install/macos.rs` and
-      bench-verified (designated requirement stable across re-installs).
-      Remaining for this task: the `fono update` re-sign hook (Phase 10)
-      and the release-asset/docs plumbing (11.1–11.3). TCC stores
+- [x] Task 11.4. **Grant-once signing pipeline, zero-cost posture** (the
+      mechanism behind Task 9.3's "grant survives updates"). **All
+      three pieces are now live**: install side (Phase 9 —
+      cert/keychain/bundle/sign in `crates/fono/src/install/macos.rs`,
+      designated requirement bench-stable across re-installs), the
+      `fono update` re-sign hook (Phase 10 — requirement bench-stable
+      across the swap), and the release-asset/docs plumbing (11.1–11.3
+      above — CI ships the plain unsigned asset + `.sha256`, no
+      secrets). TCC stores
       the app's *designated requirement* at grant time and re-checks it
       on every launch — identical signature ⇒ grant persists. Decision
       2026-07-04: **no Apple Developer Program** (USD 99/yr rejected —
@@ -700,7 +715,9 @@ deferred checklist in `docs/build-macos.md`.
          signs/notarizes, the local re-sign step simply becomes a
          no-op. Nothing in the free posture paints us into a corner.
 
-**Phase 11 gate**: tagged release publishes the first macOS asset.
+**Phase 11 gate**: tagged release publishes the first macOS asset —
+fires automatically at the next `v*` tag; every workflow-side piece is
+in place and was dry-run on the bench.
 
 ### Phase 12 — Promote macOS CI to gating + size budget
 

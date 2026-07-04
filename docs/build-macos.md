@@ -237,6 +237,22 @@ features, debug build:
   the hook silently; a failed re-sign warns and points at the
   re-grant + `fono install` recovery instead of failing the update.
 
+### Phase 11 dry-run (release artefact) — 2026-07-04
+
+- The exact `release.yml` step sequence was replicated on the bench:
+  `scripts/fetch-onnxruntime.sh` (pinned static lib), `ORT_CXX_STDLIB=c++`,
+  `cargo build --profile release-slim -p fono --features accel-metal`
+  for `aarch64-apple-darwin`.
+- Artefact: **15.40 MiB** (16,143,328 B), `fono --version` runs, and it
+  transcribes the English fixture correctly on Metal with
+  `large-v3-turbo`.
+- The workflow's Mach-O dylib gate passed verbatim: 17 `LC_LOAD_DYLIB`
+  imports, every one under `/System/Library/Frameworks/` or `/usr/lib/`
+  (incl. Metal, MetalKit, AppKit, CoreAudio) — no third-party dylibs.
+- The asset (`fono-vX.Y.Z-aarch64-apple-darwin` + `.sha256`, listed in
+  `SHA256SUMS`) publishes automatically at the next `v*` tag; the
+  end-to-end `fono update` onto it is on the checklist below.
+
 ## Deferred-GUI checklist
 
 The dev Mac is headless-only, so anything that needs a seated user —
