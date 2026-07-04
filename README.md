@@ -103,7 +103,7 @@ Local-first, by design. With the default setup, audio and text never leave your 
 ## Other ways to install
 
 - **Distro packages.** `.deb`, `.pkg.tar.zst`, and `.txz` files are built by CI and attached to each [release](https://github.com/bogdanr/fono/releases/latest). They are not regularly tested — file an issue if one misbehaves.
-- **macOS (Apple Silicon, experimental).** Each release attaches a Metal-accelerated `fono-vX.Y.Z-aarch64-apple-darwin` binary. Download it, `chmod +x`, and run `fono install` — it assembles a `Fono.app`, sets up start-at-login, and walks you through the two one-time permission grants (microphone, Accessibility), which then survive updates. Ported and tested headless; not yet verified on a physical Mac with a display — details in [docs/build-macos.md](docs/build-macos.md).
+- **macOS (Apple Silicon, experimental).** Each release attaches a Metal-accelerated `fono-vX.Y.Z-aarch64-apple-darwin` binary. Download it, `chmod +x`, and run `fono install` — it sets up start-at-login and walks you through the one-time permission grants. It's only been tested on a headless remote Mac so far, not eyeballed on a real display yet — if you try it, an issue report (good or bad) is genuinely useful. Details in [docs/build-macos.md](docs/build-macos.md).
 - **Windows.** Planned, not shipping yet. See the [roadmap](ROADMAP.md).
 
 ## Documentation
@@ -119,7 +119,7 @@ Local-first, by design. With the default setup, audio and text never leave your 
 
 ## Status
 
-Linux-first; used daily by the maintainer. Rough edges exist — issues and patches are welcome. See the [roadmap](ROADMAP.md) for what's next.
+Linux-first; used daily by the maintainer. macOS support is new and has not yet run on a real display — see [Other ways to install](#other-ways-to-install). Rough edges exist — issues and patches are welcome. See the [roadmap](ROADMAP.md) for what's next.
 
 ## Contributing
 

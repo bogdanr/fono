@@ -63,6 +63,32 @@ Task 1.2 lands.
 > cap of the 2026-06-24 amendment. `gpu` is unchanged. See
 > `docs/binary-size.md` §2.
 
+> **AMENDED 2026-07-04 — macOS artefact joins the budget matrix.** The
+> macOS port (plans/2026-07-03-macos-port-v1.md) ships a **single
+> Metal-accelerated variant** for `aarch64-apple-darwin` (no cpu/gpu
+> split — measured Phase 3: `accel-metal` costs +0.65 MiB while
+> transcribing ~4.3× faster; ggml falls back to its CPU backend at
+> runtime). A new `size-budget-macos` job in `.github/workflows/ci.yml`
+> builds the exact `release-slim --features accel-metal` ship artefact
+> and asserts:
+>
+> - **Enforced budget ≤ 18 MiB (18 874 368 B); hard cap ≤ 20 MiB.**
+>   Measured 2026-07-04 on the Mac Studio bench: **16 143 328 B
+>   (15.40 MiB)**, ~2.6 MiB headroom under the enforced row.
+> - **`LC_LOAD_DYLIB` allowlist (the Mach-O analogue of the Linux
+>   `NEEDED` gate): exactly 17 entries**, all system frameworks
+>   (`/System/Library/Frameworks/…` — Accelerate, AppKit,
+>   ApplicationServices, AudioUnit, Carbon, CoreAudio, CoreData,
+>   CoreFoundation, CoreGraphics, CoreServices, Foundation, Metal,
+>   MetalKit) or `/usr/lib` system libraries (`libSystem.B`,
+>   `libc++.1`, `libiconv.2`, `libobjc.A`). The static-link posture
+>   carries over: onnxruntime, whisper/llama/ggml, and the C++ runtime
+>   are embedded; a new import is a leaked dependency and fails CI.
+>
+> The darwin numbers live in lockstep with the `size-budget-macos` job;
+> change them together, budget bumps only with sign-off recorded here.
+> Linux budgets are unaffected.
+
 The static-musl ship (Phase 2.4) is **deferred** — see "Rejected:
 static-musl with libgomp" in Trade-offs.
 

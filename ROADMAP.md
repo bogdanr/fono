@@ -269,8 +269,16 @@ while referencing another. Plan sketch:
 
 ### macOS and Windows
 
-Native integrations for both platforms: menu-bar app and signed `.dmg` on macOS;
-system-tray app and native installer on Windows.
+Native integrations for both platforms. **macOS is code-complete on `main`
+and ships with the next release**: menu-bar app, global hotkeys, native
+overlay, CoreAudio capture/playback with Metal-accelerated local
+transcription, and a one-command `fono install` that assembles a
+self-signed `Fono.app` whose one-time Accessibility grant survives every
+update — no Apple developer account involved. Verified headless on remote
+Apple Silicon hardware; a final manual pass on a physical display is the
+remaining step (`docs/build-macos.md`). Windows follows the same
+playbook: system-tray app and native installer
+(`plans/2026-05-26-windows-port-v1.md`).
 
 ---
 

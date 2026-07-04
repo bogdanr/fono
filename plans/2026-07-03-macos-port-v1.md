@@ -721,16 +721,34 @@ in place and was dry-run on the bench.
 
 ### Phase 12 — Promote macOS CI to gating + size budget
 
-- [ ] Task 12.1. **Drop `continue-on-error`.**
-- [ ] Task 12.2. **Mach-O dylib allowlist** via `otool -L` (system
-      frameworks + libSystem only; the static-link posture carries over).
-- [ ] Task 12.3. **Size budget**: measure, pin a ceiling analogous to the
-      Linux 25 MiB gate (ADR 0022 amendment), enforce in CI.
-- [ ] Task 12.4. **ROADMAP.md**: move the macOS half of "macOS + Windows"
-      to Shipped with the release tag.
+- [x] Task 12.1. **Drop `continue-on-error`.** Done 2026-07-04: the
+      `macos` job in `ci.yml` is a blocking gate (name de-suffixed too).
+- [x] Task 12.2. **Mach-O dylib allowlist** via `otool -L`. Done
+      2026-07-04 as part of the new `size-budget-macos` job: the
+      `LC_LOAD_DYLIB` set must equal the bench-verified 17-entry
+      allowlist exactly (13 system frameworks + 4 `/usr/lib` system
+      libs) — an exact match, not a prefix match, so even a benign new
+      system framework is a visible, reviewed event. The gate script
+      was executed verbatim on the bench artefact before landing
+      (GATE-PASS, 17 imports).
+- [x] Task 12.3. **Size budget.** Done 2026-07-04: `size-budget-macos`
+      builds the exact release artefact (`release-slim`,
+      `aarch64-apple-darwin`, `accel-metal`, pinned onnxruntime,
+      `ORT_CXX_STDLIB=c++`) and enforces **≤ 18 MiB (18 874 368 B)**;
+      measured 16 143 328 B (15.40 MiB), ~2.6 MiB headroom. Hard cap
+      ≤ 20 MiB recorded in the ADR 0022 amendment (2026-07-04); the CI
+      row and the ADR live in lockstep.
+- [x] Task 12.4. **ROADMAP.md.** Done 2026-07-04 (adapted): the port
+      isn't tagged yet, so instead of moving to Shipped the
+      "macOS and Windows" horizon entry now states macOS is
+      code-complete on `main` and ships with the next release,
+      describing what actually shipped (self-signed `Fono.app`, not
+      the originally sketched signed `.dmg`). Move to **Shipped** with
+      the release tag per the AGENTS.md release rule.
 
-**Phase 12 gate**: macOS CI gating; budget enforced; first official
-macOS release out.
+**Phase 12 gate**: macOS CI gating ✅; budget enforced ✅; first official
+macOS release goes out with the next tag (release.yml row landed in
+Phase 11).
 
 ## Verification Criteria
 

@@ -253,6 +253,54 @@ features, debug build:
   `SHA256SUMS`) publishes automatically at the next `v*` tag; the
   end-to-end `fono update` onto it is on the checklist below.
 
+### Phase 12 (gating CI + size budget) — 2026-07-04
+
+- The `macos` CI job is now **blocking** (`continue-on-error` dropped):
+  a red darwin build fails the PR like the Linux rows do.
+- New `size-budget-macos` CI job — the darwin analogue of the Linux
+  size gate. It builds the exact ship artefact (`release-slim`,
+  `aarch64-apple-darwin`, `accel-metal`, pinned onnxruntime,
+  `ORT_CXX_STDLIB=c++`) and asserts **size ≤ 18 MiB (18 874 368 B)**
+  plus an **exact 17-entry `LC_LOAD_DYLIB` allowlist** (13 system
+  frameworks + `libSystem.B`, `libc++.1`, `libiconv.2`, `libobjc.A`).
+  Budget numbers live in lockstep with the ADR 0022 amendment
+  (2026-07-04, hard cap ≤ 20 MiB) — change them together.
+- The gate script was executed **verbatim** on the bench artefact
+  before landing: 16 143 328 B ≤ budget, GATE-PASS with 17 imports,
+  all allowlisted. (Note: the step needs `shell: bash` — it uses
+  process substitution, which `sh` rejects; the workflow pins it.)
+
+### Pre-push extra verification — 2026-07-04
+
+Before pushing the port, ran a broader pass on the bench release
+artefact beyond the per-phase smokes above, to catch anything a
+single-fixture check might miss:
+
+- **Multi-language transcription**: the `en`, `ro`, `es`, `fr`, and
+  `zh` equivalence fixtures all transcribed correctly on the release
+  (Metal) artefact — not just the English one used in earlier phases.
+- **Daemon as the console user** (not root): copied the model cache to
+  the `apple` account and ran the daemon via
+  `launchctl asuser <uid> sudo -u apple -H fono`, the closest a
+  headless SSH session can get to a real login. It started tray,
+  overlay, and hotkey subsystems without error, and
+  `CGWindowListCopyWindowInfo` confirmed the tray's `NSStatusItem`
+  window and the overlay's `NSPanel` are both registered with
+  WindowServer and reported `onscreen=true` when active.
+- **Screenshot limitation, honestly recorded**: `screencapture` on
+  this bench produces images where the *entire* right side of the
+  menu bar is blank — no clock, no Wi-Fi, no Control Center, not just
+  no fono icon — even though the system reports those items as
+  present. This machine is accessed through remote-desktop software
+  for out-of-band admin access, and that virtual display path
+  evidently doesn't composite menu-bar status items into its captured
+  frames. That's a property of this particular bench's remote-display
+  stack, not evidence about our tray code (which WindowServer confirms
+  is registered correctly) — but it does mean the tray icon and
+  overlay have still never been *visually* confirmed by a human, only
+  by API introspection. That gap stays open on the checklist below
+  until someone looks at a real Mac's screen.
+
 ## Deferred-GUI checklist
 
 The dev Mac is headless-only, so anything that needs a seated user —
@@ -280,12 +328,17 @@ land:
 - [ ] Menu-bar icon visible with working menu (Phase 7): state tint
   changes while recording, all submenus present and firing actions,
   no Dock icon / no Cmd+Tab entry (Accessory policy), tooltip shows
-  the FSM state line.
+  the FSM state line. Registration with WindowServer is confirmed via
+  `CGWindowListCopyWindowInfo` (2026-07-04); nobody has looked at it
+  on screen yet — this bench's remote-display capture can't render
+  menu-bar status items at all (see above).
 - [ ] Overlay paints during recording: click-through, no focus steal,
   no Dock/Cmd-Tab presence, bottom-centred on the primary display,
   correct retina sharpness (scale sync), and smooth animation —
   frames arrive event-driven via the GCD main queue at the producers'
-  ≈20–30 fps cadence (Phase 8).
+  ≈20–30 fps cadence (Phase 8). Panel registration with WindowServer
+  is confirmed via API introspection (2026-07-04); the actual pixels
+  have not been seen.
 - [ ] `fono install` → logout/login → daemon + menu-bar icon running,
   agent listed by `launchctl print gui/$UID/org.fono.daemon`; first
   daemon start raises the native Accessibility dialog

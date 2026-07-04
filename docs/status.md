@@ -1,6 +1,62 @@
 # Fono — Project Status
 Last updated: 2026-07-04
 
+## 2026-07-04 — macOS: extra pre-push verification + honest README/CHANGELOG wording
+
+Before pushing the 12-phase macOS port, ran a broader check pass on
+the bench release artefact and tightened the user-facing wording so
+the port isn't oversold:
+
+- Multi-language equivalence fixtures (en/ro/es/fr/zh) all transcribe
+  correctly on the release (Metal) artefact.
+- Ran the daemon as the console user (`apple`, not root) via
+  `launchctl asuser`, the closest headless SSH can get to a real
+  login: tray, overlay, and hotkeys all start cleanly, and
+  `CGWindowListCopyWindowInfo` confirms the tray's `NSStatusItem` and
+  the overlay's `NSPanel` are registered with WindowServer and
+  `onscreen=true`.
+- Honestly recorded a bench limitation: this Mac's remote-desktop
+  access path doesn't composite menu-bar status items into
+  `screencapture` output at all (the entire right side of the menu
+  bar is blank, including the system clock) — so the tray icon has
+  been confirmed present via API introspection but never seen by a
+  human eye. Left open on the deferred-GUI checklist.
+- README and CHANGELOG reworded: brief, whole-project framing (not a
+  session recap), explicit that macOS was only tested on a headless
+  remote Mac, and an explicit invitation for Apple Silicon users to
+  try it and file an issue either way.
+
+## 2026-07-04 — macOS Phase 12 complete: CI gating + size budget — the port plan is done
+
+Final phase of `plans/2026-07-03-macos-port-v1.md`. All 12 phases are
+now complete at the headless tier; only the deferred-GUI checklist
+(`docs/build-macos.md`) remains, to be run by whoever first sits at a
+physical Mac.
+
+- **Gating CI (Task 12.1):** the `macos` job in `ci.yml` lost
+  `continue-on-error` — a red darwin build now fails PRs like the
+  Linux rows.
+- **`size-budget-macos` job (Tasks 12.2 + 12.3):** darwin analogue of
+  the Linux size gate. Builds the exact ship artefact (`release-slim`,
+  `aarch64-apple-darwin`, `accel-metal`, pinned onnxruntime,
+  `ORT_CXX_STDLIB=c++`) and asserts size ≤ 18 MiB (18 874 368 B) plus
+  an exact 17-entry `LC_LOAD_DYLIB` allowlist (13 system frameworks +
+  4 `/usr/lib` system libs). The assert script was run verbatim on the
+  bench artefact before landing: 16 143 328 B (15.40 MiB), GATE-PASS,
+  17 imports all allowlisted. One bench lesson encoded: the step must
+  run under `shell: bash` (process substitution; `sh` rejects it).
+- **ADR 0022 amended (2026-07-04):** macOS joins the budget matrix —
+  enforced ≤ 18 MiB, hard cap ≤ 20 MiB, allowlist recorded; the CI row
+  and the ADR live in lockstep.
+- **ROADMAP.md (Task 12.4, adapted):** the "macOS and Windows" horizon
+  entry now says macOS is code-complete on `main` and ships with the
+  next release (self-signed `Fono.app`, not the originally sketched
+  signed `.dmg`); it moves to Shipped at tag time per the release
+  rule.
+- Gate: Linux fmt / clippy -D warnings / 36 test suites green (no Rust
+  changes); ci.yml round-trips YAML (5 jobs, `continue-on-error`
+  absent).
+
 ## 2026-07-04 — macOS Phase 11 complete: release workflow ships the darwin asset
 
 Phase 11 of `plans/2026-07-03-macos-port-v1.md`. The next `v*` tag will

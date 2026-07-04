@@ -423,16 +423,15 @@ jobs:
           path: cargo-bloat-*.txt
           if-no-files-found: ignore
 
-  # macOS port (plans/2026-07-03-macos-port-v1.md, Phase 2). Non-blocking
-  # while the port is in progress: `continue-on-error` keeps the row
-  # visible in Actions without gating PRs. Promote to blocking once the
-  # darwin release artefact ships (plan Phase 11/12). arm64 runner
-  # (macos-15 = Apple Silicon); x86_64 waits on its onnxruntime pin.
+  # macOS port (plans/2026-07-03-macos-port-v1.md). Promoted to a
+  # blocking gate in Phase 12 — the darwin release artefact ships from
+  # release.yml, so a red darwin build must now fail the PR like the
+  # Linux rows do. arm64 runner (macos-15 = Apple Silicon); x86_64
+  # waits on its onnxruntime pin (plan Task 11.3).
   macos:
-    name: Build & test (macos-15, non-blocking)
+    name: Build & test (macos-15)
     runs-on: macos-15
     timeout-minutes: 35
-    continue-on-error: true
     env:
       # Cancel the workspace `[env] ORT_CXX_STDLIB="static:-bundle=stdc++"`
       # (a Linux-GNU NEEDED-allowlist fix, cargo [env] cannot be
@@ -459,6 +458,109 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace --tests --lib
+
+  # macOS analogue of the Linux `size-budget` job (ADR 0022, amended
+  # 2026-07-04; plans/2026-07-03-macos-port-v1.md Phase 12). Builds the
+  # exact darwin ship artefact — `aarch64-apple-darwin`, `release-slim`,
+  # the single `accel-metal` variant, pinned static onnxruntime,
+  # ORT_CXX_STDLIB=c++ — and asserts:
+  #   - size ≤ 18 MiB (18 874 368 B); measured 16 143 328 B (15.40 MiB)
+  #     on 2026-07-04, leaving ~2.6 MiB of headroom. Hard cap ≤ 20 MiB
+  #     per the ADR — bump this row only with sign-off, in lockstep
+  #     with the ADR amendment.
+  #   - the LC_LOAD_DYLIB import set is exactly the bench-verified
+  #     17-entry allowlist of system frameworks + /usr/lib system
+  #     libraries (docs/build-macos.md). The static-link posture
+  #     carries over from Linux: onnxruntime, whisper/llama/ggml, and
+  #     libc++ statics are all embedded, so a new import means a
+  #     dependency leaked in.
+  size-budget-macos:
+    name: Binary size & deps audit (metal, aarch64-apple-darwin)
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      ORT_CXX_STDLIB: c++
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Separate cache from the dev-profile `macos` job; `-portable`
+          # mirrors the Linux size-budget rows (GGML baseline via
+          # `.cargo/config.toml` [env]).
+          key: size-budget-macos-15-metal-portable
+
+      - name: Fetch minimal onnxruntime static lib (pin ORT_LIB_LOCATION)
+        run: |
+          ort_dir="$(TARGET=aarch64-apple-darwin sh scripts/fetch-onnxruntime.sh)"
+          echo "ORT_LIB_LOCATION=${ort_dir}" >> "$GITHUB_ENV"
+          echo "pinned ORT_LIB_LOCATION=${ort_dir}"
+
+      - name: Build canonical darwin ship binary
+        # Identical to release.yml's macos matrix row so the gate
+        # measures the artefact users actually download.
+        run: |
+          cargo build -p fono --profile release-slim \
+            --target aarch64-apple-darwin --features accel-metal
+
+      - name: Assert size budget + dylib allowlist
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/aarch64-apple-darwin/release-slim/fono"
+          budget_bytes=18874368
+
+          test -f "${bin}"
+          size="$(stat -f%z "${bin}")"
+          printf "size: %s bytes — budget %s bytes\n" "${size}" "${budget_bytes}"
+          if [ "${size}" -gt "${budget_bytes}" ]; then
+            echo "FAIL: darwin metal binary exceeds budget by $((size - budget_bytes)) bytes" >&2
+            exit 5
+          fi
+
+          # Exact allowlist, bench-verified 2026-07-04 (docs/build-macos.md).
+          # All entries are system frameworks or /usr/lib system libraries
+          # present on every macOS install; the gate is exact (not a prefix
+          # match) so silently gaining a new framework — even a benign
+          # system one — is a visible, reviewed event.
+          allowlist='
+          /System/Library/Frameworks/Accelerate.framework/Versions/A/Accelerate
+          /System/Library/Frameworks/AppKit.framework/Versions/C/AppKit
+          /System/Library/Frameworks/ApplicationServices.framework/Versions/A/ApplicationServices
+          /System/Library/Frameworks/AudioUnit.framework/Versions/A/AudioUnit
+          /System/Library/Frameworks/Carbon.framework/Versions/A/Carbon
+          /System/Library/Frameworks/CoreAudio.framework/Versions/A/CoreAudio
+          /System/Library/Frameworks/CoreData.framework/Versions/A/CoreData
+          /System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation
+          /System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics
+          /System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices
+          /System/Library/Frameworks/Foundation.framework/Versions/C/Foundation
+          /System/Library/Frameworks/Metal.framework/Versions/A/Metal
+          /System/Library/Frameworks/MetalKit.framework/Versions/A/MetalKit
+          /usr/lib/libSystem.B.dylib
+          /usr/lib/libc++.1.dylib
+          /usr/lib/libiconv.2.dylib
+          /usr/lib/libobjc.A.dylib
+          '
+
+          actual="$(otool -L "${bin}" | tail -n +2 | awk '{print $1}' | sort -u)"
+          allowed="$(printf "%s\n" ${allowlist} | sort -u)"
+
+          extras="$(comm -23 <(printf "%s\n" "${actual}") <(printf "%s\n" "${allowed}") || true)"
+          if [ -n "${extras}" ]; then
+            echo "FAIL: unexpected dylib imports (not in allowlist):" >&2
+            printf "  %s\n" ${extras} >&2
+            echo "Full import set:" >&2
+            printf "  %s\n" ${actual} >&2
+            exit 5
+          fi
+          echo "size-budget gate passed (metal, aarch64-apple-darwin); imports:"
+          printf "  %s\n" ${actual}
 
   deny:
     name: License & advisory audit

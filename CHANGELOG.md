@@ -21,9 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one-time permissions flow — the microphone and Accessibility grants
   are keyed to a stable local signature, so they survive every
   `fono update` instead of breaking after each one. Caveat: the port
-  was developed and verified on a headless Mac; on-screen behaviour
-  (menu bar, overlay, permission prompts) has not yet been eyeballed
-  on a physical display — see `docs/build-macos.md` for the checklist.
+  was developed and verified on a headless remote Mac; on-screen
+  behaviour (menu bar, overlay, permission prompts) has not yet been
+  eyeballed on a physical display. If you have an Apple Silicon Mac,
+  giving it a try and filing an issue with what you find — good or
+  bad — would genuinely help; see `docs/build-macos.md` for what's
+  been checked so far.
 
 ## [0.14.0] — 2026-07-02
 
