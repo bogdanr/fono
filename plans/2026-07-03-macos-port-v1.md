@@ -374,16 +374,66 @@ already-present packages).
 
 ### Phase 7 — Menu-bar (tray) icon
 
-- [ ] Task 7.1. **Backend decision (flag first).** `tray-icon` crate
+- [x] Task 7.1. **Backend decision (flag first).** ~~`tray-icon` crate
       (muda-based, shared with the Windows plan) vs objc2 NSStatusItem
-      direct. macOS-only target dep either way; Linux stays ksni.
-- [ ] Task 7.2. **Implement behind the `fono-tray` trait split** (Windows
-      plan Task 1.1 — do the split now if the Windows port hasn't). Mirror
-      the Linux menu structure; embed the PNG icon via `include_bytes!`.
-- [ ] Task 7.3. **Caveat**: NSStatusItem requires the main thread + a running
-      event loop; reconcile with the daemon's thread layout (likely the same
-      main-thread event pump the overlay backend needs — design them
-      together with Phase 8).
+      direct.~~ **Decided 2026-07-04 (Option C): shared menu-model
+      refactor + hand-rolled objc2 `NSStatusItem` renderer.** The real
+      duplication risk was never the backend crate — it's that the
+      ~600-line menu builder in `fono-tray` was written directly
+      against ksni's types, so every backend would re-encode the menu.
+      Decision:
+      - **One platform-neutral menu model** (declarative tree of
+        label/checked/disabled/action nodes) built in exactly one
+        shared function for all OSes; per-OS backends become dumb
+        one-time interpreters that never change when menu content
+        evolves. Linux ksni becomes the first interpreter
+        (byte-identical behaviour); this also discharges Windows plan
+        Task 1.1 early.
+      - **macOS renderer: objc2 `NSStatusItem` shim.** Zero new crates
+        (`objc2 0.6` / `objc2-app-kit 0.3` / `objc2-foundation 0.3`
+        are already darwin edges via the Phase 6 focus prober) vs
+        `tray-icon 0.24` = three new-to-project crates (`tray-icon`,
+        `muda`, `png`), est. ~0.5 MiB (verified against its crates.io
+        dep list). NSStatusItem needs the AppKit main thread + run
+        loop either way (tray-icon assumes a tao/winit pump we don't
+        have); the in-house main-thread host serves both the tray and
+        Phase 8's NSPanel overlay.
+      - **Windows keeps `tray-icon`** per its plan (independent,
+        unaffected; muda's win backend is thin over windows-sys) —
+        with the model split its renderer is trivial too, and a
+        hand-rolled `Shell_NotifyIcon` renderer stays open as a
+        size-driven revisit at Windows-port time. Linux stays ksni per
+        the standing workspace rationale.
+      - **Web settings UI stays a separate front end** (discussed
+        2026-07-04): the tray and the web config page already converge
+        on the same daemon control plane (validate → persist TOML
+        atomically → hot-reload), which is where consistency is
+        guaranteed. The tray is a curated quick-action subset plus
+        runtime-only items (recent dictations, live mDNS/mic lists,
+        update entries) that don't exist in the config schema; forcing
+        one UI description across a 2 s-polled native menu and a
+        schema-driven HTML form would couple them for zero code
+        savings.
+- [x] Task 7.2. **Menu-model refactor** (`fono-tray`): extract the
+      platform-neutral model + single shared builder; re-implement the
+      ksni backend as a model interpreter. Gate: Linux behaviour
+      byte-identical (fmt/clippy/tests green; menu structure snapshot
+      test pins the tree). *Done 2026-07-04: `fono-tray::menu` holds
+      the `MenuNode` tree + the one shared `build()` (a faithful
+      transcription of the old ksni builder, all ~10 submenus); the
+      ksni backend shrank to a ~40-line recursive interpreter.
+      Snapshot tests pin the top-level structure and the load-bearing
+      details (active markers, checkmarks, disabled sentinels,
+      empty-state rows) and compile on every OS, so cross-platform
+      menu parity is CI-tested. Windows plan Task 1.1 discharged
+      early.*
+- [ ] Task 7.3. **macOS `NSStatusItem` renderer** behind the same model:
+      template-image icon (menu-bar-native dark/light), full menu tree,
+      2 s poll repaint parity. Embed the icon via `include_bytes!`.
+      Caveat: NSStatusItem requires the main thread + a running event
+      loop; reconcile with the daemon's thread layout (same main-thread
+      event pump the overlay backend needs — design them together with
+      Phase 8).
 
 **Phase 7 gate (headless)**: tray backend compiles and, with no
 WindowServer access over SSH, fails gracefully into the existing no-tray

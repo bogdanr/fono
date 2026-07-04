@@ -1,5 +1,33 @@
 # Fono — Project Status
-Last updated: 2026-07-03
+Last updated: 2026-07-04
+
+## 2026-07-04 — macOS Phase 7 Task 7.2: platform-neutral tray menu model
+
+Tray decision executed (Option C, Task 7.1 recorded the same day): the
+menu is now defined once, platform-neutrally, and backends interpret.
+
+- **New `fono-tray::menu` module:** declarative `MenuNode` tree
+  (`Item`/`Check`/`Menu`/`Separator`) + a single shared `build()` that
+  is a faithful transcription of the old ~600-line ksni builder — all
+  ~10 submenus (recent, STT with discovered Wyoming peers, polish,
+  assistant, TTS, microphones, preferences with radio groups and
+  wake-phrase info rows, servers, conditional update/GPU rows).
+  Compiles and unit-tests on every OS with zero backend types.
+- **ksni backend became a ~40-line recursive interpreter**
+  (`render_nodes`): Item→StandardItem, Check→CheckmarkItem,
+  Menu→SubMenu, action:None→disabled row. Behaviour byte-identical by
+  construction; future menu edits happen in one place for all OSes.
+  Windows plan Task 1.1 is thereby discharged early.
+- **Snapshot tests pin the tree:** top-level structure list plus
+  load-bearing details (active `●` markers, checkmark states, disabled
+  sentinel handling, empty-state rows, truncation, language summary
+  tiers). These run on Linux, macOS, and (later) Windows CI, so
+  cross-platform menu parity is tested, not hoped for.
+- Gates: Linux fmt/clippy (default + `tray-backend`)/36 suites green;
+  darwin clippy `-D warnings` clean, menu tests green, `fono` builds.
+- Next: Task 7.3 — the objc2 `NSStatusItem` renderer over the same
+  model (needs the AppKit main-thread event pump, designed together
+  with Phase 8's NSPanel overlay).
 
 ## 2026-07-03 — macOS Phase 6 complete: text injection + focus via enigo/AppKit
 
