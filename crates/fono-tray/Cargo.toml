@@ -13,17 +13,68 @@ repository.workspace = true
 workspace = true
 
 [features]
-# `ksni` is light (zbus only, no GTK), but it's still optional so a
-# library consumer that doesn't want a tray surface (e.g. the
-# `fono-server`-style headless invocation, or unit tests) can build
-# `fono-tray` as a no-op. Default off; the top-level `fono` binary
-# enables `tray-backend` via its own `tray` feature.
+# The tray backend is optional so a library consumer that doesn't want
+# a tray surface (e.g. the `fono-server`-style headless invocation, or
+# unit tests) can build `fono-tray` as a no-op. Default off; the
+# top-level `fono` binary enables `tray-backend` via its own `tray`
+# feature. Per platform the feature activates:
+#   - Linux: `ksni` (pure-Rust SNI over zbus, no GTK).
+#   - macOS: the objc2 NSStatusItem renderer (zero new crates — the
+#     objc2 stack is already a darwin edge of the graph via
+#     fono-inject / arboard).
+# The `dep:` entries for target-scoped optional dependencies are
+# no-ops off-target, so one feature serves every platform.
 default = []
-tray-backend = ["dep:ksni"]
+tray-backend = [
+    "dep:ksni",
+    "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-foundation",
+]
 
 [dependencies]
 fono-core = { path = "../fono-core" }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 ksni = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# NSStatusItem menu-bar renderer (plan Task 7.3). All three crates are
+# already in Cargo.lock at these exact versions via fono-inject's
+# focus prober / arboard's darwin backend — no new-to-project crates,
+# zero Linux cost (target tables do not unify off-target).
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", default-features = false, optional = true, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSApplication",
+    "NSBitmapImageRep",
+    "NSButton",
+    "NSCell",
+    "NSControl",
+    "NSEvent",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSImage",
+    "NSImageRep",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSView",
+] }
+objc2-foundation = { version = "0.3", default-features = false, optional = true, features = [
+    "std",
+    "NSDate",
+    "NSGeometry",
+    "NSObjCRuntime",
+    "NSString",
+    "NSThread",
+    "NSTimer",
+] }

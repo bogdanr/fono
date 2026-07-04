@@ -25,15 +25,57 @@ fn main() -> Result<()> {
     // need and which only widen the shutdown-race surface.
     fono_core::vulkan_probe::run_subprocess_probe_if_requested();
 
-    // Now build the runtime for the real entry point. Mirrors what
-    // `#[tokio::main]` would have produced.
-    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(async_main())
-}
-
-async fn async_main() -> Result<()> {
+    // Parse + tracing before the runtime: on macOS the daemon path
+    // needs the parsed command to decide whether the main thread must
+    // become the AppKit event pump instead of the tokio driver.
     let args = cli::Cli::parse();
     init_tracing(args.verbosity());
-    cli::run(args).await
+
+    // macOS daemon in a graphical session: AppKit (NSStatusItem menus,
+    // and later the NSPanel overlay) is main-thread-only and needs a
+    // running NSApplication event loop, so the roles swap — the main
+    // thread parks in the AppKit pump and the daemon runs on a second
+    // thread with its own tokio runtime. Subcommands and headless
+    // launches (SSH, launchd without Aqua) keep the plain path: no
+    // NSApplication, byte-identical behaviour to before.
+    #[cfg(all(target_os = "macos", feature = "tray"))]
+    if args.cmd.is_none() && fono::is_graphical_session() {
+        return macos_daemon_main(args);
+    }
+
+    // Now build the runtime for the real entry point. Mirrors what
+    // `#[tokio::main]` would have produced.
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(cli::run(args))
+}
+
+/// Daemon entry point for macOS graphical sessions: install the tray's
+/// main-thread job pump, run the daemon on a dedicated thread, and park
+/// the real main thread in the AppKit run loop until the daemon exits.
+#[cfg(all(target_os = "macos", feature = "tray"))]
+fn macos_daemon_main(args: cli::Cli) -> Result<()> {
+    let Some(jobs) = fono_tray::install_main_pump() else {
+        anyhow::bail!("AppKit main-thread pump installed twice — daemon started twice in-process");
+    };
+
+    let daemon = std::thread::Builder::new().name("fono-daemon".into()).spawn(move || {
+        // Stop the pump when the daemon finishes — including on panic
+        // (Drop runs during unwind), so the main thread never hangs in
+        // `NSApplication::run` after the daemon is gone.
+        struct StopPumpOnDrop;
+        impl Drop for StopPumpOnDrop {
+            fn drop(&mut self) {
+                fono_tray::stop_main_pump();
+            }
+        }
+        let _stop = StopPumpOnDrop;
+        tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(cli::run(args))
+    })?;
+
+    fono_tray::run_main_pump(jobs);
+    match daemon.join() {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!("daemon thread panicked"),
+    }
 }
 
 /// Initialise the global `tracing` subscriber.

@@ -1593,6 +1593,9 @@ dependencies = [
  "anyhow",
  "fono-core",
  "ksni",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "tokio",
  "tracing",
 ]
@@ -2871,6 +2874,7 @@ dependencies = [
  "bitflags 2.11.1",
  "libc",
  "objc2 0.6.4",
+ "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
 ]

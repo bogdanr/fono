@@ -427,13 +427,32 @@ already-present packages).
       empty-state rows) and compile on every OS, so cross-platform
       menu parity is CI-tested. Windows plan Task 1.1 discharged
       early.*
-- [ ] Task 7.3. **macOS `NSStatusItem` renderer** behind the same model:
-      template-image icon (menu-bar-native dark/light), full menu tree,
-      2 s poll repaint parity. Embed the icon via `include_bytes!`.
+- [x] Task 7.3. **macOS `NSStatusItem` renderer** behind the same model:
+      ~~template-image icon (menu-bar-native dark/light),~~ full menu tree,
+      2 s poll repaint parity. ~~Embed the icon via `include_bytes!`.~~
       Caveat: NSStatusItem requires the main thread + a running event
       loop; reconcile with the daemon's thread layout (same main-thread
       event pump the overlay backend needs — design them together with
-      Phase 8).
+      Phase 8). *Done 2026-07-04: `fono-tray::backend_macos` interprets
+      the shared `MenuNode` tree into `NSMenu` (~40-line recursive
+      renderer, mirror of the ksni one) with a target/action bridge
+      (`NSMenuItem` tag → `TrayAction` registry, swapped atomically per
+      render). Main-thread pump: `fono::main()` on darwin — daemon
+      invocation in a graphical session only — installs a job channel,
+      moves the daemon to a worker thread, and parks the real main
+      thread in `NSApplication::run()` with the `Accessory` activation
+      policy (no Dock icon) + a 100 ms `NSTimer` draining boxed
+      closures with a `MainThreadMarker`; the same pump is the Phase 8
+      overlay's host. Poll/diff loop stays on tokio, identical cadence
+      to ksni; unchanged ticks ship nothing. Icon: deliberately NOT a
+      template image — the tint carries FSM state (same
+      `menu::state_color` palette as Linux), rendered at runtime into
+      an `NSBitmapImageRep` (no embedded asset needed). Headless SSH /
+      non-daemon invocations: no pump installed → `spawn` warns once,
+      returns `false`, daemon runs tray-less (verified on the bench).
+      Zero new crates; `objc2`/`objc2-app-kit`/`objc2-foundation`
+      became direct darwin deps of `fono-tray` (already in the graph
+      via Phase 6).*
 
 **Phase 7 gate (headless)**: tray backend compiles and, with no
 WindowServer access over SSH, fails gracefully into the existing no-tray

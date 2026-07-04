@@ -450,10 +450,15 @@ pub fn spawn(
     let shared = Arc::new(AtomicU8::new(TrayState::Idle as u8));
     let (action_tx, action_rx) = mpsc::unbounded_channel();
 
-    #[cfg(feature = "tray-backend")]
+    #[cfg(all(feature = "tray-backend", any(target_os = "linux", target_os = "macos")))]
     {
+        #[cfg(target_os = "linux")]
+        use backend as platform_backend;
+        #[cfg(target_os = "macos")]
+        use backend_macos as platform_backend;
+
         let (state_tx, state_rx) = mpsc::unbounded_channel::<TrayState>();
-        let started = backend::spawn(
+        let started = platform_backend::spawn(
             tooltip.to_string(),
             action_tx,
             state_rx,
@@ -476,6 +481,13 @@ pub fn spawn(
         (Tray { shared_state: shared, state_tx }, action_rx)
     }
 
+    // Feature on, but no backend exists for this OS yet (Windows —
+    // its `tray-icon` renderer lands with the Windows port).
+    #[cfg(all(feature = "tray-backend", not(any(target_os = "linux", target_os = "macos"))))]
+    {
+        (Tray { shared_state: shared, state_tx: None }, action_rx)
+    }
+
     #[cfg(not(feature = "tray-backend"))]
     {
         (Tray { shared_state: shared }, action_rx)
@@ -483,10 +495,22 @@ pub fn spawn(
 }
 
 // -------------------------------------------------------------------------
+// macOS backend (NSStatusItem over the shared menu model).
+// -------------------------------------------------------------------------
+
+#[cfg(all(feature = "tray-backend", target_os = "macos"))]
+mod backend_macos;
+
+// The main-thread pump is part of the binary's startup contract on
+// macOS: `fono::main` installs + runs it around the daemon thread.
+#[cfg(all(feature = "tray-backend", target_os = "macos"))]
+pub use backend_macos::{install_main_pump, run_main_pump, stop_main_pump, MainPumpJobs};
+
+// -------------------------------------------------------------------------
 // Real backend (pure-Rust SNI via `ksni`).
 // -------------------------------------------------------------------------
 
-#[cfg(feature = "tray-backend")]
+#[cfg(all(feature = "tray-backend", target_os = "linux"))]
 mod backend {
     use super::menu::{self, MenuInputs, MenuNode};
     use super::{
@@ -1075,15 +1099,7 @@ mod backend {
     /// not RGBA — the byte order is the one bit easy to get wrong.
     fn icon_for(state: TrayState) -> ksni::Icon {
         const SIZE: i32 = 32;
-        let (r, g, b) = match state {
-            TrayState::Idle => (0x3b, 0x82, 0xf6),       // blue
-            TrayState::Recording => (0xef, 0x44, 0x44),  // red (dictation)
-            TrayState::Processing => (0xf5, 0x9e, 0x0b), // amber
-            TrayState::Paused => (0x6b, 0x72, 0x80),     // grey
-            // Saturated green — matches the overlay's accent stripe
-            // for assistant turns (`AssistantRecording`).
-            TrayState::Assistant => (0x22, 0xc5, 0x5e),
-        };
+        let (r, g, b) = menu::state_color(state);
         let mut data = Vec::with_capacity((SIZE * SIZE * 4) as usize);
         let cx = SIZE / 2;
         let cy = SIZE / 2;

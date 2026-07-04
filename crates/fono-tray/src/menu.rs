@@ -103,6 +103,23 @@ pub fn status_label(state: TrayState) -> &'static str {
     }
 }
 
+/// Icon tint for the current FSM state, shared by every backend so
+/// the tray colour language is identical across platforms. Returned
+/// as `(r, g, b)`; backends rasterize in their own pixel format
+/// (ksni wants ARGB, AppKit wants RGBA).
+#[must_use]
+pub fn state_color(state: TrayState) -> (u8, u8, u8) {
+    match state {
+        TrayState::Idle => (0x3b, 0x82, 0xf6),       // blue
+        TrayState::Recording => (0xef, 0x44, 0x44),  // red (dictation)
+        TrayState::Processing => (0xf5, 0x9e, 0x0b), // amber
+        TrayState::Paused => (0x6b, 0x72, 0x80),     // grey
+        // Saturated green — matches the overlay's accent stripe for
+        // assistant turns (`AssistantRecording`).
+        TrayState::Assistant => (0x22, 0xc5, 0x5e),
+    }
+}
+
 /// Build the full menu tree. This is the single shared definition of
 /// the tray menu for every platform.
 //

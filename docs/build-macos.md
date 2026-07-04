@@ -155,6 +155,22 @@ features, debug build:
   empty `FocusInfo`, no error, matching the graceful-degradation
   contract.
 
+### Phase 7 smoke (menu-bar tray / NSStatusItem) — 2026-07-04
+
+- The tray menu is defined once, platform-neutrally, in
+  `fono-tray::menu::build`; macOS renders it via an `NSStatusItem` +
+  `NSMenu` interpreter (`fono-tray::backend_macos`). Zero new crates.
+- Main-thread pump: on darwin, a daemon invocation in a graphical
+  session parks the real main thread in `NSApplication::run()`
+  (Accessory activation policy — no Dock icon, no Cmd+Tab entry) and
+  drains tray/overlay render jobs via a 100 ms timer; the daemon runs
+  on a worker thread.
+- Headless degradation verified over SSH: `is_graphical_session()` is
+  false → no pump installed → daemon logs
+  `tray icon    : skipped (headless: no graphical session)` and keeps
+  running (STT warmup, mDNS, servers all normal). Non-daemon
+  subcommands never install the pump.
+
 ## Deferred-GUI checklist
 
 The dev Mac is headless-only, so anything that needs a seated user —
@@ -179,7 +195,10 @@ land:
 - [ ] Clipboard round-trip in a logged-in session: dictation →
   NSPasteboard via arboard → Cmd+V paste; `fono test-inject` readback
   via pbpaste MATCHES (Phase 6; headless SSH has no pboard daemon).
-- [ ] Menu-bar icon visible with working menu (Phase 7).
+- [ ] Menu-bar icon visible with working menu (Phase 7): state tint
+  changes while recording, all submenus present and firing actions,
+  no Dock icon / no Cmd+Tab entry (Accessory policy), tooltip shows
+  the FSM state line.
 - [ ] Overlay paints during recording: click-through, no focus steal,
   no Dock/Cmd-Tab presence, correct positioning (Phase 8).
 - [ ] `fono install` → logout/login → daemon + menu-bar icon running

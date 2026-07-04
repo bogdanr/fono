@@ -1,6 +1,43 @@
 # Fono — Project Status
 Last updated: 2026-07-04
 
+## 2026-07-04 — macOS Phase 7 complete: native menu-bar tray (NSStatusItem)
+
+Task 7.3 lands the macOS renderer over the shared menu model; Phase 7
+is complete at the headless tier. Zero new crates.
+
+- **New `fono-tray::backend_macos`:** interprets the `MenuNode` tree
+  into a native `NSMenu` (~40-line recursive renderer, the mirror of
+  the ksni one) attached to an `NSStatusItem`. Clicks route through a
+  target/action bridge — an objc2-defined class whose registry maps
+  `NSMenuItem` tags back to `TrayAction`s, swapped atomically with the
+  menu on every render. Icon is a runtime-rasterised circle tinted by
+  FSM state (same `menu::state_color` palette as Linux — deliberately
+  not a template image, the tint carries information); tooltip carries
+  the state line.
+- **AppKit main-thread pump:** on darwin, a daemon invocation in a
+  graphical session installs a job channel, moves the daemon to a
+  worker thread, and parks the real main thread in
+  `NSApplication::run()` with the `Accessory` activation policy (no
+  Dock icon, no Cmd+Tab entry) + a 100 ms `NSTimer` that drains boxed
+  closures with a `MainThreadMarker`. The poll/diff loop stays on
+  tokio at the same 2 s cadence as ksni; unchanged ticks ship nothing
+  to the main thread. The same pump is the designated host for
+  Phase 8's NSPanel overlay.
+- **Headless degradation verified on the bench:** over SSH
+  `is_graphical_session()` is false → no pump → the daemon logs
+  `tray icon : skipped (headless: no graphical session)` and keeps
+  running (STT warmup, mDNS, Wyoming all normal). Non-daemon
+  subcommands never install the pump.
+- ksni backend gated to Linux; `objc2`/`objc2-app-kit`/
+  `objc2-foundation` became direct darwin deps of `fono-tray`
+  (already in the graph via Phase 6 — `Cargo.lock` gains edges only).
+- Gates: Linux fmt/clippy (default + `tray-backend`)/36 suites green,
+  behaviour untouched; darwin clippy `-D warnings` clean, 36 suites
+  0 failed, `fono` builds, daemon smoke over SSH.
+- Next: Phase 8 — NSPanel overlay on the same pump; the visible tray
+  itself is on the deferred-GUI checklist in `docs/build-macos.md`.
+
 ## 2026-07-04 — macOS Phase 7 Task 7.2: platform-neutral tray menu model
 
 Tray decision executed (Option C, Task 7.1 recorded the same day): the
