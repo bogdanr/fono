@@ -189,6 +189,35 @@ features, debug build:
 - `FONO_OVERLAY_BACKEND=mac|macos|mac-panel|nspanel` forces the
   backend; `noop|none|off` disables, same as Linux.
 
+### Phase 9 smoke (install / autostart / permissions) — 2026-07-04
+
+- `fono install` (per-user, no sudo): assembles `~/Applications/Fono.app`
+  around the running binary (`org.fono.app`, `LSUIElement`,
+  `NSMicrophoneUsageDescription`), creates the `fono-local-signing`
+  self-signed cert once in a dedicated always-unlocked keychain
+  (`~/Library/Keychains/fono-signing.keychain-db`), signs the bundle
+  with it, writes the LaunchAgent
+  (`~/Library/LaunchAgents/org.fono.daemon.plist` — `RunAtLoad`,
+  crash-only `KeepAlive`, `LimitLoadToSessionType Aqua`), and symlinks
+  `/usr/local/bin/fono`. Both plists `plutil -lint` clean.
+- **Grant-once property bench-proven**: `codesign -d -r-` shows the
+  designated requirement `identifier "org.fono.app" and certificate
+  leaf = H"…"`, byte-identical across re-installs — the TCC
+  Accessibility grant therefore survives updates.
+- Bench facts: `security add-trusted-cert` is denied headless (GUI
+  authorization) and `find-identity -v` hides the untrusted cert, but
+  `codesign` signs with it regardless — the installer probes without
+  `-v` and skips trust settings entirely.
+- `launchctl bootstrap gui/$UID` correctly degrades headless ("domain
+  does not exist") — install reports "starts at next login".
+- `fono doctor`: `Install:` row shows the bundle+agent state;
+  `Accessibility:` row probes `AXIsProcessTrusted` (answers headless)
+  and prints the `x-apple.systempreferences:…Privacy_Accessibility`
+  deep link when not granted.
+- `fono uninstall` round-trip: agent booted out, plist + bundle +
+  symlink + `~/.cache/fono` removed; config, history, and the signing
+  keychain kept (re-install reuses the same identity).
+
 ## Deferred-GUI checklist
 
 The dev Mac is headless-only, so anything that needs a seated user —
@@ -222,5 +251,12 @@ land:
   correct retina sharpness (scale sync), and smooth animation —
   frames arrive event-driven via the GCD main queue at the producers'
   ≈20–30 fps cadence (Phase 8).
-- [ ] `fono install` → logout/login → daemon + menu-bar icon running
-  (Phase 9).
+- [ ] `fono install` → logout/login → daemon + menu-bar icon running,
+  agent listed by `launchctl print gui/$UID/org.fono.daemon`; first
+  daemon start raises the native Accessibility dialog
+  (`AXIsProcessTrustedWithOptions`) exactly once, deep-linking to the
+  right Settings pane; after granting, `fono doctor` shows
+  `Accessibility: granted` and injection types at the cursor. Then
+  `fono update` (or a re-install simulating one) — the grant must
+  survive without re-toggling (stable designated requirement,
+  Phase 9 / Task 11.4).

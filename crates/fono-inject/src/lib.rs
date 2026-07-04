@@ -19,6 +19,7 @@ pub mod classifier;
 pub mod clipboard_probe;
 pub mod focus;
 pub mod inject;
+pub mod permissions;
 pub mod terminal;
 #[cfg(target_os = "linux")]
 pub mod wayland_probe;
@@ -35,6 +36,7 @@ pub use inject::{
     copy_to_clipboard, copy_to_clipboard_all, type_text, type_text_with_outcome, warm_backend,
     ClipboardAttempt, InjectOutcome, Injector,
 };
+pub use permissions::{accessibility_prompt, accessibility_trusted, ACCESSIBILITY_SETTINGS_URL};
 pub use terminal::{proc_enrichment_available, terminal_context};
 #[cfg(target_os = "linux")]
 pub use wayland_probe::compositor_supports_virtual_keyboard;

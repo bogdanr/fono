@@ -517,19 +517,45 @@ edges only (objc2* already in the graph).*
 
 ### Phase 9 — Install, autostart, permissions onboarding
 
-- [ ] Task 9.1. **`Installer` trait split** (shared with Windows plan Task
-      1.6). macOS impl: binary to `~/Applications/fono/` or
-      `/usr/local/bin` (decide; no sudo for the user-local path), LaunchAgent
-      plist at `~/Library/LaunchAgents/org.fono.daemon.plist`
-      (`RunAtLoad`, `KeepAlive`).
-- [ ] Task 9.2. **`fono uninstall`** removes the LaunchAgent + binary, keeps
-      `~/.config/fono` (config dir stays XDG-shaped via the existing dirs
-      handling — verify where `dirs` maps config/data on macOS and pin it
-      in `docs/build-macos.md`).
-- [ ] Task 9.3. **Permissions onboarding**: `fono doctor` (and first-run)
-      must explain the two TCC grants (Microphone, Accessibility) with
-      System Settings deep links (`x-apple.systempreferences:` URLs), since
-      nothing works until the user grants them.
+- [x] Task 9.1. **`Installer` trait split** (shared with Windows plan Task
+      1.6). Done as cfg-dispatched platform modules with one shared public
+      surface (`crates/fono/src/install/{mod,linux,macos}.rs`) — a literal
+      trait would add ceremony with exactly one impl per compiled binary.
+      macOS impl (per-user, no sudo): **`~/Applications/Fono.app`** bundle
+      assembled around the running binary (fixed `org.fono.app` bundle id,
+      `LSUIElement`, mandatory `NSMicrophoneUsageDescription`), LaunchAgent
+      at `~/Library/LaunchAgents/org.fono.daemon.plist` (`RunAtLoad`,
+      `KeepAlive.SuccessfulExit=false`, `LimitLoadToSessionType Aqua` so
+      SSH logins never spawn it), `launchctl bootstrap gui/$UID` when a
+      GUI session exists (headless: starts at next login), best-effort
+      `/usr/local/bin/fono` symlink. The Task 11.4 install side landed
+      here too: a `fono-local-signing` self-signed cert in a dedicated
+      always-unlocked keychain signs the bundle; bench-proven that the
+      designated requirement (`identifier "org.fono.app" and certificate
+      leaf = H"…"`) is **byte-identical across re-installs**, which is
+      the grant-once property. Bench facts: `security add-trusted-cert`
+      is denied headless (GUI authorization) and `find-identity -v`
+      filters the untrusted cert out — but `codesign` signs with it
+      regardless and TCC never walks the trust chain, so the installer
+      skips trust settings and probes identities without `-v`.
+- [x] Task 9.2. **`fono uninstall`** boots the agent out (`gui/` + `user/`
+      domains, best-effort), removes plist + bundle + our symlink +
+      `~/.cache/fono`, keeps `~/.config/fono`, `~/.local/share/fono` and
+      the signing keychain (re-install ⇒ same identity ⇒ old grants still
+      match). Round-trip verified on the bench. Homebrew-managed binaries
+      are refused (`is_package_managed` now knows `/opt/homebrew` +
+      `/Cellar/`).
+- [x] Task 9.3. **Permissions onboarding**: new zero-crate
+      `fono_inject::permissions` module — `accessibility_trusted()`
+      (silent `AXIsProcessTrusted`) and `accessibility_prompt()`
+      (`AXIsProcessTrustedWithOptions(prompt)`, raw
+      ApplicationServices/CoreFoundation FFI). `fono doctor` gained an
+      Accessibility row with the Settings deep link; the daemon probes at
+      startup — in a GUI session it raises the native dialog once (macOS
+      dedupes by app identity), headless it logs the `open
+      "x-apple.systempreferences:…"` command instead. Mic prompt needs no
+      code: the OS raises it on first capture, and the bundle's usage
+      string satisfies the bundled-app requirement.
 
       **Permission-UX facts (researched 2026-07-04; this is the whole
       game on macOS):**
@@ -573,11 +599,14 @@ edges only (objc2* already in the graph).*
         dictate → pasteboard → notify "paste with Cmd+V". Fono already
         degrades in this order.
 
-**Phase 9 gate (headless)**: `fono install` places the binary + LaunchAgent
-plist correctly and `launchctl print`/`bootstrap` confirms registration for
-the SSH user; `fono uninstall` reverses it; doctor lists the missing TCC
-grants. **Deferred-GUI**: daemon + menu-bar icon after a real login. Linux
-install layer byte-identical.
+**Phase 9 gate (headless)**: ✅ `fono install` assembles + signs the bundle
+and writes the LaunchAgent (plutil-lint clean); bootstrap correctly skips
+headless (gui domain absent — recorded; the positive `launchctl print`
+check moves to deferred-GUI with the login-session item); `fono uninstall`
+reverses everything; doctor names the missing Accessibility grant with the
+deep link. **Deferred-GUI**: daemon + menu-bar icon after a real login,
+agent visible in `launchctl print gui/$UID`, the two TCC prompts
+end-to-end. Linux install layer byte-identical (module split only).
 
 ### Phase 10 — `fono update` on macOS
 
@@ -606,7 +635,12 @@ install layer byte-identical.
       on the mirror); arm64-only until then. ggml's runtime CPU-backend
       fallback covers Intel Macs where the Metal backend can't initialize.
 - [ ] Task 11.4. **Grant-once signing pipeline, zero-cost posture** (the
-      mechanism behind Task 9.3's "grant survives updates"). TCC stores
+      mechanism behind Task 9.3's "grant survives updates"). *Install
+      side landed with Phase 9* — the cert/keychain/bundle/sign steps
+      below are live in `crates/fono/src/install/macos.rs` and
+      bench-verified (designated requirement stable across re-installs).
+      Remaining for this task: the `fono update` re-sign hook (Phase 10)
+      and the release-asset/docs plumbing (11.1–11.3). TCC stores
       the app's *designated requirement* at grant time and re-checks it
       on every launch — identical signature ⇒ grant persists. Decision
       2026-07-04: **no Apple Developer Program** (USD 99/yr rejected —

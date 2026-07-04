@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! `fono install` / `fono uninstall` — system-wide self-installer.
+//! Linux implementation of `fono install` / `fono uninstall` —
+//! system-wide self-installer.
 //!
 //! Two modes selected via `--server`:
 //!
@@ -25,7 +26,8 @@ use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use crate::install::assets::{DESKTOP, ICON_SVG, SERVER_CONFIG_SEED, SYSTEMD_SYSTEM_UNIT};
+use self::assets::{DESKTOP, ICON_SVG, SERVER_CONFIG_SEED, SYSTEMD_SYSTEM_UNIT};
+use crate::install::InstallModeArg;
 
 mod assets {
     //! Embedded packaging assets. Single source of truth at
@@ -33,14 +35,14 @@ mod assets {
     //! also read from there so the embedded copy and the distro
     //! copy never drift.
 
-    pub const DESKTOP: &str = include_str!("../../../packaging/assets/fono.desktop");
-    pub const ICON_SVG: &[u8] = include_bytes!("../../../packaging/assets/fono.svg");
-    pub const SYSTEMD_SYSTEM_UNIT: &str = include_str!("../../../packaging/assets/fono.service");
+    pub const DESKTOP: &str = include_str!("../../../../packaging/assets/fono.desktop");
+    pub const ICON_SVG: &[u8] = include_bytes!("../../../../packaging/assets/fono.svg");
+    pub const SYSTEMD_SYSTEM_UNIT: &str = include_str!("../../../../packaging/assets/fono.service");
     /// Minimal `/etc/fono/config.toml` seeded by `fono install --server`
     /// when no config exists yet. Enables the Wyoming STT listener on
     /// `0.0.0.0:10300` so the daemon is LAN-reachable out of the box.
     pub const SERVER_CONFIG_SEED: &str =
-        include_str!("../../../packaging/assets/server-config.toml");
+        include_str!("../../../../packaging/assets/server-config.toml");
 }
 
 // ---------------------------------------------------------------------
@@ -397,17 +399,6 @@ fn detect_installed_mode() -> Option<Mode> {
 // Headless detection (--server auto-default)
 // ---------------------------------------------------------------------
 
-/// CLI-level mode selector: `Server` and `Desktop` are explicit
-/// overrides (from `--server` / `--desktop`); `Auto` triggers
-/// `detect_headless()` so `sudo fono install` on a server picks the
-/// systemd-unit lane without the operator having to remember the flag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstallModeArg {
-    Server,
-    Desktop,
-    Auto,
-}
-
 /// Best-effort verdict: is this host running with no graphical session?
 ///
 /// Returns `(true, reason)` only when we're confident the host is
@@ -419,7 +410,7 @@ pub enum InstallModeArg {
 /// desktop default. Conservative on purpose: a false negative is
 /// recoverable with `--server`; a false positive would surprise a
 /// workstation user with an unwanted systemd unit.
-pub(crate) fn detect_headless() -> (bool, &'static str) {
+pub fn detect_headless() -> (bool, &'static str) {
     detect_headless_with(&RealProbes)
 }
 
@@ -1266,7 +1257,7 @@ fn which_in_path(name: &str) -> bool {
 /// inputs the runtime injector / overlay backends consult — so the
 /// recommendation always matches what the daemon will actually do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Session {
+pub enum Session {
     /// Native Wayland session under GNOME / Mutter. Mutter doesn't
     /// implement `zwp_virtual_keyboard_manager_v1` (so `wtype` types
     /// silently into the void) nor `zwlr_layer_shell_v1` (so the

@@ -439,7 +439,13 @@ pub fn is_package_managed(exe: &Path) -> bool {
     // Distro-owned bin dirs. `/usr/local/bin` is left writable for
     // self-update because the install script defaults to it, mirroring
     // `install:13` semantics.
-    s.starts_with("/usr/bin/") || s.starts_with("/bin/") || s.starts_with("/usr/sbin/")
+    if s.starts_with("/usr/bin/") || s.starts_with("/bin/") || s.starts_with("/usr/sbin/") {
+        return true;
+    }
+    // Homebrew (macOS): the `fono` on PATH is a symlink into the
+    // Cellar; a canonicalised current_exe therefore contains
+    // "/Cellar/". `brew upgrade` owns those files.
+    s.contains("/Cellar/") || s.starts_with("/opt/homebrew/")
 }
 
 // ---------------------------------------------------------------------
@@ -787,6 +793,14 @@ mod tests {
         assert!(is_package_managed(Path::new("/bin/fono")));
         assert!(!is_package_managed(Path::new("/usr/local/bin/fono")));
         assert!(!is_package_managed(Path::new("/home/u/.cargo/bin/fono")));
+        // Homebrew (macOS) — owned by `brew upgrade`.
+        assert!(is_package_managed(Path::new("/opt/homebrew/Cellar/fono/0.9.0/bin/fono")));
+        assert!(is_package_managed(Path::new("/usr/local/Cellar/fono/0.9.0/bin/fono")));
+        assert!(is_package_managed(Path::new("/opt/homebrew/bin/fono")));
+        // A per-user app bundle is self-updatable.
+        assert!(!is_package_managed(Path::new(
+            "/Users/u/Applications/Fono.app/Contents/MacOS/fono"
+        )));
     }
 
     #[test]

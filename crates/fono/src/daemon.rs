@@ -1548,20 +1548,48 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
         .unwrap_or("none (using native arboard)");
     debug!("delivery     : key-injector={injector:?}  clipboard-tool={clipboard_tool}");
     if matches!(injector, fono_inject::Injector::None) {
-        let session = crate::install::Session::detect();
-        let recommendation = session.recommend_injector();
-        // On GNOME-Wayland, clipboard-only is the *intended* default
-        // (see crates/fono-inject/src/inject.rs `detect_auto`). It's
-        // not a degraded mode; log it calmly. On every other session
-        // a missing injector is genuinely something to flag.
-        if matches!(session, crate::install::Session::GnomeWayland) {
-            tracing::info!(
-                "inject       : clipboard delivery (GNOME-Wayland default). {recommendation}"
-            );
-        } else {
+        #[cfg(target_os = "linux")]
+        {
+            let session = crate::install::Session::detect();
+            let recommendation = session.recommend_injector();
+            // On GNOME-Wayland, clipboard-only is the *intended* default
+            // (see crates/fono-inject/src/inject.rs `detect_auto`). It's
+            // not a degraded mode; log it calmly. On every other session
+            // a missing injector is genuinely something to flag.
+            if matches!(session, crate::install::Session::GnomeWayland) {
+                tracing::info!(
+                    "inject       : clipboard delivery (GNOME-Wayland default). {recommendation}"
+                );
+            } else {
+                warn!(
+                    "no auto-typing backend available on this session — dictation will land \
+                     on the clipboard; press Ctrl+V or Shift+Insert to paste. {recommendation}"
+                );
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        warn!(
+            "no auto-typing backend available — dictation will land on the clipboard; \
+             paste it with Cmd+V"
+        );
+    }
+    // macOS permissions onboarding (port plan Task 9.3): CGEventPost
+    // silently drops events without the Accessibility grant, so probe
+    // instead of injecting and hoping. In a graphical session the
+    // prompting variant raises the native system dialog (deep link to
+    // the right Settings pane); macOS shows it at most once per app
+    // identity, so this is idempotent across daemon restarts. Headless
+    // there is nowhere to show a dialog — log the command instead.
+    if fono_inject::accessibility_trusted() == Some(false) {
+        let prompted =
+            crate::is_graphical_session() && fono_inject::accessibility_prompt().unwrap_or(false);
+        if !prompted {
             warn!(
-                "no auto-typing backend available on this session — dictation will land \
-                 on the clipboard; press Ctrl+V or Shift+Insert to paste. {recommendation}"
+                "accessibility: not granted — fono cannot type for you yet (dictation \
+                 falls back to the clipboard; paste with Cmd+V). Flip the Fono toggle \
+                 once under System Settings → Privacy & Security → Accessibility, or \
+                 run: open \"{}\"",
+                fono_inject::ACCESSIBILITY_SETTINGS_URL
             );
         }
     }

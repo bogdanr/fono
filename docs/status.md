@@ -1,6 +1,48 @@
 # Fono — Project Status
 Last updated: 2026-07-04
 
+## 2026-07-04 — macOS Phase 9 complete: install, autostart, permissions onboarding
+
+Phase 9 of `plans/2026-07-03-macos-port-v1.md` at the headless tier,
+plus the install-side half of Task 11.4 (the zero-cost grant-once
+signing pipeline). Zero new crates.
+
+- **Installer split (Task 9.1 + Windows plan Task 1.6 discharged):**
+  `crates/fono/src/install.rs` became `install/{mod,linux,macos}.rs` —
+  `mod.rs` re-exports the per-OS implementation, `linux.rs` is the old
+  file byte-identical (moved via `git mv`), `macos.rs` is the new
+  ~600-line darwin installer.
+- **`fono install` on macOS (per-user, no sudo):** assembles
+  `~/Applications/Fono.app` around the current binary (bundle id
+  `org.fono.app`, `LSUIElement`, `NSMicrophoneUsageDescription`),
+  creates the `fono-local-signing` self-signed cert once in a
+  dedicated always-unlocked keychain, signs the bundle, writes the
+  `org.fono.daemon` LaunchAgent (`RunAtLoad`, crash-only `KeepAlive`,
+  Aqua-only), symlinks `/usr/local/bin/fono`, and tries
+  `launchctl bootstrap gui/$UID` (degrades to "starts at next login"
+  headless). **Grant-once proven on the bench:** the designated
+  requirement (`identifier "org.fono.app" and certificate leaf`) is
+  byte-identical across re-installs, so the Accessibility grant
+  survives updates. Bench facts encoded in the code: headless
+  `security add-trusted-cert` needs GUI auth but `codesign` doesn't
+  need trust at all; `find-identity -v` hides untrusted certs, so the
+  probe drops `-v`.
+- **`fono uninstall` (Task 9.2):** boots the agent out, removes plist
+  + bundle + symlink + cache; keeps config, history, and the signing
+  keychain so a re-install reuses the same identity.
+- **Permissions onboarding (Task 9.3):** new
+  `fono-inject::permissions` module — `AXIsProcessTrusted` /
+  `AXIsProcessTrustedWithOptions(prompt)` FFI (ApplicationServices,
+  zero new crates). The daemon prompts once per install marker in a
+  graphical session; `fono doctor` gained `Install:` and
+  `Accessibility:` rows with the System Settings deep link.
+- `fono-update::is_package_managed` now recognises Homebrew prefixes
+  (`/opt/homebrew`, `/usr/local/Cellar`, …) so self-update won't fight
+  brew, with tests pinning both path families.
+- Gates: Linux fmt / clippy `-D warnings` / 36 test suites green;
+  darwin clippy clean, 36 suites 0 failed; full
+  install → doctor → uninstall round-trip smoke over SSH.
+
 ## 2026-07-04 — macOS main-thread pump made event-driven (GCD main queue)
 
 Follow-up to Phases 7–8, answering "why is the overlay capped at

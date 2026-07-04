@@ -443,6 +443,26 @@ pub async fn report(paths: &Paths) -> Result<String> {
     }
     let injector = fono_inject::inject::Injector::detect();
     writeln!(out, "{} {injector:?}", head("Injector    :"))?;
+    // macOS: injection is gated by the Accessibility TCC grant, and
+    // CGEventPost drops events *silently* when it's missing — so the
+    // probe is the only honest signal (macOS port plan Task 9.3).
+    if let Some(trusted) = fono_inject::accessibility_trusted() {
+        if trusted {
+            writeln!(out, "{} {}", head("Accessibility:"), ok("granted (fono can type for you)"))?;
+        } else {
+            writeln!(
+                out,
+                "{} {}\n  {}",
+                head("Accessibility:"),
+                warn("not granted — dictation falls back to the clipboard (paste with Cmd+V)"),
+                dim(&format!(
+                    "Flip the Fono toggle once under System Settings → Privacy & \
+                     Security → Accessibility, or run:\n  open \"{}\"",
+                    fono_inject::ACCESSIBILITY_SETTINGS_URL
+                ))
+            )?;
+        }
+    }
     // Clipboard fallback — fono copies the cleaned text here when no
     // key-injection backend works, so the dictation is never lost.
     let mut clip_tools = Vec::new();
