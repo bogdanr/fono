@@ -48,6 +48,38 @@ pub const WAKE_TRIGGER_LEVEL: usize = 2;
 /// flickering utterances that a tighter gate would drop entirely.
 pub const WAKE_WINDOW_HOPS: usize = 5;
 
+/// Trailing window, in hops, over which [`EnergyGate`] measures loudness.
+/// Twelve 80 ms hops ≈ 1 s — enough to cover the spoken phrase, which sits at
+/// the recent end of the model's ~2 s receptive field. Longer would not help
+/// recall (we take the *peak* over the window) and would slightly hurt
+/// rejection by sweeping in unrelated earlier sounds.
+pub const WAKE_ENERGY_WINDOW_HOPS: usize = 12;
+
+/// How many times louder than the tracked ambient noise floor the recent audio
+/// must be for a wake crossing to count (see [`EnergyGate`]). This is a
+/// *ratio*, not an absolute level, so it self-calibrates to each machine / mic
+/// / room: the observed false fires happen when the model hallucinates the
+/// phrase out of near-silent room tone (audio *at* the ambient floor, ratio
+/// ≈ 1×), while genuine speech — even from across a room — is a burst well
+/// above it. 2× (~6 dB) clears the at-ambient phantoms with margin while
+/// staying gentle enough to hear far-field speech. Tuned empirically; a
+/// hardcoded constant on purpose (no user-facing knob).
+pub const WAKE_ENERGY_MARGIN: f32 = 2.0;
+
+/// Absolute minimum recent peak (0..=1 sample amplitude) below which a wake
+/// crossing never counts, regardless of the ratio. A safety net for a
+/// dead-silent room where the tracked floor approaches zero and the ratio
+/// alone would admit almost anything.
+pub const WAKE_ENERGY_EPSILON: f32 = 0.01;
+
+/// EMA rate at which the ambient floor falls toward a quieter level — fast, so
+/// it re-settles on true ambient within a few hops after speech ends.
+const NOISE_FLOOR_FALL: f32 = 0.25;
+
+/// EMA rate at which the ambient floor rises toward a louder level — slow, so a
+/// speech burst barely lifts it and stays a clear burst above the ambient.
+const NOISE_FLOOR_RISE: f32 = 0.002;
+
 /// Outcome of feeding audio to a [`WakeWord`] backend.
 ///
 /// `fired` is `true` only when a configured phrase crossed its sensitivity
@@ -91,6 +123,15 @@ fn rms(frame: &[f32]) -> f32 {
         return 0.0;
     }
     (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt()
+}
+
+/// Peak amplitude of a frame — the loudest `|sample|` (0.0 for an empty frame).
+/// Speech is bursty, so the peak over a window catches short loud transients
+/// that an averaged/RMS measure can miss; this is what [`EnergyGate`] tracks.
+/// Only the ONNX detector feeds hops through the [`EnergyGate`].
+#[cfg(feature = "wakeword-onnx")]
+fn peak(frame: &[f32]) -> f32 {
+    frame.iter().copied().fold(0.0_f32, |m, s| m.max(s.abs()))
 }
 
 /// Accumulates partial PCM and yields complete fixed-size hops.
@@ -186,6 +227,72 @@ impl ActivationWindow {
     }
 }
 
+/// Ambient-relative loudness gate: rejects wake crossings that occur while the
+/// audio is merely at the room's background level.
+///
+/// The dominant false-fire mode is the model hallucinating the phrase out of
+/// near-silent room tone — the crossing lands while the audio sits *at* the
+/// ambient floor. Genuine speech (near or far) is a burst *above* it. This gate
+/// tracks a slow-moving estimate of the ambient noise floor and only admits a
+/// crossing when the recent peak is at least [`WAKE_ENERGY_MARGIN`]× that
+/// floor. Because the test is a *ratio* against a self-calibrating floor, it
+/// works the same on any mic / gain / room without an absolute threshold. The
+/// floor falls quickly toward quiet (re-settling on true ambient after speech)
+/// and rises slowly (so a speech burst barely lifts it). It does **not** defend
+/// against *content* noise — radio/TV speech is a burst too — that needs a
+/// smarter model, not a loudness gate. Pure and unit-tested; one lives in the
+/// detector.
+pub struct EnergyGate {
+    recent: VecDeque<f32>,
+    window: usize,
+    margin: f32,
+    noise_floor: f32,
+    floor_initialized: bool,
+}
+
+impl EnergyGate {
+    /// New gate measuring the peak over the trailing `window` hops (clamped to
+    /// at least 1) and requiring it to exceed the ambient floor by `margin`×
+    /// (clamped to at least 1×).
+    #[must_use]
+    pub fn new(window: usize, margin: f32) -> Self {
+        let window = window.max(1);
+        Self {
+            recent: VecDeque::with_capacity(window),
+            window,
+            margin: margin.max(1.0),
+            noise_floor: 0.0,
+            floor_initialized: false,
+        }
+    }
+
+    /// Feed one hop's peak amplitude (max `|sample|`, 0..=1). Updates the
+    /// ambient floor estimate and returns whether the trailing-window peak is
+    /// loud enough — at least `margin`× the floor, and above the absolute
+    /// [`WAKE_ENERGY_EPSILON`] safety net — to admit a wake crossing.
+    pub fn update(&mut self, hop_peak: f32) -> bool {
+        let hop_peak = hop_peak.max(0.0);
+        if !self.floor_initialized {
+            // Seed on the first hop so the floor calibrates to this machine's
+            // ambient immediately instead of ramping up from zero.
+            self.noise_floor = hop_peak;
+            self.floor_initialized = true;
+        } else if hop_peak < self.noise_floor {
+            self.noise_floor =
+                NOISE_FLOOR_FALL.mul_add(hop_peak - self.noise_floor, self.noise_floor);
+        } else {
+            self.noise_floor =
+                NOISE_FLOOR_RISE.mul_add(hop_peak - self.noise_floor, self.noise_floor);
+        }
+        self.recent.push_back(hop_peak);
+        while self.recent.len() > self.window {
+            self.recent.pop_front();
+        }
+        let recent_peak = self.recent.iter().copied().fold(0.0_f32, f32::max);
+        recent_peak >= (self.noise_floor * self.margin).max(WAKE_ENERGY_EPSILON)
+    }
+}
+
 /// Energy / no-op stub used when no ONNX model is present — the wake-word
 /// analogue of [`crate::vad::WebRtcVadStub`].
 ///
@@ -253,8 +360,8 @@ mod onnx {
     use ort::value::Tensor;
 
     use super::{
-        ActivationWindow, HopBuffer, WakeDecision, WakeWord, HOP_SAMPLES, WAKE_TRIGGER_LEVEL,
-        WAKE_WINDOW_HOPS,
+        peak, ActivationWindow, EnergyGate, HopBuffer, WakeDecision, WakeWord, HOP_SAMPLES,
+        WAKE_ENERGY_MARGIN, WAKE_ENERGY_WINDOW_HOPS, WAKE_TRIGGER_LEVEL, WAKE_WINDOW_HOPS,
     };
 
     /// Mel bins emitted per melspectrogram frame (openWakeWord uses 32).
@@ -319,6 +426,10 @@ mod onnx {
         embedding_in: String,
         embedding_out: String,
         classifiers: Vec<PhraseClassifier>,
+        /// Loudness gate shared across all phrase classifiers: rejects wake
+        /// crossings on near-silent audio (the quiet-room hallucination class),
+        /// self-calibrating to each machine's ambient noise floor.
+        energy_gate: EnergyGate,
         hops: HopBuffer,
         /// Tail of the previous hop's raw audio (up to [`MELSPEC_LOOKBACK`]
         /// samples), prepended to the next hop so the streaming melspectrogram
@@ -381,6 +492,7 @@ mod onnx {
                 embedding_in,
                 embedding_out,
                 classifiers,
+                energy_gate: EnergyGate::new(WAKE_ENERGY_WINDOW_HOPS, WAKE_ENERGY_MARGIN),
                 hops: HopBuffer::new(HOP_SAMPLES),
                 mel_lookback: Vec::new(),
                 mel_ring: Vec::new(),
@@ -462,7 +574,7 @@ mod onnx {
 
         /// Run every classifier over the current embedding window and return
         /// the best decision (firing beats non-firing; higher score wins).
-        fn run_classifiers(&mut self) -> Result<WakeDecision> {
+        fn run_classifiers(&mut self, energy_ok: bool) -> Result<WakeDecision> {
             // Classifier window shape `[1, 16, 96]`.
             let feat: Vec<f32> = self.emb_ring.iter().flatten().copied().collect();
             let mut best = WakeDecision::silent(0.0);
@@ -486,7 +598,11 @@ mod onnx {
                 // crossings within the trailing window, so a lone spike cannot
                 // trigger. The reported score is the raw hop score.
                 let score = raw;
-                let fired = c.gate.update(raw >= c.threshold);
+                // A crossing only counts when the audio was loud enough to
+                // plausibly be nearby speech: this rejects the quiet-room
+                // hallucinations (high score on near-silent audio) that the
+                // score/window gates cannot, without touching genuine speech.
+                let fired = c.gate.update(raw >= c.threshold && energy_ok);
                 if (fired && !best.fired) || (fired == best.fired && score > best.score) {
                     best = if fired {
                         WakeDecision::fired(c.phrase.clone(), score)
@@ -499,6 +615,9 @@ mod onnx {
         }
 
         fn process_hop(&mut self, hop: &[f32]) -> Result<WakeDecision> {
+            // Update the loudness gate every hop (even before the embedding
+            // window fills) so the ambient noise floor keeps tracking.
+            let energy_ok = self.energy_gate.update(peak(hop));
             // Prepend the previous hop's raw-audio tail so the melspectrogram has
             // STFT context across the hop boundary and yields the full 8 mel
             // frames per hop (openWakeWord streaming parity). Then retain this
@@ -523,7 +642,7 @@ mod onnx {
             if self.emb_ring.len() < CLASSIFIER_WINDOW_EMB {
                 return Ok(WakeDecision::silent(0.0));
             }
-            self.run_classifiers()
+            self.run_classifiers(energy_ok)
         }
     }
 
@@ -684,5 +803,68 @@ mod tests {
         assert!(g.update(true), "two crossings fit the clamped window and fire");
         let mut z = ActivationWindow::new(0, 0); // trigger clamps to 1
         assert!(z.update(true), "trigger_level clamps to 1: first crossing fires");
+    }
+
+    /// The core failure from the logs: the model hallucinates the phrase out of
+    /// steady room tone, so the "loud" hop sits *at* the ambient floor (ratio
+    /// ≈ 1×). With a 2× margin that crossing must be rejected.
+    #[test]
+    fn energy_rejects_audio_at_the_ambient_floor() {
+        let mut g = EnergyGate::new(12, 2.0);
+        // Let the floor settle on a steady ambient of 0.04 (well above epsilon).
+        for _ in 0..64 {
+            let _ = g.update(0.04);
+        }
+        assert!(!g.update(0.04), "a hop at ambient (ratio 1x) must not pass the 2x gate");
+    }
+
+    /// A genuine speech burst well above the ambient floor passes.
+    #[test]
+    fn energy_admits_a_loud_burst_above_ambient() {
+        let mut g = EnergyGate::new(12, 2.0);
+        for _ in 0..64 {
+            let _ = g.update(0.04);
+        }
+        assert!(g.update(0.30), "a burst ~7x the ambient floor must pass");
+    }
+
+    /// Far-field bias: with the shipped 2x margin, speech only ~2.5x above the
+    /// ambient floor (across-the-room quiet) still passes.
+    #[test]
+    fn energy_admits_far_field_at_low_ratio() {
+        let mut g = EnergyGate::new(12, 2.0);
+        for _ in 0..64 {
+            let _ = g.update(0.04);
+        }
+        assert!(g.update(0.10), "far-field ~2.5x ambient must clear the 2x margin");
+    }
+
+    /// The absolute epsilon safety net: in a dead-silent room the tracked floor
+    /// approaches zero, but a still-tiny peak must not be admitted just because
+    /// its ratio to ~0 is large.
+    #[test]
+    fn energy_epsilon_blocks_near_silence() {
+        let mut g = EnergyGate::new(12, 2.0);
+        for _ in 0..64 {
+            let _ = g.update(0.0);
+        }
+        assert!(
+            !g.update(WAKE_ENERGY_EPSILON * 0.5),
+            "a peak below the absolute epsilon must be rejected even at a huge ratio"
+        );
+    }
+
+    /// The peak window catches a bursty crossing even after it has passed: a
+    /// single loud hop keeps the window "hot" for the next few hops.
+    #[test]
+    fn energy_peak_persists_across_the_window() {
+        let mut g = EnergyGate::new(3, 2.0);
+        for _ in 0..64 {
+            let _ = g.update(0.04);
+        }
+        assert!(g.update(0.30), "loud hop passes");
+        // The next hop is quiet, but the loud sample is still within the 3-hop
+        // peak window, so the gate stays open.
+        assert!(g.update(0.04), "the recent-peak window keeps the gate open");
     }
 }
