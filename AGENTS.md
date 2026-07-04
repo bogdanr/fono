@@ -86,6 +86,14 @@ Target users: Linux desktop (i3 / sway / KDE / GNOME, X11 and Wayland), Windows,
   not when rewording, not when squashing. The agent is a tool, not an author.
   When squashing history, strip any pre-existing `Co-authored-by: Forge …`
   lines from the combined message. This rule is permanent.
+- **Commit messages MUST be user-friendly.** Write the subject and body so a
+  non-expert user reading the changelog / release notes / `git log` can easily
+  understand *what changed for them and why* — describe the behaviour or
+  benefit in plain language, not the internal mechanics. Prefer e.g.
+  "Make the wake word trigger more reliably and stop false activations" over
+  "Replace score smoother with sliding-window activation gate". Keep jargon,
+  type/function names, and implementation detail out of the subject line; if
+  such detail is useful, put it lower in the body. This rule is permanent.
 - Every Rust source file **MUST** start with `// SPDX-License-Identifier: GPL-3.0-only`
   on line 1.
 - Do **NOT** add dependencies without updating `deny.toml` and verifying the licenses

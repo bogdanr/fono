@@ -20,12 +20,33 @@
 //!   `with_intra_threads(1)` (mirroring `fono-tts`). Multiple classifiers
 //!   share the single embedding pass, which is what makes extra phrases cheap.
 
+use std::collections::VecDeque;
+
 use anyhow::Result;
 
 /// Number of 16 kHz samples per detection hop (~80 ms). The openWakeWord
 /// front-end advances its melspectrogram one hop at a time, so this is the
 /// natural windowing granularity for the streaming detector.
 pub const HOP_SAMPLES: usize = 1280;
+
+/// Threshold crossings required within the trailing [`WAKE_WINDOW_HOPS`] window
+/// before a phrase fires (see [`ActivationWindow`]). Mirrors openWakeWord's
+/// `trigger_level`: needing two crossings (not one) means a lone single-hop
+/// spike — the confident false positive plain thresholding lets through —
+/// cannot fire, while the raw score is still compared at *full value* per hop
+/// (never averaged), so the narrow high-confidence peak of a real utterance is
+/// preserved (averaging blunted it and cost recall).
+pub const WAKE_TRIGGER_LEVEL: usize = 2;
+
+/// Trailing window, in hops, over which [`WAKE_TRIGGER_LEVEL`] crossings are
+/// counted (see [`ActivationWindow`]). Five 80 ms hops = 400 ms: the two
+/// crossings may be up to three hops apart and still count together, so a
+/// genuine wake whose peak flickers — crosses, dips for a hop or two, crosses
+/// again — still fires. This is *spread tolerance*, not latency: firing happens
+/// the instant the count reaches the trigger level, so two consecutive
+/// crossings still fire at 160 ms; the wider window only rescues the harder
+/// flickering utterances that a tighter gate would drop entirely.
+pub const WAKE_WINDOW_HOPS: usize = 5;
 
 /// Outcome of feeding audio to a [`WakeWord`] backend.
 ///
@@ -114,6 +135,57 @@ impl HopBuffer {
     }
 }
 
+/// openWakeWord-style activation gate: the debounce that makes the detector
+/// robust without blunting its peak sensitivity.
+///
+/// Each hop's *raw* classifier score is compared to threshold at full value;
+/// this gate only tracks the boolean crossing over a trailing sliding window
+/// of `window` hops. The phrase fires the instant `trigger_level` crossings
+/// are present in that window. Because the raw score is never averaged, the
+/// short high-confidence peak of a genuine wake word is preserved (a moving
+/// average smeared it out and cost recall); because a fire needs
+/// `trigger_level` crossings, an isolated single-hop spike — even a confident
+/// ~0.99 one — cannot fire. Counting over a *window* (rather than requiring
+/// consecutive crossings) tolerates a flickering peak — cross, dip for a hop
+/// or two, cross again — which is the common cause of missed wakes. Firing on
+/// count-reached (not window-full) means two consecutive crossings still fire
+/// at the earliest possible hop; the window only bounds how far apart the two
+/// crossings may be, not the latency. Pure and unit-tested; one lives in each
+/// phrase classifier.
+pub struct ActivationWindow {
+    recent: VecDeque<bool>,
+    window: usize,
+    trigger_level: usize,
+}
+
+impl ActivationWindow {
+    /// New gate firing when `trigger_level` crossings (clamped to at least 1)
+    /// are present in the trailing `window` hops (clamped to at least
+    /// `trigger_level`, so the count can always be reached).
+    #[must_use]
+    pub fn new(window: usize, trigger_level: usize) -> Self {
+        let trigger_level = trigger_level.max(1);
+        let window = window.max(trigger_level);
+        Self { recent: VecDeque::with_capacity(window), window, trigger_level }
+    }
+
+    /// Feed one hop's threshold decision. `over_threshold` is `raw >= threshold`
+    /// for this hop. Returns `true` on the hop that brings the trailing-window
+    /// crossing count up to `trigger_level` (a fire), clearing the window so the
+    /// post-fire refractory window — not a lingering count — governs any re-fire.
+    pub fn update(&mut self, over_threshold: bool) -> bool {
+        self.recent.push_back(over_threshold);
+        while self.recent.len() > self.window {
+            self.recent.pop_front();
+        }
+        if self.recent.iter().filter(|&&hit| hit).count() >= self.trigger_level {
+            self.recent.clear();
+            return true;
+        }
+        false
+    }
+}
+
 /// Energy / no-op stub used when no ONNX model is present — the wake-word
 /// analogue of [`crate::vad::WebRtcVadStub`].
 ///
@@ -180,7 +252,10 @@ mod onnx {
     use ort::session::Session;
     use ort::value::Tensor;
 
-    use super::{HopBuffer, WakeDecision, WakeWord, HOP_SAMPLES};
+    use super::{
+        ActivationWindow, HopBuffer, WakeDecision, WakeWord, HOP_SAMPLES, WAKE_TRIGGER_LEVEL,
+        WAKE_WINDOW_HOPS,
+    };
 
     /// Mel bins emitted per melspectrogram frame (openWakeWord uses 32).
     const MEL_BINS: usize = 32;
@@ -225,6 +300,12 @@ mod onnx {
         input: String,
         output: String,
         threshold: f32,
+        /// openWakeWord-style activation gate over this classifier's raw per-hop
+        /// threshold crossings. The phrase fires when `trigger_level` crossings
+        /// fall within the trailing window — raw scores are compared at full
+        /// value (never averaged), so the short high-confidence peak of a
+        /// genuine wake is preserved while a lone single-hop spike cannot fire.
+        gate: ActivationWindow,
     }
 
     /// openWakeWord detector: melspectrogram → frozen embedding → per-phrase
@@ -289,6 +370,7 @@ mod onnx {
                     input,
                     output,
                     threshold: spec.threshold,
+                    gate: ActivationWindow::new(WAKE_WINDOW_HOPS, WAKE_TRIGGER_LEVEL),
                 });
             }
             let mut detector = Self {
@@ -397,8 +479,14 @@ mod onnx {
                 let (_shape, data) = outputs[c.output.as_str()]
                     .try_extract_tensor::<f32>()
                     .map_err(|e| anyhow::anyhow!("extract classifier {} output: {e}", c.phrase))?;
-                let score = data.first().copied().unwrap_or(0.0);
-                let fired = score >= c.threshold;
+                let raw = data.first().copied().unwrap_or(0.0);
+                // Compare the raw hop score at full value (never averaged — that
+                // blunts the short peak of a real wake and costs recall) and let
+                // the activation gate debounce it: a fire needs `trigger_level`
+                // crossings within the trailing window, so a lone spike cannot
+                // trigger. The reported score is the raw hop score.
+                let score = raw;
+                let fired = c.gate.update(raw >= c.threshold);
                 if (fired && !best.fired) || (fired == best.fired && score > best.score) {
                     best = if fired {
                         WakeDecision::fired(c.phrase.clone(), score)
@@ -529,5 +617,72 @@ mod tests {
         assert!(decision.fired);
         assert_eq!(decision.phrase.as_deref(), Some("hey_jarvis"));
         assert!(decision.score > 0.2);
+    }
+
+    /// A lone threshold crossing (a single-hop spike) must not fire: only one
+    /// crossing sits in the window, below `trigger_level` 2. This is the
+    /// confident single-hop false positive from the original 24 h log.
+    #[test]
+    fn window_ignores_a_lone_spike() {
+        let mut g = ActivationWindow::new(5, 2);
+        assert!(!g.update(true), "one crossing is below trigger_level 2");
+        for _ in 0..5 {
+            assert!(!g.update(false), "misses alone never fire");
+        }
+    }
+
+    /// Two consecutive crossings fire on the second hop — a clean wake still
+    /// triggers at the earliest possible moment (160 ms), so the window costs
+    /// no latency in the common case.
+    #[test]
+    fn window_fires_on_two_consecutive_crossings() {
+        let mut g = ActivationWindow::new(5, 2);
+        assert!(!g.update(true), "first crossing");
+        assert!(g.update(true), "second consecutive crossing fires immediately");
+    }
+
+    /// The whole point of the window: a flickering peak — cross, dip, cross —
+    /// still fires, whereas a strict consecutive gate would drop it. Here the
+    /// two crossings are three hops apart, at the edge of the 5-hop window.
+    #[test]
+    fn window_fires_across_a_dip() {
+        let mut g = ActivationWindow::new(5, 2);
+        assert!(!g.update(true)); // crossing at hop 0
+        assert!(!g.update(false)); // dip
+        assert!(!g.update(false)); // dip
+        assert!(g.update(true), "second crossing within the 5-hop window fires");
+    }
+
+    /// Two crossings farther apart than the window cannot fire: the first has
+    /// aged out before the second arrives, so isolated spikes never accumulate.
+    #[test]
+    fn window_does_not_fire_when_crossings_age_out() {
+        let mut g = ActivationWindow::new(3, 2);
+        assert!(!g.update(true)); // crossing
+        assert!(!g.update(false));
+        assert!(!g.update(false)); // window now [T,F,F]
+        assert!(!g.update(true), "first crossing has aged out; only one in window");
+    }
+
+    /// After firing, the window clears so the refractory window (not a lingering
+    /// count) governs re-fires: two fresh crossings are needed again.
+    #[test]
+    fn window_clears_after_firing() {
+        let mut g = ActivationWindow::new(5, 2);
+        g.update(true);
+        assert!(g.update(true), "fires on the second crossing");
+        assert!(!g.update(true), "post-fire clear: one crossing is not enough again");
+        assert!(g.update(true), "the next crossing reaches trigger_level");
+    }
+
+    /// A window smaller than the trigger level is clamped up so the count is
+    /// always reachable; a zero trigger level clamps to 1.
+    #[test]
+    fn window_clamps_degenerate_params() {
+        let mut g = ActivationWindow::new(1, 2); // window clamped up to 2
+        assert!(!g.update(true));
+        assert!(g.update(true), "two crossings fit the clamped window and fire");
+        let mut z = ActivationWindow::new(0, 0); // trigger clamps to 1
+        assert!(z.update(true), "trigger_level clamps to 1: first crossing fires");
     }
 }
