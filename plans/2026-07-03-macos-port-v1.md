@@ -428,6 +428,48 @@ unchanged.
       System Settings deep links (`x-apple.systempreferences:` URLs), since
       nothing works until the user grants them.
 
+      **Permission-UX facts (researched 2026-07-04; this is the whole
+      game on macOS):**
+      - Injection (CGEventPost, what enigo uses) is gated by the
+        **Accessibility** TCC service. It is a **one-time grant**, not a
+        per-use confirmation: the user flips one toggle in System
+        Settings → Privacy & Security → Accessibility and is never asked
+        again. Apple provides no per-keystroke dialog and no way to skip
+        the grant — every dictation app that types for you (Wispr Flow,
+        superwhisper, MacWhisper…) requires exactly this same toggle;
+        Wispr Flow's own onboarding is a Permissions page requesting
+        Accessibility + Microphone, and their MDM docs pre-grant
+        Accessibility via a PPPC profile so users see only the mic
+        prompt.
+      - Microphone is a separate **native one-click prompt**
+        (Allow/Don't Allow) on first capture. Accessibility cannot be
+        granted from a dialog — the user must be sent to the Settings
+        toggle. So the theoretical UX floor on macOS is: one click (mic)
+        + one toggle (Accessibility), once ever. Match it, don't fight
+        it.
+      - Without the grant, CGEventPost **silently drops** events (no
+        error — confirmed on the bench: `text()` returns Ok headless).
+        First-run must therefore probe explicitly with
+        `AXIsProcessTrustedWithOptions(kAXTrustedCheckOptionPrompt)`,
+        which both answers truthfully and raises the system dialog that
+        deep-links to the right pane; poll until granted and show a
+        green tick (`AXIsProcessTrusted` — ApplicationServices is
+        already linked). Never "inject and hope".
+      - **TCC grants are keyed to the code-signing identity.** An
+        ad-hoc/linker-signed binary gets a new identity every build, so
+        the grant would break on **every update** — the single most
+        common "it stopped working" complaint against mac dictation
+        apps. A **stable** signing identity (+ consistent bundle id,
+        shipped as a `fono.app` bundle so the grant attributes to fono
+        rather than to Terminal) is a **hard prerequisite** for the
+        polished UX, not packaging polish. Achieved without the Apple
+        Developer Program via the local self-signed-cert scheme in Task
+        11.4. Feeds Tasks 10.2 and 11.4.
+      - Zero-permission fallback stays: clipboard write needs no TCC at
+        all (synthetic Cmd+V would need Accessibility again, so don't) —
+        dictate → pasteboard → notify "paste with Cmd+V". Fono already
+        degrades in this order.
+
 **Phase 9 gate (headless)**: `fono install` places the binary + LaunchAgent
 plist correctly and `launchctl print`/`bootstrap` confirms registration for
 the SSH user; `fono uninstall` reverses it; doctor lists the missing TCC
@@ -460,6 +502,43 @@ install layer byte-identical.
       Blocked on the `x86_64-apple-darwin` onnxruntime pin (still unbuilt
       on the mirror); arm64-only until then. ggml's runtime CPU-backend
       fallback covers Intel Macs where the Metal backend can't initialize.
+- [ ] Task 11.4. **Grant-once signing pipeline, zero-cost posture** (the
+      mechanism behind Task 9.3's "grant survives updates"). TCC stores
+      the app's *designated requirement* at grant time and re-checks it
+      on every launch — identical signature ⇒ grant persists. Decision
+      2026-07-04: **no Apple Developer Program** (USD 99/yr rejected —
+      no users yet). The free alternative that still achieves
+      grant-once:
+      1. **Local stable identity at install time.** For an ad-hoc
+         signature the designated requirement degenerates to the
+         per-build CDHash — grants break on every update. But TCC keys
+         on any *certificate-based* requirement equally well, so
+         `fono install` creates a **self-signed code-signing
+         certificate once** in the user's login keychain
+         (`fono-local-signing`) and re-signs the app with it;
+         `fono update` re-signs the swapped binary with the *same* local
+         cert after `codesign --verify`ing the download hash. Same cert
+         every time ⇒ stable designated requirement ⇒ Accessibility
+         toggled once, survives all updates. (Signing happens on the
+         user's machine with the user's own cert — nothing secret ships
+         in the repo or CI.)
+      2. **Gatekeeper without notarization**: quarantine only attaches
+         to browser downloads. Primary install channel is **Homebrew**
+         (`brew install`ed binaries carry no quarantine → no Gatekeeper
+         wall) or `curl | fono install`-style bootstrap; for manual
+         downloads, document the one-time right-click-Open (or
+         `xattr -d com.apple.quarantine`). CI ships the plain ad-hoc
+         arm64 asset + `.sha256` — no certs, no secrets.
+      3. **`fono.app` bundle** with fixed bundle id (`org.fono.app`)
+         and `Info.plist` usage strings (`NSMicrophoneUsageDescription`
+         is mandatory — a bundled app hard-crashes on first mic access
+         without it) — still required so the grant attributes to fono
+         rather than to Terminal; the bundle is assembled locally by
+         `fono install`, not in CI.
+      4. **Developer ID + notarization stays a future opt-in** (revisit
+         when the project has users/funding): drop-in replacement — CI
+         signs/notarizes, the local re-sign step simply becomes a
+         no-op. Nothing in the free posture paints us into a corner.
 
 **Phase 11 gate**: tagged release publishes the first macOS asset.
 
