@@ -1,6 +1,45 @@
 # Fono — Project Status
 Last updated: 2026-07-03
 
+## 2026-07-03 — macOS Phase 5 complete: global hotkeys via Carbon, zero new deps
+
+Fifth same-day session (`plans/2026-07-03-macos-port-v1.md`); Phase 5
+is complete at the headless tier.
+
+- **Task 5.1 (decision):** `global-hotkey` — and it turned out to be
+  free: the Linux X11 listener is already built on that crate, so it
+  was never a new dependency. Zero Linux size cost, `Cargo.lock`
+  unchanged, and the Carbon backend (`RegisterEventHotKey`) needs **no
+  TCC permission**, unlike a CGEventTap shim (Input Monitoring prompt,
+  untestable headless). Trade-off recorded: Carbon swallows the
+  registered key.
+- **Task 5.2:** the generic `listener.rs` runs unmodified on macOS
+  (the Linux-only `x11-dl`/`ashpd`/portal gating had already landed in
+  the Phase 1 squash). This session: `detect.rs` short-circuits to the
+  `global-hotkey` listener on darwin (display env vars carry no signal
+  there), and `is_graphical_session()` gained a real macOS probe —
+  `CGSessionCopyCurrentDictionary()` via raw framework FFI (two
+  symbols, zero new crates) — so the daemon's headless gate is truthful
+  on darwin instead of always-false.
+- **Task 5.3:** Esc-to-cancel needed no port — the transient
+  `EnableCancel`/`DisableCancel` registration goes through the same
+  `GlobalHotKeyManager` seam.
+- **Headless gate answer recorded:** Carbon registration **succeeds
+  over headless SSH as root** — the probe example registered F7/F8/Esc
+  and unregistered cleanly; a WindowServer session is needed only for
+  event *delivery* (deferred-GUI). The daemon correctly detects the
+  SSH session as non-graphical and skips the listener.
+- **Task 5.4:** Linux regression — portal/X11 code untouched (only
+  cfg-gated); fmt/clippy/36 suites green.
+- Also folded in: `hwcheck.rs` per-OS refactor (the darwin
+  statvfs/Mach probe code split into cleaner per-OS modules).
+- Gates: Linux fmt/clippy/36 suites green, `Cargo.lock` unchanged;
+  darwin clippy `-D warnings` clean + 36 suites, 0 failures.
+
+Next: Phase 6 (text injection + focus detection) — enigo/CGEvent
+behind the existing `enigo-backend` feature, clipboard fallback via
+arboard, Accessibility-TCC denial path as the headless test subject.
+
 ## 2026-07-03 — macOS Phase 4 complete: CoreAudio capture/playback via cpal
 
 Fourth same-day session (`plans/2026-07-03-macos-port-v1.md`); Phase 4

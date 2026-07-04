@@ -423,16 +423,18 @@ pub fn default_host_gpu_for_platform() -> HostGpu {
     }
 }
 
-/// Best-effort physical-core detection. Linux: parses `/proc/cpuinfo`.
-/// macOS: `hw.physicalcpu` (M-series has no SMT, but the sysctl is
-/// authoritative either way). Other OSes: returns `None` and the caller
-/// falls back to halving `available_parallelism` (assume SMT siblings).
+/// Physical-core count via `hw.physicalcpu` (M-series has no SMT, but
+/// the sysctl is authoritative either way).
+#[cfg(target_os = "macos")]
 fn physical_cores() -> Option<u32> {
-    #[cfg(target_os = "macos")]
-    {
-        return sysctl_u64("hw.physicalcpu").and_then(|v| u32::try_from(v).ok());
-    }
-    #[cfg(not(target_os = "macos"))]
+    sysctl_u64("hw.physicalcpu").and_then(|v| u32::try_from(v).ok())
+}
+
+/// Best-effort physical-core detection. Linux: parses `/proc/cpuinfo`.
+/// Other OSes: returns `None` and the caller falls back to halving
+/// `available_parallelism` (assume SMT siblings).
+#[cfg(not(target_os = "macos"))]
+fn physical_cores() -> Option<u32> {
     if cfg!(target_os = "linux") {
         let s = std::fs::read_to_string("/proc/cpuinfo").ok()?;
         let mut seen: std::collections::BTreeSet<(u32, u32)> = std::collections::BTreeSet::new();
@@ -464,34 +466,33 @@ fn physical_cores() -> Option<u32> {
     }
 }
 
-/// `(total_bytes, available_bytes)` for the running host.
-///
-/// Linux parses `/proc/meminfo`; macOS asks Mach (`hw.memsize` +
-/// `host_statistics64`); other targets return `None` and the caller
-/// treats it as `(0, 0)`.
+/// `(total_bytes, available_bytes)` for the running host: `hw.memsize`
+/// + `host_statistics64` via Mach.
+#[cfg(target_os = "macos")]
 fn read_meminfo() -> Option<(u64, u64)> {
-    #[cfg(target_os = "macos")]
-    {
-        let total = sysctl_u64("hw.memsize")?;
-        return Some((total, macos_available_ram().unwrap_or(0)));
+    let total = sysctl_u64("hw.memsize")?;
+    Some((total, macos_available_ram().unwrap_or(0)))
+}
+
+/// `(total_bytes, available_bytes)` parsed from `/proc/meminfo`; targets
+/// that are neither Linux nor macOS return `None` and the caller treats
+/// it as `(0, 0)`.
+#[cfg(not(target_os = "macos"))]
+fn read_meminfo() -> Option<(u64, u64)> {
+    if !cfg!(target_os = "linux") {
+        return None;
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        if !cfg!(target_os = "linux") {
-            return None;
+    let s = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let mut total_kb = 0u64;
+    let mut avail_kb = 0u64;
+    for line in s.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            total_kb = parse_kb(rest).unwrap_or(0);
+        } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            avail_kb = parse_kb(rest).unwrap_or(0);
         }
-        let s = std::fs::read_to_string("/proc/meminfo").ok()?;
-        let mut total_kb = 0u64;
-        let mut avail_kb = 0u64;
-        for line in s.lines() {
-            if let Some(rest) = line.strip_prefix("MemTotal:") {
-                total_kb = parse_kb(rest).unwrap_or(0);
-            } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
-                avail_kb = parse_kb(rest).unwrap_or(0);
-            }
-        }
-        Some((total_kb * 1024, avail_kb * 1024))
     }
+    Some((total_kb * 1024, avail_kb * 1024))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -513,7 +514,7 @@ fn sysctl_u64(name: &str) -> Option<u64> {
         libc::sysctlbyname(
             cname.as_ptr(),
             buf.as_mut_ptr().cast(),
-            &mut len,
+            &raw mut len,
             std::ptr::null_mut(),
             0,
         )
@@ -550,7 +551,7 @@ fn macos_available_ram() -> Option<u64> {
             libc::mach_host_self(),
             libc::HOST_VM_INFO64,
             stats.as_mut_ptr().cast(),
-            &mut count,
+            &raw mut count,
         )
     };
     if rc != libc::KERN_SUCCESS {
@@ -626,6 +627,9 @@ impl libc_statvfs {
 #[cfg(target_os = "macos")]
 #[repr(C)]
 #[allow(non_camel_case_types)]
+// The `f_` prefixes mirror the C struct field names 1:1 (layout doc
+// below); renaming them would only obscure the ABI mapping.
+#[allow(clippy::struct_field_names)]
 struct libc_statvfs {
     f_bsize: u64,
     f_frsize: u64,

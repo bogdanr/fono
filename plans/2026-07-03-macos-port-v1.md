@@ -283,25 +283,41 @@ Linux audio path untouched.
 
 ### Phase 5 — Global hotkeys
 
-- [ ] Task 5.1. **Backend decision (flag before adding).** Candidates:
-      `global-hotkey` crate (Carbon `RegisterEventHotKey`; same crate the
-      Windows plan picks — one new dep serves two ports) vs a minimal
-      objc2/CGEventTap shim. Evaluate F7/F8/Esc coverage and the
-      Input-Monitoring/Accessibility permission story; state binary-size
-      impact (macOS-only dep ⇒ zero Linux cost) and get sign-off.
-- [ ] Task 5.2. **Implement behind the existing listener seam** in
-      `fono-hotkey` (`x11-dl`/`ashpd` paths compile on macOS today but are
-      dead there; gate them `target_os = "linux"` while adding the macOS
-      module). FSM stays OS-agnostic.
-- [ ] Task 5.3. **Esc-to-cancel** mirrors the transient
-      `EnableCancel`/`DisableCancel` registration.
-- [ ] Task 5.4. **Linux regression check**: portal + X11 hotkeys unchanged.
+- [x] Task 5.1. **Backend decision: `global-hotkey`, and it's free.** The
+      crate was *not* new — the Linux X11 listener is already built on
+      `global-hotkey` 0.6 (`crates/fono-hotkey/src/listener.rs`), so it is
+      in the shipped Linux binary's graph today; its Carbon backend
+      (`RegisterEventHotKey`) compiles only on macOS. Zero Linux size
+      cost, tens of KB on darwin, no `Cargo.lock` change, and — decisive
+      for UX — Carbon hotkeys need **no TCC permission at all**, unlike a
+      CGEventTap shim (Input Monitoring prompt, untestable headless).
+      Trade-off recorded: Carbon swallows the registered key (fine for
+      F7/F8/Esc-as-cancel).
+- [x] Task 5.2. **Implemented behind the existing listener seam.** The
+      generic `listener.rs` (GlobalHotKeyManager + FSM) runs unmodified on
+      macOS (the `x11-dl`/`ashpd` Linux target table + portal gating had
+      already landed in Phase 1). `detect.rs` now short-circuits to the
+      `global-hotkey` listener on darwin (display env vars carry no
+      signal), and `is_graphical_session()` gained a real macOS probe —
+      `CGSessionCopyCurrentDictionary()` via raw framework FFI, zero new
+      crates — so the daemon's headless gating is truthful on darwin.
+- [x] Task 5.3. **Esc-to-cancel** needs no port: the transient
+      `EnableCancel`/`DisableCancel` register/unregister calls go through
+      the same `GlobalHotKeyManager` seam and were exercised by the probe
+      example on the Mac (register + unregister Esc succeeded).
+- [x] Task 5.4. **Linux regression check**: portal + X11 code untouched
+      (only cfg-gated); fmt/clippy/36 test suites green, `Cargo.lock`
+      unchanged.
 
-**Phase 5 gate (headless)**: macOS hotkey module compiles, unit tests for
-the keymap/FSM wiring pass, and registration over SSH either succeeds or
-fails gracefully with doctor guidance (Carbon/event-tap registration
-likely needs a WindowServer session — record which). **Deferred-GUI**:
-F7/F8/Esc actually firing.
+**Phase 5 gate (headless)**: PASSED. macOS hotkey module compiles, unit
+tests pass (darwin clippy clean, full workspace suites green), and —
+answer recorded — Carbon `RegisterEventHotKey` **succeeds even over
+headless SSH as root** (probe example registered F7/F8/Esc and
+unregistered cleanly; no WindowServer session required for
+registration). The daemon still gates the listener on
+`is_graphical_session()`, which correctly reports headless over SSH.
+**Deferred-GUI**: F7/F8/Esc actually *firing* (event delivery does need
+a console session).
 
 ### Phase 6 — Text injection + focus detection
 

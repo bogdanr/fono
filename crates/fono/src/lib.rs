@@ -36,22 +36,60 @@ pub mod wizard;
 #[cfg(feature = "interactive")]
 pub mod live;
 
-/// True when the daemon's environment indicates a graphical session —
-/// either an X11 server (`DISPLAY` set) or a Wayland compositor
-/// (`WAYLAND_DISPLAY` set). Used to runtime-gate the tray, overlay, and
-/// text-injection surfaces so the same single binary runs cleanly on
-/// headless servers and on graphical desktops.
+/// True when the daemon's environment indicates a graphical session.
+/// Linux: an X11 server (`DISPLAY` set) or a Wayland compositor
+/// (`WAYLAND_DISPLAY` set). macOS: a WindowServer (Aqua) session —
+/// env vars carry no signal there, so we ask CoreGraphics directly.
+/// Used to runtime-gate the tray, overlay, hotkey, and text-injection
+/// surfaces so the same single binary runs cleanly on headless servers
+/// and on graphical desktops.
 ///
 /// See `plans/2026-04-30-fono-single-binary-size-v1.md` Phase 3 +
 /// `docs/decisions/0022-binary-size-budget.md` for the contract.
 #[must_use]
 pub fn is_graphical_session() -> bool {
-    is_graphical_session_in(|k| std::env::var_os(k))
+    #[cfg(target_os = "macos")]
+    {
+        macos_has_window_server_session()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        is_graphical_session_in(|k| std::env::var_os(k))
+    }
+}
+
+/// Ask CoreGraphics whether the calling process belongs to a
+/// WindowServer session. `CGSessionCopyCurrentDictionary()` returns
+/// NULL over SSH / launchd-without-Aqua, and a session dictionary when
+/// a console user is logged in. Raw framework FFI — two symbols, no
+/// new crates (the binary already links CoreFoundation via CoreAudio).
+#[cfg(target_os = "macos")]
+fn macos_has_window_server_session() -> bool {
+    use std::ffi::c_void;
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGSessionCopyCurrentDictionary() -> *const c_void;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFRelease(cf: *const c_void);
+    }
+    // Safety: both calls are safe with any process state; the non-NULL
+    // dictionary is released exactly once and never dereferenced.
+    unsafe {
+        let d = CGSessionCopyCurrentDictionary();
+        if d.is_null() {
+            return false;
+        }
+        CFRelease(d);
+        true
+    }
 }
 
 /// Testable variant: takes a closure that resolves env-var lookups so
 /// unit tests can drive both branches without mutating the real
 /// process environment (which is racy with parallel test runners).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn is_graphical_session_in<F>(lookup: F) -> bool
 where
     F: Fn(&str) -> Option<std::ffi::OsString>,

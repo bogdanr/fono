@@ -282,7 +282,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
             }
         }
     } else {
-        debug!("hotkey listener skipped (headless: no DISPLAY / WAYLAND_DISPLAY)");
+        debug!("hotkey listener skipped (headless: no graphical session)");
         None
     };
 
@@ -441,7 +441,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     // ---------------------------------------------------------------
     let graphical = crate::is_graphical_session();
     let (tray, mut tray_rx) = if !graphical {
-        debug!("tray skipped (headless: no DISPLAY / WAYLAND_DISPLAY)");
+        debug!("tray skipped (headless: no graphical session)");
         let (_tx, rx) = mpsc::unbounded_channel::<TrayAction>();
         (None, rx)
     } else {
@@ -1521,7 +1521,7 @@ fn print_banner(paths: &Paths, config: &Config, verbosity: Verbosity) {
     debug!(
         "tray icon    : {}",
         if !graphical {
-            "skipped (headless: no DISPLAY / WAYLAND_DISPLAY)"
+            "skipped (headless: no graphical session)"
         } else if cfg!(feature = "tray") {
             "enabled"
         } else {

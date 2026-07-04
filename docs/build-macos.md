@@ -127,6 +127,18 @@ features, debug build:
 - Auto-mute: `AudioStack::CoreAudio` toggles the system output mute
   via `osascript` — round-trip verified headless.
 
+### Phase 5 smoke (global hotkeys / Carbon) — 2026-07-03
+
+- Backend: the same `global-hotkey` crate the Linux X11 listener uses;
+  its Carbon `RegisterEventHotKey` backend needs **no TCC permission**.
+- Registration works even over headless SSH as root: the
+  `fono-hotkey` probe example registered F7, F8 and Esc and
+  unregistered them cleanly (rc=0) — no WindowServer session required
+  for registration, only for event *delivery*.
+- The daemon correctly detects the SSH session as non-graphical and
+  skips the listener with a clear log line; on a console session it
+  would select the `macos` (Carbon) backend.
+
 ## Deferred-GUI checklist
 
 The dev Mac is headless-only, so anything that needs a seated user —
@@ -140,7 +152,9 @@ land:
   STT → transcript round-trip (plan Task 4.2/4.3). Needs a Mac with a
   microphone — the dev Mac Studio has none, so only the failure path
   is verified.
-- [ ] Global hotkeys F7 / F8 / Esc fire in a GUI session (Phase 5).
+- [ ] Global hotkeys F7 / F8 / Esc fire in a GUI session (Phase 5;
+  registration already proven headless — only event delivery is
+  untested).
 - [ ] Grant Accessibility (TCC); dictation lands at the cursor in
   TextEdit, Safari address bar, VS Code; per-app rules fire (Phase 6).
 - [ ] Menu-bar icon visible with working menu (Phase 7).

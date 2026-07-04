@@ -24,7 +24,9 @@ use crate::KeyHeldFlags;
 pub enum HotkeyBackend {
     /// `xdg-desktop-portal.GlobalShortcuts` (Wayland sessions).
     Portal,
-    /// The X11 / Xwayland `global-hotkey` listener.
+    /// The X11 / Xwayland `global-hotkey` listener. On macOS this is
+    /// the same listener with its Carbon `RegisterEventHotKey`
+    /// backend — the variant name is historical.
     X11,
     /// Skip the listener entirely (headless / SSH / CI runners).
     Disabled,
@@ -48,12 +50,18 @@ impl HotkeyBackend {
 /// Resolve a backend for the current session. `forced` is the parsed
 /// `FONO_HOTKEY_BACKEND` value (`None` = auto-detect).
 ///
-/// Auto-detect matrix:
+/// Auto-detect matrix (Linux):
 /// - `WAYLAND_DISPLAY` set → `Portal` (the portal listener falls
 ///   back gracefully at spawn time if `xdg-desktop-portal-*` isn't
 ///   running).
 /// - `DISPLAY` set, no `WAYLAND_DISPLAY` → `X11`.
 /// - Neither set → `Disabled`.
+///
+/// macOS: always the `global-hotkey` listener (the `X11` variant —
+/// same listener, Carbon `RegisterEventHotKey` backend). Display env
+/// vars carry no signal on darwin, and the daemon only calls
+/// [`spawn`] inside a WindowServer session; registration failures
+/// degrade gracefully in the listener itself.
 #[must_use]
 pub fn detect_backend(forced: Option<HotkeyBackend>) -> HotkeyBackend {
     detect_backend_with(forced, |k| std::env::var_os(k).is_some_and(|v| !v.is_empty()))
@@ -67,6 +75,9 @@ pub fn detect_backend_with(
 ) -> HotkeyBackend {
     if let Some(b) = forced {
         return b;
+    }
+    if cfg!(target_os = "macos") {
+        return HotkeyBackend::X11;
     }
     if env_present("WAYLAND_DISPLAY") {
         HotkeyBackend::Portal
@@ -180,21 +191,34 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn auto_detect_picks_portal_on_wayland() {
         let b = detect_backend_with(None, |k| k == "WAYLAND_DISPLAY");
         assert_eq!(b, HotkeyBackend::Portal);
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn auto_detect_picks_x11_on_xorg() {
         let b = detect_backend_with(None, |k| k == "DISPLAY");
         assert_eq!(b, HotkeyBackend::X11);
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn auto_detect_disabled_when_headless() {
         let b = detect_backend_with(None, |_| false);
         assert_eq!(b, HotkeyBackend::Disabled);
+    }
+
+    /// macOS has no display env vars — auto-detect always lands on the
+    /// global-hotkey (Carbon) listener; headless gating happens in the
+    /// daemon via the WindowServer-session probe, not here.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn auto_detect_on_macos_is_always_the_global_hotkey_listener() {
+        assert_eq!(detect_backend_with(None, |_| false), HotkeyBackend::X11);
+        assert_eq!(detect_backend_with(None, |_| true), HotkeyBackend::X11);
     }
 
     #[test]
