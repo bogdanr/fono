@@ -9,7 +9,12 @@
 //! Run: `cargo run --release -p fono-overlay --example cortex_gallery -- /tmp/cortex_gallery`
 //! then `magick <f>.ppm <f>.png` (or the harness prints the list).
 
-#![allow(clippy::suboptimal_flops, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#![allow(
+    clippy::suboptimal_flops,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::too_many_lines
+)]
 
 use fono_overlay::cortex::{draw_cortex, CortexState};
 use fono_overlay::{CortexCmd, CortexExperts, CortexFrame, OverlayState};
@@ -28,26 +33,91 @@ const ACCENT_LISTEN: u32 = 0xFFE0_5454;
 const ACCENT_THINK: u32 = 0xFFF5_9E0B;
 const ACCENT_SPEAK: u32 = 0xFF38_BDF8;
 
-fn write_ppm(path: &str, buf: &[u32]) {
+/// Desktop grey the dark composites approximate.
+const BG_DARK: f32 = 40.0;
+/// A bright desktop (light theme / white webpage behind the strip) —
+/// the translucent panel must keep the same visual hierarchy here.
+const BG_BRIGHT: f32 = 225.0;
+
+fn write_ppm_sized(path: &str, buf: &[u32], w: u32, h: u32, bg: f32) {
     let mut out = Vec::with_capacity(buf.len() * 3 + 32);
-    out.extend_from_slice(format!("P6\n{W} {H}\n255\n").as_bytes());
+    out.extend_from_slice(format!("P6\n{w} {h}\n255\n").as_bytes());
     for &px in buf {
-        // Composite the premultiplied panel over a desktop-ish dark
-        // grey so the PPM approximates what the user sees.
+        // Composite the premultiplied panel over a desktop grey so
+        // the PPM approximates what the user sees.
         let a = ((px >> 24) & 0xFF) as f32 / 255.0;
         for shift in [16u32, 8, 0] {
             let c = ((px >> shift) & 0xFF) as f32;
-            let bg = 40.0;
             out.push((c + bg * (1.0 - a)).min(255.0) as u8);
         }
     }
     std::fs::File::create(path).and_then(|mut f| f.write_all(&out)).expect("write ppm");
 }
 
+fn write_ppm(path: &str, buf: &[u32], bg: f32) {
+    write_ppm_sized(path, buf, W, H, bg);
+}
+
 fn shot(c: &CortexState, accent: u32, t: f32, dir: &str, name: &str) {
     let mut buf = vec![PANEL_BG; (W * H) as usize];
     draw_cortex(&mut buf, W, H, c, 4.0, W as f32 - 4.0, 4.0, H as f32 - 4.0, accent, 1.0, t);
-    write_ppm(&format!("{dir}/{name}.ppm"), &buf);
+    write_ppm(&format!("{dir}/{name}.ppm"), &buf, BG_DARK);
+}
+
+/// Same render, composited over BOTH a dark and a bright desktop —
+/// one draw, two PPMs — so background-polarity regressions (the
+/// "ruled paper" look over light themes) are caught offline.
+fn shot2(c: &CortexState, accent: u32, t: f32, dir: &str, name: &str) {
+    let mut buf = vec![PANEL_BG; (W * H) as usize];
+    draw_cortex(&mut buf, W, H, c, 4.0, W as f32 - 4.0, 4.0, H as f32 - 4.0, accent, 1.0, t);
+    write_ppm(&format!("{dir}/{name}.ppm"), &buf, BG_DARK);
+    write_ppm(&format!("{dir}/{name}_bright.ppm"), &buf, BG_BRIGHT);
+}
+
+/// Real-shaped keyframe: transformer per-layer L2 norms grow with
+/// depth and barely vary token-to-token (~±1 %) — exactly what a real
+/// dense model emits, and exactly the data that broke the first live
+/// deployment (flat slabs / ruled lines). `boost` scales the whole
+/// frame (the BOS attention-sink token can run 10–100× hot).
+fn real_frame(i: u64, n_layer: u32, boost: f32) -> CortexCmd {
+    let norms: Vec<f32> = (0..n_layer)
+        .map(|l| {
+            let base = 5.0 + l as f32 * 3.0;
+            base * boost * (1.0 + 0.01 * ((i as f32 * 0.7 + l as f32) * 1.3).sin())
+        })
+        .collect();
+    CortexCmd::Frame(CortexFrame {
+        token_index: i * 4,
+        layer_norms: norms,
+        experts: Vec::new(),
+        token_prob: Some(0.6),
+        entropy_bits: Some(1.0 + 0.3 * (i as f32 * 0.4).sin()),
+    })
+}
+
+/// Long real-shaped reply: `n` keyframes (4 tokens apart) with an
+/// optional BOS-outlier first frame, closed by `ReplyEnd`/`AudioTotal`.
+fn real_reply(c: &mut CortexState, n: u64, n_layer: u32, bos_outlier: bool) {
+    for i in 0..n {
+        let boost = if bos_outlier && i == 0 { 20.0 } else { 1.0 };
+        c.apply(real_frame(i, n_layer, boost));
+    }
+    c.apply(CortexCmd::ReplyEnd {
+        total_tokens: n * 4,
+        gen_ms: 30_000,
+        ctx_used: 900,
+        ctx_capacity: 4096,
+    });
+    c.apply(CortexCmd::AudioTotal { secs: 8.0 });
+}
+
+/// Advance the speaking replay clock by `secs` of wall time.
+fn advance(c: &mut CortexState, secs: f32) {
+    let steps = (secs / 0.05).ceil() as u32;
+    for _ in 0..steps {
+        c.tick(&[]);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 /// Dense keyframes: rising per-layer activation with a little wobble.
@@ -230,6 +300,81 @@ fn main() {
     }
     c.on_state(OverlayState::AssistantSpeaking);
     shoot_decode(&mut c, ACCENT_SPEAK, &dir, "6_speaking_audio_bands");
+
+    // --- Real-data scenes (regression guards for the 2026-07-10 live
+    // failures): long replies, near-constant per-layer norms, a BOS
+    // attention-sink outlier, bright desktops, fractional scale. Each
+    // must render textured, structured grids — no flat slabs, no ruled
+    // lines, no black panels.
+
+    // 7a/7b — Speaking replay of a 200-frame (800-token) real reply,
+    // early (~20 %) and late (~65 %) in playback.
+    let mut c = CortexState::default();
+    c.apply(CortexCmd::ReplyBegin { n_layer: 24 });
+    real_reply(&mut c, 200, 24, false);
+    c.on_state(OverlayState::AssistantSpeaking);
+    advance(&mut c, 1.6);
+    shot2(&c, ACCENT_SPEAK, 1.6, &dir, "7a_speaking_real_long");
+    advance(&mut c, 3.6);
+    shot2(&c, ACCENT_SPEAK, 5.2, &dir, "7b_speaking_real_long_late");
+
+    // 7c — Thinking the instant the FIRST keyframe lands (decode
+    // latch): the panel must never read as dead/black.
+    let mut c = CortexState::default();
+    c.on_state(OverlayState::AssistantThinking);
+    c.apply(CortexCmd::ReplyBegin { n_layer: 24 });
+    c.apply(CortexCmd::Prefill { n_tokens: 512 });
+    advance(&mut c, 0.5);
+    c.apply(real_frame(0, 24, 1.0));
+    advance(&mut c, 0.15);
+    shot2(&c, ACCENT_THINK, 0.65, &dir, "7c_thinking_first_token");
+
+    // 7d — Thinking mid-decode: 60 real-shaped frames arriving live.
+    let mut c = CortexState::default();
+    c.on_state(OverlayState::AssistantThinking);
+    c.apply(CortexCmd::ReplyBegin { n_layer: 24 });
+    for i in 0..60u64 {
+        c.apply(real_frame(i, 24, 1.0));
+        advance(&mut c, 0.05);
+    }
+    shot2(&c, ACCENT_THINK, 3.0, &dir, "7d_thinking_mid_decode");
+
+    // 7e — Speaking replay whose FIRST frame is a 20× BOS
+    // attention-sink outlier: the outlier must not crush every later
+    // frame's contrast toward black.
+    let mut c = CortexState::default();
+    c.apply(CortexCmd::ReplyBegin { n_layer: 24 });
+    real_reply(&mut c, 200, 24, true);
+    c.on_state(OverlayState::AssistantSpeaking);
+    advance(&mut c, 3.2);
+    shot2(&c, ACCENT_SPEAK, 3.2, &dir, "7e_speaking_bos_outlier");
+
+    // 7f — Fractional HiDPI scale (1.25×) at the correspondingly
+    // larger strip: no sub-pixel column aliasing / moiré seams.
+    {
+        const W2: u32 = 1013;
+        const H2: u32 = 120;
+        let mut c = CortexState::default();
+        c.apply(CortexCmd::ReplyBegin { n_layer: 24 });
+        real_reply(&mut c, 200, 24, false);
+        c.on_state(OverlayState::AssistantSpeaking);
+        advance(&mut c, 1.6);
+        let mut buf = vec![PANEL_BG; (W2 * H2) as usize];
+        draw_cortex(
+            &mut buf,
+            W2,
+            H2,
+            &c,
+            5.0,
+            W2 as f32 - 5.0,
+            5.0,
+            H2 as f32 - 5.0,
+            ACCENT_SPEAK,
+            1.25,
+            1.6,
+        );
+        write_ppm_sized(&format!("{dir}/7f_speaking_real_scale125.ppm"), &buf, W2, H2, BG_DARK);
+    }
 
     println!("gallery written to {dir}");
     println!("convert with: for f in {dir}/*.ppm; do magick \"$f\" \"${{f%.ppm}}.png\"; done");

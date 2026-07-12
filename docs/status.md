@@ -1,6 +1,59 @@
 # Fono — Project Status
 Last updated: 2026-07-10
 
+## 2026-07-10 — Brain visualisation: fixed the real-data regressions (black Thinking panel, "ruled paper" Speaking)
+
+The 2026-07-07 thinking/speaking redesign looked right in the synthetic
+gallery but broke on its first live run: Thinking rendered as a black
+panel with one lone column, Speaking as flat "ruled notebook paper"
+lines (user screenshots `a/b/c.png`). Root-cause class: the renderer
+degenerated on *real-shaped* capture data — hundreds of
+near-constant-norm keyframes — which the gallery never fed it. Fixes in
+`crates/fono-overlay/src/cortex.rs`; full analysis and task list in
+`plans/2026-07-10-brain-real-data-visual-fix-v1.md` (all reproduced
+offline first, then fixed against the same scenes).
+
+- **RC1 — robust normalisation.** Replaced the running per-layer max
+  scale with an outlier-trimmed band (`mean ± max(2σ, 2 % of mean)`,
+  two-pass trim, recomputed per ingest): real ±1 % norm variation now
+  spans the display ramp (textured cells instead of a flat slab), and a
+  20× BOS attention-sink first frame clamps to 1 instead of crushing
+  every later frame to black. Unit tests cover both data shapes.
+- **RC2 — integer column binning.** Decode-trace columns are now a
+  whole-pixel stride with a ≥ 1 px gap (28–96 columns); long replays
+  bin multiple keyframes per column (max/mean aggregate, per-bin
+  entropy skyline). No more sub-pixel columns merging into a slab with
+  moiré seam lines; live decode keeps a fixed narrow stride so a young
+  trace is a few crisp columns, never one giant slab.
+- **RC3 — never-black Thinking.** While the live trace covers only part
+  of the strip, the uncovered columns keep showing a dim prefill
+  resting field (floored so it exists even without prefill events) —
+  decode visibly "eats" the prompt instead of latching into a dead
+  panel. A pixel-level unit test asserts the panel can never read as
+  dead at decode latch.
+- **RC4 — background-robust stage.** A near-opaque dark backing under
+  the whole cortex area: lit cells read as light-emitting over any
+  desktop, and bright-background renders keep the same hierarchy as
+  dark ones (previously the translucent panel inverted polarity into
+  the ruled-lines look over light content).
+- **Gallery is now honest.** `cortex_gallery.rs` gained permanent
+  real-shaped regression scenes (7a–7f: 200-frame reply early/late,
+  first-token latch, live mid-decode, BOS outlier, 1.25× fractional
+  scale), each composited over BOTH a dark and a bright desktop. The
+  throwaway repro harness was folded in and deleted.
+- **RC5 (open).** The ~76 % width hard-stop in `b/c.png` is
+  mathematically impossible in the current code (all offline renders
+  span the full strip); prime suspect is a stale running binary. The
+  workspace is rebuilt — needs a live-desktop retest with a real
+  local-LLM reply to close (plan Task 6).
+
+Gate: `cargo fmt --check`, `cargo clippy --workspace --all-targets --
+-D warnings`, `cargo test --workspace --tests --lib` all green (52
+fono-overlay tests incl. 4 new). Committed; not pushed.
+
+**Next:** live retest of the overlay (Thinking + Speaking on a real
+reply) to close RC5 / plan Task 6; then continue the Windows port.
+
 ## 2026-07-10 — Windows port: IPC unification (Task 4.1) + MSVC C++-runtime link fix (Task 3.3); `fono` now compiles on Windows
 
 Drove the real Windows build over SSH (`scripts/win-remote.sh`, box now
