@@ -39,6 +39,7 @@ real-window = [
     "backend-x11",
     "backend-wlr",
     "backend-macos",
+    "backend-windows",
 ]
 
 # X11 + winit + softbuffer backend (the original carryover path).
@@ -76,6 +77,16 @@ backend-macos = [
     "dep:objc2-app-kit",
     "dep:objc2-foundation",
 ]
+
+# Native Windows overlay backend (Windows port plan Phase 10): a
+# borderless, non-activating, click-through, always-on-top layered
+# tool-window fed by `UpdateLayeredWindow` from the shared renderer's
+# premultiplied ARGB framebuffer (softbuffer's GDI blit can't carry
+# per-pixel alpha, so the plan's softbuffer sketch is superseded — see
+# `backends/windows.rs`). `windows-sys` is declared in a Windows-only
+# target table below; the `dep:` entry is a no-op off-target, so
+# enabling `real-window` on Linux / macOS still compiles without it.
+backend-windows = ["dep:ab_glyph", "dep:windows-sys"]
 
 [dependencies]
 fono-core = { path = "../fono-core" }
@@ -147,4 +158,17 @@ objc2-foundation = { version = "0.3", default-features = false, optional = true,
     "NSObjCRuntime",
     "NSString",
     "NSThread",
+] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Layered tool-window overlay backend (Windows port plan Phase 10).
+# Already in Cargo.lock at this exact version via fono-tray's tray
+# icon, fono-inject's focus prober, and cpal — no new-to-project
+# crate, zero Linux cost (target tables do not unify off-target).
+windows-sys = { version = "0.59", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
 ] }

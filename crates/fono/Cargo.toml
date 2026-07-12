@@ -98,6 +98,19 @@ tts-local = ["fono-tts/tts-local", "fono-mcp-server/tts-local"]
 #      Apache `hey_fono.ort` next) to the fono-voice mirror and pin it in
 #      `fono-audio::wake_registry`.
 wakeword-onnx = ["fono-audio/wakeword-onnx"]
+# Windows v1 default feature set. Cargo's `default` list cannot be
+# target-scoped, so Windows builds pass `--no-default-features --features
+# windows-defaults` (see docs/build-windows.md and the CI `windows` job).
+# This set deliberately OMITS the only two features that pull the ONNX
+# Runtime (`ort`) static library — `tts-local` and `wakeword-onnx`.
+# Reason: the hosted Windows `onnxruntime.lib` is not yet a
+# self-contained merged archive (its protobuf/abseil/onnx/cpuinfo deps
+# are unresolved at link time — `LNK1120`), so local TTS and wake-word
+# are deferred to a later Windows release once a merged static lib is
+# provisioned on the fono-voice mirror. Everything else is kept: local
+# whisper STT and local llama polish do NOT use `ort`, so they stay, as
+# do all cloud providers, the streaming overlay, tray, and realtime.
+windows-defaults = ["tray", "local-models", "llama-local", "interactive", "realtime"]
 
 [dependencies]
 fono-core = { path = "../fono-core", features = ["vulkan-probe"] }
@@ -173,4 +186,26 @@ fono-audio = { path = "../fono-audio", features = ["cpal-backend"] }
 # feature stays opt-in on Linux (libxdo dev headers not guaranteed);
 # enigo's darwin deps (core-graphics, icrate, objc2) are already in
 # Cargo.lock, so this adds no new-to-project crates.
+fono-inject = { path = "../fono-inject", features = ["enigo-backend"] }
+
+# WASAPI capture/playback on Windows (plan Task 5.1): cpal is the only
+# audio path there (the Linux default parec/paplay are process-backed
+# PulseAudio tools that do not exist on Windows). Mirrors the macOS
+# block above — it enables fono-audio's cpal backend on this target
+# only, so Linux and macOS builds stay byte-identical. cpal links the
+# system WASAPI stack via the `windows-sys` crates already in
+# Cargo.lock; no new-to-project dependency. `ort` is NOT pulled in here
+# (fono-audio's `ort` edge is gated behind its own `wakeword-onnx`
+# feature, which the Windows build omits — see `windows-defaults`).
+[target.'cfg(target_os = "windows")'.dependencies]
+fono-audio = { path = "../fono-audio", features = ["cpal-backend"] }
+# Win32 `SendInput` text injection on Windows (plan Task 7.1): enigo is
+# the only keystroke path there (wtype/ydotool/xdotool are Linux tools,
+# and there is no X11/Wayland cascade — see `Injector::detect_auto`,
+# which short-circuits to `Enigo` on non-Linux). Mirrors the macOS
+# block above. enigo needs no libxdo on Windows (it calls `SendInput`
+# directly) and its Windows deps (`windows 0.56`) are already in
+# Cargo.lock, so this adds no new-to-project crates. Clipboard fallback
+# stays available via fono-inject's non-optional `arboard` dep, which
+# speaks the Win32 clipboard natively.
 fono-inject = { path = "../fono-inject", features = ["enigo-backend"] }

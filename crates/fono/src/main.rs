@@ -45,7 +45,44 @@ fn main() -> Result<()> {
 
     // Now build the runtime for the real entry point. Mirrors what
     // `#[tokio::main]` would have produced.
+    run_on_worker(args)
+}
+
+/// Build the multi-threaded tokio runtime and drive the CLI/daemon
+/// future to completion.
+fn run_runtime(args: cli::Cli) -> Result<()> {
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(cli::run(args))
+}
+
+/// Run the entry point, choosing a stack large enough for daemon init.
+///
+/// On Windows the default **main-thread** stack is 1 MiB (Linux and
+/// macOS give 8 MiB). The synchronous parts of daemon startup plus the
+/// top-level future driven by `block_on` all run on this thread, which
+/// overflows the 1 MiB budget (observed as `thread 'main' has
+/// overflowed its stack` during daemon boot). So on Windows we run the
+/// whole entry point on a dedicated thread with a generous stack —
+/// mirroring the macOS daemon-thread pattern in [`macos_daemon_main`].
+/// This applies to every invocation (subcommands are short-lived, so
+/// the extra thread is harmless). Linux/macOS keep the plain path, so
+/// their behaviour is byte-identical.
+#[cfg(target_os = "windows")]
+fn run_on_worker(args: cli::Cli) -> Result<()> {
+    let worker = std::thread::Builder::new()
+        .name("fono-main".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || run_runtime(args))?;
+    match worker.join() {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!("fono main worker thread panicked"),
+    }
+}
+
+/// Non-Windows entry point: the main thread already has an 8 MiB stack,
+/// so drive the runtime directly with no extra thread.
+#[cfg(not(target_os = "windows"))]
+fn run_on_worker(args: cli::Cli) -> Result<()> {
+    run_runtime(args)
 }
 
 /// Daemon entry point for macOS graphical sessions: install the tray's

@@ -29,10 +29,16 @@ pub struct FocusInfo {
 /// populated there (reading other apps' titles needs the Screen
 /// Recording permission); class-based rules still classify.
 ///
-/// Other OSes (Windows until its port lands): degrades to an empty
-/// `FocusInfo`. The Win32 foreground-window probe
-/// (`GetForegroundWindow` + `QueryFullProcessImageNameW`) lands with
-/// Windows port plan Phase 9.
+/// Windows: the Win32 foreground-window probe — `GetForegroundWindow`
+/// for the active window, `GetWindowTextW` for its title, and
+/// `GetWindowThreadProcessId` + `QueryFullProcessImageNameW` for the
+/// owning process, whose bare executable name (e.g. `chrome.exe`,
+/// `Code.exe`, `WindowsTerminal.exe`) is returned as `window_class` so
+/// the classifier's Windows rules match (Windows port plan Phase 9).
+/// Over a non-interactive session (e.g. headless SSH) there is no
+/// foreground window and the probe degrades to an empty `FocusInfo`.
+///
+/// Other OSes: degrades to an empty `FocusInfo`.
 pub fn detect_focus() -> Result<FocusInfo> {
     #[cfg(target_os = "macos")]
     {
@@ -42,10 +48,114 @@ pub fn detect_focus() -> Result<FocusInfo> {
     {
         Ok(detect_focus_linux_desktop())
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        Ok(windows_focus())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         Ok(FocusInfo::default())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Windows — Win32 foreground window (GetForegroundWindow +
+// QueryFullProcessImageNameW)
+// ---------------------------------------------------------------------------
+
+/// Foreground-window probe via the Win32 API. Populates `window_class`
+/// with the owning process's bare executable name (e.g. `"chrome.exe"`,
+/// `"Code.exe"`, `"WindowsTerminal.exe"`) so the case-insensitive
+/// classifier rules match, `window_title` with the window caption, and
+/// `window_pid` with the owning process id. Requires no elevated
+/// privilege. Returns an empty `FocusInfo` (never an error) when there
+/// is no foreground window — e.g. over a non-interactive window station.
+#[cfg(target_os = "windows")]
+fn windows_focus() -> FocusInfo {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+    };
+
+    // SAFETY: `GetForegroundWindow` takes no arguments and has no
+    // preconditions. It returns a null handle when there is no
+    // foreground window, which we check before any further use.
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_null() {
+        tracing::debug!(
+            target: "fono::context",
+            "windows_focus: no foreground window (non-interactive session?)"
+        );
+        return FocusInfo::default();
+    }
+
+    // Window caption via GetWindowTextW.
+    let window_title = unsafe {
+        // SAFETY: `hwnd` is a valid foreground-window handle.
+        let len = GetWindowTextLengthW(hwnd);
+        if len > 0 {
+            let mut buf = vec![0u16; len as usize + 1];
+            // SAFETY: `buf` is a valid writable buffer of `buf.len()`
+            // u16s; the call writes at most that many code units.
+            let copied = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+            (copied > 0).then(|| String::from_utf16_lossy(&buf[..copied as usize]))
+        } else {
+            None
+        }
+    };
+
+    // Owning process id.
+    let mut pid: u32 = 0;
+    // SAFETY: `hwnd` is valid; `&mut pid` is a valid out-pointer.
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    let window_pid = (pid != 0).then_some(pid);
+
+    let window_class = window_pid.and_then(windows_process_exe_name);
+    tracing::debug!(
+        target: "fono::context",
+        class = ?window_class,
+        title = ?window_title,
+        pid = ?window_pid,
+        "detect_focus: Win32 foreground window"
+    );
+    FocusInfo { window_class, window_title, window_pid }
+}
+
+/// Resolve a process id to its bare executable file name (e.g.
+/// `"chrome.exe"`) via `QueryFullProcessImageNameW`. Returns `None` when
+/// the process cannot be opened (e.g. a higher-integrity process) or the
+/// query fails — the classifier then simply finds no per-app rule.
+#[cfg(target_os = "windows")]
+fn windows_process_exe_name(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: `OpenProcess` returns a null handle on failure (e.g. access
+    // denied), which we check before use.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+
+    let mut buf = vec![0u16; 1024];
+    let mut size = buf.len() as u32;
+    // SAFETY: `handle` is a valid process handle; `buf`/`size` describe a
+    // valid writable buffer. On success `size` is updated to the number
+    // of code units written (excluding the NUL terminator).
+    let ok = unsafe {
+        QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut size)
+    };
+    // SAFETY: `handle` came from `OpenProcess` and is not used afterwards.
+    unsafe { CloseHandle(handle) };
+
+    if ok == 0 || size == 0 {
+        return None;
+    }
+    let full = String::from_utf16_lossy(&buf[..size as usize]);
+    // Return only the file name so the classifier's Windows rules match.
+    full.rsplit(['\\', '/']).next().filter(|s| !s.is_empty()).map(ToOwned::to_owned)
 }
 
 // ---------------------------------------------------------------------------

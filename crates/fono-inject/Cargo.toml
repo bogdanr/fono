@@ -59,3 +59,16 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSString",
 ] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Win32 foreground-window focus probe (Windows port plan Phase 9):
+# GetForegroundWindow / GetWindowTextW / GetWindowThreadProcessId +
+# QueryFullProcessImageNameW. `windows-sys` is already in Cargo.lock at
+# 0.59 via cpal / fono-tray, so this direct edge adds no new-to-project
+# crate and is zero cost to the shipped Linux/macOS binaries (target
+# tables do not unify off-target).
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+] }

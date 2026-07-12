@@ -52,7 +52,17 @@ pub fn is_graphical_session() -> bool {
     {
         macos_has_window_server_session()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        // Windows desktop apps always run inside the user's interactive
+        // window station / desktop when launched normally; there is no
+        // X11-style `DISPLAY` concept to gate on. Fono ships as a user
+        // desktop app (not a session-0 service), so a graphical session
+        // is always present. Returning `true` lets the daemon start the
+        // global-hotkey listener (Windows port plan Task 8.1).
+        true
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         is_graphical_session_in(|k| std::env::var_os(k))
     }
@@ -89,7 +99,7 @@ fn macos_has_window_server_session() -> bool {
 /// Testable variant: takes a closure that resolves env-var lookups so
 /// unit tests can drive both branches without mutating the real
 /// process environment (which is racy with parallel test runners).
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", target_os = "windows"), allow(dead_code))]
 fn is_graphical_session_in<F>(lookup: F) -> bool
 where
     F: Fn(&str) -> Option<std::ffi::OsString>,

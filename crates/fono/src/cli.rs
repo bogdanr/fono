@@ -2502,7 +2502,7 @@ async fn update_cmd(
         // Wave 2 Thread B: --bin-dir <path> overrides the autodetected
         // current_exe(). The is_package_managed refusal in apply_update
         // still fires for system paths regardless of the override.
-        target_override: bin_dir.map(|d| d.join("fono")),
+        target_override: bin_dir.map(|d| d.join(if cfg!(windows) { "fono.exe" } else { "fono" })),
     };
     let outcome = apply_update(info, opts).await?;
     println!(

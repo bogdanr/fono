@@ -65,11 +65,12 @@ pub enum BackendId {
     /// always succeeds so the daemon never aborts on a missing
     /// graphics environment.
     Noop,
-    // TODO(windows-port Phase 10): add `Win32LayeredToolWindow` here —
-    // a winit window with the WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
-    // WS_EX_TRANSPARENT | WS_EX_TOPMOST extended styles, blitted from
-    // the same software renderer (plan 2026-05-26-windows-port-v1.md,
-    // Tasks 10.1–10.5).
+    /// `win32-layered-toolwindow` — native Windows backend: a
+    /// borderless, non-activating, click-through, always-on-top
+    /// layered tool-window fed by `UpdateLayeredWindow` from the
+    /// shared software renderer's premultiplied ARGB framebuffer.
+    /// Excluded from the taskbar and Alt+Tab via `WS_EX_TOOLWINDOW`.
+    Win32LayeredToolWindow,
 }
 
 impl BackendId {
@@ -79,16 +80,20 @@ impl BackendId {
             Self::X11OverrideRedirect => "x11-override-redirect",
             Self::MacPanel => "mac-panel",
             Self::Noop => "noop",
+            Self::Win32LayeredToolWindow => "win32-layered-toolwindow",
         }
     }
 
     /// Parse the value of `FONO_OVERLAY_BACKEND` into a forced
     /// backend selection.
     pub fn parse(s: &str) -> Option<Self> {
-        match s.to_ascii_lowercase().as_str() {
+        match s.trim().to_ascii_lowercase().as_str() {
             "wlr" | "wlr-layer-shell" | "layer-shell" => Some(Self::WlrLayerShell),
             "x11" | "x11-override-redirect" => Some(Self::X11OverrideRedirect),
             "mac" | "macos" | "mac-panel" | "nspanel" => Some(Self::MacPanel),
+            "win32" | "windows" | "win" | "layered" | "win32-layered-toolwindow" => {
+                Some(Self::Win32LayeredToolWindow)
+            }
             "noop" | "none" | "off" => Some(Self::Noop),
             _ => None,
         }
@@ -312,8 +317,9 @@ impl OverlayHandle {
 pub enum HostOs {
     Linux,
     MacOs,
-    /// Anything else (Windows until its port lands, BSDs, …): only
-    /// the noop terminal sink is offered.
+    Windows,
+    /// Anything else (BSDs, …): only the noop terminal sink is
+    /// offered.
     Other,
 }
 
@@ -327,7 +333,11 @@ impl HostOs {
         {
             Self::MacOs
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(target_os = "windows")]
+        {
+            Self::Windows
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
             Self::Other
         }
@@ -351,9 +361,9 @@ fn candidate_list_with(os: HostOs, env_present: impl Fn(&str) -> bool) -> Vec<Ba
     if os == HostOs::MacOs {
         return vec![BackendId::MacPanel, BackendId::Noop];
     }
-    // TODO(windows-port Phase 10): when the Win32 backend lands, split
-    // `HostOs::Other` into a `Windows` arm returning
-    // `vec![Win32LayeredToolWindow, Noop]`.
+    if os == HostOs::Windows {
+        return vec![BackendId::Win32LayeredToolWindow, BackendId::Noop];
+    }
     if os == HostOs::Other {
         return vec![BackendId::Noop];
     }
@@ -483,6 +493,19 @@ fn try_spawn(id: BackendId, style: WaveformStyle) -> Result<SpawnedBackend, Back
             }
         }
         BackendId::Noop => Ok(crate::backends::noop::spawn(style)),
+        BackendId::Win32LayeredToolWindow => {
+            #[cfg(all(feature = "backend-windows", target_os = "windows"))]
+            {
+                crate::backends::windows::try_spawn(style)
+            }
+            #[cfg(not(all(feature = "backend-windows", target_os = "windows")))]
+            {
+                let _ = style;
+                Err(BackendError::NotAvailable(
+                    "backend-windows not compiled for this target".into(),
+                ))
+            }
+        }
     }
 }
 
@@ -506,6 +529,7 @@ pub fn probe_selection() -> (BackendId, &'static str) {
         }
         BackendId::X11OverrideRedirect => "X11 (or Xwayland on Wayland sessions)",
         BackendId::MacPanel => "macOS (NSPanel; needs the AppKit main-thread pump)",
+        BackendId::Win32LayeredToolWindow => "Windows (Win32 layered tool-window)",
         BackendId::Noop => "no graphics session detected",
     };
     (first, reason)

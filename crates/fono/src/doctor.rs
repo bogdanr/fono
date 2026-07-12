@@ -463,6 +463,25 @@ pub async fn report(paths: &Paths) -> Result<String> {
             )?;
         }
     }
+    // Focused-window probe — powers the per-app context rules (terminal
+    // shell vocabulary, code-editor hints, private-window history
+    // suppression). Shown on every platform. Over a non-interactive
+    // session (e.g. headless SSH, or a locked screen) there is no
+    // foreground window and this reads "none detected".
+    let focus = fono_inject::detect_focus().unwrap_or_default();
+    if let Some(class) = focus.window_class.as_deref() {
+        let profile = fono_inject::ContextClassifier::classify(
+            focus.window_class.as_deref(),
+            focus.window_title.as_deref(),
+        );
+        let label = profile.as_ref().map_or_else(
+            || dim("no per-app rule — base prompt"),
+            |p| ok(&format!("{} profile", p.name)),
+        );
+        writeln!(out, "{} {} ({})", head("Focus       :"), class, label)?;
+    } else {
+        writeln!(out, "{} {}", head("Focus       :"), dim("none detected — no foreground window"))?;
+    }
     // Clipboard fallback — fono copies the cleaned text here when no
     // key-injection backend works, so the dictation is never lost.
     let mut clip_tools = Vec::new();
@@ -488,7 +507,11 @@ pub async fn report(paths: &Paths) -> Result<String> {
     // greenclip, diodon, clipmenud, cliphist) because not every
     // manager implements the ICCCM handoff — clipit, for example, is
     // a polling manager that watches the CLIPBOARD selection on a
-    // timer.
+    // timer. This is an X11/Wayland concept only: `detect_clipboard_manager`
+    // returns `None` on macOS and Windows (their OS clipboards have no
+    // such handoff/manager ecosystem), so the whole probe — and its
+    // X11-specific "typed via XTEST" guidance — is compiled on Linux only.
+    #[cfg(target_os = "linux")]
     {
         use fono_inject::ClipboardManager;
         match fono_inject::detect_clipboard_manager() {
@@ -534,14 +557,15 @@ pub async fn report(paths: &Paths) -> Result<String> {
         use fono_overlay::{BackendCapabilities, BackendId};
         let (id, reason) = fono_overlay::backend::probe_selection();
         let caps = match id {
-            BackendId::WlrLayerShell | BackendId::X11OverrideRedirect | BackendId::MacPanel => {
-                BackendCapabilities {
-                    transparency: true,
-                    client_positioning: true,
-                    focus_passthrough: true,
-                    click_passthrough: true,
-                }
-            }
+            BackendId::WlrLayerShell
+            | BackendId::X11OverrideRedirect
+            | BackendId::MacPanel
+            | BackendId::Win32LayeredToolWindow => BackendCapabilities {
+                transparency: true,
+                client_positioning: true,
+                focus_passthrough: true,
+                click_passthrough: true,
+            },
             BackendId::Noop => BackendCapabilities {
                 transparency: false,
                 client_positioning: false,

@@ -22,6 +22,9 @@ workspace = true
 #   - macOS: the objc2 NSStatusItem renderer (zero new crates — the
 #     objc2 stack is already a darwin edge of the graph via
 #     fono-inject / arboard).
+#   - Windows: the `tray-icon` Shell_NotifyIcon renderer + a small
+#     `windows-sys` Win32 message pump (windows-sys is already in the
+#     graph via cpal, so it is net-zero on binary size).
 # The `dep:` entries for target-scoped optional dependencies are
 # no-ops off-target, so one feature serves every platform.
 default = []
@@ -30,6 +33,8 @@ tray-backend = [
     "dep:objc2",
     "dep:objc2-app-kit",
     "dep:objc2-foundation",
+    "dep:tray-icon",
+    "dep:windows-sys",
 ]
 
 [dependencies]
@@ -77,4 +82,19 @@ objc2-foundation = { version = "0.3", default-features = false, optional = true,
     "NSString",
     "NSThread",
     "NSTimer",
+] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows notification-area renderer (plan Task 6.2). `tray-icon` is
+# the only new-to-project crate (MIT/Apache-2.0, already allowlisted in
+# deny.toml); it pulls `muda` transitively, which we reach via
+# `tray_icon::menu`. Windows-only, so it is zero cost to the shipped
+# Linux/macOS binaries (target tables do not unify off-target).
+tray-icon = { version = "0.20", optional = true }
+# Minimal Win32 message pump for the dedicated tray thread. Already in
+# Cargo.lock at 0.59 via cpal / tray-icon, so this direct edge adds no
+# new crate and no binary size.
+windows-sys = { version = "0.59", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
 ] }

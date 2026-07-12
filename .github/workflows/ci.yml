@@ -608,34 +608,23 @@ jobs:
         shell: bash
         run: echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
 
-      - name: Fetch minimal onnxruntime static lib (pin ORT_LIB_LOCATION)
-        # `tts-local` is a default feature; the fetcher has a pinned
-        # `onnxruntime.lib` for x86_64-pc-windows-msvc. Git Bash provides
-        # curl/xz/sha256sum on the hosted image.
-        shell: bash
-        run: |
-          ort_dir="$(sh scripts/fetch-onnxruntime.sh)"
-          echo "ORT_LIB_LOCATION=${ort_dir}" >> "$GITHUB_ENV"
-          echo "pinned ORT_LIB_LOCATION=${ort_dir}"
+      # Windows v1 ships the `windows-defaults` feature set, which omits
+      # `tts-local` and `wakeword-onnx` — the only two features that pull
+      # the ONNX Runtime (`ort`) static library. The hosted Windows
+      # `onnxruntime.lib` is not yet a self-contained merged archive (its
+      # protobuf/abseil/onnx/cpuinfo deps are unresolved at link time —
+      # LNK1120), so local TTS and wake-word are deferred to a later
+      # Windows release. Because this graph contains no `ort`, the
+      # onnxruntime fetch and the `ORT_CXX_STDLIB` neutralise step (both
+      # required on the ort-linking Linux/macOS rows) are intentionally
+      # absent here; they return when the merged static lib lands and
+      # local TTS is re-enabled on Windows. Windows port Task 5.1 /
+      # docs/build-windows.md.
+      - name: cargo build (Windows v1 feature set)
+        run: cargo build -p fono --no-default-features --features windows-defaults
 
-      - name: Neutralise ORT_CXX_STDLIB on MSVC
-        # `.cargo/config.toml` sets ORT_CXX_STDLIB=static:-bundle=stdc++
-        # for the Linux-gnu NEEDED allowlist, but cargo's [env] table is
-        # not target-scoped, so it leaks to MSVC where ort-sys would emit
-        # a bogus `stdc++.lib` link (LNK1181). An *empty* value makes
-        # ort-sys fall back to its correct MSVC default: no explicit C++
-        # stdlib link (the MSVC CRT is pulled in automatically). Setting
-        # it empty in the environment also stops the non-forced [env]
-        # entry from overriding it. Windows port Task 3.3 /
-        # docs/build-windows.md.
-        shell: bash
-        run: echo "ORT_CXX_STDLIB=" >> "$GITHUB_ENV"
-
-      - name: cargo build
-        run: cargo build -p fono
-
-      - name: cargo test
-        run: cargo test --workspace --tests --lib
+      - name: cargo test (Windows v1 feature set)
+        run: cargo test -p fono --no-default-features --features windows-defaults --tests --lib
 
   deny:
     name: License & advisory audit

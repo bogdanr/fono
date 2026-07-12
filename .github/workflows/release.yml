@@ -225,7 +225,33 @@ jobs:
             variant: metal
             asset_prefix: fono
             features: accel-metal
+          # Windows (plans/2026-05-26-windows-port-v1.md, Phase 13): a
+          # single CPU-only x86_64 build shipped as a bare `.exe` plus a
+          # `.sha256` sidecar — no MSI, no code signing (explicit v1
+          # non-goals, Task 13.4). The asset name is `fono-vX.Y.Z-x86_64.exe`
+          # (`fono-update::asset_name_for` agrees). v1 uses the
+          # `windows-defaults` feature set (default minus `tts-local` and
+          # `wakeword-onnx`, the only two `ort` pullers) because the hosted
+          # Windows `onnxruntime.lib` isn't a self-contained merged archive
+          # yet — so `no_default_features: true` and no onnxruntime fetch on
+          # this row. The `/FORCE:MULTIPLE` ggml-dedup link flag comes from
+          # `.cargo/config.toml`'s MSVC target block automatically.
+          - target: x86_64-pc-windows-msvc
+            os: windows-2022
+            cross: false
+            archive: none
+            variant: cpu
+            asset_prefix: fono
+            features: windows-defaults
+            no_default_features: true
     steps:
+      # The vendored llama.cpp checkout (a cargo git dependency) exceeds
+      # the legacy 260-char MAX_PATH; git-side long paths must be on
+      # before any fetch (Phase 0 finding, docs/build-windows.md).
+      - name: Enable git long paths
+        if: runner.os == 'Windows'
+        run: git config --system core.longpaths true
+
       - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
@@ -251,6 +277,15 @@ jobs:
           # gpu binary did not shrink; `-shaderstrip1` forces the one cold
           # rebuild that regenerates the blobs through the shim).
           key: ${{ matrix.target }}-${{ matrix.os }}-${{ matrix.variant }}-portable-shaderstrip1
+
+      - name: Point bindgen at the runner's LLVM (LIBCLANG_PATH)
+        # VS Build Tools ships no libclang.dll, but bindgen
+        # (whisper-rs-sys / llama-cpp-sys-2) needs one. The hosted
+        # windows-2022 image preinstalls standalone LLVM. Mirrors the
+        # ci.yml windows job (Phase 0 finding, docs/build-windows.md).
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
 
       - name: Install Linux build deps
         # GPU variant adds Vulkan headers + the `shaderc` SPIR-V
@@ -329,6 +364,10 @@ jobs:
         # archive from the fono-voice release mirror, SHA-256 verified, and
         # pin ORT_LIB_LOCATION — the `ort` build never touches the CDN.
         # (macOS runners ship `xz` + `shasum`; the script handles both.)
+        # Skipped on Windows: the v1 `windows-defaults` set omits
+        # `tts-local`/`wakeword-onnx`, so the graph has no `ort` to link
+        # (Windows port plan Phase 13; see the matrix row comment).
+        if: runner.os != 'Windows'
         run: |
           ort_dir="$(TARGET=${{ matrix.target }} sh scripts/fetch-onnxruntime.sh)"
           echo "ORT_LIB_LOCATION=${ort_dir}" >> "$GITHUB_ENV"
@@ -352,10 +391,16 @@ jobs:
         # Zen 3 / EPYC 7763, but the pool migrates to newer Intel Xeons
         # periodically) and SIGILLs on users' pre-VNNI / pre-AVX2 CPUs.
         # See `.cargo/config.toml` for the full rationale.
+        # `shell: bash` so the arg-assembly runs under Git Bash on the
+        # Windows runner too (the default there is pwsh).
+        shell: bash
         run: |
           extra=""
+          if [ -n "${{ matrix.no_default_features }}" ]; then
+            extra="--no-default-features"
+          fi
           if [ -n "${{ matrix.features }}" ]; then
-            extra="--features ${{ matrix.features }}"
+            extra="${extra} --features ${{ matrix.features }}"
           fi
           cargo build --profile release-slim --target ${{ matrix.target }} -p fono $extra
 
@@ -444,8 +489,12 @@ jobs:
           # 2) Internal staging tarball consumed by the .deb/.arch/.txz/.lzm
           #    package jobs below. Only the CPU variant gets full distro
           #    packaging in v0.5.0 launch; GPU variant ships raw binary
-          #    + .sha256 only (per the variants plan, slice 1).
-          if [ "${variant}" = "cpu" ]; then
+          #    + .sha256 only (per the variants plan, slice 1). Windows is
+          #    excluded too: it ships the bare `.exe` + `.sha256` only (no
+          #    distro packages — Windows port plan Task 13.4), and its
+          #    `x86_64` arch label would otherwise clash with the Linux
+          #    staging stem.
+          if [ "${variant}" = "cpu" ] && [[ "${target}" != *windows* ]]; then
             stem="${BIN_NAME}-${version}-${arch}"
             stage="out-stage/${stem}"
             mkdir -p "${stage}"
@@ -466,7 +515,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload internal staging tarball (package-job input)
-        if: matrix.variant == 'cpu'
+        if: matrix.variant == 'cpu' && !contains(matrix.target, 'windows')
         uses: actions/upload-artifact@v7
         with:
           name: fono-stage-${{ matrix.target }}

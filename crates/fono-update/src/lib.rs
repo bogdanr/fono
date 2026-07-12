@@ -457,21 +457,47 @@ pub fn save_cache(path: &Path, status: &UpdateStatus) {
 /// file and a self-replace would fight them.
 pub fn is_package_managed(exe: &Path) -> bool {
     let s = exe.to_string_lossy();
-    // Distro-owned bin dirs. `/usr/local/bin` is left writable for
-    // self-update because the install script defaults to it, mirroring
-    // `install:13` semantics.
-    if s.starts_with("/usr/bin/") || s.starts_with("/bin/") || s.starts_with("/usr/sbin/") {
-        return true;
+    #[cfg(windows)]
+    {
+        // There is no system package manager tracking the binary on
+        // Windows. The per-user installer puts fono under
+        // `%LOCALAPPDATA%\fono\`, which stays self-updatable. Treat an
+        // install under `Program Files` (or `Program Files (x86)`) as
+        // "managed": overwriting it needs elevation, so refusing up
+        // front with a clear message beats failing mid-swap on an
+        // access-denied error. Match is case-insensitive because
+        // Windows paths are.
+        return s.to_ascii_lowercase().contains(r"\program files");
     }
-    // Homebrew (macOS): the `fono` on PATH is a symlink into the
-    // Cellar; a canonicalised current_exe therefore contains
-    // "/Cellar/". `brew upgrade` owns those files.
-    s.contains("/Cellar/") || s.starts_with("/opt/homebrew/")
+    #[cfg(not(windows))]
+    {
+        // Distro-owned bin dirs. `/usr/local/bin` is left writable for
+        // self-update because the install script defaults to it,
+        // mirroring `install:13` semantics.
+        if s.starts_with("/usr/bin/") || s.starts_with("/bin/") || s.starts_with("/usr/sbin/") {
+            return true;
+        }
+        // Homebrew (macOS): the `fono` on PATH is a symlink into the
+        // Cellar; a canonicalised current_exe therefore contains
+        // "/Cellar/". `brew upgrade` owns those files.
+        s.contains("/Cellar/") || s.starts_with("/opt/homebrew/")
+    }
 }
 
 // ---------------------------------------------------------------------
 // Apply (download + verify + atomic swap)
 // ---------------------------------------------------------------------
+
+/// Platform-appropriate hint appended to "cannot write / rename" errors
+/// in the swap path. Unix suggests `sudo`; Windows has no `sudo`, so it
+/// points at the per-user install location instead.
+fn elevation_hint() -> &'static str {
+    if cfg!(windows) {
+        "reinstall under your user profile with `fono install` so it is writable"
+    } else {
+        "try `sudo fono update`"
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ApplyOpts {
@@ -506,6 +532,14 @@ pub async fn apply_update(info: &UpdateInfo, opts: ApplyOpts) -> Result<ApplyOut
     let target = std::fs::canonicalize(&target).unwrap_or(target);
 
     if is_package_managed(&target) {
+        #[cfg(windows)]
+        anyhow::bail!(
+            "{} lives under Program Files, which needs administrator rights to \
+             replace; reinstall fono under your user profile with `fono install` \
+             (no elevation needed) so it can update itself",
+            target.display()
+        );
+        #[cfg(not(windows))]
         anyhow::bail!(
             "{} is owned by the system package manager; \
              update via your distro's package manager instead of `fono update`",
@@ -519,7 +553,7 @@ pub async fn apply_update(info: &UpdateInfo, opts: ApplyOpts) -> Result<ApplyOut
     // Writability check up-front so we fail before downloading.
     let probe = tempfile::Builder::new().prefix(".fono-update-probe-").tempfile_in(dir);
     if let Err(e) = probe {
-        anyhow::bail!("cannot write to {} ({e}); try `sudo fono update`", dir.display());
+        anyhow::bail!("cannot write to {} ({e}); {}", dir.display(), elevation_hint());
     }
     drop(probe);
 
@@ -599,9 +633,10 @@ pub async fn apply_update(info: &UpdateInfo, opts: ApplyOpts) -> Result<ApplyOut
     let _ = std::fs::remove_file(&backup);
     if let Err(e) = std::fs::rename(&target, &backup) {
         anyhow::bail!(
-            "cannot rename {} -> {} ({e}); try `sudo fono update`",
+            "cannot rename {} -> {} ({e}); {}",
             target.display(),
-            backup.display()
+            backup.display(),
+            elevation_hint()
         );
     }
 
@@ -730,7 +765,34 @@ pub fn restart_in_place(target: &Path) -> Result<std::convert::Infallible> {
     Err(anyhow!("execv {} returned: {}", target.display(), std::io::Error::last_os_error()))
 }
 
-#[cfg(not(unix))]
+/// Windows has no `execv`: a process image can't be replaced in place,
+/// and a running `.exe` can't be deleted or overwritten (it *can* be
+/// renamed, which is how [`apply_update`]'s swap works — the running
+/// image ends up at a sibling `.bak` file). So "restart in place" here
+/// means: launch the freshly-installed binary as an independent child
+/// that inherits this process's console and argv, then exit so the old
+/// image file is released. The PID changes (unavoidable on Windows),
+/// but from the user's point of view the command continues in the new
+/// binary.
+#[cfg(windows)]
+pub fn restart_in_place(target: &Path) -> Result<std::convert::Infallible> {
+    use std::process::Command;
+
+    // Preserve the original arguments (argv[1..]); `Command` sets
+    // argv[0] itself from the program path.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    Command::new(target)
+        .args(&args)
+        .spawn()
+        .with_context(|| format!("spawn new binary {}", target.display()))?;
+
+    // The child now runs independently (inheriting our stdio). This
+    // process must exit to release the renamed old image (the sibling
+    // `.bak`), which a later `fono update` then cleans up.
+    std::process::exit(0);
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn restart_in_place(_target: &Path) -> Result<std::convert::Infallible> {
     anyhow::bail!("in-place restart not supported on this platform");
 }
@@ -836,6 +898,9 @@ mod tests {
         }
     }
 
+    /// Unix path heuristics; meaningless on Windows (see the
+    /// `pkg_managed_paths_windows` sibling for the Program Files rule).
+    #[cfg(not(windows))]
     #[test]
     fn pkg_managed_paths() {
         assert!(is_package_managed(Path::new("/usr/bin/fono")));
@@ -850,6 +915,20 @@ mod tests {
         assert!(!is_package_managed(Path::new(
             "/Users/u/Applications/Fono.app/Contents/MacOS/fono"
         )));
+    }
+
+    /// On Windows, a Program Files install needs elevation to replace,
+    /// so it is treated as "managed" (refuse rather than fail mid-swap);
+    /// the per-user `%LOCALAPPDATA%` install stays self-updatable.
+    #[cfg(windows)]
+    #[test]
+    fn pkg_managed_paths_windows() {
+        assert!(is_package_managed(Path::new(r"C:\Program Files\fono\fono.exe")));
+        assert!(is_package_managed(Path::new(r"C:\Program Files (x86)\fono\fono.exe")));
+        // Case-insensitive (Windows paths are).
+        assert!(is_package_managed(Path::new(r"c:\program files\fono\fono.exe")));
+        // The per-user install location is writable → self-updatable.
+        assert!(!is_package_managed(Path::new(r"C:\Users\Bogdan\AppData\Local\fono\fono.exe")));
     }
 
     #[test]

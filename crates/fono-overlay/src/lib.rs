@@ -343,7 +343,14 @@ mod tests {
         assert_eq!(BackendId::parse("x11"), Some(BackendId::X11OverrideRedirect));
         assert_eq!(BackendId::parse("mac"), Some(BackendId::MacPanel));
         assert_eq!(BackendId::parse("nspanel"), Some(BackendId::MacPanel));
+        assert_eq!(BackendId::parse("win32"), Some(BackendId::Win32LayeredToolWindow));
+        assert_eq!(BackendId::parse("windows"), Some(BackendId::Win32LayeredToolWindow));
         assert_eq!(BackendId::parse("noop"), Some(BackendId::Noop));
+        // Surrounding whitespace is tolerated (cmd.exe `set VAR=win32 `
+        // easily captures a trailing space) and matching is
+        // case-insensitive.
+        assert_eq!(BackendId::parse("  win32  "), Some(BackendId::Win32LayeredToolWindow));
+        assert_eq!(BackendId::parse("WIN32"), Some(BackendId::Win32LayeredToolWindow));
         assert_eq!(BackendId::parse("not-a-backend"), None);
         // The retired wayland-xdg backend's old aliases now fall
         // through to automatic selection, with a warning logged at
@@ -414,6 +421,19 @@ mod tests {
     fn selection_other_os_is_noop_only() {
         let picks = backend::pick_backend_with(None, backend::HostOs::Other, |_| true);
         assert_eq!(picks, vec![BackendId::Noop]);
+    }
+
+    #[test]
+    fn selection_windows_offers_layered_toolwindow_then_noop() {
+        // Windows, like macOS, has one display server — env vars carry
+        // no signal. The table is fixed; viability is decided by the
+        // backend's own window-creation check at spawn time (a
+        // non-interactive session, e.g. a service, fails cleanly to
+        // noop).
+        let picks = backend::pick_backend_with(None, backend::HostOs::Windows, |_| false);
+        assert_eq!(picks, vec![BackendId::Win32LayeredToolWindow, BackendId::Noop]);
+        let picks = backend::pick_backend_with(None, backend::HostOs::Windows, |k| k == "DISPLAY");
+        assert_eq!(picks, vec![BackendId::Win32LayeredToolWindow, BackendId::Noop]);
     }
 
     #[test]

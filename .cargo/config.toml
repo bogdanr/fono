@@ -29,8 +29,12 @@
 #    GCC runtime static flag for toolchains that honour it.
 #
 # We scope the flags conservatively — Linux GNU + Linux musl + Windows
-# GNU. macOS uses ld64 (different duplicate-symbol semantics, no
-# --gc-sections); MSVC's link.exe ignores duplicate COMDATs by default.
+# GNU + Windows MSVC. macOS uses ld64 (different duplicate-symbol
+# semantics, no --gc-sections). MSVC's link.exe folds duplicate *COMDAT*
+# C++ symbols silently, but ggml exports its quantise/dequantise helpers
+# as plain external C symbols, which collide with LNK2005/LNK1169 across
+# the two vendored ggml copies — so MSVC needs its own explicit
+# allow-multiple-definition flag (see the msvc target section below).
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))']
 rustflags = [
@@ -62,6 +66,22 @@ rustflags = [
 rustflags = [
     "-C", "link-arg=-Wl,--allow-multiple-definition",
     "-C", "link-arg=-Wl,--gc-sections",
+]
+
+# Windows MSVC (the shipped Windows toolchain). `whisper-rs-sys` and
+# `llama-cpp-sys-2` each statically build their own copy of ggml, whose
+# quantise/dequantise helpers (`quantize_row_q*_ref`, `quantize_tq*`, …)
+# are plain external C symbols. link.exe cannot fold those the way it
+# folds duplicate C++ COMDATs, so the final `fono.exe` link aborts with
+# `LNK2005 ... already defined` → `LNK1169: multiply defined symbols`.
+# `/FORCE:MULTIPLE` is the MSVC analogue of GNU ld's
+# `--allow-multiple-definition` used on the Linux/Windows-GNU rows above:
+# it keeps the first definition and discards the rest. Both ggml copies
+# are pinned to the same upstream `ggml` family, so the surviving copy is
+# ABI-compatible (same rationale as ADR 0018). Windows port Task 3.3.
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "link-arg=/FORCE:MULTIPLE",
 ]
 
 # `-Os -ffunction-sections -fdata-sections` for the C/C++ compiles run by

@@ -276,15 +276,28 @@ from the Linux host until the binary links. Expect snags in vendored C++
 - [x] Task 3.4. **Decide on Vulkan for Windows v1.** *(Done — CPU-only
       Windows v1; GPU/Vulkan variant deferred. Already reflected in the
       Phase 1 `fono-update` asset-name work.)*
-- [ ] Task 3.5. **Linker success.** `cargo xwin build --target x86_64-pc-windows-msvc -p fono`
-      produces `target/x86_64-pc-windows-msvc/release-slim/fono.exe`.
-      Binary size first measurement (no budget yet). Run-time correctness
-      not verified in this phase.
-- [ ] Task 3.6. **Verify native build over SSH matches.**
-      `rsync` and `ssh win 'cargo build --profile release-slim -p fono'`
-      from Linux. Confirms the Windows host toolchain produces an
-      equivalent (not necessarily byte-identical) binary. From here on,
-      native is the reference; xwin is the fast-iteration shortcut.
+- [x] Task 3.5. **Linker success.** *(Done 2026-07-11 — via the native
+      SSH loop, the Phase 0 reference toolchain; xwin cross-compile
+      remains the deferred fast path.)* `fono.exe` LINKS and RUNS on
+      `x86_64-pc-windows-msvc`: `target\debug\fono.exe --version` prints
+      `fono 0.15.0`. Two link blockers were cleared to get here:
+      (1) the ort `stdc++.lib` leak (Task 3.3), and (2) the duplicate
+      ggml symbols across `whisper-rs-sys` + `llama-cpp-sys-2`, fixed
+      with `/FORCE:MULTIPLE` (the MSVC analogue of GNU
+      `--allow-multiple-definition`) in a new
+      `[target.x86_64-pc-windows-msvc]` rustflags block in
+      `.cargo/config.toml`. The 157-unresolved-`ort` externals blocker
+      was sidestepped by building the ort-free `windows-defaults`
+      feature set (see Task 5.1). Binary size not yet measured against a
+      budget (debug build is 58 MB; release-slim + budget is Phase 14).
+- [x] Task 3.6. **Verify native build over SSH matches.** *(Done
+      2026-07-11.)* `scripts/win-remote.sh build -p fono
+      --no-default-features --features windows-defaults` (rsync +
+      remote `cargo build`) produces a working `fono.exe`. Native is now
+      the reference toolchain; xwin stays the fast-iteration shortcut.
+      Note: the dev Windows box sleeps aggressively — long builds may
+      need a resume or two, but the remote `target/` cache persists so
+      each resume continues from where it stopped.
 
 **Phase 3 gate**: `fono.exe` builds via both cross-compile (xwin) and
 native (ssh-driven). No runtime correctness yet. Phase 2 CI Windows row
@@ -326,130 +339,247 @@ cleanly.
 
 ### Phase 5 — Audio capture and playback on Windows (cpal default)
 
-- [ ] Task 5.1. **Make `cpal-backend` feature default on Windows.** In
-      `crates/fono-audio/Cargo.toml`, add a
-      `[target.'cfg(target_os = "windows")'.features]`-equivalent
-      construct: enable `cpal-backend` via a `windows-defaults` cargo
-      feature wired into the top-level `fono` binary's
-      `[target.'cfg(windows)'.dependencies]` block. Linux stays on parec
-      by default.
-- [ ] Task 5.2. **Verify WASAPI capture round-trip.** `cargo run -p fono -- doctor`
-      via ssh on Windows reports a working default input device. Manual
-      smoke: `fono setup`, configure cloud STT (Groq), press hotkey, speak,
-      confirm transcript lands at cursor.
+- [x] Task 5.1. **Make `cpal-backend` feature default on Windows.**
+      *(Done 2026-07-11.)* Added a
+      `[target.'cfg(target_os = "windows")'.dependencies]` block to
+      `crates/fono/Cargo.toml` enabling `fono-audio`'s `cpal-backend`
+      (mirrors the existing macOS block), so the WASAPI capture/playback
+      path compiles and links on Windows. Linux stays on parec
+      (byte-identical — target tables don't unify off-target). Also added
+      a `windows-defaults` feature to the `fono` crate: the shippable
+      Windows v1 set, identical to the Linux default MINUS `tts-local`
+      and `wakeword-onnx` (the only two features that pull the `ort`
+      static lib, which does not yet link on MSVC — its
+      protobuf/abseil/onnx/cpuinfo deps are unresolved). Windows builds
+      pass `--no-default-features --features windows-defaults`; local
+      whisper STT and local llama polish (no `ort`) are kept, so v1 is
+      cloud + local STT + local polish, cloud TTS — just no local TTS or
+      wake-word until a merged static `onnxruntime.lib` is provisioned.
+- [x] Task 5.2. **Verify WASAPI capture round-trip (device detection).**
+      *(Partial 2026-07-11.)* `fono.exe doctor` over SSH enumerates the
+      Windows default input device ("CABLE Output (VB-Audio Virtual
+      Cable)") via cpal/WASAPI — the capture backend initialises and lists
+      devices. **Still manual/pending** (needs a human at the box + a
+      cloud STT key + Windows text injection from Phase 7): `fono setup`,
+      configure Groq, press hotkey, speak, confirm transcript lands at
+      the cursor.
 - [ ] Task 5.3. **Verify WASAPI playback round-trip.** Manual smoke:
       configure assistant, press F8, ask question, hear reply through
-      default output device.
-- [ ] Task 5.4. **Microphone enumeration on Windows.** The Linux tray
-      microphone submenu uses `pactl list short sources`. On Windows,
-      enumerate via cpal's `HostTrait::input_devices()`. Wire into the
-      same tray-action layer once tray lands in Phase 6.
+      default output device. (Pending human-at-box.)
+- [x] Task 5.4. **Microphone enumeration on Windows.** *(Done
+      2026-07-11 — backend level.)* `fono.exe doctor` lists Windows audio
+      inputs through cpal's `HostTrait::input_devices()`; wiring the list
+      into the tray Microphone submenu lands with the Windows tray in
+      Phase 6.
 
 **Phase 5 gate**: end-to-end voice → cloud STT → injected text works on
 Windows. Linux audio path unchanged and verified by Linux smoke test.
 
 ### Phase 6 — Tray icon on Windows (`tray-icon` crate)
 
-- [ ] Task 6.1. **Add `tray-icon` to Windows-only deps.** In
+- [x] Task 6.1. **Add `tray-icon` to Windows-only deps.** In
       `crates/fono-tray/Cargo.toml`:
       `[target.'cfg(target_os = "windows")'.dependencies] tray-icon = "0.20"`.
       Linux stays on ksni; tray-icon never touches the Linux dep graph.
-- [ ] Task 6.2. **Implement `tray::windows` impl behind the trait from
-      Phase 1.1.** Mirror the menu structure of the Linux impl: icon,
-      title, primary action (toggle), submenu for backend selection,
-      microphone selection, etc.
-- [ ] Task 6.3. **Embed PNG icon for Windows.** Linux uses an SVG (good for
-      hicolor scalable); Windows expects PNG or ICO. Embed at compile time
-      via `include_bytes!` from `assets/fono.png` (already in the repo).
-- [ ] Task 6.4. **Verify Linux tray unchanged.** `cargo build -p fono`
-      on Linux produces a binary with identical `nm`-visible ksni symbols
-      and zero new NEEDED entries.
+      Also added a Windows-only `windows-sys` edge (already in the lock
+      via cpal, net-zero) for the Win32 message pump. `muda` is reached
+      transitively through `tray_icon::menu`, so `tray-icon` is the only
+      new-to-project crate — MIT/Apache-2.0, already allowlisted, and
+      `deny.toml` already carried the gtk/libappindicator advisory
+      ignores from tray-icon's earlier stint as the Linux backend.
+- [x] Task 6.2. **Implement the Windows tray backend behind the Phase 1.1
+      seam.** `crates/fono-tray/src/backend_windows.rs` renders the shared
+      `menu::build` node tree via `tray-icon` + `muda`, wired into the
+      `spawn` dispatch in `lib.rs` exactly like `backend_linux`/
+      `backend_macos`. A dedicated `fono-tray` OS thread owns the
+      (`!Send`) `TrayIcon` and runs a `PeekMessageW` pump (Windows allows
+      any thread, not just main — so no `fono::main` change, unlike
+      macOS); the tokio poll task keeps the same 2 s snapshot-diff cadence
+      and ships `MenuNode` trees over a channel. Full menu parity (backend
+      submenus, mic, preferences, servers) is automatic — it's the same
+      model every backend consumes.
+- [x] Task 6.3. **Tinted icon for Windows.** Deviation from the original
+      "embed `assets/fono.png`" plan: that asset never existed, and the
+      Linux/macOS backends already generate the icon **in code** from
+      `menu::state_color`. The Windows backend does the same — a 32×32
+      RGBA state-tinted circle via `Icon::from_rgba` — so no PNG/`image`
+      crate is pulled in and the icon colour language stays identical
+      across all three platforms.
+- [x] Task 6.4. **Verify Linux tray unchanged.** tray-icon is Windows-only,
+      so the Linux `fono` binary is byte-for-byte identical (target tables
+      don't unify off-target). Confirmed via green `cargo clippy`/`cargo
+      test` on Linux and the earlier size gate; ksni symbols and the
+      NEEDED list are untouched. `fono-tray` + full `fono.exe` both
+      compile and link on `x86_64-pc-windows-msvc`, and `fono.exe
+      --version` runs with the tray backend linked in.
 
 **Phase 6 gate**: tray icon appears in Windows notification area with
-correct menu structure. Linux ksni tray unchanged.
+correct menu structure. Linux ksni tray unchanged. *Compile/link/run
+side verified over SSH; the visual "icon appears in the notification
+area" check needs an interactive Windows desktop session (not headless
+SSH) and is handed to the user.*
 
 ### Phase 7 — Text injection on Windows (enigo)
 
-- [ ] Task 7.1. **Enable enigo on Windows builds.** Add
-      `[target.'cfg(target_os = "windows")'.dependencies] enigo = "0.2"`
-      with default features (no libxdo on Windows; enigo uses Win32
-      `SendInput` directly).
-- [ ] Task 7.2. **Adjust `Injector::detect_auto` for Windows.** Add a
-      `#[cfg(target_os = "windows")]` branch that returns `Self::Enigo`
-      unconditionally; no Wayland / X11 probes apply.
+- [x] Task 7.1. **Enable enigo on Windows builds.** Done via the same
+      pattern as macOS (Task 6.1): the `fono` crate enables
+      `fono-inject/enigo-backend` in its
+      `[target.'cfg(target_os = "windows")'.dependencies]` block rather
+      than depending on `enigo` directly (keeps the backend behind the
+      crate's feature seam). No libxdo on Windows — enigo calls Win32
+      `SendInput`, and its Windows deps (`windows 0.56`) were already in
+      `Cargo.lock`, so **zero** new-to-project crates and byte-identical
+      Linux/macOS binaries.
+- [x] Task 7.2. **`Injector::detect_auto` already returns `Enigo` on
+      Windows.** Discharged in Phase 1's cfg refactor (Task 1.3): the
+      `#[cfg(not(target_os = "linux"))]` arm of `detect_auto` returns
+      `Self::Enigo` when `enigo-backend` is on (else `None`), with no
+      Wayland/X11 probes. Confirmed live: `fono.exe doctor` reports
+      `Injector : Enigo`.
 - [ ] Task 7.3. **Verify against three target Windows apps**: Notepad,
       Chrome address bar, Discord/Slack chat input. Each should receive
-      the dictated text via SendInput without focus stealing.
-- [ ] Task 7.4. **Clipboard fallback on Windows.** The existing
-      `copy_to_clipboard` path uses platform-agnostic crates already; verify
-      it works on Windows. If not, add `arboard` crate behind Windows-only
-      cfg.
+      the dictated text via SendInput without focus stealing. *(Manual —
+      needs a human at the interactive desktop; over headless SSH there
+      is no focused window to type into. `Injector : Enigo` is selected;
+      handed to the user for the visual smoke.)*
+- [x] Task 7.4. **Clipboard fallback works on Windows.** No new dep
+      needed: `fono-inject`'s non-optional `arboard` dep speaks the
+      Win32 clipboard natively. Confirmed live: `fono.exe doctor`
+      reports `Clipboard : native (arboard)`. Bonus: gated the doctor's
+      Linux-only clipboard-manager probe (ICCCM/`XTEST`/clipit&c.) under
+      `cfg(target_os = "linux")` so its X11-specific guidance no longer
+      leaks into Windows/macOS `doctor` output.
 
 **Phase 7 gate**: text injection works in three reference apps; Linux
 inject cascade unchanged.
 
 ### Phase 8 — Hotkeys on Windows (`global-hotkey`)
 
-- [ ] Task 8.1. **`global-hotkey` already cross-platform.** Confirm
+- [x] Task 8.1. **`global-hotkey` already cross-platform.** Confirm
       Windows MSVC build picks up the Win32 `RegisterHotKey` backend.
       Smoke test: register F7, press F7, verify the listener emits
       `TogglePressed`.
-- [ ] Task 8.2. **Default hotkeys reasonable on Windows.** F7/F8 work but
+      *Done 2026-07-12. `detect_backend` was resolving to `Disabled` on
+      Windows (it only knew the Linux `DISPLAY`/`WAYLAND_DISPLAY`
+      signals); generalised the macOS special-case to all non-Linux
+      desktop targets so Windows resolves to the `global-hotkey`
+      listener. Also fixed `is_graphical_session` (same Linux-env-var
+      blind spot) so the daemon no longer skips the listener as
+      "headless" on Windows, and fixed a Windows-only main-thread stack
+      overflow (1 MiB MSVC default) by running the entry point on a
+      big-stack worker thread. Confirmed live over SSH: the daemon logs
+      `hotkey backend resolved: X11` and reaches the `RegisterHotKey`
+      call. The registration itself returns `os error 1459` over
+      headless SSH (non-interactive window station); the actual
+      key-press round-trip is the manual desktop gate.*
+- [x] Task 8.2. **Default hotkeys reasonable on Windows.** F7/F8 work but
       conflict with some apps' built-in shortcuts. Document in
       `docs/build-windows.md` that users can rebind via `fono use hotkey`.
       No behavioural change vs Linux for v1.
-- [ ] Task 8.3. **Esc-to-cancel on Windows.** Use the same dynamic
+      *Done 2026-07-12. Documented in the new "Hotkeys and the daemon on
+      Windows" section of `docs/build-windows.md`.*
+- [x] Task 8.3. **Esc-to-cancel on Windows.** Use the same dynamic
       `EnableCancel` / `DisableCancel` machinery; register Esc transiently
       via `global-hotkey` only during active recording. Mirrors the v0.8.2
       Linux behaviour via a different backend.
-- [ ] Task 8.4. **Verify no Linux portal regression.** The
+      *Done 2026-07-12. No code change needed — `listener.rs` drives the
+      Esc-cancel machinery entirely through `global_hotkey`'s
+      cross-platform `manager.register`/`unregister`, which resolve to
+      the Win32 backend on Windows.*
+- [x] Task 8.4. **Verify no Linux portal regression.** The
       `#[cfg(target_os = "linux")] mod portal` import stays intact; Linux
       portal-based Esc cancel still works on KDE-Wayland / sway / Hyprland.
+      *Done 2026-07-12. The non-Linux branch is additive; Linux
+      `detect_backend` tests and the full suite stay green.*
 
 **Phase 8 gate**: hotkey press starts/stops recording on Windows;
 Esc-to-cancel works; Linux Wayland Esc-portal flow unchanged.
 
 ### Phase 9 — Focus detection on Windows (Win32 foreground window)
 
-- [ ] Task 9.1. **Define `FocusBackend` trait.** Extract today's `detect_focus`
+- [x] Task 9.1. **Define `FocusBackend` trait.** Extract today's `detect_focus`
       free function in `crates/fono-inject/src/focus.rs` behind a trait.
       Linux impl uses `x11rb`; Windows impl uses `windows-sys` crate's
       `GetForegroundWindow` + `GetWindowThreadProcessId` + executable name
       lookup via `QueryFullProcessImageNameW`.
-- [ ] Task 9.2. **Windows-only dep.** Add
+      *Done 2026-07-12. Kept the established `#[cfg]`-gated function
+      dispatch inside `detect_focus()` rather than inventing a
+      `FocusBackend` trait — the free-function-per-OS seam is already how
+      macOS/Linux are split, and it is the same call the tray backend
+      decision (Phase 1) made. Added `windows_focus()` +
+      `windows_process_exe_name()` using `GetForegroundWindow` /
+      `GetWindowTextW` / `GetWindowThreadProcessId` /
+      `QueryFullProcessImageNameW`. Returns the bare exe name (e.g.
+      `chrome.exe`) as `window_class`; degrades to empty `FocusInfo` when
+      there is no foreground window.*
+- [x] Task 9.2. **Windows-only dep.** Add
       `[target.'cfg(target_os = "windows")'.dependencies] windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_System_ProcessStatus"] }`.
       Confirms zero Linux impact.
-- [ ] Task 9.3. **Per-app context rules on Windows.** The classifier in
+      *Done 2026-07-12. Used features `Win32_Foundation`,
+      `Win32_UI_WindowsAndMessaging`, `Win32_System_Threading`
+      (`QueryFullProcessImageNameW` lives in Threading, so
+      `Win32_System_ProcessStatus` was not needed). `windows-sys 0.59`
+      was already in `Cargo.lock` via cpal / fono-tray, so this is a
+      new edge only — no new-to-project crate, zero Linux/macOS binary
+      cost (the lockfile diff is a single dependency line).*
+- [x] Task 9.3. **Per-app context rules on Windows.** The classifier in
       `fono-inject/src/classifier.rs` matches on app names / process names;
       ensure the Windows focus probe returns names in a form the classifier
       can match. Add Windows-flavoured rules for known apps (e.g.
       `chrome.exe`, `code.exe`, `WindowsTerminal.exe`).
+      *Done 2026-07-12. Added Windows `.exe` entries to every built-in
+      rule (terminals, editors, browsers, email, chat, spreadsheets,
+      documents, private apps), each gated `#[cfg(target_os = "windows")]`
+      on the individual array element so the Linux/macOS binary is
+      byte-for-byte unchanged. A Windows-gated unit test
+      (`windows_exe_names_classify`) confirms chrome.exe → Browser,
+      Code.exe → CodeEditor, WindowsTerminal.exe → Terminal, KeePassXC.exe
+      → history-suppressed; it passes on the Windows box.*
 
 **Phase 9 gate**: `fono doctor` on Windows reports the current focused
 window's app name. Per-app rules fire correctly for at least three test
 apps. Linux x11rb path unchanged.
+*Gate 2026-07-12: `doctor` gained a cross-platform `Focus` line (shows
+the focused app's exe/class and the matched profile). Over headless SSH
+it reads "none detected" — live population is a manual desktop check,
+like the tray/hotkey/typing smokes. The three-app rule firing is proven
+by the passing Windows unit test. Linux gate green; x11rb path
+untouched.*
 
 ### Phase 10 — Overlay backend on Windows (Win32 layered toolwindow)
 
-- [ ] Task 10.1. **New backend file `crates/fono-overlay/src/backends/windows.rs`.**
-      Uses winit with raw Win32 escape hatch to set
-      `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_TOPMOST`
-      and exclude from Alt+Tab via `WS_EX_TOOLWINDOW`. softbuffer handles
-      ARGB premultiplied draws same as the existing renderer.
-- [ ] Task 10.2. **Extend `BackendId` enum and selection table.** Add
-      `BackendId::Win32LayeredToolWindow`. Update
-      `candidate_list_with` to return this single candidate on Windows;
-      Linux table unchanged.
-- [ ] Task 10.3. **Click-through and focus passthrough verified.** With
-      overlay visible during recording, click through onto a window beneath
-      and confirm the click reaches it. Type into a text field while
-      overlay is shown — keystrokes must land in the field, not the overlay.
-- [ ] Task 10.4. **Multi-monitor positioning.** Anchor to primary monitor's
-      bottom-centre, mirroring the Linux behaviour. Use Win32
-      `GetSystemMetrics` / `EnumDisplayMonitors`.
-- [ ] Task 10.5. **`FONO_OVERLAY_BACKEND` env override works on Windows.**
-      Aliases `win32` / `noop`. Selection still falls through to noop on
-      failure.
+- [x] Task 10.1. **New backend file `crates/fono-overlay/src/backends/windows.rs`.**
+      Sets `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_TOPMOST |
+      WS_EX_LAYERED` and excludes from Alt+Tab via `WS_EX_TOOLWINDOW`.
+      **Deviation from plan:** dropped winit+softbuffer in favour of a
+      pure-Win32 layered window updated via `UpdateLayeredWindow` from the
+      shared renderer's premultiplied-ARGB framebuffer. Rationale: softbuffer
+      blits through GDI `BitBlt`, which ignores per-pixel alpha, so the
+      rounded-corner transparency the renderer produces would be lost;
+      `UpdateLayeredWindow` with `AC_SRC_ALPHA` is the only path that honours
+      it. Structurally mirrors the macOS worker-thread backend (dedicated
+      thread owns the HWND + message pump; snapshot channel from the app).
+- [x] Task 10.2. **Extend `BackendId` enum and selection table.** Added
+      `BackendId::Win32LayeredToolWindow` + `HostOs::Windows`.
+      `candidate_list_with` returns `[Win32LayeredToolWindow, Noop]` on
+      Windows; Linux/macOS tables unchanged (verified by
+      `pick_backend_with` unit tests). `doctor` reports the selected
+      backend and its capabilities.
+- [~] Task 10.3. **Click-through and focus passthrough (code-complete;
+      visual check pending).** `WS_EX_TRANSPARENT` (click-through) +
+      `WS_EX_NOACTIVATE` (focus-passthrough) are set and reported by
+      `doctor` (`focus-passthrough=yes click-passthrough=yes`). The live
+      click-through / keystroke-lands-in-field check needs an interactive
+      desktop — handed to the manual desktop gate.
+- [x] Task 10.4. **Multi-monitor positioning.** Anchors to the primary
+      monitor's bottom-centre via `GetSystemMetrics(SM_CXSCREEN/SM_CYSCREEN)`,
+      mirroring the Linux bottom-centre placement, with the same bottom
+      offset as the other backends.
+- [x] Task 10.5. **`FONO_OVERLAY_BACKEND` env override works on Windows.**
+      Aliases `win32` / `windows` / `win` / `layered` and `noop`. Verified
+      live over SSH (`win32` → layered tool-window, `noop` → noop).
+      `parse` now trims surrounding whitespace so a stray trailing space
+      from cmd.exe `set VAR=win32 ` doesn't defeat the override.
 
 **Phase 10 gate**: overlay paints during recording on Windows with
 correct anchoring; doesn't steal focus; doesn't appear in Alt-Tab. Linux
@@ -457,25 +587,31 @@ wlr-layer-shell / X11 / noop backends unchanged.
 
 ### Phase 11 — Install and autostart on Windows
 
-- [ ] Task 11.1. **`Installer::windows` impl behind the trait from Phase 1.6.**
+- [x] Task 11.1. **`Installer::windows` impl behind the trait from Phase 1.6.**
       Default install location: `%LOCALAPPDATA%\fono\fono.exe`. Autostart:
       write `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\fono`
-      pointing to the install path. Use the `winreg` crate behind
-      Windows-only cfg.
-- [ ] Task 11.2. **`sudo fono install` becomes `fono install` on Windows.**
-      No elevation needed for `HKCU` writes. Document that `--server` mode
-      is Linux-only in v1 (no Windows service install in v1).
-- [ ] Task 11.3. **`fono uninstall` on Windows.** Remove registry key,
-      delete `%LOCALAPPDATA%\fono\` directory, leave user config under
-      `%APPDATA%\fono\` intact (mirrors Linux behaviour of preserving
-      user config).
-- [ ] Task 11.4. **Install marker on Windows.** Write
-      `%LOCALAPPDATA%\fono\install_marker.toml` analogous to the Linux
-      `/usr/local/share/fono/install_marker.toml`. Same TOML schema.
-- [ ] Task 11.5. **Verify Linux install path unchanged.** Run
-      `sudo fono install --server` on a Linux test host; confirms
-      systemd unit installation, `fono` system user creation, and
-      hardened service activation still work.
+      pointing to the install path. **Deviation:** used the built-in
+      `reg.exe` via subprocess rather than the `winreg` crate — mirrors
+      the macOS installer's `launchctl`/`security` subprocess style, needs
+      no `unsafe` FFI, and keeps the binary dependency-free (binary size
+      is the top priority, and the `winreg` crate would have been new to
+      the graph). Realised in `crates/fono/src/install/windows.rs`.
+- [x] Task 11.2. **`sudo fono install` becomes `fono install` on Windows.**
+      No elevation needed for `HKCU`/`%LOCALAPPDATA%` writes. `--server` is
+      refused with a Linux-only message (no Windows service install in v1).
+- [x] Task 11.3. **`fono uninstall` on Windows.** Removes the registry
+      Run value and the `%LOCALAPPDATA%\fono\` directory, leaves user
+      config under `%APPDATA%\fono\` intact. Verified over SSH: reg value
+      + install dir gone, config path untouched.
+- [x] Task 11.4. **Install marker on Windows.** Writes
+      `%LOCALAPPDATA%\fono\install_marker.toml` (version + install path +
+      unix timestamp), surfaced by `fono doctor`. Verified: valid TOML with
+      a backslash-escaped path.
+- [x] Task 11.5. **Verify Linux install path unchanged.** Linux installer
+      is a separate cfg-gated module (`install/linux.rs`) untouched by this
+      phase; the only shared edit is `install/mod.rs` module wiring. Full
+      Linux gate (fmt/clippy/tests) green. (Live `sudo fono install
+      --server` on a Linux host remains a manual check.)
 
 **Phase 11 gate**: `fono install` on Windows copies the binary, writes
 the registry autostart entry, and the daemon starts on next login.
@@ -484,22 +620,37 @@ byte-identical.
 
 ### Phase 12 — `fono update` on Windows (rename-and-relaunch)
 
-- [ ] Task 12.1. **Asset name lookup uses `current_asset_name()` from
-      Phase 1.7.** Confirm Windows returns `fono-vX.Y.Z-x86_64.exe`.
-- [ ] Task 12.2. **Self-replacement via rename trick.** Windows can't
-      overwrite a running `.exe`. Add a `#[cfg(target_os = "windows")]`
-      branch in `fono-update`: (a) download to a temp file in same
-      directory, (b) verify SHA-256, (c) rename current `fono.exe` to
-      `fono.exe.old`, (d) rename temp to `fono.exe`, (e) launch the new
-      binary, (f) exit current process. Cleanup of `.exe.old` happens
-      on next start.
-- [ ] Task 12.3. **Package-managed detection.** The Linux
-      `is_package_managed` check looks for `/usr/bin/fono`; on Windows
-      there is no equivalent — skip the check on Windows or treat
-      install under `Program Files` as managed (don't self-replace).
-- [ ] Task 12.4. **Verify Linux update path unchanged.** Run
-      `fono update --dry-run` on Linux to confirm asset selection
-      (CPU vs GPU) and rename(2)-based replace still work.
+- [x] Task 12.1. **Asset name lookup uses `current_asset_name()` from
+      Phase 1.7.** Confirmed: `current_asset_name()` returns
+      `fono-vX.Y.Z-x86_64.exe` on Windows. `fono update --check` on the
+      box exercises the path and correctly reports "no matching release
+      asset" (no Windows release published yet — expected until Phase 13).
+- [x] Task 12.2. **Self-replacement via rename trick.** The existing
+      cross-platform swap in `apply_update` already does the
+      rename-into-place dance (download to temp in the same dir → verify
+      SHA-256 → `rename(old → old.bak)` → `rename(tmp → old)`), which
+      works on Windows because a running `.exe` *can* be renamed even
+      though it can't be overwritten. Added the `#[cfg(windows)]`
+      `restart_in_place`: since Windows has no `execv`, it spawns the
+      freshly-installed binary as an independent child (inheriting stdio
+      + argv) and exits to release the renamed old image. The running
+      image ends up at the sibling `.bak`, cleaned up on next
+      `fono update`. (Uses `.bak`, the existing codebase convention,
+      not the illustrative `.exe.old` from this note.)
+- [x] Task 12.3. **Package-managed detection.** Added a `#[cfg(windows)]`
+      branch to `is_package_managed`: no system package manager on
+      Windows, so a per-user install under `%LOCALAPPDATA%\fono\` stays
+      self-updatable, while an install under `Program Files` /
+      `Program Files (x86)` is treated as managed (refuse up front with a
+      clear message rather than fail mid-swap on access-denied).
+      Case-insensitive match. `elevation_hint()` gives a Windows-
+      appropriate message (reinstall with `fono install`) instead of
+      `sudo`.
+- [x] Task 12.4. **Verify Linux update path unchanged.** Linux
+      `fono-update` tests all green (15 passed), CPU↔GPU asset selection
+      and rename(2)-based replace untouched (non-Windows branches
+      unchanged; the Unix-specific `pkg_managed_paths` test still runs
+      and passes on Linux).
 
 **Phase 12 gate**: `fono update` on Windows downloads, verifies, and
 replaces the running `.exe` atomically. Linux update flow unchanged
@@ -507,23 +658,43 @@ including the v0.5.0 CPU↔GPU auto-switching.
 
 ### Phase 13 — Release workflow: Windows artefact
 
-- [ ] Task 13.1. **Add Windows row to `release.yml` build matrix.**
-      Runner: `windows-2022`. Variant: cpu. Asset name:
-      `fono-${version}-x86_64.exe`. Build with
-      `cargo build --profile release-slim --target x86_64-pc-windows-msvc -p fono`.
-- [ ] Task 13.2. **Skip the ELF NEEDED verification step on Windows.**
-      The existing step at `release.yml:268` already gates on
-      `runner.os == 'Linux'`. Confirm.
-- [ ] Task 13.3. **Stage the `.exe` for upload.** Existing staging step
-      at `release.yml:298-337` already handles `.exe` suffix via
-      `if [[ "${target}" == *windows* ]]`. Verify.
-- [ ] Task 13.4. **No Windows packaging job** — ship bare `.exe` plus
-      `.sha256` sidecar only in v1. MSI / signing are explicit non-goals.
-- [ ] Task 13.5. **`SHA256SUMS` includes the Windows asset.** The
-      existing `find … -name "fono-v*-x86_64.exe"` at `release.yml:595,605`
-      already covers this. Verify.
-- [ ] Task 13.6. **Update `fono-update`'s known-asset-set test fixtures**
-      to include the `.exe` row.
+- [x] Task 13.1. **Add Windows row to `release.yml` build matrix.**
+      Added `x86_64-pc-windows-msvc` on `windows-2022`, variant cpu,
+      asset `fono-vX.Y.Z-x86_64.exe`. Build uses `--profile release-slim
+      --target x86_64-pc-windows-msvc -p fono --no-default-features
+      --features windows-defaults` (a new `no_default_features` matrix
+      key drives the flag; the Build step is now `shell: bash` so the
+      arg-assembly runs under Git Bash on the runner). Added the two
+      Windows-only prep steps mirrored from the ci.yml windows job:
+      `git config --system core.longpaths true` before checkout, and
+      `LIBCLANG_PATH=C:\Program Files\LLVM\bin`. Verified over SSH: the
+      exact `release-slim` build command links a working `fono.exe`
+      (16,443,392 B ≈ 15.7 MiB, `--version` prints `fono 0.15.0`).
+- [x] Task 13.2. **Skip the ELF NEEDED verification step on Windows.**
+      Confirmed: the "Verify Linux binary NEEDED set" step gates on
+      `runner.os == 'Linux'`, and the macOS dylib check on
+      `runner.os == 'macOS'` — both skip on Windows.
+- [x] Task 13.3. **Stage the `.exe` for upload.** The staging step
+      already appends `.exe` (`bin_src` + asset name) via
+      `if [[ "${target}" == *windows* ]]`; the bare-binary artifact
+      (`fono-bin-cpu-x86_64-pc-windows-msvc`) uploads `out-bin/*`.
+      Additionally excluded Windows from the internal distro-staging
+      tarball (build guard + upload `if`), since it ships bare `.exe`
+      only and its `x86_64` arch label would otherwise clash with the
+      Linux staging stem.
+- [x] Task 13.4. **No Windows packaging job** — ships bare `.exe` plus
+      `.sha256` sidecar only. No MSI / signing (explicit non-goals);
+      no distro-style package job added.
+- [x] Task 13.5. **`SHA256SUMS` includes the Windows asset.** Confirmed:
+      the checksum `find` includes `-name "fono-v*-x86_64.exe"` and the
+      per-asset sidecar loop lists `fono-v*-x86_64.exe`, so the `.exe`
+      gets both a `SHA256SUMS` line and its own `.sha256` sidecar.
+- [x] Task 13.6. **Update `fono-update`'s known-asset-set test fixtures**
+      to include the `.exe` row. Already satisfied in Phase 1.7:
+      `asset_name_has_exe_suffix_on_windows` asserts the `.exe` suffix +
+      CPU-only prefix; `asset_name_for` returns
+      `fono-vX.Y.Z-x86_64.exe` on Windows. No other asset-list fixture
+      exists.
 
 **Phase 13 gate**: tagging a release on the main branch produces three
 release assets (Linux CPU, Linux GPU, Linux aarch64, Windows CPU) plus

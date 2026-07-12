@@ -13,6 +13,9 @@
 //! - [`macos`] — `backend-macos` feature. Native NSPanel path on
 //!   macOS, blitting the shared software renderer via the AppKit
 //!   main-thread pump installed by `fono::main`.
+//! - [`windows`] — `backend-windows` feature. Native Win32 layered
+//!   tool-window path on Windows, blitting the shared software
+//!   renderer via `UpdateLayeredWindow` (per-pixel alpha).
 
 pub mod noop;
 
@@ -31,3 +34,6 @@ pub(crate) mod wayland_shm;
 
 #[cfg(all(feature = "backend-macos", target_os = "macos"))]
 pub mod macos;
+
+#[cfg(all(feature = "backend-windows", target_os = "windows"))]
+pub mod windows;

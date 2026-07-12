@@ -57,10 +57,12 @@ impl HotkeyBackend {
 /// - `DISPLAY` set, no `WAYLAND_DISPLAY` → `X11`.
 /// - Neither set → `Disabled`.
 ///
-/// macOS: always the `global-hotkey` listener (the `X11` variant —
-/// same listener, Carbon `RegisterEventHotKey` backend). Display env
-/// vars carry no signal on darwin, and the daemon only calls
-/// [`spawn`] inside a WindowServer session; registration failures
+/// macOS / Windows: always the `global-hotkey` listener (the `X11`
+/// variant — same listener, OS-native backend: Carbon
+/// `RegisterEventHotKey` on macOS, Win32 `RegisterHotKey` on Windows).
+/// The `WAYLAND_DISPLAY` / `DISPLAY` probes below are Linux session
+/// signals with no meaning on those targets, and the daemon only calls
+/// [`spawn`] inside a real desktop session; registration failures
 /// degrade gracefully in the listener itself.
 #[must_use]
 pub fn detect_backend(forced: Option<HotkeyBackend>) -> HotkeyBackend {
@@ -76,7 +78,10 @@ pub fn detect_backend_with(
     if let Some(b) = forced {
         return b;
     }
-    if cfg!(target_os = "macos") {
+    // Non-Linux (macOS, Windows): the global-hotkey listener drives the
+    // OS-native backend directly, so the Linux-only display-server
+    // probes below never apply — resolve straight to the listener.
+    if !cfg!(target_os = "linux") {
         return HotkeyBackend::X11;
     }
     if env_present("WAYLAND_DISPLAY") {
@@ -217,6 +222,17 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn auto_detect_on_macos_is_always_the_global_hotkey_listener() {
+        assert_eq!(detect_backend_with(None, |_| false), HotkeyBackend::X11);
+        assert_eq!(detect_backend_with(None, |_| true), HotkeyBackend::X11);
+    }
+
+    /// Windows has no `DISPLAY` / `WAYLAND_DISPLAY` — auto-detect must
+    /// still land on the global-hotkey (Win32 `RegisterHotKey`) listener
+    /// rather than falling through to `Disabled`. Regression guard for
+    /// Windows port plan Task 8.1.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn auto_detect_on_windows_is_always_the_global_hotkey_listener() {
         assert_eq!(detect_backend_with(None, |_| false), HotkeyBackend::X11);
         assert_eq!(detect_backend_with(None, |_| true), HotkeyBackend::X11);
     }

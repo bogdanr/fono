@@ -273,6 +273,23 @@ pub static BUILTIN_RULES: &[BuiltinRule] = &[
             "iTerm2",
             "ghostty",
             "Warp",
+            // Windows executable names (Win32 foreground-window probe).
+            #[cfg(target_os = "windows")]
+            "WindowsTerminal.exe",
+            #[cfg(target_os = "windows")]
+            "cmd.exe",
+            #[cfg(target_os = "windows")]
+            "powershell.exe",
+            #[cfg(target_os = "windows")]
+            "pwsh.exe",
+            #[cfg(target_os = "windows")]
+            "conhost.exe",
+            #[cfg(target_os = "windows")]
+            "alacritty.exe",
+            #[cfg(target_os = "windows")]
+            "wezterm-gui.exe",
+            #[cfg(target_os = "windows")]
+            "mintty.exe",
         ],
         title_fragments: &[],
         profile: terminal_profile,
@@ -281,15 +298,51 @@ pub static BUILTIN_RULES: &[BuiltinRule] = &[
     // "Cursor" (the AI IDE) window class is "Cursor" on Linux/X11.
     BuiltinRule {
         classes: &[
-            "Cursor", "cursor", "zed", "code", "code-oss", "vscodium", "codium", "kate", "lapce",
-            "helix", "neovide", "windsurf",
+            "Cursor",
+            "cursor",
+            "zed",
+            "code",
+            "code-oss",
+            "vscodium",
+            "codium",
+            "kate",
+            "lapce",
+            "helix",
+            "neovide",
+            "windsurf",
+            // Windows executable names.
+            #[cfg(target_os = "windows")]
+            "Code.exe",
+            #[cfg(target_os = "windows")]
+            "Cursor.exe",
+            #[cfg(target_os = "windows")]
+            "codium.exe",
+            #[cfg(target_os = "windows")]
+            "zed.exe",
+            #[cfg(target_os = "windows")]
+            "Windsurf.exe",
+            #[cfg(target_os = "windows")]
+            "devenv.exe",
         ],
         title_fragments: &[],
         profile: code_editor_profile,
     },
     // Text editors (plain prose)
     BuiltinRule {
-        classes: &["gedit", "mousepad", "xed", "pluma", "geany"],
+        classes: &[
+            "gedit",
+            "mousepad",
+            "xed",
+            "pluma",
+            "geany",
+            // Windows executable names.
+            #[cfg(target_os = "windows")]
+            "notepad.exe",
+            #[cfg(target_os = "windows")]
+            "notepad++.exe",
+            #[cfg(target_os = "windows")]
+            "wordpad.exe",
+        ],
         title_fragments: &[],
         profile: text_editor_profile,
     },
@@ -308,13 +361,43 @@ pub static BUILTIN_RULES: &[BuiltinRule] = &[
             "Google Chrome",
             "Brave Browser",
             "Microsoft Edge",
+            // Windows executable names.
+            #[cfg(target_os = "windows")]
+            "chrome.exe",
+            #[cfg(target_os = "windows")]
+            "msedge.exe",
+            #[cfg(target_os = "windows")]
+            "firefox.exe",
+            #[cfg(target_os = "windows")]
+            "brave.exe",
+            #[cfg(target_os = "windows")]
+            "chromium.exe",
+            #[cfg(target_os = "windows")]
+            "librewolf.exe",
+            #[cfg(target_os = "windows")]
+            "opera.exe",
+            #[cfg(target_os = "windows")]
+            "vivaldi.exe",
         ],
         title_fragments: &[],
         profile: browser_profile,
     },
     // Email clients
     BuiltinRule {
-        classes: &["thunderbird", "evolution", "kmail", "geary", "Mail"],
+        classes: &[
+            "thunderbird",
+            "evolution",
+            "kmail",
+            "geary",
+            "Mail",
+            // Windows executable names.
+            #[cfg(target_os = "windows")]
+            "thunderbird.exe",
+            #[cfg(target_os = "windows")]
+            "outlook.exe",
+            #[cfg(target_os = "windows")]
+            "olk.exe",
+        ],
         title_fragments: &[],
         profile: email_profile,
     },
@@ -331,25 +414,67 @@ pub static BUILTIN_RULES: &[BuiltinRule] = &[
             // case-insensitively; these two differ).
             "Messages",
             "Telegram",
+            // Windows executable names.
+            #[cfg(target_os = "windows")]
+            "Discord.exe",
+            #[cfg(target_os = "windows")]
+            "slack.exe",
+            #[cfg(target_os = "windows")]
+            "Telegram.exe",
+            #[cfg(target_os = "windows")]
+            "Signal.exe",
+            #[cfg(target_os = "windows")]
+            "ms-teams.exe",
         ],
         title_fragments: &[],
         profile: chat_profile,
     },
     // Spreadsheets
     BuiltinRule {
-        classes: &["libreoffice-calc", "gnumeric"],
+        classes: &[
+            "libreoffice-calc",
+            "gnumeric",
+            // Windows executable names.
+            #[cfg(target_os = "windows")]
+            "excel.exe",
+            #[cfg(target_os = "windows")]
+            "scalc.exe",
+        ],
         title_fragments: &[],
         profile: spreadsheet_profile,
     },
     // Documents / word processors
     BuiltinRule {
-        classes: &["libreoffice-writer", "abiword"],
+        classes: &[
+            "libreoffice-writer",
+            "abiword",
+            // Windows executable names.
+            #[cfg(target_os = "windows")]
+            "winword.exe",
+            #[cfg(target_os = "windows")]
+            "swriter.exe",
+        ],
         title_fragments: &[],
         profile: document_profile,
     },
     // Private / sensitive (suppress_history = true, no hints)
     BuiltinRule {
-        classes: &["keepassxc", "bitwarden", "1password", "gnome-keyring", "seahorse"],
+        classes: &[
+            "keepassxc",
+            "bitwarden",
+            "1password",
+            "gnome-keyring",
+            "seahorse",
+            // Windows executable names.
+            #[cfg(target_os = "windows")]
+            "KeePassXC.exe",
+            #[cfg(target_os = "windows")]
+            "KeePass.exe",
+            #[cfg(target_os = "windows")]
+            "Bitwarden.exe",
+            #[cfg(target_os = "windows")]
+            "1Password.exe",
+        ],
         title_fragments: &[],
         profile: private_profile,
     },
@@ -616,5 +741,26 @@ mod tests {
     fn detected_agent_is_none_in_phase_a() {
         let p = ContextClassifier::classify(Some("Alacritty"), None).unwrap();
         assert!(p.detected_agent.is_none());
+    }
+
+    // Windows executable-name rules (Windows port plan Task 9.3). The
+    // Win32 focus probe returns bare exe names like `chrome.exe`; these
+    // rules only compile into the Windows binary, so the test is gated to
+    // match (zero cost to the Linux/macOS binary).
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_exe_names_classify() {
+        // Browser (Task 9.3 reference app).
+        let chrome = ContextClassifier::classify(Some("chrome.exe"), None).unwrap();
+        assert_eq!(chrome.name, "Browser");
+        // Code editor (Task 9.3 reference app) — case-insensitive match.
+        let code = ContextClassifier::classify(Some("Code.exe"), None).unwrap();
+        assert!(code.is_code_editor);
+        // Terminal (Task 9.3 reference app).
+        let term = ContextClassifier::classify(Some("WindowsTerminal.exe"), None).unwrap();
+        assert!(term.is_terminal);
+        // Private app still suppresses history on Windows.
+        let pw = ContextClassifier::classify(Some("KeePassXC.exe"), None).unwrap();
+        assert!(pw.suppress_history);
     }
 }

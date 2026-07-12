@@ -451,12 +451,17 @@ pub fn spawn(
     let shared = Arc::new(AtomicU8::new(TrayState::Idle as u8));
     let (action_tx, action_rx) = mpsc::unbounded_channel();
 
-    #[cfg(all(feature = "tray-backend", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        feature = "tray-backend",
+        any(target_os = "linux", target_os = "macos", target_os = "windows")
+    ))]
     {
         #[cfg(target_os = "linux")]
         use backend_linux as platform_backend;
         #[cfg(target_os = "macos")]
         use backend_macos as platform_backend;
+        #[cfg(target_os = "windows")]
+        use backend_windows as platform_backend;
 
         let (state_tx, state_rx) = mpsc::unbounded_channel::<TrayState>();
         let started = platform_backend::spawn(
@@ -482,9 +487,12 @@ pub fn spawn(
         (Tray { shared_state: shared, state_tx }, action_rx)
     }
 
-    // Feature on, but no backend exists for this OS yet (Windows —
-    // its `tray-icon` renderer lands with the Windows port).
-    #[cfg(all(feature = "tray-backend", not(any(target_os = "linux", target_os = "macos"))))]
+    // Feature on, but no backend exists for this OS yet (a platform
+    // with no tray renderer). Linux, macOS and Windows all have one.
+    #[cfg(all(
+        feature = "tray-backend",
+        not(any(target_os = "linux", target_os = "macos", target_os = "windows"))
+    ))]
     {
         (Tray { shared_state: shared, state_tx: None }, action_rx)
     }
@@ -522,3 +530,14 @@ pub use backend_macos::{
 
 #[cfg(all(feature = "tray-backend", target_os = "linux"))]
 mod backend_linux;
+
+// -------------------------------------------------------------------------
+// Windows backend (`tray-icon` Shell_NotifyIcon over the shared menu
+// model, driven by a dedicated Win32 message-pump thread). Slots in
+// behind `target_os = "windows"` exactly as the Linux/macOS backends
+// do; the `spawn` dispatch above already routes to it (Windows port
+// plan Task 6.2).
+// -------------------------------------------------------------------------
+
+#[cfg(all(feature = "tray-backend", target_os = "windows"))]
+mod backend_windows;
