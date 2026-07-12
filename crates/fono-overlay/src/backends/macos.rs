@@ -178,10 +178,28 @@ fn run_worker(rx: Receiver<OverlayCmd>, shared: Arc<Shared>, style: WaveformStyl
     'outer: loop {
         // Block for the first command, then drain the burst — the
         // same batch-then-render shape as the winit backend's
-        // `about_to_wait`.
-        let Ok(first) = rx.recv() else { break };
+        // `about_to_wait`. When the Glass Cortex thinking / speaking
+        // phases are active they animate with no incoming data, so we
+        // wait with a ~30 fps timeout and render an animation frame
+        // when it elapses; otherwise we block indefinitely (static
+        // overlay costs zero CPU).
         let mut needs_redraw = false;
-        let mut pending = Some(first);
+        let mut animate = false;
+        let mut pending = if renderer.wants_animation_frame() {
+            match rx.recv_timeout(std::time::Duration::from_millis(33)) {
+                Ok(c) => Some(c),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    animate = true;
+                    None
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match rx.recv() {
+                Ok(c) => Some(c),
+                Err(_) => break,
+            }
+        };
         while let Some(cmd) = pending.take() {
             match cmd {
                 OverlayCmd::SetState(s) => {
@@ -245,11 +263,20 @@ fn run_worker(rx: Receiver<OverlayCmd>, shared: Arc<Shared>, style: WaveformStyl
                         needs_redraw = true;
                     }
                 }
+                OverlayCmd::Cortex(cmd) => {
+                    if renderer.push_cortex_cmd(cmd) && renderer.is_visible() {
+                        needs_redraw = true;
+                    }
+                }
                 OverlayCmd::Shutdown => break 'outer,
             }
             pending = rx.try_recv().ok();
         }
 
+        if animate {
+            renderer.animation_tick();
+            needs_redraw = true;
+        }
         if needs_redraw && shown && renderer.is_visible() {
             push_frame(&shared, render_frame(&renderer, shared.scale()));
         }

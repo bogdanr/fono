@@ -970,6 +970,12 @@ pub async fn run_assistant_turn(
             );
         }
     }
+    // Tell the Glass Cortex replay engine the audio is over (covers
+    // idle, drained, cancelled and timed-out paths alike) so trailing
+    // animation wraps up instead of ghost-playing over silence.
+    if let Some(o) = &overlay {
+        o.push_cortex(fono_overlay::CortexCmd::PlaybackDone);
+    }
     if let Some(t) = &trace {
         t.finish(json!({
             "aborted": metrics.aborted,
@@ -998,6 +1004,12 @@ struct FirstAudio<'a> {
     overlay: Option<&'a fono_overlay::OverlayHandle>,
     fired: AtomicBool,
     ttfa_cell: AtomicU64,
+    /// Cumulative enqueued reply-audio milliseconds (batch TTS path).
+    /// Each addition is forwarded to the Glass Cortex replay engine as
+    /// `CortexCmd::AudioTotal` so the brain animation is paced to the
+    /// real playback duration. Streaming TTS skips this — the engine
+    /// then estimates the timeline from token count.
+    audio_ms: AtomicU64,
 }
 
 impl<'a> FirstAudio<'a> {
@@ -1012,6 +1024,7 @@ impl<'a> FirstAudio<'a> {
             overlay,
             fired: AtomicBool::new(false),
             ttfa_cell: AtomicU64::new(u64::MAX),
+            audio_ms: AtomicU64::new(0),
         }
     }
 
@@ -1035,6 +1048,120 @@ impl<'a> FirstAudio<'a> {
             u64::MAX => None,
             v => Some(v),
         }
+    }
+
+    /// Account one enqueued audio chunk and push the running total to
+    /// the Glass Cortex replay engine (sizes its playback timeline).
+    fn add_audio(&self, samples: usize, sample_rate: u32) {
+        if sample_rate == 0 || samples == 0 {
+            return;
+        }
+        let ms = samples as u64 * 1000 / u64::from(sample_rate);
+        let total = self.audio_ms.fetch_add(ms, Ordering::SeqCst) + ms;
+        if let Some(o) = self.overlay {
+            o.push_cortex(fono_overlay::CortexCmd::AudioTotal { secs: total as f32 / 1000.0 });
+        }
+    }
+
+    /// Reply-audio seconds enqueued so far — the timeline offset the
+    /// next chunk's spectrum windows are stamped against.
+    fn audio_secs_so_far(&self) -> f32 {
+        self.audio_ms.load(Ordering::SeqCst) as f32 / 1000.0
+    }
+
+    /// Tap the REAL synthesised TTS PCM (plan Task E1): compute a few
+    /// frequency bands + amplitude per short window of the audio we
+    /// already synthesised, and push them to the overlay as
+    /// `CortexCmd::AudioBands` stamped on the reply's audio timeline.
+    /// The Glass Cortex speaking scene samples these against its
+    /// playback clock to modulate its per-row voice glow from the
+    /// genuine spoken spectrum. No model cost — a handful of Goertzel
+    /// filters over ~50 ms windows of PCM we already own. `start_secs`
+    /// is this chunk's offset within the reply. This replaces the
+    /// synthetic FFT frames that used to decorate the speaking scene:
+    /// the modulation is now the real voice. Honesty invariant: this
+    /// only feeds brightness modulation; the underlying cell value is
+    /// still a real weight/activation (see `draw_lattice_scene`).
+    fn push_audio_bands(&self, pcm: &[f32], sample_rate: u32, start_secs: f32) {
+        let Some(o) = self.overlay else { return };
+        tts_audio_band_windows(pcm, sample_rate, start_secs, |at_secs, bands, amp| {
+            o.push_cortex(fono_overlay::CortexCmd::AudioBands { at_secs, bands, amp });
+        });
+    }
+}
+
+/// Representative band centre frequencies (Hz) for the real-TTS
+/// spectrum tap — log-spaced across the speech range. Kept small so
+/// the tap stays cheap and the row lattice reads as a coarse but
+/// honest spectrum.
+const TTS_BAND_HZ: [f32; 8] = [120.0, 250.0, 450.0, 800.0, 1400.0, 2400.0, 4000.0, 6500.0];
+
+/// Goertzel single-frequency magnitude (0..) of `samples` at `freq`.
+/// One multiply-add per sample per band — cheaper than a full FFT for
+/// the handful of bands we visualise.
+#[allow(clippy::suboptimal_flops)] // keep the recurrence readable as textbook Goertzel
+fn goertzel_mag(samples: &[f32], sample_rate: u32, freq: f32) -> f32 {
+    let n = samples.len();
+    if n == 0 || sample_rate == 0 {
+        return 0.0;
+    }
+    let k = (freq * n as f32 / sample_rate as f32).round();
+    let w = 2.0 * std::f32::consts::PI * k / n as f32;
+    let coeff = 2.0 * w.cos();
+    let mut s1 = 0.0f32;
+    let mut s2 = 0.0f32;
+    for &x in samples {
+        let s0 = x + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    let power = coeff.mul_add(-s1 * s2, s1 * s1 + s2 * s2).max(0.0);
+    power.sqrt() / n as f32
+}
+
+/// Slice `pcm` into ~50 ms windows and hand each window's normalised
+/// band shape + amplitude to `emit(at_secs, bands, amp)`. The band
+/// shape is normalised to the window's own peak (so quiet windows
+/// still show structure) then scaled by loudness, and amplitude is a
+/// gained RMS — so silence stays dark and speech dances. Honest: the
+/// numbers come straight from the synthesised PCM.
+fn tts_audio_band_windows<F: FnMut(f32, Vec<f32>, f32)>(
+    pcm: &[f32],
+    sample_rate: u32,
+    start_secs: f32,
+    mut emit: F,
+) {
+    if sample_rate == 0 || pcm.is_empty() {
+        return;
+    }
+    // ~50 ms windows ⇒ ~20 spectrum frames/second, matching the
+    // overlay animation cadence.
+    let win = (sample_rate as usize / 20).max(256);
+    let mut off = 0usize;
+    while off < pcm.len() {
+        let end = (off + win).min(pcm.len());
+        let w = &pcm[off..end];
+        // Gained RMS amplitude (speech RMS ~0.05..0.2 ⇒ ×6 fills the
+        // 0..1 range for typical loud passages, clamped).
+        let sum_sq: f32 = w.iter().map(|&x| x * x).sum();
+        let rms = (sum_sq / w.len() as f32).sqrt();
+        let amp = (rms * 6.0).clamp(0.0, 1.0);
+        let mut bands = [0.0f32; TTS_BAND_HZ.len()];
+        let mut peak = 0.0f32;
+        for (b, &f) in bands.iter_mut().zip(TTS_BAND_HZ.iter()) {
+            *b = goertzel_mag(w, sample_rate, f);
+            peak = peak.max(*b);
+        }
+        // Shape from the spectrum, magnitude from loudness: divide by
+        // the window peak then scale by amplitude so pauses go dark.
+        if peak > 1e-9 {
+            for b in &mut bands {
+                *b = (*b / peak) * amp;
+            }
+        }
+        let at_secs = start_secs + off as f32 / sample_rate as f32;
+        emit(at_secs, bands.to_vec(), amp);
+        off += win;
     }
 }
 
@@ -1170,6 +1297,12 @@ async fn synth_and_enqueue(
         return false;
     };
     let enqueue_started = std::time::Instant::now();
+    let bands_start = first_audio.audio_secs_so_far();
+    first_audio.add_audio(audio.pcm.len(), audio.sample_rate);
+    // Real-voice spectrum tap for the Glass Cortex speaking scene
+    // (plan Task E1) — computed from the PCM before it is moved into
+    // the playback queue.
+    first_audio.push_audio_bands(&audio.pcm, audio.sample_rate, bands_start);
     if let Err(e) = pb.enqueue(audio.pcm, audio.sample_rate) {
         warn!(target: "fono::assistant", error = %e, "enqueue failed");
         if let Some(t) = TurnTrace::current() {

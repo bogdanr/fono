@@ -447,6 +447,10 @@ mod tests {
             // driven by `fono mcp` / `fono voices` tooling
             "mcp.voices",
             "mcp.summarize_prompt",
+            // Glass Cortex brain-keyframe capture (Phase 1 of the
+            // brain-visualization plan) — gets a UI toggle when the
+            // overlay style ships (plan Task 4.1)
+            "overlay.brain_capture",
         ];
 
         // Fully populate the optional sub-tables so their leaves count.

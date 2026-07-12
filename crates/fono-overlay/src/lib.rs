@@ -157,6 +157,71 @@ pub enum IgnoreReason {
     EchoFromPrompt,
 }
 
+/// One sampled token's forward-pass keyframe, as consumed by the
+/// Glass Cortex replay engine. A plain-data mirror of
+/// `fono_core::brain_tap::BrainKeyframe` so the overlay crate never
+/// depends on the llama feature stack — the orchestrator converts.
+#[derive(Debug, Clone, Default)]
+pub struct CortexFrame {
+    /// Index of the token within its generation (0-based).
+    pub token_index: u64,
+    /// L2 norm of each layer's output hidden state, indexed by layer;
+    /// `0.0` where the layer was not observed in this keyframe (the
+    /// capture strides layers — the replay engine merges).
+    pub layer_norms: Vec<f32>,
+    /// MoE router choices per layer; empty on dense models. Carried
+    /// through now so the Phase 3 honeycomb work is pure rendering.
+    pub experts: Vec<CortexExperts>,
+    /// Probability of the sampled token (model confidence).
+    pub token_prob: Option<f32>,
+    /// Shannon entropy of the token distribution, in bits.
+    pub entropy_bits: Option<f32>,
+}
+
+/// Routed experts for one layer of one sampled token (MoE models).
+#[derive(Debug, Clone)]
+pub struct CortexExperts {
+    pub layer: u32,
+    pub ids: Vec<i32>,
+    pub weights: Vec<f32>,
+}
+
+/// Glass Cortex replay commands pushed by the orchestrator alongside
+/// the regular overlay state/audio commands. The renderer's replay
+/// engine (see `cortex` module) turns the generation-burst keyframes
+/// into an animation paced to TTS playback.
+#[derive(Debug, Clone)]
+pub enum CortexCmd {
+    /// A local LLM generation started (assistant reply or polish
+    /// cleanup). Resets the replay buffers; `n_layer` sizes the spine.
+    ReplyBegin { n_layer: u32 },
+    /// One prompt-prefill batch (`n_tokens` wide) finished decoding.
+    /// Fires a left→right sweep pulse along the spine — the prompt
+    /// visibly flowing through the layers during the thinking phase.
+    Prefill { n_tokens: u32 },
+    /// One captured keyframe (arrives during the generation burst).
+    Frame(CortexFrame),
+    /// Generation finished: token count + decode wall-clock (for the
+    /// tok/s HUD) and KV-cache fill (for the context arc).
+    ReplyEnd { total_tokens: u64, gen_ms: u64, ctx_used: u32, ctx_capacity: u32 },
+    /// Cumulative seconds of reply audio enqueued for playback so far
+    /// (monotonic within a turn). Sizes the replay timeline; absent
+    /// (e.g. streaming TTS) the engine estimates from token count.
+    AudioTotal { secs: f32 },
+    /// A short window of the **real** reply audio's spectrum, tagged
+    /// with its position (`at_secs`) on the cumulative reply-audio
+    /// timeline. Computed cheaply (a small band split + RMS) from the
+    /// actual synthesised TTS PCM — not a synthetic field — so the
+    /// speaking scene can modulate the grid by the genuinely spoken
+    /// voice. `bands` are low→high frequency energies (0..1); `amp`
+    /// is the window RMS (0..1). The replay engine samples this
+    /// timeline against its playback clock, so the modulation tracks
+    /// the voice even though the samples are pushed at enqueue time.
+    AudioBands { at_secs: f32, bands: Vec<f32>, amp: f32 },
+    /// Reply audio finished playing (or the turn was cancelled).
+    PlaybackDone,
+}
+
 /// Compile-time-stub overlay used in tests + by callers that need an
 /// owned `Overlay` without spawning a real backend. Tracks state and
 /// text in memory so callers always have a usable handle.
@@ -187,6 +252,7 @@ impl Overlay {
     pub fn set_volume_bar(&self, _mode: fono_core::config::VolumeBarMode) {}
     pub fn push_gate_metrics(&self, _inst: f32, _voiced: f32, _silence: f32) {}
     pub fn set_waveform_style(&self, _style: fono_core::config::WaveformStyle) {}
+    pub fn push_cortex(&self, _cmd: CortexCmd) {}
 
     #[must_use]
     pub fn state(&self) -> OverlayState {
@@ -219,6 +285,14 @@ pub mod renderer;
     feature = "backend-macos"
 ))]
 pub mod r3d;
+
+#[cfg(any(
+    feature = "real-window",
+    feature = "backend-x11",
+    feature = "backend-wlr",
+    feature = "backend-macos"
+))]
+pub mod cortex;
 
 pub mod backend;
 pub mod backends;

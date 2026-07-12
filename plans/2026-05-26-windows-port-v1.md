@@ -46,56 +46,95 @@ Windows, Windows-flavored Vulkan release variant.
 
 ### Phase 0 — Remote Windows dev environment (setup, no Fono code yet)
 
-- [ ] Task 0.1. **Confirm Windows host is reachable on LAN.** Document IP,
+- [x] Task 0.1. **Confirm Windows host is reachable on LAN.** Document IP,
       hostname, and Windows edition (Win 10 1809+ or Win 11) in `docs/build-windows.md`.
       Required: 64-bit, x86_64. Rationale: every later phase assumes the
       host exists and is addressable.
-- [ ] Task 0.2. **Enable OpenSSH Server on Windows.** Via
+      Done 2026-07-06: Windows 10 build 19045 (22H2), 64-bit, confirmed
+      reachable over SSH.
+- [x] Task 0.2. **Enable OpenSSH Server on Windows.** Via
       `Settings → Apps → Optional Features → Add → OpenSSH Server`, or
       PowerShell:
       `Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0`. Then
       `Set-Service sshd -StartupType Automatic; Start-Service sshd`. Open
       firewall: `New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH SSH Server' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22`.
       Rationale: native built-in service; no third-party install, no WSL.
-- [ ] Task 0.3. **Configure SSH key auth from Linux dev host.** Copy
+      Done 2026-07-06.
+- [x] Task 0.3. **Configure SSH key auth from Linux dev host.** Copy
       `~/.ssh/id_ed25519.pub` to `C:\Users\<user>\.ssh\authorized_keys` on
       Windows (case-sensitive filename, no extension). Permissions matter on
       Windows OpenSSH — run `icacls authorized_keys /inheritance:r /grant <user>:F`
       from an admin PowerShell. Disable password auth in `C:\ProgramData\ssh\sshd_config`
       (`PasswordAuthentication no`); restart sshd. Test `ssh win 'whoami'`
       from Linux returns the user name with no prompt.
-- [ ] Task 0.4. **Install Visual Studio Build Tools 2022 on Windows.**
+      Done 2026-07-06 (by the user, ahead of the agent session).
+- [x] Task 0.4. **Install Visual Studio Build Tools 2022 on Windows.**
       Download the standalone Build Tools installer from Microsoft; select
       the "Desktop development with C++" workload, which pulls in MSVC v143
       compiler, Windows 11 SDK (latest), CMake, and Ninja. Verify with
       `where cl.exe` and `cmake --version` in a `x64 Native Tools Command Prompt`.
       Rationale: `whisper-rs-sys` and `llama-cpp-sys-2` vendor C++ that needs
       MSVC; this is non-optional.
-- [ ] Task 0.5. **Install Rust MSVC toolchain on Windows.** `rustup-init.exe`,
+      Done 2026-07-06 (installer needed a human at the keyboard — SSH
+      sessions carry a UAC-filtered token even for admin accounts, so the
+      elevation prompt cannot be scripted). MSVC v14.44 (v143), Windows 11
+      SDK 10.0.26100.0, VS Build Tools 17.14 confirmed via `vswhere`.
+      **Gotcha found, not in the original task**: the VS-bundled CMake is
+      not on `PATH` outside a Native Tools prompt; added its bin dir to the
+      system `Path` explicitly. See `docs/build-windows.md`.
+- [x] Task 0.5. **Install Rust MSVC toolchain on Windows.** `rustup-init.exe`,
       accept defaults, host triple `x86_64-pc-windows-msvc`. Then
       `rustup component add clippy rustfmt`. Verify
       `rustc --version --verbose` reports `host: x86_64-pc-windows-msvc`.
-- [ ] Task 0.6. **Install rsync on Windows.** Easiest path: install Git for
+      Done 2026-07-06; `rustc 1.88` (per `rust-toolchain.toml`) confirmed
+      `host: x86_64-pc-windows-msvc`.
+      **Gotcha found, not in the original task**: bindgen (used by
+      `llama-cpp-sys-2`/`whisper-rs-sys`) needs `libclang.dll`, which VS
+      Build Tools does not bundle. Installed standalone LLVM and set
+      `LIBCLANG_PATH` system-wide. Also needed:
+      `LongPathsEnabled=1` (`HKLM\SYSTEM\CurrentControlSet\Control\FileSystem`)
+      plus `git config --global core.longpaths true` — the vendored
+      llama.cpp submodule checkout exceeds the legacy 260-char `MAX_PATH`.
+      See `docs/build-windows.md` for the full writeup.
+- [x] Task 0.6. **Install rsync on Windows.** Easiest path: install Git for
       Windows (includes `rsync.exe` in recent versions). Alternative: MSYS2
       with `pacman -S rsync`. Confirm `ssh win 'rsync --version'` from Linux.
-- [ ] Task 0.7. **Install `cargo-xwin` on Linux dev host** for cross-compile
+      Done 2026-07-06 via MSYS2 (`pacman -S rsync openssh`) — current Git
+      for Windows no longer bundles `rsync.exe`, contrary to this task's
+      assumption.
+- [x] Task 0.7. **Install `cargo-xwin` on Linux dev host** for cross-compile
       iteration. `cargo install cargo-xwin`. Add the target on Linux:
       `rustup target add x86_64-pc-windows-msvc`. Rationale: ~80 % of porting
       work doesn't need a Windows runtime to validate; cross-compile catches
       compile errors in seconds instead of seconds-plus-rsync.
-- [ ] Task 0.8. **Create the remote helper script.** Add
+      Done 2026-07-06; smoke-tested with `cargo xwin build --target
+      x86_64-pc-windows-msvc -p fono-core` (clean compile).
+- [x] Task 0.8. **Create the remote helper script.** Add
       `scripts/win-remote.sh` (Linux-side, marked executable) with three
       subcommands: `push` (rsync to win), `build` (push + ssh cargo build),
       `test` (push + ssh cargo test). Excludes: `target/`, `.git/`,
       `models/`, `*.wav`, large bench output. Document in
       `docs/build-windows.md`.
-- [ ] Task 0.9. **First end-to-end smoke through the remote pipeline.** From
+      Done 2026-07-06, modeled on `scripts/mac-remote.sh`; also resolves
+      `ORT_LIB_LOCATION` on each push-based command via
+      `scripts/fetch-onnxruntime.sh` run remotely through MSYS bash.
+- [x] Task 0.9. **First end-to-end smoke through the remote pipeline.** From
       Linux: `./scripts/win-remote.sh push && ssh win 'cd fono && cargo --version'`.
       Confirms rsync works, ssh works, cargo is on Windows PATH, target
       directory mounts cleanly. No actual Fono build yet — just the plumbing.
+      Done 2026-07-06, and taken further: `fono-core` (including the
+      `llama-local` feature — full MSBuild/cmake C++ compile) builds
+      cleanly natively on Windows after fixing a genuine cross-platform
+      bindgen ABI bug (`crates/fono-core/src/brain_tap.rs`, see
+      `docs/status.md`). `cargo build/check -p fono` (the full binary)
+      fails exactly at the Phase 1 boundary (`fono-ipc`'s Unix sockets,
+      `fono-inject::focus`'s Unix socket import) — expected, not a setup
+      gap. See `docs/build-windows.md` for full detail.
 
 **Phase 0 gate**: `ssh win 'cd fono && cargo --version && cl.exe /?'` runs
 without error from the Linux dev host. `docs/build-windows.md` exists.
+
+**Phase 0 status: COMPLETE (2026-07-06).**
 
 ### Phase 1 — Linux-only trait refactor (zero behaviour change)
 

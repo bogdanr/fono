@@ -225,6 +225,7 @@ pub const WAVEFORM_STYLES: &[(&str, &str)] = &[
     ("transcript", "Transcript"),
     ("terrain3d", "Terrain 3D"),
     ("system360", "System/360"),
+    ("cortex", "Glass Cortex"),
 ];
 
 /// Auto-stop silence presets surfaced in the tray's radio group.

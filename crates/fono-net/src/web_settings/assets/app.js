@@ -105,6 +105,7 @@ const OVERLAY_STYLES = [
   ['bars', 'Bars', 'p-bars', ''], ['oscilloscope', 'Oscilloscope', 'p-osc', ''],
   ['fft', 'FFT', 'p-fft', ''], ['heatmap', 'Heatmap', 'p-heat', ''],
   ['terrain3d', '3D Terrain', 'p-terr', ''], ['system360', 'System/360', 'p-dots', ''],
+  ['cortex', 'Glass Cortex', 'p-terr', 'LLM brain view'],
   ['transcript', 'Transcript', 'p-text', 'more CPU/API'],
 ];
 function pname(list, id) { const p = list.find((x) => x[0] === id); return p ? p[1] : id; }

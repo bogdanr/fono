@@ -1,5 +1,136 @@
 # Fono — Project Status
-Last updated: 2026-07-04
+Last updated: 2026-07-06
+
+## 2026-07-06 — Windows port Phase 0 complete: remote dev environment live
+
+Phase 0 of `plans/2026-05-26-windows-port-v1.md` (Tasks 0.1–0.9) executed
+end-to-end against a real Windows 10 box (build 19045/22H2) reachable over
+SSH, and gate-verified beyond the original scope. `docs/build-windows.md` is
+the new authoritative reference; see it for full detail.
+
+- **Toolchain installed and verified**: OpenSSH Server + key auth (user-side,
+  ahead of the session), Visual Studio Build Tools 2022 ("Desktop development
+  with C++": MSVC v14.44/v143, Windows 11 SDK 10.0.26100.0, CMake, verified
+  via `vswhere`), Rust 1.88 (`x86_64-pc-windows-msvc` host, clippy+rustfmt),
+  rsync via MSYS2 (`pacman -S rsync openssh` — current Git for Windows no
+  longer bundles `rsync.exe`, unlike the plan's assumption), `cargo-xwin` +
+  the `x86_64-pc-windows-msvc` target on the Linux side.
+- **Three gotchas found and fixed that the original plan didn't call out**:
+  (1) VS Build Tools does not bundle `libclang.dll`, but bindgen
+  (`llama-cpp-sys-2`/`whisper-rs-sys`) needs it — installed standalone LLVM,
+  set `LIBCLANG_PATH` system-wide; (2) the VS-bundled CMake isn't on `PATH`
+  outside a Native Tools prompt — added its bin dir to the system `Path`
+  explicitly; (3) the vendored `llama.cpp` submodule checkout exceeds the
+  legacy 260-char `MAX_PATH` — fixed via `git config --global core.longpaths
+  true` **and** `LongPathsEnabled=1` under
+  `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem` (git's setting alone
+  isn't sufficient). All three were done entirely over SSH with no GUI
+  session; only the VS Build Tools installer itself needed a human at the
+  keyboard (SSH sessions carry a UAC-filtered token even for admin accounts,
+  confirmed by a failed `SYSTEM`-context scheduled-task workaround, exit code
+  87 both ways).
+- **`scripts/win-remote.sh` added**, modeled on `scripts/mac-remote.sh`
+  (`push`/`check`/`build`/`test`/`cargo`/`sh` over rsync+ssh, `FONO_WIN_HOST`
+  never committed), with one Windows-specific addition: it resolves
+  `ORT_LIB_LOCATION` on every push-based command by running
+  `scripts/fetch-onnxruntime.sh` remotely through MSYS bash (a bare
+  `cmd.exe` session lacks `curl`/`xz`/`sha256sum`) — cheap, idempotent,
+  cached after the first run. Also documented a `cmd.exe` `set` quoting trap:
+  `set VAR=value && next` bakes the space before `&&` into the value.
+- **Went beyond plumbing to a real native build**: `fono-core`, including the
+  `llama-local` feature (full MSBuild/cmake C++ compile of the embedded
+  llama.cpp backend), builds cleanly natively on Windows. Along the way, hit
+  and fixed a genuine cross-platform ABI bug in
+  `crates/fono-core/src/brain_tap.rs`: `(*tensor).type_` is a bindgen alias
+  for a C enum's underlying integer type, which is ABI-dependent — Itanium
+  (Linux/macOS) picks `unsigned int` for an all-non-negative enum, the
+  Microsoft ABI (Windows/MSVC) always uses `int` — so the same header
+  produces `u32` on Linux and `i32` on Windows. Fixed by comparing through
+  `i64` (new `ggml_type_is()` helper, `i64::from()` on both sides) instead of
+  direct equality against a fixed-signedness constant. Verified: all 7
+  `brain_tap` tests pass on Linux; fmt/clippy clean (the file's one
+  pre-existing `cognitive_complexity` lint on an unrelated test function
+  predates this change — confirmed via `git stash`, left alone).
+- **Confirmed the Phase 1 boundary**: `cargo build/check -p fono` (the full
+  binary, not just `fono-core`) fails exactly where the design plan's
+  Phase 1 trait-split targets — `fono-ipc` unconditionally imports
+  `tokio::net::{UnixListener, UnixStream}`, and `fono-inject::focus`
+  unconditionally imports `std::os::unix::net::UnixStream` (the sway/i3 IPC
+  probe, missing the `#[cfg(unix)]`/`target_os = "linux"` gate the file's
+  sibling modules already use). This is the environment doing its job, not a
+  setup gap — Phase 1 is the next real work item.
+
+Gate: Phase 0 marked complete in the plan with per-task provenance notes;
+`docs/build-windows.md` created. Next: Phase 1 (Linux-only trait refactor —
+zero Windows code, zero risk to the Linux build).
+
+## 2026-07-05 — Brain visualization Phase 2 complete: the Glass Cortex renderer
+
+Phase 2 of `plans/2026-07-05-brain-visualization-v1.md` (Tasks 2.1–2.6)
+executed and gates green. The new `cortex` overlay style renders one
+continuous scene across the whole voice pipeline — listening (mic FFT on the
+layer grid), thinking (real prefill sweep + TTFT breathing), answering
+(per-token layer activity replayed in sync with TTS playback). Zero new
+crates, no assets.
+
+- **Style + wiring (Task 2.1):** `WaveformStyle::Cortex` threaded through
+  config, tray menu, daemon style cycling, web settings, session ambient
+  driver, MCP voice I/O, and the renderer dispatch.
+- **Renderer (Tasks 2.2–2.3):** `fono-overlay/src/cortex.rs` — horizontal
+  layer spine (one ring per real transformer layer, count from `n_layer()`),
+  grazing camera with parallax drift, additive two-lobe glows accumulated in
+  a downsampled emissive buffer with dirty-region tracking, block-skipping
+  separable-bilinear composite, heat trace, uncertainty ribbon, HUD arcs
+  (tok/s + KV fill).
+- **Replay engine (Task 2.4):** `BrainKeyframe`s recorded during the
+  generation burst replay time-stretched against the TTS playback clock —
+  bead crest ≈ spoken word; keyframe interpolation keeps sparse sampling
+  fluid.
+- **Phase machine (Task 2.5):** listen → think → answer morphs; prefill
+  sweep driven by real batch-decode progress published from both embedded
+  paths; breathing loop covers the TTFT gap and any data-free stretch.
+- **Validation (Task 2.6):** capture gate 0.955 % ≤ 1 % (default dense
+  model, 35/35 layers; second GGUF with different `n_layer` also verified);
+  frame gate via `examples/cortex_frame_bench.rs` — 1.9 ms mean at the
+  640×240 max panel vs terrain baseline 1.6 ms (~4 ms envelope), 4.3 ms at
+  2× HiDPI (4× the reference pixels). Size budget 21.31 MiB ≤ 25 MiB,
+  NEEDED allowlist clean. Live sync-feel check on the desktop remains a
+  user-run item.
+
+Gate green: fmt, clippy `-D warnings`, workspace tests, size budget. Next:
+Phase 3 (MoE extras — contingent on an MoE model landing) or Phase 4 ship
+polish (docs, tray label, trace persistence hook).
+
+## 2026-07-05 — Brain visualization Phase 1 complete: capture spike proves the < 1 % budget
+
+New plan `plans/2026-07-05-brain-visualization-v1.md` (the "Glass Cortex"
+overlay style — a truthful visualization of the local LLM's forward pass);
+Phase 1 (Tasks 1.1–1.5) executed and gate-PASSED. Zero new crates.
+
+- **`fono_core::brain_tap` (Tasks 1.1–1.2):** a `cb_eval` shim that writes the
+  eval callback directly into the `llama_cpp_sys_2::llama_context_params`
+  behind `llama_cpp_2`'s `LlamaContextParams` (one contained unsafe block, no
+  crate patch). `BrainKeyframe` carries per-layer hidden-state norms (rotating
+  `LAYER_STRIDE` residue classes to cap per-sample graph splits), MoE routed
+  expert IDs + weights, and sampler-side top-token probability + entropy, into
+  a bounded drop-oldest ring that never blocks the decode thread.
+- **Tensor matching (Task 1.3):** name-pattern rules (`l_out-<i>`,
+  `ffn_moe_topk-<i>`, `ffn_moe_weights-<i>`) verified against the vendored
+  llama.cpp graph sources; the bench validates 35/35 nonzero layer norms on
+  the shipped Gemma E2B dense model.
+- **Overhead gate (Task 1.4):** `examples/brain_tap_bench.rs` + a
+  `SampleGovernor` (per-token EMA cost model, auto-widening sample interval).
+  The enforced gate is the governor's within-run sampled-vs-plain estimate
+  (immune to the reference laptop's ±20 % thermal drift): **amortized
+  0.89–0.94 % ≤ 1 % budget — PASS** across repeated runs; warm-machine
+  wall-clock active median +0.13 %, dormant ≈ 0.
+- **Wiring (Task 1.5):** both embedded paths (assistant + polish
+  `llama_local.rs`) install the tap via a shared `decode_token_with_tap`
+  helper, gated on new config `[overlay] brain_capture` (default off ⇒ null
+  callback, no allocation, zero cost).
+
+Gate green: fmt, clippy `-D warnings`, workspace tests. Next: Phase 2 — the
+Glass Cortex renderer (new overlay style, replay engine synced to TTS).
 
 ## 2026-07-04 — macOS: extra pre-push verification + honest README/CHANGELOG wording
 

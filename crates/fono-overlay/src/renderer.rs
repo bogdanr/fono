@@ -222,6 +222,28 @@ pub fn blend(bg: u32, fg: u32, coverage_alpha: u8) -> u32 {
     (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b
 }
 
+/// Blend a translucent dark rectangle over `(x0..x1, y0..y1)` — the
+/// label scrim (plan Task B3). Darkens whatever is underneath (the
+/// bright grid) without erasing it, so the status label stays legible
+/// while the visualisation still shows through faintly. Preserves the
+/// premultiplied invariant (black source only scales existing
+/// channels down).
+fn darken_rect(buf: &mut [u32], stride: u32, h: u32, x0: f32, y0: f32, x1: f32, y1: f32) {
+    let xi0 = x0.max(0.0) as i32;
+    let xi1 = (x1.min(stride as f32)) as i32;
+    let yi0 = y0.max(0.0) as i32;
+    let yi1 = (y1.min(h as f32)) as i32;
+    for y in yi0..yi1 {
+        let row = y as u32 * stride;
+        for x in xi0..xi1 {
+            let idx = (row + x as u32) as usize;
+            if let Some(slot) = buf.get_mut(idx) {
+                *slot = blend(*slot, 0xB000_0000, 255);
+            }
+        }
+    }
+}
+
 /// Draw a filled rounded rectangle with anti-aliased corners.
 pub fn fill_round_rect(
     buf: &mut [u32],
@@ -1646,6 +1668,11 @@ pub struct RendererState {
     pub fft_frames: VecDeque<Vec<f32>>,
     pub heatmap_cache: Vec<u32>,
     pub heatmap_cache_dim: (u32, u32),
+    /// Animated state for the Glass Cortex style (heat trace +
+    /// smoothed per-layer activation). Advanced from the FFT push
+    /// path, read by the redraw dispatch — same update/read split
+    /// as the heatmap cache.
+    pub cortex: crate::cortex::CortexState,
     /// Reference instant captured at renderer construction. The 3D
     /// styles (Lissajous, terrain, blob) derive their auto-rotation
     /// phase and synthetic-idle ripple from
@@ -1669,6 +1696,7 @@ impl RendererState {
             fft_frames: VecDeque::with_capacity(FFT_FRAMES_CAP),
             heatmap_cache: Vec::new(),
             heatmap_cache_dim: (0, 0),
+            cortex: crate::cortex::CortexState::default(),
             start_instant: std::time::Instant::now(),
         }
     }
@@ -1690,6 +1718,10 @@ impl RendererState {
 
     pub fn set_state(&mut self, state: OverlayState) {
         self.state = state;
+        // The cortex replay engine keys its phase machine (listening /
+        // thinking / answering) off the overlay state — notify it on
+        // every transition (cheap; a no-op for other styles' data).
+        self.cortex.on_state(state);
     }
 
     /// Update transcript text. Returns true if the text changed
@@ -1719,10 +1751,38 @@ impl RendererState {
     }
 
     pub fn push_fft_bins(&mut self, bins: Vec<f32>) {
+        if matches!(self.style, WaveformStyle::Cortex) {
+            self.cortex.tick(&bins);
+        }
         if self.fft_frames.len() == FFT_FRAMES_CAP {
             self.fft_frames.pop_front();
         }
         self.fft_frames.push_back(bins);
+    }
+
+    /// Apply a Glass Cortex replay command. Returns `true` when the
+    /// active style is `Cortex` (caller may schedule a redraw).
+    pub fn push_cortex_cmd(&mut self, cmd: crate::CortexCmd) -> bool {
+        self.cortex.apply(cmd);
+        matches!(self.style, WaveformStyle::Cortex)
+    }
+
+    /// Whether the active style needs the backend to pump frames on a
+    /// timer (no external data push will otherwise trigger repaints).
+    /// True only for the Glass Cortex thinking/speaking phases while
+    /// visible — listening self-drives from mic FFT and Idle is static.
+    pub fn wants_animation_frame(&self) -> bool {
+        matches!(self.style, WaveformStyle::Cortex)
+            && self.is_visible()
+            && self.cortex.needs_animation_frames()
+    }
+
+    /// Advance the Glass Cortex animation clock one frame (timer-driven
+    /// tick for the thinking/speaking phases). No-op for other styles.
+    pub fn animation_tick(&mut self) {
+        if matches!(self.style, WaveformStyle::Cortex) {
+            self.cortex.tick(&[]);
+        }
     }
 
     /// Idempotent style swap. Returns `(changed, crossed_text_boundary)`.
@@ -1747,6 +1807,7 @@ impl RendererState {
         self.fft_frames.clear();
         self.heatmap_cache.clear();
         self.heatmap_cache_dim = (0, 0);
+        self.cortex.clear();
     }
 
     pub fn set_volume_bar(&mut self, mode: fono_core::config::VolumeBarMode) -> bool {
@@ -1815,6 +1876,7 @@ impl RendererState {
                 | WaveformStyle::Heatmap
                 | WaveformStyle::Terrain3d
                 | WaveformStyle::System360
+                | WaveformStyle::Cortex
         ) || matches!(
             (self.style, self.state),
             (
@@ -1830,6 +1892,98 @@ impl RendererState {
     /// Whether a fresh PCM sample push should trigger a redraw.
     pub fn samples_push_needs_redraw(&self) -> bool {
         matches!(self.style, WaveformStyle::Oscilloscope)
+    }
+
+    /// Draw the status label (top-left). `backing = true` paints a
+    /// soft scrim + drop shadow under the text first, so it stays
+    /// readable when a full-panel visualisation (Cortex) has already
+    /// painted a bright grid across the label row (plan Task B3).
+    fn draw_status_label(
+        &self,
+        buf: &mut [u32],
+        w: u32,
+        h: u32,
+        scale: f32,
+        font: &ab_glyph::FontArc,
+        accent: u32,
+        backing: bool,
+    ) {
+        let label = state_label(self.state);
+        if label.is_empty() {
+            return;
+        }
+        let pad_x = (PADDING_X + ACCENT_WIDTH) * scale;
+        let pad_top = PADDING_TOP * scale;
+        let status_baseline = pad_top + STATUS_FONT_PX * scale * 0.85;
+        let size = STATUS_FONT_PX * scale;
+        if backing {
+            use ab_glyph::{Font, ScaleFont};
+            let scaled = font.as_scaled(size);
+            let text_w: f32 = label.chars().map(|c| scaled.h_advance(font.glyph_id(c))).sum();
+            // Subtle darkened backing behind just the label so the
+            // bright grid underneath doesn't bury it.
+            darken_rect(
+                buf,
+                w,
+                h,
+                pad_x - 5.0 * scale,
+                pad_top - 3.0 * scale,
+                pad_x + text_w + 6.0 * scale,
+                status_baseline + STATUS_FONT_PX * scale * 0.35,
+            );
+            // Soft drop shadow: an offset dark copy under the glyphs.
+            draw_line(
+                buf,
+                w,
+                h,
+                font,
+                label,
+                0xCC00_0000,
+                size,
+                pad_x + scale,
+                status_baseline + scale,
+            );
+        }
+        if let OverlayState::Pondering { walk_progress, .. }
+        | OverlayState::AssistantPondering { walk_progress, .. } = self.state
+        {
+            draw_line_with_highlight(
+                buf,
+                w,
+                h,
+                font,
+                label,
+                COLOR_TEXT_DIM,
+                COLOR_PONDER_HIGHLIGHT,
+                pondering_highlight_idx(walk_progress),
+                size,
+                pad_x,
+                status_baseline,
+            );
+        } else if let OverlayState::Polishing { phase, walk_progress } = self.state {
+            draw_line_with_highlight_alpha(
+                buf,
+                w,
+                h,
+                font,
+                label,
+                COLOR_TEXT_DIM,
+                accent,
+                polishing_highlight_idx(phase, walk_progress),
+                polishing_terminal_pulse_alpha(
+                    walk_progress,
+                    self.start_instant.elapsed().as_secs_f32(),
+                ),
+                size,
+                pad_x,
+                status_baseline,
+            );
+        } else {
+            // On a scrim the dim text tone loses contrast; lift it to
+            // the full-brightness text colour when backed.
+            let color = if backing { COLOR_TEXT } else { COLOR_TEXT_DIM };
+            draw_line(buf, w, h, font, label, color, size, pad_x, status_baseline);
+        }
     }
 
     /// Synchronous full-frame redraw into `buf` at `(w, h)` physical
@@ -1859,58 +2013,6 @@ impl RendererState {
         };
         let pad_x = (PADDING_X + ACCENT_WIDTH) * scale;
         let pad_top = PADDING_TOP * scale;
-        let label = state_label(self.state);
-        // Status label is drawn first so the visualisation paints on top of it.
-        if !label.is_empty() {
-            let status_baseline = pad_top + STATUS_FONT_PX * scale * 0.85;
-            if let OverlayState::Pondering { walk_progress, .. }
-            | OverlayState::AssistantPondering { walk_progress, .. } = self.state
-            {
-                draw_line_with_highlight(
-                    buf,
-                    w,
-                    h,
-                    font,
-                    label,
-                    COLOR_TEXT_DIM,
-                    COLOR_PONDER_HIGHLIGHT,
-                    pondering_highlight_idx(walk_progress),
-                    STATUS_FONT_PX * scale,
-                    pad_x,
-                    status_baseline,
-                );
-            } else if let OverlayState::Polishing { phase, walk_progress } = self.state {
-                draw_line_with_highlight_alpha(
-                    buf,
-                    w,
-                    h,
-                    font,
-                    label,
-                    COLOR_TEXT_DIM,
-                    accent,
-                    polishing_highlight_idx(phase, walk_progress),
-                    polishing_terminal_pulse_alpha(
-                        walk_progress,
-                        self.start_instant.elapsed().as_secs_f32(),
-                    ),
-                    STATUS_FONT_PX * scale,
-                    pad_x,
-                    status_baseline,
-                );
-            } else {
-                draw_line(
-                    buf,
-                    w,
-                    h,
-                    font,
-                    label,
-                    COLOR_TEXT_DIM,
-                    STATUS_FONT_PX * scale,
-                    pad_x,
-                    status_baseline,
-                );
-            }
-        }
         let text_top = pad_top + STATUS_FONT_PX * scale + STATUS_TO_TEXT * scale;
         let waveform_active = !is_text_style(self.style)
             && matches!(
@@ -1924,6 +2026,14 @@ impl RendererState {
                     | OverlayState::AssistantSpeaking
                     | OverlayState::Polishing { .. }
             );
+        // Full-panel visualisations (Cortex) paint the whole strip
+        // including the label row, so the status label is drawn LAST
+        // (on top) with a scrim + soft shadow. Every other style keeps
+        // the label first, underneath the visualisation (plan Task B3).
+        let label_last = waveform_active && matches!(self.style, WaveformStyle::Cortex);
+        if !label_last {
+            self.draw_status_label(buf, w, h, scale, font, accent, false);
+        }
         if waveform_active {
             let x0 = (PADDING_X + ACCENT_WIDTH) * scale;
             let x1 = w as f32 - PADDING_X * scale;
@@ -2107,6 +2217,26 @@ impl RendererState {
                         scale,
                     );
                 }
+                WaveformStyle::Cortex => {
+                    let elapsed_secs = self.start_instant.elapsed().as_secs_f32();
+                    crate::cortex::draw_cortex(
+                        buf,
+                        w,
+                        h,
+                        &self.cortex,
+                        x0,
+                        x1,
+                        y_top,
+                        y_bot,
+                        accent,
+                        scale,
+                        elapsed_secs,
+                    );
+                }
+            }
+            // Full-panel styles: label on top of the visualisation.
+            if label_last {
+                self.draw_status_label(buf, w, h, scale, font, accent, true);
             }
         } else if !self.wrapped.is_empty() {
             let mut baseline = text_top + TEXT_FONT_PX * scale * 0.85;
@@ -2245,6 +2375,34 @@ mod tests {
         assert!(s.set_volume_bar(VolumeBarMode::Simple));
         assert!(!s.set_volume_bar(VolumeBarMode::Simple));
         assert!(s.set_volume_bar(VolumeBarMode::Advanced));
+    }
+
+    #[test]
+    fn config_vu_bar_still_draws_when_enabled() {
+        // Regression guard (plan Task B2): the config-driven VU bar in
+        // the right margin must keep drawing. The cortex redesign must
+        // never touch this path — assert both the simple bar and the
+        // advanced bar (with its green voiced / amber silence ticks)
+        // paint pixels.
+        const W: u32 = 200;
+        const H: u32 = 60;
+        let x_right = W as f32;
+        let y_top = 4.0;
+        let y_bot = H as f32 - 4.0;
+        let accent = 0xFF38_BDF8;
+
+        // Simple bar with a mid level.
+        let mut buf = vec![0u32; (W * H) as usize];
+        draw_vu_bar(&mut buf, W, H, 0.6, x_right, y_top, y_bot, accent, 1.0);
+        assert!(buf.iter().any(|&p| p != 0), "simple VU bar must paint pixels");
+
+        // Advanced bar with a live level + reference ticks.
+        let mut buf = vec![0u32; (W * H) as usize];
+        let metrics = GateMetrics { inst_rms: 0.3, voiced_rms: 0.2, silence_rms: 0.02 };
+        draw_vu_bar_advanced(&mut buf, W, H, 0.6, x_right, y_top, y_bot, accent, 1.0, metrics);
+        assert!(buf.iter().any(|&p| p != 0), "advanced VU bar must paint pixels");
+        assert!(buf.contains(&VOICED_TICK_COLOR), "green voiced tick must render");
+        assert!(buf.contains(&SILENCE_TICK_COLOR), "amber silence tick must render");
     }
 
     #[test]

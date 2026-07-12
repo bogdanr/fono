@@ -151,6 +151,10 @@ pub enum OverlayCmd {
         silence_rms: f32,
     },
     SetWaveformStyle(WaveformStyle),
+    /// Glass Cortex replay data (see [`crate::CortexCmd`]): reply
+    /// lifecycle, captured keyframes, and the audio timeline the
+    /// renderer paces the replay against.
+    Cortex(crate::CortexCmd),
     Shutdown,
 }
 
@@ -263,6 +267,13 @@ impl OverlayHandle {
 
     pub fn set_waveform_style(&self, style: WaveformStyle) {
         self.send(OverlayCmd::SetWaveformStyle(style));
+    }
+
+    /// Push a Glass Cortex replay command (reply lifecycle, keyframe,
+    /// audio-timeline update). Ignored by styles other than
+    /// `WaveformStyle::Cortex`.
+    pub fn push_cortex(&self, cmd: crate::CortexCmd) {
+        self.send(OverlayCmd::Cortex(cmd));
     }
 
     pub fn shutdown(&self) {

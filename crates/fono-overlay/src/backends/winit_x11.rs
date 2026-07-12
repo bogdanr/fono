@@ -333,6 +333,14 @@ fn run_event_loop(
                             needs_redraw = true;
                         }
                     }
+                    OverlayCmd::Cortex(cmd) => {
+                        if self.renderer.push_cortex_cmd(cmd)
+                            && self.window.is_some()
+                            && self.renderer.is_visible()
+                        {
+                            needs_redraw = true;
+                        }
+                    }
                     OverlayCmd::Shutdown => {
                         el.exit();
                         return;
@@ -352,6 +360,20 @@ fn run_event_loop(
                 // RedrawRequested path under transparent
                 // override-redirect windows.
                 redraw(self);
+            }
+            // Self-driven animation pump: the Glass Cortex thinking /
+            // speaking phases animate with no incoming data to trigger
+            // repaints, so drive them on a ~30 fps timer. Idle,
+            // listening (mic-FFT driven) and other styles fall back to
+            // `Wait` so a static overlay costs zero CPU.
+            if self.renderer.wants_animation_frame() && self.window.is_some() {
+                self.renderer.animation_tick();
+                redraw(self);
+                el.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                    std::time::Instant::now() + std::time::Duration::from_millis(33),
+                ));
+            } else {
+                el.set_control_flow(winit::event_loop::ControlFlow::Wait);
             }
         }
     }

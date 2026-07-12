@@ -230,6 +230,9 @@ fn build_local(cfg: &Polish, polish_models_dir: &Path) -> Result<Arc<dyn TextFor
     } else {
         crate::llama_local::LlamaLocal::new(model_path, cfg.local.context)
     };
+    // Glass Cortex keyframe capture — off unless the daemon armed the
+    // process-wide latch from `[overlay].brain_capture`.
+    let backend = backend.with_brain_tap(fono_core::brain_tap::capture_enabled());
     Ok(Arc::new(backend))
 }
 

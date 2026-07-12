@@ -358,6 +358,14 @@ fn run_loop(
         if drain.needs_redraw && state.renderer.is_visible() {
             state.paint();
         }
+        // Self-driven animation pump: the Glass Cortex thinking /
+        // speaking phases animate with no incoming data to trigger
+        // repaints. The loop already wakes every 16 ms via
+        // `poll_event_sources`, so tick + paint when the scene needs it.
+        if state.renderer.wants_animation_frame() && state.renderer.is_visible() {
+            state.renderer.animation_tick();
+            state.paint();
+        }
 
         if state.exit {
             break;

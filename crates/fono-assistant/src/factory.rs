@@ -549,11 +549,16 @@ fn build_embedded_local(
     // fully-saturated decode (see `streaming_decode_threads`; the same trick
     // recovered F7 dictation from ~13 to ~26 tok/s). Falls back to all cores on
     // ≤2-core hosts.
-    Ok(Arc::new(crate::llama_local::LlamaLocalAssistant::with_threads(
-        model_path,
-        cfg.local.context,
-        fono_core::llama_backend::streaming_decode_threads(),
-    )))
+    Ok(Arc::new(
+        crate::llama_local::LlamaLocalAssistant::with_threads(
+            model_path,
+            cfg.local.context,
+            fono_core::llama_backend::streaming_decode_threads(),
+        )
+        // Glass Cortex keyframe capture — off unless the daemon armed
+        // the process-wide latch from `[overlay].brain_capture`.
+        .with_brain_tap(fono_core::brain_tap::capture_enabled()),
+    ))
 }
 
 #[cfg(not(feature = "llama-local"))]

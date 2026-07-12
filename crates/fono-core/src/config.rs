@@ -1075,6 +1075,14 @@ pub enum WaveformStyle {
     /// as `Fft` / `Heatmap` / `Terrain3d`).
     #[serde(rename = "system360")]
     System360,
+    /// "Glass Cortex" — a truthful visualization of the local LLM's
+    /// forward pass. One continuous scene: listening (live mic FFT
+    /// on the layer grid), thinking (prefill sweep + breathing),
+    /// answering (per-token layer activity replayed in sync with TTS
+    /// playback, from `fono_core::brain_tap` keyframes). Falls back
+    /// to the audio-driven phases when no embedded LLM is active.
+    /// Reuses the FFT capture tap for the listening phase.
+    Cortex,
 }
 
 impl WaveformStyle {
@@ -1118,6 +1126,18 @@ pub struct Overlay {
     /// `volume_bar = true` to `volume_bar = "simple"` and
     /// `volume_bar = false` to `volume_bar = "off"`.
     pub volume_bar: VolumeBarMode,
+    /// Capture per-token "brain" keyframes (layer activations, MoE
+    /// router choices, token confidence) from the **embedded** local
+    /// LLM backends to drive the Glass Cortex visualization (see
+    /// `plans/2026-07-05-brain-visualization-v1.md`). Off by default:
+    /// when `false` no eval callback is ever installed and the decode
+    /// path is byte-for-byte the same as before the feature existed.
+    /// When `true`, capture is sparse (a few keyframes per second of
+    /// TTS playback) and self-limits to < 1 % decode overhead.
+    /// Cloud/Ollama-server backends have no brain data to capture and
+    /// ignore this flag. Takes effect on daemon start or config
+    /// reload.
+    pub brain_capture: bool,
 }
 
 /// VU-bar rendering flavour. See [`Overlay::volume_bar`].
@@ -1152,6 +1172,7 @@ impl Default for Overlay {
             waveform: true,
             style: WaveformStyle::default(),
             volume_bar: VolumeBarMode::default(),
+            brain_capture: false,
         }
     }
 }

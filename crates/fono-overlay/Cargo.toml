@@ -12,6 +12,18 @@ repository.workspace = true
 [lints]
 workspace = true
 
+# Frame-budget microbenchmark for the Glass Cortex renderer (plan
+# Task 2.6). Dev-only; never ships in the binary.
+[[example]]
+name = "cortex_frame_bench"
+required-features = ["backend-x11"]
+
+# Offline visual gallery: renders every Synapse Lattice phase to PPM
+# frames for look iteration. Dev-only; never ships in the binary.
+[[example]]
+name = "cortex_gallery"
+required-features = ["backend-x11"]
+
 [features]
 # Default build is the slim, no-graphics-deps headless stub. The
 # desktop daemon ships with `real-window` enabled (which in turn

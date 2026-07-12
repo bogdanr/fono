@@ -229,6 +229,11 @@ pub fn drain_commands(rx: &Receiver<OverlayCmd>, renderer: &mut RendererState) -
                     needs_redraw = true;
                 }
             }
+            Ok(OverlayCmd::Cortex(cmd)) => {
+                if renderer.push_cortex_cmd(cmd) && renderer.is_visible() {
+                    needs_redraw = true;
+                }
+            }
             Ok(OverlayCmd::Shutdown) => {
                 exit = true;
                 break;

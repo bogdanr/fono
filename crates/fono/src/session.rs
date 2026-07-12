@@ -707,6 +707,36 @@ pub struct SessionOrchestrator {
     held_flags: fono_hotkey::KeyHeldFlags,
 }
 
+/// Convert one brain-trace bus event into the overlay's Glass Cortex
+/// replay command (pure field mapping — `fono-core` cannot depend on
+/// `fono-overlay`, so the two mirror types meet here).
+#[cfg(all(feature = "interactive", feature = "llama-local"))]
+fn cortex_cmd_from_brain_event(ev: fono_core::brain_tap::BrainEvent) -> fono_overlay::CortexCmd {
+    use fono_core::brain_tap::BrainEvent as E;
+    match ev {
+        E::ReplyBegin { n_layer } => fono_overlay::CortexCmd::ReplyBegin { n_layer },
+        E::Prefill { n_tokens } => fono_overlay::CortexCmd::Prefill { n_tokens },
+        E::Frame(f) => fono_overlay::CortexCmd::Frame(fono_overlay::CortexFrame {
+            token_index: f.token_index,
+            layer_norms: f.layer_norms,
+            experts: f
+                .experts
+                .into_iter()
+                .map(|e| fono_overlay::CortexExperts {
+                    layer: e.layer,
+                    ids: e.ids,
+                    weights: e.weights,
+                })
+                .collect(),
+            token_prob: f.token_prob,
+            entropy_bits: f.entropy_bits,
+        }),
+        E::ReplyEnd { total_tokens, gen_ms, ctx_used, ctx_capacity } => {
+            fono_overlay::CortexCmd::ReplyEnd { total_tokens, gen_ms, ctx_used, ctx_capacity }
+        }
+    }
+}
+
 impl SessionOrchestrator {
     /// Construct from a fresh config + secrets, building both backends.
     /// Returns an error if the STT factory fails — the daemon should
@@ -723,6 +753,11 @@ impl SessionOrchestrator {
         let stt =
             fono_stt::build_stt(&config.stt, &config.general, secrets, &paths.whisper_models_dir())
                 .context("build STT backend")?;
+        // Arm (or keep disarmed) the Glass Cortex capture latch before
+        // any embedded LLM backend is constructed — the polish and
+        // assistant factories read it at build time.
+        #[cfg(feature = "llama-local")]
+        fono_core::brain_tap::set_capture_enabled(config.overlay.brain_capture);
         let polish =
             match fono_polish::build_polish(&config.polish, secrets, &paths.polish_models_dir()) {
                 Ok(opt) => opt,
@@ -947,6 +982,22 @@ impl SessionOrchestrator {
                 }
                 None => {}
             }
+            // Bridge the brain-trace bus onto the overlay: every event
+            // published by the embedded LLM decode loops is forwarded
+            // to the Glass Cortex replay engine. The sink runs on the
+            // decode thread, so it does the minimum — snapshot the
+            // handle (cheap clones) and push onto the overlay's mpsc.
+            // With no overlay (or capture disabled ⇒ no events) this
+            // is inert.
+            #[cfg(feature = "llama-local")]
+            {
+                let overlay = Arc::clone(&orch.overlay);
+                fono_core::brain_tap::set_event_sink(Some(Arc::new(move |ev| {
+                    if let Some(h) = overlay.read().ok().and_then(|g| g.clone()) {
+                        h.push_cortex(cortex_cmd_from_brain_event(ev));
+                    }
+                })));
+            }
         }
         // Latency plan L2/L3/L5 — pay TLS handshake, mmap, and inject
         // backend page-cache costs at daemon startup so the first
@@ -978,6 +1029,10 @@ impl SessionOrchestrator {
         let new_stt =
             fono_stt::build_stt(&cfg.stt, &cfg.general, &secrets, &paths.whisper_models_dir())
                 .context("reload: build STT")?;
+        // Re-arm the Glass Cortex capture latch so a `[overlay].brain_capture`
+        // edit takes effect on the backends rebuilt below.
+        #[cfg(feature = "llama-local")]
+        fono_core::brain_tap::set_capture_enabled(cfg.overlay.brain_capture);
         let new_polish = match fono_polish::build_polish(
             &cfg.polish,
             &secrets,
@@ -1411,7 +1466,8 @@ impl SessionOrchestrator {
                         fono_core::config::WaveformStyle::Fft
                         | fono_core::config::WaveformStyle::Heatmap
                         | fono_core::config::WaveformStyle::Terrain3d
-                        | fono_core::config::WaveformStyle::System360 => {
+                        | fono_core::config::WaveformStyle::System360
+                        | fono_core::config::WaveformStyle::Cortex => {
                             let mut planner = realfft::RealFftPlanner::<f32>::new();
                             let r2c = planner.plan_fft_forward(WAVEFORM_FFT_SIZE);
                             let mut input_buf = r2c.make_input_vec();
@@ -1428,6 +1484,11 @@ impl SessionOrchestrator {
                                 | fono_core::config::WaveformStyle::Terrain3d => {
                                     WAVEFORM_FFT_MAX_HZ_HEATMAP
                                 }
+                                // Cortex listening borrows System/360's
+                                // voice-focused range (~1.5 kHz) so speech
+                                // energy fills the full panel width instead of
+                                // crowding the low end of a 0–6 kHz axis and
+                                // leaving the upper bands dark.
                                 _ => WAVEFORM_FFT_MAX_HZ_FFT,
                             };
                             let max_source_bin =
@@ -1980,7 +2041,13 @@ impl SessionOrchestrator {
                     // snake / comb' artefacts that previous
                     // single-mass attempts produced when their
                     // shape scrolled through the time axis.
-                    fono_core::config::WaveformStyle::Terrain3d => {
+                    // Cortex shares the turbulence field while the
+                    // model is between phases: the cortex renderer
+                    // maps the per-bin heights onto layer-glow
+                    // intensity so the spine keeps "breathing"
+                    // during the TTFT gap (plan Task 2.5 idle loop).
+                    fono_core::config::WaveformStyle::Terrain3d
+                    | fono_core::config::WaveformStyle::Cortex => {
                         let n = FFT_BINS_THINKING;
                         let t_s = time_ms / 1000.0;
                         // Six octaves of sin(k_x · i + k_t · t + phi),

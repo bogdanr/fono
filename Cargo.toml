@@ -113,6 +113,12 @@ whisper-rs = { version = "0.16", features = ["tracing_backend"] }
 # references from both llama.cpp and whisper.cpp without retaining a
 # dynamic `libstdc++.so.6` `NEEDED` entry.
 llama-cpp-2 = { version = "0.1", default-features = false, features = ["openmp", "static-openmp", "static-stdcxx"] }
+# Raw bindings sibling of llama-cpp-2 (same version line, already in the
+# binary's graph via llama-cpp-2 — net-zero on size). Used only by
+# `fono-core::brain_tap` to reach `cb_eval` on the context params and the
+# ggml tensor accessors, which the safe wrapper does not expose. No
+# features: it inherits whatever the llama-cpp-2 build enables.
+llama-cpp-sys-2 = { version = "0.1", default-features = false }
 # Local voice stack (TTS/VAD/wake-word/streaming-STT) runs on ONNX Runtime
 # via `ort`. RELEASE and CI builds link a pinned, minimally-built
 # `libonnxruntime.a` STATICALLY via `ORT_LIB_LOCATION` (see ADR 0032,
@@ -289,3 +295,15 @@ strip = "symbols"
 # saves a further ~1.25 MiB but disables Rust-side auto-vectorisation more
 # aggressively; `"s"` is the safe sweet spot.
 opt-level = "s"
+
+[patch.crates-io]
+# Our fork of llama-cpp-sys-2 0.1.150. It carries one extra commit that makes
+# llama.cpp fall back gracefully instead of aborting when the fused Gated Delta
+# Net support check sees an unnamed node. Without it, loading gemma-4 (a hybrid
+# GDN model) hits a GGML_ASSERT at context creation and the process dies, because
+# on the CPU reserve path those nodes still have ggml's default node_N names.
+# The fork disables the fused path and uses the non-fused one instead, which is
+# no slower on CPU (see ggml-org/llama.cpp#24298). llama-cpp-2 stays on the
+# published crate and links this patched sys. Pinned to an exact rev; drop this
+# once the fix lands in a published llama-cpp-2 release.
+llama-cpp-sys-2 = { git = "https://github.com/bogdanr/llama-cpp-rs", rev = "da311b05a71557940fb505fc811002181e6fa7d8" }

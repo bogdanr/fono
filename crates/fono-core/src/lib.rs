@@ -28,6 +28,9 @@ pub mod voice_resolver;
 pub mod budget;
 
 #[cfg(feature = "llama-local")]
+pub mod brain_tap;
+
+#[cfg(feature = "llama-local")]
 pub mod llama_backend;
 
 #[cfg(feature = "llama-local")]

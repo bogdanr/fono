@@ -1202,7 +1202,8 @@ fn spawn_visualizer_task(
             fono_core::config::WaveformStyle::Fft
             | fono_core::config::WaveformStyle::Heatmap
             | fono_core::config::WaveformStyle::Terrain3d
-            | fono_core::config::WaveformStyle::System360 => {
+            | fono_core::config::WaveformStyle::System360
+            | fono_core::config::WaveformStyle::Cortex => {
                 let mut planner = realfft::RealFftPlanner::<f32>::new();
                 let r2c = planner.plan_fft_forward(WAVEFORM_FFT_SIZE);
                 let mut input_buf = r2c.make_input_vec();
@@ -1217,7 +1218,8 @@ fn spawn_visualizer_task(
                 let max_hz = match style {
                     fono_core::config::WaveformStyle::Heatmap
                     | fono_core::config::WaveformStyle::Terrain3d
-                    | fono_core::config::WaveformStyle::System360 => WAVEFORM_FFT_MAX_HZ_WIDE,
+                    | fono_core::config::WaveformStyle::System360
+                    | fono_core::config::WaveformStyle::Cortex => WAVEFORM_FFT_MAX_HZ_WIDE,
                     _ => WAVEFORM_FFT_MAX_HZ,
                 };
                 let max_source_bin =
@@ -1550,6 +1552,7 @@ mod tests {
             WaveformStyle::Heatmap,
             WaveformStyle::Terrain3d,
             WaveformStyle::System360,
+            WaveformStyle::Cortex,
         ] {
             let mut cfg = Config::default();
             cfg.overlay.style = style;

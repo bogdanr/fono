@@ -9,11 +9,12 @@
 
 use std::num::NonZeroU32;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use fono_core::brain_tap::{decode_token_with_tap, BrainTap};
 use fono_core::llama_backend::{backend, shared_model};
 use fono_core::llama_gen::{
     first_stop_marker, generation_sampler, is_control_token, safe_stream_end, turn_markers,
@@ -78,6 +79,12 @@ pub struct LlamaLocalAssistant {
     ubatch_size: Option<u32>,
     state: Arc<Mutex<Option<Arc<LlamaModel>>>>,
     prompt_state_cache: Arc<Mutex<PromptStateCache>>,
+    /// Glass Cortex capture (opt-in, default off). Created lazily in
+    /// [`Self::ensure_loaded`] once the model's layer count is known;
+    /// shared via `Arc` so `clone_thin` workers and the overlay-side
+    /// consumer see one tap. See `fono_core::brain_tap`.
+    brain_tap_enabled: bool,
+    brain_tap: Arc<OnceLock<Arc<BrainTap>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +197,37 @@ impl LlamaLocalAssistant {
             ubatch_size,
             state: Arc::new(Mutex::new(None)),
             prompt_state_cache: Arc::new(Mutex::new(PromptStateCache::default())),
+            brain_tap_enabled: false,
+            brain_tap: Arc::new(OnceLock::new()),
+        }
+    }
+
+    /// Opt in to Glass Cortex keyframe capture (the brain-visualization
+    /// tap; default off — with it off the decode path carries zero tap
+    /// code, not even a null-callback install).
+    #[must_use]
+    pub fn with_brain_tap(mut self, enabled: bool) -> Self {
+        self.brain_tap_enabled = enabled;
+        self
+    }
+
+    /// The shared tap handle, once the model has loaded with capture
+    /// enabled. The overlay-side consumer drains keyframes from here.
+    #[must_use]
+    pub fn brain_tap(&self) -> Option<Arc<BrainTap>> {
+        if self.brain_tap_enabled {
+            self.brain_tap.get().cloned()
+        } else {
+            None
+        }
+    }
+
+    /// Internal accessor used by the decode paths.
+    fn tap(&self) -> Option<&Arc<BrainTap>> {
+        if self.brain_tap_enabled {
+            self.brain_tap.get()
+        } else {
+            None
         }
     }
 
@@ -202,6 +240,8 @@ impl LlamaLocalAssistant {
             ubatch_size: self.ubatch_size,
             state: Arc::clone(&self.state),
             prompt_state_cache: Arc::clone(&self.prompt_state_cache),
+            brain_tap_enabled: self.brain_tap_enabled,
+            brain_tap: Arc::clone(&self.brain_tap),
         }
     }
 
@@ -242,6 +282,11 @@ impl LlamaLocalAssistant {
             ubatch = self.ubatch_size.map_or_else(|| "auto".to_string(), |v| v.to_string()),
         );
         *guard = Some(model);
+        if self.brain_tap_enabled {
+            let n_layer = guard.as_ref().map_or(0, |m| m.n_layer());
+            let tap = self.brain_tap.get_or_init(|| Arc::new(BrainTap::new(n_layer)));
+            debug!("brain tap ready: {} layers, interval {}", tap.n_layer(), tap.interval());
+        }
         span.finish(json!({
             "cache_hit": false,
             "model": model_name,
@@ -503,6 +548,7 @@ impl LlamaLocalAssistant {
             (suffix_tokens.len() - 1) as i32,
             None,
             params.max_new_tokens,
+            self.tap().map(Arc::as_ref),
             on_delta,
         )?;
         // Option C: checkpoint the POST-generation state so the next turn can
@@ -739,6 +785,12 @@ impl LlamaLocalAssistant {
         if let Some(ubatch_size) = self.ubatch_size {
             ctx_params = ctx_params.with_n_ubatch(ubatch_size.max(1));
         }
+        if let Some(tap) = self.tap() {
+            // SAFETY: the tap is owned by `self` (shared across thin
+            // clones via `Arc`) and therefore outlives this
+            // method-local context — the `install` contract.
+            unsafe { tap.install(&mut ctx_params) };
+        }
         let ctx_started = Instant::now();
         let mut ctx = model.new_context(backend(), ctx_params).context("create llama context")?;
         current_instant(
@@ -793,6 +845,7 @@ impl LlamaLocalAssistant {
             last_prefill_idx,
             None,
             max_new_tokens,
+            self.tap().map(Arc::as_ref),
             on_delta,
         )?;
         Ok(generation.text.trim().to_string())
@@ -1058,6 +1111,7 @@ impl LlamaLocalAssistant {
                     (suffix_tokens.len() - 1) as i32,
                     None,
                     MAX_NEW_TOKENS,
+                    self.tap().map(Arc::as_ref),
                     |delta| {
                         if first_token_ms.is_none() {
                             first_token_ms = Some(cached_started.elapsed().as_millis() as u64);
@@ -1206,6 +1260,12 @@ impl LlamaLocalAssistant {
         if let Some(ubatch_size) = self.ubatch_size {
             ctx_params = ctx_params.with_n_ubatch(ubatch_size.max(1));
         }
+        if let Some(tap) = self.tap() {
+            // SAFETY: the tap is owned by `self` (shared across thin
+            // clones via `Arc`) and therefore outlives this
+            // method-local context — the `install` contract.
+            unsafe { tap.install(&mut ctx_params) };
+        }
         let ctx_started = Instant::now();
         let ctx = model.new_context(backend(), ctx_params).context("create llama context")?;
         current_instant(
@@ -1244,6 +1304,12 @@ impl LlamaLocalAssistant {
                 .context("prefill batch.add")?;
         }
         ctx.decode(&mut batch).context("prefill decode")?;
+        // One spine-sweep pulse on the Glass Cortex per prefill batch.
+        #[allow(clippy::cast_possible_truncation)]
+        fono_core::brain_tap::publish_prefill(
+            self.tap().map(std::convert::AsRef::as_ref),
+            tokens.len() as u32,
+        );
         batch_span.finish(json!({
             "prompt_tokens": tokens.len(),
             "start_pos": start_pos,
@@ -1308,6 +1374,12 @@ impl LlamaLocalAssistant {
             .with_n_threads_batch(self.threads);
         if let Some(ubatch_size) = self.ubatch_size {
             ctx_params = ctx_params.with_n_ubatch(ubatch_size.max(1));
+        }
+        if let Some(tap) = self.tap() {
+            // SAFETY: the tap is owned by `self` (shared across thin
+            // clones via `Arc`) and therefore outlives this
+            // method-local context — the `install` contract.
+            unsafe { tap.install(&mut ctx_params) };
         }
         let ctx_started = Instant::now();
         let mut ctx = model.new_context(backend(), ctx_params).context("create llama context")?;
@@ -1407,6 +1479,7 @@ impl LlamaLocalAssistant {
                 last_prefill_idx,
                 Some(first_token),
                 MAX_NEW_TOKENS,
+                self.tap().map(Arc::as_ref),
                 |delta| {
                     if first_token_ms.is_none() {
                         first_token_ms = Some(started.elapsed().as_millis() as u64);
@@ -1569,6 +1642,10 @@ struct GenerationResult {
     tokens: Vec<llama_cpp_2::token::LlamaToken>,
 }
 
+// 8 args: the extra `tap` observer is strictly optional plumbing for the
+// Glass Cortex visualization; bundling the generation bounds into a struct
+// would churn four call sites for no clarity gain.
+#[allow(clippy::too_many_arguments)]
 fn generate_from_prefilled_context<F>(
     model: &LlamaModel,
     ctx: &mut LlamaContext<'_>,
@@ -1576,6 +1653,7 @@ fn generate_from_prefilled_context<F>(
     first_sample_idx: i32,
     first_token_override: Option<llama_cpp_2::token::LlamaToken>,
     max_new_tokens: i32,
+    tap: Option<&BrainTap>,
     mut on_delta: F,
 ) -> Result<GenerationResult>
 where
@@ -1605,6 +1683,9 @@ where
     let mut decoded_tokens: Vec<llama_cpp_2::token::LlamaToken> = Vec::new();
     let mut stop_reason = "max_tokens";
     let mut batch = LlamaBatch::new(1, 1);
+    // Glass Cortex: announce the generation on the brain-event bus
+    // (no-op unless the tap is installed AND a sink is listening).
+    fono_core::brain_tap::publish_reply_begin(tap);
     for n_cur in (start_pos..).take(max_new_tokens.max(1) as usize) {
         let token = next_token.take().unwrap_or_else(|| sampler.sample(ctx, sample_idx));
         sampler.accept(token);
@@ -1664,7 +1745,13 @@ where
         batch.clear();
         batch.add(token, n_cur, &[0], true).context("decode batch.add")?;
         sample_idx = 0;
-        ctx.decode(&mut batch).context("decode loop")?;
+        // Glass Cortex keyframe capture (opt-in): the shared helper arms
+        // the eval-callback tap only for governor-chosen tokens and times
+        // the whole surcharge (arm + decode + collect + logits stats) so
+        // the governor's < 1 % backoff sees the true cost. With no tap
+        // this is the plain decode call.
+        decode_token_with_tap(ctx, &mut batch, tap, u64::from(generated_tokens.saturating_sub(1)))
+            .context("decode loop")?;
         decoded_tokens.push(token);
     }
     if stop_reason != "receiver_dropped" && emitted_len < out.len() {
@@ -1676,6 +1763,16 @@ where
         }
     }
     let elapsed_ms = decode_started.elapsed().as_millis() as u64;
+    // Glass Cortex: close the generation on the brain-event bus with
+    // throughput + KV-fill stats (no-op without a tap + sink).
+    #[allow(clippy::cast_sign_loss)]
+    fono_core::brain_tap::publish_reply_end(
+        tap,
+        u64::from(generated_tokens),
+        elapsed_ms,
+        (start_pos.max(0) as u32).saturating_add(generated_tokens),
+        ctx.n_ctx(),
+    );
     gen_span.finish(generation_span_args(
         generated_tokens,
         out.chars().count(),
