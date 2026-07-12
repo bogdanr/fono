@@ -226,8 +226,9 @@ into Phase 1.4 / Phase 2.3), both resource-blocked from this dev loop.
 
 **Chosen shape: #2 (shim + `--as-needed`), implemented 2026-07-12.** No
 ggml source edit and no `whisper-rs-sys` fork were needed. The shim lives
-at `crates/fono-stt/src/vk_loader_shim.rs`, gated on `accel-vulkan` +
-`target_os = "linux"` and registered from `crates/fono-stt/src/lib.rs`.
+at `crates/fono-core/src/vk_loader_shim.rs`, gated on `accel-vulkan` +
+`target_os = "linux"` and registered from `crates/fono-core/src/lib.rs`
+(relocated there from `fono-stt` in Task 1.6 — see below).
 It defines the 3 bare symbols (`vkGetInstanceProcAddr`, `vkCmdCopyBuffer`,
 `vkGetPhysicalDeviceFeatures2`) as lazy `dlopen("libvulkan.so.1")`
 forwarders. `-Wl,--as-needed` is already the workspace default on Linux
@@ -301,6 +302,23 @@ cleanly, no fault.
       `cpu` build never compiles them. Confirmed empirically:
       `./tests/check.sh --size-budget` (cpu `release-slim`) = 21.36 MiB
       (≤ 25 MiB) with the 4-entry NEEDED allowlist clean — unchanged.
+- [x] Task 1.6. **Relocated the shim to `fono-core` for robustness.**
+      *(Done 2026-07-12.)* The shim first landed in `fono-stt`, which
+      silently coupled its correctness to `fono-stt/accel-vulkan` being
+      enabled. But `fono-polish` and `fono-assistant` link
+      `llama-cpp-2/vulkan` — the *same* ggml, the *same* three bare
+      symbols — independently of whisper. A polish-only GPU build
+      (`fono-bench --features accel-polish-vulkan`) therefore linked
+      `libvulkan` hard and would crash when the loader is absent. Moved
+      `vk_loader_shim.rs` into `fono-core` (the shared crate both
+      backends depend on), gated on `fono-core/accel-vulkan`, and made
+      `fono-stt`/`fono-polish`/`fono-assistant`'s `accel-vulkan` each
+      enable `fono-core/accel-vulkan`. Cargo feature unification now
+      compiles the shim exactly once whenever *any* Vulkan backend is
+      active. Verified: the polish-only build's NEEDED is the clean
+      4-entry allowlist (was pulling `libvulkan`), the whisper-only build
+      stays clean, and the GPU equivalence smoke still PASSes (WER
+      0.0882).
 
 ### Phase 1 gate — all local CI gates green (2026-07-12)
 

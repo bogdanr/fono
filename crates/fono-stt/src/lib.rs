@@ -37,13 +37,6 @@ pub mod speechmatics;
 #[cfg(feature = "whisper-local")]
 pub mod whisper_local;
 
-// Soft-load shim for the Vulkan loader: defines the handful of bare
-// `vk*` symbols ggml references at link time so they resolve to our own
-// `dlopen`-based forwarders instead of hard-linking `libvulkan.so.1`.
-// Lets the GPU build launch on hosts without the Vulkan loader and fall
-// back to CPU. See `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`.
-#[cfg(all(feature = "accel-vulkan", target_os = "linux"))]
-pub mod vk_loader_shim;
 #[cfg(feature = "wyoming")]
 pub mod wyoming;
 

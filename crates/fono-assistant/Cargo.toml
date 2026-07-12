@@ -26,7 +26,7 @@ llama-local = ["dep:llama-cpp-2", "dep:encoding_rs", "fono-core/llama-local"]
 # crate. Off by default; mirrors `fono-polish`'s local LLM acceleration story.
 accel-cuda = ["llama-local", "llama-cpp-2/cuda"]
 accel-metal = ["llama-local", "llama-cpp-2/metal"]
-accel-vulkan = ["llama-local", "llama-cpp-2/vulkan"]
+accel-vulkan = ["llama-local", "llama-cpp-2/vulkan", "fono-core/accel-vulkan"]
 accel-rocm = ["llama-local", "llama-cpp-2/rocm"]
 # Anthropic Messages API streaming.
 anthropic = ["dep:reqwest", "dep:fono-http"]

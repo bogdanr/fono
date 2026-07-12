@@ -25,7 +25,7 @@ llama-local = ["dep:llama-cpp-2", "dep:encoding_rs", "dep:sha2", "dep:hex", "dep
 # for both STT and LLM in lockstep.
 accel-cuda = ["llama-local", "llama-cpp-2/cuda"]
 accel-metal = ["llama-local", "llama-cpp-2/metal"]
-accel-vulkan = ["llama-local", "llama-cpp-2/vulkan"]
+accel-vulkan = ["llama-local", "llama-cpp-2/vulkan", "fono-core/accel-vulkan"]
 accel-rocm = ["llama-local", "llama-cpp-2/rocm"]
 
 [dependencies]

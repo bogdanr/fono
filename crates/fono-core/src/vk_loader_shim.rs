@@ -25,6 +25,22 @@
 //! nothing references `libvulkan` anymore, because our own definitions
 //! satisfy ggml's references.
 //!
+//! ## Why it lives in `fono-core`
+//!
+//! Both Vulkan ggml consumers — `whisper-rs/vulkan` (via `fono-stt`) and
+//! `llama-cpp-2/vulkan` (via `fono-polish` / `fono-assistant`) — link
+//! the *same* ggml and reference the *same* three bare symbols. The shim
+//! must therefore be compiled whenever *either* backend is active, and
+//! it must be defined exactly *once* (two `#[no_mangle]` definitions in
+//! the same binary is a duplicate-symbol link error). `fono-core` is the
+//! shared low-level crate both depend on, so it is the single correct
+//! home: `fono-stt/accel-vulkan` and `fono-polish/accel-vulkan` each
+//! enable `fono-core/accel-vulkan`, and cargo feature unification then
+//! compiles this module once. Placing it in one backend crate instead
+//! would silently drop the shim from any build that links the *other*
+//! backend's Vulkan without the first (e.g. a polish-only GPU build),
+//! reintroducing both the hard link and the loader-absent crash.
+//!
 //! ## Loader-absent behaviour (the subtle part)
 //!
 //! When the loader is genuinely absent we must *not* simply return null

@@ -39,6 +39,17 @@ pub mod llama_gen;
 #[cfg(feature = "vulkan-probe")]
 pub mod vulkan_probe;
 
+// Soft-load shim for the Vulkan loader: defines the handful of bare
+// `vk*` symbols ggml references at link time so they resolve to our own
+// `dlopen`-based forwarders instead of hard-linking `libvulkan.so.1`.
+// Lives here (not in a backend crate) so it is defined exactly once and
+// compiled whenever *either* the whisper (`fono-stt`) or llama
+// (`fono-polish`/`fono-assistant`) Vulkan backend is active. Lets the
+// GPU build launch on hosts without the Vulkan loader and fall back to
+// CPU. See `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`.
+#[cfg(all(feature = "accel-vulkan", target_os = "linux"))]
+pub mod vk_loader_shim;
+
 pub use config::Config;
 pub use error::{Error, Result};
 pub use hwcheck::{HardwareSnapshot, LocalTier};
