@@ -1638,6 +1638,11 @@ fn which_in_path(tool: &str) -> Option<std::path::PathBuf> {
 /// — the line is `CPU AVX2+FMA+F16C` on a typical x86_64 laptop. When
 /// GPU accelerator features land in `fono-stt`/`fono-polish` the matching
 /// `cfg(feature = …)` blocks below light up, e.g. `CUDA + CPU AVX2`.
+// `vec_init_then_push`: with exactly one accel feature enabled clippy
+// sees a `Vec::new()` immediately followed by a single `push`, but the
+// list is deliberately assembled by independent `cfg` arms below and
+// cannot be expressed as a `vec![]` literal.
+#[allow(clippy::vec_init_then_push)]
 fn hardware_acceleration_summary() -> String {
     // `mut` is required when any of the cfg(feature = "accel-*") arms
     // below are active. On the default CPU-only build none fire, hence

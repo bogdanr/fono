@@ -20,6 +20,17 @@ v1, no MSI installer; ship the bare `.exe` plus a `.sha256` sidecar.
 Authenticode code signing, Windows-specific tray-only "kiosk" mode, ARM64
 Windows, Windows-flavored Vulkan release variant.
 
+> **SUPERSEDED (2026-07-12):** the "CPU-only Windows v1, GPU variant
+> deferred" decision below (Task 3.4, Phase 5.1, Phase 14.3) is
+> superseded by
+> `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`. Windows now
+> ships a **single Vulkan-accelerated `.exe` that soft-loads the Vulkan
+> loader and falls back to CPU** when `vulkan-1.dll` (or a usable
+> device) is absent — chosen for simplicity (one artefact, no variant
+> plumbing). The same plan removes the hard `libvulkan.so.1` link from
+> the Linux `fono-gpu` variant. Read that plan for the current
+> direction; the Windows tasks below are historical up to that date.
+
 ## Guiding Constraints (read these first)
 
 1. **Linux first-class** — every change must leave the existing Linux build
@@ -276,6 +287,9 @@ from the Linux host until the binary links. Expect snags in vendored C++
 - [x] Task 3.4. **Decide on Vulkan for Windows v1.** *(Done — CPU-only
       Windows v1; GPU/Vulkan variant deferred. Already reflected in the
       Phase 1 `fono-update` asset-name work.)*
+      **REVERSED 2026-07-12:** Windows v1 will instead ship a single
+      Vulkan-with-CPU-fallback `.exe`. See
+      `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`.
 - [x] Task 3.5. **Linker success.** *(Done 2026-07-11 — via the native
       SSH loop, the Phase 0 reference toolchain; xwin cross-compile
       remains the deferred fast path.)* `fono.exe` LINKS and RUNS on
@@ -718,6 +732,10 @@ their `.sha256` sidecars and the `SHA256SUMS` manifest.
       manifest, and MSVC CRT linkage. Pin a starting budget at 30 MiB;
       measure actual size and tighten in a follow-up if there's
       headroom.
+      **REVISED 2026-07-12:** the single Vulkan-with-fallback `.exe`
+      (Task 3.4 reversal) carries the ~42 MB SPIR-V shader payload, so
+      the Windows budget rises to ~60 MiB. See
+      `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`.
 - [ ] Task 14.4. **Update `CHANGELOG.md` and `ROADMAP.md`.** Move the
       "macOS + Windows" roadmap item into "Recently shipped" (Windows
       half). macOS stays in the on-the-horizon section.

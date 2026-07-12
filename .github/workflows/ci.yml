@@ -223,19 +223,22 @@ jobs:
             budget_bytes: 26214400
             extra_needed: ""
             dynamic_linker: ld-linux-x86-64.so.2
-          # GPU variant — Vulkan-enabled, ~66 MB. Adds `libvulkan.so.1`
-          # to the NEEDED allowlist; budget is a loose sanity ceiling at
-          # 72 MiB — not a tight gate. Measured 69,224,488 bytes (~66 MiB)
-          # after `tts-local` became a default feature (2026-06-03).
-          # Mirrors `fono-gpu-vX.Y.Z-x86_64`.
-          # Per `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`.
+          # GPU variant — Vulkan-enabled, ~66 MB. As of the Vulkan
+          # soft-load change (plans/2026-07-12-vulkan-soft-load-single-build-v1.md)
+          # the loader is `dlopen`ed lazily by the in-tree shim
+          # (crates/fono-stt/src/vk_loader_shim.rs), so `libvulkan.so.1`
+          # is NO LONGER a NEEDED entry — the allowlist is the same
+          # 4-entry universal glibc set as the cpu variant
+          # (`extra_needed: ""`). The binary launches on hosts without a
+          # Vulkan loader and falls back to CPU. Budget is a loose sanity
+          # ceiling at 72 MiB. Mirrors `fono-gpu-vX.Y.Z-x86_64`.
           - variant: gpu
             arch: x86_64
             target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
             features: accel-vulkan
             budget_bytes: 75497472
-            extra_needed: libvulkan.so.1
+            extra_needed: ""
             dynamic_linker: ld-linux-x86-64.so.2
           # CPU aarch64 — same shape as the x86_64 CPU row. Runs on
           # GitHub's hosted `ubuntu-22.04-arm` image (GA Jan 2025,
@@ -349,10 +352,11 @@ jobs:
           # libpthread/librt/libdl back into libc.so.6. Audio is delegated
           # to `pactl` (no libasound); libgomp/libstdc++ are statically
           # embedded via `llama-cpp-2/static-openmp,static-stdcxx`; tray is
-          # ksni (pure-Rust D-Bus, no GTK). The GPU variant adds
-          # `libvulkan.so.1` (provided by `vulkan-loader` /
-          # `mesa-vulkan-loaders` / `libvulkan1` on every modern desktop
-          # Linux distro). The dynamic linker is included in the
+          # ksni (pure-Rust D-Bus, no GTK). The GPU variant no longer adds
+          # `libvulkan.so.1`: the Vulkan loader is `dlopen`ed lazily by the
+          # in-tree shim (crates/fono-stt/src/vk_loader_shim.rs), so its
+          # NEEDED set is the same 4-entry allowlist as the cpu variant
+          # (`extra_needed` is empty). The dynamic linker is included in the
           # allowlist on x86_64 (where it appears in NEEDED on glibc <
           # 2.34) and as a no-op on aarch64 (PT_INTERP only, not
           # NEEDED); listing it here keeps the gate robust across

@@ -1,6 +1,70 @@
 # Fono — Project Status
 Last updated: 2026-07-12
 
+## 2026-07-12 — Vulkan soft-load: Phase 0 spike + Phase 1 (Linux) done
+
+Implemented and verified the Linux half of
+`plans/2026-07-12-vulkan-soft-load-single-build-v1.md`. The Vulkan GPU
+build no longer hard-links the loader: it launches everywhere and falls
+back to CPU when Vulkan is absent.
+
+- **Root cause (spike).** ggml already dispatches Vulkan calls through a
+  runtime dispatcher; only **3 bare symbols** forced the hard link
+  (`vkGetInstanceProcAddr`, `vkCmdCopyBuffer`,
+  `vkGetPhysicalDeviceFeatures2`).
+- **Fix.** A small in-tree shim (`crates/fono-stt/src/vk_loader_shim.rs`,
+  gated on `accel-vulkan` + Linux) defines those 3 symbols as lazy
+  `dlopen("libvulkan.so.1")` forwarders. With the workspace's existing
+  `--as-needed`, the loader drops out of `NEEDED` — no ggml source patch,
+  no `whisper-rs-sys` fork.
+- **Critical catch.** A naive null-returning shim *segfaults* on
+  loader-absent hosts: ggml calls `vk::enumerateInstanceVersion()`
+  through the dispatcher before any guard. The shim now returns a
+  non-null error stub (`VK_ERROR_INITIALIZATION_FAILED`) so Vulkan-Hpp
+  throws, ggml catches it, and inference falls back to CPU cleanly.
+- **Verified on the canonical artifact.** `fono --profile release-slim
+  --features accel-vulkan` = 57 MiB, `NEEDED` is the 4-entry universal
+  allowlist (`libvulkan.so.1` gone). Loader-present → GPU used
+  (`fono doctor`: "Vulkan: detected (Intel LNL, llvmpipe)"); loader
+  absent (bind-mount shadow in `unshare`) → launches (exit 0), CPU
+  fallback, identical transcript (WER 0.0882 both ways).
+- **CI gate tightened.** The `accel-vulkan` size-budget row in
+  `.github/workflows/ci.yml` now sets `extra_needed: ""`, so the gate
+  asserts the loader is *absent* from `NEEDED`.
+
+Remaining: Windows single Vulkan-with-fallback build (Phase 2, needs the
+Windows host for the `/DELAYLOAD` tolerance check + loader-absent smoke),
+llama-only GPU build confirmation, and the docs/ADR pass (Phase 3,
+including the ~60 MiB Windows budget amendment).
+
+## 2026-07-12 — Decision + plan: soft-load Vulkan (next up)
+
+New plan filed: `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`.
+This is what we work on next. Two maintainer decisions captured:
+
+- **Windows ships a single Vulkan-accelerated `.exe` that falls back to
+  CPU** when `vulkan-1.dll` (or a usable device) is absent. This
+  reverses the "CPU-only Windows v1, GPU deferred" decision (Windows
+  port plan Task 3.4). Reason: **simplicity** — one artefact, no
+  variant matrix / runtime probe / self-update variant-switching to
+  maintain on a target the maintainer rarely tests. Cost (a ~60 MB
+  `.exe` for everyone) is accepted on Windows.
+- **The Linux `fono-gpu` variant stops hard-linking `libvulkan.so.1`.**
+  It soft-loads the loader and falls back to CPU, so it launches on
+  Vulkan-less hosts and its NEEDED set shrinks back to the 4-entry
+  universal allowlist. This is the long-deferred item from
+  `plans/closed/2026-05-02-fono-cpu-gpu-variants-v1.md:323-325`.
+
+Scope guards: Linux keeps the two-variant model (compact CPU default
+stays — the 42 MB shader payload still violates the Linux size budget);
+only the GPU variant becomes launch-safe. The shared enabler is making
+ggml-vulkan load the loader softly (Linux: headers-only link / volk /
+`VK_NO_PROTOTYPES` shim — spike decides; Windows: `/DELAYLOAD:vulkan-1.dll`).
+ggml already falls back to the CPU backend when it enumerates zero
+devices, so "fallback" is mostly the backend's existing behaviour once
+the loader load is lazy. Forward-pointers added to the Windows port plan
+(Task 3.4, Phase 14.3) and the superseded-decision banner at its top.
+
 ## 2026-07-12 — Windows port: release artefact (Phase 13)
 
 The release workflow now builds and uploads a Windows binary, so the
