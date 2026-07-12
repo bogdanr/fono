@@ -76,6 +76,29 @@ These are **opt-in capabilities** layered on the shared runtime as the
 stack grows; each new model must be added to the minimal-build
 `ops.config` (see `docs/binary-size.md`) so the runtime stays small.
 
+## License tiers for default models — amended 2026-07-12
+
+Default-model eligibility is decided by license tier:
+
+1. **OSI-approved / GPL-compatible** (MIT, Apache-2.0, GPL-3.0, CC-BY-4.0) —
+   default-eligible, unchanged.
+2. **RAIL-class behavioral-restriction licenses** (e.g. OpenRAIL-M) —
+   **default-eligible**, provided the restrictions are behavioral-only (no
+   commercial limits, no field-of-use bans beyond harmful/illegal use, no user
+   caps). Rationale: model weights are runtime-downloaded data, never linked
+   into or bundled with the GPL binary, and RAIL's use restrictions largely
+   restate applicable law. Requirement: the download notice must name the
+   license and link its text — the same notice-on-download pattern already
+   applied to the wake-word community models (ADR 0012). RAIL licenses remain
+   formally non-OSI (any use restriction fails OSD #6), so this tier is a
+   deliberate, documented exception, revertible per model at any time since
+   the OSI-clean engines stay in the binary.
+3. **Commercial / field-restricted licenses** (Llama Community License, CC-NC
+   variants) — opt-in only, never default, unchanged (see exclusions below).
+
+Motivating case: Supertonic 3 TTS — code MIT, weights OpenRAIL-M; see
+`plans/2026-07-12-supertonic3-local-tts-engine-v1.md`.
+
 ## Deliberate exclusions from defaults
 
 - **Llama 3.x family** — the Llama Community License is **not OSI-approved**; its
@@ -88,9 +111,15 @@ stack grows; each new model must be added to the minimal-build
   Apache-2.0, with no additional use restrictions. Verified examples: Gemma 4 E2B
   and E4B instruction-tuned QAT/GGUF artifacts published by Google with
   `license: apache-2.0` and `license_link` to the Gemma 4 Apache-2.0 license.
-- **Parakeet (NVIDIA)** — Apache-2.0, so license-clean, but ~600 MB quantised and
-  English-only. Too big for the default tier; available as opt-in for power users
-  who want higher English STT accuracy.
+- **Parakeet (NVIDIA)** — *amended 2026-07-12:* the original exclusion
+  ("~600 MB quantised and English-only") described v1/v2. **Parakeet-TDT 0.6b
+  v3 is multilingual** — 25 European languages including Romanian, with
+  automatic language detection — and CC-BY-4.0, so the language objection no
+  longer holds. Under re-evaluation as an opt-in high-accuracy
+  European-language STT tier on the shared minimal `ort` runtime; feasibility
+  on CPU demonstrated by CrispASR (ggml) and by the sherpa-onnx ONNX exports.
+  See `plans/2026-07-12-parakeet-v3-stt-reevaluation-v1.md`. Size still keeps
+  it out of the default download tier.
 
 ## Rationale for `Qwen2.5-1.5B-Instruct` as the LLM default
 

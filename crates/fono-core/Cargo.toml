@@ -19,6 +19,13 @@ workspace = true
 name = "brain_tap_bench"
 required-features = ["llama-local"]
 
+# Dumps one real local generation's full BrainEvent stream to JSON for
+# the Glas Cortex redesign (data-shape verification + design-sim input).
+# Dev-only; never shipped.
+[[example]]
+name = "brain_trace_dump"
+required-features = ["llama-local"]
+
 [features]
 default = []
 # Live-dictation budget controller + provider price table. Plan R12.

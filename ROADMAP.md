@@ -13,7 +13,7 @@ The home page is [fono.page](https://fono.page).
 
 <table width="100%">
 <tr>
-<td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#personal-vocabulary--voice-correction">Personal vocabulary &amp; voice correction</a></strong><br>Teach Fono once that "Phono" means "Fono" — it sticks forever, deterministically, before the text ever hits the cursor.<br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".</td>
+<td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#personal-vocabulary--voice-correction">Personal vocabulary &amp; voice correction</a></strong><br>Teach Fono once that "Phono" means "Fono" — it sticks forever, deterministically, before the text ever hits the cursor.<br><br><strong><a href="#natural-local-voices-in-31-languages">Natural local voices in 31 languages</a></strong><br>One compact local model speaks 31 languages in 10 voices at 44 kHz — laughs and breaths included — replacing dozens of per-language voice downloads.<br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".</td>
 <td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#self-hosted-modelship-backend">Self-hosted Modelship backend</a></strong><br>One box on your LAN runs the LLM, speech-to-text, text-to-speech, and embeddings — every Fono desktop points at it, fully local.<br><br><strong><a href="#hover-context-injection">Hover-context injection</a></strong> <em>(experimental)</em><br>Terminal hovered → shell prompts. Code editor hovered → identifier casing.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#windows">Windows</a></strong><br>Native platform integration — macOS shipped in v0.15.0.</td>
 </tr>
 </table>
@@ -126,6 +126,29 @@ Later in the same slice: a **voice "fix that" correction hotkey**. Press it afte
 mishearing, speak the intended word, and Fono re-injects the corrected text and
 auto-records the (heard → meant) pair into your vocabulary so the same error never
 recurs. Plan: `plans/2026-06-03-correction-with-memory-v2.md`.
+
+A later phase moves correction into the decoder itself: hotword / contextual
+biasing (a Whisper `initial_prompt` injection today, CTC/TDT biasing when a
+transducer STT engine lands — an approach demonstrated by
+[CrispASR](https://github.com/CrispStrobe/CrispASR)'s `--hotwords`), layered
+under the deterministic substitution pass rather than replacing it.
+
+### Natural local voices in 31 languages
+
+> One download. Thirty-one languages. Ten voices. Laughs included.
+
+Fono's local text-to-speech will gain Supertonic 3 — a compact open model that
+speaks 31 languages (Romanian included) in 10 voices at 44.1 kHz, several times
+faster than real time on an ordinary CPU. It runs on the ONNX runtime already
+inside the binary, so it adds no new dependency: one ~140 MB download replaces
+the per-language Piper voice files and their pronunciation dictionaries. It
+also understands expressive tags, so the assistant can laugh or take a breath
+mid-sentence. Ships opt-in first, with promotion to the default non-English
+engine once it proves itself on low-end hardware. The weights are OpenRAIL-M
+licensed (free for any lawful use; the download shows the license notice —
+see the license-tier amendment in
+[ADR 0004](docs/decisions/0004-default-models.md)). Plan:
+`plans/2026-07-12-supertonic3-local-tts-engine-v1.md`.
 
 ### Automatic translation
 
@@ -282,6 +305,26 @@ while referencing another. Plan sketch:
 Native integration following the same playbook as macOS (shipped in
 v0.15.0, see below): system-tray app and native installer
 (`plans/2026-05-26-windows-port-v1.md`).
+
+### Research spikes (low priority)
+
+> Measure first, decide later. These are spike-first investigations that
+> produce a go/no-go memo before any shipping code is written. Neither blocks
+> or reorders anything above.
+
+- **NPU offload for the always-on path.** Investigate offloading the
+  wake-word, whisper encoder, and TTS to an on-device NPU (Intel AI Boost via
+  OpenVINO) for battery and CPU/GPU headroom — never latency, and never in the
+  default binary (opt-in build variant only). Reference hardware measured;
+  candidate ranking and go-bar in
+  `plans/2026-07-12-npu-offload-research-v1.md`.
+- **Local screen vision (OCR + description).** Investigate whether the local
+  model Fono already runs (Gemma 3n-class) can look at a screenshot and
+  describe what's on screen — a local, offline counterpart to the cloud
+  "see your screen" feature (v0.9.1). Scope is *description*, not verbatim
+  page OCR; the multimodal runtime would be an opt-in variant, never in the
+  default binary. Baseline numbers and go-bar in
+  `plans/2026-07-12-gemma-vision-ocr-spike-v1.md`.
 
 ---
 
