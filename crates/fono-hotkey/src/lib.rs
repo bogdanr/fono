@@ -2,6 +2,21 @@
 //! Global hotkey registration (via `global-hotkey`) and the
 //! Idle/Recording/Processing FSM. Phase 3 of
 //! `docs/plans/2026-04-24-fono-design-v1.md`.
+//!
+//! # Cross-platform layout (Windows port plan Task 1.4)
+//!
+//! This crate is already split correctly for new OS ports:
+//! - [`listener`], [`fsm`], [`parse`], and [`detect`] are OS-agnostic;
+//!   the `global-hotkey` crate provides the per-OS registration
+//!   backend (X11 `XGrabKey` on Linux, Carbon `RegisterEventHotKey`
+//!   on macOS, Win32 `RegisterHotKey` on Windows).
+//! - [`portal`] (`org.freedesktop.portal.GlobalShortcuts`) and
+//!   [`gnome_gsettings`] are Linux-only desktop integrations, gated
+//!   `#[cfg(target_os = "linux")]` below.
+//!
+//! A Windows port therefore needs no trait split here — only the
+//! `detect::detect_backend` probe learns a new arm (port plan
+//! Phase 8).
 
 pub mod detect;
 pub mod fsm;

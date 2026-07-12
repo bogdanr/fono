@@ -14,7 +14,6 @@ use fono_tray::{Tray, TrayAction, TrayState};
 #[cfg(feature = "interactive")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
-use tokio::net::UnixStream;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
@@ -164,7 +163,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     // the bind below replaces them cleanly.
     let socket_path = paths.ipc_socket();
     if socket_path.exists() {
-        match tokio::net::UnixStream::connect(&socket_path).await {
+        match fono_ipc::connect(&socket_path).await {
             Ok(_) => anyhow::bail!(
                 "another fono daemon is already running (IPC socket {} is live). \
                  Stop it before starting a new instance (e.g. `pkill fono`).",
@@ -1419,8 +1418,8 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                 info!("ctrl-c received; shutting down");
                 break;
             }
-            accept = listener.accept() => {
-                let (stream, _) = accept?;
+            accept = fono_ipc::accept(&listener) => {
+                let stream = accept?;
                 let fsm = Arc::clone(&fsm);
                 let action_tx = action_tx.clone();
                 let orch = orchestrator.clone();
@@ -1724,7 +1723,7 @@ fn cpu_simd_summary() -> String {
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments, clippy::cognitive_complexity)]
 async fn handle_client(
-    mut stream: UnixStream,
+    mut stream: fono_ipc::Stream,
     fsm: Arc<Mutex<RecordingFsm>>,
     action_tx: mpsc::UnboundedSender<HotkeyAction>,
     orchestrator: Option<Arc<SessionOrchestrator>>,
@@ -1880,7 +1879,7 @@ async fn handle_client(
             // between the Ok ack and the first iteration.
             let mut cancel_rx = mcp_cancel_tx.subscribe();
             // Split so we can read for EOF while also writing cancel signals.
-            let (mut read_half, mut write_half) = stream.into_split();
+            let (mut read_half, mut write_half) = fono_ipc::split_stream(stream);
             let mut eof_buf = [0u8; 1];
             loop {
                 tokio::select! {

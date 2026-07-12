@@ -28,14 +28,23 @@ pub struct FocusInfo {
 /// pid come for free with no TCC permission. The *window title* is not
 /// populated there (reading other apps' titles needs the Screen
 /// Recording permission); class-based rules still classify.
+///
+/// Other OSes (Windows until its port lands): degrades to an empty
+/// `FocusInfo`. The Win32 foreground-window probe
+/// (`GetForegroundWindow` + `QueryFullProcessImageNameW`) lands with
+/// Windows port plan Phase 9.
 pub fn detect_focus() -> Result<FocusInfo> {
     #[cfg(target_os = "macos")]
     {
         Ok(macos_focus())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     {
-        Ok(detect_focus_unix_desktop())
+        Ok(detect_focus_linux_desktop())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Ok(FocusInfo::default())
     }
 }
 
@@ -75,9 +84,13 @@ fn macos_focus() -> FocusInfo {
     FocusInfo { window_class, window_title: None, window_pid }
 }
 
-/// Linux/BSD detection cascade (the historical `detect_focus` body).
-#[cfg(not(target_os = "macos"))]
-fn detect_focus_unix_desktop() -> FocusInfo {
+/// Linux detection cascade (the historical `detect_focus` body).
+/// Gated on `target_os = "linux"` — not merely `not(macos)` — because
+/// `sway_focus` speaks the i3 IPC protocol over a Unix-domain socket
+/// and the whole cascade probes Linux display-server environments
+/// that carry no signal elsewhere (Windows port plan Task 1.3).
+#[cfg(target_os = "linux")]
+fn detect_focus_linux_desktop() -> FocusInfo {
     let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
     tracing::debug!(target: "fono::context", session_type = %session_type, "detect_focus: starting");
 
@@ -183,7 +196,7 @@ fn detect_focus_unix_desktop() -> FocusInfo {
 ///   magic[6]  = b"i3-ipc"
 ///   length[4] = u32 LE payload byte count
 ///   type[4]   = u32 LE message type
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn sway_focus() -> Result<FocusInfo> {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
@@ -253,7 +266,7 @@ fn sway_focus() -> Result<FocusInfo> {
 }
 
 /// Recursively search a sway tree node for the focused leaf.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn find_sway_focused(node: &serde_json::Value) -> Option<&serde_json::Value> {
     if node.get("focused").and_then(serde_json::Value::as_bool) == Some(true) {
         return Some(node);
@@ -277,7 +290,7 @@ fn find_sway_focused(node: &serde_json::Value) -> Option<&serde_json::Value> {
 /// Query the focused window from Hyprland by spawning `hyprctl activewindow
 /// -j` and parsing its JSON output. Synchronous subprocess call; typically
 /// completes in ~5 ms — acceptable at hotkey-press granularity.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn hyprland_focus() -> Result<FocusInfo> {
     use std::process::Command;
 
@@ -308,7 +321,7 @@ fn hyprland_focus() -> Result<FocusInfo> {
 // ---------------------------------------------------------------------------
 
 /// Return `true` when the running desktop session appears to be GNOME.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn is_gnome_session() -> bool {
     if let Ok(desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
         if desktop.to_ascii_uppercase().contains("GNOME") {
@@ -327,7 +340,7 @@ fn is_gnome_session() -> bool {
 ///
 /// GNOME's Introspect interface does not always expose `pid` for XWayland
 /// clients; `window_pid` is left as `None` here.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn gnome_focus() -> Result<FocusInfo> {
     use std::sync::mpsc;
     use std::time::Duration;
@@ -342,7 +355,7 @@ fn gnome_focus() -> Result<FocusInfo> {
 }
 
 /// Inner blocking call used by `gnome_focus`.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn gdbus_get_focused_window() -> Result<FocusInfo> {
     use std::process::Command;
 
@@ -381,7 +394,7 @@ fn gdbus_get_focused_window() -> Result<FocusInfo> {
 /// This is not JSON — we do a minimal manual scan rather than a full GVariant
 /// parser. Only the focused entry (containing `'is-focused': <true>`) is
 /// inspected; class and title are extracted with simple substring searches.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn parse_gnome_introspect_output(text: &str) -> Result<FocusInfo> {
     // Find the dict block that contains `'is-focused': <true>`.
     let mut depth = 0i32;
@@ -418,7 +431,7 @@ fn parse_gnome_introspect_output(text: &str) -> Result<FocusInfo> {
 }
 
 /// Extract `'key': <'value'>` from a GVariant dict block.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn extract_gnome_string(block: &str, key: &str) -> Option<String> {
     let needle = format!("'{key}': <'");
     let start = block.find(&needle)? + needle.len();
@@ -436,7 +449,7 @@ fn extract_gnome_string(block: &str, key: &str) -> Option<String> {
 // X11 path (behind `x11-focus` feature flag)
 // ---------------------------------------------------------------------------
 
-#[cfg(all(feature = "x11-focus", not(target_os = "macos")))]
+#[cfg(all(feature = "x11-focus", target_os = "linux"))]
 fn x11_focus() -> Result<FocusInfo> {
     use anyhow::anyhow;
     use x11rb::connection::Connection;

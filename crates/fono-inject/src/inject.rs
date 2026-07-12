@@ -72,8 +72,17 @@ impl Injector {
     /// fallback when the feature is off). CGEvent posting requires the
     /// Accessibility permission (TCC); denial degrades to the
     /// clipboard fallback in [`type_text_with_outcome`].
+    ///
+    /// Windows (port plan Phase 7) and other OSes: enigo is likewise
+    /// the only keystroke backend (Win32 `SendInput`), so the same
+    /// short-circuit applies — the Linux display-server cascade is
+    /// never compiled there (Windows port plan Task 1.3).
     fn detect_auto() -> Self {
-        #[cfg(target_os = "macos")]
+        #[cfg(target_os = "linux")]
+        {
+            Self::detect_auto_linux_desktop()
+        }
+        #[cfg(not(target_os = "linux"))]
         {
             #[cfg(feature = "enigo-backend")]
             {
@@ -84,17 +93,13 @@ impl Injector {
                 Self::None
             }
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            Self::detect_auto_unix_desktop()
-        }
     }
 
-    /// Linux/BSD display-server auto-detection (the historical
-    /// `detect_auto` body). Not compiled on macOS, where none of the
-    /// probed environment variables or subprocess tools exist.
-    #[cfg(not(target_os = "macos"))]
-    fn detect_auto_unix_desktop() -> Self {
+    /// Linux display-server auto-detection (the historical
+    /// `detect_auto` body). Not compiled elsewhere — none of the
+    /// probed environment variables or subprocess tools exist there.
+    #[cfg(target_os = "linux")]
+    fn detect_auto_linux_desktop() -> Self {
         let wayland = std::env::var("XDG_SESSION_TYPE").map(|v| v == "wayland").unwrap_or(false)
             || std::env::var("WAYLAND_DISPLAY").is_ok();
 
@@ -120,13 +125,8 @@ impl Injector {
         // exits 0 silently while typing nothing. Probe the registry
         // before selecting it; on unsupported compositors fall through
         // to ydotool / xdotool / clipboard-paste.
-        #[cfg(target_os = "linux")]
         if which("wtype").is_some() && crate::wayland_probe::compositor_supports_virtual_keyboard()
         {
-            return Self::Wtype;
-        }
-        #[cfg(not(target_os = "linux"))]
-        if which("wtype").is_some() {
             return Self::Wtype;
         }
         if which("ydotool").is_some() {
@@ -189,7 +189,7 @@ const NO_BACKEND_HINT: &str = if cfg!(target_os = "macos") {
 /// Matches the same desktop tokens as `crates/fono/src/install.rs` so
 /// the installer's session-aware package recommendation and the
 /// runtime injector default stay in sync.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn is_gnome_wayland_session() -> bool {
     let cur = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_ascii_lowercase();
     let sess = std::env::var("XDG_SESSION_DESKTOP").unwrap_or_default().to_ascii_lowercase();

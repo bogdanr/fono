@@ -1,13 +1,72 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Length-prefixed bincode frames over a Unix socket at
-//! `$XDG_STATE_HOME/fono/fono.sock`. Phase 8 Task 8.4.
+//! Length-prefixed bincode frames over a cross-platform local socket.
+//!
+//! On Linux/macOS this is a Unix-domain socket at a filesystem path
+//! (`$XDG_STATE_HOME/fono/fono.sock` and friends); on Windows it is a
+//! named pipe under `\\.\pipe\`. Both are provided by the
+//! [`interprocess`] crate so the daemon and CLI share one code path.
+//! The wire framing (length-prefixed bincode) is identical on every
+//! platform. Phase 8 Task 8.4; cross-platform in Windows port Task 4.1.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use interprocess::local_socket::tokio::prelude::*;
+use interprocess::local_socket::{ListenerOptions, Name};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+
+/// Local-socket listener (Unix-domain socket / Windows named pipe).
+pub use interprocess::local_socket::tokio::Listener;
+/// Receive half of a split [`Stream`].
+pub use interprocess::local_socket::tokio::RecvHalf;
+/// Send half of a split [`Stream`].
+pub use interprocess::local_socket::tokio::SendHalf;
+/// Local-socket byte stream (Unix-domain socket / Windows named pipe).
+pub use interprocess::local_socket::tokio::Stream;
+
+/// Build the platform local-socket name for a Fono socket path.
+///
+/// On Unix the path is used directly as a filesystem socket, preserving
+/// the exact pre-Windows behaviour (same paths, same permissions). On
+/// Windows the socket file name is mapped into the named-pipe namespace
+/// (`\\.\pipe\<name>`), since Windows has no filesystem sockets.
+fn socket_name(socket: &Path) -> Result<Name<'static>> {
+    #[cfg(not(windows))]
+    {
+        use interprocess::local_socket::{GenericFilePath, ToFsName};
+        Ok(socket
+            .to_path_buf()
+            .to_fs_name::<GenericFilePath>()
+            .with_context(|| format!("invalid IPC socket path {socket:?}"))?)
+    }
+    #[cfg(windows)]
+    {
+        use interprocess::local_socket::{GenericNamespaced, ToNsName};
+        // Derive a stable pipe name from the socket file name so
+        // distinct socket paths (per-user vs system service) map to
+        // distinct pipes.
+        let stem = socket.file_name().and_then(|s| s.to_str()).unwrap_or("fono.sock").to_owned();
+        Ok(stem
+            .to_ns_name::<GenericNamespaced>()
+            .with_context(|| format!("invalid IPC pipe name derived from {socket:?}"))?)
+    }
+}
+
+/// Split a connected stream into independently-owned receive and send
+/// halves. Wraps [`interprocess`]'s split so callers don't need the
+/// crate's traits in scope.
+#[must_use]
+pub fn split_stream(stream: Stream) -> (RecvHalf, SendHalf) {
+    stream.split()
+}
+
+/// Accept the next incoming connection on a [`Listener`]. Wraps
+/// [`interprocess`]'s `Listener::accept` so callers don't need the
+/// crate's traits in scope.
+pub async fn accept(listener: &Listener) -> Result<Stream> {
+    listener.accept().await.context("accept IPC connection")
+}
 
 /// Commands from the CLI to the running daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -202,15 +261,23 @@ where
     Ok(bincode::deserialize(&buf).context("bincode deserialize")?)
 }
 
-/// Bind a Unix-socket listener, removing any stale socket first. Sets mode 0600.
-pub fn bind_listener(socket: &Path) -> Result<UnixListener> {
+/// Bind a local-socket listener, removing any stale socket first. On
+/// Unix this sets mode 0600 on the socket file.
+pub fn bind_listener(socket: &Path) -> Result<Listener> {
+    // Filesystem-socket housekeeping only applies on Unix; Windows
+    // named pipes have no on-disk artefact to clean up.
+    #[cfg(not(windows))]
     if socket.exists() {
         let _ = std::fs::remove_file(socket);
     }
     if let Some(dir) = socket.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let listener = UnixListener::bind(socket).with_context(|| format!("bind UDS at {socket:?}"))?;
+    let name = socket_name(socket)?;
+    let listener = ListenerOptions::new()
+        .name(name)
+        .create_tokio()
+        .with_context(|| format!("bind IPC listener at {socket:?}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -220,8 +287,9 @@ pub fn bind_listener(socket: &Path) -> Result<UnixListener> {
 }
 
 /// Dial the daemon. Returns a descriptive error when the daemon isn't running.
-pub async fn connect(socket: &Path) -> Result<UnixStream> {
-    UnixStream::connect(socket).await.with_context(|| {
+pub async fn connect(socket: &Path) -> Result<Stream> {
+    let name = socket_name(socket)?;
+    Stream::connect(name).await.with_context(|| {
         format!(
             "fono: daemon not running at {socket:?}; start it with 'fono' or install the \
              autostart unit"
@@ -235,10 +303,22 @@ pub async fn connect(socket: &Path) -> Result<UnixStream> {
 /// headless `fono.service` unit) and falls back to the per-user XDG
 /// socket so `systemctl --user` and standalone deployments keep
 /// working. The error path reports every path that was tried.
-pub async fn connect_any(sockets: &[std::path::PathBuf]) -> Result<UnixStream> {
+pub async fn connect_any(sockets: &[std::path::PathBuf]) -> Result<Stream> {
     let mut last_err: Option<std::io::Error> = None;
     for sock in sockets {
-        match UnixStream::connect(sock).await {
+        let name = match socket_name(sock) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::debug!(
+                    target: "fono::ipc",
+                    socket = %sock.display(),
+                    error = %e,
+                    "ipc socket name invalid; skipping candidate"
+                );
+                continue;
+            }
+        };
+        match Stream::connect(name).await {
             Ok(s) => return Ok(s),
             Err(e) => {
                 tracing::debug!(

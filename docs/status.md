@@ -1,5 +1,128 @@
 # Fono — Project Status
-Last updated: 2026-07-06
+Last updated: 2026-07-10
+
+## 2026-07-10 — Windows port: IPC unification (Task 4.1) + MSVC C++-runtime link fix (Task 3.3); `fono` now compiles on Windows
+
+Drove the real Windows build over SSH (`scripts/win-remote.sh`, box now
+up) and cleared the two things that were stopping the `fono` binary from
+compiling and starting to link on `x86_64-pc-windows-msvc`.
+
+- **Task 4.1 — IPC is now cross-platform.** `crates/fono-ipc` moved off
+  `tokio::net::UnixListener`/`UnixStream` onto the `interprocess` crate's
+  Tokio local sockets: a Unix-domain socket at the same filesystem path
+  on Linux/macOS, a named pipe on Windows. Added
+  `interprocess = { version = "2", features = ["tokio"] }` to workspace
+  deps (0BSD OR Apache-2.0, already allow-listed in `deny.toml`; new
+  transitive crates `recvmsg`/`widestring`/`doctest-file` likewise
+  allow-listed). `fono-ipc` exposes `Stream`/`Listener`/`RecvHalf`/
+  `SendHalf` and `accept()`/`split_stream()` helpers so `fono` and
+  `fono-mcp-server` need no direct `interprocess` dep. **Zero behaviour
+  change on Linux**, release-slim **21.34 MiB** (under budget, NEEDED
+  allowlist clean — interprocess added ~0). This removes the old
+  `fono-ipc` Unix-socket breakpoint, so the whole `fono` binary now
+  compiles on Windows.
+- **Task 3.3 — MSVC C++-runtime link fixed.** The full link then failed
+  with `LNK1181: stdc++.lib`. Root cause: `.cargo/config.toml`'s
+  `ORT_CXX_STDLIB=static:-bundle=stdc++` (needed for the Linux NEEDED
+  allowlist) leaks to MSVC via cargo's non-target-scoped `[env]` table,
+  where `ort-sys` turns it into a bogus `-lstdc++`. Fix: neutralise it to
+  empty on Windows so ort-sys uses its correct MSVC default (no explicit
+  C++ stdlib link). CI `windows` job exports `ORT_CXX_STDLIB=`;
+  `scripts/win-remote.sh` passes `--config env.ORT_CXX_STDLIB=''`.
+  Documented in `.cargo/config.toml` and `docs/build-windows.md`. (The
+  anticipated OpenMP-on-MSVC issue was a non-event — `llama-cpp-sys-2`
+  already gates `gomp` on gnu and links the MSVC CRT on Windows.)
+- **Tasks 3.1/3.2/3.4 ticked** as satisfied along the way (native MSVC
+  toolchain builds all vendored C++ with no CMake overrides; CPU-only
+  Windows v1 already decided).
+
+**Current Windows blocker (open):** with `stdc++` fixed the link reaches
+onnxruntime and fails `LNK1120: 157 unresolved externals` from
+`libort_sys` (protobuf/abseil/onnx/cpuinfo). The pinned Windows
+`onnxruntime.lib` isn't self-contained like the Linux `.a`; its companion
+static libs must be added, or build a CPU-only Windows variant without
+`tts-local` so `ort` is never linked. Folded into Phase 5 (audio/ONNX).
+
+Gate: `cargo fmt --all --check`, `clippy --workspace --all-targets -D
+warnings`, and `cargo test --workspace --tests --lib` all green on Linux;
+release-slim size gate passed (21.34 MiB, 4-entry NEEDED).
+
+Next: resolve the onnxruntime-on-MSVC static link (companion libs or
+`tts-local`-off CPU variant) to get a linked `fono.exe` (Tasks 3.5/3.6),
+then Phase 4 continues (Task 4.2 locale via `sys-locale`).
+
+## 2026-07-10 — Windows port Phase 2 complete: non-blocking Windows CI job
+
+Phase 2 of `plans/2026-05-26-windows-port-v1.md` (Tasks 2.1–2.3): CI now
+has a `windows` job (`windows-2022` runner) so Windows porting progress
+is visible on every push — without ever blocking the pipeline.
+
+- **Non-blocking by design**: `continue-on-error: true`; the job is
+  *expected to fail* until later phases land (next known blocker:
+  `fono-ipc`'s Unix sockets, plan Phase 4). A red Windows run never
+  gates a PR; Linux/macOS rows are unaffected. Promotion to a blocking
+  gate comes with the Windows release artefact (plan Phase 13/14),
+  mirroring the macOS job's Phase 12 promotion.
+- **Structured as a dedicated job** (like the `macos` job), not a
+  matrix row — same Actions-UI visibility, cleaner separation from the
+  Linux fmt/clippy/bench steps that don't apply yet.
+- **Phase 0 findings baked into the runner setup**: git long paths
+  enabled before checkout (vendored llama.cpp exceeds legacy
+  `MAX_PATH`), `LIBCLANG_PATH` pointed at the image's preinstalled
+  standalone LLVM (VS Build Tools has no `libclang.dll`), pinned
+  `onnxruntime.lib` fetched through Git Bash — the same recipe
+  `scripts/win-remote.sh` uses over MSYS.
+- **Windows size/import gate explicitly deferred** (Task 2.2): the ELF
+  `NEEDED` check is the structurally Linux-only `size-budget` job and
+  macOS has its Mach-O sibling; the PE/dumpbin analogue is marked as
+  Phase 14 work in the job header and `docs/build-windows.md`.
+
+Also this session: verified the macOS build after the Phase 1 refactor
+on the remote Mac (Apple Silicon) — `cargo check --workspace`, clippy
+`-D warnings`, and the full test suite all green (1389 passed, 0
+failed), confirming the refactor was macOS-neutral as designed.
+
+Next: Phase 3 — first successful Windows cross-compile via `cargo-xwin`.
+
+## 2026-07-10 — Windows port Phase 1 complete: Linux-only trait refactor
+
+Phase 1 of `plans/2026-05-26-windows-port-v1.md` (Tasks 1.1–1.8) is done —
+a zero-behaviour-change refactor that puts a platform seam in front of
+every subsystem that will later need a Windows sibling. No Windows code
+landed; the Linux binary is byte-for-byte the same size.
+
+- **Audit first paid off**: roughly half the tasks were already
+  discharged by earlier work. The overlay backend table (1.2), the
+  hotkey and audio cfg splits (1.4/1.5), and the installer dispatch
+  (1.6 — realised during the macOS port as cfg-dispatched
+  `crates/fono/src/install/{mod,linux,macos}.rs` with an `unsupported`
+  fallback that already covers Windows) needed only verification and
+  documentation, not refactoring.
+- **Task 1.1 (`fono-tray`)**: the platform-neutral seam already existed
+  (the provider traits + `MenuNode` tree in `lib.rs`), so instead of
+  inventing a `TrayBackend` trait the ksni/D-Bus code moved verbatim
+  from `lib.rs` into a new `crates/fono-tray/src/backend_linux.rs`
+  behind `cfg(target_os = "linux")` — a future `backend_windows.rs`
+  slots in beside it.
+- **Task 1.2 (`fono-overlay`)**: TODO marker added in
+  `crates/fono-overlay/src/backend.rs` where the Windows
+  `Win32LayeredToolWindow` candidate row will go.
+- **Task 1.3 (`fono-inject`)**: the Unix-socket focus cascade in
+  `focus.rs` (sway/i3 IPC probe and its `std::os::unix::net` import)
+  is now gated `cfg(target_os = "linux")`, with a trivial passthrough
+  on other platforms; `detect_auto`'s X11 early-return got the same
+  gate. This was one of the two exact spots where the full Windows
+  build broke at the end of Phase 0.
+- **Task 1.7 (`fono-update`)**: `asset_name_for` gained a Windows stub
+  (`fono-vX.Y.Z-<arch>.exe`) and `desired_asset_prefix` short-circuits
+  to the CPU prefix on Windows (CPU-only in v1, same as macOS), with a
+  matching cfg-gated test.
+- **Gate (1.8)**: fmt, clippy `-D warnings`, and the full test suite
+  green (1423 tests passed, 0 failed); `release-slim` binary size delta
+  measured against a stashed baseline: exactly 0 bytes (well within the
+  ±5 KB budget).
+
+Next: Phase 2 — add a non-blocking Windows row to the CI build matrix.
 
 ## 2026-07-06 — Windows port Phase 0 complete: remote dev environment live
 

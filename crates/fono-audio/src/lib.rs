@@ -5,6 +5,17 @@
 //!
 //! The shipped VAD is the energy-threshold [`vad::WebRtcVadStub`]; a
 //! neural VAD (Silero on `ort`) is a planned upgrade, not yet wired.
+//!
+//! # Cross-platform layout (Windows port plan Task 1.5)
+//!
+//! This crate is already split correctly for new OS ports: the Linux
+//! subprocess capture/playback paths (parec / paplay) are gated
+//! `#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]`
+//! inside [`capture`] and [`playback`], and every non-Linux target
+//! compiles the `cpal` path (CoreAudio on macOS, WASAPI on Windows).
+//! The `fono` binary enables `cpal-backend` by default on those
+//! targets via a `[target.'cfg(...)'.dependencies]` table; Linux
+//! stays on the subprocess path by default.
 pub mod capture;
 pub mod devices;
 pub mod envelope;

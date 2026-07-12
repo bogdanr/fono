@@ -295,7 +295,7 @@ pub(crate) struct McpActivityHoldGuard {
     /// Write half kept alive so that dropping the guard closes the
     /// connection, signalling EOF to the daemon which then decrements
     /// the activity depth and restores the tray.
-    _write_half: Option<tokio::net::unix::OwnedWriteHalf>,
+    _write_half: Option<fono_ipc::SendHalf>,
     /// Background task reading for `McpListenCancelled` signals from
     /// the daemon. Aborted on drop so the read half is cleaned up.
     _read_task: Option<tokio::task::JoinHandle<()>>,
@@ -344,7 +344,7 @@ impl McpActivityHoldGuard {
         }
         // Split: write half stays in the guard (its drop closes the
         // connection). Read half goes to the watcher task.
-        let (mut read_half, write_half) = stream.into_split();
+        let (mut read_half, write_half) = fono_ipc::split_stream(stream);
         let cancelled_clone = Arc::clone(&cancelled);
         let task = tokio::spawn(async move {
             loop {
@@ -393,9 +393,9 @@ impl Drop for McpActivityHoldGuard {
 pub(crate) struct SpeakSlotGuard {
     // `Option` so we can mem-take on Drop without unsafe. While
     // `Some`, the daemon is holding the global mutex on our behalf;
-    // dropping the inner `UnixStream` closes the socket which
+    // dropping the inner `Stream` closes the socket which
     // triggers EOF on the daemon side → mutex released.
-    _stream: Option<tokio::net::UnixStream>,
+    _stream: Option<fono_ipc::Stream>,
 }
 
 impl SpeakSlotGuard {

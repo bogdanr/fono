@@ -144,43 +144,43 @@ subsequent phase becomes a single isolated `windows.rs` file addition. No
 Windows code lands in this phase. Linux pre-commit gate must stay green
 throughout.
 
-- [ ] Task 1.1. **`fono-tray` trait split.** Define `pub trait TrayBackend`
+- [x] Task 1.1. **`fono-tray` trait split.** Define `pub trait TrayBackend`
       in `crates/fono-tray/src/lib.rs` with the same surface as the current
       free functions. Move existing ksni-based code into
       `crates/fono-tray/src/linux.rs` behind `#[cfg(target_os = "linux")]`.
       The `lib.rs` re-export switches on `cfg(target_os)`. Verify by
       `cargo build -p fono-tray` and confirming no clippy regressions.
-- [ ] Task 1.2. **`fono-overlay` already has the backend split** — confirm
+- [x] Task 1.2. **`fono-overlay` already has the backend split** — confirm
       no refactor needed. The `BackendId` enum and `candidate_list_with`
       table at `crates/fono-overlay/src/backend.rs` are already the right
       extension point. Add a TODO comment marking where the Windows
       `Win32LayeredToolWindow` row will slot in.
-- [ ] Task 1.3. **`fono-inject` `Injector` enum extension point.** The
+- [x] Task 1.3. **`fono-inject` `Injector` enum extension point.** The
       `Injector` enum at `crates/fono-inject/src/inject.rs:10-30` is already
       the unified surface. Move the auto-detection branch in `detect_auto`
       that early-returns `Self::Enigo` on X11 into a `#[cfg(target_os = "linux")]`
       block; later add a `#[cfg(target_os = "windows")]` branch returning
       `Self::Enigo` unconditionally.
-- [ ] Task 1.4. **`fono-hotkey` already split correctly** — the `portal` and
+- [x] Task 1.4. **`fono-hotkey` already split correctly** — the `portal` and
       `gnome_gsettings` modules are already `#[cfg(target_os = "linux")]` at
       `crates/fono-hotkey/src/lib.rs:8-13`. The listener and FSM are
       OS-agnostic. Document this in a comment block at the crate root.
-- [ ] Task 1.5. **`fono-audio` already split correctly** — capture.rs and
+- [x] Task 1.5. **`fono-audio` already split correctly** — capture.rs and
       playback.rs already gate Linux subprocess paths with
       `#[cfg(all(target_os = "linux", not(feature = "cpal-backend")))]`.
       Document in crate-root comment that non-Linux targets compile the
       cpal path by default.
-- [ ] Task 1.6. **`fono/src/install.rs` trait split.** Define
+- [x] Task 1.6. **`fono/src/install.rs` trait split.** Define
       `pub trait Installer` with `install(mode) -> Result<()>` and
       `uninstall() -> Result<()>` methods. Move existing module into
       `install/linux.rs`; introduce `install/mod.rs` that dispatches on
       `cfg(target_os)`. Linux behaviour byte-identical.
-- [ ] Task 1.7. **`fono-update` asset-naming abstraction.** Extract the
+- [x] Task 1.7. **`fono-update` asset-naming abstraction.** Extract the
       asset-name format string into a small `fn current_asset_name() -> String`
       that switches on `cfg(target_os)` and `cfg(target_arch)`. Linux returns
       today's value (`fono-vX.Y.Z-x86_64`); Windows branch is a stub returning
       `fono-vX.Y.Z-x86_64.exe` for now, gated `#[cfg(target_os = "windows")]`.
-- [ ] Task 1.8. **Pre-commit gate green.** Run `cargo fmt --all -- --check`,
+- [x] Task 1.8. **Pre-commit gate green.** Run `cargo fmt --all -- --check`,
       `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo test --workspace --tests --lib`. All must pass with no new
       warnings and no test changes. Binary size delta must be within ±5 KB
@@ -189,18 +189,32 @@ throughout.
 **Phase 1 gate**: zero behaviour change on Linux. Refactor commit can be
 reverted cleanly; binary size unchanged ±5 KB; all 728+ tests still pass.
 
+**Phase 1 status: COMPLETE (2026-07-10).** Notes: several tasks were
+already discharged by earlier work — the overlay backend table (1.2),
+hotkey/audio cfg splits (1.4/1.5), and the installer module dispatch
+(1.6, realised during the macOS port as cfg-dispatched `install/{mod,
+linux,macos}.rs` with an `unsupported` fallback rather than a literal
+trait; the same applies to the tray, where the existing
+`ActiveBackends`/provider surface already is the platform-neutral seam,
+so 1.1 became a verbatim move of the ksni code into
+`backend_linux.rs`). `fono-inject::focus` gained
+`cfg(target_os = "linux")` gates around the Unix-socket focus cascade
+(1.3), and `fono-update` grew the Windows `.exe` asset-name stub plus
+the CPU-only prefix short-circuit (1.7). Gate: fmt/clippy/tests green
+(1423 tests passed), release-slim binary size delta exactly 0 bytes.
+
 ### Phase 2 — CI Windows row, non-blocking
 
-- [ ] Task 2.1. **Add Windows row to `.github/workflows/ci.yml`** build
+- [x] Task 2.1. **Add Windows row to `.github/workflows/ci.yml`** build
       matrix. Runner: `windows-2022`. Variant: cpu only initially. Set
       `continue-on-error: true` on the row and `fail-fast: false` on the
       matrix. Steps: checkout, install Rust (default host on Windows is
       MSVC), `cargo build -p fono`, `cargo test --workspace --tests --lib`.
-- [ ] Task 2.2. **Windows-specific size + NEEDED check skipped.** The
+- [x] Task 2.2. **Windows-specific size + NEEDED check skipped.** The
       existing ELF NEEDED check at `ci.yml:268-296` runs only on
       `runner.os == 'Linux'`. Confirm this condition is honored; add an
       explicit comment marking Windows size gate as deferred to Phase 14.
-- [ ] Task 2.3. **First Windows CI run is expected to fail.** Document
+- [x] Task 2.3. **First Windows CI run is expected to fail.** Document
       this in the Phase 2 commit message and in `docs/build-windows.md`.
       The job exists to surface progress; `continue-on-error` prevents it
       from blocking the Linux pipeline.
@@ -208,36 +222,60 @@ reverted cleanly; binary size unchanged ±5 KB; all 728+ tests still pass.
 **Phase 2 gate**: Linux CI rows green; Windows row present and visible in
 the GitHub Actions UI; PR / push workflow unaffected by Windows failures.
 
+**Phase 2 status: COMPLETE (2026-07-10).** Notes: implemented as a
+dedicated `windows` job (mirroring how the macOS port added its
+`macos` job) rather than a matrix row — same visibility, cleaner
+separation. The job bakes in the Phase 0 findings for the hosted
+runner: `git config --system core.longpaths true` before checkout,
+`LIBCLANG_PATH` pointed at the image's preinstalled LLVM, and the
+pinned `onnxruntime.lib` fetched via Git Bash. On 2.2: the ELF check
+no longer lives behind a `runner.os == 'Linux'` condition — it is the
+structurally Linux-only `size-budget` job (with a `size-budget-macos`
+Mach-O sibling); the deferred-to-Phase-14 PE gate is documented in the
+`windows` job header and `docs/build-windows.md`.
+
 ### Phase 3 — First successful Windows cross-compile (`cargo-xwin`)
 
 This phase iterates on `cargo xwin build --target x86_64-pc-windows-msvc -p fono`
 from the Linux host until the binary links. Expect snags in vendored C++
 (whisper-rs-sys, llama-cpp-sys-2). No runtime testing yet.
 
-- [ ] Task 3.1. **First xwin invocation.** Run from Linux:
-      `cargo xwin build --target x86_64-pc-windows-msvc --profile release-slim -p fono`.
-      Capture the failure mode. Likely candidates: missing CMake-aware
-      Windows SDK paths, mis-detection of MSVC standard library, llama.cpp
-      OpenMP not building under MSVC, whisper.cpp Vulkan shaders. Document
-      first three errors verbatim in plan revision notes.
-- [ ] Task 3.2. **Fix CMake toolchain detection for whisper-rs-sys.**
-      Likely needs `CMAKE_SYSTEM_NAME=Windows`, `CMAKE_GENERATOR=Ninja`,
-      and the xwin-provided MSVC sysroot env vars exported in
-      `.cargo/config.toml` under a
-      `[target.x86_64-pc-windows-msvc]` section. Avoid leaking these into
-      Linux builds.
-- [ ] Task 3.3. **Resolve OpenMP-on-MSVC linkage.** The workspace pins
-      `llama-cpp-2` features `openmp + static-openmp + static-stdcxx` in
-      `Cargo.toml:93`. On MSVC, OpenMP is provided by `vcomp140.dll` (not
-      libgomp); static-openmp is GCC-specific. Options to evaluate:
-      (a) disable `openmp` feature on Windows via target-cfg feature flip,
-      (b) link `vcomp140.lib` dynamically and accept the DLL dep,
-      (c) build with libomp via clang-cl. Pick the lightest option that
-      gets a working binary; document the trade-off.
-- [ ] Task 3.4. **Decide on Vulkan for Windows v1.** Recommend: ship
-      CPU-only Windows variant in v1, defer Windows GPU variant. Vulkan on
-      Windows works fine but doubles Phase 3 surface area. Document
-      decision in the plan.
+- [x] Task 3.1. **First xwin invocation.** *(Done 2026-07-10 — via the
+      native SSH loop `scripts/win-remote.sh build -p fono`, which is the
+      Phase 0 reference toolchain; xwin cross-compile deferred as the fast
+      path.)* All vendored C++ (`whisper-rs-sys`, `llama-cpp-sys-2`) and
+      every Rust crate compile cleanly on `x86_64-pc-windows-msvc`. Two
+      link-stage failures surfaced, in order: (1) `LNK1181: cannot open
+      input file 'stdc++.lib'` (fixed — Task 3.3); (2) `LNK1120: 157
+      unresolved externals` from `libort_sys` (protobuf / abseil / onnx /
+      cpuinfo) — the pinned Windows `onnxruntime.lib` needs its companion
+      static libs on the link line. That ONNX-Runtime-on-MSVC provisioning
+      gap is the current Phase 3 blocker (tracked into Phase 5's audio/ORT
+      work; a CPU-only build without `tts-local` may sidestep it for v1).
+- [x] Task 3.2. **Fix CMake toolchain detection for whisper-rs-sys.**
+      *(Done 2026-07-10 — no fix needed.)* With the Phase 0 native MSVC
+      toolchain (VS Build Tools + `LIBCLANG_PATH` + long paths),
+      `whisper-rs-sys` and `llama-cpp-sys-2` CMake/Ninja builds succeed
+      out of the box; no `[target.x86_64-pc-windows-msvc]` env overrides
+      were required.
+- [x] Task 3.3. **Resolve OpenMP / C++-runtime-on-MSVC linkage.**
+      *(Done 2026-07-10.)* The anticipated OpenMP problem did **not**
+      materialise: `llama-cpp-sys-2`'s build script already gates its
+      `gomp` link on `target_triple.contains("gnu")` and links the MSVC
+      CRT (not `stdc++`) on MSVC, so `openmp + static-openmp +
+      static-stdcxx` are no-ops on Windows. The real blocker was
+      `ort-sys`: `.cargo/config.toml` sets `ORT_CXX_STDLIB=static:-bundle
+      =stdc++` for the Linux-gnu NEEDED allowlist, but cargo's `[env]`
+      table is **not** target-scoped, so it leaked to MSVC and ort-sys
+      emitted a bogus `-lstdc++` → `LNK1181`. Fix: neutralise the env to
+      empty on Windows (ort-sys then uses its correct MSVC default of no
+      explicit C++ stdlib link) — the CI `windows` job exports
+      `ORT_CXX_STDLIB=` and `scripts/win-remote.sh` passes
+      `--config env.ORT_CXX_STDLIB=''`. Documented in `.cargo/config.toml`
+      and `docs/build-windows.md`.
+- [x] Task 3.4. **Decide on Vulkan for Windows v1.** *(Done — CPU-only
+      Windows v1; GPU/Vulkan variant deferred. Already reflected in the
+      Phase 1 `fono-update` asset-name work.)*
 - [ ] Task 3.5. **Linker success.** `cargo xwin build --target x86_64-pc-windows-msvc -p fono`
       produces `target/x86_64-pc-windows-msvc/release-slim/fono.exe`.
       Binary size first measurement (no budget yet). Run-time correctness
@@ -257,15 +295,20 @@ turns green at compile-and-link level.
 This phase makes three deliberate Linux-affecting cleanups documented in
 the prior unification analysis. Each is a small, called-out Linux trade-off.
 
-- [ ] Task 4.1. **IPC: switch from `tokio::net::UnixListener` to
-      `interprocess` crate.** Add `interprocess = "2"` to workspace deps.
-      `crates/fono-ipc` swaps Unix-domain socket primitives for
-      `interprocess::local_socket::LocalSocketStream` / `Listener`. Linux
-      uses Unix-domain socket at the same path; Windows uses a named pipe
-      at `\\.\pipe\fono`. **Linux trade-off**: one new dep, ~0 binary
-      growth, behaviour identical. Verify with all existing IPC tests
-      green and `fono toggle` CLI continues to work against running
-      daemon.
+- [x] Task 4.1. **IPC: switch from `tokio::net::UnixListener` to
+      `interprocess` crate.** *(Done 2026-07-10.)* Added
+      `interprocess = { version = "2", features = ["tokio"] }` to workspace
+      deps (licences 0BSD OR Apache-2.0, already in the deny.toml
+      allowlist). `crates/fono-ipc` now builds its listener/stream via
+      `interprocess::local_socket::tokio` — Unix-domain socket at the same
+      filesystem path on Linux/macOS, named pipe on Windows — and exposes
+      `Stream` / `Listener` / `RecvHalf` / `SendHalf` plus `accept()` /
+      `split_stream()` helpers so `fono` and `fono-mcp-server` don't need
+      `interprocess` as a direct dep. **Verified**: fmt/clippy/tests green;
+      release-slim size **21.34 MiB** (well under budget, NEEDED allowlist
+      clean — interprocess added ~0); and the full `fono` binary now
+      compiles on `x86_64-pc-windows-msvc` (the old `fono-ipc` `UnixListener`
+      breakpoint is gone).
 - [ ] Task 4.2. **Locale: switch to `sys-locale` crate.** Replace ad-hoc
       env-var probes in `crates/fono-core/src/locale.rs`. **Linux trade-off**:
       ~30 KB binary growth, behaviour identical (sys-locale falls through

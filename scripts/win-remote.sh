@@ -81,6 +81,18 @@ remote_win_dir='C:\fono-dev\fono'
 remote_rsync_dir='/c/fono-dev/fono'
 ort_dir='C:\fono-dev\fono\target\onnxruntime-1.24.2\x86_64-pc-windows-msvc'
 
+# On MSVC there is no `stdc++.lib`. `.cargo/config.toml` sets
+# ORT_CXX_STDLIB=static:-bundle=stdc++ for the Linux-gnu NEEDED allowlist,
+# but cargo's [env] table is not target-scoped, so ort-sys would emit a
+# bogus `-lstdc++` here and the final link fails with LNK1181. An *empty*
+# ORT_CXX_STDLIB makes ort-sys fall back to its correct MSVC default (no
+# explicit C++ stdlib link — the MSVC CRT is linked automatically). cmd.exe
+# cannot hold an empty-valued env var, so we override the config value with
+# an empty TOML string via `--config`. Single quotes (a TOML literal empty
+# string) survive cmd.exe unmangled where `""` would not. Windows port
+# Task 3.3 / docs/build-windows.md.
+ort_cxx_neutralise="--config env.ORT_CXX_STDLIB=''"
+
 push() {
 	# Same exclude/filter policy as scripts/mac-remote.sh: honour every
 	# .gitignore in the tree (so local bulk never crosses the wire) while
@@ -113,10 +125,10 @@ cmd=$1
 shift
 case "$cmd" in
 push) push ;;
-check) push && fetch_ort && run_remote cargo check --workspace "$@" ;;
-build) push && fetch_ort && run_remote cargo build "$@" ;;
-test) push && fetch_ort && run_remote cargo test --workspace --tests --lib "$@" ;;
-cargo) push && fetch_ort && run_remote cargo "$@" ;;
+check) push && fetch_ort && run_remote cargo check $ort_cxx_neutralise --workspace "$@" ;;
+build) push && fetch_ort && run_remote cargo build $ort_cxx_neutralise "$@" ;;
+test) push && fetch_ort && run_remote cargo test $ort_cxx_neutralise --workspace --tests --lib "$@" ;;
+cargo) push && fetch_ort && run_remote cargo $ort_cxx_neutralise "$@" ;;
 sh) run_remote "$@" ;;
 *)
 	usage >&2

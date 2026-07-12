@@ -65,6 +65,11 @@ pub enum BackendId {
     /// always succeeds so the daemon never aborts on a missing
     /// graphics environment.
     Noop,
+    // TODO(windows-port Phase 10): add `Win32LayeredToolWindow` here —
+    // a winit window with the WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
+    // WS_EX_TRANSPARENT | WS_EX_TOPMOST extended styles, blitted from
+    // the same software renderer (plan 2026-05-26-windows-port-v1.md,
+    // Tasks 10.1–10.5).
 }
 
 impl BackendId {
@@ -346,6 +351,9 @@ fn candidate_list_with(os: HostOs, env_present: impl Fn(&str) -> bool) -> Vec<Ba
     if os == HostOs::MacOs {
         return vec![BackendId::MacPanel, BackendId::Noop];
     }
+    // TODO(windows-port Phase 10): when the Win32 backend lands, split
+    // `HostOs::Other` into a `Windows` arm returning
+    // `vec![Win32LayeredToolWindow, Noop]`.
     if os == HostOs::Other {
         return vec![BackendId::Noop];
     }

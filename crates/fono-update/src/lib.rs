@@ -171,6 +171,11 @@ pub fn asset_name_for(tag: &str, prefix: &str) -> Option<String> {
         // Metal-accelerated variant only (macOS port plan, Phase 3
         // artefact-shape decision), so no `fono-gpu` sibling exists.
         Some(format!("{prefix}-{tag}-{arch}-apple-darwin"))
+    } else if cfg!(target_os = "windows") {
+        // Stub until the Windows release artefact ships (Windows port
+        // plan Task 1.7 / Phase 13): bare `.exe`, CPU-only in v1 (the
+        // Phase 3.4 decision defers a Windows GPU variant).
+        Some(format!("{prefix}-{tag}-{arch}.exe"))
     } else {
         None
     }
@@ -194,8 +199,9 @@ pub fn asset_name_for(tag: &str, prefix: &str) -> Option<String> {
 pub fn desired_asset_prefix() -> &'static str {
     // macOS ships a single Metal-accelerated variant (no cpu/gpu
     // split), so the base prefix is always right and the Vulkan probe
-    // is meaningless there.
-    if cfg!(target_os = "macos") {
+    // is meaningless there. Windows ships CPU-only in v1 (Windows
+    // port plan Task 3.4), so the same short-circuit applies.
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
         return CPU_ASSET_PREFIX;
     }
     if fono_core::vulkan_probe::probe().is_usable() {
@@ -811,6 +817,21 @@ mod tests {
             let name = asset_name_for("v1.2.3", CPU_ASSET_PREFIX).unwrap();
             assert!(name.starts_with("fono-v1.2.3-"));
             assert!(name.ends_with("-apple-darwin"));
+            assert_eq!(desired_asset_prefix(), CPU_ASSET_PREFIX);
+        }
+    }
+
+    /// The Windows asset is a bare `.exe`, CPU-only in v1 — the
+    /// desired prefix short-circuits to the base one just like macOS.
+    #[test]
+    fn asset_name_has_exe_suffix_on_windows() {
+        if cfg!(target_os = "windows") {
+            let name = asset_name_for("v1.2.3", CPU_ASSET_PREFIX).unwrap();
+            assert!(name.starts_with("fono-v1.2.3-"));
+            // Exact-case match is intentional: we generate this name.
+            #[allow(clippy::case_sensitive_file_extension_comparisons)]
+            let has_exe = name.ends_with(".exe");
+            assert!(has_exe);
             assert_eq!(desired_asset_prefix(), CPU_ASSET_PREFIX);
         }
     }

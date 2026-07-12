@@ -1,6 +1,6 @@
 [package]
 name = "fono-ipc"
-description = "Unix-socket IPC between the Fono daemon and CLI clients."
+description = "Cross-platform local IPC between the Fono daemon and CLI clients (Unix socket on Linux/macOS, named pipe on Windows)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,3 +19,4 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 bincode = { workspace = true }
+interprocess = { workspace = true }

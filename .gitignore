@@ -35,3 +35,10 @@ secrets.toml
 
 # Wake-word training venv (host tooling; never committed)
 /.venv-wakeword/
+
+# Local dev-host addresses (FONO_MAC_HOST / FONO_WIN_HOST) — per the
+# macOS/Windows port plans' guiding constraint, these never live in
+# the repo. Source .env.hosts.local yourself before using
+# scripts/mac-remote.sh or scripts/win-remote.sh.
+.env.hosts.local
+

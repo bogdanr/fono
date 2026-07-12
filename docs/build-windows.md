@@ -161,6 +161,67 @@ Linux-specific code behind a platform gate, add a Windows sibling
 later) — this is the toolchain doing its job, not a gap in the
 environment setup.
 
+## CI: the non-blocking `windows` job (Phase 2)
+
+`.github/workflows/ci.yml` has a `windows` job (`windows-2022` runner,
+`continue-on-error: true`) added by Windows port plan Phase 2. **It is
+expected to fail** until the port's later phases land — the full
+`fono` binary still hits the known gaps (`fono-ipc` Unix sockets are
+next up, plan Phase 4). The job exists purely to surface porting
+progress in the Actions UI; a red run never blocks the Linux/macOS
+pipeline. Promote it to a blocking gate when the Windows release
+artefact ships (plan Phase 13/14), the same way the macOS job was
+promoted in its Phase 12.
+
+The job encodes the Phase 0 environment findings for the hosted
+runner: git-side long paths are enabled before checkout (the vendored
+llama.cpp git dependency exceeds legacy `MAX_PATH`),
+`LIBCLANG_PATH` points at the image's preinstalled standalone LLVM
+(VS Build Tools ships no `libclang.dll`), the pinned
+`onnxruntime.lib` is fetched through Git Bash exactly like
+`scripts/win-remote.sh` does over MSYS, and `ORT_CXX_STDLIB` is
+emptied on MSVC (see below). There is no Windows size /
+import-table gate yet — the PE/dumpbin analogue of the Linux ELF
+`NEEDED` check and macOS dylib allowlist is deferred to plan Phase 14.
+
+## Link-stage findings (Phase 3)
+
+The full `fono` binary now *compiles* end-to-end on
+`x86_64-pc-windows-msvc` (all vendored C++ and every Rust crate,
+including the `interprocess`-based `fono-ipc` from plan Task 4.1). Two
+distinct failures appear at the final `link.exe` step:
+
+1. **`LNK1181: cannot open input file 'stdc++.lib'` — fixed.**
+   `.cargo/config.toml` sets `ORT_CXX_STDLIB=static:-bundle=stdc++` so
+   the Linux-gnu ship binary keeps its four-entry `NEEDED` allowlist.
+   Cargo's `[env]` table is **not** target-scoped, so that value also
+   reaches MSVC, where `ort-sys` turns it into a `-lstdc++` — but there
+   is no `libstdc++` on MSVC (the CRT is Microsoft's). An **empty**
+   `ORT_CXX_STDLIB` makes `ort-sys` fall back to its correct MSVC
+   default: no explicit C++ stdlib link (the MSVC CRT is pulled in
+   automatically). Because `cmd.exe` cannot hold an empty-valued
+   variable, the two Windows entry points neutralise it differently
+   but equivalently:
+   - CI `windows` job: `echo "ORT_CXX_STDLIB=" >> "$GITHUB_ENV"`.
+   - `scripts/win-remote.sh`: passes `--config env.ORT_CXX_STDLIB=''`
+     (a TOML literal empty string; single quotes survive `cmd.exe`).
+
+   Note `llama-cpp-sys-2` is already MSVC-aware here — it gates its
+   `gomp`/OpenMP link on `gnu` targets and links the MSVC CRT (not
+   `stdc++`) on Windows — so the anticipated OpenMP-on-MSVC problem
+   (plan Task 3.3) never materialised; `ort-sys` was the sole offender.
+
+2. **`LNK1120: 157 unresolved externals` from `libort_sys` — open.**
+   With the `stdc++` link fixed, the link proceeds to onnxruntime and
+   fails on protobuf / abseil / onnx / cpuinfo symbols. The pinned
+   Windows `onnxruntime.lib` is not self-contained the way the Linux
+   `libonnxruntime.a` is: on MSVC those dependencies ship as separate
+   static libs that must be added to the link line. Resolving this
+   (companion-lib provisioning in `scripts/fetch-onnxruntime.sh`, or
+   building a CPU-only Windows variant **without** the `tts-local`
+   feature so `ort` is never linked) is the current Phase 3 blocker,
+   folded into the Phase 5 audio/ONNX-Runtime work.
+
 ## Platform paths (not yet implemented for Windows)
 
 The design plan's locale/config-path unification (Phase 1, Tier-1

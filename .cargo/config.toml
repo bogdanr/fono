@@ -129,6 +129,16 @@ rustflags = [
 #    Result: four-entry NEEDED, 24.45 MiB (≈ −0.9 MiB vs the dynamic leak).
 #    No effect on builds without `tts-local` (ort-sys never runs, and the
 #    fono-tts build script no-ops on that feature gate).
+#
+#    MSVC NOTE: cargo's `[env]` table is NOT target-scoped, so this value
+#    also reaches `x86_64-pc-windows-msvc` builds — where ort-sys would
+#    emit a bogus `stdc++.lib` link (LNK1181; there is no libstdc++ on
+#    MSVC). The Windows build entry points therefore override it with an
+#    empty value, which makes ort-sys fall back to its MSVC default (no
+#    explicit C++ stdlib link — the MSVC CRT is linked automatically):
+#    the CI `windows` job exports `ORT_CXX_STDLIB=` and
+#    `scripts/win-remote.sh` passes `--config env.ORT_CXX_STDLIB=''`.
+#    See docs/build-windows.md (Windows port Task 3.3).
 ORT_CXX_STDLIB = "static:-bundle=stdc++"
 CFLAGS = "-Os -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables"
 CXXFLAGS = "-Os -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables"

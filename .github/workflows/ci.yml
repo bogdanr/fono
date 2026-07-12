@@ -562,6 +562,81 @@ jobs:
           echo "size-budget gate passed (metal, aarch64-apple-darwin); imports:"
           printf "  %s\n" ${actual}
 
+  # Windows port (plans/2026-05-26-windows-port-v1.md, Phase 2).
+  # Non-blocking (`continue-on-error: true`): this job exists to surface
+  # porting progress in the Actions UI, not to gate PRs — it is EXPECTED
+  # to fail until the port's later phases land (see
+  # docs/build-windows.md). Promote to a blocking gate when the Windows
+  # release artefact ships (plan Phase 13/14), mirroring how the macOS
+  # job was promoted in its Phase 12.
+  #
+  # The Windows size + import-table gate is deliberately absent: the
+  # Linux `size-budget` job is ELF/readelf-based and structurally
+  # Linux-only, and `size-budget-macos` is its Mach-O sibling. The
+  # PE/dumpbin equivalent is deferred to Windows port plan Phase 14.
+  windows:
+    name: Build & test (windows-2022)
+    runs-on: windows-2022
+    # Progress-surfacing only: a red Windows job must never block the
+    # Linux/macOS pipeline (plan Task 2.1).
+    continue-on-error: true
+    # MSVC compiles of the vendored whisper.cpp/llama.cpp C++ are slower
+    # than gcc/clang on the Linux rows; give the cold-cache case room.
+    timeout-minutes: 60
+    steps:
+      # The vendored llama.cpp checkout (a cargo git dependency) exceeds
+      # the legacy 260-char MAX_PATH; git-side long paths must be on
+      # before any fetch (Phase 0 finding, docs/build-windows.md).
+      # CARGO_NET_GIT_FETCH_WITH_CLI=true (workflow env) routes cargo's
+      # git fetches through this same git binary.
+      - name: Enable git long paths
+        run: git config --system core.longpaths true
+
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        # Default host triple on windows-2022 is x86_64-pc-windows-msvc.
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Point bindgen at the runner's LLVM (LIBCLANG_PATH)
+        # VS Build Tools ships no libclang.dll, but bindgen
+        # (whisper-rs-sys / llama-cpp-sys-2) needs one (Phase 0
+        # finding). The hosted windows-2022 image preinstalls
+        # standalone LLVM.
+        shell: bash
+        run: echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+
+      - name: Fetch minimal onnxruntime static lib (pin ORT_LIB_LOCATION)
+        # `tts-local` is a default feature; the fetcher has a pinned
+        # `onnxruntime.lib` for x86_64-pc-windows-msvc. Git Bash provides
+        # curl/xz/sha256sum on the hosted image.
+        shell: bash
+        run: |
+          ort_dir="$(sh scripts/fetch-onnxruntime.sh)"
+          echo "ORT_LIB_LOCATION=${ort_dir}" >> "$GITHUB_ENV"
+          echo "pinned ORT_LIB_LOCATION=${ort_dir}"
+
+      - name: Neutralise ORT_CXX_STDLIB on MSVC
+        # `.cargo/config.toml` sets ORT_CXX_STDLIB=static:-bundle=stdc++
+        # for the Linux-gnu NEEDED allowlist, but cargo's [env] table is
+        # not target-scoped, so it leaks to MSVC where ort-sys would emit
+        # a bogus `stdc++.lib` link (LNK1181). An *empty* value makes
+        # ort-sys fall back to its correct MSVC default: no explicit C++
+        # stdlib link (the MSVC CRT is pulled in automatically). Setting
+        # it empty in the environment also stops the non-forced [env]
+        # entry from overriding it. Windows port Task 3.3 /
+        # docs/build-windows.md.
+        shell: bash
+        run: echo "ORT_CXX_STDLIB=" >> "$GITHUB_ENV"
+
+      - name: cargo build
+        run: cargo build -p fono
+
+      - name: cargo test
+        run: cargo test --workspace --tests --lib
+
   deny:
     name: License & advisory audit
     runs-on: ubuntu-latest
