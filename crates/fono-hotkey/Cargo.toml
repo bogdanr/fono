@@ -32,3 +32,12 @@ futures = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 toml = "0.8"
 dirs = "5"
+
+# `RegisterHotKey` binds each hotkey to a message-only window owned by
+# the listener thread, so that thread must pump its Win32 message queue
+# for `WM_HOTKEY` to be delivered (see `listener.rs`). `windows-sys` is
+# already in Cargo.lock at 0.59 (via cpal / fono-tray), so this direct
+# edge adds no new-to-project crate and is zero cost to the shipped
+# Linux / macOS binaries (target tables do not unify off-target).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging"] }

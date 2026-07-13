@@ -20,13 +20,22 @@
 //! sent on the channel returned by [`spawn`].
 
 use anyhow::{Context, Result};
-use crossbeam_channel::{select, unbounded, Sender};
+#[cfg(not(windows))]
+use crossbeam_channel::select;
+use crossbeam_channel::{unbounded, Sender};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
+// On Windows each hotkey is bound to a message-only window owned by the
+// listener thread; `WM_HOTKEY` is delivered only while that thread pumps
+// its Win32 message queue (see the event loop in `run_manager`).
+#[cfg(windows)]
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+};
 
 use crate::fsm::HotkeyAction;
 use crate::parse::{parse_hotkey, ParsedHotkey};
@@ -130,6 +139,7 @@ pub fn spawn(
     Ok(ListenerHandle { thread, control: ctrl_tx })
 }
 
+#[allow(clippy::too_many_lines)] // Two cfg-split event loops (blocking select! vs. Win32 pump) inflate the count.
 fn run_manager(
     dictation: global_hotkey::hotkey::HotKey,
     cancel: Option<global_hotkey::hotkey::HotKey>,
@@ -185,6 +195,21 @@ fn run_manager(
 
     let event_rx = GlobalHotKeyEvent::receiver();
     info!("hotkey listener armed; waiting for events");
+
+    // Event loop. The platforms differ in *how* hotkey events reach
+    // `event_rx`, so the loop shape differs too:
+    //
+    // * On X11 / Wayland the `global-hotkey` backend feeds `event_rx`
+    //   from its own machinery, so we block on a crossbeam `select!`
+    //   across the event channel and the cancel-grab control channel.
+    // * On Windows `RegisterHotKey` binds each hotkey to a message-only
+    //   window owned by *this* thread, and `WM_HOTKEY` is delivered only
+    //   while this thread pumps its Win32 message queue. Blocking in
+    //   `select!` would swallow every keypress, so we run a non-blocking
+    //   pump instead (mirroring `fono-tray`'s Windows backend): drain the
+    //   message queue so `WM_HOTKEY` reaches the crate's wndproc (which
+    //   then sends into `event_rx`), service both channels, then idle.
+    #[cfg(not(windows))]
     loop {
         select! {
             recv(event_rx) -> evt => {
@@ -192,22 +217,16 @@ fn run_manager(
                     warn!("hotkey channel closed");
                     break;
                 };
-                let Some(role) = roles.get(&event.id).copied() else {
-                    continue;
-                };
-                let actions = map_event(
-                    role,
-                    event.state,
+                if process_hotkey_event(
+                    event,
+                    &roles,
                     &mut dictation_press_at,
                     &mut assistant_press_at,
                     &held_flags,
-                );
-                for action in actions {
-                    tracing::debug!("hotkey {role:?} {:?} -> {action:?}", event.state);
-                    if tx.send(action).is_err() {
-                        info!("hotkey action channel closed; listener shutting down");
-                        return Ok(());
-                    }
+                    &tx,
+                ) == Flow::Stop
+                {
+                    return Ok(());
                 }
             }
             recv(ctrl_rx) -> ctrl => {
@@ -220,8 +239,99 @@ fn run_manager(
         }
     }
 
+    #[cfg(windows)]
+    {
+        // SAFETY: a zeroed `MSG` is a valid initial value; the pump only
+        // reads fields that `PeekMessageW` populates before use.
+        let mut msg: MSG = unsafe { std::mem::zeroed() };
+        'pump: loop {
+            // 1. Drain this thread's Win32 queue so `WM_HOTKEY` reaches
+            //    `global-hotkey`'s wndproc, which sends into `event_rx`.
+            // SAFETY: standard non-blocking pump; `msg` is a valid local
+            // and the null HWND asks for messages from any window owned
+            // by this thread.
+            unsafe {
+                while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+
+            // 2. Service every hotkey event the pump just produced.
+            while let Ok(event) = event_rx.try_recv() {
+                if process_hotkey_event(
+                    event,
+                    &roles,
+                    &mut dictation_press_at,
+                    &mut assistant_press_at,
+                    &held_flags,
+                    &tx,
+                ) == Flow::Stop
+                {
+                    break 'pump;
+                }
+            }
+
+            // 3. Apply any pending cancel-grab control messages.
+            loop {
+                match ctrl_rx.try_recv() {
+                    Ok(ctrl) => handle_control(
+                        ctrl,
+                        &manager,
+                        cancel,
+                        bindings,
+                        &mut roles,
+                        &mut cancel_active,
+                    ),
+                    Err(crossbeam_channel::TryRecvError::Empty) => break,
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                        debug!("hotkey control channel closed; listener shutting down");
+                        break 'pump;
+                    }
+                }
+            }
+
+            // 4. Idle briefly so the pump doesn't busy-spin. 30 ms keeps
+            //    key response feeling instant at negligible CPU cost —
+            //    the same cadence as the tray backend.
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    }
+
     drop(manager);
     Ok(())
+}
+
+/// Whether the listener event loop should keep running after an event.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    Continue,
+    Stop,
+}
+
+/// Map one raw hotkey event to FSM actions and forward them. Shared by
+/// the blocking (non-Windows) and pumped (Windows) event loops. Returns
+/// [`Flow::Stop`] when the action channel has closed (daemon shutdown).
+fn process_hotkey_event(
+    event: GlobalHotKeyEvent,
+    roles: &HashMap<u32, Role>,
+    dictation_press_at: &mut Option<Instant>,
+    assistant_press_at: &mut Option<Instant>,
+    held_flags: &KeyHeldFlags,
+    tx: &mpsc::UnboundedSender<HotkeyAction>,
+) -> Flow {
+    let Some(role) = roles.get(&event.id).copied() else {
+        return Flow::Continue;
+    };
+    let actions = map_event(role, event.state, dictation_press_at, assistant_press_at, held_flags);
+    for action in actions {
+        tracing::debug!("hotkey {role:?} {:?} -> {action:?}", event.state);
+        if tx.send(action).is_err() {
+            info!("hotkey action channel closed; listener shutting down");
+            return Flow::Stop;
+        }
+    }
+    Flow::Continue
 }
 
 fn handle_control(
