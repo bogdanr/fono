@@ -2,6 +2,17 @@
 //! `fono` — daemon + CLI entry point. Phase 8 of
 //! `docs/plans/2026-04-24-fono-design-v1.md`.
 
+// On Windows, build the shipped tray daemon as a GUI-subsystem binary
+// so a double-click or login-autostart launch shows ONLY the tray icon
+// — no stray console window (which, as a console-subsystem exe, would
+// otherwise pop up and, if closed, kill the daemon). This mirrors the
+// Linux experience where launching the daemon never spawns a terminal.
+// CLI subcommands run from an existing terminal still print, because
+// `attach_parent_console()` re-attaches to the parent console at
+// startup. Gated on `tray`: a tray-less Windows build keeps the console
+// subsystem so it is never silently invisible.
+#![cfg_attr(all(target_os = "windows", feature = "tray"), windows_subsystem = "windows")]
+
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::filter::{LevelFilter, Targets};
@@ -23,7 +34,19 @@ fn main() -> Result<()> {
     // Crucially this MUST run before the tokio runtime is built —
     // otherwise the probe child inherits worker threads it doesn't
     // need and which only widen the shutdown-race surface.
+    //
+    // It also MUST run before `attach_parent_console()` below: the
+    // probe child's stdout is a pipe the parent captures, and
+    // re-pointing its std handles at a console would break that
+    // capture. The probe path exits the process, so it never reaches
+    // the console attach.
     fono_core::vulkan_probe::run_subprocess_probe_if_requested();
+
+    // GUI-subsystem binaries start with no std handles; if we were
+    // launched from a terminal, reconnect to it so CLI output appears.
+    // No-op (and windowless) when there is no parent console.
+    #[cfg(all(target_os = "windows", feature = "tray"))]
+    attach_parent_console();
 
     // Parse + tracing before the runtime: on macOS the daemon path
     // needs the parsed command to decide whether the main thread must
@@ -75,6 +98,120 @@ fn run_on_worker(args: cli::Cli) -> Result<()> {
     match worker.join() {
         Ok(result) => result,
         Err(_) => anyhow::bail!("fono main worker thread panicked"),
+    }
+}
+
+/// Re-attach the GUI-subsystem binary to the console it was launched
+/// from, if any, so CLI subcommands print to that terminal.
+///
+/// The shipped Windows tray build is compiled `windows_subsystem =
+/// "windows"` (see the crate attribute) so a double-click / autostart
+/// launch never opens a console window — the daemon lives only in the
+/// tray, like on Linux. The side effect is that a GUI-subsystem process
+/// starts with no valid standard handles, so `println!` / `eprintln!`
+/// (and the tracing writer) would go nowhere even when the user *did*
+/// launch `fono doctor` from PowerShell. This attaches to the parent
+/// process's console and repoints stdout/stderr/stdin at it. Every call
+/// fails harmlessly when there is no parent console (Explorer /
+/// login autostart), leaving the process cleanly windowless.
+#[cfg(all(target_os = "windows", feature = "tray"))]
+fn attach_parent_console() {
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
+        STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+
+    // `CreateFileW` is declared directly here rather than imported from
+    // windows-sys: its binding is gated behind a shifting union of module
+    // features (Storage_FileSystem + Security for the SECURITY_ATTRIBUTES
+    // parameter) that drift between windows-sys releases. A raw kernel32
+    // extern is stable across versions and keeps the feature list minimal.
+    // `HANDLE` is `*mut c_void`, matching windows-sys so the pointers pass
+    // straight into `SetStdHandle`.
+    type Handle = *mut core::ffi::c_void;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateFileW(
+            lpfilename: *const u16,
+            dwdesiredaccess: u32,
+            dwsharemode: u32,
+            lpsecurityattributes: *const core::ffi::c_void,
+            dwcreationdisposition: u32,
+            dwflagsandattributes: u32,
+            htemplatefile: Handle,
+        ) -> Handle;
+    }
+
+    // Win32 numeric constants, spelled out to avoid importing from
+    // module paths that drift between windows-sys releases.
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const OPEN_EXISTING: u32 = 3;
+    // INVALID_HANDLE_VALUE == (HANDLE)-1.
+    let invalid = usize::MAX as *mut core::ffi::c_void;
+
+    // SAFETY: a thin FFI shim. The wide strings are NUL-terminated and
+    // owned for the duration of each call; the security-attributes and
+    // template-file pointers are null; every returned handle is checked
+    // against INVALID_HANDLE_VALUE before it is installed. A std handle is
+    // only replaced when it is currently null (a GUI-subsystem launch with
+    // no inherited handle) so an explicit `> file` / `| pipe` redirection
+    // the user set up is preserved.
+    unsafe {
+        // Attach to the launching terminal. Returns 0 (fails) when the
+        // parent has no console — a double-click / autostart launch —
+        // in which case we stay windowless with no std handles, exactly
+        // what a background tray daemon wants.
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return;
+        }
+
+        // A handle already pointing somewhere valid (redirected to a file
+        // or pipe by the shell) must be left untouched.
+        let unset = |id| {
+            let h = GetStdHandle(id);
+            h.is_null() || h == invalid
+        };
+
+        let conout: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
+        let conin: Vec<u16> = "CONIN$\0".encode_utf16().collect();
+
+        if unset(STD_OUTPUT_HANDLE) || unset(STD_ERROR_HANDLE) {
+            let out = CreateFileW(
+                conout.as_ptr(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                core::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                core::ptr::null_mut(),
+            );
+            if out != invalid {
+                if unset(STD_OUTPUT_HANDLE) {
+                    SetStdHandle(STD_OUTPUT_HANDLE, out);
+                }
+                if unset(STD_ERROR_HANDLE) {
+                    SetStdHandle(STD_ERROR_HANDLE, out);
+                }
+            }
+        }
+
+        if unset(STD_INPUT_HANDLE) {
+            let inp = CreateFileW(
+                conin.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                core::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                core::ptr::null_mut(),
+            );
+            if inp != invalid {
+                SetStdHandle(STD_INPUT_HANDLE, inp);
+            }
+        }
     }
 }
 

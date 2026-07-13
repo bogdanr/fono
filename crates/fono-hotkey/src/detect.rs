@@ -45,6 +45,28 @@ impl HotkeyBackend {
             _ => None,
         }
     }
+
+    /// Human-facing label for logs. The `X11` variant is really the
+    /// cross-platform `global-hotkey` listener, so name it after the
+    /// OS-native backend it actually drives — otherwise Windows and
+    /// macOS logs confusingly report "X11" on a machine that has no X
+    /// server. The enum variant name stays `X11` for backwards
+    /// compatibility with `FONO_HOTKEY_BACKEND=x11`.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Portal => "Wayland portal",
+            Self::Disabled => "disabled",
+            #[cfg(target_os = "windows")]
+            Self::X11 => "Win32 RegisterHotKey",
+            #[cfg(target_os = "macos")]
+            Self::X11 => "Carbon RegisterEventHotKey",
+            #[cfg(target_os = "linux")]
+            Self::X11 => "X11",
+            #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+            Self::X11 => "global-hotkey",
+        }
+    }
 }
 
 /// Resolve a backend for the current session. `forced` is the parsed
@@ -101,7 +123,7 @@ pub fn spawn(
     held_flags: KeyHeldFlags,
 ) -> Result<Option<ListenerHandle>> {
     let backend = detect_backend(forced);
-    info!("hotkey backend resolved: {backend:?} (forced: {forced:?})");
+    info!("hotkey backend resolved: {} (forced: {forced:?})", backend.label());
     match backend {
         HotkeyBackend::Portal => {
             #[cfg(target_os = "linux")]

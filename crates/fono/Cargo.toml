@@ -217,3 +217,15 @@ fono-audio = { path = "../fono-audio", features = ["cpal-backend"] }
 # stays available via fono-inject's non-optional `arboard` dep, which
 # speaks the Win32 clipboard natively.
 fono-inject = { path = "../fono-inject", features = ["enigo-backend"] }
+# Thin Win32 FFI for `attach_parent_console()` in main.rs: the shipped
+# tray build is a GUI-subsystem binary (no console window on launch), so
+# it re-attaches to the parent terminal for CLI subcommands. Uses
+# `AttachConsole` / `SetStdHandle` from here; `CreateFileW` is declared
+# directly against kernel32 in main.rs (its windows-sys binding drifts
+# across module-feature unions between releases). windows-sys is already
+# in Cargo.lock (pulled transitively by cpal), so this adds no
+# new-to-project crate and is net-zero on binary size.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+] }

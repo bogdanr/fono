@@ -172,10 +172,45 @@ fn xdg_root(var: &str, fallback: &Path) -> PathBuf {
 }
 
 fn home_dir() -> Result<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .ok_or_else(|| Error::Other("HOME environment variable not set".into()))
+    // `HOME` is the canonical home on Unix. On Windows it is normally
+    // unset — it only shows up inside MSYS2 / Cygwin / OpenSSH sessions
+    // — so a plain `powershell`/`cmd` launch would otherwise fail with
+    // "HOME not set". Fall back to the native `%USERPROFILE%`, then the
+    // `%HOMEDRIVE%%HOMEPATH%` pair, matching the resolution order the
+    // `dirs`/`home` crates use. This keeps Fono's XDG-style per-user
+    // layout (`~/.config/fono`, `~/.cache/fono`, …) working identically
+    // on every OS without a new dependency.
+    if let Some(home) =
+        std::env::var_os("HOME").map(PathBuf::from).filter(|p| !p.as_os_str().is_empty())
+    {
+        return Ok(home);
+    }
+
+    #[cfg(windows)]
+    {
+        if let Some(profile) =
+            std::env::var_os("USERPROFILE").map(PathBuf::from).filter(|p| !p.as_os_str().is_empty())
+        {
+            return Ok(profile);
+        }
+        if let (Some(drive), Some(path)) =
+            (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH"))
+        {
+            if !drive.is_empty() && !path.is_empty() {
+                let mut home = PathBuf::from(drive);
+                home.push(path);
+                return Ok(home);
+            }
+        }
+        return Err(Error::Other(
+            "cannot resolve a home directory: none of %USERPROFILE%, \
+             %HOMEDRIVE%%HOMEPATH%, or $HOME are set"
+                .into(),
+        ));
+    }
+
+    #[cfg(not(windows))]
+    Err(Error::Other("HOME environment variable not set".into()))
 }
 
 #[cfg(test)]
