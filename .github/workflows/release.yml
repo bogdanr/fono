@@ -226,16 +226,26 @@ jobs:
             asset_prefix: fono
             features: accel-metal
           # Windows (plans/2026-05-26-windows-port-v1.md, Phase 13): a
-          # single CPU-only x86_64 build shipped as a bare `.exe` plus a
+          # single x86_64 build shipped as a bare `.exe` plus a
           # `.sha256` sidecar — no MSI, no code signing (explicit v1
           # non-goals, Task 13.4). The asset name is `fono-vX.Y.Z-x86_64.exe`
-          # (`fono-update::asset_name_for` agrees). v1 uses the
+          # (`fono-update::asset_name_for` agrees). It uses the
           # `windows-defaults` feature set (default minus `tts-local` and
           # `wakeword-onnx`, the only two `ort` pullers) because the hosted
           # Windows `onnxruntime.lib` isn't a self-contained merged archive
           # yet — so `no_default_features: true` and no onnxruntime fetch on
           # this row. The `/FORCE:MULTIPLE` ggml-dedup link flag comes from
           # `.cargo/config.toml`'s MSVC target block automatically.
+          #
+          # `windows-defaults` now INCLUDES `accel-vulkan`: Windows ships a
+          # single Vulkan-accelerated `.exe` that soft-loads `vulkan-1.dll`
+          # (the in-tree loader shim) and falls back to CPU when the vendor
+          # driver's loader is absent — one download for every host, no
+          # cpu/gpu split. This supersedes the earlier CPU-only-v1 plan.
+          # See `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`,
+          # Phase 2. The `variant: cpu` label is retained only as the
+          # rust-cache discriminator (there is no second Windows variant);
+          # the Linux-only NEEDED check does not run here.
           - target: x86_64-pc-windows-msvc
             os: windows-2022
             cross: false
@@ -286,6 +296,36 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+
+      - name: Install Vulkan SDK (Windows)
+        # `windows-defaults` includes `accel-vulkan`, so ggml-vulkan's
+        # CMake needs the Vulkan headers, `vulkan-1.lib` (import lib), and
+        # `glslc` (SPIR-V compiler) at build time. whisper-rs-sys' build.rs
+        # panics unless VULKAN_SDK is set (it links `vulkan-1` from
+        # `$VULKAN_SDK/Lib`). The hosted windows-2022 image ships no Vulkan
+        # SDK, so install LunarG's silently and export VULKAN_SDK + its Bin
+        # dir. Pinned for reproducibility; bump in lockstep with the Linux
+        # LunarG pull above when the shader toolchain is intentionally
+        # rolled. See docs/build-windows.md and
+        # `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`, Phase 2.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ver = '1.4.350.0'
+          $url = "https://sdk.lunarg.com/sdk/download/$ver/windows/vulkansdk-windows-X64-$ver.exe"
+          $exe = "$env:RUNNER_TEMP\VulkanSDK-Installer.exe"
+          $root = "C:\VulkanSDK\$ver"
+          Write-Host "Downloading Vulkan SDK $ver"
+          curl.exe -L -o $exe $url
+          Write-Host "Installing to $root"
+          $p = Start-Process -FilePath $exe -Wait -PassThru -ArgumentList `
+            "--root", $root, "--accept-licenses", "--default-answer", `
+            "--confirm-command", "install"
+          if ($p.ExitCode -ne 0) { throw "Vulkan SDK installer exited $($p.ExitCode)" }
+          if (-not (Test-Path "$root\Bin\glslc.exe")) { throw "glslc.exe missing after install" }
+          if (-not (Test-Path "$root\Lib\vulkan-1.lib")) { throw "vulkan-1.lib missing after install" }
+          "VULKAN_SDK=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$root\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Install Linux build deps
         # GPU variant adds Vulkan headers + the `shaderc` SPIR-V
@@ -418,19 +458,20 @@ jobs:
             echo "${needed}"
             exit 1
           fi
-          # GPU variant requires libvulkan.so.1; CPU variant forbids it.
-          if [ "${{ matrix.variant }}" = "gpu" ]; then
-            if ! grep -q 'libvulkan\.so' <<<"${needed}"; then
-              echo "GPU variant missing libvulkan.so NEEDED entry:"
-              echo "${needed}"
-              exit 1
-            fi
-          else
-            if grep -q 'libvulkan\.so' <<<"${needed}"; then
-              echo "CPU variant must not link libvulkan:"
-              echo "${needed}"
-              exit 1
-            fi
+          # Neither variant may link libvulkan.so any more. The GPU
+          # variant used to hard-link `libvulkan.so.1` (it was a required
+          # NEEDED entry), but the in-tree Vulkan loader shim
+          # (`fono-core::vk_loader_shim`) now soft-loads it via `dlopen`
+          # at runtime — so the loader drops out of NEEDED on both
+          # variants and the GPU build launches even on a Vulkan-less
+          # host, falling back to CPU. See
+          # `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`,
+          # Phase 1. (The `cpu`/`gpu` split stays only for the ~42 MB
+          # SPIR-V shader payload, not for the loader linkage.)
+          if grep -q 'libvulkan\.so' <<<"${needed}"; then
+            echo "No variant may link libvulkan (soft-loaded at runtime):"
+            echo "${needed}"
+            exit 1
           fi
           echo "${needed}"
 

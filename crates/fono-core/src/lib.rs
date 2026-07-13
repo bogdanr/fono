@@ -47,7 +47,7 @@ pub mod vulkan_probe;
 // (`fono-polish`/`fono-assistant`) Vulkan backend is active. Lets the
 // GPU build launch on hosts without the Vulkan loader and fall back to
 // CPU. See `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`.
-#[cfg(all(feature = "accel-vulkan", target_os = "linux"))]
+#[cfg(all(feature = "accel-vulkan", any(target_os = "linux", target_os = "windows")))]
 pub mod vk_loader_shim;
 
 pub use config::Config;

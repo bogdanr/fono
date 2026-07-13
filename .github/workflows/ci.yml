@@ -612,7 +612,30 @@ jobs:
         shell: bash
         run: echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
 
-      # Windows v1 ships the `windows-defaults` feature set, which omits
+      - name: Install Vulkan SDK (Windows)
+        # `windows-defaults` includes `accel-vulkan`, so ggml-vulkan's
+        # CMake needs the Vulkan headers, `vulkan-1.lib`, and `glslc` at
+        # build time, and whisper-rs-sys' build.rs panics unless
+        # VULKAN_SDK is set. Install LunarG's SDK silently and export
+        # VULKAN_SDK + Bin. Pinned; keep in lockstep with the release.yml
+        # step and the Linux LunarG pull. See docs/build-windows.md and
+        # `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`, Phase 2.
+        shell: pwsh
+        run: |
+          $ver = '1.4.350.0'
+          $url = "https://sdk.lunarg.com/sdk/download/$ver/windows/vulkansdk-windows-X64-$ver.exe"
+          $exe = "$env:RUNNER_TEMP\VulkanSDK-Installer.exe"
+          $root = "C:\VulkanSDK\$ver"
+          curl.exe -L -o $exe $url
+          $p = Start-Process -FilePath $exe -Wait -PassThru -ArgumentList `
+            "--root", $root, "--accept-licenses", "--default-answer", `
+            "--confirm-command", "install"
+          if ($p.ExitCode -ne 0) { throw "Vulkan SDK installer exited $($p.ExitCode)" }
+          if (-not (Test-Path "$root\Bin\glslc.exe")) { throw "glslc.exe missing after install" }
+          "VULKAN_SDK=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$root\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      # Windows ships the `windows-defaults` feature set, which omits
       # `tts-local` and `wakeword-onnx` — the only two features that pull
       # the ONNX Runtime (`ort`) static library. The hosted Windows
       # `onnxruntime.lib` is not yet a self-contained merged archive (its
@@ -622,12 +645,15 @@ jobs:
       # onnxruntime fetch and the `ORT_CXX_STDLIB` neutralise step (both
       # required on the ort-linking Linux/macOS rows) are intentionally
       # absent here; they return when the merged static lib lands and
-      # local TTS is re-enabled on Windows. Windows port Task 5.1 /
+      # local TTS is re-enabled on Windows. `windows-defaults` DOES
+      # include `accel-vulkan`: the single Windows `.exe` is
+      # Vulkan-accelerated and soft-loads `vulkan-1.dll` with a CPU
+      # fallback (Vulkan soft-load plan Phase 2). Windows port Task 5.1 /
       # docs/build-windows.md.
-      - name: cargo build (Windows v1 feature set)
+      - name: cargo build (Windows feature set)
         run: cargo build -p fono --no-default-features --features windows-defaults
 
-      - name: cargo test (Windows v1 feature set)
+      - name: cargo test (Windows feature set)
         run: cargo test -p fono --no-default-features --features windows-defaults --tests --lib
 
   deny:

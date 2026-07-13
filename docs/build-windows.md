@@ -46,6 +46,21 @@ rsync), three gotchas surfaced only by actually running a full build:
    an elevated prompt) — git's own setting alone is not sufficient,
    the Win32 loader-level opt-in is also required. No reboot needed;
    it's read at process-creation time.
+4. **The Vulkan SDK is required.** `windows-defaults` includes
+   `accel-vulkan`, so ggml-vulkan's CMake needs the Vulkan headers,
+   the `vulkan-1.lib` import library, and the `glslc` SPIR-V compiler
+   at build time — and `whisper-rs-sys`' `build.rs` panics unless
+   `VULKAN_SDK` is set. Install LunarG's SDK
+   (`https://sdk.lunarg.com/sdk/download/<ver>/windows/vulkansdk-windows-X64-<ver>.exe`)
+   silently — `installer.exe --root C:\VulkanSDK\<ver>
+   --accept-licenses --default-answer --confirm-command install` —
+   and set `VULKAN_SDK=C:\VulkanSDK\<ver>` plus add its `Bin` to
+   `Path`. Unlike the VS Build Tools installer, the LunarG installer
+   *does* run headless over SSH. The version is pinned in
+   `.github/workflows/ci.yml` and `release.yml`; keep the box in
+   lockstep. Note the shipped `vulkan-1.dll` loader itself is **not**
+   a build dependency — it is installed by the GPU vendor driver and
+   loaded lazily at runtime (see "Vulkan single build" below).
 
 None of the above needs a GUI session — all three were done, and
 verified, entirely over SSH (`reg add` to `HKLM` does not trigger a
@@ -378,29 +393,71 @@ As of 2026-07-12 `fono update` works on Windows.
   publishing a Windows artefact (Phase 13). The download→swap→relaunch
   round-trip becomes exercisable then.
 
+## Vulkan single build (soft-load, 2026-07-13)
+
+Windows ships **one** `fono.exe` that is Vulkan-accelerated *and* runs
+everywhere — it uses the GPU when a usable Vulkan driver is present and
+falls back to the CPU when it isn't. There is no separate CPU-only vs
+GPU Windows download (unlike Linux, which keeps the two-variant split
+for the ~42 MB SPIR-V shader payload). This was a deliberate
+simplicity-over-size trade for a target the maintainer rarely tests;
+see `plans/2026-07-12-vulkan-soft-load-single-build-v1.md` and
+`docs/status.md`.
+
+The enabler is the in-tree Vulkan loader shim
+(`crates/fono-core/src/vk_loader_shim.rs`). ggml references three bare
+Vulkan symbols at link time; the shim defines them itself as lazy
+forwarders that `LoadLibraryA("vulkan-1.dll")` on first use. That keeps
+`vulkan-1.dll` **out of the PE import table**, so the `.exe` launches
+even on a machine with no GPU driver (no "vulkan-1.dll not found"
+dialog). When the loader is absent the shim hands ggml an error stub
+that makes it throw → catch → register zero devices → CPU, rather than
+faulting on a null function pointer.
+
+Verified end-to-end on the Windows 10 bench (2026-07-13):
+
+- `dumpbin /DEPENDENTS target\debug\fono.exe` lists **no**
+  `vulkan-1.dll` import (the shim satisfies ggml's references; MSVC
+  uses our definitions instead of pulling from `vulkan-1.lib`).
+- Loader present: `fono.exe doctor` reports
+  `vulkan : Vulkan: detected (Intel(R) HD Graphics 620)`, and
+  `fono-bench equivalence --model tiny --quick` transcribes on the GPU
+  (PASS, acc 0.0882).
+- Loader absent (simulated with a bogus `vulkan-1.dll` in the exe dir,
+  which Windows searches before System32 → `LoadLibraryA` returns
+  NULL): the same transcription **exits 0** — no crash — and falls
+  back to CPU with identical accuracy. `doctor` reports
+  `Vulkan: not available (vulkan-1.dll not loadable: …)`.
+
 ## Release artefact on Windows (Phase 13)
 
-As of 2026-07-12 the release workflow (`.github/workflows/release.yml`)
+As of 2026-07-13 the release workflow (`.github/workflows/release.yml`)
 builds and uploads a Windows binary on every tag.
 
-- **What ships.** A single CPU-only `x86_64` binary named
+- **What ships.** A single `x86_64` binary named
   `fono-vX.Y.Z-x86_64.exe`, plus its `.sha256` sidecar and a line in
   `SHA256SUMS`. No MSI, no code signing, no distro-style package — a
-  bare `.exe` is the whole Windows v1 deliverable.
+  bare `.exe` is the whole Windows v1 deliverable. It is
+  Vulkan-accelerated with CPU fallback (see "Vulkan single build"
+  above), not CPU-only.
 - **How it's built.** A `windows-2022` matrix row runs
   `cargo build --profile release-slim --target x86_64-pc-windows-msvc
   -p fono --no-default-features --features windows-defaults`. The row
   reuses the ci.yml windows job's environment prep: git long paths
-  before checkout and `LIBCLANG_PATH` at the runner's LLVM. The
-  onnxruntime fetch is skipped (no `ort` in the v1 feature set), and
-  `/FORCE:MULTIPLE` comes from `.cargo/config.toml`'s MSVC block.
-- **Size.** The `release-slim` `fono.exe` measures ~15.7 MiB
-  (16,443,392 B as of v0.15.0) — well under the ~30 MiB ceiling the
-  Windows size budget will enforce in Phase 14.
+  before checkout, `LIBCLANG_PATH` at the runner's LLVM, and the
+  pinned LunarG Vulkan SDK install (headers + `vulkan-1.lib` +
+  `glslc`). The onnxruntime fetch is skipped (no `ort` in the v1
+  feature set), and `/FORCE:MULTIPLE` comes from
+  `.cargo/config.toml`'s MSVC block.
+- **Size.** Adding Vulkan brings the `release-slim` `fono.exe` up to
+  ~60 MiB (from the earlier CPU-only ~15.7 MiB) — the SPIR-V shader
+  payload. This is the accepted cost of the single-build decision; the
+  Windows size budget in ADR 0022 is set accordingly.
 - **Not yet gated.** The PE import-table allowlist + size budget (the
   Windows analogue of the Linux ELF `NEEDED` gate) is deferred to
   Phase 14, along with promoting the non-blocking CI windows job to a
-  required check.
+  required check. When it lands it must assert `vulkan-1.dll` is
+  *absent* from the import table (the soft-load guarantee).
 
 ## Platform paths (not yet implemented for Windows)
 

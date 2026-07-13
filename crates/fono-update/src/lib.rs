@@ -172,9 +172,12 @@ pub fn asset_name_for(tag: &str, prefix: &str) -> Option<String> {
         // artefact-shape decision), so no `fono-gpu` sibling exists.
         Some(format!("{prefix}-{tag}-{arch}-apple-darwin"))
     } else if cfg!(target_os = "windows") {
-        // Stub until the Windows release artefact ships (Windows port
-        // plan Task 1.7 / Phase 13): bare `.exe`, CPU-only in v1 (the
-        // Phase 3.4 decision defers a Windows GPU variant).
+        // Single Windows artefact: a bare `.exe` under the base `fono`
+        // prefix (there is no `fono-gpu` sibling). It is a single
+        // Vulkan-accelerated build that soft-loads `vulkan-1.dll` and
+        // falls back to CPU when the loader is absent, so one download
+        // serves every Windows host — see
+        // `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`, Phase 2.
         Some(format!("{prefix}-{tag}-{arch}.exe"))
     } else {
         None
@@ -199,8 +202,11 @@ pub fn asset_name_for(tag: &str, prefix: &str) -> Option<String> {
 pub fn desired_asset_prefix() -> &'static str {
     // macOS ships a single Metal-accelerated variant (no cpu/gpu
     // split), so the base prefix is always right and the Vulkan probe
-    // is meaningless there. Windows ships CPU-only in v1 (Windows
-    // port plan Task 3.4), so the same short-circuit applies.
+    // is meaningless there. Windows likewise ships a single
+    // Vulkan-with-CPU-fallback artefact under the base `fono` prefix
+    // (one binary runs everywhere — see
+    // `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`, Phase 2),
+    // so the same short-circuit applies.
     if cfg!(any(target_os = "macos", target_os = "windows")) {
         return CPU_ASSET_PREFIX;
     }

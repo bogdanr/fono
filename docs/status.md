@@ -1,5 +1,46 @@
 # Fono — Project Status
-Last updated: 2026-07-12
+Last updated: 2026-07-13
+
+## 2026-07-13 — Vulkan soft-load: Phase 2 (Windows single build) done
+
+Completed the Windows half of
+`plans/2026-07-12-vulkan-soft-load-single-build-v1.md`. Windows now
+ships **one** Vulkan-accelerated `fono.exe` that runs everywhere — GPU
+when a driver's `vulkan-1.dll` is present, CPU fallback when it isn't.
+
+- **Cross-platform shim.** Extended `crates/fono-core/src/vk_loader_shim.rs`
+  with a Windows `sys` module (`LoadLibraryA`/`GetProcAddress`,
+  `vulkan-1.dll`). All the interesting logic — the three `#[no_mangle]`
+  forwarders and the error-stub fallback — is shared; only the loader
+  open differs per-OS.
+- **No `/DELAYLOAD` needed.** The Phase 0 hedge turned out unnecessary:
+  because the shim defines ggml's three bare Vulkan symbols itself,
+  MSVC satisfies them from our object and never pulls the import from
+  `vulkan-1.lib`. Confirmed on the bench with `dumpbin /DEPENDENTS
+  fono.exe` — **no `vulkan-1.dll` in the PE import table**, the exact
+  Windows analogue of the Linux `--as-needed` result.
+- **`accel-vulkan` added to `windows-defaults`** (`crates/fono/Cargo.toml`).
+- **Verified end-to-end on the Windows 10 bench.** Loader present:
+  `doctor` reports Vulkan detected (Intel HD 620), `fono-bench
+  equivalence` transcribes on GPU (PASS). Loader absent (bogus
+  `vulkan-1.dll` in the exe dir): transcription **exits 0, no crash**,
+  CPU fallback, identical acc 0.0882. The error-stub fix works
+  identically on Windows.
+- **CI + release wiring.** Added a pinned LunarG Vulkan SDK install
+  step (v1.4.350.0) to the `windows` job and the `release.yml` Windows
+  row; fixed a Phase 1 regression in `release.yml` that still required
+  the Linux GPU variant to link `libvulkan.so` (now both variants
+  forbid it). Fixed the probe's hardcoded `libvulkan.so.1` message to
+  say `vulkan-1.dll` on Windows.
+- **Docs/ADR.** ADR 0022 gains a 2026-07-13 amendment (Windows ≤ 60 MiB,
+  `vulkan-1.dll` must be absent from the import table);
+  `docs/build-windows.md` documents the SDK prereq + the single-build
+  decision.
+
+Gates green on Linux: fmt, `clippy --workspace --all-targets`, 36 test
+suites. Remaining: the dumpbin/size CI assertion + promoting the
+`windows` job to blocking (Windows port Phase 14), and Phase 3 docs
+tail (README/install wording, CHANGELOG/ROADMAP at release time).
 
 ## 2026-07-12 — Vulkan soft-load: Phase 0 spike + Phase 1 (Linux) done
 

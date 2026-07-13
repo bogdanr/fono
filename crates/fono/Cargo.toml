@@ -110,7 +110,15 @@ wakeword-onnx = ["fono-audio/wakeword-onnx"]
 # provisioned on the fono-voice mirror. Everything else is kept: local
 # whisper STT and local llama polish do NOT use `ort`, so they stay, as
 # do all cloud providers, the streaming overlay, tray, and realtime.
-windows-defaults = ["tray", "local-models", "llama-local", "interactive", "realtime"]
+#
+# `accel-vulkan` is included so Windows ships a single GPU-accelerated
+# `.exe`: the in-tree Vulkan loader shim (`fono-core::vk_loader_shim`)
+# soft-loads `vulkan-1.dll` at runtime, so the same binary uses the GPU
+# when the vendor driver's loader is present and falls back to CPU when
+# it is absent — no separate cpu/gpu download, no launch failure on a
+# driver-less box. See `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`,
+# Phase 2 (this supersedes the CPU-only-v1 note in the Windows port plan).
+windows-defaults = ["tray", "local-models", "llama-local", "interactive", "realtime", "accel-vulkan"]
 
 [dependencies]
 fono-core = { path = "../fono-core", features = ["vulkan-probe"] }

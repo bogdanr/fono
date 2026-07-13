@@ -89,6 +89,40 @@ Task 1.2 lands.
 > change them together, budget bumps only with sign-off recorded here.
 > Linux budgets are unaffected.
 
+> **AMENDED 2026-07-13 — Windows joins the budget matrix as a single
+> Vulkan build with CPU fallback.** The Windows port ships **one**
+> `x86_64-pc-windows-msvc` artefact (`fono-vX.Y.Z-x86_64.exe`, feature
+> set `windows-defaults`) that is Vulkan-accelerated *and* runs
+> everywhere — GPU when a usable `vulkan-1.dll` driver is present, CPU
+> fallback when it isn't. Unlike Linux (which keeps the compact `cpu` /
+> Vulkan `gpu` two-variant split so the ~42 MB SPIR-V shader payload is
+> opt-in), Windows accepts the shader payload for **every** user in
+> exchange for a single no-choice download — a deliberate
+> simplicity-over-size trade for a target the maintainer rarely tests.
+> See `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`,
+> `docs/build-windows.md` ("Vulkan single build"), and `docs/status.md`.
+>
+> - **Enforced budget ≤ 60 MiB (62 914 560 B); hard cap ≤ 64 MiB** —
+>   the same ceiling family as the Linux `gpu` variant (both carry the
+>   ggml-vulkan shaders). Bump only with sign-off recorded here.
+> - **PE import-table allowlist (the Windows analogue of the Linux ELF
+>   `NEEDED` gate) must NOT contain `vulkan-1.dll`.** The in-tree loader
+>   shim (`crates/fono-core/src/vk_loader_shim.rs`) resolves ggml's
+>   three bare Vulkan symbols itself and `LoadLibraryA`s the loader
+>   lazily, so `vulkan-1.dll` stays out of the import table and the
+>   `.exe` launches even with no GPU driver. Verified 2026-07-13 on the
+>   Windows 10 bench: `dumpbin /DEPENDENTS` shows no `vulkan-1.dll`;
+>   transcription runs on GPU when the loader is present and falls back
+>   to CPU (exit 0, no crash) when it is absent. The remaining PE
+>   imports are the standard Win32 system DLLs + the MSVC/UCRT runtime.
+> - **Not yet CI-gated.** The dumpbin import-table + size assertion (the
+>   `windows`-job analogue of `size-budget` / `size-budget-macos`) is
+>   deferred to Windows port Phase 14, along with promoting the
+>   non-blocking `windows` CI job to a required check. When it lands it
+>   asserts both the ≤ 60 MiB budget and the `vulkan-1.dll`-absent
+>   invariant. Linux and macOS budgets are unaffected.
+
+
 The static-musl ship (Phase 2.4) is **deferred** — see "Rejected:
 static-musl with libgomp" in Trade-offs.
 

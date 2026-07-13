@@ -232,7 +232,11 @@ pub fn probe_in_process() -> Outcome {
     let entry = match unsafe { ash::Entry::load() } {
         Ok(entry) => entry,
         Err(err) => {
-            return Outcome::NotAvailable { reason: format!("libvulkan.so.1 not loadable: {err}") };
+            // Name the loader per-OS: `vulkan-1.dll` on Windows (installed
+            // by the GPU vendor driver), `libvulkan.so.1` elsewhere.
+            let loader =
+                if cfg!(target_os = "windows") { "vulkan-1.dll" } else { "libvulkan.so.1" };
+            return Outcome::NotAvailable { reason: format!("{loader} not loadable: {err}") };
         }
     };
 

@@ -68,20 +68,81 @@
 //! always have a live target when called; they no-op defensively if
 //! not.
 //!
-//! Gated to `target_os = "linux"` for now; the Windows sibling
-//! (`LoadLibraryW("vulkan-1.dll")`) lands with the single Vulkan
-//! Windows build (see
-//! `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`, Phase 2).
+//! ## Cross-platform loader
+//!
+//! The only per-OS difference is *how* the loader is opened: `dlopen`
+//! (`libvulkan.so.1`) on Linux, `LoadLibraryA` (`vulkan-1.dll`) on
+//! Windows. Everything else — the three `#[no_mangle]` forwarders, the
+//! error-stub fallback, the lazy `OnceLock` — is shared. The Windows
+//! `vulkan-1.dll` is installed by the GPU vendor driver (not the OS), so
+//! the same "loader may be absent" reasoning applies there: a single
+//! Vulkan-accelerated `fono.exe` uses the GPU when the driver's loader
+//! is present and falls back to CPU when it isn't.
 
-use std::ffi::{c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_void, CStr};
 use std::sync::OnceLock;
 
-const RTLD_NOW: c_int = 0x2;
-const RTLD_LOCAL: c_int = 0;
+/// Per-platform primitives for opening the Vulkan loader and resolving a
+/// symbol from it. The bodies wrap the raw C / Win32 APIs directly (no
+/// crate dependency, matching the zero-dep spirit of `fono-core`).
+#[cfg(target_os = "linux")]
+mod sys {
+    use super::{c_void, CStr};
 
-extern "C" {
-    fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    const RTLD_NOW: core::ffi::c_int = 0x2;
+    const RTLD_LOCAL: core::ffi::c_int = 0;
+
+    extern "C" {
+        fn dlopen(filename: *const super::c_char, flag: core::ffi::c_int) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const super::c_char) -> *mut c_void;
+    }
+
+    /// File name of the Vulkan loader shipped by the vendor driver.
+    pub const LOADER_NAME: &CStr = c"libvulkan.so.1";
+
+    /// # Safety
+    /// `name` is a valid NUL-terminated library name.
+    pub unsafe fn open(name: &CStr) -> *mut c_void {
+        unsafe { dlopen(name.as_ptr(), RTLD_NOW | RTLD_LOCAL) }
+    }
+
+    /// # Safety
+    /// `handle` is a live loader handle from [`open`]; `name` is a valid
+    /// NUL-terminated symbol name.
+    pub unsafe fn symbol(handle: *mut c_void, name: &CStr) -> *mut c_void {
+        unsafe { dlsym(handle, name.as_ptr()) }
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod sys {
+    use super::{c_void, CStr};
+
+    // `LoadLibraryA` / `GetProcAddress` from kernel32. Declared directly
+    // rather than pulling `windows-sys` — these two entry points are all
+    // the shim needs, and the binary already links kernel32.
+    extern "system" {
+        fn LoadLibraryA(name: *const super::c_char) -> *mut c_void;
+        fn GetProcAddress(module: *mut c_void, name: *const super::c_char) -> *mut c_void;
+    }
+
+    /// File name of the Vulkan loader shipped by the vendor driver.
+    /// Resolved through the standard DLL search order (System32, where
+    /// the driver installs it).
+    pub const LOADER_NAME: &CStr = c"vulkan-1.dll";
+
+    /// # Safety
+    /// `name` is a valid NUL-terminated library name.
+    pub unsafe fn open(name: &CStr) -> *mut c_void {
+        unsafe { LoadLibraryA(name.as_ptr()) }
+    }
+
+    /// # Safety
+    /// `handle` is a live module handle from [`open`]; `name` is a valid
+    /// NUL-terminated symbol name.
+    pub unsafe fn symbol(handle: *mut c_void, name: &CStr) -> *mut c_void {
+        unsafe { GetProcAddress(handle, name.as_ptr()) }
+    }
 }
 
 /// `VkResult` for "the implementation could not be initialised" (`-3`).
@@ -128,7 +189,7 @@ unsafe impl Sync for Loader {}
 fn loader() -> &'static Loader {
     static LOADER: OnceLock<Loader> = OnceLock::new();
     LOADER.get_or_init(|| unsafe {
-        let handle = dlopen(c"libvulkan.so.1".as_ptr(), RTLD_NOW | RTLD_LOCAL);
+        let handle = sys::open(sys::LOADER_NAME);
         if handle.is_null() {
             return Loader {
                 get_instance_proc_addr: std::ptr::null_mut(),
@@ -137,9 +198,9 @@ fn loader() -> &'static Loader {
             };
         }
         Loader {
-            get_instance_proc_addr: dlsym(handle, c"vkGetInstanceProcAddr".as_ptr()),
-            cmd_copy_buffer: dlsym(handle, c"vkCmdCopyBuffer".as_ptr()),
-            get_physical_device_features2: dlsym(handle, c"vkGetPhysicalDeviceFeatures2".as_ptr()),
+            get_instance_proc_addr: sys::symbol(handle, c"vkGetInstanceProcAddr"),
+            cmd_copy_buffer: sys::symbol(handle, c"vkCmdCopyBuffer"),
+            get_physical_device_features2: sys::symbol(handle, c"vkGetPhysicalDeviceFeatures2"),
         }
     })
 }

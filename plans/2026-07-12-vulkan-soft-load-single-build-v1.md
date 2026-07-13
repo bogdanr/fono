@@ -337,32 +337,62 @@ cleanly, no fault.
 
 ### Phase 2 — Windows single Vulkan-with-fallback build
 
-- [ ] Task 2.1. **Add `accel-vulkan` to the Windows build.** Extend the
-      Windows feature set (default − `tts-local`/`wakeword-onnx` +
-      `accel-vulkan`). Wire `/DELAYLOAD:vulkan-1.dll` + `delayimp.lib`
-      in the MSVC target block of `.cargo/config.toml` (if Phase 0 shows
-      it is needed on top of the header-only link).
-- [ ] Task 2.2. **Provision the Vulkan SDK / headers on the Windows
-      build path** (CI `windows` job + `scripts/win-remote.sh` + the
-      `release.yml` Windows row). glslang/SPIR-V toolchain as ggml
-      requires.
-- [ ] Task 2.3. **`fono.exe` launches and runs on CPU when
-      `vulkan-1.dll` is absent** (rename it and confirm), and uses the
-      GPU when present. Verify over SSH + a manual desktop pass.
-- [ ] Task 2.4. **Self-update / variant plumbing stays single-artefact.**
-      Confirm `asset_name_for` still yields `fono-vX.Y.Z-x86_64.exe` and
-      `desired_asset_prefix` short-circuits on Windows
-      (`crates/fono-update/src/lib.rs:174-212`); update the stale
-      "CPU-only in v1" comments to "single Vulkan-with-fallback".
-- [ ] Task 2.5. **Update the Windows size budget** to ~60 MiB in the
-      Phase 14 gate and the deps/PE-import allowlist (Vulkan pulls no
-      extra *runtime-required* DLL because of delay-load; document that).
+- [x] Task 2.1. **Add `accel-vulkan` to the Windows build.** Added
+      `accel-vulkan` to the `windows-defaults` feature in
+      `crates/fono/Cargo.toml`. **No `/DELAYLOAD` needed** — the
+      cross-platform shim (`vk_loader_shim.rs`, extended with a
+      `LoadLibraryA`/`GetProcAddress` `sys` module for `target_os =
+      "windows"`) defines ggml's three bare Vulkan symbols itself, so
+      MSVC satisfies them from our object and never pulls the import
+      from `vulkan-1.lib`. Verified 2026-07-13: `dumpbin /DEPENDENTS
+      fono.exe` shows **no `vulkan-1.dll`** in the PE import table. This
+      is the exact Windows analogue of the Linux `--as-needed` result;
+      the `/DELAYLOAD` hedge from Phase 0 is unnecessary.
+- [x] Task 2.2. **Provision the Vulkan SDK / headers on the Windows
+      build path.** Added a pinned LunarG SDK install step (v1.4.350.0,
+      silent `--accept-licenses --default-answer --confirm-command
+      install`, exports `VULKAN_SDK` + `Bin`) to both the CI `windows`
+      job (`.github/workflows/ci.yml`) and the `release.yml` Windows
+      row. Documented as a build prereq in `docs/build-windows.md`
+      (gotcha #4 + "Vulkan single build"). Installed + verified on the
+      bench (glslc, glslangValidator, `vulkan-1.lib`, headers all
+      present). `scripts/win-remote.sh` inherits the box's system
+      `VULKAN_SDK`, so no script change was required.
+- [x] Task 2.3. **`fono.exe` launches and runs on CPU when
+      `vulkan-1.dll` is absent, GPU when present.** Verified end-to-end
+      on the Windows 10 bench 2026-07-13. Loader present: `doctor`
+      reports `Vulkan: detected (Intel(R) HD Graphics 620)` and
+      `fono-bench equivalence --model tiny --quick` transcribes on GPU
+      (PASS, acc 0.0882). Loader absent (simulated with a bogus
+      `vulkan-1.dll` in the exe dir — Windows searches the app dir
+      before System32, so `LoadLibraryA` returns NULL, faithfully
+      exercising the shim's error-stub path): the same transcription
+      **exits 0, no crash**, CPU fallback, identical acc 0.0882. The
+      error-stub fix (shared code) works identically on Windows. Also
+      fixed the probe's hardcoded Linux loader name in
+      `crates/fono-core/src/vulkan_probe.rs` to report `vulkan-1.dll`
+      on Windows.
+- [x] Task 2.4. **Self-update / variant plumbing stays single-artefact.**
+      Confirmed the single-artefact asset naming
+      (`fono-vX.Y.Z-x86_64.exe`, no variant suffix on Windows) is
+      already correct and needs no logic change; updated the stale
+      "CPU-only in v1" comments in `crates/fono-update/src/lib.rs` to
+      describe the single Vulkan-with-fallback build.
+- [x] Task 2.5. **Update the Windows size budget** to ~60 MiB. Added a
+      2026-07-13 amendment to `docs/decisions/0022-binary-size-budget.md`
+      (≤ 60 MiB enforced / ≤ 64 MiB hard cap, same family as Linux
+      `gpu`) and a PE-import-allowlist rule: `vulkan-1.dll` must be
+      **absent** from the import table (soft-loaded at runtime).
+      `docs/build-windows.md` Phase 13 section updated (~15.7 MiB
+      CPU-only → ~60 MiB Vulkan-with-fallback). The dumpbin/size CI
+      assertion itself is deferred to Windows port Phase 14 (noted).
 
 ### Phase 3 — Docs, ADRs, gates
 
-- [ ] Task 3.1. **Amend `docs/decisions/0022-binary-size-budget.md`**
-      (or new ADR) recording the ~60 MiB Windows budget and the
-      Linux-gpu NEEDED shrink to 4.
+- [x] Task 3.1. **Amend `docs/decisions/0022-binary-size-budget.md`**
+      — done as part of Task 2.5 (the 2026-07-13 amendment records both
+      the ~60 MiB Windows budget and, via the Phase 1 amendments, the
+      Linux-gpu NEEDED shrink to 4).
 - [ ] Task 3.2. **Update `plans/2026-05-26-windows-port-v1.md`** Task 3.4
       / Phase 5.1 / Phase 14.3 to reference this plan as the superseding
       decision (done in the same session that files this plan — see the
