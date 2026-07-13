@@ -1,6 +1,43 @@
 # Fono — Project Status
 Last updated: 2026-07-13
 
+## 2026-07-13 — Windows local TTS enabled (ONNX Runtime link fixed)
+
+Local (offline) TTS + wake-word now ship in the Windows build, matching
+Linux/macOS. Previously excluded because ONNX Runtime (`ort`) would not
+link on Windows.
+
+- **Root cause 1 — incomplete/bloated ORT lib (fixed in fono-voice).**
+  The published Windows `onnxruntime.lib` was ~343 MiB (≈70% embedded
+  CodeView debug info) *and* missing FetchContent deps. Fixed the
+  `build-onnxruntime.yml` merge to strip debug info and reconstruct the
+  archive from object members under **unique names** (MSVC `lib.exe`
+  keeps duplicate member names, breaking on-demand resolution; macOS
+  `libtool`/Linux `ar` dedup). Added a verify gate. Republished:
+  ~117 MiB, complete, SHA `6bb2d9ac…fb50`, pinned in
+  `scripts/fetch-onnxruntime.sh`.
+- **Root cause 2 — MSVC single-pass archive resolution (fixed in fono).**
+  Even with a complete, correctly-indexed archive, `link.exe` reported
+  `LNK1120` for symbols that were present + indexed — the classic MSVC
+  single-pass circular-dep failure. Fix: **double-link** the archive
+  (reference `onnxruntime.lib` twice) via a new `crates/fono/build.rs`,
+  gated on Windows + the ORT features. This is **size-safe** — dead-strip
+  still runs, unlike `/WHOLEARCHIVE` (which also dragged in unresolvable
+  test/interop objects). Enabling local TTS added only **~3 MiB**
+  (~69→~72 MiB).
+- **Verified on Windows 10:** clean `cargo build --features
+  windows-defaults` (no manual link-arg), windowless GUI subsystem, no
+  `vulkan-1.dll` import, GPU intact, and the local voice `af_heart`
+  auto-downloaded + initialised ("tts local ready").
+- **Gates green (Linux):** fmt clean, `clippy --workspace --all-targets
+  -D warnings` exit 0, 36 test suites (0 failed). Committed `204df25`
+  (signed off), on top of the fono-voice archive-fix commits.
+
+Flags still open: Windows `fono.exe` is ~72 MiB — over ADR 0022's
+current Windows cap; needs a budget review before the Windows size gate
+goes blocking. The `release-slim` build needs a short `CARGO_TARGET_DIR`
+(MAX_PATH); worth pinning in Windows CI/build docs.
+
 ## 2026-07-13 — Vulkan soft-load: Phase 3 (docs/gates) done — initiative complete
 
 Closed out `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`. The

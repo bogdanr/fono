@@ -101,15 +101,17 @@ wakeword-onnx = ["fono-audio/wakeword-onnx"]
 # Windows v1 default feature set. Cargo's `default` list cannot be
 # target-scoped, so Windows builds pass `--no-default-features --features
 # windows-defaults` (see docs/build-windows.md and the CI `windows` job).
-# This set deliberately OMITS the only two features that pull the ONNX
-# Runtime (`ort`) static library — `tts-local` and `wakeword-onnx`.
-# Reason: the hosted Windows `onnxruntime.lib` is not yet a
+# This set includes `tts-local` and `wakeword-onnx`, the two features that
+# pull the ONNX Runtime (`ort`) static library. They were previously
+# omitted because the hosted Windows `onnxruntime.lib` was not a
 # self-contained merged archive (its protobuf/abseil/onnx/cpuinfo deps
-# are unresolved at link time — `LNK1120`), so local TTS and wake-word
-# are deferred to a later Windows release once a merged static lib is
-# provisioned on the fono-voice mirror. Everything else is kept: local
-# whisper STT and local llama polish do NOT use `ort`, so they stay, as
-# do all cloud providers, the streaming overlay, tray, and realtime.
+# were unresolved at link time — `LNK1120`). fono-voice's
+# build-onnxruntime workflow now merges the whole MinSizeRel tree
+# (including the FetchContent `_deps`) and strips MSVC debug info, so the
+# published lib links cleanly and is ~117 MiB (down from a bloated
+# 343 MiB). Local whisper STT and local llama polish do NOT use `ort` but
+# stay too, as do all cloud providers, the streaming overlay, tray, and
+# realtime.
 #
 # `accel-vulkan` is included so Windows ships a single GPU-accelerated
 # `.exe`: the in-tree Vulkan loader shim (`fono-core::vk_loader_shim`)
@@ -118,7 +120,7 @@ wakeword-onnx = ["fono-audio/wakeword-onnx"]
 # it is absent — no separate cpu/gpu download, no launch failure on a
 # driver-less box. See `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`,
 # Phase 2 (this supersedes the CPU-only-v1 note in the Windows port plan).
-windows-defaults = ["tray", "local-models", "llama-local", "interactive", "realtime", "accel-vulkan"]
+windows-defaults = ["tray", "local-models", "llama-local", "interactive", "realtime", "accel-vulkan", "tts-local", "wakeword-onnx"]
 
 [dependencies]
 fono-core = { path = "../fono-core", features = ["vulkan-probe"] }

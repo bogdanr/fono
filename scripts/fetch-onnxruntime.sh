@@ -81,7 +81,7 @@ sha_for_triple() {
 		echo "057135b825efd9b4269c3d70ac035390d2849d2a78bf2d994dc142938470a873"
 		;;
 	x86_64-pc-windows-msvc)
-		echo "3619b39f339903600e477caa34a161d26bfc1e5593b3c98bcad3fbb39aebcd56"
+		echo "6bb2d9ac93e50d483abc9d3f5172c57a7d9b3a7c246db874062bea956f91fb50"
 		;;
 	*)
 		echo ""
