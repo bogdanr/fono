@@ -1,7 +1,7 @@
 # Installing Fono
 
 Fono is a single static binary (~22 MB) with four glibc dependencies.
-Threre is also a GPU accelerated version (~60 MB); macOS and Windows 
+There is also a GPU-accelerated version (~60 MB); macOS and Windows
 are planned.
 
 There are three ways to install:

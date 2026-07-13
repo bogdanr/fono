@@ -1,6 +1,6 @@
 # Soft-load Vulkan — no hard link, CPU fallback, single Windows build
 
-## Status: In progress — Phase 1 (Linux soft-load) implemented and verified
+## Status: Complete — Phases 0–3 done (Linux + Windows soft-load verified end-to-end); CHANGELOG/ROADMAP "Shipped" move deferred to release tag time
 
 Date: 2026-07-12
 Author: agent session (design discussion with the maintainer)
@@ -393,18 +393,26 @@ cleanly, no fault.
       — done as part of Task 2.5 (the 2026-07-13 amendment records both
       the ~60 MiB Windows budget and, via the Phase 1 amendments, the
       Linux-gpu NEEDED shrink to 4).
-- [ ] Task 3.2. **Update `plans/2026-05-26-windows-port-v1.md`** Task 3.4
+- [x] Task 3.2. **Update `plans/2026-05-26-windows-port-v1.md`** Task 3.4
       / Phase 5.1 / Phase 14.3 to reference this plan as the superseding
-      decision (done in the same session that files this plan — see the
-      forward-pointers already added).
-- [ ] Task 3.3. **README / `docs/build-windows.md` / `docs/install.md`**
-      — Windows row describes a single GPU-accelerated `.exe` that falls
-      back to CPU; note the larger download.
+      decision — forward-pointers (SUPERSEDED banner + REVERSED notes)
+      already added when this plan was filed; verified present.
+- [x] Task 3.3. **README / `docs/build-windows.md` / `docs/install.md`**
+      — `docs/build-windows.md` updated in Phase 2 with the Vulkan SDK
+      prereq and the single-build note. README and `docs/install.md`
+      correctly state Windows is "planned, not shipping yet" — left as-is
+      to avoid a premature shipping claim; the planned single
+      GPU-with-fallback `.exe` is now described in `ROADMAP.md` (Windows
+      "On the horizon" entry). Fixed a stray typo on the install.md
+      GPU-version line.
 - [ ] Task 3.4. **CHANGELOG + ROADMAP** at release time (user-facing
       phrasing: "the Windows app now uses your GPU automatically when
       one is available, and the Linux GPU build no longer needs the
-      Vulkan library just to start").
-- [ ] Task 3.5. **Pre-commit + size gates green** on Linux
+      Vulkan library just to start"). Deferred by design: the CHANGELOG
+      has no Unreleased section (entries are added at tag time per the
+      project rules); the ROADMAP "Shipped" move also happens at tag
+      time. The forward-looking ROADMAP Windows entry is updated now.
+- [x] Task 3.5. **Pre-commit + size gates green** on Linux
       (`cargo fmt --all --check`, `cargo clippy --workspace
       --all-targets -- -D warnings`, `cargo test --workspace
       --tests --lib`, `./tests/check.sh --size-budget`).

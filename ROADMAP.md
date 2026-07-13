@@ -304,7 +304,11 @@ while referencing another. Plan sketch:
 
 Native integration following the same playbook as macOS (shipped in
 v0.15.0, see below): system-tray app and native installer
-(`plans/2026-05-26-windows-port-v1.md`).
+(`plans/2026-05-26-windows-port-v1.md`). Like macOS, Windows will ship a
+single GPU-accelerated download — it uses your GPU automatically when one
+is available and quietly falls back to the CPU otherwise, so there is no
+separate CPU build to choose between
+(`plans/2026-07-12-vulkan-soft-load-single-build-v1.md`).
 
 ### Research spikes (low priority)
 

@@ -1,6 +1,34 @@
 # Fono — Project Status
 Last updated: 2026-07-13
 
+## 2026-07-13 — Vulkan soft-load: Phase 3 (docs/gates) done — initiative complete
+
+Closed out `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`. The
+soft-load initiative (single Windows build + Linux no-hard-link) is
+complete through Phase 3; only the release-tag-time CHANGELOG/ROADMAP
+"Shipped" move remains, deferred by design.
+
+- **Phase 3 was mostly already done.** ADR 0022 (Task 3.1) and
+  `docs/build-windows.md` (Task 3.3) landed in Phase 2; the
+  windows-port forward-pointers (Task 3.2) were filed with the plan.
+  Verified all present rather than re-editing.
+- **ROADMAP Windows entry** now states Windows will ship a single
+  GPU-accelerated download that falls back to CPU (forward-looking
+  "On the horizon" phrasing, not a shipping claim), pointing at this
+  plan. Fixed a stray typo on the `docs/install.md` GPU-version line.
+- **README/install.md left as "planned, not shipping yet"** — no
+  premature shipping claim; the user-facing CHANGELOG/ROADMAP-Shipped
+  wording is deferred to release tag time per the project rules (the
+  CHANGELOG has no Unreleased section).
+- **Gates green (Linux):** `cargo fmt --all --check`, `clippy
+  --workspace --all-targets -D warnings`, 36 test suites (0 failed),
+  and `./tests/check.sh --size-budget` (cpu variant 21.36 MiB ≤ 25 MiB,
+  NEEDED ⊆ 4-entry allowlist).
+
+Remaining across the wider effort: the dumpbin/size CI assertion +
+promoting the `windows` job to blocking (Windows port Phase 14), and the
+CHANGELOG/ROADMAP-Shipped entries when the next release is tagged.
+
 ## 2026-07-13 — Vulkan soft-load: Phase 2 (Windows single build) done
 
 Completed the Windows half of
