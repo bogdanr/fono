@@ -30,14 +30,59 @@ pub struct Paths {
 }
 
 impl Paths {
-    /// Resolve from environment, falling back to HOME-based defaults.
+    /// Resolve from environment, falling back to platform-native
+    /// defaults. On Unix this is the XDG base-directory spec
+    /// (`$HOME`-relative fallbacks); on Windows it is the native
+    /// `%APPDATA%` / `%LOCALAPPDATA%` split (see [`Self::resolve_windows`]).
     pub fn resolve() -> Result<Self> {
-        let home = home_dir()?;
+        #[cfg(windows)]
+        {
+            Self::resolve_windows()
+        }
+        #[cfg(not(windows))]
+        {
+            let home = home_dir()?;
+            Ok(Self {
+                config_dir: xdg_root("XDG_CONFIG_HOME", &home.join(".config")).join(APP_NAME),
+                data_dir: xdg_root("XDG_DATA_HOME", &home.join(".local").join("share"))
+                    .join(APP_NAME),
+                cache_dir: xdg_root("XDG_CACHE_HOME", &home.join(".cache")).join(APP_NAME),
+                state_dir: xdg_root("XDG_STATE_HOME", &home.join(".local").join("state"))
+                    .join(APP_NAME),
+            })
+        }
+    }
+
+    /// Native Windows layout: no XDG convention exists there, so mirror
+    /// the split every other Windows app uses — roaming, syncable
+    /// settings under `%APPDATA%`, and machine-local state (history,
+    /// model cache, sockets, logs) under `%LOCALAPPDATA%`. This matches
+    /// the install/uninstall behaviour in `install/windows.rs`
+    /// (`%APPDATA%\fono` is preserved across reinstalls; `%LOCALAPPDATA%\fono`
+    /// is not). Building the path with successive `.join()` calls (never a
+    /// literal embedded `/`) keeps every component using the native `\`
+    /// separator throughout.
+    #[cfg(windows)]
+    fn resolve_windows() -> Result<Self> {
+        let roaming =
+            std::env::var_os("APPDATA").map(PathBuf::from).filter(|p| p.is_absolute()).ok_or_else(
+                || Error::Other("%APPDATA% is not set; cannot resolve the config directory".into()),
+            )?;
+        let local = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .ok_or_else(|| {
+                Error::Other(
+                    "%LOCALAPPDATA% is not set; cannot resolve the data/cache/state directories"
+                        .into(),
+                )
+            })?;
+        let local_app = local.join(APP_NAME);
         Ok(Self {
-            config_dir: xdg_root("XDG_CONFIG_HOME", &home.join(".config")).join(APP_NAME),
-            data_dir: xdg_root("XDG_DATA_HOME", &home.join(".local/share")).join(APP_NAME),
-            cache_dir: xdg_root("XDG_CACHE_HOME", &home.join(".cache")).join(APP_NAME),
-            state_dir: xdg_root("XDG_STATE_HOME", &home.join(".local/state")).join(APP_NAME),
+            config_dir: roaming.join(APP_NAME),
+            data_dir: local_app.join("data"),
+            cache_dir: local_app.join("cache"),
+            state_dir: local_app.join("state"),
         })
     }
 
@@ -143,7 +188,20 @@ impl Paths {
     /// `/dev/null` instead.
     #[must_use]
     pub fn log_file(&self) -> PathBuf {
-        PathBuf::from(LOG_FILE)
+        // Windows has no `/var/log` and no per-user system log
+        // convention, so the hardcoded Unix path would land the log at a
+        // bogus drive-relative location (or fail to open). Keep it beside
+        // the other per-user state (`fono.sock`, `fono.pid`) under
+        // `%LOCALAPPDATA%\fono\state`, matching the rest of the Windows
+        // per-machine state directory ([`Self::resolve_windows`]).
+        #[cfg(windows)]
+        {
+            return self.state_dir.join("fono.log");
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from(LOG_FILE)
+        }
     }
 
     #[must_use]
@@ -164,6 +222,7 @@ impl Paths {
     }
 }
 
+#[cfg(not(windows))]
 fn xdg_root(var: &str, fallback: &Path) -> PathBuf {
     match std::env::var_os(var) {
         Some(v) if !v.is_empty() => PathBuf::from(v),
@@ -171,46 +230,16 @@ fn xdg_root(var: &str, fallback: &Path) -> PathBuf {
     }
 }
 
+/// Unix-only: `HOME` is the canonical home directory used to anchor the
+/// XDG base-directory fallbacks. Windows never reaches this — it
+/// resolves `%APPDATA%` / `%LOCALAPPDATA%` directly in
+/// [`Paths::resolve_windows`], which needs no home directory at all.
+#[cfg(not(windows))]
 fn home_dir() -> Result<PathBuf> {
-    // `HOME` is the canonical home on Unix. On Windows it is normally
-    // unset — it only shows up inside MSYS2 / Cygwin / OpenSSH sessions
-    // — so a plain `powershell`/`cmd` launch would otherwise fail with
-    // "HOME not set". Fall back to the native `%USERPROFILE%`, then the
-    // `%HOMEDRIVE%%HOMEPATH%` pair, matching the resolution order the
-    // `dirs`/`home` crates use. This keeps Fono's XDG-style per-user
-    // layout (`~/.config/fono`, `~/.cache/fono`, …) working identically
-    // on every OS without a new dependency.
-    if let Some(home) =
-        std::env::var_os("HOME").map(PathBuf::from).filter(|p| !p.as_os_str().is_empty())
-    {
-        return Ok(home);
-    }
-
-    #[cfg(windows)]
-    {
-        if let Some(profile) =
-            std::env::var_os("USERPROFILE").map(PathBuf::from).filter(|p| !p.as_os_str().is_empty())
-        {
-            return Ok(profile);
-        }
-        if let (Some(drive), Some(path)) =
-            (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH"))
-        {
-            if !drive.is_empty() && !path.is_empty() {
-                let mut home = PathBuf::from(drive);
-                home.push(path);
-                return Ok(home);
-            }
-        }
-        return Err(Error::Other(
-            "cannot resolve a home directory: none of %USERPROFILE%, \
-             %HOMEDRIVE%%HOMEPATH%, or $HOME are set"
-                .into(),
-        ));
-    }
-
-    #[cfg(not(windows))]
-    Err(Error::Other("HOME environment variable not set".into()))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| Error::Other("HOME environment variable not set".into()))
 }
 
 #[cfg(test)]

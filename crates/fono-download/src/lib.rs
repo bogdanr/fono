@@ -20,30 +20,64 @@ pub async fn download(url: &str, dest: &Path, expected_sha256: &str) -> Result<(
         tokio::fs::create_dir_all(parent).await.ok();
     }
 
+    // Stream into a sibling `.part` file and only rename into `dest` once the
+    // content is fully written and SHA-verified. This guarantees `dest` never
+    // exists as a truncated/corrupt file after an interrupted download or a
+    // killed process — callers gate on a plain `dest.exists()`, so a partial
+    // file left at `dest` would otherwise be trusted forever and fail to load.
+    let part = part_path(dest);
+    let pinned = !expected_sha256.chars().all(|c| c == '0');
+
     let mut attempt = 0u32;
     loop {
         attempt += 1;
-        match try_download(url, dest).await {
-            Ok(()) => break,
+        match try_download(url, &part).await {
+            Ok(()) => {
+                let actual = sha256_file(&part).await?;
+                if !pinned {
+                    info!("downloaded {dest:?}: sha256={actual} (unpinned)");
+                    break;
+                } else if actual.eq_ignore_ascii_case(expected_sha256) {
+                    info!("downloaded {dest:?}: sha256 verified");
+                    break;
+                } else if attempt < 3 {
+                    warn!(
+                        "sha256 mismatch for {dest:?} (attempt {attempt}): expected \
+                         {expected_sha256}, got {actual}; re-downloading"
+                    );
+                    // Complete but corrupt: resuming can't repair it, so start over.
+                    tokio::fs::remove_file(&part).await.ok();
+                    tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
+                } else {
+                    tokio::fs::remove_file(&part).await.ok();
+                    return Err(anyhow!(
+                        "sha256 mismatch for {dest:?}: expected {expected_sha256}, got {actual}"
+                    ));
+                }
+            }
             Err(e) if attempt < 3 => {
                 warn!("download attempt {attempt} failed: {e}; retrying");
+                // Keep the partial file so the next attempt resumes via Range.
                 tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
             }
             Err(e) => return Err(e),
         }
     }
 
-    let actual = sha256_file(dest).await?;
-    if expected_sha256.chars().all(|c| c == '0') {
-        info!("downloaded {dest:?}: sha256={actual} (unpinned)");
-    } else if !actual.eq_ignore_ascii_case(expected_sha256) {
-        return Err(anyhow!(
-            "sha256 mismatch for {dest:?}: expected {expected_sha256}, got {actual}"
-        ));
-    } else {
-        info!("downloaded {dest:?}: sha256 verified");
-    }
+    // Atomically publish the verified file. Same directory ⇒ same filesystem,
+    // so the rename is atomic on both Unix and Windows.
+    tokio::fs::rename(&part, dest)
+        .await
+        .with_context(|| format!("failed to move downloaded file into place: {dest:?}"))?;
     Ok(())
+}
+
+/// Sibling temp path for an in-progress download: `<dest>.part` in the same
+/// directory, so the final rename stays on one filesystem and is atomic.
+fn part_path(dest: &Path) -> std::path::PathBuf {
+    let mut name = dest.file_name().unwrap_or_default().to_os_string();
+    name.push(".part");
+    dest.with_file_name(name)
 }
 
 async fn try_download(url: &str, dest: &Path) -> Result<()> {
