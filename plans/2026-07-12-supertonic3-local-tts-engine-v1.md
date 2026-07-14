@@ -64,15 +64,23 @@ Reference implementations available locally:
 
 ### Slice 1 — Model distribution
 
-- [ ] Task 1.1. Repack `sherpa-onnx-supertonic-3-tts-int8-2026-05-11` for the Fono voice
-      mirror: the four `.onnx` files plus `tts.json`, `unicode_indexer.bin`, `voice.bin`,
+- [x] Task 1.1. Repack `sherpa-onnx-supertonic-3-tts-int8-2026-05-11` for the Fono voice
+      mirror: the four graphs plus `tts.json`, `unicode_indexer.bin`, `voice.bin`,
       and the upstream `LICENSE`; per-file SHA-256 in the mirror manifest, following the
       existing Piper/Kokoro layout consumed by `fono-download`.
-- [ ] Task 1.2. Wire the pack into the download layer with a **notice-on-download** step
+      **CORRECTION (2026-07-14):** the four `.onnx` graphs must be converted to `.ort`
+      first — Fono's minimal onnxruntime (ADR 0032/0033) loads **only** `.ort`
+      flatbuffers, never plain `.onnx`. The pack descriptor (`crates/fono-tts/src/`
+      `supertonic/mod.rs`) names them `*.ort` and leaves their pins `UNPINNED` until
+      `scripts/gen-ort-models.sh` converts them and they are uploaded (the wake
+      `hey_fono` precedent); the conversion is what feeds Slice 3's ops-config. The
+      three format-stable files (`tts.json`, `voice.bin`, `unicode_indexer.bin`) are
+      pinned now with real SHA-256s from the upstream int8 pack.
+- [x] Task 1.2. Wire the pack into the download layer with a **notice-on-download** step
       (mirroring the wake-word community-model notice pattern from v0.12.0): one-line
       "Weights licensed OpenRAIL-M (behavioral-use restrictions) — <link>" shown at fetch
       time and recorded in the model metadata.
-- [ ] Task 1.3. Decide and document eviction/coexistence semantics: the ~139 MB pack is
+- [x] Task 1.3. Decide and document eviction/coexistence semantics: the ~139 MB pack is
       shared across all 31 languages and 10 speakers (one download, not per-voice), and
       supersedes the need for new Piper per-language downloads when the engine is active.
 

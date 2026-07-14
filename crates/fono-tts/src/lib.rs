@@ -63,6 +63,8 @@ pub mod local_router;
 #[cfg(feature = "tts-local")]
 pub mod piper;
 #[cfg(feature = "tts-local")]
+pub mod supertonic;
+#[cfg(feature = "tts-local")]
 pub mod voices;
 
 pub use factory::build_tts;
