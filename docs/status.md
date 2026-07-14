@@ -1,5 +1,35 @@
 # Fono — Project Status
-Last updated: 2026-07-13
+Last updated: 2026-07-14
+
+## 2026-07-14 — Release v0.16.0 (Windows support)
+
+Cut the 0.16.0 release. Headline: **Windows support (experimental)** — a
+single `fono.exe` joins the Linux and macOS builds, with the tray, F7/F8
+push-to-talk + assistant, cursor injection (clipboard fallback), the
+recording overlay, focused-app awareness, local STT/polish/TTS/wake-word,
+and every cloud provider. One download, GPU-when-present with CPU fallback
+(the Vulkan soft-load work), self-install/uninstall/update. Built and
+exercised remotely, not daily-driven — shipped as experimental.
+
+Also in the release:
+- **Atomic, checksum-verified model downloads (all platforms).** An
+  interrupted download no longer leaves a half-finished model that fails
+  on every later start; downloads land in a temp file and are only moved
+  into place once verified.
+- **Glass Cortex overlay** style (opt-in, off by default, local models
+  only) — a live view of the on-device LLM. Acknowledged still rough on
+  real replies; flagged as a preview pending a rework.
+
+Release checklist done: workspace version 0.15.0 → 0.16.0
+(`Cargo.toml` + `Cargo.lock`), `CHANGELOG.md` `[0.16.0]` section,
+`ROADMAP.md` (Recently shipped banner + Shipped list entry, Windows moved
+out of On the horizon, header table Windows tile swapped for Local REST
+API). The 14 feature commits since v0.15.0 were left intact (already clean,
+user-friendly, and signed off); only the release commit was added.
+
+Open item carried forward: Windows `fono.exe` is ~72 MiB, over ADR 0022's
+Windows cap — needs a budget review before the Windows size gate goes
+blocking. Linux `cpu` binary stays well under its 25 MiB budget.
 
 ## 2026-07-13 — Windows local TTS enabled (ONNX Runtime link fixed)
 

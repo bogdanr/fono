@@ -104,7 +104,7 @@ Local-first, by design. With the default setup, audio and text never leave your 
 
 - **Distro packages.** `.deb`, `.pkg.tar.zst`, and `.txz` files are built by CI and attached to each [release](https://github.com/bogdanr/fono/releases/latest). They are not regularly tested — file an issue if one misbehaves.
 - **macOS (Apple Silicon, experimental).** Each release attaches a Metal-accelerated `fono-vX.Y.Z-aarch64-apple-darwin` binary. Download it, `chmod +x`, and run `fono install` — it sets up start-at-login and walks you through the one-time permission grants. It's only been tested on a headless remote Mac so far, not eyeballed on a real display yet — if you try it, an issue report (good or bad) is genuinely useful. Details in [docs/build-macos.md](docs/build-macos.md).
-- **Windows.** Planned, not shipping yet. See the [roadmap](ROADMAP.md).
+- **Windows (experimental).** Each release attaches a `fono-vX.Y.Z-x86_64.exe`. Download it and run `fono install` — it copies the app into your user folder and starts it at login, no administrator prompt. One download uses your GPU when a driver is present and falls back to the processor otherwise. This is an early port, built and exercised remotely rather than daily-driven, so expect rough edges — if you try it, an issue report (good or bad) is genuinely useful. Details in [docs/build-windows.md](docs/build-windows.md).
 
 ## Documentation
 

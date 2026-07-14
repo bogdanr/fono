@@ -1,8 +1,9 @@
 # Installing Fono
 
 Fono is a single static binary (~22 MB) with four glibc dependencies.
-There is also a GPU-accelerated version (~60 MB); macOS and Windows
-are planned.
+There is also a GPU-accelerated version (~60 MB). macOS (Apple Silicon)
+and Windows builds also ship, both experimental — see the Platforms
+section below.
 
 There are three ways to install:
  - the one-liner script
@@ -152,8 +153,13 @@ inventory.
 
 - **Linux x86_64 and aarch64** — first-class. Daily-driven by the
   maintainer on NimbleX / Slackware; CI also covers Ubuntu and Arch.
-- **macOS and Windows** — planned, not shipping. See
-  [ROADMAP.md](../ROADMAP.md).
+- **macOS (Apple Silicon)** — experimental (shipped in v0.15.0). Built
+  and verified on a headless remote Mac, not yet eyeballed on a physical
+  display. See [docs/build-macos.md](build-macos.md).
+- **Windows x86_64** — experimental (shipped in v0.16.0). An early port,
+  built and exercised remotely rather than daily-driven; expect rough
+  edges and please file an issue. See
+  [docs/build-windows.md](build-windows.md).
 
 ## Verification
 

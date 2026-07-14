@@ -14,11 +14,21 @@ The home page is [fono.page](https://fono.page).
 <table width="100%">
 <tr>
 <td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#personal-vocabulary--voice-correction">Personal vocabulary &amp; voice correction</a></strong><br>Teach Fono once that "Phono" means "Fono" — it sticks forever, deterministically, before the text ever hits the cursor.<br><br><strong><a href="#natural-local-voices-in-31-languages">Natural local voices in 31 languages</a></strong><br>One compact local model speaks 31 languages in 10 voices at 44 kHz — laughs and breaths included — replacing dozens of per-language voice downloads.<br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".</td>
-<td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#self-hosted-modelship-backend">Self-hosted Modelship backend</a></strong><br>One box on your LAN runs the LLM, speech-to-text, text-to-speech, and embeddings — every Fono desktop points at it, fully local.<br><br><strong><a href="#hover-context-injection">Hover-context injection</a></strong> <em>(experimental)</em><br>Terminal hovered → shell prompts. Code editor hovered → identifier casing.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#windows">Windows</a></strong><br>Native platform integration — macOS shipped in v0.15.0.</td>
+<td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#self-hosted-modelship-backend">Self-hosted Modelship backend</a></strong><br>One box on your LAN runs the LLM, speech-to-text, text-to-speech, and embeddings — every Fono desktop points at it, fully local.<br><br><strong><a href="#hover-context-injection">Hover-context injection</a></strong> <em>(experimental)</em><br>Terminal hovered → shell prompts. Code editor hovered → identifier casing.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#local-rest-api">Local REST API</a></strong><br>Every CLI verb over plain HTTP, so scripts and editor plugins can drive the daemon you already run — no MCP, no special tooling.</td>
 </tr>
 </table>
 
 ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge)
+
+**[v0.16.0 — Windows support](#shipped)**  
+Fono now runs on Windows: one `fono.exe` with the tray icon, push-to-talk
+dictation and the voice assistant, text typed at the cursor, the recording
+overlay, local and cloud providers, and local text-to-speech. Like the macOS
+build it is a single download that uses your GPU when a driver is present and
+falls back to the processor otherwise. This is an early port, built and
+exercised remotely rather than daily-driven — give it a try and file an issue
+with what you find. Also: an interrupted model download can no longer leave a
+broken model behind, on any platform. *(2026-07-14)*
 
 **[v0.15.0 — macOS support](#shipped)**  
 Fono now runs on Apple Silicon Macs: dictation, the voice assistant, a native
@@ -300,16 +310,6 @@ windows). The remaining idea is keying the context on the window under the
 while referencing another. Plan sketch:
 `plans/2026-05-26-hover-context-injection-v1.md`.
 
-### Windows
-
-Native integration following the same playbook as macOS (shipped in
-v0.15.0, see below): system-tray app and native installer
-(`plans/2026-05-26-windows-port-v1.md`). Like macOS, Windows will ship a
-single GPU-accelerated download — it uses your GPU automatically when one
-is available and quietly falls back to the CPU otherwise, so there is no
-separate CPU build to choose between
-(`plans/2026-07-12-vulkan-soft-load-single-build-v1.md`).
-
 ### Research spikes (low priority)
 
 > Measure first, decide later. These are spike-first investigations that
@@ -335,6 +335,32 @@ separate CPU build to choose between
 ## Shipped
 
 Newest first.
+
+- ![v0.16.0](https://img.shields.io/badge/v0.16.0-2026--07--14-blue?style=flat-square)
+  **Windows support (experimental).** Fono now runs on Windows: a single
+  `fono.exe` with the notification-area tray icon and menu, push-to-talk
+  dictation and the voice assistant (F7 / F8, Escape to cancel), text typed
+  straight into your apps with a clipboard fallback, the floating recording
+  overlay, focused-app awareness, local speech-to-text, local text polishing,
+  local text-to-speech and wake word, and every cloud provider. Like the
+  macOS build there is one download rather than a CPU/GPU choice — it uses
+  your graphics card to speed up transcription when a driver is present and
+  quietly falls back to the processor when it isn't, and it starts fine on a
+  machine or virtual machine with no graphics driver yet. `fono install`
+  copies the app into your user folder and starts it at login with no
+  administrator prompt, `fono uninstall` reverses that while keeping your
+  settings and history, and `fono update` self-updates in place. This is an
+  early port: most of it was built and exercised on a remote Windows machine
+  rather than daily-driven, so expect rough edges and please file an issue
+  with what you find. Nothing changes for Linux or macOS users — their binary
+  is byte-for-byte identical, with no new dependencies. Also in this release:
+  an interrupted model download (dropped connection, sleep, or the app
+  closing mid-download) can no longer leave a half-finished model behind that
+  fails on every later start — downloads complete to a temporary file and are
+  only put in place once verified, on every platform; and an opt-in,
+  experimental "Glass Cortex" overlay style shows a live view of the
+  on-device AI thinking and speaking (off by default, still a preview).
+  *v0.16.0, 2026-07-14.*
 
 - ![v0.15.0](https://img.shields.io/badge/v0.15.0-2026--07--04-blue?style=flat-square)
   **macOS support (Apple Silicon, experimental).** Fono now runs on macOS:

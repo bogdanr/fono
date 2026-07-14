@@ -5,6 +5,47 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] — 2026-07-14
+
+### Added
+
+- **Windows support (experimental).** Fono now runs on Windows: a single
+  `fono.exe` alongside the Linux and macOS builds, with the notification-area
+  tray icon and its menu, push-to-talk dictation and the voice assistant
+  (F7 and F8 by default, Escape to cancel), text typed straight into your
+  apps with a clipboard fallback, the floating recording overlay, focused-app
+  awareness, local speech-to-text, local text polishing, local text-to-speech
+  and wake word, and every cloud provider. Like the macOS build there is one
+  download, not a CPU/GPU choice: it uses your graphics card to speed up
+  transcription when a driver is present and quietly falls back to the
+  processor when it isn't — and it starts fine on a fresh machine or virtual
+  machine that has no graphics driver yet. `fono install` copies the app into
+  your user folder and starts it at login with no administrator prompt,
+  `fono uninstall` reverses that while keeping your settings and history, and
+  `fono update` downloads, verifies, and swaps in the new version in place.
+  This is an early port: most of it was built and exercised on a remote
+  Windows machine rather than daily-driven, so expect rough edges and please
+  file an issue with whatever you hit. Nothing changes for Linux or macOS
+  users — their binary is byte-for-byte identical, with no new dependencies.
+
+- **Glass Cortex overlay (opt-in, experimental).** A new recording-overlay
+  style that shows a live view of the on-device AI while it works — the model
+  thinking through a reply, then speaking it back. Pick it as your
+  visualisation style to try it; it is off by default and only has anything
+  to show when you are running a local (on-device) model. It is still rough
+  on real replies and is due for a rework, so treat it as a preview.
+
+### Fixed
+
+- **An interrupted model download no longer leaves a broken model behind
+  (all platforms).** If a model download was cut short — a dropped
+  connection, the machine sleeping, or the app closing mid-download — Fono
+  could keep the half-finished file and then fail on every later start with a
+  "model corrupted or incomplete" error that never cleared on its own.
+  Downloads now finish into a temporary file and are only moved into place
+  once the whole file is present and its checksum verifies; a bad download is
+  re-fetched automatically.
+
 ## [0.15.0] — 2026-07-04
 
 ### Added
