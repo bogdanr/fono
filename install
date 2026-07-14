@@ -6,12 +6,17 @@
 # Usage:
 #     curl -fsSL https://fono.page/install | sh
 #
+# Works on Linux and macOS, and on Windows from a POSIX shell (Git Bash
+# or MSYS2, which ship sh + uname + curl).
+#
 # What it does:
-#   1. Detects host architecture and the latest Fono release on GitHub.
+#   1. Detects host OS + architecture and the latest Fono release.
 #   2. Downloads the matching prebuilt binary into a temp dir.
-#   3. Runs `sudo fono install` (desktop mode) or `sudo fono install
-#      --server` (headless mode), letting the self-installer place the
-#      binary, write the desktop / systemd entries, and start fono.
+#   3. Runs `fono install` so the self-installer places the binary and
+#      wires autostart: on Linux/macOS via `sudo fono install` (desktop)
+#      or `sudo fono install --server` (headless); on Windows per-user
+#      with no elevation (a login autostart entry under HKCU, no server
+#      mode).
 #
 # Environment knobs:
 #   FONO_VERSION=vX.Y.Z       pin to a specific release tag
@@ -63,6 +68,25 @@ case "$arch" in
 esac
 
 # ---------------------------------------------------------------------
+# Operating system — the same one-liner works from a POSIX shell on
+# Windows (Git Bash / MSYS2). Windows ships a single per-user x86_64
+# `.exe`; there is no server mode and no sudo.
+# ---------------------------------------------------------------------
+case "$(uname -s)" in
+    Linux*)                          OS=linux ;;
+    Darwin*)                         OS=macos ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) OS=windows ;;
+    *) err "unsupported OS: $(uname -s)" ;;
+esac
+EXE=""
+if [ "$OS" = windows ]; then
+    EXE=".exe"
+    ARCH=x86_64          # only an x86_64 Windows asset is published
+    FONO_MODE=desktop    # no Windows service; --server is refused
+    FONO_VARIANT=cpu     # single Windows .exe (Vulkan built in)
+fi
+
+# ---------------------------------------------------------------------
 # Mode detection
 #
 # Desktop = some indication of a graphical session in the env.
@@ -111,7 +135,7 @@ else
     [ -n "$TAG" ] || err "could not resolve latest release from $TAG_URL"
 fi
 
-ASSET="${ASSET_PREFIX}-${TAG}-${ARCH}"
+ASSET="${ASSET_PREFIX}-${TAG}-${ARCH}${EXE}"
 URL="https://github.com/$REPO/releases/download/${TAG}/${ASSET}"
 
 log "host:    $ARCH"
@@ -123,7 +147,7 @@ log "asset:   $ASSET"
 # ---------------------------------------------------------------------
 # Download
 # ---------------------------------------------------------------------
-BIN="$WORKDIR/fono"
+BIN="$WORKDIR/fono${EXE}"
 log "downloading $URL"
 $DL "$BIN" "$URL" || err "download failed: $URL"
 chmod +x "$BIN"
@@ -150,22 +174,36 @@ fi
 # ---------------------------------------------------------------------
 # Self-installer path
 #
-# `fono install` (run as root) handles binary placement, desktop /
-# systemd entries, completions, and — in our new code — best-effort
-# launches fono in the background for the invoking user via
+# `fono install` handles binary placement, autostart wiring, completions
+# and — on Linux — best-effort launches fono for the invoking user via
 # `$SUDO_USER`. We honour `FONO_INSTALL_NO_START` by passing it through.
 # ---------------------------------------------------------------------
+
+# Preserve FONO_INSTALL_NO_START across whatever boundary follows.
+INSTALL_ENV=""
+if [ -n "${FONO_INSTALL_NO_START:-}" ]; then
+    INSTALL_ENV="FONO_INSTALL_NO_START=$FONO_INSTALL_NO_START"
+fi
+
+# Windows: per-user install, no elevation, no server mode. `fono
+# install` copies the .exe under %LOCALAPPDATA% and writes the login
+# autostart entry itself.
+if [ "$OS" = windows ]; then
+    if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+        # shellcheck disable=SC2086
+        env $INSTALL_ENV "$BIN" install </dev/tty
+    else
+        # shellcheck disable=SC2086
+        env $INSTALL_ENV "$BIN" install
+    fi
+    exit $?
+fi
+
 if [ "$(id -u)" -ne 0 ]; then
     need sudo
     SUDO="sudo -E"
 else
     SUDO=""
-fi
-
-# Preserve FONO_INSTALL_NO_START across the sudo boundary if set.
-INSTALL_ENV=""
-if [ -n "${FONO_INSTALL_NO_START:-}" ]; then
-    INSTALL_ENV="FONO_INSTALL_NO_START=$FONO_INSTALL_NO_START"
 fi
 
 if [ "$MODE" = "server" ]; then
