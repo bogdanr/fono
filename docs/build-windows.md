@@ -344,10 +344,12 @@ elevation (`crates/fono/src/install/windows.rs`).
 - **What it does.** Copies the running binary to
   `%LOCALAPPDATA%\fono\fono.exe`, writes the autostart value
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\fono` (the path
-  is stored quoted so a profile directory with spaces still launches),
-  and records `%LOCALAPPDATA%\fono\install_marker.toml`. The daemon
-  then starts at the next login. `fono doctor` reads the marker + Run
-  value and reports "self-installed via `fono install`".
+  is stored quoted so a profile directory with spaces still launches).
+  The daemon then starts at the next login. `fono doctor` infers the
+  install state from the two artefacts an install actually creates —
+  the binary under `%LOCALAPPDATA%\fono\` plus the Run value — and
+  reports "self-installed via `fono install`" (no marker file is
+  written; this mirrors the marker-free macOS installer).
 - **`fono uninstall`.** Removes the Run value and the
   `%LOCALAPPDATA%\fono\` directory, but keeps `%APPDATA%\fono\` (config
   + history) so a reinstall picks up where you left off.

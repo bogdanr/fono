@@ -10,10 +10,13 @@
 //!    `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\fono`
 //!    pointing at the installed binary (quoted, so a profile path with
 //!    spaces still launches), so the daemon starts at the next login.
-//! 3. Records `%LOCALAPPDATA%\fono\install_marker.toml` (version +
-//!    install path + timestamp) so `fono doctor` — and, later,
-//!    `fono update` — can tell a self-managed install apart from an
-//!    ad-hoc binary sitting on `PATH`.
+//!
+//! `fono doctor` tells a self-managed install apart from an ad-hoc
+//! binary on `PATH` by *inference* — the installed binary present under
+//! `%LOCALAPPDATA%\fono\` plus the autostart Run value — mirroring the
+//! marker-free macOS installer. No marker file is written: the two
+//! artefacts an install actually creates already answer the question,
+//! and a separate file could only go stale.
 //!
 //! Registry access goes through the built-in `reg.exe` rather than a
 //! new `winreg` dependency: it mirrors the subprocess-driven style the
@@ -61,10 +64,6 @@ fn installed_binary() -> Result<PathBuf> {
     Ok(install_dir()?.join("fono.exe"))
 }
 
-fn install_marker() -> Result<PathBuf> {
-    Ok(install_dir()?.join("install_marker.toml"))
-}
-
 // ---------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------
@@ -76,24 +75,6 @@ fn run_out(prog: &str, args: &[&str]) -> Result<(bool, String)> {
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     Ok((out.status.success(), text))
-}
-
-/// TOML body of the install marker. `{:?}` renders the path as a
-/// TOML-safe basic string (backslashes escaped, wrapped in quotes).
-fn marker_contents(exe: &Path) -> String {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!(
-        "# Written by `fono install` on Windows. Its presence marks a\n\
-         # self-managed per-user install (surfaced by `fono doctor`).\n\
-         version = \"{version}\"\n\
-         install_path = {path:?}\n\
-         installed_at_unix = {ts}\n",
-        version = env!("CARGO_PKG_VERSION"),
-        path = exe.display().to_string(),
-    )
 }
 
 // ---------------------------------------------------------------------
@@ -186,13 +167,11 @@ pub fn run_install(mode: InstallModeArg, dry_run: bool) -> Result<()> {
 
     let dir = install_dir()?;
     let bin = installed_binary()?;
-    let marker = install_marker()?;
 
     if dry_run {
         println!("fono install --dry-run (Windows, per-user — no elevation) — would perform:");
         println!("  · copy the running binary -> {}", bin.display());
         println!("  · write autostart value {RUN_KEY}\\{RUN_VALUE} -> \"{}\"", bin.display());
-        println!("  · write install marker -> {}", marker.display());
         println!("  · the daemon then starts automatically at your next login");
         return Ok(());
     }
@@ -218,10 +197,6 @@ pub fn run_install(mode: InstallModeArg, dry_run: bool) -> Result<()> {
     // 2. Autostart registry value.
     set_run_key(&bin)?;
     eprintln!("  · {RUN_KEY}\\{RUN_VALUE}");
-
-    // 3. Install marker.
-    std::fs::write(&marker, marker_contents(&bin))
-        .with_context(|| format!("write install marker {}", marker.display()))?;
 
     println!();
     println!("Fono installed. It will start automatically the next time you log in.");
@@ -294,14 +269,14 @@ pub fn doctor_state() -> String {
     let exe_str =
         exe.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "<unknown>".into());
 
-    let marker = install_marker().map(|m| m.exists()).unwrap_or(false);
+    let installed = installed_binary().map(|b| b.exists()).unwrap_or(false);
     let autostart = query_run_key().is_some();
-    match (marker, autostart) {
+    match (installed, autostart) {
         (true, true) => {
             format!("self-installed via `fono install` (binary + login autostart, {exe_str})")
         }
         (true, false) => format!("installed binary present, login autostart missing ({exe_str})"),
-        (false, true) => format!("login autostart present, install marker missing ({exe_str})"),
+        (false, true) => format!("login autostart present, installed binary missing ({exe_str})"),
         (false, false) => format!("ad-hoc on PATH ({exe_str})"),
     }
 }
@@ -318,22 +293,6 @@ mod tests {
     fn server_mode_is_refused() {
         let err = run_install(InstallModeArg::Server, true).unwrap_err();
         assert!(err.to_string().contains("Linux-only"));
-    }
-
-    #[test]
-    fn marker_is_valid_toml_with_escaped_path() {
-        let body = marker_contents(Path::new(r"C:\Users\John Doe\AppData\Local\fono\fono.exe"));
-        // Parses as TOML and round-trips the load-bearing fields.
-        let doc: toml::Value = toml::from_str(&body).expect("marker is valid TOML");
-        assert_eq!(
-            doc.get("version").and_then(toml::Value::as_str),
-            Some(env!("CARGO_PKG_VERSION"))
-        );
-        assert_eq!(
-            doc.get("install_path").and_then(toml::Value::as_str),
-            Some(r"C:\Users\John Doe\AppData\Local\fono\fono.exe")
-        );
-        assert!(doc.get("installed_at_unix").and_then(toml::Value::as_integer).is_some());
     }
 
     #[test]
