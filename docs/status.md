@@ -1,6 +1,177 @@
 # Fono — Project Status
 Last updated: 2026-07-14
 
+## 2026-07-14 — Supertonic Slice 3 DONE: runtime rebuilt, pack hosted, size measured
+
+The remaining infrastructure landed — the Supertonic engine can now be
+fetched, verified, and loaded end to end, and the binary-growth question
+is answered with a real measurement.
+
+- **Runtime rebuilt (all five triples).** Dispatched the `fono-voice`
+  `build-onnxruntime` workflow (run `29347770258`) off the pushed
+  `ops.config`; it rebuilt the minimal `libonnxruntime.a` /
+  `onnxruntime.lib` for every triple and re-published them to the
+  `onnxruntime-1.24.2` release. Re-pinned all five `raw_sha256` rows in
+  `scripts/fetch-onnxruntime.sh`. The new lib is a strict superset of the
+  wake-capable one (loads every existing voice + wake stack + Supertonic).
+- **Pack hosted + graphs pinned.** Converted the four v3 int8 graphs to
+  `.ort` and uploaded the seven-file pack (four graphs + `tts.json` +
+  `voice.bin` + `unicode_indexer.bin`) to the `ort-1.24.2` mirror. Pinned
+  the four graphs in `supertonic/mod.rs` from the *uploaded* bytes
+  (conversion is not byte-reproducible, so pins come from the hosted
+  artifact); `is_hosted()` is now true.
+- **Measured binary growth — the headline number.** With the rebuilt
+  runtime linked, the canonical `release-slim` `cpu` binary
+  (x86_64-unknown-linux-gnu, default features) is **21.41 MiB
+  (22,447,864 B)** — comfortably under the 25 MiB gate, `NEEDED` allowlist
+  clean. Growth vs the ~21.64 MiB baseline is **negligible / within
+  noise**: `--gc-sections` keeps the five light net-new kernels near-free.
+  No budget bump needed. (Parakeet, if added later, folds into the same
+  rebuild — its delta still needs its v3 model to measure.)
+
+Slice 3 is complete. What's left for a user-visible voice: Slice 4
+(catalog + router + config/UX wiring) and Slice 5 (deterministic E2E +
+Python-oracle cross-check, now unblocked by the hosted pack + runtime).
+
+## 2026-07-14 — Supertonic Slice 3 config done properly (real .ort conversion)
+
+Redid the Slice 3 ops-config work the correct way — with the actual
+conversion tooling instead of the earlier static hand-merge — and found
+two things the hand-merge got wrong.
+
+- Installed `onnxruntime==1.24.2` in a throwaway venv, converted the four
+  Supertonic v3 int8 graphs to `.ort` with `scripts/gen-ort-models.sh`,
+  and unioned the emitted type-reduced config into `fono-voice`'s
+  `onnxruntime/ops.config` with `scripts/merge-ort-configs.py` (fono-voice
+  commit `24fc906`, amended over the earlier hand-merge).
+- **Correction 1 — a missed op that would break loading.** The graph
+  optimizer introduces `com.microsoft;QLinearConv` when it fuses the int8
+  Conv layers; it is invisible in the raw `.onnx`, so the hand-merge
+  omitted it — a runtime would have failed to load Supertonic. The
+  authoritative net-new set is `Erf`(13), `BatchNormalization`(15),
+  `PRelu`(16), `QLinearConv` (contrib), plus `int64_t` widenings on
+  `Clip`/`Div`/`Pow`. The hand-merge's `Constant`/`Tile`/`Reciprocal`
+  guesses were folded away by the optimizer.
+- **Correction 2 — graph pins are not reproducible.** `.ort` conversion
+  is **not byte-deterministic**: two identical runs produce different
+  bytes (different SHA-256) for all four graphs. So the four graph pins in
+  `supertonic/mod.rs` must be taken from the *uploaded* artifacts, not a
+  reproduced conversion — they correctly stay `UNPINNED`. The emitted
+  `ops.config` **is** stable across runs (it's a semantic property), so
+  the committed config is safe. Module docs updated to record this.
+
+Slice 3's config half is now genuinely done and verified. Remaining is
+pure infrastructure (not doable here): dispatch the `fono-voice`
+`build-onnxruntime` workflow to rebuild `libonnxruntime.a`, re-pin the
+per-triple SHAs in `scripts/fetch-onnxruntime.sh`, upload the converted
+`.ort` pack, then pin the four graphs from the uploaded bytes — which
+unblocks the size gate (Task 3.2), Slice 4, and Slice 5.
+
+## 2026-07-14 — Supertonic local TTS: Slice 3 ops config merged; binary-growth measured
+
+Finished the Supertonic-side work that can be done off the build
+infrastructure, and answered the binary-growth question.
+
+Binary-growth analysis (the "how much does the binary grow" question):
+- Extracted the operator set from the four **Supertonic 3** int8 graphs
+  (`sherpa-onnx-supertonic-3-tts-int8-2026-05-11`, confirmed genuinely
+  v3: 31-language `opensource-multilingual` split; the `tts.json`
+  `tts_version: v1.7.3` is the internal model-format version, not the
+  product generation). 43 ops, all `ai.onnx` opset 19.
+- Diffed against the shipped Piper+Kokoro+wake union in `fono-voice`'s
+  `onnxruntime/ops.config`: only **six net-new ops** —
+  `BatchNormalization, Constant, Erf, PRelu, Reciprocal, Tile`. Every
+  heavy op (Conv/MatMul/Gemm/Softmax/LayerNormalization + all int8 quant
+  kernels) is already linked.
+- Estimated growth for Supertonic v3: the five real kernels (Constant is
+  intrinsic) are light float elementwise/norm ops — under the +0.77 MiB
+  Kokoro's heavier quant kernels cost — so **≈ a few hundred KB (~+0.4
+  MiB)**. Parakeet v3 could not be measured: no model present locally and
+  no onnx tooling installed (that is exactly the Parakeet plan's Task A4
+  spike). Combined Supertonic+Parakeet is estimated ~+1–2 MiB, which
+  would likely need the 25 MiB `cpu` gate bumped toward the 28 MiB hard
+  cap (sign-off per ADR 0022).
+
+Landed:
+- **Slice 3 config half (Task 3.1, partial)**: merged the six net-new
+  Supertonic ops into `fono-voice` `onnxruntime/ops.config`
+  (fono-voice commit `9d6d4b2`), appended to the `ai.onnx;19` line
+  without type constraints (all-types, matching the existing
+  Reshape/Shape entries; can never strip a type a model needs).
+  Structurally validated. This makes the runtime rebuild one
+  `workflow_dispatch` away.
+
+Remaining (infra, requires the build machine / model hosting — not doable
+in this environment):
+- Convert the four graphs to `.ort` (needs `onnxruntime==1.24.2` python),
+  dispatch the `fono-voice` `build-onnxruntime` workflow, re-pin the
+  per-triple SHAs in `scripts/fetch-onnxruntime.sh`, then run
+  `./tests/check.sh --size-budget` to record the real delta (Task 3.2).
+- Host the converted `.ort` pack and pin the four graphs' SHA-256 (they
+  are `UNPINNED` today), which unblocks Slice 4 (catalog/router/config)
+  and Slice 5 (E2E + oracle cross-check).
+
+## 2026-07-14 — Supertonic local TTS: Slices 1–2 landed (engine core done)
+
+Implemented the model-distribution and engine-core slices of the
+Supertonic 3 local TTS plan
+(`plans/2026-07-12-supertonic3-local-tts-engine-v1.md`). All work lives
+under `crates/fono-tts/src/supertonic/` behind the existing `tts-local`
+feature; zero new dependencies (confirmed: no `Cargo.toml`/`Cargo.lock`/
+`deny.toml` lines touched — Slice 3 Task 3.3 done).
+
+Landed (signed off, not pushed):
+- **Slice 1 — distribution** (`mod.rs`): one shared ~140 MB pack fetched
+  and SHA-256-verified from the voice mirror into its own `supertonic/`
+  cache subdir, with a one-time OpenRAIL-M notice-on-download. The three
+  format-stable files (`tts.json`, `voice.bin`, `unicode_indexer.bin`)
+  are pinned with real checksums; the four graphs are named `.ort` and
+  left `UNPINNED` until Slice 3 converts + hosts them (the wake
+  `hey_fono` precedent). Corrected a plan error: the minimal ORT runtime
+  loads only `.ort`, never raw `.onnx`.
+- **Slice 2 — engine core**: `config.rs` (tts.json), `style.rs`
+  (voice.bin, 10 speakers), `frontend.rs` (cleanup + 31-language NFKD via
+  a committed generated table + Hangul + indexer + expressive-tag
+  allowlist/stripping), `chunker.rs` (faithful `ChunkText` port),
+  `engine.rs` (four `ort` sessions + the `Process`/concat pipeline, plus
+  a hand-rolled MT19937 + Marsaglia-polar Gaussian unit-tested bit-exact
+  against C++ `std::mt19937`). `TextToSpeech` implemented for
+  `SupertonicLocal`. ~60 new unit tests; full fmt/clippy/test gate green.
+- **Slice 4 Task 4.4 (frontend half)**: `strip_unknown_tags` +
+  `EXPRESSIVE_TAGS` allowlist.
+
+Blocked / next (a hard dependency chain, none doable in this
+environment):
+- **Slice 3 (3.1/3.2)** — extend the minimal-ORT ops config for the four
+  int8 graphs, rebuild `libonnxruntime.a`, run the size gate. Needs
+  `onnxruntime==1.24.2` Python tooling, the ONNX→`.ort` conversion, and a
+  ~40 min runtime build. **Until this runs and the pack is hosted, no
+  audio can be produced and the four graphs stay `UNPINNED`.**
+- **Slice 4 (4.1/4.2/4.3/4.5)** — catalog/router/config/UI/docs. Must
+  **not** land before Slice 3: the router's `load_engine` would try to
+  download the not-yet-hosted `.ort` graphs at daemon startup and fail.
+- **Slice 5 (5.2/5.3)** — deterministic E2E + oracle cross-check need the
+  converted pack + linked runtime (E2E test is `#[ignore]`d meanwhile).
+- Open routing decision for Slice 4.2: when Supertonic is enabled, does
+  it take all languages (displacing Kokoro for English) or non-English
+  only (Kokoro keeps English, Piper stays fallback for the 7 languages
+  Supertonic lacks)?
+
+## 2026-07-14 — Windows size budget raised to ≤ 75 MiB
+
+Bumped the Windows binary budget in ADR 0022 (2026-07-14 amendment):
+**enforced ≤ 75 MiB (78 643 200 B), hard cap ≤ 80 MiB**, superseding the
+2026-07-13 ≤ 60 MiB / ≤ 64 MiB figures. Reason: those predated local TTS
++ wake-word landing on Windows, which added the embedded ONNX Runtime
+(~3 MiB) and pushed `fono-vX.Y.Z-x86_64.exe` to ~72 MiB. The new ceiling
+leaves ~3 MiB of headroom. Windows is a single no-choice download the
+maintainer rarely tests, so this ceiling is a loose sanity bound, not a
+tight ship-size target — Linux `cpu` (≤ 25 MiB) and macOS stay strict.
+No CI enforcement yet: the dumpbin/size `windows`-job gate is still
+deferred to Windows port Phase 14; when it lands it asserts ≤ 75 MiB.
+Docs synced: ADR 0022, `docs/build-windows.md`, and the Phase 14 task in
+`plans/2026-05-26-windows-port-v1.md`. Docs-only; Linux/macOS unaffected.
+
 ## 2026-07-14 — Release v0.16.0 (Windows support)
 
 Cut the 0.16.0 release. Headline: **Windows support (experimental)** — a

@@ -21,12 +21,21 @@
 //! four `*.int8.onnx` graphs; Fono converts them to `.ort` via
 //! `scripts/gen-ort-models.sh` (the same pipeline as Piper/Kokoro/wake) and
 //! hosts the conversions on its own mirror. That conversion step also emits
-//! the operator/type union feeding the minimal-runtime rebuild (Slice 3), so
-//! the four graph pins below stay [`UNPINNED`] until that conversion is run
-//! and the `.ort` files are uploaded — the same "hosted-later" convention the
-//! wake `hey_fono` classifier uses. The three non-graph files (`tts.json`,
-//! `voice.bin`, `unicode_indexer.bin`) are byte-identical before and after
-//! conversion, so they are pinned now.
+//! the operator/type union feeding the minimal-runtime rebuild (Slice 3).
+//!
+//! **The graph pins must come from the *uploaded* artifacts, not a reproduced
+//! conversion.** Verified 2026-07-14: `convert_onnx_models_to_ort` is **not**
+//! byte-deterministic — two runs of the identical pipeline (same onnxruntime
+//! 1.24.2, same flags, same inputs) produce different `.ort` bytes each time,
+//! so their SHA-256 differs run to run. (The operator/type *config* it emits
+//! **is** stable, since that is a semantic property of the graph, not its byte
+//! layout — which is why the Slice 3 `ops.config` can be pinned but these
+//! graphs cannot.) The four graphs were therefore converted **once**
+//! (2026-07-14) and uploaded to the `ort-1.24.2` release, and each pin below is
+//! the SHA-256 of that hosted artifact — the same "convert-and-host-once"
+//! convention the wake `hey_fono` classifier uses. The three non-graph files
+//! (`tts.json`, `voice.bin`, `unicode_indexer.bin`) are byte-identical before
+//! and after conversion, so they carry the upstream pack's own digests.
 //!
 //! **License (ADR 0004, amended 2026-07-12):** Supertonic's code is MIT and
 //! its weights are **OpenRAIL-M** — a RAIL-class behavioral-restriction
@@ -99,14 +108,29 @@ pub struct SupertonicAsset {
     pub sha256: &'static str,
 }
 
-/// The four ONNX graphs, converted to `.ort` for the minimal runtime. Pins
-/// stay [`UNPINNED`] until `scripts/gen-ort-models.sh` converts the upstream
-/// `*.int8.onnx` graphs and the `.ort` files are uploaded to the mirror.
+/// The four ONNX graphs, converted to `.ort` for the minimal runtime and
+/// hosted on the mirror. Because the `.ort` conversion is not byte-reproducible
+/// (see the module docs), each pin is the SHA-256 of the exact **uploaded**
+/// artifact on the `ort-1.24.2` release — not a locally reproduced conversion.
+/// Converted 2026-07-14 with `scripts/gen-ort-models.sh` (onnxruntime 1.24.2)
+/// from the upstream `sherpa-onnx-supertonic-3-tts-int8-2026-05-11` int8 pack.
 pub const GRAPHS: &[SupertonicAsset] = &[
-    SupertonicAsset { file: "text_encoder.ort", sha256: UNPINNED },
-    SupertonicAsset { file: "vector_estimator.ort", sha256: UNPINNED },
-    SupertonicAsset { file: "vocoder.ort", sha256: UNPINNED },
-    SupertonicAsset { file: "duration_predictor.ort", sha256: UNPINNED },
+    SupertonicAsset {
+        file: "text_encoder.ort",
+        sha256: "407899bf2f1e4760cd1bb5f16408879f20b3946799f4fa264a223de7a27b0ded",
+    },
+    SupertonicAsset {
+        file: "vector_estimator.ort",
+        sha256: "737acf5332ea1e4d9bf1b18cfd788bff9b583110bf5e927289bb891e564a4813",
+    },
+    SupertonicAsset {
+        file: "vocoder.ort",
+        sha256: "53b45ccf9ca2306d4b85d219d25201f646013f95d118684e2a9e8e1ff49bfabf",
+    },
+    SupertonicAsset {
+        file: "duration_predictor.ort",
+        sha256: "f8456555f02ae1c4525b32affb8ddf65e63c87ec01c81868b1c5beca20fa8a29",
+    },
 ];
 
 /// The Supertonic runtime config (`ae`/`ttl`/`dp` shapes). Byte-identical
@@ -310,11 +334,15 @@ mod tests {
     }
 
     #[test]
-    fn graphs_are_unpinned_until_converted_and_hosted() {
+    fn graphs_are_pinned_and_pack_is_hosted() {
+        // Converted + uploaded 2026-07-14: every graph now carries the SHA-256
+        // of its hosted `.ort` artifact, so the whole pack reports hosted.
         for g in GRAPHS {
-            assert_eq!(g.sha256, UNPINNED, "graph {} pinned before conversion?", g.file);
+            assert_eq!(g.sha256.len(), 64, "{} sha must be 64 hex", g.file);
+            assert!(g.sha256.bytes().all(|b| b.is_ascii_hexdigit()));
+            assert_ne!(g.sha256, UNPINNED, "graph {} must be pinned once hosted", g.file);
         }
-        assert!(!is_hosted(), "pack must report not-hosted while graphs are unpinned");
+        assert!(is_hosted(), "pack must report hosted once every graph is pinned");
     }
 
     #[test]

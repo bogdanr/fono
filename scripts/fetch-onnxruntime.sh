@@ -66,22 +66,32 @@ fi
 # libs load the full wake `.ort` stack (melspectrogram + embedding + the real
 # upstream classifiers) as well as every voice model (the op-set is a superset
 # of the voice-only one).
+#
+# SUPERTONIC REBUILD DONE (2026-07-14): the union ops.config now also covers
+# the Supertonic 3 multilingual TTS graphs (int8, opset 19). Net-new vs the
+# wake-capable set: Erf(13), BatchNormalization(15), PRelu(16), and the
+# com.microsoft QLinearConv contrib op (introduced by the graph optimizer for
+# the int8 Conv layers), plus int64_t type widenings on Clip/Div/Pow. All five
+# triples were rebuilt by fono-voice's build-onnxruntime workflow and
+# re-published under RELEASE_TAG; every row below is re-pinned to the new
+# `raw_sha256`. This lib is a strict superset of the wake-capable one, so it
+# still loads every existing voice + the wake stack, and now Supertonic too.
 sha_for_triple() {
 	case "$1" in
 	x86_64-unknown-linux-gnu)
-		echo "9fca53b7547bfb3650a0188785a8e40c6ccc45f1886c8ab0339f59fc16b33b6c"
+		echo "467d28d2e96d7433bc32dbc5c5e518d809a2c6f46bf41fd18b7a1fff5dc56cad"
 		;;
 	aarch64-unknown-linux-gnu)
-		echo "70670ec73073048e60aab4a7ae63eb684bb759f726e8543d4039ce0f37d63742"
+		echo "0cbd30674ae394b60d3093fbe726e1576ad02e7674741a66a790c74494f73a4d"
 		;;
 	aarch64-apple-darwin)
-		echo "b4f7ff29099d2861b60e19bb2818bed6961bc0753134d9b4075f26e38128d078"
+		echo "d3cb828564f2558fa72c3f30a648556264013c088cd196d4037f1ac7f435f612"
 		;;
 	x86_64-apple-darwin)
-		echo "057135b825efd9b4269c3d70ac035390d2849d2a78bf2d994dc142938470a873"
+		echo "2213752d0e25e77a99f601fe1f5788fceddaec509101456e8c96a4515734198a"
 		;;
 	x86_64-pc-windows-msvc)
-		echo "6bb2d9ac93e50d483abc9d3f5172c57a7d9b3a7c246db874062bea956f91fb50"
+		echo "c3b4b7d0f0b8076d741365fc568aa40d00582bf2bfae98d74ff13c47e7316659"
 		;;
 	*)
 		echo ""

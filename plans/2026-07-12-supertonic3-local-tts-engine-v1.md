@@ -134,16 +134,39 @@ Reference implementations available locally:
 
 ### Slice 3 — Runtime build, size gate, and binary budget
 
-- [ ] Task 3.1. Extend the minimal-ORT ops config (`ops.config`, per ADR 0032 /
+- [x] Task 3.1. Extend the minimal-ORT ops config (`ops.config`, per ADR 0032 /
       `docs/binary-size.md`) with the operator/type union of the four int8 Supertonic
-      graphs (extract with onnxruntime's `create_reduced_build_config.py` against the
-      model pack); rebuild the pinned `libonnxruntime.a` via
+      graphs; rebuild the pinned `libonnxruntime.a` via
       `scripts/build-onnxruntime-minimal.sh` and re-pin in `scripts/fetch-onnxruntime.sh`.
-- [ ] Task 3.2. Run `./tests/check.sh --size-budget` and record the delta. Expected
-      growth: modest (extra ORT kernels + ~50 KB Rust/NFKD table). If the `cpu` budget
-      (25 MiB) is exceeded, trim first (dedupe kernels, verify int8 op reuse with
-      Piper/Kokoro ops); only with explicit maintainer sign-off bump the budget row in
-      `ci.yml` + ADR 0022 (hard cap 28 MiB), in lockstep.
+      DONE (2026-07-14, via the real conversion + merge tooling):
+      installed `onnxruntime==1.24.2` in a venv, converted the four v3 int8
+      graphs to `.ort` with `scripts/gen-ort-models.sh`, and unioned the emitted
+      type-reduced config into `fono-voice` `onnxruntime/ops.config` with
+      `scripts/merge-ort-configs.py` (fono-voice commit `24fc906`, pushed). This
+      **superseded an earlier hand-merge** that was wrong: the graph optimizer
+      introduces `com.microsoft;QLinearConv` (fusing the int8 Conv layers) — a
+      net-new op invisible in the raw `.onnx` that would have failed model load
+      if omitted. True net-new set: `Erf`(13), `BatchNormalization`(15),
+      `PRelu`(16), `QLinearConv` (contrib), + `int64_t` widenings on
+      `Clip`/`Div`/`Pow`. All heavy ops (Conv/MatMul/Gemm/Softmax/
+      LayerNormalization + int8 quant kernels) were already present. Finding
+      (2026-07-14): `.ort` conversion is **not byte-deterministic** (two runs
+      differ), so the four graph pins in `supertonic/mod.rs` come from the
+      *uploaded* artifacts, not a reproduced conversion. The emitted
+      `ops.config` **is** stable across runs. Dispatched the `fono-voice`
+      `build-onnxruntime` workflow (run `29347770258`) — all five triples
+      rebuilt + published to `onnxruntime-1.24.2`; re-pinned every per-triple
+      SHA in `scripts/fetch-onnxruntime.sh`. Uploaded the seven-file `.ort` pack
+      to `ort-1.24.2` and pinned the four graphs in `supertonic/mod.rs` from the
+      uploaded bytes (`is_hosted()` now true).
+- [x] Task 3.2. Run `./tests/check.sh --size-budget` and record the delta.
+      DONE (2026-07-14): with the rebuilt Supertonic-capable runtime linked, the
+      canonical `release-slim` `cpu` (x86_64-unknown-linux-gnu, default features)
+      binary is **22,447,864 B (21.41 MiB)** — comfortably under the 25 MiB /
+      26,214,400 B gate, `NEEDED` allowlist clean (4 entries). Measured growth vs
+      the ~21.64 MiB baseline is **negligible / within noise** — well below the
+      +0.77 MiB Kokoro cost and the ~+0.4 MiB estimate; `--gc-sections` keeps the
+      five light net-new kernels near-free. No budget bump needed.
 - [x] Task 3.3. Confirm no new crate enters the dependency graph (NFKD is a generated
       table, not the `unicode-normalization` crate; serde/ort/anyhow all pre-existing).
       No `deny.toml` change should be needed — verify. Done: the three Slice 1/2 commits
