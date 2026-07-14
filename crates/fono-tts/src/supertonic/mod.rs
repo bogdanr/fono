@@ -43,6 +43,13 @@
 //! shared across every language/speaker; removing it is a matter of deleting
 //! [`supertonic_dir`], and nothing else in the cache depends on it.
 
+pub mod chunker;
+pub mod config;
+pub mod engine;
+pub mod frontend;
+mod nfkd_table;
+pub mod style;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};

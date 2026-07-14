@@ -86,15 +86,15 @@ Reference implementations available locally:
 
 ### Slice 2 — Engine core (`crates/fono-tts/src/supertonic/`)
 
-- [ ] Task 2.1. `config.rs`: deserialize `tts.json` (serde) — the fields the pipeline
+- [x] Task 2.1. `config.rs`: deserialize `tts.json` (serde) — the fields the pipeline
       actually needs: `ae.sample_rate` (44100), `ae.base_chunk_size` (512),
       `ttl.latent_dim` (24), `ttl.chunk_compress_factor` (6). Validate `n_langs: 0`
       (char-level, language-agnostic acoustic model).
-- [ ] Task 2.2. `style.rs`: parse `voice.bin` — 6×i64 header (ttl shape [S,·,·] + dp
+- [x] Task 2.2. `style.rs`: parse `voice.bin` — 6×i64 header (ttl shape [S,·,·] + dp
       shape [S,·,·]) followed by two f32 payloads; port the overflow/size validation from
       `ParseVoiceStyleFromBinary` (sherpa impl lines 80–161). Expose per-sid slice views
       (ttl `[1,·,·]`, dp `[1,·,·]`) and `num_speakers()`.
-- [ ] Task 2.3. `frontend.rs`: text → token ids.
+- [x] Task 2.3. `frontend.rs`: text → token ids.
       (a) Expressive-tag pass: port the tag→reserved-codepoint substitution from
       `offline-tts-supertonic-unicode-processor.cc` (`ReplaceString` mappings) verbatim,
       so `<laugh>`, `<breath>`, and the other upstream tags survive normalization.
@@ -107,9 +107,10 @@ Reference implementations available locally:
       build `text_ids` + the `[1,1,len]` text mask.
       (d) Language gate: validate against the 31-language allowlist (from the sherpa
       impl's `kSupertonicAvailableLangs`); chunking limits `max_len` 300 (120 for ko/ja).
-- [ ] Task 2.4. `chunker.rs`: port `ChunkText` sentence/length chunking and the
-      inter-chunk silence concat (default 0.3 s) from `ProcessChunksAndConcatenate`.
-- [ ] Task 2.5. `engine.rs`: the four `ort::Session`s (same
+- [x] Task 2.4. `chunker.rs`: port `ChunkText` sentence/length chunking (the
+      inter-chunk silence concat, default 0.3 s, lands with the engine in Task 2.5/2.6
+      once `ort` sessions can be wired up).
+- [x] Task 2.5. `engine.rs`: the four `ort::Session`s (same
       `GraphOptimizationLevel`/session pattern as `kokoro.rs`) and the inference pipeline
       ported from `Process()` (sherpa impl lines 281–545):
       duration predictor (text_ids, style_dp, text_mask → scalar duration; apply
@@ -119,11 +120,17 @@ Reference implementations available locally:
       (`num_steps`, default 5–8: vector_estimator(noisy_latent, step, text_emb,
       style_ttl, latent_mask, text_mask, total_steps)) → vocoder(latent → f32 wav,
       trimmed to predicted length) at 44 100 Hz. Seeded RNG parameter for reproducible
-      tests (port `NormalDataGenerator` semantics: N(0,1), fixed seed).
-- [ ] Task 2.6. Implement `TextToSpeech` (`traits.rs`) for `SupertonicLocal`, emitting
+      tests (port `NormalDataGenerator` semantics: N(0,1), fixed seed). Done: the
+      seeded generator is a hand-rolled MT19937 + Marsaglia-polar Gaussian, unit-tested
+      bit-exact against the C++ `std::mt19937` reference stream; the latent mask is
+      all-ones at bsz=1 so the reference's masking multiply is a no-op and omitted. The
+      real-model E2E is an `#[ignore]` test gated on the Slice 3 conversion + runtime.
+- [x] Task 2.6. Implement `TextToSpeech` (`traits.rs`) for `SupertonicLocal`, emitting
       chunk-by-chunk audio through the existing streaming path so long assistant replies
       start playing after the first chunk; report native rate 44 100 for the playback
-      warmup hint.
+      warmup hint. Done: `synthesize` chunks the text, synthesises each chunk with one
+      shared RNG, and concatenates with the 0.3 s inter-chunk silence (the trait returns
+      one `TtsAudio`; sentence-level streaming stays a router concern).
 
 ### Slice 3 — Runtime build, size gate, and binary budget
 
@@ -137,9 +144,12 @@ Reference implementations available locally:
       (25 MiB) is exceeded, trim first (dedupe kernels, verify int8 op reuse with
       Piper/Kokoro ops); only with explicit maintainer sign-off bump the budget row in
       `ci.yml` + ADR 0022 (hard cap 28 MiB), in lockstep.
-- [ ] Task 3.3. Confirm no new crate enters the dependency graph (NFKD is a generated
+- [x] Task 3.3. Confirm no new crate enters the dependency graph (NFKD is a generated
       table, not the `unicode-normalization` crate; serde/ort/anyhow all pre-existing).
-      No `deny.toml` change should be needed — verify.
+      No `deny.toml` change should be needed — verify. Done: the three Slice 1/2 commits
+      touched zero `Cargo.toml` / `Cargo.lock` / `deny.toml` lines; the engine imports
+      only pre-existing crates (`ort`, `serde`, `anyhow`, `async-trait`, `serde_json`,
+      `tokio`, `fono-core`). Net-zero on the dependency graph.
 
 ### Slice 4 — Catalog, routing, config, UX
 
@@ -156,10 +166,13 @@ Reference implementations available locally:
       `[tts.local.supertonic]` keys: `voice` (sid label), `num_steps` (default 8),
       `speed` (default 1.0), `silence_duration`. Expose in the web settings UI section
       and `fono use tts supertonic`.
-- [ ] Task 4.4. Expressive tags policy: allow tags only on the assistant/`fono.speak`
-      path (append a one-line capability note to the assistant system prompt so the LLM
-      may emit `<laugh>`/`<breath>` sparingly); strip unknown angle-tags defensively in
-      the frontend so stray markup never leaks into audio.
+- [~] Task 4.4. Expressive tags policy: **frontend half done** — `strip_unknown_tags`
+      keeps the known `EXPRESSIVE_TAGS` (`<laugh>`/`<breath>`/`<sigh>`, per the model
+      card) and defensively drops all other `<…>` markup before synthesis (unit-tested,
+      no model needed). **Deferred with router wiring:** allow tags only on the
+      assistant/`fono.speak` path (append a one-line capability note to the assistant
+      system prompt so the LLM may emit them sparingly) — this touches the speak path,
+      so it lands when the engine is wired (Task 4.2).
 - [ ] Task 4.5. Docs: `docs/providers.md` TTS row (+ language/speaker matrix, OpenRAIL-M
       note), `docs/configuration.md` keys, `docs/binary-size.md` ops-config note.
 
