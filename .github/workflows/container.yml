@@ -79,7 +79,13 @@ jobs:
           mkdir -p target/release-slim
           cp target/${{ matrix.target }}/release-slim/fono target/release-slim/fono
           ldd target/release-slim/fono | tee /tmp/fono-container-ldd.txt
-          grep -q 'libvulkan\.so\.1' /tmp/fono-container-ldd.txt
+          # The Vulkan build soft-loads libvulkan.so.1 at runtime via dlopen
+          # (the Vulkan soft-load work, plans/2026-07-12-vulkan-soft-load-
+          # single-build-v1.md), so libvulkan is deliberately NOT a link-time
+          # NEEDED entry. Assert Vulkan is actually compiled in by finding the
+          # dlopen target string embedded in the binary, and rely on the image
+          # checks below to confirm the loader is present at runtime.
+          grep -aq 'libvulkan\.so\.1' target/${{ matrix.target }}/release-slim/fono
 
       - name: Build container image
         run: |

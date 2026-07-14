@@ -160,6 +160,17 @@ rustflags = [
 #    `scripts/win-remote.sh` passes `--config env.ORT_CXX_STDLIB=''`.
 #    See docs/build-windows.md (Windows port Task 3.3).
 ORT_CXX_STDLIB = "static:-bundle=stdc++"
+# CFLAGS/CXXFLAGS below carry GNU/Clang size flags for the Linux ship binary
+# (`-Os` + section GC + no unwind tables). Like ORT_CXX_STDLIB, cargo's `[env]`
+# is NOT target-scoped, so they also reach `x86_64-pc-windows-msvc`, where MSVC
+# `cl` rejects the `-f*` flags — harmless D9002 warnings on cached builds, but
+# on a CLEAN runner they break ggml-vulkan's `vulkan-shaders-gen` CMake compiler
+# probe (`error C1083 ... ''`/`VCEnd`), which is exactly why the release build
+# failed while the cached CI job passed. The Windows entry points therefore
+# blank both (inherited empty env beats non-forced `[env]`), so MSVC uses its
+# own defaults: the CI/release `windows` jobs export `CFLAGS=`/`CXXFLAGS=` and
+# `scripts/win-remote.sh` passes `--config env.CFLAGS='' --config env.CXXFLAGS=''`.
+# See docs/build-windows.md.
 CFLAGS = "-Os -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables"
 CXXFLAGS = "-Os -ffunction-sections -fdata-sections -fno-asynchronous-unwind-tables -fno-unwind-tables"
 GGML_NATIVE = "OFF"

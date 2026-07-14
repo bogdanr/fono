@@ -1,5 +1,52 @@
 # Fono — Project Status
-Last updated: 2026-07-14
+Last updated: 2026-07-15
+
+## 2026-07-15 — v0.16.0 Windows release build fixed end to end; ready to retag
+
+The `v0.16.0` release run kept failing on `x86_64-pc-windows-msvc` while
+CI stayed green (the CI `windows` job builds a cached `target\debug`;
+the release job builds `release-slim` from scratch). Five distinct
+clean-build failures were peeled off one by one — all are now fixed and
+squashed into a single commit; docs/build-windows.md's failure log
+(items #4–#8) has the full detail on each:
+
+- **C1083 compiler probe** — the Linux-only `CFLAGS`/`CXXFLAGS` size
+  flags from `.cargo/config.toml` `[env]` reached MSVC `cl` (cargo
+  `[env]` is not target-scoped). Blanked on Windows in CI, release, and
+  `scripts/win-remote.sh`.
+- **`VCEnd`/`MSB8066` on the `vulkan-shaders-gen` install step** — the
+  known Visual Studio-generator + nested-ExternalProject bug on clean
+  builds (first mis-attributed to a poisoned rust-cache; the cache bump
+  stays, harmless). Fixed by forcing the single-config Ninja generator
+  (`CMAKE_GENERATOR=Ninja` + `ilammy/msvc-dev-cmd` for cl/INCLUDE/LIB).
+- **Wrong linker under bash** — Git-for-Windows' `/usr/bin/link.exe`
+  shadowed MSVC's in the release build step. The impostor is removed
+  before building.
+- **`C1041` PDB path over MAX_PATH** — the deeply nested
+  `vulkan-shaders-gen` try-compile exceeded 260 chars under
+  `target\…`. Fixed with a short `CARGO_TARGET_DIR=D:\t`.
+- **`RC2136` on `manifest.rc`** — same nested path, one tool later:
+  rc.exe chokes when the generated manifest reference is ~254 chars
+  (known llama-cpp-python signature; ≤ ~246 passes). Fixed by dropping
+  `--target x86_64-pc-windows-msvc` on Windows (the runner's host
+  triple already is the release triple — identical artefact, 23 fewer
+  chars in every nested path, ≈231 with margin). This also matches how
+  the dev Windows host builds (`scripts/win-remote.sh` never passes
+  `--target`), which is why the host never reproduced any of the
+  path-length failures.
+
+Also in the same commit: a Windows test fix (`agent_setup` assumed a
+Linux home directory), and the CI + release Windows jobs now pin
+`ORT_LIB_LOCATION` to the SHA-verified merged `onnxruntime.lib` from
+the fono-voice mirror (`windows-defaults` includes `tts-local` /
+`wakeword-onnx` since 0.16) instead of silently falling back to `ort`'s
+unpinned CDN download — mirroring the dev host and every other release
+row. Stale workflow/doc comments from the debugging spiral (ort-free
+Windows-v1 claims, the poisoned-cache narrative) were rewritten to
+match reality.
+
+**Retag status.** Retag `v0.16.0` to the squashed head once the release
+workflow's Windows row goes green end to end.
 
 ## 2026-07-14 — Supertonic Slice 3 DONE: runtime rebuilt, pack hosted, size measured
 
@@ -198,9 +245,10 @@ out of On the horizon, header table Windows tile swapped for Local REST
 API). The 14 feature commits since v0.15.0 were left intact (already clean,
 user-friendly, and signed off); only the release commit was added.
 
-Open item carried forward: Windows `fono.exe` is ~72 MiB, over ADR 0022's
-Windows cap — needs a budget review before the Windows size gate goes
-blocking. Linux `cpu` binary stays well under its 25 MiB budget.
+Open item carried forward: Windows `fono.exe` is ~72 MiB. The budget was
+reviewed and raised to ≤ 75 MiB (see the 2026-07-14 amendment note
+above) before the Windows size gate goes blocking. Linux `cpu` binary
+stays well under its 25 MiB budget.
 
 ## 2026-07-13 — Windows local TTS enabled (ONNX Runtime link fixed)
 

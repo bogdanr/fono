@@ -230,12 +230,14 @@ jobs:
           # `.sha256` sidecar — no MSI, no code signing (explicit v1
           # non-goals, Task 13.4). The asset name is `fono-vX.Y.Z-x86_64.exe`
           # (`fono-update::asset_name_for` agrees). It uses the
-          # `windows-defaults` feature set (default minus `tts-local` and
-          # `wakeword-onnx`, the only two `ort` pullers) because the hosted
-          # Windows `onnxruntime.lib` isn't a self-contained merged archive
-          # yet — so `no_default_features: true` and no onnxruntime fetch on
-          # this row. The `/FORCE:MULTIPLE` ggml-dedup link flag comes from
-          # `.cargo/config.toml`'s MSVC target block automatically.
+          # `windows-defaults` feature set, which since 0.16 includes
+          # `tts-local` and `wakeword-onnx` — the merged static
+          # `onnxruntime.lib` hosted on the fono-voice mirror links cleanly
+          # on MSVC (the fetch step below pins ORT_LIB_LOCATION to it, same
+          # as every other row). The `/FORCE:MULTIPLE` ggml-dedup link flag
+          # comes from `.cargo/config.toml`'s MSVC target block, and
+          # `crates/fono/build.rs` adds the second `onnxruntime.lib`
+          # reference MSVC's single-pass linker needs.
           #
           # `windows-defaults` now INCLUDES `accel-vulkan`: Windows ships a
           # single Vulkan-accelerated `.exe` that soft-loads `vulkan-1.dll`
@@ -296,6 +298,52 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+
+      - name: Neutralise GNU size flags + force Ninja on MSVC
+        # `.cargo/config.toml` sets CFLAGS/CXXFLAGS to GNU/Clang size flags
+        # (`-Os -ffunction-sections …`) for the Linux ship binary, but cargo's
+        # `[env]` is not target-scoped so they also reach MSVC `cl`, which
+        # rejects the `-f*` flags. Blank both so `cl` uses its own defaults.
+        #
+        # CMAKE_GENERATOR=Ninja: the default Visual Studio generator drives
+        # ggml-vulkan's `vulkan-shaders-gen` as a nested ExternalProject whose
+        # install rule fails on a CLEAN build (`Not a file … cmake_install.cmake`
+        # → `VCEnd` / `MSB8066`) — the release failure the cached CI job hid.
+        # The single-config Ninja generator sidesteps that bug. Ninja is
+        # preinstalled on windows-2022; the VC toolchain is put on PATH by the
+        # msvc-dev-cmd step below. See docs/build-windows.md.
+        #
+        # ORT_CXX_STDLIB=: config.toml sets it to `static:-bundle=stdc++` for
+        # the Linux ort link; on MSVC that would emit a bogus `stdc++.lib`
+        # link (LNK1181 — no libstdc++ on Windows) if `ort-sys` is in the
+        # graph. Blank it so ort-sys falls back to the MSVC default.
+        #
+        # CARGO_TARGET_DIR=D:\t: ggml-vulkan builds its `vulkan-shaders-gen`
+        # host tool as a deeply nested ExternalProject, and neither mspdbcore
+        # (`fatal error C1041`) nor rc.exe (bogus `RC2136` parse error on the
+        # generated manifest.rc) can handle paths near/past the legacy
+        # 260-char MAX_PATH. A short build root — combined with dropping
+        # `--target` in the build step below — keeps the nested try-compile
+        # paths well under the limit. CI never hit this: it builds into the
+        # shorter `target\debug`. The staging step reads
+        # `${CARGO_TARGET_DIR:-target}` so this is Windows-only.
+        # See docs/build-windows.md failures #7 and #8.
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "CFLAGS=" >> "$GITHUB_ENV"
+          echo "CXXFLAGS=" >> "$GITHUB_ENV"
+          echo "CMAKE_GENERATOR=Ninja" >> "$GITHUB_ENV"
+          echo "ORT_CXX_STDLIB=" >> "$GITHUB_ENV"
+          echo 'CARGO_TARGET_DIR=D:\t' >> "$GITHUB_ENV"
+
+      - name: Set up MSVC environment (cl on PATH for Ninja)
+        # -G Ninja needs cl/INCLUDE/LIB, which the VS generator set up
+        # implicitly; msvc-dev-cmd exports them to GITHUB_ENV for the build.
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
       - name: Install Vulkan SDK (Windows)
         # `windows-defaults` includes `accel-vulkan`, so ggml-vulkan's
@@ -398,18 +446,21 @@ jobs:
           fi
 
       - name: Fetch minimal onnxruntime static lib (pin ORT_LIB_LOCATION)
-        # `tts-local` is a default feature, so the shipped binary links the
-        # statically-pinned `libonnxruntime.a` (onnxruntime + libstdc++
-        # embedded; NEEDED stays the 4-entry allowlist). Pull the per-triple
-        # archive from the fono-voice release mirror, SHA-256 verified, and
-        # pin ORT_LIB_LOCATION — the `ort` build never touches the CDN.
+        # `tts-local` is a default feature (and, since 0.16, part of
+        # `windows-defaults` too), so every shipped binary links the
+        # statically-pinned minimal onnxruntime. Pull the per-triple archive
+        # from the fono-voice release mirror, SHA-256 verified, and pin
+        # ORT_LIB_LOCATION — the `ort` build never touches the upstream CDN.
         # (macOS runners ship `xz` + `shasum`; the script handles both.)
-        # Skipped on Windows: the v1 `windows-defaults` set omits
-        # `tts-local`/`wakeword-onnx`, so the graph has no `ort` to link
-        # (Windows port plan Phase 13; see the matrix row comment).
-        if: runner.os != 'Windows'
+        # Windows: Git Bash provides curl/xz/sha256sum; `cygpath -w`
+        # converts the script's POSIX path into the `C:\…` form the
+        # ort-sys build script expects. This mirrors how the dev Windows
+        # host builds (`scripts/win-remote.sh` fetches the same lib and
+        # pins the same variable).
+        shell: bash
         run: |
           ort_dir="$(TARGET=${{ matrix.target }} sh scripts/fetch-onnxruntime.sh)"
+          if [ "${RUNNER_OS}" = "Windows" ]; then ort_dir="$(cygpath -w "${ort_dir}")"; fi
           echo "ORT_LIB_LOCATION=${ort_dir}" >> "$GITHUB_ENV"
           echo "pinned ORT_LIB_LOCATION=${ort_dir}"
 
@@ -420,6 +471,17 @@ jobs:
         # [env]. Mirrors the ci.yml macos job; see docs/build-macos.md.
         if: runner.os == 'macOS'
         run: echo "ORT_CXX_STDLIB=c++" >> "$GITHUB_ENV"
+
+      - name: Remove Git's link.exe so MSVC's wins (Windows)
+        # The build step below runs under `shell: bash`, where Git-for-Windows'
+        # `/usr/bin/link.exe` (a coreutils hardlink tool) shadows MSVC's
+        # `link.exe` on PATH, so rustc links build scripts with the wrong
+        # linker (`could not compile proc-macro2 (build script)`). CI's cargo
+        # steps use pwsh and never hit this. Drop the impostor. See
+        # docs/build-windows.md.
+        if: runner.os == 'Windows'
+        shell: bash
+        run: rm -f "/c/Program Files/Git/usr/bin/link.exe"
 
       - name: Build (portable AVX2 baseline)
         # `GGML_NATIVE=OFF` + explicit AVX2/FMA/F16C/BMI2 are inherited from
@@ -442,7 +504,18 @@ jobs:
           if [ -n "${{ matrix.features }}" ]; then
             extra="${extra} --features ${{ matrix.features }}"
           fi
-          cargo build --profile release-slim --target ${{ matrix.target }} -p fono $extra
+          # Windows: drop `--target` — the runner's host triple already IS
+          # x86_64-pc-windows-msvc (same binary), and the explicit triple
+          # would add a 23-char `x86_64-pc-windows-msvc\` segment to every
+          # build path. That is enough to push ggml-vulkan's nested
+          # `vulkan-shaders-gen` try-compile paths past the legacy MAX_PATH
+          # tools limit even under the short `D:\t` build root (rc.exe fails
+          # with a bogus RC2136 on the generated manifest.rc). The dev
+          # Windows host builds without `--target` too.
+          # See docs/build-windows.md failure #8.
+          tgt="--target ${{ matrix.target }}"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then tgt=""; fi
+          cargo build --profile release-slim $tgt -p fono $extra
 
       - name: Verify Linux binary NEEDED set
         if: runner.os == 'Linux'
@@ -516,8 +589,12 @@ jobs:
             *)          arch="${target}" ;;
           esac
 
-          bin_src="target/${target}/release-slim/${BIN_NAME}"
-          if [[ "${target}" == *windows* ]]; then bin_src="${bin_src}.exe"; fi
+          bin_src="${CARGO_TARGET_DIR:-target}/${target}/release-slim/${BIN_NAME}"
+          # Windows builds without `--target` (path-length fix, see the
+          # build step), so its artefacts land directly under the profile dir.
+          if [[ "${target}" == *windows* ]]; then
+            bin_src="${CARGO_TARGET_DIR:-target}/release-slim/${BIN_NAME}.exe"
+          fi
 
           # 1) Bare binary that will be uploaded as a release asset.
           #    CPU: `fono-vX.Y.Z-x86_64`. GPU: `fono-gpu-vX.Y.Z-x86_64`.

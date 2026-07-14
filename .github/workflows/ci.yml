@@ -603,6 +603,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Because this job is `continue-on-error: true`, it counts as
+          # "successful" even when the build fails, so rust-cache saves its
+          # cache on failing runs too — a half-configured CMake build dir
+          # can get persisted and poison later runs (bit us once: see
+          # docs/build-windows.md failure #5). Bump this suffix to discard
+          # a poisoned cache; the first clean run re-warms it.
+          prefix-key: "v2-win-clean"
 
       - name: Point bindgen at the runner's LLVM (LIBCLANG_PATH)
         # VS Build Tools ships no libclang.dll, but bindgen
@@ -611,6 +619,38 @@ jobs:
         # standalone LLVM.
         shell: bash
         run: echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+
+      - name: Neutralise GNU size flags + force Ninja on MSVC
+        # `.cargo/config.toml` sets CFLAGS/CXXFLAGS to GNU/Clang size flags
+        # for the Linux ship binary, but cargo's `[env]` is not target-scoped
+        # so they also reach MSVC `cl`, which rejects the `-f*` flags. Blank
+        # both so `cl` uses its own defaults.
+        #
+        # CMAKE_GENERATOR=Ninja: the default Visual Studio generator drives
+        # ggml-vulkan's `vulkan-shaders-gen` as a nested ExternalProject whose
+        # install rule fails on a CLEAN build (`Not a file … cmake_install.cmake`
+        # → `VCEnd` / `MSB8066`). The single-config Ninja generator sidesteps
+        # that bug. Ninja is preinstalled on windows-2022; the VC toolchain is
+        # put on PATH by the msvc-dev-cmd step below. Mirrors the release.yml
+        # step. See docs/build-windows.md.
+        #
+        # ORT_CXX_STDLIB=: config.toml sets it to `static:-bundle=stdc++` for
+        # the Linux ort link, but `ort-sys` IS in the Windows graph and on MSVC
+        # that emits a bogus `stdc++.lib` link (LNK1181 — no libstdc++ on
+        # Windows). Blank it so ort-sys falls back to the MSVC default.
+        shell: bash
+        run: |
+          echo "CFLAGS=" >> "$GITHUB_ENV"
+          echo "CXXFLAGS=" >> "$GITHUB_ENV"
+          echo "CMAKE_GENERATOR=Ninja" >> "$GITHUB_ENV"
+          echo "ORT_CXX_STDLIB=" >> "$GITHUB_ENV"
+
+      - name: Set up MSVC environment (cl on PATH for Ninja)
+        # -G Ninja needs cl/INCLUDE/LIB, which the VS generator set up
+        # implicitly; msvc-dev-cmd exports them to GITHUB_ENV for the build.
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
       - name: Install Vulkan SDK (Windows)
         # `windows-defaults` includes `accel-vulkan`, so ggml-vulkan's
@@ -635,21 +675,27 @@ jobs:
           "VULKAN_SDK=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
           "$root\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
-      # Windows ships the `windows-defaults` feature set, which omits
-      # `tts-local` and `wakeword-onnx` — the only two features that pull
-      # the ONNX Runtime (`ort`) static library. The hosted Windows
-      # `onnxruntime.lib` is not yet a self-contained merged archive (its
-      # protobuf/abseil/onnx/cpuinfo deps are unresolved at link time —
-      # LNK1120), so local TTS and wake-word are deferred to a later
-      # Windows release. Because this graph contains no `ort`, the
-      # onnxruntime fetch and the `ORT_CXX_STDLIB` neutralise step (both
-      # required on the ort-linking Linux/macOS rows) are intentionally
-      # absent here; they return when the merged static lib lands and
-      # local TTS is re-enabled on Windows. `windows-defaults` DOES
-      # include `accel-vulkan`: the single Windows `.exe` is
-      # Vulkan-accelerated and soft-loads `vulkan-1.dll` with a CPU
-      # fallback (Vulkan soft-load plan Phase 2). Windows port Task 5.1 /
-      # docs/build-windows.md.
+      # Windows builds the `windows-defaults` feature set, which since
+      # 0.16 includes `tts-local` and `wakeword-onnx` — the merged static
+      # `onnxruntime.lib` on the fono-voice mirror links cleanly on MSVC
+      # (`crates/fono/build.rs` supplies the second archive reference the
+      # single-pass linker needs). Pin ORT_LIB_LOCATION to that verified
+      # lib, mirroring the release.yml step and the dev Windows host
+      # (`scripts/win-remote.sh`), so the build never falls back to `ort`'s
+      # unpinned CDN download. Git Bash provides curl/xz/sha256sum;
+      # `cygpath -w` converts the script's POSIX output path into the
+      # `C:\…` form the ort-sys build script expects. `windows-defaults`
+      # also includes `accel-vulkan`: the single Windows `.exe` soft-loads
+      # `vulkan-1.dll` with a CPU fallback (Vulkan soft-load plan Phase 2).
+      # Windows port Task 5.1 / docs/build-windows.md.
+      - name: Fetch minimal onnxruntime static lib (pin ORT_LIB_LOCATION)
+        shell: bash
+        run: |
+          ort_dir="$(TARGET=x86_64-pc-windows-msvc sh scripts/fetch-onnxruntime.sh)"
+          ort_dir="$(cygpath -w "${ort_dir}")"
+          echo "ORT_LIB_LOCATION=${ort_dir}" >> "$GITHUB_ENV"
+          echo "pinned ORT_LIB_LOCATION=${ort_dir}"
+
       - name: cargo build (Windows feature set)
         run: cargo build -p fono --no-default-features --features windows-defaults
 

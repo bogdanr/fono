@@ -8,10 +8,19 @@ all-features = false
 version = 2
 yanked = "deny"
 ignore = [
-    # gtk3-rs bindings (atk, atk-sys, gdk, gdk-sys, gdk-pixbuf, gdk-pixbuf-sys,
-    # gtk, gtk-sys, gtk3-macros) are unmaintained but pulled in transitively
-    # via tray-icon -> libappindicator on Linux. tray-icon upstream is aware
-    # and migration to gtk4 is tracked. Re-evaluate when tray-icon 0.20+ ships.
+    # gtk3-rs bindings (glib, atk, atk-sys, gdk, gdk-sys, gdk-pixbuf,
+    # gdk-pixbuf-sys, gtk, gtk-sys, gtk3-macros) are unmaintained. They are
+    # NOT compiled into any Fono binary on any platform: they appear in
+    # Cargo.lock only through cargo's cross-target dependency unification.
+    # fono-tray depends on `tray-icon` on Windows ONLY, and `tray-icon`
+    # depends on the gtk3 stack on Linux ONLY -- the two edges never coexist
+    # on a single build target (`cargo tree -p fono -i glib` prints nothing
+    # for both x86_64-unknown-linux-gnu and x86_64-pc-windows-msvc; the Linux
+    # tray uses pure-Rust ksni, no GTK). cargo-deny scans the whole
+    # multi-target lockfile, so it still flags them -- hence the ignores.
+    # Drop these once the gtk3 stack leaves Cargo.lock entirely (e.g. a
+    # tray-icon release that no longer pulls gtk3, or a Windows tray that
+    # avoids it). The matching Dependabot alert is dismissed as "not used".
     "RUSTSEC-2024-0412", # gtk
     "RUSTSEC-2024-0413", # atk
     "RUSTSEC-2024-0415", # gdk
@@ -19,7 +28,7 @@ ignore = [
     "RUSTSEC-2024-0418", # gdk-sys
     "RUSTSEC-2024-0419", # gdk-pixbuf
     "RUSTSEC-2024-0420", # gdk-pixbuf-sys
-    "RUSTSEC-2024-0429", # gtk-sys
+    "RUSTSEC-2024-0429", # glib (VariantStrIter unsoundness; fixed in 0.20, gated behind gtk4 migration)
     "RUSTSEC-2025-0119", # gtk3-macros
     "RUSTSEC-2024-0370", # proc-macro-error (transitive, unmaintained)
     "RUSTSEC-2025-0141", # transitive unmaintained crate
@@ -91,10 +100,11 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# No forked git sources: the llama-cpp-rs patches (the `common` opt-out
-# from utilityai/llama-cpp-rs#1015 and the `static-openmp` runtime-linkage
-# feature) all landed upstream and ship in crates.io 0.1.147, so the
-# `[patch.crates-io]` block and its fork were dropped. Re-add an entry here
-# only if a future fork is consumed via `[patch]` in the workspace
-# `Cargo.toml`.
-allow-git = []
+# One forked git source: our `llama-cpp-sys-2` fork, consumed via the
+# `[patch.crates-io]` block in the workspace `Cargo.toml`. It carries one
+# extra commit on top of the published 0.1.150 crate (a model-loading fix
+# so hybrid Gated-Delta-Net models such as gemma-4 don't abort on load);
+# `llama-cpp-2` still tracks the crates.io release and links this patched
+# sys. Keep this in lockstep with the `rev` pinned in `Cargo.toml`; drop it
+# once the fix lands in a published release.
+allow-git = ["https://github.com/bogdanr/llama-cpp-rs"]

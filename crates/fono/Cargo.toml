@@ -204,9 +204,9 @@ fono-inject = { path = "../fono-inject", features = ["enigo-backend"] }
 # block above — it enables fono-audio's cpal backend on this target
 # only, so Linux and macOS builds stay byte-identical. cpal links the
 # system WASAPI stack via the `windows-sys` crates already in
-# Cargo.lock; no new-to-project dependency. `ort` is NOT pulled in here
-# (fono-audio's `ort` edge is gated behind its own `wakeword-onnx`
-# feature, which the Windows build omits — see `windows-defaults`).
+# Cargo.lock; no new-to-project dependency. `ort` is NOT pulled in by
+# this edge (fono-audio's `ort` dep is gated behind its own
+# `wakeword-onnx` feature, which `windows-defaults` enables separately).
 [target.'cfg(target_os = "windows")'.dependencies]
 fono-audio = { path = "../fono-audio", features = ["cpal-backend"] }
 # Win32 `SendInput` text injection on Windows (plan Task 7.1): enigo is

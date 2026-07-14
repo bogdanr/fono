@@ -119,8 +119,28 @@ Task 1.2 lands.
 >   `windows`-job analogue of `size-budget` / `size-budget-macos`) is
 >   deferred to Windows port Phase 14, along with promoting the
 >   non-blocking `windows` CI job to a required check. When it lands it
->   asserts both the ≤ 60 MiB budget and the `vulkan-1.dll`-absent
->   invariant. Linux and macOS budgets are unaffected.
+>   asserts both the budget (see the 2026-07-14 amendment below) and the
+>   `vulkan-1.dll`-absent invariant. Linux and macOS budgets are
+>   unaffected.
+
+> **AMENDED 2026-07-14 — Windows budget raised to ≤ 75 MiB.** Enabling
+> local (offline) text-to-speech and the wake-word engine on Windows —
+> which links the statically-embedded ONNX Runtime, matching Linux and
+> macOS — added ~3 MiB and pushed the single `fono-vX.Y.Z-x86_64.exe`
+> from ~69 MiB to ~72 MiB, over the ≤ 60 MiB figure set on 2026-07-13
+> (that figure predated local TTS landing on Windows). With sign-off,
+> the Windows budget is raised to:
+>
+> - **Enforced budget ≤ 75 MiB (78 643 200 B); hard cap ≤ 80 MiB
+>   (83 886 080 B).** This supersedes the ≤ 60 MiB / ≤ 64 MiB figures in
+>   the 2026-07-13 amendment above. It leaves the ~72 MiB measured
+>   artefact ~3 MiB of headroom for CI toolchain variance. Windows is a
+>   single no-choice download the maintainer rarely tests, so the ceiling
+>   is a loose sanity bound, not a tight ship-size target; the strict
+>   budgets stay on Linux `cpu` (≤ 25 MiB) and macOS. Bump only with
+>   sign-off recorded here. When the Phase 14 `windows`-job size gate
+>   lands it asserts this ≤ 75 MiB figure. Linux and macOS budgets are
+>   unaffected.
 
 
 The static-musl ship (Phase 2.4) is **deferred** — see "Rejected:

@@ -16,7 +16,12 @@ if [ ! -x "$FONO_BINARY" ]; then
     exit 1
 fi
 
-if ! ldd "$FONO_BINARY" 2>/dev/null | grep -q 'libvulkan[.]so[.]1'; then
+# The Vulkan build soft-loads libvulkan.so.1 at runtime via dlopen (the
+# Vulkan soft-load work, plans/2026-07-12-vulkan-soft-load-single-build-v1.md),
+# so libvulkan is deliberately NOT a link-time NEEDED entry. Confirm Vulkan is
+# compiled in by finding the embedded dlopen target string rather than
+# inspecting ldd's NEEDED list.
+if ! grep -aq 'libvulkan[.]so[.]1' "$FONO_BINARY"; then
     printf '%s\n' "Fono binary is not Vulkan-capable: $FONO_BINARY" >&2
     printf '%s\n' "Build it first with: $FONO_BUILD_COMMAND" >&2
     exit 1

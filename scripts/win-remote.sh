@@ -91,7 +91,13 @@ ort_dir='C:\fono-dev\fono\target\onnxruntime-1.24.2\x86_64-pc-windows-msvc'
 # an empty TOML string via `--config`. Single quotes (a TOML literal empty
 # string) survive cmd.exe unmangled where `""` would not. Windows port
 # Task 3.3 / docs/build-windows.md.
-ort_cxx_neutralise="--config env.ORT_CXX_STDLIB=''"
+#
+# The same target-scoping gap applies to the GNU/Clang size flags
+# CFLAGS/CXXFLAGS in `.cargo/config.toml` (`-Os -ffunction-sections …`): MSVC
+# `cl` rejects the `-f*` flags and on a CLEAN checkout that breaks
+# ggml-vulkan's `vulkan-shaders-gen` CMake compiler probe. Blank them the same
+# way so `cl` uses its own defaults.
+win_neutralise="--config env.ORT_CXX_STDLIB='' --config env.CFLAGS='' --config env.CXXFLAGS=''"
 
 push() {
 	# Same exclude/filter policy as scripts/mac-remote.sh: honour every
@@ -125,10 +131,10 @@ cmd=$1
 shift
 case "$cmd" in
 push) push ;;
-check) push && fetch_ort && run_remote cargo check $ort_cxx_neutralise --workspace "$@" ;;
-build) push && fetch_ort && run_remote cargo build $ort_cxx_neutralise "$@" ;;
-test) push && fetch_ort && run_remote cargo test $ort_cxx_neutralise --workspace --tests --lib "$@" ;;
-cargo) push && fetch_ort && run_remote cargo $ort_cxx_neutralise "$@" ;;
+check) push && fetch_ort && run_remote cargo check $win_neutralise --workspace "$@" ;;
+build) push && fetch_ort && run_remote cargo build $win_neutralise "$@" ;;
+test) push && fetch_ort && run_remote cargo test $win_neutralise --workspace --tests --lib "$@" ;;
+cargo) push && fetch_ort && run_remote cargo $win_neutralise "$@" ;;
 sh) run_remote "$@" ;;
 *)
 	usage >&2

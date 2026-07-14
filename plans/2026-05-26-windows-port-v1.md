@@ -736,6 +736,10 @@ their `.sha256` sidecars and the `SHA256SUMS` manifest.
       (Task 3.4 reversal) carries the ~42 MB SPIR-V shader payload, so
       the Windows budget rises to ~60 MiB. See
       `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`.
+      **REVISED 2026-07-14:** enabling local TTS + wake-word on Windows
+      (embedded ONNX Runtime) added ~3 MiB, to ~72 MiB, so the budget
+      was raised to enforced ≤ 75 MiB / hard cap ≤ 80 MiB (ADR 0022,
+      2026-07-14 amendment). The Phase 14 gate asserts ≤ 75 MiB.
 - [ ] Task 14.4. **Update `CHANGELOG.md` and `ROADMAP.md`.** Move the
       "macOS + Windows" roadmap item into "Recently shipped" (Windows
       half). macOS stays in the on-the-horizon section.

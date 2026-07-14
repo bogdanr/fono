@@ -695,7 +695,9 @@ mod tests {
 
     #[test]
     fn expand_tilde_replaces_home() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+        // Mirror expand_tilde's own fallback so the two sides agree on every
+        // platform (the Windows CI runner leaves HOME unset).
+        let home = std::env::var("HOME").unwrap_or_default();
         let p = expand_tilde("~/.forge/mcp.json");
         assert_eq!(p, PathBuf::from(home).join(".forge/mcp.json"));
     }

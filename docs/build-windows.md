@@ -193,13 +193,13 @@ The job encodes the Phase 0 environment findings for the hosted
 runner: git-side long paths are enabled before checkout (the vendored
 llama.cpp git dependency exceeds legacy `MAX_PATH`) and `LIBCLANG_PATH`
 points at the image's preinstalled standalone LLVM (VS Build Tools
-ships no `libclang.dll`). Because the `windows-defaults` graph contains
-no `ort`, the onnxruntime fetch and the `ORT_CXX_STDLIB` neutralise
-step (both required on the ort-linking Linux/macOS rows) are absent
-here; they return when a merged static `onnxruntime.lib` lands and
-local TTS is re-enabled on Windows. There is no Windows size /
-import-table gate yet — the PE/dumpbin analogue of the Linux ELF
-`NEEDED` check and macOS dylib allowlist is deferred to plan Phase 14.
+ships no `libclang.dll`). Since 0.16 `windows-defaults` includes
+`tts-local` and `wakeword-onnx`, so the job pins `ORT_LIB_LOCATION` to
+the SHA-verified merged `onnxruntime.lib` from the fono-voice mirror
+(same fetch script as every other row) and blanks `ORT_CXX_STDLIB`.
+There is no Windows size / import-table gate yet — the PE/dumpbin
+analogue of the Linux ELF `NEEDED` check and macOS dylib allowlist is
+deferred to plan Phase 14.
 
 ## Link-stage findings (Phase 3)
 
@@ -230,20 +230,19 @@ failures, in the order they surfaced:
    (plan Task 3.3) never materialised; `ort-sys` was the sole offender.
 
 2. **`LNK1120: 157 unresolved externals` from `libort_sys` —
-   sidestepped for v1.** With the `stdc++` link fixed, the link
-   proceeded to onnxruntime and failed on protobuf / abseil / onnx /
-   cpuinfo symbols. The pinned Windows `onnxruntime.lib` is not
-   self-contained the way the Linux `libonnxruntime.a` is: on MSVC
-   those dependencies ship as separate static libs that must be added
-   to the link line. Rather than provision a merged static lib now
-   (that is a fono-voice release-side task), **Windows v1 builds the
-   ort-free feature set** — the `windows-defaults` feature on the
-   `fono` crate is the Linux default minus `tts-local` and
-   `wakeword-onnx`, the only two features that pull `ort`. Build with
-   `cargo build -p fono --no-default-features --features
-   windows-defaults`. Local whisper STT and local llama polish stay
-   (they do not use `ort`); local TTS and wake-word return once a
-   merged `onnxruntime.lib` is hosted for `x86_64-pc-windows-msvc`.
+   sidestepped at first, properly fixed in 0.16.** With the `stdc++`
+   link fixed, the link proceeded to onnxruntime and failed on
+   protobuf / abseil / onnx / cpuinfo symbols: the then-hosted Windows
+   `onnxruntime.lib` was not self-contained the way the Linux
+   `libonnxruntime.a` is. Windows initially shipped the ort-free
+   `windows-defaults` set (default minus `tts-local`/`wakeword-onnx`).
+   As of 0.16 fono-voice publishes a merged MinSizeRel archive (all
+   FetchContent deps included, MSVC debug info stripped), and
+   `crates/fono/build.rs` places `onnxruntime.lib` on the link line a
+   second time so MSVC's single-pass `link.exe` can resolve the
+   archive's intra-archive cycles — `windows-defaults` now includes
+   `tts-local` and `wakeword-onnx`, and both CI and the release build
+   pin `ORT_LIB_LOCATION` to the verified lib.
 
 3. **`LNK2005 ... already defined` → `LNK1169: multiply defined
    symbols` (duplicate ggml) — fixed.** `whisper-rs-sys` and
@@ -257,6 +256,100 @@ failures, in the order they surfaced:
    rustflags block. Both ggml copies are pinned to the same upstream
    family so the surviving definition is ABI-compatible (ADR 0018).
    With this in place the final `fono.exe` link succeeds.
+
+4. **`error C1083: ... '': Invalid argument` — the compiler probe —
+   fixed.** The same `[env]`-is-not-target-scoped gap that bit
+   `ORT_CXX_STDLIB` (item 1) also applies to the GNU/Clang size flags
+   `.cargo/config.toml` sets for the Linux ship binary:
+   `CFLAGS`/`CXXFLAGS = "-Os -ffunction-sections -fdata-sections
+   -fno-asynchronous-unwind-tables -fno-unwind-tables"`. These reach
+   MSVC `cl`, which does not understand the `-f*` flags. On a **cached**
+   build (CI's `continue-on-error` `windows` job) they are only harmless
+   `D9002 ignoring unknown option` warnings — but on a **clean** checkout
+   (the release build, and any fresh runner) they break the CMake
+   compiler-identification probe for ggml-vulkan's `vulkan-shaders-gen`
+   host tool (`error C1083: Cannot open compiler generated file: '':
+   Invalid argument`), which leaves the sub-project configure incomplete.
+   This was the **first** error in `v0.16.0`'s failed release run. Fix
+   mirrors item 1 — blank both on Windows so `cl` uses its own defaults:
+   - CI + release `windows` jobs:
+     `echo "CFLAGS=" >> "$GITHUB_ENV"` and `echo "CXXFLAGS=" >> …`.
+   - `scripts/win-remote.sh`: passes
+     `--config env.CFLAGS='' --config env.CXXFLAGS=''`.
+
+   With this in place the `vulkan-shaders-gen` sub-project configures and
+   its `.exe` builds — confirmed on the CI `windows` job — so the C1083
+   probe failure is gone.
+
+5. **`VCEnd` / `MSB8066` on the `vulkan-shaders-gen` **install** step —
+   the Visual Studio generator + nested ExternalProject bug.** After the
+   C1083 flag leak was fixed, a **clean** build still failed here: the
+   `vulkan-shaders-gen` ExternalProject install runs `cmake -P
+   …/vulkan-shaders-gen-build/cmake_install.cmake`, reported `Not a
+   file`, aborting MSBuild (`... batch label specified - VCEnd` →
+   `MSB8066`), with a nested `TryCompile` C1083 whose flags were by then
+   already empty (`CFLAGS = Some()` in the build log) — i.e. a
+   generator-level failure, not the flag leak. This is the well-known
+   ggml-vulkan behaviour under the default `Visual Studio 17 2022`
+   generator, where the shader-gen host tool is built as a nested
+   ExternalProject whose custom install rule misbehaves. The dev Windows
+   host (`scripts/win-remote.sh`) masks it with a warm `/target` (the
+   sub-project was configured once and never re-runs); the clean release
+   runner reconfigures every time and hits it. It was originally
+   mis-attributed to a poisoned `rust-cache` — the `prefix-key` bump
+   (still in place, harmless) did not fix it because the release job
+   never cached. **Fix: build the vendored C/C++ with the single-config
+   Ninja generator on Windows** (`CMAKE_GENERATOR=Ninja`), which sidesteps
+   the VS-generator ExternalProject path entirely. Ninja is preinstalled
+   on `windows-2022`; `-G Ninja` needs `cl`/`INCLUDE`/`LIB` on PATH (the
+   VS generator provided these implicitly), so the CI and release Windows
+   jobs run `ilammy/msvc-dev-cmd@v1` first. `scripts/win-remote.sh` is
+   left on the VS generator — its warm cache already works.
+
+6. **`could not compile proc-macro2 (build script)` — Git's `link.exe`
+   shadows MSVC's under bash.** Once the Ninja fix let the release build
+   run, it failed linking host build scripts with
+   `"C:\Program Files\Git\usr\bin\link.exe" … exit code: 1`. The release
+   `Build` step uses `shell: bash` (shared arg-assembly across OSes), and
+   Git-for-Windows' `/usr/bin/link.exe` (a coreutils hardlink tool) sits
+   ahead of MSVC's `link.exe` on the bash PATH, so rustc invokes the wrong
+   linker. CI's cargo steps use the default pwsh shell and never hit this.
+   Fix: a Windows-only release step removes
+   `/c/Program Files/Git/usr/bin/link.exe` before the build so PATH
+   resolves to MSVC's linker (put there by msvc-dev-cmd).
+
+7. **`fatal error C1041: cannot open program database` — the build path
+   exceeds MAX_PATH.** With the linker fixed, the release build failed in
+   ggml-vulkan's `vulkan-shaders-gen` compiler probe: cl could not create
+   its `.pdb` because the deeply-nested ExternalProject path
+   (`target\x86_64-pc-windows-msvc\release-slim\build\llama-cpp-sys-2-…\
+   out\build\ggml\src\ggml-vulkan\vulkan-shaders-gen-prefix\src\
+   vulkan-shaders-gen-build\CMakeFiles\CMakeScratch\TryCompile-…\…\vc143.pdb`)
+   runs past Windows' 260-char limit, and mspdbcore has no long-path
+   support. CI never hit it because it builds into the much shorter
+   `target\debug\…`, while the release adds `--target … --profile
+   release-slim`. Fix: point the Windows release build at a short
+   `CARGO_TARGET_DIR` (`D:\t`), which keeps the nested PDB path under the
+   limit; the staging step reads `${CARGO_TARGET_DIR:-target}` so only the
+   Windows job is affected.
+
+8. **`RC2136 : missing '=' in EXSTYLE=<flags>` on `manifest.rc` — rc.exe
+   vs the same deep ExternalProject path.** With the PDB fixed, the same
+   `vulkan-shaders-gen` try-compile then failed one tool later: `cmake -E
+   vs_link_exe` writes a `manifest.rc` referencing the absolute
+   `intermediate.manifest` path, and under `D:\t\x86_64-pc-windows-msvc\
+   release-slim\…` that path is ~254 chars — past the resource
+   compiler's internal filename limit, which it reports as a bogus parse
+   error on a nonexistent line 3 (the identical signature is documented
+   across llama-cpp-python issues #582/#426: paths whose manifest lands
+   ≤ ~246 chars pass, ~254+ fail). The dev Windows host never sees it
+   because it builds without `--target` (shorter paths) and with
+   `LongPathsEnabled=1`. Fix: drop `--target x86_64-pc-windows-msvc`
+   from the Windows release build — the runner's host triple already IS
+   the release triple, so the artefact is identical while every nested
+   path loses the 23-char triple segment (manifest path ≈ 231 chars,
+   comfortably inside the known-good range). The staging step picks the
+   binary up from `D:\t\release-slim\` accordingly.
 
 ## Hotkeys and the daemon on Windows (Phase 8)
 
@@ -453,8 +546,12 @@ builds and uploads a Windows binary on every tag.
   `.cargo/config.toml`'s MSVC block.
 - **Size.** Adding Vulkan brings the `release-slim` `fono.exe` up to
   ~60 MiB (from the earlier CPU-only ~15.7 MiB) — the SPIR-V shader
-  payload. This is the accepted cost of the single-build decision; the
-  Windows size budget in ADR 0022 is set accordingly.
+  payload — and enabling local text-to-speech and wake-word (the
+  statically-embedded ONNX Runtime, matching Linux/macOS) adds a
+  further ~3 MiB, to ~72 MiB. This is the accepted cost of the
+  single-build decision; the Windows size budget in ADR 0022 is set
+  accordingly (enforced ≤ 75 MiB, hard cap ≤ 80 MiB, per the 2026-07-14
+  amendment).
 - **Not yet gated.** The PE import-table allowlist + size budget (the
   Windows analogue of the Linux ELF `NEEDED` gate) is deferred to
   Phase 14, along with promoting the non-blocking CI windows job to a
