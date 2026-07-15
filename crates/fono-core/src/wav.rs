@@ -52,6 +52,74 @@ pub fn encode_pcm_s16le(pcm: &[f32]) -> Vec<u8> {
     out
 }
 
+/// Decode a mono/stereo 16-bit PCM WAV blob into mono `f32` samples plus the
+/// sample rate. Multi-channel input is downmixed to mono by averaging.
+///
+/// This is intentionally minimal: it handles the canonical 16-bit PCM RIFF
+/// layout that Fono itself emits and that the common OpenAI-client uploads
+/// use (`file` field of `/v1/audio/transcriptions`). Non-WAV or non-16-bit
+/// input yields an error so the caller can return a clean 400 rather than
+/// pulling in a general audio-decoding dependency (binary-size budget).
+///
+/// # Errors
+/// Returns a message when the header is not a 16-bit PCM `WAVE`/`RIFF`
+/// container or the `data`/`fmt ` chunks cannot be located.
+pub fn decode_wav(bytes: &[u8]) -> std::result::Result<(Vec<f32>, u32), String> {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err("not a RIFF/WAVE container".to_string());
+    }
+    let mut pos = 12;
+    let mut sample_rate = 0u32;
+    let mut channels = 1u16;
+    let mut bits = 16u16;
+    let mut data: Option<&[u8]> = None;
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let size =
+            u32::from_le_bytes([bytes[pos + 4], bytes[pos + 5], bytes[pos + 6], bytes[pos + 7]])
+                as usize;
+        let body_start = pos + 8;
+        let body_end = (body_start + size).min(bytes.len());
+        match id {
+            b"fmt " if size >= 16 => {
+                channels =
+                    u16::from_le_bytes([bytes[body_start + 2], bytes[body_start + 3]]).max(1);
+                sample_rate = u32::from_le_bytes([
+                    bytes[body_start + 4],
+                    bytes[body_start + 5],
+                    bytes[body_start + 6],
+                    bytes[body_start + 7],
+                ]);
+                bits = u16::from_le_bytes([bytes[body_start + 14], bytes[body_start + 15]]);
+            }
+            b"data" => data = Some(&bytes[body_start..body_end]),
+            _ => {}
+        }
+        // Chunks are word-aligned: an odd size carries a pad byte.
+        pos = body_start + size + (size & 1);
+    }
+    if bits != 16 {
+        return Err(format!("unsupported WAV bit depth {bits} (only 16-bit PCM is decoded)"));
+    }
+    let data = data.ok_or_else(|| "WAV has no data chunk".to_string())?;
+    if sample_rate == 0 {
+        return Err("WAV has no fmt chunk / sample rate".to_string());
+    }
+    let ch = channels as usize;
+    let frames = data.len() / (2 * ch);
+    let mut pcm = Vec::with_capacity(frames);
+    for f in 0..frames {
+        let mut acc = 0.0f32;
+        for c in 0..ch {
+            let o = (f * ch + c) * 2;
+            let s = i16::from_le_bytes([data[o], data[o + 1]]);
+            acc += f32::from(s) / f32::from(i16::MAX);
+        }
+        pcm.push(acc / ch as f32);
+    }
+    Ok((pcm, sample_rate))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,5 +140,22 @@ mod tests {
         assert_eq!(i16::from_le_bytes([blob[2], blob[3]]), i16::MAX);
         assert_eq!(i16::from_le_bytes([blob[4], blob[5]]), -i16::MAX);
         assert_eq!(i16::from_le_bytes([blob[6], blob[7]]), i16::MAX);
+    }
+
+    #[test]
+    fn wav_encode_decode_round_trips() {
+        let src = vec![0.0f32, 0.5, -0.5, 1.0, -1.0];
+        let blob = encode_wav(&src, 16_000);
+        let (pcm, sr) = decode_wav(&blob).expect("decode");
+        assert_eq!(sr, 16_000);
+        assert_eq!(pcm.len(), src.len());
+        for (a, b) in pcm.iter().zip(src.iter()) {
+            assert!((a - b).abs() < 1e-3, "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn decode_rejects_non_wav() {
+        assert!(decode_wav(b"not a wav at all").is_err());
     }
 }

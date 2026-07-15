@@ -49,12 +49,14 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 mod access_log;
+mod audio;
 mod messages;
 mod ollama;
 mod openai;
 mod proxy;
 
 use access_log::ReqLog;
+pub use audio::{TranscribeProvider, TranscribeRequest};
 
 /// Default port — Ollama's, so Ollama/OpenAI clients (and Home
 /// Assistant's Ollama conversation agent) point at Fono unchanged.
@@ -81,6 +83,10 @@ pub type AssistantProvider = Arc<dyn Fn() -> Option<Arc<dyn Assistant>> + Send +
 /// restart. See ADR 0036.
 pub type UpstreamProvider =
     Arc<dyn Fn() -> Option<Arc<fono_assistant::CloudUpstream>> + Send + Sync>;
+
+/// Speech-synthesis handler for `POST /v1/audio/speech` — the same closure
+/// type the settings server mounts, so routing/synthesis logic is shared.
+pub type SpeechProvider = crate::web_settings::SpeechFn;
 
 /// Configuration for [`LlmServer::start`]. Built from `[server.llm]` at
 /// the daemon layer; tests construct it directly.
@@ -125,6 +131,10 @@ pub(crate) struct ServerCtx {
     /// Cloud pass-through upstream (OpenAI surface only). `|| None` when
     /// the backend is not proxyable. See ADR 0036.
     pub upstream: UpstreamProvider,
+    /// Optional `POST /v1/audio/speech` handler. `None` = route 404s.
+    pub speech: Option<SpeechProvider>,
+    /// Optional `POST /v1/audio/transcriptions` handler. `None` = route 404s.
+    pub transcribe: Option<TranscribeProvider>,
 }
 
 /// Handle returned by [`LlmServer::start`]. Drop or call
@@ -166,13 +176,28 @@ pub struct LlmServer {
     cfg: LlmServerConfig,
     assistant: AssistantProvider,
     upstream: UpstreamProvider,
+    speech: Option<SpeechProvider>,
+    transcribe: Option<TranscribeProvider>,
 }
 
 impl LlmServer {
     /// Build a server. Does not bind yet — call [`Self::start`].
     #[must_use]
     pub fn new(cfg: LlmServerConfig, assistant: AssistantProvider) -> Self {
-        Self { cfg, assistant, upstream: Arc::new(|| None) }
+        Self { cfg, assistant, upstream: Arc::new(|| None), speech: None, transcribe: None }
+    }
+
+    /// Attach the OpenAI-compatible audio handlers (`/v1/audio/speech`,
+    /// `/v1/audio/transcriptions`). Absent handlers make their routes 404.
+    #[must_use]
+    pub fn with_audio(
+        mut self,
+        speech: Option<SpeechProvider>,
+        transcribe: Option<TranscribeProvider>,
+    ) -> Self {
+        self.speech = speech;
+        self.transcribe = transcribe;
+        self
     }
 
     /// Attach the cloud pass-through upstream provider (ADR 0036). When
@@ -212,6 +237,8 @@ impl LlmServer {
             cfg: Arc::new(self.cfg),
             assistant: self.assistant,
             upstream: self.upstream,
+            speech: self.speech,
+            transcribe: self.transcribe,
         };
         let join = tokio::spawn(async move {
             loop {
@@ -264,6 +291,8 @@ fn classify(path: &str) -> (&'static str, String) {
     match path {
         "/v1/models" => ("openai", "models".to_string()),
         "/v1/chat/completions" => ("openai", "chat".to_string()),
+        "/v1/audio/speech" => ("openai", "speech".to_string()),
+        "/v1/audio/transcriptions" => ("openai", "transcribe".to_string()),
         "/api/tags" => ("ollama", "tags".to_string()),
         "/api/chat" => ("ollama", "chat".to_string()),
         "/api/version" => ("ollama", "version".to_string()),
@@ -297,6 +326,8 @@ async fn route(req: Request<Incoming>, peer: SocketAddr, ctx: ServerCtx) -> Resp
     let resp = match (method.as_str(), path.as_str()) {
         ("GET", "/v1/models") => openai::models(&ctx, &mut log).await,
         ("POST", "/v1/chat/completions") => openai::chat(req, &ctx, &mut log).await,
+        ("POST", "/v1/audio/speech") => audio::speech(req, &ctx, &mut log).await,
+        ("POST", "/v1/audio/transcriptions") => audio::transcriptions(req, &ctx, &mut log).await,
         ("GET", "/api/tags") => ollama::tags(&ctx, &mut log),
         ("POST", "/api/chat") => ollama::chat(req, &ctx, &mut log).await,
         ("GET", "/api/version") => ollama::version(&ctx),
@@ -348,6 +379,30 @@ pub(crate) fn error_response(status: StatusCode, msg: &str) -> Response<ResBody>
         .status(status)
         .header(hyper::header::CONTENT_TYPE, "application/json")
         .body(full(Bytes::from(body)))
+        .expect("static response builder")
+}
+
+/// OpenAI-shaped error body (`{"error": {"message", "type"}}`) for the
+/// `/v1/audio/*` routes so off-the-shelf OpenAI clients parse failures.
+pub(crate) fn openai_error(status: StatusCode, msg: &str) -> Response<ResBody> {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "error": { "message": msg, "type": "invalid_request_error" }
+    }))
+    .unwrap_or_default();
+    Response::builder()
+        .status(status)
+        .header(hyper::header::CONTENT_TYPE, "application/json")
+        .body(full(Bytes::from(body)))
+        .expect("static response builder")
+}
+
+/// Binary audio response (WAV or raw PCM) for `/v1/audio/speech`.
+pub(crate) fn audio_response(content_type: String, bytes: Vec<u8>) -> Response<ResBody> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(hyper::header::CONTENT_TYPE, content_type)
+        .header(hyper::header::CACHE_CONTROL, "no-store")
+        .body(full(Bytes::from(bytes)))
         .expect("static response builder")
 }
 

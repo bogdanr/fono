@@ -33,13 +33,25 @@ and Fono gained a standard speech-synthesis HTTP endpoint
   daemon runs on a remote box. Cloud + Network segments got the tester
   too. `/api/meta` also exposes a `tts_cloud` block (per-provider key
   presence + voice palette; key values never leave the daemon).
-- **Severable follow-ups (not in this slice):** mounting the endpoint on
-  the LLM server with the verbatim cloud-proxy fast-lane + attribution
-  headers, and the sibling `POST /v1/audio/transcriptions`. The adapter
-  path already reaches cloud TTS today; the proxy lane is a latency/format
-  optimization.
-- **Gates.** fmt / clippy (default + `tts-local`) / workspace tests all
-  green.
+- **Audio surface on the LLM server.** The OpenAI-compatible audio
+  endpoints are now mounted on the LLM server (port 11434) too, not just
+  the settings server: `POST /v1/audio/speech` reuses the same `SpeechFn`
+  hook (shared routing/synthesis), and a new `POST /v1/audio/transcriptions`
+  accepts a `multipart/form-data` upload, decodes the WAV in-process (new
+  `fono_core::wav::decode_wav`, no audio-decode dependency), and drives the
+  resolved STT backend. The transcription `model` field selects the backend
+  per request (`groq`, `openai`, `openrouter/…`, `local`, …), else the
+  configured `[stt]` backend. Both routes 404 cleanly when no audio hook is
+  supplied. Multipart parsing is a tiny hand-rolled splitter — no new crate.
+- **Cloud reach.** Both audio endpoints reach cloud providers through the
+  existing TTS/STT factories with keys resolved from `secrets.toml`/env, so
+  the gateway synthesizes/transcribes through the configured cloud when a
+  key exists. The verbatim proxy fast-lane (native mp3/opus passthrough via
+  a parallel audio-upstream) remains a deferred optimization; the adapter
+  path already delivers cloud audio within the wav/pcm formats the endpoint
+  encodes.
+- **Gates.** fmt / clippy (default + `tts-local`) / workspace tests / size
+  budget all green.
 
 ## 2026-07-15 — Web doctor: health icon + `#/doctor` page in the settings UI
 

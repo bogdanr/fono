@@ -20,7 +20,8 @@ pub mod llm_server;
 
 #[cfg(feature = "llm-server")]
 pub use llm_server::{
-    AssistantProvider, LlmServer, LlmServerConfig, LlmServerHandle, UpstreamProvider,
+    AssistantProvider, LlmServer, LlmServerConfig, LlmServerHandle, TranscribeProvider,
+    TranscribeRequest, UpstreamProvider,
 };
 
 #[cfg(feature = "web-settings")]

@@ -323,6 +323,7 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
         rt: Arc::new(tokio::sync::Mutex::new(LlmRuntime::default())),
         mdns: discovery.as_ref().and_then(|d| d.daemon.clone()),
         registry: discovery_registry.clone(),
+        paths: paths.clone(),
     };
     llm_ctl.reconcile(&config, orchestrator.as_ref()).await;
 
@@ -3210,6 +3211,10 @@ struct LlmControl {
     /// The discovery registry, so the local peer can be (un)seeded as the
     /// listener starts/stops.
     registry: Option<fono_net::discovery::Registry>,
+    /// Filesystem paths, needed to build the per-request audio hooks
+    /// (`/v1/audio/speech`, `/v1/audio/transcriptions`) which re-read
+    /// config + secrets fresh on each call.
+    paths: Paths,
 }
 
 /// The live handles owned by an [`LlmControl`]. Both are `None` when the
@@ -3234,7 +3239,7 @@ impl LlmControl {
         let want = config.server.llm.enabled;
         let running = rt.server.is_some();
         if want && !running {
-            let handle = spawn_llm_server_if_enabled(config, orch).await;
+            let handle = spawn_llm_server_if_enabled(config, orch, &self.paths).await;
             let started = handle.is_some();
             rt.server = handle;
             if started {
@@ -3556,6 +3561,7 @@ fn llm_model_name(config: &Config) -> String {
 async fn spawn_llm_server_if_enabled(
     config: &Config,
     orchestrator: Option<&Arc<SessionOrchestrator>>,
+    paths: &Paths,
 ) -> Option<fono_net::LlmServerHandle> {
     let cfg = &config.server.llm;
     if !cfg.enabled {
@@ -3611,11 +3617,23 @@ async fn spawn_llm_server_if_enabled(
     let upstream: fono_net::UpstreamProvider =
         Arc::new(move || orch_for_upstream.server_upstream_snapshot());
     let model = server_cfg.model_name.clone();
-    match fono_net::LlmServer::new(server_cfg, provider).with_upstream(upstream).start().await {
+    // OpenAI-compatible audio surface (`/v1/audio/speech`,
+    // `/v1/audio/transcriptions`). Same per-request hooks the settings
+    // server mounts, so routing/synthesis logic is shared and config /
+    // secrets changes take effect without restarting the listener.
+    let speech = speech_hook(paths.config_file(), paths.secrets_file(), paths.voices_dir());
+    let transcribe =
+        transcribe_hook(paths.config_file(), paths.secrets_file(), paths.whisper_models_dir());
+    match fono_net::LlmServer::new(server_cfg, provider)
+        .with_upstream(upstream)
+        .with_audio(Some(speech), Some(transcribe))
+        .start()
+        .await
+    {
         Ok(handle) => {
             info!(
                 "LLM server listening on {} (model={model}, loopback_only={loopback_only}); \
-                 OpenAI + Ollama API",
+                 OpenAI + Ollama API + audio (speech/transcriptions)",
                 handle.local_addr()
             );
             Some(handle)
@@ -3939,6 +3957,94 @@ fn speech_hook(
                 ))
             }
         })
+    })
+}
+
+/// OpenAI-compatible `POST /v1/audio/transcriptions` handler for the LLM
+/// server. Loads config + secrets fresh per request, optionally overrides
+/// the configured `[stt]` backend from the request's `model` field, decodes
+/// the uploaded WAV to mono PCM, and drives the resolved STT backend. The
+/// upload is decoded in-process (no audio-decoding dependency): only 16-bit
+/// PCM WAV is accepted, matching what Fono itself and common OpenAI clients
+/// emit.
+fn transcribe_hook(
+    config_path: std::path::PathBuf,
+    secrets_path: std::path::PathBuf,
+    whisper_models_dir: std::path::PathBuf,
+) -> fono_net::TranscribeProvider {
+    Arc::new(move |req: fono_net::TranscribeRequest| {
+        let config_path = config_path.clone();
+        let secrets_path = secrets_path.clone();
+        let whisper_models_dir = whisper_models_dir.clone();
+        Box::pin(async move {
+            if req.audio.is_empty() {
+                return Err("`file` upload is empty".to_string());
+            }
+            let cfg = Config::load(&config_path).map_err(|e| format!("load config: {e}"))?;
+            let secrets = Secrets::load(&secrets_path).unwrap_or_default();
+            let mut stt_cfg = cfg.stt.clone();
+            // A non-empty `model` whose first path segment names a known STT
+            // backend selects that backend for this request; otherwise the
+            // configured `[stt]` backend is used. The optional `provider/model`
+            // suffix (e.g. `openrouter/openai/whisper-large-v3-turbo`) sets the
+            // cloud model override.
+            let route = req.model.trim();
+            if !route.is_empty() {
+                let (head, rest) = route.split_once('/').unwrap_or((route, ""));
+                if let Some(backend) = stt_backend_from_token(head) {
+                    stt_cfg.backend = backend;
+                    if !rest.is_empty() {
+                        match stt_cfg.cloud.as_mut() {
+                            Some(cloud) => cloud.model = rest.to_string(),
+                            None => {
+                                stt_cfg.cloud = Some(fono_core::config::SttCloud {
+                                    provider: head.to_string(),
+                                    api_key_ref: String::new(),
+                                    model: rest.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            let (pcm, sample_rate) = fono_core::wav::decode_wav(&req.audio)
+                .map_err(|e| format!("decode upload: {e}"))?;
+            let general = cfg.general.clone();
+            let lang = req.language.clone();
+            let stt = tokio::task::spawn_blocking(move || {
+                fono_stt::build_stt(&stt_cfg, &general, &secrets, &whisper_models_dir)
+            })
+            .await
+            .map_err(|e| format!("transcription task panicked: {e}"))?
+            .map_err(|e| format!("{e:#}"))?;
+
+            let out = stt
+                .transcribe(&pcm, sample_rate, lang.as_deref())
+                .await
+                .map_err(|e| format!("transcription failed: {e:#}"))?;
+            Ok(out.text)
+        })
+    })
+}
+
+/// Map a `/v1/audio/transcriptions` `model` route token to an STT backend,
+/// or `None` when the token doesn't name one (caller then keeps the
+/// configured backend). Kept in lockstep with [`fono_core::config::SttBackend`].
+fn stt_backend_from_token(token: &str) -> Option<fono_core::config::SttBackend> {
+    use fono_core::config::SttBackend;
+    Some(match token.to_ascii_lowercase().as_str() {
+        "local" | "whisper" => SttBackend::Local,
+        "groq" => SttBackend::Groq,
+        "openai" => SttBackend::OpenAI,
+        "openrouter" => SttBackend::OpenRouter,
+        "deepgram" => SttBackend::Deepgram,
+        "cartesia" => SttBackend::Cartesia,
+        "elevenlabs" => SttBackend::ElevenLabs,
+        "gemini" => SttBackend::Gemini,
+        "speechmatics" => SttBackend::Speechmatics,
+        "wyoming" => SttBackend::Wyoming,
+        _ => return None,
     })
 }
 
