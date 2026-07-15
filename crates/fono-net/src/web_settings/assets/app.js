@@ -842,10 +842,94 @@ function toast(msg, isErr) {
   toastTimer = setTimeout(() => { el.hidden = true; }, isErr ? 6000 : 2500);
 }
 
+// ---------- views (hash router) ----------
+// Two views share the page shell (header, toast, theme, token): the
+// settings editor (default) and the doctor report. Hash routing keeps
+// `?token=…` intact across navigation — a real path would drop it.
+function currentView() { return location.hash === '#/doctor' ? 'doctor' : 'settings'; }
+function showView() {
+  const v = currentView();
+  document.getElementById('view-settings').hidden = v !== 'settings';
+  document.getElementById('view-doctor').hidden = v !== 'doctor';
+  document.getElementById('verchip').textContent =
+    v + (meta && meta.version ? ' \u00b7 v' + meta.version : '');
+  if (v === 'doctor') renderDoctor();
+}
+window.addEventListener('hashchange', showView);
+
+// ---------- doctor ----------
+// Structured report from GET /api/doctor: { aggregate, generated_at,
+// version, variant, sections: [{ title, checks: [{label, detail,
+// severity}] }] }. Severity is ok|warn|fail|info. Fetched once on page
+// load (drives the header icon) and again on explicit re-run — never
+// polled, the daemon stays quiet.
+let doctor = null, doctorErr = null, doctorBusy = false;
+const SEV_GLYPH = { ok: '\u2713', warn: '\u26a0', fail: '\u2715', busy: '\u2026' };
+const SEV_TITLE = {
+  ok: 'All checks passed', warn: 'Some checks need attention',
+  fail: 'Some checks failed', busy: 'Running checks\u2026',
+};
+function setDoctorIcon(state) {
+  const b = document.getElementById('doctorbtn');
+  b.className = 'iconbtn ' + state;
+  b.innerHTML = SEV_GLYPH[state] || '\u2026';
+  b.title = SEV_TITLE[state] || 'System health';
+  b.setAttribute('aria-label', b.title);
+}
+async function fetchDoctor() {
+  if (doctorBusy) return;
+  doctorBusy = true;
+  setDoctorIcon('busy');
+  if (currentView() === 'doctor') renderDoctor();
+  try {
+    doctor = await api('/api/doctor');
+    doctorErr = null;
+  } catch (err) {
+    doctorErr = err.message;
+  }
+  doctorBusy = false;
+  setDoctorIcon(doctor && !doctorErr ? doctor.aggregate : 'fail');
+  if (currentView() === 'doctor') renderDoctor();
+}
+function sevDot(sev) { return '<span class="sev ' + esc(sev) + '" title="' + esc(sev) + '"></span>'; }
+function renderDoctor() {
+  const el = document.getElementById('view-doctor');
+  const bar = '<div class="doctor-bar">'
+    + '<a class="btn ghost" href="#/settings">\u2190 Settings</a>'
+    + '<span class="hint" style="margin-left:auto">'
+    + (doctorBusy ? 'running checks\u2026'
+      : doctor ? 'checked ' + new Date(doctor.generated_at * 1000).toLocaleTimeString() : '')
+    + '</span>'
+    + '<button class="btn" type="button" id="rerunbtn"' + (doctorBusy ? ' disabled' : '') + '>Re-run checks</button>'
+    + '</div>';
+  let body;
+  if (doctorErr) {
+    body = '<p class="privacy-note">Could not run the checks: ' + esc(doctorErr) + '</p>';
+  } else if (!doctor) {
+    body = '<p class="hint">Running checks\u2026</p>';
+  } else {
+    body = doctor.sections.map((s) => {
+      const worst = s.checks.some((c) => c.severity === 'fail') ? 'fail'
+        : s.checks.some((c) => c.severity === 'warn') ? 'warn' : 'ok';
+      const rows = s.checks.map((c) =>
+        '<div class="row"><div class="info"><div class="lbl">' + sevDot(c.severity) + ' ' + esc(c.label) + '</div>'
+        + (c.detail ? '<div class="desc mono">' + esc(c.detail) + '</div>' : '') + '</div></div>').join('');
+      return '<details class="sec dsec"' + (worst === 'ok' ? '' : ' open') + '>'
+        + '<summary><span class="chev">\u25b6</span><span class="t">' + esc(s.title) + '</span>'
+        + '<span class="sum">' + sevDot(worst) + '</span></summary>'
+        + '<div class="body">' + rows + '</div></details>';
+    }).join('');
+  }
+  el.innerHTML = bar + body;
+  const b = el.querySelector('#rerunbtn');
+  if (b) b.addEventListener('click', fetchDoctor);
+}
+
 // ---------- search + theme ----------
 function applyFilter(q) {
   q = (q || '').trim().toLowerCase();
-  document.querySelectorAll('details.sec').forEach((d) => {
+  // Scoped to the settings view — doctor sections are not searchable.
+  document.querySelectorAll('#view-settings details.sec').forEach((d) => {
     const hit = !q || d.textContent.toLowerCase().includes(q);
     d.style.display = hit ? '' : 'none';
     if (q && hit) d.open = true;
@@ -863,6 +947,8 @@ async function init() {
   try { if (localStorage.getItem('fono-theme') === 'light') document.documentElement.setAttribute('data-theme', 'light'); } catch (e) { /* private mode */ }
   document.getElementById('savebtn').addEventListener('click', saveAll);
   document.getElementById('discardbtn').addEventListener('click', discardAll);
+  showView();
+  fetchDoctor(); // fire-and-forget: sets the header health icon
   try {
     const [c, m, v] = await Promise.all([
       api('/api/config'),
@@ -871,7 +957,8 @@ async function init() {
     ]);
     cfg = c; orig = clone(c); meta = m;
     vocab = v; vocabOrig = v == null ? null : clone(v);
-    document.getElementById('verchip').textContent = 'settings \u00b7 v' + (meta.version || '');
+    document.getElementById('verchip').textContent =
+      currentView() + ' \u00b7 v' + (meta.version || '');
     document.getElementById('cfgpath').textContent = meta.config_path || '';
     renderAll();
   } catch (err) {

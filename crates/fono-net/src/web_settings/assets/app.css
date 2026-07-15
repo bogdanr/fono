@@ -14,6 +14,7 @@
   --accent: #d9342f;
   --accent-soft: rgba(217, 52, 47, 0.14);
   --ok: #5a9e6f;
+  --warn: #c9a227;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
   --radius: 8px;
@@ -32,6 +33,7 @@
   --accent: #b02824;
   --accent-soft: rgba(176, 40, 36, 0.10);
   --ok: #3f7d53;
+  --warn: #94741a;
   --shadow: 0 10px 30px rgba(60,50,30,0.12);
 }
 * { box-sizing: border-box; }
@@ -48,6 +50,31 @@ body {
 main { max-width: 740px; margin: 0 auto; padding: 40px 32px 140px; }
 .hd { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 20px; }
 .hd .left { display: flex; align-items: baseline; gap: 10px; }
+.hd .actions { display: flex; align-items: center; gap: 8px; }
+
+/* ---------- header icon buttons (theme, doctor) ---------- */
+/* Plain text glyphs colored via CSS — no emoji-font dependence. */
+.iconbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; font-size: 15px; line-height: 1;
+  color: var(--ink-mute); background: var(--bg-3);
+  border: 1px solid var(--line-2); border-radius: 6px;
+  cursor: pointer; text-decoration: none;
+}
+.iconbtn:hover { border-color: var(--ink-dim); color: var(--ink); }
+.iconbtn.ok { color: var(--ok); }
+.iconbtn.warn { color: var(--warn); }
+.iconbtn.fail { color: var(--accent); }
+
+/* ---------- doctor view ---------- */
+.doctor-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.sev { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.sev.ok { background: var(--ok); }
+.sev.warn { background: var(--warn); }
+.sev.fail { background: var(--accent); }
+.sev.info { background: var(--ink-dim); }
+.dsec .lbl .sev { margin-right: 6px; }
+.dsec .desc.mono { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; max-width: none; }
 .search {
   display: flex; align-items: center; gap: 10px;
   background: var(--bg-2); border: 1px solid var(--line-2);

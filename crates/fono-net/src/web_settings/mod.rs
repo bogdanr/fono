@@ -12,6 +12,10 @@
 //!   (booleans only), and baked-in prompt defaults for "Reset to default".
 //! * `PUT /api/secret/{NAME}` — write-only secret update (`{"value": "…"}`;
 //!   empty value clears). Responses never echo stored values.
+//! * `GET /api/doctor` — run the daemon-side doctor checks and return the
+//!   structured report as JSON (sections → checks with severities plus an
+//!   aggregate). Token-gated like every other `/api/*` route — the report
+//!   describes system topology.
 //!
 //! ## Why raw hyper (no axum)
 //!
@@ -82,6 +86,11 @@ pub type PutVocabularyFn =
 /// Metadata for the page chrome: version, config path, secret statuses,
 /// prompt defaults.
 pub type MetaFn = Arc<dyn Fn() -> serde_json::Value + Send + Sync>;
+/// Run the doctor checks and return the structured report as JSON.
+/// Async: the daemon side runs the probes on a blocking-friendly task.
+pub type DoctorFn = Arc<
+    dyn Fn() -> BoxFuture<'static, std::result::Result<serde_json::Value, String>> + Send + Sync,
+>;
 
 /// Hook closures supplied by the daemon layer. The server itself is a thin
 /// wire adapter with no config semantics.
@@ -93,6 +102,7 @@ pub struct WebSettingsHooks {
     pub get_vocabulary: GetVocabularyFn,
     pub put_vocabulary: PutVocabularyFn,
     pub meta: MetaFn,
+    pub doctor: DoctorFn,
 }
 
 /// Configuration for [`WebSettingsServer::start`]. Built from
@@ -278,6 +288,10 @@ async fn route(req: Request<Incoming>, ctx: ServerCtx) -> Response<ResBody> {
             }
         }
         (&Method::GET, "/api/meta") => json_ok(&(ctx.hooks.meta)()),
+        (&Method::GET, "/api/doctor") => match (ctx.hooks.doctor)().await {
+            Ok(v) => json_ok(&v),
+            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        },
         (&Method::GET, "/api/vocabulary") => match (ctx.hooks.get_vocabulary)() {
             Ok(v) => json_ok(&v),
             Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -411,8 +425,10 @@ mod tests {
     fn assets_are_nonempty_and_linked() {
         assert!(INDEX_HTML.contains("app.css"));
         assert!(INDEX_HTML.contains("app.js"));
+        assert!(INDEX_HTML.contains("view-doctor"));
         assert!(APP_CSS.contains("--accent"));
         assert!(APP_JS.contains("FONO_SECTIONS"));
+        assert!(APP_JS.contains("/api/doctor"));
     }
 
     /// Every leaf key of a fully-populated `Config` must either be bound

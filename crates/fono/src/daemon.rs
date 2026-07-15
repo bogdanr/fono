@@ -1430,10 +1430,12 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                 let mcp_cancel_tx = Arc::clone(&mcp_cancel_tx);
                 let cancel_ctrl_for_ipc = cancel_ctrl.clone();
                 let wake_for_ipc = wake.clone();
+                let paths_for_ipc = paths.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_client(
                         stream, fsm, action_tx, orch, registry, tray_for_ipc, mcp_activity,
                         mcp_speak_slot, mcp_cancel_tx, cancel_ctrl_for_ipc, wake_for_ipc,
+                        paths_for_ipc,
                     )
                     .await
                     {
@@ -1739,6 +1741,7 @@ async fn handle_client(
     mcp_cancel_tx: Arc<tokio::sync::broadcast::Sender<()>>,
     cancel_ctrl: Option<fono_hotkey::HotkeyControlSender>,
     wake: crate::wake::WakeHandle,
+    paths: Paths,
 ) -> Result<()> {
     let req: Request = read_frame(&mut stream).await?;
     // Read live-preview from the orchestrator's post-reload config
@@ -1798,9 +1801,10 @@ async fn handle_client(
                 ),
             }
         }
-        Request::Doctor => {
-            Response::Text("doctor via IPC not yet available; run `fono doctor` directly".into())
-        }
+        Request::Doctor => match run_doctor(paths.clone()).await {
+            Ok(report) => Response::Text(report.render_plain()),
+            Err(e) => Response::Error(format!("doctor failed: {e:#}")),
+        },
         Request::ListDiscovered => {
             let peers = discovery_registry.as_ref().map(snapshot_discovered).unwrap_or_default();
             Response::Discovered(peers)
@@ -3746,6 +3750,20 @@ async fn spawn_web_settings(
     }
 }
 
+/// Run the doctor checks off the async runtime. A process-wide mutex
+/// deduplicates concurrent runs (web UI + IPC): the probes spawn
+/// subprocesses (Vulkan probe, `wpctl`/`pactl`) and there is no value in
+/// running two full reports at once — the second caller simply waits for
+/// its own fresh run right after the first finishes. This is
+/// deduplication, not caching: every call produces a fresh report.
+async fn run_doctor(paths: Paths) -> Result<crate::doctor::DoctorReport> {
+    static GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _running = GUARD.lock().await;
+    tokio::task::spawn_blocking(move || crate::doctor::gather(&paths))
+        .await
+        .context("doctor task panicked")?
+}
+
 /// Build the daemon-side hook closures for the web settings server:
 /// config read/write, write-only secret updates, and page metadata.
 /// Split out of [`spawn_web_settings`] to keep both under clippy's
@@ -3824,6 +3842,15 @@ fn web_settings_hooks(
     let (get_vocabulary, put_vocabulary) = vocabulary_hooks(paths);
     let meta = meta_hook(config_path, secrets_path);
 
+    let doctor_paths = paths.clone();
+    let doctor: fono_net::web_settings::DoctorFn = Arc::new(move || {
+        let paths = doctor_paths.clone();
+        Box::pin(async move {
+            let report = run_doctor(paths).await.map_err(|e| format!("doctor: {e:#}"))?;
+            serde_json::to_value(&report).map_err(|e| format!("serialize doctor report: {e}"))
+        })
+    });
+
     fono_net::WebSettingsHooks {
         get_config,
         put_config,
@@ -3831,6 +3858,7 @@ fn web_settings_hooks(
         get_vocabulary,
         put_vocabulary,
         meta,
+        doctor,
     }
 }
 

@@ -13,8 +13,12 @@
       <span class="wordmark" style="font-size:24px;">Fono<span class="dot">.</span></span>
       <span class="hint mono" id="verchip">settings</span>
     </div>
-    <button class="btn" id="themebtn" type="button">Theme</button>
+    <div class="actions">
+      <a class="iconbtn" id="doctorbtn" href="#/doctor" title="System health" aria-label="System health">&hellip;</a>
+      <button class="iconbtn" id="themebtn" type="button" title="Toggle light/dark theme" aria-label="Toggle light/dark theme">&#9680;</button>
+    </div>
   </div>
+  <div id="view-settings">
   <div class="search">
     <span style="color:var(--ink-dim)">&#8981;</span>
     <input id="q" placeholder="Search settings&hellip; try &ldquo;wake word&rdquo; or &ldquo;api key&rdquo;" autocomplete="off" />
@@ -22,6 +26,8 @@
   </div>
   <div id="list"><p class="hint" id="loading">Loading configuration&hellip;</p></div>
   <p class="privacy-note" style="margin-top:20px;">Config lives at <span class="kbd" id="cfgpath">&hellip;</span> &mdash; audio never leaves this machine unless you pick a cloud provider.</p>
+  </div>
+  <div id="view-doctor" hidden></div>
 </main>
 <div class="unsaved" id="unsaved" hidden>
   <span class="msg"><b id="dirtymsg">0 unsaved changes</b></span>

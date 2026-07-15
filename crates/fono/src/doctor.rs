@@ -34,8 +34,123 @@ fn star(active: bool) -> String {
     if active { paint("1;36", "*") } else { " ".into() }
 }
 
-#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
+/// Severity of a single doctor check. `Info` is purely informational and
+/// never affects [`DoctorReport::aggregate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Ok,
+    Warn,
+    Fail,
+    Info,
+}
+
+/// One structured finding inside a [`DoctorSection`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorCheck {
+    pub label: String,
+    pub detail: String,
+    pub severity: Severity,
+}
+
+/// A titled group of checks — mirrors one heading of the text report.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorSection {
+    pub title: String,
+    pub checks: Vec<DoctorCheck>,
+}
+
+/// Structured doctor report. The web settings UI and IPC consume the
+/// JSON shape; the CLI prints [`Self::text`], which is built in the same
+/// pass so the two surfaces can never disagree.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorReport {
+    pub version: String,
+    pub variant: String,
+    /// Unix seconds when the checks ran.
+    pub generated_at: u64,
+    /// Worst check severity: any `Fail` ⇒ `Fail`, else any `Warn` ⇒
+    /// `Warn`, else `Ok`. `Info` never counts.
+    pub aggregate: Severity,
+    pub sections: Vec<DoctorSection>,
+    /// The human text report (ANSI-colored iff stdout is a TTY).
+    #[serde(skip)]
+    pub text: String,
+}
+
+impl DoctorReport {
+    /// The text report with ANSI escapes removed — for non-TTY surfaces
+    /// (IPC responses, logs).
+    #[must_use]
+    pub fn render_plain(&self) -> String {
+        strip_ansi(&self.text)
+    }
+}
+
+/// Worst severity across all checks (`Info` is ignored).
+fn aggregate(sections: &[DoctorSection]) -> Severity {
+    let mut worst = Severity::Ok;
+    for c in sections.iter().flat_map(|s| &s.checks) {
+        match c.severity {
+            Severity::Fail => return Severity::Fail,
+            Severity::Warn => worst = Severity::Warn,
+            Severity::Ok | Severity::Info => {}
+        }
+    }
+    worst
+}
+
+/// Remove ANSI SGR escapes (`ESC [ … m`) — the only kind this module emits.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for c2 in chars.by_ref() {
+                if c2 == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Accumulates [`DoctorSection`]s alongside the text report as [`gather`]
+/// walks the checks. Purely additive — the text output is built exactly
+/// as before; details are stored ANSI-stripped.
+#[derive(Default)]
+struct Collector {
+    sections: Vec<DoctorSection>,
+}
+
+impl Collector {
+    fn section(&mut self, title: &str) {
+        self.sections.push(DoctorSection { title: title.to_string(), checks: Vec::new() });
+    }
+    fn push(&mut self, severity: Severity, label: &str, detail: &str) {
+        if self.sections.is_empty() {
+            self.section("General");
+        }
+        let checks = &mut self.sections.last_mut().expect("non-empty sections").checks;
+        checks.push(DoctorCheck { label: label.to_string(), detail: strip_ansi(detail), severity });
+    }
+}
+
+/// `fono doctor` — the full diagnostic report as text (colored when
+/// stdout is a TTY). Thin wrapper over [`gather`].
 pub async fn report(paths: &Paths) -> Result<String> {
+    Ok(gather(paths)?.text)
+}
+
+/// Run every doctor check once, producing the structured report and the
+/// text rendering in a single pass.
+#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
+pub fn gather(paths: &Paths) -> Result<DoctorReport> {
+    use Severity as S;
+    let mut col = Collector::default();
     let mut out = String::new();
     let variant = crate::variant::VARIANT;
     writeln!(
@@ -89,8 +204,27 @@ pub async fn report(paths: &Paths) -> Result<String> {
         snap.os, snap.arch
     )?;
     writeln!(out, "  local-tier : {} (recommends whisper-{})", tier.as_str(), recommended_model)?;
+    col.section("Hardware");
+    col.push(
+        S::Info,
+        "cores",
+        &format!("{} physical / {} logical ({isa})", snap.physical_cores, snap.logical_cores),
+    );
+    col.push(
+        S::Info,
+        "memory / disk",
+        &format!("{ram_gb} GB RAM · {disk_gb} GB free disk · {}/{}", snap.os, snap.arch),
+    );
+    col.push(
+        S::Info,
+        "local tier",
+        &format!("{} (recommends whisper-{})", tier.as_str(), recommended_model),
+    );
     if let Err(reason) = snap.suitability() {
         writeln!(out, "  {} {reason}", bad("unsuitable because:"))?;
+        col.push(S::Fail, "suitability", &format!("unsuitable: {reason}"));
+    } else {
+        col.push(S::Ok, "suitability", "suitable for local inference");
     }
     writeln!(out)?;
 
@@ -104,7 +238,16 @@ pub async fn report(paths: &Paths) -> Result<String> {
         writeln!(out, "  variant  : {} ({})", VARIANT.label(), VARIANT.description())?;
         let outcome = probe();
         writeln!(out, "  vulkan   : {}", outcome.summary_line())?;
+        col.section("Compute backends");
+        col.push(S::Info, "variant", &format!("{} ({})", VARIANT.label(), VARIANT.description()));
+        col.push(S::Info, "vulkan", &outcome.summary_line());
         if matches!(VARIANT, Variant::Cpu) && outcome.is_usable() {
+            col.push(
+                S::Info,
+                "hint",
+                "this machine has Vulkan-capable GPU(s); the GPU release variant runs \
+                 inference faster on this hardware",
+            );
             writeln!(
                 out,
                 "  hint     : your machine has Vulkan-capable GPU(s); the GPU release \
@@ -122,9 +265,17 @@ pub async fn report(paths: &Paths) -> Result<String> {
     writeln!(out, "  cache  : {}", paths.cache_dir.display())?;
     writeln!(out, "  state  : {}", paths.state_dir.display())?;
     writeln!(out)?;
+    col.section("Paths");
+    col.push(S::Info, "config", &paths.config_file().display().to_string());
+    col.push(S::Info, "data", &paths.data_dir.display().to_string());
+    col.push(S::Info, "cache", &paths.cache_dir.display().to_string());
+    col.push(S::Info, "state", &paths.state_dir.display().to_string());
 
-    writeln!(out, "{} {}", head("Install:"), crate::install::doctor_state())?;
+    let install_state = crate::install::doctor_state();
+    writeln!(out, "{} {}", head("Install:"), install_state)?;
     writeln!(out)?;
+    col.section("Install");
+    col.push(S::Info, "state", &install_state);
 
     let config_exists = paths.config_file().exists();
     writeln!(
@@ -133,6 +284,12 @@ pub async fn report(paths: &Paths) -> Result<String> {
         head("Config :"),
         if config_exists { ok("present") } else { bad("MISSING (run `fono setup`)") }
     )?;
+    col.section("Config");
+    if config_exists {
+        col.push(S::Ok, "config file", "present");
+    } else {
+        col.push(S::Fail, "config file", "missing (run `fono setup`)");
+    }
     let cfg = if config_exists {
         match Config::load(&paths.config_file()) {
             Ok(c) => {
@@ -146,10 +303,29 @@ pub async fn report(paths: &Paths) -> Result<String> {
                     "  hotkeys        : dictation={} assistant={} (short=toggle, long=hold)",
                     c.hotkeys.dictation, c.hotkeys.assistant,
                 )?;
+                col.push(
+                    S::Info,
+                    "stt backend",
+                    &format!("{:?} (model {})", c.stt.backend, c.stt.local.model),
+                );
+                col.push(
+                    S::Info,
+                    "polish backend",
+                    &format!("{:?} (model {})", c.polish.backend, c.polish.local.model),
+                );
+                col.push(
+                    S::Info,
+                    "hotkeys",
+                    &format!(
+                        "dictation={} assistant={} (short=toggle, long=hold)",
+                        c.hotkeys.dictation, c.hotkeys.assistant
+                    ),
+                );
                 Some(c)
             }
             Err(e) => {
                 writeln!(out, "  {} {e}", bad("FAILED TO LOAD:"))?;
+                col.push(S::Fail, "parse", &format!("failed to load: {e}"));
                 None
             }
         }
@@ -161,15 +337,30 @@ pub async fn report(paths: &Paths) -> Result<String> {
     // Personal vocabulary (ADR 0037): entry count / parse status.
     {
         let vpath = paths.vocabulary_file();
+        col.section("Vocabulary");
         let state = if vpath.exists() {
             match fono_core::correction::VocabularyFile::load(&vpath) {
                 Ok(f) => match f.to_table() {
-                    Ok(t) => ok(&format!("{} rule(s)", t.len())),
-                    Err(e) => bad(&format!("INVALID ({e}) — corrections disabled")),
+                    Ok(t) => {
+                        col.push(S::Ok, "rules", &format!("{} rule(s)", t.len()));
+                        ok(&format!("{} rule(s)", t.len()))
+                    }
+                    Err(e) => {
+                        col.push(
+                            S::Fail,
+                            "rules",
+                            &format!("invalid ({e}) — corrections disabled"),
+                        );
+                        bad(&format!("INVALID ({e}) — corrections disabled"))
+                    }
                 },
-                Err(e) => bad(&format!("FAILED TO LOAD: {e}")),
+                Err(e) => {
+                    col.push(S::Fail, "rules", &format!("failed to load: {e}"));
+                    bad(&format!("FAILED TO LOAD: {e}"))
+                }
             }
         } else {
+            col.push(S::Info, "rules", "none (add with `fono vocabulary add <wrong> <right>`)");
             "none (add with `fono vocabulary add <wrong> <right>`)".to_string()
         };
         writeln!(out, "{} {}", head("Vocabulary:"), state)?;
@@ -186,14 +377,30 @@ pub async fn report(paths: &Paths) -> Result<String> {
     let secrets = Secrets::load(&paths.secrets_file()).unwrap_or_default();
     if let Some(c) = cfg.as_ref() {
         writeln!(out, "{}", head("Backends:"))?;
+        col.section("Backends");
         match fono_stt::build_stt(&c.stt, &c.general, &secrets, &paths.whisper_models_dir()) {
-            Ok(s) => writeln!(out, "  stt: {} {}", s.name(), ok("ready"))?,
-            Err(e) => writeln!(out, "  stt: {} {e:#}", bad("FAIL —"))?,
+            Ok(s) => {
+                writeln!(out, "  stt: {} {}", s.name(), ok("ready"))?;
+                col.push(S::Ok, "stt", &format!("{} ready", s.name()));
+            }
+            Err(e) => {
+                writeln!(out, "  stt: {} {e:#}", bad("FAIL —"))?;
+                col.push(S::Fail, "stt", &format!("{e:#}"));
+            }
         }
         match fono_polish::build_polish(&c.polish, &secrets, &paths.polish_models_dir()) {
-            Ok(Some(l)) => writeln!(out, "  polish: {} {}", l.name(), ok("ready"))?,
-            Ok(None) => writeln!(out, "  polish: {}", dim("disabled (cleanup off)"))?,
-            Err(e) => writeln!(out, "  polish: {} {e:#}", bad("FAIL —"))?,
+            Ok(Some(l)) => {
+                writeln!(out, "  polish: {} {}", l.name(), ok("ready"))?;
+                col.push(S::Ok, "polish", &format!("{} ready", l.name()));
+            }
+            Ok(None) => {
+                writeln!(out, "  polish: {}", dim("disabled (cleanup off)"))?;
+                col.push(S::Info, "polish", "disabled (cleanup off)");
+            }
+            Err(e) => {
+                writeln!(out, "  polish: {} {e:#}", bad("FAIL —"))?;
+                col.push(S::Fail, "polish", &format!("{e:#}"));
+            }
         }
         // `mut` is only touched by the `realtime`-gated arm below; allow
         // the unused-mut when that feature is compiled out.
@@ -206,6 +413,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
         ) {
             Ok(Some(fono_assistant::AssistantHandle::Staged(a))) => {
                 writeln!(out, "  assistant: {} {} (staged)", a.name(), ok("ready"))?;
+                col.push(S::Ok, "assistant", &format!("{} ready (staged)", a.name()));
             }
             #[cfg(feature = "realtime")]
             Ok(Some(fono_assistant::AssistantHandle::Realtime(a))) => {
@@ -216,16 +424,34 @@ pub async fn report(paths: &Paths) -> Result<String> {
                     a.name(),
                     ok("ready")
                 )?;
+                col.push(
+                    S::Ok,
+                    "assistant",
+                    &format!("{} ready (realtime speech-to-speech)", a.name()),
+                );
             }
-            Ok(None) => writeln!(out, "  assistant: {}", dim("disabled"))?,
-            Err(e) => writeln!(out, "  assistant: {} {e:#}", bad("FAIL —"))?,
+            Ok(None) => {
+                writeln!(out, "  assistant: {}", dim("disabled"))?;
+                col.push(S::Info, "assistant", "disabled");
+            }
+            Err(e) => {
+                writeln!(out, "  assistant: {} {e:#}", bad("FAIL —"))?;
+                col.push(S::Fail, "assistant", &format!("{e:#}"));
+            }
         }
         match fono_tts::build_tts(&c.tts, &secrets, &c.general.languages, &paths.voices_dir()) {
-            Ok(Some(t)) => writeln!(out, "  tts: {} {}", t.name(), ok("ready"))?,
+            Ok(Some(t)) => {
+                writeln!(out, "  tts: {} {}", t.name(), ok("ready"))?;
+                col.push(S::Ok, "tts", &format!("{} ready", t.name()));
+            }
             Ok(None) => {
                 writeln!(out, "  tts: {}", warn("disabled (assistant replies will be silent)"))?;
+                col.push(S::Warn, "tts", "disabled (assistant replies will be silent)");
             }
-            Err(e) => writeln!(out, "  tts: {} {e:#}", bad("FAIL —"))?,
+            Err(e) => {
+                writeln!(out, "  tts: {} {e:#}", bad("FAIL —"))?;
+                col.push(S::Fail, "tts", &format!("{e:#}"));
+            }
         }
         // Local LLM inference server (OpenAI + Ollama HTTP API; ADR 0036).
         // The served model tracks the active [assistant] backend, with a
@@ -257,6 +483,14 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 c.server.llm.bind,
                 c.server.llm.port,
             )?;
+            col.push(
+                S::Info,
+                "llm server",
+                &format!(
+                    "enabled on {}:{} ({scope}); serving {served}; {mode}",
+                    c.server.llm.bind, c.server.llm.port
+                ),
+            );
             if assistant_realtime_only {
                 writeln!(
                     out,
@@ -272,6 +506,11 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 "  llm server: {} (enable `[server.llm]` to serve local inference over HTTP)",
                 dim("disabled"),
             )?;
+            col.push(
+                S::Info,
+                "llm server",
+                "disabled (enable `[server.llm]` to serve local inference over HTTP)",
+            );
         }
         writeln!(out)?;
 
@@ -282,6 +521,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
         // to via `fono use stt …` / `fono use polish …`.
         // ------------------------------------------------------------
         writeln!(out, "{}", head("Providers (STT):"))?;
+        col.section("Providers (STT)");
         for b in fono_core::providers::all_stt_backends() {
             let active = b == c.stt.backend;
             let mark = star(active);
@@ -301,10 +541,16 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 c.stt.local.model.clone()
             };
             writeln!(out, "  {mark} {name:<14} model: {model:<32} {key_status}")?;
+            col.push(
+                S::Info,
+                name,
+                &format!("{}model: {model} · {key_status}", if active { "(active) " } else { "" }),
+            );
         }
         writeln!(out)?;
 
         writeln!(out, "{}", head("Providers (LLM):"))?;
+        col.section("Providers (LLM)");
         for b in fono_core::providers::all_polish_backends() {
             let active = b == c.polish.backend;
             let mark = star(active);
@@ -326,10 +572,16 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 c.polish.local.model.clone()
             };
             writeln!(out, "  {mark} {name:<14} model: {model:<32} {key_status}")?;
+            col.push(
+                S::Info,
+                name,
+                &format!("{}model: {model} · {key_status}", if active { "(active) " } else { "" }),
+            );
         }
         writeln!(out)?;
 
         writeln!(out, "{}", head("Providers (assistant):"))?;
+        col.section("Providers (assistant)");
         for b in fono_core::providers::all_assistant_backends() {
             let active = b == c.assistant.backend;
             let mark = star(active);
@@ -344,10 +596,16 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 dim(&format!("{key_env} missing"))
             };
             writeln!(out, "  {mark} {name:<14} {key_status}")?;
+            col.push(
+                S::Info,
+                name,
+                &format!("{}{key_status}", if active { "(active) " } else { "" }),
+            );
         }
         writeln!(out)?;
 
         writeln!(out, "{}", head("Providers (TTS):"))?;
+        col.section("Providers (TTS)");
         for b in fono_core::providers::all_tts_backends() {
             let active = b == c.tts.backend;
             let mark = star(active);
@@ -386,6 +644,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
             };
             let _ = needs_key;
             writeln!(out, "  {mark} {name:<14} {extra}")?;
+            col.push(S::Info, name, &format!("{}{extra}", if active { "(active) " } else { "" }));
         }
         writeln!(out)?;
         writeln!(out, "(* = active. Switch with `fono use stt|polish|assistant|tts <backend>`.)")?;
@@ -409,8 +668,15 @@ pub async fn report(paths: &Paths) -> Result<String> {
         std::env::var("DISPLAY").unwrap_or_else(|_| "(unset)".into())
     )?;
     writeln!(out)?;
+    col.section("Session");
+    for var in ["XDG_SESSION_TYPE", "WAYLAND_DISPLAY", "DISPLAY"] {
+        col.push(S::Info, var, &std::env::var(var).unwrap_or_else(|_| "(unset)".into()));
+    }
 
-    writeln!(out, "{} {:?}", head("Audio stack :"), fono_audio::mute::detect())?;
+    let audio_stack = fono_audio::mute::detect();
+    writeln!(out, "{} {audio_stack:?}", head("Audio stack :"))?;
+    col.section("Audio");
+    col.push(S::Info, "stack", &format!("{audio_stack:?}"));
     // Input device matrix: list every device the active stack
     // (PulseAudio / PipeWire via pactl, or cpal as fallback) reports,
     // marking whichever the OS currently considers default. Fono no
@@ -430,11 +696,17 @@ pub async fn report(paths: &Paths) -> Result<String> {
             "(no input devices reported — install `wireplumber` (wpctl) or `pulseaudio-utils` (pactl), or check that your microphone is plugged in)"
         };
         writeln!(out, "  {}", bad(hint))?;
+        col.push(S::Fail, "input devices", hint);
     } else {
         for d in &devices {
             let mark = star(d.is_default);
             writeln!(out, "  {mark} {}", d.display_name)?;
         }
+        let names: Vec<String> = devices
+            .iter()
+            .map(|d| format!("{}{}", if d.is_default { "* " } else { "" }, d.display_name))
+            .collect();
+        col.push(S::Ok, "input devices", &names.join(" · "));
         writeln!(
             out,
             "(* = system default. Change via the tray Microphone submenu, \
@@ -443,12 +715,15 @@ pub async fn report(paths: &Paths) -> Result<String> {
     }
     let injector = fono_inject::inject::Injector::detect();
     writeln!(out, "{} {injector:?}", head("Injector    :"))?;
+    col.section("Desktop integration");
+    col.push(S::Info, "injector", &format!("{injector:?}"));
     // macOS: injection is gated by the Accessibility TCC grant, and
     // CGEventPost drops events *silently* when it's missing — so the
     // probe is the only honest signal (macOS port plan Task 9.3).
     if let Some(trusted) = fono_inject::accessibility_trusted() {
         if trusted {
             writeln!(out, "{} {}", head("Accessibility:"), ok("granted (fono can type for you)"))?;
+            col.push(S::Ok, "accessibility", "granted (fono can type for you)");
         } else {
             writeln!(
                 out,
@@ -461,6 +736,11 @@ pub async fn report(paths: &Paths) -> Result<String> {
                     fono_inject::ACCESSIBILITY_SETTINGS_URL
                 ))
             )?;
+            col.push(
+                S::Warn,
+                "accessibility",
+                "not granted — dictation falls back to the clipboard (paste with Cmd+V)",
+            );
         }
     }
     // Focused-window probe — powers the per-app context rules (terminal
@@ -479,8 +759,10 @@ pub async fn report(paths: &Paths) -> Result<String> {
             |p| ok(&format!("{} profile", p.name)),
         );
         writeln!(out, "{} {} ({})", head("Focus       :"), class, label)?;
+        col.push(S::Info, "focus", &format!("{class} ({label})"));
     } else {
         writeln!(out, "{} {}", head("Focus       :"), dim("none detected — no foreground window"))?;
+        col.push(S::Info, "focus", "none detected — no foreground window");
     }
     // Clipboard fallback — fono copies the cleaned text here when no
     // key-injection backend works, so the dictation is never lost.
@@ -492,6 +774,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
     }
     if clip_tools.is_empty() {
         writeln!(out, "{} {}", head("Clipboard   :"), ok("native (arboard)"))?;
+        col.push(S::Info, "clipboard", "native (arboard)");
     } else {
         writeln!(
             out,
@@ -500,6 +783,11 @@ pub async fn report(paths: &Paths) -> Result<String> {
             clip_tools.join(", "),
             dim("(native arboard preferred)")
         )?;
+        col.push(
+            S::Info,
+            "clipboard",
+            &format!("{} (native arboard preferred)", clip_tools.join(", ")),
+        );
     }
     // Probe for a clipboard manager. We check both the ICCCM
     // `CLIPBOARD_MANAGER` selection owner *and* the running process
@@ -515,30 +803,43 @@ pub async fn report(paths: &Paths) -> Result<String> {
     {
         use fono_inject::ClipboardManager;
         match fono_inject::detect_clipboard_manager() {
-            ClipboardManager::Icccm => writeln!(
-                out,
-                "{} {}",
-                head("Clip manager:"),
-                ok("present (owns CLIPBOARD_MANAGER selection)")
-            )?,
-            ClipboardManager::Polling(name) => writeln!(
-                out,
-                "{} {}",
-                head("Clip manager:"),
-                ok(&format!("present ({name}, polling — no CLIPBOARD_MANAGER selection)"))
-            )?,
-            ClipboardManager::None => writeln!(
-                out,
-                "{} {}\n  {}",
-                head("Clip manager:"),
-                dim("none detected"),
-                dim("Typing is unaffected — fono types directly via XTEST and never \
+            ClipboardManager::Icccm => {
+                writeln!(
+                    out,
+                    "{} {}",
+                    head("Clip manager:"),
+                    ok("present (owns CLIPBOARD_MANAGER selection)")
+                )?;
+                col.push(S::Ok, "clipboard manager", "present (owns CLIPBOARD_MANAGER selection)");
+            }
+            ClipboardManager::Polling(name) => {
+                writeln!(
+                    out,
+                    "{} {}",
+                    head("Clip manager:"),
+                    ok(&format!("present ({name}, polling — no CLIPBOARD_MANAGER selection)"))
+                )?;
+                col.push(
+                    S::Ok,
+                    "clipboard manager",
+                    &format!("present ({name}, polling — no CLIPBOARD_MANAGER selection)"),
+                );
+            }
+            ClipboardManager::None => {
+                writeln!(
+                    out,
+                    "{} {}\n  {}",
+                    head("Clip manager:"),
+                    dim("none detected"),
+                    dim("Typing is unaffected — fono types directly via XTEST and never \
                      touches the clipboard. The optional `also_copy_to_clipboard` path \
                      keeps working while fono runs because the daemon holds one \
                      persistent arboard handle. Clipboard contents are lost when fono \
                      exits unless a manager (clipit / parcellite / xfce4-clipman / \
                      klipper / copyq / gpaste / greenclip) is running.")
-            )?,
+                )?;
+                col.push(S::Info, "clipboard manager", "none detected");
+            }
         }
     }
     writeln!(
@@ -548,6 +849,15 @@ pub async fn report(paths: &Paths) -> Result<String> {
         paths.ipc_socket().display(),
         if paths.ipc_socket().exists() { ok("exists") } else { warn("absent") }
     )?;
+    if paths.ipc_socket().exists() {
+        col.push(S::Ok, "ipc socket", &format!("{} (exists)", paths.ipc_socket().display()));
+    } else {
+        col.push(
+            S::Warn,
+            "ipc socket",
+            &format!("{} (absent — daemon not running)", paths.ipc_socket().display()),
+        );
+    }
 
     // Overlay backend probe. Uses `fono_overlay::backend::probe_selection`
     // which only reads env vars + walks the candidate list — it does
@@ -574,6 +884,8 @@ pub async fn report(paths: &Paths) -> Result<String> {
             },
         };
         writeln!(out, "{} {} ({}) — {reason}", head("Overlay     :"), id.as_str(), caps.summary())?;
+        col.section("Overlay");
+        col.push(S::Info, "backend", &format!("{} ({}) — {reason}", id.as_str(), caps.summary()));
         // Wayland session without layer-shell and without Xwayland
         // — we have no graphical overlay path. Tell the user how
         // to fix it.
@@ -581,6 +893,12 @@ pub async fn report(paths: &Paths) -> Result<String> {
             && std::env::var_os("WAYLAND_DISPLAY").is_some()
             && std::env::var_os("DISPLAY").is_none()
         {
+            col.push(
+                S::Warn,
+                "hint",
+                "Wayland session without Xwayland or layer-shell — install your distro's \
+                 xwayland package to enable the overlay",
+            );
             writeln!(
                 out,
                 "  {}",
@@ -602,6 +920,8 @@ pub async fn report(paths: &Paths) -> Result<String> {
 
         writeln!(out, "{}", head("Screen capture:"))?;
         writeln!(out, "  Session type : {}", probe.session_label())?;
+        col.section("Screen capture");
+        col.push(S::Info, "session type", probe.session_label());
 
         let auto_rungs = probe.auto_rungs();
         if auto_rungs.is_empty() {
@@ -610,6 +930,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 "  Active (auto): {}",
                 bad("none — install scrot (X11) or grim+slurp (Wayland)")
             )?;
+            col.push(S::Fail, "auto capture", "none — install scrot (X11) or grim+slurp (Wayland)");
         } else {
             let auto_display: Vec<String> = auto_rungs
                 .iter()
@@ -627,6 +948,11 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 .collect();
             writeln!(out, "  Auto rungs   : {}", auto_display.join("  "))?;
             writeln!(out, "  Active (auto): {}", ok(auto_rungs[0].display_name()))?;
+            col.push(
+                S::Ok,
+                "auto capture",
+                &format!("{} — rungs: {}", auto_rungs[0].display_name(), auto_display.join("  ")),
+            );
         }
 
         let sel_rungs = probe.select_rungs();
@@ -636,6 +962,11 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 "  Active (sel.): {}",
                 bad("none — install grim+slurp (Wayland) or scrot -s (X11)")
             )?;
+            col.push(
+                S::Fail,
+                "select capture",
+                "none — install grim+slurp (Wayland) or scrot -s (X11)",
+            );
         } else {
             let sel_display: Vec<String> = sel_rungs
                 .iter()
@@ -653,6 +984,11 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 .collect();
             writeln!(out, "  Select rungs : {}", sel_display.join("  "))?;
             writeln!(out, "  Active (sel.): {}", ok(sel_rungs[0].display_name()))?;
+            col.push(
+                S::Ok,
+                "select capture",
+                &format!("{} — rungs: {}", sel_rungs[0].display_name(), sel_display.join("  ")),
+            );
         }
         writeln!(out)?;
     }
@@ -671,8 +1007,10 @@ pub async fn report(paths: &Paths) -> Result<String> {
         use fono_core::config::{WakeTarget, WakeWyoming};
         let w = &c.wakeword;
         writeln!(out, "{}", head("Wake word:"))?;
+        col.section("Wake word");
         if w.enabled {
             writeln!(out, "  enabled        : {}", ok("true"))?;
+            col.push(S::Ok, "enabled", "true");
 
             // Which detector backend would actually run. Reuses the registry's
             // path resolution (no duplicated filename logic) and mirrors
@@ -691,6 +1029,7 @@ pub async fn report(paths: &Paths) -> Result<String> {
             match wake_backend(&inputs) {
                 WakeBackend::Onnx => {
                     writeln!(out, "  backend        : {} (openWakeWord ONNX)", ok("ONNX"))?;
+                    col.push(S::Ok, "backend", "ONNX (openWakeWord)");
                 }
                 WakeBackend::EnergyStub => {
                     let why = if !inputs.onnx_compiled {
@@ -703,10 +1042,12 @@ pub async fn report(paths: &Paths) -> Result<String> {
                         "one or more phrase classifiers not yet downloaded"
                     };
                     writeln!(out, "  backend        : {} ({why})", warn("energy stub"))?;
+                    col.push(S::Warn, "backend", &format!("energy stub ({why})"));
                 }
             }
             if w.phrases.is_empty() {
                 writeln!(out, "  phrases        : {}", warn("none configured"))?;
+                col.push(S::Warn, "phrases", "none configured");
             } else {
                 writeln!(out, "  phrases:")?;
                 for p in &w.phrases {
@@ -732,6 +1073,14 @@ pub async fn report(paths: &Paths) -> Result<String> {
                         p.model,
                         p.sensitivity,
                     )?;
+                    col.push(
+                        S::Info,
+                        &format!("phrase {}", p.model),
+                        &format!(
+                            "target={target} sens={:.2} · {license} · {cache_state}",
+                            p.sensitivity
+                        ),
+                    );
                 }
             }
 
@@ -752,6 +1101,14 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 "  default model  : {default_id}  {default_badge}  {}",
                 if default_cached { ok("cached") } else { dim("not yet downloaded") }
             )?;
+            col.push(
+                S::Info,
+                "default model",
+                &format!(
+                    "{default_id} · {default_badge} · {}",
+                    if default_cached { "cached" } else { "not yet downloaded" }
+                ),
+            );
 
             // NonCommercial community models: no consent is stored — Fono
             // notifies the user at download time and proceeds. Flag if any
@@ -769,6 +1126,11 @@ pub async fn report(paths: &Paths) -> Result<String> {
                          non-commercial use only"
                     )
                 )?;
+                col.push(
+                    S::Warn,
+                    "community model",
+                    "NonCommercial (CC-BY-NC-SA-4.0) — non-commercial use only",
+                );
             }
 
             // Wyoming wake serving is automatic, mirroring STT/TTS: whenever
@@ -785,12 +1147,22 @@ pub async fn report(paths: &Paths) -> Result<String> {
                          the LAN server; audio stays on this machine",
                         ok("served")
                     )?;
+                    col.push(
+                        S::Info,
+                        "wyoming",
+                        "served — local wake detection over the LAN server; audio stays on this machine",
+                    );
                 } else {
                     writeln!(
                         out,
                         "  Wyoming        : {} (enable `[server.wyoming]` to share wake on the LAN)",
                         dim("available")
                     )?;
+                    col.push(
+                        S::Info,
+                        "wyoming",
+                        "available (enable `[server.wyoming]` to share wake on the LAN)",
+                    );
                 }
             } else {
                 writeln!(
@@ -798,6 +1170,11 @@ pub async fn report(paths: &Paths) -> Result<String> {
                     "  Wyoming        : {}",
                     dim("unavailable (wakeword-onnx not compiled into this build)")
                 )?;
+                col.push(
+                    S::Info,
+                    "wyoming",
+                    "unavailable (wakeword-onnx not compiled into this build)",
+                );
             }
             if w.wyoming.as_ref().is_some_and(WakeWyoming::is_client) {
                 writeln!(
@@ -806,6 +1183,14 @@ pub async fn report(paths: &Paths) -> Result<String> {
                     bad("CLIENT — opt-in")
                 )?;
                 writeln!(out, "  {}", bad(WakeWyoming::CLIENT_PRIVACY_WARNING))?;
+                col.push(
+                    S::Fail,
+                    "wyoming client",
+                    &format!(
+                        "CLIENT mode (opt-in) — idle mic audio leaves the machine. {}",
+                        WakeWyoming::CLIENT_PRIVACY_WARNING
+                    ),
+                );
             }
         } else {
             writeln!(
@@ -815,6 +1200,12 @@ pub async fn report(paths: &Paths) -> Result<String> {
                 dim("(default — no idle mic stream is opened; enable with \
                      `[wakeword].enabled = true`)")
             )?;
+            col.push(
+                S::Info,
+                "enabled",
+                "false (default — no idle mic stream is opened; enable with \
+                 `[wakeword].enabled = true`)",
+            );
         }
         writeln!(out)?;
     }
@@ -823,14 +1214,17 @@ pub async fn report(paths: &Paths) -> Result<String> {
     // ----------------------------------------------------------------
     if let Some(c) = cfg.as_ref() {
         writeln!(out, "{}", head("Coding agents (MCP server):"))?;
+        col.section("Coding agents (MCP)");
         if c.mcp.enabled {
             writeln!(out, "  mcp.enabled          : {}", ok("true"))?;
+            col.push(S::Ok, "mcp", "enabled");
         } else {
             writeln!(
                 out,
                 "  mcp.enabled          : {} (enable with `fono use mcp-server on`)",
                 warn("false")
             )?;
+            col.push(S::Info, "mcp", "disabled (enable with `fono use mcp-server on`)");
         }
         writeln!(out, "  transport            : stdio")?;
         writeln!(
@@ -846,17 +1240,35 @@ pub async fn report(paths: &Paths) -> Result<String> {
 
     writeln!(out)?;
     writeln!(out, "{} ({}):", head("Log tail"), paths.log_file().display())?;
+    col.section("Log");
     match tail_log(&paths.log_file(), 10) {
-        Ok(lines) if lines.is_empty() => writeln!(out, "  {}", dim("(log is empty)"))?,
+        Ok(lines) if lines.is_empty() => {
+            writeln!(out, "  {}", dim("(log is empty)"))?;
+            col.push(S::Info, "tail", "(log is empty)");
+        }
         Ok(lines) => {
-            for line in lines {
+            for line in &lines {
                 writeln!(out, "  {line}")?;
             }
+            col.push(S::Info, "tail", &lines.join("\n"));
         }
-        Err(e) => writeln!(out, "  {} {e}", bad("(cannot read log:"))?,
+        Err(e) => {
+            writeln!(out, "  {} {e}", bad("(cannot read log:"))?;
+            col.push(S::Info, "tail", &format!("cannot read log: {e}"));
+        }
     }
 
-    Ok(out)
+    let generated_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    Ok(DoctorReport {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        variant: variant.label().to_string(),
+        generated_at,
+        aggregate: aggregate(&col.sections),
+        sections: col.sections,
+        text: out,
+    })
 }
 
 /// The detector backend `fono doctor` reports the daemon *would* build for an
@@ -951,6 +1363,56 @@ fn which_in_path(tool: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Aggregate is the worst non-Info severity: Fail beats Warn beats Ok,
+    /// and Info never counts.
+    #[test]
+    fn aggregate_orders_severities() {
+        let sec = |sev: Severity| DoctorSection {
+            title: "t".into(),
+            checks: vec![DoctorCheck { label: "l".into(), detail: "d".into(), severity: sev }],
+        };
+        assert_eq!(aggregate(&[]), Severity::Ok);
+        assert_eq!(aggregate(&[sec(Severity::Info)]), Severity::Ok);
+        assert_eq!(aggregate(&[sec(Severity::Ok), sec(Severity::Info)]), Severity::Ok);
+        assert_eq!(aggregate(&[sec(Severity::Ok), sec(Severity::Warn)]), Severity::Warn);
+        assert_eq!(
+            aggregate(&[sec(Severity::Warn), sec(Severity::Fail), sec(Severity::Ok)]),
+            Severity::Fail
+        );
+    }
+
+    /// SGR escapes are removed; plain text passes through untouched.
+    #[test]
+    fn strip_ansi_removes_sgr_only() {
+        assert_eq!(strip_ansi("plain"), "plain");
+        assert_eq!(strip_ansi("\x1b[32mready\x1b[0m"), "ready");
+        assert_eq!(strip_ansi("a \x1b[31;1mFAIL\x1b[0m b"), "a FAIL b");
+    }
+
+    /// The collector groups checks under the most recent section and
+    /// strips ANSI from details.
+    #[test]
+    fn collector_groups_and_strips() {
+        let mut col = Collector::default();
+        col.section("First");
+        col.push(Severity::Ok, "a", "\x1b[32mfine\x1b[0m");
+        col.section("Second");
+        col.push(Severity::Warn, "b", "meh");
+        assert_eq!(col.sections.len(), 2);
+        assert_eq!(col.sections[0].checks[0].detail, "fine");
+        assert_eq!(col.sections[1].checks[0].label, "b");
+        assert_eq!(col.sections[1].checks[0].severity, Severity::Warn);
+    }
+
+    /// Severity serializes lowercase — the wire contract the web UI parses.
+    #[test]
+    fn severity_serializes_lowercase() {
+        assert_eq!(serde_json::to_string(&Severity::Ok).unwrap(), "\"ok\"");
+        assert_eq!(serde_json::to_string(&Severity::Warn).unwrap(), "\"warn\"");
+        assert_eq!(serde_json::to_string(&Severity::Fail).unwrap(), "\"fail\"");
+        assert_eq!(serde_json::to_string(&Severity::Info).unwrap(), "\"info\"");
+    }
 
     /// ONNX is reported only when every precondition holds; missing any one
     /// of {feature, graphs, classifiers} falls back to the stub — the exact

@@ -1,6 +1,36 @@
 # Fono — Project Status
 Last updated: 2026-07-15
 
+## 2026-07-15 — Web doctor: health icon + `#/doctor` page in the settings UI
+
+`fono doctor` is now reachable from the browser settings page
+(plan: `plans/2026-07-15-web-doctor-integration-v1.md`, all tasks done):
+
+- **Structured doctor model.** `doctor::report()` was decomposed into
+  `gather() -> DoctorReport` (typed `Severity` / `DoctorCheck` /
+  `DoctorSection`, serde-serializable, aggregate = worst check) plus the
+  text output built in the same pass — the CLI report is unchanged.
+- **`GET /api/doctor`.** New token-gated route on the web settings
+  server; the daemon hook runs `gather()` on a blocking task with an
+  in-flight mutex (dedup, not cache — every call is a fresh run).
+- **Hash router + shell.** The SPA now has two views sharing the header
+  / toast / theme / token plumbing: `#/settings` (default, the existing
+  editor untouched) and `#/doctor`. Hash routing preserves `?token=…`.
+  This is the foundation for further planned pages.
+- **Header icons.** The "Theme" text button became a `◐` glyph button,
+  joined by a three-state health icon (green ✓ / yellow ⚠ / red ✕,
+  CSS-colored text glyphs, tooltips + aria-labels) that links to the
+  doctor page. One report fetch on page load sets it; no polling.
+- **Doctor view.** Accordion sections with per-check severity dots,
+  Warn/Fail sections auto-opened, last-run timestamp, "Re-run checks".
+- **IPC `Request::Doctor` implemented.** The long-standing "not yet
+  available" stub now returns the color-free rendered report from the
+  same gather path.
+- **Tests + gates.** New `web_settings_round_trip.rs` (401/200 token
+  gate, report JSON shape, open assets), doctor model unit tests;
+  fmt/clippy/test and the size-budget gate all green (21.44 MiB of
+  25 MiB budget).
+
 ## 2026-07-15 — v0.16.0 Windows release build fixed end to end; ready to retag
 
 The `v0.16.0` release run kept failing on `x86_64-pc-windows-msvc` while
