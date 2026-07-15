@@ -47,6 +47,12 @@ pub struct LocalRouter {
     /// When set, every utterance uses `default_voice` regardless of `lang`
     /// (an explicit `[tts.local].voice` pin).
     pinned: bool,
+    /// Engine the user pinned via `[tts.local].engine` (`"piper"` /
+    /// `"kokoro"`), or `None` for Auto. When set, per-language routing and
+    /// explicit per-call voice overrides are constrained to this engine's
+    /// catalog entries, so a Kokoro-pinned user never gets routed to a Piper
+    /// voice (and vice versa).
+    engine_filter: Option<String>,
     /// The user's configured `general.languages` as base codes (deduped,
     /// e.g. `["en", "ro"]`). When a caller supplies no `lang` hint, text is
     /// language-identified against *this* allowlist so detection on short
@@ -66,6 +72,7 @@ impl LocalRouter {
         default_voice: Voice,
         pinned: bool,
         languages: &[String],
+        engine_filter: Option<String>,
     ) -> Result<Self> {
         let voices_dir = voices_dir.into();
         let engine = load_engine(&voices_dir, &default_voice)?;
@@ -73,7 +80,15 @@ impl LocalRouter {
         let mut cache: HashMap<String, Arc<dyn TextToSpeech>> = HashMap::new();
         cache.insert(default_voice.name.clone(), engine);
         let langs = dedup_base_langs(languages);
-        Ok(Self { voices_dir, cache: Mutex::new(cache), default_voice, pinned, langs, native_rate })
+        Ok(Self {
+            voices_dir,
+            cache: Mutex::new(cache),
+            default_voice,
+            pinned,
+            langs,
+            native_rate,
+            engine_filter,
+        })
     }
 
     /// Resolve which catalog voice should speak `text`.
@@ -95,7 +110,9 @@ impl LocalRouter {
         // names a real catalog voice. An empty or unknown name falls
         // through to the language-based selection below.
         if let Some(name) = voice.map(str::trim).filter(|s| !s.is_empty()) {
-            if let Some(v) = resolve_explicit_voice(Some(name)) {
+            if let Some(v) = resolve_explicit_voice(Some(name))
+                .filter(|v| self.engine_filter.as_deref().is_none_or(|e| v.engine == e))
+            {
                 current_instant(
                     "tts.voice_select",
                     "assistant.tts",
@@ -121,7 +138,12 @@ impl LocalRouter {
         let chosen = detected
             .clone()
             .or_else(|| lang.map(str::trim).filter(|l| !l.is_empty()).map(str::to_string));
-        let voice = resolve_voice_for_lang(&self.default_voice, self.pinned, chosen.as_deref());
+        let voice = resolve_voice_for_lang_engine(
+            &self.default_voice,
+            self.pinned,
+            chosen.as_deref(),
+            self.engine_filter.as_deref(),
+        );
         current_instant(
             "tts.voice_select",
             "assistant.tts",
@@ -259,6 +281,20 @@ pub fn detect_base_lang(text: &str, allowed: &[String]) -> Option<String> {
 /// catalog voice for the hint's base language, falling back to the default.
 #[must_use]
 pub fn resolve_voice_for_lang(default_voice: &Voice, pinned: bool, lang: Option<&str>) -> Voice {
+    resolve_voice_for_lang_engine(default_voice, pinned, lang, None)
+}
+
+/// Engine-aware variant of [`resolve_voice_for_lang`]: when `engine` is
+/// `Some("piper"/"kokoro")`, the per-language lookup is constrained to that
+/// engine's catalog entries (falling back to the default voice when the
+/// engine has no voice for the language). `None` is the Auto policy.
+#[must_use]
+pub fn resolve_voice_for_lang_engine(
+    default_voice: &Voice,
+    pinned: bool,
+    lang: Option<&str>,
+    engine: Option<&str>,
+) -> Voice {
     if pinned {
         return default_voice.clone();
     }
@@ -268,7 +304,11 @@ pub fn resolve_voice_for_lang(default_voice: &Voice, pinned: bool, lang: Option<
     if lang == base_lang(&default_voice.language) {
         return default_voice.clone();
     }
-    crate::voices::for_language(&lang).ok().flatten().unwrap_or_else(|| default_voice.clone())
+    let found = engine.map_or_else(
+        || crate::voices::for_language(&lang).ok().flatten(),
+        |e| crate::voices::for_language_engine(&lang, e).ok().flatten(),
+    );
+    found.unwrap_or_else(|| default_voice.clone())
 }
 
 /// Resolve an explicit per-call voice name (the resolver's chosen
@@ -507,5 +547,27 @@ mod tests {
         assert!(resolve_explicit_voice(Some("definitely-not-a-voice")).is_none());
         assert!(resolve_explicit_voice(Some("   ")).is_none());
         assert!(resolve_explicit_voice(None).is_none());
+    }
+
+    #[test]
+    fn engine_pin_constrains_language_routing_to_that_engine() {
+        // Default is a Romanian Piper voice. Under a Piper pin an English hint
+        // stays within Piper (a Piper English voice), never crossing to Kokoro.
+        let def = voice("ro_RO-mihai-medium", "ro");
+        let got = resolve_voice_for_lang_engine(&def, false, Some("en"), Some("piper"));
+        assert_eq!(got.engine, "piper", "piper pin must resolve a piper voice");
+
+        // Under Auto (no pin) the same English hint routes to the catalog's
+        // English (Kokoro) voice per the ADR 0033 policy.
+        let auto = resolve_voice_for_lang_engine(&def, false, Some("en"), None);
+        assert_eq!(auto.engine, "kokoro", "auto policy routes English to Kokoro");
+    }
+
+    #[test]
+    fn kokoro_pin_routes_english_within_kokoro() {
+        // A Kokoro-pinned English default keeps routing English within Kokoro.
+        let def = voice("af_heart", "en");
+        let got = resolve_voice_for_lang_engine(&def, false, Some("en"), Some("kokoro"));
+        assert_eq!(got.name, "af_heart");
     }
 }

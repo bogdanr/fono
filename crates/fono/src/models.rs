@@ -120,10 +120,25 @@ pub async fn ensure_models(paths: &Paths, config: &Config) -> Result<()> {
 /// catalog voice are skipped with a warning rather than failing the lot.
 #[cfg(feature = "tts-local")]
 pub async fn ensure_local_tts(paths: &Paths, config: &Config) -> Result<EnsureOutcome> {
-    let voices = resolve_local_tts_voices(config)?;
     let voices_dir = paths.voices_dir();
     let base_url = &config.tts.local.base_url;
     let base = (!base_url.is_empty()).then_some(base_url.as_str());
+    // Supertonic is a single shared pack outside the per-language catalog, so
+    // when the user pins that engine we ensure the pack instead of catalog
+    // voices (mirroring the voice-ensure flow).
+    if config.tts.local.engine == fono_core::config::TtsLocalEngine::Supertonic {
+        let dir = fono_tts::supertonic::supertonic_dir(&voices_dir);
+        let already = dir.join(fono_tts::supertonic::CONFIG.file).is_file();
+        if !already {
+            debug!("Supertonic voice pack missing; downloading from the fono-voice mirror");
+        }
+        fono_tts::supertonic::ensure_pack(&voices_dir, base)
+            .await
+            .context("ensuring the Supertonic voice pack")?;
+        info!("Supertonic voice pack ready");
+        return Ok(if already { EnsureOutcome::AlreadyPresent } else { EnsureOutcome::Downloaded });
+    }
+    let voices = resolve_local_tts_voices(config)?;
     let mut any_downloaded = false;
     for voice in &voices {
         let already = voices_dir.join(&voice.model.file).is_file()

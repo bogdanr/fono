@@ -91,6 +91,16 @@ pub type MetaFn = Arc<dyn Fn() -> serde_json::Value + Send + Sync>;
 pub type DoctorFn = Arc<
     dyn Fn() -> BoxFuture<'static, std::result::Result<serde_json::Value, String>> + Send + Sync,
 >;
+/// OpenAI-compatible `POST /v1/audio/speech` handler. Takes the parsed
+/// request body (`{model, input, voice, response_format?}`) and returns the
+/// synthesized audio as `(content_type, bytes)` — WAV or raw PCM. Async: the
+/// daemon side builds the requested engine and runs synthesis off the accept
+/// loop. Errors are surfaced as an OpenAI-shaped 4xx/5xx by the caller.
+pub type SpeechFn = Arc<
+    dyn Fn(serde_json::Value) -> BoxFuture<'static, std::result::Result<(String, Vec<u8>), String>>
+        + Send
+        + Sync,
+>;
 
 /// Hook closures supplied by the daemon layer. The server itself is a thin
 /// wire adapter with no config semantics.
@@ -103,6 +113,8 @@ pub struct WebSettingsHooks {
     pub put_vocabulary: PutVocabularyFn,
     pub meta: MetaFn,
     pub doctor: DoctorFn,
+    /// OpenAI-compatible speech synthesis handler for `POST /v1/audio/speech`.
+    pub speak: SpeechFn,
 }
 
 /// Configuration for [`WebSettingsServer::start`]. Built from
@@ -288,6 +300,15 @@ async fn route(req: Request<Incoming>, ctx: ServerCtx) -> Response<ResBody> {
             }
         }
         (&Method::GET, "/api/meta") => json_ok(&(ctx.hooks.meta)()),
+        (&Method::POST, "/v1/audio/speech") => {
+            let Some(body) = read_json_body(req).await else {
+                return openai_error(StatusCode::BAD_REQUEST, "invalid or oversized JSON body");
+            };
+            match (ctx.hooks.speak)(body).await {
+                Ok((content_type, bytes)) => audio_response(content_type, bytes),
+                Err(e) => openai_error(StatusCode::BAD_REQUEST, &e),
+            }
+        }
         (&Method::GET, "/api/doctor") => match (ctx.hooks.doctor)().await {
             Ok(v) => json_ok(&v),
             Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -394,6 +415,30 @@ fn error_response(status: StatusCode, msg: &str) -> Response<ResBody> {
         .status(status)
         .header(hyper::header::CONTENT_TYPE, "application/json")
         .body(full(Bytes::from(body)))
+        .expect("static response builder")
+}
+
+/// OpenAI-shaped error body: `{"error": {"message", "type"}}`. Used by the
+/// `/v1/audio/*` gateway routes so off-the-shelf OpenAI clients parse it.
+fn openai_error(status: StatusCode, msg: &str) -> Response<ResBody> {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "error": { "message": msg, "type": "invalid_request_error" }
+    }))
+    .unwrap_or_default();
+    Response::builder()
+        .status(status)
+        .header(hyper::header::CONTENT_TYPE, "application/json")
+        .body(full(Bytes::from(body)))
+        .expect("static response builder")
+}
+
+/// Binary audio response (WAV or raw PCM) for `/v1/audio/speech`.
+fn audio_response(content_type: String, bytes: Vec<u8>) -> Response<ResBody> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(hyper::header::CONTENT_TYPE, content_type)
+        .header(hyper::header::CACHE_CONTROL, "no-store")
+        .body(full(Bytes::from(bytes)))
         .expect("static response builder")
 }
 

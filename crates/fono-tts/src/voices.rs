@@ -171,6 +171,20 @@ pub fn for_language(language: &str) -> Result<Option<Voice>> {
     Ok(catalog()?.into_iter().find(|v| v.language == language))
 }
 
+/// First catalog voice that speaks `language` **and** uses `engine`
+/// (`"piper"` / `"kokoro"`). Used when the user has pinned a single local
+/// engine via `[tts.local].engine`, so voice routing stays within that
+/// engine's catalog entries rather than following the default Auto policy.
+pub fn for_language_engine(language: &str, engine: &str) -> Result<Option<Voice>> {
+    Ok(catalog()?.into_iter().find(|v| v.language == language && v.engine == engine))
+}
+
+/// Every catalog voice using `engine` (`"piper"` / `"kokoro"`), in catalog
+/// order. Powers the settings UI's per-engine voice dropdowns.
+pub fn for_engine(engine: &str) -> Result<Vec<Voice>> {
+    Ok(catalog()?.into_iter().filter(|v| v.engine == engine).collect())
+}
+
 /// Build the local voice palette for the given active base languages
 /// (e.g. `["en", "ro"]`). Mirrors the engine policy — Kokoro voices for
 /// English, the Piper voice(s) for every other language — so the palette

@@ -229,6 +229,77 @@ function astopSeg() {
   return ms === 0 ? 'off' : ms === 3000 ? '3000' : ms === 5000 ? '5000' : 'custom';
 }
 
+// ---------- local TTS engine + voice picker ----------
+// Renders the engine card row (auto/piper/kokoro/supertonic from
+// /api/meta) plus a per-engine preset-voice dropdown, falling back to a
+// free-text catalog-id field for `auto` (which spans the whole catalog).
+function ttsLocalPanel() {
+  const engines = (meta && meta.tts_local && meta.tts_local.engines) || [];
+  const eng = gv('tts.local.engine', 'auto');
+  let out = '';
+  if (engines.length) {
+    const cards = engines.map((e) =>
+      [e.id, e.label, (e.voices && e.voices.length) ? e.voices.length + ' voices' : 'language-aware']);
+    out += '<div class="subhead">Engine</div>' + pgrid(cards, 'tts-local-engine', eng);
+  }
+  const cur = engines.find((e) => e.id === eng);
+  if (cur && cur.voices && cur.voices.length) {
+    const opts = [['', 'Default / auto']].concat(cur.voices.map((v) => {
+      const bits = [v.language, v.gender].filter((x) => x && x !== 'multi' && x !== 'neutral');
+      return [v.id, bits.length ? v.id + ' \u00b7 ' + bits.join(' \u00b7 ') : v.id];
+    }));
+    out += row('Voice', 'Preset voices for this engine.', sel('tts.local.voice', opts, ''));
+  } else {
+    out += row('Voice', 'Catalog voice id, e.g. en_US-lessac-medium. Empty = match your first language.',
+      txt('tts.local.voice', { mono: true, w: 220, ph: 'auto' }));
+  }
+  return out + row('Test', 'Plays through your browser.', ttsTestBox('local'));
+}
+
+// Inline "type a sentence and hear it" tester. `kind` picks how the
+// click handler resolves the route (local engine vs configured cloud
+// provider vs Wyoming). Ephemeral — not bound into cfg.
+function ttsTestBox(kind) {
+  return '<div class="ttstest">'
+    + '<input class="input tts-sample" placeholder="Type a sentence to hear it\u2026" '
+    + 'value="The quick brown fox jumps over the lazy dog." />'
+    + '<button class="btn" type="button" data-tts-test="' + kind + '">Test voice</button>'
+    + '<span class="hint tts-status"></span></div>';
+}
+
+// Synthesize via the OpenAI-compatible POST /v1/audio/speech endpoint and
+// play the returned WAV through the Web Audio API — so playback happens in
+// the browser even when the daemon runs on a remote box. This same Web
+// Audio primitive is what the future assistant page will build on for mic
+// capture + streamed audio.
+let ttsAudioCtx = null;
+async function playSpeech(model, voice, input, statusEl) {
+  if (statusEl) statusEl.textContent = 'Synthesizing\u2026';
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (TOKEN) headers['Authorization'] = 'Bearer ' + TOKEN;
+    const body = { model: model || undefined, input: input, response_format: 'wav' };
+    if (voice) body.voice = voice;
+    const r = await fetch('/v1/audio/speech', { method: 'POST', headers, body: JSON.stringify(body) });
+    if (!r.ok) {
+      let m = 'HTTP ' + r.status;
+      try { const j = await r.json(); m = (j.error && (j.error.message || j.error)) || m; } catch (e) { /* keep */ }
+      throw new Error(m);
+    }
+    const buf = await r.arrayBuffer();
+    ttsAudioCtx = ttsAudioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (ttsAudioCtx.state === 'suspended') await ttsAudioCtx.resume();
+    const audio = await ttsAudioCtx.decodeAudioData(buf);
+    const src = ttsAudioCtx.createBufferSource();
+    src.buffer = audio;
+    src.connect(ttsAudioCtx.destination);
+    src.start();
+    if (statusEl) statusEl.textContent = 'Playing \u00b7 ' + audio.duration.toFixed(1) + 's';
+  } catch (e) {
+    if (statusEl) statusEl.textContent = 'Error: ' + e.message;
+  }
+}
+
 // Segment click handlers: value -> mutate cfg; section is re-rendered.
 const SEG = {
   stt(v) {
@@ -283,6 +354,12 @@ const PICK = {
     set(cfg, 'tts.cloud.provider', v);
     set(cfg, 'tts.cloud.api_key_ref', ENV[v] || '');
     set(cfg, 'tts.backend', v);
+  },
+  'tts-local-engine'(v) {
+    // Preset voices differ per engine, so drop a stale cross-engine
+    // voice pin when switching (keeps the dropdown consistent).
+    if (gv('tts.local.engine', 'auto') !== v) set(cfg, 'tts.local.voice', '');
+    set(cfg, 'tts.local.engine', v);
   },
   'overlay-style'(v) { set(cfg, 'overlay.style', v); },
 };
@@ -468,21 +545,22 @@ const FONO_SECTIONS = [
       const s = ttsSeg();
       let panel = '';
       if (s === 'local') {
-        panel = row('Voice', 'Catalog voice id, e.g. en_US-lessac-medium. Empty = match your first language.',
-          txt('tts.local.voice', { mono: true, w: 220, ph: 'auto' }));
+        panel = ttsLocalPanel();
       } else if (s === 'cloud') {
         const p = gv('tts.backend', 'openai');
         panel = '<div class="subhead">Provider</div>' + pgrid(TTS_PROVIDERS, 'tts-provider', p)
           + '<div style="margin-top:12px">'
           + row('Model', 'Empty = provider default.', txt('tts.cloud.model', { mono: true, w: 200, ph: pdef(TTS_PROVIDERS, p) }))
           + row('Voice', 'Voice id \u2014 see `fono voices`. Empty = backend default.', txt('tts.voice', { mono: true, w: 200, ph: 'default' }))
-          + keyRow(ENV[p]) + '</div>';
+          + keyRow(ENV[p])
+          + row('Test', 'Plays through your browser.', ttsTestBox('cloud')) + '</div>';
       } else if (s === 'wyoming') {
         panel = row('Server URI', 'Wyoming protocol \u2014 e.g. tcp://10.0.0.4:10200.', txt('tts.wyoming.uri', { mono: true, w: 240 }))
           + row('Token ref', 'Optional pre-shared token reference.', txt('tts.wyoming.auth_token_ref', { mono: true, w: 180, ph: 'none' }))
-          + row('Voice', 'Empty = server default.', txt('tts.voice', { mono: true, w: 200, ph: 'default' }));
+          + row('Voice', 'Empty = server default.', txt('tts.voice', { mono: true, w: 200, ph: 'default' }))
+          + row('Test', 'Plays through your browser.', ttsTestBox('wyoming'));
       }
-      const dev = s === 'none' ? '' : row('Output device', 'Empty = system default.', txt('tts.output_device', { w: 200, ph: 'System default' }));
+      const dev = s === 'none' ? '' : row('Output device', 'Empty = system default (daemon-side playback only).', txt('tts.output_device', { w: 200, ph: 'System default' }));
       return row('Backend', 'Text-to-speech for assistant replies.',
         seg('tts', [['none', 'None'], ['local', 'Local'], ['cloud', 'Cloud'], ['wyoming', 'Network']], s)) + panel + dev;
     },
@@ -676,13 +754,31 @@ document.addEventListener('input', (e) => {
 });
 
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-seg],[data-pick],[data-tag-rm],[data-wake-rm],[data-wake-add],[data-vocab-rm],[data-vocab-add],[data-keycap],[data-reset],[data-key-edit],[data-key-clear],[data-key-save],[data-key-cancel]');
+  const t = e.target.closest('[data-seg],[data-pick],[data-tts-test],[data-tag-rm],[data-wake-rm],[data-wake-add],[data-vocab-rm],[data-vocab-add],[data-keycap],[data-reset],[data-key-edit],[data-key-clear],[data-key-save],[data-key-cancel]');
   if (!t) return;
   const secEl = t.closest('details.sec');
   const sec = secEl ? FONO_SECTIONS.find((s) => 'd-' + s.id === secEl.id) : null;
 
   if (t.dataset.seg) { SEG[t.dataset.seg](t.dataset.val); afterChange(t, sec); return; }
   if (t.dataset.pick) { PICK[t.dataset.pick](t.dataset.val); afterChange(t, sec); return; }
+  if (t.dataset.ttsTest) {
+    // Voice preview — never re-renders (that would drop the sample text
+    // and stop playback); resolves the route from the live cfg.
+    const wrap = t.closest('.ttstest');
+    const sample = wrap && wrap.querySelector('.tts-sample');
+    const status = wrap && wrap.querySelector('.tts-status');
+    const text = (sample && sample.value.trim()) || 'The quick brown fox jumps over the lazy dog.';
+    let model, voice;
+    if (t.dataset.ttsTest === 'local') {
+      model = gv('tts.local.engine', 'auto');
+      voice = gv('tts.local.voice', '');
+    } else {
+      model = gv('tts.backend', 'openai');
+      voice = gv('tts.voice', '');
+    }
+    playSpeech(model, voice, text, status);
+    return;
+  }
   if (t.dataset.tagRm !== undefined) {
     const box = t.closest('.tags');
     const arr = gv(box.dataset.tags, []).slice();

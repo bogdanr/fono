@@ -3840,6 +3840,7 @@ fn web_settings_hooks(
     });
 
     let (get_vocabulary, put_vocabulary) = vocabulary_hooks(paths);
+    let speak = speech_hook(config_path.clone(), secrets_path.clone(), paths.voices_dir());
     let meta = meta_hook(config_path, secrets_path);
 
     let doctor_paths = paths.clone();
@@ -3859,7 +3860,86 @@ fn web_settings_hooks(
         put_vocabulary,
         meta,
         doctor,
+        speak,
     }
+}
+
+/// OpenAI-compatible `POST /v1/audio/speech` handler for the settings server.
+/// Loads the current config + secrets fresh on each request (so a config
+/// change or a newly-added cloud key takes effect without a daemon restart),
+/// resolves the request's `model` route selector against the configured
+/// `[tts]` backend, builds the selected engine, synthesizes `input`, and
+/// encodes the PCM to WAV (default) or raw signed-16 PCM. The browser test
+/// box and any off-the-shelf OpenAI client share this one path.
+fn speech_hook(
+    config_path: std::path::PathBuf,
+    secrets_path: std::path::PathBuf,
+    voices_dir: std::path::PathBuf,
+) -> fono_net::web_settings::SpeechFn {
+    Arc::new(move |body: serde_json::Value| {
+        let config_path = config_path.clone();
+        let secrets_path = secrets_path.clone();
+        let voices_dir = voices_dir.clone();
+        Box::pin(async move {
+            let input = body.get("input").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            if input.trim().is_empty() {
+                return Err("`input` is required".to_string());
+            }
+            let model = body.get("model").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let voice = body
+                .get("voice")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let format =
+                body.get("response_format").and_then(|v| v.as_str()).unwrap_or("wav").to_string();
+            if !matches!(format.as_str(), "wav" | "pcm") {
+                return Err(format!(
+                    "unsupported response_format '{format}'; this endpoint encodes only \
+                     'wav' and 'pcm' (proxied cloud providers may offer more)"
+                ));
+            }
+
+            let cfg = Config::load(&config_path).map_err(|e| format!("load config: {e}"))?;
+            let secrets = Secrets::load(&secrets_path).unwrap_or_default();
+            let mut tts_cfg = cfg.tts.resolve_speech_route(&model)?;
+            if let Some(v) = voice {
+                // Local engines read the voice/speaker from `[tts.local].voice`;
+                // cloud backends from the top-level `[tts].voice`.
+                if tts_cfg.backend == fono_core::config::TtsBackend::Local {
+                    tts_cfg.local.voice = v;
+                } else {
+                    tts_cfg.voice = v;
+                }
+            }
+            let languages = cfg.general.languages.clone();
+
+            // Building a local engine loads ONNX models (blocking); do it off
+            // the async accept loop. Cloud clients construct cheaply but this
+            // is uniform and harmless.
+            let backend = tokio::task::spawn_blocking(move || {
+                fono_tts::build_tts(&tts_cfg, &secrets, &languages, &voices_dir)
+            })
+            .await
+            .map_err(|e| format!("synthesis task panicked: {e}"))?
+            .map_err(|e| format!("{e:#}"))?
+            .ok_or_else(|| "TTS is disabled ([tts].backend = none)".to_string())?;
+
+            let audio = backend
+                .synthesize(input.trim(), None, None)
+                .await
+                .map_err(|e| format!("synthesis failed: {e:#}"))?;
+
+            if format == "pcm" {
+                Ok(("audio/pcm".to_string(), fono_core::wav::encode_pcm_s16le(&audio.pcm)))
+            } else {
+                Ok((
+                    "audio/wav".to_string(),
+                    fono_core::wav::encode_wav(&audio.pcm, audio.sample_rate),
+                ))
+            }
+        })
+    })
 }
 
 /// Page-metadata hook for the web settings server. Split out of
@@ -3893,6 +3973,8 @@ fn meta_hook(
             "version": env!("CARGO_PKG_VERSION"),
             "config_path": config_path.display().to_string(),
             "secrets": statuses,
+            "tts_local": tts_local_meta(),
+            "tts_cloud": tts_cloud_meta(&secrets),
             "defaults": {
                 "polish_prompt_main": fono_core::config::default_prompt_main(),
                 "polish_prompt_advanced": fono_core::config::default_prompt_advanced(),
@@ -3900,6 +3982,72 @@ fn meta_hook(
             },
         })
     })
+}
+
+/// Local-TTS engine + voice metadata for the settings UI: the engine picker
+/// options (`auto`/`piper`/`kokoro`/`supertonic`) and, per engine, the
+/// selectable voices from the compiled-in catalog (Supertonic exposes its
+/// numeric speakers). Consumed by the Voice section's engine cards + voice
+/// dropdown. Empty voice lists on the non-`tts-local` build are fine — the UI
+/// simply shows the engine with no presets.
+#[cfg(feature = "tts-local")]
+fn tts_local_meta() -> serde_json::Value {
+    let voices_for = |engine: &str| -> Vec<serde_json::Value> {
+        fono_tts::voices::for_engine(engine)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| {
+                serde_json::json!({
+                    "id": v.name,
+                    "language": v.language,
+                    "gender": v.gender().as_str(),
+                })
+            })
+            .collect()
+    };
+    // Supertonic ships 10 numeric speakers in one shared pack.
+    let supertonic_voices: Vec<serde_json::Value> = (0..10)
+        .map(|i| serde_json::json!({ "id": i.to_string(), "language": "multi", "gender": "neutral" }))
+        .collect();
+    serde_json::json!({
+        "engines": [
+            { "id": "auto", "label": "Auto (recommended)", "voices": [] },
+            { "id": "piper", "label": "Piper", "voices": voices_for("piper") },
+            { "id": "kokoro", "label": "Kokoro", "voices": voices_for("kokoro") },
+            { "id": "supertonic", "label": "Supertonic", "voices": supertonic_voices },
+        ]
+    })
+}
+
+#[cfg(not(feature = "tts-local"))]
+fn tts_local_meta() -> serde_json::Value {
+    serde_json::json!({ "engines": [] })
+}
+
+/// Cloud-TTS provider metadata for the settings UI test box: every catalog
+/// provider that offers TTS, whether its API key is currently resolvable
+/// (so the UI can grey out un-keyed providers), its default voice, and its
+/// curated voice palette. Key *values* are never exposed — only a boolean.
+fn tts_cloud_meta(secrets: &Secrets) -> serde_json::Value {
+    let providers: Vec<serde_json::Value> = fono_core::provider_catalog::CLOUD_PROVIDERS
+        .iter()
+        .filter_map(|p| {
+            let tts = p.tts.as_ref()?;
+            let voices: Vec<serde_json::Value> = tts
+                .voices
+                .iter()
+                .map(|v| serde_json::json!({ "id": v.backend_id, "gender": v.gender.as_str() }))
+                .collect();
+            Some(serde_json::json!({
+                "id": p.id,
+                "display_name": p.display_name,
+                "has_key": secrets.resolve(p.key_env).is_some(),
+                "default_voice": tts.default_voice,
+                "voices": voices,
+            }))
+        })
+        .collect();
+    serde_json::json!({ "providers": providers })
 }
 
 /// Vocabulary read/write hooks for the web settings server. Split out of

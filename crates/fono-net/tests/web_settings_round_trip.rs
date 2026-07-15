@@ -32,6 +32,7 @@ fn stub_hooks() -> WebSettingsHooks {
         put_vocabulary: Arc::new(|_| Ok(String::new())),
         meta: Arc::new(|| serde_json::json!({})),
         doctor,
+        speak: Arc::new(|_| Box::pin(async { Err("speech disabled in test".to_string()) })),
     }
 }
 

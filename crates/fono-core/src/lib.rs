@@ -23,6 +23,7 @@ pub mod turn_trace;
 pub mod voice_discovery;
 pub mod voice_palette;
 pub mod voice_resolver;
+pub mod wav;
 
 #[cfg(feature = "budget")]
 pub mod budget;

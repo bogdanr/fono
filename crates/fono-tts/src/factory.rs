@@ -112,11 +112,44 @@ fn build_local(
     languages: &[String],
     voices_dir: &Path,
 ) -> Result<Arc<dyn TextToSpeech>> {
+    use fono_core::config::TtsLocalEngine;
+    // Supertonic is a single shared pack outside the catalog router, so it is
+    // built directly from the cached pack dir. The daemon ensures the pack at
+    // startup when the engine is pinned to Supertonic (mirroring the voice
+    // ensure flow); a missing pack yields an actionable error here.
+    if cfg.local.engine == TtsLocalEngine::Supertonic {
+        return build_supertonic(cfg, voices_dir);
+    }
     let pinned = !cfg.local.voice.is_empty();
     let default_voice = resolve_local_voice(cfg, languages)?;
-    let router =
-        crate::local_router::LocalRouter::new(voices_dir, default_voice, pinned, languages)?;
+    let engine_filter = cfg.local.engine.catalog_filter().map(str::to_string);
+    let router = crate::local_router::LocalRouter::new(
+        voices_dir,
+        default_voice,
+        pinned,
+        languages,
+        engine_filter,
+    )?;
     Ok(Arc::new(router))
+}
+
+/// Build the Supertonic engine from the cached pack under
+/// `voices_dir/supertonic/`. The speaker id comes from `[tts.local].voice`
+/// (a Supertonic speaker name or 0-based index); an empty/unknown value uses
+/// speaker 0.
+#[cfg(feature = "tts-local")]
+fn build_supertonic(cfg: &Tts, voices_dir: &Path) -> Result<Arc<dyn TextToSpeech>> {
+    let pack_dir = crate::supertonic::supertonic_dir(voices_dir);
+    if !pack_dir.join(crate::supertonic::CONFIG.file).is_file() {
+        return Err(anyhow!(
+            "Supertonic engine selected but its voice pack is not present under {}; \
+             the daemon downloads it on startup — check the logs for a download error",
+            pack_dir.display()
+        ));
+    }
+    let sid = crate::supertonic::style::speaker_id(&cfg.local.voice).unwrap_or(0);
+    let engine = crate::supertonic::engine::SupertonicLocal::load(&pack_dir, sid)?;
+    Ok(Arc::new(engine))
 }
 
 /// Resolve which catalog voice the local backend should load: the

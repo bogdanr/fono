@@ -583,30 +583,13 @@ impl GroqStt {
 }
 
 /// Encode mono f32 samples as a 16-bit PCM WAV blob.
+///
+/// Thin re-export of [`fono_core::wav::encode_wav`], the shared home for the
+/// encoder (so the `fono-net` speech gateway can reuse it without depending on
+/// `fono-stt`). Kept here so the many in-crate callers stay unchanged.
+#[must_use]
 pub fn encode_wav(pcm: &[f32], sample_rate: u32) -> Vec<u8> {
-    let num_samples = pcm.len() as u32;
-    let byte_rate = sample_rate * 2;
-    let data_size = num_samples * 2;
-    let mut out = Vec::with_capacity(44 + data_size as usize);
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&(36 + data_size).to_le_bytes());
-    out.extend_from_slice(b"WAVE");
-    out.extend_from_slice(b"fmt ");
-    out.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
-    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    out.extend_from_slice(&1u16.to_le_bytes()); // mono
-    out.extend_from_slice(&sample_rate.to_le_bytes());
-    out.extend_from_slice(&byte_rate.to_le_bytes());
-    out.extend_from_slice(&2u16.to_le_bytes()); // block align
-    out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&data_size.to_le_bytes());
-    for s in pcm {
-        let clamped = s.clamp(-1.0, 1.0);
-        let i = (clamped * i16::MAX as f32) as i16;
-        out.extend_from_slice(&i.to_le_bytes());
-    }
-    out
+    fono_core::wav::encode_wav(pcm, sample_rate)
 }
 
 #[cfg(test)]

@@ -131,6 +131,26 @@ impl SupertonicStyle {
     }
 }
 
+/// Resolve a Supertonic speaker id from a configured `[tts.local].voice`
+/// string. Supertonic speakers are 0-based numeric indices (the pack ships
+/// 10), so this accepts a bare index (`"3"`) or any name/prefix ending in
+/// digits (`"speaker3"`, `"supertonic-3"`). Returns `None` when the string
+/// carries no trailing digits, so the caller falls back to speaker 0. The
+/// engine clamps out-of-range ids at synthesis time.
+#[must_use]
+pub fn speaker_id(voice: &str) -> Option<i64> {
+    let tail: String = voice
+        .trim()
+        .chars()
+        .rev()
+        .take_while(char::is_ascii_digit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    tail.parse().ok()
+}
+
 /// `a*b*c` as `usize` with the reference's positivity + overflow guard.
 fn mul3(a: i64, b: i64, c: i64, name: &str) -> Result<usize> {
     let overflow = || anyhow::anyhow!("invalid voice.bin: {name} dims overflow");
@@ -248,5 +268,16 @@ mod tests {
             err.to_string().contains("too large") || err.to_string().contains("overflow"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn speaker_id_parses_bare_index_and_trailing_digits() {
+        assert_eq!(speaker_id("3"), Some(3));
+        assert_eq!(speaker_id(" 7 "), Some(7));
+        assert_eq!(speaker_id("speaker5"), Some(5));
+        assert_eq!(speaker_id("supertonic-10"), Some(10));
+        // No trailing digits → None (caller falls back to speaker 0).
+        assert_eq!(speaker_id(""), None);
+        assert_eq!(speaker_id("default"), None);
     }
 }

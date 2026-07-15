@@ -1,6 +1,46 @@
 # Fono — Project Status
 Last updated: 2026-07-15
 
+## 2026-07-15 — Local TTS engine picker + OpenAI-compatible `/v1/audio/speech`
+
+The settings UI's Voice section grew a proper local-engine experience,
+and Fono gained a standard speech-synthesis HTTP endpoint
+(plan: `plans/2026-07-15-web-settings-local-tts-ux-v5.md`):
+
+- **`tts.local.engine` config field** (`auto`/`piper`/`kokoro`/`supertonic`,
+  default `auto` = today's language-aware routing). `auto`/`piper`/`kokoro`
+  route through the catalog router with an engine filter; `supertonic`
+  builds the shared Supertonic pack directly (previously implemented but
+  unreachable). The daemon ensures the Supertonic pack at startup when the
+  engine is pinned.
+- **Voice routing resolver.** `Tts::resolve_speech_route(model)` maps an
+  OpenAI-`model`-shaped route selector to a per-request backend: empty =
+  the configured `[tts]` backend; `piper`/`kokoro`/`supertonic`/`local` =
+  on-device; every cloud provider id (`gemini`, `elevenlabs`, …) selects
+  that backend; a `provider/model` suffix (split on the first slash, so
+  `openrouter/openai/tts-1` works) overrides the cloud model. Unit-tested.
+- **`POST /v1/audio/speech`** (OpenAI Audio API shape) on the settings
+  server, token-gated, returning `audio/wav` (default) or raw `pcm`. One
+  daemon `SpeechFn` hook loads config + secrets fresh per request, resolves
+  the route, builds the engine off the accept loop, synthesizes, and
+  encodes via the new shared `fono_core::wav` helpers (promoted from
+  `fono-stt` to avoid a `fono-net → fono-stt` edge). Works for local and
+  cloud backends alike through the existing TTS factory.
+- **Settings UI.** Local backend now shows an engine card row + a
+  per-engine preset-voice dropdown (from a new `/api/meta` `tts_local`
+  block), plus an inline "type a sentence, hear it" tester that plays the
+  WAV through the **Web Audio API** — so preview works even when the
+  daemon runs on a remote box. Cloud + Network segments got the tester
+  too. `/api/meta` also exposes a `tts_cloud` block (per-provider key
+  presence + voice palette; key values never leave the daemon).
+- **Severable follow-ups (not in this slice):** mounting the endpoint on
+  the LLM server with the verbatim cloud-proxy fast-lane + attribution
+  headers, and the sibling `POST /v1/audio/transcriptions`. The adapter
+  path already reaches cloud TTS today; the proxy lane is a latency/format
+  optimization.
+- **Gates.** fmt / clippy (default + `tts-local`) / workspace tests all
+  green.
+
 ## 2026-07-15 — Web doctor: health icon + `#/doctor` page in the settings UI
 
 `fono doctor` is now reachable from the browser settings page

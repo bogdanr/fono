@@ -619,6 +619,13 @@ pub struct TtsCloud {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct TtsLocal {
+    /// Which on-device engine to use. `auto` (default) keeps the
+    /// language-aware router behaviour (Kokoro for English, Piper for
+    /// the rest — ADR 0033); `piper` / `kokoro` / `supertonic` pin a
+    /// single engine and constrain voice selection to that engine's
+    /// catalog entries.
+    #[serde(default, skip_serializing_if = "TtsLocalEngine::is_auto")]
+    pub engine: TtsLocalEngine,
     /// Catalog voice id, e.g. `ro_RO-mihai-medium`. Empty = pick the
     /// first catalog voice matching the first entry of
     /// `general.languages`.
@@ -628,6 +635,141 @@ pub struct TtsLocal {
     /// the built-in `fono-voice` default.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_url: String,
+}
+
+/// On-device TTS engine selector for `[tts.local].engine`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TtsLocalEngine {
+    /// Language-aware routing across the local catalog (ADR 0033).
+    #[default]
+    Auto,
+    /// Pin the Piper engine.
+    Piper,
+    /// Pin the Kokoro engine.
+    Kokoro,
+    /// Pin the Supertonic engine.
+    Supertonic,
+}
+
+impl TtsLocalEngine {
+    /// True for the default `auto` variant (used by `skip_serializing_if`).
+    #[must_use]
+    pub fn is_auto(&self) -> bool {
+        matches!(self, Self::Auto)
+    }
+    /// The catalog engine name (`"piper"` / `"kokoro"`) this pin constrains
+    /// voice routing to, or `None` for `Auto` (language-aware routing across
+    /// the whole catalog) and `Supertonic` (built directly, outside the
+    /// catalog router).
+    #[must_use]
+    pub fn catalog_filter(&self) -> Option<&'static str> {
+        match self {
+            Self::Piper => Some("piper"),
+            Self::Kokoro => Some("kokoro"),
+            Self::Auto | Self::Supertonic => None,
+        }
+    }
+
+    /// Parse a local-engine token (`auto`/`piper`/`kokoro`/`supertonic`).
+    ///
+    /// # Errors
+    /// Returns the offending token when it names no known local engine.
+    pub fn parse(token: &str) -> std::result::Result<Self, String> {
+        match token {
+            "auto" | "" => Ok(Self::Auto),
+            "piper" => Ok(Self::Piper),
+            "kokoro" => Ok(Self::Kokoro),
+            "supertonic" => Ok(Self::Supertonic),
+            other => Err(format!("unknown local TTS engine: '{other}'")),
+        }
+    }
+}
+
+impl Tts {
+    /// Resolve an OpenAI-`model`-shaped route selector into a per-request
+    /// [`Tts`] config, starting from `self` (the daemon's configured
+    /// backend) as the default.
+    ///
+    /// The `model` field is a namespaced route: the leading segment (up to
+    /// the first `/`) picks the provider/engine, and any suffix after the
+    /// first `/` is the provider's own model id (`openrouter/openai/tts-1`
+    /// → OpenRouter with model `openai/tts-1`). An empty/blank `model`
+    /// keeps the configured backend. Local engine tokens (`auto`, `piper`,
+    /// `kokoro`, `supertonic`, and `local[/engine]`) select the on-device
+    /// router; every other leading segment must name a cloud TTS provider.
+    ///
+    /// This is pure routing logic — availability (whether a cloud key
+    /// actually resolves) is enforced later when the backend is built.
+    ///
+    /// # Errors
+    /// Returns an OpenAI-shaped message when the leading segment names no
+    /// known provider or engine.
+    pub fn resolve_speech_route(&self, model: &str) -> std::result::Result<Self, String> {
+        let mut cfg = self.clone();
+        let model = model.trim();
+        if model.is_empty() {
+            return Ok(cfg);
+        }
+        let (provider, suffix) = match model.split_once('/') {
+            Some((p, rest)) => (p, (!rest.is_empty()).then_some(rest)),
+            None => (model, None),
+        };
+        let set_cloud_model = |cfg: &mut Self, suffix: Option<&str>| {
+            if let Some(m) = suffix {
+                let mut cloud = cfg.cloud.take().unwrap_or_default();
+                cloud.model = m.to_string();
+                cfg.cloud = Some(cloud);
+            }
+        };
+        match provider {
+            "local" => {
+                cfg.backend = TtsBackend::Local;
+                if let Some(s) = suffix {
+                    cfg.local.engine = TtsLocalEngine::parse(s)?;
+                }
+            }
+            "auto" | "piper" | "kokoro" | "supertonic" => {
+                cfg.backend = TtsBackend::Local;
+                cfg.local.engine = TtsLocalEngine::parse(provider)?;
+            }
+            "wyoming" => cfg.backend = TtsBackend::Wyoming,
+            "openai" => {
+                cfg.backend = TtsBackend::OpenAI;
+                set_cloud_model(&mut cfg, suffix);
+            }
+            "groq" => {
+                cfg.backend = TtsBackend::Groq;
+                set_cloud_model(&mut cfg, suffix);
+            }
+            "openrouter" => {
+                cfg.backend = TtsBackend::OpenRouter;
+                set_cloud_model(&mut cfg, suffix);
+            }
+            "cartesia" => {
+                cfg.backend = TtsBackend::Cartesia;
+                set_cloud_model(&mut cfg, suffix);
+            }
+            "deepgram" => {
+                cfg.backend = TtsBackend::Deepgram;
+                set_cloud_model(&mut cfg, suffix);
+            }
+            "elevenlabs" => {
+                cfg.backend = TtsBackend::ElevenLabs;
+                set_cloud_model(&mut cfg, suffix);
+            }
+            "speechmatics" => {
+                cfg.backend = TtsBackend::Speechmatics;
+                set_cloud_model(&mut cfg, suffix);
+            }
+            "gemini" => {
+                cfg.backend = TtsBackend::Gemini;
+                set_cloud_model(&mut cfg, suffix);
+            }
+            other => return Err(format!("unknown TTS model/provider: '{other}'")),
+        }
+        Ok(cfg)
+    }
 }
 
 /// `[tts.wyoming]` — coordinates of a Wyoming-protocol TTS server.
@@ -1781,6 +1923,52 @@ pub(crate) fn atomic_write(path: &Path, data: &[u8], _mode: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speech_route_empty_keeps_configured_backend() {
+        let mut base = Tts { backend: TtsBackend::Gemini, ..Tts::default() };
+        base.voice = "Kore".into();
+        assert_eq!(base.resolve_speech_route("").unwrap().backend, TtsBackend::Gemini);
+        assert_eq!(base.resolve_speech_route("   ").unwrap().backend, TtsBackend::Gemini);
+    }
+
+    #[test]
+    fn speech_route_local_engine_tokens() {
+        let base = Tts::default();
+        let r = base.resolve_speech_route("kokoro").unwrap();
+        assert_eq!(r.backend, TtsBackend::Local);
+        assert_eq!(r.local.engine, TtsLocalEngine::Kokoro);
+        let r = base.resolve_speech_route("supertonic").unwrap();
+        assert_eq!(r.local.engine, TtsLocalEngine::Supertonic);
+        // `local/piper` selects the router then pins the engine.
+        let r = base.resolve_speech_route("local/piper").unwrap();
+        assert_eq!(r.backend, TtsBackend::Local);
+        assert_eq!(r.local.engine, TtsLocalEngine::Piper);
+    }
+
+    #[test]
+    fn speech_route_cloud_provider_and_model_suffix() {
+        let base = Tts::default();
+        let r = base.resolve_speech_route("gemini").unwrap();
+        assert_eq!(r.backend, TtsBackend::Gemini);
+        let r = base.resolve_speech_route("elevenlabs/eleven_turbo_v2").unwrap();
+        assert_eq!(r.backend, TtsBackend::ElevenLabs);
+        assert_eq!(r.cloud.unwrap().model, "eleven_turbo_v2");
+    }
+
+    #[test]
+    fn speech_route_nested_openrouter_splits_on_first_slash() {
+        let base = Tts::default();
+        let r = base.resolve_speech_route("openrouter/openai/tts-1").unwrap();
+        assert_eq!(r.backend, TtsBackend::OpenRouter);
+        // Everything after the first slash is the downstream model id.
+        assert_eq!(r.cloud.unwrap().model, "openai/tts-1");
+    }
+
+    #[test]
+    fn speech_route_unknown_provider_errors() {
+        assert!(Tts::default().resolve_speech_route("nope").is_err());
+    }
 
     #[test]
     fn mcp_voice_defaults_and_roundtrip() {
