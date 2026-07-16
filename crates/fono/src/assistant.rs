@@ -488,6 +488,9 @@ pub async fn run_assistant_turn(
         screen_capture: screen_capture_fn,
         prefer_vision,
         max_new_tokens: None,
+        // Local hotkey-triggered turn: this is the one the on-screen
+        // overlay is meant to visualize, so allow the brain-capture tap.
+        allow_brain_capture: true,
     };
 
     // 3. Open the LLM stream.
@@ -628,7 +631,13 @@ pub async fn run_assistant_turn(
     // language the STT engine actually detected for this turn (falling back to
     // the configured hint), so a Romanian reply is spoken by the Romanian
     // voice rather than whichever voice the primary language resolved to.
-    let tts_lang: Option<String> = metrics.language.clone();
+    //
+    // Normalise to an alpha-2 code here: some STT backends surface the full
+    // English name Whisper emits ("romanian") rather than the code ("ro"),
+    // and the local TTS engines only accept codes. This is the single point
+    // every STT path converges on, so normalising once guards them all.
+    let tts_lang: Option<String> =
+        metrics.language.as_deref().map(fono_stt::lang::whisper_lang_to_code);
 
     loop {
         let next = tokio::select! {
@@ -1669,6 +1678,9 @@ pub async fn run_realtime_turn(
         screen_capture: screen_capture_fn,
         prefer_vision,
         max_new_tokens: None,
+        // Local hotkey-triggered turn: this is the one the on-screen
+        // overlay is meant to visualize, so allow the brain-capture tap.
+        allow_brain_capture: true,
     };
 
     // Open the live session.
@@ -1947,6 +1959,9 @@ pub async fn run_live_session(
         screen_capture: None,
         prefer_vision: false,
         max_new_tokens: None,
+        // Local hotkey-triggered turn: this is the one the on-screen
+        // overlay is meant to visualize, so allow the brain-capture tap.
+        allow_brain_capture: true,
     };
 
     // Connect on demand. On failure, classify + notify like the PTT

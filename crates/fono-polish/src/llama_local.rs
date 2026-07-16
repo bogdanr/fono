@@ -199,7 +199,11 @@ impl LlamaLocal {
         *guard = Some(model);
         if self.brain_tap_enabled {
             let n_layer = guard.as_ref().map_or(0, |m| m.n_layer());
-            let tap = self.brain_tap.get_or_init(|| Arc::new(BrainTap::new(n_layer)));
+            let (n_expert, n_expert_used) =
+                guard.as_ref().map_or((0, 0), |m| fono_core::brain_tap::model_expert_counts(m));
+            let tap = self
+                .brain_tap
+                .get_or_init(|| Arc::new(BrainTap::new(n_layer, n_expert, n_expert_used)));
             debug!("brain tap ready: {} layers, interval {}", tap.n_layer(), tap.interval());
         }
         Ok(())

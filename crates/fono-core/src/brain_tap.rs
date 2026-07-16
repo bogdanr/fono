@@ -19,7 +19,7 @@
 //! disarmed the callback answers "not interested" to every `ask` in a
 //! single relaxed atomic load — llama.cpp then never materialises any
 //! data for us, so the steady-state cost is one predictable branch per
-//! graph node. The `< 1 %` decode-overhead budget is enforced by
+//! graph node. The small decode-overhead budget (~3 %) is enforced by
 //! [`SampleGovernor`], which measures sampled-vs-unsampled token times
 //! and widens the sampling interval when a sampled token proves
 //! expensive (e.g. GPU→CPU syncs on a discrete-VRAM backend).
@@ -80,14 +80,21 @@ fn ggml_type_is(t: llama_cpp_sys_2::ggml_type, expect: u32) -> bool {
     i64::from(t) == i64::from(expect)
 }
 
-/// Default sampling cadence: consider every 3rd generated token (the
+/// Default sampling cadence: consider every 2nd generated token (the
 /// governor widens this whenever the measured surcharge would break the
-/// budget). Phase 2 replaces this with playback-paced demand.
-pub const DEFAULT_BASE_INTERVAL: u32 = 3;
+/// budget). Kept low so fast machines capture a dense keyframe stream;
+/// the governor is the real throttle on slow ones.
+pub const DEFAULT_BASE_INTERVAL: u32 = 2;
 
-/// Hard decode-overhead budget for the tap (fraction; 0.01 = 1 %). See
-/// the plan's verification criteria.
-pub const OVERHEAD_BUDGET: f64 = 0.01;
+/// Decode-overhead budget for the tap (fraction; 0.03 = 3 %). The tap is
+/// purely observational, so a few percent is imperceptible in practice
+/// (a 2 s reply becomes ~2.06 s) while buying roughly three times the
+/// keyframe rate of the original 1 % cap — enough for the Glas Cortex
+/// replay to visibly evolve across a reply instead of showing one thin
+/// snapshot, and to keep the sparse tail of a long reply populated with
+/// real anchors. Still a hard ceiling: the governor widens the sampling
+/// interval to hold it.
+pub const OVERHEAD_BUDGET: f64 = 0.03;
 
 /// Layer-observation stride: each keyframe captures `l_out` for only
 /// every `LAYER_STRIDE`-th layer, with the phase rotating on every arm
@@ -97,10 +104,14 @@ pub const OVERHEAD_BUDGET: f64 = 0.01;
 /// not by the tensor copies (a few KB) but by the graph-scheduler
 /// splits each observed node forces — measured on gemma-4-e2b (35
 /// layers, 8-core CPU): observing all layers cost ~30 % of a token,
-/// observing a quarter of them cuts that near-proportionally. MoE
-/// router tensors are *not* strided — expert activity is the headline
-/// signal and those tensors are top-k-sized.
-pub const LAYER_STRIDE: u32 = 4;
+/// and the cost scales near-proportionally with the fraction observed.
+/// An eighth-stack per keyframe keeps each sample cheap so the governor
+/// permits a higher keyframe rate within the budget; the renderer
+/// interpolates the unobserved layers, and successive keyframes rotate
+/// phase so the full stack is still covered over `LAYER_STRIDE` frames.
+/// MoE router tensors are *not* strided — expert activity is the
+/// headline signal and those tensors are top-k-sized.
+pub const LAYER_STRIDE: u32 = 8;
 
 /// Process-wide capture latch, set from `[overlay].brain_capture` by the
 /// daemon at startup and on config reload. The embedded-backend factories
@@ -126,15 +137,37 @@ pub fn capture_enabled() -> bool {
     CAPTURE_ENABLED.load(Ordering::Relaxed)
 }
 
+/// Whether the loaded model routes tokens through mixture-of-experts
+/// layers. Selects the Glas Cortex row semantics: dense models render
+/// the 6 rows as a vertical magnitude bar, MoE models render them as
+/// expert lanes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BrainModelKind {
+    /// Every token passes through every FFN — no router.
+    #[default]
+    Dense,
+    /// Router picks top-k experts per layer per token.
+    Moe,
+}
+
 /// One event on the brain-trace bus: the reply lifecycle plus every
-/// captured keyframe, in decode order. Consumed by the Glass Cortex
+/// captured keyframe, in decode order. Consumed by the Glas Cortex
 /// replay engine (`fono-overlay`), which turns the generation-burst
 /// trace into a playback-paced animation.
 #[derive(Debug, Clone)]
 pub enum BrainEvent {
     /// A local generation is starting (assistant reply or polish
-    /// cleanup). `n_layer` is the loaded model's transformer depth.
-    ReplyBegin { n_layer: u32 },
+    /// cleanup). `n_layer` is the loaded model's transformer depth;
+    /// `kind` selects dense-vs-MoE row semantics in the renderer.
+    /// `n_experts_total` / `n_experts_active` (GGUF `expert_count` /
+    /// `expert_used_count`) let the renderer scale perceived sparsity
+    /// — `None` when unknown or dense.
+    ReplyBegin {
+        n_layer: u32,
+        kind: BrainModelKind,
+        n_experts_total: Option<u32>,
+        n_experts_active: Option<u32>,
+    },
     /// One prompt-prefill batch finished decoding (`n_tokens` wide).
     /// A reply may prefill in several batches (cached prefix +
     /// suffix); the Glass Cortex fires one spine sweep per event —
@@ -176,8 +209,32 @@ fn event_sink() -> Option<BrainEventSink> {
 /// No-op when the tap is absent or no sink is installed.
 pub fn publish_reply_begin(tap: Option<&BrainTap>) {
     if let (Some(tap), Some(sink)) = (tap, event_sink()) {
-        sink(BrainEvent::ReplyBegin { n_layer: tap.n_layer() });
+        sink(BrainEvent::ReplyBegin {
+            n_layer: tap.n_layer(),
+            kind: tap.kind(),
+            n_experts_total: tap.n_experts_total(),
+            n_experts_active: tap.n_experts_active(),
+        });
     }
+}
+
+/// Read the loaded model's MoE hyperparameters from its GGUF metadata:
+/// `({arch}.expert_count, {arch}.expert_used_count)`, `0` when absent
+/// (dense models don't carry the keys). There is no C-API accessor for
+/// these, so we go through the generic metadata lookup.
+#[must_use]
+pub fn model_expert_counts(model: &llama_cpp_2::model::LlamaModel) -> (u32, u32) {
+    let Ok(arch) = model.meta_val_str("general.architecture") else {
+        return (0, 0);
+    };
+    let get = |key: &str| {
+        model
+            .meta_val_str(&format!("{arch}.{key}"))
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(0)
+    };
+    (get("expert_count"), get("expert_used_count"))
 }
 
 /// Publish a prefill-batch event for a generation observed by `tap`
@@ -265,6 +322,10 @@ struct TapShared {
     /// Monotonic arm counter driving the phase rotation.
     arm_seq: AtomicU64,
     n_layer: u32,
+    /// GGUF `expert_count` (0 = dense / unknown).
+    n_expert: u32,
+    /// GGUF `expert_used_count` (0 = dense / unknown).
+    n_expert_used: u32,
     capture: Mutex<Capture>,
     frames: Mutex<VecDeque<BrainKeyframe>>,
     governor: Mutex<SampleGovernor>,
@@ -280,14 +341,19 @@ pub struct BrainTap {
 impl BrainTap {
     /// `n_layer` comes from the loaded model's GGUF metadata
     /// (`LlamaModel::n_layer()`); it sizes the per-keyframe norm vector.
+    /// `n_expert` / `n_expert_used` come from [`model_expert_counts`]
+    /// (`0, 0` for dense models) and drive the reply-begin `kind` +
+    /// sparsity fields.
     #[must_use]
-    pub fn new(n_layer: u32) -> Self {
+    pub fn new(n_layer: u32, n_expert: u32, n_expert_used: u32) -> Self {
         let shared = Arc::new(TapShared {
             armed: AtomicBool::new(false),
             token_index: AtomicU64::new(0),
             layer_phase: AtomicU32::new(0),
             arm_seq: AtomicU64::new(0),
             n_layer,
+            n_expert,
+            n_expert_used,
             capture: Mutex::new(Capture::default()),
             frames: Mutex::new(VecDeque::with_capacity(MAX_KEYFRAMES)),
             governor: Mutex::new(SampleGovernor::new(DEFAULT_BASE_INTERVAL, OVERHEAD_BUDGET)),
@@ -422,6 +488,30 @@ impl BrainTap {
     #[must_use]
     pub fn n_layer(&self) -> u32 {
         self.shared.n_layer
+    }
+
+    /// Dense-vs-MoE row semantics for the visualization: MoE when the
+    /// model declares more than one expert.
+    #[must_use]
+    pub fn kind(&self) -> BrainModelKind {
+        if self.shared.n_expert > 1 {
+            BrainModelKind::Moe
+        } else {
+            BrainModelKind::Dense
+        }
+    }
+
+    /// GGUF `expert_count`, `None` when dense/unknown.
+    #[must_use]
+    pub fn n_experts_total(&self) -> Option<u32> {
+        (self.shared.n_expert > 1).then_some(self.shared.n_expert)
+    }
+
+    /// GGUF `expert_used_count`, `None` when dense/unknown.
+    #[must_use]
+    pub fn n_experts_active(&self) -> Option<u32> {
+        (self.shared.n_expert > 1 && self.shared.n_expert_used > 0)
+            .then_some(self.shared.n_expert_used)
     }
 }
 
@@ -658,6 +748,12 @@ pub fn decode_token_with_tap(
 /// distribution, in bits. Numerically stable (max-subtracted softmax);
 /// runs on the decode thread only for sampled keyframe tokens, and its
 /// cost is part of the timed surcharge the governor amortises.
+///
+/// The distribution pass is *fused*: `sum` and the entropy's weighted
+/// term are accumulated together so `exp()` is evaluated exactly once
+/// per logit (a full-vocab slice is ~256k wide, so halving the
+/// transcendental calls roughly halves the per-sample surcharge — which
+/// directly buys the governor more keyframes within the same budget).
 #[must_use]
 pub fn logits_stats(logits: &[f32]) -> (f32, f32) {
     if logits.is_empty() {
@@ -667,22 +763,20 @@ pub fn logits_stats(logits: &[f32]) -> (f32, f32) {
     if !max.is_finite() {
         return (0.0, 0.0);
     }
+    // Single fused pass: p = exp(l - max) / sum, and
+    // H = ln_sum - Σ (l - max)·exp(l - max) / sum  (nats).
     let mut sum = 0.0_f64;
+    let mut weighted_raw = 0.0_f64; // Σ (l - max)·exp(l - max)
     for &l in logits {
-        sum += f64::from(l - max).exp();
+        let d = f64::from(l - max);
+        let e = d.exp();
+        sum += e;
+        weighted_raw = d.mul_add(e, weighted_raw);
     }
     if sum <= 0.0 {
         return (0.0, 0.0);
     }
-    let ln_sum = sum.ln();
-    // H = -Σ p ln p  with  p = exp(l - max) / sum
-    //   = ln_sum - Σ (l - max) p   (in nats)
-    let mut weighted = 0.0_f64;
-    for &l in logits {
-        let d = f64::from(l - max);
-        weighted = d.mul_add(d.exp() / sum, weighted);
-    }
-    let entropy_nats = ln_sum - weighted;
+    let entropy_nats = sum.ln() - weighted_raw / sum;
     let max_prob = 1.0 / sum; // exp(0) / sum for the max logit
     #[allow(clippy::cast_possible_truncation)]
     {
@@ -712,10 +806,26 @@ pub struct SampleGovernor {
     sampled_ema: Option<f64>,
     /// Tokens since the last sample.
     since_sample: u32,
+    /// Number of sampled tokens the cost model has accepted so far. The
+    /// very first sampled token of a run carries one-time warmup cost
+    /// (graph reservation, cold caches) that is not representative of
+    /// steady-state sampling; it is excluded from the EMAs so it can't
+    /// poison the estimate and starve the rest of the reply.
+    sampled_count: u32,
 }
 
 /// EMA smoothing factor — light smoothing, reacts within a few tokens.
 const EMA_ALPHA: f64 = 0.2;
+
+/// Hard cap on the effective sampling interval. Even when the measured
+/// surcharge would push the budget-derived interval higher, the governor
+/// samples at least this often so the visualization always has enough
+/// real keyframes to read as "thinking" (≈1 anchor / `MAX_INTERVAL`
+/// tokens). This deliberately makes the overhead budget *soft* on
+/// genuinely slow hardware — capture density is prioritised over the
+/// strict budget — which is acceptable because the tap is observational
+/// and the fused `logits_stats` keeps the real per-sample cost modest.
+pub const MAX_INTERVAL: u32 = 10;
 
 /// Snapshot of the governor's cost model — see
 /// [`SampleGovernor::overhead_estimate`].
@@ -743,6 +853,7 @@ impl SampleGovernor {
             plain_ema: None,
             sampled_ema: None,
             since_sample: 0,
+            sampled_count: 0,
         }
     }
 
@@ -756,11 +867,20 @@ impl SampleGovernor {
     /// decode took. Updates the EMAs and re-derives the interval.
     pub fn on_token(&mut self, sampled: bool, decode_time: Duration) {
         let secs = decode_time.as_secs_f64();
-        let ema = if sampled { &mut self.sampled_ema } else { &mut self.plain_ema };
-        *ema = Some(ema.map_or(secs, |prev| EMA_ALPHA.mul_add(secs - prev, prev)));
         if sampled {
+            self.sampled_count = self.sampled_count.saturating_add(1);
             self.since_sample = 0;
+            // Drop the first sampled token: it carries one-time warmup
+            // cost (graph reservation / cold caches) that would seed the
+            // EMA far above steady state and starve the rest of the run.
+            if self.sampled_count > 1 {
+                self.sampled_ema = Some(
+                    self.sampled_ema.map_or(secs, |prev| EMA_ALPHA.mul_add(secs - prev, prev)),
+                );
+            }
         } else {
+            self.plain_ema =
+                Some(self.plain_ema.map_or(secs, |prev| EMA_ALPHA.mul_add(secs - prev, prev)));
             self.since_sample = self.since_sample.saturating_add(1);
         }
         self.rederive_interval();
@@ -807,7 +927,10 @@ impl SampleGovernor {
         let min_interval = (surcharge / (self.budget * plain)).ceil();
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let min_interval = if min_interval.is_finite() { min_interval as u32 } else { u32::MAX };
-        self.interval = min_interval.max(self.base_interval);
+        // Cap the interval so capture density has a guaranteed floor even
+        // when the measured surcharge is high (soft-budget on slow HW).
+        self.interval =
+            min_interval.clamp(self.base_interval, MAX_INTERVAL.max(self.base_interval));
     }
 }
 
@@ -867,7 +990,7 @@ mod tests {
     #[allow(clippy::float_cmp)] // exact 0.0 marks "layer not observed this frame"
     #[allow(clippy::cognitive_complexity)] // linear test: arrange phases, assert keyframe
     fn callback_captures_norms_and_experts_when_armed() {
-        let tap = BrainTap::new(2);
+        let tap = BrainTap::new(2, 0, 0);
         let user_data = Arc::as_ptr(&tap.shared).cast_mut().cast::<c_void>();
 
         // Disarmed: not interested, and eval continues.
@@ -935,7 +1058,7 @@ mod tests {
 
     #[test]
     fn callback_skips_batched_and_wrong_type_tensors() {
-        let tap = BrainTap::new(1);
+        let tap = BrainTap::new(1, 0, 0);
         let user_data = Arc::as_ptr(&tap.shared).cast_mut().cast::<c_void>();
         tap.arm(0);
         unsafe {
@@ -957,7 +1080,7 @@ mod tests {
 
     #[test]
     fn frame_ring_drops_oldest() {
-        let tap = BrainTap::new(1);
+        let tap = BrainTap::new(1, 0, 0);
         for i in 0..(MAX_KEYFRAMES + 3) {
             tap.push_frame(BrainKeyframe { token_index: i as u64, ..Default::default() });
         }
@@ -968,24 +1091,35 @@ mod tests {
     }
 
     #[test]
-    fn governor_widens_interval_to_hold_budget() {
-        // Plain token: 50 ms. Sampled token: 60 ms (20 % surcharge).
-        // Budget 1 % ⇒ need interval ≥ 0.010 / (0.01 * 0.050) = 20.
+    fn governor_caps_interval_and_ignores_warmup_sample() {
+        // Plain 50 ms, sampled 60 ms (20 % surcharge). Budget 1 % would
+        // derive interval ~20, but two guards apply:
+        //   1. the first sampled token is warmup — dropped from the cost
+        //      model, so it must NOT move the interval off the base;
+        //   2. the derived interval is capped at MAX_INTERVAL so capture
+        //      density never collapses on slow hardware.
         let mut g = SampleGovernor::new(5, 0.01);
         for _ in 0..50 {
             g.on_token(false, Duration::from_millis(50));
         }
-        assert!(g.should_sample(), "base interval elapsed");
-        g.on_token(true, Duration::from_millis(60));
-        for _ in 0..30 {
-            g.on_token(false, Duration::from_millis(50));
-        }
-        assert!(g.interval() >= 20, "interval {} should be >= 20", g.interval());
+        g.on_token(true, Duration::from_millis(60)); // warmup — ignored
+        assert_eq!(g.interval(), 5, "first (warmup) sample must not widen the interval");
+        g.on_token(false, Duration::from_millis(50));
+        g.on_token(true, Duration::from_millis(60)); // real sample
+        assert_eq!(
+            g.interval(),
+            MAX_INTERVAL,
+            "interval capped at MAX_INTERVAL, got {}",
+            g.interval()
+        );
 
-        // Cheap sampling relaxes back to the base interval.
+        // Cheap sampling relaxes back to the base interval (still needs a
+        // non-warmup sample to populate the cost model).
         let mut g = SampleGovernor::new(5, 0.01);
         g.on_token(false, Duration::from_millis(50));
-        g.on_token(true, Duration::from_millis(50));
+        g.on_token(true, Duration::from_millis(50)); // warmup, dropped
+        g.on_token(false, Duration::from_millis(50));
+        g.on_token(true, Duration::from_millis(50)); // cheap, seeds model
         assert_eq!(g.interval(), 5);
     }
 

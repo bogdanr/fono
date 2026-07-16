@@ -379,6 +379,8 @@ async fn summarize_with_timeouts(
         screen_capture: None,
         prefer_vision: false,
         max_new_tokens: Some(SUMMARY_MAX_NEW_TOKENS),
+        // Background summarize (may arrive via MCP): never light the overlay.
+        allow_brain_capture: false,
     };
     let user_turn = render_user_turn(payload);
 

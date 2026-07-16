@@ -298,6 +298,7 @@ async fn exercise_assistant(cfg: &AssistantCfg, secrets: &Secrets) -> Result<usi
         screen_capture: None,
         prefer_vision: false,
         max_new_tokens: None,
+        allow_brain_capture: false,
     };
     let stream_started = Instant::now();
     let stream =
@@ -427,6 +428,7 @@ async fn exercise_groq_e2e(secrets: &Secrets) -> Result<()> {
         screen_capture: None,
         prefer_vision: false,
         max_new_tokens: None,
+        allow_brain_capture: false,
     };
     let started = Instant::now();
     let mut stream =

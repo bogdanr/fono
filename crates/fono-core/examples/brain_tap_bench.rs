@@ -112,7 +112,7 @@ fn main() -> Result<()> {
     let n_layer = model.n_layer();
     println!("layers:  {n_layer}\n");
 
-    let tap = BrainTap::new(n_layer);
+    let tap = BrainTap::new(n_layer, 0, 0);
 
     // Warm-up: fault the weights in so round 1 isn't a page-cache benchmark.
     run(&model, None, false, 8.min(n_tokens))?;

@@ -1,5 +1,284 @@
 # Fono — Project Status
-Last updated: 2026-07-15
+Last updated: 2026-07-16
+
+## 2026-07-16 — Glas Cortex: tray label, cloud MoE sim, brighter listening
+
+Three follow-up polish items from user feedback:
+
+1. **Tray label.** The Glass Cortex waveform style was the only one
+   with no parenthetical description in the tray menu. Added
+   "Glass Cortex (live AI thinking)" (`crates/fono-tray/src/menu.rs`).
+   The web settings picker already lists it (`app.js:108`, committed
+   at `77e79e8`) — no change needed there.
+2. **Traceless (cloud) fallback = simulated MoE.** A *local* assistant
+   turn on a cloud backend produces no `brain_tap` keyframes, so the
+   bar used to sit idle through the whole reply. After a short grace
+   window (`SIM_GRACE = 0.7 s`, so grounded local turns that publish
+   `ReplyBegin`/`Prefill` first are never affected) it now drives a
+   simulated sparse expert-lane sweep that drifts across depth and
+   time — the bar reads as an active routing network. This is the one
+   path *not* grounded in real data; it engages only when no trace
+   exists and never for network requests (which don't move the overlay
+   into a busy phase). `Prefill` now also marks the reply active so a
+   grounded turn suppresses the sim.
+3. **Brighter listening.** The mic equalizer gain went from 0.85 to
+   1.25 so the Listening scene reads with presence instead of a dim
+   shimmer.
+
+Gates green: `fmt`, `clippy -D warnings` (default + `backend-x11`),
+full workspace tests (55 cortex lib tests incl. the new
+`traceless_backend_simulates_after_grace_but_not_before`). Gallery
+gains a `6b_traceless_moe_sim` scene.
+
+## 2026-07-16 — Glas Cortex: transparent panel (black → transparent)
+
+User feedback: the overlay's black pixels should be transparent, and
+the status label ("ASSISTANT", "PONDERING", …) had an opaque scrim
+behind it that should be transparent too. Made the Cortex style a
+true transparent-panel visualisation:
+
+1. **No stage backing.** `draw_cortex` dropped the near-black
+   `0x000A0A12 @ 0.92` slab that covered the whole strip — unlit tiles
+   now show the desktop through (`crates/fono-overlay/src/cortex.rs`).
+2. **Brightness-keyed tile opacity.** Cells (settled field + sweep
+   heads) render via `blend_rect` with `cell_alpha(v)` instead of the
+   old opaque write, so the near-black ramp bottoms fade to
+   transparent rather than painting solid black squares; bright tiles
+   still reach full opacity and read as crisp LEDs. `fill_rect_opaque`
+   retired.
+3. **No charcoal panel for Cortex.** `redraw` skips the opaque
+   `COLOR_BG` rounded-panel fill for the full-panel Cortex style
+   (`crates/fono-overlay/src/renderer.rs`); the accent stripe stays.
+4. **No label scrim.** `draw_status_label` dropped the `darken_rect`
+   backing; legibility now comes from the soft drop shadow alone.
+   `darken_rect` retired.
+
+Gallery updated to start from a transparent buffer (matching the real
+renderer) so the dark+bright composites reflect the floating-LED look.
+All gates green (fmt, clippy default + `backend-x11`, 54 cortex tests,
+full workspace tests).
+
+## 2026-07-16 — Glas Cortex: fix keyframe starvation (real variety)
+
+Live feedback: still "not a lot of variety." The daemon trace was
+decisive — a 75-token reply captured only **2 real keyframes** (tokens
+1 and 31), *fewer* than the 8 we got at the old 2% budget. So the
+budget was never the effective lever; the sampling governor was
+starving capture. Two root causes in `crates/fono-core/src/brain_tap.rs`:
+
+1. **Expensive per-sample stats.** `logits_stats` computed confidence +
+   entropy over the model's *entire* vocabulary (~256k logits for
+   gemma) with **two** separate `exp()` passes in `f64` — several ms per
+   sample, a big share of the measured surcharge. Fused into a single
+   `exp()` pass (identical result, ~2× cheaper), so the governor allows
+   more keyframes within the same budget.
+2. **First-sample poisoning → starvation feedback.** The first sampled
+   token carries one-time warmup cost (graph reservation, cold caches);
+   it seeded the cost EMA far above steady state, the interval
+   ballooned, and because we then sampled rarely the EMA never
+   recovered — it stayed wide for the whole reply (explaining 3% giving
+   *fewer* anchors than 2%). The governor now (a) excludes the first
+   sampled token from the cost model, and (b) applies a hard
+   `MAX_INTERVAL = 10` cap so capture density has a guaranteed floor
+   (≈1 anchor / 10 tokens ⇒ ~7–8 per this reply).
+
+The cap deliberately makes the overhead budget *soft* on genuinely slow
+hardware (capture density is prioritised) — signed off by the user. The
+fused stats keep the real per-sample cost modest, so in practice the
+overhead stays well-behaved.
+
+Tests: `governor_widens_interval_to_hold_budget` replaced by
+`governor_caps_interval_and_ignores_warmup_sample` (warmup ignored +
+cap enforced); `logits_stats` correctness tests unchanged and still
+green. Full workspace gate green (234 fono-core tests).
+
+## 2026-07-16 — Glas Cortex: steady pacing, flowing churn, denser capture
+
+Three tuning changes after live feedback that the Speaking bar felt
+"a bit better" but still lurched and looked like slow breathing in the
+middle/tail of a long reply. The daemon trace was decisive: the reply
+is generated *and* spoken in overlapping chunks, so `audio_total`
+climbs 4.8 → 24.5s across four sentences and `total_tokens` (94) isn't
+known until ~4s into playback; capture was also front-loaded (6 anchors
+in the first 20 tokens, then 2 across the next 74).
+
+1. **Steady pacing (renderer).** The Speaking morph is now driven by a
+   *monotonic* playback cursor (`play_pos`, token space) in
+   `crates/fono-overlay/src/cortex.rs`. Each beat it advances toward the
+   best-known total at a velocity of "remaining tokens / remaining
+   audio" (floored + capped), and it never moves backward. Because the
+   audio length and token count climb mid-playback, the old raw-ratio
+   position lurched forward then snapped back; the cursor now only ever
+   eases its speed, so the bar reads as smooth progress start to finish.
+
+2. **Flowing churn (renderer).** Between the sparse real anchors the
+   equalizer used to crossfade uniformly (slow breathing). The
+   per-column shimmer is now a deeper two-octave pattern that
+   *translates* each beat, so long anchor gaps read as active compute.
+   Brightness only — it never changes which columns/layers are lit, so
+   the grounded shape is untouched.
+
+3. **Denser capture (`brain_tap`).** `OVERHEAD_BUDGET` 2% → **3%** so the
+   governor lets ~1.5× more real anchors through, keeping the sparse
+   tail of a long reply populated. Still imperceptible (a 2 s reply →
+   ~2.06 s) and still a hard governor-enforced ceiling.
+
+Two new regression tests: `speaking_cursor_is_monotonic_when_audio_grows_midplayback`
+(the exact growing-audio field scenario — cursor must never retreat and
+must reach the reply length) and the existing morph/evolve tests still
+hold. All 54 cortex tests + full workspace gate green.
+
+## 2026-07-16 — Glas Cortex: continuous morph during speech
+
+Field feedback: even with denser capture the Speaking bar still looked
+dull — a couple of pulses then a frozen shape. The daemon trace
+confirmed the cause was not the beat but the *content*: between the
+sparse real anchors the renderer redrew the same held snapshot, so
+every ~3/s sweep looked identical.
+
+Fixed in `crates/fono-overlay/src/cortex.rs` by making the Speaking
+equalizer **morph continuously through the real captures**:
+
+- `beat_speaking` is now position-based: playback position in token
+  space is derived from the real audio duration + real token count, and
+  every beat launches a sweep whose dense shape is the *time-interpolated*
+  frame at that position (`morph_norms_at`). The bar slides smoothly
+  between anchors instead of snapping and freezing.
+- Anchors we pass are still merged (routing / confidence / log-norm
+  band) but no longer each fire their own sweep — the morph pulse
+  carries the visible shape, so the show stays one continuous evolving
+  equalizer for the whole utterance.
+- `launch_decode_pulse` split into a `_with_norms` variant so the same
+  sweep machinery renders either the merged held state (Thinking) or
+  the interpolated frame (Speaking); MoE still reads revealed lanes.
+- `spatial_fill` extracted and shared by `filled_held` + `morph_norms_at`.
+
+Two new regression tests: `morph_norms_interpolates_in_time_between_anchors`
+(temporal interpolation math) and `speaking_equalizer_shape_evolves_across_the_reply`
+(the field profile must actually differ early vs late in playback).
+All 53 cortex tests + full workspace gate green.
+
+## 2026-07-16 — Glas Cortex: denser capture + local-only tap
+
+Two follow-ups after the grounded-playback fix.
+
+**1. Capture a bit more real data (fuller, evolving bar).** The daemon
+trace showed the sample governor widening its interval so far on CPU
+that a whole reply produced ~1 keyframe. Retuned the tap in
+`crates/fono-core/src/brain_tap.rs` so the show is grounded in more
+real snapshots at a still-imperceptible cost:
+
+- `OVERHEAD_BUDGET` 1% → **2%** — the tap is purely observational, so a
+  couple of percent (a 2 s reply → ~2.04 s) is unnoticeable while
+  roughly doubling the keyframe rate.
+- `LAYER_STRIDE` 4 → **8** — each keyframe observes an eighth of the
+  stack instead of a quarter, halving the per-sample graph-scheduler
+  cost so the budget buys ~2× more frames; the renderer already
+  interpolates the unobserved layers and the phase rotates to cover the
+  full stack over successive frames.
+- `DEFAULT_BASE_INTERVAL` 3 → **2** — a finer floor so fast machines
+  capture a denser stream (the governor remains the real throttle on
+  slow ones).
+
+Net: ~4× more grounded keyframes per reply, so the bar's *shape* now
+evolves across the utterance instead of replaying one snapshot.
+
+**2. Capture only on local turns, never over the network.** The
+OpenAI/Ollama-compatible LLM server shares the same embedded assistant
+`Arc`, so a remote client's `/v1/chat/completions` request was arming
+the tap and lighting *this* computer's overlay. Fixed with an explicit
+opt-in:
+
+- New `AssistantContext::allow_brain_capture` (default `false`); the
+  local F8 hotkey paths set it `true`, the LLM server's `make_context`
+  leaves it `false` (network turns stay dark).
+- The embedded backend gained a per-turn `capture_gate` (an atomic set
+  under the model lock, so it can't race a concurrent turn, with an RAII
+  guard that closes it on every exit). `tap()` returns the tap only when
+  capture is enabled **and** the gate is open, so prewarm/diagnostic
+  decodes stay dark too.
+- Regression tests: `network_context_never_allows_brain_capture`
+  (fono-net) and `capture_gate_guard_closes_on_drop` /
+  `tap_stays_dark_until_the_gate_opens` (fono-assistant).
+
+## 2026-07-16 — Glas Cortex: grounded, continuous playback pacing
+
+Follow-up to the rewrite after live feedback that the bar animated in
+"0–2 sparse bursts" and then went stale during speaking. The daemon
+`debug` trace was decisive: a 27-token reply captured **one**
+keyframe (`trace=1`) — the sample governor widened its interval to
+hold the <1% decode budget on CPU — so the old queue-based replay had
+essentially one data point and everything else was identical carry
+sweeps of a sparse (strided) frame.
+
+Fix (`crates/fono-overlay/src/cortex.rs`), keeping the ~3 pulses/s
+metronome the user preferred but grounding it in the two signals we
+always capture reliably — the real **token count** and real **audio
+duration**:
+
+- **Speaking is paced by real token count, not keyframe count.** The
+  retained trace is revealed in `token_index` order, a keyframe
+  captured at token K appearing K/`total_tokens` of the way through
+  the reply audio; between real keyframes the beat carries the
+  last-known state so a sweep fires on *every* beat for the whole
+  utterance. `total_tokens` now comes from `ReplyEnd`.
+- **Sparse strided layers are interpolated** (`filled_held`) so a
+  single-frame reply renders as a full, readable equalizer instead of
+  a dozen-column flicker — linear fill between real samples, flat at
+  the ends, no fabricated structure.
+- **Subtle per-token texture** on decode sweeps so repeated carries
+  never look frozen (brightness micro-variation only; never changes
+  which columns are grounded-on).
+- Two new regression tests lock it: continuous animation across a
+  27-token / 1-keyframe / 9.37 s reply, and the interpolation math.
+
+## 2026-07-16 — Glas Cortex rewritten as the 6×46 LED grid
+
+The Cortex waveform style ("watch it think") was rewritten from
+scratch against the 2026-07 design prototype
+(plan: `plans/2026-07-15-glas-cortex-rewrite-v1.md`, Tasks 1–14 done;
+Task 15 speech-synced clock deferred pending separate sign-off):
+
+- **New visual grammar.** A fixed **6×46 LED grid** (never resized to
+  the model's layer count; `layer(col)` maps depth onto columns) with
+  two fixed color ramps — cool indigo→cyan for intake (idle,
+  listening, prefill) and the warm Fono ember for compute (decode).
+  Pulses sweep left→right as crisp stepped cells (`1.0/0.66/0.42`
+  tiers, no blur/bloom); dense models render a center-out equalizer
+  per column, MoE models light expert lanes (`lane = id % 6`, budget
+  adapted to the real routing ratio, co-activity gating,
+  lane-collision bumping). Confidence brightens the pulse
+  (`0.5 + 0.5·token_prob`); high entropy desaturates toward grey.
+- **Grounded-replay clock.** Reworked after live feedback into a
+  steady **metronome at ~3 pulses/s** (the web demo's human-relatable
+  pace) that never stops while a reply is live or its audio plays:
+  each beat fires the next real keyframe when due — consumed once, in
+  `token_index` order, live during Thinking, spread across the reply
+  audio during Speaking (the full trace is retained and reloaded at
+  playback start) — otherwise a slightly dimmer *carry* sweep
+  re-showing the last-known real state; waiting on the first token
+  shows a slow cool scan. Nothing looped, nothing fabricated, but the
+  rhythm is continuous through thinking → synthesising → speaking.
+  Cortex lifecycle events log at `debug` (frames at `trace`) for
+  live diagnosis.
+- **Never dead.** Field decays `exp(-dt/0.30)`; a dim (~0.17)
+  breathing resting field of last-known norms/routing covers real
+  capture gaps; idle shows a slow drifting breath. Listening restyles
+  the mic FFT onto the same grid grammar (cool equalizer).
+- **Engine contract.** `BrainEvent::ReplyBegin` now carries
+  `kind` (dense/moe) and optional `n_experts_total`/`n_experts_active`
+  read from llama.cpp model metadata; mirrored through
+  `CortexCmd::ReplyBegin` and `brain_trace_dump` JSON.
+- **Retired.** ~1,800 lines of the old renderer (chart recorder,
+  beads/sparks, constellation, MoE HUD, entropy skyline, `GlowAccum`
+  bloom) plus the `brain_mockups` example. The gallery
+  (`cortex_gallery`) was rebuilt for the new scenes with a
+  deterministic clock (instant, no sleeps) and dark+bright desktop
+  composites; new unit tests cover the grid bounds, layer mapping,
+  play-once/ordering/clamping, never-black, MoE lane determinism and
+  entropy desaturation.
+- **Gates.** fmt / clippy / workspace tests / size budget all green
+  (binary 21.57 MiB of the 25 MiB budget).
 
 ## 2026-07-15 — Local TTS engine picker + OpenAI-compatible `/v1/audio/speech`
 

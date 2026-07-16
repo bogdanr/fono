@@ -714,7 +714,19 @@ pub struct SessionOrchestrator {
 fn cortex_cmd_from_brain_event(ev: fono_core::brain_tap::BrainEvent) -> fono_overlay::CortexCmd {
     use fono_core::brain_tap::BrainEvent as E;
     match ev {
-        E::ReplyBegin { n_layer } => fono_overlay::CortexCmd::ReplyBegin { n_layer },
+        E::ReplyBegin { n_layer, kind, n_experts_total, n_experts_active } => {
+            fono_overlay::CortexCmd::ReplyBegin {
+                n_layer,
+                kind: match kind {
+                    fono_core::brain_tap::BrainModelKind::Dense => {
+                        fono_overlay::CortexModelKind::Dense
+                    }
+                    fono_core::brain_tap::BrainModelKind::Moe => fono_overlay::CortexModelKind::Moe,
+                },
+                n_experts_total,
+                n_experts_active,
+            }
+        }
         E::Prefill { n_tokens } => fono_overlay::CortexCmd::Prefill { n_tokens },
         E::Frame(f) => fono_overlay::CortexCmd::Frame(fono_overlay::CortexFrame {
             token_index: f.token_index,

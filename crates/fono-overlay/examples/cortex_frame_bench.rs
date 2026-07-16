@@ -16,11 +16,16 @@
 
 use fono_overlay::cortex::{draw_cortex, CortexState};
 use fono_overlay::renderer::{draw_system_360, draw_terrain_3d};
-use fono_overlay::{CortexCmd, CortexFrame, OverlayState};
+use fono_overlay::{CortexCmd, CortexFrame, CortexModelKind, OverlayState};
 
 fn make_busy_state(n_layer: u32) -> CortexState {
     let mut c = CortexState::default();
-    c.apply(CortexCmd::ReplyBegin { n_layer });
+    c.apply(CortexCmd::ReplyBegin {
+        n_layer,
+        kind: CortexModelKind::Dense,
+        n_experts_total: None,
+        n_experts_active: None,
+    });
     c.apply(CortexCmd::Prefill { n_tokens: 512 });
     // A realistic keyframe train: 40 frames over a 160-token reply.
     for i in 0..40u64 {

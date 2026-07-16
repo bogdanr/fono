@@ -1,464 +1,402 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! "Activation Heatmap" — the LLM brain visualisation
-//! (`WaveformStyle::Cortex`).
+//! Glas Cortex — the "watch it think" LED bar (`WaveformStyle::Cortex`).
 //!
-//! A chunky heat grid fills the whole panel: columns are the model's
-//! real transformer layers (left = input, right = output), rows are a
-//! handful of sampled units per layer. Each cell's colour is a
-//! grounded 0..1 signal on a per-phase heat ramp; the hottest cells
-//! get a faint additive bloom. The scene draws *data*, not structure,
-//! and follows the voice pipeline:
+//! A wordless, event-driven visualizer rendered as a fixed **6×46 LED
+//! grid**: a Rust port of the reference `cortex-live-engine.js` from
+//! the 2026-07 design (see `plans/2026-07-15-glas-cortex-rewrite-v1.md`
+//! and the implementation spec it was written against). It makes a
+//! running language model legible at a glance — reading vs writing,
+//! how deep/hard it is working, which experts it routes through (MoE),
+//! and how confident it is — without a single label.
 //!
-//! - **Listening** — a warm red-orange grid reacting to the live mic
-//!   FFT: louder bins push their columns hotter (sound flowing in).
-//! - **Thinking / prefill** — a sequential per-column ignition wipe
-//!   sweeps left → right, driven by the real per-batch prefill events
-//!   (`CortexCmd::Prefill`); rows within a column latch at slightly
-//!   staggered moments so the wipe reads as real per-row texture, not
-//!   a flat bar. The instant the first real token keyframe lands, a
-//!   single one-shot deterministic wipe (never a per-frame blend)
-//!   snaps columns over to the decode flare grammar and the prefill
-//!   field is retired for the rest of the reply.
-//! - **Synthesising** (TTS prep, after decode finishes but before
-//!   audio starts playing) — keeps replaying the real decode flares
-//!   captured during generation, looped and paced by the same real
-//!   arrival-time clock, so the grid never goes dark or drifts onto
-//!   fabricated motion while waiting on the TTS round-trip.
-//! - **Speaking / decode (dense)** — the same real per-token flares
-//!   continue, now paced by the audio replay clock so each token's
-//!   flare crests in step with the spoken words, lighting only the
-//!   row that token's real per-layer sample data actually visits at
-//!   each layer (never a flat column fill); the real, already-
-//!   synthesised reply audio (Goertzel bands) subtly modulates row
-//!   brightness on top, capped well under a third of a cell's
-//!   intensity so the flare stays the primary signal.
-//! - **Speaking / decode (MoE)** — only the routed experts light up,
-//!   warm = amber (RAM-resident) vs cold = blue (offloaded), with a
-//!   focal hotspot tracking the active layer.
+//! ## Visual language
 //!
-//! Thinking/Synthesising/Speaking all derive their heat-ramp colour
-//! from the same real per-state accent the rest of the overlay
-//! already uses (status label, System/360's lit-lamp colour) instead
-//! of inventing separate hues, so the whole panel reads as one
-//! coherent palette family.
+//! - **X (46 cols) = network depth**: col 0 = first layer, col 45 =
+//!   last. The model's real layer count is *mapped onto* the fixed
+//!   grid (`layer(col) = round(col/(COLS-1)·(nLayer-1))`) — the grid
+//!   never resizes to the layer count.
+//! - **A pulse sweeping left→right = one token being computed.** The
+//!   head is rendered as crisp *cells* (three stepped tiers), never a
+//!   blur.
+//! - **Prefill = a wide cool flood** (indigo→cyan) across all columns:
+//!   many prompt tokens ingested in parallel, one inhale.
+//!   **Decode = a single warm (ember) pulse per token** — the
+//!   autoregressive loop made visible.
+//! - **Dense rows = an equalizer**: per column, rows fill center-out
+//!   proportional to that layer's log-normalized activation norm.
+//!   **MoE rows = 6 expert lanes**: only the routed lanes spark
+//!   (`lane = id % 6`), the rest of the column stays dark — the
+//!   sparsity story.
+//! - **Confidence lives in the pulse itself**: brightness
+//!   `0.5 + 0.5·token_prob`; high entropy desaturates the column
+//!   toward grey. No separate edge flash.
 //!
-//! When no capture data is available (external backends, or capture
-//! disabled) the speaking phase falls back honestly to a dense grid
-//! whose travelling column is paced to the word cadence — activity
-//! and rhythm without fabricating model internals.
+//! ## Timing — a human-pace metronome over real data
 //!
-//! ## Rendering approach
+//! Real decode runs 20–100+ tok/s and real keyframes arrive sparsely
+//! (the tap strides tokens and the governor can widen the interval so
+//! far that a whole reply carries a single keyframe), so the clock is
+//! a steady **metronome at ~3 pulses/s** — the pace of the reference
+//! web demo — that never stops while a reply is live or its audio is
+//! playing. The *timing* is grounded in the two signals we always
+//! capture: the real decoded **token count** and the real **audio
+//! duration**. During playback the retained trace is revealed in
+//! `token_index` order, paced so the reveal spans the utterance;
+//! between real keyframes a *carry* sweep re-shows the last-known real
+//! state (with subtle per-token texture so repeats never look frozen).
+//! Waiting on the first token (prefill compute) shows a slow cool
+//! scan. Nothing is fabricated — carries and scans only re-animate
+//! captured state — but the rhythm is continuous.
 //!
-//! All ingredients are computed at runtime — no asset files, no new
-//! crates:
+//! ## Never-dead behavior
 //!
-//! - **Additive glow** ([`add_glow`] / [`GlowAccum`]): a two-lobe
-//!   radial falloff (bright core + wide faint halo) composited with
-//!   saturating channel addition at quarter resolution. The halo lobe
-//!   plays the role of the classic quarter-res bloom pass at a
-//!   fraction of its cost — one pass, no intermediate buffer, no blur
-//!   kernel — while producing the same luminous read. Bloom is kept
-//!   deliberately faint here so the chunky cells never wash out.
+//! The brightness field decays as `exp(-dt/0.30)` so pulses stay
+//! crisp; between sweeps a dim (~0.17) breathing **resting field** of
+//! the last-known layer norms / expert routing keeps the bar alive
+//! through real capture gaps (the tap strides layers and the governor
+//! widens intervals); idle shows a slow breath drifting across the
+//! columns.
 //!
-//! ## State
+//! ## Traceless (cloud) fallback
 //!
-//! [`CortexState`] holds the slow-decaying per-layer heat trace, the
-//! smoothed per-layer activation, and the keyframe replay clock. It
-//! is *advanced* from the renderer's FFT push path and the animation
-//! pump (the same clock the other styles redraw on) and *read* by the
-//! draw entry point — the honest "real vs synthetic signal" seam
-//! lives entirely in the state, so [`draw_cortex`] never knows which
-//! source backs a given cell.
+//! When a *local* assistant turn runs on a backend that produces no
+//! `brain_tap` keyframes (a cloud model), the bar would otherwise sit
+//! idle through the whole reply. After a short grace window it instead
+//! drives a **simulated MoE** sweep — sparse expert lanes drifting
+//! across depth and time — so the panel reads as an active, routing
+//! network. This is the one path that is *not* grounded in real
+//! activity; it engages only when no real trace exists and never for
+//! network requests (which don't move the overlay into a busy phase).
+//!
+//! ## State / draw split
+//!
+//! [`CortexState`] owns everything animated and is advanced by
+//! [`CortexState::tick`] (renderer FFT push + animation pump) and fed
+//! by [`CortexState::apply`] / [`CortexState::on_state`];
+//! [`draw_cortex`] is a pure read of the `field[6][46]` brightness
+//! array plus the in-flight pulse heads. Colors come from two fixed
+//! ramps (cool intake / warm compute) drawn onto a fully transparent
+//! panel — each tile's opacity tracks its brightness so unlit cells
+//! disappear and only lit LEDs float over the desktop. The per-state
+//! accent is deliberately not used.
 
-// Same lint posture as `renderer.rs` / `r3d.rs`: readable
-// visualisation math beats `mul_add` chains — glow falloffs and
-// lattice placement genuinely want plain `a + b * c` shapes.
-#![allow(clippy::suboptimal_flops, clippy::many_single_char_names, clippy::too_many_arguments)]
+// Readable visualisation math beats `mul_add` chains, and the
+// fixed-grid rasteriser genuinely wants plain casts.
+#![allow(
+    clippy::suboptimal_flops,
+    clippy::many_single_char_names,
+    clippy::too_many_arguments,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
 
-/// Default layer count for the spine before real model metadata
-/// arrives (plan Task 2.4 plumbs `n_layer()` from the loaded GGUF).
-/// 32 reads well on the 640 px strip and is in the ballpark of the
-/// small dense models Fono ships.
-const DEFAULT_LAYERS: usize = 32;
-/// Clamp for pathological metadata so the spine never degenerates.
-const MIN_LAYERS: usize = 8;
-const MAX_LAYERS: usize = 96;
-/// Per-tick exponential decay of the heat trace (ticks arrive at
-/// ~20 fps ⇒ 0.985²⁰ ≈ 0.74/s — the "shape of the thought" fades
-/// over a few seconds).
-const HEAT_DECAY: f32 = 0.985;
-/// Fraction of the instantaneous activation folded into the heat
-/// trace each tick.
-const HEAT_GAIN: f32 = 0.12;
-/// EMA coefficient for the per-layer activation smoothing (input →
-/// displayed glow). Low = snappy.
-const ACT_EMA: f32 = 0.45;
-/// Fraction of the lattice behind a pulse head that still glows (the
-/// fading tail of a token's path).
-const WAKE_FRAC: f32 = 0.22;
-/// Estimated seconds per spoken word for the cadence fallback
-/// (external backends with no capture data).
-const SYNTH_SECS_PER_WORD: f32 = 0.38;
+use std::collections::VecDeque;
 
-/// Seconds a token pulse spends traveling the lattice before
-/// cresting at the right edge (where its word is "spoken").
-const BEAD_TRAVEL_SECS: f32 = 0.9;
-/// Lifetime of the burst spark at the lattice's right edge.
-const SPARK_LIFE_SECS: f32 = 0.45;
-/// Seconds a prefill sweep pulse takes to cross the lattice.
-const SWEEP_CROSS_SECS: f32 = 0.45;
-/// Half-width of the sweep bump, as a fraction of the lattice.
-const SWEEP_WIDTH: f32 = 0.18;
-/// Prefill batch width (tokens) at which a sweep reaches full
-/// amplitude (log scale — a 16-token suffix still reads).
-const SWEEP_FULL_TOKENS: f32 = 512.0;
-/// Fallback speech-duration estimate when no `AudioTotal` arrives
-/// (streaming TTS): ~4 chars/token at ~15 chars/s of speech.
-const SECS_PER_TOKEN_EST: f32 = 0.27;
-/// Entropy normalisation ceiling for the uncertainty ribbon (bits).
-const ENTROPY_NORM_BITS: f32 = 4.0;
-/// tok/s that fills the HUD throughput arc completely.
-const HUD_TOKPS_FULL: f32 = 40.0;
-/// Largest tick step fed to the replay clock — guards against a
-/// stalled compositor delivering one huge dt and skipping the show.
-const MAX_TICK_DT: f32 = 0.25;
-/// Downsampling factor of the glow accumulation buffer (the classic
-/// quarter-res fake-bloom pass from plan Task 2.2) in *logical*
-/// pixels: glows are splatted at 1/4 logical resolution (1/16 the
-/// pixels) and composited back up with one bilinear pass, which also
-/// gives the halo its final softness. The physical factor scales with
-/// HiDPI (`GLOW_DOWN × scale`) so glow cost tracks logical panel
-/// size, not physical pixel count.
-const GLOW_DOWN: u32 = 4;
+use crate::{CortexCmd, CortexModelKind, OverlayState};
 
-/// Heatmap grid rows (sampled units per layer column). Six reads well
-/// on the wide 810×96 strip while keeping cells legibly chunky. Also
-/// the row count [`path_rows`] routes real token paths through, so
-/// the decode flare's per-row texture always matches what is drawn.
-const GRID_ROWS: usize = 6;
-/// MoE expert residency tints (packed `0x00RR_GGBB`): warm = amber
-/// (RAM-resident), cold = blue (offloaded to disk). Reserved for the
-/// deferred, opt-in synthetic warm/cold tint (plan G3); the shipped
-/// constellation uses the weight-honest palette so nothing implies
-/// real residency until G5 lands actual `mincore()` scanning.
-#[allow(dead_code)]
-const EXPERT_WARM: u32 = 0x00FF_B347;
-#[allow(dead_code)]
-const EXPERT_COLD: u32 = 0x0056_8CFF;
+/// Fixed grid columns (network depth axis).
+pub const COLS: usize = 46;
+/// Fixed grid rows (equalizer height / expert lanes).
+pub const ROWS: usize = 6;
 
-/// True-OFF activation threshold (plan Task A3). Cells whose value
-/// falls below this render the real (dark) panel background so
-/// non-activating params/experts read as genuinely off; only a hair
-/// of hint is drawn in the narrow band just under the threshold.
-const ACT_THRESHOLD: f32 = 0.12;
-/// Duration of the one-shot prefill→decode "snap" wipe (plan Task 3):
-/// a single deterministic left-to-right cut from the prefill flood to
-/// the token-flare decode grammar, fired exactly once when the first
-/// real token keyframe lands. Never re-evaluated as a per-frame blend
-/// — once `decode_clock` (reset to 0 at that moment) passes this many
-/// seconds the prefill field is fully retired.
-const SNAP_SECS: f32 = 0.22;
-/// Calm resting brightness a prefill column holds once the ignition
-/// wipe has passed it — not zero (dead), not full-hot (still
-/// "reading"), so the phase shows a clear beginning-middle-end shape.
-const PREFILL_REST_LEVEL: f32 = 0.30;
-/// Hard cap on the additive per-row voice glow during speaking, as a
-/// fraction of full cell intensity — sound decorates, it never
-/// dominates the decode column (synergy subtlety constraint).
-const AUDIO_ROW_CAP: f32 = 0.26;
-/// Hard cap on the gentle global amplitude pulse added during
-/// speaking.
-const AUDIO_PULSE_CAP: f32 = 0.10;
-/// Listening spectrum: number of frequency bands sampled from the mic
-/// FFT. Resampled to the grid column count at draw time, so this is
-/// independent of how many columns actually fit.
-const SPEC_BANDS: usize = 56;
-/// Noise-floor gate subtracted from each normalised mic bin so a quiet
-/// room settles the energy dots to the bottom row instead of showing a
-/// spurious mid-band cluster. Sits just above the dB-normalised idle
-/// floor the session pushes.
+/// Field decay time constant (seconds): `field *= exp(-dt/τ)`.
+const FIELD_TAU: f32 = 0.30;
+/// Largest dt fed to the clock — a stalled compositor delivering one
+/// huge step must not skip the whole show (mirrors the JS `dt > 0.1`
+/// clamp).
+const MAX_TICK_DT: f32 = 0.1;
+/// Resting-field amplitude (dim breathing floor of held state).
+const REST_AMP: f32 = 0.17;
+/// Metronome beat: one sweep fires every beat while a reply is live
+/// or playing (≈3 pulses/s — the "human-relatable thinking pace" of
+/// the reference web demo at its ~3 tok/s setting).
+const BEAT: f32 = 0.34;
+/// Grace period (seconds) after entering Thinking with no real
+/// keyframes before the simulated-MoE fallback kicks in. Local
+/// embedded turns publish `ReplyBegin` within a few hundred ms, so
+/// this window keeps the simulation off for grounded turns and only
+/// engages it for traceless (cloud) backends.
+const SIM_GRACE: f32 = 0.7;
+/// Speaking cursor speed cap (tokens/second). Bounds how fast the
+/// monotonic playback cursor may advance so a mid-reply correction
+/// (audio/total revealed late) eases in smoothly instead of
+/// fast-forwarding through the trace.
+const PLAY_MAX_TPS: f32 = 12.0;
+/// Floor on the "remaining audio" estimate (seconds) when pacing the
+/// Speaking cursor, so an under-reported audio length can't blow the
+/// velocity up to infinity.
+const PLAY_MIN_TAIL: f32 = 0.5;
+/// Decode sweep duration — slightly longer than a beat so
+/// consecutive sweeps overlap into continuous motion.
+const DECODE_DUR: f32 = 0.46;
+/// Prefill flood duration (one fast pass, seconds).
+const PREFILL_DUR: f32 = 0.62;
+/// Draw cutoff: cells below this brightness stay fully transparent.
+const DRAW_FLOOR: f32 = 0.02;
+/// Listening: noise floor subtracted from normalised mic bins so a
+/// quiet room settles dark instead of shimmering mid-band.
 const SPEC_NOISE_FLOOR: f32 = 0.16;
-/// Snappy EMA toward each band's target energy (rise fast, fall via
-/// the peak-hold cap so the dots feel responsive but not jittery).
+/// Listening: EMA toward each column's target energy.
 const SPEC_EMA: f32 = 0.5;
-/// Per-second fall of the peak-hold caps (classic EQ "cap" that hangs
-/// at the last peak then drifts down).
-const SPEC_PEAK_FALL: f32 = 0.9;
-/// Number of stars in the MoE constellation field. Most stay dark
-/// (true-OFF); expert ids map into this fixed field via a hash so the
-/// scene scales gracefully from 8 to 256+ experts without becoming
-/// sub-pixel noise.
-const N_STARS: usize = 84;
-/// Per-tick decay of the constellation heat-trace (which regions of
-/// expert space carried the reply).
-const CONSTELLATION_HEAT_DECAY: f32 = 0.97;
-/// Constellation palette (`0x00RR_GGBB`): ignited star core, the dim
-/// implied-population substrate, and the thin routing threads.
-const CONSTELLATION_HOT: u32 = 0x00CF_E8FF;
-const CONSTELLATION_DIM: u32 = 0x0020_2838;
-const CONSTELLATION_THREAD: u32 = 0x0066_A8E0;
 
-/// Cool, dim colour for the listening weight-field (the shimmering
-/// ambient grid behind the peak dots). Kept low-alpha so the hot
-/// energy dots pop against it (plan C, redesigned).
-const WEIGHT_FIELD_COLOR: u32 = 0x0024_3446;
+/// Cool ramp (intake / prefill / idle): `#0c0c28 → #222a96 → #2882d6
+/// → #3ce0d6 → #e4fcff`.
+const RAMP_COOL: [(f32, [f32; 3]); 5] = [
+    (0.00, [12.0, 12.0, 40.0]),
+    (0.30, [34.0, 42.0, 150.0]),
+    (0.58, [40.0, 130.0, 214.0]),
+    (0.80, [60.0, 224.0, 214.0]),
+    (1.00, [228.0, 252.0, 255.0]),
+];
+/// Warm ramp (active compute / decode — the Fono ember): `#1a0c22 →
+/// #782860 → #d9342f → #ff8b5e → #fff7ec`.
+const RAMP_WARM: [(f32, [f32; 3]); 5] = [
+    (0.00, [26.0, 12.0, 34.0]),
+    (0.28, [120.0, 40.0, 96.0]),
+    (0.55, [217.0, 52.0, 47.0]),
+    (0.80, [255.0, 139.0, 94.0]),
+    (1.00, [255.0, 247.0, 236.0]),
+];
 
-/// Brighter cool-blue used for sparse "firing" cells in the listening
-/// weight-field — brief, desynchronised flashes that make the resting
-/// brain read as gently active (idle thought) rather than a dead grid.
-/// Distinct from the warm energy dots so the two never read as the same
-/// signal. Kept sparse + capped so it never dominates (plan C).
-const WEIGHT_FIELD_SPARK: u32 = 0x0058_9AD8;
+/// Piecewise-linear ramp lookup.
+fn ramp(stops: &[(f32, [f32; 3])], t: f32) -> [f32; 3] {
+    let t = t.clamp(0.0, 1.0);
+    for i in 1..stops.len() {
+        if t <= stops[i].0 {
+            let (t0, c0) = stops[i - 1];
+            let (t1, c1) = stops[i];
+            let f = (t - t0) / (t1 - t0).max(1e-6);
+            return [
+                c0[0] + (c1[0] - c0[0]) * f,
+                c0[1] + (c1[1] - c0[1]) * f,
+                c0[2] + (c1[2] - c0[2]) * f,
+            ];
+        }
+    }
+    stops[stops.len() - 1].1
+}
 
-/// Pipeline phase the scene is in, derived from [`crate::OverlayState`]
-/// by [`CortexState::on_state`].
+/// Deterministic hash noise in `0..1` (the JS engine's `h1`).
+fn h1(n: f32) -> f32 {
+    let s = (n * 127.1).sin() * 43_758.547;
+    s - s.floor()
+}
+
+/// Column → real layer index for an `n`-layer model (spec §2).
+fn col_to_layer(c: usize, n: usize) -> usize {
+    if n <= 1 {
+        return 0;
+    }
+    ((c as f32 / (COLS - 1) as f32) * (n - 1) as f32).round() as usize
+}
+
+/// Pipeline phase, derived from [`OverlayState`] by
+/// [`CortexState::on_state`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Phase {
-    /// Overlay hidden — decay to black.
+    /// Overlay hidden — slow breath, decay to dark.
     #[default]
     Idle,
-    /// Mic is hot (dictation/assistant recording): live FFT drives
-    /// the grid.
+    /// Mic is hot: the live FFT drives a cool equalizer.
     Listening,
-    /// Prompt submitted / generation burst / TTS synth in flight
-    /// (also the polish cleanup burst): captured keyframes are
-    /// applied live as they arrive; synthetic turbulence fills gaps.
+    /// Prompt submitted / generation burst / TTS synth in flight:
+    /// prefill floods and the first decode pulses play here.
     Thinking,
-    /// Reply audio is playing: timed replay of the keyframes, paced
-    /// so each bead crests as its word is spoken.
+    /// Reply audio is playing: grounded replay paced to span it.
     Speaking,
 }
 
-/// One ingested keyframe, post-merge (strided gaps filled from the
-/// previous frame) with raw (un-normalised) layer norms.
-#[derive(Debug, Clone, Default)]
-struct ReplayFrame {
-    token_index: u64,
-    /// Raw merged per-layer L2 norms.
-    norms: Vec<f32>,
-    /// Token-distribution entropy in bits (0 when unknown).
+/// Sweep flavor — selects ramp, mood and per-column deposit shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PulseKind {
+    Prefill,
+    Decode,
+}
+
+/// One left→right compute front in flight.
+#[derive(Debug, Clone)]
+struct Pulse {
+    kind: PulseKind,
+    /// Birth timestamp on [`CortexState::clock`].
+    born: f32,
+    /// Seconds for the head to cross the grid.
+    dur: f32,
+    /// Head column position last tick (fractional; starts left of 0).
+    last_head: f32,
+    /// Per-column brightness payload (dense magnitude / prefill
+    /// texture; for MoE it just marks active columns).
+    profile: [f32; COLS],
+    /// MoE: lit `(lane, brightness)` pairs per column.
+    moe: Option<Vec<Vec<(usize, f32)>>>,
+    /// Normalised entropy (0..1) — desaturates the columns it paints.
     entropy: f32,
-    /// Real arrival timestamp on [`CortexState::decode_clock`] (0 for
-    /// the very first token of the reply, since that arrival is what
-    /// latches and resets the clock). This is the crest schedule for
-    /// the thinking-phase decode flare (plan Task 4) — frames are
-    /// paced by exactly when they really arrived, never by render-tick
-    /// counting.
-    at: f32,
-}
-
-/// A token pulse in flight along the lattice (answering phase).
-#[derive(Debug, Clone, Copy)]
-pub struct Bead {
-    /// Head position along the lattice, 0 (left/layer 1) ..= 1 (right).
-    pub x: f32,
-    /// Overall glow energy, 0..1 (mean normalised activation of the
-    /// pulse's keyframe, or a hashed level in cadence mode).
-    pub energy: f32,
-    /// Token index — the stable seed of the path this pulse takes.
-    token: u64,
-    /// Index into the frame list when real capture data backs this
-    /// pulse (`None` in cadence mode).
-    frame: Option<usize>,
-}
-
-/// Right-edge burst spark ("the word left the model").
-#[derive(Debug, Clone, Copy)]
-struct Spark {
-    age: f32,
-    energy: f32,
-}
-
-/// A prefill sweep pulse crossing the spine left→right (thinking
-/// phase): one per prompt-prefill batch, amplitude from batch width.
-#[derive(Debug, Clone, Copy)]
-struct Sweep {
-    /// Head position, 0..1 across the spine (advances with time).
-    pos: f32,
-    /// Peak amplitude, 0..1.
+    /// Peak amplitude (`0.5 + 0.5·token_prob` for decode).
     amp: f32,
 }
 
-/// Per-frame animated state for the cortex scene. Owned by
-/// `RendererState`; advanced by [`CortexState::tick`] on the FFT
-/// push path (20 fps — the same clock the other styles redraw on),
-/// fed replay data by [`CortexState::apply`], phase-switched by
-/// [`CortexState::on_state`], and read by [`draw_cortex`].
-#[derive(Debug, Default)]
+/// One captured keyframe queued for grounded replay.
+#[derive(Debug, Clone)]
+struct QueuedFrame {
+    token: u64,
+    norms: Vec<f32>,
+    /// `(layer, ids, weights)` triples (MoE only).
+    experts: Vec<(u32, Vec<i32>, Vec<f32>)>,
+    prob: f32,
+    entropy_bits: f32,
+}
+
+/// Animated state for the Glas Cortex style. `Default` gives a dark,
+/// idle panel; the renderer feeds it via [`Self::on_state`],
+/// [`Self::apply`] and [`Self::tick`].
 pub struct CortexState {
-    /// Layer count reported by the loaded model (0 = unknown, use
-    /// [`DEFAULT_LAYERS`]).
-    model_layers: usize,
-    /// Smoothed per-layer activation, 0..1.
-    activation: Vec<f32>,
-    /// Slow-decaying per-layer heat trace, 0..1.
-    heat: Vec<f32>,
-    /// Current pipeline phase (from the overlay state).
     phase: Phase,
-    /// Ingested keyframes for the current reply, in token order.
-    frames: Vec<ReplayFrame>,
-    /// Robust per-layer normalisation band low edge (RC1 fix):
-    /// outlier-trimmed `mean − max(2σ, 2 % of mean)` over the reply's
-    /// ingested keyframe norms, recomputed on every ingest.
-    layer_lo: Vec<f32>,
-    /// Robust per-layer normalisation band high edge, parallel to
-    /// [`Self::layer_lo`].
-    layer_hi: Vec<f32>,
-    /// Last merged raw norms (fills the stride gaps of new frames).
-    merged: Vec<f32>,
-    /// Total decoded tokens (known after `ReplyEnd`).
-    total_tokens: Option<u64>,
-    /// Decode throughput from `ReplyEnd` (HUD).
-    tok_per_sec: f32,
-    /// KV-cache fill 0..1 from `ReplyEnd` (HUD).
-    ctx_fill: f32,
-    /// Cumulative enqueued reply-audio seconds (`AudioTotal`).
-    audio_secs: f32,
-    /// Whole reply audio finished playing.
-    playback_done: bool,
-    /// Playback clock, seconds since the speaking phase began.
+    /// Monotonic animation clock (seconds), advanced by ticks.
     clock: f32,
-    /// Replay-timeline length the clock runs against (cached by the
-    /// speaking tick; feeds [`Self::playback_frac`]).
-    timeline_secs: f32,
-    /// Thinking-phase decode clock: real wall-clock seconds since the
-    /// first token keyframe of this reply landed (reset to 0 at that
-    /// exact moment). This is the "already used elsewhere for TTS
-    /// sync" replay-clock mechanism (plan Task 4) applied to
-    /// Thinking's decode tail: every captured frame stamps its real
-    /// arrival time on this clock ([`ReplayFrame::at`]), and the
-    /// decode flare is spawned by comparing that stamp against this
-    /// clock -- never by counting render ticks.
-    decode_clock: f32,
-    /// Total real decode duration once known (snapshotted from
-    /// [`Self::decode_clock`] at `ReplyEnd`) -- the period the captured
-    /// trace loops over while Thinking lingers in the TTS round-trip
-    /// (`AssistantSynthesising`) after generation has finished.
-    gen_total_secs: Option<f32>,
-    /// Beads in flight this tick (speaking phase; rebuilt per tick).
-    beads: Vec<Bead>,
-    /// Right-edge sparks in flight.
-    sparks: Vec<Spark>,
-    /// Prefill sweep pulses crossing the lattice (thinking phase).
-    sweeps: Vec<Sweep>,
-    /// Per-column row last touched by a token path (`u8::MAX` =
-    /// none) — anchors the cooling embers and the crest sparks.
-    ember_row: Vec<u8>,
-    /// Wall-clock anchor for the tick delta.
+    /// Wall-clock anchor for real dt between ticks.
     last_tick: Option<std::time::Instant>,
-    /// True once a captured keyframe reported MoE routing — switches
-    /// the speaking scene from the dense travelling-column look to the
-    /// sparse expert-cell look. Stays false for dense models and for
-    /// the degraded (no-capture) path, so both fall back honestly to
-    /// the dense heatmap driven by cadence.
-    moe: bool,
-    /// Latest per-layer routed expert ids (MoE only), indexed by
-    /// layer. Empty rows mean "no routing observed for this layer".
-    routing: Vec<Vec<i32>>,
-    /// Latest per-layer routing weights (MoE only), parallel to
-    /// `routing`. Drives constellation ignition brightness (plan G1).
-    weights: Vec<Vec<f32>>,
-    /// Highest expert id seen this reply (for the "k / N" HUD scale).
-    max_expert_id: i32,
-    /// Largest observed top-k width (the "k" in the HUD readout).
-    top_k: usize,
-    /// Slow-decaying per-star heat trace for the MoE constellation —
-    /// which regions of expert space carried the reply (plan G2).
-    star_heat: Vec<f32>,
-    /// Smoothed per-band mic energy for the listening spectrum
-    /// (X = frequency, linearly sampled; `SPEC_BANDS` long, resampled to
-    /// the grid column count at draw time). Reuses the real mic FFT bins
-    /// pushed by the session — no new DSP.
-    spec_bands: Vec<f32>,
-    /// Slow-falling peak-hold caps, parallel to `spec_bands` (classic
-    /// EQ cap that hangs at the last peak then drifts down).
-    spec_peak: Vec<f32>,
-    /// Real reply-audio spectrum timeline: `(at_secs, bands, amp)`
-    /// windows computed from the genuine synthesised TTS PCM and
-    /// sampled against the speaking clock (plan E1). Empty on backends
-    /// that never push audio bands.
-    audio_frames: Vec<(f32, Vec<f32>, f32)>,
-    /// Thinking-phase decode latch: set once (and only once) the first
-    /// token keyframe lands, which also resets [`Self::decode_clock`]
-    /// to 0 and starts the one-shot prefill→decode snap (plan Task 3).
-    decode_latched: bool,
-    /// Progress 0..1 of the one-shot prefill→decode snap wipe, driven
-    /// by `decode_clock / SNAP_SECS`. Reaches 1.0 once and stays there
-    /// — never re-evaluated as an ongoing blend.
-    decode_snap: f32,
-    /// Per-layer prefill "read" latch, 0..1 (plan Task 2): monotonic
-    /// resting brightness a column snaps to once the ignition wipe has
-    /// passed it, persisting until the next `ReplyBegin`/`clear`.
-    prefill_lit: Vec<f32>,
+    /// The LED brightness field (rows × cols).
+    field: [[f32; COLS]; ROWS],
+    /// Per-column mood: 0 = cool ramp, 1 = warm ramp.
+    mood: [f32; COLS],
+    /// Per-column normalised entropy (drives desaturation).
+    ent: [f32; COLS],
+    pulses: Vec<Pulse>,
+    /// Last-known per-layer norms, merged across strided frames.
+    held: Vec<f32>,
+    /// Last-known routed experts per layer: `(ids, weights)`.
+    held_exp: Vec<Option<(Vec<i32>, Vec<f32>)>>,
+    n_layer: usize,
+    kind: CortexModelKind,
+    n_experts_total: Option<u32>,
+    n_experts_active: Option<u32>,
+    /// Running log-norm normalisation band (winsorised: the first
+    /// frame's values are excluded so a BOS outlier can't pin it).
+    log_min: f32,
+    log_max: f32,
+    saw_first: bool,
+    /// True between `ReplyBegin` and the replay queue draining after
+    /// `ReplyEnd` — the resting field shows only during a reply.
+    reply_active: bool,
+    /// Grounded-replay queue + schedule (on [`Self::clock`]).
+    queue: VecDeque<QueuedFrame>,
+    next_fire_at: f32,
+    /// Full keyframe trace of the current reply, retained so the
+    /// Speaking phase can replay the whole show paced to the
+    /// utterance (the live queue drains during Thinking).
+    trace: Vec<QueuedFrame>,
+    /// Fired-frame count (real keyframes only; telemetry + tests).
+    fired: u64,
+    /// Real keyframes consumed since playback started (Speaking
+    /// pacing: spread the trace across the reply audio).
+    replay_fired: usize,
+    /// Last real keyframe's confidence / normalised entropy — carry
+    /// sweeps reuse them so the rhythm stays grounded.
+    last_prob: f32,
+    last_entropy: f32,
+    /// Cumulative reply audio enqueued (seconds) + playback state.
+    audio_secs: f32,
+    playback_done: bool,
+    /// Real decoded token count for the current reply (`ReplyEnd`).
+    /// Anchors the Speaking reveal cadence: the sparse trace is spread
+    /// across this many tokens so its pacing matches the real reply
+    /// length regardless of how few keyframes the governor let through.
+    total_tokens: u64,
+    /// Clock timestamp when the Speaking phase began.
+    speak_start: f32,
+    /// Monotonic playback position in token space (Speaking). Advances
+    /// every beat toward `total_tokens` at a velocity re-derived from
+    /// the *current* (still-growing) audio length, and is clamped so it
+    /// never jumps backward — TTS synthesises sentence-by-sentence while
+    /// generation is still running, so both `audio_secs` and
+    /// `total_tokens` climb throughout the reply; pacing the morph off a
+    /// monotonic cursor removes the lurch that recomputing position
+    /// from the raw ratio produced.
+    play_pos: f32,
+    /// Listening: smoothed per-column mic energy.
+    spec: [f32; COLS],
+    /// Clock timestamp when the overlay entered the Thinking/Speaking
+    /// group (spanning the whole busy stretch, not reset on the
+    /// Thinking→Speaking hand-off). `None` when idle/listening. Gates
+    /// the simulated fallback so it only engages after `SIM_GRACE`.
+    busy_since: Option<f32>,
+    /// Synthetic token counter driving the simulated-MoE fallback
+    /// (traceless cloud backends): advances one per beat so the
+    /// routing pattern drifts across depth and time.
+    sim_tok: f32,
+}
+
+impl Default for CortexState {
+    fn default() -> Self {
+        Self {
+            phase: Phase::Idle,
+            clock: 0.0,
+            last_tick: None,
+            field: [[0.0; COLS]; ROWS],
+            mood: [0.0; COLS],
+            ent: [0.0; COLS],
+            pulses: Vec::new(),
+            held: Vec::new(),
+            held_exp: Vec::new(),
+            n_layer: 24,
+            kind: CortexModelKind::Dense,
+            n_experts_total: None,
+            n_experts_active: None,
+            log_min: f32::INFINITY,
+            log_max: f32::NEG_INFINITY,
+            saw_first: false,
+            reply_active: false,
+            queue: VecDeque::new(),
+            next_fire_at: 0.0,
+            trace: Vec::new(),
+            fired: 0,
+            replay_fired: 0,
+            last_prob: 0.7,
+            last_entropy: 0.3,
+            audio_secs: 0.0,
+            playback_done: false,
+            total_tokens: 0,
+            speak_start: 0.0,
+            play_pos: 0.0,
+            spec: [0.0; COLS],
+            busy_since: None,
+            sim_tok: 0.0,
+        }
+    }
 }
 
 impl CortexState {
-    /// Effective spine length.
-    #[must_use]
-    pub fn layer_count(&self) -> usize {
-        if self.model_layers == 0 {
-            DEFAULT_LAYERS
-        } else {
-            self.model_layers.clamp(MIN_LAYERS, MAX_LAYERS)
-        }
-    }
-
-    /// Set the real transformer layer count read from the loaded
-    /// model's metadata. `0` reverts to the default spine.
-    pub fn set_model_layers(&mut self, n: usize) {
-        if self.model_layers != n {
-            self.model_layers = n;
-            self.activation.clear();
-            self.heat.clear();
-        }
-    }
-
-    /// Drop animation + replay state on style swap so stale data
-    /// doesn't flash when the user switches back to the style.
+    /// Full reset (style swap / overlay teardown).
     pub fn clear(&mut self) {
-        self.activation.clear();
-        self.heat.clear();
-        self.sweeps.clear();
-        self.clear_replay();
+        *self = Self { last_tick: self.last_tick, ..Self::default() };
     }
 
-    fn clear_replay(&mut self) {
-        self.frames.clear();
-        self.layer_lo.clear();
-        self.layer_hi.clear();
-        self.merged.clear();
-        self.total_tokens = None;
-        self.tok_per_sec = 0.0;
-        self.ctx_fill = 0.0;
+    /// Reset the per-reply replay state, keeping in-flight pulses and
+    /// the lit field: the assistant/polish backends publish `Prefill`
+    /// *before* `ReplyBegin`, and cutting that flood mid-pass would
+    /// eat the visible "reading" beat.
+    fn clear_reply(&mut self) {
+        self.held.clear();
+        self.held_exp.clear();
+        self.log_min = f32::INFINITY;
+        self.log_max = f32::NEG_INFINITY;
+        self.saw_first = false;
+        self.queue.clear();
+        self.next_fire_at = self.clock;
+        self.trace.clear();
+        self.replay_fired = 0;
         self.audio_secs = 0.0;
         self.playback_done = false;
-        self.clock = 0.0;
-        self.timeline_secs = 0.0;
-        self.decode_clock = 0.0;
-        self.gen_total_secs = None;
-        self.beads.clear();
-        self.sparks.clear();
-        self.ember_row.clear();
-        self.moe = false;
-        self.routing.clear();
-        self.weights.clear();
-        self.max_expert_id = 0;
-        self.top_k = 0;
-        self.star_heat.clear();
-        self.audio_frames.clear();
-        self.decode_latched = false;
-        self.decode_snap = 0.0;
-        self.prefill_lit.clear();
-        // `sweeps` deliberately survives: prefill pulses are published
-        // *before* the generation's `ReplyBegin`, and cutting a sweep
-        // mid-flight on that reset would eat the suffix-prefill pulse.
+        self.total_tokens = 0;
+        self.play_pos = 0.0;
+        self.sim_tok = 0.0;
     }
 
     /// Track the overlay state so the phase machine follows the
     /// pipeline: listening (mic hot) → thinking (generation burst) →
-    /// speaking (timed replay). Called on every `SetState`.
-    pub fn on_state(&mut self, state: crate::OverlayState) {
-        use crate::OverlayState as S;
+    /// speaking (playback replay). Called on every `SetState`.
+    pub fn on_state(&mut self, state: OverlayState) {
+        use OverlayState as S;
         let phase = match state {
             S::Hidden => Phase::Idle,
             S::AssistantThinking
@@ -469,1186 +407,987 @@ impl CortexState {
             _ => Phase::Listening,
         };
         if phase == Phase::Speaking && self.phase != Phase::Speaking {
-            // Playback starts now — the replay clock is relative to
-            // this moment (first audio chunk enqueued).
-            self.clock = 0.0;
+            self.speak_start = self.clock;
+            self.begin_playback_replay();
+        }
+        // Track the busy stretch (Thinking or Speaking) as one span so
+        // the simulated-MoE fallback survives the Thinking→Speaking
+        // hand-off; clear it when we return to idle/listening.
+        let was_busy = matches!(self.phase, Phase::Thinking | Phase::Speaking);
+        let now_busy = matches!(phase, Phase::Thinking | Phase::Speaking);
+        if now_busy && !was_busy {
+            self.busy_since = Some(self.clock);
+            self.sim_tok = 0.0;
+        } else if !now_busy {
+            self.busy_since = None;
+        }
+        if phase != self.phase {
+            tracing::debug!(
+                "cortex: phase {:?} -> {phase:?} (queue={} trace={} held={})",
+                self.phase,
+                self.queue.len(),
+                self.trace.len(),
+                self.held.len()
+            );
         }
         self.phase = phase;
     }
 
-    /// Ingest one replay command from the orchestrator (see
-    /// [`crate::CortexCmd`]).
-    pub fn apply(&mut self, cmd: crate::CortexCmd) {
-        use crate::CortexCmd as C;
+    /// Reply audio is starting: reload the full retained trace so the
+    /// whole decode show replays paced to span the utterance. Without
+    /// this the live queue (drained during Thinking) would leave the
+    /// Speaking phase a static resting floor.
+    fn begin_playback_replay(&mut self) {
+        // Speaking replays the retained real trace (paced by
+        // `beat_speaking` across the reply audio); reset the reveal
+        // cursor and drop any live queue left over from the Thinking
+        // pass — the trace already holds every captured frame.
+        self.queue.clear();
+        self.replay_fired = 0;
+        self.play_pos = 0.0;
+        self.next_fire_at = self.clock;
+    }
+
+    /// Ingest one replay command from the orchestrator.
+    pub fn apply(&mut self, cmd: CortexCmd) {
         match cmd {
-            C::ReplyBegin { n_layer } => {
-                self.clear_replay();
+            CortexCmd::ReplyBegin { n_layer, kind, n_experts_total, n_experts_active } => {
+                tracing::debug!(
+                    "cortex: reply_begin n_layer={n_layer} kind={kind:?} \
+                     experts={n_experts_total:?}/{n_experts_active:?}"
+                );
+                self.clear_reply();
+                self.reply_active = true;
                 if n_layer > 0 {
-                    self.set_model_layers(n_layer as usize);
+                    self.n_layer = n_layer as usize;
                 }
+                self.kind = kind;
+                self.n_experts_total = n_experts_total;
+                self.n_experts_active = n_experts_active;
             }
-            C::Frame(f) => self.ingest_frame(&f),
-            C::Prefill { n_tokens } => {
-                // Amplitude grows with the log of the batch width so a
-                // short cached-suffix prefill still reads while a full
-                // cold prompt hits hard.
-                let amp = ((n_tokens.max(1) as f32).ln() / SWEEP_FULL_TOKENS.ln()).clamp(0.25, 1.0);
-                self.sweeps.push(Sweep { pos: 0.0, amp });
+            CortexCmd::Prefill { n_tokens } => {
+                tracing::debug!("cortex: prefill n_tokens={n_tokens}");
+                // A prefill event is only published when the tap is armed
+                // (a grounded local turn), so it marks the reply live and
+                // suppresses the traceless simulated fallback.
+                self.reply_active = true;
+                self.fire_prefill(n_tokens);
             }
-            C::ReplyEnd { total_tokens, gen_ms, ctx_used, ctx_capacity } => {
-                self.total_tokens = Some(total_tokens.max(1));
-                if gen_ms > 0 {
-                    self.tok_per_sec = total_tokens as f32 * 1000.0 / gen_ms as f32;
+            CortexCmd::Frame(f) => {
+                // A frame implies a live reply even if `ReplyBegin` got
+                // lost (defensive; the resting field needs the flag).
+                self.reply_active = true;
+                if self.held.len() < f.layer_norms.len() {
+                    self.n_layer = self.n_layer.max(f.layer_norms.len());
                 }
-                if ctx_capacity > 0 {
-                    self.ctx_fill = (ctx_used as f32 / ctx_capacity as f32).clamp(0.0, 1.0);
-                }
-                // Snapshot the real decode duration so the Thinking tail
-                // (waiting on the TTS round-trip) can loop-replay the
-                // captured trace over its real length instead of
-                // fabricating a filler period (plan Task 4).
-                if self.decode_latched {
-                    self.gen_total_secs = Some(self.decode_clock.max(0.1));
-                }
-            }
-            C::AudioTotal { secs } => {
-                if secs.is_finite() {
-                    self.audio_secs = self.audio_secs.max(secs.max(0.0));
-                }
-            }
-            C::AudioBands { at_secs, bands, amp } => {
-                // Real spectrum window from the genuine TTS PCM. Stored
-                // on a timeline so the speaking scene samples it against
-                // the playback clock (plan E1). Cap the history so a
-                // very long reply can't grow this unbounded.
-                if at_secs.is_finite() && amp.is_finite() {
-                    self.audio_frames.push((at_secs.max(0.0), bands, amp.clamp(0.0, 1.0)));
-                    if self.audio_frames.len() > 4096 {
-                        self.audio_frames.remove(0);
+                self.queue.push_back(QueuedFrame {
+                    token: f.token_index,
+                    norms: f.layer_norms,
+                    experts: f.experts.into_iter().map(|e| (e.layer, e.ids, e.weights)).collect(),
+                    prob: f.token_prob.unwrap_or(0.7).clamp(0.0, 1.0),
+                    entropy_bits: f.entropy_bits.unwrap_or(2.0).max(0.0),
+                });
+                // Retain for the Speaking replay (bounded; the tap
+                // itself caps a reply at 256 keyframes).
+                if self.trace.len() < 512 {
+                    if let Some(frame) = self.queue.back() {
+                        self.trace.push(frame.clone());
                     }
                 }
+                tracing::trace!(
+                    "cortex: frame token={} queue={} trace={}",
+                    self.queue.back().map_or(0, |f| f.token),
+                    self.queue.len(),
+                    self.trace.len()
+                );
             }
-            C::PlaybackDone => self.playback_done = true,
-        }
-    }
-
-    /// Merge a captured keyframe: strided `0.0` gaps are filled from
-    /// the previous merged frame so every stored frame has full layer
-    /// coverage, and the per-layer robust normalisation band is
-    /// recomputed.
-    fn ingest_frame(&mut self, f: &crate::CortexFrame) {
-        let n = f.layer_norms.len().max(self.merged.len());
-        self.merged.resize(n, 0.0);
-        for (i, slot) in self.merged.iter_mut().enumerate() {
-            let v = f.layer_norms.get(i).copied().unwrap_or(0.0);
-            if v > 0.0 {
-                *slot = v;
+            CortexCmd::ReplyEnd { total_tokens, gen_ms, .. } => {
+                self.total_tokens = total_tokens;
+                tracing::debug!(
+                    "cortex: reply_end total_tokens={total_tokens} gen_ms={gen_ms} \
+                     trace={} queue={}",
+                    self.trace.len(),
+                    self.queue.len()
+                );
             }
-        }
-        // The first real token keyframe of a reply latches the decode
-        // phase and restarts the decode clock at 0 (plan Task 3/4): every
-        // frame's arrival timestamp below is relative to this moment, so
-        // the crest schedule the decode flare reads is exactly when the
-        // tokens really arrived, not a render-tick count.
-        if !self.decode_latched {
-            self.decode_latched = true;
-            self.decode_clock = 0.0;
-        }
-        self.frames.push(ReplayFrame {
-            token_index: f.token_index,
-            norms: self.merged.clone(),
-            entropy: f.entropy_bits.unwrap_or(0.0).max(0.0),
-            at: self.decode_clock,
-        });
-        self.update_norm_bands();
-        // MoE routing: remember the latest per-layer expert choices so
-        // the speaking scene can light only the routed experts. A dense
-        // model never carries `experts`, so `moe` stays false and the
-        // scene keeps the dense travelling-column look.
-        if !f.experts.is_empty() {
-            self.moe = true;
-            for e in &f.experts {
-                let l = e.layer as usize;
-                if l >= self.routing.len() {
-                    self.routing.resize(l + 1, Vec::new());
-                    self.weights.resize(l + 1, Vec::new());
-                }
-                self.routing[l].clone_from(&e.ids);
-                self.weights[l].clone_from(&e.weights);
-                self.top_k = self.top_k.max(e.ids.len());
-                for &id in &e.ids {
-                    self.max_expert_id = self.max_expert_id.max(id);
+            CortexCmd::AudioTotal { secs } => {
+                if secs.is_finite() {
+                    self.audio_secs = self.audio_secs.max(secs.max(0.0));
+                    tracing::debug!("cortex: audio_total {:.2}s", self.audio_secs);
                 }
             }
-        }
-    }
-
-    /// Recompute the per-layer robust normalisation band from every
-    /// stored keyframe (RC1 fix). Real transformer per-layer L2 norms
-    /// are nearly constant across tokens, so normalising by a running
-    /// peak collapsed everything to ≈ 1.0 (a flat slab) — and one
-    /// BOS attention-sink outlier frame (10–100× hot) crushed every
-    /// later frame toward 0. Instead: a two-pass trimmed estimate —
-    /// mean/σ over all frames, then mean/σ excluding >3σ outliers —
-    /// and a band of `mean ± max(2σ, 2 % of mean)`, so the tiny real
-    /// token-to-token variation is stretched across the display ramp's
-    /// mid-range while outliers simply clamp to 1.
-    // The flagged grouping IS the textbook variance formula
-    // `E[x²] − E[x]²` — not a typo.
-    #[allow(clippy::suspicious_operation_groupings)]
-    fn update_norm_bands(&mut self) {
-        let n = self.merged.len();
-        self.layer_lo.resize(n, 0.0);
-        self.layer_hi.resize(n, 0.0);
-        for layer in 0..n {
-            let vals = || {
-                self.frames
-                    .iter()
-                    .filter_map(|f| f.norms.get(layer).copied())
-                    .filter(|&v| v > 0.0 && v.is_finite())
-            };
-            let (mut cnt, mut sum, mut sq) = (0.0f32, 0.0f32, 0.0f32);
-            for v in vals() {
-                cnt += 1.0;
-                sum += v;
-                sq += v * v;
-            }
-            if cnt <= 0.0 {
-                self.layer_lo[layer] = 0.0;
-                self.layer_hi[layer] = 0.0;
-                continue;
-            }
-            let mean = sum / cnt;
-            let sd = (sq / cnt - mean * mean).max(0.0).sqrt();
-            // Trim pass: outliers (the BOS sink) must not own the scale.
-            let (mut tc, mut ts, mut tq) = (0.0f32, 0.0f32, 0.0f32);
-            for v in vals() {
-                if (v - mean).abs() <= 3.0 * sd + f32::EPSILON {
-                    tc += 1.0;
-                    ts += v;
-                    tq += v * v;
-                }
-            }
-            let (mean, sd) = if tc > 0.0 {
-                let m = ts / tc;
-                (m, (tq / tc - m * m).max(0.0).sqrt())
-            } else {
-                (mean, sd)
-            };
-            let half = (2.0 * sd).max(mean.abs() * 0.02).max(f32::EPSILON);
-            self.layer_lo[layer] = mean - half;
-            self.layer_hi[layer] = mean + half;
-        }
-    }
-
-    /// Normalised (0..1) activation of `layer` in `frame`, mapped
-    /// through the robust per-layer band (see
-    /// [`Self::update_norm_bands`]).
-    fn frame_act(&self, frame: usize, layer: usize) -> f32 {
-        let Some(f) = self.frames.get(frame) else { return 0.0 };
-        let norm = f.norms.get(layer).copied().unwrap_or(0.0);
-        if norm <= 0.0 {
-            return 0.0;
-        }
-        let lo = self.layer_lo.get(layer).copied().unwrap_or(0.0);
-        let hi = self.layer_hi.get(layer).copied().unwrap_or(0.0);
-        if hi - lo <= f32::EPSILON {
-            return 0.0;
-        }
-        ((norm - lo) / (hi - lo)).clamp(0.0, 1.0)
-    }
-
-    /// Mean normalised activation of a frame (bead energy).
-    fn frame_energy(&self, frame: usize) -> f32 {
-        let n = self.layer_count();
-        if n == 0 {
-            return 0.0;
-        }
-        (0..n).map(|i| self.frame_act(frame, i)).sum::<f32>() / n as f32
-    }
-
-    /// Number of tokens the replay timeline spans: the reply's total
-    /// when known, otherwise the highest keyframe index seen so far.
-    fn token_span(&self) -> f32 {
-        let known = self.total_tokens.unwrap_or(0);
-        let seen = self.frames.last().map_or(0, |f| f.token_index + 1);
-        known.max(seen).max(1) as f32
-    }
-
-    /// Remember, for every column a bead is currently crossing, which
-    /// row its real token path visits there ([`path_rows`]) — the
-    /// cooling embers that make the reply's "worn routes" visible
-    /// between flares (real per-column, per-token structure, not a
-    /// flat resting glow).
-    fn update_embers(&mut self, n: usize) {
-        if self.ember_row.len() != n {
-            self.ember_row = vec![u8::MAX; n];
-        }
-        let beads = &self.beads;
-        let ember = &mut self.ember_row;
-        for b in beads {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let col = (b.x.clamp(0.0, 1.0) * (n - 1) as f32).round() as usize;
-            if let Some(slot) = ember.get_mut(col) {
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    *slot = path_rows(b.token, col, GRID_ROWS)[col] as u8;
-                }
+            // The LED grammar is driven by compute events; the voice
+            // itself is what the user *hears*, so its spectrum is
+            // deliberately not double-encoded here.
+            CortexCmd::AudioBands { .. } => {}
+            CortexCmd::PlaybackDone => {
+                tracing::debug!("cortex: playback_done (queue={})", self.queue.len());
+                self.playback_done = true;
             }
         }
     }
 
-    /// Advance the animation one tick from the latest FFT frame. The
-    /// bins drive the grid directly while listening (live mic
-    /// spectrum) and pad the thinking phase (the orchestrator's
-    /// synthetic turbulence field); the answering phase ignores them
-    /// and runs the timed keyframe replay instead.
-    pub fn tick(&mut self, latest: &[f32]) {
+    /// Advance the animation. `bins` is the live mic FFT during
+    /// listening (empty from the timer-driven animation pump). Uses
+    /// real wall-clock dt, clamped so a stalled compositor can't skip
+    /// the show.
+    pub fn tick(&mut self, bins: &[f32]) {
         let now = std::time::Instant::now();
         let dt = self
             .last_tick
-            .map_or(0.05, |t| now.duration_since(t).as_secs_f32())
-            .clamp(0.0, MAX_TICK_DT);
+            .map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32())
+            .min(MAX_TICK_DT);
         self.last_tick = Some(now);
-        self.tick_dt(latest, dt);
+        self.tick_dt(bins, dt);
     }
 
-    /// Deterministic tick core (`dt` injectable for tests).
-    fn tick_dt(&mut self, latest: &[f32], dt: f32) {
-        let n = self.layer_count();
-        if self.activation.len() != n {
-            self.activation = vec![0.0; n];
-            self.heat = vec![0.0; n];
-        }
-        // Sparks age on every tick so they finish fading even when
-        // the phase moves on mid-burst.
-        for s in &mut self.sparks {
-            s.age += dt;
-        }
-        self.sparks.retain(|s| s.age < SPARK_LIFE_SECS);
-        // Prefill sweeps advance on every tick for the same reason.
-        for s in &mut self.sweeps {
-            s.pos += dt / SWEEP_CROSS_SECS;
-        }
-        self.sweeps.retain(|s| s.pos < 1.0 + SWEEP_WIDTH);
-        // Listening spectrum source (plan C, redesigned): X = frequency
-        // (linearly sampled), Y = energy. Reuses the real mic FFT bins
-        // already pushed by the session (`latest`) — no new DSP, exactly
-        // like the System/360 style. We deliberately do NOT auto-gain per
-        // band: that pumped quiet mid-band noise into a false bright
-        // cluster and divided the always-loud low bins back down so voice
-        // never lit the left of the panel. The bins are already dB-scaled
-        // and normalised upstream, so we use them directly, gate the idle
-        // noise floor, lift contrast, then track a snappy EMA plus
-        // slow-falling peak-hold caps.
-        if self.phase == Phase::Listening {
-            if self.spec_bands.len() != SPEC_BANDS {
-                self.spec_bands = vec![0.0; SPEC_BANDS];
-                self.spec_peak = vec![0.0; SPEC_BANDS];
-            }
-            let peak_fall = SPEC_PEAK_FALL * dt;
-            let denom = (SPEC_BANDS - 1).max(1) as f32;
-            for b in 0..SPEC_BANDS {
-                // Linear frequency sample position into the mic bins.
-                let p = b as f32 / denom;
-                let raw = sample_frac(latest, p);
-                // Gate the idle noise floor so a quiet room rests at the
-                // bottom, then rescale and lift contrast so speech reads.
-                let cleaned = ((raw - SPEC_NOISE_FLOOR) / (1.0 - SPEC_NOISE_FLOOR)).max(0.0);
-                let target = cleaned.powf(0.7);
-                let s = &mut self.spec_bands[b];
-                *s += (target - *s) * SPEC_EMA;
-                // Peak-hold cap: jump to new peaks, else drift down.
-                if *s >= self.spec_peak[b] {
-                    self.spec_peak[b] = *s;
-                } else {
-                    self.spec_peak[b] = (self.spec_peak[b] - peak_fall).max(*s);
-                }
+    /// Deterministic-dt tick (tests, gallery, bench).
+    pub fn tick_dt(&mut self, bins: &[f32], dt: f32) {
+        let dt = dt.clamp(0.0, MAX_TICK_DT);
+        self.clock += dt;
+
+        // Field decay: fast → crisp pulses, legible cadence.
+        let decay = (-dt / FIELD_TAU).exp();
+        for row in &mut self.field {
+            for v in row.iter_mut() {
+                *v *= decay;
             }
         }
-        let targets: Vec<f32> = match self.phase {
-            Phase::Idle => vec![0.0; n],
-            Phase::Listening => (0..n).map(|i| resample(latest, i, n)).collect(),
-            Phase::Thinking => self.thinking_targets(latest, n, dt),
-            Phase::Speaking => self.replay_targets(n, dt),
-        };
-        for ((act, heat), target) in
-            self.activation.iter_mut().zip(self.heat.iter_mut()).zip(targets)
+
+        // The metronome: one sweep per beat, continuously, while a
+        // reply is live or its audio plays — a steady human-relatable
+        // "thinking pace" regardless of how sparse the real keyframes
+        // are. Real keyframes are consumed once, in order; between
+        // them, carry sweeps re-show the last-known real state.
+        if matches!(self.phase, Phase::Thinking | Phase::Speaking)
+            && self.clock >= self.next_fire_at
         {
-            *act += (target - *act) * ACT_EMA;
-            *heat = (*heat * HEAT_DECAY + *act * HEAT_GAIN).clamp(0.0, 1.0);
+            if self.reply_active {
+                self.beat();
+            } else if self.simulating() {
+                // Traceless (cloud) backend: no real keyframes will
+                // arrive, so drive a plausible simulated-MoE sweep so
+                // the bar still "thinks" while the remote model works.
+                self.beat_sim();
+            }
         }
-    }
 
-    /// Thinking-phase targets. Two mutually exclusive regimes, chosen
-    /// once and never blended (plan Task 2/3):
-    ///
-    /// - **Prefill** (before the first real token keyframe lands): a
-    ///   sequential column-ignition wipe, paced by the real
-    ///   `CortexCmd::Prefill` batch progress (`Self::sweeps`). Columns
-    ///   the wipe front has already crossed latch to
-    ///   [`PREFILL_REST_LEVEL`] in [`Self::prefill_lit`] and stay
-    ///   there — a real beginning-middle-end shape, not a blob that
-    ///   passes through and vanishes. With no real prefill events at
-    ///   all (external backends, no capture) a synthetic keep-alive
-    ///   wipe fills the gap honestly.
-    /// - **Decode** (from the moment the first frame lands): the same
-    ///   token-flare replay grammar Speaking uses, paced by
-    ///   [`Self::decode_clock`] — a real wall-clock replay clock, not
-    ///   render-tick counting (plan Task 4). While tokens are still
-    ///   arriving live, each frame's flare fires exactly at its real
-    ///   arrival timestamp. Once generation has finished
-    ///   (`ReplyEnd` set [`Self::gen_total_secs`]) but Thinking
-    ///   lingers (`AssistantSynthesising`, waiting on the TTS
-    ///   round-trip), the captured trace loops over its own real
-    ///   length instead of fading to a fabricated filler.
-    ///
-    /// The prefill→decode handoff itself is a single one-shot wipe
-    /// (`Self::decode_snap`, plan Task 3): for the `SNAP_SECS` right
-    /// after latch, columns behind the snap front already show decode
-    /// while columns ahead of it still show the last prefill state;
-    /// once the snap completes the prefill field is never evaluated
-    /// again this reply.
-    fn thinking_targets(&mut self, latest: &[f32], n: usize, dt: f32) -> Vec<f32> {
-        if !self.decode_latched {
-            // No real prefill events and nothing crossing? Keep the
-            // brain visibly working: loop a moderate synthetic sweep so
-            // external backends (no capture) still show the
-            // prompt-crunch phase.
-            if self.frames.is_empty() && self.sweeps.is_empty() {
-                self.sweeps.push(Sweep { pos: -SWEEP_WIDTH, amp: 0.75 });
-            }
-            if self.prefill_lit.len() != n {
-                self.prefill_lit = vec![0.0; n];
-            }
-            // Columns the wipe front has already crossed latch to a
-            // calm resting brightness and stay there (monotonic).
-            for s in &self.sweeps {
-                for (i, lit) in self.prefill_lit.iter_mut().enumerate() {
-                    let frac = i as f32 / (n - 1).max(1) as f32;
-                    if frac <= s.pos {
-                        *lit = lit.max(PREFILL_REST_LEVEL);
-                    }
+        // Advance pulses; deposit each newly crossed column.
+        let mut i = 0;
+        while i < self.pulses.len() {
+            let age = self.clock - self.pulses[i].born;
+            let prog = age / self.pulses[i].dur.max(1e-3);
+            // Head runs slightly past the right edge so the last
+            // column ignites.
+            let head = prog * (COLS as f32 - 1.0 + 3.0) - 1.5;
+            let from = (self.pulses[i].last_head.floor() as i64 + 1).max(0) as usize;
+            let to = head.floor().min(COLS as f32 - 1.0);
+            if to >= 0.0 {
+                for c in from..=(to as usize) {
+                    self.deposit_column(i, c);
                 }
             }
-            let mut targets = self.prefill_lit.clone();
-            // The moving ignition front itself: a narrow bright spike
-            // right at each in-flight sweep's leading edge.
-            for s in &self.sweeps {
-                for (i, t) in targets.iter_mut().enumerate() {
-                    let frac = i as f32 / (n - 1).max(1) as f32;
-                    let d = ((frac - s.pos) / SWEEP_WIDTH).abs();
-                    if d < 1.0 {
-                        *t = t.max(s.amp * (1.0 - d));
-                    }
-                }
+            self.pulses[i].last_head = head;
+            if prog < 1.25 {
+                i += 1;
+            } else {
+                self.pulses.swap_remove(i);
             }
-            if self.frames.is_empty() {
-                for (i, t) in targets.iter_mut().enumerate() {
-                    *t = t.max(resample(latest, i, n) * 0.2);
-                }
-            }
-            return targets;
         }
-        // Decode tail: real replay clock (plan Task 4), never gated by
-        // render-tick counting.
-        let prev = self.decode_clock;
-        self.decode_clock += dt;
-        self.decode_snap = (self.decode_clock / SNAP_SECS).min(1.0);
-        let loop_period = self.gen_total_secs.filter(|&t| t > 0.05);
-        let (replay_prev, replay_now) = match loop_period {
-            Some(total) => (prev.rem_euclid(total), self.decode_clock.rem_euclid(total)),
-            None => (prev, self.decode_clock),
-        };
-        self.spawn_flares(replay_prev, replay_now, |f| f.at);
-        self.update_embers(n);
-        let idx = self
-            .frames
-            .iter()
-            .position(|f| f.at >= replay_now)
-            .unwrap_or_else(|| self.frames.len().saturating_sub(1));
-        (0..n).map(|i| self.frame_act(idx, i)).collect()
-    }
 
-    /// Spawn beads/sparks for every captured frame whose real crest
-    /// timestamp (`crest_of`) falls in `[replay_prev, replay_now)` —
-    /// the shared token-flare replay engine (plan Task 6) driving both
-    /// [`Self::replay_targets`] (Speaking, crested against the audio
-    /// timeline) and [`Self::thinking_targets`] (the Thinking decode
-    /// tail, crested against each frame's real arrival time), so the
-    /// two phases speak one continuous visual language.
-    fn spawn_flares(
-        &mut self,
-        replay_prev: f32,
-        replay_now: f32,
-        crest_of: impl Fn(&ReplayFrame) -> f32,
-    ) {
-        self.beads.clear();
-        for idx in 0..self.frames.len() {
-            let crest = crest_of(&self.frames[idx]);
-            if replay_now >= crest - BEAD_TRAVEL_SECS && replay_now < crest {
-                let x = 1.0 - (crest - replay_now) / BEAD_TRAVEL_SECS;
-                let token = self.frames[idx].token_index;
-                self.beads.push(Bead {
-                    x,
-                    energy: self.frame_energy(idx),
-                    token,
-                    frame: Some(idx),
-                });
+        match self.phase {
+            Phase::Idle => {
+                if self.pulses.is_empty() {
+                    self.idle_breath();
+                }
             }
-            if crest > replay_prev && crest <= replay_now {
-                self.sparks.push(Spark { age: 0.0, energy: self.frame_energy(idx) });
+            Phase::Listening => {
+                if !bins.is_empty() {
+                    self.ingest_spectrum(bins);
+                }
+                self.listening_field();
+            }
+            Phase::Thinking | Phase::Speaking => {
+                // Resting field: a dim, breathing floor showing the
+                // last-known state between sweeps. Real traces sample
+                // sparsely, leaving long true gaps — this keeps the
+                // panel alive with grounded held state instead of
+                // going black. Sweeps ride over it.
+                if self.reply_active && !self.held.is_empty() {
+                    self.resting_floor();
+                } else if self.pulses.is_empty() {
+                    self.idle_breath();
+                }
             }
         }
     }
 
-    /// Speaking-phase targets: advance the playback clock, rebuild
-    /// the pulse set, fire crest sparks, and light each column from
-    /// the wake of the paths passing over it plus a soft ambient
-    /// level from the keyframe currently being "spoken".
-    ///
-    /// With no keyframes (external backend, capture off) the engine
-    /// falls back to **cadence mode**: pulses fire at an estimated
-    /// word rate over the known audio duration, honestly showing
-    /// activity and pace without fabricating internals.
-    #[allow(clippy::too_many_lines)]
-    fn replay_targets(&mut self, n: usize, dt: f32) -> Vec<f32> {
-        let cadence = self.frames.is_empty();
-        // External TTS paths that never report an audio duration
-        // (e.g. streaming synthesis) still get word pulses: the
-        // timeline grows open-endedly with the clock until the
-        // speaking state ends.
-        let open_ended = cadence && self.audio_secs <= 0.25;
-        let span = if open_ended {
-            ((self.clock / SYNTH_SECS_PER_WORD).ceil() + 2.0).max(1.0)
-        } else if cadence {
-            (self.audio_secs / SYNTH_SECS_PER_WORD).ceil().max(1.0)
-        } else {
-            self.token_span()
-        };
-        let total_secs = if self.audio_secs > 0.25 {
-            self.audio_secs
-        } else if cadence {
-            span * SYNTH_SECS_PER_WORD
-        } else {
-            span * SECS_PER_TOKEN_EST
-        }
-        .max(0.5);
-        self.timeline_secs = total_secs;
-        let prev = self.clock;
-        // Once the audio has drained, fast-forward so trailing pulses
-        // wrap up promptly instead of ghost-playing over silence.
-        let step = if self.playback_done { dt * 2.5 } else { dt };
-        self.clock = (self.clock + step).min(total_secs + BEAD_TRAVEL_SECS);
-        if cadence {
-            self.beads.clear();
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let words = span as u64;
-            for k in 0..words {
-                let crest = (k as f32 + 0.5) / span * total_secs;
-                if self.clock >= crest - BEAD_TRAVEL_SECS && self.clock < crest {
-                    let x = 1.0 - (crest - self.clock) / BEAD_TRAVEL_SECS;
-                    self.beads.push(Bead {
-                        x,
-                        energy: 0.5 + 0.5 * hash01(k.wrapping_mul(0x9E37)),
-                        token: k,
-                        frame: None,
-                    });
-                }
-                if crest > prev && crest <= self.clock {
-                    self.sparks.push(Spark { age: 0.0, energy: 0.7 });
-                }
-            }
-        } else {
-            // Same shared token-flare replay engine the Thinking decode
-            // tail uses (plan Task 6), crested against the real audio
-            // timeline instead of each frame's arrival timestamp.
-            self.spawn_flares(prev, self.clock, |f| f.token_index as f32 / span * total_secs);
-        }
-        self.update_embers(n);
-        // Ambient: the keyframe nearest the currently spoken token
-        // keeps the lattice faintly alive under the paths.
-        let ambient = if cadence {
-            None
-        } else {
-            let pos_tokens = (self.clock / total_secs) * span;
-            Some(
-                self.frames
-                    .iter()
-                    .position(|f| f.token_index as f32 >= pos_tokens)
-                    .unwrap_or(self.frames.len() - 1),
-            )
-        };
-        let targets = (0..n)
-            .map(|i| {
-                let frac = i as f32 / (n - 1).max(1) as f32;
-                let mut t = ambient.map_or(0.05, |a| self.frame_act(a, i) * 0.25);
-                for b in &self.beads {
-                    let d = b.x - frac;
-                    if (0.0..WAKE_FRAC).contains(&d) {
-                        let base = b.frame.map_or(b.energy, |f| self.frame_act(f, i));
-                        t = t.max(base * (1.0 - d / WAKE_FRAC));
-                    }
-                }
-                t
-            })
-            .collect();
-        // MoE constellation heat-trace (plan G2): decay every star and
-        // deposit the real routing weights of the currently-decoded
-        // layer, so the regions of expert space that carried the reply
-        // slowly accumulate. Purely real routing — no synthetic roll.
-        if self.moe {
-            if self.star_heat.len() != N_STARS {
-                self.star_heat = vec![0.0; N_STARS];
-            }
-            for hcell in &mut self.star_heat {
-                *hcell *= CONSTELLATION_HEAT_DECAY;
-            }
-            let front = self.beads.iter().fold(f32::NEG_INFINITY, |m, b| m.max(b.x));
-            let sweep = if front.is_finite() { front.clamp(0.0, 1.0) } else { 0.55 };
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let layer =
-                ((sweep * (n.saturating_sub(1)) as f32).round() as usize).min(n.saturating_sub(1));
-            if let Some(ids) = self.routing.get(layer) {
-                let ws = self.weights.get(layer);
-                let wmax =
-                    ws.map(|w| w.iter().copied().fold(0.0f32, f32::max)).unwrap_or(1.0).max(1e-3);
-                for (k, &id) in ids.iter().enumerate() {
-                    let w = ws.and_then(|w| w.get(k)).copied().unwrap_or(1.0) / wmax;
-                    let s = expert_star(id);
-                    self.star_heat[s] = (self.star_heat[s] + w.clamp(0.0, 1.0) * 0.14).min(1.0);
-                }
-            }
-        }
-        targets
-    }
-
-    /// Smoothed activation for layer `i` (0 when out of range).
-    #[must_use]
-    pub fn activation(&self, i: usize) -> f32 {
-        self.activation.get(i).copied().unwrap_or(0.0)
-    }
-
-    /// Heat-trace value for layer `i` (0 when out of range).
-    #[must_use]
-    pub fn heat(&self, i: usize) -> f32 {
-        self.heat.get(i).copied().unwrap_or(0.0)
-    }
-
-    /// Beads currently in flight (speaking phase; empty otherwise).
-    #[must_use]
-    pub fn beads(&self) -> &[Bead] {
-        &self.beads
-    }
-
-    /// Whether the scene needs continuous repaints that no external
-    /// data push will trigger. Listening self-drives from mic FFT
-    /// pushes, and Idle is static, so only the thinking and speaking
-    /// phases need the backend to pump frames on a timer.
+    /// Whether the backend should pump timer frames (no external data
+    /// push would otherwise trigger repaints). Listening self-drives
+    /// from the mic FFT push; Idle is hidden.
     #[must_use]
     pub fn needs_animation_frames(&self) -> bool {
         matches!(self.phase, Phase::Thinking | Phase::Speaking)
     }
 
-    /// Active right-edge sparks as `(life_frac 0..1, energy)`.
+    /// Frames replayed so far this session (tests/telemetry).
     #[must_use]
-    pub fn spark_states(&self) -> Vec<(f32, f32)> {
-        self.sparks.iter().map(|s| ((s.age / SPARK_LIFE_SECS).clamp(0.0, 1.0), s.energy)).collect()
+    pub fn frames_fired(&self) -> u64 {
+        self.fired
     }
 
-    /// Whether replay data exists for the ribbon / HUD overlays.
-    #[must_use]
-    pub fn has_replay(&self) -> bool {
-        !self.frames.is_empty() && matches!(self.phase, Phase::Thinking | Phase::Speaking)
-    }
+    // ---- event → pulse ------------------------------------------------
 
-    /// Listening spectrum energy (0..1) for grid column `col` of
-    /// `cols`. X = frequency (log-spaced), sampled from the smoothed
-    /// mic-FFT bands with linear interpolation (plan C, redesigned).
-    #[must_use]
-    pub fn spec_col(&self, col: usize, cols: usize) -> f32 {
-        if self.spec_bands.is_empty() || cols == 0 {
-            return 0.0;
+    /// Prefill flood: fills every column, all rows, cool ramp, one
+    /// fast pass. Amplitude grows with the log of the batch width.
+    fn fire_prefill(&mut self, n_tokens: u32) {
+        let amp = ((n_tokens.max(1) as f32).ln_1p() / 400.0_f32.ln()).clamp(0.0, 1.0);
+        let mut profile = [0.0_f32; COLS];
+        for (c, p) in profile.iter_mut().enumerate() {
+            *p = 0.72 + 0.28 * h1(c as f32 * 3.7);
         }
-        let p = if cols > 1 { col as f32 / (cols - 1) as f32 } else { 0.0 };
-        sample_frac(&self.spec_bands, p)
-    }
-
-    /// Slow-falling peak-hold cap (0..1) for grid column `col` of
-    /// `cols`, parallel to [`Self::spec_col`].
-    #[must_use]
-    pub fn spec_peak_col(&self, col: usize, cols: usize) -> f32 {
-        if self.spec_peak.is_empty() || cols == 0 {
-            return 0.0;
-        }
-        let p = if cols > 1 { col as f32 / (cols - 1) as f32 } else { 0.0 };
-        sample_frac(&self.spec_peak, p)
-    }
-
-    /// Sample the real reply-audio spectrum timeline at the current
-    /// playback clock. Returns `None` when no audio bands were pushed.
-    fn audio_sample(&self) -> Option<usize> {
-        if self.audio_frames.is_empty() {
-            return None;
-        }
-        let mut best = 0usize;
-        let mut best_d = f32::MAX;
-        for (i, (t, _, _)) in self.audio_frames.iter().enumerate() {
-            let d = (t - self.clock).abs();
-            if d < best_d {
-                best_d = d;
-                best = i;
-            }
-        }
-        Some(best)
-    }
-
-    /// Real reply-audio band energy (0..1) for grid `row` of `nrows`,
-    /// sampled at the playback clock. Rows map to frequency bands with
-    /// the lowest band at the bottom (same axis as listening). `0` when
-    /// no real audio spectrum is available.
-    #[must_use]
-    pub fn audio_row(&self, row: usize, nrows: usize) -> f32 {
-        let Some(i) = self.audio_sample() else { return 0.0 };
-        let bands = &self.audio_frames[i].1;
-        if bands.is_empty() || nrows == 0 {
-            return 0.0;
-        }
-        let freq = nrows.saturating_sub(1).saturating_sub(row);
-        resample(bands, freq, nrows)
-    }
-
-    /// Current real reply-audio amplitude (0..1) sampled at the
-    /// playback clock, plus whether any real audio band data exists.
-    #[must_use]
-    pub fn audio_amp_now(&self) -> (f32, bool) {
-        self.audio_sample().map_or((0.0, false), |i| (self.audio_frames[i].2, true))
-    }
-
-    /// Thinking decode-latch state and the one-shot prefill→decode
-    /// snap wipe's progress (plan Task 3): `(latched, snap_t 0..1)`.
-    /// The snap front sweeps left→right across the columns as `snap_t`
-    /// advances from 0 to 1 over `SNAP_SECS`; once it reaches 1.0 the
-    /// prefill field must never be evaluated again this reply.
-    #[must_use]
-    pub fn decode_snap(&self) -> (bool, f32) {
-        (self.decode_latched, self.decode_snap)
-    }
-
-    /// Per-layer prefill "read" latch (0..1, plan Task 2) for `layer`
-    /// — the calm resting brightness a column holds once the ignition
-    /// wipe has crossed it. `0.0` when not yet read or out of range.
-    #[must_use]
-    pub fn prefill_lit(&self, layer: usize) -> f32 {
-        self.prefill_lit.get(layer).copied().unwrap_or(0.0)
-    }
-
-    /// In-flight prefill ignition-wipe fronts as `(position 0..1, peak
-    /// amplitude 0..1)` — real per-batch `CortexCmd::Prefill` pulses
-    /// (plus the synthetic keep-alive sweep when no capture data
-    /// exists at all).
-    pub fn prefill_sweeps(&self) -> impl Iterator<Item = (f32, f32)> + '_ {
-        self.sweeps.iter().map(|s| (s.pos, s.amp))
-    }
-
-    /// Routed expert ids for `layer` (empty when none observed).
-    #[must_use]
-    pub fn routing_at(&self, layer: usize) -> &[i32] {
-        self.routing.get(layer).map(Vec::as_slice).unwrap_or(&[])
-    }
-
-    /// Routing weights for `layer` (empty when none observed).
-    #[must_use]
-    pub fn weights_at(&self, layer: usize) -> &[f32] {
-        self.weights.get(layer).map(Vec::as_slice).unwrap_or(&[])
-    }
-
-    /// Constellation heat-trace for `star` (0..1).
-    #[must_use]
-    pub fn star_heat(&self, star: usize) -> f32 {
-        self.star_heat.get(star).copied().unwrap_or(0.0)
-    }
-
-    /// MoE HUD readout `(k, n)` — the top-k width and the (estimated)
-    /// total expert population — available once routing was observed.
-    /// `n` is derived from the highest expert id seen, so it reflects
-    /// real scale even for 128/256-expert models.
-    #[must_use]
-    pub fn moe_hud(&self) -> Option<(usize, usize)> {
-        if !self.moe || self.top_k == 0 {
-            return None;
-        }
-        #[allow(clippy::cast_sign_loss)]
-        let n = (self.max_expert_id.max(0) as usize) + 1;
-        Some((self.top_k, n.max(self.top_k)))
-    }
-
-    /// True while the MoE constellation should be shown (routing seen
-    /// and in the speaking phase).
-    #[must_use]
-    pub fn is_moe_speaking(&self) -> bool {
-        self.moe && self.phase == Phase::Speaking
-    }
-
-    /// Normalised token entropy (0..1) at `frac` of the reply
-    /// timeline — linear interpolation between keyframes. Feeds the
-    /// uncertainty ribbon.
-    #[must_use]
-    pub fn entropy_at(&self, frac: f32) -> f32 {
-        if self.frames.is_empty() {
-            return 0.0;
-        }
-        let pos = frac.clamp(0.0, 1.0) * (self.token_span() - 1.0);
-        let mut prev: Option<&ReplayFrame> = None;
-        for f in &self.frames {
-            let ft = f.token_index as f32;
-            if ft >= pos {
-                let e = prev.map_or(f.entropy, |p| {
-                    let pt = p.token_index as f32;
-                    let w = if ft > pt { (pos - pt) / (ft - pt) } else { 1.0 };
-                    p.entropy + (f.entropy - p.entropy) * w.clamp(0.0, 1.0)
-                });
-                return (e / ENTROPY_NORM_BITS).clamp(0.0, 1.0);
-            }
-            prev = Some(f);
-        }
-        (self.frames.last().map_or(0.0, |f| f.entropy) / ENTROPY_NORM_BITS).clamp(0.0, 1.0)
-    }
-
-    /// Playback progress 0..1 along the replay timeline (0 outside
-    /// the speaking phase).
-    #[must_use]
-    pub fn playback_frac(&self) -> f32 {
-        if self.phase != Phase::Speaking || self.timeline_secs <= 0.0 {
-            return 0.0;
-        }
-        (self.clock / self.timeline_secs).clamp(0.0, 1.0)
-    }
-
-    /// HUD arc fills as `(tok_per_sec_frac, ctx_fill)`, available
-    /// once `ReplyEnd` delivered the stats.
-    #[must_use]
-    pub fn hud(&self) -> Option<(f32, f32)> {
-        if self.tok_per_sec <= 0.0 && self.ctx_fill <= 0.0 {
-            return None;
-        }
-        Some(((self.tok_per_sec / HUD_TOKPS_FULL).clamp(0.0, 1.0), self.ctx_fill))
-    }
-}
-
-/// Linear resample of an FFT bin array onto layer column `i` of `n`.
-fn resample(bins: &[f32], i: usize, n: usize) -> f32 {
-    if bins.is_empty() {
-        return 0.0;
-    }
-    if bins.len() == 1 {
-        return bins[0].clamp(0.0, 1.0);
-    }
-    let pos = i as f32 / (n - 1).max(1) as f32 * (bins.len() - 1) as f32;
-    let lo = pos.floor() as usize;
-    let hi = (lo + 1).min(bins.len() - 1);
-    let frac = pos - lo as f32;
-    (bins[lo] * (1.0 - frac) + bins[hi] * frac).clamp(0.0, 1.0)
-}
-
-/// Sample a 0..1-normalised bin array at fractional position `p`
-/// (0 = first bin, 1 = last) with linear interpolation. Used to
-/// log-spread the mic FFT across the listening spectrum bands and to
-/// resample those bands onto the grid columns at draw time.
-fn sample_frac(bins: &[f32], p: f32) -> f32 {
-    if bins.is_empty() {
-        return 0.0;
-    }
-    if bins.len() == 1 {
-        return bins[0].clamp(0.0, 1.0);
-    }
-    let pos = p.clamp(0.0, 1.0) * (bins.len() - 1) as f32;
-    let lo = pos.floor() as usize;
-    let hi = (lo + 1).min(bins.len() - 1);
-    let frac = pos - lo as f32;
-    (bins[lo] * (1.0 - frac) + bins[hi] * frac).clamp(0.0, 1.0)
-}
-
-/// Additive two-lobe radial glow centred at `(cx, cy)`.
-///
-/// The inner lobe (`radius`) is a bright `(1 - d²/r²)²` core; the
-/// outer lobe (`2 × radius`) is a faint halo at a quarter of the
-/// intensity — the "fake bloom". Channels saturate-add on top of the
-/// existing framebuffer; the alpha channel is lifted by the largest
-/// added component so the premultiplied invariant (`channel ≤
-/// alpha`) holds against the translucent panel background.
-///
-/// No square roots: both falloffs are expressed in d², and the
-/// bounding box is clipped before the per-pixel loop.
-pub fn add_glow(
-    buf: &mut [u32],
-    stride: u32,
-    h: u32,
-    cx: f32,
-    cy: f32,
-    radius: f32,
-    color: u32,
-    intensity: f32,
-) {
-    if radius <= 0.5 || intensity <= 0.0 {
-        return;
-    }
-    let halo_r = radius * 2.0;
-    let inv_core_r2 = 1.0 / (radius * radius);
-    let inv_halo_r2 = 1.0 / (halo_r * halo_r);
-    let cr = ((color >> 16) & 0xFF) as f32;
-    let cg = ((color >> 8) & 0xFF) as f32;
-    let cb = (color & 0xFF) as f32;
-    let x_min = ((cx - halo_r).floor() as i32).max(0);
-    let x_max = ((cx + halo_r).ceil() as i32).min(stride as i32 - 1);
-    let y_min = ((cy - halo_r).floor() as i32).max(0);
-    let y_max = ((cy + halo_r).ceil() as i32).min(h as i32 - 1);
-    for yi in y_min..=y_max {
-        let dy = yi as f32 + 0.5 - cy;
-        let dy2 = dy * dy;
-        let row = yi as u32 * stride;
-        for xi in x_min..=x_max {
-            let dx = xi as f32 + 0.5 - cx;
-            let d2 = dx * dx + dy2;
-            // Core lobe.
-            let core = (1.0 - d2 * inv_core_r2).max(0.0);
-            // Halo lobe (the fake bloom).
-            let halo = (1.0 - d2 * inv_halo_r2).max(0.0);
-            let g = (core * core + halo * halo * 0.25) * intensity;
-            if g <= 0.003 {
-                continue;
-            }
-            let idx = (row + xi as u32) as usize;
-            if let Some(slot) = buf.get_mut(idx) {
-                let px = *slot;
-                let add_r = (cr * g) as u32;
-                let add_g = (cg * g) as u32;
-                let add_b = (cb * g) as u32;
-                let r = ((px >> 16) & 0xFF) + add_r;
-                let gch = ((px >> 8) & 0xFF) + add_g;
-                let b = (px & 0xFF) + add_b;
-                let max_add = add_r.max(add_g).max(add_b);
-                let a = ((px >> 24) & 0xFF) + max_add;
-                *slot = (a.min(255) << 24) | (r.min(255) << 16) | (gch.min(255) << 8) | b.min(255);
-            }
-        }
-    }
-}
-
-/// Lerp an `0xAARRGGBB` colour toward white by `t` (0..1). Used for
-/// heat-trace whitening of the lattice nodes.
-fn whiten(color: u32, t: f32) -> u32 {
-    let t = t.clamp(0.0, 1.0);
-    let a = (color >> 24) & 0xFF;
-    let r = ((color >> 16) & 0xFF) as f32;
-    let g = ((color >> 8) & 0xFF) as f32;
-    let b = (color & 0xFF) as f32;
-    let r = (r + (255.0 - r) * t) as u32;
-    let g = (g + (255.0 - g) * t) as u32;
-    let b = (b + (255.0 - b) * t) as u32;
-    (a << 24) | (r << 16) | (g << 8) | b
-}
-
-/// Lerp between two `0xAARRGGBB` colours by `t` (0..1). Carries the
-/// activation → uncertainty hue axis (accent → magenta).
-fn mix_color(c0: u32, c1: u32, t: f32) -> u32 {
-    let t = t.clamp(0.0, 1.0);
-    let ch = |shift: u32| {
-        let a = ((c0 >> shift) & 0xFF) as f32;
-        let b = ((c1 >> shift) & 0xFF) as f32;
-        ((a + (b - a) * t) as u32) << shift
-    };
-    ch(24) | ch(16) | ch(8) | ch(0)
-}
-
-/// SplitMix64-derived hash mapped to 0..1 — stable across runs, so a
-/// token always draws the same path.
-fn hash01(x: u64) -> f32 {
-    let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    ((z >> 40) as f32) / ((1u64 << 24) as f32)
-}
-
-/// The grid row token `token`'s path visits in each column `0..=upto`
-/// of a `rows`-row lattice: starts at a hashed row and wanders at
-/// most one row per column, so consecutive layers stay connected and
-/// every token draws a visibly different route through the lattice.
-/// This is the real per-row texture generator for the decode flare
-/// (plan Task 5): the row is stable and deterministic for a given
-/// real token id, so a token's flare always lights the same
-/// connected path rather than a flat column fill.
-fn path_rows(token: u64, upto: usize, rows: usize) -> Vec<usize> {
-    let rows = rows.max(1);
-    let mut out = Vec::with_capacity(upto + 1);
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let mut r = ((hash01(token) * rows as f32) as i32).clamp(0, rows as i32 - 1);
-    out.push(r as usize);
-    for k in 1..=upto {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let step = (hash01(token.wrapping_mul(31).wrapping_add(k as u64 * 7919)) * 3.0) as i32 - 1;
-        r = (r + step).clamp(0, rows as i32 - 1);
-        out.push(r as usize);
-    }
-    out
-}
-
-/// Quarter-resolution additive glow accumulator — the deferred
-/// fake-bloom pass. All scene glows splat into this buffer at
-/// `1/GLOW_DOWN` resolution (so a big halo touches 1/16 the pixels),
-/// then [`Self::composite`] bilinearly upsamples the accumulated
-/// energy onto the framebuffer in one pass. Reused across frames via
-/// a thread-local in [`draw_cortex`], so the steady state allocates
-/// nothing.
-#[derive(Default)]
-struct GlowAccum {
-    w: u32,
-    h: u32,
-    /// Physical-pixel downsampling factor for the current surface
-    /// (`GLOW_DOWN × HiDPI scale`, min `GLOW_DOWN`).
-    down: u32,
-    /// RGB energy per low-res cell (`w * h * 3`), in 0..255 units.
-    data: Vec<f32>,
-    /// Dirty bounding box in low-res cells (`x0, x1, y0, y1`,
-    /// inclusive); `None` when the buffer is clean.
-    dirty: Option<(u32, u32, u32, u32)>,
-}
-
-impl GlowAccum {
-    /// Size for a full-res surface and clear last frame's energy
-    /// (dirty region only — steady-state cost scales with lit area).
-    fn reset(&mut self, full_w: u32, full_h: u32, scale: f32) {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let down = GLOW_DOWN * (scale.round().max(1.0) as u32);
-        let w = full_w.div_ceil(down);
-        let h = full_h.div_ceil(down);
-        if self.w != w || self.h != h || self.down != down {
-            self.w = w;
-            self.h = h;
-            self.down = down;
-            self.data.clear();
-            self.data.resize((w * h * 3) as usize, 0.0);
-            self.dirty = None;
-            return;
-        }
-        if let Some((x0, x1, y0, y1)) = self.dirty.take() {
-            for y in y0..=y1 {
-                let row = (y * self.w + x0) as usize * 3;
-                let end = (y * self.w + x1 + 1) as usize * 3;
-                self.data[row..end].fill(0.0);
-            }
-        }
-    }
-
-    fn mark(&mut self, x0: u32, x1: u32, y0: u32, y1: u32) {
-        self.dirty = Some(match self.dirty {
-            None => (x0, x1, y0, y1),
-            Some((a0, a1, b0, b1)) => (a0.min(x0), a1.max(x1), b0.min(y0), b1.max(y1)),
+        self.pulses.push(Pulse {
+            kind: PulseKind::Prefill,
+            born: self.clock,
+            dur: PREFILL_DUR,
+            last_head: -1.0,
+            profile,
+            moe: None,
+            entropy: 0.25,
+            amp: 0.7 + 0.3 * amp,
         });
     }
 
-    /// Splat a two-lobe glow (bright `(1-d²/r²)²` core + wide faint
-    /// halo) at full-res centre `(cx, cy)` with full-res `radius`.
-    /// No square roots; the bounding box is clipped up front.
-    fn add(&mut self, cx: f32, cy: f32, radius: f32, color: u32, intensity: f32) {
-        if radius <= 0.5 || intensity <= 0.0 || self.w == 0 {
+    /// Whether the simulated-MoE fallback should drive the beat: the
+    /// overlay is busy (Thinking/Speaking) but no real reply keyframes
+    /// have arrived, and the grace window has elapsed. This only ever
+    /// engages for a *local* assistant turn on a traceless backend —
+    /// network requests never move the overlay into a busy phase, and
+    /// grounded (embedded) turns set `reply_active` before the grace
+    /// window ends.
+    fn simulating(&self) -> bool {
+        !self.reply_active
+            && matches!(self.phase, Phase::Thinking | Phase::Speaking)
+            && self.busy_since.is_some_and(|s| self.clock - s > SIM_GRACE)
+    }
+
+    /// Simulated decode beat for traceless backends (cloud models with
+    /// no `brain_tap` keyframes). Fires a sparse MoE-style expert-lane
+    /// sweep whose routing drifts across depth (columns) and time
+    /// (`sim_tok`), so the bar reads as an active, sparsely-routing
+    /// network. This is explicitly *not* grounded in real activity —
+    /// it is a stand-in shown only when no real trace exists, so the
+    /// panel isn't dead while a cloud model is working.
+    fn beat_sim(&mut self) {
+        self.next_fire_at = self.clock + BEAT;
+        self.sim_tok += 1.0;
+        let t = self.sim_tok;
+        let mut profile = [0.0_f32; COLS];
+        let mut cols: Vec<Vec<(usize, f32)>> = Vec::with_capacity(COLS);
+        for (c, p) in profile.iter_mut().enumerate() {
+            let ph = c as f32 * 0.37 + t * 0.55;
+            let mut lanes: Vec<(usize, f32)> = Vec::new();
+            // ~83% of columns route (the rest stay dark → sparsity).
+            if h1(ph * 5.0 + 1.0) >= 0.17 {
+                let primary = (h1(ph) * ROWS as f32) as usize % ROWS;
+                lanes.push((primary, 0.62 + 0.38 * h1(ph * 1.7)));
+                // Occasional co-active second expert.
+                if h1(ph * 2.3 + 4.0) > 0.6 {
+                    let off = 1 + (h1(ph * 3.1) * (ROWS as f32 - 2.0)) as usize;
+                    lanes.push(((primary + off) % ROWS, 0.4 + 0.3 * h1(ph * 0.9)));
+                }
+            }
+            *p = if lanes.is_empty() { 0.0 } else { 1.0 };
+            cols.push(lanes);
+        }
+        self.pulses.push(Pulse {
+            kind: PulseKind::Decode,
+            born: self.clock,
+            dur: DECODE_DUR,
+            last_head: -1.0,
+            profile,
+            moe: Some(cols),
+            entropy: 0.2,
+            amp: 0.85,
+        });
+    }
+
+    /// One metronome beat. Thinking replays live keyframes as they
+    /// arrive; Speaking reveals the retained real trace paced across
+    /// the reply audio. Both fall back to a grounded carry sweep so a
+    /// beat is never silent.
+    fn beat(&mut self) {
+        match self.phase {
+            Phase::Speaking => self.beat_speaking(),
+            _ => self.beat_thinking(),
+        }
+    }
+
+    /// Live pass (Thinking / Synthesising): fire the next captured
+    /// keyframe as it arrives, one per beat; between them a grounded
+    /// carry sweep, or a cool "still reading" scan before the first
+    /// token.
+    fn beat_thinking(&mut self) {
+        if let Some(f) = self.queue.pop_front() {
+            self.fire_decode(&f);
+            self.next_fire_at = self.clock + BEAT;
             return;
         }
-        let s = self.down as f32;
-        let (cx, cy, radius) = (cx / s, cy / s, radius / s);
-        let halo_r = (radius * 2.0).max(1.0);
-        let core_r = radius.max(0.5);
-        let inv_core_r2 = 1.0 / (core_r * core_r);
-        let inv_halo_r2 = 1.0 / (halo_r * halo_r);
-        let cr = ((color >> 16) & 0xFF) as f32;
-        let cg = ((color >> 8) & 0xFF) as f32;
-        let cb = (color & 0xFF) as f32;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let x_min = ((cx - halo_r).floor().max(0.0)) as u32;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let y_min = ((cy - halo_r).floor().max(0.0)) as u32;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let x_max = (((cx + halo_r).ceil().max(0.0)) as u32).min(self.w - 1);
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let y_max = (((cy + halo_r).ceil().max(0.0)) as u32).min(self.h - 1);
-        if x_min > x_max || y_min > y_max {
+        if self.held.is_empty() {
+            // Waiting on the first token (prefill compute): a slower
+            // cool scan — "still reading".
+            self.fire_wait_scan();
+            self.next_fire_at = self.clock + 2.0 * BEAT;
+        } else {
+            // Carry: re-sweep the last-known real state so the rhythm
+            // never breaks between sparse keyframes / during synth.
+            self.launch_decode_pulse(self.last_prob, self.last_entropy, 0.88, self.clock * 3.0);
+            self.next_fire_at = self.clock + BEAT;
+        }
+    }
+
+    /// Playback pass (Speaking): the equalizer **morphs continuously**
+    /// through the retained real trace, paced so the show spans the
+    /// reply audio — grounded in the real token count + real audio
+    /// duration. The playback cursor (`play_pos`, token space) is
+    /// **monotonic**: every beat it advances toward the best-known
+    /// `total` at a velocity re-derived from the remaining audio, and it
+    /// never moves backward. This matters because TTS synthesises
+    /// sentence-by-sentence while generation is still running, so both
+    /// `audio_secs` and `total_tokens` climb *during* playback — pacing
+    /// off the raw ratio made the cursor lurch forward then snap back;
+    /// the cursor only ever eases its speed, never its position.
+    fn beat_speaking(&mut self) {
+        self.next_fire_at = self.clock + BEAT;
+        if self.trace.is_empty() {
+            // No real data at all: keep the rhythm with a carry/scan.
+            if self.held.is_empty() {
+                self.fire_wait_scan();
+            } else {
+                let seed = self.speak_start + self.clock * 0.5;
+                self.launch_decode_pulse(self.last_prob, self.last_entropy, 0.9, seed);
+            }
             return;
         }
-        self.mark(x_min, x_max, y_min, y_max);
-        for yi in y_min..=y_max {
-            let dy = yi as f32 + 0.5 - cy;
-            let dy2 = dy * dy;
-            let row = (yi * self.w) as usize * 3;
-            for xi in x_min..=x_max {
-                let dx = xi as f32 + 0.5 - cx;
-                let d2 = dx * dx + dy2;
-                let core = (1.0 - d2 * inv_core_r2).max(0.0);
-                let halo = (1.0 - d2 * inv_halo_r2).max(0.0);
-                let g = (core * core + halo * halo * 0.25) * intensity;
-                if g <= 0.003 {
+        let last_tok = self.trace.last().map_or(0, |f| f.token);
+        let total = self.total_tokens.max(last_tok + 1).max(1) as f32;
+        if self.playback_done {
+            // Audio finished: stop stretching — drain any remaining real
+            // anchors one per beat and let the cursor track the last one
+            // revealed, so the show completes promptly.
+            if self.replay_fired < self.trace.len() {
+                let f = self.trace[self.replay_fired].clone();
+                self.play_pos = f.token as f32;
+                self.merge_anchor(&f);
+                self.replay_fired += 1;
+            } else {
+                self.play_pos = total;
+            }
+        } else {
+            // Advance the monotonic cursor toward `total`. Velocity is
+            // "remaining tokens / remaining audio", so as the audio
+            // length grows the cursor eases off instead of snapping back;
+            // a floor on the remaining audio keeps it finite when the
+            // audio was under-reported, and a cap keeps a big correction
+            // from reading as a fast-forward blur.
+            let elapsed = (self.clock - self.speak_start).max(0.0);
+            let remaining_tokens = (total - self.play_pos).max(0.0);
+            let remaining_audio = (self.audio_secs - elapsed).max(PLAY_MIN_TAIL);
+            let vel = (remaining_tokens / remaining_audio).min(PLAY_MAX_TPS);
+            self.play_pos = (self.play_pos + vel * BEAT).min(total);
+            // Reveal every anchor the cursor has now passed — updates
+            // routing, confidence and the log-norm band — *without* each
+            // firing its own sweep; the morph pulse below carries the
+            // visible shape.
+            while self.replay_fired < self.trace.len()
+                && self.trace[self.replay_fired].token as f32 <= self.play_pos
+            {
+                let f = self.trace[self.replay_fired].clone();
+                self.merge_anchor(&f);
+                self.replay_fired += 1;
+            }
+        }
+        let pos = self.play_pos;
+        if self.held.is_empty() {
+            self.fire_wait_scan();
+            return;
+        }
+        // Time-interpolated dense shape at `pos`: smooth morph through
+        // the real captures (MoE ignores this and reads revealed lanes).
+        let norms = self.morph_norms_at(pos);
+        let seed = self.speak_start + self.clock;
+        self.launch_decode_pulse_with_norms(&norms, self.last_prob, self.last_entropy, 1.0, seed);
+    }
+
+    /// One token's compute front: merge the (strided) frame into the
+    /// held state, then launch a warm decode pulse carrying the
+    /// per-column payload.
+    fn fire_decode(&mut self, f: &QueuedFrame) {
+        self.merge_anchor(f);
+        self.launch_decode_pulse(self.last_prob, self.last_entropy, 1.0, f.token as f32);
+    }
+
+    /// Merge one captured keyframe into the running state — held norms
+    /// (strided, so only the observed layers update), routed experts,
+    /// the winsorised log-norm band, confidence/entropy, and the fired
+    /// counter — *without* launching a sweep. Used both by
+    /// [`Self::fire_decode`] and by the Speaking morph path, which
+    /// reveals anchors for their routing/confidence then overwrites the
+    /// dense shape with a time-interpolated frame.
+    fn merge_anchor(&mut self, f: &QueuedFrame) {
+        let n = self.n_layer.max(f.norms.len()).max(1);
+        self.n_layer = n;
+        if self.held.len() != n {
+            self.held.resize(n, 0.0);
+            self.held_exp.resize(n, None);
+        }
+        for (l, &v) in f.norms.iter().enumerate() {
+            if v > 0.0 {
+                self.held[l] = v;
+                if self.saw_first {
+                    let lv = v.ln_1p();
+                    self.log_min = self.log_min.min(lv);
+                    self.log_max = self.log_max.max(lv);
+                }
+            }
+        }
+        for (layer, ids, weights) in &f.experts {
+            if let Some(slot) = self.held_exp.get_mut(*layer as usize) {
+                *slot = Some((ids.clone(), weights.clone()));
+            }
+        }
+        self.saw_first = true;
+        self.fired += 1;
+        self.last_prob = f.prob;
+        self.last_entropy = (f.entropy_bits / 6.0).clamp(0.0, 1.0);
+    }
+
+    /// Per-layer real norms **time-interpolated** to playback token
+    /// position `pos`. For each layer we find the trace anchors that
+    /// actually observed it and interpolate that layer's value between
+    /// the ones bracketing `pos` (flat before the first / after the
+    /// last real observation of that layer), then spatially fill any
+    /// layer never observed at all. The result evolves smoothly as
+    /// `pos` advances — the equalizer morphs *through* the real
+    /// captures instead of snapping between them — while every value
+    /// still lies between two genuine observations of that exact layer.
+    fn morph_norms_at(&self, pos: f32) -> Vec<f32> {
+        let n = self.n_layer.max(1);
+        let mut v = vec![0.0_f32; n];
+        if self.trace.is_empty() {
+            return v;
+        }
+        for (l, slot) in v.iter_mut().enumerate() {
+            let mut prev: Option<(f32, f32)> = None;
+            let mut next: Option<(f32, f32)> = None;
+            for f in &self.trace {
+                let val = f.norms.get(l).copied().unwrap_or(0.0);
+                if val <= 0.0 {
                     continue;
                 }
-                let idx = row + xi as usize * 3;
-                self.data[idx] += cr * g;
-                self.data[idx + 1] += cg * g;
-                self.data[idx + 2] += cb * g;
+                let tok = f.token as f32;
+                if tok <= pos {
+                    prev = Some((tok, val));
+                } else {
+                    next = Some((tok, val));
+                    break;
+                }
             }
+            *slot = match (prev, next) {
+                (Some((pt, pv)), Some((nt, nv))) => {
+                    let t = ((pos - pt) / (nt - pt).max(1e-3)).clamp(0.0, 1.0);
+                    pv + (nv - pv) * t
+                }
+                (Some((_, pv)), None) => pv,
+                (None, Some((_, nv))) => nv,
+                (None, None) => 0.0,
+            };
         }
+        Self::spatial_fill(&mut v);
+        v
     }
 
-    /// Whether any energy sits in the 3×3 low-res neighbourhood of
-    /// cell `(bx, by)` — the reach of bilinear sampling for full-res
-    /// pixels inside that cell's block. Lets [`Self::composite`] skip
-    /// dark blocks wholesale so its cost scales with lit area, not
-    /// panel area (the difference between ~7 ms and ~3 ms at 2×
-    /// HiDPI).
-    fn block_lit(&self, bx: u32, by: u32) -> bool {
-        let lw = self.w as usize;
-        for y in by.saturating_sub(1)..=(by + 1).min(self.h - 1) {
-            let row = y as usize * lw * 3;
-            for x in bx.saturating_sub(1)..=(bx + 1).min(self.w - 1) {
-                let i = row + x as usize * 3;
-                if self.data[i] + self.data[i + 1] + self.data[i + 2] > 1.0 {
-                    return true;
+    /// Held per-layer norms with unobserved layers filled by linear
+    /// interpolation between the nearest observed neighbours (flat at
+    /// the ends). The tap observes only every `LAYER_STRIDE`-th layer
+    /// per frame and, when the governor widens the interval, a whole
+    /// reply may carry a single sparse frame — interpolating between
+    /// the real samples fills the bar without fabricating structure
+    /// (layer-output norm varies smoothly with depth), turning a
+    /// sparse dozen-column flicker into a full, readable equalizer.
+    fn filled_held(&self) -> Vec<f32> {
+        let n = self.n_layer.max(1);
+        let mut v = vec![0.0_f32; n];
+        for (i, slot) in v.iter_mut().enumerate() {
+            *slot = self.held.get(i).copied().unwrap_or(0.0);
+        }
+        Self::spatial_fill(&mut v);
+        v
+    }
+
+    /// Fill zero (unobserved) entries of a per-layer vector by linear
+    /// interpolation between the nearest observed neighbours, flat at
+    /// the ends. Shared by [`Self::filled_held`] (spatial fill of the
+    /// merged held state) and [`Self::morph_norms_at`] (after its
+    /// per-layer temporal interpolation). Leaves an all-zero vector
+    /// untouched.
+    fn spatial_fill(v: &mut [f32]) {
+        let obs: Vec<usize> = (0..v.len()).filter(|&i| v[i] > 0.0).collect();
+        let (Some(&first), Some(&last)) = (obs.first(), obs.last()) else {
+            return; // nothing observed yet
+        };
+        let (fv, lv) = (v[first], v[last]);
+        v[..first].iter_mut().for_each(|x| *x = fv);
+        v[last + 1..].iter_mut().for_each(|x| *x = lv);
+        for w in obs.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if b > a + 1 {
+                let (va, vb) = (v[a], v[b]);
+                for (k, i) in ((a + 1)..b).enumerate() {
+                    let t = (k + 1) as f32 / (b - a) as f32;
+                    v[i] = va + (vb - va) * t;
                 }
             }
         }
-        false
     }
 
-    /// Bilinearly upsample the accumulated energy and saturate-add it
-    /// onto the framebuffer (alpha lifted by the largest added
-    /// channel, preserving the premultiplied invariant). Visits the
-    /// dirty region block-by-block, skipping blocks with no energy in
-    /// bilinear reach (see [`Self::block_lit`]).
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn composite(&self, buf: &mut [u32], stride: u32, h: u32) {
-        let Some((dx0, dx1, dy0, dy1)) = self.dirty else { return };
-        // Low-res block range, padded one cell for bilinear reach.
-        let bx0 = dx0.saturating_sub(1);
-        let by0 = dy0.saturating_sub(1);
-        let bx1 = (dx1 + 1).min(self.w - 1);
-        let by1 = (dy1 + 1).min(self.h - 1);
-        for by in by0..=by1 {
-            for bx in bx0..=bx1 {
-                if self.block_lit(bx, by) {
-                    self.composite_block(buf, stride, h, bx, by);
+    /// Launch one warm decode sweep from the current held state.
+    /// `gain` dims carry sweeps slightly so fresh keyframes read
+    /// stronger than re-shows; `seed` gives each sweep subtle
+    /// per-token micro-texture so repeated carries never look frozen
+    /// (it perturbs brightness only, never which columns are lit).
+    fn launch_decode_pulse(&mut self, prob: f32, entropy: f32, gain: f32, seed: f32) {
+        let filled = self.filled_held();
+        self.launch_decode_pulse_with_norms(&filled, prob, entropy, gain, seed);
+    }
+
+    /// As [`Self::launch_decode_pulse`] but the dense equalizer shape is
+    /// taken from an explicit per-layer `norms` slice rather than the
+    /// merged held state. The Speaking morph path passes
+    /// [`Self::morph_norms_at`] so the bar interpolates smoothly through
+    /// the real captures; MoE ignores `norms` and reads routed lanes
+    /// from the held expert state (revealed as anchors are passed).
+    fn launch_decode_pulse_with_norms(
+        &mut self,
+        norms: &[f32],
+        prob: f32,
+        entropy: f32,
+        gain: f32,
+        seed: f32,
+    ) {
+        let n = self.n_layer.max(1);
+        let mut profile = [0.0_f32; COLS];
+        let moe = if self.kind == CortexModelKind::Moe {
+            let mut cols = Vec::with_capacity(COLS);
+            for (c, p) in profile.iter_mut().enumerate() {
+                let l = col_to_layer(c, n);
+                let lanes = self
+                    .held_exp
+                    .get(l)
+                    .and_then(Option::as_ref)
+                    .map_or_else(Vec::new, |ex| self.lanes_for(ex));
+                *p = if lanes.is_empty() { 0.0 } else { 1.0 };
+                cols.push(lanes);
+            }
+            Some(cols)
+        } else {
+            for (c, p) in profile.iter_mut().enumerate() {
+                let l = col_to_layer(c, n);
+                let mag = self.magnitude(norms.get(l).copied().unwrap_or(0.0), l, n);
+                // Flowing two-octave shimmer: the noise pattern
+                // *translates* with `seed` (which steps once per beat)
+                // so the bar keeps churning like live compute instead of
+                // reading as a uniform breath between the sparse real
+                // anchors. Brightness only — it never changes which
+                // columns/layers are lit, so the grounded shape stands.
+                let flow = seed * 1.6;
+                let churn = 0.80
+                    + 0.14 * h1(c as f32 * 0.7 - flow)
+                    + 0.06 * h1(c as f32 * 1.9 + flow * 0.5);
+                *p = mag * churn;
+            }
+            None
+        };
+        self.pulses.push(Pulse {
+            kind: PulseKind::Decode,
+            born: self.clock,
+            dur: DECODE_DUR,
+            last_head: -1.0,
+            profile,
+            moe,
+            entropy,
+            amp: (0.5 + 0.5 * prob) * gain,
+        });
+    }
+
+    /// Cool low-amplitude scan while the model is still reading the
+    /// prompt (reply begun, no keyframe yet) — continuous "working on
+    /// it" motion grounded in the fact that prefill is running.
+    fn fire_wait_scan(&mut self) {
+        let mut profile = [0.0_f32; COLS];
+        for (c, p) in profile.iter_mut().enumerate() {
+            *p = 0.5 + 0.3 * h1(c as f32 * 2.9 + self.clock);
+        }
+        self.pulses.push(Pulse {
+            kind: PulseKind::Prefill,
+            born: self.clock,
+            dur: PREFILL_DUR * 1.4,
+            last_head: -1.0,
+            profile,
+            moe: None,
+            entropy: 0.25,
+            amp: 0.42,
+        });
+    }
+
+    /// Routed experts → lit `(lane, brightness)` pairs. Lane =
+    /// `id % 6` with collision bumping; the lit-lane budget adapts to
+    /// the model's real routing ratio when the engine reported expert
+    /// counts (spec §9.1: `<8% → 1`, `8–20% → 2`, `≥20% → 3`), and a
+    /// 2nd/3rd lane lights only when its real routing weight is
+    /// genuinely co-active (within 60% of the top weight).
+    fn lanes_for(&self, ex: &(Vec<i32>, Vec<f32>)) -> Vec<(usize, f32)> {
+        let (ids, ws) = ex;
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let budget = match (self.n_experts_total, self.n_experts_active) {
+            (Some(total), Some(active)) if total > 0 => {
+                let ratio = active as f32 / total as f32;
+                if ratio < 0.08 {
+                    1
+                } else if ratio < 0.20 {
+                    2
+                } else {
+                    3
+                }
+            }
+            _ => 3,
+        };
+        let k = budget.min(ids.len());
+        let top_w = ws.first().copied().unwrap_or(1.0).max(1e-6);
+        let mut lanes: Vec<(usize, f32)> = Vec::with_capacity(k);
+        let mut used = [false; ROWS];
+        #[allow(clippy::needless_range_loop)] // parallel indexing of ids+ws
+        for i in 0..k {
+            let real_w = ws.get(i).copied();
+            // Co-activity gate only applies to real weights; when the
+            // weights tensor wasn't observed, fall back to the JS
+            // engine's synthetic best-first decay.
+            if i > 0 {
+                if let Some(w) = real_w {
+                    if w < 0.6 * top_w {
+                        break;
+                    }
+                }
+            }
+            let w = real_w.unwrap_or_else(|| (-0.6 * i as f32).exp());
+            let mut lane = ids[i].rem_euclid(ROWS as i32) as usize;
+            if used[lane] {
+                if let Some(free) = (0..ROWS).map(|d| (lane + d) % ROWS).find(|&l| !used[l]) {
+                    lane = free;
+                }
+            }
+            used[lane] = true;
+            lanes.push((lane, 0.45 + 0.55 * w.clamp(0.0, 1.0)));
+        }
+        lanes
+    }
+
+    /// Norm → magnitude 0..1: log, running-normalised within the
+    /// reply, with a mild depth rise so late layers read taller.
+    fn magnitude(&self, v: f32, l: usize, n: usize) -> f32 {
+        if v <= 0.0 {
+            return 0.0;
+        }
+        let lv = v.ln_1p();
+        let t = if self.log_min.is_finite() && self.log_max > self.log_min {
+            ((lv - self.log_min) / (self.log_max - self.log_min)).clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        let depth = if n > 1 { l as f32 / (n - 1) as f32 } else { 0.5 };
+        (0.15 + 0.85 * (0.72 * t + 0.28 * depth)).clamp(0.0, 1.0).powf(0.9)
+    }
+
+    // ---- per-tick field writers ---------------------------------------
+
+    /// Deposit pulse `pi`'s payload into column `c` (the compute front
+    /// just crossed it).
+    fn deposit_column(&mut self, pi: usize, c: usize) {
+        // Extract the payload up front: the pulse borrow must end
+        // before the field/mood writes below.
+        let (kind, amp, entropy, m, lanes) = {
+            let p = &self.pulses[pi];
+            let lanes = p.moe.as_ref().map(|moe| moe[c].clone());
+            (p.kind, p.amp, p.entropy, p.profile[c], lanes)
+        };
+        self.mood[c] = if kind == PulseKind::Prefill { 0.45 } else { 1.0 };
+        self.ent[c] = entropy;
+        match kind {
+            PulseKind::Prefill => {
+                let m = m * amp;
+                for r in 0..ROWS {
+                    let rr = 1.0 - (r as f32 - 2.5).abs() / 2.5;
+                    let v = m * (0.55 + 0.45 * rr);
+                    if v > self.field[r][c] {
+                        self.field[r][c] = v;
+                    }
+                }
+            }
+            PulseKind::Decode => {
+                if let Some(lanes) = lanes {
+                    // Sparse expert lanes + a faint ghost on unused
+                    // lanes of an active column (sparsity story).
+                    if lanes.is_empty() {
+                        return;
+                    }
+                    let mut lit = [0.0_f32; ROWS];
+                    for &(lane, b) in &lanes {
+                        let v = b * amp;
+                        if v > lit[lane] {
+                            lit[lane] = v;
+                        }
+                    }
+                    for (r, &l) in lit.iter().enumerate() {
+                        let v = if l > 0.0 { l } else { 0.035 * amp };
+                        if v > self.field[r][c] {
+                            self.field[r][c] = v;
+                        }
+                    }
+                } else {
+                    // Dense equalizer: center-out vertical fill.
+                    if m <= 0.0 {
+                        return;
+                    }
+                    for r in 0..ROWS {
+                        let dist = (r as f32 - 2.5).abs() / 2.5;
+                        if m < dist * 0.72 {
+                            continue; // low magnitude → only core rows
+                        }
+                        let v = (m * (1.0 - dist * 0.45)).clamp(0.0, 1.0) * amp;
+                        if v > self.field[r][c] {
+                            self.field[r][c] = v;
+                        }
+                    }
                 }
             }
         }
     }
 
-    /// Composite one `down`×`down` full-res block for low-res cell
-    /// `(bx, by)`.
-    ///
-    /// Separable bilinear: per output row, the two low-res rows are
-    /// blended once into three local cell values (`bx-1`, `bx`,
-    /// `bx+1` — the horizontal reach of pixels inside this block),
-    /// then each pixel is a single horizontal lerp of those locals.
-    /// This drops the inner loop from twelve scattered buffer fetches
-    /// and four weight products per pixel to three fused lerps on
-    /// registers — the difference between the cortex costing ~4× and
-    /// ~1.5× the terrain baseline per frame.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn composite_block(&self, buf: &mut [u32], stride: u32, h: u32, bx: u32, by: u32) {
-        let fx0 = bx * self.down;
-        let fy0 = by * self.down;
-        let fx1 = ((bx + 1) * self.down - 1).min(stride - 1);
-        let fy1 = ((by + 1) * self.down - 1).min(h - 1);
-        let lw = self.w as usize;
-        let inv_down = 1.0 / self.down as f32;
-        // Clamped low-res columns reachable from this block.
-        let cxm = (bx as usize).saturating_sub(1);
-        let cx = bx as usize;
-        let cxp = (cx + 1).min(lw - 1);
-        let bxf = bx as f32;
-        for y in fy0..=fy1 {
-            // Low-res sample row pair + vertical weight (cell centres).
-            let sy = (y as f32 + 0.5) * inv_down - 0.5;
-            let y0 = sy.floor().max(0.0) as usize;
-            let y1c = (y0 + 1).min(self.h as usize - 1);
-            let wy = (sy - y0 as f32).clamp(0.0, 1.0);
-            let row0 = y0 * lw * 3;
-            let row1 = y1c * lw * 3;
-            // Row-blended cell values (three cells × RGB).
-            let mut vm = [0.0f32; 3];
-            let mut v0 = [0.0f32; 3];
-            let mut vp = [0.0f32; 3];
-            for c in 0..3 {
-                vm[c] = self.data[row0 + cxm * 3 + c]
-                    + (self.data[row1 + cxm * 3 + c] - self.data[row0 + cxm * 3 + c]) * wy;
-                v0[c] = self.data[row0 + cx * 3 + c]
-                    + (self.data[row1 + cx * 3 + c] - self.data[row0 + cx * 3 + c]) * wy;
-                vp[c] = self.data[row0 + cxp * 3 + c]
-                    + (self.data[row1 + cxp * 3 + c] - self.data[row0 + cxp * 3 + c]) * wy;
+    /// Dim breathing floor from the held state, drawn between sweeps
+    /// during a reply. Grounded: shows the *last-known* layer norms /
+    /// expert routing, never synthetic activity.
+    fn resting_floor(&mut self) {
+        let n = self.n_layer.max(1);
+        let breath = 0.8 + 0.2 * (self.clock * 2.0).sin();
+        let filled = self.filled_held();
+        for c in 0..COLS {
+            let l = col_to_layer(c, n);
+            if self.kind == CortexModelKind::Moe {
+                let Some(ex) = self.held_exp.get(l).and_then(Option::as_ref) else { continue };
+                let lanes = self.lanes_for(ex);
+                if lanes.is_empty() {
+                    continue;
+                }
+                let mut lit = [false; ROWS];
+                for &(lane, _) in &lanes {
+                    lit[lane] = true;
+                }
+                for (r, &on) in lit.iter().enumerate() {
+                    let v = if on { REST_AMP } else { 0.03 } * breath;
+                    if v > self.field[r][c] {
+                        self.field[r][c] = v;
+                    }
+                }
+            } else {
+                let m = self.magnitude(filled.get(l).copied().unwrap_or(0.0), l, n);
+                if m <= 0.0 {
+                    continue;
+                }
+                for r in 0..ROWS {
+                    let dist = (r as f32 - 2.5).abs() / 2.5;
+                    if m < dist * 0.72 {
+                        continue;
+                    }
+                    let v = (m * (1.0 - dist * 0.45)).clamp(0.0, 1.0) * REST_AMP * breath;
+                    if v > self.field[r][c] {
+                        self.field[r][c] = v;
+                    }
+                }
             }
-            // Interpolated values can't exceed the cell values, so a
-            // dark cell triple means the whole row is skippable.
-            let row_max =
-                (vm[0] + vm[1] + vm[2]).max(v0[0] + v0[1] + v0[2]).max(vp[0] + vp[1] + vp[2]);
-            if row_max <= 1.0 {
+        }
+    }
+
+    /// Idle: a slow breath drifting across the columns so the bar is
+    /// never dead; the mood eases back toward cool.
+    fn idle_breath(&mut self) {
+        let b = 0.05 + 0.045 * (self.clock * 1.4).sin();
+        for c in 0..COLS {
+            let e = b * (0.5 + 0.5 * (self.clock * 0.9 + c as f32 * 0.5).sin());
+            for r in 0..ROWS {
+                let rr = 1.0 - (r as f32 - 2.5).abs() / 2.5;
+                let v = e * (0.4 + 0.6 * rr) * (0.6 + 0.4 * h1(c as f32 * 2.1 + r as f32 * 5.3));
+                if v > self.field[r][c] {
+                    self.field[r][c] = v;
+                }
+            }
+            self.mood[c] *= 0.96;
+        }
+    }
+
+    /// Resample the live mic FFT onto the 46 columns (EMA-smoothed,
+    /// noise-floor gated).
+    fn ingest_spectrum(&mut self, bins: &[f32]) {
+        for (c, s) in self.spec.iter_mut().enumerate() {
+            let pos = c as f32 / (COLS - 1) as f32 * (bins.len() - 1) as f32;
+            let i0 = pos.floor() as usize;
+            let i1 = (i0 + 1).min(bins.len() - 1);
+            let f = pos - i0 as f32;
+            let raw = bins[i0] * (1.0 - f) + bins[i1] * f;
+            let target =
+                ((raw.clamp(0.0, 1.0) - SPEC_NOISE_FLOOR) / (1.0 - SPEC_NOISE_FLOOR)).max(0.0);
+            *s += (target - *s) * SPEC_EMA;
+        }
+    }
+
+    /// Listening scene: the mic spectrum as a cool center-out
+    /// equalizer on the same grid grammar as dense decode, plus the
+    /// idle shimmer underneath so silence still breathes.
+    fn listening_field(&mut self) {
+        self.idle_breath();
+        for c in 0..COLS {
+            // Brighter than unity so the mic equalizer reads with
+            // presence rather than a dim shimmer; clamped after the
+            // vertical falloff so peaks saturate cleanly.
+            let m = self.spec[c].clamp(0.0, 1.0) * 1.25;
+            if m <= 0.0 {
                 continue;
             }
-            let out_row = (y * stride) as usize;
-            for x in fx0..=fx1 {
-                let sx = (x as f32 + 0.5) * inv_down - 0.5;
-                // Left neighbour is `bx-1` for the block's first half,
-                // `bx` for the second.
-                let (a, b, wx) = if sx < bxf {
-                    (&vm, &v0, (sx - (bxf - 1.0)).clamp(0.0, 1.0))
-                } else {
-                    (&v0, &vp, (sx - bxf).clamp(0.0, 1.0))
-                };
-                let rf = a[0] + (b[0] - a[0]) * wx;
-                let gf = a[1] + (b[1] - a[1]) * wx;
-                let bf = a[2] + (b[2] - a[2]) * wx;
-                if rf + gf + bf <= 1.0 {
+            for r in 0..ROWS {
+                let dist = (r as f32 - 2.5).abs() / 2.5;
+                if m < dist * 0.72 {
                     continue;
                 }
-                let slot = &mut buf[out_row + x as usize];
-                let px = *slot;
-                let add_r = rf as u32;
-                let add_g = gf as u32;
-                let add_b = bf as u32;
-                let r = ((px >> 16) & 0xFF) + add_r;
-                let g = ((px >> 8) & 0xFF) + add_g;
-                let b = (px & 0xFF) + add_b;
-                let a = ((px >> 24) & 0xFF) + add_r.max(add_g).max(add_b);
-                *slot = (a.min(255) << 24) | (r.min(255) << 16) | (g.min(255) << 8) | b.min(255);
+                let v = (m * (1.0 - dist * 0.45)).clamp(0.0, 1.0);
+                if v > self.field[r][c] {
+                    self.field[r][c] = v;
+                }
             }
+            self.mood[c] = 0.0;
+            self.ent[c] = 0.0;
         }
     }
 }
 
-std::thread_local! {
-    /// Per-render-thread reusable glow buffer (the overlay renders
-    /// from exactly one thread; tests get their own instance).
-    static GLOW: std::cell::RefCell<GlowAccum> = std::cell::RefCell::new(GlowAccum::default());
+// ---- rasteriser -------------------------------------------------------
+
+/// Fixed 6×46 grid geometry: square cells, one uniform integer gap
+/// (scaled), pixel-aligned and centred in the panel area.
+struct Grid {
+    cell: i32,
+    gap: i32,
+    ox: i32,
+    oy: i32,
 }
 
-/// Draw the Activation Heatmap scene into the panel area
-/// `(x0..x1, y_top..y_bot)`.
-///
-/// A chunky heat grid fills the whole strip: columns run left → right
-/// as the model's layers (depth), rows are sampled units per layer.
-/// Cell colour is a grounded 0..1 signal on a per-phase heat ramp
-/// (the same [`CortexState`] activation / heat / replay-clock the old
-/// scene used — the honest "real vs synthetic" seam lives there, so
-/// this drawing code never knows which source backs a cell):
-///
-/// - **Listening** — a cool, high-contrast ramp driven by the live
-///   mic spectrum, with a mic-level bar on the left edge.
-/// - **Thinking / prefill** — the whole grid floods (model engaged)
-///   with a bright fill-wave sweeping left → right.
-/// - **Speaking / decode (dense)** — a bright hot column travels
-///   left → right through the grid, synced to TTS via the replay clock.
-/// - **Speaking / decode (MoE)** — only routed experts light up,
-///   warm = amber (RAM) vs cold = blue (offloaded), with a bright
-///   focal hotspot at the active layer.
-///
-/// A future "flow field" style can slot in beside this as a separate
-/// selectable style; only the heatmap is built here.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+impl Grid {
+    fn compute(x0: f32, y0: f32, w: f32, h: f32, scale: f32) -> Self {
+        let gap = (scale.round() as i32).max(1);
+        let cols = COLS as i32;
+        let rows = ROWS as i32;
+        let by_w = (w as i32 - (cols + 1) * gap) / cols;
+        let by_h = (h as i32 - (rows + 1) * gap) / rows;
+        let cell = by_w.min(by_h).max(2);
+        let total_w = cols * cell + (cols + 1) * gap;
+        let total_h = rows * cell + (rows + 1) * gap;
+        let ox = (x0 + (w - total_w as f32) * 0.5).round() as i32 + gap;
+        let oy = (y0 + (h - total_h as f32) * 0.5).round() as i32 + gap;
+        Self { cell, gap, ox, oy }
+    }
+
+    /// Top-left pixel of cell `(col, row)`.
+    fn cell_origin(&self, col: usize, row: usize) -> (i32, i32) {
+        let step = self.cell + self.gap;
+        (self.ox + col as i32 * step, self.oy + row as i32 * step)
+    }
+}
+
+/// Brightness → tile opacity. Dim cells fade toward transparent so
+/// the near-black bottom of each ramp never paints as a solid black
+/// square; bright cells reach full opacity and read as crisp LEDs.
+/// The gentle mid-lift keeps mid-brightness tiles visible without
+/// muddying the transparent look.
+fn cell_alpha(v: f32) -> f32 {
+    let v = v.clamp(0.0, 1.0);
+    (v * (1.7 - 0.7 * v)).clamp(0.0, 1.0)
+}
+
+/// Alpha-blend an unpremultiplied `0x00RR_GGBB` color at `alpha` over
+/// the premultiplied-ARGB buffer.
+fn blend_rect(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    x: i32,
+    y: i32,
+    w: i32,
+    hh: i32,
+    rgb: u32,
+    alpha: f32,
+) {
+    let a = alpha.clamp(0.0, 1.0);
+    let sr = ((rgb >> 16) & 0xFF) as f32 * a;
+    let sg = ((rgb >> 8) & 0xFF) as f32 * a;
+    let sb = (rgb & 0xFF) as f32 * a;
+    let sa = a * 255.0;
+    let inv = 1.0 - a;
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x + w).min(stride as i32);
+    let y1 = (y + hh).min(h as i32);
+    for yy in y0..y1 {
+        let row = yy as usize * stride as usize;
+        for xx in x0..x1 {
+            let d = buf[row + xx as usize];
+            let da = ((d >> 24) & 0xFF) as f32;
+            let dr = ((d >> 16) & 0xFF) as f32;
+            let dg = ((d >> 8) & 0xFF) as f32;
+            let db = (d & 0xFF) as f32;
+            let oa = (sa + da * inv).min(255.0) as u32;
+            let or = (sr + dr * inv).min(255.0) as u32;
+            let og = (sg + dg * inv).min(255.0) as u32;
+            let ob = (sb + db * inv).min(255.0) as u32;
+            buf[row + xx as usize] = (oa << 24) | (or << 16) | (og << 8) | ob;
+        }
+    }
+}
+
+/// Cell brightness + column mood/entropy → packed `0x00RR_GGBB`.
+fn cell_color(v: f32, warm: bool, entropy: f32) -> u32 {
+    let stops: &[(f32, [f32; 3])] = if warm { &RAMP_WARM } else { &RAMP_COOL };
+    let mut col = ramp(stops, v);
+    if entropy > 0.55 {
+        // Uncertainty desaturates the column toward grey.
+        let g = (col[0] + col[1] + col[2]) / 3.0;
+        let k = (entropy - 0.55) * 0.55;
+        for ch in &mut col {
+            *ch += (g - *ch) * k;
+        }
+    }
+    ((col[0].clamp(0.0, 255.0) as u32) << 16)
+        | ((col[1].clamp(0.0, 255.0) as u32) << 8)
+        | (col[2].clamp(0.0, 255.0) as u32)
+}
+
+/// Sweep-head brightness tiers: the head column at full tier plus two
+/// trailing columns stepped down — crisp cells, no blur (spec §4.1).
+const HEAD_TIERS: [(i32, f32); 3] = [(0, 1.0), (-1, 0.66), (-2, 0.42)];
+
+/// Draw the Glas Cortex LED bar into the waveform strip
+/// `(x0..x1, y_top..y_bot)`. Pure read of [`CortexState`]; the
+/// per-state `accent` is deliberately unused — the two fixed ramps
+/// (cool intake / warm compute) *are* the design.
 pub fn draw_cortex(
     buf: &mut [u32],
     stride: u32,
@@ -1658,993 +1397,74 @@ pub fn draw_cortex(
     x1: f32,
     y_top: f32,
     y_bot: f32,
-    accent: u32,
+    _accent: u32,
     scale: f32,
-    elapsed_secs: f32,
+    _elapsed_secs: f32,
 ) {
     let panel_w = (x1 - x0).max(1.0);
     let panel_h = (y_bot - y_top).max(1.0);
     if panel_w < 8.0 || panel_h < 8.0 {
         return;
     }
-    // Slim vertical margin so cells don't jam against the panel edge.
-    let my = (panel_h * 0.05).max(scale);
-    let gy0 = y_top + my;
-    let gy1 = (y_bot - my).max(gy0 + 1.0);
-    let area_h = (gy1 - gy0).max(1.0);
-    // Integer square lattice (plan Task A1): identical square cells,
-    // one uniform integer gap, pixel-aligned and centred.
-    let lat = Lattice::compute(x0, gy0, panel_w, area_h, scale);
-    let phase = cortex.phase;
-    // Speaking replays the sampled decode trace whenever keyframes were
-    // captured — including on MoE models, where the trace is the primary
-    // view and the expert constellation only covers the no-frames case
-    // (routing without frames cannot happen today, but keep it as the
-    // honest fallback rather than dead code).
-    let moe = cortex.is_moe_speaking() && cortex.frames.is_empty();
+    // No near-black stage backing: unlit tiles let the panel show
+    // through instead of painting an extra dark slab. Each lit tile is
+    // alpha-blended by its own brightness (see `cell_alpha`), so dim
+    // cells fade into the panel cleanly instead of rendering as
+    // near-black opaque squares.
+    let grid = Grid::compute(x0, y_top, panel_w, panel_h, scale);
 
-    // Background-robust stage (RC4 fix): the panel itself is
-    // translucent, so over a bright desktop the low end of the heat
-    // ramp reads *darker* than the background showing through and the
-    // scene's polarity inverts (dark cells + bright row gaps = "ruled
-    // notebook paper"). A near-opaque dark backing under the whole
-    // cortex area guarantees lit cells always read as light-emitting,
-    // on any desktop.
-    fill_cell(buf, stride, h, x0, y_top, x1, y_bot, 0x000B_0B10, 0.86);
-
-    GLOW.with(|glow| {
-        let mut glow = glow.borrow_mut();
-        glow.reset(stride, h, scale);
-
-        if moe {
-            draw_constellation(buf, stride, h, cortex, &lat, x0, gy0, panel_w, area_h, &mut glow);
-        } else {
-            draw_lattice_scene(
+    // Settled field.
+    for c in 0..COLS {
+        let warm = cortex.mood[c] > 0.5;
+        let e = cortex.ent[c];
+        for r in 0..ROWS {
+            let v = cortex.field[r][c];
+            if v < DRAW_FLOOR {
+                continue;
+            }
+            let (cx, cy) = grid.cell_origin(c, r);
+            blend_rect(
                 buf,
                 stride,
                 h,
-                cortex,
-                &lat,
-                phase,
-                accent,
-                elapsed_secs,
-                &mut glow,
+                cx,
+                cy,
+                grid.cell,
+                grid.cell,
+                cell_color(v, warm, e),
+                cell_alpha(v),
             );
         }
-
-        // Minimal HUD (top-right): decode throughput + KV fill.
-        if cortex.has_replay() {
-            if let Some((tokps, ctx_fill)) = cortex.hud() {
-                draw_hud_arcs(&mut glow, x1, y_top, accent, scale, tokps, ctx_fill);
-            }
-        }
-
-        glow.composite(buf, stride, h);
-    });
-}
-
-/// Integer square-lattice geometry (plan Task A1): identical square
-/// cells separated by ONE uniform integer gap, pixel-aligned and
-/// centred so every gap is the same width — no fractional rounding,
-/// so no uneven gaps.
-struct Lattice {
-    /// Square cell edge in physical pixels.
-    cell: i32,
-    /// Uniform gap between cells (and edge inset) in physical pixels.
-    gap: i32,
-    /// Columns that actually fit.
-    cols: usize,
-    /// Rows (fixed at [`GRID_ROWS`]).
-    rows: usize,
-    /// Grid origin (top-left of the first cell).
-    ox: i32,
-    oy: i32,
-}
-
-impl Lattice {
-    fn compute(x0: f32, y0: f32, w: f32, h: f32, scale: f32) -> Self {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let gap = ((3.0 * scale).round() as i32).max(2);
-        let rows = GRID_ROWS as i32;
-        // Cell size derived so `rows` square cells fit the height.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let cell = (((h - (rows - 1) as f32 * gap as f32) / rows as f32).floor() as i32).max(3);
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let cols = (((w + gap as f32) / (cell + gap) as f32).floor() as i32).max(1);
-        let total_w = cols * cell + (cols - 1) * gap;
-        let total_h = rows * cell + (rows - 1) * gap;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let ox = (x0 + (w - total_w as f32) * 0.5).round() as i32;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let oy = (y0 + (h - total_h as f32) * 0.5).round() as i32;
-        Self { cell, gap, cols: cols as usize, rows: rows as usize, ox, oy }
     }
 
-    /// `(x0, y0, x1, y1)` of cell `(col, row)` in physical pixels.
-    fn cell_rect(&self, col: usize, row: usize) -> (f32, f32, f32, f32) {
-        let step = self.cell + self.gap;
-        let x0 = self.ox + col as i32 * step;
-        let y0 = self.oy + row as i32 * step;
-        (x0 as f32, y0 as f32, (x0 + self.cell) as f32, (y0 + self.cell) as f32)
-    }
-}
-
-/// Dense square-lattice scene (listening / thinking / speaking on
-/// non-MoE models). Rows carry the frequency axis (listening + the
-/// speaking voice glow); columns carry model depth (the decode
-/// column). Cells below [`ACT_THRESHOLD`] render the real dark panel
-/// background (plan Task A3), so the grid looks sparse and meaningful.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn draw_lattice_scene(
-    buf: &mut [u32],
-    stride: u32,
-    h: u32,
-    cortex: &CortexState,
-    lat: &Lattice,
-    phase: Phase,
-    accent: u32,
-    elapsed_secs: f32,
-    glow: &mut GlowAccum,
-) {
-    let (deep, mid, hot) = heat_palette(phase, accent);
-    let cols = lat.cols;
-    let rows = lat.rows;
-    let n = cortex.layer_count();
-
-    // Listening (plan C, redesigned): "peak dots over a weight field".
-    // X = frequency (log-spaced), Y = energy, with exactly one
-    // significantly-emphasised dot per frequency column over a dim
-    // shimmering ambient grid. Handled in its own pass, so the
-    // thinking/speaking depth loop below never runs for listening.
-    if phase == Phase::Listening {
-        draw_listening_spectrum(buf, stride, h, cortex, lat, elapsed_secs, glow);
-        return;
-    }
-    // Thinking is deliberately split into two visually distinct regimes:
-    // prefill (prompt/context ingestion; grounded by real prefill batch
-    // widths) and decode (sampled token/layer trace; grounded by captured
-    // keyframes). Do not let the generic speaking lattice blend them back
-    // together — the handoff must be obvious at a glance.
-    if phase == Phase::Thinking {
-        let (decode_latched, snap_t) = cortex.decode_snap();
-        if decode_latched {
-            draw_thinking_decode(buf, stride, h, cortex, lat, accent, snap_t, None, glow);
-        } else {
-            draw_thinking_prefill(buf, stride, h, cortex, lat, accent, glow);
-        }
-        return;
-    }
-    // Speaking is the inspectable decode animation: replay the same
-    // sampled layer-by-token trace against the TTS playback clock instead
-    // of switching to a separate sparse bead grid.
-    if phase == Phase::Speaking && !cortex.frames.is_empty() {
-        draw_thinking_decode(
-            buf,
-            stride,
-            h,
-            cortex,
-            lat,
-            accent,
-            1.0,
-            Some(cortex.playback_frac()),
-            glow,
-        );
-        return;
-    }
-    // External/capture-off speaking still falls through to the cadence
-    // bead renderer below, because there are no sampled frames to trace.
-    let beads = cortex.beads();
-    // Real reply-audio (plan E): per-row band glow + global pulse.
-    let (audio_amp, has_audio) = cortex.audio_amp_now();
-
-    for col in 0..cols {
-        let nx = if cols > 1 { col as f32 / (cols - 1) as f32 } else { 0.0 };
-        // Bin the model's layers into the columns that actually fit
-        // (plan Task A2), so squares stay square for any layer count.
-        let layer = if cols <= 1 { 0 } else { (col * n) / cols }.min(n.saturating_sub(1));
-        let heat = cortex.heat(layer);
-        let ember = cortex.ember_row.get(col).copied().unwrap_or(u8::MAX);
-
-        // Which row(s), if any, a token flare currently crossing this
-        // column lights, and how strongly — one row per bead, taken
-        // from that token's real per-layer sample data (plan Task 5:
-        // true per-row values, never a flat column fill).
-        let mut flares: [(usize, f32); 4] = [(usize::MAX, 0.0); 4];
-        let mut n_flares = 0usize;
-        for b in beads {
-            let dd = nx - b.x;
-            if (0.0..WAKE_FRAC).contains(&dd) && n_flares < flares.len() {
-                let row = *path_rows(b.token, layer, rows).last().unwrap_or(&0);
-                let base = b.frame.map_or(b.energy, |f| cortex.frame_act(f, layer));
-                let strength = (base * (1.0 - dd / WAKE_FRAC)).clamp(0.0, 1.0);
-                flares[n_flares] = (row, strength);
-                n_flares += 1;
-            }
-        }
-        let flares = &flares[..n_flares];
-
-        for row in 0..rows {
-            let (cx0, cy0, cx1, cy1) = lat.cell_rect(col, row);
-            let cxc = (cx0 + cx1) * 0.5;
-            let cyc = (cy0 + cy1) * 0.5;
-
-            // Speaking decode flare (plan Task 5/6): a dim ambient base
-            // from the slow heat trace, a resting ember on the row this
-            // column's real token path last touched (the "worn route"
-            // between flares), and the real per-row flare(s) crossing
-            // right now. At most one row per column reads hot from any
-            // single flare, so the column never fills flat.
-            let mut v = 0.10 + 0.22 * heat;
-            if usize::from(ember) == row {
-                let jitter = cell_hash(col * 13 + row, row * 7 + col);
-                v = v.max(0.26 + 0.08 * jitter);
-            }
-            for &(frow, strength) in flares {
-                if frow == row {
-                    v = v.max((0.16 + 0.80 * strength).clamp(0.0, 1.0));
-                }
-            }
-            v = v.clamp(0.0, 1.0);
-
-            // Speaking synergy (plan E2): the real spoken voice lights
-            // ROWS (frequency) as a capped, shimmering additive glow,
-            // plus a gentle global amplitude pulse. The flare stays the
-            // primary motion; sound only decorates (honesty invariant —
-            // the cell still shows a real activation value, audio only
-            // modulates brightness).
-            if phase == Phase::Speaking && has_audio {
-                let band = cortex.audio_row(row, rows);
-                let shimmer =
-                    0.6 + 0.4 * (((elapsed_secs * 7.0) + row as f32 * 1.3).sin() * 0.5 + 0.5);
-                v += (band * shimmer).min(1.0) * AUDIO_ROW_CAP;
-                v += audio_amp * AUDIO_PULSE_CAP;
-                v = v.clamp(0.0, 1.0);
-            }
-
-            // True-OFF (plan A3): below threshold ⇒ real dark panel bg.
-            // A hair of hint is kept only in the band just under it.
-            if v < ACT_THRESHOLD {
-                if v > ACT_THRESHOLD * 0.6 {
-                    let t = (v - ACT_THRESHOLD * 0.6) / (ACT_THRESHOLD * 0.4);
-                    let cc = heat_ramp(deep, mid, hot, 0.0);
-                    fill_cell(buf, stride, h, cx0, cy0, cx1, cy1, cc, 0.35 * t);
-                }
+    // Sweep heads — crisp stepped cells over the field.
+    for p in &cortex.pulses {
+        let hc = p.last_head.round() as i32;
+        let warm = p.kind == PulseKind::Decode;
+        for (off, b) in HEAD_TIERS {
+            let c = hc + off;
+            if c < 0 || c >= COLS as i32 {
                 continue;
             }
-            // Renormalise above-threshold values across the full ramp so
-            // just-on cells read deep and full cells read hot.
-            let t = ((v - ACT_THRESHOLD) / (1.0 - ACT_THRESHOLD)).clamp(0.0, 1.0);
-            let cc = heat_ramp(deep, mid, hot, t);
-            fill_cell(buf, stride, h, cx0, cy0, cx1, cy1, cc, 0.96);
-            // Per-flare, per-cell glow only (plan Task 1): every glow
-            // is anchored at, and sized against, the cell that is
-            // actually hot — never a floating shape independent of the
-            // grid.
-            if t > 0.8 {
-                glow.add(cxc, cyc, lat.cell as f32 * 0.5, hot, 0.22 * (t - 0.7));
-            }
-            if flares.iter().any(|&(frow, s)| frow == row && s > 0.35) {
-                glow.add(cxc, cyc, lat.cell as f32 * 0.9, hot, 0.28);
-            }
-        }
-    }
-}
-
-/// Thinking / prefill scene: prompt/context ingestion before any sampled
-/// token keyframe exists. This is intentionally *not* a token heatmap yet;
-/// the only real signal available is each `Prefill { n_tokens }` batch,
-/// represented as one luminous context wave crossing the transformer depth.
-#[allow(clippy::too_many_arguments)]
-fn draw_thinking_prefill(
-    buf: &mut [u32],
-    stride: u32,
-    h: u32,
-    cortex: &CortexState,
-    lat: &Lattice,
-    accent: u32,
-    glow: &mut GlowAccum,
-) {
-    let (deep, mid, hot) = accent_ramp(accent);
-    let cols = lat.cols;
-    let rows = lat.rows;
-    if cols == 0 || rows == 0 {
-        return;
-    }
-
-    for col in 0..cols {
-        let nx = if cols > 1 { col as f32 / (cols - 1) as f32 } else { 0.0 };
-        let layer = if cols <= 1 { 0 } else { (col * cortex.layer_count()) / cols };
-        let layer_charge = cortex.prefill_lit(layer).max(cortex.activation(layer) * 0.55);
-        for row in 0..rows {
-            let (cx0, cy0, cx1, cy1) = lat.cell_rect(col, row);
-            let cx = (cx0 + cx1) * 0.5;
-            let cy = (cy0 + cy1) * 0.5;
-            let jitter = cell_hash(col * 17 + row * 3, row * 19 + col);
-            let mut v = 0.08 + layer_charge * (0.62 + 0.16 * jitter);
-            let row_phase = if rows > 1 { row as f32 / (rows - 1) as f32 } else { 0.5 };
-
-            for (pos, amp) in cortex.prefill_sweeps() {
-                // Data grounding: one real prefill batch creates one
-                // wave; `amp` is log-scaled from the batch's token count.
-                let front = ((nx - pos) / SWEEP_WIDTH).abs();
-                if front < 1.0 {
-                    let edge = smooth(1.0 - front);
-                    let vertical_ripple =
-                        0.72 + 0.28 * ((row_phase * std::f32::consts::TAU) + pos * 8.0).sin().abs();
-                    v = v.max((0.24 + amp * edge * vertical_ripple).clamp(0.0, 1.0));
-                    if edge > 0.62 {
-                        glow.add(
-                            cx,
-                            cy,
-                            lat.cell as f32 * (0.7 + edge * 0.8),
-                            hot,
-                            0.16 * amp * edge,
-                        );
-                    }
+            for r in 0..ROWS {
+                let rr = 1.0 - (r as f32 - 2.5).abs() / 2.5;
+                let v = b * (0.55 + 0.45 * rr) * p.amp;
+                if v < 0.04 {
+                    continue;
                 }
-                // A crisp leading edge makes prompt ingestion read as a
-                // front moving through transformer depth, not a flat fill.
-                let edge_d = ((nx - pos) / (SWEEP_WIDTH * 0.18)).abs();
-                if edge_d < 1.0 {
-                    v = v.max((0.68 + 0.32 * amp) * (1.0 - edge_d * 0.25));
-                    glow.add(cx, cy, lat.cell as f32 * 1.15, hot, 0.30 * amp * (1.0 - edge_d));
-                }
+                let (cx, cy) = grid.cell_origin(c as usize, r);
+                blend_rect(
+                    buf,
+                    stride,
+                    h,
+                    cx,
+                    cy,
+                    grid.cell,
+                    grid.cell,
+                    cell_color(v, warm, p.entropy),
+                    cell_alpha(v),
+                );
             }
-
-            if v < ACT_THRESHOLD * 0.45 {
-                continue;
-            }
-            let t = ((v - ACT_THRESHOLD * 0.45) / (1.0 - ACT_THRESHOLD * 0.45)).clamp(0.0, 1.0);
-            let cc = heat_ramp(deep, mid, hot, t);
-            fill_cell(buf, stride, h, cx0, cy0, cx1, cy1, cc, 0.82);
-        }
-    }
-}
-
-/// Dim prefill resting field over the lattice columns left of
-/// `x_limit` (RC3 fix): while the young live-decode trace covers only
-/// part of the strip, the already-ingested prompt keeps glowing calmly
-/// under it instead of leaving a dead black panel. Deliberately dimmer
-/// than any decode column, and floored at a faint ambient level so the
-/// region is never black even when no prefill event ever arrived.
-#[allow(clippy::too_many_arguments)]
-fn draw_prefill_rest(
-    buf: &mut [u32],
-    stride: u32,
-    h: u32,
-    cortex: &CortexState,
-    lat: &Lattice,
-    accent: u32,
-    x_limit: f32,
-) {
-    let (deep, mid, hot) = accent_ramp(accent);
-    let n = cortex.layer_count().max(1);
-    for col in 0..lat.cols {
-        let (_, _, cx1, _) = lat.cell_rect(col, 0);
-        if cx1 > x_limit {
-            break;
-        }
-        let layer = if lat.cols <= 1 { 0 } else { (col * n) / lat.cols }.min(n - 1);
-        let charge = cortex.prefill_lit(layer).max(PREFILL_REST_LEVEL * 0.7);
-        for row in 0..lat.rows {
-            let (cx0, cy0, cx1, cy1) = lat.cell_rect(col, row);
-            let jitter = cell_hash(col * 17 + row * 3, row * 19 + col);
-            let v = charge * (0.55 + 0.25 * jitter);
-            let cc = heat_ramp(deep, mid, hot, (v * 0.75).clamp(0.0, 1.0));
-            fill_cell(buf, stride, h, cx0, cy0, cx1, cy1, cc, 0.75);
-        }
-    }
-}
-
-/// Thinking / decode scene: once the first sampled token keyframe lands,
-/// the prompt wave resolves into a rolling transformer trace. X is sampled
-/// token frames, Y is real transformer layer depth, and brightness is the
-/// captured per-layer output norm normalised for that layer.
-#[allow(
-    clippy::too_many_arguments,
-    clippy::too_many_lines,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
-fn draw_thinking_decode(
-    buf: &mut [u32],
-    stride: u32,
-    h: u32,
-    cortex: &CortexState,
-    lat: &Lattice,
-    accent: u32,
-    snap_t: f32,
-    replay_frac: Option<f32>,
-    glow: &mut GlowAccum,
-) {
-    let (deep, mid, hot) = accent_ramp(accent);
-    let n_layers = cortex.layer_count().max(1);
-    let frames = &cortex.frames;
-    if frames.is_empty() {
-        draw_thinking_prefill(buf, stride, h, cortex, lat, accent, glow);
-        return;
-    }
-
-    let grid_w =
-        (lat.cols as i32 * lat.cell + (lat.cols.saturating_sub(1)) as i32 * lat.gap) as f32;
-    let grid_h =
-        (lat.rows as i32 * lat.cell + (lat.rows.saturating_sub(1)) as i32 * lat.gap) as f32;
-    let gx0 = lat.ox as f32;
-    let gy0 = lat.oy as f32;
-    let trace_h = (grid_h - 7.0).max(grid_h * 0.72);
-    let ribbon_h = (grid_h - trace_h).clamp(4.0, 8.0);
-    let visual_layers = n_layers.min((trace_h / 2.0).floor().max(8.0) as usize).max(1);
-    let row_h = trace_h / visual_layers as f32;
-
-    // Column layout differs by mode. Live decode (thinking) accumulates
-    // the newest sampled keyframes against the right edge, like a chart
-    // recorder. Speaking replay instead spreads the WHOLE captured trace
-    // across the panel, so the playback cursor can visibly scan through
-    // the answer's decode history in sync with the voice.
-    //
-    // Legible integer column geometry (RC2 fix): a column stride is a
-    // whole number of pixels with a ≥ 1 px gap — never sub-pixel. Long
-    // replies BIN multiple keyframes per column (max/mean aggregate)
-    // instead of shrinking columns into an aliasing slab whose
-    // double-coverage seams read as spurious bright lines.
-    let replaying = replay_frac.is_some();
-    let target_cols = ((grid_w / 9.0).floor() as usize).clamp(28, 96);
-    let n_avail = frames.len().max(1);
-    // Replay spreads the whole trace across the strip (wider columns
-    // for short replies); live decode keeps a FIXED narrow stride so a
-    // young trace is a few narrow columns at the right edge — never one
-    // giant slab — while the prefill field holds the rest of the strip.
-    let (n_cols, stride_px) = if replaying {
-        let n = n_avail.min(target_cols);
-        let stride = ((grid_w / n as f32).floor() as i32).max(4);
-        (n.min(((grid_w as i32) / stride).max(1) as usize), stride)
-    } else {
-        let stride = ((grid_w / target_cols as f32).floor() as i32).max(4);
-        let fit = ((grid_w as i32) / stride).max(1) as usize;
-        (n_avail.min(fit).max(1), stride)
-    };
-    let col_w = stride_px as f32;
-    let gap_px = (stride_px / 5).max(1);
-    let cell_w = (stride_px - gap_px) as f32;
-    let span_w = (n_cols as i32 * stride_px) as f32;
-    // Replay fills from the left edge; live decode right-aligns the
-    // newest columns, chart-recorder style.
-    let span_x0 = if replaying { gx0 } else { gx0 + grid_w - span_w };
-    // Keyframe range each column bins: replay partitions the whole
-    // trace; live decode shows the newest `n_cols` frames one-per-col.
-    let bin_range = |col: usize| -> (usize, usize) {
-        if replaying {
-            let b0 = col * frames.len() / n_cols;
-            let b1 = ((col + 1) * frames.len() / n_cols).max(b0 + 1).min(frames.len());
-            (b0, b1.max(b0 + 1))
-        } else {
-            let f = frames.len() - n_cols + col;
-            (f, f + 1)
-        }
-    };
-
-    // Cursor: speaking scans the trace against the TTS playback clock;
-    // live decode pins it on the newest keyframe at the right edge.
-    let cursor_x = replay_frac
-        .map_or(span_x0 + span_w - col_w * 0.5, |frac| span_x0 + frac.clamp(0.0, 1.0) * span_w);
-
-    // Draw an explicit transformer-depth scaffold first. This is not
-    // sampled activity: it is the layer axis, kept very dim so real frame
-    // columns and hot bands own the visual hierarchy (dark glass stage).
-    for row in 0..visual_layers {
-        let y0 = gy0 + row as f32 * row_h;
-        let y1 = (y0 + row_h * 0.58).max(y0 + 1.0);
-        let band = if row % 4 == 0 { 0.065 } else { 0.028 };
-        let layer_hint = row as f32 / visual_layers.saturating_sub(1).max(1) as f32;
-        let cc = heat_ramp(deep, mid, hot, 0.08 + 0.10 * layer_hint);
-        fill_cell(buf, stride, h, gx0, y0, gx0 + grid_w, y1, cc, band);
-    }
-
-    // Never-black Thinking (RC3 fix): while the live trace hasn't grown
-    // across the strip yet, the columns it doesn't cover keep showing
-    // the dim prefill resting field instead of going dead the instant
-    // decode latches. The field visibly recedes leftward as real token
-    // columns accumulate — decode literally eats the prompt.
-    if !replaying && span_x0 > gx0 + 1.0 {
-        draw_prefill_rest(buf, stride, h, cortex, lat, accent, span_x0);
-    }
-
-    // Sampled keyframes: one legible pixel-aligned column per bin, never
-    // a stretched full-panel wash; more tokens visibly build a
-    // layer/time heatmap history.
-    let mut prev_mean = vec![0.0f32; visual_layers];
-    for col in 0..n_cols {
-        let (b0, b1) = bin_range(col);
-        let x0 = span_x0 + (col as i32 * stride_px) as f32;
-        let x1 = x0 + cell_w;
-        let xc = (x0 + x1) * 0.5;
-        // Recency drives brightness. Live decode fades older columns to
-        // the left. Speaking replay keeps spoken columns lit with a slow
-        // fade behind the cursor and previews unspoken columns faintly,
-        // so the sweep reads as "the answer being spoken through".
-        let recency = if replaying {
-            let d = xc - cursor_x;
-            if d > col_w * 0.5 {
-                0.14
-            } else {
-                let trail = (-d / (span_w * 0.40).max(1.0)).clamp(0.0, 1.0);
-                (1.0 - 0.45 * trail).clamp(0.30, 1.0)
-            }
-        } else {
-            let age = (n_cols - col) as f32 / n_cols as f32;
-            (1.0 - 0.70 * age).clamp(0.30, 1.0)
-        };
-        let near_cursor = replaying && (xc - cursor_x).abs() < col_w.max(3.0) * 1.6;
-
-        for (row, prev) in prev_mean.iter_mut().enumerate() {
-            let layer0 = row * n_layers / visual_layers;
-            let layer1 = ((row + 1) * n_layers / visual_layers).max(layer0 + 1).min(n_layers);
-            let span = (layer1 - layer0) as f32;
-            let mut sum = 0.0;
-            let mut peak: f32 = 0.0;
-            for fi in b0..b1 {
-                for layer in layer0..layer1 {
-                    let v = cortex.frame_act(fi, layer);
-                    sum += v;
-                    peak = peak.max(v);
-                }
-            }
-            let mean = sum / (span * (b1 - b0) as f32);
-            let delta = if col == 0 { 0.0 } else { (mean - *prev).abs().clamp(0.0, 1.0) };
-            *prev = mean;
-            let energy = (0.62 * peak + 0.38 * mean).clamp(0.0, 1.0);
-            if energy < 0.055 && delta < 0.06 {
-                continue;
-            }
-
-            let y0 = gy0 + row as f32 * row_h;
-            let y1 = (y0 + row_h * 0.76).max(y0 + 1.0);
-            let mut t = ((energy * 0.88 + delta * 0.40) * recency).clamp(0.0, 1.0).powf(0.72);
-            if near_cursor {
-                // The column being spoken right now blooms above its
-                // neighbours, so the sweep visibly "speaks through" it.
-                t = (t * 1.18 + 0.10).clamp(0.0, 1.0);
-            }
-            let mut cc = heat_ramp(deep, mid, hot, t);
-            if delta > 0.20 {
-                cc = mix_color(cc, 0x00FF_F7B8, (delta * 0.65).clamp(0.0, 0.45));
-            }
-            fill_cell(buf, stride, h, x0, y0, x1, y1, cc, 0.20 + 0.74 * t);
-
-            let hot_band = t > 0.70;
-            let glow_here = if replaying { near_cursor && t > 0.45 } else { n_cols - col <= 5 };
-            if hot_band && glow_here {
-                let cy = (y0 + y1) * 0.5;
-                glow.add(xc, cy, row_h.max(2.0) * (1.2 + 1.6 * t), hot, 0.10 + 0.16 * t);
-            }
-        }
-
-        // Entropy ribbon: uncertainty is tied to each sampled token column,
-        // not a decorative full-width footer. Higher entropy grows upward
-        // and shifts toward amber/magenta so uncertainty is glanceable.
-        let e_bits = frames[b0..b1].iter().fold(0.0f32, |m, f| m.max(f.entropy));
-        let e = (e_bits / ENTROPY_NORM_BITS).clamp(0.0, 1.0);
-        let y1 = gy0 + trace_h + ribbon_h;
-        let y0 = y1 - (1.5 + e * ribbon_h).max(1.0);
-        let color = mix_color(mid, 0x00FF_5A5A, e);
-        // During replay the ribbon follows the cursor too: spoken tokens
-        // keep their entropy skyline lit; unspoken ones stay faint.
-        fill_cell(buf, stride, h, x0, y0, x1, y1, color, (0.26 + 0.55 * e) * recency.max(0.4));
-    }
-
-    // Cursor line + halo. Live decode: pinned on the newest keyframe
-    // with a short decode-lock bloom. Speaking replay: sweeps across the
-    // trace with the voice, trailing a soft bloom behind it.
-    let flash = (1.0 - snap_t).clamp(0.0, 1.0);
-    fill_cell(buf, stride, h, cursor_x - 1.35, gy0, cursor_x + 1.35, gy0 + trace_h, hot, 0.85);
-    let halo_w = if replaying { col_w.max(3.0) * 1.8 } else { col_w * (0.45 + flash) };
-    let halo_a = if replaying { 0.16 } else { 0.10 + 0.18 * flash };
-    fill_cell(
-        buf,
-        stride,
-        h,
-        cursor_x - halo_w,
-        gy0,
-        cursor_x + halo_w,
-        gy0 + trace_h,
-        hot,
-        halo_a,
-    );
-    if replaying {
-        // Short trailing bloom so the sweep has a comet tail instead of
-        // a bare line.
-        let tail_w = (span_w * 0.08).max(halo_w * 2.0);
-        fill_cell(buf, stride, h, cursor_x - tail_w, gy0, cursor_x, gy0 + trace_h, hot, 0.05);
-    }
-    glow.add(
-        cursor_x,
-        gy0 + trace_h * 0.5,
-        trace_h * (0.12 + 0.24 * flash),
-        hot,
-        if replaying { 0.42 } else { 0.30 + 0.46 * flash },
-    );
-}
-
-/// Listening scene (plan C, redesigned): "peak dots over a weight
-/// field". X = frequency (log-spaced mic FFT bands, reusing the real
-/// bins the session already pushes), Y = energy. Every grid cell shows
-/// a dim, slowly-shimmering ambient "weight" box so the whole panel
-/// reads as living texture; over it, each frequency column emphasises
-/// exactly ONE hot dot at the height of its current energy, plus a
-/// slow-falling peak-hold cap. Silence rests the dots near the bottom,
-/// so the scene is always alive but never a flat wall (fixes the old
-/// single-row collapse).
-#[allow(clippy::too_many_arguments)]
-fn draw_listening_spectrum(
-    buf: &mut [u32],
-    stride: u32,
-    h: u32,
-    cortex: &CortexState,
-    lat: &Lattice,
-    elapsed_secs: f32,
-    glow: &mut GlowAccum,
-) {
-    let (deep, mid, hot) = (LISTEN_DEEP, LISTEN_MID, LISTEN_HOT);
-    let cols = lat.cols;
-    let rows = lat.rows;
-    if cols == 0 || rows == 0 {
-        return;
-    }
-
-    // Weight-field: every cell a dim ambient box so the whole grid
-    // reads as a living brain at rest. A slow travelling shimmer gives
-    // an organic base pulse, and — crucially — a small, ever-changing
-    // subset of cells briefly "fires" (a brighter cool-blue flash that
-    // rises fast and decays) so the resting network looks like it is
-    // idly thinking rather than sitting dead. Sparse and capped so it
-    // never competes with the warm energy dots.
-    //
-    // Each cell owns a phase offset (hashed) and cycles on a slow
-    // period; only the narrow window near the top of its cycle lights
-    // up, so at any instant only a handful of cells are firing and they
-    // never pulse in lockstep.
-    for row in 0..rows {
-        for col in 0..cols {
-            let (x0, y0, x1, y1) = lat.cell_rect(col, row);
-            let cf = col as f32;
-            let rf = row as f32;
-
-            // Base shimmer: two counter-travelling ripples, kept low but
-            // now with a visible floor so the grid is never fully black.
-            let w1 = (elapsed_secs * 1.05 - cf * 0.33 + rf * 0.21).sin();
-            let w2 = (elapsed_secs * 0.63 + cf * 0.17 - rf * 0.44).sin();
-            let shimmer = ((w1 + w2) * 0.25 + 0.5).clamp(0.0, 1.0);
-            let base_a = 0.035 + 0.04 * shimmer;
-            fill_cell(buf, stride, h, x0, y0, x1, y1, WEIGHT_FIELD_COLOR, base_a);
-
-            // Sparse firing: each cell cycles at ~0.5 Hz with a hashed
-            // phase; only the top ~15% of the cycle ignites, so few cells
-            // are lit at once and never synchronously.
-            let phase = cell_hash(col * 7 + 3, row * 11 + 5);
-            let cycle = (elapsed_secs * 0.5 + phase).fract();
-            if cycle > 0.85 {
-                let fire = (cycle - 0.85) / 0.15; // 0->1 across the window
-                let env = (fire * std::f32::consts::PI).sin(); // smooth rise+fall
-                let fa = 0.14 * env;
-                fill_cell(buf, stride, h, x0, y0, x1, y1, WEIGHT_FIELD_SPARK, fa);
-                let cx = (x0 + x1) * 0.5;
-                let cy = (y0 + y1) * 0.5;
-                glow.add(cx, cy, lat.cell as f32 * 0.5, WEIGHT_FIELD_SPARK, 0.08 * env);
-            }
-        }
-    }
-
-    // Energy axis geometry: every dot snaps to a grid row (row 0 = loud
-    // top, row N-1 = quiet bottom) so both the energy dots and the
-    // peak-hold caps sit cleanly on cells rather than floating between.
-    let step = (lat.cell + lat.gap) as f32;
-    let col_cx = |c: usize| lat.ox as f32 + c as f32 * step + lat.cell as f32 * 0.5;
-    let row_cy = |r: usize| lat.oy as f32 + r as f32 * step + lat.cell as f32 * 0.5;
-    let dot_r = (lat.cell as f32 * 0.42).max(1.5);
-
-    let nb = cortex.spec_bands.len();
-    let np = cortex.spec_peak.len();
-    for col in 0..cols {
-        // Sample this column's frequency band (spectrum length is
-        // independent of column count; resample proportionally).
-        let e = if nb == 0 { 0.0 } else { cortex.spec_bands[(col * nb / cols).min(nb - 1)] };
-        let pk = if np == 0 { e } else { cortex.spec_peak[(col * np / cols).min(np - 1)] };
-        let cx = col_cx(col);
-
-        // Emphasised energy dot: brightness + colour climb with energy.
-        // Snap to the nearest grid row so the dot sits on a cell rather
-        // than floating at an interpolated height (row 0 = loud/top).
-        let erow = ((1.0 - e.clamp(0.0, 1.0)) * (rows - 1) as f32).round() as usize;
-        let ey = row_cy(erow.min(rows - 1));
-        let color = heat_ramp(deep, mid, hot, 0.35 + 0.65 * e);
-        fill_dot(buf, stride, h, cx, ey, dot_r * (0.8 + 0.5 * e), color, (0.55 + 0.4 * e).min(1.0));
-        glow.add(cx, ey, lat.cell as f32 * (0.7 + 0.8 * e), hot, (0.3 + 0.7 * e).min(1.2));
-
-        // Peak-hold cap: thin bright marker that hangs, then drifts down.
-        // Snap it to the nearest grid row so it sits on a cell rather than
-        // floating at an interpolated height (row 0 = loud/top).
-        let prow = ((1.0 - pk.clamp(0.0, 1.0)) * (rows - 1) as f32).round() as usize;
-        let py = row_cy(prow.min(rows - 1));
-        fill_dot(buf, stride, h, cx, py, dot_r * 0.55, 0x00FF_FFFF, 0.5);
-    }
-}
-
-/// MoE Constellation scene (plan G): a sparse field of dim stars where
-/// only the REAL routed top-k experts of the currently-decoded layer
-/// ignite (brightness = real routing weight), with thin threads
-/// between them in weight order and a slow heat-trace of the regions
-/// that carried the reply. Most stars stay dark (true-OFF). Expert ids
-/// map into the fixed star field via a hash, so it stays legible from
-/// 8 to 256+ experts. No synthetic hash roll decides which ignite.
-#[allow(clippy::too_many_arguments)]
-fn draw_constellation(
-    buf: &mut [u32],
-    stride: u32,
-    h: u32,
-    cortex: &CortexState,
-    lat: &Lattice,
-    ax0: f32,
-    ay0: f32,
-    aw: f32,
-    ah: f32,
-    glow: &mut GlowAccum,
-) {
-    // Real reply-audio: gentle global brightness pulse (same subtlety
-    // cap / honesty invariant as the heatmap).
-    let (audio_amp, has_audio) = cortex.audio_amp_now();
-    let pulse = if has_audio { 1.0 + AUDIO_PULSE_CAP * audio_amp * 2.0 } else { 1.0 };
-    let star_r = (lat.cell as f32 * 0.16).max(1.0);
-
-    // Dim implied population + slow heat-trace residue.
-    for s in 0..N_STARS {
-        let (px, py) = star_pos(s, ax0, ay0, aw, ah);
-        let ht = cortex.star_heat(s);
-        if ht > 0.02 {
-            glow.add(px, py, lat.cell as f32 * 0.7, CONSTELLATION_HOT, (0.14 * ht).min(0.4));
-        }
-        fill_dot(buf, stride, h, px, py, star_r, CONSTELLATION_DIM, 0.5);
-    }
-
-    // Currently-decoded layer's REAL routing (depth = progression).
-    let n = cortex.layer_count();
-    let front = cortex.beads().iter().fold(f32::NEG_INFINITY, |m, b| m.max(b.x));
-    let sweep = if front.is_finite() { front.clamp(0.0, 1.0) } else { 0.55 };
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let layer = ((sweep * n.saturating_sub(1) as f32).round() as usize).min(n.saturating_sub(1));
-    let ids = cortex.routing_at(layer);
-    let ws = cortex.weights_at(layer);
-    let wmax = ws.iter().copied().fold(0.0f32, f32::max).max(1e-3);
-
-    // Ignite the real top-k experts (brightness = real weight) and
-    // remember their positions for the threads (top-k weight order).
-    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(ids.len());
-    for (k, &id) in ids.iter().enumerate() {
-        let s = expert_star(id);
-        let (px, py) = star_pos(s, ax0, ay0, aw, ah);
-        let w = if ids.is_empty() {
-            0.0
-        } else {
-            ws.get(k).copied().unwrap_or(1.0 / ids.len() as f32) / wmax
-        };
-        let b = (w.clamp(0.05, 1.0)) * pulse;
-        fill_dot(
-            buf,
-            stride,
-            h,
-            px,
-            py,
-            star_r * (1.6 + 1.4 * b),
-            CONSTELLATION_HOT,
-            (0.6 * b).min(1.0),
-        );
-        glow.add(
-            px,
-            py,
-            lat.cell as f32 * (0.6 + 0.9 * b),
-            CONSTELLATION_HOT,
-            (0.4 + 0.7 * b).min(1.3),
-        );
-        pts.push((px, py));
-    }
-    // Thin threads between the chosen experts in top-k order.
-    for w2 in pts.windows(2) {
-        thread(glow, w2[0], w2[1], CONSTELLATION_THREAD, star_r);
-    }
-}
-
-/// Deterministic star position for star index `s` inside the panel
-/// area, with a small margin so ignited glows stay on-panel.
-fn star_pos(s: usize, ax0: f32, ay0: f32, aw: f32, ah: f32) -> (f32, f32) {
-    let hx = hash01(s as u64 * 2 + 1);
-    let hy = hash01(s as u64 * 7 + 3);
-    let mx = aw * 0.05;
-    let my = ah * 0.14;
-    (ax0 + mx + hx * (aw - 2.0 * mx), ay0 + my + hy * (ah - 2.0 * my))
-}
-
-/// Map a real expert id into the fixed star field via a hash, so any
-/// expert count (8 / 128 / 256) spreads across the implied population
-/// without becoming sub-pixel noise (plan G — id-band mapping).
-fn expert_star(id: i32) -> usize {
-    #[allow(clippy::cast_sign_loss)]
-    let seed = (id as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    (hash01(seed) * N_STARS as f32) as usize % N_STARS
-}
-
-/// Draw a fast-decaying thin light-thread between two star positions as
-/// a short chain of faint glow dots (no dedicated line primitive).
-fn thread(glow: &mut GlowAccum, p0: (f32, f32), p1: (f32, f32), color: u32, r: f32) {
-    const STEPS: usize = 8;
-    for i in 1..STEPS {
-        let t = i as f32 / STEPS as f32;
-        let x = p0.0 + (p1.0 - p0.0) * t;
-        let y = p0.1 + (p1.1 - p0.1) * t;
-        glow.add(x, y, r * 1.2, color, 0.10);
-    }
-}
-
-/// Fill a small square dot centred at `(cx, cy)` with radius `r`.
-fn fill_dot(buf: &mut [u32], stride: u32, h: u32, cx: f32, cy: f32, r: f32, color: u32, a: f32) {
-    fill_cell(buf, stride, h, cx - r, cy - r, cx + r, cy + r, color, a);
-}
-
-/// Smoothstep on 0..1.
-fn smooth(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-/// Deterministic per-cell hash in 0..1 (SplitMix-derived) so a cell's
-/// jitter / expert roll is stable across frames.
-fn cell_hash(a: usize, b: usize) -> f32 {
-    hash01(
-        (a as u64)
-            .wrapping_mul(0x9E37_79B1)
-            .wrapping_add((b as u64).wrapping_mul(0x85EB_CA77))
-            .wrapping_add(0x1_2345),
-    )
-}
-
-/// Synthetic-but-stable expert residency: warm (RAM) vs cold (disk).
-/// Real residency isn't carried in the keyframe stream, so this is a
-/// deterministic per-expert stand-in kept behind the same "synthetic
-/// signal" seam as the rest of the degraded path. Deferred/opt-in
-/// (plan G3): the shipped constellation drives ignition purely from
-/// real routing weights, so this is not wired into the render — it is
-/// retained as the home for the flagged synthetic tint until G5 lands
-/// real `mincore()`-based residency.
-#[allow(dead_code)]
-fn expert_warm(id: i32) -> bool {
-    #[allow(clippy::cast_sign_loss)]
-    let seed = id as u64;
-    hash01(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) ^ 0xA5A5) < 0.45
-}
-
-/// Listening's dedicated warm red-orange ramp anchors (FIX 1): a
-/// lifted maroon floor, a saturated red mid, and a bright orange hot
-/// so cells pop clearly instead of reading dark-on-dark. Kept as its
-/// own fixed palette (independent of the per-state accent) since it
-/// is the already-shipped coherence reference the other phases are
-/// tuned against.
-const LISTEN_DEEP: u32 = 0x0078_1A12;
-const LISTEN_MID: u32 = 0x00E8_3E22;
-const LISTEN_HOT: u32 = 0x00FF_B863;
-
-/// Derive a (deep, mid, hot) heat-ramp from the real per-state
-/// `accent` colour the rest of the overlay already uses for this
-/// phase (status label, System/360's lit-lamp colour) — the same
-/// "accent lerped toward white" trick `draw_system_360` uses for its
-/// brightest lamps. Thinking and Speaking both route through this so
-/// they read as one coherent palette family instead of each inventing
-/// its own disconnected hue; they still stay visually distinct from
-/// each other because the app already assigns them different accents
-/// (amber vs sky-blue).
-fn accent_ramp(accent: u32) -> (u32, u32, u32) {
-    let base = accent & 0x00FF_FFFF;
-    let deep = mix_color(0x0004_0404, base, 0.42);
-    let hot = mix_color(base, 0x00FF_FFFF, 0.55);
-    (deep, base, hot)
-}
-
-/// Per-phase (deep, mid, hot) anchors for the dense heat ramp
-/// (`0x00RR_GGBB`).
-fn heat_palette(phase: Phase, accent: u32) -> (u32, u32, u32) {
-    match phase {
-        Phase::Listening => (LISTEN_DEEP, LISTEN_MID, LISTEN_HOT),
-        Phase::Thinking | Phase::Speaking => accent_ramp(accent),
-        Phase::Idle => (0x000A_0A10, 0x0016_1622, 0x0030_3040),
-    }
-}
-
-/// Multi-stop heat ramp: `t` in 0..1 walks near-black floor → deep →
-/// mid → hot, so `t≈0` cells still show faint grid structure.
-fn heat_ramp(deep: u32, mid: u32, hot: u32, t: f32) -> u32 {
-    const FLOOR: u32 = 0x000A_0A10;
-    let t = t.clamp(0.0, 1.0);
-    let seg = t * 3.0;
-    if seg < 1.0 {
-        mix_color(FLOOR, deep, smooth(seg))
-    } else if seg < 2.0 {
-        mix_color(deep, mid, smooth(seg - 1.0))
-    } else {
-        mix_color(mid, hot, smooth(seg - 2.0))
-    }
-}
-
-/// Alpha-blend a straight `0x00RR_GGBB` colour at coverage `a` (0..1)
-/// into the premultiplied ARGB framebuffer over `(x0..x1, y0..y1)`.
-/// Keeps the premultiplied invariant (each channel ≤ alpha): `a·src ≤
-/// a·255` and the destination already satisfies `chan ≤ alpha`.
-#[allow(clippy::too_many_arguments, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn fill_cell(
-    buf: &mut [u32],
-    stride: u32,
-    h: u32,
-    x0: f32,
-    y0: f32,
-    x1: f32,
-    y1: f32,
-    color: u32,
-    a: f32,
-) {
-    let a = a.clamp(0.0, 1.0);
-    if a <= 0.0 {
-        return;
-    }
-    let sr = ((color >> 16) & 0xFF) as f32;
-    let sg = ((color >> 8) & 0xFF) as f32;
-    let sb = (color & 0xFF) as f32;
-    let xi0 = x0.floor().max(0.0) as i32;
-    let xi1 = (x1.ceil() as i32).min(stride as i32);
-    let yi0 = y0.floor().max(0.0) as i32;
-    let yi1 = (y1.ceil() as i32).min(h as i32);
-    let inv = 1.0 - a;
-    for y in yi0..yi1 {
-        let rowbase = y as u32 * stride;
-        for x in xi0..xi1 {
-            let idx = (rowbase + x as u32) as usize;
-            if let Some(slot) = buf.get_mut(idx) {
-                let px = *slot;
-                let da = ((px >> 24) & 0xFF) as f32;
-                let dr = ((px >> 16) & 0xFF) as f32;
-                let dg = ((px >> 8) & 0xFF) as f32;
-                let db = (px & 0xFF) as f32;
-                let out_a = (a * 255.0 + da * inv).min(255.0) as u32;
-                let out_r = (a * sr + dr * inv).min(255.0) as u32;
-                let out_g = (a * sg + dg * inv).min(255.0) as u32;
-                let out_b = (a * sb + db * inv).min(255.0) as u32;
-                *slot = (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
-            }
-        }
-    }
-}
-
-/// Minimal HUD: two slim arcs in the top-right corner — decode
-/// throughput (outer) and KV-cache fill (inner) — drawn as chains of
-/// small additive glow dots (no dedicated 2D arc primitive needed).
-#[allow(clippy::too_many_arguments)]
-fn draw_hud_arcs(
-    glow: &mut GlowAccum,
-    x1: f32,
-    y_top: f32,
-    accent: u32,
-    scale: f32,
-    tokps: f32,
-    ctx_fill: f32,
-) {
-    let cx = x1 - 16.0 * scale;
-    let cy = y_top + 14.0 * scale;
-    for (radius, fill) in [(10.0 * scale, tokps), (6.0 * scale, ctx_fill)] {
-        const STEPS: usize = 22;
-        // 270° sweep starting at the lower-left (135°), clockwise.
-        for s in 0..=STEPS {
-            let t = s as f32 / STEPS as f32;
-            let angle = (135.0 + 270.0 * t).to_radians();
-            let px = cx + radius * angle.cos();
-            let py = cy + radius * angle.sin();
-            let lit = t <= fill && fill > 0.0;
-            let (color, intensity) = if lit { (whiten(accent, 0.35), 0.8) } else { (accent, 0.12) };
-            glow.add(px, py, 1.4 * scale, color, intensity);
         }
     }
 }
@@ -2652,339 +1472,420 @@ fn draw_hud_arcs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CortexFrame;
 
-    #[test]
-    fn layer_count_defaults_and_clamps() {
-        let mut c = CortexState::default();
-        assert_eq!(c.layer_count(), DEFAULT_LAYERS);
-        c.set_model_layers(48);
-        assert_eq!(c.layer_count(), 48);
-        c.set_model_layers(2);
-        assert_eq!(c.layer_count(), MIN_LAYERS);
-        c.set_model_layers(400);
-        assert_eq!(c.layer_count(), MAX_LAYERS);
-        c.set_model_layers(0);
-        assert_eq!(c.layer_count(), DEFAULT_LAYERS);
+    fn begin(state: &mut CortexState, n_layer: u32, kind: CortexModelKind) {
+        state.apply(CortexCmd::ReplyBegin {
+            n_layer,
+            kind,
+            n_experts_total: None,
+            n_experts_active: None,
+        });
     }
 
-    #[test]
-    fn tick_resizes_and_accumulates_heat() {
-        let mut c = CortexState::default();
-        c.on_state(crate::OverlayState::Recording { db: -20 });
-        c.tick(&[1.0; 16]);
-        assert_eq!(c.activation.len(), DEFAULT_LAYERS);
-        let a1 = c.activation(0);
-        assert!(a1 > 0.0 && a1 <= 1.0);
-        let h1 = c.heat(0);
-        assert!(h1 > 0.0);
-        // Heat keeps building while activation is sustained…
-        for _ in 0..20 {
-            c.tick(&[1.0; 16]);
-        }
-        assert!(c.heat(0) > h1);
-        // …and decays once the input goes silent.
-        let peak = c.heat(0);
-        for _ in 0..40 {
-            c.tick(&[0.0; 16]);
-        }
-        assert!(c.heat(0) < peak);
-    }
-
-    #[test]
-    fn set_model_layers_resets_trace() {
-        let mut c = CortexState::default();
-        c.on_state(crate::OverlayState::Recording { db: -20 });
-        c.tick(&[1.0; 8]);
-        assert!(c.activation(0) > 0.0);
-        c.set_model_layers(24);
-        assert_eq!(c.layer_count(), 24);
-        assert!(c.activation.is_empty());
-        c.tick(&[0.5; 8]);
-        assert_eq!(c.activation.len(), 24);
-    }
-
-    fn frame(token_index: u64, norms: &[f32], entropy: f32) -> crate::CortexCmd {
-        crate::CortexCmd::Frame(crate::CortexFrame {
-            token_index,
-            layer_norms: norms.to_vec(),
+    fn frame(token: u64, norms: Vec<f32>, prob: f32, entropy: f32) -> CortexCmd {
+        CortexCmd::Frame(CortexFrame {
+            token_index: token,
+            layer_norms: norms,
             experts: Vec::new(),
-            token_prob: None,
+            token_prob: Some(prob),
             entropy_bits: Some(entropy),
         })
     }
 
-    #[test]
-    fn prefill_sweep_crosses_the_spine_and_expires() {
-        let mut c = CortexState::default();
-        c.on_state(crate::OverlayState::AssistantThinking);
-        c.apply(crate::CortexCmd::Prefill { n_tokens: 512 });
-        // Early in the crossing the bump sits on the left half.
-        c.tick_dt(&[], 0.05);
-        let n = c.layer_count();
-        let left: f32 = (0..n / 2).map(|i| c.activation(i)).sum();
-        let right: f32 = (n / 2..n).map(|i| c.activation(i)).sum();
-        assert!(left > right, "sweep should start on the left ({left} vs {right})");
-        assert!(c.activation.iter().any(|&a| a > 0.3), "full-amplitude sweep should be bright");
-        // After crossing time + margin the pulse is gone.
-        for _ in 0..40 {
-            c.tick_dt(&[], 0.05);
+    fn tick_for(state: &mut CortexState, secs: f32) {
+        let steps = (secs / 0.05).ceil() as usize;
+        for _ in 0..steps {
+            state.tick_dt(&[], 0.05);
         }
-        // After crossing time + margin the real prefill pulse is gone;
-        // only the looping synthetic keep-alive sweep (amp 0.75) may
-        // remain since this state has no capture data.
-        assert!(
-            c.sweeps.iter().all(|s| s.amp < 0.9),
-            "full-amplitude prefill sweep should expire after crossing"
-        );
-        // A ReplyBegin reset must NOT kill an in-flight sweep (prefill
-        // events precede the generation's ReplyBegin).
-        c.apply(crate::CortexCmd::Prefill { n_tokens: 16 });
-        let before = c.sweeps.len();
-        c.apply(crate::CortexCmd::ReplyBegin { n_layer: 32 });
-        assert_eq!(c.sweeps.len(), before, "ReplyBegin must not clear in-flight sweeps");
     }
 
     #[test]
-    fn replay_ingest_merges_stride_gaps_and_normalises_robustly() {
-        let mut c = CortexState::default();
-        c.apply(crate::CortexCmd::ReplyBegin { n_layer: 4 });
-        assert_eq!(c.layer_count(), MIN_LAYERS, "tiny models clamp to the minimum spine");
-        c.apply(frame(0, &[2.0, 0.0, 4.0, 0.0], 1.0));
-        c.apply(frame(5, &[0.0, 3.0, 0.0, 1.0], 2.0));
-        // Second frame keeps the first frame's values in its gaps.
-        assert_eq!(c.frames.len(), 2);
-        assert_eq!(c.frames[1].norms, vec![2.0, 3.0, 4.0, 1.0]);
-        // A layer whose norm never varies maps to the ramp mid-point
-        // (the robust band is centred on the mean), never to 0 or 1.
-        let a = c.frame_act(1, 2);
-        assert!((a - 0.5).abs() < 0.05, "constant norm should sit mid-ramp, got {a}");
+    fn layer_mapping_endpoints() {
+        assert_eq!(col_to_layer(0, 40), 0);
+        assert_eq!(col_to_layer(COLS - 1, 40), 39);
+        assert_eq!(col_to_layer(0, 1), 0);
+        assert_eq!(col_to_layer(COLS - 1, 1), 0);
+        // Monotonic across the strip.
+        let mut prev = 0;
+        for c in 0..COLS {
+            let l = col_to_layer(c, 96);
+            assert!(l >= prev && l < 96);
+            prev = l;
+        }
     }
 
     #[test]
-    fn bos_outlier_does_not_crush_later_contrast() {
-        // A 20×-hot first frame (BOS attention sink) must not own the
-        // normalisation scale: later frames keep a usable dynamic range
-        // instead of all collapsing toward 0 (the "dead panel" bug).
-        let mut c = CortexState::default();
-        c.apply(crate::CortexCmd::ReplyBegin { n_layer: 24 });
-        for i in 0..60u64 {
-            let boost = if i == 0 { 20.0 } else { 1.0 };
-            let norms: Vec<f32> = (0..24)
-                .map(|l| {
-                    let base = 5.0 + l as f32 * 3.0;
-                    base * boost * (1.0 + 0.01 * ((i as f32 * 0.7 + l as f32) * 1.3).sin())
-                })
-                .collect();
-            c.apply(frame(i * 4, &norms, 1.0));
+    fn grid_never_exceeds_fixed_dims_and_fits_panel() {
+        for &(w, h, s) in &[(810.0, 96.0, 1.25), (640.0, 100.0, 1.0), (507.0, 67.0, 1.0)] {
+            let g = Grid::compute(0.0, 0.0, w, h, s);
+            let right = g.ox + COLS as i32 * (g.cell + g.gap) - g.gap;
+            let bottom = g.oy + ROWS as i32 * (g.cell + g.gap) - g.gap;
+            assert!(right <= w as i32, "grid overflows width at {w}x{h}");
+            assert!(bottom <= h as i32, "grid overflows height at {w}x{h}");
+            assert!(g.cell >= 2);
         }
-        let acts: Vec<f32> = (1..60).map(|f| c.frame_act(f, 12)).collect();
-        let max = acts.iter().copied().fold(0.0f32, f32::max);
-        let min = acts.iter().copied().fold(1.0f32, f32::min);
-        assert!(max > 0.6, "later frames must still reach the hot end, got max {max}");
-        assert!(max - min > 0.25, "later frames need dynamic range, got {min}..{max}");
-        // The outlier itself clamps to full brightness.
-        assert!((c.frame_act(0, 12) - 1.0).abs() < 1e-6);
     }
 
     #[test]
-    fn near_constant_norms_span_the_ramp() {
-        // Real transformer per-layer norms vary only ~±1 % across
-        // tokens; that tiny variation must be stretched across the
-        // display ramp instead of collapsing to a flat ≈ 1.0 slab.
-        let mut c = CortexState::default();
-        c.apply(crate::CortexCmd::ReplyBegin { n_layer: 24 });
-        for i in 0..80u64 {
-            let norms: Vec<f32> = (0..24)
-                .map(|l| {
-                    let base = 5.0 + l as f32 * 3.0;
-                    base * (1.0 + 0.01 * ((i as f32 * 0.7 + l as f32) * 1.3).sin())
-                })
-                .collect();
-            c.apply(frame(i * 4, &norms, 1.0));
-        }
-        let acts: Vec<f32> = (0..80).map(|f| c.frame_act(f, 12)).collect();
-        let max = acts.iter().copied().fold(0.0f32, f32::max);
-        let min = acts.iter().copied().fold(1.0f32, f32::min);
-        let mean = acts.iter().sum::<f32>() / acts.len() as f32;
-        assert!(max - min > 0.3, "±1 % norms must show mid-ramp variation, got {min}..{max}");
-        assert!((0.2..=0.8).contains(&mean), "acts should centre mid-ramp, mean {mean}");
+    fn keyframes_fire_once_in_order_at_the_beat() {
+        let mut s = CortexState::default();
+        s.on_state(OverlayState::AssistantThinking);
+        begin(&mut s, 8, CortexModelKind::Dense);
+        s.apply(frame(0, vec![1.0; 8], 0.9, 1.0));
+        s.apply(frame(3, vec![2.0; 8], 0.8, 1.5));
+        s.apply(frame(43, vec![3.0; 8], 0.7, 2.0));
+        assert_eq!(s.frames_fired(), 0);
+        tick_for(&mut s, 0.05);
+        assert_eq!(s.frames_fired(), 1, "first keyframe fires on the first beat");
+        tick_for(&mut s, 0.20);
+        assert_eq!(s.frames_fired(), 1, "next beat not due yet");
+        tick_for(&mut s, 0.20);
+        assert_eq!(s.frames_fired(), 2, "one keyframe per beat");
+        tick_for(&mut s, 0.40);
+        assert_eq!(s.frames_fired(), 3);
+        // Keyframes are never replayed within the pass; carry sweeps
+        // keep the rhythm alive without touching the counter.
+        tick_for(&mut s, 5.0);
+        assert_eq!(s.frames_fired(), 3);
+        assert!(!s.pulses.is_empty(), "carry sweeps keep the animation continuous");
     }
 
     #[test]
-    fn thinking_never_black_at_decode_latch() {
-        // The instant the first keyframe lands, the strip must NOT read
-        // as a dead black panel with one lone column: the prefill
-        // resting field stays under the young trace (RC3).
-        const W: u32 = 810;
-        const H: u32 = 96;
-        let mut c = CortexState::default();
-        c.on_state(crate::OverlayState::AssistantThinking);
-        c.apply(crate::CortexCmd::ReplyBegin { n_layer: 24 });
-        c.apply(crate::CortexCmd::Prefill { n_tokens: 512 });
-        for _ in 0..20 {
-            c.tick_dt(&[], 0.05);
+    fn speaking_replays_full_trace_after_thinking_drained_it() {
+        let mut s = CortexState::default();
+        s.on_state(OverlayState::AssistantThinking);
+        begin(&mut s, 8, CortexModelKind::Dense);
+        for t in 0..5 {
+            s.apply(frame(t * 3, vec![1.0 + t as f32; 8], 0.8, 1.5));
         }
-        let norms: Vec<f32> = (0..24).map(|l| 5.0 + l as f32 * 3.0).collect();
-        c.apply(frame(0, &norms, 1.0));
-        c.tick_dt(&[], 0.05);
-        let mut buf = vec![0xCC17_171Bu32; (W * H) as usize];
-        draw_cortex(&mut buf, W, H, &c, 4.0, 806.0, 4.0, 92.0, 0xFFF5_9E0B, 1.0, 1.05);
-        // Count pixels meaningfully brighter than the dark stage
-        // backing (channel sum ≈ 43): a healthy scene lights a large
-        // fraction of the strip.
-        let lit = buf
-            .iter()
-            .filter(|&&p| {
-                let sum = ((p >> 16) & 0xFF) + ((p >> 8) & 0xFF) + (p & 0xFF);
-                sum > 60
-            })
-            .count();
-        let frac = lit as f32 / (W * H) as f32;
-        assert!(frac > 0.20, "panel must never read as dead at decode latch, lit frac {frac}");
+        // Thinking: the live pass drains the whole queue.
+        tick_for(&mut s, 10.0);
+        assert_eq!(s.frames_fired(), 5, "live pass fires every frame");
+        // Synthesising keeps the phase machine in Thinking; then the
+        // reply audio arrives and playback starts.
+        s.on_state(OverlayState::AssistantSynthesising);
+        s.apply(CortexCmd::AudioTotal { secs: 4.0 });
+        s.on_state(OverlayState::AssistantSpeaking);
+        // Speaking must NOT be a static floor: the retained trace
+        // replays, paced to span the audio.
+        tick_for(&mut s, 0.05);
+        assert_eq!(s.frames_fired(), 6, "replay starts immediately at playback");
+        tick_for(&mut s, 6.0);
+        assert_eq!(s.frames_fired(), 10, "the full trace replays during playback");
+        // Still never looped within the pass.
+        tick_for(&mut s, 5.0);
+        assert_eq!(s.frames_fired(), 10);
     }
 
     #[test]
-    fn speaking_replay_spawns_beads_sparks_and_advances_clock() {
-        let mut c = CortexState::default();
-        c.apply(crate::CortexCmd::ReplyBegin { n_layer: 4 });
-        for i in 0..10 {
-            c.apply(frame(i * 4, &[1.0, 1.0, 1.0, 1.0], 1.5));
+    fn playback_done_drains_at_the_beat() {
+        let mut s = CortexState::default();
+        s.on_state(OverlayState::AssistantSpeaking);
+        begin(&mut s, 4, CortexModelKind::Dense);
+        for t in 0..4 {
+            s.apply(frame(t * 20, vec![1.0; 4], 0.9, 1.0));
         }
-        c.apply(crate::CortexCmd::ReplyEnd {
-            total_tokens: 40,
-            gen_ms: 2000,
-            ctx_used: 512,
-            ctx_capacity: 4096,
+        s.apply(CortexCmd::PlaybackDone);
+        tick_for(&mut s, 0.05);
+        assert_eq!(s.frames_fired(), 1);
+        tick_for(&mut s, 3.0 * BEAT + 0.1);
+        assert_eq!(s.frames_fired(), 4, "drain one per beat after playback ends");
+    }
+
+    #[test]
+    fn never_black_during_active_reply() {
+        let mut s = CortexState::default();
+        s.on_state(OverlayState::AssistantThinking);
+        begin(&mut s, 8, CortexModelKind::Dense);
+        s.apply(frame(0, vec![5.0; 8], 0.9, 1.0));
+        // Long gap: everything the pulse deposited decays away, but the
+        // resting floor must keep the panel alive.
+        tick_for(&mut s, 6.0);
+        let max = s.field.iter().flatten().fold(0.0_f32, |a, &v| a.max(v));
+        assert!(max >= DRAW_FLOOR, "resting field must stay visible, got {max}");
+    }
+
+    #[test]
+    fn traceless_backend_simulates_after_grace_but_not_before() {
+        // A cloud/traceless local turn: the overlay goes busy but no
+        // `ReplyBegin`/`Frame` ever arrives. Before the grace window the
+        // bar must not simulate; after it, a simulated MoE sweep drives
+        // the panel so it isn't dead while the remote model works.
+        let mut s = CortexState::default();
+        s.on_state(OverlayState::AssistantThinking);
+        // Within the grace window: no simulated pulses yet.
+        tick_for(&mut s, SIM_GRACE - 0.2);
+        assert!(!s.simulating(), "must not simulate inside the grace window");
+        // Past the grace window: simulation kicks in and lights the bar.
+        tick_for(&mut s, 0.5);
+        assert!(s.simulating(), "traceless busy turn simulates after grace");
+        assert!(!s.pulses.is_empty(), "simulated beats keep the bar alive");
+        let max = s.field.iter().flatten().fold(0.0_f32, |a, &v| a.max(v));
+        assert!(max >= DRAW_FLOOR, "simulated activity must be visible, got {max}");
+        // A grounded turn (real keyframes) must suppress the simulation.
+        let mut g = CortexState::default();
+        g.on_state(OverlayState::AssistantThinking);
+        begin(&mut g, 8, CortexModelKind::Dense);
+        g.apply(frame(0, vec![1.0; 8], 0.9, 1.0));
+        tick_for(&mut g, SIM_GRACE + 1.0);
+        assert!(!g.simulating(), "grounded reply never simulates");
+    }
+
+    #[test]
+    fn moe_lane_selection_deterministic_with_collision_bump() {
+        let mut s = CortexState::default();
+        begin(&mut s, 4, CortexModelKind::Moe);
+        // ids 7 and 13 collide on lane 1; the second bumps to a free
+        // lane. Weights co-active (within 60% of top).
+        let ex = (vec![7, 13, 2], vec![0.5, 0.35, 0.15]);
+        let lanes = s.lanes_for(&ex);
+        assert_eq!(lanes.len(), 2, "third expert gated by co-activity (0.15 < 0.6·0.5)");
+        assert_eq!(lanes[0].0, 1);
+        assert_ne!(lanes[1].0, 1, "collision bumped to a free lane");
+        assert_eq!(lanes, s.lanes_for(&ex), "deterministic");
+    }
+
+    #[test]
+    fn moe_lane_budget_adapts_to_sparsity() {
+        let mut s = CortexState::default();
+        s.apply(CortexCmd::ReplyBegin {
+            n_layer: 4,
+            kind: CortexModelKind::Moe,
+            n_experts_total: Some(128),
+            n_experts_active: Some(8), // 6.25% < 8% → 1 lane
         });
-        c.apply(crate::CortexCmd::AudioTotal { secs: 4.0 });
-        c.on_state(crate::OverlayState::AssistantSpeaking);
-        let mut saw_bead = false;
-        let mut saw_spark = false;
-        for _ in 0..100 {
-            c.tick_dt(&[], 0.05);
-            saw_bead |= !c.beads().is_empty();
-            saw_spark |= !c.spark_states().is_empty();
-        }
-        assert!(saw_bead, "pulses should cross the lattice during replay");
-        assert!(saw_spark, "crest sparks should fire as tokens are spoken");
-        assert!(c.playback_frac() > 0.9, "clock should near the end of the timeline");
-        assert!(c.hud().is_some());
-        assert!(c.has_replay());
-        // Entropy ribbon source: 1.5 bits normalised, constant across
-        // the timeline.
-        let e = c.entropy_at(0.5);
-        assert!(e > 0.0 && e < 1.0);
+        let ex = (vec![1, 2, 3], vec![0.4, 0.35, 0.25]);
+        assert_eq!(s.lanes_for(&ex).len(), 1);
+        s.apply(CortexCmd::ReplyBegin {
+            n_layer: 4,
+            kind: CortexModelKind::Moe,
+            n_experts_total: Some(8),
+            n_experts_active: Some(2), // 25% → up to 3 lanes
+        });
+        assert_eq!(s.lanes_for(&ex).len(), 3);
     }
 
     #[test]
-    fn playback_done_fast_forwards_the_clock() {
-        let mut a = CortexState::default();
-        let mut b = CortexState::default();
-        for c in [&mut a, &mut b] {
-            c.apply(crate::CortexCmd::ReplyBegin { n_layer: 4 });
-            c.apply(frame(0, &[1.0; 4], 1.0));
-            c.apply(crate::CortexCmd::ReplyEnd {
-                total_tokens: 100,
-                gen_ms: 1000,
-                ctx_used: 0,
-                ctx_capacity: 0,
-            });
-            c.apply(crate::CortexCmd::AudioTotal { secs: 10.0 });
-            c.on_state(crate::OverlayState::AssistantSpeaking);
-        }
-        b.apply(crate::CortexCmd::PlaybackDone);
-        for _ in 0..10 {
-            a.tick_dt(&[], 0.05);
-            b.tick_dt(&[], 0.05);
-        }
-        assert!(b.clock > a.clock, "drained playback should fast-forward");
+    fn entropy_desaturates_above_threshold() {
+        let sat = cell_color(0.8, true, 0.0);
+        let desat = cell_color(0.8, true, 1.0);
+        let spread = |c: u32| {
+            let r = (c >> 16) & 0xFF;
+            let g = (c >> 8) & 0xFF;
+            let b = c & 0xFF;
+            r.max(g).max(b) - r.min(g).min(b)
+        };
+        assert!(spread(desat) < spread(sat), "high entropy must desaturate");
+        assert_eq!(cell_color(0.8, true, 0.55), sat, "no desaturation at the threshold");
     }
 
     #[test]
-    fn reply_begin_resets_previous_replay() {
-        let mut c = CortexState::default();
-        c.apply(crate::CortexCmd::ReplyBegin { n_layer: 4 });
-        c.apply(frame(0, &[1.0; 4], 1.0));
-        c.apply(crate::CortexCmd::PlaybackDone);
-        c.apply(crate::CortexCmd::ReplyBegin { n_layer: 16 });
-        assert!(c.frames.is_empty());
-        assert!(!c.playback_done);
-        assert_eq!(c.layer_count(), 16);
+    fn prefill_flood_is_cool_and_covers_all_columns() {
+        let mut s = CortexState::default();
+        s.on_state(OverlayState::AssistantThinking);
+        s.apply(CortexCmd::Prefill { n_tokens: 61 });
+        tick_for(&mut s, PREFILL_DUR + 0.1);
+        for c in 0..COLS {
+            assert!(s.mood[c] < 0.5, "prefill paints cool mood at col {c}");
+            let col_max = (0..ROWS).map(|r| s.field[r][c]).fold(0.0_f32, f32::max);
+            assert!(col_max > 0.0, "prefill floods col {c}");
+        }
     }
 
     #[test]
-    fn add_glow_saturates_and_keeps_premultiplied_invariant() {
-        const W: u32 = 32;
-        const H: u32 = 32;
-        let mut buf = vec![0xCC17_171Bu32; (W * H) as usize];
-        for _ in 0..8 {
-            add_glow(&mut buf, W, H, 16.0, 16.0, 8.0, 0xFFFF_FFFF, 1.0);
-        }
-        let centre = buf[(16 * W + 16) as usize];
-        assert_eq!(centre & 0x00FF_FFFF, 0x00FF_FFFF, "centre saturates to white");
-        for &px in &buf {
-            let a = (px >> 24) & 0xFF;
-            for shift in [16, 8, 0] {
-                assert!((px >> shift) & 0xFF <= a, "premultiplied invariant: {px:08X}");
+    fn sparse_trace_still_animates_continuously_across_the_reply() {
+        // The exact failure from the field log: 27 real tokens but the
+        // governor let only ONE keyframe through, and a long spoken
+        // reply. The bar must still pulse continuously (a sweep on
+        // every beat) for the whole utterance, grounded in the real
+        // token count + audio duration — not fire once and freeze.
+        let mut s = CortexState::default();
+        s.on_state(OverlayState::AssistantThinking);
+        begin(&mut s, 35, CortexModelKind::Dense);
+        s.apply(frame(2, vec![4.0; 35], 0.9, 1.2)); // the single keyframe
+        s.apply(CortexCmd::ReplyEnd {
+            total_tokens: 27,
+            gen_ms: 2045,
+            ctx_used: 0,
+            ctx_capacity: 0,
+        });
+        s.on_state(OverlayState::AssistantSynthesising);
+        s.apply(CortexCmd::AudioTotal { secs: 9.37 });
+        s.on_state(OverlayState::AssistantSpeaking);
+
+        // Sample the pulse activity across the whole reply: every
+        // ~BEAT window must contain at least one live sweep.
+        let mut silent_windows = 0;
+        for _ in 0..((9.37 / BEAT) as usize) {
+            tick_for(&mut s, BEAT);
+            if s.pulses.is_empty() {
+                silent_windows += 1;
             }
         }
+        assert_eq!(silent_windows, 0, "every beat window must carry a sweep");
+        // The one real keyframe is revealed exactly once.
+        assert_eq!(s.frames_fired(), 1, "the single real keyframe fires once");
     }
 
     #[test]
-    fn add_glow_zero_radius_or_intensity_is_noop() {
-        const W: u32 = 8;
-        let mut buf = vec![0u32; 64];
-        add_glow(&mut buf, W, 8, 4.0, 4.0, 0.0, 0xFFFF_FFFF, 1.0);
-        add_glow(&mut buf, W, 8, 4.0, 4.0, 4.0, 0xFFFF_FFFF, 0.0);
-        assert!(buf.iter().all(|&p| p == 0));
-    }
-
-    #[test]
-    fn cadence_mode_animates_without_keyframes() {
-        // External backend (no capture): only the audio duration is
-        // known, yet the lattice must still fire word pulses.
-        let mut c = CortexState::default();
-        c.apply(crate::CortexCmd::ReplyBegin { n_layer: 32 });
-        c.apply(crate::CortexCmd::AudioTotal { secs: 5.0 });
-        c.on_state(crate::OverlayState::AssistantSpeaking);
-        let mut saw_bead = false;
-        let mut saw_spark = false;
-        for _ in 0..80 {
-            c.tick_dt(&[], 0.05);
-            saw_bead |= !c.beads().is_empty();
-            saw_spark |= !c.spark_states().is_empty();
+    fn filled_held_interpolates_sparse_layers() {
+        // Seed the held state via a real keyframe that observes only
+        // layers 1 and 5 (0.0 marks "not observed this frame").
+        let mut s = CortexState::default();
+        s.on_state(OverlayState::AssistantThinking);
+        begin(&mut s, 8, CortexModelKind::Dense);
+        let mut norms = vec![0.0_f32; 8];
+        norms[1] = 2.0;
+        norms[5] = 6.0;
+        s.apply(frame(0, norms, 0.9, 1.0));
+        tick_for(&mut s, 0.05); // fires the keyframe → merges into held
+        let f = s.filled_held();
+        assert_eq!(f.len(), 8);
+        assert!((f[0] - 2.0).abs() < 1e-5, "flat-extrapolate before first observed");
+        assert!((f[1] - 2.0).abs() < 1e-5);
+        assert!((f[3] - 4.0).abs() < 1e-5, "midpoint interpolates between 2 and 6");
+        assert!((f[5] - 6.0).abs() < 1e-5);
+        assert!((f[7] - 6.0).abs() < 1e-5, "flat-extrapolate after last observed");
+        // Monotonic across the interpolated gap — no fabricated bumps.
+        for w in f.windows(2) {
+            assert!(w[1] >= w[0] - 1e-6);
         }
-        assert!(saw_bead, "cadence mode should fire word pulses");
-        assert!(saw_spark, "cadence mode should fire crest sparks");
-        assert!(c.ember_row.iter().any(|&r| (r as usize) < GRID_ROWS), "paths should leave embers");
     }
 
     #[test]
-    fn path_rows_are_stable_connected_and_in_range() {
-        let a = path_rows(42, 47, GRID_ROWS);
-        let b = path_rows(42, 47, GRID_ROWS);
-        assert_eq!(a, b, "a token's path must be deterministic");
-        assert_eq!(a.len(), 48);
-        for w in a.windows(2) {
-            assert!(w[0].abs_diff(w[1]) <= 1, "path may wander at most one row per column");
+    fn speaking_cursor_is_monotonic_when_audio_grows_midplayback() {
+        // The field scenario: TTS synthesises sentence-by-sentence while
+        // generation is still running, so audio_total climbs
+        // 4.8 → 9.9 → 17.5 → 24.5s and total_tokens isn't known until
+        // late. The playback cursor must only ever advance — never snap
+        // backward — so the morph reads as steady progress, not a lurch.
+        let mut s = CortexState::default();
+        s.on_state(OverlayState::AssistantThinking);
+        begin(&mut s, 35, CortexModelKind::Dense);
+        for t in [1_u64, 6, 14, 16, 18, 20] {
+            s.apply(frame(t, vec![2.0 + t as f32 * 0.1; 35], 0.9, 1.2));
         }
-        assert!(a.iter().all(|&r| r < GRID_ROWS));
-        // Different tokens take different routes (overwhelmingly).
-        assert_ne!(path_rows(1, 47, GRID_ROWS), path_rows(2, 47, GRID_ROWS));
+        s.apply(CortexCmd::AudioTotal { secs: 4.80 });
+        s.on_state(OverlayState::AssistantSpeaking);
+        let mut prev = s.play_pos;
+        // Late anchors + audio growth arrive during playback:
+        // (elapsed_at, new_anchor_token, new_audio_secs).
+        let anchors: &[(f32, u64)] = &[(1.2, 47), (3.6, 83)];
+        let audio: &[(f32, f32)] = &[(1.7, 9.94), (3.9, 17.54), (4.2, 24.54)];
+        let mut ai = 0;
+        let mut si = 0;
+        let mut elapsed = 0.0_f32;
+        for _ in 0..70 {
+            tick_for(&mut s, BEAT);
+            elapsed += BEAT;
+            while ai < anchors.len() && elapsed >= anchors[ai].0 {
+                s.apply(frame(anchors[ai].1, vec![3.2; 35], 0.85, 1.5));
+                ai += 1;
+            }
+            while si < audio.len() && elapsed >= audio[si].0 {
+                s.apply(CortexCmd::AudioTotal { secs: audio[si].1 });
+                si += 1;
+            }
+            assert!(s.play_pos >= prev - 1e-4, "cursor went backward: {prev} -> {}", s.play_pos);
+            prev = s.play_pos;
+        }
+        // It also eventually reaches the real reply length (the last
+        // observed token + 1 = 84 here; no ReplyEnd was sent).
+        assert!(s.play_pos >= 83.0, "cursor should span the whole reply, got {}", s.play_pos);
     }
 
     #[test]
-    fn draw_cortex_paints_pixels_without_panic() {
-        const W: u32 = 320;
-        const H: u32 = 80;
-        let mut buf = vec![0xCC17_171Bu32; (W * H) as usize];
-        let mut c = CortexState::default();
-        c.on_state(crate::OverlayState::Recording { db: -20 });
-        for _ in 0..5 {
-            c.tick(&[0.8; 32]);
+    fn morph_norms_interpolates_in_time_between_anchors() {
+        // Two real captures of the SAME layer at tokens 0 and 10 with
+        // clearly different norms. The Speaking morph must return a
+        // value that slides smoothly between them as playback advances
+        // — never snapping — and clamps flat outside the observed span.
+        let mut s = CortexState::default();
+        s.on_state(OverlayState::AssistantThinking);
+        begin(&mut s, 8, CortexModelKind::Dense);
+        s.apply(frame(0, vec![2.0; 8], 0.9, 1.0));
+        s.apply(frame(10, vec![8.0; 8], 0.9, 1.0));
+        // The trace retains both anchors regardless of live draining.
+        let at = |pos: f32| s.morph_norms_at(pos)[4];
+        assert!((at(0.0) - 2.0).abs() < 1e-4, "flat at/before first anchor");
+        assert!((at(-3.0) - 2.0).abs() < 1e-4, "flat before first anchor");
+        assert!((at(5.0) - 5.0).abs() < 1e-4, "midpoint interpolates 2→8");
+        assert!((at(2.5) - 3.5).abs() < 1e-4, "quarter-way interpolation");
+        assert!((at(10.0) - 8.0).abs() < 1e-4, "reaches the second anchor");
+        assert!((at(99.0) - 8.0).abs() < 1e-4, "flat after last anchor");
+        // Monotonic sweep across the span — no fabricated wobble.
+        let mut prev = at(0.0);
+        for i in 1..=10 {
+            let cur = at(i as f32);
+            assert!(cur >= prev - 1e-6, "morph must advance monotonically");
+            prev = cur;
         }
-        draw_cortex(&mut buf, W, H, &c, 4.0, 316.0, 4.0, 76.0, 0xFF38_BDF8, 1.0, 1.25);
-        let painted = buf.iter().filter(|&&p| p != 0xCC17_171B).count();
-        assert!(painted > 200, "cortex should paint many pixels, got {painted}");
+    }
+
+    #[test]
+    fn speaking_equalizer_shape_evolves_across_the_reply() {
+        // With multiple anchors the visible bar must actually CHANGE
+        // shape through the utterance (the "dull, frozen" complaint),
+        // not repaint one snapshot. Capture the field column profile
+        // early vs late in playback and require it to differ.
+        let mut s = CortexState::default();
+        s.on_state(OverlayState::AssistantThinking);
+        begin(&mut s, 8, CortexModelKind::Dense);
+        // Rising ramp so early vs late frames have distinct shapes.
+        for t in 0..6 {
+            s.apply(frame(t * 6, vec![1.0 + 2.0 * t as f32; 8], 0.9, 1.0));
+        }
+        s.apply(CortexCmd::ReplyEnd {
+            total_tokens: 30,
+            gen_ms: 3000,
+            ctx_used: 0,
+            ctx_capacity: 0,
+        });
+        s.on_state(OverlayState::AssistantSynthesising);
+        s.apply(CortexCmd::AudioTotal { secs: 6.0 });
+        s.on_state(OverlayState::AssistantSpeaking);
+        let snapshot = |s: &CortexState| -> Vec<f32> {
+            (0..COLS).map(|c| (0..ROWS).map(|r| s.field[r][c]).fold(0.0_f32, f32::max)).collect()
+        };
+        tick_for(&mut s, 0.5);
+        let early = snapshot(&s);
+        tick_for(&mut s, 4.5);
+        let late = snapshot(&s);
+        let diff: f32 = early.iter().zip(&late).map(|(a, b)| (a - b).abs()).sum();
+        assert!(diff > 0.1, "equalizer shape must evolve across the reply, diff={diff}");
+    }
+
+    #[test]
+    fn draw_smoke_renders_within_bounds() {
+        let (w, h) = (820_u32, 100_u32);
+        let mut buf = vec![0_u32; (w * h) as usize];
+        let mut s = CortexState::default();
+        s.on_state(OverlayState::AssistantThinking);
+        begin(&mut s, 32, CortexModelKind::Dense);
+        s.apply(CortexCmd::Prefill { n_tokens: 100 });
+        s.apply(frame(0, vec![4.0; 32], 0.9, 1.0));
+        tick_for(&mut s, 0.3);
+        draw_cortex(&mut buf, w, h, &s, 5.0, 815.0, 2.0, 98.0, 0xFFF5_9E0B, 1.25, 0.3);
+        assert!(buf.iter().any(|&p| p & 0x00FF_FFFF != 0), "something must be drawn");
+        // Nothing outside the strip: left margin column stays untouched.
+        for y in 0..h {
+            assert_eq!(buf[(y * w) as usize], 0, "pixel left of x0 written at row {y}");
+        }
+    }
+
+    #[test]
+    fn clear_resets_but_reply_begin_keeps_inflight_prefill() {
+        let mut s = CortexState::default();
+        s.on_state(OverlayState::AssistantThinking);
+        s.apply(CortexCmd::Prefill { n_tokens: 32 });
+        assert_eq!(s.pulses.len(), 1);
+        // ReplyBegin arrives after the prefill pulse (real event order)
+        // and must not cut the flood mid-pass.
+        begin(&mut s, 16, CortexModelKind::Dense);
+        assert_eq!(s.pulses.len(), 1, "prefill pulse survives ReplyBegin");
+        s.clear();
+        assert_eq!(s.pulses.len(), 0);
+        assert_eq!(s.frames_fired(), 0);
     }
 }

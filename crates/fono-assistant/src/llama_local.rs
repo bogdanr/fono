@@ -9,6 +9,7 @@
 
 use std::num::NonZeroU32;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -56,7 +57,26 @@ struct GenParams {
     /// system-prompt prefix, never a payload-specific completed-turn
     /// checkpoint. See [`LlamaLocalAssistant::generate_with_prefix_cache`].
     one_shot: bool,
+    /// Whether this turn may drive the Glas Cortex tap. Carried from
+    /// [`AssistantContext::allow_brain_capture`]; `false` for network turns
+    /// so a remote client sharing this backend never lights the local
+    /// overlay. Opens the backend's `capture_gate` for the duration of the
+    /// turn.
+    allow_capture: bool,
 }
+
+/// RAII guard that closes the backend's brain-capture gate when a
+/// generation ends. Set the gate open (or not) at the start of a turn and
+/// hold one of these for the turn's body; on any exit path — success,
+/// `?`-propagated error, or panic — the gate falls back to closed so no
+/// later prewarm/diagnostic decode accidentally captures.
+struct CaptureGateGuard<'a>(&'a AtomicBool);
+impl Drop for CaptureGateGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
 const DEFAULT_BATCH_SIZE: u32 = 2048;
 const DEFAULT_UBATCH_SIZE: u32 = 512;
 const STREAM_CHANNEL_CAPACITY: usize = 32;
@@ -85,6 +105,13 @@ pub struct LlamaLocalAssistant {
     /// consumer see one tap. See `fono_core::brain_tap`.
     brain_tap_enabled: bool,
     brain_tap: Arc<OnceLock<Arc<BrainTap>>>,
+    /// Per-generation latch gating whether the tap actually captures.
+    /// Set (under the model lock, so it can't race a concurrent turn) at
+    /// the top of the reply path from [`AssistantContext::allow_brain_capture`]
+    /// and reset when the turn ends. Shared across `clone_thin` workers via
+    /// `Arc`. Keeps network-driven turns (the shared LLM server) from
+    /// lighting the local overlay while local hotkey turns still do.
+    capture_gate: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -199,6 +226,7 @@ impl LlamaLocalAssistant {
             prompt_state_cache: Arc::new(Mutex::new(PromptStateCache::default())),
             brain_tap_enabled: false,
             brain_tap: Arc::new(OnceLock::new()),
+            capture_gate: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -222,9 +250,12 @@ impl LlamaLocalAssistant {
         }
     }
 
-    /// Internal accessor used by the decode paths.
+    /// Internal accessor used by the decode paths. Returns the tap only
+    /// when capture is enabled *and* the per-generation gate is open (a
+    /// local, overlay-visible turn) — so network-driven turns sharing this
+    /// backend never arm the tap or publish overlay events.
     fn tap(&self) -> Option<&Arc<BrainTap>> {
-        if self.brain_tap_enabled {
+        if self.brain_tap_enabled && self.capture_gate.load(Ordering::Relaxed) {
             self.brain_tap.get()
         } else {
             None
@@ -242,6 +273,7 @@ impl LlamaLocalAssistant {
             prompt_state_cache: Arc::clone(&self.prompt_state_cache),
             brain_tap_enabled: self.brain_tap_enabled,
             brain_tap: Arc::clone(&self.brain_tap),
+            capture_gate: Arc::clone(&self.capture_gate),
         }
     }
 
@@ -284,7 +316,11 @@ impl LlamaLocalAssistant {
         *guard = Some(model);
         if self.brain_tap_enabled {
             let n_layer = guard.as_ref().map_or(0, |m| m.n_layer());
-            let tap = self.brain_tap.get_or_init(|| Arc::new(BrainTap::new(n_layer)));
+            let (n_expert, n_expert_used) =
+                guard.as_ref().map_or((0, 0), |m| fono_core::brain_tap::model_expert_counts(m));
+            let tap = self
+                .brain_tap
+                .get_or_init(|| Arc::new(BrainTap::new(n_layer, n_expert, n_expert_used)));
             debug!("brain tap ready: {} layers, interval {}", tap.n_layer(), tap.interval());
         }
         span.finish(json!({
@@ -746,6 +782,12 @@ impl LlamaLocalAssistant {
     {
         let guard = self.state.lock().map_err(|_| anyhow!("llama-local mutex poisoned"))?;
         let model = guard.as_ref().ok_or_else(|| anyhow!("llama-local model not loaded"))?;
+        // Open the capture gate for exactly this turn (we hold the model
+        // lock, so generations are serialised and this can't race a
+        // concurrent network turn). The RAII guard closes it again on every
+        // exit path, so any later prewarm/diagnostic decode stays dark.
+        self.capture_gate.store(params.allow_capture, Ordering::Relaxed);
+        let _capture_gate = CaptureGateGuard(&self.capture_gate);
         if format!("{prefix}{suffix}") == prompt {
             if let Some(text) = self.generate_with_prefix_cache(
                 model,
@@ -1960,7 +2002,11 @@ impl Assistant for LlamaLocalAssistant {
         // One-shot (empty history) requests — the `fono.summarize` path — cache
         // only the shared system-prompt prefix, not a payload-specific
         // completed-turn checkpoint (see `generate_with_prefix_cache`).
-        let gen_params = GenParams { max_new_tokens, one_shot: ctx.history.is_empty() };
+        let gen_params = GenParams {
+            max_new_tokens,
+            one_shot: ctx.history.is_empty(),
+            allow_capture: ctx.allow_brain_capture,
+        };
         let started = Instant::now();
         let (tx, rx) = mpsc::channel::<Result<TokenDelta>>(STREAM_CHANNEL_CAPACITY);
         tokio::task::spawn_blocking(move || {
@@ -2129,6 +2175,34 @@ fn env_bool(value: &str) -> Option<bool> {
 mod tests {
     use super::*;
     use crate::history::ChatTurn;
+
+    #[test]
+    fn capture_gate_guard_closes_on_drop() {
+        // The RAII guard must leave the gate closed no matter what it was
+        // set to, so a later prewarm/diagnostic decode never captures.
+        let gate = AtomicBool::new(false);
+        {
+            gate.store(true, Ordering::Relaxed);
+            let _g = CaptureGateGuard(&gate);
+            assert!(gate.load(Ordering::Relaxed), "gate open for the turn body");
+        }
+        assert!(!gate.load(Ordering::Relaxed), "gate closed after the turn");
+    }
+
+    #[test]
+    fn tap_stays_dark_until_the_gate_opens() {
+        // A capture-enabled backend must not expose the tap to the decode
+        // path until a local turn opens the gate — the network-safety
+        // invariant, checked without needing a loaded model.
+        let a = LlamaLocalAssistant::new("/nonexistent.gguf", MIN_CTX).with_brain_tap(true);
+        // Simulate the tap having been created at load time.
+        let _ = a.brain_tap.set(Arc::new(BrainTap::new(4, 0, 0)));
+        assert!(a.tap().is_none(), "gate closed by default");
+        a.capture_gate.store(true, Ordering::Relaxed);
+        assert!(a.tap().is_some(), "gate open exposes the tap");
+        a.capture_gate.store(false, Ordering::Relaxed);
+        assert!(a.tap().is_none(), "gate closed again hides the tap");
+    }
 
     #[test]
     fn gemma_prompt_uses_gemma_turn_markers() {

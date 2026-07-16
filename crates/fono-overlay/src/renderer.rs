@@ -222,28 +222,6 @@ pub fn blend(bg: u32, fg: u32, coverage_alpha: u8) -> u32 {
     (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b
 }
 
-/// Blend a translucent dark rectangle over `(x0..x1, y0..y1)` — the
-/// label scrim (plan Task B3). Darkens whatever is underneath (the
-/// bright grid) without erasing it, so the status label stays legible
-/// while the visualisation still shows through faintly. Preserves the
-/// premultiplied invariant (black source only scales existing
-/// channels down).
-fn darken_rect(buf: &mut [u32], stride: u32, h: u32, x0: f32, y0: f32, x1: f32, y1: f32) {
-    let xi0 = x0.max(0.0) as i32;
-    let xi1 = (x1.min(stride as f32)) as i32;
-    let yi0 = y0.max(0.0) as i32;
-    let yi1 = (y1.min(h as f32)) as i32;
-    for y in yi0..yi1 {
-        let row = y as u32 * stride;
-        for x in xi0..xi1 {
-            let idx = (row + x as u32) as usize;
-            if let Some(slot) = buf.get_mut(idx) {
-                *slot = blend(*slot, 0xB000_0000, 255);
-            }
-        }
-    }
-}
-
 /// Draw a filled rounded rectangle with anti-aliased corners.
 pub fn fill_round_rect(
     buf: &mut [u32],
@@ -1917,21 +1895,10 @@ impl RendererState {
         let status_baseline = pad_top + STATUS_FONT_PX * scale * 0.85;
         let size = STATUS_FONT_PX * scale;
         if backing {
-            use ab_glyph::{Font, ScaleFont};
-            let scaled = font.as_scaled(size);
-            let text_w: f32 = label.chars().map(|c| scaled.h_advance(font.glyph_id(c))).sum();
-            // Subtle darkened backing behind just the label so the
-            // bright grid underneath doesn't bury it.
-            darken_rect(
-                buf,
-                w,
-                h,
-                pad_x - 5.0 * scale,
-                pad_top - 3.0 * scale,
-                pad_x + text_w + 6.0 * scale,
-                status_baseline + STATUS_FONT_PX * scale * 0.35,
-            );
-            // Soft drop shadow: an offset dark copy under the glyphs.
+            // No opaque scrim behind the label: the transparent panel
+            // must show the desktop through. Legibility comes from a
+            // soft drop shadow (an offset dark copy under the glyphs)
+            // rather than a darkened backing rectangle.
             draw_line(
                 buf,
                 w,

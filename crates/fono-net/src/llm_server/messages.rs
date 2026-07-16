@@ -91,6 +91,11 @@ pub fn split_messages(msgs: &[WireMessage]) -> Result<Split, String> {
 }
 
 /// Build the per-turn [`AssistantContext`] from a [`Split`].
+///
+/// Note the [`AssistantContext::default`] tail: `allow_brain_capture`
+/// stays `false`, so a network client hitting the shared LLM server never
+/// drives the local Glas Cortex overlay or pays the brain-capture cost —
+/// only local hotkey turns (which set it explicitly) do.
 pub fn make_context(split: &Split, max_new_tokens: Option<u32>) -> AssistantContext {
     AssistantContext {
         system_prompt: split.system_prompt.clone(),
@@ -285,5 +290,16 @@ mod tests {
         assert_eq!(s.len(), 20);
         assert!(s.ends_with('Z'));
         assert_eq!(&s[4..5], "-");
+    }
+
+    #[test]
+    fn network_context_never_allows_brain_capture() {
+        // A turn arriving over the shared LLM server must not drive the
+        // local Glas Cortex overlay (or pay its capture cost) — the tap is
+        // reserved for local hotkey turns.
+        let split =
+            Split { system_prompt: "be terse".into(), history: Vec::new(), user_text: "hi".into() };
+        assert!(!make_context(&split, None).allow_brain_capture);
+        assert!(!make_context(&split, Some(64)).allow_brain_capture);
     }
 }

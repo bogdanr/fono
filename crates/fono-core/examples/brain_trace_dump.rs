@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Brain-trace dump — captures one real local generation's full
-//! [`BrainEvent`] stream to JSON, for the Glas Cortex redesign
-//! (`plans/2026-07-11-glas-cortex-restart-v1.md`, step 1).
+//! [`BrainEvent`] stream to JSON, for the Glas Cortex rewrite
+//! (`plans/2026-07-15-glas-cortex-rewrite-v1.md`).
 //!
 //! This is the "is the instrumented data the right shape?" tool: it
 //! drives a real GGUF model exactly the way the assistant backend does
@@ -28,8 +28,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use fono_core::brain_tap::{
-    decode_token_with_tap, publish_prefill, publish_reply_begin, publish_reply_end, set_event_sink,
-    BrainEvent, BrainTap, LAYER_STRIDE,
+    decode_token_with_tap, model_expert_counts, publish_prefill, publish_reply_begin,
+    publish_reply_end, set_event_sink, BrainEvent, BrainModelKind, BrainTap, LAYER_STRIDE,
 };
 use fono_core::llama_backend::{backend, decode_threads, shared_model};
 use fono_core::llama_gen::generation_sampler;
@@ -101,7 +101,13 @@ fn generate(model: &LlamaModel, tap: &BrainTap, n_tokens: u32) -> Result<()> {
 /// design contract and the source stay legible against each other.
 fn event_to_json(ev: &BrainEvent) -> Value {
     match ev {
-        BrainEvent::ReplyBegin { n_layer } => json!({ "type": "reply_begin", "n_layer": n_layer }),
+        BrainEvent::ReplyBegin { n_layer, kind, n_experts_total, n_experts_active } => json!({
+            "type": "reply_begin",
+            "n_layer": n_layer,
+            "kind": if *kind == BrainModelKind::Moe { "moe" } else { "dense" },
+            "n_experts_total": n_experts_total,
+            "n_experts_active": n_experts_active,
+        }),
         BrainEvent::Prefill { n_tokens } => json!({ "type": "prefill", "n_tokens": n_tokens }),
         BrainEvent::Frame(f) => json!({
             "type": "frame",
@@ -142,6 +148,7 @@ fn main() -> Result<()> {
 
     let model = shared_model(&model_path, &LlamaModelParams::default())?;
     let n_layer = model.n_layer();
+    let (n_expert, n_expert_used) = model_expert_counts(&model);
     println!("layers:  {n_layer}");
 
     // Record every published event in decode order.
@@ -151,7 +158,7 @@ fn main() -> Result<()> {
         sink_log.lock().expect("trace log mutex poisoned").push(ev);
     })));
 
-    let tap = BrainTap::new(n_layer);
+    let tap = BrainTap::new(n_layer, n_expert, n_expert_used);
     // Warm-up so weights are faulted in before the recorded run (keeps
     // the governor from paying the page-cache cost mid-trace). Cleared
     // afterwards so only the real run lands in the log.
@@ -186,7 +193,7 @@ fn main() -> Result<()> {
         "model": model_path.file_name().and_then(|s| s.to_str()).unwrap_or_default(),
         "n_layer": n_layer,
         "layer_stride": LAYER_STRIDE,
-        "kind": if moe_layers > 0 { "moe" } else { "dense" },
+        "kind": if n_expert > 1 { "moe" } else { "dense" },
         "frame_count": frame_count,
         "events": events.iter().map(event_to_json).collect::<Vec<_>>(),
     });

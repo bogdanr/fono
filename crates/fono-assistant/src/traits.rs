@@ -127,6 +127,14 @@ pub struct AssistantContext {
     /// backend default. Used by short-form tasks (e.g. notification
     /// summaries) that never need a long reply.
     pub max_new_tokens: Option<u32>,
+    /// Whether this turn may drive the Glas Cortex "brain" capture on the
+    /// embedded llama.cpp backend. `true` only for turns triggered on the
+    /// local machine (the F8 voice hotkey) whose thinking the on-screen
+    /// overlay is meant to show. Left `false` (the [`Default`]) for turns
+    /// arriving over the network — e.g. the OpenAI/Ollama-compatible LLM
+    /// server shares the same backend `Arc`, and a remote client's request
+    /// must never light up this computer's overlay or pay the capture cost.
+    pub allow_brain_capture: bool,
 }
 
 impl std::fmt::Debug for AssistantContext {
@@ -139,6 +147,7 @@ impl std::fmt::Debug for AssistantContext {
             .field("screen_capture", &self.screen_capture.is_some())
             .field("prefer_vision", &self.prefer_vision)
             .field("max_new_tokens", &self.max_new_tokens)
+            .field("allow_brain_capture", &self.allow_brain_capture)
             .finish()
     }
 }

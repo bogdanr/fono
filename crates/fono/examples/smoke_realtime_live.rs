@@ -158,6 +158,7 @@ mod realtime_live {
             screen_capture: None,
             prefer_vision: false,
             max_new_tokens: None,
+            allow_brain_capture: false,
         };
 
         println!("opening full-duplex session…");

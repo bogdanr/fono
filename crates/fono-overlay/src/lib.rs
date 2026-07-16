@@ -186,6 +186,17 @@ pub struct CortexExperts {
     pub weights: Vec<f32>,
 }
 
+/// Dense-vs-MoE row semantics for the Glas Cortex LED bar. Mirrors
+/// `fono_core::brain_tap::BrainModelKind` (same no-dependency rationale
+/// as [`CortexFrame`]). Dense models draw the 6 rows as a vertical
+/// magnitude bar; MoE models draw them as expert lanes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CortexModelKind {
+    #[default]
+    Dense,
+    Moe,
+}
+
 /// Glass Cortex replay commands pushed by the orchestrator alongside
 /// the regular overlay state/audio commands. The renderer's replay
 /// engine (see `cortex` module) turns the generation-burst keyframes
@@ -193,8 +204,15 @@ pub struct CortexExperts {
 #[derive(Debug, Clone)]
 pub enum CortexCmd {
     /// A local LLM generation started (assistant reply or polish
-    /// cleanup). Resets the replay buffers; `n_layer` sizes the spine.
-    ReplyBegin { n_layer: u32 },
+    /// cleanup). Resets the replay buffers; `n_layer` drives the
+    /// column→layer mapping, `kind` picks the row semantics, and the
+    /// expert counts (when known) scale perceived MoE sparsity.
+    ReplyBegin {
+        n_layer: u32,
+        kind: CortexModelKind,
+        n_experts_total: Option<u32>,
+        n_experts_active: Option<u32>,
+    },
     /// One prompt-prefill batch (`n_tokens` wide) finished decoding.
     /// Fires a left→right sweep pulse along the spine — the prompt
     /// visibly flowing through the layers during the thinking phase.

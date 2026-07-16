@@ -426,6 +426,7 @@ fn preferences_submenu(p: &PreferencesSnapshot) -> MenuNode {
                 "Terrain 3D" => "Terrain 3D (spectrogram landscape)",
                 "Aurora Beziers" => "Aurora Beziers (glowing fluid ribbons)",
                 "System/360" => "System/360 (mainframe console lamps)",
+                "Glass Cortex" => "Glass Cortex (live AI thinking)",
                 other => other,
             };
             MenuNode::item(format!("{prefix}{descriptive}"), TrayAction::SetWaveformStyle(idx_u8))
