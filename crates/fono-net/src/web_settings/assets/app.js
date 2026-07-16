@@ -101,15 +101,58 @@ const TTS_PROVIDERS = [
   ['groq', 'Groq', 'orpheus-v1-english'], ['gemini', 'Gemini', 'flash-tts-preview'],
   ['speechmatics', 'Speechmatics', 'preview'], ['openrouter', 'OpenRouter', 'grok-voice-tts-1.0'],
 ];
+// Cloud-only provider grids for Cleanup and the Assistant. The
+// embedded local model and the Ollama / OpenAI-compatible network
+// server are their own segments (Local / Network), so they are
+// filtered out of the "Cloud" provider cards here.
+const POLISH_CLOUD_PROVIDERS = POLISH_PROVIDERS.filter((p) => p[0] !== 'local' && p[0] !== 'ollama');
+const ASSISTANT_CLOUD_PROVIDERS = ASSISTANT_PROVIDERS.filter((p) => p[0] !== 'ollama');
+// Default endpoint offered when switching Cleanup / Assistant to the
+// Network (self-hosted server) segment.
+const LOCAL_SERVER_URL = 'http://localhost:11434/v1/chat/completions';
 const OVERLAY_STYLES = [
   ['bars', 'Bars', 'p-bars', ''], ['oscilloscope', 'Oscilloscope', 'p-osc', ''],
   ['fft', 'FFT', 'p-fft', ''], ['heatmap', 'Heatmap', 'p-heat', ''],
   ['terrain3d', '3D Terrain', 'p-terr', ''], ['system360', 'System/360', 'p-dots', ''],
-  ['cortex', 'Glass Cortex', 'p-terr', 'LLM brain view'],
+  ['cortex', 'Glass Cortex', 'p-cortex', ''],
   ['transcript', 'Transcript', 'p-text', 'more CPU/API'],
 ];
 function pname(list, id) { const p = list.find((x) => x[0] === id); return p ? p[1] : id; }
 function pdef(list, id) { const p = list.find((x) => x[0] === id); return p ? p[2] : ''; }
+
+// Glass Cortex preview: a flat-cell LED activation matrix rendered as an
+// inline SVG so every cell is one solid colour (not a smooth gradient),
+// mirroring the live cortex renderer. Colours step through the warm
+// "compute" ramp (fono-overlay cortex.rs RAMP_WARM: #1a0c22 → #782860 →
+// #d9342f → #ff8b5e → #fff7ec); a dense hot cluster on the left fades to
+// idle dim cells on the right. Generated once at load, injected as the
+// preview tile's background.
+const CORTEX_RAMP = [
+  '#241021', '#3a1730', '#5c1f4c', '#782860', '#b0332c',
+  '#d9342f', '#ff8b5e', '#ffe6cf', '#fff7ec',
+];
+function cortexMatrixBg() {
+  const cols = 18, rows = 4, pitch = 10, cell = 8.4, rx = 1.3;
+  let rects = '';
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const x = c / (cols - 1);
+      // Deterministic per-cell jitter so the pattern is stable.
+      const n = Math.sin(c * 127.1 + r * 311.7) * 43758.5453;
+      const rnd = n - Math.floor(n);
+      // Hot, busy cluster on the left third; dim idle field on the right.
+      let v = x < 0.6 ? 0.55 + rnd * 0.5 - x * 0.55 : 0.05 + rnd * 0.2;
+      v = Math.max(0, Math.min(1, v));
+      const fill = CORTEX_RAMP[Math.round(v * (CORTEX_RAMP.length - 1))];
+      rects += '<rect x="' + (c * pitch) + '" y="' + (r * pitch) + '" width="'
+        + cell + '" height="' + cell + '" rx="' + rx + '" fill="' + fill + '"/>';
+    }
+  }
+  const w = (cols - 1) * pitch + cell, h = (rows - 1) * pitch + cell;
+  return 'data:image/svg+xml,' + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + w + ' ' + h + '">' + rects + '</svg>');
+}
+const CORTEX_BG = cortexMatrixBg();
 
 // ---------- control builders ----------
 function row(lbl, desc, ctl, cls) {
@@ -159,10 +202,15 @@ function pgrid(list, pick, cur, extra) {
     + '<div class="pname">' + esc(p[1]) + '</div><div class="pmeta">' + esc(p[2]) + '</div></button>').join('') + '</div>';
 }
 function ovgrid(cur) {
-  return '<div class="pgrid ovgrid">' + OVERLAY_STYLES.map((s) =>
-    '<button type="button" class="pcard ov" data-pick="overlay-style" data-val="' + s[0] + '" aria-pressed="' + (s[0] === cur) + '">'
-    + '<div class="ovprev ' + s[2] + '"></div><div class="pname">' + esc(s[1]) + '</div>'
-    + (s[3] ? '<div class="pmeta">' + esc(s[3]) + '</div>' : '') + '</button>').join('') + '</div>';
+  return '<div class="pgrid ovgrid">' + OVERLAY_STYLES.map((s) => {
+    // The cortex tile is a generated flat-cell matrix, not a CSS pattern.
+    const style = s[0] === 'cortex'
+      ? ' style="background:#140a16 url(&quot;' + CORTEX_BG + '&quot;) center/100% 100% no-repeat"'
+      : '';
+    return '<button type="button" class="pcard ov" data-pick="overlay-style" data-val="' + s[0] + '" aria-pressed="' + (s[0] === cur) + '">'
+      + '<div class="ovprev ' + s[2] + '"' + style + '></div><div class="pname">' + esc(s[1]) + '</div>'
+      + (s[3] ? '<div class="pmeta">' + esc(s[3]) + '</div>' : '') + '</button>';
+  }).join('') + '</div>';
 }
 // Write-only secret status + set/replace/clear. `env` is the secret name.
 function keyRow(env, lbl, desc) {
@@ -227,6 +275,33 @@ function ttsSeg() {
 function astopSeg() {
   const ms = gv('audio.auto_stop_silence_ms', 3000);
   return ms === 0 ? 'off' : ms === 3000 ? '3000' : ms === 5000 ? '5000' : 'custom';
+}
+// Cleanup backend → segment. `local` = embedded model, `ollama` =
+// self-hosted server (Network), anything else = a cloud provider.
+function polishSeg() {
+  const b = gv('polish.backend', 'local');
+  return b === 'local' ? 'local' : b === 'ollama' ? 'network' : 'cloud';
+}
+// Assistant backend → segment. The embedded model and a self-hosted
+// server share the `ollama` backend; they are told apart by the
+// `[assistant.cloud].provider` marker (`ollama-server` /
+// `openai-compatible-local` = Network, otherwise embedded Local).
+function assistantIsNetwork() {
+  const p = gv('assistant.cloud.provider', '');
+  return p === 'ollama-server' || p === 'openai-compatible-local';
+}
+function assistantSeg() {
+  const b = gv('assistant.backend', 'none');
+  if (b === 'ollama') return assistantIsNetwork() ? 'network' : 'local';
+  return 'cloud';
+}
+// Embedded local-LLM panel for the Cleanup / Assistant "Local" segment.
+// Shows the current on-device GGUF model id and lets the user change it.
+// `base` is 'polish' or 'assistant'.
+function localLlmPanel(base) {
+  return row('Model', 'Embedded on-device model. Install others with <span class="mono">fono models install &lt;id&gt;</span>.',
+    txt(base + '.local.model', { mono: true, w: 220, ph: 'gemma-4-e2b' }))
+    + '<p class="hint" style="margin-top:6px">Runs on this machine \u2014 no API key, nothing leaves your computer.</p>';
 }
 
 // ---------- local TTS engine + voice picker ----------
@@ -332,6 +407,58 @@ const SEG = {
     else if (v === 'custom') { if (gv('audio.auto_stop_silence_ms', 0) === 0) set(cfg, 'audio.auto_stop_silence_ms', 4000); }
     else set(cfg, 'audio.auto_stop_silence_ms', parseInt(v, 10));
   },
+  polish(v) {
+    if (v === 'local') set(cfg, 'polish.backend', 'local');
+    else if (v === 'network') {
+      if (!get(cfg, 'polish.cloud') || typeof get(cfg, 'polish.cloud') !== 'object') {
+        set(cfg, 'polish.cloud', { provider: '', api_key_ref: '', model: '' });
+      }
+      // Switching in from a cloud provider: seed the endpoint + drop the
+      // provider-specific model. Preserve both when already on the server.
+      if (gv('polish.cloud.provider', '') !== 'ollama') {
+        set(cfg, 'polish.cloud.model', '');
+        set(cfg, 'polish.cloud.api_key_ref', LOCAL_SERVER_URL);
+      }
+      set(cfg, 'polish.cloud.provider', 'ollama');
+      set(cfg, 'polish.backend', 'ollama');
+    } else {
+      const prev = gv('polish.cloud.provider', '');
+      const p = POLISH_CLOUD_PROVIDERS.some((x) => x[0] === prev) ? prev : 'openai';
+      ensureCloud('polish.cloud', p);
+      set(cfg, 'polish.cloud.provider', p);
+      set(cfg, 'polish.cloud.api_key_ref', ENV[p] || '');
+      set(cfg, 'polish.backend', p);
+    }
+  },
+  assistant(v) {
+    if (v === 'local') {
+      // Embedded on-device model = Ollama backend with no manual server.
+      // Clear the server markers so the factory takes the embedded path.
+      if (get(cfg, 'assistant.cloud')) {
+        set(cfg, 'assistant.cloud.provider', '');
+        set(cfg, 'assistant.cloud.api_key_ref', '');
+        set(cfg, 'assistant.cloud.model', '');
+      }
+      set(cfg, 'assistant.backend', 'ollama');
+    } else if (v === 'network') {
+      if (!get(cfg, 'assistant.cloud') || typeof get(cfg, 'assistant.cloud') !== 'object') {
+        set(cfg, 'assistant.cloud', { provider: '', api_key_ref: '', model: '' });
+      }
+      if (!assistantIsNetwork()) {
+        set(cfg, 'assistant.cloud.model', '');
+        set(cfg, 'assistant.cloud.api_key_ref', LOCAL_SERVER_URL);
+      }
+      set(cfg, 'assistant.cloud.provider', 'ollama-server');
+      set(cfg, 'assistant.backend', 'ollama');
+    } else {
+      const prev = gv('assistant.cloud.provider', '');
+      const p = ASSISTANT_CLOUD_PROVIDERS.some((x) => x[0] === prev) ? prev : 'openai';
+      ensureCloud('assistant.cloud', p);
+      set(cfg, 'assistant.cloud.provider', p);
+      set(cfg, 'assistant.cloud.api_key_ref', ENV[p] || '');
+      set(cfg, 'assistant.backend', p);
+    }
+  },
 };
 
 // Provider-card click handlers. The explicit `.provider` / `.api_key_ref`
@@ -340,12 +467,10 @@ const SEG = {
 const PICK = {
   'stt-provider'(v) { ensureSttCloud(v); set(cfg, 'stt.backend', v); },
   'polish-provider'(v) {
+    ensureCloud('polish.cloud', v);
+    set(cfg, 'polish.cloud.provider', v);
+    set(cfg, 'polish.cloud.api_key_ref', ENV[v] || '');
     set(cfg, 'polish.backend', v);
-    if (v !== 'local') {
-      ensureCloud('polish.cloud', v);
-      set(cfg, 'polish.cloud.provider', v);
-      set(cfg, 'polish.cloud.api_key_ref', ENV[v] || '');
-    }
   },
   'assistant-provider'(v) {
     set(cfg, 'assistant.backend', v);
@@ -451,23 +576,35 @@ const FONO_SECTIONS = [
     id: 'cleanup', title: 'Cleanup',
     summary() {
       if (!gv('polish.enabled', false)) return 'Off';
-      const b = gv('polish.backend', 'local');
-      return b === 'local' ? 'Local model' : pname(POLISH_PROVIDERS, b);
+      const s = polishSeg();
+      if (s === 'local') return 'Local model';
+      if (s === 'network') return 'Network \u00b7 ' + (gv('polish.cloud.api_key_ref', '') || 'no server');
+      return 'Cloud \u00b7 ' + pname(POLISH_CLOUD_PROVIDERS, gv('polish.backend', ''));
     },
     html() {
       const on = gv('polish.enabled', false);
-      const b = gv('polish.backend', 'local');
-      const cloudBits = b !== 'local' && b !== 'none'
-        ? '<div style="margin-top:12px">'
-        + row('Model', 'Empty = provider default.', txt('polish.cloud.model', { mono: true, w: 220, ph: pdef(POLISH_PROVIDERS, b) }))
-        + keyRow(ENV[b]) + '</div>'
-        : '';
+      const s = polishSeg();
+      let panel = '';
+      if (s === 'local') {
+        panel = localLlmPanel('polish');
+      } else if (s === 'network') {
+        panel = row('Server URL', 'Ollama / OpenAI-compatible endpoint \u2014 e.g. http://localhost:11434/v1/chat/completions.',
+          txt('polish.cloud.api_key_ref', { mono: true, w: 300 }))
+          + row('Model', 'Model id served by that endpoint.', txt('polish.cloud.model', { mono: true, w: 220, ph: 'gemma4:12b' }));
+      } else {
+        const b = gv('polish.backend', 'openai');
+        panel = '<div class="subhead">Provider</div>'
+          + pgrid(POLISH_CLOUD_PROVIDERS, 'polish-provider', b)
+          + '<div style="margin-top:12px">'
+          + row('Model', 'Empty = provider default.', txt('polish.cloud.model', { mono: true, w: 220, ph: pdef(POLISH_PROVIDERS, b) }))
+          + keyRow(ENV[b]) + '</div>';
+      }
       return row('Enable cleanup', 'Runs each transcript through a small language model \u2014 punctuation, casing, filler removal.',
         toggle('polish.enabled', false, 'cleanup'), 'master')
         + '<div' + (on ? '' : ' class="section-off"') + '>'
-        + '<div class="subhead">Provider</div>'
-        + pgrid(POLISH_PROVIDERS, 'polish-provider', b === 'none' ? 'local' : b)
-        + cloudBits
+        + row('Backend', 'Local runs on this machine. Network connects to an Ollama / OpenAI-compatible server.',
+          seg('polish', [['local', 'Local'], ['cloud', 'Cloud'], ['network', 'Network']], s))
+        + panel
         + '<div style="margin-top:12px">'
         + row('Personal dictionary', 'Words and spellings to preserve.', tags('polish.prompt.dictionary'))
         + '</div>'
@@ -505,25 +642,42 @@ const FONO_SECTIONS = [
     id: 'assistant', title: 'Assistant',
     summary() {
       if (!gv('assistant.enabled', false)) return 'Off';
-      const b = gv('assistant.backend', 'none');
-      let s = b === 'none' ? 'no backend' : pname(ASSISTANT_PROVIDERS, b);
-      if (gv('assistant.realtime.live_mode', true)) s += ' \u00b7 live mode on';
-      return s;
+      const s = assistantSeg();
+      let str;
+      if (s === 'local') str = 'Local model';
+      else if (s === 'network') str = 'Network \u00b7 ' + (gv('assistant.cloud.api_key_ref', '') || 'no server');
+      else {
+        const b = gv('assistant.backend', 'none');
+        str = b === 'none' ? 'no backend' : pname(ASSISTANT_CLOUD_PROVIDERS, b);
+      }
+      if (gv('assistant.realtime.live_mode', true)) str += ' \u00b7 live mode on';
+      return str;
     },
     html() {
       const on = gv('assistant.enabled', false);
-      const b = gv('assistant.backend', 'none');
-      const cloudBits = b !== 'none'
-        ? '<div style="margin-top:12px">'
-        + row('Model', 'Empty = provider default.', txt('assistant.cloud.model', { mono: true, w: 220, ph: pdef(ASSISTANT_PROVIDERS, b) }))
-        + keyRow(ENV[b]) + '</div>'
-        : '';
+      const s = assistantSeg();
+      let panel = '';
+      if (s === 'local') {
+        panel = localLlmPanel('assistant');
+      } else if (s === 'network') {
+        panel = row('Server URL', 'Ollama / OpenAI-compatible endpoint \u2014 e.g. http://localhost:11434/v1/chat/completions.',
+          txt('assistant.cloud.api_key_ref', { mono: true, w: 300 }))
+          + row('Model', 'Model id served by that endpoint.', txt('assistant.cloud.model', { mono: true, w: 220, ph: 'gemma4:12b' }));
+      } else {
+        const b = gv('assistant.backend', 'openai');
+        const gridB = ASSISTANT_CLOUD_PROVIDERS.some((x) => x[0] === b) ? b : '';
+        panel = '<div class="subhead">Provider</div>'
+          + pgrid(ASSISTANT_CLOUD_PROVIDERS, 'assistant-provider', gridB)
+          + '<div style="margin-top:12px">'
+          + row('Model', 'Empty = provider default.', txt('assistant.cloud.model', { mono: true, w: 220, ph: pdef(ASSISTANT_PROVIDERS, b) }))
+          + keyRow(ENV[b]) + '</div>';
+      }
       return row('Enable assistant', 'Voice Q&A \u2014 ask a question, hear or read the answer.',
         toggle('assistant.enabled', false, 'assistant'), 'master')
         + '<div' + (on ? '' : ' class="section-off"') + '>'
-        + '<div class="subhead">Provider</div>'
-        + pgrid(ASSISTANT_PROVIDERS, 'assistant-provider', b)
-        + cloudBits
+        + row('Backend', 'Local runs on this machine. Network connects to an Ollama / OpenAI-compatible server.',
+          seg('assistant', [['local', 'Local'], ['cloud', 'Cloud'], ['network', 'Network']], s))
+        + panel
         + promptRow('System prompt', 'Personality and constraints', 'assistant.prompt_main', 'assistant_prompt', 5)
         + row('Live conversation mode', 'A tap on the assistant key opens a continuous conversation (realtime models only).',
           toggle('assistant.realtime.live_mode', true))

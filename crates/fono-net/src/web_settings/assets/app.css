@@ -300,6 +300,8 @@ details.sec .body > .row:first-child, details.sec .body > .row.master { border-t
 /* 3D Terrain: Tron-style wireframe plane in perspective, with a lifted ridge. */
 .p-terr::before { content: ""; position: absolute; inset: -30% -25% -6%; background: repeating-linear-gradient(90deg, var(--accent) 0 1px, transparent 1px 8px), repeating-linear-gradient(0deg, var(--accent) 0 1px, transparent 1px 7px); opacity: .5; transform: perspective(46px) rotateX(56deg); transform-origin: 50% 100%; }
 .p-terr::after { content: ""; position: absolute; left: 18%; right: 18%; bottom: 28%; height: 45%; background: var(--accent); opacity: .9; clip-path: polygon(0 100%, 14% 55%, 26% 78%, 42% 15%, 55% 65%, 70% 35%, 84% 80%, 100% 100%, 84% 86%, 70% 43%, 55% 73%, 42% 25%, 26% 86%, 14% 63%, 0 100%); }
+/* Glass Cortex: a generated flat-cell LED activation matrix injected as
+   the tile background from app.js (cortexMatrixBg) — no CSS pattern here. */
 /* System/360: console lamp grid — dim "off" lamps, columns lit bottom-up. */
 .p-dots::before { content: ""; position: absolute; inset: 12% 8%; background: radial-gradient(circle 1.5px at 3px 3px, var(--accent) 95%, transparent) 0 100% / 7px 7px; opacity: .18; }
 .p-dots::after { content: ""; position: absolute; inset: 12% 8%; background: radial-gradient(circle 1.5px at 3px 3px, var(--accent) 95%, transparent) 0 100% / 7px 7px; clip-path: polygon(0 100%, 0 60%, 12% 60%, 12% 30%, 26% 30%, 26% 68%, 40% 68%, 40% 45%, 54% 45%, 54% 10%, 68% 10%, 68% 52%, 82% 52%, 82% 70%, 100% 70%, 100% 100%); }
