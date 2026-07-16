@@ -120,9 +120,8 @@ fn build_local(
     if cfg.local.engine == TtsLocalEngine::Supertonic {
         return build_supertonic(cfg, voices_dir);
     }
-    let pinned = !cfg.local.voice.is_empty();
-    let default_voice = resolve_local_voice(cfg, languages)?;
     let engine_filter = cfg.local.engine.catalog_filter().map(str::to_string);
+    let (default_voice, pinned) = resolve_local_voice(cfg, languages, engine_filter.as_deref())?;
     let router = crate::local_router::LocalRouter::new(
         voices_dir,
         default_voice,
@@ -152,23 +151,57 @@ fn build_supertonic(cfg: &Tts, voices_dir: &Path) -> Result<Arc<dyn TextToSpeech
     Ok(Arc::new(engine))
 }
 
-/// Resolve which catalog voice the local backend should load: the
-/// explicit `[tts.local].voice` if set, otherwise the first catalog
-/// voice matching the first configured language.
+/// Resolve which catalog voice the local backend should load, plus whether
+/// it is a hard pin (disabling per-language routing). Rules:
+///
+/// * An explicit `[tts.local].voice` is honoured **only when it is consistent
+///   with a pinned `[tts.local].engine`** — a Kokoro voice while the engine
+///   is pinned to Piper is ignored so the *engine* selection wins (this is
+///   what makes "test Piper" actually play Piper even when the configured
+///   voice is a Kokoro one). A consistent pin returns `(voice, true)`.
+/// * Otherwise the first catalog voice matching the primary language is
+///   chosen, constrained to the pinned engine when one is set, falling back
+///   to that engine's first catalog voice. Returned as `(voice, false)` so
+///   the router still does per-language routing within the engine.
 #[cfg(feature = "tts-local")]
-fn resolve_local_voice(cfg: &Tts, languages: &[String]) -> Result<crate::voices::Voice> {
+fn resolve_local_voice(
+    cfg: &Tts,
+    languages: &[String],
+    engine_filter: Option<&str>,
+) -> Result<(crate::voices::Voice, bool)> {
     if !cfg.local.voice.is_empty() {
-        return crate::voices::by_name(&cfg.local.voice)?.ok_or_else(|| {
-            anyhow!("[tts.local].voice = {:?} is not in the voice catalog", cfg.local.voice)
-        });
+        match crate::voices::by_name(&cfg.local.voice)? {
+            Some(v) if engine_filter.is_none_or(|e| v.engine == e) => return Ok((v, true)),
+            Some(_) => {} // engine pin wins over a cross-engine voice → fall through
+            None if engine_filter.is_none() => {
+                return Err(anyhow!(
+                    "[tts.local].voice = {:?} is not in the voice catalog",
+                    cfg.local.voice
+                ));
+            }
+            None => {} // unknown voice but an engine is pinned → fall through
+        }
     }
     let lang = languages.first().map_or("en", String::as_str);
-    crate::voices::for_language(lang)?.ok_or_else(|| {
-        anyhow!(
-            "no local voice in the catalog for language {lang:?}; \
-             set [tts.local].voice to a catalog voice id"
+    let voice = match engine_filter {
+        Some(e) => match crate::voices::for_language_engine(lang, e)? {
+            Some(v) => Some(v),
+            None => crate::voices::for_engine(e)?.into_iter().next(),
+        },
+        None => crate::voices::for_language(lang)?,
+    };
+    let voice = voice.ok_or_else(|| {
+        engine_filter.map_or_else(
+            || {
+                anyhow!(
+                    "no local voice in the catalog for language {lang:?}; \
+                     set [tts.local].voice to a catalog voice id"
+                )
+            },
+            |e| anyhow!("no local {e} voice in the catalog (language {lang:?})"),
         )
-    })
+    })?;
+    Ok((voice, false))
 }
 
 #[cfg(not(feature = "tts-local"))]
@@ -646,5 +679,50 @@ mod tests {
             strip_cartesia_default_voice(voice).is_none(),
             "catalogue default UUID must NOT pin the voice"
         );
+    }
+
+    #[cfg(feature = "tts-local")]
+    #[test]
+    fn engine_pin_overrides_cross_engine_voice() {
+        use fono_core::config::{TtsLocal, TtsLocalEngine};
+        // A configured Kokoro voice while the engine is pinned to Piper: the
+        // engine must win, so the resolved voice is a Piper one and NOT a hard
+        // pin (routing within the engine stays enabled). Regression for
+        // "selected Piper but it played Kokoro".
+        let kokoro = crate::voices::for_engine("kokoro").unwrap().into_iter().next().unwrap();
+        let cfg = TtsCfg {
+            backend: TtsBackend::Local,
+            local: TtsLocal {
+                voice: kokoro.name,
+                engine: TtsLocalEngine::Piper,
+                ..TtsLocal::default()
+            },
+            ..TtsCfg::default()
+        };
+        let (voice, pinned) =
+            resolve_local_voice(&cfg, &["en".to_string()], Some("piper")).unwrap();
+        assert_eq!(voice.engine, "piper", "engine pin must override a cross-engine voice");
+        assert!(!pinned, "a dropped cross-engine voice must not pin the router");
+    }
+
+    #[cfg(feature = "tts-local")]
+    #[test]
+    fn consistent_voice_pin_is_honoured() {
+        use fono_core::config::{TtsLocal, TtsLocalEngine};
+        let kokoro = crate::voices::for_engine("kokoro").unwrap().into_iter().next().unwrap();
+        let expected = kokoro.name.clone();
+        let cfg = TtsCfg {
+            backend: TtsBackend::Local,
+            local: TtsLocal {
+                voice: kokoro.name,
+                engine: TtsLocalEngine::Kokoro,
+                ..TtsLocal::default()
+            },
+            ..TtsCfg::default()
+        };
+        let (voice, pinned) =
+            resolve_local_voice(&cfg, &["en".to_string()], Some("kokoro")).unwrap();
+        assert_eq!(voice.name, expected, "an engine-consistent voice must be honoured");
+        assert!(pinned, "an explicit consistent voice pins the router");
     }
 }

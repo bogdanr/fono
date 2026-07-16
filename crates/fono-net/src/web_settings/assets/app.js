@@ -258,11 +258,15 @@ function ttsLocalPanel() {
 
 // Inline "type a sentence and hear it" tester. `kind` picks how the
 // click handler resolves the route (local engine vs configured cloud
-// provider vs Wyoming). Ephemeral — not bound into cfg.
+// provider vs Wyoming). Ephemeral — not bound into cfg. The typed text
+// lives in `ttsSample` (module-level) so it survives the section
+// re-render that a voice/engine pick triggers, instead of snapping back
+// to the default sentence.
+let ttsSample = 'The quick brown fox jumps over the lazy dog.';
 function ttsTestBox(kind) {
   return '<div class="ttstest">'
     + '<input class="input tts-sample" placeholder="Type a sentence to hear it\u2026" '
-    + 'value="The quick brown fox jumps over the lazy dog." />'
+    + 'value="' + esc(ttsSample) + '" />'
     + '<button class="btn" type="button" data-tts-test="' + kind + '">Test voice</button>'
     + '<span class="hint tts-status"></span></div>';
 }
@@ -747,6 +751,8 @@ document.addEventListener('change', (e) => {
 
 document.addEventListener('input', (e) => {
   const el = e.target;
+  // Remember the voice-test sentence across section re-renders.
+  if (el.classList.contains('tts-sample')) { ttsSample = el.value; return; }
   // Live sensitivity readout next to wake sliders.
   if (el.classList.contains('slider') && el.previousElementSibling && el.previousElementSibling.classList.contains('sens')) {
     el.previousElementSibling.textContent = Number(el.value).toFixed(2);

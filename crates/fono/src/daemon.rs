@@ -3932,6 +3932,18 @@ fn speech_hook(
             }
             let languages = cfg.general.languages.clone();
 
+            // Download the requested local voice/pack on demand when it's
+            // missing, so testing an engine that isn't the configured one (or
+            // a first-ever local synthesis) doesn't fail with "voice not
+            // downloaded" — no daemon restart required. Cloud backends need
+            // no local assets, so they skip this.
+            #[cfg(feature = "tts-local")]
+            if tts_cfg.backend == fono_core::config::TtsBackend::Local {
+                crate::models::ensure_local_tts_route(&voices_dir, &tts_cfg.local, &languages)
+                    .await
+                    .map_err(|e| format!("preparing local voice: {e:#}"))?;
+            }
+
             // Building a local engine loads ONNX models (blocking); do it off
             // the async accept loop. Cloud clients construct cheaply but this
             // is uniform and harmless.

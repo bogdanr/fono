@@ -213,7 +213,10 @@ impl SpeechToText for CartesiaStt {
             }
         }
 
-        Ok(Transcription { text: parsed.text, language: parsed.language, duration_ms: None })
+        // Normalise the detected language to alpha-2 (Cartesia may echo a
+        // full name); downstream TTS voice routing expects a code.
+        let language = parsed.language.as_deref().map(crate::lang::whisper_lang_to_code);
+        Ok(Transcription { text: parsed.text, language, duration_ms: None })
     }
 
     fn name(&self) -> &'static str {

@@ -345,8 +345,12 @@ impl SpeechToText for OpenAiStt {
             }
         }
 
+        // verbose_json echoes the full English name ("romanian"); normalise
+        // to alpha-2 so downstream TTS voice routing accepts it.
         let language = parsed
             .language
+            .as_deref()
+            .map(crate::lang::whisper_lang_to_code)
             .or(first_pass_lang)
             .or_else(|| selection.fallback_hint().map(str::to_string));
         Ok(Transcription { text: parsed.text, language, duration_ms: None })

@@ -568,7 +568,12 @@ impl StreamingStt for GroqStreaming {
                                             filtered,
                                             started.elapsed(),
                                         )
-                                        .with_language(verbose_resp.language);
+                                        .with_language(
+                                            verbose_resp
+                                                .language
+                                                .as_deref()
+                                                .map(crate::lang::whisper_lang_to_code),
+                                        );
                                         let _ = tx.send(upd);
                                     }
                                     Err(e) => finalize_err_handler(e),
@@ -596,7 +601,11 @@ impl StreamingStt for GroqStreaming {
                                             resp.text,
                                             started.elapsed(),
                                         )
-                                        .with_language(resp.language);
+                                        .with_language(
+                                            resp.language
+                                                .as_deref()
+                                                .map(crate::lang::whisper_lang_to_code),
+                                        );
                                         let _ = tx.send(upd);
                                     }
                                     Err(e) => finalize_err_handler(e),

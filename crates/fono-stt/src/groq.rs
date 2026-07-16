@@ -448,7 +448,11 @@ impl SpeechToText for GroqStt {
             }
         }
 
-        Ok(Transcription { text: parsed.text, language: parsed.language, duration_ms: None })
+        // verbose_json echoes the full English name ("romanian"); the
+        // rest of Fono (TTS voice routing, language-stickiness cache)
+        // expects alpha-2. Normalise before handing it back.
+        let language = parsed.language.as_deref().map(crate::lang::whisper_lang_to_code);
+        Ok(Transcription { text: parsed.text, language, duration_ms: None })
     }
 
     /// Context-aware override: merges `opts.context_hint` with the
@@ -512,7 +516,11 @@ impl SpeechToText for GroqStt {
             }
         }
 
-        Ok(Transcription { text: parsed.text, language: parsed.language, duration_ms: None })
+        // verbose_json echoes the full English name ("romanian"); the
+        // rest of Fono (TTS voice routing, language-stickiness cache)
+        // expects alpha-2. Normalise before handing it back.
+        let language = parsed.language.as_deref().map(crate::lang::whisper_lang_to_code);
+        Ok(Transcription { text: parsed.text, language, duration_ms: None })
     }
 
     fn name(&self) -> &'static str {

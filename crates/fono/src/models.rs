@@ -120,25 +120,40 @@ pub async fn ensure_models(paths: &Paths, config: &Config) -> Result<()> {
 /// catalog voice are skipped with a warning rather than failing the lot.
 #[cfg(feature = "tts-local")]
 pub async fn ensure_local_tts(paths: &Paths, config: &Config) -> Result<EnsureOutcome> {
-    let voices_dir = paths.voices_dir();
-    let base_url = &config.tts.local.base_url;
+    ensure_local_tts_route(&paths.voices_dir(), &config.tts.local, &config.general.languages).await
+}
+
+/// Ensure the local TTS assets for an *already-resolved* route are on disk,
+/// downloading them on demand. Unlike [`ensure_local_tts`] this takes the
+/// concrete `[tts.local]` block and language list directly, so the
+/// `/v1/audio/speech` handler can prepare a voice for a per-request engine
+/// (e.g. testing Kokoro while the configured backend is Piper) without a
+/// daemon restart. Resolution mirrors `fono_tts::factory`: an explicit
+/// `voice` pins a single voice; otherwise one voice per language is ensured.
+#[cfg(feature = "tts-local")]
+pub async fn ensure_local_tts_route(
+    voices_dir: &std::path::Path,
+    local: &fono_core::config::TtsLocal,
+    languages: &[String],
+) -> Result<EnsureOutcome> {
+    let base_url = &local.base_url;
     let base = (!base_url.is_empty()).then_some(base_url.as_str());
     // Supertonic is a single shared pack outside the per-language catalog, so
     // when the user pins that engine we ensure the pack instead of catalog
     // voices (mirroring the voice-ensure flow).
-    if config.tts.local.engine == fono_core::config::TtsLocalEngine::Supertonic {
-        let dir = fono_tts::supertonic::supertonic_dir(&voices_dir);
+    if local.engine == fono_core::config::TtsLocalEngine::Supertonic {
+        let dir = fono_tts::supertonic::supertonic_dir(voices_dir);
         let already = dir.join(fono_tts::supertonic::CONFIG.file).is_file();
         if !already {
             debug!("Supertonic voice pack missing; downloading from the fono-voice mirror");
         }
-        fono_tts::supertonic::ensure_pack(&voices_dir, base)
+        fono_tts::supertonic::ensure_pack(voices_dir, base)
             .await
             .context("ensuring the Supertonic voice pack")?;
         info!("Supertonic voice pack ready");
         return Ok(if already { EnsureOutcome::AlreadyPresent } else { EnsureOutcome::Downloaded });
     }
-    let voices = resolve_local_tts_voices(config)?;
+    let voices = resolve_local_tts_voices(local, languages)?;
     let mut any_downloaded = false;
     for voice in &voices {
         let already = voices_dir.join(&voice.model.file).is_file()
@@ -148,7 +163,7 @@ pub async fn ensure_local_tts(paths: &Paths, config: &Config) -> Result<EnsureOu
             any_downloaded = true;
             debug!("local voice {:?} missing; downloading from the fono-voice mirror", voice.name);
         }
-        fono_tts::voices::ensure_voice(voice, &voices_dir, base)
+        fono_tts::voices::ensure_voice(voice, voices_dir, base)
             .await
             .with_context(|| format!("ensuring local voice {:?}", voice.name))?;
         if already {
@@ -165,20 +180,38 @@ pub async fn ensure_local_tts(paths: &Paths, config: &Config) -> Result<EnsureOu
 /// otherwise one voice per configured language (deduped) is chosen.
 /// Languages without a catalog voice are skipped with a warning.
 #[cfg(feature = "tts-local")]
-fn resolve_local_tts_voices(config: &Config) -> Result<Vec<fono_tts::voices::Voice>> {
-    let local = &config.tts.local;
+fn resolve_local_tts_voices(
+    local: &fono_core::config::TtsLocal,
+    languages: &[String],
+) -> Result<Vec<fono_tts::voices::Voice>> {
+    let engine_filter = local.engine.catalog_filter();
+    // Honour an explicit voice only when it belongs to the pinned engine (if
+    // any); a cross-engine voice is ignored so the engine selection wins and
+    // we download *that* engine's assets (mirrors `fono_tts::factory`).
     if !local.voice.is_empty() {
-        return Ok(vec![fono_tts::voices::by_name(&local.voice)?.ok_or_else(|| {
-            anyhow::anyhow!("[tts.local].voice = {:?} is not in the voice catalog", local.voice)
-        })?]);
+        match fono_tts::voices::by_name(&local.voice)? {
+            Some(v) if engine_filter.is_none_or(|e| v.engine == e) => return Ok(vec![v]),
+            Some(_) => {} // engine pin wins → fall through
+            None if engine_filter.is_none() => {
+                return Err(anyhow::anyhow!(
+                    "[tts.local].voice = {:?} is not in the voice catalog",
+                    local.voice
+                ));
+            }
+            None => {} // unknown voice but an engine is pinned → fall through
+        }
     }
-    let mut langs: Vec<&str> = config.general.languages.iter().map(String::as_str).collect();
+    let mut langs: Vec<&str> = languages.iter().map(String::as_str).collect();
     if langs.is_empty() {
         langs.push("en");
     }
     let mut chosen: Vec<fono_tts::voices::Voice> = Vec::new();
     for lang in langs {
-        match fono_tts::voices::for_language(lang)? {
+        let found = match engine_filter {
+            Some(e) => fono_tts::voices::for_language_engine(lang, e)?,
+            None => fono_tts::voices::for_language(lang)?,
+        };
+        match found {
             Some(v) if !chosen.iter().any(|c| c.name == v.name) => chosen.push(v),
             Some(_) => {} // a different language already mapped to this voice
             None => warn!(
@@ -187,8 +220,18 @@ fn resolve_local_tts_voices(config: &Config) -> Result<Vec<fono_tts::voices::Voi
             ),
         }
     }
+    // Engine pinned but no per-language match (e.g. Kokoro is English-only and
+    // no configured language is English): fall back to that engine's first
+    // catalog voice so the test still has something to download and play.
     if chosen.is_empty() {
-        let lang = config.general.languages.first().map_or("en", String::as_str);
+        if let Some(e) = engine_filter {
+            if let Some(v) = fono_tts::voices::for_engine(e)?.into_iter().next() {
+                chosen.push(v);
+            }
+        }
+    }
+    if chosen.is_empty() {
+        let lang = languages.first().map_or("en", String::as_str);
         return Err(anyhow::anyhow!(
             "no local voice in the catalog for any configured language (e.g. {lang:?}); \
              set [tts.local].voice to a catalog voice id"
@@ -204,7 +247,7 @@ fn resolve_local_tts_voices(config: &Config) -> Result<Vec<fono_tts::voices::Voi
 #[cfg(feature = "tts-local")]
 #[must_use]
 pub fn local_tts_pending_mb(paths: &Paths, config: &Config) -> Option<u32> {
-    let voices = resolve_local_tts_voices(config).ok()?;
+    let voices = resolve_local_tts_voices(&config.tts.local, &config.general.languages).ok()?;
     let voices_dir = paths.voices_dir();
     let pending: u64 = voices
         .iter()
