@@ -95,6 +95,7 @@ pub fn accent_color(state: OverlayState) -> u32 {
         }
         OverlayState::AssistantThinking | OverlayState::AssistantSynthesising => 0xFFF5_9E0B,
         OverlayState::AssistantSpeaking => 0xFF38_BDF8,
+        OverlayState::AssistantReading => 0xFF2D_D4BF,
         OverlayState::Processing | OverlayState::Polishing { .. } => 0xFFE0_A040,
         OverlayState::LiveDictating => 0xFF63_7AFF,
         // Neutral grey — deliberately unsaturated so it reads as
@@ -115,6 +116,7 @@ pub fn state_label(state: OverlayState) -> &'static str {
         OverlayState::AssistantThinking => "THINKING",
         OverlayState::AssistantSynthesising => "SYNTHESISING",
         OverlayState::AssistantSpeaking => "SPEAKING",
+        OverlayState::AssistantReading => "REPLY",
         OverlayState::Processing | OverlayState::Polishing { .. } => "POLISHING",
         OverlayState::LiveDictating => "LIVE",
         OverlayState::Ignoring { .. } => "IGNORED",
@@ -1481,6 +1483,54 @@ pub fn draw_line(
     }
 }
 
+/// [`draw_line`] with an extra vertical clip: only pixels whose row is
+/// in `[y_min, y_max)` are painted. Used by the smooth reading
+/// auto-scroll so a line partially scrolled past the top of the text
+/// area (or arriving at the bottom) is cleanly cut off instead of
+/// bleeding into the status label / panel edge.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_line_vclip(
+    buf: &mut [u32],
+    stride: u32,
+    h: u32,
+    font: &ab_glyph::FontArc,
+    text: &str,
+    color: u32,
+    size_px: f32,
+    x_origin: f32,
+    baseline_y: f32,
+    y_min: f32,
+    y_max: f32,
+) {
+    use ab_glyph::{Font, ScaleFont};
+    let scaled = font.as_scaled(size_px);
+    let (y_min, y_max) = (y_min.floor() as i32, y_max.ceil() as i32);
+    let mut x = x_origin;
+    for ch in text.chars() {
+        let glyph_id = font.glyph_id(ch);
+        let glyph = glyph_id.with_scale_and_position(size_px, ab_glyph::point(x, baseline_y));
+        if let Some(outlined) = font.outline_glyph(glyph) {
+            let bounds = outlined.px_bounds();
+            outlined.draw(|gx, gy, coverage| {
+                let px = bounds.min.x as i32 + gx as i32;
+                let py = bounds.min.y as i32 + gy as i32;
+                if px < 0 || py < y_min || py >= y_max {
+                    return;
+                }
+                let (px, py) = (px as u32, py as u32);
+                if px >= stride || py >= h {
+                    return;
+                }
+                let idx = (py * stride + px) as usize;
+                let Some(slot) = buf.get_mut(idx) else { return };
+                let alpha = (coverage.clamp(0.0, 1.0) * 255.0) as u8;
+                *slot = blend(*slot, color, alpha);
+            });
+        }
+        x += scaled.h_advance(glyph_id);
+    }
+}
+
 /// `draw_line` variant that paints one character (`highlight_char_idx`)
 /// in `highlight_color` instead of `base_color`. Used for the
 /// walking-letter highlight on the "Pondering…" status label —
@@ -1657,6 +1707,16 @@ pub struct RendererState {
     /// `start_instant.elapsed()` so motion is continuous across
     /// state transitions and independent of redraw cadence.
     pub start_instant: std::time::Instant,
+    /// Smooth tail-follow scroll for the [`OverlayState::AssistantReading`]
+    /// text-only reply panel, measured in wrapped-line units (fractional)
+    /// from the top of the reply. As tokens stream in and the reply grows
+    /// past the panel, this eases toward the tail (`reading_overflow`) so
+    /// the newest line glides into view instead of snapping a row at a
+    /// time — the reply is shown exactly once, while it streams, and
+    /// there is no second top-to-bottom pass. `reading_last_tick` carries
+    /// the previous animation-frame instant for `dt`-based easing.
+    pub reading_scroll_lines: f32,
+    pub reading_last_tick: Option<std::time::Instant>,
 }
 
 impl RendererState {
@@ -1676,6 +1736,8 @@ impl RendererState {
             heatmap_cache_dim: (0, 0),
             cortex: crate::cortex::CortexState::default(),
             start_instant: std::time::Instant::now(),
+            reading_scroll_lines: 0.0,
+            reading_last_tick: None,
         }
     }
 
@@ -1695,6 +1757,23 @@ impl RendererState {
     }
 
     pub fn set_state(&mut self, state: OverlayState) {
+        // Reset the reading-scroll position on entry so a fresh reply
+        // starts at the top and eases down as it streams, rather than
+        // inheriting a previous turn's scroll offset.
+        if state != self.state {
+            self.reading_scroll_lines = 0.0;
+            self.reading_last_tick = None;
+            // Clear the previous turn's reply text when entering the
+            // reading panel. Otherwise `self.wrapped` still holds the
+            // last (possibly long) reply, so `target_logical_height`
+            // sizes the window tall the instant the state flips —
+            // before the first new token arrives — and the overlay
+            // opens at the previous turn's height (GitHub #15 follow-up).
+            if matches!(state, OverlayState::AssistantReading) {
+                self.text.clear();
+                self.wrapped.clear();
+            }
+        }
         self.state = state;
         // The cortex replay engine keys its phase machine (listening /
         // thinking / answering) off the overlay state — notify it on
@@ -1711,6 +1790,35 @@ impl RendererState {
         self.text = text;
         self.rewrap();
         true
+    }
+
+    /// Number of wrapped lines that don't fit in the reading panel at
+    /// its (clamped) target height — i.e. how far the reply must scroll.
+    /// Zero when the reply fits or the panel isn't in the reading state.
+    /// Scale-independent: the panel height, text-area insets, and line
+    /// pitch all scale together, so the ratio is computed at logical
+    /// scale and matches the physical layout used by [`Self::redraw`].
+    fn reading_overflow(&self) -> usize {
+        if !matches!(self.state, OverlayState::AssistantReading) {
+            return 0;
+        }
+        let total = self.wrapped.len();
+        let panel_h = target_height(total);
+        let text_top = PADDING_TOP + STATUS_FONT_PX + STATUS_TO_TEXT;
+        let line_h = TEXT_FONT_PX + LINE_GAP;
+        let avail = (panel_h - text_top - PADDING_BOT).max(0.0);
+        // The last visible line needs no trailing `LINE_GAP`, so add one
+        // back before dividing — mirrors `target_height`'s `(n - 1)` gap
+        // count and keeps a reply sized to fit from reporting overflow.
+        let max_visible = ((avail + LINE_GAP) / line_h) as usize;
+        total.saturating_sub(max_visible.max(1))
+    }
+
+    /// Target scroll offset (in wrapped-line units) that keeps the tail
+    /// of the reply visible — i.e. the full overflow. The live scroll
+    /// position (`reading_scroll_lines`) eases toward this.
+    fn reading_scroll_target(&self) -> f32 {
+        self.reading_overflow() as f32
     }
 
     pub fn push_level(&mut self, v: f32) {
@@ -1747,19 +1855,62 @@ impl RendererState {
 
     /// Whether the active style needs the backend to pump frames on a
     /// timer (no external data push will otherwise trigger repaints).
-    /// True only for the Glass Cortex thinking/speaking phases while
-    /// visible — listening self-drives from mic FFT and Idle is static.
+    /// True for the Glass Cortex thinking/speaking phases while visible,
+    /// and while the text-only reply panel is actively auto-scrolling a
+    /// long reply (so the pan stays smooth without external pushes).
+    /// Listening self-drives from mic FFT; Idle / a fully-scrolled or
+    /// short reply are static and cost zero CPU.
     pub fn wants_animation_frame(&self) -> bool {
-        matches!(self.style, WaveformStyle::Cortex)
+        if matches!(self.style, WaveformStyle::Cortex)
             && self.is_visible()
             && self.cortex.needs_animation_frames()
+        {
+            return true;
+        }
+        // Reading panel: keep pumping only while the tail-follow scroll
+        // is still easing toward the newest line. Once it has caught up
+        // (or the reply fits with nothing to scroll) this goes false and
+        // the loop returns to a blocking wait — zero CPU until the next
+        // token grows the reply.
+        matches!(self.state, OverlayState::AssistantReading)
+            && self.is_visible()
+            && (self.reading_scroll_target() - self.reading_scroll_lines).abs() > 0.01
     }
 
     /// Advance the Glass Cortex animation clock one frame (timer-driven
-    /// tick for the thinking/speaking phases). No-op for other styles.
+    /// tick for the thinking/speaking phases), and ease the text-only
+    /// reply panel toward the tail so streamed lines glide into view.
     pub fn animation_tick(&mut self) {
         if matches!(self.style, WaveformStyle::Cortex) {
             self.cortex.tick(&[]);
+        }
+        if matches!(self.state, OverlayState::AssistantReading) {
+            // `dt` is clamped so the first frame after a blocking wait
+            // (when the reply grew) doesn't lurch.
+            let now = std::time::Instant::now();
+            let dt = self
+                .reading_last_tick
+                .map(|t| now.duration_since(t).as_secs_f32())
+                .unwrap_or(0.0)
+                .clamp(0.0, 0.1);
+            self.reading_last_tick = Some(now);
+            self.ease_reading_scroll(dt);
+        }
+    }
+
+    /// Advance the text-only reply panel's tail-follow scroll by one
+    /// frame of `dt` seconds. Exponential ease toward the tail: cover
+    /// `1 - e^(-RATE·dt)` of the remaining gap each frame, so motion is
+    /// smooth and frame-rate independent. Split out from
+    /// [`Self::animation_tick`] so the easing is unit-testable without
+    /// real wall-clock timing.
+    fn ease_reading_scroll(&mut self, dt: f32) {
+        const RATE: f32 = 12.0;
+        let target = self.reading_scroll_target();
+        let k = 1.0 - (-RATE * dt).exp();
+        self.reading_scroll_lines += (target - self.reading_scroll_lines) * k;
+        if (target - self.reading_scroll_lines).abs() < 0.01 {
+            self.reading_scroll_lines = target;
         }
     }
 
@@ -1803,9 +1954,14 @@ impl RendererState {
 
     /// Window height target for the current state (logical px).
     /// Text-mode panels grow to fit the wrapped transcript; waveform
-    /// panels use a fixed height.
+    /// panels use a fixed height. The text-only reply panel
+    /// ([`OverlayState::AssistantReading`]) is always sized as text —
+    /// it shows the reply, not a visualisation — regardless of the
+    /// configured waveform style, so it grows to fit (up to the max)
+    /// and then tail-scrolls, and its height stays in lockstep with
+    /// [`Self::reading_overflow`].
     pub fn target_logical_height(&self) -> f32 {
-        if is_text_style(self.style) {
+        if is_text_style(self.style) || matches!(self.state, OverlayState::AssistantReading) {
             target_height(self.wrapped.len())
         } else {
             WIN_WAVEFORM_HEIGHT
@@ -2206,17 +2362,62 @@ impl RendererState {
                 self.draw_status_label(buf, w, h, scale, font, accent, true);
             }
         } else if !self.wrapped.is_empty() {
-            let mut baseline = text_top + TEXT_FONT_PX * scale * 0.85;
-            let max_visible_lines = ((h as f32 - text_top - PADDING_BOT * scale)
-                / (TEXT_FONT_PX * scale + LINE_GAP * scale))
-                as usize;
+            let line_h = TEXT_FONT_PX * scale + LINE_GAP * scale;
+            let ascent = TEXT_FONT_PX * scale * 0.85;
+            let text_bottom = h as f32 - PADDING_BOT * scale;
+            let max_visible_lines = ((text_bottom - text_top) / line_h) as usize;
             let total = self.wrapped.len();
-            let skip = total.saturating_sub(max_visible_lines.max(1));
-            for line in self.wrapped.iter().skip(skip) {
-                draw_line(buf, w, h, font, line, COLOR_TEXT, TEXT_FONT_PX * scale, pad_x, baseline);
-                baseline += TEXT_FONT_PX * scale + LINE_GAP * scale;
-                if baseline > h as f32 - PADDING_BOT * scale {
-                    break;
+            let overflow = total.saturating_sub(max_visible_lines.max(1));
+            if matches!(self.state, OverlayState::AssistantReading) {
+                // Text-only reply: pan the reply upward to follow the tail
+                // as it streams, by a *pixel-smooth* amount (fractional
+                // line offsets included) so it glides rather than jumping a
+                // row at a time. Glyphs are clipped to the text area so the
+                // partially-scrolled top/bottom lines don't bleed into the
+                // status label or the panel edge.
+                let scroll_lines = self.reading_scroll_lines.clamp(0.0, overflow as f32);
+                let scroll_px = scroll_lines * line_h;
+                let skip = (scroll_px / line_h).floor().max(0.0) as usize;
+                let frac = scroll_px - skip as f32 * line_h;
+                let mut baseline = text_top + ascent - frac;
+                for line in self.wrapped.iter().skip(skip) {
+                    draw_line_vclip(
+                        buf,
+                        w,
+                        h,
+                        font,
+                        line,
+                        COLOR_TEXT,
+                        TEXT_FONT_PX * scale,
+                        pad_x,
+                        baseline,
+                        text_top,
+                        text_bottom,
+                    );
+                    baseline += line_h;
+                    if baseline - ascent > text_bottom {
+                        break;
+                    }
+                }
+            } else {
+                // Live dictation follows the tail (newest text visible).
+                let mut baseline = text_top + ascent;
+                for line in self.wrapped.iter().skip(overflow) {
+                    draw_line(
+                        buf,
+                        w,
+                        h,
+                        font,
+                        line,
+                        COLOR_TEXT,
+                        TEXT_FONT_PX * scale,
+                        pad_x,
+                        baseline,
+                    );
+                    baseline += line_h;
+                    if baseline > text_bottom {
+                        break;
+                    }
                 }
             }
         }
@@ -2260,6 +2461,124 @@ mod tests {
     #[test]
     fn highlight_idx_zero_is_none() {
         assert_eq!(pondering_highlight_idx(0), None);
+    }
+
+    #[test]
+    fn reading_panel_grows_as_text_even_with_waveform_style() {
+        // Regression: the reply panel must be sized as text (grow to fit,
+        // then scroll) regardless of the configured waveform style — not
+        // pinned to the fixed waveform height, which left it stuck at a
+        // couple of lines with no growth and no scroll.
+        let mut r = RendererState::new(WaveformStyle::Cortex);
+        assert!(!is_text_style(WaveformStyle::Cortex));
+        r.state = OverlayState::AssistantReading;
+        r.wrapped = (0..12).map(|i| format!("line {i}")).collect();
+        // A dozen lines exceed the waveform height, so the text sizing
+        // must have kicked in (taller than the fixed waveform panel).
+        assert!(
+            r.target_logical_height() > WIN_WAVEFORM_HEIGHT,
+            "reply panel should grow past the fixed waveform height, got {}",
+            r.target_logical_height()
+        );
+        // …and it caps at the max so it never dominates the screen.
+        assert!(r.target_logical_height() <= WIN_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn entering_reading_clears_previous_reply_text() {
+        // Regression (GitHub #15 follow-up): the reply panel must not
+        // inherit the previous turn's (possibly long) text. Otherwise the
+        // window sizes to the stale reply the instant the state flips —
+        // before the first new token — and opens at the old tall height.
+        let mut r = RendererState::new(WaveformStyle::Cortex);
+        r.set_state(OverlayState::AssistantReading);
+        r.update_text((0..40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n"));
+        let tall = r.target_logical_height();
+        assert!(tall > WIN_WAVEFORM_HEIGHT, "first reply should have grown tall");
+        // Turn ends, then a fresh turn re-enters the reading panel.
+        r.set_state(OverlayState::Hidden);
+        r.set_state(OverlayState::AssistantReading);
+        assert!(r.wrapped.is_empty(), "stale reply text must be cleared on entry");
+        assert!(
+            (r.target_logical_height() - target_height(0)).abs() < f32::EPSILON,
+            "panel must open at minimum height, not the previous reply's height"
+        );
+    }
+
+    #[test]
+    fn reading_overflow_zero_when_reply_fits() {
+        // A short reply fits inside the panel — nothing to scroll.
+        let mut r = RendererState::new(WaveformStyle::default());
+        r.state = OverlayState::AssistantReading;
+        r.wrapped = vec!["one".into(), "two".into()];
+        assert_eq!(r.reading_overflow(), 0);
+    }
+
+    #[test]
+    fn reading_overflow_positive_when_reply_is_long() {
+        // Far more lines than the clamped panel can show → must scroll.
+        let mut r = RendererState::new(WaveformStyle::default());
+        r.state = OverlayState::AssistantReading;
+        r.wrapped = (0..60).map(|i| format!("line {i}")).collect();
+        assert!(r.reading_overflow() > 0, "a 60-line reply must overflow the panel");
+    }
+
+    #[test]
+    fn reading_overflow_zero_off_reading_state() {
+        // Overflow only applies to the text-only reply panel.
+        let mut r = RendererState::new(WaveformStyle::default());
+        r.state = OverlayState::LiveDictating;
+        r.wrapped = (0..60).map(|i| format!("line {i}")).collect();
+        assert_eq!(r.reading_overflow(), 0);
+    }
+
+    #[test]
+    fn reading_scroll_target_follows_overflow() {
+        // The tail-follow target is exactly the overflow line count.
+        let mut r = RendererState::new(WaveformStyle::default());
+        r.state = OverlayState::AssistantReading;
+        r.wrapped = (0..60).map(|i| format!("line {i}")).collect();
+        let overflow = r.reading_overflow();
+        assert!(overflow > 0);
+        assert!((r.reading_scroll_target() - overflow as f32).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn reading_eases_toward_tail_without_overshoot() {
+        // A long reply: repeated ticks converge on the tail from the top
+        // and never overshoot it.
+        let mut r = RendererState::new(WaveformStyle::default());
+        r.state = OverlayState::AssistantReading;
+        r.wrapped = (0..60).map(|i| format!("line {i}")).collect();
+        let target = r.reading_scroll_target();
+        assert!(r.reading_scroll_lines.abs() < f32::EPSILON);
+        let mut prev = 0.0;
+        for _ in 0..600 {
+            r.ease_reading_scroll(0.016);
+            assert!(r.reading_scroll_lines <= target + 0.001, "must not overshoot the tail");
+            assert!(r.reading_scroll_lines >= prev - 0.001, "must be monotonic downward");
+            prev = r.reading_scroll_lines;
+        }
+        assert!(
+            (r.reading_scroll_lines - target).abs() < 0.01,
+            "should have caught up to the tail, got {} vs {target}",
+            r.reading_scroll_lines
+        );
+        // Caught up → no more animation frames wanted (idle, zero CPU).
+        assert!(!r.wants_animation_frame());
+    }
+
+    #[test]
+    fn reading_wants_frames_only_while_behind_the_tail() {
+        let mut r = RendererState::new(WaveformStyle::default());
+        r.state = OverlayState::AssistantReading;
+        // A reply that fits: nothing to scroll, no animation.
+        r.wrapped = vec!["one".into(), "two".into()];
+        assert!(!r.wants_animation_frame());
+        // A long reply that just arrived: scroll is behind → animate.
+        r.wrapped = (0..60).map(|i| format!("line {i}")).collect();
+        r.reading_scroll_lines = 0.0;
+        assert!(r.wants_animation_frame());
     }
 
     #[test]

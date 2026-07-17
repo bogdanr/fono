@@ -252,6 +252,14 @@ fn run_event_loop(
                             if let Some(w) = self.window.as_ref() {
                                 w.set_visible(true);
                                 needs_redraw = true;
+                                // A state transition changes the target
+                                // height (e.g. a tall reply panel → a
+                                // short waveform on the next turn). Without
+                                // this the window keeps the previous turn's
+                                // inner size and re-opens tall (GitHub #15
+                                // follow-up). Mirrors the Wayland backend,
+                                // which resizes on every SetState.
+                                needs_resize = true;
                             }
                         }
                     }

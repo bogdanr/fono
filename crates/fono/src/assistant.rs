@@ -131,7 +131,10 @@ pub struct AssistantTurnInputs {
     /// Batch STT backend. Unused when `pre_transcribed` is `Some`.
     pub stt: Arc<dyn SpeechToText>,
     pub assistant: Arc<dyn Assistant>,
-    pub tts: Arc<dyn TextToSpeech>,
+    /// TTS backend, or `None` for a text-only turn. When absent the
+    /// reply is streamed to the overlay as on-screen text and held for
+    /// a reading-time dwell instead of being synthesised + played back
+    pub tts: Option<Arc<dyn TextToSpeech>>,
     pub system_prompt: String,
     pub language: Option<String>,
     /// Channel back into the FSM. The pump sends
@@ -572,6 +575,24 @@ pub async fn run_assistant_turn(
         },
     };
 
+    // 3b. Text-only turn: no TTS backend. Stream the reply to the
+    //     overlay as on-screen text and hold it for a reading dwell
+    //     instead of synthesising + playing audio
+    let Some(tts) = tts else {
+        return drive_text_only_reply(
+            &state,
+            deltas,
+            overlay.as_ref(),
+            &action_tx,
+            &notify,
+            &mut metrics,
+            turn_started,
+            llm_started,
+            trace.as_ref(),
+        )
+        .await;
+    };
+
     // 4. Lazily ensure a playback handle exists.
     {
         let playback_started = std::time::Instant::now();
@@ -999,6 +1020,183 @@ pub async fn run_assistant_turn(
         }));
     }
     Ok(any_audio)
+}
+
+/// Upper bound on the character count fed to [`read_dwell`] when sizing
+/// the post-stream reading *hold*. The reply already scrolled past while
+/// streaming, so the hold only needs to cover the last screenful the
+/// reader is left looking at (~one panel of wrapped text ≈ 8 lines).
+/// Capping here keeps a very long reply from holding its final two
+/// lines on screen for the full [`read_dwell`] minute.
+const READING_HOLD_CHARS: usize = 320;
+
+/// Reading-time dwell for a text-only reply of `reply_chars` characters.
+/// Deliberately slow (~130 wpm, vs the ~200–250 wpm of a fluent reader)
+/// so the panel errs on staying up a little too long — Escape is the
+/// user's override, and cutting a reply off mid-read is the worse
+/// failure. Floored so even a one-word reply is legible, and capped so
+/// the overlay can never wedge on screen forever.
+fn read_dwell(reply_chars: usize) -> std::time::Duration {
+    const WPM: f32 = 130.0;
+    // Average English word ≈ 5 letters + 1 separating space.
+    const CHARS_PER_WORD: f32 = 6.0;
+    const FLOOR: std::time::Duration = std::time::Duration::from_secs(3);
+    const CAP: std::time::Duration = std::time::Duration::from_secs(60);
+    let words = reply_chars as f32 / CHARS_PER_WORD;
+    let secs = words / WPM * 60.0;
+    std::time::Duration::from_secs_f32(secs.max(0.0)).clamp(FLOOR, CAP)
+}
+
+/// Text-only reply pump consume the already-opened LLM
+/// delta stream, stream the growing reply text to the overlay
+/// (`AssistantReading`), record tool events + the reply into history,
+/// then hold the panel for a reading-time dwell
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn drive_text_only_reply(
+    state: &Arc<Mutex<AssistantSessionState>>,
+    mut deltas: futures::stream::BoxStream<'static, Result<fono_assistant::TokenDelta>>,
+    overlay: Option<&fono_overlay::OverlayHandle>,
+    action_tx: &mpsc::UnboundedSender<HotkeyAction>,
+    notify: &Arc<Notify>,
+    metrics: &mut AssistantTurnMetrics,
+    turn_started: std::time::Instant,
+    llm_started: std::time::Instant,
+    trace: Option<&TurnTrace>,
+) -> Result<bool> {
+    let mut full_reply = String::new();
+    let mut tool_event_log: Vec<ToolEvent> = Vec::new();
+    let mut tool_started: HashMap<String, (String, std::time::Instant)> = HashMap::new();
+    let mut aborted_mid_stream = false;
+    let mut reading_announced = false;
+
+    loop {
+        let next = tokio::select! {
+            biased;
+            () = notify.notified() => {
+                debug!(target: "fono::assistant", "text-only: cancelled mid-stream");
+                aborted_mid_stream = true;
+                break;
+            }
+            n = deltas.next() => n,
+        };
+        let Some(item) = next else { break };
+        let delta = match item {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(target: "fono::assistant", error = %e, "text-only: assistant stream error");
+                let err_text = format!("{e:#}");
+                let class = fono_core::critical_notify::classify(&err_text);
+                if matches!(
+                    class,
+                    fono_core::critical_notify::ErrorClass::Auth
+                        | fono_core::critical_notify::ErrorClass::PaymentRequired
+                        | fono_core::critical_notify::ErrorClass::Network
+                        | fono_core::critical_notify::ErrorClass::TermsRequired
+                ) {
+                    fono_core::critical_notify::notify(
+                        fono_core::critical_notify::Stage::Assistant,
+                        "assistant",
+                        class,
+                        &err_text,
+                    );
+                }
+                break;
+            }
+        };
+        // Tool sentinels carry no spoken/visible prose — record them for
+        // history and skip the text panel.
+        if let Some(event) = delta.tool_event {
+            match &event {
+                ToolEvent::Called(call) => {
+                    tool_started
+                        .insert(call.id.clone(), (call.name.clone(), std::time::Instant::now()));
+                }
+                ToolEvent::Result { tool_call_id, summary } => {
+                    if let Some((name, started_at)) = tool_started.remove(tool_call_id) {
+                        let exec_ms = started_at.elapsed().as_millis() as u64;
+                        let outcome = classify_tool_outcome(summary);
+                        metrics.tools.push(AssistantToolMetric { name, exec_ms, outcome });
+                    }
+                }
+            }
+            tool_event_log.push(event);
+            continue;
+        }
+        if delta.text.is_empty() {
+            continue;
+        }
+        // First visible token: flip the overlay to the reading panel and
+        // move the FSM Thinking → Speaking so Escape dismisses cleanly.
+        if !reading_announced {
+            reading_announced = true;
+            metrics.llm_ttfb_ms = llm_started.elapsed().as_millis() as u64;
+            let _ = action_tx.send(HotkeyAction::AssistantSpeakingStarted);
+            if let Some(o) = overlay {
+                o.set_state(fono_overlay::OverlayState::AssistantReading);
+            }
+        }
+        full_reply.push_str(&delta.text);
+        if let Some(o) = overlay {
+            o.update_text(full_reply.clone());
+        }
+    }
+
+    metrics.llm_total_ms = llm_started.elapsed().as_millis() as u64;
+
+    // Push tool exchange + the reply into history under a single lock.
+    {
+        let mut s = state.lock().await;
+        for event in tool_event_log {
+            match event {
+                ToolEvent::Called(call) => {
+                    s.history.push_assistant_tool_calls(String::new(), vec![call]);
+                }
+                ToolEvent::Result { tool_call_id, summary } => {
+                    s.history.push_tool_result(tool_call_id, summary);
+                }
+            }
+        }
+        if !full_reply.trim().is_empty() {
+            s.history.push_assistant(full_reply.trim().to_string());
+        }
+    }
+
+    metrics.reply_chars = full_reply.chars().count();
+    metrics.aborted = aborted_mid_stream;
+    metrics.tts_ttfa_ms = None;
+    metrics.total_ms = turn_started.elapsed().as_millis() as u64;
+    info!(target: "fono::assistant", "{}", format_assistant_summary(metrics));
+
+    // Reading hold: the reply already scrolled past while it streamed
+    // (the panel tail-follows the newest line as tokens arrive), so we
+    // hold the final screenful on-screen long enough to finish reading
+    // it, then dismiss. The hold is sized to a screenful, not the whole
+    // reply — a long answer isn't pinned to its last two lines for a
+    // full minute. Escape / barge-in (`notify`) ends it early.
+    if !aborted_mid_stream && !full_reply.trim().is_empty() {
+        let hold = read_dwell(metrics.reply_chars.min(READING_HOLD_CHARS));
+        tokio::select! {
+            biased;
+            () = notify.notified() => {
+                debug!(target: "fono::assistant", "text-only: reading hold cancelled");
+            }
+            () = tokio::time::sleep(hold) => {}
+        }
+    }
+
+    if let Some(t) = trace {
+        t.finish(json!({
+            "aborted": aborted_mid_stream,
+            "played_audio": false,
+            "mode": "text_only",
+            "total_ms": metrics.total_ms,
+            "llm_ttfb_ms": metrics.llm_ttfb_ms,
+            "llm_total_ms": metrics.llm_total_ms,
+            "reply_chars": metrics.reply_chars,
+            "summary": t.cache_scoreboard(),
+        }));
+    }
+    Ok(false)
 }
 
 /// Per-turn first-audio signal. [`Self::fire`] is invoked at the *true* moment
@@ -2658,7 +2856,33 @@ fn notify_triggered(_notify: &Arc<Notify>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_json_message, truncate};
+    use super::{extract_json_message, read_dwell, truncate};
+
+    #[test]
+    fn read_dwell_floors_short_replies() {
+        // A one-word reply must still stay legible: never below the 3 s floor.
+        assert_eq!(read_dwell(0), std::time::Duration::from_secs(3));
+        assert_eq!(read_dwell(1), std::time::Duration::from_secs(3));
+        assert_eq!(read_dwell(20), std::time::Duration::from_secs(3));
+    }
+
+    #[test]
+    fn read_dwell_caps_huge_replies() {
+        // A pathologically long reply can't wedge the overlay: 60 s ceiling.
+        assert_eq!(read_dwell(1_000_000), std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn read_dwell_scales_between_floor_and_cap() {
+        // ~130 wpm over ~6 chars/word: mid-size replies land strictly
+        // between the bounds and grow monotonically with length.
+        // 300 chars ≈ 50 words ≈ 23 s; 600 chars ≈ 100 words ≈ 46 s.
+        let short = read_dwell(300);
+        let long = read_dwell(600);
+        assert!(short > std::time::Duration::from_secs(3), "300 chars should exceed floor");
+        assert!(long < std::time::Duration::from_secs(60), "600 chars should stay under cap");
+        assert!(long > short, "longer replies dwell longer");
+    }
 
     #[test]
     fn extract_json_message_pulls_groq_429_body() {

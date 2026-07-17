@@ -359,10 +359,11 @@ fn run_loop(
             state.paint();
         }
         // Self-driven animation pump: the Glass Cortex thinking /
-        // speaking phases animate with no incoming data to trigger
-        // repaints. The loop already wakes every 16 ms via
-        // `poll_event_sources`, so tick + paint when the scene needs it.
-        if state.renderer.wants_animation_frame() && state.renderer.is_visible() {
+        // speaking phases and the text-only reply auto-scroll animate
+        // with no incoming data to trigger repaints. Tick + paint when
+        // the scene needs it.
+        let animating = state.renderer.wants_animation_frame() && state.renderer.is_visible();
+        if animating {
             state.renderer.animation_tick();
             state.paint();
         }
@@ -371,8 +372,14 @@ fn run_loop(
             break;
         }
 
-        // 3. Poll for wayland events / new commands.
-        poll_event_sources(wl_fd, waker_borrow, Duration::from_millis(16));
+        // 3. Poll for wayland events / new commands. Only spin at the
+        // ~60 fps animation cadence while something is actually
+        // animating; otherwise block until the compositor or the
+        // orchestrator's waker rouses us, so a static overlay (idle,
+        // recording, a settled reply panel) costs zero CPU instead of
+        // waking 60×/s.
+        let timeout = if animating { Duration::from_millis(16) } else { Duration::from_secs(3600) };
+        poll_event_sources(wl_fd, waker_borrow, timeout);
         // Drain any waker bytes regardless of poll result; the
         // closure may have written several.
         let mut buf = [0u8; 64];

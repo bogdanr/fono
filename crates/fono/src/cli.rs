@@ -2747,16 +2747,38 @@ fn test_overlay_cmd() {
             return;
         }
     };
-    println!("[1/3] Recording (red), 1s");
+    println!("[1/4] Recording (red), 1s");
     handle.set_state(OverlayState::Recording { db: -20 });
     std::thread::sleep(Duration::from_secs(1));
-    println!("[2/3] LiveDictating with sample text (blue), 1s");
+    println!("[2/4] LiveDictating with sample text (blue), 1s");
     handle.set_state(OverlayState::LiveDictating);
     handle.update_text("Hello from fono live mode");
     std::thread::sleep(Duration::from_secs(1));
-    println!("[3/3] Processing (amber), 1s");
+    println!("[3/4] Processing (amber), 1s");
     handle.set_state(OverlayState::Processing);
     std::thread::sleep(Duration::from_secs(1));
+    // Text-only assistant reply (no TTS): a long reply the panel shows
+    // once, tail-following the newest line with a pixel-smooth scroll as
+    // it "streams" in — exactly like a real turn. We feed it word by
+    // word so you can watch the panel glide to keep up, then hold.
+    println!("[4/4] AssistantReading — long reply streaming + tail-scroll (teal)");
+    handle.set_state(OverlayState::AssistantReading);
+    let reply = "This is a text-only assistant reply, shown on screen because no TTS \
+         backend is configured. It is deliberately long so it overflows the \
+         panel and has to scroll. As it streams in, the panel smoothly follows \
+         the newest line — it is shown exactly once, while it arrives, with no \
+         second pass. In the real assistant it then holds the last screenful \
+         long enough to finish reading and dismisses on Escape. And this \
+         closing sentence is the very bottom of the reply — if you can read \
+         this, the tail-scroll kept up to the end.";
+    let mut acc = String::new();
+    for word in reply.split_inclusive(' ') {
+        acc.push_str(word);
+        handle.update_text(acc.clone());
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    // Hold the final screenful, as the real turn does.
+    std::thread::sleep(Duration::from_secs(3));
     println!("test-overlay: shutting down");
     handle.shutdown();
 }

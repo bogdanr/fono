@@ -404,6 +404,9 @@ impl CortexState {
             | S::Processing
             | S::Polishing { .. } => Phase::Thinking,
             S::AssistantSpeaking => Phase::Speaking,
+            // Text-only reply: no audio, so the cortex sits idle while
+            // the user reads the on-screen text.
+            S::AssistantReading => Phase::Idle,
             _ => Phase::Listening,
         };
         if phase == Phase::Speaking && self.phase != Phase::Speaking {

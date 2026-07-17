@@ -3131,26 +3131,27 @@ impl SessionOrchestrator {
         }
         let stt = self.current_stt();
         let assistant = self.current_assistant();
+        // TTS is optional: when no TTS backend is available (e.g. a
+        // cloud provider without TTS, or `tts.backend = none`) the turn
+        // still runs and the reply is shown as on-screen text instead
+        // of being spoken (GitHub #15). Only a missing *assistant*
+        // backend aborts the turn.
         let tts = self.current_tts();
-        let (Some(assistant), Some(tts)) = (assistant, tts) else {
-            // The slots are populated by `build_assistant()` /
-            // `build_tts()` in `new()` and `reload()`. If the config
-            // flags are on but the slots are empty, the factory
-            // errored at startup (missing API key, missing
-            // sub-block, missing feature). Run `fono doctor` for the
-            // exact reason; the daemon also logged it on startup.
+        let Some(assistant) = assistant else {
+            // The slot is populated by `build_assistant()` in `new()` /
+            // `reload()`. If the config flag is on but the slot is
+            // empty, the factory errored at startup (missing API key,
+            // missing sub-block, missing feature). Run `fono doctor`
+            // for the exact reason; the daemon also logged it on
+            // startup.
             warn!(
-                "assistant turn requested but a runtime backend is missing \
-                 (assistant_loaded={} tts_loaded={}; config: assistant.enabled={} \
-                 tts.backend={:?}). Run `fono doctor` to see which factory failed.",
-                self.current_assistant().is_some(),
-                self.current_tts().is_some(),
+                "assistant turn requested but the assistant backend is missing \
+                 (assistant.enabled={}). Run `fono doctor` to see which factory failed.",
                 cfg.assistant.enabled,
-                cfg.tts.backend,
             );
             fono_core::notify::send(
                 "Fono — assistant backend missing",
-                "The assistant or TTS factory failed at startup (likely a missing API key). \
+                "The assistant factory failed at startup (likely a missing API key). \
                  Run `fono doctor` to see which backend errored.",
                 "dialog-information",
                 6_000,

@@ -1,5 +1,44 @@
 # Fono — Project Status
-Last updated: 2026-07-16
+Last updated: 2026-07-17
+
+## 2026-07-17 — Assistant usable without TTS (on-screen reply panel) — GitHub #15
+
+Anthropic-only (and any STT + LLM, no-TTS) users could not use the
+voice assistant at all: the staged turn hard-required a TTS backend
+and otherwise bailed with a "backend missing" notification. Since
+`tts.backend = none` is the default, that was a silent dead end for a
+large slice of users. Fixed by showing the reply as an on-screen text
+panel when no TTS is configured.
+
+1. **TTS is now optional.** `AssistantTurnInputs.tts` became
+   `Option<...>` and the staged-turn guard requires only the assistant
+   (`crates/fono/src/assistant.rs`, `crates/fono/src/session.rs`).
+2. **Text-only reply pump.** `drive_text_only_reply` streams the reply
+   into the overlay, records tool events + reply into history, then
+   holds the panel for a deliberately slow reading-time dwell (~130 wpm,
+   3 s floor, 60 s cap — no config knob; Escape / barge-in ends it
+   early).
+3. **Reading overlay state.** New `OverlayState::AssistantReading`
+   (teal, "REPLY" label). The panel grows to fit as the reply streams
+   and tail-follows the newest line with a smooth, frame-rate-
+   independent pixel scroll (sub-line clipping, not row jumps).
+4. **Zero idle CPU.** The Wayland loop blocks unless a scroll is
+   actively catching up (`wants_animation_frame`); a settled/short reply
+   costs no CPU. Fixed the earlier 25 %-CPU-while-visible regression.
+5. **Second-turn sizing.** Fixed the reply panel re-opening at the
+   previous turn's tall height: the X11 backend now resizes on every
+   `SetState` (it previously only resized on text/style changes, unlike
+   Wayland), and the renderer clears stale reply text on entering the
+   reading state.
+6. **Reporting + docs.** `fono doctor` reports no-TTS as an
+   informational line (not a warning); `docs/providers.md` documents
+   text-only mode. `fono test-overlay` gained a reading-panel demo.
+
+Gates green: `fmt`, `clippy --workspace -D warnings` (+ overlay
+`--all-features`), full workspace tests and overlay `--all-features`
+(63 lib tests, incl. dwell bounds, tail-follow easing, overflow, and
+the second-turn resize regression). Plan:
+`plans/2026-07-16-assistant-without-tts-v1.md`.
 
 ## 2026-07-16 — Glas Cortex: tray label, cloud MoE sim, brighter listening
 

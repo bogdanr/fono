@@ -36,9 +36,11 @@ leans on the local backend (local Whisper for STT, embedded GGUF for
 cleanup, on-device Piper/Kokoro for TTS). The primary picker therefore
 lists **every** provider with at least one wired capability — including
 speech-only ones like Speechmatics, Deepgram, AssemblyAI, and Cartesia
-— not just the LLM-capable rows. Assistant chat stays opt-in. Five
-providers can drive the assistant end-to-end today: OpenAI, Groq,
-Anthropic + any cloud TTS, Cerebras + any cloud TTS, and OpenRouter.
+— not just the LLM-capable rows. Assistant chat stays opt-in. Any
+provider with STT + an LLM can drive the assistant end-to-end today —
+TTS is optional (without it the reply is shown as on-screen text). OpenAI,
+Groq, and OpenRouter add spoken replies out of the box; Anthropic and
+Cerebras speak once paired with any cloud TTS.
 
 The wizard's cloud STT picker, cloud LLM/cleanup picker, and API-key
 reachability validation are generated entirely from this catalogue
@@ -450,6 +452,15 @@ The voice assistant streams its reply sentence-by-sentence to whichever
 TTS backend is selected in `[tts].backend`. v2 (issue #11) adds four
 cloud providers next to the existing Wyoming + OpenAI options so
 assistant audio works without an OpenAI key.
+
+**Text-only mode (no TTS).** TTS is optional. When `[tts].backend` is
+`none` (the default), the assistant no longer refuses to run — instead
+of speaking, it shows the reply as an on-screen text panel that stays up
+long enough to read at a relaxed pace and auto-scrolls long answers.
+Press **Escape** to dismiss it early. This makes providers without a TTS
+of their own (e.g. an Anthropic-only setup: STT + LLM, no TTS) usable
+end-to-end. `fono doctor` reports this as an informational line, not a
+warning.
 
 | Backend       | Type       | Default model       | Endpoint                                               | Auth header                  |
 |---------------|------------|---------------------|--------------------------------------------------------|------------------------------|

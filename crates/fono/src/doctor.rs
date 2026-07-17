@@ -445,8 +445,12 @@ pub fn gather(paths: &Paths) -> Result<DoctorReport> {
                 col.push(S::Ok, "tts", &format!("{} ready", t.name()));
             }
             Ok(None) => {
-                writeln!(out, "  tts: {}", warn("disabled (assistant replies will be silent)"))?;
-                col.push(S::Warn, "tts", "disabled (assistant replies will be silent)");
+                writeln!(
+                    out,
+                    "  tts: {}",
+                    dim("disabled (assistant replies shown as on-screen text)")
+                )?;
+                col.push(S::Info, "tts", "disabled (assistant replies shown as on-screen text)");
             }
             Err(e) => {
                 writeln!(out, "  tts: {} {e:#}", bad("FAIL —"))?;

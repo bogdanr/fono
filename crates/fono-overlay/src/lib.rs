@@ -89,6 +89,17 @@ pub enum OverlayState {
     /// audio chunk is enqueued, in lockstep with the FSM
     /// `AssistantThinking → AssistantSpeaking` transition.
     AssistantSpeaking,
+    /// Voice-assistant text-only reply: no TTS backend is available,
+    /// so the reply is presented as on-screen text rather than spoken
+    /// (GitHub #15). The reply text is streamed in via
+    /// [`OverlayHandle::update_text`] as the model generates it; the
+    /// panel smoothly tail-follows the newest line as it arrives (so a
+    /// long reply is shown exactly once, while it streams — no second
+    /// pass), then holds the final screenful on screen for a reading
+    /// beat, or until the user presses Escape. Distinct teal palette +
+    /// "REPLY" label so it reads as "here is the answer, read it"
+    /// rather than the waveform speaking scene.
+    AssistantReading,
     Processing,
     /// Dictation post-release: the batch STT and optional LLM cleanup
     /// pipeline is running and is expected to take long enough (local
