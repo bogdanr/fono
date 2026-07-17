@@ -1051,7 +1051,7 @@ fn read_dwell(reply_chars: usize) -> std::time::Duration {
 /// delta stream, stream the growing reply text to the overlay
 /// (`AssistantReading`), record tool events + the reply into history,
 /// then hold the panel for a reading-time dwell
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::cognitive_complexity)]
 async fn drive_text_only_reply(
     state: &Arc<Mutex<AssistantSessionState>>,
     mut deltas: futures::stream::BoxStream<'static, Result<fono_assistant::TokenDelta>>,
