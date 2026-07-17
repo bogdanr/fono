@@ -20,6 +20,7 @@
 
 pub mod agent_setup;
 pub mod agents;
+pub mod api_key_auth;
 pub mod assistant;
 pub mod audio_recovery;
 pub mod cli;

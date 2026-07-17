@@ -761,6 +761,16 @@ const FONO_SECTIONS = [
     },
   },
   {
+    id: 'apikeys', title: 'API Keys',
+    summary() {
+      if (apiKeysErr) return 'unavailable';
+      if (!apiKeys) return 'loading\u2026';
+      const active = apiKeys.filter((k) => !k.revoked).length;
+      return active ? active + (active === 1 ? ' key' : ' keys') : 'none yet';
+    },
+    html() { return apiKeysHtml(); },
+  },
+  {
     id: 'servers', title: 'Servers & Advanced',
     summary() {
       const bits = [];
@@ -776,16 +786,16 @@ const FONO_SECTIONS = [
         + srvField('Port', srvNum('server.wyoming.port', 10300))
         + srvField('Token ref', srvInput('server.wyoming.auth_token_ref', '', 'none')),
         'server.wyoming.enabled')
-        + srvCard('LLM API server (OpenAI + Ollama compatible)',
+        + srvCard('API server (OpenAI + Ollama compatible)',
           srvField('Bind', srvInput('server.llm.bind', '127.0.0.1'))
           + srvField('Port', srvNum('server.llm.port', 11434))
-          + srvField('Token ref', srvInput('server.llm.auth_token_ref', '', 'none'))
+          + srvField('Require API key', toggle('server.llm.auth', true))
           + srvField('Model override', srvInput('server.llm.model', '', '\u2014')),
           'server.llm.enabled')
         + srvCard('Web settings (this page \u2014 changes apply after restart)',
           srvField('Bind', srvInput('server.web.bind', '127.0.0.1'))
           + srvField('Port', srvNum('server.web.port', 10808))
-          + srvField('Token ref', srvInput('server.web.auth_token_ref', '', 'none')),
+          + srvField('Require API key', toggle('server.web.auth', true)),
           'server.web.enabled')
         + row('Network name', 'How this machine appears to other Fono instances. Empty = fono-<hostname>.',
           txt('network.instance_name', { w: 180, ph: 'auto' }))
@@ -826,6 +836,130 @@ const FONO_SECTIONS = [
   },
 ];
 function keycapRow(lbl, desc, path) { return row(lbl, desc, keycap(path)); }
+
+// ---------- inbound API keys (async: GET/POST/PATCH/DELETE /api/apikeys) ----------
+// These guard the local LLM/STT/TTS API and this settings page when
+// authentication is on. Loaded lazily after config; the section
+// re-renders itself on load and after every mutation. `newKeySecret`
+// holds the just-created plaintext secret so it can be shown exactly
+// once — it is never persisted client-side beyond the reveal.
+let apiKeys = null, apiKeysErr = null, newKeySecret = null;
+function refreshApiKeysSection() {
+  const sec = FONO_SECTIONS.find((s) => s.id === 'apikeys');
+  if (sec && document.getElementById('d-apikeys')) renderSection(sec);
+}
+async function loadApiKeys() {
+  try {
+    const r = await api('/api/apikeys');
+    apiKeys = (r && r.keys) || [];
+    apiKeysErr = null;
+  } catch (err) {
+    apiKeys = null;
+    apiKeysErr = err.message;
+  }
+  refreshApiKeysSection();
+}
+function fmtDate(ts) { return ts ? new Date(ts * 1000).toLocaleDateString() : '\u2014'; }
+function keyExpiryCell(k) {
+  if (!k.expires_at) return '<span class="hint">Never</span>';
+  const soon = k.expires_at * 1000 < Date.now() + 7 * 864e5;
+  return '<span' + (soon ? ' class="key-exp-warn"' : '') + '>' + fmtDate(k.expires_at) + '</span>';
+}
+function apiKeysHtml() {
+  let out = '<p class="hint">These keys authenticate callers to the local LLM, speech-to-text and '
+    + 'text-to-speech API, and to this settings page, whenever authentication is on '
+    + '(see Servers &amp; Advanced). The secret is shown once at creation and stored only as a '
+    + 'hash \u2014 it can never be shown again.</p>';
+  if (newKeySecret) {
+    out += '<div class="key-reveal"><div class="lbl">New key \u2014 copied to your clipboard. It won\u2019t be shown again.</div>'
+      + '<div class="key-reveal-row"><code class="mono">' + esc(newKeySecret) + '</code></div></div>';
+  }
+  out += '<div class="key-new-row">'
+    + '<input class="input" id="newkeyname" placeholder="Key name, e.g. laptop" style="width:200px" autocomplete="off" />'
+    + '<select class="select" id="newkeyexpiry" title="When this key stops working">'
+    + '<option value="0">No expiry</option>'
+    + '<option value="7">Expires in 7 days</option>'
+    + '<option value="30">Expires in 30 days</option>'
+    + '<option value="90">Expires in 90 days</option>'
+    + '<option value="365">Expires in 1 year</option>'
+    + '</select>'
+    + '<button class="btn primary" type="button" data-key-new>Create API Key</button></div>';
+  if (apiKeysErr) return out + '<p class="privacy-note">Could not load keys: ' + esc(apiKeysErr) + '</p>';
+  if (!apiKeys) return out + '<p class="hint">Loading\u2026</p>';
+  if (!apiKeys.length) return out + '<p class="hint">No API keys yet.</p>';
+  const rows = apiKeys.map((k) =>
+    '<tr' + (k.revoked ? ' class="key-revoked"' : '') + '>'
+    + '<td>' + esc(k.name) + (k.revoked ? ' <span class="hint">(revoked)</span>' : '') + '</td>'
+    + '<td class="mono">' + esc(k.masked) + '</td>'
+    + '<td>' + fmtDate(k.created_at) + '</td>'
+    + '<td>' + (k.last_used_at ? fmtDate(k.last_used_at) : '<span class="hint">Never</span>') + '</td>'
+    + '<td>' + keyExpiryCell(k) + '</td>'
+    + '<td>' + (k.usage_month || 0) + '</td>'
+    + '<td class="key-actions">'
+    + keyIconBtn('key-rename', k.id, '\u270E', 'Rename')
+    + (k.revoked
+      ? keyIconBtn('key-restore', k.id, '\u21BA', 'Restore')
+      : keyIconBtn('key-revoke', k.id, '\u2298', 'Revoke'))
+    + keyIconBtn('key-delete', k.id, '\u2715', 'Delete', 'danger')
+    + '</td></tr>').join('');
+  return out + '<table class="key-table"><thead><tr>'
+    + '<th>Name</th><th>Secret</th><th>Created</th><th>Last used</th><th>Expires</th>'
+    + '<th>Usage (month)</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+// Compact icon action button for a key row. `action` is the data-* name
+// (e.g. 'key-rename'); the glyph is a system-font character so we stay
+// image-/icon-font-free. `title`/`aria-label` carry the accessible name.
+function keyIconBtn(action, id, glyph, label, extra) {
+  return '<button class="keybtn' + (extra ? ' ' + extra : '') + '" type="button" data-'
+    + action + '="' + id + '" title="' + label + '" aria-label="' + label + '">' + glyph + '</button>';
+}
+async function createApiKey() {
+  const inp = document.getElementById('newkeyname');
+  const name = inp && inp.value.trim();
+  if (!name) { toast('Enter a key name first', true); return; }
+  const sel = document.getElementById('newkeyexpiry');
+  const days = sel ? parseInt(sel.value, 10) : 0;
+  const body = { name };
+  if (days > 0) body.expires_at = Math.floor(Date.now() / 1000) + days * 86400;
+  try {
+    const r = await api('/api/apikeys', { method: 'POST', body: JSON.stringify(body) });
+    newKeySecret = r.secret;
+    if (newKeySecret && navigator.clipboard) {
+      navigator.clipboard.writeText(newKeySecret).then(
+        () => toast('Key created \u2014 copied to clipboard'),
+        () => toast('Key created \u2014 copy it manually, clipboard blocked', true),
+      );
+    } else {
+      toast('Key created \u2014 copy it now, it won\u2019t be shown again', true);
+    }
+    await loadApiKeys();
+  } catch (err) { toast('Could not create key: ' + err.message, true); }
+}
+async function renameApiKey(id) {
+  const cur = (apiKeys.find((k) => k.id === id) || {}).name || '';
+  const name = prompt('New name for this key:', cur);
+  if (name == null || !name.trim()) return;
+  try {
+    await api('/api/apikeys/' + id, { method: 'PATCH', body: JSON.stringify({ name: name.trim() }) });
+    await loadApiKeys();
+  } catch (err) { toast('Could not rename: ' + err.message, true); }
+}
+async function setApiKeyRevoked(id, revoked) {
+  try {
+    await api('/api/apikeys/' + id, { method: 'PATCH', body: JSON.stringify({ revoked }) });
+    toast(revoked ? 'Key revoked' : 'Key restored');
+    await loadApiKeys();
+  } catch (err) { toast('Could not update key: ' + err.message, true); }
+}
+async function deleteApiKey(id) {
+  if (!confirm('Permanently delete this key and its usage history? This cannot be undone.')) return;
+  try {
+    await api('/api/apikeys/' + id, { method: 'DELETE' });
+    toast('Key deleted');
+    await loadApiKeys();
+  } catch (err) { toast('Could not delete key: ' + err.message, true); }
+}
+
 
 // ---------- render ----------
 function renderSection(s) {
@@ -914,7 +1048,7 @@ document.addEventListener('input', (e) => {
 });
 
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-seg],[data-pick],[data-tts-test],[data-tag-rm],[data-wake-rm],[data-wake-add],[data-vocab-rm],[data-vocab-add],[data-keycap],[data-reset],[data-key-edit],[data-key-clear],[data-key-save],[data-key-cancel]');
+  const t = e.target.closest('[data-seg],[data-pick],[data-tts-test],[data-tag-rm],[data-wake-rm],[data-wake-add],[data-vocab-rm],[data-vocab-add],[data-keycap],[data-reset],[data-key-edit],[data-key-clear],[data-key-save],[data-key-cancel],[data-key-new],[data-key-rename],[data-key-revoke],[data-key-restore],[data-key-delete]');
   if (!t) return;
   const secEl = t.closest('details.sec');
   const sec = secEl ? FONO_SECTIONS.find((s) => 'd-' + s.id === secEl.id) : null;
@@ -989,6 +1123,12 @@ document.addEventListener('click', (e) => {
     return;
   }
   if (t.dataset.keyCancel !== undefined && sec) { renderSection(sec); }
+  if (t.dataset.keyNew !== undefined) { createApiKey(); return; }
+  if (t.dataset.keyRename) { renameApiKey(parseInt(t.dataset.keyRename, 10)); return; }
+  if (t.dataset.keyRevoke) { setApiKeyRevoked(parseInt(t.dataset.keyRevoke, 10), true); return; }
+  if (t.dataset.keyRestore) { setApiKeyRevoked(parseInt(t.dataset.keyRestore, 10), false); return; }
+  if (t.dataset.keyDelete) { deleteApiKey(parseInt(t.dataset.keyDelete, 10)); return; }
+
 });
 
 // Tag input: Enter or comma adds a tag.
@@ -1217,6 +1357,7 @@ async function init() {
       currentView() + ' \u00b7 v' + (meta.version || '');
     document.getElementById('cfgpath').textContent = meta.config_path || '';
     renderAll();
+    loadApiKeys(); // fire-and-forget: fills the API Keys section
   } catch (err) {
     document.getElementById('loading').textContent = 'Could not load configuration: ' + err.message
       + (TOKEN ? '' : ' \u2014 if a token is configured, open this page as /?token=\u2026');

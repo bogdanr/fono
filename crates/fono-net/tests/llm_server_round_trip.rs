@@ -263,28 +263,26 @@ async fn missing_user_message_is_400() {
 }
 
 #[tokio::test]
-async fn auth_token_gates_requests() {
+async fn loopback_is_trusted_even_with_auth_on() {
+    // With auth enabled and a verifier that rejects everything, a loopback
+    // caller (the local owner) is still admitted without a token — this is
+    // the deliberate no-bootstrap-lockout rule. The non-loopback 401 path
+    // is unit-tested exhaustively in `fono_net::auth::tests` (loopback is
+    // untestable over a real socket, where the peer is always 127.0.0.1).
     let mock = Arc::new(MockAssistant { deltas: vec!["ok".into()] });
-    let cfg = LlmServerConfig {
-        port: 0,
-        auth_token: Some("secret".to_string()),
-        ..LlmServerConfig::default()
-    };
-    let handle = LlmServer::with_fixed(cfg, mock).start().await.expect("server starts");
+    let cfg = LlmServerConfig { port: 0, auth_enabled: true, ..LlmServerConfig::default() };
+    let reject_all: fono_net::AuthVerifier = Arc::new(|_tok: &str| None);
+    let usage: fono_net::UsageSink = Arc::new(|_id| {});
+    let handle = LlmServer::with_fixed(cfg, mock)
+        .with_auth(reject_all, usage)
+        .start()
+        .await
+        .expect("server starts");
     let base = format!("http://{}", handle.local_addr());
     let client = reqwest::Client::new();
 
-    // No token → 401.
+    // No token, but loopback → admitted.
     let resp = client.get(format!("{base}/v1/models")).send().await.expect("request");
-    assert_eq!(resp.status(), 401);
-
-    // Correct token → 200.
-    let resp = client
-        .get(format!("{base}/v1/models"))
-        .header("authorization", "Bearer secret")
-        .send()
-        .await
-        .expect("request");
     assert_eq!(resp.status(), 200);
 
     handle.shutdown().await;

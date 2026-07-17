@@ -1475,11 +1475,19 @@ pub struct ServerLlm {
     pub bind: String,
     /// TCP port. Default `11434` (the de-facto Ollama port).
     pub port: u16,
-    /// Optional pre-shared bearer token reference, resolved through
-    /// `secrets.toml` / env. Empty = no auth. When set, requests must
-    /// carry `Authorization: Bearer <token>`. The plaintext HTTP
-    /// transport offers no confidentiality — the token gates access,
-    /// not eavesdropping; use TLS/reverse-proxy for off-LAN exposure.
+    /// Require a valid inbound API key on the inference surface. Default
+    /// `true`. When on, non-loopback callers to `/v1/chat/completions`,
+    /// `/v1/audio/transcriptions`, `/v1/audio/speech`, and the Ollama
+    /// routes must present `Authorization: Bearer <key>` matching a key
+    /// created in the web UI or via `fono server keys create`. Loopback
+    /// callers are always trusted so a local client is never locked out.
+    /// The keys themselves live in `api_keys.sqlite`, never here.
+    #[serde(default = "default_true")]
+    pub auth: bool,
+    /// Deprecated: legacy single pre-shared bearer token reference. Kept
+    /// only so pre-existing configs still parse; on first load the daemon
+    /// migrates any non-empty value into a named entry in the API-key
+    /// store, sets `auth = true`, and clears this field.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub auth_token_ref: String,
     /// Optional model-name override for the assistant the server
@@ -1503,6 +1511,7 @@ impl Default for ServerLlm {
             enabled: false,
             bind: "127.0.0.1".to_string(),
             port: 11_434,
+            auth: true,
             auth_token_ref: String::new(),
             model: String::new(),
         }
@@ -1524,9 +1533,16 @@ pub struct ServerWeb {
     pub bind: String,
     /// TCP port. Default `10808`.
     pub port: u16,
-    /// Optional pre-shared bearer token reference, resolved through
-    /// `secrets.toml` / env. Empty = no auth (fine on loopback; unwise
-    /// on wider binds).
+    /// Require a valid inbound API key for non-loopback access to the web
+    /// settings surface (and the `/v1/audio/speech` route it hosts).
+    /// Default `true`. Loopback callers are always trusted so the very
+    /// first key can be created from the local browser without a
+    /// bootstrap lockout. Keys live in `api_keys.sqlite`, never here.
+    #[serde(default = "default_true")]
+    pub auth: bool,
+    /// Deprecated: legacy single pre-shared bearer token reference. Kept
+    /// only so pre-existing configs still parse; migrated into the
+    /// API-key store on first load, then cleared.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub auth_token_ref: String,
 }
@@ -1537,6 +1553,7 @@ impl Default for ServerWeb {
             enabled: false,
             bind: "127.0.0.1".to_string(),
             port: 10_808,
+            auth: true,
             auth_token_ref: String::new(),
         }
     }

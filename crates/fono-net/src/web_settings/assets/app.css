@@ -333,6 +333,36 @@ details.sec .body > .row:first-child, details.sec .body > .row.master { border-t
 .wordmark .dot { color: var(--accent); }
 .privacy-note { font-size: 12px; color: var(--ink-dim); display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 
+/* ---------- API keys table ---------- */
+.key-new-row { display: flex; gap: 8px; align-items: center; margin: 10px 0 14px; flex-wrap: wrap; }
+.key-reveal {
+  border: 1px solid var(--accent); border-radius: var(--radius);
+  background: var(--accent-soft); padding: 10px 12px; margin: 10px 0 14px;
+}
+.key-reveal .lbl { font-size: 12px; color: var(--ink-mute); margin-bottom: 6px; }
+.key-reveal-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.key-reveal-row code { font-size: 13px; word-break: break-all; }
+.key-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.key-table th {
+  text-align: left; font-weight: 600; font-size: 11px; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--ink-dim); padding: 6px 10px;
+  border-bottom: 1px solid var(--line-2);
+}
+.key-table td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.key-table td.mono { white-space: nowrap; }
+.key-table tr.key-revoked td { color: var(--ink-dim); }
+.key-actions { white-space: nowrap; text-align: right; width: 1%; }
+.keybtn {
+  width: 30px; height: 30px; padding: 0; margin-left: 6px;
+  font-size: 15px; line-height: 1; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--line-2); background: var(--bg-2); color: var(--ink-mute);
+  vertical-align: middle;
+}
+.keybtn:hover { color: var(--ink); background: var(--bg-3); }
+.keybtn.danger:hover { color: var(--accent); border-color: var(--accent); }
+.key-new-row .select { width: auto; }
+.key-exp-warn { color: var(--accent); }
+
 @media (max-width: 560px) {
   main { padding: 24px 14px 140px; }
   details.sec .body { padding-left: 18px; }

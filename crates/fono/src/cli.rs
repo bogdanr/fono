@@ -233,6 +233,12 @@ pub enum Cmd {
         #[command(subcommand)]
         action: KeysCmd,
     },
+    /// Manage the local server: inbound API keys that authenticate
+    /// callers to the LLM/STT/TTS API and the web settings page.
+    Server {
+        #[command(subcommand)]
+        action: ServerCmd,
+    },
     /// Manage the personal vocabulary (`~/.config/fono/vocabulary.toml`).
     ///
     /// Deterministic transcript corrections: teach Fono once that a
@@ -494,6 +500,57 @@ pub enum KeysCmd {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum ServerCmd {
+    /// Manage inbound API keys (guard the LLM/STT/TTS API and web UI).
+    Keys {
+        #[command(subcommand)]
+        action: ServerKeysCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ServerKeysCmd {
+    /// List inbound API keys (secrets are masked; usage is per month).
+    List,
+    /// Create a new key and print its secret exactly once.
+    Create {
+        /// Human-readable name, e.g. `laptop` or `home-assistant`.
+        name: String,
+        /// Optional expiry, days from now (omit for a key that never expires).
+        #[arg(long)]
+        expires_in_days: Option<i64>,
+    },
+    /// Rename an existing key by id.
+    Rename {
+        /// Numeric key id (see `fono server keys list`).
+        id: i64,
+        /// New name.
+        name: String,
+    },
+    /// Set or clear a key's expiry by id.
+    Expire {
+        /// Numeric key id.
+        id: i64,
+        /// Days from now until expiry. Use `--never` to clear it instead.
+        #[arg(long, conflicts_with = "never")]
+        in_days: Option<i64>,
+        /// Clear any expiry so the key never expires.
+        #[arg(long)]
+        never: bool,
+    },
+    /// Revoke a key by id (keeps its usage history; disables the key).
+    Revoke {
+        /// Numeric key id.
+        id: i64,
+    },
+    /// Permanently delete a key and its usage counters by id.
+    Delete {
+        /// Numeric key id.
+        id: i64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum VocabularyCmd {
     /// List all vocabulary entries.
     List,
@@ -736,6 +793,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
         Some(Cmd::Use { action }) => use_cmd(&paths, action).await,
         Some(Cmd::Keys { action }) => keys_cmd(&paths, action).await,
+        Some(Cmd::Server { action }) => server_cmd(&paths, action).await,
         Some(Cmd::Vocabulary { action }) => vocabulary_cmd(&paths, action),
         Some(Cmd::TestOverlay) => {
             test_overlay_cmd();
@@ -1370,15 +1428,9 @@ fn config_web_cmd(paths: &Paths) -> Result<()> {
     }
     let web = &cfg.server.web;
     let host = if web.bind == "0.0.0.0" || web.bind == "::" { "127.0.0.1" } else { &web.bind };
-    let token_query = if web.auth_token_ref.is_empty() {
-        String::new()
-    } else {
-        Secrets::load(&paths.secrets_file())?
-            .resolve(&web.auth_token_ref)
-            .map(|tok| format!("?token={tok}"))
-            .unwrap_or_default()
-    };
-    let url = format!("http://{host}:{}/{token_query}", web.port);
+    // Loopback callers are always trusted, so a locally-opened settings
+    // page needs no token in the URL.
+    let url = format!("http://{host}:{}/", web.port);
     let listening = std::net::ToSocketAddrs::to_socket_addrs(&format!("{host}:{}", web.port))
         .ok()
         .and_then(|mut a| a.next())
@@ -2178,6 +2230,129 @@ async fn keys_cmd(paths: &Paths, action: KeysCmd) -> Result<()> {
             let secrets = Secrets::load(&secrets_path).unwrap_or_default();
             print_keys_list(&secrets);
             print_keys_reachability(&secrets).await;
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// `fono server keys …` — inbound API keys that authenticate callers to
+// the local LLM/STT/TTS API and the web settings page. Distinct from
+// `fono keys` (outbound provider keys in secrets.toml); these live in
+// `api_keys.sqlite`, hashed at rest. Verified constant-time by the
+// servers; usage is stored as bounded per-interval counters, never an
+// access log. Secrets are shown exactly once, at creation.
+// ---------------------------------------------------------------------
+
+async fn server_cmd(paths: &Paths, action: ServerCmd) -> Result<()> {
+    match action {
+        ServerCmd::Keys { action } => server_keys_cmd(paths, action).await,
+    }
+}
+
+/// Render an epoch-seconds instant as a coarse "N days ago" (past) or
+/// "never" when absent — the CLI has no date-formatting dependency and
+/// the web UI is the place for exact dates.
+fn ago(ts: Option<i64>, now: i64) -> String {
+    ts.map_or_else(
+        || "never".to_string(),
+        |t| {
+            let d = (now - t) / 86_400;
+            if d <= 0 {
+                "today".to_string()
+            } else {
+                format!("{d}d ago")
+            }
+        },
+    )
+}
+
+/// Render an expiry instant relative to now: "never", "in Nd", or
+/// "expired".
+fn until(ts: Option<i64>, now: i64) -> String {
+    ts.map_or_else(
+        || "never".to_string(),
+        |t| {
+            let d = (t - now) / 86_400;
+            if t <= now {
+                "expired".to_string()
+            } else if d == 0 {
+                "<1d".to_string()
+            } else {
+                format!("in {d}d")
+            }
+        },
+    )
+}
+
+async fn server_keys_cmd(paths: &Paths, action: ServerKeysCmd) -> Result<()> {
+    use fono_core::api_keys::ApiKeyStore;
+    let store = ApiKeyStore::open(&paths.api_keys_db())
+        .context("open api_keys.sqlite (the inbound API-key store)")?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    match action {
+        ServerKeysCmd::List => {
+            let keys = store.list()?;
+            if keys.is_empty() {
+                println!("no inbound API keys ({})", paths.api_keys_db().display());
+                println!("create one with: fono server keys create <name>");
+                return Ok(());
+            }
+            println!("inbound API keys ({}):", paths.api_keys_db().display());
+            println!(
+                "  {:>4}  {:<20} {:<16} {:<10} {:<10} {:<10} USAGE(month)",
+                "ID", "NAME", "SECRET", "CREATED", "LAST USED", "EXPIRES"
+            );
+            for k in keys {
+                let name = if k.revoked { format!("{} (revoked)", k.name) } else { k.name.clone() };
+                println!(
+                    "  {:>4}  {:<20} {:<16} {:<10} {:<10} {:<10} {}",
+                    k.id,
+                    name,
+                    k.masked,
+                    ago(Some(k.created_at), now),
+                    ago(k.last_used_at, now),
+                    until(k.expires_at, now),
+                    k.usage_month,
+                );
+            }
+        }
+        ServerKeysCmd::Create { name, expires_in_days } => {
+            let expires_at = expires_in_days.map(|d| now + d.max(0) * 86_400);
+            let (view, secret) = store.create(&name, expires_at)?;
+            println!("created inbound API key #{} {:?}", view.id, view.name);
+            println!();
+            println!("  {secret}");
+            println!();
+            println!("This secret is shown only once — copy it now. It is stored only as a");
+            println!("hash and can never be shown again. Use it as a bearer token:");
+            println!("  Authorization: Bearer {secret}");
+        }
+        ServerKeysCmd::Rename { id, name } => {
+            store.rename(id, &name)?;
+            println!("renamed key #{id} to {name:?}");
+        }
+        ServerKeysCmd::Expire { id, in_days, never } => {
+            if !never && in_days.is_none() {
+                anyhow::bail!("specify --in-days <N> or --never");
+            }
+            let expires_at = if never { None } else { in_days.map(|d| now + d.max(0) * 86_400) };
+            store.set_expiry(id, expires_at)?;
+            match expires_at {
+                Some(_) => println!("key #{id} now expires {}", until(expires_at, now)),
+                None => println!("key #{id} no longer expires"),
+            }
+        }
+        ServerKeysCmd::Revoke { id } => {
+            store.revoke(id)?;
+            println!("revoked key #{id} (usage history kept; the key no longer authenticates)");
+        }
+        ServerKeysCmd::Delete { id } => {
+            store.delete(id)?;
+            println!("deleted key #{id} and its usage counters");
         }
     }
     Ok(())

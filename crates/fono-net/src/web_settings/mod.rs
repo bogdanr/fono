@@ -102,6 +102,25 @@ pub type SpeechFn = Arc<
         + Sync,
 >;
 
+/// List all inbound API keys as JSON (metadata only — never secrets):
+/// `{"keys": [{id, name, masked, created_at, expires_at, last_used_at,
+/// revoked, usage_day, usage_month}, …]}`.
+pub type ListApiKeysFn =
+    Arc<dyn Fn() -> std::result::Result<serde_json::Value, String> + Send + Sync>;
+/// Create a named key. Args: `(name, expires_at?)`. Returns
+/// `{"key": {…metadata…}, "secret": "fono_sk_…"}` — the plaintext secret
+/// is present **exactly once**, in this response only.
+pub type CreateApiKeyFn =
+    Arc<dyn Fn(&str, Option<i64>) -> std::result::Result<serde_json::Value, String> + Send + Sync>;
+/// Update a key by id. The JSON body may carry any of `name` (rename),
+/// `expires_at` (number or null), or `revoked` (bool). Returns the
+/// updated metadata.
+pub type UpdateApiKeyFn = Arc<
+    dyn Fn(i64, serde_json::Value) -> std::result::Result<serde_json::Value, String> + Send + Sync,
+>;
+/// Permanently delete a key (and its usage counters) by id.
+pub type DeleteApiKeyFn = Arc<dyn Fn(i64) -> std::result::Result<(), String> + Send + Sync>;
+
 /// Hook closures supplied by the daemon layer. The server itself is a thin
 /// wire adapter with no config semantics.
 #[derive(Clone)]
@@ -115,6 +134,11 @@ pub struct WebSettingsHooks {
     pub doctor: DoctorFn,
     /// OpenAI-compatible speech synthesis handler for `POST /v1/audio/speech`.
     pub speak: SpeechFn,
+    /// Inbound API-key management (the Groq-style "API Keys" table).
+    pub list_api_keys: ListApiKeysFn,
+    pub create_api_key: CreateApiKeyFn,
+    pub update_api_key: UpdateApiKeyFn,
+    pub delete_api_key: DeleteApiKeyFn,
 }
 
 /// Configuration for [`WebSettingsServer::start`]. Built from
@@ -125,10 +149,13 @@ pub struct WebSettingsConfig {
     pub bind: String,
     /// TCP port. Default [`DEFAULT_PORT`] (`10808`).
     pub port: u16,
-    /// Optional pre-shared bearer token. When `Some`, `/api/*` requests
-    /// must carry `Authorization: Bearer <token>` or `?token=<token>`.
-    /// The static assets are served without auth (they contain no state).
-    pub auth_token: Option<String>,
+    /// Require a valid inbound API key for non-loopback access. When
+    /// `true`, non-loopback `/api/*` and `/v1/audio/*` requests must carry
+    /// `Authorization: Bearer <key>` (or `?token=<key>`) matching an entry
+    /// in the API-key store. Loopback callers are always trusted so the
+    /// first key can be created from the local browser without a bootstrap
+    /// lockout. Static assets are always served without auth.
+    pub auth_enabled: bool,
     /// When `true`, refuses non-loopback peers even if the bind address
     /// would have allowed them. Set when `bind = "127.0.0.1"`.
     pub loopback_only: bool,
@@ -139,7 +166,7 @@ impl Default for WebSettingsConfig {
         Self {
             bind: "127.0.0.1".to_string(),
             port: DEFAULT_PORT,
-            auth_token: None,
+            auth_enabled: true,
             loopback_only: true,
         }
     }
@@ -183,19 +210,36 @@ impl Drop for WebSettingsHandle {
 struct ServerCtx {
     cfg: Arc<WebSettingsConfig>,
     hooks: WebSettingsHooks,
+    verifier: Option<crate::auth::AuthVerifier>,
+    usage: Option<crate::auth::UsageSink>,
 }
 
 /// The server itself. Stateless beyond the config + hook closures.
 pub struct WebSettingsServer {
     cfg: WebSettingsConfig,
     hooks: WebSettingsHooks,
+    verifier: Option<crate::auth::AuthVerifier>,
+    usage: Option<crate::auth::UsageSink>,
 }
 
 impl WebSettingsServer {
     /// Build a server. Does not bind yet — call [`Self::start`].
     #[must_use]
     pub fn new(cfg: WebSettingsConfig, hooks: WebSettingsHooks) -> Self {
-        Self { cfg, hooks }
+        Self { cfg, hooks, verifier: None, usage: None }
+    }
+
+    /// Attach the inbound-auth verifier and usage sink. Required for
+    /// `auth_enabled = true` to admit any non-loopback caller.
+    #[must_use]
+    pub fn with_auth(
+        mut self,
+        verifier: crate::auth::AuthVerifier,
+        usage: crate::auth::UsageSink,
+    ) -> Self {
+        self.verifier = Some(verifier);
+        self.usage = Some(usage);
+        self
     }
 
     /// Bind the listener and spawn the accept loop. Returns once the
@@ -214,7 +258,12 @@ impl WebSettingsServer {
         );
 
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
-        let ctx = ServerCtx { cfg: Arc::new(self.cfg), hooks: self.hooks };
+        let ctx = ServerCtx {
+            cfg: Arc::new(self.cfg),
+            hooks: self.hooks,
+            verifier: self.verifier,
+            usage: self.usage,
+        };
         let join = tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -234,7 +283,7 @@ impl WebSettingsServer {
                                     drop(sock);
                                     continue;
                                 }
-                                tokio::spawn(serve_conn(sock, ctx.clone()));
+                                tokio::spawn(serve_conn(sock, peer, ctx.clone()));
                             }
                             Err(e) => {
                                 tracing::warn!(target: "fono::web::server", "accept failed: {e:#}");
@@ -250,11 +299,11 @@ impl WebSettingsServer {
     }
 }
 
-async fn serve_conn(sock: TcpStream, ctx: ServerCtx) {
+async fn serve_conn(sock: TcpStream, peer: SocketAddr, ctx: ServerCtx) {
     let io = TokioIo::new(sock);
     let service = service_fn(move |req: Request<Incoming>| {
         let ctx = ctx.clone();
-        async move { Ok::<_, Infallible>(route(req, ctx).await) }
+        async move { Ok::<_, Infallible>(route(req, peer, ctx).await) }
     });
     if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
         tracing::debug!(target: "fono::web::server", "connection ended: {e:#}");
@@ -263,7 +312,7 @@ async fn serve_conn(sock: TcpStream, ctx: ServerCtx) {
 
 /// Dispatch one request. The service layer never fails; every path
 /// returns a `Response` (including error responses).
-async fn route(req: Request<Incoming>, ctx: ServerCtx) -> Response<ResBody> {
+async fn route(req: Request<Incoming>, peer: SocketAddr, ctx: ServerCtx) -> Response<ResBody> {
     let path = req.uri().path().to_owned();
     let method = req.method().clone();
 
@@ -279,10 +328,27 @@ async fn route(req: Request<Incoming>, ctx: ServerCtx) -> Response<ResBody> {
         _ => {}
     }
 
-    // Everything else is the JSON API — token-gated when configured.
-    if let Some(expected) = ctx.cfg.auth_token.as_deref() {
-        if !token_ok(&req, expected) {
-            return error_response(StatusCode::UNAUTHORIZED, "missing or invalid token");
+    // Everything else is state-bearing (JSON API + `/v1/audio/*`). When
+    // auth is on, a presented token is always verified — even from loopback
+    // — so a wrong `?token=`/bearer is rejected and a valid key's id is
+    // recorded against its usage counters. Loopback with *no* token is
+    // trusted so the first key can be created locally (bootstrap).
+    if ctx.cfg.auth_enabled {
+        let presented = presented_token(&req);
+        match crate::auth::decide(
+            ctx.cfg.auth_enabled,
+            is_loopback(&peer),
+            presented.as_deref(),
+            ctx.verifier.as_ref(),
+        ) {
+            crate::auth::AuthDecision::Allow(key_id) => {
+                if let (Some(id), Some(sink)) = (key_id, ctx.usage.as_ref()) {
+                    sink(id);
+                }
+            }
+            crate::auth::AuthDecision::Deny => {
+                return error_response(StatusCode::UNAUTHORIZED, "missing or invalid API key");
+            }
         }
     }
     match (&method, path.as_str()) {
@@ -300,6 +366,9 @@ async fn route(req: Request<Incoming>, ctx: ServerCtx) -> Response<ResBody> {
             }
         }
         (&Method::GET, "/api/meta") => json_ok(&(ctx.hooks.meta)()),
+        (m, p) if p == "/api/apikeys" || p.starts_with("/api/apikeys/") => {
+            route_api_keys(m, p, req, &ctx).await
+        }
         (&Method::POST, "/v1/audio/speech") => {
             let Some(body) = read_json_body(req).await else {
                 return openai_error(StatusCode::BAD_REQUEST, "invalid or oversized JSON body");
@@ -346,6 +415,57 @@ async fn route(req: Request<Incoming>, ctx: ServerCtx) -> Response<ResBody> {
     }
 }
 
+/// Dispatch the inbound API-key management routes (`/api/apikeys[/id]`).
+/// Split out of [`route`] to keep it under clippy's `too_many_lines`.
+async fn route_api_keys(
+    method: &Method,
+    path: &str,
+    req: Request<Incoming>,
+    ctx: &ServerCtx,
+) -> Response<ResBody> {
+    match (method, path) {
+        (&Method::GET, "/api/apikeys") => match (ctx.hooks.list_api_keys)() {
+            Ok(v) => json_ok(&v),
+            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        },
+        (&Method::POST, "/api/apikeys") => {
+            let Some(body) = read_json_body(req).await else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid or oversized JSON body");
+            };
+            let Some(name) = body.get("name").and_then(|v| v.as_str()) else {
+                return error_response(StatusCode::BAD_REQUEST, "body must include a \"name\"");
+            };
+            let expires_at = body.get("expires_at").and_then(serde_json::Value::as_i64);
+            match (ctx.hooks.create_api_key)(name, expires_at) {
+                Ok(v) => json_ok(&v),
+                Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &e),
+            }
+        }
+        (&Method::PATCH, p) if p.starts_with("/api/apikeys/") => {
+            let Some(id) = p.trim_start_matches("/api/apikeys/").parse::<i64>().ok() else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid API key id");
+            };
+            let Some(body) = read_json_body(req).await else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid or oversized JSON body");
+            };
+            match (ctx.hooks.update_api_key)(id, body) {
+                Ok(v) => json_ok(&v),
+                Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &e),
+            }
+        }
+        (&Method::DELETE, p) if p.starts_with("/api/apikeys/") => {
+            let Some(id) = p.trim_start_matches("/api/apikeys/").parse::<i64>().ok() else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid API key id");
+            };
+            match (ctx.hooks.delete_api_key)(id) {
+                Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
+                Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &e),
+            }
+        }
+        _ => error_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
+    }
+}
+
 /// Secret names are env-var shaped: `[A-Z][A-Z0-9_]*`, sane length.
 fn valid_secret_name(name: &str) -> bool {
     !name.is_empty()
@@ -354,20 +474,19 @@ fn valid_secret_name(name: &str) -> bool {
         && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
-/// Bearer header or `?token=` query parameter.
-fn token_ok(req: &Request<Incoming>, expected: &str) -> bool {
-    let bearer = req
+/// Bearer header or `?token=` query parameter, whichever is present.
+fn presented_token(req: &Request<Incoming>) -> Option<String> {
+    if let Some(tok) = req
         .headers()
         .get(hyper::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
-        .is_some_and(|tok| tok == expected);
-    if bearer {
-        return true;
+    {
+        return Some(tok.to_owned());
     }
     req.uri()
         .query()
-        .is_some_and(|q| q.split('&').any(|kv| kv.strip_prefix("token=") == Some(expected)))
+        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token=").map(str::to_owned)))
 }
 
 async fn read_json_body(req: Request<Incoming>) -> Option<serde_json::Value> {
@@ -452,7 +571,7 @@ mod tests {
         assert_eq!(cfg.bind, "127.0.0.1");
         assert_eq!(cfg.port, 10_808);
         assert!(cfg.loopback_only);
-        assert!(cfg.auth_token.is_none());
+        assert!(cfg.auth_enabled);
     }
 
     #[test]
@@ -557,9 +676,7 @@ mod tests {
             prompt_suffix: "s".into(),
         });
         cfg.server.wyoming.auth_token_ref = "T".into();
-        cfg.server.llm.auth_token_ref = "T".into();
         cfg.server.llm.model = "m".into();
-        cfg.server.web.auth_token_ref = "T".into();
         cfg.network.instance_name = "n".into();
         cfg.mcp.summarize_prompt = "p".into();
         cfg.mcp.voices.insert("app".into(), "auto".into());

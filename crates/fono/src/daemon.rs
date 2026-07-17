@@ -316,8 +316,10 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     // daemon's lifetime; dropping the handles closes the listener and
     // fires the mDNS goodbye. Backend swaps (`fono use assistant …`) are
     // tracked live via the per-request provider closure. Toggling
-    // `[server.llm].enabled` hot-reloads the listener in place via the
-    // tray (`ToggleLlmServer`) — no restart required, mirroring Wyoming.
+    // `[server.llm].enabled` hot-reloads the listener in place — from the
+    // tray (`ToggleLlmServer`) or from a browser config save (the web
+    // settings `put_config` hook reconciles this control) — no restart
+    // required, mirroring Wyoming.
     // ---------------------------------------------------------------
     let llm_ctl = LlmControl {
         rt: Arc::new(tokio::sync::Mutex::new(LlmRuntime::default())),
@@ -338,7 +340,16 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
     // afterwards needs a restart.
     // ---------------------------------------------------------------
     let web_settings: WebSettingsSlot = Arc::new(tokio::sync::Mutex::new(
-        spawn_web_settings_if_enabled(&config, paths, &secrets, orchestrator.as_ref(), &wake).await,
+        spawn_web_settings_if_enabled(
+            &config,
+            paths,
+            &secrets,
+            orchestrator.as_ref(),
+            &wake,
+            &llm_ctl,
+            &wyoming_ctl,
+        )
+        .await,
     ));
 
     // ---------------------------------------------------------------
@@ -1336,6 +1347,8 @@ pub async fn run(paths: &Paths, verbosity: Verbosity) -> Result<()> {
                             &web_ctl_for_tray,
                             orchestrator_for_tray.as_ref(),
                             &wake_tray,
+                            &llm_ctl_for_tray,
+                            &wyoming_ctl_for_tray,
                         ))
                         .await;
                     }
@@ -3593,12 +3606,41 @@ async fn spawn_llm_server_if_enabled(
     }
 
     let loopback_only = cfg.bind == "127.0.0.1" || cfg.bind == "::1";
-    let auth_token =
-        if cfg.auth_token_ref.is_empty() { None } else { std::env::var(&cfg.auth_token_ref).ok() };
+    // Inbound API-key auth (replaces the single static token). Loopback is
+    // always trusted; non-loopback callers need a valid key when `auth`.
+    let auth = match crate::api_key_auth::ApiKeyAuth::open(paths) {
+        Ok(a) => a,
+        Err(e) => {
+            warn!("LLM server: cannot open API-key store: {e:#}; skipping LLM server");
+            return None;
+        }
+    };
+    // One-time migration of any legacy [server.llm].auth_token_ref into a key.
+    crate::api_key_auth::migrate_legacy_token(
+        &auth,
+        "llm",
+        &cfg.auth_token_ref,
+        std::env::var(&cfg.auth_token_ref).ok(),
+    );
+    if !loopback_only && cfg.auth && auth.active_count() == 0 {
+        warn!(
+            "[server.llm] is bound beyond loopback ({}) with auth on but no API keys exist — \
+             all remote requests will be rejected. Create one with `fono server keys create`.",
+            cfg.bind
+        );
+    }
+    if !loopback_only && !cfg.auth {
+        warn!(
+            "[server.llm] is bound beyond loopback ({}) with auth DISABLED — anyone on the \
+             network can drive your assistant (and any paid cloud key it proxies). Set \
+             [server.llm].auth = true.",
+            cfg.bind
+        );
+    }
     let server_cfg = fono_net::LlmServerConfig {
         bind: cfg.bind.clone(),
         port: cfg.port,
-        auth_token,
+        auth_enabled: cfg.auth,
         model_name: llm_model_name(config),
         server_version: env!("CARGO_PKG_VERSION").to_string(),
         loopback_only,
@@ -3627,6 +3669,7 @@ async fn spawn_llm_server_if_enabled(
     match fono_net::LlmServer::new(server_cfg, provider)
         .with_upstream(upstream)
         .with_audio(Some(speech), Some(transcribe))
+        .with_auth(auth.verifier(), auth.usage_sink())
         .start()
         .await
     {
@@ -3666,11 +3709,13 @@ async fn spawn_web_settings_if_enabled(
     secrets: &Secrets,
     orchestrator: Option<&Arc<SessionOrchestrator>>,
     wake: &crate::wake::WakeHandle,
+    llm_ctl: &LlmControl,
+    wyoming_ctl: &WyomingControl,
 ) -> Option<fono_net::WebSettingsHandle> {
     if !config.server.web.enabled {
         return None;
     }
-    spawn_web_settings(config, paths, secrets, orchestrator, wake).await
+    spawn_web_settings(config, paths, secrets, orchestrator, wake, llm_ctl, wyoming_ctl).await
 }
 
 /// Tray "Settings…" handler: lazy-start the web settings listener when
@@ -3681,6 +3726,8 @@ async fn open_settings_web_via_tray(
     slot: &WebSettingsSlot,
     orchestrator: Option<&Arc<SessionOrchestrator>>,
     wake: &crate::wake::WakeHandle,
+    llm_ctl: &LlmControl,
+    wyoming_ctl: &WyomingControl,
 ) {
     let mut guard = slot.lock().await;
     if guard.is_none() {
@@ -3700,7 +3747,9 @@ async fn open_settings_web_via_tray(
             }
         };
         let secrets = Secrets::load(&paths.secrets_file()).unwrap_or_default();
-        *guard = spawn_web_settings(&cfg, paths, &secrets, orchestrator, wake).await;
+        *guard =
+            spawn_web_settings(&cfg, paths, &secrets, orchestrator, wake, llm_ctl, wyoming_ctl)
+                .await;
     }
     if let Some(handle) = guard.as_ref() {
         open_url(&web_settings_url(&handle.local_addr()));
@@ -3734,26 +3783,50 @@ async fn spawn_web_settings(
     secrets: &Secrets,
     orchestrator: Option<&Arc<SessionOrchestrator>>,
     wake: &crate::wake::WakeHandle,
+    llm_ctl: &LlmControl,
+    wyoming_ctl: &WyomingControl,
 ) -> Option<fono_net::WebSettingsHandle> {
     let cfg = &config.server.web;
     let loopback_only = cfg.bind == "127.0.0.1" || cfg.bind == "::1";
-    let auth_token =
-        if cfg.auth_token_ref.is_empty() { None } else { secrets.resolve(&cfg.auth_token_ref) };
-    if !loopback_only && auth_token.is_none() {
+    let auth = match crate::api_key_auth::ApiKeyAuth::open(paths) {
+        Ok(a) => a,
+        Err(e) => {
+            warn!("web settings: cannot open API-key store: {e:#}; not starting settings UI");
+            return None;
+        }
+    };
+    crate::api_key_auth::migrate_legacy_token(
+        &auth,
+        "web",
+        &cfg.auth_token_ref,
+        secrets.resolve(&cfg.auth_token_ref),
+    );
+    if !loopback_only && cfg.auth && auth.active_count() == 0 {
         warn!(
-            "[server.web] is bound beyond loopback ({}) without a resolvable auth_token_ref — \
-             anyone on the network can rewrite the config; set [server.web].auth_token_ref",
+            "[server.web] is bound beyond loopback ({}) with auth on but no API keys exist — \
+             remote access will be rejected. Create one locally, then share it.",
+            cfg.bind
+        );
+    }
+    if !loopback_only && !cfg.auth {
+        warn!(
+            "[server.web] is bound beyond loopback ({}) with auth DISABLED — anyone on the \
+             network can rewrite the config; set [server.web].auth = true",
             cfg.bind
         );
     }
     let server_cfg = fono_net::WebSettingsConfig {
         bind: cfg.bind.clone(),
         port: cfg.port,
-        auth_token,
+        auth_enabled: cfg.auth,
         loopback_only,
     };
-    let hooks = web_settings_hooks(paths, orchestrator, wake);
-    match fono_net::WebSettingsServer::new(server_cfg, hooks).start().await {
+    let hooks = web_settings_hooks(paths, orchestrator, wake, &auth, llm_ctl, wyoming_ctl);
+    match fono_net::WebSettingsServer::new(server_cfg, hooks)
+        .with_auth(auth.verifier(), auth.usage_sink())
+        .start()
+        .await
+    {
         Ok(handle) => {
             info!(
                 "web settings UI listening on http://{} (loopback_only={loopback_only})",
@@ -3801,6 +3874,9 @@ fn web_settings_hooks(
     paths: &Paths,
     orchestrator: Option<&Arc<SessionOrchestrator>>,
     wake: &crate::wake::WakeHandle,
+    auth: &crate::api_key_auth::ApiKeyAuth,
+    llm_ctl: &LlmControl,
+    wyoming_ctl: &WyomingControl,
 ) -> fono_net::WebSettingsHooks {
     let config_path = paths.config_file();
     let secrets_path = paths.secrets_file();
@@ -3814,16 +3890,29 @@ fn web_settings_hooks(
     let cp = config_path.clone();
     let orch = orchestrator.map(Arc::clone);
     let wake_put = wake.clone();
+    let put_paths = paths.clone();
+    let llm_ctl_put = llm_ctl.clone();
+    let wyoming_ctl_put = wyoming_ctl.clone();
     let put_config: fono_net::web_settings::PutConfigFn = Arc::new(move |value| {
         let cp = cp.clone();
         let orch = orch.clone();
         let wake = wake_put.clone();
+        let put_paths = put_paths.clone();
+        let llm_ctl = llm_ctl_put.clone();
+        let wyoming_ctl = wyoming_ctl_put.clone();
         Box::pin(async move {
             let mut new_cfg: Config =
                 serde_json::from_value(value).map_err(|e| format!("invalid config: {e}"))?;
             new_cfg.migrate().map_err(|e| format!("config migration: {e}"))?;
             new_cfg.save(&cp).map_err(|e| format!("save config: {e}"))?;
             info!("web settings: config saved via browser UI");
+            // Start/stop the LAN listeners in place so toggling
+            // `[server.llm]` / `[server.wyoming]` from the browser takes
+            // effect immediately, exactly like the tray toggles do — no
+            // daemon restart. (The web server can't reconcile itself from
+            // inside its own request handler; that still needs a restart.)
+            llm_ctl.reconcile(&new_cfg, orch.as_ref()).await;
+            wyoming_ctl.reconcile(&new_cfg, &put_paths, orch.as_ref()).await;
             match orch.as_ref() {
                 Some(o) => match o.reload().await {
                     Ok(summary) => {
@@ -3890,6 +3979,10 @@ fn web_settings_hooks(
         meta,
         doctor,
         speak,
+        list_api_keys: auth.list_hook(),
+        create_api_key: auth.create_hook(),
+        update_api_key: auth.update_hook(),
+        delete_api_key: auth.delete_hook(),
     }
 }
 
@@ -4098,10 +4191,19 @@ fn meta_hook(
             .into_iter()
             .map(|n| (n.to_string(), serde_json::Value::Bool(secrets.has_in_file(n))))
             .collect();
+        // Inbound-auth toggle state so the UI can render the on/off switch
+        // and warn when a server is exposed with auth off.
+        let cfg = Config::load(&config_path).unwrap_or_default();
         serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
             "config_path": config_path.display().to_string(),
             "secrets": statuses,
+            "auth": {
+                "llm": cfg.server.llm.auth,
+                "web": cfg.server.web.auth,
+                "llm_enabled": cfg.server.llm.enabled,
+                "web_enabled": cfg.server.web.enabled,
+            },
             "tts_local": tts_local_meta(),
             "tts_cloud": tts_cloud_meta(&secrets),
             "defaults": {

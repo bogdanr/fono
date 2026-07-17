@@ -145,9 +145,19 @@ conversation agent can then use Fono as a local model backend (ADR 0036).
 enabled = true              # off by default
 bind    = "127.0.0.1"       # loopback only; "0.0.0.0" exposes it on the LAN
 port    = 11434             # Ollama's port, so existing clients connect unchanged
-# auth_token_ref = "FONO_LLM_TOKEN"   # optional bearer token (env/secrets ref)
+auth    = true              # require an API key for non-loopback callers (default on)
 # model = ""                          # optional served-model override (see below)
 ```
+
+**Authentication is a simple on/off switch, on by default.** When `auth`
+is on, callers reaching the server from another machine must present a
+valid inbound API key as `Authorization: Bearer <key>` (loopback callers
+— the local owner — are always trusted, so a local client is never locked
+out). There is no token string in this file: keys are managed separately
+(see [Inbound API keys](#inbound-api-keys-for-the-llmsttts-api-and-web-ui)
+below) and stored hashed in `api_keys.sqlite`, never in `config.toml`.
+Set `auth = false` only if you deliberately want an unauthenticated LAN
+endpoint.
 
 Toggle it from the tray too (*Servers → Local LLM server*) — the listener
 starts/stops in place, no restart. The served model tracks whatever
@@ -196,9 +206,11 @@ adapter instead. `fono doctor` shows which path is in effect.
 
 > **Security note:** because your client's requested model is honoured and
 > your provider key is injected outbound, exposing `[server.llm]` on
-> `0.0.0.0` **without** an `auth_token_ref` turns the box into an open
-> relay to your paid cloud account. Keep the loopback default, or set a
-> bearer token before binding to the LAN.
+> `0.0.0.0` **with `auth = false`** turns the box into an open relay to
+> your paid cloud account. Keep the loopback default, or leave `auth` on
+> (the default) and create at least one API key before binding to the
+> LAN. `fono doctor` warns loudly when a server is LAN-exposed with auth
+> off, or on with no keys (which rejects every remote call).
 
 **See who's calling the server.** At `debug` level the server prints one
 line per request on the `fono::llm::server` target — run the daemon with
@@ -234,10 +246,9 @@ demand. The underlying block:
 ```toml
 [server.web]
 enabled = false          # off by default; `fono config web` / tray flip it on
-bind    = "127.0.0.1"    # loopback only; non-loopback binds want a token
+bind    = "127.0.0.1"    # loopback only; non-loopback binds should keep auth on
 port    = 10808
-# auth_token_ref = "FONO_WEB_TOKEN"   # bearer token (env/secrets ref);
-#                                     # required in practice beyond loopback
+auth    = true           # require an API key for non-loopback callers (default on)
 ```
 
 Saves go through the same atomic-write + hot-reload path as `fono use`,
@@ -247,9 +258,53 @@ response.
 
 > **Security note:** the page can rewrite your whole config and store
 > API keys. It refuses non-loopback peers while `bind` is loopback; if
-> you widen `bind`, set `auth_token_ref` first — the daemon warns
-> loudly otherwise. Turning the listener off again is a config edit
-> (`enabled = false`) plus a daemon restart.
+> you widen `bind`, keep `auth = true` (the default) and create a key —
+> the daemon warns loudly otherwise. Loopback browsers are always
+> trusted, so you can create the first key locally without a lockout.
+> Turning the listener off again is a config edit (`enabled = false`)
+> plus a daemon restart.
+
+### Inbound API keys (for the LLM/STT/TTS API and web UI)
+
+The `auth` toggles above are guarded by a set of **inbound API keys** —
+distinct from the outbound provider keys in `secrets.toml`. One key set
+covers everything Fono *serves*: the OpenAI/Ollama chat API, the
+speech-to-text (`/v1/audio/transcriptions`) and text-to-speech
+(`/v1/audio/speech`) routes, and the web settings page.
+
+Manage them from the web settings **API Keys** section (a table of name,
+masked secret, created / last-used dates, expiry, and per-month usage,
+with create / rename / revoke / delete) or from the CLI:
+
+```console
+$ fono server keys create laptop            # prints the secret ONCE — copy it now
+$ fono server keys create ci --expires-in-days 30
+$ fono server keys list                      # masked; shows last-used + monthly usage
+$ fono server keys rename 3 home-assistant
+$ fono server keys expire 3 --in-days 90     # or --never to clear an expiry
+$ fono server keys revoke 3                   # disables it, keeps usage history
+$ fono server keys delete 3                   # removes it and its counters
+```
+
+Keys live in `api_keys.sqlite` (mode `0600`) as a SHA-256 hash — the
+plaintext secret is shown **exactly once**, at creation, and can never be
+shown again by the CLI or the web page. Use it as a bearer token:
+`Authorization: Bearer fono_sk_…`.
+
+**Usage tracking without an access log.** Each key records a coarse
+"last used" timestamp (debounced) and per-day / per-month request
+*counts* — not a per-request log. The counters are pre-aggregated and
+old buckets are pruned, so `api_keys.sqlite` stays small no matter how
+much the API is called; it never grows into an access log. The web UI
+shows the current month's count per key; `fono server keys list` prints
+the same.
+
+**Upgrading from an older token.** Earlier versions used a single
+`auth_token_ref` string per server. On first run after upgrading, any
+non-empty `auth_token_ref` is migrated into a named inbound key
+(`migrated-llm` / `migrated-web`), `auth` is left on, and the old field
+is cleared from `config.toml`. The migration logs the new secret once so
+you can update existing clients.
 
 ### Per-app context rules
 

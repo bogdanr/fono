@@ -594,6 +594,61 @@ pub fn gather(paths: &Paths, probes_source: impl FnOnce() -> KeyProbes) -> Resul
                 "disabled (enable `[server.llm]` to serve local inference over HTTP)",
             );
         }
+
+        // Inbound API-key authentication for the exposed servers (ADR:
+        // replaces the legacy single static token). Loopback callers are
+        // always trusted; non-loopback callers need a valid key when auth
+        // is on. Report per-server auth state, key counts, and the loud
+        // "open relay to your paid cloud account" hazard when a server is
+        // LAN-exposed with auth off.
+        {
+            let (active, inactive) = fono_core::api_keys::ApiKeyStore::open(&paths.api_keys_db())
+                .map_or((0, 0), |s| {
+                    let a = s.active_count().unwrap_or(0);
+                    let total = s.list().map(|k| k.len() as i64).unwrap_or(0);
+                    (a, (total - a).max(0))
+                });
+            for (label, enabled, bind, auth) in [
+                ("llm", c.server.llm.enabled, c.server.llm.bind.as_str(), c.server.llm.auth),
+                ("web", c.server.web.enabled, c.server.web.bind.as_str(), c.server.web.auth),
+            ] {
+                if !enabled {
+                    continue;
+                }
+                let loopback = bind == "127.0.0.1" || bind == "::1";
+                let auth_str = if auth { ok("on") } else { bad("off") };
+                writeln!(
+                    out,
+                    "  {label} auth: {auth_str}; {active} active / {inactive} inactive key(s)"
+                )?;
+                if !loopback && !auth {
+                    let msg = format!(
+                        "[server.{label}] is LAN-exposed ({bind}) with authentication OFF — anyone \
+                         on the network can drive it (and any paid cloud key it proxies). Set \
+                         [server.{label}].auth = true."
+                    );
+                    writeln!(out, "    {}", bad(&msg))?;
+                    col.push(S::Fail, &format!("{label} auth"), &msg);
+                } else if !loopback && active == 0 {
+                    let msg = format!(
+                        "[server.{label}] is LAN-exposed ({bind}) with auth on but no API keys \
+                         exist — all remote requests are rejected. Create one with \
+                         `fono server keys create`."
+                    );
+                    writeln!(out, "    {}", bad(&msg))?;
+                    col.push(S::Warn, &format!("{label} auth"), &msg);
+                } else {
+                    col.push(
+                        S::Info,
+                        &format!("{label} auth"),
+                        &format!(
+                            "auth {}; {active} active / {inactive} inactive key(s)",
+                            if auth { "on" } else { "off" }
+                        ),
+                    );
+                }
+            }
+        }
         writeln!(out)?;
 
         // ------------------------------------------------------------

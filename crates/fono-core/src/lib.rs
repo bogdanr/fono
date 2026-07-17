@@ -3,6 +3,7 @@
 //!
 //! Implemented per Phase 1 of `docs/plans/2026-04-24-fono-design-v1.md`.
 
+pub mod api_keys;
 pub mod config;
 pub mod correction;
 pub mod critical_notify;
@@ -51,6 +52,7 @@ pub mod vulkan_probe;
 #[cfg(all(feature = "accel-vulkan", any(target_os = "linux", target_os = "windows")))]
 pub mod vk_loader_shim;
 
+pub use api_keys::{ApiKeyStore, ApiKeyView};
 pub use config::Config;
 pub use error::{Error, Result};
 pub use hwcheck::{HardwareSnapshot, LocalTier};

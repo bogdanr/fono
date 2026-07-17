@@ -127,6 +127,17 @@ impl Paths {
         self.data_dir.join("history.sqlite")
     }
 
+    /// Store for **inbound** HTTP API keys and their bounded per-interval
+    /// usage counters (see [`crate::api_keys::ApiKeyStore`]). Lives beside
+    /// `history.sqlite` under the data dir — desktop:
+    /// `$XDG_DATA_HOME/fono/`; system service: `/var/lib/fono/`. Clamped
+    /// `0600`. Deliberately separate from `secrets.toml` (outbound keys)
+    /// and `history.sqlite` (transcripts).
+    #[must_use]
+    pub fn api_keys_db(&self) -> PathBuf {
+        self.data_dir.join("api_keys.sqlite")
+    }
+
     #[must_use]
     pub fn notes_db(&self) -> PathBuf {
         self.data_dir.join("notes.sqlite")

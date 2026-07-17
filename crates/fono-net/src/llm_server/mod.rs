@@ -58,6 +58,8 @@ mod proxy;
 use access_log::ReqLog;
 pub use audio::{TranscribeProvider, TranscribeRequest};
 
+use crate::auth::{AuthVerifier, UsageSink};
+
 /// Default port — Ollama's, so Ollama/OpenAI clients (and Home
 /// Assistant's Ollama conversation agent) point at Fono unchanged.
 pub const DEFAULT_PORT: u16 = 11_434;
@@ -96,9 +98,12 @@ pub struct LlmServerConfig {
     pub bind: String,
     /// TCP port. Default [`DEFAULT_PORT`] (`11434`).
     pub port: u16,
-    /// Optional pre-shared bearer token. When `Some`, requests must
-    /// carry `Authorization: Bearer <token>`.
-    pub auth_token: Option<String>,
+    /// Require a valid inbound API key. When `true`, non-loopback callers
+    /// must present `Authorization: Bearer <key>` matching an entry in the
+    /// API-key store (see [`LlmServer::with_auth`]). Loopback callers are
+    /// always trusted so a local client is never locked out. When `false`
+    /// the surface is open (loopback-only deployments that opt out).
+    pub auth_enabled: bool,
     /// Model id surfaced by `/v1/models` and `/api/tags`. Cosmetic — the
     /// server always drives the one configured assistant regardless of
     /// the `model` field a client sends.
@@ -115,7 +120,7 @@ impl Default for LlmServerConfig {
         Self {
             bind: "127.0.0.1".to_string(),
             port: DEFAULT_PORT,
-            auth_token: None,
+            auth_enabled: true,
             model_name: "fono".to_string(),
             server_version: env!("CARGO_PKG_VERSION").to_string(),
             loopback_only: true,
@@ -135,6 +140,11 @@ pub(crate) struct ServerCtx {
     pub speech: Option<SpeechProvider>,
     /// Optional `POST /v1/audio/transcriptions` handler. `None` = route 404s.
     pub transcribe: Option<TranscribeProvider>,
+    /// Verifier mapping a presented bearer token to a key id. `None` with
+    /// `auth_enabled = true` fails closed (all non-loopback callers 401).
+    pub verifier: Option<AuthVerifier>,
+    /// Records one authenticated hit against the matched key id.
+    pub usage: Option<UsageSink>,
 }
 
 /// Handle returned by [`LlmServer::start`]. Drop or call
@@ -178,13 +188,32 @@ pub struct LlmServer {
     upstream: UpstreamProvider,
     speech: Option<SpeechProvider>,
     transcribe: Option<TranscribeProvider>,
+    verifier: Option<AuthVerifier>,
+    usage: Option<UsageSink>,
 }
 
 impl LlmServer {
     /// Build a server. Does not bind yet — call [`Self::start`].
     #[must_use]
     pub fn new(cfg: LlmServerConfig, assistant: AssistantProvider) -> Self {
-        Self { cfg, assistant, upstream: Arc::new(|| None), speech: None, transcribe: None }
+        Self {
+            cfg,
+            assistant,
+            upstream: Arc::new(|| None),
+            speech: None,
+            transcribe: None,
+            verifier: None,
+            usage: None,
+        }
+    }
+
+    /// Attach the inbound-auth verifier and usage sink. Required for
+    /// `auth_enabled = true` to admit any non-loopback caller.
+    #[must_use]
+    pub fn with_auth(mut self, verifier: AuthVerifier, usage: UsageSink) -> Self {
+        self.verifier = Some(verifier);
+        self.usage = Some(usage);
+        self
     }
 
     /// Attach the OpenAI-compatible audio handlers (`/v1/audio/speech`,
@@ -239,6 +268,8 @@ impl LlmServer {
             upstream: self.upstream,
             speech: self.speech,
             transcribe: self.transcribe,
+            verifier: self.verifier,
+            usage: self.usage,
         };
         let join = tokio::spawn(async move {
             loop {
@@ -314,11 +345,28 @@ async fn route(req: Request<Incoming>, peer: SocketAddr, ctx: ServerCtx) -> Resp
     let peer_field = (!is_loopback(&peer)).then_some(peer);
     let mut log = ReqLog::new(surface, op, ua, peer_field);
 
-    if let Some(expected) = ctx.cfg.auth_token.as_deref() {
-        if !bearer_ok(&req, expected) {
-            let resp = error_response(StatusCode::UNAUTHORIZED, "missing or invalid bearer token");
-            log.finish(resp.status().as_u16());
-            return resp;
+    // Auth: when enabled, a presented bearer token is always verified —
+    // even from loopback — so a wrong key is rejected and a valid key's id
+    // is recorded against its bounded usage counters (last-used, per-day/
+    // month). Loopback with *no* token is trusted (local owner; avoids a
+    // bootstrap lockout). Fails closed when the verifier is absent.
+    if ctx.cfg.auth_enabled {
+        match crate::auth::decide(
+            ctx.cfg.auth_enabled,
+            is_loopback(&peer),
+            presented_bearer(&req),
+            ctx.verifier.as_ref(),
+        ) {
+            crate::auth::AuthDecision::Allow(key_id) => {
+                if let (Some(id), Some(sink)) = (key_id, ctx.usage.as_ref()) {
+                    sink(id);
+                }
+            }
+            crate::auth::AuthDecision::Deny => {
+                let resp = error_response(StatusCode::UNAUTHORIZED, "missing or invalid API key");
+                log.finish(resp.status().as_u16());
+                return resp;
+            }
         }
     }
     let method = req.method().as_str().to_owned();
@@ -348,12 +396,12 @@ fn is_loopback(addr: &SocketAddr) -> bool {
     }
 }
 
-fn bearer_ok(req: &Request<Incoming>, expected: &str) -> bool {
+/// Extract the presented bearer token (`Authorization: Bearer <tok>`).
+fn presented_bearer(req: &Request<Incoming>) -> Option<&str> {
     req.headers()
         .get(hyper::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
-        .is_some_and(|tok| tok == expected)
 }
 
 // --- response builders (shared by the format modules) --------------------
@@ -441,7 +489,7 @@ mod tests {
         assert_eq!(cfg.bind, "127.0.0.1");
         assert_eq!(cfg.port, 11_434);
         assert!(cfg.loopback_only);
-        assert!(cfg.auth_token.is_none());
+        assert!(cfg.auth_enabled);
     }
 
     #[test]

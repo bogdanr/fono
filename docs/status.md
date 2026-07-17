@@ -1,6 +1,47 @@
 # Fono — Project Status
 Last updated: 2026-07-17
 
+## 2026-07-17 — Inbound API-key authentication with bounded usage
+
+Replaced the single pre-shared bearer token on the served HTTP surfaces
+(the OpenAI/Ollama LLM API, its STT `/v1/audio/transcriptions` + TTS
+`/v1/audio/speech` routes, and the web settings page) with a proper
+multi-key store, a simple on/off auth toggle, and per-key usage
+tracking that never grows into an access log. Implements
+`plans/2026-07-17-inbound-api-key-auth-and-usage-v1.md` (all 5 phases)
+and ADR 0038.
+
+1. **Key store (`crates/fono-core/src/api_keys.rs`).** New
+   `ApiKeyStore` over a dedicated `api_keys.sqlite` (mode `0600`):
+   create/list/rename/set-expiry/revoke/delete, SHA-256 hash at rest
+   (plaintext shown once), constant-time verify that rejects
+   revoked/expired keys. Usage is stored as **bounded per-day/per-month
+   counters** (UPSERT) plus a debounced `last_used_at`, with `prune()`
+   trimming old buckets — DB size scales with key count, not request
+   volume. 13 unit tests incl. a bounded-growth proof over 400 days.
+2. **Config: one boolean, on by default.** `[server.llm].auth` and
+   `[server.web].auth` (`default_true`) replace `auth_token_ref`; the
+   legacy ref is migrated into a named key on first load, then cleared.
+3. **Shared enforcement.** `fono_net::auth::decide(...)` is the single
+   testable auth seam used by both servers: auth off ⇒ open; loopback
+   always trusted (no bootstrap lockout); otherwise a bearer token must
+   resolve via an injected verifier, with a usage sink recording the
+   hit. 6 unit tests cover every branch.
+4. **Web UI "API Keys" section.** Groq-style table (name, masked
+   secret, created, last-used, expires with warning styling, monthly
+   usage) with create-once secret reveal + rename/revoke/delete; the
+   old "Token ref" server fields became "Require API key" toggles.
+5. **CLI + doctor.** `fono server keys {create|list|rename|expire|
+   revoke|delete}` (distinct from outbound `fono keys`); `fono doctor`
+   reports per-server auth state, active/inactive key counts, and warns
+   loudly on LAN-exposed-with-auth-off or on-with-no-keys.
+6. **Docs.** `docs/configuration.md` rewritten for the toggle + API Keys
+   table + usage + migration; new ADR 0038.
+
+Gates green: `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -D warnings`, full workspace tests (all suites pass,
+incl. new `auth`, `api_keys`, and updated llm/web round-trip tests).
+
 ## 2026-07-17 — Assistant usable without TTS (on-screen reply panel) — GitHub #15
 
 Anthropic-only (and any STT + LLM, no-TTS) users could not use the
