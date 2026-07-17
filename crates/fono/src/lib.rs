@@ -26,6 +26,7 @@ pub mod cli;
 pub mod daemon;
 pub mod doctor;
 pub mod install;
+pub mod key_probe;
 pub mod models;
 pub mod session;
 pub mod speak_stream;

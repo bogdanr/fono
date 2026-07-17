@@ -2172,11 +2172,12 @@ async fn keys_cmd(paths: &Paths, action: KeysCmd) -> Result<()> {
             }
         }
         KeysCmd::Check => {
-            // Lightweight: list which env-keys are present; full
-            // network reachability is in `fono doctor`.
+            // List which keys are configured, then live-probe each one
+            // in parallel so the user learns both "is it set up?" and
+            // "does it actually work?" in a single command.
             let secrets = Secrets::load(&secrets_path).unwrap_or_default();
             print_keys_list(&secrets);
-            println!("\nFor live reachability probes, run `fono doctor`.");
+            print_keys_reachability(&secrets).await;
         }
     }
     Ok(())
@@ -2294,6 +2295,49 @@ fn is_canonical_key(name: &str) -> bool {
     };
     all_stt_backends().iter().any(|b| stt_key_env(b) == name)
         || all_polish_backends().iter().any(|b| polish_key_env(b) == name)
+}
+
+/// Live-probe every configured API key in parallel and print a
+/// reachability report, so `fono keys check` answers both "is it set
+/// up?" and "does it actually work?" — surfacing expired/revoked keys
+/// that a presence-only check would miss.
+async fn print_keys_reachability(secrets: &Secrets) {
+    use crate::key_probe::{all_key_envs, probe_keys, KeyReachability};
+
+    // Only probe keys that are actually configured (in secrets.toml or
+    // the environment); an unset key has nothing to verify.
+    let envs: Vec<String> =
+        all_key_envs().into_iter().filter(|e| secrets.resolve(e).is_some()).collect();
+
+    println!("\nlive reachability:");
+    if envs.is_empty() {
+        println!("  (no API keys configured — add one with `fono keys add <NAME>`)");
+        return;
+    }
+
+    println!("  probing {} key(s)…", envs.len());
+    let results = probe_keys(&envs, secrets).await;
+
+    let mut any_rejected = false;
+    for name in &envs {
+        let status = results.get(name).cloned().unwrap_or(KeyReachability::NoProbe);
+        if status.is_rejected() {
+            any_rejected = true;
+        }
+        let mark = match &status {
+            KeyReachability::Valid => "ok  ",
+            KeyReachability::Rejected(_) => "FAIL",
+            KeyReachability::Unexpected(_) | KeyReachability::Unreachable(_) => "warn",
+            KeyReachability::NoProbe => "  - ",
+        };
+        println!("  [{mark}] {name:<24} {}", status.summary());
+    }
+    if any_rejected {
+        println!(
+            "\nOne or more keys were rejected by their provider (expired, revoked, or \
+             mistyped). Replace them with `fono keys add <NAME>`."
+        );
+    }
 }
 
 fn mask(value: &str) -> String {

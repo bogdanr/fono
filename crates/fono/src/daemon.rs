@@ -3777,9 +3777,20 @@ async fn spawn_web_settings(
 async fn run_doctor(paths: Paths) -> Result<crate::doctor::DoctorReport> {
     static GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _running = GUARD.lock().await;
-    tokio::task::spawn_blocking(move || crate::doctor::gather(&paths))
-        .await
-        .context("doctor task panicked")?
+    // Kick off the live API-key reachability probes first so they run
+    // concurrently with the synchronous `gather` pass (hardware, model,
+    // config checks). `gather` blocks for the probe results only when it
+    // reaches the provider matrix, by which point the local checks have
+    // already absorbed most of the network wait.
+    let probe_paths = paths.clone();
+    let probe_task =
+        tokio::spawn(async move { crate::doctor::probe_configured_keys(&probe_paths).await });
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        crate::doctor::gather(&paths, || handle.block_on(probe_task).unwrap_or_default())
+    })
+    .await
+    .context("doctor task panicked")?
 }
 
 /// Build the daemon-side hook closures for the web settings server:

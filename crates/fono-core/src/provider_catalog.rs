@@ -989,6 +989,17 @@ pub fn find(id: &str) -> Option<&'static CloudProvider> {
     CLOUD_PROVIDERS.iter().find(|p| p.id == id)
 }
 
+/// Look up the first catalogue entry whose `key_env` matches `key_env`.
+/// Providers that share an API-key env var (e.g. OpenAI's polish + STT)
+/// resolve to the same key regardless, so the first match's validation
+/// endpoint is a valid liveness probe for that key. Shared by the
+/// wizard's key-validation probe and `fono keys check` / `fono doctor`'s
+/// live reachability probes.
+#[must_use]
+pub fn find_by_key_env(key_env: &str) -> Option<&'static CloudProvider> {
+    CLOUD_PROVIDERS.iter().find(|p| p.key_env == key_env)
+}
+
 /// True when the given TTS backend only renders intelligible English
 /// (see [`TtsDefaults::english_only`]). Non-cloud backends (`None`,
 /// `Wyoming`, `Local`) and any backend without a catalogue TTS entry

@@ -527,7 +527,7 @@ async fn prompt_or_reuse_key(
 /// Used by [`validate_cloud_key`] to recover a provider's validation
 /// metadata from a bare env-var name.
 fn catalogue_by_key_env(key_env: &str) -> Option<&'static CloudProvider> {
-    CLOUD_PROVIDERS.iter().find(|p| p.key_env == key_env)
+    fono_core::provider_catalog::find_by_key_env(key_env)
 }
 
 /// Catalogue entry matching the configured polish backend (used by the

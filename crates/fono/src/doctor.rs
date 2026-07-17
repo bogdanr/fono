@@ -9,6 +9,15 @@ use anyhow::Result;
 use fono_core::hwcheck;
 use fono_core::{Config, Paths, Secrets};
 
+use crate::key_probe::KeyReachability;
+
+/// Map of API-key env-var name → live reachability outcome, produced by
+/// [`crate::key_probe::probe_keys`] before [`gather`] runs (the probes
+/// are async; `gather` is synchronous so it can run under
+/// `spawn_blocking`). An empty map means the caller skipped live probes
+/// — provider rows then fall back to the presence-only "present" line.
+pub type KeyProbes = std::collections::BTreeMap<String, KeyReachability>;
+
 /// Whether to emit ANSI color escapes in the report. True iff stdout
 /// is a TTY and `NO_COLOR` is unset. Cached on first call.
 fn color_enabled() -> bool {
@@ -140,15 +149,84 @@ impl Collector {
 }
 
 /// `fono doctor` — the full diagnostic report as text (colored when
-/// stdout is a TTY). Thin wrapper over [`gather`].
+/// stdout is a TTY).
+///
+/// The live API-key reachability probes are kicked off **first**, then
+/// the synchronous [`gather`] pass runs concurrently on a blocking
+/// thread. `gather` only needs the probe results for the provider
+/// matrix, so it blocks for them lazily — meaning all the local
+/// hardware / Vulkan / model / config checks are computed *while* the
+/// network probes are still in flight. Net effect: doctor waits roughly
+/// `max(local_checks, slowest_probe)` instead of their sum.
 pub async fn report(paths: &Paths) -> Result<String> {
-    Ok(gather(paths)?.text)
+    let probe_paths = paths.clone();
+    let probe_task = tokio::spawn(async move { probe_configured_keys(&probe_paths).await });
+    let handle = tokio::runtime::Handle::current();
+    let gather_paths = paths.clone();
+    tokio::task::spawn_blocking(move || {
+        gather(&gather_paths, || handle.block_on(probe_task).unwrap_or_default()).map(|r| r.text)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("doctor task panicked: {e}"))?
+}
+
+/// Live-probe every configured API key in parallel. Returns an empty
+/// map on any load failure — doctor then degrades to presence-only key
+/// reporting rather than failing outright.
+pub async fn probe_configured_keys(paths: &Paths) -> KeyProbes {
+    let secrets = Secrets::load(&paths.secrets_file()).unwrap_or_default();
+    let envs: Vec<String> = crate::key_probe::all_key_envs()
+        .into_iter()
+        .filter(|e| secrets.resolve(e).is_some())
+        .collect();
+    if envs.is_empty() {
+        return KeyProbes::new();
+    }
+    crate::key_probe::probe_keys(&envs, &secrets).await
+}
+
+/// Compute the `(severity, painted status)` for a provider's API-key
+/// column, folding in the live reachability probe when one is
+/// available. Falls back to the presence-only "present / missing" line
+/// when `probes` has no entry for this key (probes skipped or the key
+/// carries no catalogue endpoint).
+fn key_status(
+    needs_key: bool,
+    key_env: &str,
+    secrets: &Secrets,
+    probes: &KeyProbes,
+) -> (Severity, String) {
+    use Severity as S;
+    if !needs_key {
+        return (S::Info, dim("no key needed"));
+    }
+    if secrets.resolve(key_env).is_none() {
+        return (S::Info, dim(&format!("{key_env} missing")));
+    }
+    match probes.get(key_env) {
+        Some(KeyReachability::Valid) => (S::Ok, ok(&format!("{key_env} works"))),
+        Some(KeyReachability::Rejected(code)) => {
+            (S::Fail, bad(&format!("{key_env} REJECTED (HTTP {code} — expired or invalid)")))
+        }
+        Some(KeyReachability::Unexpected(code)) => {
+            (S::Warn, warn(&format!("{key_env} present (unverified: HTTP {code})")))
+        }
+        Some(KeyReachability::Unreachable(e)) => {
+            (S::Warn, warn(&format!("{key_env} present (unreachable: {e})")))
+        }
+        // No probe was run (or no endpoint) — report presence only.
+        Some(KeyReachability::NoProbe) | None => (S::Ok, ok(&format!("{key_env} present"))),
+    }
 }
 
 /// Run every doctor check once, producing the structured report and the
-/// text rendering in a single pass.
+/// text rendering in a single pass. `probes_source` yields the live
+/// API-key reachability results (from [`probe_configured_keys`]); it is
+/// invoked lazily, only once the provider matrix is reached, so callers
+/// can run the network probes concurrently with this pass. Return an
+/// empty map to skip live key reporting (presence-only).
 #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
-pub fn gather(paths: &Paths) -> Result<DoctorReport> {
+pub fn gather(paths: &Paths, probes_source: impl FnOnce() -> KeyProbes) -> Result<DoctorReport> {
     use Severity as S;
     let mut col = Collector::default();
     let mut out = String::new();
@@ -524,6 +602,11 @@ pub fn gather(paths: &Paths) -> Result<DoctorReport> {
         // so users see at a glance which providers are ready to switch
         // to via `fono use stt …` / `fono use polish …`.
         // ------------------------------------------------------------
+        // Resolve the live key-reachability probes now. Everything above
+        // (hardware, Vulkan, model registry, config, backends) was
+        // computed while the probes ran concurrently, so this blocks
+        // only for whatever network time is left — usually none.
+        let probes = probes_source();
         writeln!(out, "{}", head("Providers (STT):"))?;
         col.section("Providers (STT)");
         for b in fono_core::providers::all_stt_backends() {
@@ -532,13 +615,7 @@ pub fn gather(paths: &Paths) -> Result<DoctorReport> {
             let name = fono_core::providers::stt_backend_str(&b);
             let needs_key = fono_core::providers::stt_requires_key(&b);
             let key_env = fono_core::providers::stt_key_env(&b);
-            let key_status = if !needs_key {
-                dim("no key needed")
-            } else if secrets.resolve(key_env).is_some() {
-                ok(&format!("{key_env} present"))
-            } else {
-                dim(&format!("{key_env} missing"))
-            };
+            let (sev, key_status) = key_status(needs_key, key_env, &secrets, &probes);
             let model = if needs_key {
                 fono_stt::defaults::default_cloud_model(name).to_string()
             } else {
@@ -546,7 +623,7 @@ pub fn gather(paths: &Paths) -> Result<DoctorReport> {
             };
             writeln!(out, "  {mark} {name:<14} model: {model:<32} {key_status}")?;
             col.push(
-                S::Info,
+                sev,
                 name,
                 &format!("{}model: {model} · {key_status}", if active { "(active) " } else { "" }),
             );
@@ -561,13 +638,7 @@ pub fn gather(paths: &Paths) -> Result<DoctorReport> {
             let name = fono_core::providers::polish_backend_str(&b);
             let needs_key = fono_core::providers::polish_requires_key(&b);
             let key_env = fono_core::providers::polish_key_env(&b);
-            let key_status = if !needs_key {
-                dim("no key needed")
-            } else if secrets.resolve(key_env).is_some() {
-                ok(&format!("{key_env} present"))
-            } else {
-                dim(&format!("{key_env} missing"))
-            };
+            let (sev, key_status) = key_status(needs_key, key_env, &secrets, &probes);
             let model = if matches!(b, fono_core::config::PolishBackend::None) {
                 "—".to_string()
             } else if needs_key || matches!(b, fono_core::config::PolishBackend::Ollama) {
@@ -577,7 +648,7 @@ pub fn gather(paths: &Paths) -> Result<DoctorReport> {
             };
             writeln!(out, "  {mark} {name:<14} model: {model:<32} {key_status}")?;
             col.push(
-                S::Info,
+                sev,
                 name,
                 &format!("{}model: {model} · {key_status}", if active { "(active) " } else { "" }),
             );
@@ -592,19 +663,9 @@ pub fn gather(paths: &Paths) -> Result<DoctorReport> {
             let name = fono_core::providers::assistant_backend_str(&b);
             let needs_key = fono_core::providers::assistant_requires_key(&b);
             let key_env = fono_core::providers::assistant_key_env(&b);
-            let key_status = if !needs_key {
-                dim("no key needed")
-            } else if secrets.resolve(key_env).is_some() {
-                ok(&format!("{key_env} present"))
-            } else {
-                dim(&format!("{key_env} missing"))
-            };
+            let (sev, key_status) = key_status(needs_key, key_env, &secrets, &probes);
             writeln!(out, "  {mark} {name:<14} {key_status}")?;
-            col.push(
-                S::Info,
-                name,
-                &format!("{}{key_status}", if active { "(active) " } else { "" }),
-            );
+            col.push(sev, name, &format!("{}{key_status}", if active { "(active) " } else { "" }));
         }
         writeln!(out)?;
 
@@ -616,6 +677,9 @@ pub fn gather(paths: &Paths) -> Result<DoctorReport> {
             let name = fono_core::providers::tts_backend_str(&b);
             let needs_key = fono_core::providers::tts_requires_key(&b);
             let key_env = fono_core::providers::tts_key_env(&b);
+            // Cloud TTS backends fold in the live reachability probe;
+            // the non-cloud arms (Wyoming/Local/None) stay informational.
+            let mut sev = S::Info;
             let extra = match b {
                 fono_core::config::TtsBackend::Wyoming => c
                     .tts
@@ -631,11 +695,9 @@ pub fn gather(paths: &Paths) -> Result<DoctorReport> {
                 | fono_core::config::TtsBackend::ElevenLabs
                 | fono_core::config::TtsBackend::Speechmatics
                 | fono_core::config::TtsBackend::Gemini => {
-                    if secrets.resolve(key_env).is_some() {
-                        ok(&format!("{key_env} present"))
-                    } else {
-                        dim(&format!("{key_env} missing"))
-                    }
+                    let (s, status) = key_status(needs_key, key_env, &secrets, &probes);
+                    sev = s;
+                    status
                 }
                 fono_core::config::TtsBackend::Local => {
                     if c.tts.local.voice.is_empty() {
@@ -646,9 +708,8 @@ pub fn gather(paths: &Paths) -> Result<DoctorReport> {
                 }
                 fono_core::config::TtsBackend::None => dim("—"),
             };
-            let _ = needs_key;
             writeln!(out, "  {mark} {name:<14} {extra}")?;
-            col.push(S::Info, name, &format!("{}{extra}", if active { "(active) " } else { "" }));
+            col.push(sev, name, &format!("{}{extra}", if active { "(active) " } else { "" }));
         }
         writeln!(out)?;
         writeln!(out, "(* = active. Switch with `fono use stt|polish|assistant|tts <backend>`.)")?;
