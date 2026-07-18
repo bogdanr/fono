@@ -77,36 +77,33 @@ fi
 # `raw_sha256`. This lib is a strict superset of the wake-capable one, so it
 # still loads every existing voice + the wake stack, and now Supertonic too.
 #
-# SPEAKER REBUILD PENDING (2026-07-19): shipping the ReDimNet2 speaker-
+# SPEAKER REBUILD DONE (2026-07-19): shipping the ReDimNet2 speaker-
 # verification embeddings (redimnet2-b3 / -b6, PalabraAI, MIT) unions three
 # net-new operators into ../fono-voice/onnxruntime/ops.config:
 # InstanceNormalization(6), ReduceProd(13, int64_t), and the com.microsoft
 # FastGelu contrib op (verified locally via scripts/gen-ort-models.sh +
 # scripts/merge-ort-configs.py; B3 and B6 are operator-identical). The minimal
-# runtime therefore MUST be rebuilt before either speaker model loads, else it
-# fails with "Could not find an implementation for InstanceNormalization(6)".
-# The rows below are NOT yet updated for this rebuild — they remain the
-# Supertonic-era libs (which do NOT contain the three new ops). When
-# fono-voice's build-onnxruntime workflow republishes the runtime from the
-# unioned config, re-pin EVERY triple below from the updated
-# sha-<triple>.txt (curl "$BASE_URL/$RELEASE_TAG/sha-<triple>.txt"), then run
-# `./tests/check.sh --size-budget` to confirm the size gate still passes.
+# runtime was rebuilt from the unioned config by fono-voice's
+# build-onnxruntime workflow and re-published under RELEASE_TAG; every row
+# below is re-pinned to the new `raw_sha256` from each sha-<triple>.txt. This
+# lib is a strict superset of the Supertonic-era one, so it still loads every
+# voice + the wake stack + Supertonic, and now the ReDimNet2 speaker models.
 sha_for_triple() {
 	case "$1" in
 	x86_64-unknown-linux-gnu)
-		echo "467d28d2e96d7433bc32dbc5c5e518d809a2c6f46bf41fd18b7a1fff5dc56cad"
+		echo "3b324a9a46cd9f3b41fa4d051cf90303c069c6d99c4ac44bdde743b58fdbd451"
 		;;
 	aarch64-unknown-linux-gnu)
-		echo "0cbd30674ae394b60d3093fbe726e1576ad02e7674741a66a790c74494f73a4d"
+		echo "71421eb9a006d42e80f22ff8b86030569db76a934b0d567f8cbee636296530a5"
 		;;
 	aarch64-apple-darwin)
-		echo "d3cb828564f2558fa72c3f30a648556264013c088cd196d4037f1ac7f435f612"
+		echo "be9b1db2bbc2bdcd514032983da7d3db9f19557fb08772bead9489367463a67d"
 		;;
 	x86_64-apple-darwin)
-		echo "2213752d0e25e77a99f601fe1f5788fceddaec509101456e8c96a4515734198a"
+		echo "5c9136439fe6d29f80f441d925bff725c75cd211501537888b42270bf7f931f2"
 		;;
 	x86_64-pc-windows-msvc)
-		echo "c3b4b7d0f0b8076d741365fc568aa40d00582bf2bfae98d74ff13c47e7316659"
+		echo "d4a8b27573bc86a35655b2eb6f56c2cfe49f01d5fb6bfc37ad6ca4a8d3a0a857"
 		;;
 	*)
 		echo ""

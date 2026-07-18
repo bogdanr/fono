@@ -201,18 +201,26 @@ New `#/speakers` page on the existing hash router:
 
 ### Slice 1 — Model + distribution
 
-- [ ] Task 1.1. Pin **ReDimNet-B6** as the default: locate/produce the
-      ONNX export, validate it with the Python oracle on a pinned
-      trial list (EER within bound of the published 0.58 %), measure
-      CPU RTF on a reference host. Record in the ADR.
-- [ ] Task 1.2. Convert to `.ort`, union net-new ops into fono-voice
-      `ops.config`, rebuild the minimal runtime, re-pin SHAs in
-      `scripts/fetch-onnxruntime.sh` (Supertonic Slice 3 playbook).
-- [ ] Task 1.3. Host the pack (graph + fbank config + impostor-cohort
-      embeddings ~200 KB) on the voice mirror; pin checksums.
-- [ ] Task 1.4. `./tests/check.sh --size-budget` — expect a small
-      delta (Conv/MatMul/quant kernels already linked); flag if the
-      `cpu` budget needs an ADR 0022 sign-off.
+- [~] Task 1.1. Default model pinned to **ReDimNet2-B3** (B6 optional
+      tier) — see the design note above; superseded ReDimNet-B6. ONNX
+      self-exported from the pinned `.pt` and verified faithful
+      (torch-vs-onnxruntime embedding cosine 1.000000). **Remaining:**
+      the Python-oracle EER cross-check on a pinned trial list and the
+      CPU-RTF measurement are Slice 5.
+- [x] Task 1.2. Converted both tiers to `.ort`, unioned the three
+      net-new ops (`InstanceNormalization`, `ReduceProd`, `FastGelu`)
+      into fono-voice `ops.config`, rebuilt the minimal runtime via the
+      `build-onnxruntime` workflow, and re-pinned all five triples in
+      `scripts/fetch-onnxruntime.sh`.
+- [~] Task 1.3. Graphs (`redimnet2-b3.ort` / `-b6.ort`) + fbank config
+      hosted on the `ort-1.24.2` mirror release and checksum-pinned in
+      the registry + `manifest.json`. **Remaining:** the impostor-cohort
+      sidecar (~200 KB) is generated in Slice 4/5, so its rows stay
+      UNPINNED and AS-Norm degrades to plain cosine until it lands.
+- [x] Task 1.4. `./tests/check.sh --size-budget` — passes at 21.79 MiB
+      (budget 25 MiB); the larger op-set added no measurable binary
+      delta (the linker drops unreferenced kernels), no ADR 0022
+      sign-off needed.
 
 ### Slice 2 — Engine core (`fono-audio` or new module, behind a feature)
 

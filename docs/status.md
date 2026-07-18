@@ -1,6 +1,35 @@
 # Fono — Project Status
 Last updated: 2026-07-19
 
+## 2026-07-19 — Speaker verification: Slice 1 model hosting (runtime rebuild + upload)
+
+Completed the mirror-hosting half of Slice 1 so the ReDimNet2 speaker models
+load end-to-end:
+
+1. **Runtime rebuilt + re-pinned.** The `fono-voice` `build-onnxruntime`
+   workflow rebuilt the minimal runtime from the unioned `ops.config` (adding
+   `InstanceNormalization`, `ReduceProd`, `FastGelu`) and republished all five
+   triples under `onnxruntime-1.24.2`. Re-pinned every row of
+   `scripts/fetch-onnxruntime.sh` from the published `sha-<triple>.txt` and
+   flipped its header note PENDING→DONE.
+2. **Model graphs hosted + pinned.** Uploaded `redimnet2-b3.ort` /
+   `redimnet2-b6.ort` to the `ort-1.24.2` release; verified the hosted bytes
+   are byte-identical to the local conversion (sha `7bb3…e0e2` / `9030…f087`).
+   Pinned both graph SHAs in the `fono-audio::speaker` registry and flipped the
+   guard test (`graphs_are_hosted_cohorts_still_pending`). The manifest
+   `speaker_models[]` statuses are now `hosted`.
+3. **Size gate re-verified.** `./tests/check.sh --size-budget` passes at 21.79
+   MiB (budget 25 MiB) — the larger op-set added no measurable binary delta,
+   and the build fetching through the re-pinned SHA confirms the pins are
+   correct end-to-end.
+
+Still pending on the model side: the AS-Norm impostor-cohort sidecar (Slice
+4/5, so cohort rows stay UNPINNED and AS-Norm degrades to plain cosine), and
+the Slice 5 Python-oracle EER cross-check. Plan Slice 1 Tasks 1.2/1.4 ticked,
+1.1/1.3 partial. Gates green (fmt, clippy, workspace tests, size budget).
+
+**Committed but NOT pushed** — holding for your review of the commits.
+
 ## 2026-07-19 — Speaker verification: decision layer (Task 2.5)
 
 Landed the model-independent decision layer in `fono-audio::speaker`, the last

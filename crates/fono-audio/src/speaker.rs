@@ -427,15 +427,13 @@ const REGISTRY: &[SpeakerModel] = &[
         params_millions: 4.1,
         embedding_dim: 192,
         fbank: REDIMNET2_FBANK,
-        // Locally converted + validated (torch→onnx→ort, onnxruntime 1.24.2);
-        // known-good local .ort sha256:
-        //   7bb30475c5924b525b6684a00ff768aa9185f69e6265d5ff9653a48d70eee0e2
-        // Stays UNPINNED until the canonical build is uploaded to the mirror
-        // (a CI re-export may differ byte-for-byte), then pin from the release.
+        // Hosted on the mirror (ort-1.24.2 release); pinned from the published
+        // .ort bytes (byte-identical to the local torch→onnx→ort conversion on
+        // onnxruntime 1.24.2).
         graph: SpeakerAsset {
             file: "redimnet2-b3.ort",
             release_tag: RELEASE_TAG,
-            sha256: UNPINNED,
+            sha256: "7bb30475c5924b525b6684a00ff768aa9185f69e6265d5ff9653a48d70eee0e2",
         },
         // Impostor cohort generated in Slice 4/5; not hosted yet.
         cohort: SpeakerAsset {
@@ -450,12 +448,12 @@ const REGISTRY: &[SpeakerModel] = &[
         params_millions: 12.3,
         embedding_dim: 192,
         fbank: REDIMNET2_FBANK,
-        // known-good local .ort sha256:
-        //   903015c8f462c98b28ec361f2a774bd00b3acbb4086b83b8c3b04824cd26f087
+        // Hosted on the mirror (ort-1.24.2 release); pinned from the published
+        // .ort bytes.
         graph: SpeakerAsset {
             file: "redimnet2-b6.ort",
             release_tag: RELEASE_TAG,
-            sha256: UNPINNED,
+            sha256: "903015c8f462c98b28ec361f2a774bd00b3acbb4086b83b8c3b04824cd26f087",
         },
         cohort: SpeakerAsset {
             file: "redimnet2-b6.cohort.bin",
@@ -1070,15 +1068,16 @@ mod tests {
     }
 
     #[test]
-    fn packs_are_unpinned_until_hosted() {
-        // The ReDimNet2 assets are converted + validated but not yet uploaded,
-        // so every pin is the all-zeros sentinel. Flip this test when the
-        // canonical build is hosted and the rows are pinned from the release.
+    fn graphs_are_hosted_cohorts_still_pending() {
+        // The ReDimNet2 graphs are hosted on the mirror and pinned from the
+        // published .ort bytes; the AS-Norm impostor cohorts are generated in
+        // Slice 4/5 and remain UNPINNED (not hosted) for now, so AS-Norm
+        // degrades to plain cosine until they land.
         for m in registry() {
-            assert!(!is_pinned(m.graph.sha256), "{} graph should be UNPINNED until hosted", m.name);
+            assert!(is_pinned(m.graph.sha256), "{} graph should be pinned once hosted", m.name);
             assert!(
                 !is_pinned(m.cohort.sha256),
-                "{} cohort should be UNPINNED until hosted",
+                "{} cohort should stay UNPINNED until generated",
                 m.name
             );
         }
