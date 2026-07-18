@@ -247,13 +247,19 @@ New `#/speakers` page on the existing hash router:
 
 - [x] Task 3.1. `[speaker]` config block + model registry (named
       rows, `redimnet-b6` default; no auto/tier logic).
-- [~] Task 3.2. `/api/speakers/*` + `#/speakers` surface. **Done (model-
-      independent):** `GET/PATCH/DELETE /api/speakers` (list/rename/
-      remove) wired through daemon hooks over `SpeakerStore`; the
-      Speakers settings section (enable/model/threshold/min-speech card
-      + roster table with rename/delete) in the SPA. **Blocked on the
-      model pack:** WAV enrollment upload, browser capture flow with
-      DSP-off constraints + device picker, and the calibration card.
+- [~] Task 3.2. `/api/speakers/*` + `#/speakers` surface. **Done:**
+      `GET/PATCH/DELETE /api/speakers` (list/rename/remove) plus
+      `POST /api/speakers` (browser-capture enrollment) wired through
+      daemon hooks over `SpeakerStore` + a per-request `SpeakerEngine`
+      (`speaker-onnx`, now a default feature of the `fono` binary). The
+      Speakers settings section carries the enable/model/threshold/
+      min-speech card, the roster table (rename/delete), and the
+      **browser enrollment card**: `getUserMedia` with DSP disabled
+      (no AEC/NS/AGC) + device picker, resample to 16 kHz mono via
+      `OfflineAudioContext`, base64 i16 PCM upload; only the derived
+      embedding is stored (raw audio never persisted). **Still pending:**
+      the guided multi-utterance capture wizard and the calibration card
+      (Slice 5, needs the impostor cohort).
 - [~] Task 3.3. `fono speaker …` CLI group + doctor section. **Done:**
       `fono speaker list|rename|remove` over `SpeakerStore`; `fono
       doctor` Speaker section (enabled state, registry model check,

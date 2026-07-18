@@ -3958,7 +3958,7 @@ fn web_settings_hooks(
     });
 
     let (get_vocabulary, put_vocabulary) = vocabulary_hooks(paths);
-    let (list_speakers, rename_speaker, delete_speaker) = speaker_hooks(paths);
+    let (list_speakers, rename_speaker, delete_speaker, enroll_speaker) = speaker_hooks(paths);
     let speak = speech_hook(config_path.clone(), secrets_path.clone(), paths.voices_dir());
     let meta = meta_hook(config_path, secrets_path);
 
@@ -3987,6 +3987,7 @@ fn web_settings_hooks(
         list_speakers,
         rename_speaker,
         delete_speaker,
+        enroll_speaker,
     }
 }
 
@@ -4326,6 +4327,7 @@ fn speaker_hooks(
     fono_net::web_settings::ListSpeakersFn,
     fono_net::web_settings::RenameSpeakerFn,
     fono_net::web_settings::DeleteSpeakerFn,
+    fono_net::web_settings::EnrollSpeakerFn,
 ) {
     use fono_core::speakers::SpeakerStore;
 
@@ -4365,7 +4367,173 @@ fn speaker_hooks(
         Ok(())
     });
 
-    (list_speakers, rename_speaker, delete_speaker)
+    let db = paths.speakers_db();
+    let cache_dir = paths.cache_dir.clone();
+    let config_path = paths.config_file();
+    let enroll_speaker: fono_net::web_settings::EnrollSpeakerFn = Arc::new(move |body| {
+        let db = db.clone();
+        let cache_dir = cache_dir.clone();
+        let config_path = config_path.clone();
+        Box::pin(async move {
+            let name = body
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "body must include a non-empty \"name\"".to_string())?
+                .to_owned();
+            let b64 = body
+                .get("audio_pcm16")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "body must include base64 \"audio_pcm16\"".to_string())?;
+            let sample_rate = u32::try_from(
+                body.get("sample_rate").and_then(serde_json::Value::as_u64).unwrap_or(16_000),
+            )
+            .map_err(|_| "invalid sample_rate".to_string())?;
+            let capture_source =
+                body.get("capture_source").and_then(|v| v.as_str()).unwrap_or("browser").to_owned();
+            let pcm = decode_pcm16(b64)?;
+
+            // Embed off the accept loop: model fetch is async; the ort run is
+            // CPU-bound, so it goes through spawn_blocking inside the helper.
+            let embedding =
+                embed_enrollment_pcm(&config_path, &cache_dir, pcm, sample_rate).await?;
+
+            let store = SpeakerStore::open(&db).map_err(|e| format!("open speakers db: {e}"))?;
+            let speaker = match store
+                .get_speaker_by_name(&name)
+                .map_err(|e| format!("look up speaker: {e}"))?
+            {
+                Some(s) => s,
+                None => store.add_speaker(&name).map_err(|e| format!("add speaker: {e}"))?,
+            };
+            store
+                .add_utterance(speaker.id, &embedding, &capture_source)
+                .map_err(|e| format!("store voice print: {e}"))?;
+            let count =
+                store.utterance_count(speaker.id).map_err(|e| format!("count utterances: {e}"))?;
+            info!(
+                "web settings: enrolled voice sample for speaker '{}' (id {}, now {count} sample(s))",
+                speaker.name, speaker.id
+            );
+            Ok(serde_json::json!({
+                "ok": true,
+                "speaker": {
+                    "id": speaker.id,
+                    "name": speaker.name,
+                    "utterance_count": count,
+                },
+                "embedding_dim": embedding.len(),
+            }))
+        })
+    });
+
+    (list_speakers, rename_speaker, delete_speaker, enroll_speaker)
+}
+
+/// Decode a base64 little-endian `i16` mono PCM payload into `f32` samples in
+/// `[-1, 1)`. A trailing odd byte is ignored.
+fn decode_pcm16(b64: &str) -> std::result::Result<Vec<f32>, String> {
+    use base64::Engine as _;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|e| format!("decode audio: {e}"))?;
+    if raw.len() < 2 {
+        return Err("audio payload is empty".to_string());
+    }
+    Ok(raw
+        .chunks_exact(2)
+        .map(|b| f32::from(i16::from_le_bytes([b[0], b[1]])) / 32_768.0)
+        .collect())
+}
+
+/// Turn captured enrollment PCM into a stored-ready voice print using the
+/// configured speaker model. Requires 16 kHz mono input (the browser resamples
+/// before upload). Feature-gated: without `speaker-onnx` the engine is not
+/// compiled in and enrollment reports that cleanly.
+#[cfg(feature = "speaker-onnx")]
+async fn embed_enrollment_pcm(
+    config_path: &std::path::Path,
+    cache_dir: &std::path::Path,
+    pcm: Vec<f32>,
+    sample_rate: u32,
+) -> std::result::Result<Vec<f32>, String> {
+    use fono_audio::speaker::{self, engine::SpeakerEngine, Cohort, Fbank};
+
+    if sample_rate != 16_000 {
+        return Err(format!(
+            "expected 16 kHz mono audio, got {sample_rate} Hz — resample before upload"
+        ));
+    }
+    let cfg = Config::load(config_path).map_err(|e| format!("load config: {e}"))?;
+    let model_name = cfg.speaker.model.clone();
+    let model = speaker::model(&model_name)
+        .ok_or_else(|| format!("unknown speaker model '{model_name}'"))?;
+    let fbank_cfg = model.fbank;
+
+    let resolved = speaker::fetch_model(&model_name, cache_dir, None)
+        .await
+        .map_err(|e| format!("fetch speaker model '{model_name}': {e:#}"))?;
+
+    // Load the cohort sidecar when hosted; otherwise score-time AS-Norm
+    // degrades to plain cosine and enrollment only length-normalises.
+    let cohort = resolved
+        .cohort
+        .as_deref()
+        .map_or_else(Cohort::default, |path| load_cohort(path).unwrap_or_default());
+
+    // The ort session load + embed are CPU-bound: run off the async runtime.
+    tokio::task::spawn_blocking(move || {
+        let fbank = Fbank::new(fbank_cfg);
+        let mut engine = SpeakerEngine::load(&resolved.graph, fbank, cohort)
+            .map_err(|e| format!("load speaker engine: {e:#}"))?;
+        engine
+            .embed(&pcm)
+            .map_err(|e| format!("embed voice sample: {e:#}"))?
+            .ok_or_else(|| "audio too short to enroll (need ~1 s of speech)".to_string())
+    })
+    .await
+    .map_err(|e| format!("embed task join: {e}"))?
+}
+
+/// Load an AS-Norm impostor cohort from a `<name>.cohort.bin` sidecar: a flat
+/// little-endian `f32` matrix prefixed by a `u32` row count and `u32` embedding
+/// dim. Returns an empty cohort on any malformation (AS-Norm then degrades to
+/// plain cosine rather than failing enrollment).
+#[cfg(feature = "speaker-onnx")]
+fn load_cohort(path: &std::path::Path) -> Option<fono_audio::speaker::Cohort> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() < 8 {
+        return None;
+    }
+    let rows = u32::from_le_bytes(bytes[0..4].try_into().ok()?) as usize;
+    let dim = u32::from_le_bytes(bytes[4..8].try_into().ok()?) as usize;
+    let body = &bytes[8..];
+    if dim == 0 || body.len() < rows * dim * 4 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(rows);
+    for r in 0..rows {
+        let mut row = Vec::with_capacity(dim);
+        for c in 0..dim {
+            let off = (r * dim + c) * 4;
+            row.push(f32::from_le_bytes(body[off..off + 4].try_into().ok()?));
+        }
+        out.push(row);
+    }
+    Some(fono_audio::speaker::Cohort::from_raw(&out))
+}
+
+/// Fallback when speaker verification is not compiled in.
+#[cfg(not(feature = "speaker-onnx"))]
+#[allow(clippy::unused_async)]
+async fn embed_enrollment_pcm(
+    _config_path: &std::path::Path,
+    _cache_dir: &std::path::Path,
+    _pcm: Vec<f32>,
+    _sample_rate: u32,
+) -> std::result::Result<Vec<f32>, String> {
+    Err("this build was compiled without speaker verification (speaker-onnx)".to_string())
 }
 
 /// Capability tags advertised over mDNS for the LLM service. Both wire

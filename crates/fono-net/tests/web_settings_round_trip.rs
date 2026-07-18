@@ -69,6 +69,9 @@ fn stub_hooks() -> WebSettingsHooks {
         list_speakers: Arc::new(|| Ok(serde_json::json!({ "speakers": [] }))),
         rename_speaker: Arc::new(|_, _| Ok(())),
         delete_speaker: Arc::new(|_| Ok(())),
+        enroll_speaker: Arc::new(|_| {
+            Box::pin(async { Err("enrollment disabled in test".to_string()) })
+        }),
     }
 }
 
@@ -184,6 +187,17 @@ async fn speakers_list_and_mutations_round_trip() {
     // Delete by id succeeds.
     let r = client.delete(format!("{base}/api/speakers/1")).send().await.expect("send");
     assert_eq!(r.status(), 200);
+
+    // Enrollment is wired: the stub rejects, surfacing a 422 (not a 404),
+    // proving `POST /api/speakers` reaches the enroll hook.
+    let r = client
+        .post(format!("{base}/api/speakers"))
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "name": "Ada", "audio_pcm16": "AAA=" }).to_string())
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(r.status(), 422);
 
     handle.shutdown().await;
 }

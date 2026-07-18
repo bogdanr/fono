@@ -130,6 +130,18 @@ pub type ListSpeakersFn =
 pub type RenameSpeakerFn = Arc<dyn Fn(i64, &str) -> std::result::Result<(), String> + Send + Sync>;
 /// Delete an enrolled speaker (and all their voice prints) by id.
 pub type DeleteSpeakerFn = Arc<dyn Fn(i64) -> std::result::Result<(), String> + Send + Sync>;
+/// Enroll one voice sample for a speaker (create-or-append) from captured
+/// audio. The JSON body carries `{name, audio_pcm16 (base64 LE i16 mono),
+/// sample_rate, capture_source?}`; the daemon fetches/loads the embedding
+/// model, turns the audio into a voice print, and stores it. Returns the
+/// updated speaker metadata `{ok, speaker:{…}}`. Async: model fetch + the
+/// `ort` embed run happen off the accept loop. Only the derived embedding is
+/// persisted — the raw audio never touches disk.
+pub type EnrollSpeakerFn = Arc<
+    dyn Fn(serde_json::Value) -> BoxFuture<'static, std::result::Result<serde_json::Value, String>>
+        + Send
+        + Sync,
+>;
 
 /// Hook closures supplied by the daemon layer. The server itself is a thin
 /// wire adapter with no config semantics.
@@ -150,11 +162,13 @@ pub struct WebSettingsHooks {
     pub update_api_key: UpdateApiKeyFn,
     pub delete_api_key: DeleteApiKeyFn,
     /// Enrolled-speaker management (local voice biometrics). Metadata
-    /// verbs only — enrollment/verification from audio arrive with the
-    /// hosted model pack; these never move voice-print embeddings.
+    /// verbs plus audio enrollment; verification runs live in the daemon
+    /// pipeline. These never move voice-print embeddings over the wire.
     pub list_speakers: ListSpeakersFn,
     pub rename_speaker: RenameSpeakerFn,
     pub delete_speaker: DeleteSpeakerFn,
+    /// Enroll a voice sample from captured audio (`POST /api/speakers`).
+    pub enroll_speaker: EnrollSpeakerFn,
 }
 
 /// Configuration for [`WebSettingsServer::start`]. Built from
@@ -485,9 +499,10 @@ async fn route_api_keys(
     }
 }
 
-/// Enrolled-speaker metadata endpoints. List / rename / delete only —
-/// voice-print embeddings never cross this boundary. Enrollment and
-/// verification from audio arrive with the hosted model pack.
+/// Enrolled-speaker endpoints. `GET` lists metadata, `POST` enrolls a voice
+/// sample from captured audio, `PATCH` renames, `DELETE` removes. Voice-print
+/// embeddings never cross this boundary — only names and counts leave, and
+/// only audio (never stored) enters.
 async fn route_speakers(
     method: &Method,
     path: &str,
@@ -499,6 +514,15 @@ async fn route_speakers(
             Ok(v) => json_ok(&v),
             Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
         },
+        (&Method::POST, "/api/speakers") => {
+            let Some(body) = read_json_body(req).await else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid or oversized JSON body");
+            };
+            match (ctx.hooks.enroll_speaker)(body).await {
+                Ok(v) => json_ok(&v),
+                Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &e),
+            }
+        }
         (&Method::PATCH, p) if p.starts_with("/api/speakers/") => {
             let Some(id) = p.trim_start_matches("/api/speakers/").parse::<i64>().ok() else {
                 return error_response(StatusCode::BAD_REQUEST, "invalid speaker id");

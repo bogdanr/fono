@@ -1,6 +1,38 @@
 # Fono — Project Status
 Last updated: 2026-07-19
 
+## 2026-07-19 — Speaker verification: browser enrollment (Task 3.2) + speaker-onnx default
+
+Wired the speaker engine into the shipped binary and built end-to-end voice
+enrollment from the web settings page:
+
+1. **`speaker-onnx` is now a default `fono` feature.** Forwarded
+   `fono-audio/speaker-onnx` and added it to the default + ship sets, so
+   `SpeakerEngine` compiles into every release build. `ort` was already linked
+   via `wakeword-onnx`, so the binary only gained the extra kernels — size
+   holds at 21.82 MiB (budget 25 MiB).
+2. **`POST /api/speakers` enrollment.** New async `enroll_speaker` hook: decodes
+   base64 i16 PCM, fetches/loads the configured model on demand, embeds off the
+   accept loop via `spawn_blocking`, and appends the voice print to
+   `SpeakerStore` (create-or-append by name). Only the derived embedding is
+   persisted — raw audio never touches disk. A `cohort.bin` sidecar loader is in
+   place for when the AS-Norm cohort is hosted (degrades to plain cosine until
+   then). Feature-gated with a clean "not compiled in" fallback.
+3. **Browser capture UI on the Speakers section.** Enrollment card with a name
+   field + microphone device picker + record/stop button: captures via
+   `getUserMedia` with browser DSP disabled (no AEC/NS/AGC, mono), resamples to
+   16 kHz with `OfflineAudioContext`, and uploads base64 i16 PCM. Name persists
+   across re-renders; roster refreshes after each enrollment.
+4. **`base64`** added as a `fono` dependency edge (already in the graph via
+   `fono-assistant` — net-zero on binary size).
+
+Gates green: fmt, `clippy --workspace` (default now includes speaker-onnx),
+workspace tests (incl. the `POST /api/speakers` round-trip), the no-feature
+fallback build, and the size-budget gate. Plan Task 3.2 updated (browser
+enrollment done; guided wizard + calibration card remain for Slice 5).
+
+**Not committed** — holding for your review.
+
 ## 2026-07-19 — Speaker verification: Slice 1 model hosting (runtime rebuild + upload)
 
 Completed the mirror-hosting half of Slice 1 so the ReDimNet2 speaker models

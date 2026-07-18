@@ -33,7 +33,7 @@ path = "src/main.rs"
 # at it — run `scripts/fetch-onnxruntime.sh` first (CI does this
 # automatically; see `.github/workflows/ci.yml` + `release.yml`):
 #   export ORT_LIB_LOCATION="$(sh scripts/fetch-onnxruntime.sh)"
-default = ["tray", "local-models", "llama-local", "interactive", "tts-local", "realtime", "wakeword-onnx"]
+default = ["tray", "local-models", "llama-local", "interactive", "tts-local", "realtime", "wakeword-onnx", "speaker-onnx"]
 tray = ["fono-tray/tray-backend"]
 # Realtime / speech-to-speech assistant (Gemini Live WebSocket). Forwards
 # to `fono-assistant/realtime`. Default-on; the Live client's WebSocket
@@ -98,6 +98,17 @@ tts-local = ["fono-tts/tts-local", "fono-mcp-server/tts-local"]
 #      Apache `hey_fono.ort` next) to the fono-voice mirror and pin it in
 #      `fono-audio::wake_registry`.
 wakeword-onnx = ["fono-audio/wakeword-onnx"]
+# On-device speaker verification ("who is speaking") on the statically-linked
+# `ort` runtime. DEFAULT as of 2026-07-19: forwards to
+# `fono-audio/speaker-onnx`, which compiles the `SpeakerEngine` (ReDimNet2
+# embedding graph + fbank front-end) into the binary. Net-zero on the
+# dependency graph (`ort` is already linked for `tts-local`/`wakeword-onnx`);
+# the only delta is the speaker code path plus the three speaker ops folded
+# into the union `ops.config` (InstanceNormalization, ReduceProd,
+# com.microsoft FastGelu). The models are fetched on demand from the fono-voice
+# mirror (see `fono-audio::speaker` registry) and are never bundled, so the
+# feature is inert (no enrolled speakers) until a user enrolls a voice.
+speaker-onnx = ["fono-audio/speaker-onnx"]
 # Windows v1 default feature set. Cargo's `default` list cannot be
 # target-scoped, so Windows builds pass `--no-default-features --features
 # windows-defaults` (see docs/build-windows.md and the CI `windows` job).
@@ -120,7 +131,7 @@ wakeword-onnx = ["fono-audio/wakeword-onnx"]
 # it is absent — no separate cpu/gpu download, no launch failure on a
 # driver-less box. See `plans/2026-07-12-vulkan-soft-load-single-build-v1.md`,
 # Phase 2 (this supersedes the CPU-only-v1 note in the Windows port plan).
-windows-defaults = ["tray", "local-models", "llama-local", "interactive", "realtime", "accel-vulkan", "tts-local", "wakeword-onnx"]
+windows-defaults = ["tray", "local-models", "llama-local", "interactive", "realtime", "accel-vulkan", "tts-local", "wakeword-onnx", "speaker-onnx"]
 
 [dependencies]
 fono-core = { path = "../fono-core", features = ["vulkan-probe"] }
@@ -152,6 +163,7 @@ fono-mcp-server = { path = "../fono-mcp-server" }
 mdns-sd = { workspace = true }
 
 anyhow = { workspace = true }
+base64 = "0.22"
 serde = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

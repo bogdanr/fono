@@ -980,6 +980,9 @@ async function deleteApiKey(id) {
 // the enable/threshold settings and lists/renames/removes whatever the CLI
 // (`fono speaker enroll`) has captured.
 let speakers = null, speakersErr = null;
+// Enrollment UI state, preserved across section re-renders.
+let spkEnrollName = '';
+let spkRec = null;
 function refreshSpeakersSection() {
   const sec = FONO_SECTIONS.find((s) => s.id === 'speakers');
   if (sec && document.getElementById('d-speakers')) renderSection(sec);
@@ -1003,9 +1006,14 @@ function speakersHtml() {
     + row('Decision threshold', 'auto tunes from your calibration; or pin a fixed 0\u20131 score.',
       txt('speaker.threshold', { w: 120, ph: 'auto' }))
     + row('Minimum speech', 'Seconds of speech gathered before a decision.', flt('speaker.min_speech_secs', 3.0, 'seconds'));
-  out += '<p class="hint">Enrollment and \u201ctest my voice\u201d calibration record in the browser and '
-    + 'arrive with the voice model pack. For now, enroll from the terminal with '
-    + '<code class="mono">fono speaker enroll &lt;name&gt;</code>.</p>';
+  out += '<div class="enroll-card">'
+    + '<div class="enroll-row">'
+    + '<input id="spk-enroll-name" class="input enroll-name" type="text" placeholder="Name (e.g. Alice)" value="' + esc(spkEnrollName) + '" autocomplete="off" />'
+    + '<select id="spk-enroll-device" class="select enroll-device"><option value="">Default microphone</option></select>'
+    + '<button class="btn" data-spk-enroll type="button">Record &amp; enroll</button>'
+    + '</div>'
+    + '<p id="spk-enroll-status" class="hint">Records locally in your browser, resamples to 16&nbsp;kHz, and stores only the derived voice print &mdash; the audio never leaves your machine. Record a few seconds; repeat 2&ndash;3 times per person for a solid profile.</p>'
+    + '</div>';
   if (speakersErr) return out + '<p class="privacy-note">Could not load speakers: ' + esc(speakersErr) + '</p>';
   if (!speakers) return out + '<p class="hint">Loading\u2026</p>';
   if (!speakers.length) return out + '<p class="hint">No enrolled voices yet.</p>';
@@ -1039,6 +1047,101 @@ async function deleteSpeaker(id) {
     toast('Voice deleted');
     await loadSpeakers();
   } catch (err) { toast('Could not delete voice: ' + err.message, true); }
+}
+
+// ---------- speaker enrollment (browser capture) ----------
+// Records mic audio with the browser's DSP disabled (no AGC/NS/AEC so the
+// voice print matches raw dictation audio), resamples to 16 kHz mono, and
+// POSTs 16-bit PCM. Only the derived embedding is stored server-side.
+async function spkPopulateDevices(selectedId) {
+  const devEl = document.getElementById('spk-enroll-device');
+  if (!devEl || !navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  try {
+    const devs = await navigator.mediaDevices.enumerateDevices();
+    const mics = devs.filter((d) => d.kind === 'audioinput');
+    devEl.innerHTML = '<option value="">Default microphone</option>' + mics.map((d) =>
+      '<option value="' + esc(d.deviceId) + '"' + (d.deviceId === selectedId ? ' selected' : '') + '>'
+      + esc(d.label || 'Microphone') + '</option>').join('');
+  } catch (_e) { /* labels need permission; ignore */ }
+}
+function spkStatus(msg) {
+  const el = document.getElementById('spk-enroll-status');
+  if (el) el.textContent = msg;
+}
+async function spkEnrollToggle(btn) {
+  if (spkRec) { await spkStopAndEnroll(btn); return; }
+  const nameEl = document.getElementById('spk-enroll-name');
+  const name = (nameEl && nameEl.value.trim()) || '';
+  if (!name) { toast('Enter a name first', true); if (nameEl) nameEl.focus(); return; }
+  const devEl = document.getElementById('spk-enroll-device');
+  const deviceId = devEl && devEl.value ? devEl.value : null;
+  try {
+    const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 };
+    if (deviceId) audio.deviceId = { exact: deviceId };
+    const stream = await navigator.mediaDevices.getUserMedia({ audio });
+    await spkPopulateDevices(deviceId);
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    const source = ctx.createMediaStreamSource(stream);
+    const proc = ctx.createScriptProcessor(4096, 1, 1);
+    const chunks = [];
+    proc.onaudioprocess = (ev) => { chunks.push(new Float32Array(ev.inputBuffer.getChannelData(0))); };
+    source.connect(proc); proc.connect(ctx.destination);
+    spkRec = { stream, ctx, source, proc, chunks, sampleRate: ctx.sampleRate };
+    btn.textContent = 'Stop \u0026 save';
+    btn.classList.add('danger');
+    spkStatus('Recording\u2026 speak naturally for a few seconds, then press Stop \u0026 save.');
+  } catch (err) { toast('Microphone error: ' + err.message, true); }
+}
+async function spkStopAndEnroll(btn) {
+  const rec = spkRec; spkRec = null;
+  btn.textContent = 'Record \u0026 enroll';
+  btn.classList.remove('danger');
+  try {
+    rec.proc.disconnect(); rec.source.disconnect();
+    rec.stream.getTracks().forEach((t) => t.stop());
+    await rec.ctx.close();
+  } catch (_e) { /* teardown best-effort */ }
+  let total = 0; rec.chunks.forEach((c) => { total += c.length; });
+  const merged = new Float32Array(total);
+  let off = 0; rec.chunks.forEach((c) => { merged.set(c, off); off += c.length; });
+  spkStatus('Processing\u2026');
+  const pcm = await spkResampleTo16k(merged, rec.sampleRate);
+  if (pcm.length < 16000) { spkStatus('That was too short \u2014 record at least about a second of speech.'); return; }
+  const nameEl = document.getElementById('spk-enroll-name');
+  const name = (nameEl && nameEl.value.trim()) || spkEnrollName;
+  try {
+    await api('/api/speakers', { method: 'POST', body: JSON.stringify({
+      name, audio_pcm16: spkFloatToB64(pcm), sample_rate: 16000, capture_source: 'browser',
+    }) });
+    toast('Enrolled a voice sample for ' + name);
+    await loadSpeakers();
+  } catch (err) { spkStatus(''); toast('Enrollment failed: ' + err.message, true); }
+}
+async function spkResampleTo16k(samples, srcRate) {
+  if (srcRate === 16000 || !samples.length) return samples;
+  const len = Math.max(1, Math.round(samples.length * 16000 / srcRate));
+  const Off = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  const off = new Off(1, len, 16000);
+  const buf = off.createBuffer(1, samples.length, srcRate);
+  buf.copyToChannel(samples, 0);
+  const src = off.createBufferSource(); src.buffer = buf; src.connect(off.destination); src.start();
+  const rendered = await off.startRendering();
+  return rendered.getChannelData(0);
+}
+function spkFloatToB64(f32) {
+  const bytes = new Uint8Array(f32.length * 2);
+  const view = new DataView(bytes.buffer);
+  for (let i = 0; i < f32.length; i++) {
+    const s = Math.max(-1, Math.min(1, f32[i]));
+    view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
 }
 
 
@@ -1122,6 +1225,8 @@ document.addEventListener('input', (e) => {
   const el = e.target;
   // Remember the voice-test sentence across section re-renders.
   if (el.classList.contains('tts-sample')) { ttsSample = el.value; return; }
+  // Remember the enrollment name across section re-renders.
+  if (el.id === 'spk-enroll-name') { spkEnrollName = el.value; return; }
   // Live sensitivity readout next to wake sliders.
   if (el.classList.contains('slider') && el.previousElementSibling && el.previousElementSibling.classList.contains('sens')) {
     el.previousElementSibling.textContent = Number(el.value).toFixed(2);
@@ -1129,7 +1234,7 @@ document.addEventListener('input', (e) => {
 });
 
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-seg],[data-pick],[data-tts-test],[data-tag-rm],[data-wake-rm],[data-wake-add],[data-vocab-rm],[data-vocab-add],[data-keycap],[data-reset],[data-key-edit],[data-key-clear],[data-key-save],[data-key-cancel],[data-key-new],[data-key-rename],[data-key-revoke],[data-key-restore],[data-key-delete],[data-spk-rename],[data-spk-delete]');
+  const t = e.target.closest('[data-seg],[data-pick],[data-tts-test],[data-tag-rm],[data-wake-rm],[data-wake-add],[data-vocab-rm],[data-vocab-add],[data-keycap],[data-reset],[data-key-edit],[data-key-clear],[data-key-save],[data-key-cancel],[data-key-new],[data-key-rename],[data-key-revoke],[data-key-restore],[data-key-delete],[data-spk-rename],[data-spk-delete],[data-spk-enroll]');
   if (!t) return;
   const secEl = t.closest('details.sec');
   const sec = secEl ? FONO_SECTIONS.find((s) => 'd-' + s.id === secEl.id) : null;
@@ -1211,6 +1316,7 @@ document.addEventListener('click', (e) => {
   if (t.dataset.keyDelete) { deleteApiKey(parseInt(t.dataset.keyDelete, 10)); return; }
   if (t.dataset.spkRename) { renameSpeaker(parseInt(t.dataset.spkRename, 10)); return; }
   if (t.dataset.spkDelete) { deleteSpeaker(parseInt(t.dataset.spkDelete, 10)); return; }
+  if (t.dataset.spkEnroll !== undefined) { spkEnrollToggle(t); return; }
 
 });
 

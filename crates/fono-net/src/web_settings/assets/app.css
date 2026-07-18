@@ -214,6 +214,14 @@ details.sec .body > .row:first-child, details.sec .body > .row.master { border-t
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn.ghost { background: none; border-color: transparent; color: var(--ink-mute); }
 .btn.ghost:hover { color: var(--ink); }
+.btn.danger { border-color: var(--accent); color: var(--accent); }
+
+/* Speaker enrollment card */
+.enroll-card { margin: 12px 0 6px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-2); }
+.enroll-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.enroll-row .enroll-name { flex: 1 1 160px; min-width: 140px; }
+.enroll-row .enroll-device { flex: 1 1 180px; min-width: 150px; }
+.enroll-card .hint { margin: 8px 0 0; }
 
 /* ---------- section disabled state ---------- */
 .section-off .row:not(.master), .section-off .pgrid, .section-off .subhead, .section-off .prompt-d, .section-off .wake-row, .section-off .srv-card { opacity: 0.38; pointer-events: none; filter: saturate(0.4); }
