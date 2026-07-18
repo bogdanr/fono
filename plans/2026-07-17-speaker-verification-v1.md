@@ -230,7 +230,7 @@ New `#/speakers` page on the existing hash router:
       rows. Enrollment accepts raw 16 kHz PCM regardless of origin
       (daemon mic via CLI, uploaded WAV) — the engine is
       channel-agnostic by construction.
-- [ ] Task 2.5. Decision layer: (threshold, min-duration) from
+- [x] Task 2.5. Decision layer: (threshold, min-duration) from
       config; audio accumulation across wake phrase + command until
       `min_speech_secs` is met; emits `SpeakerDecision { name, score,
       confidence, sufficient_audio }`.

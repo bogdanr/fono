@@ -1,5 +1,33 @@
 # Fono — Project Status
-Last updated: 2026-07-17
+Last updated: 2026-07-19
+
+## 2026-07-19 — Speaker verification: decision layer (Task 2.5)
+
+Landed the model-independent decision layer in `fono-audio::speaker`, the last
+Slice 2 piece that needs no hosted model:
+
+1. **`SpeechAccumulator`.** Accumulates 16 kHz mono PCM across the wake phrase
+   and the following command until `min_speech_secs` of audio is gathered
+   (`SAMPLE_RATE`-based), reporting `seconds()` / `is_sufficient()` so short
+   commands keep accumulating until enough voice backs a decision.
+2. **`decide()` → `SpeakerDecision { name, score, confidence,
+   sufficient_audio }`.** Scores a centred/normalised test embedding against
+   every `EnrolledSpeaker` centroid with AS-Norm, picks the best, and only
+   names a match when the score clears the (config) threshold. `confidence` is
+   a logistic of the score's margin over the threshold (0.5 at the threshold,
+   monotone in the score); the winning score/confidence are reported even on a
+   reject, for logging/calibration.
+
+Pure arithmetic — 7 new unit tests (accumulator seconds/sufficiency/clear,
+zero-minimum, empty-candidate reject, genuine-match-vs-reject, threshold
+confidence). Re-exported from `fono-audio`. Gates green: fmt, `clippy
+--workspace` (and `--features speaker-onnx`), full `cargo test --workspace`.
+Plan Task 2.5 ticked.
+
+**Slice 2 is now complete bar Task 2.3's oracle fixtures (Slice 5).** Next
+model-independent work is Slice 4 wiring (tagging transcripts / history with
+the decision). The audio-dependent verbs and Slice 1 mirror hosting +
+runtime rebuild remain as previously noted.
 
 ## 2026-07-17 — Speaker verification: web + CLI management surface (Tasks 3.2–3.3, model-independent half)
 

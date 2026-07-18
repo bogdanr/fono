@@ -44,7 +44,10 @@ pub use silence_watch::{SilenceEvent, SilenceState, SilenceWatch, SilenceWatchCo
 pub use sink::{LocalPlaybackSink, PcmSink};
 #[cfg(feature = "speaker-onnx")]
 pub use speaker::engine::SpeakerEngine;
-pub use speaker::{Cohort, Fbank, FbankConfig, SpeakerModel};
+pub use speaker::{
+    decide, Cohort, EnrolledSpeaker, Fbank, FbankConfig, SpeakerDecision, SpeakerModel,
+    SpeechAccumulator,
+};
 pub use trim::{trim_silence, TrimConfig};
 pub use vad::{Vad, VadDecision, WebRtcVadStub};
 pub use wake_registry::{ResolvedWakeModel, WakeLicense, WakeModelClass, WakeModelEntry};

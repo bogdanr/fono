@@ -188,6 +188,132 @@ fn mean_std(xs: &[f32]) -> (f32, f32) {
     (mean, var.sqrt().max(f32::EPSILON))
 }
 
+/// Assumed sample rate of every mono PCM buffer flowing through the speaker
+/// path (enrolment, verification, accumulation). The engine and the [`Fbank`]
+/// front-end both assume this rate by construction.
+pub const SAMPLE_RATE: u32 = 16_000;
+
+/// Default per-side impostor-cohort size for [`Cohort::as_norm`] (the "top-k"
+/// of the AS-Norm literature, typically 200–300). Clamped to the cohort
+/// length internally, so a smaller shipped cohort is harmless.
+pub const DEFAULT_AS_NORM_TOP_K: usize = 200;
+
+/// One enrolled speaker reduced to a single centred, length-normalised
+/// centroid embedding (the mean of that speaker's enrolment utterances, run
+/// through [`Cohort::center`]). The store/consumer builds these; the decision
+/// layer scores against them.
+#[derive(Debug, Clone)]
+pub struct EnrolledSpeaker {
+    /// Human-readable speaker name (the store's display label).
+    pub name: String,
+    /// Centred + L2-normalised centroid embedding.
+    pub embedding: Vec<f32>,
+}
+
+/// The outcome of comparing one test utterance against the enrolled speakers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpeakerDecision {
+    /// Best-matching enrolled speaker whose score cleared the threshold, or
+    /// `None` when nobody matched (an unknown / rejected speaker).
+    pub name: Option<String>,
+    /// AS-Norm score of the best candidate (whether or not it matched), kept
+    /// for logging and calibration. `0.0` when there were no candidates.
+    pub score: f32,
+    /// Confidence in `0.0..=1.0`: a logistic of the score's margin over the
+    /// threshold — `0.5` exactly at the threshold, →1 well above, →0 well
+    /// below. Model-independent and monotone in the score.
+    pub confidence: f32,
+    /// Whether at least `min_speech_secs` of audio backed this decision. When
+    /// `false` the score is provisional — the caller kept accumulating audio.
+    pub sufficient_audio: bool,
+}
+
+/// Logistic confidence from an AS-Norm score's margin over the decision
+/// threshold: `0.5` at the threshold, saturating towards `0`/`1` away from it.
+#[must_use]
+fn confidence_from_margin(score: f32, threshold: f32) -> f32 {
+    1.0 / (1.0 + (-(score - threshold)).exp())
+}
+
+/// Score a centred/normalised `test` embedding against every enrolled speaker
+/// with AS-Norm and return the best [`SpeakerDecision`]. `name` is `Some` only
+/// when the winning score reaches `threshold`. Both `candidates` and `test`
+/// must already be centred/normalised (see [`Cohort::center`]);
+/// `sufficient_audio` is threaded through from the [`SpeechAccumulator`]. With
+/// no candidates the result is an empty reject.
+#[must_use]
+pub fn decide(
+    candidates: &[EnrolledSpeaker],
+    test: &[f32],
+    cohort: &Cohort,
+    threshold: f32,
+    sufficient_audio: bool,
+) -> SpeakerDecision {
+    let best = candidates
+        .iter()
+        .map(|c| {
+            let raw = cosine(&c.embedding, test);
+            (c, cohort.as_norm(&c.embedding, test, raw, DEFAULT_AS_NORM_TOP_K))
+        })
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    match best {
+        Some((c, score)) => {
+            let name = (score >= threshold).then(|| c.name.clone());
+            let confidence = confidence_from_margin(score, threshold);
+            SpeakerDecision { name, score, confidence, sufficient_audio }
+        }
+        None => SpeakerDecision { name: None, score: 0.0, confidence: 0.0, sufficient_audio },
+    }
+}
+
+/// Accumulates mono PCM across the wake phrase and the following command until
+/// `min_speech_secs` of audio has been gathered, so the verification decision
+/// is made on enough voice. Short commands keep accumulating until the minimum
+/// is met.
+#[derive(Debug, Clone)]
+pub struct SpeechAccumulator {
+    samples: Vec<f32>,
+    min_samples: usize,
+}
+
+impl SpeechAccumulator {
+    /// New accumulator requiring `min_speech_secs` of 16 kHz audio before
+    /// [`Self::is_sufficient`] turns true. Negative values clamp to zero.
+    #[must_use]
+    pub fn new(min_speech_secs: f32) -> Self {
+        let min_samples = (min_speech_secs.max(0.0) * SAMPLE_RATE as f32).ceil() as usize;
+        Self { samples: Vec::new(), min_samples }
+    }
+
+    /// Append a chunk of 16 kHz mono PCM.
+    pub fn push(&mut self, pcm: &[f32]) {
+        self.samples.extend_from_slice(pcm);
+    }
+
+    /// Seconds of audio accumulated so far.
+    #[must_use]
+    pub fn seconds(&self) -> f32 {
+        self.samples.len() as f32 / SAMPLE_RATE as f32
+    }
+
+    /// Whether at least `min_speech_secs` has accumulated.
+    #[must_use]
+    pub fn is_sufficient(&self) -> bool {
+        self.samples.len() >= self.min_samples
+    }
+
+    /// The accumulated PCM, fed to the engine to embed.
+    #[must_use]
+    pub fn samples(&self) -> &[f32] {
+        &self.samples
+    }
+
+    /// Drop the accumulated audio, keeping the configured minimum.
+    pub fn clear(&mut self) {
+        self.samples.clear();
+    }
+}
+
 /// Front-end filterbank configuration a speaker-embedding model expects. The
 /// engine (feature `speaker-onnx`, a later slice) turns 16 kHz mono PCM into
 /// these features before the `ort` session runs.
@@ -977,5 +1103,67 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let err = fetch_model("ghost", tmp.path(), None).await.unwrap_err().to_string();
         assert!(err.contains("unknown speaker model"), "{err}");
+    }
+
+    #[test]
+    fn accumulator_tracks_seconds_and_sufficiency() {
+        let mut acc = SpeechAccumulator::new(1.0); // 1 s = 16000 samples
+        assert!(!acc.is_sufficient());
+        acc.push(&vec![0.0; SAMPLE_RATE as usize / 2]); // 0.5 s
+        assert!((acc.seconds() - 0.5).abs() < 1e-6);
+        assert!(!acc.is_sufficient(), "half a second is below the 1 s minimum");
+        acc.push(&vec![0.0; SAMPLE_RATE as usize / 2]); // now 1.0 s
+        assert!(acc.is_sufficient(), "one full second meets the minimum");
+        assert_eq!(acc.samples().len(), SAMPLE_RATE as usize);
+        acc.clear();
+        assert!(acc.seconds().abs() < f32::EPSILON);
+        assert!(!acc.is_sufficient());
+    }
+
+    #[test]
+    fn accumulator_zero_minimum_is_always_sufficient() {
+        let acc = SpeechAccumulator::new(0.0);
+        assert!(acc.is_sufficient(), "a zero minimum needs no audio");
+    }
+
+    #[test]
+    fn decide_with_no_candidates_is_an_empty_reject() {
+        let cohort = Cohort::default();
+        let d = decide(&[], &[1.0, 0.0], &cohort, 0.5, true);
+        assert_eq!(d.name, None);
+        assert!(d.score.abs() < f32::EPSILON);
+        assert!(d.confidence.abs() < f32::EPSILON);
+        assert!(d.sufficient_audio);
+    }
+
+    #[test]
+    fn decide_matches_the_genuine_speaker_and_rejects_below_threshold() {
+        let cohort = Cohort::default(); // empty → AS-Norm is identity (raw cosine)
+        let alice =
+            EnrolledSpeaker { name: "alice".into(), embedding: cohort.center(&[1.0, 0.0, 0.0]) };
+        let bob =
+            EnrolledSpeaker { name: "bob".into(), embedding: cohort.center(&[0.0, 1.0, 0.0]) };
+        let candidates = vec![alice, bob];
+
+        // A test voice almost identical to Alice clears a modest threshold.
+        let test = cohort.center(&[0.98, 0.02, 0.0]);
+        let d = decide(&candidates, &test, &cohort, 0.5, true);
+        assert_eq!(d.name.as_deref(), Some("alice"));
+        assert!(d.score > 0.5);
+        assert!(d.confidence > 0.5, "above-threshold score → confidence over 0.5");
+
+        // The same voice against an impossibly high threshold is rejected,
+        // but the winning score/confidence are still reported.
+        let d = decide(&candidates, &test, &cohort, 5.0, true);
+        assert_eq!(d.name, None, "no score can clear a threshold above the cosine ceiling");
+        assert!(d.score > 0.5);
+        assert!(d.confidence < 0.5, "below-threshold score → confidence under 0.5");
+    }
+
+    #[test]
+    fn confidence_is_one_half_at_the_threshold() {
+        assert!((confidence_from_margin(1.23, 1.23) - 0.5).abs() < 1e-6);
+        assert!(confidence_from_margin(2.0, 1.0) > 0.5);
+        assert!(confidence_from_margin(0.0, 1.0) < 0.5);
     }
 }
