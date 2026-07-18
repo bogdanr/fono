@@ -76,6 +76,21 @@ fi
 # re-published under RELEASE_TAG; every row below is re-pinned to the new
 # `raw_sha256`. This lib is a strict superset of the wake-capable one, so it
 # still loads every existing voice + the wake stack, and now Supertonic too.
+#
+# SPEAKER REBUILD PENDING (2026-07-19): shipping the ReDimNet2 speaker-
+# verification embeddings (redimnet2-b3 / -b6, PalabraAI, MIT) unions three
+# net-new operators into ../fono-voice/onnxruntime/ops.config:
+# InstanceNormalization(6), ReduceProd(13, int64_t), and the com.microsoft
+# FastGelu contrib op (verified locally via scripts/gen-ort-models.sh +
+# scripts/merge-ort-configs.py; B3 and B6 are operator-identical). The minimal
+# runtime therefore MUST be rebuilt before either speaker model loads, else it
+# fails with "Could not find an implementation for InstanceNormalization(6)".
+# The rows below are NOT yet updated for this rebuild — they remain the
+# Supertonic-era libs (which do NOT contain the three new ops). When
+# fono-voice's build-onnxruntime workflow republishes the runtime from the
+# unioned config, re-pin EVERY triple below from the updated
+# sha-<triple>.txt (curl "$BASE_URL/$RELEASE_TAG/sha-<triple>.txt"), then run
+# `./tests/check.sh --size-budget` to confirm the size gate still passes.
 sha_for_triple() {
 	case "$1" in
 	x86_64-unknown-linux-gnu)

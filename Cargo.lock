@@ -1459,6 +1459,7 @@ dependencies = [
  "fono-core",
  "fono-download",
  "ort",
+ "realfft",
  "rubato",
  "serde_json",
  "tempfile",

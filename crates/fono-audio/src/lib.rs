@@ -25,6 +25,7 @@ pub mod pulse;
 pub mod resample;
 pub mod silence_watch;
 pub mod sink;
+pub mod speaker;
 pub mod trim;
 pub mod vad;
 pub mod wake_registry;
@@ -41,6 +42,9 @@ pub use envelope::{dbfs_to_rms, rms_to_dbfs, EnvelopeConfig, EnvelopeFollower, E
 pub use playback::{AudioPlayback, PlaybackError};
 pub use silence_watch::{SilenceEvent, SilenceState, SilenceWatch, SilenceWatchConfig};
 pub use sink::{LocalPlaybackSink, PcmSink};
+#[cfg(feature = "speaker-onnx")]
+pub use speaker::engine::SpeakerEngine;
+pub use speaker::{Cohort, Fbank, FbankConfig, SpeakerModel};
 pub use trim::{trim_silence, TrimConfig};
 pub use vad::{Vad, VadDecision, WebRtcVadStub};
 pub use wake_registry::{ResolvedWakeModel, WakeLicense, WakeModelClass, WakeModelEntry};

@@ -85,6 +85,12 @@ pub struct Config {
     /// no network exposure). Disable with `fono use mcp-server off`.
     #[serde(default, skip_serializing_if = "McpServer::is_default")]
     pub mcp: McpServer,
+
+    /// Local speaker-verification ("who is speaking") settings. Off by
+    /// default; everything runs on-device. See
+    /// `plans/2026-07-17-speaker-verification-v1.md`.
+    #[serde(default, skip_serializing_if = "Speaker::is_default")]
+    pub speaker: Speaker,
 }
 
 impl Default for Config {
@@ -108,6 +114,7 @@ impl Default for Config {
             server: Server::default(),
             network: Network::default(),
             mcp: McpServer::default(),
+            speaker: Speaker::default(),
         }
     }
 }
@@ -389,6 +396,104 @@ impl WakeWyoming {
     #[must_use]
     pub fn is_client(&self) -> bool {
         self.enabled && self.uri.as_deref().is_some_and(|u| !u.trim().is_empty())
+    }
+}
+
+/// Local speaker-verification settings (Slice 3.1 of
+/// `plans/2026-07-17-speaker-verification-v1.md`). Off by default; when
+/// enabled the daemon embeds each utterance on the local ONNX voice stack
+/// and tags transcripts/turns with a `{ name, confidence }` decision.
+///
+/// This is **identification + a convenience gate, not authentication**:
+/// voice biometrics are defeated by cloning/replay, so fail-deadly actions
+/// always require a second factor outside the voice channel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Speaker {
+    /// Master switch. `false` (default) means no embedding model is loaded
+    /// and no speaker metadata is attached.
+    pub enabled: bool,
+    /// Registry model name (see `fono_audio::speaker` registry). Default
+    /// `redimnet2-b3`.
+    pub model: String,
+    /// Decision threshold: `"auto"` resolves from the shipped impostor
+    /// cohort plus the user's own calibration stats; an explicit float pins
+    /// a fixed operating point for strict deployments.
+    pub threshold: SpeakerThreshold,
+    /// Seconds of speech accumulated (wake phrase + command) before a
+    /// verification decision is made. Short commands accumulate until met.
+    pub min_speech_secs: f32,
+}
+
+impl Default for Speaker {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: "redimnet2-b3".into(),
+            threshold: SpeakerThreshold::Auto,
+            min_speech_secs: 3.0,
+        }
+    }
+}
+
+impl Speaker {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// The `[speaker].threshold` knob: either the string `"auto"` (resolved from
+/// calibration) or an explicit fixed float.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum SpeakerThreshold {
+    /// Resolve from the shipped impostor cohort + the user's calibration.
+    #[default]
+    Auto,
+    /// A pinned operating point.
+    Fixed(f32),
+}
+
+impl Serialize for SpeakerThreshold {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            Self::Auto => s.serialize_str("auto"),
+            Self::Fixed(f) => s.serialize_f32(*f),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SpeakerThreshold {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = SpeakerThreshold;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("\"auto\" or a float threshold")
+            }
+            fn visit_str<E: serde::de::Error>(
+                self,
+                v: &str,
+            ) -> std::result::Result<Self::Value, E> {
+                if v.eq_ignore_ascii_case("auto") {
+                    Ok(SpeakerThreshold::Auto)
+                } else {
+                    v.parse::<f32>()
+                        .map(SpeakerThreshold::Fixed)
+                        .map_err(|_| E::custom(format!("expected \"auto\" or a float, got {v:?}")))
+                }
+            }
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> std::result::Result<Self::Value, E> {
+                Ok(SpeakerThreshold::Fixed(v as f32))
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> std::result::Result<Self::Value, E> {
+                Ok(SpeakerThreshold::Fixed(v as f32))
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> std::result::Result<Self::Value, E> {
+                Ok(SpeakerThreshold::Fixed(v as f32))
+            }
+        }
+        d.deserialize_any(Visitor)
     }
 }
 
@@ -2060,6 +2165,52 @@ mod tests {
         // WakeTarget serialises lowercase for legible TOML.
         assert!(toml.contains("dictation"), "target should be lowercase: {toml}");
         assert!(toml.contains("assistant"), "target should be lowercase: {toml}");
+    }
+
+    #[test]
+    fn speaker_absent_table_loads_disabled() {
+        // A whole config with no [speaker] table loads with defaults — off,
+        // default model, auto threshold — so existing configs are unchanged.
+        let cfg: Config = toml::from_str("version = 1\n").unwrap();
+        assert!(!cfg.speaker.enabled, "missing [speaker] ⇒ disabled");
+        assert_eq!(cfg.speaker.model, "redimnet2-b3");
+        assert_eq!(cfg.speaker.threshold, SpeakerThreshold::Auto);
+        assert!((cfg.speaker.min_speech_secs - 3.0).abs() < f32::EPSILON);
+        assert!(cfg.speaker.is_default());
+    }
+
+    #[test]
+    fn speaker_default_is_skipped_in_serialization() {
+        // Default [speaker] must not be written, keeping serialized configs
+        // clean for the off-by-default majority.
+        let cfg = Config::default();
+        let toml = toml::to_string(&cfg).unwrap();
+        assert!(!toml.contains("[speaker]"), "default speaker block should be skipped: {toml}");
+    }
+
+    #[test]
+    fn speaker_threshold_auto_roundtrips_as_string() {
+        let s = Speaker { enabled: true, ..Speaker::default() };
+        let toml = toml::to_string(&s).unwrap();
+        assert!(toml.contains("threshold = \"auto\""), "auto is a string: {toml}");
+        let back: Speaker = toml::from_str(&toml).unwrap();
+        assert_eq!(back.threshold, SpeakerThreshold::Auto);
+        assert!(back.enabled);
+    }
+
+    #[test]
+    fn speaker_threshold_fixed_roundtrips_as_float() {
+        let s = Speaker { threshold: SpeakerThreshold::Fixed(2.5), ..Speaker::default() };
+        let toml = toml::to_string(&s).unwrap();
+        let back: Speaker = toml::from_str(&toml).unwrap();
+        assert_eq!(back.threshold, SpeakerThreshold::Fixed(2.5));
+    }
+
+    #[test]
+    fn speaker_threshold_accepts_integer_and_rejects_junk() {
+        let from_int: Speaker = toml::from_str("threshold = 3\n").unwrap();
+        assert_eq!(from_int.threshold, SpeakerThreshold::Fixed(3.0));
+        assert!(toml::from_str::<Speaker>("threshold = \"nonsense\"\n").is_err());
     }
 
     #[test]

@@ -27,6 +27,14 @@ streaming = []
 # is net-zero on shipped binary size (AGENTS size rule). Off by default; the
 # energy stub keeps the pipeline functional with no model present.
 wakeword-onnx = ["dep:ort"]
+# Local speaker-verification embedding engine: a `ort` session that turns an
+# fbank feature block into an embedding vector (Slice 2 of the speaker plan).
+# `ort` is already in the binary's dependency graph via `fono-tts`'s
+# `tts-local`, so this edge is net-zero on shipped binary size. Off by
+# default; the scoring back-end, model registry, and fbank front-end compile
+# without it (they need no model). The fbank uses `realfft`, which is already
+# in the graph via `rubato` — also net-zero.
+speaker-onnx = ["dep:ort"]
 
 [dependencies]
 fono-core = { path = "../fono-core" }
@@ -42,6 +50,10 @@ serde_json = { workspace = true }
 cpal = { workspace = true, optional = true }
 ort = { workspace = true, optional = true }
 rubato = { workspace = true }
+# Real-input FFT for the speaker-verification fbank front-end. Already in the
+# binary's dependency graph via `rubato` (and directly via `fono`), so this
+# direct edge is net-zero on shipped binary size (AGENTS size rule).
+realfft = "3"
 tokio = { workspace = true }
 
 [dev-dependencies]

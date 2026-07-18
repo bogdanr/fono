@@ -1,6 +1,92 @@
 # Fono — Project Status
 Last updated: 2026-07-17
 
+## 2026-07-17 — Speaker verification: web + CLI management surface (Tasks 3.2–3.3, model-independent half)
+
+Built the model-independent half of the speaker web/CLI surface on top of the
+Slice 2/3.1 foundation. Everything below compiles and tests in the default
+gate; enrollment-from-audio, browser capture, and calibration remain blocked
+on the Slice 1 model pack and are clearly deferred.
+
+1. **`/api/speakers/*` (Task 3.2 backend).** New `route_speakers` on the
+   settings server — `GET /api/speakers` (list), `PATCH /api/speakers/{id}`
+   (rename), `DELETE /api/speakers/{id}` (remove) — behind the same
+   loopback-trust + API-key rules as the rest of `/api/*`. Three new
+   `WebSettingsHooks` closures (`list_speakers`/`rename_speaker`/
+   `delete_speaker`) wired in the daemon over `SpeakerStore` (reopened per
+   call, like the config/vocabulary hooks). The list projects `SpeakerView`
+   down to metadata only — voice-print embeddings never cross the wire.
+2. **Speakers settings section (Task 3.2 frontend).** New `Speakers (voice
+   ID)` section in the SPA: a settings card (enable toggle, model picker,
+   `"auto"`-or-float threshold, min-speech seconds) bound to the `[speaker]`
+   config, plus a roster table (name / utterances / calibrated / updated)
+   with rename + delete actions. Enrollment/calibration are flagged in-UI as
+   arriving with the model pack, pointing users at the CLI meanwhile. This
+   binds every `speaker.*` config key, satisfying the config-coverage guard.
+3. **`fono speaker` CLI + doctor (Task 3.3).** `fono speaker
+   list|rename|remove` over `SpeakerStore`, and a `fono doctor` Speaker
+   section: enabled state, registry-model check (loud on an unknown
+   `[speaker].model`), threshold source, enrolled count, and a warning when
+   enabled with zero enrolled speakers.
+
+Gates green: `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -D warnings`, full `cargo test --workspace --tests --lib`
+(incl. a new `speakers_list_and_mutations_round_trip` HTTP test).
+
+**Next / blocked:** the audio-dependent verbs — WAV/mic enrollment, the
+browser capture flow (DSP-off + device picker), calibration ("test my
+voice"), and `fono speaker enroll|test|identify` — all need **Slice 1**
+(hosting the ReDimNet-B6 `.ort` pack + impostor cohort, the minimal-runtime
+rebuild) and the Slice 5 Python-oracle validation. Those need network/mirror
+resources and sign-off. Nothing is committed yet.
+
+## 2026-07-17 — Speaker verification: model-independent foundation (Slice 2 core + 3.1)
+
+Started `plans/2026-07-17-speaker-verification-v1.md`. Landed the parts that
+need no hosted model, no ONNX runtime, and no network — so they compile and
+test in the default workspace gate. Adopted the plan's default open-question
+resolutions: engine will be a `fono-audio` module behind a future
+`speaker-onnx` feature; the store lives in `fono-core` beside `api_keys.rs`.
+Confirmed **zero new crates** (`ort` already in the graph via `fono-audio`,
+`rusqlite` via `fono-core`).
+
+1. **Back-end scoring (Task 2.3, `crates/fono-audio/src/speaker.rs`).**
+   Pure-Rust `l2_normalize`, `cosine`, and a `Cohort` (impostor cohort) with
+   mean-centering and **AS-Norm** score normalisation. 10 unit tests incl. a
+   genuine-vs-impostor separation check. Also holds the **model registry**
+   (Slice 3.1): `redimnet-b6` default row with its fbank config (16 kHz,
+   80-mel, 25/10 ms) and 256-dim embedding; `registry()` / `model(name)`.
+2. **Speaker store (Task 2.4, `crates/fono-core/src/speakers.rs`).** New
+   `SpeakerStore` over a dedicated `speakers.sqlite` (mode `0600`, WAL,
+   owner-clamp per the `api_keys.rs` pattern): `speakers` +
+   `speaker_utterances(embedding BLOB, capture_source, …)` with cascade
+   delete, calibration stats, and LE-`f32` embedding (de)serialisation.
+   13 unit tests. New `Paths::speakers_db()`.
+3. **Config (Slice 3.1, `crates/fono-core/src/config.rs`).** `[speaker]`
+   block (`enabled`/`model`/`threshold`/`min_speech_secs`), off by default and
+   skipped from serialization when default. `threshold` is a `"auto"`-or-float
+   union with a custom serde visitor. 5 round-trip tests.
+4. **Fbank front-end + ONNX engine (Tasks 2.1–2.2, `speaker.rs`).** A
+   log-mel `Fbank` (povey window, 0.97 pre-emphasis, HTK mel triangles,
+   per-utterance CMN) built on `realfft` — already in the graph via `rubato`,
+   so **net-zero** on binary size and always-compiled/testable (4 tests incl.
+   a tone-localisation check). A feature-gated `speaker-onnx` `engine`
+   (`SpeakerEngine`) wraps an `ort` session mirroring the wakeword build
+   idiom: fbank → session → centred + length-normalised embedding. Compiles
+   clean under `--features speaker-onnx`. Exact numerical parity with the
+   Python oracle is deferred to Slice 5.
+
+Gates green: `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -D warnings` (and with `--features speaker-onnx`), full
+`cargo test --workspace --tests --lib`.
+
+**Next / blocked:** the engine's *runtime validation* still needs **Slice 1**
+— hosting the ReDimNet-B6 `.ort` pack + impostor cohort on the voice mirror,
+the `ops.config` union / minimal-runtime rebuild, and the Python-oracle
+cross-check (Slice 5) — which needs network/mirror resources and sign-off.
+Also still open on model-independent surface: `/api/speakers/*` + `#/speakers`
+web page and the `fono speaker` CLI (Tasks 3.2–3.3). Nothing is committed yet.
+
 ## 2026-07-17 — Inbound API-key authentication with bounded usage
 
 Replaced the single pre-shared bearer token on the served HTTP surfaces

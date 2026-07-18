@@ -1,0 +1,981 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//! Speaker-verification back-end scoring (the cheap, model-independent half
+//! of the "who is speaking" engine — Slice 2 of
+//! `plans/2026-07-17-speaker-verification-v1.md`).
+//!
+//! An embedding model (a separate, feature-gated `ort` session — added in a
+//! later slice) turns an utterance into a fixed-width `f32` vector. Everything
+//! *after* that point — turning two embeddings into a comparable score — is
+//! plain arithmetic and lives here so it can be unit-tested with no model,
+//! no ONNX runtime, and no network. Research grounding (arXiv 2606.22369,
+//! Kiwano) shows this inference-time back-end wins ~30 % relative EER for
+//! free:
+//!
+//! - **Length-normalisation** ([`l2_normalize`]): project every embedding onto
+//!   the unit sphere so a dot product *is* the cosine similarity.
+//! - **Centering** ([`Cohort::center`]): subtract the impostor-cohort mean
+//!   before normalising, removing the shared "session" direction that
+//!   otherwise inflates every score.
+//! - **AS-Norm** ([`Cohort::as_norm`]): adaptive symmetric score
+//!   normalisation against a shipped impostor cohort (~200 embeddings,
+//!   ~200 KB in the model pack), which rescales a raw cosine into a
+//!   z-score-like quantity that is far more stable across channels and
+//!   speakers than the raw cosine alone.
+//!
+//! The decision layer (threshold, min-speech accumulation) and the enrollment
+//! store live elsewhere; this module only answers "how alike are these two
+//! voices, calibrated against the cohort?".
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use realfft::{num_complex::Complex, RealFftPlanner, RealToComplex};
+
+/// L2-normalise a vector in place (project onto the unit hypersphere). A
+/// zero (or numerically tiny) vector is left untouched — there is no
+/// meaningful direction to normalise.
+pub fn l2_normalize(v: &mut [f32]) {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > f32::EPSILON {
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+    }
+}
+
+/// Cosine similarity of two equal-length vectors, in `-1.0..=1.0`. Returns
+/// `0.0` when the lengths differ or either vector is (near) zero, so callers
+/// never divide by zero.
+#[must_use]
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+    let mut dot = 0.0f32;
+    let mut na = 0.0f32;
+    let mut nb = 0.0f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    let denom = na.sqrt() * nb.sqrt();
+    if denom > f32::EPSILON {
+        dot / denom
+    } else {
+        0.0
+    }
+}
+
+/// The shipped impostor cohort: a fixed set of embeddings from speakers who
+/// are, by construction, *not* the user. Used both to centre embeddings and
+/// to normalise scores (AS-Norm). Members are stored already L2-normalised.
+#[derive(Debug, Clone, Default)]
+pub struct Cohort {
+    /// L2-normalised impostor embeddings (one per row).
+    members: Vec<Vec<f32>>,
+    /// Element-wise mean of the raw (pre-normalisation) cohort embeddings,
+    /// used by [`Self::center`]. Same width as an embedding.
+    mean: Vec<f32>,
+}
+
+impl Cohort {
+    /// Build a cohort from raw impostor embeddings. The mean is computed from
+    /// the raw vectors (for centering); the stored members are the centred +
+    /// L2-normalised forms, matching how [`Self::as_norm`] expects to compare
+    /// against them. Rows whose width does not match the first row are
+    /// dropped defensively.
+    #[must_use]
+    pub fn from_raw(rows: &[Vec<f32>]) -> Self {
+        let Some(dim) = rows.first().map(Vec::len) else {
+            return Self::default();
+        };
+        let usable: Vec<&Vec<f32>> = rows.iter().filter(|r| r.len() == dim).collect();
+        let mut mean = vec![0.0f32; dim];
+        for row in &usable {
+            for (m, x) in mean.iter_mut().zip(row.iter()) {
+                *m += x;
+            }
+        }
+        if !usable.is_empty() {
+            let n = usable.len() as f32;
+            for m in &mut mean {
+                *m /= n;
+            }
+        }
+        let members = usable
+            .iter()
+            .map(|row| {
+                let mut centred: Vec<f32> =
+                    row.iter().zip(mean.iter()).map(|(x, m)| x - m).collect();
+                l2_normalize(&mut centred);
+                centred
+            })
+            .collect();
+        Self { members, mean }
+    }
+
+    /// Number of impostor embeddings in the cohort.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.members.len()
+    }
+
+    /// Whether the cohort carries no members.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    /// Centre and L2-normalise a raw embedding against the cohort mean,
+    /// producing the canonical form used for scoring. When the cohort is
+    /// empty (no mean available) the embedding is only length-normalised.
+    #[must_use]
+    pub fn center(&self, raw: &[f32]) -> Vec<f32> {
+        let mut out: Vec<f32> = if self.mean.len() == raw.len() {
+            raw.iter().zip(self.mean.iter()).map(|(x, m)| x - m).collect()
+        } else {
+            raw.to_vec()
+        };
+        l2_normalize(&mut out);
+        out
+    }
+
+    /// The `top_k` highest cosine scores of `emb` against the cohort,
+    /// descending. `emb` must already be centred/normalised
+    /// (see [`Self::center`]).
+    fn top_k_scores(&self, emb: &[f32], top_k: usize) -> Vec<f32> {
+        let mut scores: Vec<f32> = self.members.iter().map(|m| cosine(emb, m)).collect();
+        scores.sort_unstable_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        scores.truncate(top_k.min(scores.len()));
+        scores
+    }
+
+    /// Adaptive Symmetric Normalisation of a raw cosine `raw_score` between an
+    /// enrolment embedding and a test embedding, both already centred/
+    /// normalised. `top_k` is the impostor-cohort size to select per side
+    /// (~200–300 in the literature; clamped to the cohort length).
+    ///
+    /// The normalised score is
+    /// `0.5 * ((s - μ_e)/σ_e + (s - μ_t)/σ_t)`, where `(μ, σ)` are the mean
+    /// and standard deviation of each side's top-k impostor cosines. This
+    /// rescales the raw cosine into a channel-robust z-score-like quantity.
+    /// When the cohort is empty the raw score is returned unchanged.
+    #[must_use]
+    pub fn as_norm(&self, enroll: &[f32], test: &[f32], raw_score: f32, top_k: usize) -> f32 {
+        if self.members.is_empty() {
+            return raw_score;
+        }
+        let (mu_e, sd_e) = mean_std(&self.top_k_scores(enroll, top_k));
+        let (mu_t, sd_t) = mean_std(&self.top_k_scores(test, top_k));
+        let ze = (raw_score - mu_e) / sd_e;
+        let zt = (raw_score - mu_t) / sd_t;
+        0.5 * (ze + zt)
+    }
+}
+
+/// Mean and (population) standard deviation of a slice. The standard
+/// deviation is floored at [`f32::EPSILON`] so callers never divide by zero
+/// on a degenerate (all-equal or single-element) cohort slice.
+fn mean_std(xs: &[f32]) -> (f32, f32) {
+    if xs.is_empty() {
+        return (0.0, 1.0);
+    }
+    let n = xs.len() as f32;
+    let mean = xs.iter().sum::<f32>() / n;
+    let var = xs.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / n;
+    (mean, var.sqrt().max(f32::EPSILON))
+}
+
+/// Front-end filterbank configuration a speaker-embedding model expects. The
+/// engine (feature `speaker-onnx`, a later slice) turns 16 kHz mono PCM into
+/// these features before the `ort` session runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FbankConfig {
+    pub sample_rate: u32,
+    pub n_mels: usize,
+    pub frame_length_ms: f32,
+    pub frame_shift_ms: f32,
+    /// Low band edge of the mel filterbank (Hz).
+    pub f_min_hz: f32,
+    /// High band edge of the mel filterbank (Hz).
+    pub f_max_hz: f32,
+}
+
+/// SHA-256 sentinel for assets without a pinned digest yet (same convention
+/// and value as `wake_registry::UNPINNED` and `fono_stt::registry::UNPINNED`).
+/// The downloader logs the computed hash and accepts the file; tighten to a
+/// real pin once the artifact is hosted on the mirror.
+pub const UNPINNED: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// ONNX Runtime version the speaker `.ort` assets are converted for. Must
+/// match the linked runtime ABI (ADR 0032) — the same value the voice/wake
+/// stacks and `scripts/fetch-onnxruntime.sh` pin.
+pub const ORT_VERSION: &str = "1.24.2";
+
+/// Release tag the speaker assets live under on the mirror, named for the ONNX
+/// Runtime ABI (ADR 0033), e.g. `ort-1.24.2`.
+pub const RELEASE_TAG: &str = "ort-1.24.2";
+
+/// Default mirror base URL: the `fono-voice` release-download root — the same
+/// mirror the voices and wake models use (ADR 0033). Override via the
+/// `base_url` argument to [`fetch_model`] for forks / self-hosting / a CDN.
+pub const DEFAULT_BASE_URL: &str = "https://github.com/bogdanr/fono-voice/releases/download";
+
+/// `true` for a real 64-hex SHA-256 pin (i.e. not the all-zeros [`UNPINNED`]
+/// sentinel). An unpinned asset is treated as not-yet-hosted: unfetchable, and
+/// its cohort (if any) is reported absent so AS-Norm degrades to plain cosine.
+#[must_use]
+pub fn is_pinned(sha256: &str) -> bool {
+    sha256.len() == 64 && !sha256.chars().all(|c| c == '0')
+}
+
+/// One downloadable file in a model pack: its on-disk basename (also the
+/// mirror asset name), the release tag it lives under, and its pinned hash.
+/// The full URL is built at fetch time via [`asset_url`] from a base URL + the
+/// tag + the file — mirroring `wake_registry::WakeAsset` — so forks and
+/// self-hosting only swap the base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpeakerAsset {
+    /// Local cache basename, also the mirror asset name (e.g.
+    /// `redimnet2-b3.ort`, `redimnet2-b3.cohort.bin`).
+    pub file: &'static str,
+    /// Release tag the asset lives under in the mirror (e.g. `ort-1.24.2`).
+    pub release_tag: &'static str,
+    /// Lowercase-hex SHA-256, or [`UNPINNED`] for a not-yet-hosted artifact.
+    pub sha256: &'static str,
+}
+
+/// One entry in the speaker-embedding model registry: a named model plus the
+/// metadata the engine and UI need, and the SHA-256-pinned download pack (the
+/// `.ort` embedding graph + the AS-Norm impostor-cohort sidecar). Deliberately
+/// **no tier/`auto` ladder** (see the plan's "Model selection" section) —
+/// models are additive rows.
+///
+/// The `.ort` graphs and cohort sidecars are hosted on the `fono-voice` mirror
+/// under [`RELEASE_TAG`]; until an asset is uploaded its `sha256` stays
+/// [`UNPINNED`] (unfetchable), exactly like the wake registry's pending
+/// entries. The known, model-intrinsic metadata below is always valid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpeakerModel {
+    /// Registry key, matched against `[speaker].model`.
+    pub name: &'static str,
+    /// Short human description for the web UI picker.
+    pub description: &'static str,
+    /// Parameter count in millions (a size/CPU hint for the UI).
+    pub params_millions: f32,
+    /// Embedding width (the `f32` vector length the model emits).
+    pub embedding_dim: usize,
+    /// Front-end filterbank the model expects.
+    pub fbank: FbankConfig,
+    /// The `.ort` embedding graph asset.
+    pub graph: SpeakerAsset,
+    /// The AS-Norm impostor-cohort sidecar asset (`<name>.cohort.bin`).
+    pub cohort: SpeakerAsset,
+}
+
+/// Default registry model name (see `[speaker].model`). ReDimNet2-B3 is the
+/// efficiency sweet spot (4.1 M params, ~2.7 GMACs, MIT) and already beats the
+/// original ReDimNet-B6 on clean EER at roughly a quarter of the parameters.
+pub const DEFAULT_MODEL: &str = "redimnet2-b3";
+
+/// Front-end shared by the whole ReDimNet2 family (`feat_type='tf'`): 16 kHz,
+/// 25 ms / 10 ms framing, 72 mel bands over 20–7600 Hz.
+const REDIMNET2_FBANK: FbankConfig = FbankConfig {
+    sample_rate: 16_000,
+    n_mels: 72,
+    frame_length_ms: 25.0,
+    frame_shift_ms: 10.0,
+    f_min_hz: 20.0,
+    f_max_hz: 7600.0,
+};
+
+/// Built-in speaker-embedding model registry. Additive rows, no schema change.
+/// Both tiers share one graph operator set and a 192-d embedding, so a single
+/// hosted runtime serves either.
+const REGISTRY: &[SpeakerModel] = &[
+    SpeakerModel {
+        name: "redimnet2-b3",
+        description: "ReDimNet2-B3 — 4.1M params, robust mixture-trained (MIT)",
+        params_millions: 4.1,
+        embedding_dim: 192,
+        fbank: REDIMNET2_FBANK,
+        // Locally converted + validated (torch→onnx→ort, onnxruntime 1.24.2);
+        // known-good local .ort sha256:
+        //   7bb30475c5924b525b6684a00ff768aa9185f69e6265d5ff9653a48d70eee0e2
+        // Stays UNPINNED until the canonical build is uploaded to the mirror
+        // (a CI re-export may differ byte-for-byte), then pin from the release.
+        graph: SpeakerAsset {
+            file: "redimnet2-b3.ort",
+            release_tag: RELEASE_TAG,
+            sha256: UNPINNED,
+        },
+        // Impostor cohort generated in Slice 4/5; not hosted yet.
+        cohort: SpeakerAsset {
+            file: "redimnet2-b3.cohort.bin",
+            release_tag: RELEASE_TAG,
+            sha256: UNPINNED,
+        },
+    },
+    SpeakerModel {
+        name: "redimnet2-b6",
+        description: "ReDimNet2-B6 — 12.3M params, max accuracy (MIT)",
+        params_millions: 12.3,
+        embedding_dim: 192,
+        fbank: REDIMNET2_FBANK,
+        // known-good local .ort sha256:
+        //   903015c8f462c98b28ec361f2a774bd00b3acbb4086b83b8c3b04824cd26f087
+        graph: SpeakerAsset {
+            file: "redimnet2-b6.ort",
+            release_tag: RELEASE_TAG,
+            sha256: UNPINNED,
+        },
+        cohort: SpeakerAsset {
+            file: "redimnet2-b6.cohort.bin",
+            release_tag: RELEASE_TAG,
+            sha256: UNPINNED,
+        },
+    },
+];
+
+/// All registry models.
+#[must_use]
+pub fn registry() -> &'static [SpeakerModel] {
+    REGISTRY
+}
+
+/// Look up a registry model by name.
+#[must_use]
+pub fn model(name: &str) -> Option<&'static SpeakerModel> {
+    REGISTRY.iter().find(|m| m.name == name)
+}
+
+/// Build the full download URL for an asset: `{base}/{release_tag}/{file}`.
+/// Identical join to `wake_registry::asset_url` / `fono_tts::voices::asset_url`.
+#[must_use]
+pub fn asset_url(base_url: &str, release_tag: &str, file: &str) -> String {
+    format!("{}/{}/{}", base_url.trim_end_matches('/'), release_tag, file)
+}
+
+/// Cache directory speaker-model assets live in, mirroring the `models/<kind>`
+/// convention used by the STT, voice, and wake-word model dirs.
+#[must_use]
+pub fn speaker_dir(cache_dir: &Path) -> PathBuf {
+    cache_dir.join("models").join("speaker")
+}
+
+/// Resolved on-disk paths for a fetched speaker model: the `.ort` graph and,
+/// once its sidecar is hosted, the AS-Norm impostor cohort. Returned by
+/// [`fetch_model`] and computable offline via [`resolved_paths`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSpeakerModel {
+    /// The embedding graph `.ort` file.
+    pub graph: PathBuf,
+    /// The cohort sidecar, present only once the asset is hosted/pinned;
+    /// `None` degrades AS-Norm to plain cosine scoring.
+    pub cohort: Option<PathBuf>,
+}
+
+/// Compute where a model's files would live on disk, without downloading.
+/// Returns `None` for an unknown name. The cohort path is reported only when
+/// its asset is pinned (hosted); an unpinned cohort yields `None` so callers
+/// treat AS-Norm as unavailable.
+#[must_use]
+pub fn resolved_paths(name: &str, cache_dir: &Path) -> Option<ResolvedSpeakerModel> {
+    let m = model(name)?;
+    let dir = speaker_dir(cache_dir);
+    Some(ResolvedSpeakerModel {
+        graph: dir.join(m.graph.file),
+        cohort: is_pinned(m.cohort.sha256).then(|| dir.join(m.cohort.file)),
+    })
+}
+
+/// Fetch and verify a speaker model by name: the `.ort` embedding graph
+/// (required) and, when hosted, its AS-Norm cohort sidecar. Assets are
+/// downloaded into the speaker cache dir via [`fono_download::download`] and
+/// checked against the pinned SHA-256; a cached file whose hash already
+/// matches is reused (no network). `base_url` overrides [`DEFAULT_BASE_URL`]
+/// (forks / self-hosting / CDN); pass `None` for the default mirror.
+///
+/// The cohort is fetched only when its asset is pinned; an unpinned (not yet
+/// hosted) cohort is skipped and reported as `None`, leaving AS-Norm to
+/// degrade to plain cosine scoring rather than failing the whole fetch.
+pub async fn fetch_model(
+    name: &str,
+    cache_dir: &Path,
+    base_url: Option<&str>,
+) -> Result<ResolvedSpeakerModel> {
+    let m = model(name).with_context(|| format!("unknown speaker model '{name}'"))?;
+    let base = base_url.unwrap_or(DEFAULT_BASE_URL);
+    let dir = speaker_dir(cache_dir);
+    let graph = Box::pin(fetch_asset(&m.graph, base, &dir)).await?;
+    let cohort = if is_pinned(m.cohort.sha256) {
+        Some(Box::pin(fetch_asset(&m.cohort, base, &dir)).await?)
+    } else {
+        tracing::debug!(model = name, "cohort sidecar not hosted yet; AS-Norm disabled");
+        None
+    };
+    Ok(ResolvedSpeakerModel { graph, cohort })
+}
+
+/// Fetch one asset into `dir`, reusing a cached copy whose SHA-256 already
+/// matches. Returns the absolute path to the verified file. Mirrors
+/// `wake_registry::fetch_asset`.
+async fn fetch_asset(asset: &SpeakerAsset, base_url: &str, dir: &Path) -> Result<PathBuf> {
+    let dest = dir.join(asset.file);
+    if dest.is_file() && is_pinned(asset.sha256) {
+        let actual = fono_download::sha256_file(&dest)
+            .await
+            .with_context(|| format!("hash cached {}", dest.display()))?;
+        if actual.eq_ignore_ascii_case(asset.sha256) {
+            tracing::debug!("speaker asset {} present and verified (cache hit)", asset.file);
+            return Ok(dest);
+        }
+        tracing::warn!("cached {} failed checksum; re-downloading", dest.display());
+    }
+    let url = asset_url(base_url, asset.release_tag, asset.file);
+    fono_download::download(&url, &dest, asset.sha256)
+        .await
+        .with_context(|| format!("download speaker asset {url}"))?;
+    Ok(dest)
+}
+
+/// Pre-emphasis coefficient (0.97, as ReDimNet2's front-end).
+const PRE_EMPHASIS: f32 = 0.97;
+/// Small floor added before the log so silent frames stay finite.
+const LOG_FLOOR: f32 = 1e-10;
+
+fn hz_to_mel(f: f32) -> f32 {
+    1127.0 * (f / 700.0).ln_1p()
+}
+
+fn mel_to_hz(m: f32) -> f32 {
+    700.0 * (m / 1127.0).exp_m1()
+}
+
+/// Symmetric Hann window of length `n` (denominator `n-1`), matching
+/// ReDimNet2's `feat_type='tf'` front-end.
+fn hann_window(n: usize) -> Vec<f32> {
+    if n <= 1 {
+        return vec![1.0; n];
+    }
+    let denom = (n - 1) as f32;
+    (0..n)
+        .map(|i| 0.5f32.mul_add(-(2.0 * std::f32::consts::PI * i as f32 / denom).cos(), 0.5))
+        .collect()
+}
+
+/// Log-mel filterbank ("fbank") front-end: 16 kHz mono PCM → per-frame
+/// log-mel features (72 bands for ReDimNet2) with per-utterance cepstral mean
+/// normalisation (CMN). Parameterised by [`FbankConfig`] (from the registry).
+///
+/// Reconciled to ReDimNet2's `feat_type='tf'` front-end: symmetric Hann
+/// window, 0.97 pre-emphasis, HTK mel (`2595·log10(1+f/700)`), **power**
+/// spectrum (`real²+imag²`, no sqrt), natural log, CMN. Two residual quirks of
+/// the upstream graph are deferred to the Slice 5 Python-oracle cross-check
+/// before they matter: it frames the DFT over `nfft/2` (256) truncated bins
+/// with `linspace(0, sr/2, 256)` mel spacing (vs the standard `nfft/2+1`
+/// rfft bins here), and applies a per-signal mean/std normalisation upstream
+/// of pre-emphasis.
+pub struct Fbank {
+    n_mels: usize,
+    frame_len: usize,
+    frame_shift: usize,
+    window: Vec<f32>,
+    /// Per-filter sparse triangular weights: `(fft_bin, weight)`.
+    filters: Vec<Vec<(usize, f32)>>,
+    /// Centre frequency (Hz) of each mel filter (diagnostics / tests).
+    centers: Vec<f32>,
+    plan: Arc<dyn RealToComplex<f32>>,
+}
+
+impl Fbank {
+    /// Build a front-end for the given filterbank config.
+    #[must_use]
+    pub fn new(cfg: FbankConfig) -> Self {
+        let sr = cfg.sample_rate as f32;
+        let frame_len = (cfg.frame_length_ms / 1000.0 * sr).round() as usize;
+        let frame_shift = (cfg.frame_shift_ms / 1000.0 * sr).round() as usize;
+        let nfft = frame_len.next_power_of_two().max(1);
+        let window = hann_window(frame_len);
+        let (filters, centers) =
+            mel_filterbank(cfg.n_mels, nfft, cfg.sample_rate, cfg.f_min_hz, cfg.f_max_hz);
+        let plan = RealFftPlanner::<f32>::new().plan_fft_forward(nfft);
+        Self { n_mels: cfg.n_mels, frame_len, frame_shift, window, filters, centers, plan }
+    }
+
+    /// Number of mel bands.
+    #[must_use]
+    pub fn n_mels(&self) -> usize {
+        self.n_mels
+    }
+
+    /// Compute CMN-normalised log-mel features as `[n_frames][n_mels]`.
+    /// Returns empty when the input is shorter than one frame.
+    #[must_use]
+    pub fn compute(&self, samples: &[f32]) -> Vec<Vec<f32>> {
+        let mut feats = self.log_mel_frames(samples);
+        apply_cmn(&mut feats, self.n_mels);
+        feats
+    }
+
+    /// Log-mel features **without** CMN (the raw per-frame spectra). Split out
+    /// so tests can inspect spectral localisation before mean-subtraction
+    /// flattens a stationary tone.
+    fn log_mel_frames(&self, samples: &[f32]) -> Vec<Vec<f32>> {
+        if samples.len() < self.frame_len {
+            return Vec::new();
+        }
+        let n_frames = 1 + (samples.len() - self.frame_len) / self.frame_shift;
+        let mut input = self.plan.make_input_vec();
+        let mut output = self.plan.make_output_vec();
+        let mut feats = Vec::with_capacity(n_frames);
+        for f in 0..n_frames {
+            let start = f * self.frame_shift;
+            let frame = &samples[start..start + self.frame_len];
+            input.fill(0.0);
+            for i in 0..self.frame_len {
+                let pre = if i == 0 {
+                    frame[0] * (1.0 - PRE_EMPHASIS)
+                } else {
+                    PRE_EMPHASIS.mul_add(-frame[i - 1], frame[i])
+                };
+                input[i] = pre * self.window[i];
+            }
+            // realfft overwrites the input scratch; a fresh plan call per frame
+            // is fine at utterance cadence (event-driven, not continuous).
+            let _ = self.plan.process(&mut input, &mut output);
+            feats.push(self.mel_energies(&output));
+        }
+        feats
+    }
+
+    fn mel_energies(&self, spectrum: &[Complex<f32>]) -> Vec<f32> {
+        self.filters
+            .iter()
+            .map(|filt| {
+                let e: f32 = filt.iter().map(|&(bin, w)| spectrum[bin].norm_sqr() * w).sum();
+                (e + LOG_FLOOR).ln()
+            })
+            .collect()
+    }
+
+    /// Mel filter centre frequencies (Hz), for diagnostics / tests.
+    #[must_use]
+    pub fn centers(&self) -> &[f32] {
+        &self.centers
+    }
+}
+
+/// Build `n_mels` triangular mel filters over the `nfft/2 + 1` FFT bins,
+/// returning each filter's sparse `(bin, weight)` list and its centre Hz.
+fn mel_filterbank(
+    n_mels: usize,
+    nfft: usize,
+    sample_rate: u32,
+    low_hz: f32,
+    high_hz: f32,
+) -> (Vec<Vec<(usize, f32)>>, Vec<f32>) {
+    let n_bins = nfft / 2 + 1;
+    let sr = sample_rate as f32;
+    let mel_low = hz_to_mel(low_hz);
+    let mel_high = hz_to_mel(high_hz);
+    // n_mels + 2 equally-spaced mel points => n_mels triangles.
+    let points: Vec<f32> = (0..n_mels + 2)
+        .map(|i| mel_to_hz(mel_low + (mel_high - mel_low) * i as f32 / (n_mels + 1) as f32))
+        .collect();
+    let bin_hz = sr / nfft as f32;
+    let mut filters = Vec::with_capacity(n_mels);
+    let mut centers = Vec::with_capacity(n_mels);
+    for m in 1..=n_mels {
+        let (left, center, right) = (points[m - 1], points[m], points[m + 1]);
+        centers.push(center);
+        let mut filt = Vec::new();
+        for k in 0..n_bins {
+            let f = k as f32 * bin_hz;
+            let w = if f >= left && f <= center && center > left {
+                (f - left) / (center - left)
+            } else if f > center && f <= right && right > center {
+                (right - f) / (right - center)
+            } else {
+                0.0
+            };
+            if w > 0.0 {
+                filt.push((k, w));
+            }
+        }
+        filters.push(filt);
+    }
+    (filters, centers)
+}
+
+/// Subtract each mel dimension's mean across all frames (per-utterance CMN).
+fn apply_cmn(feats: &mut [Vec<f32>], n_mels: usize) {
+    if feats.is_empty() {
+        return;
+    }
+    let n = feats.len() as f32;
+    for d in 0..n_mels {
+        let mean = feats.iter().map(|f| f[d]).sum::<f32>() / n;
+        for f in feats.iter_mut() {
+            f[d] -= mean;
+        }
+    }
+}
+
+/// ONNX embedding engine (feature `speaker-onnx`). Turns 16 kHz mono PCM into
+/// a centred, length-normalised speaker embedding via an `ort` session, ready
+/// for [`cosine`] / [`Cohort::as_norm`] scoring.
+///
+/// The graph itself (a ReDimNet-family `.ort` export) and its impostor cohort
+/// ship in the model pack wired up in Slice 1; this type is the generic
+/// runtime around whatever pack is loaded. Exact numerical parity with the
+/// Python oracle is asserted in Slice 5.
+#[cfg(feature = "speaker-onnx")]
+pub mod engine {
+    use std::path::Path;
+
+    use anyhow::Result;
+    use ort::session::builder::GraphOptimizationLevel;
+    use ort::session::Session;
+    use ort::value::Tensor;
+
+    use super::{Cohort, Fbank};
+
+    /// A loaded speaker-embedding model plus its front-end and impostor cohort.
+    pub struct SpeakerEngine {
+        session: Session,
+        input_name: String,
+        output_name: String,
+        fbank: Fbank,
+        cohort: Cohort,
+    }
+
+    impl SpeakerEngine {
+        /// Load an embedding graph from `model_path`, pairing it with the
+        /// front-end `fbank` and impostor `cohort` from the same pack.
+        pub fn load(model_path: &Path, fbank: Fbank, cohort: Cohort) -> Result<Self> {
+            // Idempotent process-wide ONNX Runtime env (mirrors wakeword/tts).
+            let _ = ort::init().with_name("fono").commit();
+            let session = Session::builder()
+                .map_err(|e| anyhow::anyhow!("create ort session builder: {e}"))?
+                // `.ort` models are pre-optimised and the minimal runtime has
+                // the optimiser compiled out, so setting a level errors —
+                // recover the builder (the documented `ort` minimal idiom).
+                .with_optimization_level(GraphOptimizationLevel::Disable)
+                .unwrap_or_else(ort::Error::recover)
+                .with_intra_threads(1)
+                .map_err(|e| anyhow::anyhow!("set intra-op threads: {e}"))?
+                .commit_from_file(model_path)
+                .map_err(|e| anyhow::anyhow!("load speaker model {}: {e}", model_path.display()))?;
+            let input_name = session
+                .inputs()
+                .first()
+                .map_or_else(|| "feats".to_string(), |i| i.name().to_string());
+            let output_name = session
+                .outputs()
+                .first()
+                .map_or_else(|| "embs".to_string(), |o| o.name().to_string());
+            Ok(Self { session, input_name, output_name, fbank, cohort })
+        }
+
+        /// The impostor cohort shipped with this model (for scoring).
+        #[must_use]
+        pub fn cohort(&self) -> &Cohort {
+            &self.cohort
+        }
+
+        /// Embed 16 kHz mono PCM into a centred, length-normalised embedding.
+        /// Returns `None` when the audio is too short to yield any frames.
+        pub fn embed(&mut self, samples: &[f32]) -> Result<Option<Vec<f32>>> {
+            let feats = self.fbank.compute(samples);
+            if feats.is_empty() {
+                return Ok(None);
+            }
+            let n_frames = feats.len();
+            let n_mels = self.fbank.n_mels();
+            let flat: Vec<f32> = feats.into_iter().flatten().collect();
+            // Shape `[1, n_frames, n_mels]`. The exact expected layout for a
+            // given model is confirmed against the oracle in Slice 5.
+            let tensor = Tensor::from_array((vec![1_i64, n_frames as i64, n_mels as i64], flat))
+                .map_err(|e| anyhow::anyhow!("build speaker feats tensor: {e}"))?;
+            let outputs = self
+                .session
+                .run(ort::inputs![self.input_name.as_str() => tensor])
+                .map_err(|e| anyhow::anyhow!("run speaker embedding: {e}"))?;
+            let (_shape, data) = outputs[self.output_name.as_str()]
+                .try_extract_tensor::<f32>()
+                .map_err(|e| anyhow::anyhow!("extract speaker embedding: {e}"))?;
+            // center() subtracts the cohort mean and L2-normalises.
+            Ok(Some(self.cohort.center(data)))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn l2_normalize_unit_length() {
+        let mut v = vec![3.0, 4.0];
+        l2_normalize(&mut v);
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6);
+        assert!((v[0] - 0.6).abs() < 1e-6);
+        assert!((v[1] - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn l2_normalize_zero_is_noop() {
+        let mut v = vec![0.0, 0.0, 0.0];
+        l2_normalize(&mut v);
+        assert_eq!(v, vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn default_model_is_in_registry() {
+        let m = model(DEFAULT_MODEL).expect("default model present");
+        assert_eq!(m.name, "redimnet2-b3");
+        assert_eq!(m.embedding_dim, 192);
+        assert_eq!(m.fbank.sample_rate, 16_000);
+        assert_eq!(m.fbank.n_mels, 72);
+    }
+
+    #[test]
+    fn unknown_model_is_none() {
+        assert!(model("no-such-model").is_none());
+        assert!(!registry().is_empty());
+    }
+
+    fn default_fbank() -> Fbank {
+        Fbank::new(model(DEFAULT_MODEL).unwrap().fbank)
+    }
+
+    fn tone(freq: f32, secs: f32, sr: u32) -> Vec<f32> {
+        let n = (secs * sr as f32) as usize;
+        (0..n)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * freq * i as f32 / sr as f32).sin())
+            .collect()
+    }
+
+    #[test]
+    fn fbank_frame_count_and_dims() {
+        let fb = default_fbank();
+        // 1 s @ 16 kHz, 25 ms frame (400) / 10 ms shift (160):
+        // 1 + (16000 - 400) / 160 = 98 frames, 72 mels each.
+        let feats = fb.compute(&tone(440.0, 1.0, 16_000));
+        assert_eq!(feats.len(), 98);
+        assert!(feats.iter().all(|f| f.len() == 72));
+    }
+
+    #[test]
+    fn fbank_too_short_is_empty() {
+        let fb = default_fbank();
+        assert!(fb.compute(&[0.0; 100]).is_empty());
+    }
+
+    #[test]
+    fn fbank_cmn_gives_zero_mean_per_dim() {
+        let fb = default_fbank();
+        let feats = fb.compute(&tone(300.0, 0.5, 16_000));
+        assert!(!feats.is_empty());
+        for d in 0..fb.n_mels() {
+            let mean = feats.iter().map(|f| f[d]).sum::<f32>() / feats.len() as f32;
+            assert!(mean.abs() < 1e-4, "dim {d} mean {mean} should be ~0 after CMN");
+        }
+    }
+
+    #[test]
+    fn fbank_tone_energy_localises_near_pitch() {
+        let fb = default_fbank();
+        // Average the pre-CMN spectra of a 1 kHz tone; the peak mel band's
+        // centre frequency should sit near 1 kHz.
+        let frames = fb.log_mel_frames(&tone(1000.0, 0.3, 16_000));
+        assert!(!frames.is_empty());
+        let mut avg = vec![0.0f32; fb.n_mels()];
+        for fr in &frames {
+            for (a, x) in avg.iter_mut().zip(fr.iter()) {
+                *a += x;
+            }
+        }
+        let peak = avg
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i)
+            .unwrap();
+        let center = fb.centers()[peak];
+        assert!(
+            (center - 1000.0).abs() < 250.0,
+            "peak band centre {center} Hz should be near 1 kHz"
+        );
+    }
+
+    #[test]
+    fn cosine_identical_is_one() {
+        let a = vec![1.0, 2.0, 3.0];
+        assert!((cosine(&a, &a) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_orthogonal_is_zero() {
+        assert!(cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_opposite_is_minus_one() {
+        assert!((cosine(&[1.0, 0.0], &[-1.0, 0.0]) + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_length_mismatch_or_zero_is_zero() {
+        assert!(cosine(&[1.0, 2.0], &[1.0]).abs() < f32::EPSILON);
+        assert!(cosine(&[0.0, 0.0], &[1.0, 2.0]).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn cohort_from_raw_normalises_members() {
+        let rows = vec![vec![1.0, 0.0, 0.0], vec![0.0, 2.0, 0.0], vec![0.0, 0.0, 3.0]];
+        let cohort = Cohort::from_raw(&rows);
+        assert_eq!(cohort.len(), 3);
+        assert!(!cohort.is_empty());
+        for m in &cohort.members {
+            let norm = m.iter().map(|x| x * x).sum::<f32>().sqrt();
+            // Non-zero after centering => unit length.
+            assert!((norm - 1.0).abs() < 1e-5 || norm < 1e-5);
+        }
+    }
+
+    #[test]
+    fn cohort_from_raw_drops_mismatched_rows() {
+        let rows = vec![vec![1.0, 0.0], vec![0.0, 1.0, 0.0], vec![0.0, 1.0]];
+        let cohort = Cohort::from_raw(&rows);
+        assert_eq!(cohort.len(), 2, "the width-3 row is dropped");
+    }
+
+    #[test]
+    fn empty_cohort_as_norm_is_identity() {
+        let cohort = Cohort::default();
+        let e = vec![1.0, 0.0];
+        let t = vec![1.0, 0.0];
+        let raw = cosine(&e, &t);
+        assert!((cohort.as_norm(&e, &t, raw, 10) - raw).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn as_norm_rewards_genuine_over_impostor() {
+        // A cohort clustered around one direction; a "genuine" pair points
+        // away from the cohort (high raw cosine to each other, low to the
+        // cohort) and an "impostor" pair sits inside the cohort cloud.
+        let raw_cohort: Vec<Vec<f32>> = (0..8)
+            .map(|i| {
+                let j = i as f32 * 0.01;
+                vec![1.0 + j, 0.1 - j, 0.0]
+            })
+            .collect();
+        let cohort = Cohort::from_raw(&raw_cohort);
+
+        // Genuine: two near-identical embeddings orthogonal to the cohort.
+        let g_enroll = cohort.center(&[0.0, 0.0, 1.0]);
+        let g_test = cohort.center(&[0.0, 0.01, 1.0]);
+        let g_raw = cosine(&g_enroll, &g_test);
+        let g_norm = cohort.as_norm(&g_enroll, &g_test, g_raw, 8);
+
+        // Impostor: two embeddings pointing along the cohort direction.
+        let i_enroll = cohort.center(&[1.0, 0.1, 0.0]);
+        let i_test = cohort.center(&[1.02, 0.08, 0.0]);
+        let i_raw = cosine(&i_enroll, &i_test);
+        let i_norm = cohort.as_norm(&i_enroll, &i_test, i_raw, 8);
+
+        assert!(
+            g_norm > i_norm,
+            "AS-Norm should separate genuine ({g_norm}) above impostor ({i_norm})"
+        );
+    }
+
+    #[test]
+    fn asset_url_joins_without_double_slashes() {
+        assert_eq!(
+            asset_url("https://example.test/dl/", "ort-1.24.2", "redimnet2-b3.ort"),
+            "https://example.test/dl/ort-1.24.2/redimnet2-b3.ort"
+        );
+        assert_eq!(
+            asset_url("https://example.test/dl", "ort-1.24.2", "redimnet2-b3.ort"),
+            "https://example.test/dl/ort-1.24.2/redimnet2-b3.ort"
+        );
+    }
+
+    #[test]
+    fn every_graph_is_an_ort_on_the_fono_voice_mirror_with_abi_tag() {
+        // Distribution must match the voice/wake stacks (ADR 0033): `.ort`
+        // graph files under the ABI-named release tag on the fono-voice mirror.
+        assert!(DEFAULT_BASE_URL.contains("fono-voice"), "assets ride the fono-voice mirror");
+        assert_eq!(RELEASE_TAG, format!("ort-{ORT_VERSION}"));
+        for m in registry() {
+            assert!(
+                std::path::Path::new(m.graph.file)
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("ort")),
+                "{} graph must be a .ort",
+                m.name
+            );
+            assert_eq!(m.graph.release_tag, RELEASE_TAG, "{} graph must use the ABI tag", m.name);
+            assert_eq!(
+                m.cohort.file,
+                format!("{}.cohort.bin", m.name),
+                "cohort basename must be <name>.cohort.bin",
+            );
+            assert_eq!(m.cohort.release_tag, RELEASE_TAG, "{} cohort must use the ABI tag", m.name);
+        }
+    }
+
+    #[test]
+    fn graph_basename_is_name_dot_ort() {
+        // The engine loads `<name>.ort`; the cached basename must equal that.
+        for m in registry() {
+            assert_eq!(
+                m.graph.file,
+                format!("{}.ort", m.name),
+                "graph basename must be <name>.ort"
+            );
+        }
+    }
+
+    #[test]
+    fn packs_are_unpinned_until_hosted() {
+        // The ReDimNet2 assets are converted + validated but not yet uploaded,
+        // so every pin is the all-zeros sentinel. Flip this test when the
+        // canonical build is hosted and the rows are pinned from the release.
+        for m in registry() {
+            assert!(!is_pinned(m.graph.sha256), "{} graph should be UNPINNED until hosted", m.name);
+            assert!(
+                !is_pinned(m.cohort.sha256),
+                "{} cohort should be UNPINNED until hosted",
+                m.name
+            );
+        }
+        assert!(is_pinned("7bb30475c5924b525b6684a00ff768aa9185f69e6265d5ff9653a48d70eee0e2"));
+        assert!(!is_pinned(UNPINNED));
+        assert!(!is_pinned("abc"));
+    }
+
+    #[test]
+    fn resolved_paths_land_under_the_speaker_cache_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = resolved_paths(DEFAULT_MODEL, tmp.path()).unwrap();
+        let dir = speaker_dir(tmp.path());
+        assert_eq!(r.graph, dir.join("redimnet2-b3.ort"));
+        // Cohort is unpinned (not hosted), so no path is advertised yet.
+        assert_eq!(r.cohort, None);
+        assert!(resolved_paths("nope", tmp.path()).is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_unknown_model_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = fetch_model("ghost", tmp.path(), None).await.unwrap_err().to_string();
+        assert!(err.contains("unknown speaker model"), "{err}");
+    }
+}

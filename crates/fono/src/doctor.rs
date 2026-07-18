@@ -1330,6 +1330,94 @@ pub fn gather(paths: &Paths, probes_source: impl FnOnce() -> KeyProbes) -> Resul
         writeln!(out)?;
     }
     // ----------------------------------------------------------------
+    // Speaker verification — local voice biometrics (Slice 3 of
+    // plans/2026-07-17-speaker-verification-v1.md). Honest field
+    // reporting: enabled?, the selected registry model (and whether it
+    // resolves), the enrolled-speaker count, and the threshold source.
+    // Loudly warns when enabled with zero enrolled speakers (nothing
+    // can ever match) — cheap + side-effect free: reads config and the
+    // 0600 speakers store, no network, no daemon, no model load.
+    // ----------------------------------------------------------------
+    if let Some(c) = cfg.as_ref() {
+        use fono_core::config::SpeakerThreshold;
+        let sp = &c.speaker;
+        writeln!(out, "{}", head("Speaker verification:"))?;
+        col.section("Speaker verification");
+        if sp.enabled {
+            writeln!(out, "  enabled        : {}", ok("true"))?;
+            col.push(S::Ok, "enabled", "true");
+
+            // Selected registry model — flag an unknown name loudly so a
+            // typo in `[speaker].model` is obvious.
+            if let Some(m) = fono_audio::speaker::model(&sp.model) {
+                writeln!(out, "  model          : {} ({})", ok(&sp.model), m.description)?;
+                col.push(S::Ok, "model", &format!("{} ({})", sp.model, m.description));
+            } else {
+                writeln!(
+                    out,
+                    "  model          : {} (not in the registry — check `[speaker].model`)",
+                    bad(&sp.model)
+                )?;
+                col.push(
+                    S::Fail,
+                    "model",
+                    &format!("{} not in the registry — check `[speaker].model`", sp.model),
+                );
+            }
+
+            let threshold = match sp.threshold {
+                SpeakerThreshold::Auto => "auto (from calibration + shipped cohort)".to_string(),
+                SpeakerThreshold::Fixed(t) => format!("pinned at {t:.3}"),
+            };
+            writeln!(out, "  threshold      : {}", dim(&threshold))?;
+            col.push(S::Info, "threshold", &threshold);
+            writeln!(out, "  min speech     : {}", dim(&format!("{:.1}s", sp.min_speech_secs)))?;
+            col.push(S::Info, "min speech", &format!("{:.1}s", sp.min_speech_secs));
+
+            // Enrolled-speaker count from the 0600 store. Enabled with
+            // zero enrolled speakers is a mis-configuration: no utterance
+            // can ever match, so every gated action silently fails closed.
+            match fono_core::speakers::SpeakerStore::open(&paths.speakers_db())
+                .and_then(|s| s.speaker_count())
+            {
+                Ok(0) => {
+                    writeln!(
+                        out,
+                        "  enrolled       : {} (verification is on but no one is enrolled — \
+                         nothing can match)",
+                        warn("0")
+                    )?;
+                    col.push(
+                        S::Warn,
+                        "enrolled",
+                        "0 — verification is on but no one is enrolled; nothing can match",
+                    );
+                }
+                Ok(n) => {
+                    writeln!(out, "  enrolled       : {}", ok(&format!("{n} speaker(s)")))?;
+                    col.push(S::Ok, "enrolled", &format!("{n} speaker(s)"));
+                }
+                Err(e) => {
+                    writeln!(out, "  enrolled       : {}", warn(&format!("unavailable ({e})")))?;
+                    col.push(S::Warn, "enrolled", &format!("unavailable ({e})"));
+                }
+            }
+        } else {
+            writeln!(
+                out,
+                "  enabled        : {} {}",
+                dim("false"),
+                dim("(default — no voice biometrics; enable with `[speaker].enabled = true`)")
+            )?;
+            col.push(
+                S::Info,
+                "enabled",
+                "false (default — no voice biometrics; enable with `[speaker].enabled = true`)",
+            );
+        }
+        writeln!(out)?;
+    }
+    // ----------------------------------------------------------------
     // Coding agents — MCP server status
     // ----------------------------------------------------------------
     if let Some(c) = cfg.as_ref() {

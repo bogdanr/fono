@@ -3958,6 +3958,7 @@ fn web_settings_hooks(
     });
 
     let (get_vocabulary, put_vocabulary) = vocabulary_hooks(paths);
+    let (list_speakers, rename_speaker, delete_speaker) = speaker_hooks(paths);
     let speak = speech_hook(config_path.clone(), secrets_path.clone(), paths.voices_dir());
     let meta = meta_hook(config_path, secrets_path);
 
@@ -3983,6 +3984,9 @@ fn web_settings_hooks(
         create_api_key: auth.create_hook(),
         update_api_key: auth.update_hook(),
         delete_api_key: auth.delete_hook(),
+        list_speakers,
+        rename_speaker,
+        delete_speaker,
     }
 }
 
@@ -4309,6 +4313,59 @@ fn vocabulary_hooks(
     });
 
     (get_vocabulary, put_vocabulary)
+}
+
+/// Enrolled-speaker metadata hooks (list / rename / delete). The store is
+/// reopened per call — same cheap-SQLite-open pattern as the config and
+/// vocabulary hooks — so a `fono speaker` CLI edit and a browser edit stay
+/// coherent without a shared handle. Voice-print embeddings never cross
+/// this boundary: `list` projects [`SpeakerView`] down to metadata only.
+fn speaker_hooks(
+    paths: &Paths,
+) -> (
+    fono_net::web_settings::ListSpeakersFn,
+    fono_net::web_settings::RenameSpeakerFn,
+    fono_net::web_settings::DeleteSpeakerFn,
+) {
+    use fono_core::speakers::SpeakerStore;
+
+    let db = paths.speakers_db();
+    let list_speakers: fono_net::web_settings::ListSpeakersFn = Arc::new(move || {
+        let store = SpeakerStore::open(&db).map_err(|e| format!("open speakers db: {e}"))?;
+        let rows = store.list_speakers().map_err(|e| format!("list speakers: {e}"))?;
+        let speakers: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|s| {
+                serde_json::json!({
+                    "id": s.id,
+                    "name": s.name,
+                    "utterance_count": s.utterance_count,
+                    "created_at": s.created_at,
+                    "updated_at": s.updated_at,
+                    "calibrated": s.calibration.is_some(),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "speakers": speakers }))
+    });
+
+    let db = paths.speakers_db();
+    let rename_speaker: fono_net::web_settings::RenameSpeakerFn = Arc::new(move |id, name| {
+        let store = SpeakerStore::open(&db).map_err(|e| format!("open speakers db: {e}"))?;
+        store.rename(id, name).map_err(|e| format!("rename speaker: {e}"))?;
+        info!("web settings: speaker {id} renamed via browser UI");
+        Ok(())
+    });
+
+    let db = paths.speakers_db();
+    let delete_speaker: fono_net::web_settings::DeleteSpeakerFn = Arc::new(move |id| {
+        let store = SpeakerStore::open(&db).map_err(|e| format!("open speakers db: {e}"))?;
+        store.remove(id).map_err(|e| format!("remove speaker: {e}"))?;
+        info!("web settings: speaker {id} removed via browser UI");
+        Ok(())
+    });
+
+    (list_speakers, rename_speaker, delete_speaker)
 }
 
 /// Capability tags advertised over mDNS for the LLM service. Both wire

@@ -34,6 +34,103 @@ Target users: Linux desktop (i3 / sway / KDE / GNOME, X11 and Wayland), Windows,
   <https://github.com/OpenWhispr/openwhispr> — upstream projects whose feature union
   Fono is replicating.
 
+## Voice model (ONNX) conversion & hosting — how it actually works
+
+Everything needed to convert and host a new ONNX voice model exists **today**,
+split across two repos (`fono` + `../fono-voice`). There is a
+`.forge/skills/add-onnx-voice-model` skill with the full playbook, but this
+section is the durable backup in case the skill is unavailable.
+
+- **Two-repo split.** The conversion *scripts* live in **this** repo under
+  `scripts/`; the *runtime build recipe, op-union config, and hosted assets*
+  live in the `../fono-voice` mirror.
+  - `scripts/gen-ort-models.sh` — `.onnx` → `.ort` (minimal-runtime flatbuffer)
+    + emits a per-model `required_operators_and_types.config`. Drive it with
+    `MODELS_DIR=… OUT_DIR=… PYTHON=… ALLOW_PARTIAL=1` for single-model probes.
+  - `scripts/merge-ort-configs.py in1.config in2.config … out.config` — unions
+    per-model configs (operators **and** per-op tensor types).
+  - `scripts/build-onnxruntime-minimal.sh` — builds `libonnxruntime.a`/`.lib`
+    from source, driven by the union config.
+  - `scripts/fetch-onnxruntime.sh` — downloads prebuilt libs; holds the pinned
+    SHA table (used by `ORT_LIB_LOCATION` / the size-budget gate).
+  - `../fono-voice/onnxruntime/ops.config` — the **canonical union operator
+    set** (must cover EVERY shipped model or the omitted model fails at load
+    with `Could not find an implementation for <Op>(<opset>)`).
+  - `../fono-voice/.github/workflows/build-onnxruntime.yml` — rebuilds the
+    minimal runtime per triple; it checks out **this** repo for the build
+    script. `../fono-voice/manifest.json` is the asset catalog (per asset:
+    sha256, size, upstream URL + SHA, license). Assets live on ABI-tagged
+    releases (`ort-<ver>` for models, `onnxruntime-<ver>` for libs).
+
+- **The Python venv for conversion lives in THIS repo, not `fono-voice`.**
+  `../fono-voice` has **no** venv. Use `tmp/venv/bin/python` (onnxruntime
+  **1.24.2**, matching the `ort-sys` ABI pin) — `tmp/kokoro-venv` is
+  equivalent; `.venv-wakeword` is onnxruntime 1.27.0 (wake-word *training*
+  only, WRONG ABI for conversion). If `tmp/` gets pruned, recreate with
+  `python3 -m venv tmp/venv && tmp/venv/bin/pip install onnxruntime==1.24.2
+  flatbuffers numpy`. Conversion is **doable locally** — do not treat it as
+  "blocked on tooling".
+
+- **ABI lockstep (non-negotiable):** the python `onnxruntime` version MUST equal
+  the version `ort-sys` links (currently **1.24.2**). The `.ort` flatbuffer
+  schema and op config are version-coupled to the runtime.
+
+- **Skip the runtime rebuild when ops don't change.** If a new model adds no
+  net-new operators to `ops.config`, you only convert + host + index — no
+  minimal-runtime rebuild. Confirm with a `merge-ort-configs.py` diff and
+  `./tests/check.sh --size-budget`.
+
+- **ReDimNet finding (2026-07-18, speaker verification Slice 1).** Probed
+  `OpenVoiceOS/redimnet-b2-vox2-onnx` (B2 is a fair op-set proxy for the whole
+  B0–B6 family — shared STFT front-end + GELU + L2-norm). Local conversion via
+  `tmp/venv` succeeded and the union diff vs the current mirror `ops.config`
+  shows **three net-new operators**, so shipping ReDimNet **DOES require a
+  minimal-runtime rebuild** (not a convert-and-host-only case):
+  - `ai.onnx;18;ReduceL2` (embedding L2-norm)
+  - `ai.onnx;18;ReduceProd`
+  - `com.microsoft;1;FastGelu` (fused GELU contrib op; distinct from the
+    existing `Gelu`)
+  Hosting layout for the pack (mirrors the openWakeWord family): size-tiered
+  `redimnet-<tier>.ort` graphs + a `redimnet-<tier>.cohort.bin` impostor-cohort
+  sidecar (~200 KB, for AS-Norm) + a `speaker_models[]` manifest section.
+
+- **ReDimNet2 decision + export finding (2026-07-18).** We are targeting
+  **ReDimNet2** (`PalabraAI/redimnet2`, Interspeech 2026, **MIT**), not v1 — it
+  is a strictly better Pareto front (v2-B3 beats v1-B6 at ~1/4 the params).
+  **Default pick: `b3`, dataset `vb2+vox2+cnc2_v0`, train_type `lm`** (the
+  robust mixture-trained, large-margin weights); **B6 same recipe** as an
+  optional max-accuracy tier. Pick the mixture + `lm` weights, never the
+  `vox2`-only or `ptn` rows (those overfit / are un-polished). "Bad room" EER
+  expectation: ~1–3 % realistic desktop, up to ~4 % (B3) / ~3 % (B6) in
+  VOICES-like far-field.
+  - **No ONNX ships upstream — you self-export** from the `.pt`. Do it in a
+    **dedicated export venv** (NOT `tmp/venv`, which is the ABI-pinned .ort
+    converter): `python3 -m venv tmp/redimnet2-export && pip install
+    --index-url https://download.pytorch.org/whl/cpu torch==2.11.0
+    torchaudio==2.11.0 && pip install onnx scipy numpy`. **torch/torchaudio
+    versions must MATCH** — torchaudio caps at 2.11.0 on the cpu index (that
+    mismatch is why `.venv-wakeword`'s torchaudio is broken). Load via the
+    repo's `load_custom(...)`, run a forward, then `torch.onnx.export(...,
+    opset_version=17, dynamo=False)` (waveform input `[N,T]`, dynamic time).
+  - **Exported b3 op-diff vs mirror `ops.config` = three net-new ops → runtime
+    rebuild required:** `ai.onnx;6;InstanceNormalization`, `ReduceProd`,
+    `com.microsoft;1;FastGelu`. NOTE this differs from the v1 probe — v2's `tf`
+    front-end uses conv/matmul framing (NO `STFT` op) and does **not** L2-norm
+    in-graph (NO `ReduceL2`; Fono L2-normalises the embedding in Rust).
+  - **Verified faithful:** torch vs onnxruntime-1.24.2 embedding cosine =
+    1.000000, max abs diff 4e-6. **Embedding dim = 192.** fp32 ONNX ≈ 19 MB.
+  - **Front-end parity (b3 `feat_type='tf'`, `TFMelBanks`):** 16 kHz, frame
+    400 / hop 160 / n_fft 512, **Hann** window (symmetric, denom `N-1`), **72**
+    mel bins, f 20–7600 Hz, HTK mel (`2595·log10(1+hz/700)`), **power**
+    spectrum (`real²+imag²`, NO sqrt — the `fft_mode='abs'` label is misleading;
+    the melbanks path never takes the root), natural log, per-utterance CMN.
+    Upstream quirks to match only at Slice-5 oracle time: the DFT is a
+    conv1d over `nfft/2` (256) truncated bins with `linspace(0, sr/2, 256)` mel
+    spacing (not the standard `nfft/2+1` rfft grid), and a per-signal mean/std
+    normalisation is applied before pre-emphasis. The Rust fbank in
+    `crates/fono-audio/src/speaker.rs` is now reconciled to 72-mel / Hann /
+    power / 20–7600 Hz; the two quirks above remain for Slice 5.
+
 ## Hard rules for agent sessions
 
 - **Pre-commit gate (run, in order, before EVERY `git commit` and EVERY

@@ -771,6 +771,18 @@ const FONO_SECTIONS = [
     html() { return apiKeysHtml(); },
   },
   {
+    id: 'speakers', title: 'Speakers (voice ID)',
+    summary() {
+      if (!gv('speaker.enabled', false)) return 'off';
+      if (speakersErr) return 'unavailable';
+      if (!speakers) return 'loading\u2026';
+      return speakers.length
+        ? speakers.length + (speakers.length === 1 ? ' voice' : ' voices')
+        : 'no voices yet';
+    },
+    html() { return speakersHtml(); },
+  },
+  {
     id: 'servers', title: 'Servers & Advanced',
     summary() {
       const bits = [];
@@ -961,6 +973,75 @@ async function deleteApiKey(id) {
 }
 
 
+// ---------- enrolled speakers (async: GET/PATCH/DELETE /api/speakers) ----------
+// Local voice identification. Metadata only crosses the wire — voice-print
+// embeddings never leave the daemon. Enrollment and "test my voice"
+// calibration arrive with the hosted model pack; until then this manages
+// the enable/threshold settings and lists/renames/removes whatever the CLI
+// (`fono speaker enroll`) has captured.
+let speakers = null, speakersErr = null;
+function refreshSpeakersSection() {
+  const sec = FONO_SECTIONS.find((s) => s.id === 'speakers');
+  if (sec && document.getElementById('d-speakers')) renderSection(sec);
+}
+async function loadSpeakers() {
+  try {
+    const r = await api('/api/speakers');
+    speakers = (r && r.speakers) || [];
+    speakersErr = null;
+  } catch (err) {
+    speakers = null;
+    speakersErr = err.message;
+  }
+  refreshSpeakersSection();
+}
+function speakersHtml() {
+  let out = row('Identify who is speaking', 'Tag transcripts with a speaker name using a local voice model. '
+    + 'This is identification and a convenience gate \u2014 not authentication.', toggle('speaker.enabled', false, 'speakers'))
+    + row('Model', 'Local speaker-embedding model.',
+      sel('speaker.model', [['redimnet2-b3', 'ReDimNet2-B3 (recommended)'], ['redimnet2-b6', 'ReDimNet2-B6 (max accuracy)']], 'redimnet2-b3'))
+    + row('Decision threshold', 'auto tunes from your calibration; or pin a fixed 0\u20131 score.',
+      txt('speaker.threshold', { w: 120, ph: 'auto' }))
+    + row('Minimum speech', 'Seconds of speech gathered before a decision.', flt('speaker.min_speech_secs', 3.0, 'seconds'));
+  out += '<p class="hint">Enrollment and \u201ctest my voice\u201d calibration record in the browser and '
+    + 'arrive with the voice model pack. For now, enroll from the terminal with '
+    + '<code class="mono">fono speaker enroll &lt;name&gt;</code>.</p>';
+  if (speakersErr) return out + '<p class="privacy-note">Could not load speakers: ' + esc(speakersErr) + '</p>';
+  if (!speakers) return out + '<p class="hint">Loading\u2026</p>';
+  if (!speakers.length) return out + '<p class="hint">No enrolled voices yet.</p>';
+  const rows = speakers.map((s) =>
+    '<tr>'
+    + '<td>' + esc(s.name) + '</td>'
+    + '<td>' + (s.utterance_count || 0) + '</td>'
+    + '<td>' + (s.calibrated ? '<span>\u2713</span>' : '<span class="hint">\u2014</span>') + '</td>'
+    + '<td>' + fmtDate(s.updated_at) + '</td>'
+    + '<td class="key-actions">'
+    + keyIconBtn('spk-rename', s.id, '\u270E', 'Rename')
+    + keyIconBtn('spk-delete', s.id, '\u2715', 'Delete', 'danger')
+    + '</td></tr>').join('');
+  return out + '<table class="key-table"><thead><tr>'
+    + '<th>Name</th><th>Utterances</th><th>Calibrated</th><th>Updated</th><th></th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
+async function renameSpeaker(id) {
+  const cur = (speakers.find((s) => s.id === id) || {}).name || '';
+  const name = prompt('New name for this voice:', cur);
+  if (name == null || !name.trim()) return;
+  try {
+    await api('/api/speakers/' + id, { method: 'PATCH', body: JSON.stringify({ name: name.trim() }) });
+    await loadSpeakers();
+  } catch (err) { toast('Could not rename: ' + err.message, true); }
+}
+async function deleteSpeaker(id) {
+  if (!confirm('Permanently delete this voice and all its voice prints? This cannot be undone.')) return;
+  try {
+    await api('/api/speakers/' + id, { method: 'DELETE' });
+    toast('Voice deleted');
+    await loadSpeakers();
+  } catch (err) { toast('Could not delete voice: ' + err.message, true); }
+}
+
+
 // ---------- render ----------
 function renderSection(s) {
   const d = document.getElementById('d-' + s.id);
@@ -1048,7 +1129,7 @@ document.addEventListener('input', (e) => {
 });
 
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-seg],[data-pick],[data-tts-test],[data-tag-rm],[data-wake-rm],[data-wake-add],[data-vocab-rm],[data-vocab-add],[data-keycap],[data-reset],[data-key-edit],[data-key-clear],[data-key-save],[data-key-cancel],[data-key-new],[data-key-rename],[data-key-revoke],[data-key-restore],[data-key-delete]');
+  const t = e.target.closest('[data-seg],[data-pick],[data-tts-test],[data-tag-rm],[data-wake-rm],[data-wake-add],[data-vocab-rm],[data-vocab-add],[data-keycap],[data-reset],[data-key-edit],[data-key-clear],[data-key-save],[data-key-cancel],[data-key-new],[data-key-rename],[data-key-revoke],[data-key-restore],[data-key-delete],[data-spk-rename],[data-spk-delete]');
   if (!t) return;
   const secEl = t.closest('details.sec');
   const sec = secEl ? FONO_SECTIONS.find((s) => 'd-' + s.id === secEl.id) : null;
@@ -1128,6 +1209,8 @@ document.addEventListener('click', (e) => {
   if (t.dataset.keyRevoke) { setApiKeyRevoked(parseInt(t.dataset.keyRevoke, 10), true); return; }
   if (t.dataset.keyRestore) { setApiKeyRevoked(parseInt(t.dataset.keyRestore, 10), false); return; }
   if (t.dataset.keyDelete) { deleteApiKey(parseInt(t.dataset.keyDelete, 10)); return; }
+  if (t.dataset.spkRename) { renameSpeaker(parseInt(t.dataset.spkRename, 10)); return; }
+  if (t.dataset.spkDelete) { deleteSpeaker(parseInt(t.dataset.spkDelete, 10)); return; }
 
 });
 
@@ -1358,6 +1441,7 @@ async function init() {
     document.getElementById('cfgpath').textContent = meta.config_path || '';
     renderAll();
     loadApiKeys(); // fire-and-forget: fills the API Keys section
+    loadSpeakers(); // fire-and-forget: fills the Speakers section
   } catch (err) {
     document.getElementById('loading').textContent = 'Could not load configuration: ' + err.message
       + (TOKEN ? '' : ' \u2014 if a token is configured, open this page as /?token=\u2026');

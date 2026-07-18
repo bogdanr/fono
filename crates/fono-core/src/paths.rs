@@ -143,6 +143,15 @@ impl Paths {
         self.data_dir.join("notes.sqlite")
     }
 
+    /// Store for enrolled speaker voice-print embeddings and their
+    /// calibration stats (see [`crate::speakers::SpeakerStore`]). Embeddings
+    /// are biometric data, so this DB lives beside `history.sqlite` under the
+    /// data dir and is clamped `0600`. Never in `config.toml`.
+    #[must_use]
+    pub fn speakers_db(&self) -> PathBuf {
+        self.data_dir.join("speakers.sqlite")
+    }
+
     #[must_use]
     pub fn whisper_models_dir(&self) -> PathBuf {
         self.cache_dir.join("models").join("whisper")

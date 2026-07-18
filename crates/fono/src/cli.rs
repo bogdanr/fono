@@ -239,6 +239,18 @@ pub enum Cmd {
         #[command(subcommand)]
         action: ServerCmd,
     },
+    /// Manage enrolled speakers for local voice biometrics.
+    ///
+    /// Speaker verification is a private, on-device "who is speaking"
+    /// gate (off by default; enable with `[speaker].enabled = true`).
+    /// Voice prints live in `speakers.sqlite` (mode 0600) and never
+    /// leave the machine. This is identification plus a convenience
+    /// gate — not authentication — so fail-deadly actions always need a
+    /// second factor outside the voice channel.
+    Speaker {
+        #[command(subcommand)]
+        action: SpeakerCmd,
+    },
     /// Manage the personal vocabulary (`~/.config/fono/vocabulary.toml`).
     ///
     /// Deterministic transcript corrections: teach Fono once that a
@@ -551,6 +563,25 @@ pub enum ServerKeysCmd {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum SpeakerCmd {
+    /// List enrolled speakers (id, name, enrolled utterance count,
+    /// last update, and whether calibration has been run).
+    List,
+    /// Rename an enrolled speaker by id.
+    Rename {
+        /// Numeric speaker id (see `fono speaker list`).
+        id: i64,
+        /// New name.
+        name: String,
+    },
+    /// Remove an enrolled speaker by id (wipes all their voice prints).
+    Remove {
+        /// Numeric speaker id to remove.
+        id: i64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum VocabularyCmd {
     /// List all vocabulary entries.
     List,
@@ -794,6 +825,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Some(Cmd::Use { action }) => use_cmd(&paths, action).await,
         Some(Cmd::Keys { action }) => keys_cmd(&paths, action).await,
         Some(Cmd::Server { action }) => server_cmd(&paths, action).await,
+        Some(Cmd::Speaker { action }) => speaker_cmd(&paths, action),
         Some(Cmd::Vocabulary { action }) => vocabulary_cmd(&paths, action),
         Some(Cmd::TestOverlay) => {
             test_overlay_cmd();
@@ -2353,6 +2385,62 @@ async fn server_keys_cmd(paths: &Paths, action: ServerKeysCmd) -> Result<()> {
         ServerKeysCmd::Delete { id } => {
             store.delete(id)?;
             println!("deleted key #{id} and its usage counters");
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// `fono speaker …` — manage enrolled speakers for local voice biometrics
+// (Slice 3.3 of plans/2026-07-17-speaker-verification-v1.md). Voice prints
+// live in `speakers.sqlite` (mode 0600) beside history.sqlite and never
+// leave the machine. Enrollment/identification from audio (`enroll`,
+// `test`, `identify`) land with the hosted model pack in Slice 1; the
+// metadata verbs below (list/rename/remove) work today against the store.
+// ---------------------------------------------------------------------
+
+fn speaker_cmd(paths: &Paths, action: SpeakerCmd) -> Result<()> {
+    use fono_core::speakers::SpeakerStore;
+    let store = SpeakerStore::open(&paths.speakers_db())
+        .context("open speakers.sqlite (the enrolled-speaker voice-print store)")?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    match action {
+        SpeakerCmd::List => {
+            let speakers = store.list_speakers()?;
+            if speakers.is_empty() {
+                println!("no enrolled speakers ({})", paths.speakers_db().display());
+                println!(
+                    "enrollment from audio lands with the model pack; \
+                     see `[speaker]` in your config to enable verification."
+                );
+                return Ok(());
+            }
+            println!("enrolled speakers ({}):", paths.speakers_db().display());
+            println!(
+                "  {:>4}  {:<24} {:<12} {:<12} CALIBRATED",
+                "ID", "NAME", "UTTERANCES", "UPDATED"
+            );
+            for s in speakers {
+                println!(
+                    "  {:>4}  {:<24} {:<12} {:<12} {}",
+                    s.id,
+                    s.name,
+                    s.utterance_count,
+                    ago(Some(s.updated_at), now),
+                    if s.calibration.is_some() { "yes" } else { "no" },
+                );
+            }
+        }
+        SpeakerCmd::Rename { id, name } => {
+            store.rename(id, &name)?;
+            println!("renamed speaker #{id} to {name:?}");
+        }
+        SpeakerCmd::Remove { id } => {
+            store.remove(id)?;
+            println!("removed speaker #{id} and all their voice prints");
         }
     }
     Ok(())

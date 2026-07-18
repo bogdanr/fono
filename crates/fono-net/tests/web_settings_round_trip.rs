@@ -66,6 +66,9 @@ fn stub_hooks() -> WebSettingsHooks {
         create_api_key: create_key,
         update_api_key: Arc::new(|_, _| Ok(serde_json::json!({ "key": {} }))),
         delete_api_key: Arc::new(|_| Ok(())),
+        list_speakers: Arc::new(|| Ok(serde_json::json!({ "speakers": [] }))),
+        rename_speaker: Arc::new(|_, _| Ok(())),
+        delete_speaker: Arc::new(|_| Ok(())),
     }
 }
 
@@ -142,6 +145,45 @@ async fn api_keys_create_then_list_round_trip() {
     let body: serde_json::Value = r.json().await.expect("json");
     assert_eq!(body["keys"].as_array().unwrap().len(), 1);
     assert_eq!(body["keys"][0]["name"], "laptop");
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn speakers_list_and_mutations_round_trip() {
+    let handle = start(true).await;
+    let base = format!("http://{}", handle.local_addr());
+    let client = reqwest::Client::new();
+
+    // Metadata listing is served (the stub reports an empty roster).
+    let r = client.get(format!("{base}/api/speakers")).send().await.expect("send");
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().await.expect("json");
+    assert_eq!(body["speakers"].as_array().unwrap().len(), 0);
+
+    // Rename accepts a JSON name and reports success.
+    let r = client
+        .patch(format!("{base}/api/speakers/1"))
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "name": "Ada" }).to_string())
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(r.status(), 200);
+
+    // A non-numeric id is a client error, not a 500.
+    let r = client
+        .patch(format!("{base}/api/speakers/notanid"))
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "name": "Ada" }).to_string())
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(r.status(), 400);
+
+    // Delete by id succeeds.
+    let r = client.delete(format!("{base}/api/speakers/1")).send().await.expect("send");
+    assert_eq!(r.status(), 200);
 
     handle.shutdown().await;
 }

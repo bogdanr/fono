@@ -20,6 +20,7 @@ pub mod provider_catalog;
 pub mod providers;
 pub mod screen_capture;
 pub mod secrets;
+pub mod speakers;
 pub mod turn_trace;
 pub mod voice_discovery;
 pub mod voice_palette;
@@ -63,6 +64,7 @@ pub use provider_catalog::{
 };
 pub use screen_capture::{CaptureError, CaptureMode, CaptureSource, CapturedImage, GrabberProbe};
 pub use secrets::Secrets;
+pub use speakers::{Calibration, SpeakerStore, SpeakerView, Utterance};
 
 #[cfg(feature = "budget")]
 pub use budget::{BudgetController, BudgetVerdict, PerSecondCostUMicros, PriceTable, QualityFloor};

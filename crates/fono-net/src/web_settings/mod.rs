@@ -121,6 +121,16 @@ pub type UpdateApiKeyFn = Arc<
 /// Permanently delete a key (and its usage counters) by id.
 pub type DeleteApiKeyFn = Arc<dyn Fn(i64) -> std::result::Result<(), String> + Send + Sync>;
 
+/// List enrolled speakers as JSON (metadata only — never voice-print
+/// embeddings): `{"speakers": [{id, name, utterance_count, created_at,
+/// updated_at, calibrated}, …]}`.
+pub type ListSpeakersFn =
+    Arc<dyn Fn() -> std::result::Result<serde_json::Value, String> + Send + Sync>;
+/// Rename an enrolled speaker by id. Args `(id, new_name)`.
+pub type RenameSpeakerFn = Arc<dyn Fn(i64, &str) -> std::result::Result<(), String> + Send + Sync>;
+/// Delete an enrolled speaker (and all their voice prints) by id.
+pub type DeleteSpeakerFn = Arc<dyn Fn(i64) -> std::result::Result<(), String> + Send + Sync>;
+
 /// Hook closures supplied by the daemon layer. The server itself is a thin
 /// wire adapter with no config semantics.
 #[derive(Clone)]
@@ -139,6 +149,12 @@ pub struct WebSettingsHooks {
     pub create_api_key: CreateApiKeyFn,
     pub update_api_key: UpdateApiKeyFn,
     pub delete_api_key: DeleteApiKeyFn,
+    /// Enrolled-speaker management (local voice biometrics). Metadata
+    /// verbs only — enrollment/verification from audio arrive with the
+    /// hosted model pack; these never move voice-print embeddings.
+    pub list_speakers: ListSpeakersFn,
+    pub rename_speaker: RenameSpeakerFn,
+    pub delete_speaker: DeleteSpeakerFn,
 }
 
 /// Configuration for [`WebSettingsServer::start`]. Built from
@@ -369,6 +385,9 @@ async fn route(req: Request<Incoming>, peer: SocketAddr, ctx: ServerCtx) -> Resp
         (m, p) if p == "/api/apikeys" || p.starts_with("/api/apikeys/") => {
             route_api_keys(m, p, req, &ctx).await
         }
+        (m, p) if p == "/api/speakers" || p.starts_with("/api/speakers/") => {
+            route_speakers(m, p, req, &ctx).await
+        }
         (&Method::POST, "/v1/audio/speech") => {
             let Some(body) = read_json_body(req).await else {
                 return openai_error(StatusCode::BAD_REQUEST, "invalid or oversized JSON body");
@@ -458,6 +477,48 @@ async fn route_api_keys(
                 return error_response(StatusCode::BAD_REQUEST, "invalid API key id");
             };
             match (ctx.hooks.delete_api_key)(id) {
+                Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
+                Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &e),
+            }
+        }
+        _ => error_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
+    }
+}
+
+/// Enrolled-speaker metadata endpoints. List / rename / delete only —
+/// voice-print embeddings never cross this boundary. Enrollment and
+/// verification from audio arrive with the hosted model pack.
+async fn route_speakers(
+    method: &Method,
+    path: &str,
+    req: Request<Incoming>,
+    ctx: &ServerCtx,
+) -> Response<ResBody> {
+    match (method, path) {
+        (&Method::GET, "/api/speakers") => match (ctx.hooks.list_speakers)() {
+            Ok(v) => json_ok(&v),
+            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        },
+        (&Method::PATCH, p) if p.starts_with("/api/speakers/") => {
+            let Some(id) = p.trim_start_matches("/api/speakers/").parse::<i64>().ok() else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid speaker id");
+            };
+            let Some(body) = read_json_body(req).await else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid or oversized JSON body");
+            };
+            let Some(name) = body.get("name").and_then(|v| v.as_str()) else {
+                return error_response(StatusCode::BAD_REQUEST, "body must include a \"name\"");
+            };
+            match (ctx.hooks.rename_speaker)(id, name) {
+                Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
+                Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &e),
+            }
+        }
+        (&Method::DELETE, p) if p.starts_with("/api/speakers/") => {
+            let Some(id) = p.trim_start_matches("/api/speakers/").parse::<i64>().ok() else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid speaker id");
+            };
+            match (ctx.hooks.delete_speaker)(id) {
                 Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
                 Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &e),
             }
