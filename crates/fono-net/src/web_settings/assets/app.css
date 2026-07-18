@@ -222,6 +222,7 @@ details.sec .body > .row:first-child, details.sec .body > .row.master { border-t
 .enroll-row .enroll-name { flex: 1 1 160px; min-width: 140px; }
 .enroll-row .enroll-device { flex: 1 1 180px; min-width: 150px; }
 .enroll-card .hint { margin: 8px 0 0; }
+.spk-hidden { display: none; }
 
 /* ---------- section disabled state ---------- */
 .section-off .row:not(.master), .section-off .pgrid, .section-off .subhead, .section-off .prompt-d, .section-off .wake-row, .section-off .srv-card { opacity: 0.38; pointer-events: none; filter: saturate(0.4); }

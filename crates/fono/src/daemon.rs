@@ -4458,7 +4458,7 @@ async fn embed_enrollment_pcm(
     pcm: Vec<f32>,
     sample_rate: u32,
 ) -> std::result::Result<Vec<f32>, String> {
-    use fono_audio::speaker::{self, engine::SpeakerEngine, Cohort, Fbank};
+    use fono_audio::speaker::{self, engine::SpeakerEngine, Cohort};
 
     if sample_rate != 16_000 {
         return Err(format!(
@@ -4467,9 +4467,6 @@ async fn embed_enrollment_pcm(
     }
     let cfg = Config::load(config_path).map_err(|e| format!("load config: {e}"))?;
     let model_name = cfg.speaker.model.clone();
-    let model = speaker::model(&model_name)
-        .ok_or_else(|| format!("unknown speaker model '{model_name}'"))?;
-    let fbank_cfg = model.fbank;
 
     let resolved = speaker::fetch_model(&model_name, cache_dir, None)
         .await
@@ -4483,9 +4480,10 @@ async fn embed_enrollment_pcm(
         .map_or_else(Cohort::default, |path| load_cohort(path).unwrap_or_default());
 
     // The ort session load + embed are CPU-bound: run off the async runtime.
+    // The ReDimNet2 graph takes raw waveform and runs its mel front-end
+    // internally, so we hand it the PCM directly.
     tokio::task::spawn_blocking(move || {
-        let fbank = Fbank::new(fbank_cfg);
-        let mut engine = SpeakerEngine::load(&resolved.graph, fbank, cohort)
+        let mut engine = SpeakerEngine::load(&resolved.graph, cohort)
             .map_err(|e| format!("load speaker engine: {e:#}"))?;
         engine
             .embed(&pcm)

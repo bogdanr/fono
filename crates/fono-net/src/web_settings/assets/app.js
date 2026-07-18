@@ -983,6 +983,8 @@ let speakers = null, speakersErr = null;
 // Enrollment UI state, preserved across section re-renders.
 let spkEnrollName = '';
 let spkRec = null;
+// Captured-but-not-yet-submitted 16 kHz PCM, awaiting Submit or Discard.
+let spkPending = null;
 function refreshSpeakersSection() {
   const sec = FONO_SECTIONS.find((s) => s.id === 'speakers');
   if (sec && document.getElementById('d-speakers')) renderSection(sec);
@@ -1010,9 +1012,11 @@ function speakersHtml() {
     + '<div class="enroll-row">'
     + '<input id="spk-enroll-name" class="input enroll-name" type="text" placeholder="Name (e.g. Alice)" value="' + esc(spkEnrollName) + '" autocomplete="off" />'
     + '<select id="spk-enroll-device" class="select enroll-device"><option value="">Default microphone</option></select>'
-    + '<button class="btn" data-spk-enroll type="button">Record &amp; enroll</button>'
+    + '<button class="btn" id="spk-record-btn" data-spk-record type="button">Record</button>'
+    + '<button class="btn spk-hidden" id="spk-submit-btn" data-spk-submit type="button">Submit</button>'
+    + '<button class="btn danger spk-hidden" id="spk-discard-btn" data-spk-discard type="button">Discard</button>'
     + '</div>'
-    + '<p id="spk-enroll-status" class="hint">Records locally in your browser, resamples to 16&nbsp;kHz, and stores only the derived voice print &mdash; the audio never leaves your machine. Record a few seconds; repeat 2&ndash;3 times per person for a solid profile.</p>'
+    + '<p id="spk-enroll-status" class="hint">Records locally in your browser, resamples to 16&nbsp;kHz, and stores only the derived voice print &mdash; the audio never leaves your machine. Record a few seconds, then submit or discard; repeat 2&ndash;3 times per person for a solid profile.</p>'
     + '</div>';
   if (speakersErr) return out + '<p class="privacy-note">Could not load speakers: ' + esc(speakersErr) + '</p>';
   if (!speakers) return out + '<p class="hint">Loading\u2026</p>';
@@ -1068,8 +1072,33 @@ function spkStatus(msg) {
   const el = document.getElementById('spk-enroll-status');
   if (el) el.textContent = msg;
 }
-async function spkEnrollToggle(btn) {
-  if (spkRec) { await spkStopAndEnroll(btn); return; }
+// Toggle the enroll buttons between the idle/recording/review phases.
+function spkSetPhase(phase) {
+  const rec = document.getElementById('spk-record-btn');
+  const sub = document.getElementById('spk-submit-btn');
+  const dis = document.getElementById('spk-discard-btn');
+  if (!rec || !sub || !dis) return;
+  if (phase === 'recording') {
+    rec.textContent = 'Stop';
+    rec.classList.add('danger');
+    rec.classList.remove('spk-hidden');
+    sub.classList.add('spk-hidden');
+    dis.classList.add('spk-hidden');
+  } else if (phase === 'review') {
+    rec.classList.add('spk-hidden');
+    rec.classList.remove('danger');
+    sub.classList.remove('spk-hidden');
+    dis.classList.remove('spk-hidden');
+  } else { // idle
+    rec.textContent = 'Record';
+    rec.classList.remove('danger', 'spk-hidden');
+    sub.classList.add('spk-hidden');
+    dis.classList.add('spk-hidden');
+  }
+}
+// Start recording, or stop-and-hold for review if already recording.
+async function spkRecordToggle() {
+  if (spkRec) { await spkStopToReview(); return; }
   const nameEl = document.getElementById('spk-enroll-name');
   const name = (nameEl && nameEl.value.trim()) || '';
   if (!name) { toast('Enter a name first', true); if (nameEl) nameEl.focus(); return; }
@@ -1088,15 +1117,13 @@ async function spkEnrollToggle(btn) {
     proc.onaudioprocess = (ev) => { chunks.push(new Float32Array(ev.inputBuffer.getChannelData(0))); };
     source.connect(proc); proc.connect(ctx.destination);
     spkRec = { stream, ctx, source, proc, chunks, sampleRate: ctx.sampleRate };
-    btn.textContent = 'Stop \u0026 save';
-    btn.classList.add('danger');
-    spkStatus('Recording\u2026 speak naturally for a few seconds, then press Stop \u0026 save.');
+    spkSetPhase('recording');
+    spkStatus('Recording\u2026 speak naturally for a few seconds, then press Stop.');
   } catch (err) { toast('Microphone error: ' + err.message, true); }
 }
-async function spkStopAndEnroll(btn) {
+// Stop the mic, resample, and hold the clip for the user to submit or discard.
+async function spkStopToReview() {
   const rec = spkRec; spkRec = null;
-  btn.textContent = 'Record \u0026 enroll';
-  btn.classList.remove('danger');
   try {
     rec.proc.disconnect(); rec.source.disconnect();
     rec.stream.getTracks().forEach((t) => t.stop());
@@ -1107,16 +1134,41 @@ async function spkStopAndEnroll(btn) {
   let off = 0; rec.chunks.forEach((c) => { merged.set(c, off); off += c.length; });
   spkStatus('Processing\u2026');
   const pcm = await spkResampleTo16k(merged, rec.sampleRate);
-  if (pcm.length < 16000) { spkStatus('That was too short \u2014 record at least about a second of speech.'); return; }
+  if (pcm.length < 16000) {
+    spkPending = null;
+    spkSetPhase('idle');
+    spkStatus('That was too short \u2014 record at least about a second of speech.');
+    return;
+  }
+  spkPending = pcm;
+  spkSetPhase('review');
+  const secs = (pcm.length / 16000).toFixed(1);
+  spkStatus('Captured ' + secs + '\u00a0s. Submit to enroll this sample, or discard and try again.');
+}
+// Send the held clip to the server as a new enrollment sample.
+async function spkSubmit() {
+  if (!spkPending) return;
   const nameEl = document.getElementById('spk-enroll-name');
   const name = (nameEl && nameEl.value.trim()) || spkEnrollName;
+  if (!name) { toast('Enter a name first', true); if (nameEl) nameEl.focus(); return; }
+  const pcm = spkPending;
+  spkStatus('Enrolling\u2026');
   try {
     await api('/api/speakers', { method: 'POST', body: JSON.stringify({
       name, audio_pcm16: spkFloatToB64(pcm), sample_rate: 16000, capture_source: 'browser',
     }) });
+    spkPending = null;
+    spkSetPhase('idle');
+    spkStatus('');
     toast('Enrolled a voice sample for ' + name);
     await loadSpeakers();
-  } catch (err) { spkStatus(''); toast('Enrollment failed: ' + err.message, true); }
+  } catch (err) { toast('Enrollment failed: ' + err.message, true); }
+}
+// Throw the held clip away and return to the idle state.
+function spkDiscard() {
+  spkPending = null;
+  spkSetPhase('idle');
+  spkStatus('Discarded. Record again when ready.');
 }
 async function spkResampleTo16k(samples, srcRate) {
   if (srcRate === 16000 || !samples.length) return samples;
@@ -1234,7 +1286,7 @@ document.addEventListener('input', (e) => {
 });
 
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-seg],[data-pick],[data-tts-test],[data-tag-rm],[data-wake-rm],[data-wake-add],[data-vocab-rm],[data-vocab-add],[data-keycap],[data-reset],[data-key-edit],[data-key-clear],[data-key-save],[data-key-cancel],[data-key-new],[data-key-rename],[data-key-revoke],[data-key-restore],[data-key-delete],[data-spk-rename],[data-spk-delete],[data-spk-enroll]');
+  const t = e.target.closest('[data-seg],[data-pick],[data-tts-test],[data-tag-rm],[data-wake-rm],[data-wake-add],[data-vocab-rm],[data-vocab-add],[data-keycap],[data-reset],[data-key-edit],[data-key-clear],[data-key-save],[data-key-cancel],[data-key-new],[data-key-rename],[data-key-revoke],[data-key-restore],[data-key-delete],[data-spk-rename],[data-spk-delete],[data-spk-record],[data-spk-submit],[data-spk-discard]');
   if (!t) return;
   const secEl = t.closest('details.sec');
   const sec = secEl ? FONO_SECTIONS.find((s) => 'd-' + s.id === secEl.id) : null;
@@ -1316,7 +1368,9 @@ document.addEventListener('click', (e) => {
   if (t.dataset.keyDelete) { deleteApiKey(parseInt(t.dataset.keyDelete, 10)); return; }
   if (t.dataset.spkRename) { renameSpeaker(parseInt(t.dataset.spkRename, 10)); return; }
   if (t.dataset.spkDelete) { deleteSpeaker(parseInt(t.dataset.spkDelete, 10)); return; }
-  if (t.dataset.spkEnroll !== undefined) { spkEnrollToggle(t); return; }
+  if (t.dataset.spkRecord !== undefined) { spkRecordToggle(); return; }
+  if (t.dataset.spkSubmit !== undefined) { spkSubmit(); return; }
+  if (t.dataset.spkDiscard !== undefined) { spkDiscard(); return; }
 
 });
 

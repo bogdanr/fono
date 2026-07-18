@@ -765,21 +765,22 @@ pub mod engine {
     use ort::session::Session;
     use ort::value::Tensor;
 
-    use super::{Cohort, Fbank};
+    use super::Cohort;
 
-    /// A loaded speaker-embedding model plus its front-end and impostor cohort.
+    /// A loaded speaker-embedding model plus its impostor cohort. The
+    /// ReDimNet2 `.ort` export takes **raw 16 kHz mono waveform** and computes
+    /// its mel front-end inside the graph, so no external fbank is needed here.
     pub struct SpeakerEngine {
         session: Session,
         input_name: String,
         output_name: String,
-        fbank: Fbank,
         cohort: Cohort,
     }
 
     impl SpeakerEngine {
         /// Load an embedding graph from `model_path`, pairing it with the
-        /// front-end `fbank` and impostor `cohort` from the same pack.
-        pub fn load(model_path: &Path, fbank: Fbank, cohort: Cohort) -> Result<Self> {
+        /// impostor `cohort` from the same pack.
+        pub fn load(model_path: &Path, cohort: Cohort) -> Result<Self> {
             // Idempotent process-wide ONNX Runtime env (mirrors wakeword/tts).
             let _ = ort::init().with_name("fono").commit();
             let session = Session::builder()
@@ -796,12 +797,12 @@ pub mod engine {
             let input_name = session
                 .inputs()
                 .first()
-                .map_or_else(|| "feats".to_string(), |i| i.name().to_string());
+                .map_or_else(|| "waveform".to_string(), |i| i.name().to_string());
             let output_name = session
                 .outputs()
                 .first()
                 .map_or_else(|| "embs".to_string(), |o| o.name().to_string());
-            Ok(Self { session, input_name, output_name, fbank, cohort })
+            Ok(Self { session, input_name, output_name, cohort })
         }
 
         /// The impostor cohort shipped with this model (for scoring).
@@ -811,19 +812,18 @@ pub mod engine {
         }
 
         /// Embed 16 kHz mono PCM into a centred, length-normalised embedding.
-        /// Returns `None` when the audio is too short to yield any frames.
+        /// Returns `None` when the audio is too short for even one mel frame.
+        ///
+        /// The graph's input is the **raw waveform** shaped `[1, T]` (rank 2);
+        /// the mel front-end runs inside the model. Exact numerical parity with
+        /// the Python oracle is asserted in Slice 5.
         pub fn embed(&mut self, samples: &[f32]) -> Result<Option<Vec<f32>>> {
-            let feats = self.fbank.compute(samples);
-            if feats.is_empty() {
+            // Need at least one 25 ms frame (400 samples at 16 kHz).
+            if samples.len() < 400 {
                 return Ok(None);
             }
-            let n_frames = feats.len();
-            let n_mels = self.fbank.n_mels();
-            let flat: Vec<f32> = feats.into_iter().flatten().collect();
-            // Shape `[1, n_frames, n_mels]`. The exact expected layout for a
-            // given model is confirmed against the oracle in Slice 5.
-            let tensor = Tensor::from_array((vec![1_i64, n_frames as i64, n_mels as i64], flat))
-                .map_err(|e| anyhow::anyhow!("build speaker feats tensor: {e}"))?;
+            let tensor = Tensor::from_array((vec![1_i64, samples.len() as i64], samples.to_vec()))
+                .map_err(|e| anyhow::anyhow!("build speaker waveform tensor: {e}"))?;
             let outputs = self
                 .session
                 .run(ort::inputs![self.input_name.as_str() => tensor])
