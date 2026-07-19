@@ -75,6 +75,10 @@ fn stub_hooks() -> WebSettingsHooks {
         calibrate_speaker: Arc::new(|_, _| {
             Box::pin(async { Err("calibration disabled in test".to_string()) })
         }),
+        list_utterances: Arc::new(|_| {
+            Ok(serde_json::json!({ "utterances": [], "suggested_prune": [] }))
+        }),
+        delete_utterance: Arc::new(|_, _| Ok(())),
     }
 }
 
@@ -218,6 +222,27 @@ async fn speakers_list_and_mutations_round_trip() {
         .post(format!("{base}/api/speakers/notanid/calibrate"))
         .header("content-type", "application/json")
         .body(serde_json::json!({ "clips": [] }).to_string())
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(r.status(), 400);
+
+    // Utterance list is wired: the stub returns an empty set (200), proving
+    // `GET /api/speakers/{id}/utterances` reaches the list hook.
+    let r = client.get(format!("{base}/api/speakers/1/utterances")).send().await.expect("send");
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().await.expect("json");
+    assert!(body.get("utterances").is_some(), "utterance list shape");
+
+    // Utterance delete is wired: the stub accepts (200), proving
+    // `DELETE /api/speakers/{id}/utterances/{uid}` reaches the delete hook.
+    let r =
+        client.delete(format!("{base}/api/speakers/1/utterances/2")).send().await.expect("send");
+    assert_eq!(r.status(), 200);
+
+    // A non-numeric utterance id is a client error, not a 500.
+    let r = client
+        .delete(format!("{base}/api/speakers/1/utterances/notanid"))
         .send()
         .await
         .expect("send");

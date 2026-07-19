@@ -110,7 +110,12 @@ Where EER tuning on the user's own room/mic and user confidence materialise.
       decision time, with a documented uncalibrated fallback.
       (`resolve_auto_threshold` in `fono-audio` — pure, four-case; the live
       call lands in Slice 4.)
-- [ ] Task 3.5. Utterance-pruning UI (see prune flow) — suggested, confirmable.
+- [x] Task 3.5. Utterance-pruning UI (see prune flow) — suggested, confirmable.
+  Pure `suggest_prune` (coverage floor: clips + seconds + per-source) in
+  `fono-core`; `GET /api/speakers/{id}/utterances` (rows + quality + on-demand
+  consistency + prune suggestion) and `DELETE .../utterances/{uid}` (refuses the
+  last clip); a "Manage samples" card on `#/speakers` that flags weak clips and
+  removes individually or by accepting the whole suggestion.
 - [ ] Task 3.6. `fono speaker test [name]` CLI parity (distributions, self-EER,
       latency, threshold verdict).
 

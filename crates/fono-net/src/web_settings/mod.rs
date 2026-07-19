@@ -158,6 +158,16 @@ pub type CalibrateSpeakerFn = Arc<
         + Send
         + Sync,
 >;
+/// List a speaker's enrolled utterances with their capture-time quality
+/// metrics and on-demand consistency scores, plus a suggested prune set that
+/// respects the coverage floor (`GET /api/speakers/{id}/utterances`). Never
+/// carries the raw voice-print embeddings. Arg `(id)`.
+pub type ListUtterancesFn =
+    Arc<dyn Fn(i64) -> std::result::Result<serde_json::Value, String> + Send + Sync>;
+/// Delete one enrolled utterance (`DELETE /api/speakers/{id}/utterances/{uid}`).
+/// Refuses to remove the speaker's last remaining clip. Args
+/// `(speaker_id, utterance_id)`.
+pub type DeleteUtteranceFn = Arc<dyn Fn(i64, i64) -> std::result::Result<(), String> + Send + Sync>;
 
 /// Hook closures supplied by the daemon layer. The server itself is a thin
 /// wire adapter with no config semantics.
@@ -187,6 +197,11 @@ pub struct WebSettingsHooks {
     pub enroll_speaker: EnrollSpeakerFn,
     /// Run "test my voice" calibration (`POST /api/speakers/{id}/calibrate`).
     pub calibrate_speaker: CalibrateSpeakerFn,
+    /// List a speaker's utterances + quality/consistency + prune suggestion
+    /// (`GET /api/speakers/{id}/utterances`).
+    pub list_utterances: ListUtterancesFn,
+    /// Delete one utterance (`DELETE /api/speakers/{id}/utterances/{uid}`).
+    pub delete_utterance: DeleteUtteranceFn,
 }
 
 /// Configuration for [`WebSettingsServer::start`]. Built from
@@ -551,6 +566,29 @@ async fn route_speakers(
             };
             match (ctx.hooks.calibrate_speaker)(id, body).await {
                 Ok(v) => json_ok(&v),
+                Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &e),
+            }
+        }
+        (&Method::GET, p) if p.starts_with("/api/speakers/") && p.ends_with("/utterances") => {
+            let id_str = p.trim_start_matches("/api/speakers/").trim_end_matches("/utterances");
+            let Some(id) = id_str.parse::<i64>().ok() else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid speaker id");
+            };
+            match (ctx.hooks.list_utterances)(id) {
+                Ok(v) => json_ok(&v),
+                Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
+            }
+        }
+        (&Method::DELETE, p) if p.contains("/utterances/") && p.starts_with("/api/speakers/") => {
+            let rest = p.trim_start_matches("/api/speakers/");
+            let Some((sid_str, uid_str)) = rest.split_once("/utterances/") else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid utterance path");
+            };
+            let (Ok(sid), Ok(uid)) = (sid_str.parse::<i64>(), uid_str.parse::<i64>()) else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid speaker or utterance id");
+            };
+            match (ctx.hooks.delete_utterance)(sid, uid) {
+                Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
                 Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &e),
             }
         }

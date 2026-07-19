@@ -3866,6 +3866,20 @@ async fn run_doctor(paths: Paths) -> Result<crate::doctor::DoctorReport> {
     .context("doctor task panicked")?
 }
 
+/// The doctor hook (`GET /api/doctor`): runs the full diagnostic suite and
+/// serializes the report. Split out to keep [`web_settings_hooks`] within the
+/// line budget.
+fn doctor_hook(paths: &Paths) -> fono_net::web_settings::DoctorFn {
+    let doctor_paths = paths.clone();
+    Arc::new(move || {
+        let paths = doctor_paths.clone();
+        Box::pin(async move {
+            let report = run_doctor(paths).await.map_err(|e| format!("doctor: {e:#}"))?;
+            serde_json::to_value(&report).map_err(|e| format!("serialize doctor report: {e}"))
+        })
+    })
+}
+
 /// Build the daemon-side hook closures for the web settings server:
 /// config read/write, write-only secret updates, and page metadata.
 /// Split out of [`spawn_web_settings`] to keep both under clippy's
@@ -3960,17 +3974,11 @@ fn web_settings_hooks(
     let (get_vocabulary, put_vocabulary) = vocabulary_hooks(paths);
     let (list_speakers, rename_speaker, delete_speaker, enroll_speaker, calibrate_speaker) =
         speaker_hooks(paths);
+    let list_utterances = list_utterances_hook(paths);
+    let delete_utterance = delete_utterance_hook(paths);
     let speak = speech_hook(config_path.clone(), secrets_path.clone(), paths.voices_dir());
     let meta = meta_hook(config_path, secrets_path);
-
-    let doctor_paths = paths.clone();
-    let doctor: fono_net::web_settings::DoctorFn = Arc::new(move || {
-        let paths = doctor_paths.clone();
-        Box::pin(async move {
-            let report = run_doctor(paths).await.map_err(|e| format!("doctor: {e:#}"))?;
-            serde_json::to_value(&report).map_err(|e| format!("serialize doctor report: {e}"))
-        })
-    });
+    let doctor = doctor_hook(paths);
 
     fono_net::WebSettingsHooks {
         get_config,
@@ -3990,6 +3998,8 @@ fn web_settings_hooks(
         delete_speaker,
         enroll_speaker,
         calibrate_speaker,
+        list_utterances,
+        delete_utterance,
     }
 }
 
@@ -4376,6 +4386,62 @@ fn speaker_hooks(
     let calibrate_speaker = calibrate_speaker_hook(paths);
 
     (list_speakers, rename_speaker, delete_speaker, enroll_speaker, calibrate_speaker)
+}
+
+/// The utterance-list hook (`GET /api/speakers/{id}/utterances`): returns each
+/// enrolled clip's capture-time quality metrics plus an on-demand consistency
+/// score (its cosine to the centroid of the others — relational, so never
+/// stored), and a suggested prune set that honours the coverage floor. Never
+/// moves the raw voice-print embeddings over the wire.
+fn list_utterances_hook(paths: &Paths) -> fono_net::web_settings::ListUtterancesFn {
+    use fono_core::speakers::{suggest_prune, SpeakerStore, PRUNE_MIN_CLIPS, PRUNE_MIN_SECS};
+    let db = paths.speakers_db();
+    Arc::new(move |id| {
+        let store = SpeakerStore::open(&db).map_err(|e| format!("open speakers db: {e}"))?;
+        let utts = store.utterances(id).map_err(|e| format!("list utterances: {e}"))?;
+        let embeddings: Vec<Vec<f32>> = utts.iter().map(|u| u.embedding.clone()).collect();
+        let consistency = fono_audio::speaker::consistency_scores(&embeddings);
+        let suggested = suggest_prune(&utts, &consistency);
+        let rows: Vec<serde_json::Value> = utts
+            .iter()
+            .zip(consistency.iter())
+            .map(|(u, c)| {
+                serde_json::json!({
+                    "id": u.id,
+                    "capture_source": u.capture_source,
+                    "created_at": u.created_at,
+                    "duration_secs": u.quality.duration_secs,
+                    "loudness_dbfs": u.quality.loudness_dbfs,
+                    "snr_db": u.quality.snr_db,
+                    "consistency": c,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "utterances": rows,
+            "suggested_prune": suggested,
+            "floor": { "min_clips": PRUNE_MIN_CLIPS, "min_secs": PRUNE_MIN_SECS },
+        }))
+    })
+}
+
+/// The utterance-delete hook (`DELETE /api/speakers/{id}/utterances/{uid}`):
+/// removes one enrolled clip, refusing to delete the speaker's last remaining
+/// one (an empty profile can verify nothing — delete the speaker instead).
+fn delete_utterance_hook(paths: &Paths) -> fono_net::web_settings::DeleteUtteranceFn {
+    use fono_core::speakers::SpeakerStore;
+    let db = paths.speakers_db();
+    Arc::new(move |speaker_id, utterance_id| {
+        let store = SpeakerStore::open(&db).map_err(|e| format!("open speakers db: {e}"))?;
+        let count =
+            store.utterance_count(speaker_id).map_err(|e| format!("count utterances: {e}"))?;
+        if count <= 1 {
+            return Err("cannot remove the last voice sample — delete the speaker instead".into());
+        }
+        store.remove_utterance(utterance_id).map_err(|e| format!("remove utterance: {e}"))?;
+        info!("web settings: utterance {utterance_id} of speaker {speaker_id} pruned via UI");
+        Ok(())
+    })
 }
 
 /// The browser-enrollment hook (`POST /api/speakers`): decode PCM, embed off

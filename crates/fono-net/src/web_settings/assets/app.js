@@ -989,6 +989,9 @@ let spkPending = null;
 // `spkCalClips` accumulates held-out 16 kHz PCM clips; `spkCalResult` holds
 // the last calibrate response so its histogram survives a re-render.
 let spkCalSpeakerId = null, spkCalClips = [], spkCalRec = null, spkCalResult = null, spkCalBusy = false;
+// Sample-manager state: which speaker's utterances are expanded, and the last
+// loaded utterance list (rows + suggested_prune + floor) for that speaker.
+let spkManageId = null, spkUtts = null, spkUttsErr = null;
 function refreshSpeakersSection() {
   const sec = FONO_SECTIONS.find((s) => s.id === 'speakers');
   if (sec && document.getElementById('d-speakers')) renderSection(sec);
@@ -1035,6 +1038,7 @@ function speakersHtml() {
     + '<td>' + (s.calibrated ? '<span>\u2713</span>' : '<span class="hint">\u2014</span>') + '</td>'
     + '<td>' + fmtDate(s.updated_at) + '</td>'
     + '<td class="key-actions">'
+    + keyIconBtn('spk-manage', s.id, '\u2699', 'Manage samples')
     + keyIconBtn('spk-rename', s.id, '\u270E', 'Rename')
     + keyIconBtn('spk-delete', s.id, '\u2715', 'Delete', 'danger')
     + '</td></tr>';
@@ -1042,7 +1046,51 @@ function speakersHtml() {
   return out + '<table class="key-table"><thead><tr>'
     + '<th>Name</th><th>Utterances</th><th>Strength</th><th>Calibrated</th><th>Updated</th><th></th>'
     + '</tr></thead><tbody>' + rows + '</tbody></table>'
+    + manageSamplesHtml()
     + calibrateCardHtml();
+}
+
+// ---------- sample manager (per-utterance list + suggested prune) ----------
+// Expanded from a roster row's gear button. Lists each enrolled clip with its
+// capture-time quality metrics and on-demand consistency score, flags the ones
+// a suggested prune would drop, and lets the user remove individual clips or
+// accept the whole suggestion. The coverage floor (enforced server-side) means
+// a prune can only ever tighten quality, never leave a profile under-enrolled.
+function manageSamplesHtml() {
+  if (spkManageId == null) return '';
+  const sp = speakers && speakers.find((s) => s.id === spkManageId);
+  if (!sp) return '';
+  let body;
+  if (spkUttsErr) body = '<p class="err">' + esc(spkUttsErr) + '</p>';
+  else if (!spkUtts) body = '<p class="hint">Loading samples\u2026</p>';
+  else {
+    const prune = spkUtts.suggested_prune || [];
+    const rows = (spkUtts.utterances || []).map((u) => {
+      const flagged = prune.indexOf(u.id) >= 0;
+      const dur = typeof u.duration_secs === 'number' ? u.duration_secs.toFixed(1) + '\u00a0s' : '\u2014';
+      const snr = typeof u.snr_db === 'number' ? Math.round(u.snr_db) + '\u00a0dB' : '\u2014';
+      const loud = typeof u.loudness_dbfs === 'number' ? Math.round(u.loudness_dbfs) + '\u00a0dBFS' : '\u2014';
+      const cons = typeof u.consistency === 'number' ? u.consistency.toFixed(2) : '\u2014';
+      return '<tr' + (flagged ? ' class="utt-weak"' : '') + '>'
+        + '<td>' + esc(u.capture_source || '\u2014') + '</td>'
+        + '<td>' + dur + '</td><td>' + loud + '</td><td>' + snr + '</td><td>' + cons + '</td>'
+        + '<td>' + (flagged ? '<span class="spk-strength weak">weak</span>' : '<span class="hint">\u2713</span>') + '</td>'
+        + '<td class="key-actions">' + keyIconBtn('spk-utt-del', u.id, '\u2715', 'Remove', 'danger') + '</td>'
+        + '</tr>';
+    }).join('');
+    const table = '<table class="key-table"><thead><tr>'
+      + '<th>Source</th><th>Length</th><th>Level</th><th>SNR</th><th>Match</th><th></th><th></th>'
+      + '</tr></thead><tbody>' + rows + '</tbody></table>';
+    const pruneBtn = prune.length
+      ? '<button class="btn danger" data-spk-prune="' + sp.id + '" type="button">Remove '
+        + prune.length + ' weak ' + (prune.length === 1 ? 'sample' : 'samples') + '</button>'
+      : '<p class="hint">No weak samples to prune \u2014 your profile looks clean.</p>';
+    body = table + '<div class="enroll-row">' + pruneBtn + '</div>';
+  }
+  return '<div class="enroll-card">'
+    + '<div class="cal-title">Samples for ' + esc(sp.name)
+    + ' <button class="btn" data-spk-manage-close type="button">Close</button></div>'
+    + body + '</div>';
 }
 
 // ---------- "test my voice" calibration card ----------
@@ -1181,6 +1229,56 @@ async function deleteSpeaker(id) {
     toast('Voice deleted');
     await loadSpeakers();
   } catch (err) { toast('Could not delete voice: ' + err.message, true); }
+}
+
+// ---------- sample manager actions (per-utterance list + suggested prune) ----------
+async function loadUtterances(id) {
+  try {
+    spkUtts = await api('/api/speakers/' + id + '/utterances');
+    spkUttsErr = null;
+  } catch (err) {
+    spkUtts = null;
+    spkUttsErr = err.message;
+  }
+  refreshSpeakersSection();
+}
+function spkManageOpen(id) {
+  if (spkManageId === id) { spkManageClose(); return; }
+  spkManageId = id;
+  spkUtts = null;
+  spkUttsErr = null;
+  refreshSpeakersSection();
+  loadUtterances(id);
+}
+function spkManageClose() {
+  spkManageId = null;
+  spkUtts = null;
+  spkUttsErr = null;
+  refreshSpeakersSection();
+}
+async function spkDeleteUtterance(uid) {
+  if (spkManageId == null) return;
+  if (!confirm('Remove this voice sample? This cannot be undone.')) return;
+  try {
+    await api('/api/speakers/' + spkManageId + '/utterances/' + uid, { method: 'DELETE' });
+    toast('Sample removed');
+    await loadUtterances(spkManageId);
+    await loadSpeakers();
+  } catch (err) { toast('Could not remove sample: ' + err.message, true); }
+}
+async function spkPrune(id) {
+  const prune = (spkUtts && spkUtts.suggested_prune) || [];
+  if (!prune.length) return;
+  if (!confirm('Remove ' + prune.length + ' weak ' + (prune.length === 1 ? 'sample' : 'samples')
+    + '? Your profile keeps its stronger samples. This cannot be undone.')) return;
+  try {
+    for (const uid of prune) {
+      await api('/api/speakers/' + id + '/utterances/' + uid, { method: 'DELETE' });
+    }
+    toast('Removed ' + prune.length + ' weak ' + (prune.length === 1 ? 'sample' : 'samples'));
+    await loadUtterances(id);
+    await loadSpeakers();
+  } catch (err) { toast('Could not prune samples: ' + err.message, true); }
 }
 
 // ---------- speaker enrollment (browser capture) ----------
@@ -1582,7 +1680,7 @@ document.addEventListener('input', (e) => {
 });
 
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-seg],[data-pick],[data-tts-test],[data-tag-rm],[data-wake-rm],[data-wake-add],[data-vocab-rm],[data-vocab-add],[data-keycap],[data-reset],[data-key-edit],[data-key-clear],[data-key-save],[data-key-cancel],[data-key-new],[data-key-rename],[data-key-revoke],[data-key-restore],[data-key-delete],[data-spk-rename],[data-spk-delete],[data-spk-record],[data-spk-submit],[data-spk-discard],[data-spk-cal-record],[data-spk-cal-run],[data-spk-cal-clear],[data-spk-cal-apply]');
+  const t = e.target.closest('[data-seg],[data-pick],[data-tts-test],[data-tag-rm],[data-wake-rm],[data-wake-add],[data-vocab-rm],[data-vocab-add],[data-keycap],[data-reset],[data-key-edit],[data-key-clear],[data-key-save],[data-key-cancel],[data-key-new],[data-key-rename],[data-key-revoke],[data-key-restore],[data-key-delete],[data-spk-rename],[data-spk-delete],[data-spk-record],[data-spk-submit],[data-spk-discard],[data-spk-cal-record],[data-spk-cal-run],[data-spk-cal-clear],[data-spk-cal-apply],[data-spk-manage],[data-spk-manage-close],[data-spk-utt-del],[data-spk-prune]');
   if (!t) return;
   const secEl = t.closest('details.sec');
   const sec = secEl ? FONO_SECTIONS.find((s) => 'd-' + s.id === secEl.id) : null;
@@ -1671,6 +1769,10 @@ document.addEventListener('click', (e) => {
   if (t.dataset.spkCalRun !== undefined) { spkCalRun(); return; }
   if (t.dataset.spkCalClear !== undefined) { spkCalClear(); return; }
   if (t.dataset.spkCalApply !== undefined) { spkCalApply(t.dataset.spkCalApply); return; }
+  if (t.dataset.spkManage) { spkManageOpen(parseInt(t.dataset.spkManage, 10)); return; }
+  if (t.dataset.spkManageClose !== undefined) { spkManageClose(); return; }
+  if (t.dataset.spkUttDel) { spkDeleteUtterance(parseInt(t.dataset.spkUttDel, 10)); return; }
+  if (t.dataset.spkPrune) { spkPrune(parseInt(t.dataset.spkPrune, 10)); return; }
 
 });
 

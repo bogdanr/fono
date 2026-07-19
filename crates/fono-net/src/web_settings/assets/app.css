@@ -232,6 +232,7 @@ details.sec .body > .row:first-child, details.sec .body > .row.master { border-t
 .spk-strength.weak { color: var(--accent); border-color: var(--accent); }
 .cal-card { margin-top: 14px; }
 .cal-title { font-weight: 600; margin-bottom: 4px; }
+.utt-weak td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .cal-results { margin-top: 12px; }
 .cal-hist { display: block; width: 100%; height: 96px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
 .cal-hist .cal-genuine { fill: var(--ok, #3a7); fill-opacity: 0.75; }

@@ -1,6 +1,34 @@
 # Fono — Project Status
 Last updated: 2026-07-19
 
+## 2026-07-19 — Speaker verification: sample-manager + prune UI (Step 3, Task 3.5)
+
+Added per-utterance sample management with a suggested, confirmable prune, so a
+profile can be cleaned of weak clips without dropping below a safe coverage
+floor:
+
+- `fono-core::suggest_prune(utterances, consistency)` — pure and unit-tested.
+  Ranks clips weakest-first and proposes removing only genuinely weak ones (low
+  peer-consistency, low SNR, too quiet, clipping, or too short) while preserving
+  a coverage floor: `PRUNE_MIN_CLIPS` clips, `PRUNE_MIN_SECS` seconds, and at
+  least one clip per capture source. Never proposes dropping good audio to hit a
+  target; the result is advisory.
+- `GET /api/speakers/{id}/utterances` — lists each clip with its capture-time
+  quality metrics (duration, loudness, SNR) and on-demand consistency score,
+  plus the prune suggestion and the floor. Never carries embeddings over the
+  wire. `DELETE /api/speakers/{id}/utterances/{uid}` removes one clip, refusing
+  the speaker's last remaining one (delete the speaker instead).
+- A "Manage samples" card on `#/speakers` (gear button per roster row) lists the
+  clips, tints the weak ones, and offers per-clip removal or a one-click "remove
+  N weak samples" that accepts the whole suggestion — each confirmable.
+
+Two `web_settings_hooks` helpers (`doctor_hook`, and the existing utterance
+builders) were extracted to keep clippy's line budget.
+
+Gates green: fmt, clippy workspace, workspace tests (incl. 5 prune + 2 route
+round-trip), size-budget 21.88 MiB / 25.
+Next: Task 3.6 (`fono speaker test` CLI parity), then Slice 4 wiring.
+
 ## 2026-07-19 — Speaker verification: auto-threshold resolver (Step 3, Task 3.4)
 
 Added the model-independent logic that turns `threshold = "auto"` into a

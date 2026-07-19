@@ -86,6 +86,86 @@ pub struct Utterance {
     pub quality: UtteranceQuality,
 }
 
+/// Coverage-floor constants for [`suggest_prune`]. Pruning never drops the set
+/// below this many clips or this many seconds of total speech, and never
+/// removes the last remaining clip from any capture source — so a suggested
+/// prune can only ever tighten quality, never leave a speaker under-enrolled.
+pub const PRUNE_MIN_CLIPS: usize = 3;
+/// See [`PRUNE_MIN_CLIPS`].
+pub const PRUNE_MIN_SECS: f32 = 15.0;
+
+/// Weakness thresholds: a clip is a prune *candidate* only if it trips one of
+/// these — an outlier vs its peers, too quiet, clipping, too noisy, or too
+/// short. Clips that look fine are never suggested for removal. A `None`
+/// metric (older clip, or a capture path that did not measure it) never trips
+/// its signal.
+const WEAK_CONSISTENCY: f32 = 0.55;
+const WEAK_SNR_DB: f32 = 8.0;
+const WEAK_QUIET_DBFS: f32 = -45.0;
+const WEAK_CLIP_DBFS: f32 = -1.0;
+const WEAK_SHORT_SECS: f32 = 1.2;
+
+/// Is this utterance a weak-quality prune candidate? `consistency` is its
+/// cosine to the centroid of the *other* utterances (computed on demand — it
+/// is relational, so it is never stored).
+fn is_weak(u: &Utterance, consistency: f32) -> bool {
+    let q = &u.quality;
+    consistency < WEAK_CONSISTENCY
+        || q.snr_db.is_some_and(|s| s < WEAK_SNR_DB)
+        || q.loudness_dbfs.is_some_and(|l| !(WEAK_QUIET_DBFS..=WEAK_CLIP_DBFS).contains(&l))
+        || q.duration_secs.is_some_and(|d| d < WEAK_SHORT_SECS)
+}
+
+/// Suggest which utterances to prune, weakest first, while preserving the
+/// coverage floor ([`PRUNE_MIN_CLIPS`] clips, [`PRUNE_MIN_SECS`] seconds, and
+/// at least one clip per capture source). Only genuinely weak clips
+/// ([`is_weak`]) are ever suggested — this never proposes dropping good audio
+/// just to hit a target. The result is advisory: the daemon returns it for the
+/// user to confirm, and nothing is deleted without an explicit request.
+///
+/// `consistency[i]` pairs with `utterances[i]` (same order); a short or empty
+/// `consistency` slice treats the missing entries as perfectly consistent.
+#[must_use]
+pub fn suggest_prune(utterances: &[Utterance], consistency: &[f32]) -> Vec<i64> {
+    // Nothing to do if we are already at or below the clip floor.
+    if utterances.len() <= PRUNE_MIN_CLIPS {
+        return Vec::new();
+    }
+
+    // Running trackers for the remaining set as we tentatively remove clips.
+    let mut remaining_clips = utterances.len();
+    let mut remaining_secs: f32 = utterances.iter().filter_map(|u| u.quality.duration_secs).sum();
+    let mut per_source: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for u in utterances {
+        *per_source.entry(u.capture_source.as_str()).or_insert(0) += 1;
+    }
+
+    // Candidates, weakest (lowest consistency) first.
+    let mut order: Vec<usize> = (0..utterances.len()).collect();
+    let cons = |i: usize| consistency.get(i).copied().unwrap_or(1.0);
+    order.sort_by(|&a, &b| cons(a).total_cmp(&cons(b)));
+
+    let mut remove = Vec::new();
+    for i in order {
+        let u = &utterances[i];
+        if !is_weak(u, cons(i)) {
+            continue;
+        }
+        let dur = u.quality.duration_secs.unwrap_or(0.0);
+        let src = u.capture_source.as_str();
+        let keeps_clip_floor = remaining_clips > PRUNE_MIN_CLIPS;
+        let keeps_secs_floor = remaining_secs - dur >= PRUNE_MIN_SECS;
+        let keeps_source = per_source.get(src).copied().unwrap_or(0) > 1;
+        if keeps_clip_floor && keeps_secs_floor && keeps_source {
+            remaining_clips -= 1;
+            remaining_secs -= dur;
+            *per_source.get_mut(src).unwrap() -= 1;
+            remove.push(u.id);
+        }
+    }
+    remove
+}
+
 /// SQLite-backed store of enrolled speakers and their voice-print embeddings.
 pub struct SpeakerStore {
     conn: Connection,
@@ -500,6 +580,74 @@ fn restrict_to_owner(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build an `Utterance` with the given id, capture source, and quality
+    /// metrics (duration, loudness dBFS, SNR dB) for prune tests.
+    fn mk_utt(id: i64, src: &str, dur: f32, loud: f32, snr: f32) -> Utterance {
+        Utterance {
+            id,
+            embedding: vec![0.0; 4],
+            capture_source: src.to_string(),
+            created_at: 0,
+            quality: UtteranceQuality {
+                duration_secs: Some(dur),
+                loudness_dbfs: Some(loud),
+                snr_db: Some(snr),
+            },
+        }
+    }
+
+    #[test]
+    fn suggest_prune_respects_clip_floor() {
+        // Exactly the floor count, all weak → nothing to prune.
+        let utts: Vec<Utterance> =
+            (0..PRUNE_MIN_CLIPS as i64).map(|i| mk_utt(i, "mic", 6.0, -20.0, 3.0)).collect();
+        let cons = vec![0.1; utts.len()];
+        assert!(suggest_prune(&utts, &cons).is_empty());
+    }
+
+    #[test]
+    fn suggest_prune_keeps_good_clips() {
+        // Plenty of strong clips → never suggest dropping any.
+        let utts: Vec<Utterance> = (0..6).map(|i| mk_utt(i, "mic", 6.0, -20.0, 25.0)).collect();
+        let cons = vec![0.95; utts.len()];
+        assert!(suggest_prune(&utts, &cons).is_empty());
+    }
+
+    #[test]
+    fn suggest_prune_drops_weak_while_holding_floor() {
+        // 4 strong + 2 weak (a noisy one and an outlier). Floor is 3 clips /
+        // 15 s; strong clips alone give 4 clips / 24 s, so both weak drop.
+        let mut utts: Vec<Utterance> = (0..4).map(|i| mk_utt(i, "mic", 6.0, -20.0, 25.0)).collect();
+        utts.push(mk_utt(100, "mic", 6.0, -20.0, 2.0)); // noisy
+        utts.push(mk_utt(101, "mic", 6.0, -20.0, 25.0)); // metric-clean but outlier
+        let mut cons = vec![0.95; 4];
+        cons.push(0.9); // noisy clip still flagged by SNR
+        cons.push(0.2); // outlier flagged by consistency
+        let remove = suggest_prune(&utts, &cons);
+        assert!(remove.contains(&100) && remove.contains(&101), "both weak dropped: {remove:?}");
+        assert_eq!(remove.len(), 2);
+    }
+
+    #[test]
+    fn suggest_prune_preserves_device_diversity() {
+        // Many good "mic" clips plus a single weak clip on a second device:
+        // dropping it would lose that device, so it must be kept.
+        let mut utts: Vec<Utterance> = (0..5).map(|i| mk_utt(i, "mic", 6.0, -20.0, 25.0)).collect();
+        utts.push(mk_utt(200, "usb", 6.0, -20.0, 2.0)); // weak, only "usb" clip
+        let mut cons = vec![0.95; 5];
+        cons.push(0.9);
+        assert!(!suggest_prune(&utts, &cons).contains(&200), "last clip of a device is kept");
+    }
+
+    #[test]
+    fn suggest_prune_holds_seconds_floor() {
+        // 4 short weak clips (3 s each = 12 s total). Removing any would fall
+        // under both the seconds floor and, after one, the clip floor.
+        let utts: Vec<Utterance> = (0..4).map(|i| mk_utt(i, "mic", 3.0, -20.0, 2.0)).collect();
+        let cons = vec![0.2; utts.len()];
+        assert!(suggest_prune(&utts, &cons).is_empty(), "seconds floor blocks pruning");
+    }
 
     #[test]
     fn add_list_and_count() {
