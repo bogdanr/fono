@@ -1,6 +1,32 @@
 # Fono — Project Status
 Last updated: 2026-07-19
 
+## 2026-07-19 — Speaker verification: calibrate endpoint (Step 3, Task 3.2)
+
+Wired the "test my voice" calibration path end-to-end (still headless — the
+`#/speakers` card is Task 3.3):
+
+- `fono-audio`: `Cohort::impostor_scores` (score every cohort member against a
+  centroid, for the impostor distribution) and `centroid` (L2-normalised mean of
+  enrolled voice prints, the canonical profile point reused by Slice 4). Both
+  unit-tested.
+- `fono-net`: `CalibrateSpeakerFn` hook + `POST /api/speakers/{id}/calibrate`
+  route (ordered before the generic PATCH/DELETE arms), plus round-trip tests
+  proving the route reaches the hook (422 on stub reject, 400 on a bad id).
+- `fono` daemon: `calibrate_speaker_hook` + `run_calibration` — decodes held-out
+  16 kHz clips, fetches/loads the model + cohort, embeds off the accept loop
+  (timing each embed), builds the target centroid, scores genuine
+  vs-own-centroid and impostor vs-cohort (plus other enrolled speakers as extra
+  local impostors via `other_speaker_centroids`), runs `calibrate`, persists the
+  genuine distribution via `set_calibration`, and returns the score
+  distributions + EER + recommended thresholds + latency stats. No audio
+  persisted. Feature-gated on `speaker-onnx` with a clean fallback.
+
+Gates green: fmt, clippy workspace, workspace tests, size-budget 21.87 MiB / 25.
+Next: Task 3.3 — the `#/speakers` calibration card (inline-SVG histogram +
+verdict + "use recommended threshold"), then 3.4 (`threshold="auto"`
+resolution), 3.5 (prune UI), 3.6 (`fono speaker test` CLI).
+
 ## 2026-07-19 — Speaker verification: calibration math (Step 3, Task 3.1)
 
 Started Step 3 ("test my voice") of

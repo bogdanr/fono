@@ -100,7 +100,7 @@ Where EER tuning on the user's own room/mic and user confidence materialise.
 - [x] Task 3.1. Calibration math in `fono-audio` (pure, tested): genuine +
       impostor score arrays → EER estimate, EER-threshold, target-FAR
       threshold, per-embed latency stats.
-- [ ] Task 3.2. Daemon hook + `POST /api/speakers/{id}/calibrate`: record
+- [x] Task 3.2. Daemon hook + `POST /api/speakers/{id}/calibrate`: record
       held-out clips, embed, score genuine vs own centroid and impostor vs
       cohort (+ other enrolled speakers when present), `set_calibration`.
 - [ ] Task 3.3. `#/speakers` calibration card: inline-SVG genuine/impostor

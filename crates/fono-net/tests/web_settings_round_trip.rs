@@ -72,6 +72,9 @@ fn stub_hooks() -> WebSettingsHooks {
         enroll_speaker: Arc::new(|_| {
             Box::pin(async { Err("enrollment disabled in test".to_string()) })
         }),
+        calibrate_speaker: Arc::new(|_, _| {
+            Box::pin(async { Err("calibration disabled in test".to_string()) })
+        }),
     }
 }
 
@@ -198,6 +201,27 @@ async fn speakers_list_and_mutations_round_trip() {
         .await
         .expect("send");
     assert_eq!(r.status(), 422);
+
+    // Calibration is wired: the stub rejects, surfacing a 422 (not a 404),
+    // proving `POST /api/speakers/{id}/calibrate` reaches the calibrate hook.
+    let r = client
+        .post(format!("{base}/api/speakers/1/calibrate"))
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "clips": [] }).to_string())
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(r.status(), 422);
+
+    // A non-numeric id on calibrate is a client error, not a 500.
+    let r = client
+        .post(format!("{base}/api/speakers/notanid/calibrate"))
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "clips": [] }).to_string())
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(r.status(), 400);
 
     handle.shutdown().await;
 }

@@ -109,6 +109,37 @@ pub fn consistency_scores(embeddings: &[Vec<f32>]) -> Vec<f32> {
         .collect()
 }
 
+/// The L2-normalised mean of a set of already centred/normalised embeddings —
+/// the canonical single-vector representation of an enrolled speaker, matching
+/// the form [`decide`] expects as an [`EnrolledSpeaker`] centroid and the
+/// calibration flow scores against. Rows whose width differs from the first are
+/// dropped defensively. Returns an empty vector for empty input or when no rows
+/// are usable.
+#[must_use]
+pub fn centroid(embeddings: &[Vec<f32>]) -> Vec<f32> {
+    let Some(dim) = embeddings.first().map(Vec::len) else {
+        return Vec::new();
+    };
+    let mut sum = vec![0.0f32; dim];
+    let mut n = 0.0f32;
+    for e in embeddings {
+        if e.len() == dim {
+            for (s, x) in sum.iter_mut().zip(e.iter()) {
+                *s += x;
+            }
+            n += 1.0;
+        }
+    }
+    if n == 0.0 {
+        return Vec::new();
+    }
+    for s in &mut sum {
+        *s /= n;
+    }
+    l2_normalize(&mut sum);
+    sum
+}
+
 /// The shipped impostor cohort: a fixed set of embeddings from speakers who
 /// are, by construction, *not* the user. Used both to centre embeddings and
 /// to normalise scores (AS-Norm). Members are stored already L2-normalised.
@@ -213,6 +244,17 @@ impl Cohort {
         let ze = (raw_score - mu_e) / sd_e;
         let zt = (raw_score - mu_t) / sd_t;
         0.5 * (ze + zt)
+    }
+
+    /// AS-Norm scores of every cohort member against `centroid`, each member
+    /// treated as an impostor "test" embedding — in the same space as
+    /// [`Self::as_norm`]. Lets the calibration ("test my voice") flow build an
+    /// impostor score distribution from the shipped cohort with **no** impostor
+    /// audio upload. `centroid` must already be centred/normalised (see
+    /// [`Self::center`]); members already are. Empty when the cohort is empty.
+    #[must_use]
+    pub fn impostor_scores(&self, centroid: &[f32], top_k: usize) -> Vec<f32> {
+        self.members.iter().map(|m| self.as_norm(centroid, m, cosine(centroid, m), top_k)).collect()
     }
 }
 
@@ -1190,6 +1232,19 @@ mod tests {
     }
 
     #[test]
+    fn centroid_is_l2_normalised_mean_and_empty_on_bad_input() {
+        // Mean of the two axis vectors points at 45°, then normalised to unit
+        // length: (1/√2, 1/√2).
+        let c = centroid(&[vec![1.0, 0.0], vec![0.0, 1.0]]);
+        assert_eq!(c.len(), 2);
+        let norm = c.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6, "centroid must be unit length, got {norm}");
+        assert!((c[0] - c[1]).abs() < 1e-6, "symmetric inputs → symmetric centroid");
+        // Empty input and all-mismatched widths yield an empty centroid.
+        assert!(centroid(&[]).is_empty());
+    }
+
+    #[test]
     fn cohort_from_raw_normalises_members() {
         let rows = vec![vec![1.0, 0.0, 0.0], vec![0.0, 2.0, 0.0], vec![0.0, 0.0, 3.0]];
         let cohort = Cohort::from_raw(&rows);
@@ -1247,6 +1302,25 @@ mod tests {
             g_norm > i_norm,
             "AS-Norm should separate genuine ({g_norm}) above impostor ({i_norm})"
         );
+    }
+
+    #[test]
+    fn impostor_scores_cover_every_member_and_are_empty_without_cohort() {
+        let raw_cohort: Vec<Vec<f32>> = (0..6)
+            .map(|i| {
+                let j = i as f32 * 0.02;
+                vec![1.0 + j, 0.1 - j, 0.0]
+            })
+            .collect();
+        let cohort = Cohort::from_raw(&raw_cohort);
+        // A genuine-looking centroid orthogonal to the cohort cloud.
+        let centroid = cohort.center(&[0.0, 0.0, 1.0]);
+        let scores = cohort.impostor_scores(&centroid, 6);
+        assert_eq!(scores.len(), 6, "one impostor score per cohort member");
+        assert!(scores.iter().all(|s| s.is_finite()));
+
+        // Empty cohort → no impostor scores.
+        assert!(Cohort::default().impostor_scores(&centroid, 6).is_empty());
     }
 
     #[test]

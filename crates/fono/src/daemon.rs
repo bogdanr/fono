@@ -3958,7 +3958,8 @@ fn web_settings_hooks(
     });
 
     let (get_vocabulary, put_vocabulary) = vocabulary_hooks(paths);
-    let (list_speakers, rename_speaker, delete_speaker, enroll_speaker) = speaker_hooks(paths);
+    let (list_speakers, rename_speaker, delete_speaker, enroll_speaker, calibrate_speaker) =
+        speaker_hooks(paths);
     let speak = speech_hook(config_path.clone(), secrets_path.clone(), paths.voices_dir());
     let meta = meta_hook(config_path, secrets_path);
 
@@ -3988,6 +3989,7 @@ fn web_settings_hooks(
         rename_speaker,
         delete_speaker,
         enroll_speaker,
+        calibrate_speaker,
     }
 }
 
@@ -4328,6 +4330,7 @@ fn speaker_hooks(
     fono_net::web_settings::RenameSpeakerFn,
     fono_net::web_settings::DeleteSpeakerFn,
     fono_net::web_settings::EnrollSpeakerFn,
+    fono_net::web_settings::CalibrateSpeakerFn,
 ) {
     use fono_core::speakers::SpeakerStore;
 
@@ -4370,8 +4373,9 @@ fn speaker_hooks(
     });
 
     let enroll_speaker = enroll_speaker_hook(paths);
+    let calibrate_speaker = calibrate_speaker_hook(paths);
 
-    (list_speakers, rename_speaker, delete_speaker, enroll_speaker)
+    (list_speakers, rename_speaker, delete_speaker, enroll_speaker, calibrate_speaker)
 }
 
 /// The browser-enrollment hook (`POST /api/speakers`): decode PCM, embed off
@@ -4459,6 +4463,218 @@ fn enroll_speaker_hook(paths: &Paths) -> fono_net::web_settings::EnrollSpeakerFn
             }))
         })
     })
+}
+
+/// The "test my voice" calibration hook (`POST /api/speakers/{id}/calibrate`):
+/// decode the held-out genuine clips, hand them to [`run_calibration`] which
+/// embeds them, scores genuine-vs-own-centroid and impostor-vs-cohort, persists
+/// the resulting `Calibration`, and returns the score distributions + EER +
+/// recommended thresholds + embed latency. No audio is persisted.
+fn calibrate_speaker_hook(paths: &Paths) -> fono_net::web_settings::CalibrateSpeakerFn {
+    let db = paths.speakers_db();
+    let cache_dir = paths.cache_dir.clone();
+    let config_path = paths.config_file();
+    Arc::new(move |id, body| {
+        let db = db.clone();
+        let cache_dir = cache_dir.clone();
+        let config_path = config_path.clone();
+        Box::pin(async move {
+            let clips_json = body
+                .get("clips")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| "body must include a \"clips\" array".to_string())?;
+            if clips_json.is_empty() {
+                return Err("need at least one held-out clip to calibrate".to_string());
+            }
+            let mut clips: Vec<Vec<f32>> = Vec::with_capacity(clips_json.len());
+            for c in clips_json {
+                let b64 = c
+                    .get("audio_pcm16")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "each clip needs base64 \"audio_pcm16\"".to_string())?;
+                let sr = u32::try_from(
+                    c.get("sample_rate").and_then(serde_json::Value::as_u64).unwrap_or(16_000),
+                )
+                .map_err(|_| "invalid sample_rate".to_string())?;
+                if sr != 16_000 {
+                    return Err(format!(
+                        "expected 16 kHz mono audio, got {sr} Hz — resample before upload"
+                    ));
+                }
+                clips.push(decode_pcm16(b64)?);
+            }
+            run_calibration(&config_path, &cache_dir, &db, id, clips).await
+        })
+    })
+}
+
+/// Centroids of every enrolled speaker except `exclude_id`, used as extra
+/// local impostors when calibrating (on top of the shipped cohort). Skips
+/// speakers whose voice prints are unusable. Errors reading a row are ignored
+/// so a single bad speaker never blocks calibration.
+#[cfg(feature = "speaker-onnx")]
+fn other_speaker_centroids(
+    store: &fono_core::speakers::SpeakerStore,
+    exclude_id: i64,
+) -> Vec<Vec<f32>> {
+    use fono_audio::speaker::centroid;
+    let mut out: Vec<Vec<f32>> = Vec::new();
+    if let Ok(list) = store.list_speakers() {
+        for s in list {
+            if s.id == exclude_id {
+                continue;
+            }
+            if let Ok(us) = store.utterances(s.id) {
+                let c = centroid(&us.into_iter().map(|u| u.embedding).collect::<Vec<_>>());
+                if !c.is_empty() {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Result of embedding the held-out calibration clips off the async runtime:
+/// the per-clip embeddings, their per-embed latencies (ms), and the cohort
+/// recovered from the engine for scoring. Named to keep the `spawn_blocking`
+/// return type simple (clippy `type_complexity`).
+#[cfg(feature = "speaker-onnx")]
+struct CalibEmbedOut {
+    embeddings: Vec<Vec<f32>>,
+    latencies_ms: Vec<f32>,
+    cohort: fono_audio::speaker::Cohort,
+}
+
+/// Embed the held-out clips with the configured model, build the target's
+/// centroid from its enrolled voice prints, score the genuine clips against it
+/// and the shipped impostor cohort (plus any other enrolled speakers) against
+/// it, then persist and return the calibration. Feature-gated: without
+/// `speaker-onnx` the engine is not compiled in and calibration reports that
+/// cleanly.
+#[cfg(feature = "speaker-onnx")]
+async fn run_calibration(
+    config_path: &std::path::Path,
+    cache_dir: &std::path::Path,
+    db: &std::path::Path,
+    id: i64,
+    clips: Vec<Vec<f32>>,
+) -> std::result::Result<serde_json::Value, String> {
+    use fono_audio::speaker::{
+        self, calibrate, centroid, cosine, engine::SpeakerEngine, latency_stats, Cohort,
+        DEFAULT_AS_NORM_TOP_K, DEFAULT_TARGET_FAR,
+    };
+    use fono_core::speakers::{Calibration, SpeakerStore};
+
+    // Gather the target centroid and any other-speaker centroids (extra local
+    // impostors) from the store before any async model work.
+    let store = SpeakerStore::open(db).map_err(|e| format!("open speakers db: {e}"))?;
+    let target = store.utterances(id).map_err(|e| format!("load utterances: {e}"))?;
+    if target.is_empty() {
+        return Err("enroll at least one voice sample before calibrating".to_string());
+    }
+    let target_embs: Vec<Vec<f32>> = target.into_iter().map(|u| u.embedding).collect();
+    let target_centroid = centroid(&target_embs);
+    if target_centroid.is_empty() {
+        return Err("enrolled voice prints are unusable (dimension mismatch)".to_string());
+    }
+    let other_centroids = other_speaker_centroids(&store, id);
+
+    // Resolve + load the model and cohort, then embed the held-out clips off
+    // the async runtime, timing each embed.
+    let cfg = Config::load(config_path).map_err(|e| format!("load config: {e}"))?;
+    let model_name = cfg.speaker.model.clone();
+    let resolved = speaker::fetch_model(&model_name, cache_dir, None)
+        .await
+        .map_err(|e| format!("fetch speaker model '{model_name}': {e:#}"))?;
+    let cohort = resolved
+        .cohort
+        .as_deref()
+        .map_or_else(Cohort::default, |path| load_cohort(path).unwrap_or_default());
+
+    let (test_embs, latencies_ms, cohort) =
+        tokio::task::spawn_blocking(move || -> std::result::Result<CalibEmbedOut, String> {
+            let mut engine = SpeakerEngine::load(&resolved.graph, cohort)
+                .map_err(|e| format!("load speaker engine: {e:#}"))?;
+            let mut embs = Vec::with_capacity(clips.len());
+            let mut lat = Vec::with_capacity(clips.len());
+            for pcm in &clips {
+                let t0 = std::time::Instant::now();
+                let emb =
+                    engine.embed(pcm).map_err(|e| format!("embed calibration clip: {e:#}"))?;
+                lat.push(t0.elapsed().as_secs_f32() * 1000.0);
+                if let Some(e) = emb {
+                    embs.push(e);
+                }
+            }
+            // Recover the cohort for scoring (the engine owns it).
+            let cohort = engine.cohort().clone();
+            Ok(CalibEmbedOut { embeddings: embs, latencies_ms: lat, cohort })
+        })
+        .await
+        .map_err(|e| format!("calibration embed task join: {e}"))
+        .and_then(|r| r)
+        .map(|o| (o.embeddings, o.latencies_ms, o.cohort))?;
+    if test_embs.is_empty() {
+        return Err("every held-out clip was too short to score (need ~1 s each)".to_string());
+    }
+
+    // Genuine: each held-out clip vs the target centroid (AS-Norm).
+    let top_k = DEFAULT_AS_NORM_TOP_K;
+    let genuine: Vec<f32> = test_embs
+        .iter()
+        .map(|t| cohort.as_norm(&target_centroid, t, cosine(&target_centroid, t), top_k))
+        .collect();
+    // Impostor: the shipped cohort's members, plus any other enrolled speakers.
+    let mut impostor = cohort.impostor_scores(&target_centroid, top_k);
+    for o in &other_centroids {
+        impostor.push(cohort.as_norm(&target_centroid, o, cosine(&target_centroid, o), top_k));
+    }
+
+    let report = calibrate(&genuine, &impostor, DEFAULT_TARGET_FAR);
+    let latency = latency_stats(&latencies_ms);
+
+    // Persist the genuine distribution for `threshold = "auto"` resolution.
+    store
+        .set_calibration(
+            id,
+            Some(Calibration {
+                genuine_mean: report.genuine_mean,
+                genuine_std: report.genuine_std,
+                trials: i64::try_from(report.genuine_trials).unwrap_or(i64::MAX),
+            }),
+        )
+        .map_err(|e| format!("save calibration: {e}"))?;
+
+    info!(
+        "web settings: calibrated speaker id {id} ({} genuine, {} impostor trials, EER {:.3})",
+        report.genuine_trials, report.impostor_trials, report.eer
+    );
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "cohort_size": cohort.len(),
+        "genuine": { "scores": genuine, "mean": report.genuine_mean, "std": report.genuine_std, "trials": report.genuine_trials },
+        "impostor": { "scores": impostor, "mean": report.impostor_mean, "std": report.impostor_std, "trials": report.impostor_trials },
+        "eer": report.eer,
+        "eer_threshold": report.eer_threshold,
+        "target_far": report.target_far,
+        "far_threshold": report.far_threshold,
+        "latency_ms": { "count": latency.count, "mean": latency.mean_ms, "p50": latency.p50_ms, "p95": latency.p95_ms },
+    }))
+}
+
+/// Fallback when speaker verification is not compiled in.
+#[cfg(not(feature = "speaker-onnx"))]
+#[allow(clippy::unused_async)]
+async fn run_calibration(
+    _config_path: &std::path::Path,
+    _cache_dir: &std::path::Path,
+    _db: &std::path::Path,
+    _id: i64,
+    _clips: Vec<Vec<f32>>,
+) -> std::result::Result<serde_json::Value, String> {
+    Err("this build was compiled without speaker verification (speaker-onnx)".to_string())
 }
 
 /// Decode a base64 little-endian `i16` mono PCM payload into `f32` samples in

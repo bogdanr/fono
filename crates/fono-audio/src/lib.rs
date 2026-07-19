@@ -45,9 +45,10 @@ pub use sink::{LocalPlaybackSink, PcmSink};
 #[cfg(feature = "speaker-onnx")]
 pub use speaker::engine::SpeakerEngine;
 pub use speaker::{
-    calibrate, consistency_scores, decide, eer_and_threshold, latency_stats, score_mean_std,
-    threshold_for_far, CalibrationReport, Cohort, EnrolledSpeaker, Fbank, FbankConfig,
-    LatencyStats, SpeakerDecision, SpeakerModel, SpeechAccumulator, DEFAULT_TARGET_FAR,
+    calibrate, centroid, consistency_scores, decide, eer_and_threshold, latency_stats,
+    score_mean_std, threshold_for_far, CalibrationReport, Cohort, EnrolledSpeaker, Fbank,
+    FbankConfig, LatencyStats, SpeakerDecision, SpeakerModel, SpeechAccumulator,
+    DEFAULT_TARGET_FAR,
 };
 pub use trim::{trim_silence, TrimConfig};
 pub use vad::{Vad, VadDecision, WebRtcVadStub};

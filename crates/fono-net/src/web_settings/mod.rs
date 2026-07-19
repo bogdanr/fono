@@ -142,6 +142,22 @@ pub type EnrollSpeakerFn = Arc<
         + Send
         + Sync,
 >;
+/// Run "test my voice" calibration for a speaker (`POST
+/// /api/speakers/{id}/calibrate`). The JSON body carries held-out genuine
+/// clips `{clips: [{audio_pcm16 (base64 LE i16 mono), sample_rate}, …]}`; the
+/// daemon embeds them, scores genuine-vs-own-centroid and impostor-vs-cohort,
+/// persists the resulting calibration, and returns the score distributions,
+/// EER estimate, recommended thresholds, and per-embed latency. Args
+/// `(id, body)`. Async: model fetch + the `ort` embed runs happen off the
+/// accept loop. No audio is persisted — only the derived calibration stats.
+pub type CalibrateSpeakerFn = Arc<
+    dyn Fn(
+            i64,
+            serde_json::Value,
+        ) -> BoxFuture<'static, std::result::Result<serde_json::Value, String>>
+        + Send
+        + Sync,
+>;
 
 /// Hook closures supplied by the daemon layer. The server itself is a thin
 /// wire adapter with no config semantics.
@@ -169,6 +185,8 @@ pub struct WebSettingsHooks {
     pub delete_speaker: DeleteSpeakerFn,
     /// Enroll a voice sample from captured audio (`POST /api/speakers`).
     pub enroll_speaker: EnrollSpeakerFn,
+    /// Run "test my voice" calibration (`POST /api/speakers/{id}/calibrate`).
+    pub calibrate_speaker: CalibrateSpeakerFn,
 }
 
 /// Configuration for [`WebSettingsServer::start`]. Built from
@@ -519,6 +537,19 @@ async fn route_speakers(
                 return error_response(StatusCode::BAD_REQUEST, "invalid or oversized JSON body");
             };
             match (ctx.hooks.enroll_speaker)(body).await {
+                Ok(v) => json_ok(&v),
+                Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &e),
+            }
+        }
+        (&Method::POST, p) if p.starts_with("/api/speakers/") && p.ends_with("/calibrate") => {
+            let id_str = p.trim_start_matches("/api/speakers/").trim_end_matches("/calibrate");
+            let Some(id) = id_str.parse::<i64>().ok() else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid speaker id");
+            };
+            let Some(body) = read_json_body(req).await else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid or oversized JSON body");
+            };
+            match (ctx.hooks.calibrate_speaker)(id, body).await {
                 Ok(v) => json_ok(&v),
                 Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &e),
             }
