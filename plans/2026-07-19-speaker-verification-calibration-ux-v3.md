@@ -106,8 +106,10 @@ Where EER tuning on the user's own room/mic and user confidence materialise.
 - [x] Task 3.3. `#/speakers` calibration card: inline-SVG genuine/impostor
       histogram + threshold marker + verdict badge + "use recommended
       threshold" (writes `[speaker].threshold`); no new JS deps.
-- [ ] Task 3.4. Resolve `threshold="auto"` from `Calibration` + cohort at
+- [x] Task 3.4. Resolve `threshold="auto"` from `Calibration` + cohort at
       decision time, with a documented uncalibrated fallback.
+      (`resolve_auto_threshold` in `fono-audio` — pure, four-case; the live
+      call lands in Slice 4.)
 - [ ] Task 3.5. Utterance-pruning UI (see prune flow) — suggested, confirmable.
 - [ ] Task 3.6. `fono speaker test [name]` CLI parity (distributions, self-EER,
       latency, threshold verdict).

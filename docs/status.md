@@ -1,6 +1,31 @@
 # Fono — Project Status
 Last updated: 2026-07-19
 
+## 2026-07-19 — Speaker verification: auto-threshold resolver (Step 3, Task 3.4)
+
+Added the model-independent logic that turns `threshold = "auto"` into a
+concrete decision cutoff, ready for the Slice 4 live path to call:
+
+- `fono-audio::resolve_auto_threshold(calibration, impostor, target_far)` — pure
+  and fully unit-tested, taking primitives so the scoring layer stays free of
+  config coupling. Four cases, most-informed first: (1) **calibration + cohort**
+  → the std-weighted midpoint between the user's genuine mean and the cohort
+  impostor mean (approximating the two-Gaussian equal-density boundary, pulled
+  toward the tighter cluster), floored at the `target_far` operating point so
+  impostors stay out even on overlap; (2) **calibration only** → the genuine
+  lower tail `mean − 2σ`; (3) **cohort only** → the `target_far` point;
+  (4) **neither** → `DEFAULT_UNCALIBRATED_THRESHOLD` (a documented conservative
+  fallback that only bites on a cold, uncalibrated, cohort-less install).
+- New constants `GENUINE_MARGIN_STDS` and `DEFAULT_UNCALIBRATED_THRESHOLD`,
+  re-exported from `fono-audio`.
+
+The live invocation (match `SpeakerThreshold::Fixed(f) => f`, `Auto =>
+resolve_auto_threshold(...)`) is deliberately deferred to Slice 4, which is the
+"make it live" step; this task delivers the single resolution point it calls.
+
+Gates green: fmt, clippy workspace, workspace tests, size-budget 21.88 MiB / 25.
+Next: Task 3.5 (prune UI), 3.6 (`fono speaker test` CLI), then Slice 4 wiring.
+
 ## 2026-07-19 — Speaker verification: calibration card (Step 3, Task 3.3)
 
 Gave the "test my voice" path a face on the `#/speakers` page — the calibrate

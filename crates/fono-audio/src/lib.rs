@@ -46,9 +46,9 @@ pub use sink::{LocalPlaybackSink, PcmSink};
 pub use speaker::engine::SpeakerEngine;
 pub use speaker::{
     calibrate, centroid, consistency_scores, decide, eer_and_threshold, latency_stats,
-    score_mean_std, threshold_for_far, CalibrationReport, Cohort, EnrolledSpeaker, Fbank,
-    FbankConfig, LatencyStats, SpeakerDecision, SpeakerModel, SpeechAccumulator,
-    DEFAULT_TARGET_FAR,
+    resolve_auto_threshold, score_mean_std, threshold_for_far, CalibrationReport, Cohort,
+    EnrolledSpeaker, Fbank, FbankConfig, LatencyStats, SpeakerDecision, SpeakerModel,
+    SpeechAccumulator, DEFAULT_TARGET_FAR, DEFAULT_UNCALIBRATED_THRESHOLD, GENUINE_MARGIN_STDS,
 };
 pub use trim::{trim_silence, TrimConfig};
 pub use vad::{Vad, VadDecision, WebRtcVadStub};

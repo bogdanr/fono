@@ -530,6 +530,64 @@ pub fn calibrate(genuine: &[f32], impostor: &[f32], target_far: f32) -> Calibrat
     }
 }
 
+/// Number of genuine standard deviations below the genuine mean that the
+/// `auto` threshold tolerates when there is no impostor cohort to anchor
+/// against — accepts scores within the genuine lower tail (≈2σ covers ~97.7%
+/// of a Gaussian, so genuine trials are rarely rejected).
+pub const GENUINE_MARGIN_STDS: f32 = 2.0;
+
+/// The `auto` decision threshold used when *neither* a user calibration nor an
+/// impostor cohort is available to anchor an operating point. AS-Norm centres
+/// impostor scores near `0` and pushes genuine scores well above it, so a
+/// modest positive cutoff is a conservative "unknown until proven" default.
+/// Running "test my voice" replaces this guess with a threshold measured on the
+/// user's own mic/room; this constant only bites on a cold, uncalibrated,
+/// cohort-less install.
+pub const DEFAULT_UNCALIBRATED_THRESHOLD: f32 = 0.5;
+
+/// Resolve a concrete decision threshold for `threshold = "auto"` at decision
+/// time, combining what is known about *this* speaker:
+/// - `calibration`: the persisted genuine score distribution `(mean, std)`
+///   from a "test my voice" run, or `None` if never calibrated.
+/// - `impostor`: live impostor scores — the shipped cohort (plus any other
+///   enrolled speakers) scored against this speaker's centroid, or empty if no
+///   cohort is loaded.
+///
+/// Four cases, most-informed first:
+/// 1. **Both** — the std-weighted midpoint between the genuine and impostor
+///    means (approximating the equal-density boundary of two Gaussians, pulled
+///    towards the tighter distribution), floored at the impostor `target_far`
+///    operating point so impostors stay out at the target rate even when the
+///    user's genuine distribution overlaps.
+/// 2. **Calibration only** (no cohort) — the genuine lower tail
+///    `mean − GENUINE_MARGIN_STDS·std`.
+/// 3. **Cohort only** (no calibration) — the `target_far` operating point.
+/// 4. **Neither** — [`DEFAULT_UNCALIBRATED_THRESHOLD`].
+#[must_use]
+pub fn resolve_auto_threshold(
+    calibration: Option<(f32, f32)>,
+    impostor: &[f32],
+    target_far: f32,
+) -> f32 {
+    match (calibration, impostor.is_empty()) {
+        (Some((g_mean, g_std)), false) => {
+            let (i_mean, i_std) = score_mean_std(impostor);
+            let denom = g_std + i_std;
+            // Weight each mean by the *other* distribution's spread, so the
+            // boundary sits closer to the tighter (more confident) cluster.
+            let mid = if denom > 0.0 {
+                i_mean.mul_add(g_std, g_mean * i_std) / denom
+            } else {
+                0.5 * (g_mean + i_mean)
+            };
+            mid.max(threshold_for_far(impostor, target_far))
+        }
+        (Some((g_mean, g_std)), true) => GENUINE_MARGIN_STDS.mul_add(-g_std, g_mean),
+        (None, false) => threshold_for_far(impostor, target_far),
+        (None, true) => DEFAULT_UNCALIBRATED_THRESHOLD,
+    }
+}
+
 /// Summary statistics for per-embedding latency measurements (milliseconds),
 /// surfaced by "test my voice" as "≈X ms/utterance on this machine".
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1531,6 +1589,43 @@ mod tests {
         // FAR point rejects every impostor and the EER point accepts every genuine.
         assert!(impostor.iter().all(|&s| s < r.far_threshold), "FAR point must reject impostors");
         assert!(genuine.iter().all(|&s| s >= r.eer_threshold), "EER point must accept genuines");
+    }
+
+    #[test]
+    fn resolve_auto_threshold_uses_all_four_cases() {
+        // Case 4 — nothing to go on: the documented uncalibrated fallback.
+        assert!(
+            (resolve_auto_threshold(None, &[], DEFAULT_TARGET_FAR)
+                - DEFAULT_UNCALIBRATED_THRESHOLD)
+                .abs()
+                < 1e-9
+        );
+
+        // Case 3 — cohort only: equals the target-FAR operating point.
+        let impostor = [0.0, 0.1, 0.2, 0.3, 0.4];
+        let far = threshold_for_far(&impostor, DEFAULT_TARGET_FAR);
+        assert!((resolve_auto_threshold(None, &impostor, DEFAULT_TARGET_FAR) - far).abs() < 1e-9);
+
+        // Case 2 — calibration only (no cohort): genuine lower tail.
+        let t = resolve_auto_threshold(Some((0.8, 0.05)), &[], DEFAULT_TARGET_FAR);
+        assert!((t - GENUINE_MARGIN_STDS.mul_add(-0.05, 0.8)).abs() < 1e-6);
+
+        // Case 1 — both: a boundary that sits between the two clusters and
+        // still keeps every impostor out.
+        let t = resolve_auto_threshold(Some((0.8, 0.05)), &impostor, DEFAULT_TARGET_FAR);
+        assert!(t > 0.4 && t < 0.8, "boundary {t} should sit in the gap");
+        assert!(impostor.iter().all(|&s| s < t), "auto threshold must reject the cohort");
+        assert!(t >= far, "auto threshold never drops below the FAR floor");
+    }
+
+    #[test]
+    fn resolve_auto_threshold_leans_toward_the_tighter_cluster() {
+        // A tight genuine cluster and a broad impostor spread with equal-ish
+        // means → the std-weighted boundary sits nearer the tight genuine side.
+        let impostor = [-0.4, -0.2, 0.0, 0.2, 0.4];
+        let plain_mid = 0.5 * (0.6 + 0.0);
+        let t = resolve_auto_threshold(Some((0.6, 0.02)), &impostor, DEFAULT_TARGET_FAR);
+        assert!(t > plain_mid, "tight genuine pulls the boundary above the plain midpoint");
     }
 
     #[test]
