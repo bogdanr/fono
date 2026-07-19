@@ -1,6 +1,45 @@
 # Fono — Project Status
 Last updated: 2026-07-19
 
+## 2026-07-19 — Speaker verification: capture-quality UX (Step 2)
+
+Built the capture-quality half of the calibration-UX plan
+(`plans/2026-07-19-speaker-verification-calibration-ux-v3.md` Step 2) — all
+model-independent, gates green. It attacks the #1 real-world EER killer: bad
+enrollment audio.
+
+1. **Per-utterance quality metrics persisted (Tasks Q.1–Q.2).** Added three
+   nullable columns to `speaker_utterances` (`duration_secs`, `loudness_dbfs`,
+   `snr_db`) via an idempotent `column_exists`-guarded `ALTER TABLE` migration.
+   The browser computes these intrinsic metrics once on the resampled 16 kHz
+   clip and sends them with the enroll POST; the store writes them through a new
+   `add_utterance_with_quality` (the old `add_utterance` delegates with
+   defaults). Rationale: the audio is dropped after embedding, so these are
+   recompute-impossible — capture now or never.
+2. **On-demand consistency helper (Task Q.3).** `consistency_scores` in
+   `fono-audio` scores each utterance against the centroid of the others —
+   the "which clip is the weak one" signal, computed on demand (never stored,
+   since it goes stale when the set changes).
+3. **Live VU meter + warnings (Task 2.1).** The enroll card shows a running
+   input meter during capture (RMS→bar, clip tint on peak≥0.99) and, on stop,
+   plain-language warnings for too-quiet / clipping / noisy-room clips.
+4. **Post-enroll self-match (Task 2.3).** The daemon scores the just-recorded
+   clip against the profile-so-far (prior utterances only) and returns
+   `self_match`; the UI shows "✓ this sample matches" or flags an odd capture.
+   `None` on the first sample.
+5. **Profile-strength indicator (Task 2.4).** A strength badge (weak/ok/strong)
+   in the roster from count × seconds × device-diversity, with a
+   most-limiting-factor nudge. Honest by design: these are only proxies until
+   the voice test (Step 3) gives ground-truth self-EER. `list_speakers` now
+   projects `total_secs` + `source_count` aggregates.
+
+Refactored the enroll closure into `enroll_speaker_hook` to stay within the
+line budget. Gates green: fmt, `clippy --workspace`, workspace tests, and the
+size-budget gate (21.83 MiB / 25 MiB). Step 1 (cohort) and Step 3 (calibration
+card) remain — Step 1 is being done in a separate session.
+
+**Not committed** — holding for your review.
+
 ## 2026-07-19 — Speaker verification: browser enrollment (Task 3.2) + speaker-onnx default
 
 Wired the speaker engine into the shipped binary and built end-to-end voice

@@ -4345,6 +4345,8 @@ fn speaker_hooks(
                     "created_at": s.created_at,
                     "updated_at": s.updated_at,
                     "calibrated": s.calibration.is_some(),
+                    "total_secs": s.total_secs,
+                    "source_count": s.source_count,
                 })
             })
             .collect();
@@ -4367,10 +4369,21 @@ fn speaker_hooks(
         Ok(())
     });
 
+    let enroll_speaker = enroll_speaker_hook(paths);
+
+    (list_speakers, rename_speaker, delete_speaker, enroll_speaker)
+}
+
+/// The browser-enrollment hook (`POST /api/speakers`): decode PCM, embed off
+/// the accept loop, self-match against the profile so far, then persist the
+/// voice print plus its intrinsic capture-quality metrics. Split out of
+/// [`speaker_hooks`] to keep each function within the line budget.
+fn enroll_speaker_hook(paths: &Paths) -> fono_net::web_settings::EnrollSpeakerFn {
+    use fono_core::speakers::SpeakerStore;
     let db = paths.speakers_db();
     let cache_dir = paths.cache_dir.clone();
     let config_path = paths.config_file();
-    let enroll_speaker: fono_net::web_settings::EnrollSpeakerFn = Arc::new(move |body| {
+    Arc::new(move |body| {
         let db = db.clone();
         let cache_dir = cache_dir.clone();
         let config_path = config_path.clone();
@@ -4392,6 +4405,17 @@ fn speaker_hooks(
             .map_err(|_| "invalid sample_rate".to_string())?;
             let capture_source =
                 body.get("capture_source").and_then(|v| v.as_str()).unwrap_or("browser").to_owned();
+            let quality = fono_core::speakers::UtteranceQuality {
+                duration_secs: body
+                    .get("duration_secs")
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|v| v as f32),
+                loudness_dbfs: body
+                    .get("loudness_dbfs")
+                    .and_then(serde_json::Value::as_f64)
+                    .map(|v| v as f32),
+                snr_db: body.get("snr_db").and_then(serde_json::Value::as_f64).map(|v| v as f32),
+            };
             let pcm = decode_pcm16(b64)?;
 
             // Embed off the accept loop: model fetch is async; the ort run is
@@ -4407,8 +4431,15 @@ fn speaker_hooks(
                 Some(s) => s,
                 None => store.add_speaker(&name).map_err(|e| format!("add speaker: {e}"))?,
             };
+            // Self-match: how well this clip matches the profile built so far
+            // (prior utterances only). None on the first sample — nothing to
+            // compare against yet. Catches silence / wrong-speaker / dead-mic
+            // clips before they poison the centroid.
+            let prior =
+                store.utterances(speaker.id).map_err(|e| format!("load utterances: {e}"))?;
+            let self_match = speaker_self_match(&embedding, &prior);
             store
-                .add_utterance(speaker.id, &embedding, &capture_source)
+                .add_utterance_with_quality(speaker.id, &embedding, &capture_source, quality)
                 .map_err(|e| format!("store voice print: {e}"))?;
             let count =
                 store.utterance_count(speaker.id).map_err(|e| format!("count utterances: {e}"))?;
@@ -4424,11 +4455,10 @@ fn speaker_hooks(
                     "utterance_count": count,
                 },
                 "embedding_dim": embedding.len(),
+                "self_match": self_match,
             }))
         })
-    });
-
-    (list_speakers, rename_speaker, delete_speaker, enroll_speaker)
+    })
 }
 
 /// Decode a base64 little-endian `i16` mono PCM payload into `f32` samples in
@@ -4445,6 +4475,34 @@ fn decode_pcm16(b64: &str) -> std::result::Result<Vec<f32>, String> {
         .chunks_exact(2)
         .map(|b| f32::from(i16::from_le_bytes([b[0], b[1]])) / 32_768.0)
         .collect())
+}
+
+/// Cosine of a freshly-embedded clip against the centroid of the speaker's
+/// prior enrollment embeddings. `None` when there are no prior utterances of a
+/// matching width (the first sample has nothing to compare against). Used to
+/// surface "this sample matches your profile" and flag odd captures.
+fn speaker_self_match(new: &[f32], prior: &[fono_core::speakers::Utterance]) -> Option<f32> {
+    if prior.is_empty() || new.is_empty() {
+        return None;
+    }
+    let dim = new.len();
+    let mut sum = vec![0.0f32; dim];
+    let mut n = 0.0f32;
+    for u in prior {
+        if u.embedding.len() == dim {
+            for (s, x) in sum.iter_mut().zip(u.embedding.iter()) {
+                *s += x;
+            }
+            n += 1.0;
+        }
+    }
+    if n == 0.0 {
+        return None;
+    }
+    for s in &mut sum {
+        *s /= n;
+    }
+    Some(fono_audio::speaker::cosine(new, &sum))
 }
 
 /// Turn captured enrollment PCM into a stored-ready voice print using the

@@ -39,6 +39,21 @@ pub struct Calibration {
     pub trials: i64,
 }
 
+/// Intrinsic capture-time audio-quality metrics for one enrollment utterance.
+/// Computed client-side during capture and persisted *once* — the audio is
+/// discarded, so these can never be recomputed (capture-now-or-never). All
+/// fields are optional: utterances enrolled before the metrics existed, or via
+/// paths that do not measure them, carry `None`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct UtteranceQuality {
+    /// Clip length in seconds.
+    pub duration_secs: Option<f32>,
+    /// RMS level in dBFS (negative; ~0 is full-scale, very negative is quiet).
+    pub loudness_dbfs: Option<f32>,
+    /// Rough signal-to-noise ratio in dB (speech vs noise-floor frames).
+    pub snr_db: Option<f32>,
+}
+
 /// Metadata view of an enrolled speaker. Never carries raw embeddings.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SpeakerView {
@@ -50,6 +65,11 @@ pub struct SpeakerView {
     pub utterance_count: i64,
     /// Calibration stats, once the speaker has run "test my voice".
     pub calibration: Option<Calibration>,
+    /// Total enrolled speech in seconds (sum of per-utterance durations);
+    /// `None` when no utterance carries a duration metric.
+    pub total_secs: Option<f32>,
+    /// Number of distinct capture sources (microphones/channels) enrolled.
+    pub source_count: i64,
 }
 
 /// One stored enrollment utterance: its embedding, where it was captured, and
@@ -62,6 +82,8 @@ pub struct Utterance {
     /// `"wav-upload"`) so a channel mismatch can be warned about later.
     pub capture_source: String,
     pub created_at: i64,
+    /// Intrinsic capture-time quality metrics (may be all-`None`).
+    pub quality: UtteranceQuality,
 }
 
 /// SQLite-backed store of enrolled speakers and their voice-print embeddings.
@@ -121,7 +143,30 @@ impl SpeakerStore {
                 ON speaker_utterances(speaker_id);
             ",
         )?;
+        // Additive columns for intrinsic capture-quality metrics. SQLite has
+        // no `ADD COLUMN IF NOT EXISTS`, so guard each with `column_exists`
+        // for idempotent upgrades of an existing DB.
+        for col in ["duration_secs", "loudness_dbfs", "snr_db"] {
+            if !self.column_exists("speaker_utterances", col)? {
+                self.conn.execute_batch(&format!(
+                    "ALTER TABLE speaker_utterances ADD COLUMN {col} REAL"
+                ))?;
+            }
+        }
         Ok(())
+    }
+
+    /// Whether `table` has a column named `column`.
+    fn column_exists(&self, table: &str, column: &str) -> Result<bool> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Enroll a new (initially utterance-less) speaker. Fails if the name
@@ -153,16 +198,49 @@ impl SpeakerStore {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut out = Vec::with_capacity(rows.len());
         for (id, name, created_at, updated_at, cal) in rows {
-            out.push(SpeakerView {
-                id,
-                name,
-                created_at,
-                updated_at,
-                utterance_count: self.utterance_count(id)?,
-                calibration: cal,
-            });
+            out.push(self.assemble_view(id, name, created_at, updated_at, cal)?);
         }
         Ok(out)
+    }
+
+    /// Build a [`SpeakerView`] from its base row, filling the derived
+    /// utterance count and enrollment aggregates.
+    fn assemble_view(
+        &self,
+        id: i64,
+        name: String,
+        created_at: i64,
+        updated_at: i64,
+        calibration: Option<Calibration>,
+    ) -> Result<SpeakerView> {
+        let (total_secs, source_count) = self.enrollment_summary(id)?;
+        Ok(SpeakerView {
+            id,
+            name,
+            created_at,
+            updated_at,
+            utterance_count: self.utterance_count(id)?,
+            calibration,
+            total_secs,
+            source_count,
+        })
+    }
+
+    /// Enrollment aggregates for a speaker: total enrolled seconds (sum of
+    /// per-utterance durations, `None` if none recorded) and the number of
+    /// distinct capture sources. Feeds the profile-strength indicator.
+    pub fn enrollment_summary(&self, speaker_id: i64) -> Result<(Option<f32>, i64)> {
+        let total_secs: Option<f32> = self.conn.query_row(
+            "SELECT SUM(duration_secs) FROM speaker_utterances WHERE speaker_id = ?1",
+            params![speaker_id],
+            |r| r.get(0),
+        )?;
+        let source_count: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT capture_source) FROM speaker_utterances WHERE speaker_id = ?1",
+            params![speaker_id],
+            |r| r.get(0),
+        )?;
+        Ok((total_secs, source_count))
     }
 
     /// Fetch one speaker by id.
@@ -179,14 +257,7 @@ impl SpeakerStore {
         let Some((id, name, created_at, updated_at, cal)) = row else {
             return Ok(None);
         };
-        Ok(Some(SpeakerView {
-            id,
-            name,
-            created_at,
-            updated_at,
-            utterance_count: self.utterance_count(id)?,
-            calibration: cal,
-        }))
+        Ok(Some(self.assemble_view(id, name, created_at, updated_at, cal)?))
     }
 
     /// Look a speaker up by (exact, trimmed) name.
@@ -236,6 +307,23 @@ impl SpeakerStore {
         embedding: &[f32],
         capture_source: &str,
     ) -> Result<i64> {
+        self.add_utterance_with_quality(
+            speaker_id,
+            embedding,
+            capture_source,
+            UtteranceQuality::default(),
+        )
+    }
+
+    /// Append one enrollment utterance together with its intrinsic
+    /// capture-quality metrics, and touch the speaker's `updated_at`.
+    pub fn add_utterance_with_quality(
+        &self,
+        speaker_id: i64,
+        embedding: &[f32],
+        capture_source: &str,
+        quality: UtteranceQuality,
+    ) -> Result<i64> {
         if embedding.is_empty() {
             return Err(Error::Other("embedding must not be empty".into()));
         }
@@ -249,9 +337,19 @@ impl SpeakerStore {
             return Err(Error::Other(format!("no speaker with id {speaker_id}")));
         }
         self.conn.execute(
-            "INSERT INTO speaker_utterances (speaker_id, embedding, capture_source, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![speaker_id, blob, capture_source, now],
+            "INSERT INTO speaker_utterances
+                 (speaker_id, embedding, capture_source, created_at,
+                  duration_secs, loudness_dbfs, snr_db)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                speaker_id,
+                blob,
+                capture_source,
+                now,
+                quality.duration_secs,
+                quality.loudness_dbfs,
+                quality.snr_db,
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -259,7 +357,8 @@ impl SpeakerStore {
     /// Every enrolled utterance for a speaker, oldest first.
     pub fn utterances(&self, speaker_id: i64) -> Result<Vec<Utterance>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, embedding, capture_source, created_at
+            "SELECT id, embedding, capture_source, created_at,
+                    duration_secs, loudness_dbfs, snr_db
              FROM speaker_utterances WHERE speaker_id = ?1 ORDER BY created_at ASC, id ASC",
         )?;
         let rows = stmt
@@ -269,16 +368,22 @@ impl SpeakerStore {
                     r.get::<_, Vec<u8>>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, i64>(3)?,
+                    UtteranceQuality {
+                        duration_secs: r.get::<_, Option<f32>>(4)?,
+                        loudness_dbfs: r.get::<_, Option<f32>>(5)?,
+                        snr_db: r.get::<_, Option<f32>>(6)?,
+                    },
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows
             .into_iter()
-            .map(|(id, blob, capture_source, created_at)| Utterance {
+            .map(|(id, blob, capture_source, created_at, quality)| Utterance {
                 id,
                 embedding: decode_embedding(&blob),
                 capture_source,
                 created_at,
+                quality,
             })
             .collect())
     }
@@ -520,5 +625,59 @@ mod tests {
     fn decode_ignores_trailing_partial() {
         // 5 bytes -> one full f32, trailing byte dropped.
         assert_eq!(decode_embedding(&[0, 0, 128, 63, 7]), vec![1.0f32]);
+    }
+
+    #[test]
+    fn quality_metrics_persist_and_default_to_none() {
+        let db = SpeakerStore::open_in_memory().unwrap();
+        let v = db.add_speaker("Ivy").unwrap();
+        // Plain add_utterance leaves the metrics NULL.
+        db.add_utterance(v.id, &[1.0, 2.0], "browser").unwrap();
+        // The quality-bearing variant records them.
+        let q = UtteranceQuality {
+            duration_secs: Some(3.5),
+            loudness_dbfs: Some(-22.0),
+            snr_db: Some(18.0),
+        };
+        db.add_utterance_with_quality(v.id, &[3.0, 4.0], "usb-mic", q).unwrap();
+        let utts = db.utterances(v.id).unwrap();
+        assert_eq!(utts.len(), 2);
+        assert_eq!(utts[0].quality, UtteranceQuality::default());
+        assert_eq!(utts[1].quality, q);
+    }
+
+    #[test]
+    fn enrollment_summary_totals_and_distinct_sources() {
+        let db = SpeakerStore::open_in_memory().unwrap();
+        let v = db.add_speaker("Jill").unwrap();
+        // No utterances yet: no duration, no sources.
+        assert_eq!(db.enrollment_summary(v.id).unwrap(), (None, 0));
+        let q = |d: f32| UtteranceQuality { duration_secs: Some(d), ..Default::default() };
+        db.add_utterance_with_quality(v.id, &[1.0], "browser", q(4.0)).unwrap();
+        db.add_utterance_with_quality(v.id, &[2.0], "browser", q(6.0)).unwrap();
+        db.add_utterance_with_quality(v.id, &[3.0], "usb-mic", q(5.0)).unwrap();
+        let (total, sources) = db.enrollment_summary(v.id).unwrap();
+        assert!((total.unwrap() - 15.0).abs() < 1e-4, "durations sum");
+        assert_eq!(sources, 2, "two distinct capture sources");
+        // Surfaced on the view too.
+        let view = db.get_speaker(v.id).unwrap().unwrap();
+        assert!((view.total_secs.unwrap() - 15.0).abs() < 1e-4);
+        assert_eq!(view.source_count, 2);
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        // Opening twice over the same file must not fail re-adding columns.
+        let dir = std::env::temp_dir().join(format!("fono-spk-mig-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("speakers.sqlite");
+        {
+            let db = SpeakerStore::open(&path).unwrap();
+            db.add_speaker("K").unwrap();
+        }
+        // Second open re-runs migrate(); columns already exist.
+        let db = SpeakerStore::open(&path).unwrap();
+        assert_eq!(db.speaker_count().unwrap(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

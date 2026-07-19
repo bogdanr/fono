@@ -68,6 +68,47 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
+/// Leave-one-out consistency of a set of embeddings: for each embedding, its
+/// cosine similarity to the mean of the *other* embeddings. A high score means
+/// the utterance is typical of the set; a low (or negative) score flags an
+/// outlier (a clip captured on a different mic, in noise, or of the wrong
+/// speaker). This is deliberately **derived on demand** rather than stored,
+/// because it changes whenever any utterance is added or removed.
+///
+/// With fewer than two embeddings there is nothing to compare against, so a
+/// score of `1.0` is returned for each (treated as trivially consistent).
+/// Empty input yields an empty vector.
+#[must_use]
+pub fn consistency_scores(embeddings: &[Vec<f32>]) -> Vec<f32> {
+    let n = embeddings.len();
+    if n < 2 {
+        return vec![1.0; n];
+    }
+    let dim = embeddings[0].len();
+    // Column-wise sum of all embeddings; each leave-one-out mean subtracts the
+    // held-out row and divides by (n - 1).
+    let mut sum = vec![0.0f32; dim];
+    for e in embeddings {
+        if e.len() == dim {
+            for (s, x) in sum.iter_mut().zip(e.iter()) {
+                *s += x;
+            }
+        }
+    }
+    let others = (n - 1) as f32;
+    embeddings
+        .iter()
+        .map(|e| {
+            if e.len() != dim {
+                return 0.0;
+            }
+            let centroid: Vec<f32> =
+                sum.iter().zip(e.iter()).map(|(s, x)| (s - x) / others).collect();
+            cosine(e, &centroid)
+        })
+        .collect()
+}
+
 /// The shipped impostor cohort: a fixed set of embeddings from speakers who
 /// are, by construction, *not* the user. Used both to centre embeddings and
 /// to normalise scores (AS-Norm). Members are stored already L2-normalised.
@@ -957,6 +998,32 @@ mod tests {
     fn cosine_length_mismatch_or_zero_is_zero() {
         assert!(cosine(&[1.0, 2.0], &[1.0]).abs() < f32::EPSILON);
         assert!(cosine(&[0.0, 0.0], &[1.0, 2.0]).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn consistency_scores_edge_cases() {
+        assert!(consistency_scores(&[]).is_empty());
+        assert_eq!(consistency_scores(&[vec![1.0, 0.0]]), vec![1.0]);
+    }
+
+    #[test]
+    fn consistency_flags_the_outlier() {
+        // Three tight vectors near +x, one outlier pointing away.
+        let embs = vec![
+            vec![1.0, 0.05, 0.0],
+            vec![1.0, -0.05, 0.0],
+            vec![0.98, 0.0, 0.03],
+            vec![-1.0, 0.0, 0.0], // outlier
+        ];
+        let s = consistency_scores(&embs);
+        assert_eq!(s.len(), 4);
+        // The outlier scores far below the three consistent members.
+        let outlier = s[3];
+        for &good in &s[..3] {
+            assert!(good > 0.9, "consistent member should score high, got {good}");
+            assert!(outlier < good, "outlier {outlier} should score below member {good}");
+        }
+        assert!(outlier < 0.0, "outlier points away, expect negative cosine, got {outlier}");
     }
 
     #[test]

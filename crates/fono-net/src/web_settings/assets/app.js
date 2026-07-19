@@ -1016,24 +1016,48 @@ function speakersHtml() {
     + '<button class="btn spk-hidden" id="spk-submit-btn" data-spk-submit type="button">Submit</button>'
     + '<button class="btn danger spk-hidden" id="spk-discard-btn" data-spk-discard type="button">Discard</button>'
     + '</div>'
+    + '<div id="spk-meter" class="spk-meter spk-hidden"><div id="spk-meter-bar" class="spk-meter-bar"></div></div>'
     + '<p id="spk-enroll-status" class="hint">Records locally in your browser, resamples to 16&nbsp;kHz, and stores only the derived voice print &mdash; the audio never leaves your machine. Record a few seconds, then submit or discard; repeat 2&ndash;3 times per person for a solid profile.</p>'
     + '</div>';
   if (speakersErr) return out + '<p class="privacy-note">Could not load speakers: ' + esc(speakersErr) + '</p>';
   if (!speakers) return out + '<p class="hint">Loading\u2026</p>';
   if (!speakers.length) return out + '<p class="hint">No enrolled voices yet.</p>';
-  const rows = speakers.map((s) =>
-    '<tr>'
+  const rows = speakers.map((s) => {
+    const st = spkStrength(s);
+    return '<tr>'
     + '<td>' + esc(s.name) + '</td>'
     + '<td>' + (s.utterance_count || 0) + '</td>'
+    + '<td><span class="spk-strength ' + st.cls + '" title="' + esc(st.nudge) + '">' + st.label + '</span></td>'
     + '<td>' + (s.calibrated ? '<span>\u2713</span>' : '<span class="hint">\u2014</span>') + '</td>'
     + '<td>' + fmtDate(s.updated_at) + '</td>'
     + '<td class="key-actions">'
     + keyIconBtn('spk-rename', s.id, '\u270E', 'Rename')
     + keyIconBtn('spk-delete', s.id, '\u2715', 'Delete', 'danger')
-    + '</td></tr>').join('');
+    + '</td></tr>';
+  }).join('');
   return out + '<table class="key-table"><thead><tr>'
-    + '<th>Name</th><th>Utterances</th><th>Calibrated</th><th>Updated</th><th></th>'
+    + '<th>Name</th><th>Utterances</th><th>Strength</th><th>Calibrated</th><th>Updated</th><th></th>'
     + '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+// Heuristic profile-strength bucket. The count/seconds/device signals are
+// only *proxies* (five clipped or silent clips can still look "strong"); the
+// authoritative quality measure is the voice test (Step 3), so the nudge
+// pushes toward stronger enrollment until calibration exists.
+function spkStrength(s) {
+  const n = s.utterance_count || 0;
+  const secs = s.total_secs || 0;
+  const devs = s.source_count || 0;
+  if (n === 0) return { label: 'empty', cls: 'weak', nudge: 'Record a first sample.' };
+  const factors = [
+    { ok: n >= 4, msg: 'Add more samples (aim for 4\u20135).' },
+    { ok: secs >= 15, msg: 'Record more speech (aim ~15\u201330\u00a0s total).' },
+    { ok: devs >= 2, msg: 'Enroll on another microphone you use.' },
+  ];
+  const failed = factors.filter((f) => !f.ok);
+  const label = failed.length === 0 ? 'strong' : failed.length === 1 ? 'ok' : 'weak';
+  const nudge = failed.length ? failed[0].msg : 'Solid profile.';
+  return { label, cls: label, nudge };
 }
 async function renameSpeaker(id) {
   const cur = (speakers.find((s) => s.id === id) || {}).name || '';
@@ -1114,9 +1138,16 @@ async function spkRecordToggle() {
     const source = ctx.createMediaStreamSource(stream);
     const proc = ctx.createScriptProcessor(4096, 1, 1);
     const chunks = [];
-    proc.onaudioprocess = (ev) => { chunks.push(new Float32Array(ev.inputBuffer.getChannelData(0))); };
+    proc.onaudioprocess = (ev) => {
+      const ch = ev.inputBuffer.getChannelData(0);
+      chunks.push(new Float32Array(ch));
+      let sq = 0, pk = 0;
+      for (let i = 0; i < ch.length; i++) { const a = Math.abs(ch[i]); if (a > pk) pk = a; sq += ch[i] * ch[i]; }
+      spkUpdateMeter(Math.sqrt(sq / Math.max(1, ch.length)), pk);
+    };
     source.connect(proc); proc.connect(ctx.destination);
     spkRec = { stream, ctx, source, proc, chunks, sampleRate: ctx.sampleRate };
+    spkMeterShow(true);
     spkSetPhase('recording');
     spkStatus('Recording\u2026 speak naturally for a few seconds, then press Stop.');
   } catch (err) { toast('Microphone error: ' + err.message, true); }
@@ -1140,10 +1171,17 @@ async function spkStopToReview() {
     spkStatus('That was too short \u2014 record at least about a second of speech.');
     return;
   }
-  spkPending = pcm;
+  const metrics = spkAnalyze(pcm);
+  spkPending = { pcm, metrics };
+  spkMeterShow(false);
   spkSetPhase('review');
-  const secs = (pcm.length / 16000).toFixed(1);
-  spkStatus('Captured ' + secs + '\u00a0s. Submit to enroll this sample, or discard and try again.');
+  const warns = spkQualityWarnings(metrics);
+  const secs = metrics.duration_secs.toFixed(1);
+  if (warns.length) {
+    spkStatus('Captured ' + secs + '\u00a0s, but ' + warns.join('; ') + '. Submit anyway, or discard and re-record.');
+  } else {
+    spkStatus('Captured ' + secs + '\u00a0s \u2014 audio looks good. Submit to enroll, or discard and try again.');
+  }
 }
 // Send the held clip to the server as a new enrollment sample.
 async function spkSubmit() {
@@ -1151,24 +1189,85 @@ async function spkSubmit() {
   const nameEl = document.getElementById('spk-enroll-name');
   const name = (nameEl && nameEl.value.trim()) || spkEnrollName;
   if (!name) { toast('Enter a name first', true); if (nameEl) nameEl.focus(); return; }
-  const pcm = spkPending;
+  const pcm = spkPending.pcm;
+  const m = spkPending.metrics;
   spkStatus('Enrolling\u2026');
   try {
-    await api('/api/speakers', { method: 'POST', body: JSON.stringify({
+    const resp = await api('/api/speakers', { method: 'POST', body: JSON.stringify({
       name, audio_pcm16: spkFloatToB64(pcm), sample_rate: 16000, capture_source: 'browser',
+      duration_secs: m.duration_secs, loudness_dbfs: m.loudness_dbfs, snr_db: m.snr_db,
     }) });
     spkPending = null;
     spkSetPhase('idle');
     spkStatus('');
-    toast('Enrolled a voice sample for ' + name);
+    const sm = resp && typeof resp.self_match === 'number' ? resp.self_match : null;
+    if (sm == null) {
+      toast('Enrolled the first voice sample for ' + name);
+    } else if (sm >= 0.4) {
+      toast('Enrolled \u2014 \u2713 this sample matches ' + name + '\u2019s profile');
+    } else {
+      toast('Enrolled, but this sample sounds different from ' + name + '\u2019s other samples \u2014 check the mic', true);
+    }
     await loadSpeakers();
   } catch (err) { toast('Enrollment failed: ' + err.message, true); }
 }
 // Throw the held clip away and return to the idle state.
 function spkDiscard() {
   spkPending = null;
+  spkMeterShow(false);
   spkSetPhase('idle');
   spkStatus('Discarded. Record again when ready.');
+}
+// Show/hide and reset the live input meter.
+function spkMeterShow(on) {
+  const meter = document.getElementById('spk-meter');
+  const bar = document.getElementById('spk-meter-bar');
+  if (!meter) return;
+  meter.classList.toggle('spk-hidden', !on);
+  if (bar && !on) { bar.style.width = '0%'; bar.classList.remove('clip'); }
+}
+// Map the running RMS/peak to the meter bar (\u221260..0 dBFS \u2192 0..100%).
+function spkUpdateMeter(rms, peak) {
+  const bar = document.getElementById('spk-meter-bar');
+  if (!bar) return;
+  const db = 20 * Math.log10(rms + 1e-9);
+  const pct = Math.max(0, Math.min(100, (db + 60) / 60 * 100));
+  bar.style.width = pct.toFixed(0) + '%';
+  bar.classList.toggle('clip', peak >= 0.99);
+}
+// Intrinsic capture-quality metrics, computed once on the resampled 16 kHz clip.
+// These are recompute-impossible after the audio is dropped, so they ride the
+// enroll POST and are persisted per utterance.
+function spkAnalyze(pcm) {
+  const n = pcm.length;
+  let sumSq = 0, peak = 0;
+  for (let i = 0; i < n; i++) { const a = Math.abs(pcm[i]); if (a > peak) peak = a; sumSq += pcm[i] * pcm[i]; }
+  const rms = Math.sqrt(sumSq / Math.max(1, n));
+  const loudness = 20 * Math.log10(rms + 1e-9);
+  // Per-frame (25 ms) energies \u2192 SNR from the 10th vs 90th percentile.
+  const F = 400; const energies = [];
+  for (let i = 0; i + F <= n; i += F) { let e = 0; for (let j = 0; j < F; j++) { const s = pcm[i + j]; e += s * s; } energies.push(e / F); }
+  let snr = null;
+  if (energies.length >= 4) {
+    const sorted = energies.slice().sort((a, b) => a - b);
+    const noise = sorted[Math.floor(sorted.length * 0.1)];
+    const speech = sorted[Math.floor(sorted.length * 0.9)];
+    snr = 10 * Math.log10((speech + 1e-12) / (noise + 1e-12));
+  }
+  return {
+    duration_secs: +(n / 16000).toFixed(2),
+    loudness_dbfs: +loudness.toFixed(1),
+    snr_db: snr == null ? null : +snr.toFixed(1),
+    peak: +peak.toFixed(3),
+  };
+}
+// Plain-language warnings from the intrinsic metrics; empty means the clip is clean.
+function spkQualityWarnings(m) {
+  const w = [];
+  if (m.peak >= 0.99) w.push('the audio is clipping (move back or lower input gain)');
+  if (m.loudness_dbfs < -45) w.push('it is very quiet (move closer or raise input gain)');
+  if (m.snr_db != null && m.snr_db < 10) w.push('the background sounds noisy');
+  return w;
 }
 async function spkResampleTo16k(samples, srcRate) {
   if (srcRate === 16000 || !samples.length) return samples;

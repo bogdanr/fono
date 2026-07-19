@@ -45,8 +45,8 @@ pub use sink::{LocalPlaybackSink, PcmSink};
 #[cfg(feature = "speaker-onnx")]
 pub use speaker::engine::SpeakerEngine;
 pub use speaker::{
-    decide, Cohort, EnrolledSpeaker, Fbank, FbankConfig, SpeakerDecision, SpeakerModel,
-    SpeechAccumulator,
+    consistency_scores, decide, Cohort, EnrolledSpeaker, Fbank, FbankConfig, SpeakerDecision,
+    SpeakerModel, SpeechAccumulator,
 };
 pub use trim::{trim_silence, TrimConfig};
 pub use vad::{Vad, VadDecision, WebRtcVadStub};

@@ -223,6 +223,13 @@ details.sec .body > .row:first-child, details.sec .body > .row.master { border-t
 .enroll-row .enroll-device { flex: 1 1 180px; min-width: 150px; }
 .enroll-card .hint { margin: 8px 0 0; }
 .spk-hidden { display: none; }
+.spk-meter { margin: 10px 0 2px; height: 8px; border-radius: 4px; background: var(--bg); overflow: hidden; border: 1px solid var(--line); }
+.spk-meter-bar { height: 100%; width: 0; background: var(--ok, #3a7); transition: width 60ms linear; }
+.spk-meter-bar.clip { background: var(--accent); }
+.spk-strength { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; border: 1px solid var(--line); }
+.spk-strength.strong { color: var(--ok, #3a7); border-color: var(--ok, #3a7); }
+.spk-strength.ok { color: var(--fg); }
+.spk-strength.weak { color: var(--accent); border-color: var(--accent); }
 
 /* ---------- section disabled state ---------- */
 .section-off .row:not(.master), .section-off .pgrid, .section-off .subhead, .section-off .prompt-d, .section-off .wake-row, .section-off .srv-card { opacity: 0.38; pointer-events: none; filter: saturate(0.4); }
