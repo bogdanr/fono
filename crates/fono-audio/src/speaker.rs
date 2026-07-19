@@ -355,6 +355,167 @@ impl SpeechAccumulator {
     }
 }
 
+/// Default false-accept-rate target for the operating-point threshold in
+/// [`calibrate`]. 1 % is a sensible desktop-dictation default: a strict-ish
+/// point that keeps impostor acceptances rare without being paranoid. The
+/// EER threshold is reported alongside as the balanced alternative.
+pub const DEFAULT_TARGET_FAR: f32 = 0.01;
+
+/// The outcome of a "test my voice" run: the genuine and impostor score
+/// distributions, the equal-error-rate estimate, and two candidate operating
+/// thresholds (balanced EER point and a target-FAR point). All scores are
+/// AS-Norm outputs on the user's own mic/room, so this is a *practical*
+/// self-EER ("your mic, your room"), not a benchmark figure.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CalibrationReport {
+    /// Mean of the genuine-trial scores (self vs own centroid).
+    pub genuine_mean: f32,
+    /// Standard deviation of the genuine-trial scores (population, ddof=0).
+    pub genuine_std: f32,
+    /// Number of genuine trials scored.
+    pub genuine_trials: usize,
+    /// Mean of the impostor-trial scores (self vs cohort / other speakers).
+    pub impostor_mean: f32,
+    /// Standard deviation of the impostor-trial scores.
+    pub impostor_std: f32,
+    /// Number of impostor trials scored.
+    pub impostor_trials: usize,
+    /// Equal-error-rate estimate in `[0, 1]` (where FAR ≈ FRR).
+    pub eer: f32,
+    /// Score threshold at the equal-error point (balanced FAR/FRR).
+    pub eer_threshold: f32,
+    /// The false-accept-rate target used for [`Self::far_threshold`].
+    pub target_far: f32,
+    /// Score threshold achieving `target_far` on the impostor distribution.
+    pub far_threshold: f32,
+}
+
+/// Population mean and standard deviation (ddof = 0) of a score array, for
+/// calibration *reporting*. Unlike the private AS-Norm [`mean_std`] helper this
+/// does not floor the std, so a constant distribution reports `std = 0`, and an
+/// empty slice is `(0, 0)`.
+#[must_use]
+pub fn score_mean_std(xs: &[f32]) -> (f32, f32) {
+    if xs.is_empty() {
+        return (0.0, 0.0);
+    }
+    let n = xs.len() as f32;
+    let mean = xs.iter().sum::<f32>() / n;
+    let var = xs.iter().map(|&x| (x - mean) * (x - mean)).sum::<f32>() / n;
+    (mean, var.sqrt())
+}
+
+/// The equal-error-rate estimate and its threshold from genuine and impostor
+/// score arrays. A trial is *accepted* when its score is `>=` the threshold, so
+/// as the threshold rises the false-accept rate (impostors accepted) falls and
+/// the false-reject rate (genuines rejected) rises; the EER is where the two
+/// cross. Sweeps every observed score as a candidate threshold and returns the
+/// point of minimal `|FAR − FRR|`. Returns `(0.5, 0.0)` if either side is empty.
+#[must_use]
+pub fn eer_and_threshold(genuine: &[f32], impostor: &[f32]) -> (f32, f32) {
+    if genuine.is_empty() || impostor.is_empty() {
+        return (0.5, 0.0);
+    }
+    let g = genuine.len() as f32;
+    let i = impostor.len() as f32;
+    // Candidate thresholds: every observed score (both sides), ascending.
+    let mut cands: Vec<f32> = genuine.iter().chain(impostor.iter()).copied().collect();
+    cands.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    cands.dedup();
+    let mut best_eer = 1.0;
+    let mut best_thr = cands[0];
+    let mut best_gap = f32::INFINITY;
+    for &t in &cands {
+        let far = impostor.iter().filter(|&&s| s >= t).count() as f32 / i;
+        let frr = genuine.iter().filter(|&&s| s < t).count() as f32 / g;
+        let gap = (far - frr).abs();
+        if gap < best_gap {
+            best_gap = gap;
+            best_eer = 0.5 * (far + frr);
+            best_thr = t;
+        }
+    }
+    (best_eer, best_thr)
+}
+
+/// The lowest threshold whose false-accept rate on `impostor` is `<=`
+/// `target_far` — i.e. the operating point that keeps impostor acceptances at
+/// or below the target. Equivalent to the `1 − target_far` quantile of the
+/// impostor scores. Returns `0.0` for an empty impostor set.
+#[must_use]
+pub fn threshold_for_far(impostor: &[f32], target_far: f32) -> f32 {
+    if impostor.is_empty() {
+        return 0.0;
+    }
+    let target = target_far.clamp(0.0, 1.0);
+    let mut sorted = impostor.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = sorted.len();
+    // Smallest threshold t (chosen from observed scores, plus one above the max)
+    // with (#impostor >= t)/n <= target. Scanning high→low, stop just before the
+    // accepted fraction exceeds the target.
+    let mut thr = sorted[n - 1] + f32::EPSILON.max(sorted[n - 1].abs() * 1e-6);
+    for k in (0..n).rev() {
+        let accepted = (n - k) as f32 / n as f32;
+        if accepted <= target {
+            thr = sorted[k];
+        } else {
+            break;
+        }
+    }
+    thr
+}
+
+/// Compute a full [`CalibrationReport`] from genuine and impostor score arrays
+/// using `target_far` for the strict operating point.
+#[must_use]
+pub fn calibrate(genuine: &[f32], impostor: &[f32], target_far: f32) -> CalibrationReport {
+    let (genuine_mean, genuine_std) = score_mean_std(genuine);
+    let (impostor_mean, impostor_std) = score_mean_std(impostor);
+    let (eer, eer_threshold) = eer_and_threshold(genuine, impostor);
+    let far_threshold = threshold_for_far(impostor, target_far);
+    CalibrationReport {
+        genuine_mean,
+        genuine_std,
+        genuine_trials: genuine.len(),
+        impostor_mean,
+        impostor_std,
+        impostor_trials: impostor.len(),
+        eer,
+        eer_threshold,
+        target_far,
+        far_threshold,
+    }
+}
+
+/// Summary statistics for per-embedding latency measurements (milliseconds),
+/// surfaced by "test my voice" as "≈X ms/utterance on this machine".
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LatencyStats {
+    pub count: usize,
+    pub mean_ms: f32,
+    pub p50_ms: f32,
+    pub p95_ms: f32,
+}
+
+/// Mean / median / 95th-percentile of `samples_ms` (nearest-rank percentiles).
+/// All-zero for an empty slice.
+#[must_use]
+pub fn latency_stats(samples_ms: &[f32]) -> LatencyStats {
+    if samples_ms.is_empty() {
+        return LatencyStats { count: 0, mean_ms: 0.0, p50_ms: 0.0, p95_ms: 0.0 };
+    }
+    let n = samples_ms.len();
+    let mean_ms = samples_ms.iter().sum::<f32>() / n as f32;
+    let mut sorted = samples_ms.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pct = |p: f32| {
+        let rank = (p * n as f32).ceil() as usize;
+        sorted[rank.clamp(1, n) - 1]
+    };
+    LatencyStats { count: n, mean_ms, p50_ms: pct(0.5), p95_ms: pct(0.95) }
+}
+
 /// Front-end filterbank configuration a speaker-embedding model expects. The
 /// engine (feature `speaker-onnx`, a later slice) turns 16 kHz mono PCM into
 /// these features before the `ort` session runs.
@@ -1229,5 +1390,85 @@ mod tests {
         assert!((confidence_from_margin(1.23, 1.23) - 0.5).abs() < 1e-6);
         assert!(confidence_from_margin(2.0, 1.0) > 0.5);
         assert!(confidence_from_margin(0.0, 1.0) < 0.5);
+    }
+
+    #[test]
+    fn score_mean_std_matches_hand_computation() {
+        let (m, s) = score_mean_std(&[1.0, 2.0, 3.0, 4.0]);
+        assert!((m - 2.5).abs() < 1e-6);
+        // population variance = 1.25 → std ≈ 1.1180
+        assert!((s - 1.118_033_9).abs() < 1e-5);
+        assert_eq!(score_mean_std(&[]), (0.0, 0.0));
+    }
+
+    #[test]
+    fn eer_is_zero_for_perfectly_separable_scores() {
+        let genuine = [0.8, 0.85, 0.9, 0.95];
+        let impostor = [0.1, 0.15, 0.2, 0.25];
+        let (eer, thr) = eer_and_threshold(&genuine, &impostor);
+        assert!(eer.abs() < 1e-6, "cleanly separable → EER 0, got {eer}");
+        // Threshold lands strictly between the two clusters.
+        assert!(thr > 0.25 && thr <= 0.8, "threshold {thr} should sit in the gap");
+    }
+
+    #[test]
+    fn eer_is_high_for_fully_overlapping_scores() {
+        let genuine = [0.4, 0.5, 0.6];
+        let impostor = [0.4, 0.5, 0.6];
+        let (eer, _) = eer_and_threshold(&genuine, &impostor);
+        assert!(eer > 0.3, "identical distributions → EER near 0.5, got {eer}");
+    }
+
+    #[test]
+    fn eer_empty_side_is_the_neutral_default() {
+        assert_eq!(eer_and_threshold(&[], &[0.1]), (0.5, 0.0));
+        assert_eq!(eer_and_threshold(&[0.9], &[]), (0.5, 0.0));
+    }
+
+    #[test]
+    fn far_threshold_hits_the_target_quantile() {
+        // 100 impostor scores 0.00..0.99. A 1% FAR target admits only the very
+        // top scores, so the threshold sits high in the distribution.
+        let impostor: Vec<f32> = (0..100).map(|k| k as f32 / 100.0).collect();
+        let thr = threshold_for_far(&impostor, 0.01);
+        let far = impostor.iter().filter(|&&s| s >= thr).count() as f32 / 100.0;
+        assert!(far <= 0.01 + 1e-6, "achieved FAR {far} must be ≤ target");
+        assert!(thr >= 0.98, "1% FAR threshold {thr} should be near the top");
+    }
+
+    #[test]
+    fn far_threshold_zero_target_rejects_all_impostors() {
+        let impostor = [0.2, 0.5, 0.9];
+        let thr = threshold_for_far(&impostor, 0.0);
+        assert!(impostor.iter().all(|&s| s < thr), "0% FAR must reject every impostor");
+    }
+
+    #[test]
+    fn calibrate_reports_consistent_distributions_and_thresholds() {
+        let genuine = [0.7, 0.75, 0.8, 0.85];
+        let impostor = [0.1, 0.2, 0.3, 0.4];
+        let r = calibrate(&genuine, &impostor, DEFAULT_TARGET_FAR);
+        assert_eq!(r.genuine_trials, 4);
+        assert_eq!(r.impostor_trials, 4);
+        assert!(r.genuine_mean > r.impostor_mean);
+        assert!(r.eer.abs() < 1e-6, "separable → EER 0");
+        assert!((r.target_far - DEFAULT_TARGET_FAR).abs() < 1e-9);
+        // Both operating points cleanly separate this separable data: the strict
+        // FAR point rejects every impostor and the EER point accepts every genuine.
+        assert!(impostor.iter().all(|&s| s < r.far_threshold), "FAR point must reject impostors");
+        assert!(genuine.iter().all(|&s| s >= r.eer_threshold), "EER point must accept genuines");
+    }
+
+    #[test]
+    fn latency_stats_percentiles_are_nearest_rank() {
+        let s: Vec<f32> = (1..=100).map(|k| k as f32).collect();
+        let l = latency_stats(&s);
+        assert_eq!(l.count, 100);
+        assert!((l.mean_ms - 50.5).abs() < 1e-4);
+        assert!((l.p50_ms - 50.0).abs() < 1e-6);
+        assert!((l.p95_ms - 95.0).abs() < 1e-6);
+        let empty = latency_stats(&[]);
+        assert_eq!(empty.count, 0);
+        assert!(empty.mean_ms.abs() < f32::EPSILON);
     }
 }

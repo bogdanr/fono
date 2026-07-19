@@ -97,7 +97,7 @@ centrepiece.
 ### Step 3 — "Test my voice" calibration card (needs Step 1)
 Where EER tuning on the user's own room/mic and user confidence materialise.
 
-- [ ] Task 3.1. Calibration math in `fono-audio` (pure, tested): genuine +
+- [x] Task 3.1. Calibration math in `fono-audio` (pure, tested): genuine +
       impostor score arrays → EER estimate, EER-threshold, target-FAR
       threshold, per-embed latency stats.
 - [ ] Task 3.2. Daemon hook + `POST /api/speakers/{id}/calibrate`: record

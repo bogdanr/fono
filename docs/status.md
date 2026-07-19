@@ -1,6 +1,30 @@
 # Fono — Project Status
 Last updated: 2026-07-19
 
+## 2026-07-19 — Speaker verification: calibration math (Step 3, Task 3.1)
+
+Started Step 3 ("test my voice") of
+`plans/2026-07-19-speaker-verification-calibration-ux-v3.md` with its
+model-independent foundation — the calibration math in `fono-audio`, pure and
+fully unit-tested:
+
+- `score_mean_std` — population mean/std for reporting (no std floor, unlike the
+  private AS-Norm helper), `(0,0)` on empty.
+- `eer_and_threshold` — sweeps every observed score as a candidate threshold and
+  returns the equal-error-rate estimate + its threshold (accept when `score >=
+  t`); neutral `(0.5, 0.0)` when either side is empty.
+- `threshold_for_far` — the strict operating point: lowest threshold whose
+  impostor false-accept rate is `<= target_far` (the `1 − target_far` quantile).
+- `calibrate` — assembles a full `CalibrationReport` (both distributions, EER,
+  EER-threshold, and a `DEFAULT_TARGET_FAR` = 1 % strict point).
+- `latency_stats` / `LatencyStats` — nearest-rank p50/p95 + mean for per-embed
+  latency reporting ("≈X ms on this machine").
+
+Re-exported from `fono-audio`. 6 new unit tests (37 speaker tests total). Gates
+green (fmt, clippy workspace, workspace tests). Next: Task 3.2 — the daemon
+calibrate hook + `POST /api/speakers/{id}/calibrate`, then the `#/speakers`
+calibration card.
+
 ## 2026-07-19 — Speaker verification: impostor cohort shipped (Step 1 complete)
 
 Completed Step 1 of `plans/2026-07-19-speaker-verification-calibration-ux-v2.md`
