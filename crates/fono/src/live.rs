@@ -134,7 +134,21 @@ pub struct LiveTranscript {
     /// translator task does not currently see preview text. The pure
     /// function is unit-tested.
     pub commit_extended_by_punct_ms: u32,
+    /// Concatenated voiced PCM the streaming STT actually consumed, at
+    /// the session sample rate. Populated only when the caller opts in
+    /// via [`LiveSession::with_collect_pcm`] (speaker verification on),
+    /// and capped at [`MAX_VOICED_PCM_SAMPLES`] to bound memory. Empty
+    /// otherwise — collecting the whole utterance costs nothing when the
+    /// feature is off. The consumer hands this to the speaker-embedding
+    /// model after the stream closes, since the streaming path discards
+    /// each frame after transcription and never retains the buffer.
+    pub voiced_pcm: Vec<f32>,
 }
+
+/// Upper bound on retained voiced PCM (60 s at 16 kHz ≈ 3.8 MB). A voice
+/// embedding saturates well before this; the cap only guards against a
+/// pathologically long dictation pinning memory.
+pub const MAX_VOICED_PCM_SAMPLES: usize = 16_000 * 60;
 
 /// Builder for a live-dictation session.
 pub struct LiveSession {
@@ -150,6 +164,10 @@ pub struct LiveSession {
     /// passes `AssistantRecording` so the same plumbing renders the
     /// green "ASSISTANT" panel with realtime preview text.
     overlay_active_state: OverlayState,
+    /// When true, retain the voiced PCM fed to STT so the caller can run
+    /// speaker verification after the stream closes. Off by default so
+    /// the common (verification-disabled) path allocates nothing.
+    collect_pcm: bool,
 }
 
 impl LiveSession {
@@ -163,7 +181,18 @@ impl LiveSession {
             stream_cfg: StreamConfig::default(),
             heuristics: HeuristicConfig::default(),
             overlay_active_state: OverlayState::LiveDictating,
+            collect_pcm: false,
         }
+    }
+
+    /// Opt in to retaining the voiced PCM on [`LiveTranscript::voiced_pcm`]
+    /// for post-stream speaker verification. Enable only when speaker
+    /// verification is on — it keeps up to [`MAX_VOICED_PCM_SAMPLES`] in
+    /// memory for the session's lifetime.
+    #[must_use]
+    pub fn with_collect_pcm(mut self, collect: bool) -> Self {
+        self.collect_pcm = collect;
+        self
     }
 
     #[must_use]
@@ -238,8 +267,15 @@ impl LiveSession {
             stream_cfg: _,
             heuristics,
             overlay_active_state,
+            collect_pcm,
         } = self;
         let budget = Arc::new(Mutex::new(budget));
+
+        // Accumulator for the voiced PCM the STT consumes, shared with the
+        // translator task and drained back onto the transcript after the
+        // stream closes. Only allocated when the caller opts in.
+        let pcm_accum: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+        let pcm_accum_for_pump = Arc::clone(&pcm_accum);
 
         // Translate FrameEvent -> StreamFrame and feed the StreamingStt.
         //
@@ -290,6 +326,17 @@ impl LiveSession {
                                 tail.pop_front();
                             }
                             tail.push_back(*s);
+                        }
+                        // Retain the exact voiced audio STT sees (capped)
+                        // for post-stream speaker verification.
+                        if collect_pcm {
+                            if let Ok(mut acc) = pcm_accum_for_pump.lock() {
+                                let room = MAX_VOICED_PCM_SAMPLES.saturating_sub(acc.len());
+                                if room > 0 {
+                                    let take = room.min(pcm.len());
+                                    acc.extend_from_slice(&pcm[..take]);
+                                }
+                            }
                         }
                         if sf_tx.send(StreamFrame::Pcm(pcm)).is_err() {
                             return;
@@ -398,6 +445,13 @@ impl LiveSession {
         // Promote the prosody metric out of the translator task.
         if let Ok(g) = prosody_metric.lock() {
             transcript.commit_extended_by_prosody_ms = *g;
+        }
+
+        // Promote the accumulated voiced PCM (empty unless opted in).
+        if collect_pcm {
+            if let Ok(mut acc) = pcm_accum.lock() {
+                transcript.voiced_pcm = std::mem::take(&mut acc);
+            }
         }
 
         // R10.5: stamp the heuristic outcomes on the run span.

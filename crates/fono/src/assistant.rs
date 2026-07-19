@@ -136,6 +136,11 @@ pub struct AssistantTurnInputs {
     /// a reading-time dwell instead of being synthesised + played back
     pub tts: Option<Arc<dyn TextToSpeech>>,
     pub system_prompt: String,
+    /// Verified enrolled speaker for this turn, when speaker verification
+    /// is enabled and the captured voice matched (name only, never the
+    /// embedding). Annotates the `assistant:` summary line; `None`
+    /// otherwise.
+    pub speaker: Option<String>,
     pub language: Option<String>,
     /// Channel back into the FSM. The pump sends
     /// [`HotkeyAction::AssistantSpeakingStarted`] the moment the
@@ -248,6 +253,7 @@ pub async fn run_assistant_turn(
         assistant,
         tts,
         system_prompt,
+        speaker,
         language,
         action_tx,
         overlay,
@@ -267,7 +273,8 @@ pub async fn run_assistant_turn(
         t.instant("turn.start", "assistant", "assistant-pump", json!({ "turn_id": t.id() }));
     }
     let turn_started = std::time::Instant::now();
-    let mut metrics = AssistantTurnMetrics { language: language.clone(), ..Default::default() };
+    let mut metrics =
+        AssistantTurnMetrics { language: language.clone(), speaker, ..Default::default() };
 
     // 1. Resolve the user's text. When `pre_transcribed` is set the
     //    caller already ran streaming STT (live-mode F8 path); we

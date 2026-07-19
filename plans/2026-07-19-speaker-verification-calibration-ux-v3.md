@@ -135,8 +135,14 @@ Until this lands, verification only runs in enrollment/testing.
 - [x] Task 4.2. Tag transcripts + history with the decision (name + score,
       never the embedding). History schema carries a nullable `speaker` column
       (`fono-core/history.rs`); only the matched name is stored, score/threshold
-      are logged. Tagged on the batch path today (live path accumulates PCM in a
-      follow-up).
+      are logged. Tagged on **all** capture paths: the batch pipeline, streaming
+      live dictation (via `LiveSession::with_collect_pcm` retaining the voiced
+      PCM), and the assistant turn (streamed + batch).
+- [x] Task 4.4. Wire the assistant turn: verify the captured voice and, when
+      matched, prepend a one-line identity note to the system prompt so the
+      assistant knows who it is addressing (context injection, no gating). The
+      verified name is merged into the `pipeline (live):` and `assistant:`
+      summary lines (no extra log line).
 - [x] Task 4.3. Assert (test + docs) the embedding/biometric never enters any
       cloud request path. Regression test
       `pipeline_speaker_verification_never_leaks_audio_or_embedding_to_stt`

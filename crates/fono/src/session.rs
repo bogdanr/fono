@@ -476,6 +476,10 @@ pub struct AssistantTurnMetrics {
     /// playback-stop, etc.). Renders as `| aborted` at the end of
     /// the summary line.
     pub aborted: bool,
+    /// Verified enrolled speaker for this turn, when speaker verification
+    /// is on and the voice matched. Rendered as `| speaker <name>` on the
+    /// summary line; `None` omits the segment.
+    pub speaker: Option<String>,
 }
 
 /// Outcome of one full dictation pipeline run, returned by the inner
@@ -3000,6 +3004,10 @@ impl SessionOrchestrator {
         let mut pre_transcribed: Option<String> = None;
         let mut elapsed: Option<Duration> = None;
         let mut assistant_focus_info: Option<FocusInfo> = None;
+        // Verified speaker for this turn (Slice 4 live-path wiring), used to
+        // tell the assistant who it is talking to and to annotate the turn
+        // log. `None` unless verification is on and the voice matched.
+        let mut assistant_speaker: Option<String> = None;
         #[cfg(feature = "interactive")]
         {
             let live_taken = self.assistant_live_capture.lock().await.take();
@@ -3059,6 +3067,16 @@ impl SessionOrchestrator {
                 }
                 pre_transcribed = Some(raw);
                 elapsed = Some(captured_for);
+                // Embed the retained voiced PCM (see `LiveSession::with_collect_pcm`)
+                // and resolve the enrolled speaker. The live pipeline is 16 kHz.
+                assistant_speaker = match self.speaker_verify(&cfg) {
+                    Some(v) => {
+                        let secs = transcript.voiced_pcm.len() as f32 / 16_000.0;
+                        let sufficient = secs >= cfg.speaker.min_speech_secs;
+                        v.verify(&transcript.voiced_pcm, 16_000, sufficient).await
+                    }
+                    None => None,
+                };
             }
         }
 
@@ -3225,13 +3243,34 @@ impl SessionOrchestrator {
             };
         let active_window_context =
             assistant_focus_info.as_ref().and_then(assistant_window_context_for_cache);
+        // Batch (record-then-send) path: the interactive live path resolves
+        // `assistant_speaker` from the streamed voiced PCM above; when we
+        // instead captured a whole-utterance buffer, verify it here so the
+        // record-then-send assistant turn is tagged too. No-op when the live
+        // path already matched or when verification is off.
+        if assistant_speaker.is_none() && !pcm.is_empty() {
+            if let Some(v) = self.speaker_verify(&cfg) {
+                let sr = self.capture_cfg.target_sample_rate;
+                let secs = if sr > 0 { pcm.len() as f32 / sr as f32 } else { 0.0 };
+                let sufficient = secs >= cfg.speaker.min_speech_secs;
+                assistant_speaker = v.verify(&pcm, sr, sufficient).await;
+            }
+        }
+        // Option 1 (speaker verification): when the voice matched an enrolled
+        // speaker, tell the assistant who it is talking to by prepending a
+        // one-line identity note to the system prompt. No-op when unmatched.
+        let system_prompt = assistant_speaker.as_deref().map_or_else(
+            || cfg.assistant.prompt_main.clone(),
+            |name| format!("The current speaker is {name}.\n\n{}", cfg.assistant.prompt_main),
+        );
         let inputs = AssistantTurnInputs {
             pcm,
             sample_rate: self.capture_cfg.target_sample_rate,
             stt,
             assistant,
             tts,
-            system_prompt: cfg.assistant.prompt_main.clone(),
+            system_prompt,
+            speaker: assistant_speaker,
             language: cfg.general.language_override().map(str::to_string),
             action_tx: self.action_tx.clone(),
             // Hand the pump a clone of the live overlay handle so it
@@ -4007,7 +4046,11 @@ impl SessionOrchestrator {
         };
         let mut session = crate::live::LiveSession::new(streaming, sample_rate)
             .with_language(language)
-            .with_overlay_active_state(active_state);
+            .with_overlay_active_state(active_state)
+            // Retain the voiced PCM only when speaker verification is on, so
+            // both the live-dictation and assistant streaming paths can embed
+            // the whole utterance after the stream closes. Zero cost when off.
+            .with_collect_pcm(cfg.speaker.enabled);
         if let Some(o) = overlay.as_ref() {
             session = session.with_overlay(o.clone());
         }
@@ -4478,6 +4521,21 @@ impl SessionOrchestrator {
         let raw_chars = raw.chars().count();
         let final_chars = final_text.chars().count();
         let llm_label = llm_label_for_log.as_deref().unwrap_or("none");
+
+        // Speaker verification (Slice 4 live-path wiring): the streaming STT
+        // discards each frame after transcription, so `LiveSession` retained
+        // the voiced PCM on the transcript when verification is enabled. Embed
+        // the whole utterance now and reuse the matched name (never the
+        // embedding) for both the summary log line and the history row. The
+        // live pipeline is fixed at 16 kHz.
+        let live_speaker = match self.speaker_verify(&cfg) {
+            Some(v) => {
+                let secs = transcript.voiced_pcm.len() as f32 / 16_000.0;
+                let sufficient = secs >= cfg.speaker.min_speech_secs;
+                v.verify(&transcript.voiced_pcm, 16_000, sufficient).await
+            }
+            None => None,
+        };
         info!(
             "{}",
             format_pipeline_summary_live(
@@ -4491,6 +4549,7 @@ impl SessionOrchestrator {
                 final_chars,
                 inject_ms,
                 &live_inject_backend,
+                live_speaker.as_deref(),
             )
         );
 
@@ -4521,13 +4580,7 @@ impl SessionOrchestrator {
                     stt_backend: Some(stt_label),
                     polish_backend: llm_label,
                     language: None,
-                    // Speaker verification is not wired into the streaming
-                    // live-dictation path yet: it consumes PCM frame-by-frame
-                    // and does not retain the whole-utterance buffer the
-                    // embedding model needs. Tagged only on the batch path
-                    // (`run_pipeline`) for now; a follow-up can accumulate the
-                    // live PCM to verify here too.
-                    speaker: None,
+                    speaker: live_speaker.clone(),
                 };
                 let redact = cfg.history.redact_secrets;
                 let db = self.history.lock().await;
@@ -5758,6 +5811,7 @@ fn format_pipeline_summary_live(
     final_chars: usize,
     inject_ms: u64,
     inject_backend: &str,
+    speaker: Option<&str>,
 ) -> String {
     let capture = fmt_capture(capture_ms);
     let lang = language.unwrap_or("?");
@@ -5768,8 +5822,9 @@ fn format_pipeline_summary_live(
         format!("polish {pol} [{ctx_tag}] {raw_chars} → {final_chars} chars")
     };
     let inject = fmt_ms(inject_ms, warn_ms::INJECT);
+    let speaker_seg = speaker.map(|s| format!(" | speaker {s}")).unwrap_or_default();
     format!(
-        "pipeline (live): {capture} | {lang} | stt streaming ({segments} segs) {raw_chars} chars | {polish_seg} | inject {inject_backend} {inject}",
+        "pipeline (live): {capture} | {lang} | stt streaming ({segments} segs) {raw_chars} chars | {polish_seg} | inject {inject_backend} {inject}{speaker_seg}",
     )
 }
 
@@ -5824,7 +5879,8 @@ pub fn format_assistant_summary(m: &AssistantTurnMetrics) -> String {
         |ms| format!("tts {} ttfa / {} sent", fmt_ms(ms, warn_ms::TTS_TTFA), m.sentences),
     );
     let tail = if m.aborted { " | aborted" } else { "" };
-    format!("assistant: {total} | {lang} | {stt_seg} | {llm_seg}{tool_seg} | {tts_seg}{tail}")
+    let speaker_seg = m.speaker.as_deref().map(|s| format!(" | speaker {s}")).unwrap_or_default();
+    format!("assistant: {total} | {lang} | {stt_seg} | {llm_seg}{tool_seg} | {tts_seg}{speaker_seg}{tail}")
 }
 
 /// Helper used by `fono record` and the integration test to construct an
@@ -5973,6 +6029,7 @@ mod tests {
             tts_ttfa_ms: Some(420),
             sentences: 8,
             aborted: false,
+            speaker: None,
         };
         // Tests run with stderr piped (non-TTY), so `log_color_enabled()`
         // is false: numbers are plain, no colour, no marker — even the
@@ -6008,6 +6065,7 @@ mod tests {
             tts_ttfa_ms: Some(9000),
             sentences: 2,
             aborted: false,
+            speaker: None,
         };
         let line = format_assistant_summary(&m);
         assert!(!line.contains('\u{1b}'), "summary leaked an ANSI escape: {line:?}");
@@ -6032,6 +6090,7 @@ mod tests {
             tts_ttfa_ms: Some(330),
             sentences: 5,
             aborted: false,
+            speaker: None,
         };
         let line = format_assistant_summary(&m);
         assert!(
@@ -6083,6 +6142,25 @@ mod tests {
         let line = format_assistant_summary(&m);
         assert!(line.ends_with("| aborted"), "got: {line}");
         assert!(line.contains("tts none"), "got: {line}");
+    }
+
+    #[test]
+    fn assistant_summary_appends_speaker_when_matched() {
+        let m = AssistantTurnMetrics {
+            total_ms: 3120,
+            language: Some("ro".into()),
+            stt_ms: Some(412),
+            user_chars: 22,
+            llm_ttfb_ms: 180,
+            llm_total_ms: 1450,
+            reply_chars: 198,
+            tts_ttfa_ms: Some(330),
+            sentences: 5,
+            speaker: Some("Alex".into()),
+            ..Default::default()
+        };
+        let line = format_assistant_summary(&m);
+        assert!(line.contains(" | speaker Alex"), "got: {line}");
     }
 
     // ---- Streaming-cleanup injection (plan v3) ----------------------

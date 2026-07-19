@@ -1,6 +1,32 @@
 # Fono — Project Status
 Last updated: 2026-07-19
 
+## 2026-07-19 — Speaker verification: live-path + assistant wiring (Step 4 follow-up)
+
+Closed the two Slice-4 gaps flagged in the previous entry: streaming live
+dictation and the assistant turn are now speaker-tagged too, so verification
+fires for every capture path, not just the batch record-then-transcribe one.
+
+- **Streaming live dictation.** `LiveSession` (`crates/fono/src/live.rs`) gains
+  an opt-in `with_collect_pcm(bool)`: when verification is enabled the translator
+  task accumulates exactly the voiced PCM it forwards to STT (capped at 60 s) and
+  returns it on `LiveTranscript::voiced_pcm`. Zero allocation when verification is
+  off. `on_stop_live_dictation` (`session.rs`) embeds that buffer and tags the
+  history row — previously always `speaker: None` on the streaming path.
+- **Assistant turn.** The same shared pipeline builder enables collection for the
+  assistant path, so the streamed F8 turn resolves the speaker from its voiced
+  PCM; the batch (record-then-send) assistant turn verifies its whole-utterance
+  buffer. When matched, the verified name is prepended to the assistant's system
+  prompt for that turn ("The current speaker is <name>.") so the assistant knows
+  who it's addressing (Option 1 — context injection, no gating).
+- **Logging.** The verified name is merged into the existing single-line
+  summaries — ` | speaker <name>` on both the `pipeline (live):` dictation line
+  and the `assistant:` line — no extra log line.
+
+Gates green: fmt, clippy workspace (`-D warnings`), full workspace tests
+(all suites pass, incl. a new `assistant:`-summary speaker-rendering test).
+Builds verified with and without the `speaker-onnx` / `interactive` features.
+
 ## 2026-07-19 — Speaker verification: Slice 4 pipeline wiring (Step 4, complete)
 
 Verification now runs on real dictation, not just enrollment/testing. Step 4 is
