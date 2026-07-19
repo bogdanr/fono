@@ -1,6 +1,38 @@
 # Fono — Project Status
 Last updated: 2026-07-19
 
+## 2026-07-19 — Speaker verification: Slice 4 pipeline wiring (Step 4, complete)
+
+Verification now runs on real dictation, not just enrollment/testing. Step 4 is
+done:
+
+- **Task 4.1 — concurrent embed + decision.** `run_pipeline` (`session.rs`),
+  when `config.speaker.enabled` is on, runs the voice embedding + AS-Norm
+  decision **concurrently** with the STT call via `tokio::join!`, so the embed
+  latency hides behind the transcription round-trip. The process-lived
+  `SpeakerEngine` is cached behind a new `SpeakerVerify` handle (`daemon.rs`),
+  so the ONNX model + cohort load **once** on first use — not per utterance.
+  Threshold resolves through `SpeakerThreshold::Fixed(f)` / `Auto =>
+  resolve_auto_threshold(...)`. A broken/missing model degrades to un-tagged
+  dictation rather than blocking the pipeline.
+- **Task 4.2 — tag transcripts + history.** History carries a nullable
+  `speaker` column (`fono-core/history.rs`, additive migration). Only the
+  matched **name** is stored; the score/threshold are logged, and the embedding
+  never touches history. Tagged on the batch path today; the live push-to-talk
+  path (which doesn't retain the whole-utterance buffer) accumulates PCM in a
+  follow-up.
+- **Task 4.3 — biometric-leak regression test + privacy doc.**
+  `pipeline_speaker_verification_never_leaks_audio_or_embedding_to_stt`
+  (`crates/fono/tests/pipeline.rs`) drives a full `run_oneshot` with
+  verification on and a recording STT, asserting the STT payload is
+  byte-for-byte the same dictation PCM (no appended/mixed embedding) and the
+  `TranscribeOptions` carry nothing biometric. `docs/privacy.md` gains a "voice
+  embeddings never leave the machine" bullet.
+
+Gates green: fmt, clippy workspace, workspace tests (all suites pass, incl. the
+new pipeline test). Next: Slice 5 (Python-oracle EER cross-check, deterministic
+E2E, ADR/docs) — the verification/validation slice.
+
 ## 2026-07-19 — Speaker verification: `fono speaker test` CLI (Step 3, Task 3.6)
 
 Added terminal parity for the web "test my voice" card, closing out Step 3:

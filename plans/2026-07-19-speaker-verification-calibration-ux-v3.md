@@ -127,13 +127,21 @@ Where EER tuning on the user's own room/mic and user confidence materialise.
 ### Step 4 — Slice 4 pipeline wiring (make it live)
 Until this lands, verification only runs in enrollment/testing.
 
-- [ ] Task 4.1. Run local embedding **concurrently** with the STT call (local
+- [x] Task 4.1. Run local embedding **concurrently** with the STT call (local
       or cloud) via `tokio::join!` so embed latency hides behind the round-trip;
-      join before tagging.
-- [ ] Task 4.2. Tag transcripts + history with the decision (name + score,
-      never the embedding).
-- [ ] Task 4.3. Assert (test + docs) the embedding/biometric never enters any
-      cloud request path.
+      join before tagging. Implemented in `run_pipeline` (`session.rs`), gated on
+      `config.speaker.enabled`; the process-lived engine is cached behind
+      `SpeakerVerify` (`daemon.rs`) so the model loads once, not per utterance.
+- [x] Task 4.2. Tag transcripts + history with the decision (name + score,
+      never the embedding). History schema carries a nullable `speaker` column
+      (`fono-core/history.rs`); only the matched name is stored, score/threshold
+      are logged. Tagged on the batch path today (live path accumulates PCM in a
+      follow-up).
+- [x] Task 4.3. Assert (test + docs) the embedding/biometric never enters any
+      cloud request path. Regression test
+      `pipeline_speaker_verification_never_leaks_audio_or_embedding_to_stt`
+      (`crates/fono/tests/pipeline.rs`) asserts the STT payload is byte-for-byte
+      unchanged with verification on; privacy note added to `docs/privacy.md`.
 
 ### Explicit non-goals (avoid overcomplication)
 - **Language tagging / coverage UX — DROPPED (decided 2026-07-19).** Not

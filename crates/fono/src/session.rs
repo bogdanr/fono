@@ -690,6 +690,11 @@ pub struct SessionOrchestrator {
     #[cfg(feature = "interactive")]
     live_fallback_notified: Arc<AtomicBool>,
     pipeline_in_flight: Arc<AtomicBool>,
+    /// Lazily-loaded speaker-embedding engine, shared across dictations so the
+    /// heavy ONNX graph is loaded once (on the first verified dictation) and
+    /// reused. `None` inside until then. Only present in `speaker-onnx` builds.
+    #[cfg(feature = "speaker-onnx")]
+    speaker_engine: crate::daemon::SpeakerEngineCache,
     config: Arc<StdRwLock<Arc<Config>>>,
     /// Resolved XDG paths; used by [`Self::reload`] to re-read config
     /// + secrets from disk.
@@ -1370,6 +1375,25 @@ impl SessionOrchestrator {
 
     fn current_config(&self) -> Arc<Config> {
         Arc::clone(&self.config.read().expect("config lock poisoned"))
+    }
+
+    /// Build a per-dictation speaker-verify handle when `[speaker].enabled`
+    /// and a `Paths` root exists; `None` otherwise (verification off, or a
+    /// test orchestrator without paths). The handle shares the process-lived
+    /// engine cache so the model is loaded once.
+    #[cfg(feature = "speaker-onnx")]
+    fn speaker_verify(&self, config: &Config) -> Option<crate::daemon::SpeakerVerify> {
+        if !config.speaker.enabled {
+            return None;
+        }
+        let paths = self.paths.as_deref()?;
+        Some(crate::daemon::SpeakerVerify::new(Arc::clone(&self.speaker_engine), paths, config))
+    }
+
+    /// Verification is compiled out; dictation is never speaker-tagged.
+    #[cfg(not(feature = "speaker-onnx"))]
+    fn speaker_verify(&self, _config: &Config) -> Option<crate::daemon::SpeakerVerify> {
+        None
     }
 
     /// Snapshot of the post-reload [`Config::live_preview`] flag. The
@@ -2401,6 +2425,8 @@ impl SessionOrchestrator {
             #[cfg(feature = "interactive")]
             live_fallback_notified: Arc::new(AtomicBool::new(false)),
             pipeline_in_flight: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "speaker-onnx")]
+            speaker_engine: Arc::new(Mutex::new(None)),
             config: Arc::new(StdRwLock::new(config)),
             paths: None,
             action_tx,
@@ -3719,6 +3745,7 @@ impl SessionOrchestrator {
         let vocabulary = self.load_vocabulary();
         let injector = Arc::clone(&self.injector);
         let sample_rate = self.capture_cfg.target_sample_rate;
+        let speaker_verify = self.speaker_verify(&config);
         // Standalone-waveform overlay: clone the handle so the pipeline
         // task can hide the panel once STT + LLM + inject are done. The
         // overlay was already shifted to `Processing` in
@@ -3774,6 +3801,7 @@ impl SessionOrchestrator {
                 overlay.as_ref(),
                 &mut polish_label_anim,
                 polish_walk_duration(Duration::from_millis(capture_ms)),
+                speaker_verify,
             )
             .await;
             match &outcome {
@@ -3837,6 +3865,7 @@ impl SessionOrchestrator {
         let focus_info =
             tokio::task::spawn_blocking(move || focus.probe()).await.unwrap_or_default();
         let mut polish_anim = None;
+        let speaker_verify = self.speaker_verify(&config);
         run_pipeline(
             pcm,
             self.capture_cfg.target_sample_rate,
@@ -3851,6 +3880,7 @@ impl SessionOrchestrator {
             None,
             &mut polish_anim,
             polish_walk_duration(Duration::from_millis(capture_ms)),
+            speaker_verify,
         )
         .await
     }
@@ -4491,6 +4521,13 @@ impl SessionOrchestrator {
                     stt_backend: Some(stt_label),
                     polish_backend: llm_label,
                     language: None,
+                    // Speaker verification is not wired into the streaming
+                    // live-dictation path yet: it consumes PCM frame-by-frame
+                    // and does not retain the whole-utterance buffer the
+                    // embedding model needs. Tagged only on the batch path
+                    // (`run_pipeline`) for now; a follow-up can accumulate the
+                    // live PCM to verify here too.
+                    speaker: None,
                 };
                 let redact = cfg.history.redact_secrets;
                 let db = self.history.lock().await;
@@ -4531,6 +4568,7 @@ async fn run_pipeline(
     overlay: Option<&fono_overlay::OverlayHandle>,
     polish_label_anim: &mut Option<tokio::task::AbortHandle>,
     polish_walk_duration: Duration,
+    speaker_verify: Option<crate::daemon::SpeakerVerify>,
 ) -> PipelineOutcome {
     if pcm.is_empty() {
         return PipelineOutcome::EmptyOrTooShort { duration_ms: capture_ms };
@@ -4592,7 +4630,22 @@ async fn run_pipeline(
             .and_then(|p| p.whisper_hint.as_deref())
             .map(str::to_string),
     };
-    let stt_result = stt.transcribe_with_opts(&pcm_for_stt, sample_rate, &stt_opts).await;
+    // Speaker verification (when enabled) runs *concurrently* with the STT
+    // call over the same 16 kHz buffer, so its tens-of-ms embed hides behind
+    // the STT round-trip. The embedding never leaves `verify` — only the
+    // matched speaker name comes back — and it is joined before we tag
+    // history. `stt_ms` therefore measures the STT+embed envelope (embed is
+    // the shorter leg), which is what the operator waits on.
+    let speech_secs = pcm_for_stt.len() as f32 / sample_rate.max(1) as f32;
+    let sufficient_audio = speech_secs >= config.speaker.min_speech_secs;
+    let stt_future = stt.transcribe_with_opts(&pcm_for_stt, sample_rate, &stt_opts);
+    let verify_future = async {
+        match speaker_verify.as_ref() {
+            Some(v) => v.verify(&pcm_for_stt, sample_rate, sufficient_audio).await,
+            None => None,
+        }
+    };
+    let (stt_result, speaker_name) = tokio::join!(stt_future, verify_future);
     let stt_ended = Instant::now();
     metrics.stt_ms = stt_started.elapsed().as_millis() as u64;
     let trans = match stt_result {
@@ -4921,6 +4974,7 @@ async fn run_pipeline(
             stt_backend: Some(stt.name().to_string()),
             polish_backend: polish.map(|l| l.name().to_string()),
             language: trans.language.clone(),
+            speaker: speaker_name.clone(),
         };
         let redact = config.history.redact_secrets;
         let db = history.lock().await;

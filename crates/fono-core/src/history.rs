@@ -28,6 +28,12 @@ pub struct Transcription {
     pub stt_backend: Option<String>,
     pub polish_backend: Option<String>,
     pub language: Option<String>,
+    /// Name of the enrolled speaker this dictation was verified as, when
+    /// speaker verification is enabled and produced a match. `None` when
+    /// verification is off, no speaker is enrolled, or the voice did not
+    /// clear the match threshold. Only the name is ever stored — never the
+    /// voice embedding.
+    pub speaker: Option<String>,
 }
 
 impl Transcription {
@@ -44,6 +50,7 @@ impl Transcription {
             stt_backend: None,
             polish_backend: None,
             language: None,
+            speaker: None,
         }
     }
 }
@@ -113,7 +120,8 @@ impl HistoryDb {
                 app_title     TEXT,
                 stt_backend   TEXT,
                 polish_backend   TEXT,
-                language      TEXT
+                language      TEXT,
+                speaker       TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_transcriptions_ts
@@ -143,6 +151,12 @@ impl HistoryDb {
                 END;
             ",
         )?;
+        // Additive migration: older DBs that already have `polish_backend`
+        // (so they survive the rebuild check above) may still predate the
+        // `speaker` column. Add it in place — nullable, no data loss.
+        if !self.column_exists("transcriptions", "speaker")? {
+            self.conn.execute_batch("ALTER TABLE transcriptions ADD COLUMN speaker TEXT;")?;
+        }
         Ok(())
     }
 
@@ -174,8 +188,8 @@ impl HistoryDb {
         };
         self.conn.execute(
             "INSERT INTO transcriptions
-             (ts, duration_ms, raw, cleaned, app_class, app_title, stt_backend, polish_backend, language)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (ts, duration_ms, raw, cleaned, app_class, app_title, stt_backend, polish_backend, language, speaker)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 t.ts,
                 t.duration_ms,
@@ -186,6 +200,7 @@ impl HistoryDb {
                 t.stt_backend,
                 t.polish_backend,
                 t.language,
+                t.speaker,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -218,7 +233,7 @@ impl HistoryDb {
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Transcription>> {
         let mut stmt = self.conn.prepare(
             "SELECT t.id, t.ts, t.duration_ms, t.raw, t.cleaned, t.app_class, t.app_title,
-                    t.stt_backend, t.polish_backend, t.language
+                    t.stt_backend, t.polish_backend, t.language, t.speaker
              FROM transcriptions t
              JOIN transcriptions_fts fts ON fts.rowid = t.id
              WHERE transcriptions_fts MATCH ?1
@@ -235,7 +250,7 @@ impl HistoryDb {
     pub fn recent(&self, limit: usize) -> Result<Vec<Transcription>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, ts, duration_ms, raw, cleaned, app_class, app_title,
-                    stt_backend, polish_backend, language
+                    stt_backend, polish_backend, language, speaker
              FROM transcriptions ORDER BY ts DESC LIMIT ?1",
         )?;
         let rows = stmt
@@ -263,6 +278,7 @@ fn row_to_transcription(r: &rusqlite::Row<'_>) -> rusqlite::Result<Transcription
         stt_backend: r.get(7)?,
         polish_backend: r.get(8)?,
         language: r.get(9)?,
+        speaker: r.get(10)?,
     })
 }
 

@@ -4839,7 +4839,7 @@ async fn embed_enrollment_pcm(
 /// dim. Returns an empty cohort on any malformation (AS-Norm then degrades to
 /// plain cosine rather than failing enrollment).
 #[cfg(feature = "speaker-onnx")]
-fn load_cohort(path: &std::path::Path) -> Option<fono_audio::speaker::Cohort> {
+pub(crate) fn load_cohort(path: &std::path::Path) -> Option<fono_audio::speaker::Cohort> {
     let bytes = std::fs::read(path).ok()?;
     if bytes.len() < 8 {
         return None;
@@ -4872,6 +4872,203 @@ async fn embed_enrollment_pcm(
     _sample_rate: u32,
 ) -> std::result::Result<Vec<f32>, String> {
     Err("this build was compiled without speaker verification (speaker-onnx)".to_string())
+}
+
+/// Process-lived, lazily-loaded speaker-embedding engine shared with the
+/// dictation pipeline. Loading the ONNX graph is the expensive part, so it is
+/// done once on the first verified dictation and reused thereafter (the inner
+/// `std::sync::Mutex` serialises the `&mut self` embed call across concurrent
+/// dictations; the outer async `Mutex` guards lazy initialisation).
+#[cfg(feature = "speaker-onnx")]
+pub(crate) type SpeakerEngineCache =
+    Arc<Mutex<Option<Arc<std::sync::Mutex<fono_audio::speaker::engine::SpeakerEngine>>>>>;
+
+/// A per-dictation handle that attaches a verified speaker name to a
+/// transcript. Cheap to build (clones an `Arc` + a couple of paths); the heavy
+/// engine lives behind the shared [`SpeakerEngineCache`]. Present in every
+/// build — without the `speaker-onnx` feature it carries no state and
+/// [`Self::verify`] is a no-op returning `None`.
+pub(crate) struct SpeakerVerify {
+    #[cfg(feature = "speaker-onnx")]
+    engine: SpeakerEngineCache,
+    #[cfg(feature = "speaker-onnx")]
+    cache_dir: std::path::PathBuf,
+    #[cfg(feature = "speaker-onnx")]
+    speakers_db: std::path::PathBuf,
+    #[cfg(feature = "speaker-onnx")]
+    model: String,
+    #[cfg(feature = "speaker-onnx")]
+    threshold: fono_core::config::SpeakerThreshold,
+}
+
+impl SpeakerVerify {
+    /// Build a verify handle from the shared engine cache and the resolved
+    /// per-user paths + `[speaker]` config. Only called when
+    /// `config.speaker.enabled` is true and a `Paths` root exists.
+    #[cfg(feature = "speaker-onnx")]
+    pub(crate) fn new(engine: SpeakerEngineCache, paths: &Paths, config: &Config) -> Self {
+        Self {
+            engine,
+            cache_dir: paths.cache_dir.clone(),
+            speakers_db: paths.speakers_db(),
+            model: config.speaker.model.clone(),
+            threshold: config.speaker.threshold,
+        }
+    }
+
+    /// Embed `pcm` (16 kHz mono) and return the enrolled speaker whose AS-Norm
+    /// score cleared the decision threshold, or `None` when nobody matched, no
+    /// speaker is enrolled, or the engine is unavailable. **Only the name is
+    /// ever returned — the biometric embedding never leaves this function.**
+    /// The embed runs off the async runtime so it composes under
+    /// `tokio::join!` with the STT call.
+    #[cfg(feature = "speaker-onnx")]
+    pub(crate) async fn verify(
+        &self,
+        pcm: &[f32],
+        sample_rate: u32,
+        sufficient_audio: bool,
+    ) -> Option<String> {
+        use fono_audio::speaker::{
+            self, centroid, cosine, resolve_auto_threshold, Cohort, DEFAULT_AS_NORM_TOP_K,
+            DEFAULT_TARGET_FAR,
+        };
+        use fono_core::config::SpeakerThreshold;
+        use fono_core::speakers::SpeakerStore;
+
+        struct Cand {
+            name: String,
+            centroid: Vec<f32>,
+            calibration: Option<(f32, f32)>,
+        }
+
+        if sample_rate != speaker::SAMPLE_RATE {
+            warn!("speaker verify: expected {} Hz, got {sample_rate} Hz", speaker::SAMPLE_RATE);
+            return None;
+        }
+
+        // Enrolled speakers → per-speaker centroid + calibration. Metadata and
+        // embeddings only; a small local sqlite read.
+        let store = match SpeakerStore::open(&self.speakers_db) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("speaker verify: open speakers db: {e}");
+                return None;
+            }
+        };
+        let views = store.list_speakers().ok()?;
+        let mut cands = Vec::new();
+        for v in &views {
+            let embs: Vec<Vec<f32>> =
+                store.utterances(v.id).ok()?.into_iter().map(|u| u.embedding).collect();
+            let c = centroid(&embs);
+            if c.is_empty() {
+                continue;
+            }
+            cands.push(Cand {
+                name: v.name.clone(),
+                centroid: c,
+                calibration: v.calibration.map(|cal| (cal.genuine_mean, cal.genuine_std)),
+            });
+        }
+        if cands.is_empty() {
+            return None;
+        }
+
+        // Embed the test utterance off the async runtime, recovering the
+        // cohort the engine owns (for AS-Norm scoring).
+        let engine = self.ensure_engine().await?;
+        let pcm_owned = pcm.to_vec();
+        let embedded = tokio::task::spawn_blocking(move || -> Option<(Vec<f32>, Cohort)> {
+            let mut guard = engine.lock().ok()?;
+            let emb = guard.embed(&pcm_owned).ok()??;
+            Some((emb, guard.cohort().clone()))
+        })
+        .await
+        .ok()?;
+        let (test, cohort) = embedded?;
+
+        // Score every enrolled speaker; keep the best.
+        let top_k = DEFAULT_AS_NORM_TOP_K;
+        let mut best: Option<(&Cand, f32)> = None;
+        for c in &cands {
+            let raw = cosine(&c.centroid, &test);
+            let score = cohort.as_norm(&c.centroid, &test, raw, top_k);
+            if best.is_none_or(|(_, b)| score > b) {
+                best = Some((c, score));
+            }
+        }
+        let (best_c, score) = best?;
+
+        // Resolve the operating point: a pinned float, or the auto point from
+        // this speaker's calibration + the cohort's impostor distribution.
+        let threshold = match self.threshold {
+            SpeakerThreshold::Fixed(f) => f,
+            SpeakerThreshold::Auto => {
+                let impostor = cohort.impostor_scores(&best_c.centroid, top_k);
+                resolve_auto_threshold(best_c.calibration, &impostor, DEFAULT_TARGET_FAR)
+            }
+        };
+        let matched = score >= threshold;
+        info!(
+            "speaker verify: best='{}' score={score:.3} threshold={threshold:.3} \
+             matched={matched} sufficient_audio={sufficient_audio}",
+            best_c.name
+        );
+        matched.then(|| best_c.name.clone())
+    }
+
+    /// No-op verification when the build lacks the `speaker-onnx` feature.
+    #[cfg(not(feature = "speaker-onnx"))]
+    #[allow(clippy::unused_async)]
+    pub(crate) async fn verify(
+        &self,
+        _pcm: &[f32],
+        _sample_rate: u32,
+        _sufficient_audio: bool,
+    ) -> Option<String> {
+        None
+    }
+
+    /// Return the cached engine, loading it (fetch model + cohort, build the
+    /// ONNX session off the runtime) on first use. `None` on any load failure,
+    /// so a broken model degrades to un-tagged dictation rather than breaking
+    /// the pipeline.
+    #[cfg(feature = "speaker-onnx")]
+    async fn ensure_engine(
+        &self,
+    ) -> Option<Arc<std::sync::Mutex<fono_audio::speaker::engine::SpeakerEngine>>> {
+        use fono_audio::speaker::{self, engine::SpeakerEngine, Cohort};
+        let mut guard = self.engine.lock().await;
+        if let Some(e) = guard.as_ref() {
+            return Some(Arc::clone(e));
+        }
+        let resolved = match speaker::fetch_model(&self.model, &self.cache_dir, None).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("speaker verify: fetch model '{}': {e:#}", self.model);
+                return None;
+            }
+        };
+        let cohort = resolved
+            .cohort
+            .as_deref()
+            .map_or_else(Cohort::default, |p| load_cohort(p).unwrap_or_default());
+        let graph = resolved.graph.clone();
+        let loaded =
+            tokio::task::spawn_blocking(move || SpeakerEngine::load(&graph, cohort)).await.ok()?;
+        let engine = match loaded {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("speaker verify: load engine: {e:#}");
+                return None;
+            }
+        };
+        let arc = Arc::new(std::sync::Mutex::new(engine));
+        *guard = Some(Arc::clone(&arc));
+        drop(guard);
+        Some(arc)
+    }
 }
 
 /// Capability tags advertised over mDNS for the LLM service. Both wire

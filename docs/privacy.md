@@ -11,6 +11,17 @@ Fono is designed so that audio and transcripts leave your machine
 * API keys (`~/.config/fono/secrets.toml`, mode 0600, refuses to load if
   world-readable; `$ENV_VAR` references never touch disk).
 * Audio device names or application focus metadata.
+* Voice embeddings (speaker verification). When `speaker.enabled` is on,
+  Fono computes a numeric voiceprint locally to recognise who is
+  speaking. That embedding **never** leaves the machine and is **never**
+  attached to a cloud STT or LLM request — only the raw audio (to STT)
+  and the transcript text (to a polish LLM, if configured) are sent,
+  exactly as when verification is off. At most a matched speaker's
+  **name** is stored in the local history database; the embedding itself
+  stays in the local speakers database. This is covered by a regression
+  test (`pipeline_speaker_verification_never_leaks_audio_or_embedding_to_stt`)
+  asserting the STT payload is byte-for-byte unchanged with verification
+  enabled.
 * Crash dumps or telemetry — there are none. Fono makes zero analytics
   calls. `rg -i 'telemetr|analytic|sentry|posthog|mixpanel'` over the
   source returns nothing.

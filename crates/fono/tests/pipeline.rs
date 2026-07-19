@@ -10,7 +10,7 @@ use fono_core::config::{Config, PolishBackend};
 use fono_core::history::HistoryDb;
 use fono_core::paths::Paths;
 use fono_polish::{FormatContext, TextFormatter};
-use fono_stt::{SpeechToText, Transcription};
+use fono_stt::{SpeechToText, TranscribeOptions, Transcription};
 
 use fono::session::{orchestrator_for_test, FocusProbe, Injector, PipelineOutcome};
 use fono_inject::FocusInfo;
@@ -614,4 +614,111 @@ async fn pipeline_vocabulary_reaches_streaming_cleanup_inject_path() {
     for delta in &captured {
         assert!(!delta.to_lowercase().contains("phono"), "mishearing leaked: {delta}");
     }
+}
+
+// ---- Speaker verification (plan v3 Task 4.3) -------------------------
+//
+// The biometric-leak guarantee: turning speaker verification on must
+// never change, augment, or biometrically pollute the payload handed to
+// the STT backend. The transcriber only ever sees the raw dictation PCM
+// plus a `TranscribeOptions` (language override + vocabulary hint) — the
+// voice embedding is computed on a separate path and only a matched
+// *name* can ever reach history. A cloud STT request is built from
+// exactly these two inputs, so proving they are untouched proves no
+// embedding bytes cross the network boundary.
+
+/// An STT that records the exact PCM buffer and `TranscribeOptions` it
+/// was handed, so the test can assert nothing biometric was smuggled in.
+#[derive(Clone, Default)]
+struct SeenOpts {
+    lang: Option<String>,
+    hint: Option<String>,
+}
+
+struct RecordingStt {
+    text: String,
+    seen_pcm: Arc<Mutex<Option<Vec<f32>>>>,
+    seen_opts: Arc<Mutex<Option<SeenOpts>>>,
+}
+
+#[async_trait]
+impl SpeechToText for RecordingStt {
+    async fn transcribe(&self, pcm: &[f32], _sr: u32, lang: Option<&str>) -> Result<Transcription> {
+        *self.seen_pcm.lock().unwrap() = Some(pcm.to_vec());
+        *self.seen_opts.lock().unwrap() =
+            Some(SeenOpts { lang: lang.map(str::to_string), hint: None });
+        Ok(Transcription { text: self.text.clone(), language: None, duration_ms: None })
+    }
+    async fn transcribe_with_opts(
+        &self,
+        pcm: &[f32],
+        _sr: u32,
+        opts: &TranscribeOptions,
+    ) -> Result<Transcription> {
+        *self.seen_pcm.lock().unwrap() = Some(pcm.to_vec());
+        *self.seen_opts.lock().unwrap() =
+            Some(SeenOpts { lang: opts.lang_override.clone(), hint: opts.context_hint.clone() });
+        Ok(Transcription { text: self.text.clone(), language: None, duration_ms: None })
+    }
+    fn name(&self) -> &'static str {
+        "recording-stt"
+    }
+}
+
+/// Plan Task 4.3 — with `[speaker].enabled = true` and a real `Paths`
+/// root (so the verification path actually executes and opens the
+/// speakers DB), the STT backend must receive byte-for-byte the same
+/// dictation PCM it would get with verification off, and a
+/// `TranscribeOptions` that carries no biometric data. No speaker is
+/// enrolled, so the transcript is left untagged — verification degrades
+/// silently rather than blocking dictation.
+#[tokio::test]
+async fn pipeline_speaker_verification_never_leaks_audio_or_embedding_to_stt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("history.sqlite");
+
+    let seen_pcm = Arc::new(Mutex::new(None));
+    let seen_opts = Arc::new(Mutex::new(None));
+    let stt: Arc<dyn SpeechToText> = Arc::new(RecordingStt {
+        text: "verify me but do not leak my voice".into(),
+        seen_pcm: Arc::clone(&seen_pcm),
+        seen_opts: Arc::clone(&seen_opts),
+    });
+    let injected = Arc::new(Mutex::new(Vec::<String>::new()));
+    let injector = Arc::new(CapturingInjector(Arc::clone(&injected)));
+
+    let mut cfg = Config::default();
+    cfg.speaker.enabled = true;
+    let cfg = Arc::new(cfg);
+
+    let (mut orch, _rx) =
+        orchestrator_for_test(stt, None, &db_path, Arc::clone(&cfg), injector, Arc::new(StubFocus));
+    // Root a real Paths under tmp so `speaker_verify()` returns a live
+    // handle and the verification path genuinely runs (opens an empty
+    // speakers DB, finds nobody enrolled, and returns None).
+    orch.set_paths(Arc::new(Paths::rooted_at(tmp.path())));
+
+    // A recognizable non-silent ramp: an appended embedding (192 f32) or
+    // any mixing would change the length or the samples.
+    let pcm: Vec<f32> = (0..16_000).map(|i| (i as f32 / 16_000.0) - 0.5).collect();
+    let expected_pcm = pcm.clone();
+    let outcome = orch.run_oneshot(pcm, 1000).await;
+    assert!(matches!(outcome, PipelineOutcome::Completed { .. }));
+
+    // The STT saw exactly the dictation audio — same length, same samples.
+    let got_pcm = seen_pcm.lock().unwrap().clone().expect("STT must be called");
+    assert_eq!(got_pcm.len(), expected_pcm.len(), "STT PCM length changed: embedding leak?");
+    assert_eq!(got_pcm, expected_pcm, "STT PCM samples changed: biometric mixing?");
+
+    // The options carry only language + vocabulary hint, nothing biometric.
+    let opts = seen_opts.lock().unwrap().clone().expect("opts must be captured");
+    assert!(opts.lang.is_none(), "no language override expected: {:?}", opts.lang);
+    assert!(opts.hint.is_none(), "no context hint expected: {:?}", opts.hint);
+
+    // Nobody is enrolled ⇒ the transcript is stored untagged.
+    let db = HistoryDb::open(&db_path).unwrap();
+    let rows = db.recent(1).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].raw, "verify me but do not leak my voice");
+    assert!(rows[0].speaker.is_none(), "no speaker enrolled ⇒ no tag, got: {:?}", rows[0].speaker);
 }
