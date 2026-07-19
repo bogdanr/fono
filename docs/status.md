@@ -1,6 +1,26 @@
 # Fono — Project Status
 Last updated: 2026-07-19
 
+## 2026-07-19 — Speaker verification: calibration card (Step 3, Task 3.3)
+
+Gave the "test my voice" path a face on the `#/speakers` page — the calibrate
+backend (Task 3.2) is now driven from the UI:
+
+- A self-contained calibration recorder (its own mic picker + live level meter,
+  reusing the generalised enrollment meter helpers) captures held-out clips into
+  `spkCalClips`, separate from enrollment. Record two or more, then Run test.
+- Run test POSTs the clips to `/api/speakers/{id}/calibrate` and renders the
+  response: an inline-SVG genuine-vs-impostor histogram (no chart library) with
+  a vertical marker at the recommended threshold, the self-EER, measured
+  per-embed latency, a plain-language verdict, and a "use recommended threshold"
+  button that writes `[speaker].threshold`.
+- Calibration state (`spkCalResult`) is preserved across section re-renders so
+  the histogram survives list refreshes; Clear resets it.
+
+Gates green: fmt, clippy workspace, workspace tests, size-budget 21.88 MiB / 25.
+Next: Task 3.4 (`threshold="auto"` resolution from the persisted `Calibration`),
+3.5 (prune UI), 3.6 (`fono speaker test` CLI).
+
 ## 2026-07-19 — Speaker verification: calibrate endpoint (Step 3, Task 3.2)
 
 Wired the "test my voice" calibration path end-to-end (still headless — the

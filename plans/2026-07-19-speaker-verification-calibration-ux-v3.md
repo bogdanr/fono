@@ -103,7 +103,7 @@ Where EER tuning on the user's own room/mic and user confidence materialise.
 - [x] Task 3.2. Daemon hook + `POST /api/speakers/{id}/calibrate`: record
       held-out clips, embed, score genuine vs own centroid and impostor vs
       cohort (+ other enrolled speakers when present), `set_calibration`.
-- [ ] Task 3.3. `#/speakers` calibration card: inline-SVG genuine/impostor
+- [x] Task 3.3. `#/speakers` calibration card: inline-SVG genuine/impostor
       histogram + threshold marker + verdict badge + "use recommended
       threshold" (writes `[speaker].threshold`); no new JS deps.
 - [ ] Task 3.4. Resolve `threshold="auto"` from `Calibration` + cohort at

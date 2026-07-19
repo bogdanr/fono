@@ -985,6 +985,10 @@ let spkEnrollName = '';
 let spkRec = null;
 // Captured-but-not-yet-submitted 16 kHz PCM, awaiting Submit or Discard.
 let spkPending = null;
+// "Test my voice" calibration state, preserved across section re-renders.
+// `spkCalClips` accumulates held-out 16 kHz PCM clips; `spkCalResult` holds
+// the last calibrate response so its histogram survives a re-render.
+let spkCalSpeakerId = null, spkCalClips = [], spkCalRec = null, spkCalResult = null, spkCalBusy = false;
 function refreshSpeakersSection() {
   const sec = FONO_SECTIONS.find((s) => s.id === 'speakers');
   if (sec && document.getElementById('d-speakers')) renderSection(sec);
@@ -1037,7 +1041,41 @@ function speakersHtml() {
   }).join('');
   return out + '<table class="key-table"><thead><tr>'
     + '<th>Name</th><th>Utterances</th><th>Strength</th><th>Calibrated</th><th>Updated</th><th></th>'
-    + '</tr></thead><tbody>' + rows + '</tbody></table>';
+    + '</tr></thead><tbody>' + rows + '</tbody></table>'
+    + calibrateCardHtml();
+}
+
+// ---------- "test my voice" calibration card ----------
+// Records a few *held-out* clips (separate from enrollment) and POSTs them to
+// /api/speakers/{id}/calibrate, which scores them against the chosen voice and
+// a large impostor cohort. The response drives a genuine-vs-impostor histogram,
+// an equal-error-rate readout, a plain-language verdict, and a one-click
+// "use recommended threshold" that writes speaker.threshold. No audio is stored.
+function calibrateCardHtml() {
+  if (!speakers || !speakers.length) return '';
+  if (spkCalSpeakerId == null || !speakers.some((s) => s.id === spkCalSpeakerId)) {
+    spkCalSpeakerId = speakers[0].id;
+  }
+  const opts = speakers.map((s) =>
+    '<option value="' + s.id + '"' + (s.id === spkCalSpeakerId ? ' selected' : '') + '>'
+    + esc(s.name) + '</option>').join('');
+  const n = spkCalClips.length;
+  const canRun = n >= 2 && !spkCalBusy;
+  return '<div class="enroll-card cal-card">'
+    + '<div class="cal-title">Test my voice</div>'
+    + '<p class="hint">Record 3\u20135 short <em>new</em> clips of the chosen voice (don\u2019t reuse enrollment audio). '
+    + 'Fono measures how well it tells this voice apart from others, on your mic and room, and can set the decision threshold for you.</p>'
+    + '<div class="enroll-row">'
+    + '<select id="spk-cal-speaker" class="select enroll-name">' + opts + '</select>'
+    + '<select id="spk-cal-device" class="select enroll-device"><option value="">Default microphone</option></select>'
+    + '<button class="btn" id="spk-cal-record" data-spk-cal-record type="button">Record clip</button>'
+    + '<button class="btn primary" data-spk-cal-run type="button"' + (canRun ? '' : ' disabled') + '>Run test</button>'
+    + '<button class="btn" data-spk-cal-clear type="button"' + (n && !spkCalBusy ? '' : ' disabled') + '>Clear</button>'
+    + '</div>'
+    + '<div id="spk-cal-meter" class="spk-meter spk-hidden"><div id="spk-cal-meter-bar" class="spk-meter-bar"></div></div>'
+    + '<p id="spk-cal-status" class="hint">' + (n ? (n + (n === 1 ? ' clip' : ' clips') + ' captured' + (n < 2 ? ' \u2014 record at least one more, then Run test.' : ' \u2014 Run test when ready.')) : 'No test clips yet.') + '</p>'
+    + '<div id="spk-cal-results">' + calResultsHtml() + '</div>'
+    + '</div>';
 }
 
 // Heuristic profile-strength bucket. The count/seconds/device signals are
@@ -1058,6 +1096,74 @@ function spkStrength(s) {
   const label = failed.length === 0 ? 'strong' : failed.length === 1 ? 'ok' : 'weak';
   const nudge = failed.length ? failed[0].msg : 'Solid profile.';
   return { label, cls: label, nudge };
+}
+
+// Render the last calibrate result: histogram + EER + verdict + apply button.
+function calResultsHtml() {
+  const r = spkCalResult;
+  if (!r) return '';
+  const eerPct = (r.eer * 100).toFixed(1);
+  const v = calVerdict(r.eer);
+  const lat = r.latency_ms && r.latency_ms.count
+    ? ' \u00b7 \u2248' + Math.round(r.latency_ms.mean) + '\u00a0ms/check on this machine' : '';
+  const g = (r.genuine && r.genuine.scores) || [];
+  const im = (r.impostor && r.impostor.scores) || [];
+  const thr = typeof r.eer_threshold === 'number' ? r.eer_threshold : null;
+  return '<div class="cal-results">'
+    + calHistogramSvg(g, im, thr)
+    + '<div class="cal-verdict"><span class="spk-strength ' + v.cls + '">' + v.label + '</span> '
+    + '<strong>' + eerPct + '%</strong> equal-error rate' + lat + '</div>'
+    + '<p class="hint">' + v.msg + '</p>'
+    + '<div class="cal-legend"><span class="cal-swatch cal-genuine"></span>you ('
+    + (r.genuine ? r.genuine.trials : 0) + ') <span class="cal-swatch cal-impostor"></span>others ('
+    + (r.impostor ? r.impostor.trials : 0) + ')'
+    + (thr != null ? ' <span class="cal-swatch cal-thr"></span>threshold ' + thr.toFixed(3) : '') + '</div>'
+    + (thr != null
+      ? '<button class="btn" data-spk-cal-apply="' + thr.toFixed(4) + '" type="button">Use recommended threshold ('
+        + thr.toFixed(2) + ')</button>'
+      : '')
+    + '</div>';
+}
+// Plain-language verdict bucketed by EER.
+function calVerdict(eer) {
+  if (eer <= 0.01) return { label: 'excellent', cls: 'strong', msg: 'Your voice is easy to tell apart here.' };
+  if (eer <= 0.05) return { label: 'good', cls: 'strong', msg: 'Reliable separation on this mic and room.' };
+  if (eer <= 0.10) return { label: 'fair', cls: 'ok', msg: 'Usable, but more or cleaner samples would help.' };
+  return { label: 'weak', cls: 'weak', msg: 'Hard to separate \u2014 enroll more clips in your real environment.' };
+}
+// Inline-SVG overlaid histogram of the genuine vs impostor score distributions,
+// with a vertical marker at the recommended threshold. No chart library.
+function calHistogramSvg(genuine, impostor, thr) {
+  const all = genuine.concat(impostor);
+  if (!all.length) return '';
+  let lo = Math.min.apply(null, all), hi = Math.max.apply(null, all);
+  if (thr != null) { lo = Math.min(lo, thr); hi = Math.max(hi, thr); }
+  if (hi - lo < 1e-6) { lo -= 0.5; hi += 0.5; }
+  const pad = (hi - lo) * 0.05; lo -= pad; hi += pad;
+  const W = 320, H = 96, BINS = 24;
+  const bin = (hi - lo) / BINS;
+  const gh = new Array(BINS).fill(0), ih = new Array(BINS).fill(0);
+  const fill = (arr, dst) => arr.forEach((x) => {
+    let k = Math.floor((x - lo) / bin); if (k < 0) k = 0; if (k >= BINS) k = BINS - 1; dst[k]++;
+  });
+  fill(genuine, gh); fill(impostor, ih);
+  const peak = Math.max(1, Math.max.apply(null, gh.concat(ih)));
+  const bw = W / BINS;
+  const bars = (arr, cls) => arr.map((c, k) => {
+    if (!c) return '';
+    const h = c / peak * (H - 12);
+    return '<rect class="' + cls + '" x="' + (k * bw).toFixed(1) + '" y="' + (H - h).toFixed(1)
+      + '" width="' + (bw - 1).toFixed(1) + '" height="' + h.toFixed(1) + '"/>';
+  }).join('');
+  let marker = '';
+  if (thr != null) {
+    const x = ((thr - lo) / (hi - lo) * W).toFixed(1);
+    marker = '<line class="cal-thr-line" x1="' + x + '" y1="0" x2="' + x + '" y2="' + H + '"/>';
+  }
+  return '<svg class="cal-hist" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" role="img" '
+    + 'aria-label="Score distribution of your voice versus others">'
+    + bars(ih, 'cal-impostor') + bars(gh, 'cal-genuine') + marker + '</svg>'
+    + '<div class="cal-axis"><span>' + lo.toFixed(2) + '</span><span>score</span><span>' + hi.toFixed(2) + '</span></div>';
 }
 async function renameSpeaker(id) {
   const cur = (speakers.find((s) => s.id === id) || {}).name || '';
@@ -1081,8 +1187,8 @@ async function deleteSpeaker(id) {
 // Records mic audio with the browser's DSP disabled (no AGC/NS/AEC so the
 // voice print matches raw dictation audio), resamples to 16 kHz mono, and
 // POSTs 16-bit PCM. Only the derived embedding is stored server-side.
-async function spkPopulateDevices(selectedId) {
-  const devEl = document.getElementById('spk-enroll-device');
+async function spkPopulateDevices(selectedId, elId) {
+  const devEl = document.getElementById(elId || 'spk-enroll-device');
   if (!devEl || !navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
   try {
     const devs = await navigator.mediaDevices.enumerateDevices();
@@ -1219,16 +1325,17 @@ function spkDiscard() {
   spkStatus('Discarded. Record again when ready.');
 }
 // Show/hide and reset the live input meter.
-function spkMeterShow(on) {
-  const meter = document.getElementById('spk-meter');
-  const bar = document.getElementById('spk-meter-bar');
+function spkMeterShow(on, meterId) {
+  meterId = meterId || 'spk-meter';
+  const meter = document.getElementById(meterId);
+  const bar = document.getElementById(meterId + '-bar');
   if (!meter) return;
   meter.classList.toggle('spk-hidden', !on);
   if (bar && !on) { bar.style.width = '0%'; bar.classList.remove('clip'); }
 }
 // Map the running RMS/peak to the meter bar (\u221260..0 dBFS \u2192 0..100%).
-function spkUpdateMeter(rms, peak) {
-  const bar = document.getElementById('spk-meter-bar');
+function spkUpdateMeter(rms, peak, barId) {
+  const bar = document.getElementById(barId || 'spk-meter-bar');
   if (!bar) return;
   const db = 20 * Math.log10(rms + 1e-9);
   const pct = Math.max(0, Math.min(100, (db + 60) / 60 * 100));
@@ -1295,6 +1402,92 @@ function spkFloatToB64(f32) {
   return btoa(binary);
 }
 
+// ---------- "test my voice" calibration recorder ----------
+// A self-contained recorder that appends each stop into `spkCalClips` (rather
+// than the enroll submit/discard flow). Reuses the pure resample/encode/device
+// helpers; the recorded audio is only used to POST /calibrate and is dropped.
+function spkCalStatus(msg) {
+  const el = document.getElementById('spk-cal-status');
+  if (el) el.textContent = msg;
+}
+async function spkCalRecordToggle() {
+  if (spkCalRec) { await spkCalStop(); return; }
+  const devEl = document.getElementById('spk-cal-device');
+  const deviceId = devEl && devEl.value ? devEl.value : null;
+  try {
+    const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 };
+    if (deviceId) audio.deviceId = { exact: deviceId };
+    const stream = await navigator.mediaDevices.getUserMedia({ audio });
+    await spkPopulateDevices(deviceId, 'spk-cal-device');
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    const source = ctx.createMediaStreamSource(stream);
+    const proc = ctx.createScriptProcessor(4096, 1, 1);
+    const chunks = [];
+    proc.onaudioprocess = (ev) => {
+      const ch = ev.inputBuffer.getChannelData(0);
+      chunks.push(new Float32Array(ch));
+      let sq = 0, pk = 0;
+      for (let i = 0; i < ch.length; i++) { const a = Math.abs(ch[i]); if (a > pk) pk = a; sq += ch[i] * ch[i]; }
+      spkUpdateMeter(Math.sqrt(sq / Math.max(1, ch.length)), pk, 'spk-cal-meter-bar');
+    };
+    source.connect(proc); proc.connect(ctx.destination);
+    spkCalRec = { stream, ctx, source, proc, chunks, sampleRate: ctx.sampleRate };
+    spkMeterShow(true, 'spk-cal-meter');
+    const btn = document.getElementById('spk-cal-record');
+    if (btn) { btn.textContent = 'Stop'; btn.classList.add('danger'); }
+    spkCalStatus('Recording\u2026 speak a sentence, then press Stop.');
+  } catch (err) { toast('Microphone error: ' + err.message, true); }
+}
+async function spkCalStop() {
+  const rec = spkCalRec; spkCalRec = null;
+  try {
+    rec.proc.disconnect(); rec.source.disconnect();
+    rec.stream.getTracks().forEach((t) => t.stop());
+    await rec.ctx.close();
+  } catch (_e) { /* teardown best-effort */ }
+  spkMeterShow(false, 'spk-cal-meter');
+  let total = 0; rec.chunks.forEach((c) => { total += c.length; });
+  const merged = new Float32Array(total);
+  let off = 0; rec.chunks.forEach((c) => { merged.set(c, off); off += c.length; });
+  const pcm = await spkResampleTo16k(merged, rec.sampleRate);
+  if (pcm.length < 16000) { refreshSpeakersSection(); spkCalStatus('That was too short \u2014 record about a second or more.'); return; }
+  spkCalClips.push(pcm);
+  refreshSpeakersSection();
+}
+function spkCalClear() {
+  spkCalClips = [];
+  spkCalResult = null;
+  refreshSpeakersSection();
+}
+async function spkCalRun() {
+  if (spkCalClips.length < 2 || spkCalBusy) return;
+  const id = spkCalSpeakerId;
+  spkCalBusy = true;
+  refreshSpeakersSection();
+  spkCalStatus('Testing your voice against a large set of other speakers\u2026');
+  try {
+    const clips = spkCalClips.map((pcm) => ({ audio_pcm16: spkFloatToB64(pcm), sample_rate: 16000 }));
+    const resp = await api('/api/speakers/' + id + '/calibrate', { method: 'POST', body: JSON.stringify({ clips }) });
+    spkCalResult = resp;
+    spkCalBusy = false;
+    refreshSpeakersSection();
+    await loadSpeakers(); // refresh the "Calibrated" column
+    toast('Voice test complete \u2014 ' + (resp.eer * 100).toFixed(1) + '% error rate');
+  } catch (err) {
+    spkCalBusy = false;
+    refreshSpeakersSection();
+    toast('Voice test failed: ' + err.message, true);
+  }
+}
+// Write the recommended threshold into the working config; the user Saves it.
+function spkCalApply(thr) {
+  set(cfg, 'speaker.threshold', String(thr));
+  const sec = FONO_SECTIONS.find((s) => s.id === 'speakers');
+  if (sec) renderSection(sec);
+  updateBar();
+  toast('Threshold set to ' + thr + ' \u2014 press Save to apply');
+}
 
 // ---------- render ----------
 function renderSection(s) {
@@ -1359,7 +1552,11 @@ document.addEventListener('change', (e) => {
     afterChange(el);
     return;
   }
-  if (!el.dataset || !el.dataset.bind) return;
+  if (!el.dataset || !el.dataset.bind) {
+    // Remember which enrolled voice the calibration card targets.
+    if (el.id === 'spk-cal-speaker') { spkCalSpeakerId = parseInt(el.value, 10); }
+    return;
+  }
   let v;
   switch (el.dataset.kind) {
     case 'toggle': v = el.checked; break;
@@ -1385,7 +1582,7 @@ document.addEventListener('input', (e) => {
 });
 
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-seg],[data-pick],[data-tts-test],[data-tag-rm],[data-wake-rm],[data-wake-add],[data-vocab-rm],[data-vocab-add],[data-keycap],[data-reset],[data-key-edit],[data-key-clear],[data-key-save],[data-key-cancel],[data-key-new],[data-key-rename],[data-key-revoke],[data-key-restore],[data-key-delete],[data-spk-rename],[data-spk-delete],[data-spk-record],[data-spk-submit],[data-spk-discard]');
+  const t = e.target.closest('[data-seg],[data-pick],[data-tts-test],[data-tag-rm],[data-wake-rm],[data-wake-add],[data-vocab-rm],[data-vocab-add],[data-keycap],[data-reset],[data-key-edit],[data-key-clear],[data-key-save],[data-key-cancel],[data-key-new],[data-key-rename],[data-key-revoke],[data-key-restore],[data-key-delete],[data-spk-rename],[data-spk-delete],[data-spk-record],[data-spk-submit],[data-spk-discard],[data-spk-cal-record],[data-spk-cal-run],[data-spk-cal-clear],[data-spk-cal-apply]');
   if (!t) return;
   const secEl = t.closest('details.sec');
   const sec = secEl ? FONO_SECTIONS.find((s) => 'd-' + s.id === secEl.id) : null;
@@ -1470,6 +1667,10 @@ document.addEventListener('click', (e) => {
   if (t.dataset.spkRecord !== undefined) { spkRecordToggle(); return; }
   if (t.dataset.spkSubmit !== undefined) { spkSubmit(); return; }
   if (t.dataset.spkDiscard !== undefined) { spkDiscard(); return; }
+  if (t.dataset.spkCalRecord !== undefined) { spkCalRecordToggle(); return; }
+  if (t.dataset.spkCalRun !== undefined) { spkCalRun(); return; }
+  if (t.dataset.spkCalClear !== undefined) { spkCalClear(); return; }
+  if (t.dataset.spkCalApply !== undefined) { spkCalApply(t.dataset.spkCalApply); return; }
 
 });
 
