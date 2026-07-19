@@ -74,16 +74,23 @@ pool is bigger than top-k. Parameters:
 
 - [x] Task 1.1. Cohort source decided — see the decision block above (was
       Open Decision 1).
-- [ ] Task 1.2. Curate + commit the selection manifest (download tarballs,
-      select speakers per the composition above), then generate
-      `redimnet2-b3.cohort.bin` (and `-b6`) locally with the model-agnostic
-      tool: embed each speaker's 3–5 clips through the hosted graph, mean per
-      speaker, L2-normalise, serialise.
-- [ ] Task 1.3. Host on the `ort-1.24.2` mirror release; pin sha256 + size in
-      the registry rows (`speaker.rs`) and `manifest.json` (flip cohort rows
-      from UNPINNED → hosted). Needs push + sign-off.
-- [ ] Task 1.4. Load path already exists (`load_cohort` in daemon); verify
-      AS-Norm now active end-to-end and the empty-cohort fallback still holds.
+- [x] Task 1.2. Done 2026-07-19: `scripts/gen-speaker-cohort.py` (select +
+      generate), pinned manifest at `calibration/speaker-cohort/selection.tsv`
+      (600 speakers: ro=130 en=150 de/fr/es/it=80; cv-corpus-17.0 dev+test via
+      the ungated `fsicoli/common_voice_17_0` HF mirror). Generated cohorts
+      (600×192, 460,808 B each):
+      `redimnet2-b3.cohort.bin` sha256
+      `3562c1c29c0e11ddbb4c72d392e104aeab1192e650bdd12d16214af3f52bc091`,
+      `redimnet2-b6.cohort.bin` sha256
+      `ee2877a2f56ad7d04f9e6b9011f89cd3bca0d11889f407d8175aecc55b8f6d5c`
+      (artefacts in `tmp/cv-cohort/out/`, awaiting Task 1.3 hosting).
+- [x] Task 1.3. Hosted on the `ort-1.24.2` mirror release (2026-07-19); sha256
+      + size pinned in the registry rows (`speaker.rs`) and `manifest.json`
+      (cohort rows flipped from UNPINNED → hosted).
+- [x] Task 1.4. Verified: hosted bytes at the exact fetch URLs hash-match the
+      pins, registry/loader tests updated and green, cohorts installed into
+      the local model cache so AS-Norm is active; empty-cohort fallback
+      (raw-score path) unchanged and still covered by tests.
 
 ### Step 2 — Capture-quality UX (biggest UX + EER-per-effort; zero blockers)
 Attacks the #1 real-world EER killer — bad enrollment audio — entirely in the

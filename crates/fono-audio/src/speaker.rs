@@ -476,11 +476,12 @@ const REGISTRY: &[SpeakerModel] = &[
             release_tag: RELEASE_TAG,
             sha256: "7bb30475c5924b525b6684a00ff768aa9185f69e6265d5ff9653a48d70eee0e2",
         },
-        // Impostor cohort generated in Slice 4/5; not hosted yet.
+        // Impostor cohort: 600 Common Voice (CC0) speakers embedded through
+        // this graph; selection pinned in calibration/speaker-cohort/selection.tsv.
         cohort: SpeakerAsset {
             file: "redimnet2-b3.cohort.bin",
             release_tag: RELEASE_TAG,
-            sha256: UNPINNED,
+            sha256: "3562c1c29c0e11ddbb4c72d392e104aeab1192e650bdd12d16214af3f52bc091",
         },
     },
     SpeakerModel {
@@ -496,10 +497,11 @@ const REGISTRY: &[SpeakerModel] = &[
             release_tag: RELEASE_TAG,
             sha256: "903015c8f462c98b28ec361f2a774bd00b3acbb4086b83b8c3b04824cd26f087",
         },
+        // Same 600-speaker Common Voice cohort, embedded through the b6 graph.
         cohort: SpeakerAsset {
             file: "redimnet2-b6.cohort.bin",
             release_tag: RELEASE_TAG,
-            sha256: UNPINNED,
+            sha256: "ee2877a2f56ad7d04f9e6b9011f89cd3bca0d11889f407d8175aecc55b8f6d5c",
         },
     },
 ];
@@ -1135,18 +1137,14 @@ mod tests {
     }
 
     #[test]
-    fn graphs_are_hosted_cohorts_still_pending() {
-        // The ReDimNet2 graphs are hosted on the mirror and pinned from the
-        // published .ort bytes; the AS-Norm impostor cohorts are generated in
-        // Slice 4/5 and remain UNPINNED (not hosted) for now, so AS-Norm
-        // degrades to plain cosine until they land.
+    fn graphs_and_cohorts_are_hosted_and_pinned() {
+        // Both the ReDimNet2 graphs and their AS-Norm impostor-cohort sidecars
+        // are hosted on the mirror and pinned from the published bytes, so
+        // AS-Norm is active end-to-end (empty-cohort fallback stays for
+        // malformed/missing files only).
         for m in registry() {
             assert!(is_pinned(m.graph.sha256), "{} graph should be pinned once hosted", m.name);
-            assert!(
-                !is_pinned(m.cohort.sha256),
-                "{} cohort should stay UNPINNED until generated",
-                m.name
-            );
+            assert!(is_pinned(m.cohort.sha256), "{} cohort should be pinned once hosted", m.name);
         }
         assert!(is_pinned("7bb30475c5924b525b6684a00ff768aa9185f69e6265d5ff9653a48d70eee0e2"));
         assert!(!is_pinned(UNPINNED));
@@ -1159,8 +1157,8 @@ mod tests {
         let r = resolved_paths(DEFAULT_MODEL, tmp.path()).unwrap();
         let dir = speaker_dir(tmp.path());
         assert_eq!(r.graph, dir.join("redimnet2-b3.ort"));
-        // Cohort is unpinned (not hosted), so no path is advertised yet.
-        assert_eq!(r.cohort, None);
+        // Cohort is hosted/pinned, so its cache path is advertised.
+        assert_eq!(r.cohort, Some(dir.join("redimnet2-b3.cohort.bin")));
         assert!(resolved_paths("nope", tmp.path()).is_none());
     }
 

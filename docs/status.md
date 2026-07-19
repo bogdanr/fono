@@ -1,6 +1,32 @@
 # Fono — Project Status
 Last updated: 2026-07-19
 
+## 2026-07-19 — Speaker verification: impostor cohort shipped (Step 1 complete)
+
+Completed Step 1 of `plans/2026-07-19-speaker-verification-calibration-ux-v2.md`
+end to end — AS-Norm score normalisation is now live:
+
+1. **Open Decision 1 resolved.** Universal multilingual cohort from Mozilla
+   Common Voice (CC0) — no per-language cohorts; the adaptive top-k selection
+   plus the Step 3 per-user calibration covers language-heavy deployments
+   (e.g. Romanian) without bespoke machinery.
+2. **Pinned selection manifest** (`calibration/speaker-cohort/selection.tsv`):
+   600 speakers (ro=130, en=150, de/fr/es/it=80), ≥3 validated clips each,
+   deterministic seed, anonymised speaker hashes, full provenance header.
+   Sourced from the ungated `fsicoli/common_voice_17_0` HF mirror — no manual
+   download gate after all.
+3. **Reusable generation tool** (`scripts/gen-speaker-cohort.py`): `select` +
+   `generate` subcommands, model-agnostic (`.ort` path is an argument), so
+   future models rebuild the pack with one command from the pinned manifest.
+4. **Cohorts generated, hosted, pinned.** `redimnet2-{b3,b6}.cohort.bin`
+   (600×192, 460,808 B each) uploaded to the `ort-1.24.2` mirror release;
+   registry rows in `speaker.rs` and `../fono-voice/manifest.json` flipped
+   from UNPINNED → hosted; pending-cohort tests updated. Hosted bytes verified
+   hash-identical to the pins at the exact fetch URLs.
+
+Gates green (fmt, clippy, workspace tests). Next: Step 3 — the "test my
+voice" calibration card, now unblocked by the live cohort.
+
 ## 2026-07-19 — Speaker verification: capture-quality UX (Step 2)
 
 Built the capture-quality half of the calibration-UX plan
