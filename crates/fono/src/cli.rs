@@ -579,6 +579,20 @@ pub enum SpeakerCmd {
         /// Numeric speaker id to remove.
         id: i64,
     },
+    /// Run "test my voice" from the terminal: score held-out WAV clips against
+    /// the speaker's enrolled profile and the shipped impostor cohort, then
+    /// print the self error-rate, recommended thresholds, and embed latency.
+    ///
+    /// Clips must be 16-bit PCM WAV; non-16 kHz files are resampled. The
+    /// resulting calibration is saved so `threshold = "auto"` can use it —
+    /// exactly like the web Speakers page.
+    Test {
+        /// Numeric speaker id (see `fono speaker list`).
+        id: i64,
+        /// One or more held-out WAV files (recordings NOT used for enrollment).
+        #[arg(required = true)]
+        clips: Vec<std::path::PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -825,7 +839,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Some(Cmd::Use { action }) => use_cmd(&paths, action).await,
         Some(Cmd::Keys { action }) => keys_cmd(&paths, action).await,
         Some(Cmd::Server { action }) => server_cmd(&paths, action).await,
-        Some(Cmd::Speaker { action }) => speaker_cmd(&paths, action),
+        Some(Cmd::Speaker { action }) => speaker_cmd(&paths, action).await,
         Some(Cmd::Vocabulary { action }) => vocabulary_cmd(&paths, action),
         Some(Cmd::TestOverlay) => {
             test_overlay_cmd();
@@ -2399,7 +2413,7 @@ async fn server_keys_cmd(paths: &Paths, action: ServerKeysCmd) -> Result<()> {
 // metadata verbs below (list/rename/remove) work today against the store.
 // ---------------------------------------------------------------------
 
-fn speaker_cmd(paths: &Paths, action: SpeakerCmd) -> Result<()> {
+async fn speaker_cmd(paths: &Paths, action: SpeakerCmd) -> Result<()> {
     use fono_core::speakers::SpeakerStore;
     let store = SpeakerStore::open(&paths.speakers_db())
         .context("open speakers.sqlite (the enrolled-speaker voice-print store)")?;
@@ -2442,8 +2456,111 @@ fn speaker_cmd(paths: &Paths, action: SpeakerCmd) -> Result<()> {
             store.remove(id)?;
             println!("removed speaker #{id} and all their voice prints");
         }
+        SpeakerCmd::Test { id, clips } => {
+            speaker_test_cmd(paths, &store, id, &clips).await?;
+        }
     }
     Ok(())
+}
+
+/// `fono speaker test <id> <wav>...` — the CLI twin of the web "test my
+/// voice" card. Loads the held-out WAVs (resampling to 16 kHz when needed),
+/// runs the exact same calibration the daemon's `/api/speakers/{id}/calibrate`
+/// endpoint runs (so results and the persisted calibration match), then prints
+/// the distributions, self error-rate, recommended thresholds, latency, and a
+/// plain-language verdict.
+async fn speaker_test_cmd(
+    paths: &Paths,
+    store: &fono_core::speakers::SpeakerStore,
+    id: i64,
+    clips: &[std::path::PathBuf],
+) -> Result<()> {
+    // Resolve the speaker name up front so we fail clearly on a bad id.
+    let name = store.list_speakers()?.into_iter().find(|s| s.id == id).map(|s| s.name).ok_or_else(
+        || anyhow::anyhow!("no enrolled speaker with id {id} (see `fono speaker list`)"),
+    )?;
+
+    // Load each held-out clip to 16 kHz mono f32.
+    let mut pcm_clips: Vec<Vec<f32>> = Vec::with_capacity(clips.len());
+    for path in clips {
+        let (pcm, rate) =
+            read_wav_mono_f32(path).with_context(|| format!("read wav {}", path.display()))?;
+        let pcm = resample_to_16k(pcm, rate);
+        pcm_clips.push(pcm);
+    }
+
+    let value = crate::daemon::run_calibration(
+        &paths.config_file(),
+        &paths.cache_dir,
+        &paths.speakers_db(),
+        id,
+        pcm_clips,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!(e))?;
+
+    print_speaker_test(id, &name, &value);
+    Ok(())
+}
+
+/// Resample mono f32 PCM to 16 kHz using the shared rubato wrapper. A no-op
+/// when already at 16 kHz.
+fn resample_to_16k(pcm: Vec<f32>, rate: u32) -> Vec<f32> {
+    if rate == 16_000 {
+        return pcm;
+    }
+    match fono_audio::resample::Resampler::new(rate, 16_000) {
+        Ok(mut r) => r.process(&pcm),
+        Err(_) => pcm,
+    }
+}
+
+/// Pretty-print the calibration JSON returned by `run_calibration`.
+fn print_speaker_test(id: i64, name: &str, v: &serde_json::Value) {
+    let g = &v["genuine"];
+    let im = &v["impostor"];
+    let lat = &v["latency_ms"];
+    let eer = v["eer"].as_f64().unwrap_or(0.0);
+    let get = |x: &serde_json::Value| x.as_f64().unwrap_or(0.0);
+
+    println!("tested speaker #{id} ({name})");
+    println!("  held-out clips:   {}", g["trials"].as_i64().unwrap_or(0));
+    println!("  cohort size:      {} impostors", v["cohort_size"].as_i64().unwrap_or(0));
+    println!("  your voice:       mean {:.3}  std {:.3}", get(&g["mean"]), get(&g["std"]));
+    println!(
+        "  other voices:     mean {:.3}  std {:.3}  ({} trials)",
+        get(&im["mean"]),
+        get(&im["std"]),
+        im["trials"].as_i64().unwrap_or(0)
+    );
+    println!(
+        "  error rate (EER): {:.1}%  at sensitivity {:.3}",
+        eer * 100.0,
+        get(&v["eer_threshold"])
+    );
+    println!(
+        "  strict setting:   {:.3}  (keeps other voices under {:.1}%)",
+        get(&v["far_threshold"]),
+        get(&v["target_far"]) * 100.0
+    );
+    println!(
+        "  embed latency:    mean {:.0} ms  p50 {:.0}  p95 {:.0}  (n={})",
+        get(&lat["mean"]),
+        get(&lat["p50"]),
+        get(&lat["p95"]),
+        lat["count"].as_i64().unwrap_or(0)
+    );
+    let verdict = if eer < 0.02 {
+        "excellent — your voice is easily told apart from others"
+    } else if eer < 0.05 {
+        "good — reliable in conditions like these recordings"
+    } else if eer < 0.10 {
+        "fair — enroll more or cleaner samples to improve it"
+    } else {
+        "weak — recognition may be unreliable; enroll more samples in your normal room"
+    };
+    println!("  verdict:          {verdict}");
+    println!("  saved: calibration stored; `threshold = \"auto\"` will use it.");
 }
 
 // ---------------------------------------------------------------------

@@ -116,8 +116,13 @@ Where EER tuning on the user's own room/mic and user confidence materialise.
   consistency + prune suggestion) and `DELETE .../utterances/{uid}` (refuses the
   last clip); a "Manage samples" card on `#/speakers` that flags weak clips and
   removes individually or by accepting the whole suggestion.
-- [ ] Task 3.6. `fono speaker test [name]` CLI parity (distributions, self-EER,
-      latency, threshold verdict).
+- [x] Task 3.6. `fono speaker test <id> <wav>...` CLI parity (distributions,
+      self-EER, latency, threshold verdict). Loads held-out WAVs (resampling to
+      16 kHz via the shared `rubato` wrapper), calls the same `run_calibration`
+      the `/api/speakers/{id}/calibrate` endpoint uses (so results and the
+      persisted calibration match the web card), and prints the distributions,
+      self-EER, recommended + strict thresholds, embed latency, and a
+      plain-language verdict.
 
 ### Step 4 — Slice 4 pipeline wiring (make it live)
 Until this lands, verification only runs in enrollment/testing.

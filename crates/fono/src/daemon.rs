@@ -4619,7 +4619,7 @@ struct CalibEmbedOut {
 /// `speaker-onnx` the engine is not compiled in and calibration reports that
 /// cleanly.
 #[cfg(feature = "speaker-onnx")]
-async fn run_calibration(
+pub(crate) async fn run_calibration(
     config_path: &std::path::Path,
     cache_dir: &std::path::Path,
     db: &std::path::Path,
@@ -4733,7 +4733,7 @@ async fn run_calibration(
 /// Fallback when speaker verification is not compiled in.
 #[cfg(not(feature = "speaker-onnx"))]
 #[allow(clippy::unused_async)]
-async fn run_calibration(
+pub(crate) async fn run_calibration(
     _config_path: &std::path::Path,
     _cache_dir: &std::path::Path,
     _db: &std::path::Path,

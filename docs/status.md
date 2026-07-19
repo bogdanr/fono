@@ -1,6 +1,27 @@
 # Fono — Project Status
 Last updated: 2026-07-19
 
+## 2026-07-19 — Speaker verification: `fono speaker test` CLI (Step 3, Task 3.6)
+
+Added terminal parity for the web "test my voice" card, closing out Step 3:
+
+- `fono speaker test <id> <wav>...` — loads one or more held-out WAV clips
+  (16-bit PCM; non-16 kHz files are resampled through the shared `rubato`
+  wrapper to 16 kHz mono), then calls the very same `run_calibration` the
+  `/api/speakers/{id}/calibrate` endpoint uses, so terminal results and the
+  persisted calibration are identical to the web page.
+- Prints the genuine/impostor score distributions, cohort size, self error-rate
+  (EER) with its recommended sensitivity, the strict target-FAR threshold,
+  per-embed latency (mean/p50/p95), and a plain-language verdict. The resulting
+  calibration is saved so `threshold = "auto"` can use it.
+- `run_calibration` is now `pub(crate)` (both the `speaker-onnx` and the
+  compiled-out fallback definitions); `speaker_cmd` became `async` and the
+  dispatch site awaits it. Reuses the existing `read_wav_mono_f32` loader.
+
+Gates green: fmt, clippy workspace, workspace tests, size-budget 21.88 MiB / 25.
+Step 3 (calibration + UX) is complete. Next: Slice 4 (live pipeline wiring) —
+where `resolve_auto_threshold` + `decide` finally run on real dictation.
+
 ## 2026-07-19 — Speaker verification: sample-manager + prune UI (Step 3, Task 3.5)
 
 Added per-utterance sample management with a suggested, confirmable prune, so a
