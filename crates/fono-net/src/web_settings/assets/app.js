@@ -994,7 +994,13 @@ let spkCalSpeakerId = null, spkCalClips = [], spkCalRec = null, spkCalResult = n
 let spkManageId = null, spkUtts = null, spkUttsErr = null;
 function refreshSpeakersSection() {
   const sec = FONO_SECTIONS.find((s) => s.id === 'speakers');
-  if (sec && document.getElementById('d-speakers')) renderSection(sec);
+  if (sec && document.getElementById('d-speakers')) {
+    renderSection(sec);
+    // Re-renders rebuild the device <select>s from static HTML, so refill them
+    // and reveal the picker only when there's more than one microphone.
+    spkPopulateDevices(null, 'spk-enroll-device');
+    spkPopulateDevices(null, 'spk-cal-device');
+  }
 }
 async function loadSpeakers() {
   try {
@@ -1018,7 +1024,7 @@ function speakersHtml() {
   out += '<div class="enroll-card">'
     + '<div class="enroll-row">'
     + '<input id="spk-enroll-name" class="input enroll-name" type="text" placeholder="Name (e.g. Alice)" value="' + esc(spkEnrollName) + '" autocomplete="off" />'
-    + '<select id="spk-enroll-device" class="select enroll-device"><option value="">Default microphone</option></select>'
+    + '<select id="spk-enroll-device" class="select enroll-device spk-hidden"><option value="">Default microphone</option></select>'
     + '<button class="btn" id="spk-record-btn" data-spk-record type="button">Record</button>'
     + '<button class="btn spk-hidden" id="spk-submit-btn" data-spk-submit type="button">Submit</button>'
     + '<button class="btn danger spk-hidden" id="spk-discard-btn" data-spk-discard type="button">Discard</button>'
@@ -1115,13 +1121,25 @@ function calibrateCardHtml() {
     + 'Fono measures how well it tells this voice apart from others, on your mic and room, and can set the decision threshold for you.</p>'
     + '<div class="enroll-row">'
     + '<select id="spk-cal-speaker" class="select enroll-name">' + opts + '</select>'
-    + '<select id="spk-cal-device" class="select enroll-device"><option value="">Default microphone</option></select>'
+    + '<select id="spk-cal-device" class="select enroll-device spk-hidden"><option value="">Default microphone</option></select>'
     + '<button class="btn" id="spk-cal-record" data-spk-cal-record type="button">Record clip</button>'
-    + '<button class="btn primary" data-spk-cal-run type="button"' + (canRun ? '' : ' disabled') + '>Run test</button>'
-    + '<button class="btn" data-spk-cal-clear type="button"' + (n && !spkCalBusy ? '' : ' disabled') + '>Clear</button>'
+    // Only surface Run test once there's a clip to run; keep it disabled (with a
+    // reason) until the two-clip minimum is met, and hide Clear when empty.
+    + (n >= 1
+      ? '<button class="btn primary" data-spk-cal-run type="button"'
+        + (canRun ? '' : ' disabled title="Record at least 2 clips first"') + '>Run test</button>'
+        + '<button class="btn" data-spk-cal-clear type="button"' + (spkCalBusy ? ' disabled' : '') + '>Clear</button>'
+      : '')
     + '</div>'
     + '<div id="spk-cal-meter" class="spk-meter spk-hidden"><div id="spk-cal-meter-bar" class="spk-meter-bar"></div></div>'
-    + '<p id="spk-cal-status" class="hint">' + (n ? (n + (n === 1 ? ' clip' : ' clips') + ' captured' + (n < 2 ? ' \u2014 record at least one more, then Run test.' : ' \u2014 Run test when ready.')) : 'No test clips yet.') + '</p>'
+    + '<p id="spk-cal-status" class="hint">'
+    + (n
+      ? (n + (n === 1 ? ' clip' : ' clips') + ' captured'
+        + (n < 2
+          ? ' \u2014 record one more so Fono can measure how consistently it recognises you (2 clips minimum).'
+          : ' \u2014 Run test when ready.'))
+      : 'No test clips yet \u2014 record a few short new clips to begin.')
+    + '</p>'
     + '<div id="spk-cal-results">' + calResultsHtml() + '</div>'
     + '</div>';
 }
@@ -1157,20 +1175,76 @@ function calResultsHtml() {
   const g = (r.genuine && r.genuine.scores) || [];
   const im = (r.impostor && r.impostor.scores) || [];
   const thr = typeof r.eer_threshold === 'number' ? r.eer_threshold : null;
+  const auto = calAutoThreshold(r);
+  const fixed = calFixedThreshold(r);
+  const safe = typeof r.far_threshold === 'number' ? r.far_threshold : null;
   return '<div class="cal-results">'
-    + calHistogramSvg(g, im, thr)
+    + calHistogramSvg(g, im, fixed, auto, safe)
     + '<div class="cal-verdict"><span class="spk-strength ' + v.cls + '">' + v.label + '</span> '
     + '<strong>' + eerPct + '%</strong> equal-error rate' + lat + '</div>'
     + '<p class="hint">' + v.msg + '</p>'
+    + '<p class="hint cal-help">Green bars are your own test clips scored against your saved voice; '
+    + 'red bars are a large set of other people. Each bar counts how many clips landed at that '
+    + 'similarity score \u2014 further right means more like your enrolled voice. The more the green '
+    + 'sits to the right of the red, the more reliably Fono can tell you apart. Voices land in two '
+    + 'clumps (yours near the right, everyone else near zero) because the score normalisation pushes '
+    + 'them apart \u2014 the empty middle is the safety margin, and the accept cut-offs live in it. Bar '
+    + 'heights are scaled within each group, so your handful of clips stays visible next to the large '
+    + 'impostor set.</p>'
+    + (auto != null && fixed != null && thr != null
+      ? '<p class="hint cal-help">The vertical lines are candidate accept cut-offs \u2014 a clip scoring to '
+        + 'the right of a line is accepted as you. <strong>Auto</strong> ('
+        + auto.toFixed(3) + ') is what <code>threshold&nbsp;=&nbsp;"auto"</code> enforces at dictation time: '
+        + 'it sits partway between your voice and the others and is re-derived live against the impostor set, '
+        + 'so it adapts as your mic and room change. <strong>Fixed</strong> (' + fixed.toFixed(1) + ') is the '
+        + 'value the button below pins \u2014 a rounded point set halfway between Auto and the measured '
+        + 'balance point (equal-error ' + thr.toFixed(3) + '), so it stays predictable without clinging to the '
+        + 'exact number these few clips produced and tolerates a slightly worse clip than the raw measured '
+        + 'point would. '
+        + (safe != null ? '<strong>Safety</strong> (' + safe.toFixed(3) + ') is the strict floor that keeps '
+          + 'out about 99% of impostors; the fixed value never drops below it. ' : '')
+        + 'A fixed threshold never adapts, though, so for tougher conditions prefer Auto and enroll a few '
+        + 'clips from that mic and distance. Auto is the default and suits most people.</p>'
+      : '')
     + '<div class="cal-legend"><span class="cal-swatch cal-genuine"></span>you ('
     + (r.genuine ? r.genuine.trials : 0) + ') <span class="cal-swatch cal-impostor"></span>others ('
     + (r.impostor ? r.impostor.trials : 0) + ')'
-    + (thr != null ? ' <span class="cal-swatch cal-thr"></span>threshold ' + thr.toFixed(3) : '') + '</div>'
-    + (thr != null
-      ? '<button class="btn" data-spk-cal-apply="' + thr.toFixed(4) + '" type="button">Use recommended threshold ('
-        + thr.toFixed(2) + ')</button>'
+    + (safe != null ? ' <span class="cal-swatch cal-safe"></span>safety ' + safe.toFixed(3) : '')
+    + (auto != null ? ' <span class="cal-swatch cal-auto"></span>auto ' + auto.toFixed(3) : '')
+    + (fixed != null ? ' <span class="cal-swatch cal-thr"></span>fixed ' + fixed.toFixed(1) : '') + '</div>'
+    + (fixed != null
+      ? '<button class="btn" data-spk-cal-apply="' + fixed + '" type="button">Pin a fixed threshold ('
+        + fixed.toFixed(1) + ')</button>'
       : '')
     + '</div>';
+}
+// Reproduce resolve_auto_threshold (speaker.rs) for the case a completed test
+// always provides \u2014 both a genuine calibration and a live impostor set: the
+// std-weighted midpoint between the genuine and impostor means, floored at the
+// target-FAR operating point. This is the concrete value threshold = "auto"
+// resolves to at dictation time, so the card can show it instead of leaving
+// "auto" opaque.
+function calAutoThreshold(r) {
+  const g = r.genuine, im = r.impostor;
+  if (!g || !im || typeof g.mean !== 'number' || typeof im.mean !== 'number') return null;
+  const gStd = g.std || 0, iStd = im.std || 0, denom = gStd + iStd;
+  const mid = denom > 0 ? (im.mean * gStd + g.mean * iStd) / denom : 0.5 * (g.mean + im.mean);
+  const far = typeof r.far_threshold === 'number' ? r.far_threshold : mid;
+  return Math.max(mid, far);
+}
+// The value the "Pin a fixed threshold" button writes: a rounded operating
+// point set halfway between Auto and the measured equal-error point. Not the
+// raw EER \u2014 pinning the exact number from 2\u20133 clips overfits and is
+// fragile; a 1-decimal midpoint is predictable, forgives a slightly worse clip,
+// and never dips below the target false-accept floor (rounded up to stay a clean
+// number).
+function calFixedThreshold(r) {
+  const auto = calAutoThreshold(r);
+  const eer = typeof r.eer_threshold === 'number' ? r.eer_threshold : null;
+  if (auto == null || eer == null) return eer;
+  let t = Math.round(((auto + eer) / 2) * 10) / 10;
+  if (typeof r.far_threshold === 'number') t = Math.max(t, Math.ceil(r.far_threshold * 10) / 10);
+  return t;
 }
 // Plain-language verdict bucketed by EER.
 function calVerdict(eer) {
@@ -1180,12 +1254,15 @@ function calVerdict(eer) {
   return { label: 'weak', cls: 'weak', msg: 'Hard to separate \u2014 enroll more clips in your real environment.' };
 }
 // Inline-SVG overlaid histogram of the genuine vs impostor score distributions,
-// with a vertical marker at the recommended threshold. No chart library.
-function calHistogramSvg(genuine, impostor, thr) {
+// with vertical markers at the safety, auto and fixed cut-offs. No chart library.
+// Each group is scaled to its OWN peak (not a shared one) so your handful of
+// clips stays visible beside the hundreds-strong impostor cohort; the chart
+// shows where each group sits, not comparable raw counts.
+function calHistogramSvg(genuine, impostor, fixed, auto, safe) {
   const all = genuine.concat(impostor);
   if (!all.length) return '';
   let lo = Math.min.apply(null, all), hi = Math.max.apply(null, all);
-  if (thr != null) { lo = Math.min(lo, thr); hi = Math.max(hi, thr); }
+  [fixed, auto, safe].forEach((m) => { if (m != null) { lo = Math.min(lo, m); hi = Math.max(hi, m); } });
   if (hi - lo < 1e-6) { lo -= 0.5; hi += 0.5; }
   const pad = (hi - lo) * 0.05; lo -= pad; hi += pad;
   const W = 320, H = 96, BINS = 24;
@@ -1195,22 +1272,26 @@ function calHistogramSvg(genuine, impostor, thr) {
     let k = Math.floor((x - lo) / bin); if (k < 0) k = 0; if (k >= BINS) k = BINS - 1; dst[k]++;
   });
   fill(genuine, gh); fill(impostor, ih);
-  const peak = Math.max(1, Math.max.apply(null, gh.concat(ih)));
   const bw = W / BINS;
-  const bars = (arr, cls) => arr.map((c, k) => {
-    if (!c) return '';
-    const h = c / peak * (H - 12);
-    return '<rect class="' + cls + '" x="' + (k * bw).toFixed(1) + '" y="' + (H - h).toFixed(1)
-      + '" width="' + (bw - 1).toFixed(1) + '" height="' + h.toFixed(1) + '"/>';
-  }).join('');
-  let marker = '';
-  if (thr != null) {
-    const x = ((thr - lo) / (hi - lo) * W).toFixed(1);
-    marker = '<line class="cal-thr-line" x1="' + x + '" y1="0" x2="' + x + '" y2="' + H + '"/>';
-  }
+  // Per-group peak + a floor so any non-empty bin is at least a few px tall.
+  const bars = (arr, cls) => {
+    const peak = Math.max(1, Math.max.apply(null, arr));
+    return arr.map((c, k) => {
+      if (!c) return '';
+      const h = Math.max(4, c / peak * (H - 12));
+      return '<rect class="' + cls + '" x="' + (k * bw).toFixed(1) + '" y="' + (H - h).toFixed(1)
+        + '" width="' + (bw - 1).toFixed(1) + '" height="' + h.toFixed(1) + '"/>';
+    }).join('');
+  };
+  const vline = (val, cls) => {
+    if (val == null) return '';
+    const x = ((val - lo) / (hi - lo) * W).toFixed(1);
+    return '<line class="' + cls + '" x1="' + x + '" y1="0" x2="' + x + '" y2="' + H + '"/>';
+  };
   return '<svg class="cal-hist" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" role="img" '
-    + 'aria-label="Score distribution of your voice versus others">'
-    + bars(ih, 'cal-impostor') + bars(gh, 'cal-genuine') + marker + '</svg>'
+    + 'aria-label="Score distribution of your voice versus others, with the safety, auto and fixed accept cut-offs">'
+    + bars(ih, 'cal-impostor') + bars(gh, 'cal-genuine')
+    + vline(safe, 'cal-safe-line') + vline(auto, 'cal-auto-line') + vline(fixed, 'cal-thr-line') + '</svg>'
     + '<div class="cal-axis"><span>' + lo.toFixed(2) + '</span><span>score</span><span>' + hi.toFixed(2) + '</span></div>';
 }
 async function renameSpeaker(id) {
@@ -1294,6 +1375,8 @@ async function spkPopulateDevices(selectedId, elId) {
     devEl.innerHTML = '<option value="">Default microphone</option>' + mics.map((d) =>
       '<option value="' + esc(d.deviceId) + '"' + (d.deviceId === selectedId ? ' selected' : '') + '>'
       + esc(d.label || 'Microphone') + '</option>').join('');
+    // Nothing to choose between with a single mic — keep the picker hidden.
+    devEl.classList.toggle('spk-hidden', mics.length <= 1);
   } catch (_e) { /* labels need permission; ignore */ }
 }
 function spkStatus(msg) {
