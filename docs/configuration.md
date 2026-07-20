@@ -45,6 +45,7 @@ field-level rustdoc comments. The user-facing sections are:
 | `[mcp]` | MCP server limits + voice-tool relevance filter | this file |
 | `[[context_rules]]` | Per-app prompt/behaviour overrides | this file |
 | `[wakeword]` | Always-on "hey fono" wake-word activation | below |
+| `[speaker]` | On-device "who is speaking" voice verification | [speakers.md](speakers.md) |
 
 ## Common knobs by example
 
@@ -331,6 +332,31 @@ max_entries = 10_000        # rolling cap; older entries are pruned
 
 `fono history clear` truncates the table without touching the file;
 deleting `~/.local/share/fono/history.sqlite` wipes everything.
+
+### Speaker verification (who is speaking)
+
+Off by default. When enabled, Fono computes a local voiceprint and tags
+each dictation with the enrolled speaker it matches — entirely
+on-device. See **[speakers.md](speakers.md)** for the full guide
+(enrolling, the "test my voice" calibration, sample management, and the
+`fono speaker` commands).
+
+```toml
+[speaker]
+enabled = true              # off by default; loads no model until true
+model = "redimnet2-b3"      # embedding model (registry name); "-b6" is the
+                            # larger, more accurate tier
+threshold = "auto"          # "auto" resolves from the shipped impostor cohort
+                            # + your own calibration; or pin a float for a
+                            # strict, fixed operating point
+min_speech_secs = 3.0       # speech gathered (wake phrase + command) before a
+                            # decision; short commands accumulate until met
+```
+
+> Speaker verification is **identification plus a convenience gate, not
+> authentication** — voiceprints can be defeated by cloning or replay, so
+> never gate a fail-deadly action on the voice channel alone. Voiceprints
+> live in `speakers.sqlite` (mode `0600`) and never leave the machine.
 
 ### MCP voice-tool relevance filter
 
@@ -678,6 +704,8 @@ learning corrections stays opt-in.
 | Whisper models | `$XDG_CACHE_HOME/fono/models/whisper/` |
 | Polish models | `$XDG_CACHE_HOME/fono/models/polish/` |
 | History DB | `$XDG_DATA_HOME/fono/history.sqlite` |
+| Speakers DB (voiceprints) | `$XDG_DATA_HOME/fono/speakers.sqlite` (mode `0600`) |
+| Inbound API keys DB | `$XDG_DATA_HOME/fono/api_keys.sqlite` (mode `0600`) |
 | IPC socket + PID | `$XDG_STATE_HOME/fono/` |
 
 Server mode uses `/etc/fono/`, `/var/lib/fono/`, `/var/cache/fono/`,
