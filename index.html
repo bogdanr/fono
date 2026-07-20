@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Fono — Local-first voice dictation and assistant for Linux (Whisper · llama.cpp · Vulkan · X11 &amp; Wayland)</title>
-<meta name="description" content="Fono is a free, open-source voice dictation and voice assistant for Linux. Press a hotkey, speak, see your words typed in any window. Whisper runs locally; Groq, OpenAI, Cerebras, Anthropic, Deepgram are one command away. Single static Rust binary, GPL-3.0, no telemetry." />
-<meta name="keywords" content="voice dictation, speech to text, Linux dictation, Whisper, voice assistant, Wayland, X11, open source, Rust, local-first, speech recognition" />
+<title>Fono φ Talk to your computer. Open-source voice AI. (dictation · assistant · agents)</title>
+<meta name="description" content="Fono is an open-source, complete voice-AI stack — speech-to-text, natural voices, a local LLM, wake word, speaker ID — in one small binary. Press a key and speak: it types into any app, answers out loud, or drives your coding agent. Local by default; cloud per stage when you choose. Serves Wyoming and OpenAI/Ollama APIs. GPL-3.0, no telemetry." />
+<meta name="keywords" content="voice dictation, speech to text, text to speech, voice assistant, wake word, speaker recognition, Linux dictation, Whisper, Wayland, X11, open source, Rust, local-first, home assistant, ollama api" />
 <meta name="author" content="Bogdan Radulescu" />
 <meta name="application-name" content="Fono" />
 <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
@@ -23,8 +23,8 @@
 
 <link rel="alternate" type="application/atom+xml" title="Fono releases" href="https://github.com/bogdanr/fono/releases.atom" />
 
-<meta property="og:title" content="Fono — Speak. It types — or answers." />
-<meta property="og:description" content="Local-first voice dictation and voice assistant for Linux. Press F7 to dictate into any window, F8 to ask a question and hear the answer. Single static Rust binary, GPL-3.0." />
+<meta property="og:title" content="Fono φ Talk to your computer." />
+<meta property="og:description" content="Dictation, voice assistant, agent control. An open-source, complete voice-AI stack (STT · TTS · LLM · wake word · speaker ID) in one small binary. Local or cloud, per stage. Wyoming + OpenAI/Ollama APIs." />
 <meta property="og:url" content="https://fono.page/" />
 <meta property="og:type" content="website" />
 <meta property="og:site_name" content="Fono" />
@@ -37,8 +37,8 @@
 <meta property="og:image:alt" content="Fono — local-first voice dictation and assistant for Linux. Sepia card with the Fono wordmark and an oxblood waveform." />
 
 <meta name="twitter:card" content="summary_large_image" />
-<meta name="twitter:title" content="Fono — Speak. It types — or answers." />
-<meta name="twitter:description" content="Local-first voice dictation and voice assistant for Linux. Press F7 to dictate into any window, F8 to ask a question and hear the answer. Single static Rust binary, GPL-3.0." />
+<meta name="twitter:title" content="Fono φ Talk to your computer." />
+<meta name="twitter:description" content="Dictation, voice assistant, agent control. An open-source, complete voice-AI stack (STT · TTS · LLM · wake word · speaker ID) in one small binary. Local or cloud, per stage. Wyoming + OpenAI/Ollama APIs." />
 <meta name="twitter:image" content="https://fono.page/assets/og.png" />
 <meta name="twitter:image:alt" content="Fono — local-first voice dictation and assistant for Linux. Sepia card with the Fono wordmark and an oxblood waveform." />
 
@@ -693,6 +693,7 @@
       <li><a href="#features">Manifesto</a></li>
       <li><a href="#install">Install</a></li>
       <li><a href="#how">Pipeline</a></li>
+      <li><a href="/setup-demo/">Demo</a></li>
       <li><a href="#compat">Runs on</a></li>
       <li><a href="#faq">FAQ</a></li>
     </ul>
@@ -714,9 +715,9 @@
     <div class="wrap">
       <div class="hero-top">
         <div class="hero-headline">
-          <div class="eyebrow"><span id="eb-tag">Issue</span> · <span id="eb-date"></span> · Local-first dictation for Linux</div>
+          <div class="eyebrow"><span id="eb-tag">Issue</span> · <span id="eb-date"></span> · Open-source voice AI</div>
           <h1>Speak.<br/><span class="swap" id="hero-swap" data-kind="dictate" data-fono-kind-swap><span class="it" data-on="dictate">It types.</span><span data-on="ask">It answers.</span></span></h1>
-          <p class="sr-only">Fono is a free, open-source voice dictation and voice assistant for Linux. Press a hotkey, speak, and your words appear in the focused window. Whisper runs locally for privacy; Groq, OpenAI, Cerebras, Anthropic, and Deepgram are one command away for speed. Distributed as a single static Rust binary under GPL-3.0 with zero telemetry.</p>
+          <p class="sr-only">Fono is an open-source, complete voice-AI stack — speech-to-text, natural voices, a local LLM, wake word, and speaker ID — in one small binary for Linux, macOS, and Windows. Press a key and speak: your words are typed into the focused window, an assistant answers out loud, or your coding agent takes instructions. Everything runs locally by default; every stage can switch to a cloud provider. It also serves Wyoming for Home Assistant and an OpenAI/Ollama-compatible API for your network. GPL-3.0, zero telemetry.</p>
         </div>
         <div class="hero-visual">
           <div class="fono-demo" id="fono-demo">
@@ -730,12 +731,12 @@
 
       <div class="hero-meta">
         <div class="hero-main">
-          <p class="hero-lede">A <em class="swap" id="lede-swap" data-kind="dictate" data-fono-kind-swap><span data-on="dictate">lightweight dictation</span><span data-on="ask">lightweight assistant</span></em> system for Linux, macOS, and Windows. Local for privacy. Cloud for performance. Self-host on your LAN. <em>State&#8209;of&#8209;the&#8209;art</em> on whatever silicon you have.</p>
+            <p class="hero-lede">Talk to your computer. Fono <em class="swap" id="lede-swap" data-kind="dictate" data-fono-kind-swap><span data-on="dictate">types into any app</span><span data-on="ask">answers out loud</span></em>, drives your coding agent locally or serves your whole network.<br/>It is a complete, open-source <em>voice-AI stack</em> in one small binary. Local by default. Cloud when <em>you choose</em>.</p>
           <div class="hero-cta-row">
             <div class="install-pill">
               <span class="prompt">$</span>
-              <span>curl -L https://fono.page/install | sh</span>
-              <button data-copy="curl -L https://fono.page/install | sh">copy</button>
+              <span>curl -fsSL https://fono.page/install | sh</span>
+              <button data-copy="curl -fsSL https://fono.page/install | sh">copy</button>
             </div>
             <a href="https://github.com/bogdanr/fono" class="btn-star-hero" aria-label="Star on GitHub">
               <svg class="star" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.6-1.4-1.4-1.8-1.4-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.9 1.2 1.9 1.2 1.1 1.9 2.9 1.4 3.6 1 .1-.8.4-1.4.8-1.7-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3"/></svg>
@@ -745,8 +746,8 @@
         </div>
         <dl class="hero-side">
           <dt>License</dt><dd>GPL-3.0-only · audit every byte</dd>
-          <dt>Runs on</dt><dd>Linux · X11 , Wayland</dd>
-          <dt>Roadmap</dt><dd>macOS · Windows</dd>
+          <dt>Runs on</dt><dd>Linux · macOS &amp; Windows (experimental)</dd>
+          <dt>Binary</dt><dd>~22 MB CPU · ~60 MB Vulkan GPU</dd>
           <dt>Telemetry</dt><dd>None. Ever.</dd>
         </dl>
       </div>
@@ -769,18 +770,22 @@
       <div class="section-h">
         <div>
           <div class="num">№01 · Manifesto</div>
-          <h2>Six things, <em>done well</em>.</h2>
+          <h2>Ten things, <em>done well</em>.</h2>
         </div>
-        <p class="desc">Dictation on Linux has been Electron apps with subscriptions or Python scripts that never quite work. Fono is a third option.</p>
+        <p class="desc">Voice on the desktop has been Electron apps with subscriptions or Python scripts that never quite work. Fono is a third option: the whole voice stack, one small binary.</p>
       </div>
 
       <div class="feat-grid">
-        <div class="feat"><span class="idx">01</span><div><h3>Local <em>first</em>.</h3><p>Whisper runs on your machine. Audio never leaves the box unless you opt in. Your voice stays yours.</p></div></div>
-        <div class="feat"><span class="idx">02</span><div><h3>Cloud <em>fast</em>.</h3><p>One command swaps in Groq, OpenAI, Cerebras, Anthropic, or Deepgram. Bring your own key. No restart.</p></div></div>
-        <div class="feat"><span class="idx">03</span><div><h3>It <em>answers</em>.</h3><p>Hit F8 instead of F7 to fire the voice assistant. Ask a question, hear the reply spoken back.</p></div></div>
-        <div class="feat"><span class="idx">04</span><div><h3>Hardware <em>aware</em>.</h3><p><code>fono setup</code> probes your machine, picks <a href="/calibration" target="_blank">the right model size</a>, and binds the hotkeys. One minute flat.</p></div></div>
-        <div class="feat"><span class="idx">05</span><div><h3>Server <em>mode</em>.</h3><p>Run Fono in server mode on your fastest machine. Clients find it automatically — Home Assistant included.</p></div></div>
-        <div class="feat"><span class="idx">06</span><div><h3>Open <em>source</em>.</h3><p>GPL-3.0-only. Single static Rust binary. No telemetry. No accounts. No upsell. Ever.</p></div></div>
+        <div class="feat"><span class="idx">01</span><div><h3>Local <em>first</em>.</h3><p>Whisper, a built-in llama.cpp LLM, and three text-to-speech engines run on your machine. Audio never leaves the box unless you opt in. Your voice stays yours.</p></div></div>
+        <div class="feat"><span class="idx">02</span><div><h3>Cloud <em>fast</em>.</h3><p>One command swaps any stage to Groq, OpenAI, Gemini, Anthropic, Cerebras, Deepgram, ElevenLabs and more. Bring your own key. No restart.</p></div></div>
+        <div class="feat"><span class="idx">03</span><div><h3>It <em>answers</em>.</h3><p>Hit F8 and ask. The reply is spoken back, streamed sentence by sentence. Prefer no keys? Say the wake phrase, or hold a realtime back-and-forth conversation.</p></div></div>
+        <div class="feat"><span class="idx">04</span><div><h3>It knows <em>your voice</em>.</h3><p>Enroll voices and Fono knows who's speaking. It has state of the art EER, quick and easy enrolment, auto calibration and it allows unlocking functions with authorized voices.</p></div></div>
+        <div class="feat"><span class="idx">05</span><div><h3>Agents, <em>by voice</em>.</h3><p>Talk to Claude Code, Cursor, or Forge through MCP: the agent listens, works, and talks back. Different programs use different voices, and skills tune how chatty the agent is.</p></div></div>
+        <div class="feat"><span class="idx">06</span><div><h3>Hardware <em>aware</em>.</h3><p><code>fono setup</code> probes your machine and picks <a href="/calibration" target="_blank">the right model size</a>, backed by 900+ benchmark runs, not guesses. The installer grabs the Vulkan build if you have a GPU.</p></div></div>
+        <div class="feat"><span class="idx">07</span><div><h3>It <em>serves</em>.</h3><p>One box can voice your whole LAN. Use Wyoming for Home Assistant, an OpenAI and Ollama-compatible API for editors and Open WebUI. Clients find it over mDNS.</p></div></div>
+        <div class="feat"><span class="idx">08</span><div><h3>Various <em>visualizations</em>.</h3><p>Fono shows an overlay when you interact with it so you can visualize the audio and <a href="/how-it-thinks.html">the thinking</a>. There are different styles such as bars, oscilloscope, FFT, heatmap and others.</p></div></div>
+        <div class="feat"><span class="idx">09</span><div><h3>Web <em>settings</em>.</h3><p>Every option is a searchable page the daemon serves itself, loopback-only and off until you open it. No config file to learn. <a href="/setup-demo/">Click around the demo &rarr;</a></p></div></div>
+        <div class="feat"><span class="idx">10</span><div><h3>Open <em>source</em>.</h3><p>GPL-3.0-only. Single Rust binary. No telemetry. No accounts. No upsell. Read the code, fork it, make it yours. Every line is auditable.</p></div></div>
       </div>
     </div>
   </section>
@@ -796,25 +801,26 @@
       </div>
 
       <div class="install-card">
-        <div class="lbl">One-liner · any Linux</div>
-        <pre><span class="pr">$</span> curl -L https://fono.page/install | sh</pre>
-        <div class="inspect">Detects your arch, fetches the latest release binary, installs to <code>/usr/local/bin/fono</code>. <a href="/install">Inspect the script</a> before piping.</div>
+        <div class="lbl">One-liner · Linux · macOS · Windows</div>
+        <pre><span class="pr">$</span> curl -fsSL https://fono.page/install | sh</pre>
+        <div class="inspect">Detects your OS and CPU, grabs the Vulkan build if you have a GPU, starts the daemon, and opens the setup wizard in the same terminal. <a href="/install">Inspect the script</a> before piping.</div>
       </div>
 
       <div class="pkg-mat" style="margin-top: 32px;">
-        <div class="pkg-cell"><div class="name">Debian / Ubuntu</div><code>sudo apt install ./fono_<span class="pkg-ver">0.7.1</span>_amd64.deb</code></div>
-        <div class="pkg-cell"><div class="name">Slackware / NimbleX</div><code>installpkg fono-<span class="pkg-ver">0.7.1</span>-x86_64-1.txz</code></div>
-        <div class="pkg-cell"><div class="name">Arch / Manjaro</div><code>sudo pacman -U fono-<span class="pkg-ver">0.7.1</span>-1-x86_64.pkg.tar.zst</code></div>
+        <div class="pkg-cell"><div class="name">Debian / Ubuntu</div><code>sudo apt install ./fono_<span class="pkg-ver">0.17.0</span>_amd64.deb</code></div>
+        <div class="pkg-cell"><div class="name">Slackware / NimbleX</div><code>installpkg fono-<span class="pkg-ver">0.17.0</span>-x86_64-1.txz</code></div>
+        <div class="pkg-cell"><div class="name">Arch / Manjaro</div><code>sudo pacman -U fono-<span class="pkg-ver">0.17.0</span>-1-x86_64.pkg.tar.zst</code></div>
         <div class="pkg-cell"><div class="name">Other Linux</div><code>bare binary from <a href="https://github.com/bogdanr/fono/releases/latest" style="color:inherit">Releases</a></code></div>
-        <div class="pkg-cell soon"><div class="name">macOS</div><code>planned · Linux first</code></div>
-        <div class="pkg-cell soon"><div class="name">Windows</div><code>planned · Linux first</code></div>
+        <div class="pkg-cell"><div class="name">macOS <span style="font-size:13px;color:var(--ink-dim)">(Apple Silicon, experimental)</span></div><code>binary from Releases · then: fono install</code></div>
+        <div class="pkg-cell"><div class="name">Windows <span style="font-size:13px;color:var(--ink-dim)">(experimental)</span></div><code>fono-v<span class="pkg-ver">0.17.0</span>-x86_64.exe · then: fono install</code></div>
       </div>
 
       <div class="switch-callout">
         <div class="lbl">First run · hot-swap</div>
         <pre><span class="pr">$</span> fono setup            <span class="cm"># picks local vs cloud, installs models</span>
 <span class="pr">$</span> fono                  <span class="cm"># starts the daemon (tray + hotkeys)</span>
-<span class="pr">$</span> fono use cloud groq   <span class="cm"># swap STT + LLM, no restart</span>
+<span class="pr">$</span> fono use cloud groq   <span class="cm"># swap STT + LLM + TTS, no restart</span>
+<span class="pr">$</span> fono use tts local    <span class="cm"># or swap one stage at a time</span>
 <span class="pr">$</span> fono keys add GROQ_API_KEY</pre>
       </div>
     </div>
@@ -831,18 +837,18 @@
       </div>
 
       <div class="pipeline">
-        <div class="stage"><div class="dot">01</div><h3><em>Capture</em></h3><p>PipeWire, PulseAudio, or ALSA. VAD trims silence before bytes ever leave the mic.</p></div>
-        <div class="stage"><div class="dot">02</div><h3><em>Transcribe</em></h3><p>whisper.cpp on-device, or Groq · OpenAI · Cerebras · Deepgram on the wire.</p></div>
+        <div class="stage"><div class="dot">01</div><h3><em>Capture</em></h3><p>Mic audio via PipeWire, PulseAudio, ALSA, or native macOS/Windows. VAD trims silence before anything moves on.</p></div>
+        <div class="stage"><div class="dot">02</div><h3><em>Transcribe</em></h3><p>whisper.cpp on-device, or Groq · OpenAI · Gemini · Deepgram · ElevenLabs on the wire.</p></div>
         <div class="stage">
           <div class="dot">03</div>
           <div class="swap swap--block" data-kind="dictate" data-fono-kind-swap>
             <div data-on="dictate">
               <h3><em>Cleanup</em></h3>
-              <p>Optional small LLM strips filler, restores punctuation, fixes names. Local or cloud.</p>
+              <p>Optional small LLM strips filler, restores punctuation, fixes names. Runs locally or on the cloud.</p>
             </div>
             <div data-on="ask">
               <h3><em>Think</em></h3>
-              <p>Local Ollama or cloud LLM reasons over your question, streaming tokens as they come.</p>
+              <p>The built-in engine reasons locally or pick a cloud LLM for more intelligence, streaming tokens as they come.</p>
             </div>
           </div>
         </div>
@@ -855,7 +861,7 @@
             </div>
             <div data-on="ask">
               <h3><em>Speak</em></h3>
-              <p>Kokoro or Piper on-device, or cloud TTS. The reply streams back through your speakers.</p>
+              <p>Kokoro, Piper, or Supertonic on-device or cloud TTS. The reply streams back through your speakers.</p>
             </div>
           </div>
         </div>
@@ -868,22 +874,24 @@
       <div class="section-h">
         <div>
           <div class="num">№04 · Compatibility</div>
-          <h2>Runs on <em>your Linux</em>.</h2>
+          <h2>Runs on <em>your machine</em>.</h2>
         </div>
-        <p class="desc">Linux first. macOS and Windows next. If your distro boots, Fono should run.</p>
+        <p class="desc">Linux first, daily-driven. macOS and Windows are new ports, labelled experimental until they've earned it. If your distro boots, Fono should run.</p>
       </div>
 
       <dl class="compat-list">
-        <dt>Display server</dt>
-        <dd><span class="y">X11</span><span class="y">Wayland</span></dd>
+        <dt>Systems</dt>
+        <dd><span class="y">Linux · X11 &amp; Wayland</span><span class="y">macOS · Apple Silicon</span><span class="y">Windows</span></dd>
         <dt>Audio backend</dt>
         <dd><span class="y">PipeWire</span><span class="y">PulseAudio</span><span class="y">ALSA</span></dd>
-        <dt>STT providers</dt>
-        <dd><span class="y">whisper.cpp (local)</span><span class="y">Groq</span><span class="y">OpenAI</span><span class="y">Cerebras</span><span class="y">Deepgram</span></dd>
-        <dt>LLM providers</dt>
-        <dd><span class="y">Local (llama-cpp)</span><span class="y">Groq</span><span class="y">OpenAI</span><span class="y">Anthropic</span><span class="y">Cerebras</span></dd>
-        <dt>TTS providers</dt>
-        <dd><span class="y">Groq</span><span class="y">OpenAI</span><span class="y">OpenRouter</span><span class="pending">Google (in progress)</span></dd>
+        <dt>Speech-to-text</dt>
+        <dd><span class="y">whisper.cpp (local)</span><span class="y">Groq</span><span class="y">OpenAI</span><span class="y">Gemini</span><span class="y">Deepgram</span><span class="y">Cartesia</span><span class="y">AssemblyAI</span><span class="y">Speechmatics</span><span class="y">ElevenLabs</span></dd>
+        <dt>LLM</dt>
+        <dd><span class="y">llama.cpp (built in)</span><span class="y">Ollama</span><span class="y">Groq</span><span class="y">OpenAI</span><span class="y">Anthropic</span><span class="y">Cerebras</span><span class="y">Gemini</span><span class="y">OpenRouter</span></dd>
+        <dt>Text-to-speech</dt>
+        <dd><span class="y">Kokoro (local)</span><span class="y">Piper (local)</span><span class="y">Supertonic (local)</span><span class="y">OpenAI</span><span class="y">Groq</span><span class="y">Gemini</span><span class="y">Cartesia</span><span class="y">Deepgram</span><span class="y">ElevenLabs</span><span class="y">OpenRouter</span></dd>
+        <dt>It serves</dt>
+        <dd><span class="y">Wyoming (Home Assistant)</span><span class="y">OpenAI-compatible API</span><span class="y">Ollama-compatible API</span></dd>
         <dt>Tested distros</dt>
         <dd><span class="y">Debian / Ubuntu</span><span class="y">Slackware / NimbleX</span><span class="y">any glibc Linux (bare binary)</span></dd>
       </dl>
@@ -894,7 +902,7 @@
     <div class="narrow">
       <div class="section-h">
         <div>
-          <div class="num">№ 05 · Questions</div>
+          <div class="num">№05 · Questions</div>
           <h2 id="faq-h">Things <em>people ask</em>.</h2>
         </div>
         <p class="desc">Short, honest answers. If yours isn’t here, open an issue on GitHub.</p>
@@ -906,7 +914,7 @@
         </details>
         <details class="faq-item">
           <summary>Can Fono answer questions, or is it dictation-only?</summary>
-          <p>Both. <code>F7</code> is dictation — your words land in the focused window. <code>F8</code> is the voice assistant — Fono transcribes your question, runs it through a local Ollama model or a cloud LLM (Groq, OpenAI, Anthropic, Cerebras), and speaks the reply back through Kokoro or Piper on-device, or a cloud TTS. Same daemon, same hotkey muscle memory, different brain.</p>
+          <p>Both. <code>F7</code> is dictation — your words land in the focused window. <code>F8</code> is the voice assistant — Fono transcribes your question, runs it through its built-in local LLM (llama.cpp compiled in, no extra installs) or a cloud LLM, and speaks the reply through Kokoro, Piper, or Supertonic on-device — or a cloud voice. Same daemon, same hotkey muscle memory, different brain.</p>
         </details>
         <details class="faq-item">
           <summary>Does Fono work on Wayland?</summary>
@@ -921,12 +929,32 @@
           <p>No. None. The daemon makes no analytics calls. The only outbound traffic is to the cloud STT, LLM, or TTS provider that you explicitly configured.</p>
         </details>
         <details class="faq-item">
+          <summary>Can it start hands-free, without a hotkey?</summary>
+          <p>Yes. Fono can idle and listen for a spoken wake phrase; detection runs locally and is off until you enable it. There's also a realtime mode for back-and-forth conversation — just keep talking.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Can Fono tell who is speaking?</summary>
+          <p>Yes. Enrol a voice once and Fono recognises it on-device, tagging each history entry with the speaker's name. The voiceprint never leaves your machine — only the recognised name is saved.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Can I drive coding agents by voice?</summary>
+          <p>Yes — early preview. Fono exposes an MCP voice loop: Claude Code, Cursor, Forge, and other MCP-capable agents can take your spoken instructions and talk back when they need input or finish a task.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Can other apps and machines use Fono?</summary>
+          <p>Yes. Fono serves the Wyoming protocol (Home Assistant discovers it over mDNS as a speech-to-text, text-to-speech, and wake-word provider) and an OpenAI and Ollama-compatible API on port 11434 for editors, Open WebUI, and anything that speaks those APIs. Inbound API keys gate LAN access.</p>
+        </details>
+        <details class="faq-item">
+          <summary>How fast is local, really?</summary>
+          <p>On a laptop CPU the local assistant's first spoken word lands in about a third of a second, and the engine runs 2–4× ahead of Ollama on identical weights. The model picker is backed by <a href="/calibration">900+ benchmark runs</a>, not guesses.</p>
+        </details>
+        <details class="faq-item">
           <summary>How do I switch from local Whisper to a cloud provider?</summary>
-          <p>Run <code>fono use cloud groq</code> (or <code>openai</code>, <code>cerebras</code>, <code>anthropic</code>, <code>deepgram</code>). Add your API key with <code>fono keys add PROVIDER_API_KEY</code>. No restart needed.</p>
+          <p>Run <code>fono use cloud groq</code> — one key covers STT, polish, assistant, and TTS — or swap a single stage with <code>fono use stt deepgram</code>. Add your API key with <code>fono keys add PROVIDER_API_KEY</code>. No restart needed; <code>fono use local</code> brings everything back home.</p>
         </details>
         <details class="faq-item">
           <summary>Are macOS and Windows supported?</summary>
-          <p>They are on the roadmap. Linux is the primary target and ships first; macOS and Windows builds follow.</p>
+          <p>Yes, as experimental ports. Each release ships a Metal-accelerated Apple Silicon binary and a Windows <code>.exe</code> that uses the GPU when a driver is present. Linux remains the daily-driven primary; issue reports on the new ports are genuinely useful.</p>
         </details>
         <details class="faq-item">
           <summary>Can I self-host Fono on my LAN?</summary>
@@ -934,7 +962,7 @@
         </details>
         <details class="faq-item">
           <summary>Does Fono use the GPU?</summary>
-          <p>Fono provides a GPU build that uses Vulkan to run Whisper on your GPU, making it incredibly fast. With a mid-range graphics card, it can transcribe your speech almost instantly. This works on nearly all Nvidia, AMD, and Intel GPUs made in the last few years. This is especially usefull when running larger models.</p>
+          <p>Yes. The GPU build uses Vulkan and works on nearly all NVIDIA, AMD, and Intel GPUs from the last few years — the installer picks it automatically when it detects one. With a mid-range card, larger Whisper models transcribe your speech almost instantly.</p>
         </details>
         <details class="faq-item">
           <summary><span>What’s the <span class="phi">φ</span> in the favicon?</span></summary>
@@ -951,8 +979,8 @@
       <div class="hero-cta-row">
         <div class="install-pill">
           <span class="prompt">$</span>
-          <span>curl -L https://fono.page/install | sh</span>
-          <button data-copy="curl -L https://fono.page/install | sh">copy</button>
+          <span>curl -fsSL https://fono.page/install | sh</span>
+          <button data-copy="curl -fsSL https://fono.page/install | sh">copy</button>
         </div>
         <a href="https://github.com/bogdanr/fono" class="btn-star-hero" aria-label="Star on GitHub">
           <svg class="star" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 .3a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.4-4-1.4-.6-1.4-1.4-1.8-1.4-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.9 1.2 1.9 1.2 1.1 1.9 2.9 1.4 3.6 1 .1-.8.4-1.4.8-1.7-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .3"/></svg>
@@ -967,8 +995,10 @@
       <div class="sig">Fono · an open-source affair</div>
       <div class="links">
         <a href="https://github.com/bogdanr/fono" rel="me noopener">GitHub</a>
+        <a href="https://github.com/bogdanr/fono/tree/main/docs">Docs</a>
         <a href="https://github.com/bogdanr/fono/issues">Issues</a>
         <a href="https://github.com/bogdanr/fono/blob/main/LICENSE">GPL-3.0</a>
+        <a href="/setup-demo/">Demo</a>
         <a href="#install">Install</a>
         <a href="#faq">FAQ</a>
       </div>
@@ -1060,7 +1090,7 @@
   document.addEventListener('DOMContentLoaded', () => {
     window.typeSequence(document.getElementById('typed'), [
       { type: 'pause', delay: 600 },
-      { type: 'line', text: '"Hey, anyone up for ramen Friday? That place near the park, 7-ish? Don\'t bringing Sam."' },
+      { type: 'line', text: '"Hey, anyone up for ramen Friday? That place near the park, 7-ish? Don\'t bring Sam."' },
       { type: 'pause', delay: 1500 },
       { type: 'clear', delay: 200 },
       { type: 'line', text: '"Refactor the audio capture loop to use a ring buffer instead of a Vec, and keep the existing API surface intact."' },
@@ -1078,14 +1108,14 @@
       "@id": "https://fono.page/#software",
       "name": "Fono",
       "alternateName": "fono",
-      "description": "Local-first voice dictation and voice assistant for Linux. Press a hotkey, speak, see your words typed in any window. Whisper runs locally; cloud providers (Groq, OpenAI, Cerebras, Anthropic, Deepgram) are one command away.",
+      "description": "Fono is an open-source, complete voice-AI stack — speech-to-text, natural voices, a local LLM, wake word, and speaker ID — in one small binary. Press a key and speak: it types into any app, answers out loud, or drives your coding agent. Local by default; cloud per stage when you choose. Serves Wyoming and OpenAI/Ollama-compatible APIs.",
       "url": "https://fono.page/",
       "applicationCategory": ["UtilitiesApplication", "DeveloperApplication", "CommunicationApplication"],
-      "applicationSubCategory": ["Voice Dictation", "Voice Assistant"],
-      "operatingSystem": "Linux (X11, Wayland)",
+      "applicationSubCategory": ["Voice Dictation", "Voice Assistant", "Speech Recognition", "Text to Speech"],
+      "operatingSystem": "Linux (X11, Wayland), macOS, Windows",
       "downloadUrl": "https://github.com/bogdanr/fono/releases/latest",
       "installUrl": "https://fono.page/install",
-      "softwareVersion": "0.7.1",
+      "softwareVersion": "0.17.0",
       "releaseNotes": "https://github.com/bogdanr/fono/releases",
       "license": "https://www.gnu.org/licenses/gpl-3.0.en.html",
       "isAccessibleForFree": true,
@@ -1095,16 +1125,22 @@
         "priceCurrency": "USD"
       },
       "programmingLanguage": "Rust",
-      "keywords": "voice dictation, speech to text, Linux, Whisper, voice assistant, Wayland, X11, local-first, open source",
+      "keywords": "voice dictation, speech to text, text to speech, voice assistant, wake word, speaker recognition, Linux, macOS, Windows, Whisper, Wayland, X11, local-first, open source, home assistant, ollama api",
       "featureList": [
         "Local Whisper transcription (whisper.cpp)",
-        "Cloud STT: Groq, OpenAI, Cerebras, Deepgram",
+        "Built-in local LLM (llama.cpp), no extra installs",
+        "On-device text-to-speech via Kokoro, Piper, or Supertonic",
         "Voice assistant mode with local or cloud LLM",
-        "On-device TTS via Kokoro or Piper",
-        "X11 and Wayland support",
-        "PipeWire, PulseAudio, ALSA audio backends",
+        "Wake word for hands-free start",
+        "On-device speaker recognition",
+        "Drive coding agents by voice over MCP",
+        "Cloud providers per stage: Groq, OpenAI, Gemini, Anthropic, Cerebras, Deepgram, ElevenLabs, Cartesia, AssemblyAI, Speechmatics, OpenRouter",
+        "GPU acceleration via Vulkan (NVIDIA, AMD, Intel)",
+        "Serves Wyoming and OpenAI/Ollama-compatible APIs",
         "LAN server mode with mDNS discovery",
         "Home Assistant integration",
+        "Settings in your browser",
+        "Runs on Linux, macOS, and Windows",
         "Zero telemetry"
       ],
       "author": { "@id": "https://fono.page/#author" },
@@ -1126,7 +1162,7 @@
       "@id": "https://fono.page/#website",
       "url": "https://fono.page/",
       "name": "Fono",
-      "description": "Local-first voice dictation and voice assistant for Linux.",
+      "description": "Talk to your computer. An open-source, complete voice-AI stack in one small binary.",
       "publisher": { "@id": "https://fono.page/#author" },
       "inLanguage": "en"
     },
@@ -1134,7 +1170,7 @@
       "@type": "WebPage",
       "@id": "https://fono.page/#webpage",
       "url": "https://fono.page/",
-      "name": "Fono — Local-first voice dictation and assistant for Linux",
+      "name": "Fono — Talk to your computer",
       "isPartOf": { "@id": "https://fono.page/#website" },
       "about": { "@id": "https://fono.page/#software" },
       "primaryImageOfPage": "https://fono.page/assets/og.png",
@@ -1162,7 +1198,7 @@
       "name": "Can Fono answer questions, or is it dictation-only?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Both. F7 is dictation — your words land in the focused window. F8 is the voice assistant — Fono transcribes your question, runs it through a local Ollama model or a cloud LLM (Groq, OpenAI, Anthropic, Cerebras), and speaks the reply back through Kokoro or Piper on-device, or a cloud TTS. Same daemon, same hotkey muscle memory, different brain."
+        "text": "Both. F7 is dictation — your words land in the focused window. F8 is the voice assistant — Fono transcribes your question, runs it through its built-in local LLM (llama.cpp compiled in, no extra installs) or a cloud LLM, and speaks the reply through Kokoro, Piper, or Supertonic on-device, or a cloud voice. Same daemon, same hotkey muscle memory, different brain."
       }
     },
     {
@@ -1191,10 +1227,50 @@
     },
     {
       "@type": "Question",
+      "name": "Can it start hands-free, without a hotkey?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Fono can idle and listen for a spoken wake phrase; detection runs locally and is off until you enable it. There's also a realtime mode for back-and-forth conversation — just keep talking."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can Fono tell who is speaking?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Enrol a voice once and Fono recognises it on-device, tagging each history entry with the speaker's name. The voiceprint never leaves your machine — only the recognised name is saved."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I drive coding agents by voice?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes — early preview. Fono exposes an MCP voice loop: Claude Code, Cursor, Forge, and other MCP-capable agents can take your spoken instructions and talk back when they need input or finish a task."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can other apps and machines use Fono?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Fono serves the Wyoming protocol (Home Assistant discovers it over mDNS as a speech-to-text, text-to-speech, and wake-word provider) and an OpenAI- and Ollama-compatible API on port 11434 for editors, Open WebUI, and anything that speaks those APIs. Inbound API keys gate LAN access."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How fast is local, really?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "On a laptop CPU the local assistant's first spoken word lands in about a third of a second, and the engine runs 2-4x ahead of Ollama on identical weights. The model picker is backed by 900+ benchmark runs, not guesses."
+      }
+    },
+    {
+      "@type": "Question",
       "name": "How do I switch from local Whisper to a cloud provider?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Run 'fono use cloud groq' (or openai, cerebras, anthropic, deepgram). Add your API key with 'fono keys add PROVIDER_API_KEY'. No restart needed."
+        "text": "Run 'fono use cloud groq' — one key covers STT, polish, assistant, and TTS — or swap a single stage with 'fono use stt deepgram'. Add your API key with 'fono keys add PROVIDER_API_KEY'. No restart needed; 'fono use local' brings everything back home."
       }
     },
     {
@@ -1202,7 +1278,7 @@
       "name": "Are macOS and Windows supported?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "They are on the roadmap. Linux is the primary target and ships first; macOS and Windows builds follow."
+        "text": "Yes, as experimental ports. Each release ships a Metal-accelerated Apple Silicon binary and a Windows .exe that uses the GPU when a driver is present. Linux remains the daily-driven primary; issue reports on the new ports are genuinely useful."
       }
     },
     {
@@ -1218,7 +1294,7 @@
       "name": "Does Fono use the GPU?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Fono provides a GPU build that uses Vulkan to run Whisper on your GPU, making it incredibly fast. With a mid-range graphics card, it can transcribe your speech almost instantly. This works on nearly all Nvidia, AMD, and Intel GPUs made in the last few years. This is especially usefull when running larger models."
+        "text": "Yes. The GPU build uses Vulkan and works on nearly all NVIDIA, AMD, and Intel GPUs from the last few years — the installer picks it automatically when it detects one. With a mid-range card, larger Whisper models transcribe your speech almost instantly."
       }
     },
     {

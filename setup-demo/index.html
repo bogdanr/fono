@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Fono settings — demo</title>
+<meta name="description" content="Click around Fono's settings page — the exact page the binary serves, running on canned demo data." />
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<link rel="stylesheet" href="app.css" />
+<style>
+  .demo-banner {
+    position: sticky; top: 0; z-index: 50;
+    padding: 8px 16px; text-align: center;
+    font: 13px/1.5 system-ui, sans-serif;
+    background: #d9342f; color: #fff;
+  }
+  .demo-banner a { color: #fff; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="demo-banner">Demo — this page ships inside the binary; changes don&rsquo;t save here.
+  <a href="/#install">Or skip the demo: installing takes about a minute.</a></div>
+<main>
+  <div class="hd">
+    <div class="left">
+      <span class="wordmark" style="font-size:24px;">Fono<span class="dot">.</span></span>
+      <span class="hint mono" id="verchip">settings</span>
+    </div>
+    <div class="actions">
+      <a class="iconbtn" id="doctorbtn" href="#/doctor" title="System health" aria-label="System health">&hellip;</a>
+      <button class="iconbtn" id="themebtn" type="button" title="Toggle light/dark theme" aria-label="Toggle light/dark theme">&#9680;</button>
+    </div>
+  </div>
+  <div id="view-settings">
+  <div class="search">
+    <span style="color:var(--ink-dim)">&#8981;</span>
+    <input id="q" placeholder="Search settings&hellip; try &ldquo;wake word&rdquo; or &ldquo;api key&rdquo;" autocomplete="off" />
+    <span class="kbd">/</span>
+  </div>
+  <div id="list"><p class="hint" id="loading">Loading configuration&hellip;</p></div>
+  <p class="privacy-note" style="margin-top:20px;">Config lives at <span class="kbd" id="cfgpath">&hellip;</span> &mdash; audio never leaves this machine unless you pick a cloud provider.</p>
+  </div>
+  <div id="view-doctor" hidden></div>
+</main>
+<div class="unsaved" id="unsaved" hidden>
+  <span class="msg"><b id="dirtymsg">0 unsaved changes</b></span>
+  <button class="btn ghost" id="discardbtn" type="button">Discard</button>
+  <button class="btn primary" id="savebtn" type="button">Save</button>
+</div>
+<div id="toast" hidden></div>
+<script src="fixture.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
