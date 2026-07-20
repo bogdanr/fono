@@ -242,7 +242,9 @@ $ fono config web        # enables [server.web] if needed, opens the browser
 ```
 
 or via the tray's **Settings…** entry, which starts the listener on
-demand. The underlying block:
+demand. Want a look before installing? There's a
+[read-only demo of the page](https://fono.page/setup-demo/) on the
+website. The underlying block:
 
 ```toml
 [server.web]

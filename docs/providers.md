@@ -1,9 +1,12 @@
 # Fono provider matrix
 
-Fono ships with one **speech-to-text (STT)** engine and one **polish**
-engine active at a time. Both are selected in `~/.config/fono/config.toml`
-and can be swapped at any time with `fono use`, `fono setup`, or by editing
-the file directly. API keys are stored in `~/.config/fono/secrets.toml`
+Fono's pipeline has five swappable stages — **speech-to-text (STT)**,
+**polish** (transcript cleanup), the **voice assistant**,
+**text-to-speech (TTS)**, and the **wake word** — each with a local
+default and cloud alternatives. This page is the per-stage matrix.
+Backends are selected in `~/.config/fono/config.toml` and can be swapped
+at any time with `fono use`, `fono setup`, or by editing the file
+directly. API keys are stored in `~/.config/fono/secrets.toml`
 (mode 0600, never logged) or read from `$ENV_VAR`.
 
 ## Capability matrix
@@ -312,7 +315,7 @@ degradation and otherwise accepts the detected response. Scribe also
 has no equivalent of Whisper's `prompt` field; any `[stt.prompts]`
 entries are accepted for forward compatibility but unused on the wire.
 
-## polish
+## Polish
 
 | Backend            | Type         | Default model                 | API key env var        |
 |--------------------|--------------|-------------------------------|------------------------|
@@ -436,9 +439,10 @@ user-facing recipe lives in
 ## Default picks (rationale)
 
 * **Local default:** `whisper small` (resolves to `small-q5_1`, 182 MB, multilingual)
-  + `Qwen2.5-1.5B-Instruct` (1.0 GB, Apache-2.0). Runs on any 4-core x86_64 at
-  ~2 s latency for a 10-second utterance; idle RAM ~30 MB, active ~800 MB
-  (down from ~1.3 GB on fp16). Per-model quantization picks are recorded
+  + `gemma-4-e2b` (Gemma 4 E2B Instruct, Q4_0, ~3.2 GB, Apache-2.0) for polish
+  and assistant chat. The smaller `qwen3.5-0.8b` (528 MB) and `qwen3.5-2b`
+  (1.3 GB) GGUFs remain installable alternatives via `fono models install`,
+  both Apache-2.0. Per-model quantization picks are recorded
   in [ADR 0027](decisions/0027-stt-quantization-ladder.md).
 * **Cloud presets:** `fono use cloud groq` pairs Groq whisper-large-v3-turbo
   with Groq llama-3.3-70b-versatile (single key, sub-1 s end-to-end).
@@ -461,6 +465,14 @@ Press **Escape** to dismiss it early. This makes providers without a TTS
 of their own (e.g. an Anthropic-only setup: STT + LLM, no TTS) usable
 end-to-end. `fono doctor` reports this as an informational line, not a
 warning.
+
+**Local engines.** The default binaries bundle three on-device TTS engines,
+selected via `[tts.local].engine` (`auto` | `piper` | `kokoro` | `supertonic`):
+**Kokoro** (highest-quality English, six voices on one shared model), **Piper**
+(42 voices across 38 languages), and **Supertonic** (opt-in: one shared pack
+serving 31 languages in 10 voices at 44.1 kHz). `auto` routes English to
+Kokoro and other languages to Piper; pinning `supertonic` downloads its pack
+on the daemon's next start.
 
 | Backend       | Type       | Default model       | Endpoint                                               | Auth header                  |
 |---------------|------------|---------------------|--------------------------------------------------------|------------------------------|
@@ -574,11 +586,9 @@ https://openrouter.ai/apps?url=https://fono.page. The shared source
 of truth is `fono_core::openrouter_attribution`.
 
 Kokoro (`hexgrad/kokoro-82m`, voice `af_heart`) was the previous
-default. It is deferred to a future local-and-cloud-symmetric backend
-with a shared `KokoroVoiceRouter` so picking Kokoro local vs cloud
-yields the same audio output for the same `(text, lang, voice)`
-triple — see
-`plans/2026-05-14-kokoro-local-and-cloud-parity-v1.md`. Existing users
+default. It is deferred until Kokoro can ship as a symmetric
+local-and-cloud backend where picking Kokoro local vs cloud yields the
+same audio for the same text, language, and voice. Existing users
 who prefer Kokoro today can pin
 `[tts.cloud] model = "hexgrad/kokoro-82m"` and `voice = "af_heart"`
 manually.
@@ -780,7 +790,7 @@ exposes Whisper over the Wyoming protocol on TCP/10300 so other Fono
 clients, Home Assistant, and Rhasspy can route transcription through
 this host (auto-discovery via mDNS). The installer seeds a minimal
 `/etc/fono/config.toml` and verifies the listener bound. See
-[install.md → Server mode](install.md#server-mode-wyoming-stt-host) for
+[install.md → Server mode](install.md#server-mode-wyoming-stt-tts-and-wake-word-host) for
 the install, security, and key-management story.
 
 ## Wake-word models
@@ -806,7 +816,11 @@ one:
 Apache-2.0 classifier (Apache melspectrogram + Apache Google embedding +
 Piper-synthetic positive samples + openly-licensed negatives). It carries
 **no usage restriction** and is the only model eligible to be a default or
-to be bundled in a release.
+to be bundled in a release. The `hey_fono` artifact is **not yet
+hosted**, and local always-on listening stays off until you enable it in
+`[wakeword]`; in the meantime, the auto-served Wyoming wake path (see
+below) uses the community `hey_jarvis` model as a temporary fetchable
+default.
 
 **Opt-in NonCommercial community models.** The upstream openWakeWord
 phrases (`hey_jarvis`, `alexa`, `hey_mycroft`) are published under
@@ -835,7 +849,7 @@ is proprietary and ToS-bound, so such a model must not be shipped. See
 
 **Wyoming and privacy.** Fono automatically serves its **local** detector
 as a Wyoming wake `Detection` service whenever `[server.wyoming]` is
-enabled — exactly like STT and TTS, with audio staying on the machine and
+enabled — same as STT and TTS, with audio staying on the machine and
 no extra switch. Opt-in only, it can instead delegate detection to an
 external `wyoming-openwakeword` service (client direction, which
 **streams idle mic audio over the LAN** and triggers a prominent

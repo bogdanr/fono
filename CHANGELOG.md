@@ -5,6 +5,82 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] — 2026-07-20
+
+### Added
+
+- **Fono recognises who is speaking (on-device speaker recognition).** Enrol
+  your voice once and Fono can tell it's you when you dictate or talk to the
+  assistant, tagging each entry in your history with the recognised person.
+  Enrol from the browser settings page (the new **Speakers** page) or the
+  `fono speaker` commands, then use **"test my voice"** — on the page or via
+  `fono speaker test` — to see how reliably Fono tells you apart from other
+  people: it reads a few short clips, charts your scores against a shipped
+  comparison set, recommends a sensitivity, and works out the automatic
+  match cut-off for you (leaning toward keeping other people out). You can
+  review each recorded sample, see its length, loudness, noise, and how well
+  it matches the others, and drop weak clips in one click — Fono always keeps
+  enough good audio behind and never deletes your last sample without asking.
+  Recognition runs at the same time as transcription so it adds no delay, and
+  the model loads only once. When the assistant recognises you it's quietly
+  told who it's talking to, so it can answer more personally.
+
+  Your voiceprint never leaves the machine: it is computed locally, stored in
+  an on-device voiceprint database, and is never attached to any cloud
+  transcription or cleanup request — only the recognised *name* is ever saved,
+  alongside your history. The full walkthrough is in the new Speakers guide
+  (`docs/speakers.md`), linked from the README and docs index, and the
+  `[speaker]` config block is documented in the configuration reference.
+
+- **Let other apps on your network use Fono's voices and transcription.**
+  Building on the local LLM server from 0.13.0, Fono can now also serve its
+  speech-to-text and text-to-speech to other apps and machines on your LAN,
+  so one Fono box can voice a whole network. Access is gated by **inbound API
+  keys you manage yourself**, with per-key usage tracking, and `fono doctor`
+  (and the keys check) now confirm a configured key actually works. As always
+  the server binds to loopback by default and only reaches the LAN when you
+  opt in.
+
+- **Settings-page improvements.** Pick and try your local voice engine right
+  from the settings page with a built-in voice tester (which now plays the
+  engine you actually selected), see system health inline with a one-click
+  `fono doctor` view, and configure Network options for the cleanup and
+  assistant stages. The "watch it think" activity overlay was rebuilt into a
+  clearer, livelier readout, and the assistant now shows its replies on
+  screen even when no voice output is set up.
+
+### Changed
+
+- **Fono is now described as what it has become: a complete, open-source
+  voice-AI stack in one small binary** — speech-to-text, natural voices, a
+  local LLM, wake word, and speaker recognition, local by default with
+  per-stage cloud switching. This release retells that story across the
+  README, the roadmap, and the packaging descriptions (Debian, AUR,
+  SlackBuild, Nix, desktop entries). Copy and metadata only — no change to
+  how Fono works.
+
+### Fixed
+
+- **Recording your "test my voice" clips no longer fails with an "invalid or
+  oversized JSON body" error.** The settings server capped every upload at
+  1 MB, which a handful of short voice clips could exceed; voice enrolment and
+  testing now accept a larger local-only upload while ordinary settings
+  changes keep the tight limit.
+
+- **Voice enrolment no longer fails silently**, and now shows you a review
+  step before it saves, so you can confirm the captured audio first.
+
+- **The Node.js 20 deprecation warning in the container build is gone** — the
+  GHCR login step moved to `docker/login-action@v4`, which runs on Node.js 24.
+
+### Internal
+
+- **Release artefacts are simpler: one consolidated `SHA256SUMS` instead of a
+  `.sha256` file per download.** `fono update` now verifies each download
+  against the matching row in `SHA256SUMS` (and still accepts the old
+  per-asset sidecar for historical releases), so nothing changes for the
+  self-updater — there are just fewer files on each release.
+
 ## [0.16.0] — 2026-07-14
 
 ### Added
@@ -2809,6 +2885,7 @@ feature and ships fully wired in v0.2.
 - Local LLM cleanup (Qwen / SmolLM) is opt-in / preview.
 - Real `winit + softbuffer` overlay window is a stub (event channel only).
 
+[0.17.0]: https://github.com/bogdanr/fono/compare/v0.16.0...v0.17.0
 [0.10.0]: https://github.com/bogdanr/fono/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/bogdanr/fono/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/bogdanr/fono/compare/v0.8.2...v0.9.0

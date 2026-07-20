@@ -4,6 +4,10 @@ A symptom-first guide. For each problem, the first step is the diagnostic
 command — paste its output into a bug report if the suggested fix doesn't
 help.
 
+The commands on this page are Linux-flavoured; on macOS or Windows the
+same diagnostics apply but the platform notes live in
+[build-macos.md](build-macos.md) and [build-windows.md](build-windows.md).
+
 ## Dictation produces nothing
 
 ### Step 1 — confirm the daemon is running
@@ -361,7 +365,9 @@ fono use local
 
 - Run `fono hwprobe` to see your hardware tier.
 - If the tier says `unsuitable` or `minimum`, switch to a smaller whisper
-  model (`base` instead of `small`, `tiny` instead of `base`).
+  model (`small` instead of `large-v3-turbo`, `tiny` instead of `small` —
+  `base` was removed from the model ladder; see
+  [providers.md](providers.md#speech-to-text) for the current rungs).
 - The first dictation after daemon start pays a model-load cost
   (~200–600 ms). Subsequent dictations should be faster — `fono history`
   shows actual `stt_ms` per row.
@@ -440,20 +446,22 @@ log around the switch.
 
 ## Voice assistant (F8) doesn't trigger
 
-The assistant pipeline is independent of dictation and needs both an
-assistant chat backend and a TTS backend selected before F8 will do
-anything useful.
+The assistant pipeline is independent of dictation and needs an
+assistant chat backend selected before F8 will do anything useful. A
+TTS backend is optional — without one the assistant shows the reply as
+an on-screen text panel instead of speaking it (see
+[providers.md → Text-only mode](providers.md#text-to-speech-assistant-audio-replies)).
 
 ```sh
 fono doctor
 ```
 
-Look for the `assistant:` and `tts:` rows. Each should show
-`(active) reachable` or `ready`. If either says `not configured`:
+Look for the `assistant:` row; it should show `(active) reachable` or
+`ready`. If it says `not configured`:
 
 ```sh
-fono use assistant groq           # or anthropic, cerebras, openai, ollama
-fono use tts openai               # or wyoming, piper
+fono use assistant local          # or groq, anthropic, cerebras, openai, gemini
+fono use tts openai               # optional — spoken replies instead of the text panel
 ```
 
 If `fono doctor` reports the backends ready but pressing F8 still
@@ -502,62 +510,45 @@ where the drain wait will land.
 `~/.config/fono/config.toml` directly, or change the system default for
 `text/plain` via `xdg-mime default <editor>.desktop text/plain`.
 
-## Capturing screencasts
+## Wake word doesn't trigger
 
-`scripts/capture-overlay.sh` records the overlay window for the README and
-release notes. It runs entirely against the live daemon — no test harness —
-so the captures show the real hotkey → waveform → inject flow.
+Run `fono doctor` — it shows whether the wake word is enabled, which
+detector backend would run, each phrase's target, and whether the model
+file is cached. Common causes:
 
-### Modes
+- `[wakeword].enabled` is `false` (the default — always-on listening is
+  opt-in; see [configuration.md](configuration.md#wakeword--always-on-wake-word)).
+- The phrase's model file isn't downloaded yet — `fono doctor` reports
+  the cache state.
+- You spoke during a recording or an assistant turn: the idle listener
+  suspends while either is active and resumes when Fono goes idle.
 
-- `--mode overlay` *(default)* — tight crop of the overlay (640 × ≤240
-  logical px, bottom-centered) for the README hero shot.
-- `--mode paste --target-app <wm_class>` — extends the crop down to
-  include a target window (terminal, editor, browser) so the screencast
-  shows the pasted text landing in a real surface. Falls back to
-  `--below <px>` when geometry probes are restricted (most Wayland
-  compositors), or `--region WxH+X+Y` for a fully manual crop.
-- `--mode gallery [--styles bars,oscilloscope,fft,heatmap]` — records
-  one take per waveform style, labels each clip, and stitches them
-  into one master via `ffmpeg -f concat` (or `--layout grid` for a
-  2×2 `xstack` mosaic). Style switching edits `[overlay].style` in
-  `~/.config/fono/config.toml` and sends `SIGHUP` to the daemon.
+## Speaker tag missing in history
 
-### Output triplet
+Speaker verification is off by default, and even when enabled it only
+tags dictations that match an **enrolled** voice. Enable
+`[speaker].enabled`, enroll yourself (settings-page enrollment card, or
+manage profiles with `fono speaker list` / `rename` / `test`), and check
+`fono doctor` for the verification section — it warns when verification
+is on but nobody is enrolled. Full guide: [speakers.md](speakers.md).
 
-Each take emits MP4 (`-crf 23` faststart), animated GIF (palette
-pipeline, auto-tiered down 480→420→360 px / 15→12→10 fps for overlay,
-640→540→480 for paste / gallery until under the 5 MB soft budget; hard
-fail above 9.5 MB to stay inside GitHub's 10 MB inline cap), and
-animated WebP (q 70). MP4 is the master for PRs / release notes; GIF
-or WebP go in `README.md`.
+## Settings page won't open
 
-### Dependencies
+The web settings listener (`[server.web]`) is off by default. `fono
+config web` or the tray's **Settings…** entry starts it on demand and
+opens the browser. It binds to loopback (`127.0.0.1:10808`) — it is not
+reachable from other machines unless you widen `bind`, in which case
+keep `auth = true` and create an inbound API key first. See
+[configuration.md → Settings in the browser](configuration.md#settings-in-the-browser).
 
-The script aborts at startup with a single message listing every
-missing tool. On NimbleX / Slackware install:
-`ffmpeg`, `xorg-xrandr`, `xdotool`, `wmctrl` (X11) or `wlr-randr`,
-`grim`, `wf-recorder` (Wayland). `gifsicle` is optional but produces
-noticeably smaller GIFs when present. See `--help` for the full flag
-set and per-distro package names.
+## The OpenAI/Ollama API isn't reachable
 
-### Recipes
-
-```sh
-# README hero (X11/i3, 6 s, daemon auto-spawned).
-scripts/capture-overlay.sh --mode overlay --duration 6 --start-fono
-
-# "Lands in a real app" demo — position Alacritty under the overlay first.
-scripts/capture-overlay.sh --mode paste --target-app Alacritty --duration 8
-
-# All four waveform styles, labelled and stitched into one clip.
-scripts/capture-overlay.sh --mode gallery --duration 5 --layout concat
-```
-
-HiDPI displays need `--scale 1.25` (or whatever `GDK_SCALE` /
-`Xft.dpi/96` is). Compositors that refuse sub-region capture (most
-Wayland portals) record the full output and rely on the ffmpeg crop
-pass — geometry is still resolved via `wlr-randr` or `swaymsg`.
+The LLM server (`[server.llm]`) is off by default. Enable it in config
+or via the tray (*Servers → Local LLM server*); it listens on port
+`11434` (Ollama's port) and binds to loopback unless you set `bind =
+"0.0.0.0"`. Remote callers also need an inbound API key while `auth =
+true` (the default). See
+[configuration.md → Serve local inference](configuration.md#serve-local-inference-over-http-openai--ollama-api).
 
 ## Where to file a bug
 

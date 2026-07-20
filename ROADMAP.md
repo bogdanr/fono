@@ -21,6 +21,18 @@ The home page is [fono.page](https://fono.page).
 
 ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge)
 
+**[v0.17.0 — Fono recognises who is speaking](#shipped)**  
+Enrol your voice once and Fono can tell it's you when you dictate or talk to the
+assistant, tagging each history entry with the recognised person — all on
+device. A new Speakers settings page and `fono speaker` commands handle
+enrolment, a "test my voice" check that charts how reliably you're told apart
+and sets the match sensitivity for you, and sample review that drops weak clips.
+Your voiceprint never leaves the machine; only the recognised name is saved.
+Also: other apps on your LAN can now use Fono's speech-to-text and voices,
+gated by inbound API keys you manage with per-key usage tracking; plus
+settings-page improvements (local voice-engine picker and tester, inline
+system health, network options). *(2026-07-20)*
+
 **[v0.16.0 — Windows support](#shipped)**  
 Fono now runs on Windows: one `fono.exe` with the tray icon, push-to-talk
 dictation and the voice assistant, text typed at the cursor, the recording
@@ -337,6 +349,37 @@ while referencing another. Plan sketch:
 
 Newest first.
 
+- ![v0.17.0](https://img.shields.io/badge/v0.17.0-2026--07--20-blue?style=flat-square)
+  **Fono recognises who is speaking (on-device speaker recognition).** Enrol
+  your voice once and Fono can tell it's you when you dictate or talk to the
+  assistant, tagging each entry in your history with the recognised person.
+  Enrol from the new **Speakers** settings page or the `fono speaker`
+  commands, then run **"test my voice"** — on the page or via `fono speaker
+  test` — to see how reliably Fono tells you apart from other people: it
+  charts your scores against a shipped comparison set, recommends a
+  sensitivity, and works out the automatic match cut-off for you, leaning
+  toward keeping other people out. Review each recorded sample (length,
+  loudness, noise, how well it matches the rest) and drop weak clips in one
+  click; Fono always keeps enough good audio behind and never deletes your
+  last sample without asking. Recognition runs alongside transcription so it
+  adds no delay, the model loads once, and when the assistant recognises you
+  it's quietly told who it's speaking with. Your voiceprint is computed
+  locally, stored on device, and never attached to any cloud request — only
+  the recognised name is ever saved. Full guide in `docs/speakers.md`.
+
+  Also in this release: other apps and machines on your LAN can now use
+  Fono's speech-to-text and text-to-speech (building on the local LLM server
+  from 0.13.0), gated by inbound API keys you manage yourself with per-key
+  usage tracking, and `fono doctor` confirms a configured key actually works.
+  The settings page gains a local voice-engine picker and built-in voice
+  tester, inline system health with a one-click doctor view, and network
+  options for cleanup and the assistant; the "watch it think" activity
+  overlay was rebuilt to be clearer. And Fono is now described across the
+  README, roadmap, and packaging as what it has become — a complete,
+  open-source voice-AI stack (speech-to-text, natural voices, a local LLM,
+  wake word, and speaker recognition) in one small binary. *v0.17.0,
+  2026-07-20.*
+
 - ![v0.16.0](https://img.shields.io/badge/v0.16.0-2026--07--14-blue?style=flat-square)
   **Windows support (experimental).** Fono now runs on Windows: a single
   `fono.exe` with the notification-area tray icon and menu, push-to-talk
@@ -576,7 +619,7 @@ Newest first.
   answer (`[mcp].relevance_filter`, default `"heuristic"`, with an
   optional `"llm"` mode that uses the configured polish backend as
   a one-shot classifier with a 1.5 s timeout). New companion CLI
-  verbs: `fono speak --stream` (sentence-segments stdin and speaks
+  verbs: `fono speak stream` (sentence-segments stdin and speaks
   through the configured TTS backend) and
   `fono use mcp-server on|off`. Disabled by default — opt in with
   `fono use mcp-server on`. ADR 0030 captures the design.

@@ -75,9 +75,10 @@ pub struct UpdateInfo {
     pub notes: String,
     /// Release was flagged prerelease on GitHub.
     pub prerelease: bool,
-    /// URL of the asset's `.sha256` sidecar, when one was published
-    /// alongside the release. `None` when the release predates the
-    /// per-asset sidecar convention or omits one.
+    /// URL of the release's checksum manifest — the consolidated
+    /// `SHA256SUMS` for current releases, or a per-asset `<asset>.sha256`
+    /// sidecar for older ones. `None` when the release predates the
+    /// checksum-publication convention or omits one.
     #[serde(default)]
     pub sha256_url: Option<String>,
     /// Pre-fetched sidecar digest (lowercase hex). Populated by
@@ -329,15 +330,21 @@ fn pick_release(
             );
         };
         if let Some(asset) = r.assets.iter().find(|a| a.name == want) {
-            // Look for a sibling `<asset>.sha256` published in the
-            // same release. Wave 2 Thread B — supply-chain hardening:
-            // when the sidecar is present, `apply_update` requires the
-            // streamed digest to match it.
-            let sidecar_name = format!("{}.sha256", asset.name);
+            // Verify against the consolidated `SHA256SUMS` manifest
+            // published alongside the release (one row per artefact).
+            // `apply_update` fetches it and `parse_sha256_sidecar` picks
+            // the row whose filename matches this asset, requiring the
+            // streamed digest to match. Older releases published a
+            // per-asset `<asset>.sha256` sidecar instead; accept that
+            // too so `fono update` can still verify historical builds.
             let sha256_url = r
                 .assets
                 .iter()
-                .find(|a| a.name == sidecar_name)
+                .find(|a| a.name == "SHA256SUMS")
+                .or_else(|| {
+                    let sidecar_name = format!("{}.sha256", asset.name);
+                    r.assets.iter().find(|a| a.name == sidecar_name)
+                })
                 .map(|a| a.browser_download_url.clone());
             return Ok(GhReleaseChoice {
                 tag: r.tag_name.clone(),

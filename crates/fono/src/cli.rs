@@ -347,9 +347,9 @@ pub enum Cmd {
     /// playback. Backpressure prevents a fast producer from outrunning
     /// the listener (at most 5 sentences queue ahead).
     ///
-    /// Example: `echo "Hello there. This is sentence two." | fono speak --stream`
+    /// Example: `echo "Hello there. This is sentence two." | fono speak stream`
     ///
-    /// Pipe from a coding agent: `forge | fono speak --stream`
+    /// Pipe from a coding agent: `forge | fono speak stream`
     Speak {
         #[command(subcommand)]
         action: SpeakCmd,

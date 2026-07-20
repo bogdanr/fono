@@ -22,6 +22,8 @@ showing what the microphone is hearing (bars, oscilloscope, FFT, or
 heatmap — switch via the tray *Preferences → Waveform style*). The
 overlay disappears as soon as capture ends.
 
+![The four waveform overlay styles: bars, oscilloscope, FFT, and heatmap](../assets/styles.webp)
+
 ## Your first assistant turn
 
 1. Press and hold **F8**, ask a short question, release.
@@ -29,10 +31,12 @@ overlay disappears as soon as capture ends.
    playing before the model is done thinking.
 3. Press **Escape** at any time to shut up the reply.
 
-If F8 does nothing, the assistant needs a chat backend selected. Run
-`fono use assistant <provider>` (any of `openai`, `anthropic`, `groq`,
-`cerebras`, `openrouter`, `ollama`) and add the key if you don't have
-one yet:
+The assistant runs on the bundled local model out of the box — the
+setup wizard's local path enables it with no key and no cloud account.
+If F8 does nothing, the assistant is probably disabled or has no
+backend selected. Run `fono use assistant <backend>` (any of `local`,
+`openai`, `anthropic`, `groq`, `cerebras`, `gemini`, `openrouter`);
+cloud backends also need a key:
 
 ```sh
 fono keys add OPENAI_API_KEY      # paste your key at the prompt

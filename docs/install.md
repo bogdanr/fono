@@ -32,7 +32,7 @@ Useful environment knobs:
 | `FONO_VARIANT=cpu\|gpu` | override variant detection |
 | `FONO_MODE=desktop\|server` | override mode detection |
 | `FONO_INSTALL_NO_START=1` | skip the post-install daemon launch |
-| `BIN_DIR=/path` | legacy: bypass `fono install` and drop the binary in `BIN_DIR`
+| `BIN_DIR=/path` | legacy: bypass `fono install` and drop the binary in `BIN_DIR` |
 
 ## Manual install
 
@@ -63,11 +63,12 @@ sudo fono install --server       # binary + systemd unit running as user `fono` 
 sudo fono install --dry-run      # print the planned actions, write nothing
 ```
 
-## Server mode (Wyoming STT host)
+## Server mode (Wyoming STT, TTS, and wake-word host)
 
 `sudo fono install --server` is the way to run Fono headless as a LAN
-STT server that Home Assistant, Rhasspy, or other Fono clients can
-auto-discover via mDNS and route transcription through.
+voice server: it serves Wyoming speech-to-text, text-to-speech, and
+wake-word detection that Home Assistant, Rhasspy, or other Fono clients
+can auto-discover via mDNS.
 
 > Prefer Docker? See [home-assistant.md](home-assistant.md) for the
 > prebuilt multi-arch Wyoming STT/TTS container.
@@ -155,10 +156,18 @@ inventory.
   maintainer on NimbleX / Slackware; CI also covers Ubuntu and Arch.
 - **macOS (Apple Silicon)** — experimental (shipped in v0.15.0). Built
   and verified on a headless remote Mac, not yet eyeballed on a physical
-  display. See [docs/build-macos.md](build-macos.md).
+  display. To install: each release attaches a Metal-accelerated
+  `fono-vX.Y.Z-aarch64-apple-darwin` binary — download it, `chmod +x`,
+  and run `fono install`. It sets up start-at-login and walks you
+  through the one-time permission grants. See
+  [docs/build-macos.md](build-macos.md).
 - **Windows x86_64** — experimental (shipped in v0.16.0). An early port,
   built and exercised remotely rather than daily-driven; expect rough
-  edges and please file an issue. See
+  edges and please file an issue. To install: each release attaches a
+  `fono-vX.Y.Z-x86_64.exe` — download it and run `fono install`. It
+  copies the app into your user folder and starts it at login, no
+  administrator prompt; one download uses your GPU when a driver is
+  present and falls back to the processor otherwise. See
   [docs/build-windows.md](build-windows.md).
 
 ## Verification

@@ -1,5 +1,31 @@
 # Fono — Project Status
-Last updated: 2026-07-19
+Last updated: 2026-07-20
+
+## 2026-07-20 — Release 0.17.0 prepared (speaker recognition)
+
+Cut the 0.17.0 release. Headline: **on-device speaker recognition** — the full
+enrol → "test my voice" → live-tagging slice landed across the 31 commits since
+v0.16.0 (Speakers settings page, `fono speaker` CLI incl. `speaker test`,
+sample review/cleanup, auto-threshold calibration, live + assistant tagging,
+biometric-leak regression test, `docs/speakers.md`). Also shipped: LAN access
+to Fono's STT/TTS gated by inbound API keys with per-key usage tracking;
+settings-page improvements (local voice-engine picker + tester, inline system
+health, network options, rebuilt activity overlay); and a public-surface
+repositioning to "a complete voice-AI stack in one small binary".
+
+Release chores this session:
+- Bumped workspace version `0.16.0 → 0.17.0` (`Cargo.toml` + `Cargo.lock`, 21
+  crates).
+- Added the `CHANGELOG.md` `[0.17.0]` section and the compare-link ref.
+- Updated `ROADMAP.md` (new Recently-shipped banner + Shipped entry).
+- CI/release fixes folded into this release: container GHCR login moved to
+  `docker/login-action@v4` (kills the Node 20 deprecation warning); release
+  artefacts now ship a single consolidated `SHA256SUMS` instead of a per-asset
+  `.sha256` sidecar, with `fono-update` verifying against the matching row and
+  still accepting legacy sidecars (Task 2.6 of the TTS-stack plan).
+
+Pre-tag gates run: fmt, clippy `-D warnings`, workspace tests, and the
+size-budget gate. Committed (not pushed) with an annotated tag ready.
 
 ## 2026-07-19 — Speaker verification: live-path + assistant wiring (Step 4 follow-up)
 

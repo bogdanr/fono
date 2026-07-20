@@ -1,61 +1,66 @@
 # Fono documentation
 
-Start here, then drop into whichever page covers what you're after.
+Everything about installing, using, hosting, and hacking on Fono lives here.
+Pick the section that matches what you're trying to do.
 
-## New to Fono
+## Get started
 
-1. [install.md](install.md) — one-liner, manual install, server mode,
-   updating, uninstalling.
-2. [quickstart.md](quickstart.md) — your first dictation, your first
-   assistant turn, the most common follow-up commands.
+- [Install Fono](install.md) — the one-liner, manual install, updating,
+  uninstalling.
+- [Do your first dictation](quickstart.md) — first dictation, first assistant
+  turn, and the follow-up commands you'll reach for next.
 
-## Day-to-day reference
+## Use it
 
-- [configuration.md](configuration.md) — every section in
-  `config.toml`, hotkey rebinding, secrets, XDG paths.
-- [providers.md](providers.md) — STT / polish / assistant / TTS
-  matrices, per-provider quirks, the wizard.
-- [speakers.md](speakers.md) — on-device speaker verification: enrolling
-  your voice, "test my voice" calibration, the `fono speaker` commands.
-- [home-assistant.md](home-assistant.md) — run the Docker container as
-  a Wyoming STT/TTS server and connect Home Assistant.
-- [interactive.md](interactive.md) — live (streaming) dictation: how
-  the overlay paints while you speak, the tuning knobs that survived
-  the 2026-05-22 simplification.
-- [inject.md](inject.md) — text injection backends, clipboard safety
-  net, per-compositor notes.
-- [wayland.md](wayland.md) — overlay backends, hotkey registration
+- [Change any setting](configuration.md) — every section of `config.toml`,
+  hotkey rebinding, secrets, XDG paths.
+- [Pick your STT, polish, and TTS providers](providers.md) — the full provider
+  matrices, per-provider quirks, and the setup wizard.
+- [Lock dictation to your own voice](speakers.md) — on-device speaker
+  verification: enrolling, calibration, the `fono speaker` commands.
+- [Watch words appear while you speak](interactive.md) — live streaming
+  dictation and how the overlay paints during it.
+- [Fix where text lands](inject.md) — text-injection backends, the clipboard
+  safety net, per-compositor notes.
+- [Sort out Wayland quirks](wayland.md) — overlay backends, hotkey registration
   (portal vs gsettings), per-compositor caveats.
+- [Diagnose a problem](troubleshooting.md) — symptom-first recipes, plus
+  `fono doctor` for a full diagnostic report.
+- [See what stays local and what leaves the machine](privacy.md) — data flows
+  and where files live on disk.
+- [Report a vulnerability](../SECURITY.md) — disclosure process.
 
-## When something is wrong
+## Serve your network
 
-- [troubleshooting.md](troubleshooting.md) — symptom-first recipes.
-- `fono doctor` — diagnostic report covering config, paths, providers,
-  audio device, injector, overlay backend, hotkey backend, tray host.
+- [Connect Home Assistant](home-assistant.md) — run the Docker container as a
+  Wyoming STT/TTS server for your voice assistant.
+- [Run a headless STT host](install.md#server-mode-wyoming-stt-tts-and-wake-word-host) — server
+  mode from the install guide.
+- [Serve your assistant as a local LLM API](configuration.md#serve-local-inference-over-http-openai--ollama-api)
+  — an OpenAI- and Ollama-compatible HTTP endpoint for editors, Open WebUI, and
+  Home Assistant.
+- [Change settings in your browser](configuration.md#settings-in-the-browser) —
+  the local web settings page, started with `fono config web`.
 
-## Privacy and security
+## Build on it
 
-- [privacy.md](privacy.md) — what stays local, what leaves the
-  machine, where data lives on disk.
-- [../SECURITY.md](../SECURITY.md) — vulnerability disclosure.
+- [Talk to your coding agent by voice](coding-agents.md) — the MCP server,
+  `fono agent-setup`, and per-agent configs for Claude Code, Cursor, Forge, and
+  more.
+- [Understand how Fono is put together](architecture.md) — workspace crate map,
+  runtime model, the dictation FSM.
+- [Keep the binary small](binary-size.md) — the size budget and how it's
+  enforced.
+- [Build on macOS](build-macos.md) and [build on Windows](build-windows.md) —
+  platform-specific build notes.
+- [Read why key choices were made](decisions/) — Architecture Decision Records
+  (language, default models, FSM design, overlay style, and more).
+- [Browse the implementation plans](plans/) — phased plans driving the roadmap.
+- [Check performance baselines](bench/) — benchmark reports and sweep results.
 
-## Under the hood
-
-- [architecture.md](architecture.md) — workspace crate map, runtime
-  model, the dictation FSM.
-- [decisions/](decisions/) — Architecture Decision Records explaining
-  *why* (language, default models, FSM design, overlay style,
-  language stickiness, etc.).
-- [plans/](plans/) — phased implementation plans driving the
-  roadmap.
-- [bench/](bench/) — performance baselines and sweep reports.
-
-## Contributor docs
-
-- [../AGENTS.md](../AGENTS.md) — orientation for agent sessions.
-- [../CONTRIBUTING.md](../CONTRIBUTING.md) — DCO sign-off, formatting,
-  clippy rules.
-- [../ROADMAP.md](../ROADMAP.md) — in progress / planned / shipped.
-- [dev/release-checklist.md](dev/release-checklist.md),
-  [dev/update-qa.md](dev/update-qa.md) — release-time procedures.
-- [status.md](status.md) — running session log.
+Contributor notes: [get oriented for agent sessions](../AGENTS.md),
+[read the contribution rules](../CONTRIBUTING.md) (DCO sign-off, formatting,
+clippy), [see what's planned and shipped](../ROADMAP.md),
+[follow the release checklist](dev/release-checklist.md),
+[QA an update](dev/update-qa.md), and
+[read the running session log](status.md).

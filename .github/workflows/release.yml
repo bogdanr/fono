@@ -181,7 +181,8 @@ jobs:
           # Two variants per
           # `plans/2026-05-02-fono-cpu-gpu-variants-v1.md`:
           # CPU-only (compact, default download, fully packaged) and
-          # GPU (Vulkan-enabled, raw binary + .sha256 only). aarch64
+          # GPU (Vulkan-enabled, raw binary only; checksum via the
+          # consolidated SHA256SUMS). aarch64
           # currently ships CPU-only (Vulkan SDK story on ARM lands in
           # a follow-up slice).
           - target: x86_64-unknown-linux-gnu
@@ -213,7 +214,8 @@ jobs:
           # carries the full target triple (`fono-vX.Y.Z-aarch64-apple-
           # darwin`) to stay unambiguous next to the bare-arch Linux
           # names — `fono-update::asset_name_for` must agree. Raw binary
-          # + .sha256 only (no bundle in CI: `fono install` assembles and
+          # only, checksum via the consolidated SHA256SUMS (no bundle in
+          # CI: `fono install` assembles and
           # self-signs Fono.app locally so the Accessibility grant is
           # keyed to the user's own stable identity; nothing to sign or
           # notarise here, no secrets). x86_64 / universal-lipo waits on
@@ -226,8 +228,8 @@ jobs:
             asset_prefix: fono
             features: accel-metal
           # Windows (plans/2026-05-26-windows-port-v1.md, Phase 13): a
-          # single x86_64 build shipped as a bare `.exe` plus a
-          # `.sha256` sidecar — no MSI, no code signing (explicit v1
+          # single x86_64 build shipped as a bare `.exe` (checksum via
+          # the consolidated SHA256SUMS) — no MSI, no code signing (explicit v1
           # non-goals, Task 13.4). The asset name is `fono-vX.Y.Z-x86_64.exe`
           # (`fono-update::asset_name_for` agrees). It uses the
           # `windows-defaults` feature set, which since 0.16 includes
@@ -606,9 +608,9 @@ jobs:
 
           # 2) Internal staging tarball consumed by the .deb/.arch/.txz/.lzm
           #    package jobs below. Only the CPU variant gets full distro
-          #    packaging in v0.5.0 launch; GPU variant ships raw binary
-          #    + .sha256 only (per the variants plan, slice 1). Windows is
-          #    excluded too: it ships the bare `.exe` + `.sha256` only (no
+          #    packaging in v0.5.0 launch; GPU variant ships the raw
+          #    binary only (per the variants plan, slice 1). Windows is
+          #    excluded too: it ships the bare `.exe` only (no
           #    distro packages — Windows port plan Task 13.4), and its
           #    `x86_64` arch label would otherwise clash with the Linux
           #    staging stem.
@@ -885,18 +887,13 @@ jobs:
                -o -name "*.deb" -o -name "*.pkg.tar.zst" -o -name "*.txz" -o -name "*.lzm" \) \
             -exec cp {} release/ \;
           cd release
+          # A single consolidated `SHA256SUMS` (one row per artefact) is
+          # the only checksum manifest we publish. `fono update` verifies
+          # the streamed SHA-256 against the matching row in this file
+          # (crates/fono-update/src/lib.rs — parse_sha256_sidecar picks
+          # the row by filename), so no per-asset `.sha256` sidecars are
+          # emitted.
           sha256sum * > SHA256SUMS
-          # Wave 2 Thread B — emit a per-asset `<asset>.sha256` sidecar
-          # for every release artefact. `fono update` (≥0.3.0) verifies
-          # the streamed SHA-256 against this sidecar and refuses to
-          # apply on mismatch. See crates/fono-update/src/lib.rs:462.
-          for f in fono-v*-x86_64 fono-v*-aarch64 fono-v*-x86_64.exe \
-                   fono-v*-aarch64-apple-darwin \
-                   fono-gpu-v*-x86_64 fono-gpu-v*-aarch64 \
-                   *.deb *.pkg.tar.zst *.txz *.lzm; do
-            [ -e "$f" ] || continue
-            sha256sum "$f" > "${f}.sha256"
-          done
           ls -la
 
       - name: Sign SHA256SUMS with minisign (optional)

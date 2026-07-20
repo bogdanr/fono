@@ -19,7 +19,7 @@
 #   <name>.gif   palette-optimised, ≤ 5 MB target for inline README.
 #   <name>.webp  animated, q 70 — fallback when GIF blows the budget.
 #
-# See `docs/troubleshooting.md` → "Capturing screencasts" for end-to-end
+# See `docs/dev/screencasts.md` for end-to-end
 # recipes and dependency packages per distro.
 
 set -euo pipefail

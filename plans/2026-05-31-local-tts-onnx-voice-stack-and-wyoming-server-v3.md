@@ -217,14 +217,17 @@ landed as part of 1.2 above.
   - [ ] Remaining: live daemon HA playback smoke. *(espeak
     per-language dict fetch wired in 2.3; mirror uploads complete in
     2.2e.)*
-- [ ] **2.6** De-clutter the **app** release artifacts (ADR 0033 side
+- [x] **2.6** De-clutter the **app** release artifacts (ADR 0033 side
   effect): drop the per-asset `<asset>.sha256` sidecars
   (`release.yml:601-610`) now that voices live in `fono-voice`; migrate
   `fono-update` to verify against the single `SHA256SUMS` asset — point
   `sha256_url` at `SHA256SUMS` (`crates/fono-update/src/lib.rs:314-320`);
   `parse_sha256_sidecar` (`:633`) already filters by filename, so it
   handles the combined file unchanged. Keeps the back-compat
-  `None`-sidecar path for old releases.
+  `None`-sidecar path for old releases. *(2026-07-20: `release.yml`
+  now emits only the consolidated `SHA256SUMS`; `pick_release` points
+  `sha256_url` at `SHA256SUMS`, falling back to a legacy per-asset
+  `<asset>.sha256` for historical releases.)*
 
 > **Licensing follow-up (blocks `tts-local` graduating to a cargo-deny-checked
 > set).** The transitive data crates `espeak-ng-data-phonemes` and

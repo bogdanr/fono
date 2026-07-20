@@ -11,7 +11,7 @@ Intel/AMD mini-PC and on arm64 boards like the Raspberry Pi 5 or the
 NVIDIA Jetson Orin Nano.
 
 > Looking for the native, non-Docker server install? See
-> [install.md → Server mode](install.md#server-mode-wyoming-stt-host).
+> [install.md → Server mode](install.md#server-mode-wyoming-stt-tts-and-wake-word-host).
 
 ## Two ways to run it
 
@@ -88,7 +88,7 @@ The built-in clean-licence phrase is **"hey fono"**; the matcher is
 English-first and tied to whichever phrase model is loaded (it is not
 free-form speech).
 
-For Home Assistant, Fono's wake word works **exactly like its STT and
+For Home Assistant, Fono's wake word works **the same way as its STT and
 TTS**: whenever the `[server.wyoming]` listener is enabled, Fono
 automatically advertises and serves its *own* local detector as a Wyoming
 wake `Detection` service over that listener (TCP `10300`). There is **no
@@ -162,13 +162,20 @@ against a cloud `[assistant]` backend already get full tool-calling
 today, because those requests are proxied to the provider verbatim.
 
 > **Security.** Like the Wyoming listener, the LLM server has no
-> transport encryption; the optional `[server.llm].auth_token_ref` bearer
-> token gates access but not eavesdropping. Keep it on a trusted LAN or
-> behind a reverse proxy / firewall when binding beyond loopback. Note
-> that for a **cloud** `[assistant]` backend the OpenAI surface proxies
-> to the provider with your stored key injected — an unauthenticated
-> `0.0.0.0` instance is an open relay to your cloud account, so set the
-> bearer token before exposing it.
+> transport encryption. Access is gated by **inbound API keys**: with
+> `auth = true` (the default), non-loopback callers must present a key
+> as `Authorization: Bearer <key>`. Create one on the Fono host with
+> `fono server keys create home-assistant` — the secret is printed once
+> and stored only as a SHA-256 hash in `api_keys.sqlite`. Keys can also
+> be managed from the web settings page. Keep the server on a trusted
+> LAN or behind a reverse proxy / firewall when binding beyond loopback.
+> Note that for a **cloud** `[assistant]` backend the OpenAI surface
+> proxies to the provider with your stored key injected — an
+> unauthenticated `0.0.0.0` instance is an open relay to your cloud
+> account, so leave `auth` on and create a key before exposing it.
+> (Upgrading from an older version? The removed `auth_token_ref` field
+> is migrated into a named inbound key automatically; see
+> [configuration.md → Inbound API keys](configuration.md#inbound-api-keys-for-the-llmsttts-api-and-web-ui).)
 
 ## GPU acceleration
 
