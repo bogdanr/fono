@@ -2,7 +2,7 @@
 pkgname=fono
 pkgver=0.2.0
 pkgrel=1
-pkgdesc="Lightweight native voice dictation — press a hotkey, speak, text appears"
+pkgdesc="Talk to your computer: an open-source voice-AI stack (STT, TTS, LLM, wake word, speaker ID) in one small binary, local or cloud"
 arch=('x86_64' 'aarch64')
 url="https://github.com/bogdanr/fono"
 license=('GPL-3.0-only')

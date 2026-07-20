@@ -5,10 +5,13 @@
   <img src="assets/logo-dark.svg" alt="fono" width="400">
 </picture>
 
-### Dictate anywhere. Drive agents by voice.
+### Talk to your computer.
 
-Press a key and speak — Fono types it into whatever window has focus,<br>
-answers as a voice assistant, or drives your coding agent. Local-first, one static binary.
+Press a key and speak, and Fono types into any app, answers as a voice assistant,<br>
+or drives your coding agent. It's an open-source, complete voice-AI stack<br>
+(speech-to-text, natural voices, a local LLM, wake word, speaker ID)<br>
+in one small binary. Everything runs locally, and every stage can switch<br>
+to a cloud provider when you choose.
 
 <a href="https://github.com/bogdanr/fono/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/bogdanr/fono/ci.yml?branch=main&amp;style=flat-square&amp;label=ci&amp;labelColor=16140f" alt="CI status"></a>
 <a href="https://github.com/bogdanr/fono/releases/latest"><img src="https://img.shields.io/github/v/release/bogdanr/fono?style=flat-square&amp;label=release&amp;labelColor=16140f&amp;color=d9342f" alt="Latest release"></a>
@@ -26,6 +29,8 @@ answers as a voice assistant, or drives your coding agent. Local-first, one stat
 <a href="assets/fono.webp"><img src="assets/fono.webp" alt="Fono demo — press a hotkey, speak, and the text lands in the focused window" width="720"></a>
 
 </div>
+
+Think of it as the **SQLite of voice AI**: the whole stack, self-contained, one small file, no server farm to run. Point Home Assistant, Open WebUI, or your editor at it and it just answers. Fono serves the Wyoming protocol and an OpenAI/Ollama-compatible API, local by default, cloud only when you opt in.
 
 ## Install
 
@@ -61,15 +66,12 @@ While you speak, a small overlay shows what the microphone hears — `bars`, `os
 
 ## What you get
 
-- ⌨️ **Dictation that lands anywhere.** X11 or Wayland — your words are typed straight into whatever window has focus, with a clipboard mirror as a safety net. Per-compositor details in [docs/wayland.md](docs/wayland.md).
-- 💬 **A voice assistant that talks back.** Ask on `F8` — replies stream sentence-by-sentence into TTS so you hear the answer before the model finishes thinking, and it can call tools to actually do things.
-- 🤖 **Voice-driven coding agents** *(early preview)*. Claude Code, Cursor, Forge — any MCP-capable agent. One command wires it up; the agent then speaks or listens for follow-ups ([docs](docs/coding-agents.md)).
-- 🔒 **Local-first, actually.** Whisper speech-to-text plus llama.cpp polish and assistant run on your machine on a shared model instance, no duplicated memory. Nothing leaves it unless you opt into a cloud provider.
-- 🏎️ **Engineered for latency.** Pinned KV-cache snapshots and append-only prompts get the local assistant's first word out in ~⅓ s on a laptop CPU — 2–4× ahead of Ollama on identical weights. [How we did it](https://bogdan.nimblex.net/programming/2026/06/10/making-local-llm-fast.html).
-- ⚡ **Zero-tuning model selection.** The first run probes your CPU and GPU, then picks the heaviest Whisper model that still beats real time — a decision matrix built from [900+ benchmark runs](https://fono.page/calibration), not guesses.
-- ✨ **Optional polish pass.** A small LLM tidies the transcript before it's typed — punctuation, casing, filler words — locally via the bundled llama.cpp or through the cloud provider of your choice.
-- 📡 **LAN-friendly.** Speaks the [Wyoming protocol](https://github.com/rhasspy/wyoming) as both client and server, so Fono can route through (or host for) Home Assistant or another Fono on your network — mDNS finds peers automatically.
-- 📦 **One small static binary.** ~22 MB CPU or ~60 MB Vulkan, four glibc dependencies — no Electron, no Node, no Python, no WebKit. `fono update` probes your host and pulls the matching build automatically.
+- 🎙️ **It does everything voice.** Dictate into any window, ask a question and hear the answer, or drive your tools by voice. It bundles speech-to-text, natural text-to-speech, a local LLM, wake word, and speaker ID, all in one box. Dictation lands straight into the focused window on X11 or Wayland ([details](docs/wayland.md)) with a clipboard mirror as a safety net; the assistant streams its reply sentence-by-sentence and can call tools, including MCP-capable coding agents like Claude Code, Cursor, and Forge *(early preview, [docs](docs/coding-agents.md))*.
+- 📦 **In one small binary.** ~22 MB on CPU or ~60 MB with cross-vendor GPU acceleration (Vulkan: NVIDIA / AMD / Intel), four glibc dependencies, and no Electron, no Node, no Python, no WebKit. `fono update` probes your host and pulls the matching build automatically.
+- 🔒 **Local-first, actually.** With the default setup nothing leaves your machine. Whisper speech-to-text and a shared llama.cpp instance for polish and the assistant all run locally, with no duplicated memory, and every stage stays cloud-capable independently: swap just speech-to-text, or just text-to-speech, to any of a dozen providers with one command.
+- 🏎️ **Fast, with receipts.** Pinned KV-cache snapshots and append-only prompts get the local assistant's first spoken word out in ~⅓ s on a laptop CPU, 2–4× ahead of Ollama on identical weights ([how we did it](https://bogdan.nimblex.net/programming/2026/06/10/making-local-llm-fast.html)). The first run probes your CPU and GPU and picks the heaviest Whisper model that still beats real time, from a matrix built on [900+ benchmark runs](https://fono.page/calibration), and the installer auto-picks the GPU build so acceleration costs you nothing.
+- 📡 **It serves, not just consumes.** Speaks the [Wyoming protocol](https://github.com/rhasspy/wyoming) as both client and server plus an OpenAI/Ollama-compatible API, so one Fono can be the voice backend for Home Assistant, another Fono, or your whole LAN, and mDNS finds peers automatically.
+- 🔓 **Open source, GPL-3.0.** No telemetry, no account, no strings.
 
 ## Providers
 

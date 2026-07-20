@@ -1,6 +1,6 @@
 [package]
 name = "fono"
-description = "Lightweight native voice-dictation daemon and CLI."
+description = "Talk to your computer: an open-source, complete voice-AI stack (STT, TTS, LLM, wake word, speaker ID) in one small binary. Local or cloud, per stage."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

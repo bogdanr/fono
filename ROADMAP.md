@@ -1,10 +1,11 @@
 # Fono Roadmap
 
-> One binary. Any desktop. Your voice, at the cursor.
+> Talk to your computer.
 
-Fono is an open-source (GPL-3.0) voice dictation tool for Linux — native, lightweight,
-and privacy-first. No Electron. No Python. No WebKit. Press a hotkey, speak, and your
-words land at the cursor in any app, on any desktop, X11 or Wayland.
+Fono gives your computer a voice interface: press a key and speak, and it types,
+answers, or acts. It's the entire voice-AI stack (speech-to-text, natural
+voices, a local LLM, wake word, speaker ID) in one small binary, local by
+default, cloud only when you opt in. Open source, GPL-3.0.
 
 For exact per-release details see [`CHANGELOG.md`](CHANGELOG.md).
 The home page is [fono.page](https://fono.page).

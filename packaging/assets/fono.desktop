@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
 Name=Fono
-GenericName=Voice Dictation
-Comment=Lightweight native voice dictation — press a hotkey, speak, text appears
+GenericName=Voice AI
+Comment=Talk to your computer, a local voice-AI stack in one binary
 Exec=fono
 Icon=fono
 Terminal=false

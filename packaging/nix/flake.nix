@@ -1,5 +1,5 @@
 {
-  description = "Fono — lightweight native voice dictation";
+  description = "Fono: talk to your computer, a local voice-AI stack in one binary";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -43,7 +43,7 @@
           '';
 
           meta = with pkgs.lib; {
-            description = "Lightweight native voice dictation";
+            description = "Talk to your computer, a local voice-AI stack in one binary";
             homepage = "https://github.com/bogdanr/fono";
             license = licenses.gpl3Only;
             mainProgram = "fono";

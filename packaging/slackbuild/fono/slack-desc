@@ -6,13 +6,13 @@
 # customary to leave one space after the ':' except on otherwise blank lines.
 
     |-----handy-ruler------------------------------------------------------|
-fono: fono (lightweight native voice dictation)
+fono: fono (talk to your computer)
 fono:
-fono: Fono is a single-binary Rust voice dictation tool: press a hotkey,
-fono: speak, and cleaned text is typed at the cursor. Local Whisper +
-fono: Qwen models by default, or bring-your-own cloud keys (Groq,
-fono: OpenAI, Cerebras, Anthropic, ...). No Electron, no WebKit, no
-fono: Python runtime.
+fono: Fono gives your computer a voice interface: press a key and
+fono: speak, and it types, answers, or acts. It's the entire voice-AI
+fono: stack (speech-to-text, natural voices, a local LLM, wake word,
+fono: speaker ID) in one small binary, local by default, cloud only
+fono: when you opt in. No Electron, no WebKit, no Python runtime.
 fono:
 fono: Ships a per-user systemd unit (fono.service) under
 fono: /lib/systemd/user/ — enable with: systemctl --user enable --now fono
