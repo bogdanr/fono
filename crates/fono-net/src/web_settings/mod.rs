@@ -55,6 +55,13 @@ pub const DEFAULT_PORT: u16 = 10_808;
 /// this only stops a hostile peer streaming an unbounded body.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 
+/// Larger cap for the two routes that carry base64-encoded PCM audio
+/// (speaker enrollment and "test my voice" calibration). A handful of
+/// several-second 16 kHz mono clips base64-encodes to a few MB, which
+/// overflows [`MAX_BODY_BYTES`]; audio uploads are loopback-only so the
+/// wider bound is safe.
+const MAX_AUDIO_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 /// Embedded page assets. Design source: the 2026-07-02 search-first
 /// accordion handoff (see `plans/2026-07-02-web-config-ui-v2.md`).
 pub const INDEX_HTML: &str = include_str!("assets/index.html");
@@ -548,7 +555,7 @@ async fn route_speakers(
             Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
         },
         (&Method::POST, "/api/speakers") => {
-            let Some(body) = read_json_body(req).await else {
+            let Some(body) = read_json_body_limited(req, MAX_AUDIO_BODY_BYTES).await else {
                 return error_response(StatusCode::BAD_REQUEST, "invalid or oversized JSON body");
             };
             match (ctx.hooks.enroll_speaker)(body).await {
@@ -561,7 +568,7 @@ async fn route_speakers(
             let Some(id) = id_str.parse::<i64>().ok() else {
                 return error_response(StatusCode::BAD_REQUEST, "invalid speaker id");
             };
-            let Some(body) = read_json_body(req).await else {
+            let Some(body) = read_json_body_limited(req, MAX_AUDIO_BODY_BYTES).await else {
                 return error_response(StatusCode::BAD_REQUEST, "invalid or oversized JSON body");
             };
             match (ctx.hooks.calibrate_speaker)(id, body).await {
@@ -644,7 +651,11 @@ fn presented_token(req: &Request<Incoming>) -> Option<String> {
 }
 
 async fn read_json_body(req: Request<Incoming>) -> Option<serde_json::Value> {
-    let limited = Limited::new(req.into_body(), MAX_BODY_BYTES);
+    read_json_body_limited(req, MAX_BODY_BYTES).await
+}
+
+async fn read_json_body_limited(req: Request<Incoming>, max: usize) -> Option<serde_json::Value> {
+    let limited = Limited::new(req.into_body(), max);
     let bytes = limited.collect().await.ok()?.to_bytes();
     serde_json::from_slice(&bytes).ok()
 }
