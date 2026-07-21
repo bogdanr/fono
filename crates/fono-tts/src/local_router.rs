@@ -326,7 +326,12 @@ pub fn resolve_explicit_voice(voice: Option<&str>) -> Option<Voice> {
 /// model plus a per-voice style pack; Piper voices use a `.ort` model plus a
 /// `.onnx.json` config sidecar. A missing asset yields an actionable error
 /// (the daemon downloads voices at startup; see `ensure_local_tts`).
-pub(crate) fn load_engine(voices_dir: &Path, voice: &Voice) -> Result<Arc<dyn TextToSpeech>> {
+///
+/// Public so out-of-crate tooling (e.g. `fono-bench`'s TTS backend benchmark)
+/// can construct a single Piper/Kokoro voice **directly**, bypassing
+/// [`LocalRouter`]'s language auto-routing, to measure exactly the intended
+/// backend.
+pub fn load_engine(voices_dir: &Path, voice: &Voice) -> Result<Arc<dyn TextToSpeech>> {
     let model_path = voices_dir.join(&voice.model.file);
     if !model_path.is_file() {
         return Err(not_downloaded(voice, voices_dir));

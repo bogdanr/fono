@@ -62,6 +62,32 @@ pub fn word_error_rate(reference: &str, hypothesis: &str) -> f32 {
     dist as f32 / r.len() as f32
 }
 
+/// Character Error Rate of `hypothesis` against `reference`.
+///
+/// Like [`word_error_rate`] but over characters after light normalisation
+/// (lowercase, collapse runs of whitespace to a single space, trim). CER is a
+/// finer-grained accuracy signal than WER for TTS round-trip — it catches a
+/// single mangled syllable that WER would score as a whole wrong word. Returns
+/// `0.0` for an empty reference.
+#[must_use]
+pub fn char_error_rate(reference: &str, hypothesis: &str) -> f32 {
+    let norm = |s: &str| -> Vec<String> {
+        s.to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .map(|c| c.to_string())
+            .collect()
+    };
+    let r = norm(reference);
+    let h = norm(hypothesis);
+    if r.is_empty() {
+        return 0.0;
+    }
+    levenshtein(&r, &h) as f32 / r.len() as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +140,21 @@ mod tests {
         let r = "don't";
         let h = "do not";
         assert!(word_error_rate(r, h) >= 1.0);
+    }
+
+    #[test]
+    fn cer_perfect_match_is_zero() {
+        assert_eq!(char_error_rate("Hello, World", "hello, world"), 0.0);
+    }
+
+    #[test]
+    fn cer_single_char_substitution() {
+        // "cat" vs "car": 1 char edit / 3 ref chars ≈ 0.333
+        assert!((char_error_rate("cat", "car") - 1.0 / 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cer_empty_reference_is_zero() {
+        assert_eq!(char_error_rate("", "anything"), 0.0);
     }
 }

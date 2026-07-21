@@ -1482,6 +1482,7 @@ dependencies = [
  "fono-download",
  "fono-polish",
  "fono-stt",
+ "fono-tts",
  "futures",
  "hex",
  "indicatif",

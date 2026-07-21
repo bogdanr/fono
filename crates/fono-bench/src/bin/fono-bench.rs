@@ -32,8 +32,10 @@ use fono_bench::runner::BenchRunner;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum Provider {
-    /// Fake STT that returns each fixture's reference transcript verbatim.
-    /// Always available; latency reports orchestrator overhead, WER == 0.
+    /// Fake STT that returns a fixed canned string. Always available; use it
+    /// to exercise the plumbing / orchestrator overhead only. The round-trip
+    /// WER/CER it produces is meaningless (it never sees the reference) — use a
+    /// real backend (`groq`/`openai`/`local`) for the TTS quality anchor.
     Fake,
     /// Groq-hosted whisper-large-v3-turbo. Requires `GROQ_API_KEY` and the
     /// `groq` feature.
@@ -93,6 +95,10 @@ enum Cmd {
     ExtractTracePrompt(ExtractTracePromptArgs),
     /// Streaming↔batch equivalence harness (plan v6 R18).
     Equivalence(EquivalenceArgs),
+    /// Local TTS backend benchmark (Piper / Kokoro / Supertonic), EN + RO.
+    Tts(TtsArgs),
+    /// Score existing TTS WAVs against cloud STT (OpenAI + Google/Gemini).
+    TtsScore(TtsScoreArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -641,6 +647,108 @@ struct EquivalenceArgs {
     rate_limit_ms: Option<u64>,
 }
 
+#[derive(Debug, Parser)]
+struct TtsArgs {
+    /// Comma-separated base languages to run (`en,ro`). Empty = every language
+    /// present in the fixtures.
+    #[arg(long, default_value = "")]
+    languages: String,
+
+    /// Comma-separated backends to test.
+    #[arg(long, default_value = "piper,kokoro,supertonic")]
+    backends: String,
+
+    /// Per-backend voice/speaker override, repeatable, e.g.
+    /// `--voices piper=en_US-amy-medium,en_GB-alan-medium --voices supertonic=0,3,7`.
+    /// Piper/Kokoro values are catalog voice names; Supertonic values are
+    /// integer speaker ids.
+    #[arg(long = "voices")]
+    voices: Vec<String>,
+
+    /// Voices cache directory. Defaults to Fono's `models/voices` cache.
+    #[arg(long)]
+    voices_dir: Option<PathBuf>,
+
+    /// Output directory for WAVs + the listening index. Defaults to
+    /// `./tts-bench-out`.
+    #[arg(long)]
+    wav_dir: Option<PathBuf>,
+
+    /// Timed synthesis repetitions per sentence (for p50/p95).
+    #[arg(long, default_value_t = 3)]
+    iterations: usize,
+
+    /// Discarded warm-up synths before timing.
+    #[arg(long, default_value_t = 1)]
+    warmup: usize,
+
+    /// Requested ORT intra-op thread count (recorded in metadata).
+    #[arg(long, default_value_t = 1)]
+    threads: usize,
+
+    /// Seed recorded in metadata (Supertonic re-seeds per call regardless).
+    #[arg(long, default_value_t = 1234)]
+    seed: u32,
+
+    /// Optional STT backend for the round-trip WER/CER quality anchor.
+    #[arg(long, value_enum)]
+    stt: Option<Provider>,
+
+    /// STT model name for `--stt`.
+    #[arg(long)]
+    stt_model: Option<String>,
+
+    /// Download missing assets via the catalog ensure path before measuring.
+    #[arg(long, default_value_t = false)]
+    download: bool,
+
+    /// Supertonic flow-matching steps (quality/latency knob). Omit for the
+    /// engine default (5). Ignored by Piper/Kokoro.
+    #[arg(long)]
+    num_steps: Option<i32>,
+
+    /// Human-readable machine label stored in the report.
+    #[arg(long)]
+    machine_label: Option<String>,
+
+    /// Pretty-print the JSON report to stdout.
+    #[arg(long, default_value_t = true)]
+    pretty: bool,
+
+    /// Optional path to write the JSON report.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+struct TtsScoreArgs {
+    /// Directory of WAVs from a prior `tts` run
+    /// (`<lang>__<backend>__<voice>__<sentence-id>.wav`).
+    #[arg(long, default_value = "tts-bench-out")]
+    wav_dir: PathBuf,
+
+    /// Comma-separated cloud STT engines to score against. Supported:
+    /// `openai`, `gemini` (Google), `groq`.
+    #[arg(long, default_value = "openai,gemini")]
+    engines: String,
+
+    /// Comma-separated backend filter. Empty scores every backend present.
+    #[arg(long, default_value = "kokoro,supertonic")]
+    backends: String,
+
+    /// Optional secrets file. Defaults to `~/.config/fono/secrets.toml`.
+    #[arg(long)]
+    secrets: Option<PathBuf>,
+
+    /// Pretty-print the JSON report to stdout.
+    #[arg(long, default_value_t = true)]
+    pretty: bool,
+
+    /// Optional path to write the JSON report.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -670,6 +778,8 @@ async fn main() -> Result<()> {
         Cmd::AssistantToolUse(a) => run_assistant_tool_use_cmd(a).await,
         Cmd::ExtractTracePrompt(a) => run_extract_trace_prompt_cmd(a).await,
         Cmd::Equivalence(a) => run_equivalence(a).await,
+        Cmd::Tts(a) => run_tts_cmd(a).await,
+        Cmd::TtsScore(a) => run_tts_score_cmd(a).await,
     }
 }
 
@@ -2225,6 +2335,291 @@ async fn run_equivalence(args: EquivalenceArgs) -> Result<()> {
             std::process::exit(1);
         }
     }
+}
+
+async fn run_tts_cmd(args: TtsArgs) -> Result<()> {
+    #[cfg(feature = "tts-local")]
+    {
+        use fono_bench::tts_bench::{run_tts_bench, TtsBenchConfig};
+
+        let voices_dir = match args.voices_dir.clone() {
+            Some(d) => d,
+            None => fono_core::Paths::resolve()
+                .context("resolve Fono paths for the voices cache dir")?
+                .voices_dir(),
+        };
+        let wav_dir = args.wav_dir.clone().unwrap_or_else(|| PathBuf::from("tts-bench-out"));
+        let backends = parse_languages(&args.backends);
+        if backends.is_empty() {
+            return Err(anyhow!("--backends must list at least one of piper,kokoro,supertonic"));
+        }
+        let voice_overrides = parse_voice_overrides(&args.voices)?;
+        let stt = match args.stt {
+            Some(p) => Some(build_stt(p, args.stt_model.as_deref())?),
+            None => None,
+        };
+
+        let cfg = TtsBenchConfig {
+            languages: parse_languages(&args.languages),
+            backends,
+            voice_overrides,
+            voices_dir,
+            wav_dir,
+            iterations: args.iterations,
+            warmup: args.warmup,
+            threads: args.threads,
+            seed: args.seed,
+            machine_label: args.machine_label.clone(),
+            download: args.download,
+            num_steps: args.num_steps,
+        };
+
+        let report = run_tts_bench(&cfg, stt).await?;
+        print_tts_summary(&report);
+        let payload = if args.pretty {
+            serde_json::to_string_pretty(&report)?
+        } else {
+            serde_json::to_string(&report)?
+        };
+        if let Some(p) = &args.out {
+            std::fs::write(p, &payload).with_context(|| format!("write {}", p.display()))?;
+            info!("wrote tts report to {}", p.display());
+        }
+        println!("{payload}");
+        Ok(())
+    }
+    #[cfg(not(feature = "tts-local"))]
+    {
+        let _ = args;
+        Err(anyhow!(
+            "compiled without --features tts-local; rebuild with \
+             `cargo run -p fono-bench --features tts-local -- tts ...` \
+             (needs a pinned libonnxruntime.a via ORT_LIB_LOCATION, same as building fono with tts-local)"
+        ))
+    }
+}
+
+/// Score existing TTS WAVs against cloud STT engines (OpenAI + Google/Gemini).
+async fn run_tts_score_cmd(args: TtsScoreArgs) -> Result<()> {
+    #[cfg(feature = "tts-local")]
+    {
+        use fono_bench::tts_bench::score_existing_wavs;
+
+        let secrets_path = args.secrets.clone().or_else(default_config_secrets_file);
+        let secrets = load_optional_secrets(secrets_path.as_deref())?;
+
+        let mut engines: Vec<(String, Arc<dyn fono_stt::SpeechToText>)> = Vec::new();
+        for name in parse_languages(&args.engines) {
+            engines.push((name.clone(), build_score_stt(&name, &secrets)?));
+        }
+        if engines.is_empty() {
+            return Err(anyhow!("--engines must list at least one of openai,gemini,groq"));
+        }
+
+        let backends = parse_languages(&args.backends);
+        let report = score_existing_wavs(&args.wav_dir, &engines, &backends).await?;
+        print_tts_score_summary(&report);
+
+        let payload = if args.pretty {
+            serde_json::to_string_pretty(&report)?
+        } else {
+            serde_json::to_string(&report)?
+        };
+        if let Some(p) = &args.out {
+            std::fs::write(p, &payload).with_context(|| format!("write {}", p.display()))?;
+            info!("wrote tts-score report to {}", p.display());
+        }
+        println!("{payload}");
+        Ok(())
+    }
+    #[cfg(not(feature = "tts-local"))]
+    {
+        let _ = args;
+        Err(anyhow!(
+            "compiled without --features tts-local; rebuild with \
+             `cargo run -p fono-bench --features tts-local,openai,gemini -- tts-score ...`"
+        ))
+    }
+}
+
+/// `~/.config/fono/secrets.toml` if it exists (the daemon's default location).
+#[cfg(feature = "tts-local")]
+fn default_config_secrets_file() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let path = PathBuf::from(home).join(".config").join("fono").join("secrets.toml");
+    path.exists().then_some(path)
+}
+
+/// Build one cloud STT engine by short name for the `tts-score` subcommand.
+#[cfg(feature = "tts-local")]
+fn build_score_stt(
+    name: &str,
+    secrets: &fono_core::Secrets,
+) -> Result<Arc<dyn fono_stt::SpeechToText>> {
+    match name {
+        "openai" => {
+            #[cfg(feature = "openai")]
+            {
+                Ok(Arc::new(fono_stt::openai::OpenAiStt::new(resolve_key(
+                    secrets,
+                    "OPENAI_API_KEY",
+                )?)))
+            }
+            #[cfg(not(feature = "openai"))]
+            {
+                let _ = secrets;
+                Err(anyhow!("compiled without --features openai"))
+            }
+        }
+        "gemini" | "google" => {
+            #[cfg(feature = "gemini")]
+            {
+                Ok(Arc::new(fono_stt::gemini::GeminiStt::new(resolve_key(
+                    secrets,
+                    "GEMINI_API_KEY",
+                )?)))
+            }
+            #[cfg(not(feature = "gemini"))]
+            {
+                let _ = secrets;
+                Err(anyhow!("compiled without --features gemini (Google STT)"))
+            }
+        }
+        "groq" => {
+            #[cfg(feature = "groq")]
+            {
+                Ok(Arc::new(fono_stt::groq::GroqStt::new(resolve_key(secrets, "GROQ_API_KEY")?)))
+            }
+            #[cfg(not(feature = "groq"))]
+            {
+                let _ = secrets;
+                Err(anyhow!("compiled without --features groq"))
+            }
+        }
+        other => Err(anyhow!("unknown STT engine {other:?}; use openai, gemini, or groq")),
+    }
+}
+
+/// Compact table of transcribe-existing scoring, grouped by backend/voice/engine.
+#[cfg(feature = "tts-local")]
+fn print_tts_score_summary(report: &fono_bench::tts_bench::ScoreReport) {
+    println!();
+    println!(
+        "tts-score — {} — {} WAVs scored against {}",
+        report.suite_version,
+        report.entries.len(),
+        report.engines.join(", "),
+    );
+    println!();
+    println!(
+        " {:<10} {:<4} {:<20} {:<8} {:>4} {:>8} {:>8}",
+        "backend", "lang", "voice", "engine", "n", "mean_wer", "mean_cer"
+    );
+    for s in &report.summary {
+        println!(
+            " {:<10} {:<4} {:<20} {:<8} {:>4} {:>8.3} {:>8.3}",
+            s.backend, s.language, s.voice, s.engine, s.n, s.mean_wer, s.mean_cer
+        );
+    }
+}
+
+/// Parse repeatable `--voices backend=v1,v2` entries into a per-backend map.
+#[cfg(feature = "tts-local")]
+fn parse_voice_overrides(
+    entries: &[String],
+) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
+    let mut map = std::collections::BTreeMap::new();
+    for e in entries {
+        let (backend, list) = e
+            .split_once('=')
+            .ok_or_else(|| anyhow!("--voices expects backend=v1,v2, got {e:?}"))?;
+        let voices: Vec<String> =
+            list.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect();
+        if voices.is_empty() {
+            return Err(anyhow!("--voices {backend}= lists no voices"));
+        }
+        map.insert(backend.trim().to_string(), voices);
+    }
+    Ok(map)
+}
+
+/// Compact human-readable table of the TTS benchmark, printed before the JSON.
+#[cfg(feature = "tts-local")]
+fn print_tts_summary(report: &fono_bench::tts_bench::TtsBenchReport) {
+    println!();
+    println!(
+        "fono-bench tts — {} on {}/{} (seed {}, {} iters, {} warmup)",
+        report.suite_version,
+        report.build.os,
+        report.build.arch,
+        report.seed,
+        report.iterations,
+        report.warmup,
+    );
+    if let Some(peak) = report.rss_peak_kib {
+        println!("peak process RSS: {} MiB", peak / 1024);
+    }
+    for note in &report.notes {
+        println!("note: {note}");
+    }
+    println!();
+    println!(
+        " {:<10} {:<4} {:<20} {:>8} {:>8} {:>7} {:>9} {:>7} {:>7}",
+        "backend", "lang", "voice", "cold_ms", "synth_ms", "rtf", "disk_MiB", "wer", "cer"
+    );
+    for b in &report.backends {
+        if !b.supported {
+            println!(
+                " {:<10} {:<4} (unsupported — {})",
+                b.backend,
+                b.language,
+                b.note.as_deref().unwrap_or("")
+            );
+            continue;
+        }
+        if b.voices.is_empty() {
+            println!(
+                " {:<10} {:<4} (no voices — {})",
+                b.backend,
+                b.language,
+                b.note.as_deref().unwrap_or("")
+            );
+            continue;
+        }
+        let disk_mib = b.disk_footprint_bytes / (1024 * 1024);
+        for v in &b.voices {
+            // Average WER/CER across utterances that have them.
+            let (mut wer_sum, mut cer_sum, mut n) = (0.0f32, 0.0f32, 0u32);
+            for u in &v.utterances {
+                if let (Some(w), Some(c)) = (u.wer, u.cer) {
+                    wer_sum += w;
+                    cer_sum += c;
+                    n += 1;
+                }
+            }
+            let (wer, cer) = if n > 0 {
+                (format!("{:.2}", wer_sum / n as f32), format!("{:.2}", cer_sum / n as f32))
+            } else {
+                ("-".to_string(), "-".to_string())
+            };
+            println!(
+                " {:<10} {:<4} {:<20} {:>8} {:>8} {:>7.2} {:>9} {:>7} {:>7}",
+                b.backend,
+                b.language,
+                v.voice,
+                v.cold_start_ms,
+                v.synth_ms_median,
+                v.rtf_median,
+                disk_mib,
+                wer,
+                cer,
+            );
+        }
+    }
+    if let Some(idx) = &report.listening_index {
+        println!("\nlistening index: {idx}");
+    }
+    println!();
 }
 
 use std::io::IsTerminal;

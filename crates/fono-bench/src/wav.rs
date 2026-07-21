@@ -24,6 +24,38 @@ pub fn read(path: &Path) -> Result<WavData> {
     decode(&bytes).with_context(|| format!("decode {}", path.display()))
 }
 
+/// Write mono `f32` samples (`[-1.0, 1.0]`) to a 16-bit PCM WAV at
+/// `sample_rate`. Samples are clamped and rounded to `i16`; the audio is
+/// written **raw** (no loudness normalization) so a backend's native volume
+/// is preserved for listening comparisons.
+pub fn write(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create dir {}", parent.display()))?;
+    }
+    let data_size = (samples.len() * 2) as u32;
+    let byte_rate = sample_rate * 2; // mono, 2 bytes/sample
+    let mut out = Vec::with_capacity(44 + data_size as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_size).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&byte_rate.to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes()); // block align
+    out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_size.to_le_bytes());
+    for &s in samples {
+        let v = (s.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16;
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(path, &out).with_context(|| format!("write {}", path.display()))
+}
+
 fn decode(bytes: &[u8]) -> Result<WavData> {
     if bytes.len() < 44 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(anyhow!("not a RIFF/WAVE file"));
@@ -139,5 +171,21 @@ mod tests {
     #[test]
     fn rejects_non_riff() {
         assert!(decode(b"\x00\x00\x00\x00").is_err());
+    }
+
+    #[test]
+    fn write_then_read_roundtrips() {
+        let dir = std::env::temp_dir().join(format!("fono-wav-test-{}", std::process::id()));
+        let path = dir.join("probe.wav");
+        let samples = [0.0f32, 0.5, -0.5, 1.0, -1.0];
+        write(&path, &samples, 24_000).expect("write wav");
+        let back = read(&path).expect("read wav");
+        assert_eq!(back.sample_rate, 24_000);
+        assert_eq!(back.channels, 1);
+        assert_eq!(back.samples.len(), samples.len());
+        for (a, b) in samples.iter().zip(back.samples.iter()) {
+            assert!((a - b).abs() < 1e-3, "{a} vs {b}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

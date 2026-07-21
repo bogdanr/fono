@@ -42,7 +42,13 @@ use crate::traits::{TextToSpeech, TtsAudio};
 /// Default speech-speed factor (reference `Generate` default).
 const DEFAULT_SPEED: f32 = 1.05;
 /// Default number of flow-matching denoising steps (reference default).
-const DEFAULT_NUM_STEPS: i32 = 5;
+pub const DEFAULT_NUM_STEPS: i32 = 5;
+/// Lowest step count worth allowing: below this the flow-matching latent is too
+/// under-denoised to produce usable speech.
+pub const MIN_NUM_STEPS: i32 = 1;
+/// Highest step count worth allowing: beyond this quality has saturated and the
+/// (linear) time cost is wasted.
+pub const MAX_NUM_STEPS: i32 = 32;
 /// Default silence between chunks, in seconds (reference default).
 const DEFAULT_SILENCE: f32 = 0.3;
 /// Minimum utterance duration in seconds, preventing zero-length audio.
@@ -193,6 +199,9 @@ pub struct SupertonicLocal {
     frontend: Arc<Frontend>,
     /// Speaker id selected for this engine (0-based; clamped at use).
     sid: i64,
+    /// Flow-matching denoising steps per chunk (defaults to
+    /// [`DEFAULT_NUM_STEPS`]; the quality/latency knob).
+    num_steps: i32,
 }
 
 /// Open one `.ort` model as a session on the shared minimal runtime, using the
@@ -239,7 +248,17 @@ impl SupertonicLocal {
             style: Arc::new(style),
             frontend: Arc::new(frontend),
             sid,
+            num_steps: DEFAULT_NUM_STEPS,
         })
+    }
+
+    /// Override the flow-matching step count (clamped to
+    /// `[MIN_NUM_STEPS, MAX_NUM_STEPS]`). Fewer steps are faster but lower
+    /// quality; more steps cost linearly more time for diminishing gains.
+    #[must_use]
+    pub fn with_num_steps(mut self, steps: i32) -> Self {
+        self.num_steps = steps.clamp(MIN_NUM_STEPS, MAX_NUM_STEPS);
+        self
     }
 
     /// Synthesise one already-chunked text into mono `f32` PCM, advancing `rng`.
@@ -456,6 +475,7 @@ impl SupertonicLocal {
             style: Arc::clone(&self.style),
             frontend: Arc::clone(&self.frontend),
             sid: self.sid,
+            num_steps: self.num_steps,
         }
     }
 
@@ -468,8 +488,7 @@ impl SupertonicLocal {
         let silence_len = (DEFAULT_SILENCE * self.cfg.sample_rate as f32) as usize;
         let mut out: Vec<f32> = Vec::new();
         for chunk in chunks {
-            let samples =
-                self.run_chunk(chunk, lang, DEFAULT_NUM_STEPS, DEFAULT_SPEED, &mut rng)?;
+            let samples = self.run_chunk(chunk, lang, self.num_steps, DEFAULT_SPEED, &mut rng)?;
             if samples.is_empty() {
                 continue;
             }

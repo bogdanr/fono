@@ -33,6 +33,10 @@ tracing-subscriber = { workspace = true }
 fono-stt = { path = "../fono-stt", default-features = false }
 fono-polish = { path = "../fono-polish", default-features = false, features = ["anthropic", "cerebras", "openai-compat"] }
 fono-assistant = { path = "../fono-assistant", default-features = false, features = ["anthropic", "openai-compat"] }
+# TTS engines, off by default. Only pulled in when the `tts-local` feature is
+# enabled for the `fono-bench tts` subcommand; the shipped `fono` binary graph
+# is unaffected (this crate is `publish = false` and never linked into it).
+fono-tts = { path = "../fono-tts", default-features = false, optional = true }
 fono-core = { path = "../fono-core" }
 fono-download = { path = "../fono-download" }
 toml = { workspace = true }
@@ -48,6 +52,9 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 default = ["groq"]
 groq = ["fono-stt/groq"]
 openai = ["fono-stt/openai"]
+# Google STT via Gemini audio-understanding (ADR 0034), for the `tts-score`
+# quality anchor. Uses a single GEMINI_API_KEY.
+gemini = ["fono-stt/gemini"]
 whisper-local = ["fono-stt/whisper-local"]
 # Hardware-acceleration passthroughs. Off by default; require the
 # matching SDK on the build host (CUDA toolkit, Vulkan SDK, ROCm).
@@ -62,6 +69,12 @@ accel-openblas = ["whisper-local", "fono-stt/accel-openblas"]
 # needed to build a BoxStream<StreamFrame> from an in-memory PCM
 # buffer.
 equivalence = ["fono-stt/streaming", "dep:tokio-stream"]
+# Local ONNX TTS backend benchmark (`fono-bench tts`). Constructs Piper,
+# Kokoro, and Supertonic engines directly to compare synthesis latency,
+# real-time factor, memory, and quality across English + Romanian. Requires a
+# pinned `libonnxruntime.a` via `ORT_LIB_LOCATION` at build time (same as
+# building `fono` with `tts-local`). Off by default.
+tts-local = ["dep:fono-tts", "fono-tts/tts-local"]
 # Direct embedded llama.cpp polish and assistant backends for comparing
 # Fono's local runtime against Ollama with the same fixtures.
 llama-local = ["fono-polish/llama-local", "fono-assistant/llama-local"]

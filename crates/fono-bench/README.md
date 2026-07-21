@@ -92,6 +92,60 @@ The baseline files are checked in under `docs/bench/`. CI updates them
 manually after a deliberate accuracy/latency change with a corresponding
 PR comment.
 
+## TTS backend benchmark (`fono-bench tts`)
+
+Compares the three local ONNX TTS backends — **Piper**, **Kokoro**, and
+**Supertonic** — on English and Romanian, to inform default-voice
+decisions. Each engine is constructed **directly** (bypassing the
+daemon's `LocalRouter`, which would otherwise auto-route English to
+Kokoro), so you measure the backend you actually asked for.
+
+Feature-gated on `tts-local` (off by default; pulls in `fono-tts` and a
+statically linked `libonnxruntime.a`). It never touches the shipped
+`fono` binary graph — `fono-bench` is `publish = false`.
+
+```sh
+# ORT_LIB_LOCATION is resolved the same way CI does.
+export ORT_LIB_LOCATION="$(bash scripts/fetch-onnxruntime.sh | tail -1)"
+
+# Full matrix, download any missing voice assets first, pretty JSON to file.
+cargo run -p fono-bench --release --features tts-local -- tts \
+  --languages en,ro \
+  --backends piper,kokoro,supertonic \
+  --download \
+  --iterations 5 --warmup 1 \
+  --wav-dir ./tts-bench-out \
+  --machine-label "thinkpad-t14" \
+  --out ./tts-bench-out/report.json --pretty
+```
+
+What it measures per (language × backend × voice):
+
+* **cold-start** model-load latency (first-F8-press proxy) vs **warm**
+  steady-state synthesis time
+* **real-time factor** (synth time ÷ audio duration) — the number that
+  says "does it keep up with speech", with p50 / p95 over `--iterations`
+* **peak RSS** per backend, isolated one-engine-per-process and read
+  from `/proc/self/status` (`VmHWM`, Linux only)
+* **disk / download footprint** per backend (Piper per-voice vs Kokoro
+  shared model vs Supertonic's ~140 MB pack)
+* **determinism** check (Supertonic re-seeds per call → identical PCM)
+  and **robustness** logging on the hard sentences
+* optional **STT round-trip WER/CER** quality anchor (`--stt groq|openai|
+  local|fake`) — transcribe each output back and score it against the
+  input text, an objective backstop for your subjective listening
+
+Output: one **raw, un-normalised** WAV per synth (native volume
+preserved on purpose) with descriptive names
+(`<lang>__<backend>__<voice>__<sentence-id>.wav`), a grouped
+**listening index** for easy A/B, and a schema-versioned JSON report.
+
+The difficult-sentence fixtures live in `tests/fixtures/tts/sentences.toml`
+— tongue-twisters, numbers/dates/units, acronyms, Romanian diacritics,
+and mixed-language sentences (English tech terms inside Romanian, the
+coding-agent case). Kokoro is English-only, so the Romanian matrix is
+Piper + Supertonic automatically.
+
 ## Adding a new fixture
 
 1. Pick a public-domain or CC0 audio source (LibriVox, Wikimedia

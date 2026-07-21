@@ -43,4 +43,9 @@ pub use polish_text::{
 };
 pub use report::{ClipReport, LangReport, Report};
 pub use runner::{BenchOutcome, BenchRunner};
-pub use wer::word_error_rate;
+pub use wer::{char_error_rate, word_error_rate};
+
+/// TTS backend benchmark (Piper / Kokoro / Supertonic). Gated on
+/// `tts-local` because it constructs the local ONNX voice engines directly.
+#[cfg(feature = "tts-local")]
+pub mod tts_bench;

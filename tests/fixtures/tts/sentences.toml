@@ -1,0 +1,120 @@
+# SPDX-License-Identifier: GPL-3.0-only
+# Difficult sentence set for `fono-bench tts` — the local TTS backend
+# benchmark (Piper / Kokoro / Supertonic) across English and Romanian.
+#
+# These sentences are chosen to *expose* differences between backends and
+# voices when listened to side by side: numbers and dates, acronyms, code and
+# URLs, proper nouns, homographs / stress-sensitive words, long nested
+# clauses, prosody (questions / exclamations), and — for Romanian — mixed
+# English tech terms and diacritic-dense text (the coding-agent use case).
+#
+# Schema (one table per sentence):
+#   id       — stable identifier, unique across the file (used in WAV names)
+#   language — base language code: "en" or "ro"
+#   category — grouping label for aggregated WER/CER reporting
+#   text     — the sentence to synthesize (kept verbatim, diacritics intact)
+#
+# Add new sentences rather than rewriting existing ones so past runs stay
+# comparable.
+
+suite_version = "tts-sentences-v1"
+
+# ─────────────────────────────── English ───────────────────────────────
+
+[[sentence]]
+id = "en-numbers-1"
+language = "en"
+category = "numbers"
+text = "The invoice total was $1,299.99, due on 3/14 at 09:45, up 27% from last quarter."
+
+[[sentence]]
+id = "en-numbers-2"
+language = "en"
+category = "numbers"
+text = "Call me at 555-0142 before 5 p.m.; the meeting moved from the 1st to the 23rd."
+
+[[sentence]]
+id = "en-acronyms-1"
+language = "en"
+category = "acronyms"
+text = "NASA and the ESA use HTTP APIs over TLS, while the GPU handles SQL and JSON."
+
+[[sentence]]
+id = "en-code-1"
+language = "en"
+category = "code"
+text = "Run cargo build --release, then git push origin main, and email me at dev@fono.app."
+
+[[sentence]]
+id = "en-propernouns-1"
+language = "en"
+category = "propernouns"
+text = "Siobhan, Nguyen, and Zbigniew met Kirchhoff near Worcestershire to review the schedule."
+
+[[sentence]]
+id = "en-homographs-1"
+language = "en"
+category = "homographs"
+text = "I read the book yesterday, so please read this lead pipe warning and don't tear the paper with a tear in your eye."
+
+[[sentence]]
+id = "en-long-1"
+language = "en"
+category = "long"
+text = "Although the deployment, which had been delayed twice, finally shipped on Friday, the team — exhausted but relieved — agreed that, all things considered, the rollback plan (rarely needed) was still worth rehearsing."
+
+[[sentence]]
+id = "en-prosody-1"
+language = "en"
+category = "prosody"
+text = "Wait — you actually finished the whole migration already? That's incredible! How on earth did you manage it so fast?"
+
+# ─────────────────────────────── Romanian ──────────────────────────────
+
+[[sentence]]
+id = "ro-numbers-1"
+language = "ro"
+category = "numbers"
+text = "Factura de 1.299,99 lei este scadentă pe 14 martie la ora 09:45, în creștere cu 27% față de trimestrul trecut."
+
+[[sentence]]
+id = "ro-acronyms-1"
+language = "ro"
+category = "acronyms"
+text = "NASA și ESA folosesc API-uri HTTP peste TLS, iar procesorul grafic gestionează SQL și JSON."
+
+[[sentence]]
+id = "ro-propernouns-1"
+language = "ro"
+category = "propernouns"
+text = "Gheorghe, Mihăiță și Ștefănescu au mers la Târgu Jiu ca să discute cu Brâncuși despre program."
+
+[[sentence]]
+id = "ro-long-1"
+language = "ro"
+category = "long"
+text = "Deși implementarea, care fusese amânată de două ori, a fost în sfârșit lansată vineri, echipa — epuizată, dar ușurată — a fost de acord că, una peste alta, planul de revenire (rareori necesar) merita totuși repetat."
+
+[[sentence]]
+id = "ro-prosody-1"
+language = "ro"
+category = "prosody"
+text = "Stai puțin — chiar ai terminat toată migrarea deja? Este incredibil! Cum naiba ai reușit atât de repede?"
+
+[[sentence]]
+id = "ro-diacritics-1"
+language = "ro"
+category = "diacritics"
+text = "În pădurea întunecată, câțiva copii încântați și înghețați ascultau șoaptele mătușii Ștefania despre îngeri și tâlhari."
+
+[[sentence]]
+id = "ro-mixed-1"
+language = "ro"
+category = "mixed"
+text = "Am rulat cargo build --release pe branch-ul main, apoi am dat push la commit și am deschis un pull request pe GitHub."
+
+[[sentence]]
+id = "ro-mixed-2"
+language = "ro"
+category = "mixed"
+text = "Deschide un terminal, rulează comanda git status, verifică output-ul și dă-mi de știre dacă apare vreo eroare la build."
