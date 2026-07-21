@@ -4,6 +4,22 @@
 
 Accepted 2026-05-31.
 
+**Amended 2026-07-21** — the default on-device engine is now **Supertonic**,
+and the cross-engine `auto` router (English → Kokoro, else → Piper) has been
+**removed** as a selectable engine. Piper and Kokoro remain available as
+explicit opt-in pins (`[tts.local].engine = "piper" | "kokoro"`); when pinned
+they still route per-language *within* that engine. Rationale: a benchmark of
+all three engines on hard English + Romanian sentences (2026-07-21) found
+Supertonic at least as intelligible as Kokoro on English (STT-scored CER ≈
+half Kokoro's), strong on Romanian, comfortably real-time even on a 2016
+dual-core i7-7500U (RTF ≈ 0.45 vs Kokoro's ≈ 2.1, which is unusable there),
+covering EN + RO + 29 more languages and 10 speakers in one shared ~140 MiB
+pack. Making Supertonic the default therefore *improves* the low-end-hardware
+experience over the previous Kokoro English default. The `auto` engine token
+is gone entirely (no config/route alias). Supertonic exposes two per-engine
+knobs (`num_steps`, `speed`) surfaced in the web setup; the §1 engine-per-language routing below now applies only to an
+explicit Piper/Kokoro pin.
+
 Builds on **ADR 0032** (ONNX Runtime as the voice-stack platform),
 **ADR 0022** (binary-size budget + `NEEDED` allowlist), **ADR 0005**
 (single static binary), **ADR 0004** (per-model licensing), and

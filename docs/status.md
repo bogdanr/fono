@@ -1,6 +1,54 @@
 # Fono — Project Status
 Last updated: 2026-07-21
 
+## 2026-07-21 — Release 0.17.1 (natural multilingual voice by default)
+
+Cut the 0.17.1 release. Headline: the on-device TTS default flips from the
+cross-engine `auto` router to **Supertonic** — one compact multilingual pack
+(Romanian included) that stays comfortably real-time on low-end hardware — plus
+two new Settings controls for the built-in voice (Speed slider, optional
+extra-passes quality toggle). Piper and Kokoro remain explicit opt-ins. Also
+folded in: the `stt.raw` diagnostic log now prints the pre-vocabulary-correction
+transcript. (See the two 2026-07-21 sessions below for the implementation.)
+
+Release chores this session:
+- Bumped workspace version `0.17.0 → 0.17.1` (`Cargo.toml` + `Cargo.lock`,
+  19 crates).
+- Added the `CHANGELOG.md` `[0.17.1]` section (Changed / Added / Fixed) and the
+  compare-link ref.
+- Updated `ROADMAP.md`: new Recently-shipped banner + Shipped entry, and moved
+  the "Natural local voices in 31 languages" item out of **Up next** (the
+  Supertonic default fulfils it) — removed from both the summary table and the
+  section body.
+- The three feature commits since v0.17.0 (Supertonic default, TTS benchmark,
+  `stt.raw` log) were left intact; the release doc/version changes were squashed
+  into the last commit per the maintainer's instruction.
+
+Pre-tag gates run: fmt, clippy `-D warnings`, workspace tests, and the
+size-budget gate. Committed (not pushed) with an annotated `v0.17.1` tag ready.
+
+## 2026-07-21 — Make Supertonic the default local TTS engine; drop the auto router
+
+Flipped the on-device TTS default from the cross-engine `auto` router to
+**Supertonic**, and removed `auto` as a selectable engine. Piper and Kokoro
+stay available as explicit opt-in pins (`[tts.local].engine = "piper" |
+"kokoro"`), still routing per-language within their own catalog. Backed by the
+three-engine benchmark (see the prior TTS-benchmark session + `fono-bench tts`
+/ `tts-score`): Supertonic is at least as intelligible as Kokoro on English
+(STT-scored CER ≈ half), strong on Romanian, and comfortably real-time even on
+a 2016 dual-core i7-7500U (RTF ≈ 0.45 vs Kokoro's unusable ≈ 2.1), from one
+shared ~140 MiB multilingual pack — so the flip *improves* the low-end story
+over the old Kokoro English default.
+
+Changes: `TtsLocalEngine` drops the `Auto` variant and defaults to
+`Supertonic` (`config.rs`); the `auto` token is removed entirely (no config /
+route alias); `is_auto` → `is_supertonic`. Factory + ensure paths already handled Supertonic
+(built directly, pack ensured). `local_tts_pending_mb` now sizes the Supertonic
+pack by presence (~140 MiB) instead of mis-reporting catalog voices. Settings
+UI: engine picker drops the Auto card, defaults to "Supertonic (recommended)"
+(`daemon.rs` meta + `app.js`). ADR 0033 amended. Gates green (fmt, clippy
+`-D warnings`, tests).
+
 ## 2026-07-21 — Log the raw STT text before personal-vocabulary correction
 
 Small observability fix. The `stt.raw` pipeline log line

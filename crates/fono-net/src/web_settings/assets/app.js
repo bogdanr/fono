@@ -305,12 +305,12 @@ function localLlmPanel(base) {
 }
 
 // ---------- local TTS engine + voice picker ----------
-// Renders the engine card row (auto/piper/kokoro/supertonic from
-// /api/meta) plus a per-engine preset-voice dropdown, falling back to a
-// free-text catalog-id field for `auto` (which spans the whole catalog).
+// Renders the engine card row (supertonic/piper/kokoro from /api/meta)
+// plus a per-engine preset-voice dropdown, falling back to a free-text
+// catalog-id field when the engine exposes no preset voice list.
 function ttsLocalPanel() {
   const engines = (meta && meta.tts_local && meta.tts_local.engines) || [];
-  const eng = gv('tts.local.engine', 'auto');
+  const eng = gv('tts.local.engine', 'supertonic');
   let out = '';
   if (engines.length) {
     const cards = engines.map((e) =>
@@ -327,6 +327,20 @@ function ttsLocalPanel() {
   } else {
     out += row('Voice', 'Catalog voice id, e.g. en_US-lessac-medium. Empty = match your first language.',
       txt('tts.local.voice', { mono: true, w: 220, ph: 'auto' }));
+  }
+  // Supertonic exposes two extra knobs; the other engines ignore them.
+  if (eng === 'supertonic') {
+    const steps = gv('tts.local.num_steps', 5);
+    out += row('Extra passes',
+      'Runs 10 refinement passes instead of 5 for a small quality margin at higher latency. Off is plenty for most voices.',
+      '<input type="checkbox" class="toggle" data-bind="tts.local.num_steps" data-kind="toggle" data-on="10" data-off="5"'
+      + (Number(steps) >= 10 ? ' checked' : '') + ' />');
+    const spd = Number(gv('tts.local.speed', 1)) || 1;
+    out += row('Speed',
+      'Speaking rate: slower \u00b7 normal \u00b7 faster.',
+      '<span class="spd-out mono">' + spd.toFixed(1) + '\u00d7</span> '
+      + '<input type="range" class="slider spd-slider" min="0.8" max="1.2" step="0.2" '
+      + 'data-bind="tts.local.speed" data-kind="float" value="' + spd + '" />');
   }
   return out + row('Test', 'Plays through your browser.', ttsTestBox('local'));
 }
@@ -487,7 +501,7 @@ const PICK = {
   'tts-local-engine'(v) {
     // Preset voices differ per engine, so drop a stale cross-engine
     // voice pin when switching (keeps the dropdown consistent).
-    if (gv('tts.local.engine', 'auto') !== v) set(cfg, 'tts.local.voice', '');
+    if (gv('tts.local.engine', 'supertonic') !== v) set(cfg, 'tts.local.voice', '');
     set(cfg, 'tts.local.engine', v);
   },
   'overlay-style'(v) { set(cfg, 'overlay.style', v); },
@@ -1740,7 +1754,16 @@ document.addEventListener('change', (e) => {
   }
   let v;
   switch (el.dataset.kind) {
-    case 'toggle': v = el.checked; break;
+    case 'toggle':
+      // A plain toggle writes a boolean. When data-on/data-off are present it
+      // instead writes those numbers, so an on/off switch can drive a numeric
+      // config field (e.g. Supertonic "extra passes" → num_steps 10/5).
+      if (el.dataset.on !== undefined || el.dataset.off !== undefined) {
+        v = el.checked ? Number(el.dataset.on) : Number(el.dataset.off);
+      } else {
+        v = el.checked;
+      }
+      break;
     case 'num': v = Math.max(0, parseInt(el.value, 10) || 0); break;
     case 'float': v = parseFloat(el.value) || 0; break;
     case 'radio': if (!el.checked) return; v = el.value; break;
@@ -1759,6 +1782,10 @@ document.addEventListener('input', (e) => {
   // Live sensitivity readout next to wake sliders.
   if (el.classList.contains('slider') && el.previousElementSibling && el.previousElementSibling.classList.contains('sens')) {
     el.previousElementSibling.textContent = Number(el.value).toFixed(2);
+  }
+  // Live "1.0×" readout next to the Supertonic speed slider.
+  if (el.classList.contains('spd-slider') && el.previousElementSibling && el.previousElementSibling.classList.contains('spd-out')) {
+    el.previousElementSibling.textContent = Number(el.value).toFixed(1) + '\u00d7';
   }
 });
 
@@ -1779,7 +1806,7 @@ document.addEventListener('click', (e) => {
     const text = (sample && sample.value.trim()) || 'The quick brown fox jumps over the lazy dog.';
     let model, voice;
     if (t.dataset.ttsTest === 'local') {
-      model = gv('tts.local.engine', 'auto');
+      model = gv('tts.local.engine', 'supertonic');
       voice = gv('tts.local.voice', '');
     } else {
       model = gv('tts.backend', 'openai');

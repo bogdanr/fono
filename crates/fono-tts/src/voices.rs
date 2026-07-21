@@ -174,7 +174,7 @@ pub fn for_language(language: &str) -> Result<Option<Voice>> {
 /// First catalog voice that speaks `language` **and** uses `engine`
 /// (`"piper"` / `"kokoro"`). Used when the user has pinned a single local
 /// engine via `[tts.local].engine`, so voice routing stays within that
-/// engine's catalog entries rather than following the default Auto policy.
+/// engine's catalog entries.
 pub fn for_language_engine(language: &str, engine: &str) -> Result<Option<Voice>> {
     Ok(catalog()?.into_iter().find(|v| v.language == language && v.engine == engine))
 }

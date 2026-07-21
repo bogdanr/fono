@@ -48,10 +48,11 @@ pub struct LocalRouter {
     /// (an explicit `[tts.local].voice` pin).
     pinned: bool,
     /// Engine the user pinned via `[tts.local].engine` (`"piper"` /
-    /// `"kokoro"`), or `None` for Auto. When set, per-language routing and
-    /// explicit per-call voice overrides are constrained to this engine's
-    /// catalog entries, so a Kokoro-pinned user never gets routed to a Piper
-    /// voice (and vice versa).
+    /// `"kokoro"`). Always set when the router is in use: per-language
+    /// routing and explicit per-call voice overrides are constrained to this
+    /// engine's catalog entries, so a Kokoro-pinned user never gets routed to
+    /// a Piper voice (and vice versa). Supertonic (the default) does not use
+    /// the router at all — it is built directly by the factory.
     engine_filter: Option<String>,
     /// The user's configured `general.languages` as base codes (deduped,
     /// e.g. `["en", "ro"]`). When a caller supplies no `lang` hint, text is
@@ -287,7 +288,8 @@ pub fn resolve_voice_for_lang(default_voice: &Voice, pinned: bool, lang: Option<
 /// Engine-aware variant of [`resolve_voice_for_lang`]: when `engine` is
 /// `Some("piper"/"kokoro")`, the per-language lookup is constrained to that
 /// engine's catalog entries (falling back to the default voice when the
-/// engine has no voice for the language). `None` is the Auto policy.
+/// engine has no voice for the language). `None` is a raw cross-catalog
+/// fallback (used only in tests; production always pins an engine).
 #[must_use]
 pub fn resolve_voice_for_lang_engine(
     default_voice: &Voice,
@@ -562,10 +564,10 @@ mod tests {
         let got = resolve_voice_for_lang_engine(&def, false, Some("en"), Some("piper"));
         assert_eq!(got.engine, "piper", "piper pin must resolve a piper voice");
 
-        // Under Auto (no pin) the same English hint routes to the catalog's
-        // English (Kokoro) voice per the ADR 0033 policy.
+        // With no engine filter (the raw cross-catalog fallback) the same
+        // English hint resolves to the catalog's first English voice (Kokoro).
         let auto = resolve_voice_for_lang_engine(&def, false, Some("en"), None);
-        assert_eq!(auto.engine, "kokoro", "auto policy routes English to Kokoro");
+        assert_eq!(auto.engine, "kokoro", "cross-catalog fallback resolves the English voice");
     }
 
     #[test]

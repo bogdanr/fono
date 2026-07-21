@@ -147,7 +147,9 @@ fn build_supertonic(cfg: &Tts, voices_dir: &Path) -> Result<Arc<dyn TextToSpeech
         ));
     }
     let sid = crate::supertonic::style::speaker_id(&cfg.local.voice).unwrap_or(0);
-    let engine = crate::supertonic::engine::SupertonicLocal::load(&pack_dir, sid)?;
+    let engine = crate::supertonic::engine::SupertonicLocal::load(&pack_dir, sid)?
+        .with_num_steps(i32::try_from(cfg.local.num_steps).unwrap_or(i32::MAX))
+        .with_speed(cfg.local.speed);
     Ok(Arc::new(engine))
 }
 

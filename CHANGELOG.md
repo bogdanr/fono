@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] — 2026-07-21
+
+### Changed
+
+- **The built-in text-to-speech now uses the multilingual Supertonic voice by
+  default.** It's one compact download that speaks many languages — including
+  Romanian — in a single natural voice, and it stays comfortably faster than
+  real time even on older laptops. This replaces the previous setup that
+  automatically switched between English-only and per-language voices behind
+  the scenes. The older Piper and Kokoro voices are still available if you
+  prefer them — just pick one in Settings under the on-device voice engine —
+  but the automatic voice-switching option has been removed, since the new
+  default covers every language on its own. Existing setups keep working;
+  nothing needs to be reconfigured.
+
+### Added
+
+- **Two new controls for the built-in voice in Settings.** A **Speed** control
+  (slower / normal / faster) and an optional **extra passes** toggle that
+  trades a little processing time for a small quality boost (off by default,
+  which already sounds great for most people).
+
 ### Fixed
 
 - The diagnostic log now shows the exact words speech-to-text produced
@@ -2895,6 +2917,7 @@ feature and ships fully wired in v0.2.
 - Local LLM cleanup (Qwen / SmolLM) is opt-in / preview.
 - Real `winit + softbuffer` overlay window is a stub (event channel only).
 
+[0.17.1]: https://github.com/bogdanr/fono/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/bogdanr/fono/compare/v0.16.0...v0.17.0
 [0.10.0]: https://github.com/bogdanr/fono/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/bogdanr/fono/compare/v0.9.0...v0.9.1

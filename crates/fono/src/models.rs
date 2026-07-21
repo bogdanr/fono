@@ -247,8 +247,17 @@ fn resolve_local_tts_voices(
 #[cfg(feature = "tts-local")]
 #[must_use]
 pub fn local_tts_pending_mb(paths: &Paths, config: &Config) -> Option<u32> {
-    let voices = resolve_local_tts_voices(&config.tts.local, &config.general.languages).ok()?;
     let voices_dir = paths.voices_dir();
+    // Supertonic (the default) is a single shared pack outside the per-language
+    // catalog, so size it by pack presence rather than catalog voices. The
+    // pack has no per-asset size metadata; report its documented approximate
+    // download (~140 MiB int8 pack) only when it is not yet cached.
+    if config.tts.local.engine == fono_core::config::TtsLocalEngine::Supertonic {
+        let dir = fono_tts::supertonic::supertonic_dir(&voices_dir);
+        let present = dir.join(fono_tts::supertonic::CONFIG.file).is_file();
+        return (!present).then_some(140);
+    }
+    let voices = resolve_local_tts_voices(&config.tts.local, &config.general.languages).ok()?;
     let pending: u64 = voices
         .iter()
         .filter(|v| {

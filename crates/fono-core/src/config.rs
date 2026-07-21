@@ -721,15 +721,14 @@ pub struct TtsCloud {
 /// The voice's `.ort` model + `.onnx.json` config are fetched from the
 /// `fono-voice` mirror on first use, verified against the committed
 /// catalog, and cached under the voices cache dir (ADR 0033).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct TtsLocal {
-    /// Which on-device engine to use. `auto` (default) keeps the
-    /// language-aware router behaviour (Kokoro for English, Piper for
-    /// the rest — ADR 0033); `piper` / `kokoro` / `supertonic` pin a
-    /// single engine and constrain voice selection to that engine's
-    /// catalog entries.
-    #[serde(default, skip_serializing_if = "TtsLocalEngine::is_auto")]
+    /// Which on-device engine to use. `supertonic` (default) is one shared
+    /// multilingual pack; `piper` / `kokoro` pin a per-language catalog
+    /// engine and constrain voice selection to that engine's entries.
+    /// Kokoro is English-only; Piper covers the rest (ADR 0033).
+    #[serde(default, skip_serializing_if = "TtsLocalEngine::is_supertonic")]
     pub engine: TtsLocalEngine,
     /// Catalog voice id, e.g. `ro_RO-mihai-medium`. Empty = pick the
     /// first catalog voice matching the first entry of
@@ -740,52 +739,85 @@ pub struct TtsLocal {
     /// the built-in `fono-voice` default.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_url: String,
+    /// Supertonic only: flow-matching denoising steps (default 5). More
+    /// steps very slightly improve quality at proportionally higher
+    /// latency; quality saturates by ~10 in our benchmarks. The web setup
+    /// surfaces this as an "extra passes" on/off (off = 5, on = 10), but
+    /// any value is accepted here. No effect on Piper or Kokoro.
+    #[serde(default = "default_local_num_steps")]
+    pub num_steps: u32,
+    /// Supertonic only: playback speed factor (default 1.0). Below 1.0 is
+    /// slower, above 1.0 faster. The web setup surfaces this as a three-stop
+    /// slider (0.8 / 1.0 / 1.2), but any value is accepted here. No effect
+    /// on Piper or Kokoro.
+    #[serde(default = "default_local_speed")]
+    pub speed: f32,
+}
+
+/// Default Supertonic flow-matching steps (matches the engine's own default).
+fn default_local_num_steps() -> u32 {
+    5
+}
+
+/// Default Supertonic playback speed factor (natural tempo).
+fn default_local_speed() -> f32 {
+    1.0
+}
+
+impl Default for TtsLocal {
+    fn default() -> Self {
+        Self {
+            engine: TtsLocalEngine::default(),
+            voice: String::new(),
+            base_url: String::new(),
+            num_steps: default_local_num_steps(),
+            speed: default_local_speed(),
+        }
+    }
 }
 
 /// On-device TTS engine selector for `[tts.local].engine`.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TtsLocalEngine {
-    /// Language-aware routing across the local catalog (ADR 0033).
+    /// Pin the Supertonic engine (the default): one shared multilingual
+    /// pack, built directly outside the per-language catalog router.
     #[default]
-    Auto,
-    /// Pin the Piper engine.
-    Piper,
-    /// Pin the Kokoro engine.
-    Kokoro,
-    /// Pin the Supertonic engine.
     Supertonic,
+    /// Pin the Piper engine (opt-in): per-language `.ort` voices.
+    Piper,
+    /// Pin the Kokoro engine (opt-in): English-only.
+    Kokoro,
 }
 
 impl TtsLocalEngine {
-    /// True for the default `auto` variant (used by `skip_serializing_if`).
+    /// True for the default `supertonic` variant (used by
+    /// `skip_serializing_if`).
     #[must_use]
-    pub fn is_auto(&self) -> bool {
-        matches!(self, Self::Auto)
+    pub fn is_supertonic(&self) -> bool {
+        matches!(self, Self::Supertonic)
     }
     /// The catalog engine name (`"piper"` / `"kokoro"`) this pin constrains
-    /// voice routing to, or `None` for `Auto` (language-aware routing across
-    /// the whole catalog) and `Supertonic` (built directly, outside the
-    /// catalog router).
+    /// voice routing to, or `None` for `Supertonic` (built directly, outside
+    /// the catalog router).
     #[must_use]
     pub fn catalog_filter(&self) -> Option<&'static str> {
         match self {
             Self::Piper => Some("piper"),
             Self::Kokoro => Some("kokoro"),
-            Self::Auto | Self::Supertonic => None,
+            Self::Supertonic => None,
         }
     }
 
-    /// Parse a local-engine token (`auto`/`piper`/`kokoro`/`supertonic`).
+    /// Parse a local-engine token (`supertonic`/`piper`/`kokoro`).
     ///
     /// # Errors
     /// Returns the offending token when it names no known local engine.
     pub fn parse(token: &str) -> std::result::Result<Self, String> {
         match token {
-            "auto" | "" => Ok(Self::Auto),
+            "supertonic" => Ok(Self::Supertonic),
             "piper" => Ok(Self::Piper),
             "kokoro" => Ok(Self::Kokoro),
-            "supertonic" => Ok(Self::Supertonic),
             other => Err(format!("unknown local TTS engine: '{other}'")),
         }
     }
@@ -800,9 +832,9 @@ impl Tts {
     /// the first `/`) picks the provider/engine, and any suffix after the
     /// first `/` is the provider's own model id (`openrouter/openai/tts-1`
     /// → OpenRouter with model `openai/tts-1`). An empty/blank `model`
-    /// keeps the configured backend. Local engine tokens (`auto`, `piper`,
-    /// `kokoro`, `supertonic`, and `local[/engine]`) select the on-device
-    /// router; every other leading segment must name a cloud TTS provider.
+    /// keeps the configured backend. Local engine tokens (`supertonic`,
+    /// `piper`, `kokoro`, and `local[/engine]`) select the on-device
+    /// engine; every other leading segment must name a cloud TTS provider.
     ///
     /// This is pure routing logic — availability (whether a cloud key
     /// actually resolves) is enforced later when the backend is built.
@@ -834,7 +866,7 @@ impl Tts {
                     cfg.local.engine = TtsLocalEngine::parse(s)?;
                 }
             }
-            "auto" | "piper" | "kokoro" | "supertonic" => {
+            "piper" | "kokoro" | "supertonic" => {
                 cfg.backend = TtsBackend::Local;
                 cfg.local.engine = TtsLocalEngine::parse(provider)?;
             }
@@ -2052,6 +2084,22 @@ mod tests {
         base.voice = "Kore".into();
         assert_eq!(base.resolve_speech_route("").unwrap().backend, TtsBackend::Gemini);
         assert_eq!(base.resolve_speech_route("   ").unwrap().backend, TtsBackend::Gemini);
+    }
+
+    #[test]
+    fn tts_local_num_steps_and_speed_defaults_and_roundtrip() {
+        let d = TtsLocal::default();
+        assert_eq!(d.num_steps, 5);
+        assert!((d.speed - 1.0).abs() < f32::EPSILON);
+        // Non-default values round-trip through TOML.
+        let custom = TtsLocal { num_steps: 10, speed: 0.8, ..TtsLocal::default() };
+        let back: TtsLocal = toml::from_str(&toml::to_string(&custom).unwrap()).unwrap();
+        assert_eq!(back.num_steps, 10);
+        assert!((back.speed - 0.8).abs() < f32::EPSILON);
+        // A config file that omits the keys still deserialises to the defaults.
+        let bare: TtsLocal = toml::from_str("engine = \"supertonic\"").unwrap();
+        assert_eq!(bare.num_steps, 5);
+        assert!((bare.speed - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]

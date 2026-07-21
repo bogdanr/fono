@@ -43,6 +43,10 @@ use crate::traits::{TextToSpeech, TtsAudio};
 const DEFAULT_SPEED: f32 = 1.05;
 /// Default number of flow-matching denoising steps (reference default).
 pub const DEFAULT_NUM_STEPS: i32 = 5;
+/// Lowest speed factor worth allowing (below this speech is unnaturally slow).
+pub const MIN_SPEED: f32 = 0.5;
+/// Highest speed factor worth allowing (above this speech is unintelligible).
+pub const MAX_SPEED: f32 = 2.0;
 /// Lowest step count worth allowing: below this the flow-matching latent is too
 /// under-denoised to produce usable speech.
 pub const MIN_NUM_STEPS: i32 = 1;
@@ -202,6 +206,8 @@ pub struct SupertonicLocal {
     /// Flow-matching denoising steps per chunk (defaults to
     /// [`DEFAULT_NUM_STEPS`]; the quality/latency knob).
     num_steps: i32,
+    /// Speech-speed factor (defaults to [`DEFAULT_SPEED`]; the tempo knob).
+    speed: f32,
 }
 
 /// Open one `.ort` model as a session on the shared minimal runtime, using the
@@ -249,6 +255,7 @@ impl SupertonicLocal {
             frontend: Arc::new(frontend),
             sid,
             num_steps: DEFAULT_NUM_STEPS,
+            speed: DEFAULT_SPEED,
         })
     }
 
@@ -258,6 +265,14 @@ impl SupertonicLocal {
     #[must_use]
     pub fn with_num_steps(mut self, steps: i32) -> Self {
         self.num_steps = steps.clamp(MIN_NUM_STEPS, MAX_NUM_STEPS);
+        self
+    }
+
+    /// Override the speech-speed factor (clamped to `[MIN_SPEED, MAX_SPEED]`).
+    /// Values below 1.0 slow speech down; above 1.0 speed it up.
+    #[must_use]
+    pub fn with_speed(mut self, speed: f32) -> Self {
+        self.speed = speed.clamp(MIN_SPEED, MAX_SPEED);
         self
     }
 
@@ -476,6 +491,7 @@ impl SupertonicLocal {
             frontend: Arc::clone(&self.frontend),
             sid: self.sid,
             num_steps: self.num_steps,
+            speed: self.speed,
         }
     }
 
@@ -488,7 +504,7 @@ impl SupertonicLocal {
         let silence_len = (DEFAULT_SILENCE * self.cfg.sample_rate as f32) as usize;
         let mut out: Vec<f32> = Vec::new();
         for chunk in chunks {
-            let samples = self.run_chunk(chunk, lang, self.num_steps, DEFAULT_SPEED, &mut rng)?;
+            let samples = self.run_chunk(chunk, lang, self.num_steps, self.speed, &mut rng)?;
             if samples.is_empty() {
                 continue;
             }

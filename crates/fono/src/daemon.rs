@@ -4233,7 +4233,7 @@ fn meta_hook(
 }
 
 /// Local-TTS engine + voice metadata for the settings UI: the engine picker
-/// options (`auto`/`piper`/`kokoro`/`supertonic`) and, per engine, the
+/// options (`supertonic`/`piper`/`kokoro`) and, per engine, the
 /// selectable voices from the compiled-in catalog (Supertonic exposes its
 /// numeric speakers). Consumed by the Voice section's engine cards + voice
 /// dropdown. Empty voice lists on the non-`tts-local` build are fine — the UI
@@ -4259,10 +4259,9 @@ fn tts_local_meta() -> serde_json::Value {
         .collect();
     serde_json::json!({
         "engines": [
-            { "id": "auto", "label": "Auto (recommended)", "voices": [] },
+            { "id": "supertonic", "label": "Supertonic (recommended)", "voices": supertonic_voices },
             { "id": "piper", "label": "Piper", "voices": voices_for("piper") },
             { "id": "kokoro", "label": "Kokoro", "voices": voices_for("kokoro") },
-            { "id": "supertonic", "label": "Supertonic", "voices": supertonic_voices },
         ]
     })
 }
