@@ -1,5 +1,32 @@
 # Fono — Project Status
-Last updated: 2026-07-20
+Last updated: 2026-07-21
+
+## 2026-07-21 — Log the raw STT text before personal-vocabulary correction
+
+Small observability fix. The `stt.raw` pipeline log line
+(`crates/fono/src/session.rs`) printed `raw` *after* it had been reassigned to
+the vocabulary-corrected transcript, so the original speech-to-text output was
+never visible — only the corrected text, which also appears later on the
+injected-text line. Captured the pre-correction transcript (`raw_pre_vocab`) and
+changed the log line to print it, appending ` (vocabulary → …)` only when a
+correction actually fired. Debug-level, off the audio hot path (clone/format
+only when the line is emitted).
+
+Docs: added a CHANGELOG `[Unreleased] / Fixed` entry, added a status note to the
+ROADMAP personal-vocabulary item, and dropped the `fono vocabulary suggest` and
+voice "fix that" items from that roadmap entry (not planned). Gate green (fmt,
+clippy `-D warnings`, tests).
+
+## 2026-07-21 — Retire the pointer-hover context-injection roadmap item
+
+Roadmap-only change. Removed the "Hover-context injection" item from
+`ROADMAP.md` (the "On the horizon" list and the top summary table). Rationale:
+the focused-window half already shipped in v0.8.2 and is the right signal for
+dictation — text lands in the focused window, so context should key off focus.
+The remaining pointer-under-mouse variant serves only the niche "dictate into A
+while pointing at B" case, off a noisy signal, and would cost per-platform
+pointer→window mapping (X11/Wayland/macOS/Windows) and binary weight against a
+size-first budget. Considered done as-is; not pursuing the pointer variant.
 
 ## 2026-07-20 — Release 0.17.0 prepared (speaker recognition)
 

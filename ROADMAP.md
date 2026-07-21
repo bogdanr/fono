@@ -15,7 +15,7 @@ The home page is [fono.page](https://fono.page).
 <table width="100%">
 <tr>
 <td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#personal-vocabulary--voice-correction">Personal vocabulary &amp; voice correction</a></strong><br>Teach Fono once that "Phono" means "Fono" — it sticks forever, deterministically, before the text ever hits the cursor.<br><br><strong><a href="#natural-local-voices-in-31-languages">Natural local voices in 31 languages</a></strong><br>One compact local model speaks 31 languages in 10 voices at 44 kHz — laughs and breaths included — replacing dozens of per-language voice downloads.<br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".</td>
-<td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#self-hosted-modelship-backend">Self-hosted Modelship backend</a></strong><br>One box on your LAN runs the LLM, speech-to-text, text-to-speech, and embeddings — every Fono desktop points at it, fully local.<br><br><strong><a href="#hover-context-injection">Hover-context injection</a></strong> <em>(experimental)</em><br>Terminal hovered → shell prompts. Code editor hovered → identifier casing.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#local-rest-api">Local REST API</a></strong><br>Every CLI verb over plain HTTP, so scripts and editor plugins can drive the daemon you already run — no MCP, no special tooling.</td>
+<td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#self-hosted-modelship-backend">Self-hosted Modelship backend</a></strong><br>One box on your LAN runs the LLM, speech-to-text, text-to-speech, and embeddings — every Fono desktop points at it, fully local.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#local-rest-api">Local REST API</a></strong><br>Every CLI verb over plain HTTP, so scripts and editor plugins can drive the daemon you already run — no MCP, no special tooling.</td>
 </tr>
 </table>
 
@@ -140,15 +140,11 @@ canonical spellings (`phono → Fono`, `bug done → Bogdan`, `cube ernetes → 
 After every STT result — regardless of whether LLM cleanup is on or off — a
 word-boundary-aware substitution pass rewrites the final text before injection. It is
 deterministic and idempotent: no probability, no model call, no network round-trip.
+This substitution pass is already implemented and runs on every dictation; when a
+correction fires, the diagnostic log now shows the original speech-to-text output
+alongside the corrected text.
 
-The vocabulary grows via `fono vocabulary add/remove/list`. `fono vocabulary suggest`
-mines your dictation history for swaps you already accepted via LLM cleanup and offers
-them for one-keystroke confirmation — no auto-pollution of your vocabulary file.
-
-Later in the same slice: a **voice "fix that" correction hotkey**. Press it after a
-mishearing, speak the intended word, and Fono re-injects the corrected text and
-auto-records the (heard → meant) pair into your vocabulary so the same error never
-recurs. Plan: `plans/2026-06-03-correction-with-memory-v2.md`.
+The vocabulary grows via `fono vocabulary add/remove/list`.
 
 A later phase moves correction into the decoder itself: hotword / contextual
 biasing (a Whisper `initial_prompt` injection today, CTC/TDT biasing when a
@@ -310,18 +306,6 @@ with confirmation off by default; the UX layers on later without schema churn.
 Concrete plan: `plans/2026-05-22-voice-actions-via-mcp-v1.md`. Once it lands,
 voice actions apply in lockstep to both the staged pipeline and the realtime
 assistant.
-
-### Hover-context injection
-
-> Terminal hovered → shell prompts. Code editor hovered → identifier casing.
-
-*(experimental)* The focused-window half of this already shipped in v0.8.2:
-Fono reads the focused window at hotkey-press time and adjusts the Whisper
-hint and the LLM cleanup suffix per app (terminal, code editor, private
-windows). The remaining idea is keying the context on the window under the
-**mouse pointer** instead of keyboard focus, so you can dictate into one app
-while referencing another. Plan sketch:
-`plans/2026-05-26-hover-context-injection-v1.md`.
 
 ### Research spikes (low priority)
 

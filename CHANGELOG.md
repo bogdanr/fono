@@ -5,6 +5,16 @@ All notable changes to Fono are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The diagnostic log now shows the exact words speech-to-text produced
+  **before** your personal-vocabulary corrections are applied. Previously the
+  `stt.raw` log line already reflected the corrected text, so there was no way
+  to see the original wording; it now prints the original and, when a
+  correction fired, the corrected form alongside it.
+
 ## [0.17.0] — 2026-07-20
 
 ### Added

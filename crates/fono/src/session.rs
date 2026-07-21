@@ -4763,6 +4763,7 @@ async fn run_pipeline(
     // the transcript itself, so polish, injection (one-shot *and* the
     // word-by-word streaming path), clipboard, history, and the overlay
     // all see the canonical spelling.
+    let raw_pre_vocab = raw.clone();
     let raw = if vocabulary.is_empty() { raw } else { vocabulary.apply(&raw) };
     metrics.raw_chars = raw.chars().count();
     if raw.is_empty() {
@@ -4791,8 +4792,9 @@ async fn run_pipeline(
     let app_title = focus_info.window_title.clone();
     tracing::debug!(
         target: "fono::pipeline",
-        "stt.raw lang={:?} app=({:?}, {:?}): {raw:?}",
+        "stt.raw lang={:?} app=({:?}, {:?}): {raw_pre_vocab:?}{}",
         trans.language, app_class, app_title,
+        if raw == raw_pre_vocab { String::new() } else { format!(" (vocabulary → {raw:?})") },
     );
     let word_count = raw.split_whitespace().count() as u32;
     let skip_short =
