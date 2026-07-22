@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.17.1] — 2026-07-21
+## [0.17.1] — 2026-07-22
 
 ### Changed
 
@@ -24,6 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Run large local assistant models that don't fit in your RAM.** Fono can now
+  use big on-device chat models — such as the 9.6 GB Gemma and 11.7 GB Qwen
+  builds — by streaming their weights from disk as they are needed instead of
+  loading the whole model into memory. That means a model can be larger than the
+  free RAM on your machine and still run, loading in about a second rather than
+  stalling or running you out of memory. Pick one as your assistant and Fono
+  downloads it for you, or point it at a GGUF you downloaded yourself; a name
+  copied straight from Hugging Face works either way. These models trade some
+  speed for the ability to run big models locally, so replies come a little
+  slower than the small default — the small default is still what ships out of
+  the box.
+
 - **Two new controls for the built-in voice in Settings.** A **Speed** control
   (slower / normal / faster) and an optional **extra passes** toggle that
   trades a little processing time for a small quality boost (off by default,
@@ -36,6 +48,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `stt.raw` log line already reflected the corrected text, so there was no way
   to see the original wording; it now prints the original and, when a
   correction fired, the corrected form alongside it.
+
+- Switching to a local assistant now downloads its model automatically, the
+  same way switching the speech, cleanup, and voice engines already does.
+  Before this it could fail with "model not found" until you fetched the file
+  by hand.
+
+- A local model name copied from Hugging Face — whatever the capitalisation,
+  and with or without a trailing "-GGUF" — now resolves to the right file, so
+  the automatic download and the loader always agree on where it lives.
 
 ## [0.17.0] — 2026-07-20
 

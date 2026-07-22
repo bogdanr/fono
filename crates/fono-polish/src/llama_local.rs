@@ -898,7 +898,7 @@ fn sha256_tokens(tokens: &[LlamaToken]) -> String {
 }
 
 /// ChatML prompt template used by the Apache-2.0 local cleanup models in
-/// [`PolishRegistry`](crate::registry::PolishRegistry). Qwen3-family GGUFs use
+/// [`LocalLlmRegistry`](crate::registry::LocalLlmRegistry). Qwen3-family GGUFs use
 /// a thinking-capable template; for cleanup we explicitly seed the assistant
 /// turn with an empty `<think>` block so generation starts directly in the
 /// visible answer channel.

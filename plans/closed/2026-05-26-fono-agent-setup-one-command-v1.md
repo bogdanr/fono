@@ -1,5 +1,7 @@
 # `fono agent-setup` — One-Command Agent Integration
 
+## Status: Completed
+
 ## Objective
 
 Replace the current three-step manual process (enable MCP server, edit `mcp.json`,

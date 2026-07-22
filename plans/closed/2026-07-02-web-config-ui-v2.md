@@ -1,5 +1,7 @@
 # Fono Web Configuration UI
 
+## Status: Completed
+
 ## Objective
 
 Implement a browser-based settings screen for Fono covering every user-relevant `config.toml` option, based on the **authoritative design handoff at `/root/design_handoff_fono_settings`** (search-first accordion, dark/light themes, high-fidelity — recreate pixel-perfectly per its README). Served over localhost by the daemon itself, reusing the already-shipped hyper stack, with embedded assets and no new dependencies.

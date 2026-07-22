@@ -2510,6 +2510,15 @@ async fn switch_assistant_via_tray(
     match result {
         Ok(Ok(())) => {
             info!("tray: switched assistant to {label}");
+            // Auto-download the embedded local GGUF before reloading, mirroring
+            // the STT/polish/TTS switch paths; skips silently for cloud/manual
+            // backends. Without this, switching to the local assistant would
+            // reload straight into a "model not found" error.
+            if matches!(backend, fono_core::config::AssistantBackend::Ollama)
+                && !ensure_local_assistant_with_notify(paths).await
+            {
+                return;
+            }
             if let Some(o) = orch {
                 if let Err(e) = o.reload().await {
                     warn!("tray: assistant reload failed: {e:#}");
@@ -2919,7 +2928,10 @@ async fn ensure_local_polish_with_notify(paths: &fono_core::Paths) -> bool {
     };
     let model = cfg.polish.local.model.clone();
     let size_hint = crate::models::local_llm_size_mb(&model);
-    let dest_exists = paths.polish_models_dir().join(format!("{model}.gguf")).exists();
+    // Canonicalize to the stem the downloader writes so the "already present"
+    // check (and thus the download toast) matches a repo-style config name.
+    let stem = fono_polish::LocalLlmRegistry::resolve_filename_stem(&model);
+    let dest_exists = paths.polish_models_dir().join(format!("{stem}.gguf")).exists();
     if !dest_exists {
         let body = size_hint.map_or_else(
             || format!("LLM model: {model}"),
@@ -2933,7 +2945,7 @@ async fn ensure_local_polish_with_notify(paths: &fono_core::Paths) -> bool {
             fono_core::notify::Urgency::Normal,
         );
     }
-    match crate::models::ensure_local_polish(paths, &model).await {
+    match crate::models::ensure_local_llm(paths, &model).await {
         Ok(crate::models::EnsureOutcome::Downloaded) => {
             fono_core::notify::send(
                 "Fono — cleanup model ready",
@@ -2949,6 +2961,73 @@ async fn ensure_local_polish_with_notify(paths: &fono_core::Paths) -> bool {
             warn!("ensure_local_polish: download failed: {e:#}");
             fono_core::notify::send(
                 "Fono — cleanup model download failed",
+                &format!("{e}"),
+                "dialog-error",
+                6_000,
+                fono_core::notify::Urgency::Critical,
+            );
+            false
+        }
+    }
+}
+
+/// Assistant counterpart to [`ensure_local_polish_with_notify`]. When the
+/// on-disk config's `[assistant]` resolves to the embedded local model (the
+/// `ollama` backend with no manual server endpoint), ensure its GGUF is
+/// downloaded — with the same download/ready/failure notifications — before a
+/// live switch triggers a reload. Returns `true` when the assistant is ready
+/// to load, which includes the no-op cases (cloud backend, manual local
+/// server, or assistant disabled) where there is nothing to fetch. This is the
+/// assistant-side analogue of the STT/polish/TTS ensure steps; without it a
+/// tray switch to the local assistant would reload straight into a "model not
+/// found" error instead of auto-downloading.
+async fn ensure_local_assistant_with_notify(paths: &fono_core::Paths) -> bool {
+    let cfg = match fono_core::Config::load(&paths.config_file()) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("ensure_local_assistant: config load failed: {e:#}");
+            return false;
+        }
+    };
+    if !cfg.assistant.enabled || !fono_assistant::uses_embedded_local_model(&cfg.assistant) {
+        // Cloud backend, manual local server, or disabled — no GGUF to fetch.
+        return true;
+    }
+    let model = cfg.assistant.local.model.clone();
+    let size_hint = crate::models::local_llm_size_mb(&model);
+    // Canonicalize to the stem the downloader writes so the "already present"
+    // check matches a repo-style config name (e.g. a copied `…-GGUF`).
+    let stem = fono_polish::LocalLlmRegistry::resolve_filename_stem(&model);
+    let dest_exists = paths.polish_models_dir().join(format!("{stem}.gguf")).exists();
+    if !dest_exists {
+        let body = size_hint.map_or_else(
+            || format!("Assistant model: {model}"),
+            |mb| format!("Assistant model: {model} ({mb} MB)"),
+        );
+        fono_core::notify::send(
+            "Fono — downloading assistant model",
+            &body,
+            "emblem-downloads",
+            4_000,
+            fono_core::notify::Urgency::Normal,
+        );
+    }
+    match crate::models::ensure_local_llm(paths, &model).await {
+        Ok(crate::models::EnsureOutcome::Downloaded) => {
+            fono_core::notify::send(
+                "Fono — assistant model ready",
+                &format!("{model} downloaded and cached"),
+                "emblem-default",
+                4_000,
+                fono_core::notify::Urgency::Normal,
+            );
+            true
+        }
+        Ok(_) => true,
+        Err(e) => {
+            warn!("ensure_local_assistant: download failed: {e:#}");
+            fono_core::notify::send(
+                "Fono — assistant model download failed",
                 &format!("{e}"),
                 "dialog-error",
                 6_000,

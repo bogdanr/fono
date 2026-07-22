@@ -16,7 +16,7 @@ use std::time::Instant;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use fono_core::brain_tap::{decode_token_with_tap, BrainTap};
-use fono_core::llama_backend::{backend, shared_model};
+use fono_core::llama_backend::{backend, shared_model, streaming_model_params};
 use fono_core::llama_gen::{
     first_stop_marker, generation_sampler, is_control_token, safe_stream_end, turn_markers,
     warn_on_template_vocab_mismatch, TurnMarkers,
@@ -28,7 +28,6 @@ use futures::stream::{BoxStream, StreamExt};
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_batch::LlamaBatch;
-use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use serde_json::json;
@@ -297,7 +296,15 @@ impl LlamaLocalAssistant {
         // the same model (the default `gemma-4-e2b`) they share ONE
         // `LlamaModel` rather than each loading a ~3.2 GB copy. See
         // `fono_core::llama_backend::shared_model`.
-        let model = shared_model(&self.model_path, &LlamaModelParams::default())?;
+        //
+        // The assistant role uses the explicit streaming params (mmap on, mlock
+        // off, CPU) so a selected larger-than-RAM asym MoE pages in from SSD
+        // instead of being copied resident — the mechanism behind Win #1. For
+        // the small dense default this is behaviourally identical to
+        // `default()`; the differing params also key a *separate* shared-model
+        // entry from polish's `default()` load of the same file (Phase B), which
+        // is correct — the two roles want different residency for big MoEs.
+        let model = shared_model(&self.model_path, &streaming_model_params())?;
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let model_name = self.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
         // Load-time tripwire: warn when the selected hand-rolled template's

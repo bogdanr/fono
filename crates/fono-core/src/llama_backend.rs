@@ -66,16 +66,18 @@ pub fn backend() -> &'static LlamaBackend {
 ///
 /// Entries are held **weakly**: each backend keeps the strong `Arc` in its own
 /// `state`, so a daemon hot-swap that drops the old backend frees the weights
-/// once nothing references them. Keyed by canonicalized path; a caller loading
-/// the same file with materially different [`LlamaModelParams`] would share
-/// the first-loaded variant — acceptable today because both embedded backends
-/// load with `LlamaModelParams::default()`.
+/// once nothing references them. Keyed by canonicalized path **plus** the
+/// load-time knobs that change the resident layout (`n_gpu_layers`, `use_mmap`,
+/// `use_mlock`): a caller loading the same file with the same knobs shares one
+/// resident copy, while the same file loaded with different per-role params
+/// (e.g. polish on `default()` vs assistant on [`streaming_model_params`])
+/// loads as separate entries rather than silently reusing the first variant.
 ///
 /// # Errors
 /// Propagates `llama.cpp`'s load failure (missing/corrupt GGUF, OOM, …).
 pub fn shared_model(path: &Path, params: &LlamaModelParams) -> Result<Arc<LlamaModel>> {
-    static MODELS: OnceLock<Mutex<HashMap<PathBuf, Weak<LlamaModel>>>> = OnceLock::new();
-    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    static MODELS: OnceLock<Mutex<HashMap<ModelKey, Weak<LlamaModel>>>> = OnceLock::new();
+    let key = ModelKey::new(path, params);
     let registry = MODELS.get_or_init(|| Mutex::new(HashMap::new()));
     // Held across the (slow) load on purpose: a concurrent request for the
     // same key then waits and reuses the freshly-loaded weights instead of
@@ -94,6 +96,41 @@ pub fn shared_model(path: &Path, params: &LlamaModelParams) -> Result<Arc<LlamaM
     map.insert(key, Arc::downgrade(&model));
     drop(map);
     Ok(model)
+}
+
+/// Cache key for [`shared_model`]: the canonicalized path together with the
+/// load-time params that materially change the resident layout. Two loads that
+/// agree on all of these can safely share one `Arc<LlamaModel>`; any difference
+/// must load a separate copy (see the `shared_model` doc and Phase B).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ModelKey {
+    path: PathBuf,
+    n_gpu_layers: i32,
+    use_mmap: bool,
+    use_mlock: bool,
+}
+
+impl ModelKey {
+    fn new(path: &Path, params: &LlamaModelParams) -> Self {
+        Self {
+            path: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
+            n_gpu_layers: params.n_gpu_layers(),
+            use_mmap: params.use_mmap(),
+            use_mlock: params.use_mlock(),
+        }
+    }
+}
+
+/// Model-load params for the larger-than-RAM streaming regime: **mmap on**
+/// (weights stay file-backed and page in on demand instead of being copied into
+/// anonymous RAM) and **mlock off** (never pin — pinning a model bigger than
+/// RAM is an OOM). CPU-only (`n_gpu_layers = 0`); GPU offload is a separate,
+/// still-unproven effort. This is what the assistant role uses so a selected
+/// asym MoE streams from SSD rather than being resident in full; the small
+/// dense polish models keep `LlamaModelParams::default()`.
+#[must_use]
+pub fn streaming_model_params() -> LlamaModelParams {
+    LlamaModelParams::default().with_use_mmap(true).with_use_mlock(false).with_n_gpu_layers(0)
 }
 
 /// Default llama.cpp decode thread count: all available logical cores
@@ -127,5 +164,48 @@ pub fn streaming_decode_threads() -> i32 {
         all - 1
     } else {
         all
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Phase B regression: the shared-model cache key must fold in the load-time
+    // params that change resident layout, so per-role variants of the *same*
+    // file don't silently reuse the first-loaded copy. `path.canonicalize()`
+    // falls back to the literal path when the file is absent, so these tests
+    // need no real GGUF on disk.
+    fn key(path: &str, params: &LlamaModelParams) -> ModelKey {
+        ModelKey::new(Path::new(path), params)
+    }
+
+    #[test]
+    fn same_file_same_params_shares_one_key() {
+        // Scenario A: identical file + identical params → one resident copy.
+        let a = key("/models/gemma.gguf", &LlamaModelParams::default());
+        let b = key("/models/gemma.gguf", &LlamaModelParams::default());
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn same_file_different_params_load_separately() {
+        // Scenario B: same file, but polish `default()` vs assistant streaming
+        // params → distinct keys, so the two roles load independent copies
+        // rather than the assistant inheriting polish's (or vice versa).
+        let polish = key("/models/gemma.gguf", &LlamaModelParams::default());
+        let assistant = key("/models/gemma.gguf", &streaming_model_params());
+        assert_ne!(
+            polish, assistant,
+            "streaming params must not collide with default() for the same file"
+        );
+    }
+
+    #[test]
+    fn streaming_params_are_mmap_on_mlock_off_cpu() {
+        let p = streaming_model_params();
+        assert!(p.use_mmap(), "streaming must mmap (file-backed, page on demand)");
+        assert!(!p.use_mlock(), "streaming must not pin — mlock on an over-RAM model OOMs");
+        assert_eq!(p.n_gpu_layers(), 0, "streaming path is CPU-only for now");
     }
 }

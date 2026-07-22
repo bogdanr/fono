@@ -1,5 +1,7 @@
 # Hover-Context Injection — Zero-Friction Implementation Plan
 
+## Status: Completed
+
 ## Objective
 
 Automatically enrich both the Whisper `initial_prompt` and the LLM cleanup prompt based on
@@ -28,8 +30,8 @@ the existing `[[context_rules]]` schema.
   `crates/fono-core/src/config.rs:700-714`
 
 **Gaps to close**: Wayland focus detection, built-in classifier with no-config defaults,
-Whisper hint flowing from context (not just language), `/proc` deep terminal enrichment,
-cloud STT `prompt` field threading.
+Whisper hint flowing from context (not just language), `/proc` deep terminal enrichment
+including coding agent detection, cloud STT `prompt` field threading.
 
 ---
 
@@ -37,12 +39,12 @@ cloud STT `prompt` field threading.
 
 ### Phase A — Built-in context classifier (the zero-friction core)
 
-- [ ] A.1. Define a `ContextProfile` struct in `fono-core` (or as a new lightweight module
+- [x] A.1. Define a `ContextProfile` struct in `fono-core` (or as a new lightweight module
   within `fono-inject`) carrying `whisper_hint: Option<&'static str>` and
   `llm_suffix: Option<&'static str>`. This is the output of the classifier; it is never
   serialised and never stored in config.
 
-- [ ] A.2. Define a static built-in rule table as a `&[BuiltinRule]` — a compile-time
+- [x] A.2. Define a static built-in rule table as a `&[BuiltinRule]` — a compile-time
   constant, no heap allocation, no file I/O. Each `BuiltinRule` holds:
   - `classes: &[&str]` — window class names, matched case-insensitively
   - `title_fragments: &[&str]` — optional title substrings for finer matching
@@ -61,12 +63,12 @@ cloud STT `prompt` field threading.
   | `Spreadsheet` | `libreoffice-calc`, `gnumeric` |
   | `Document` | `libreoffice-writer`, `abiword` |
 
-- [ ] A.3. Implement `ContextClassifier::classify(window_class, window_title) -> Option<ContextProfile>`:
+- [x] A.3. Implement `ContextClassifier::classify(window_class, window_title) -> Option<ContextProfile>`:
   1. Walk built-in rules; first match wins. Class check is `eq_ignore_ascii_case`. Title
      check is a case-insensitive substring scan against `title_fragments`.
   2. Return `None` on no match (unknown app) — treated as "no enrichment, use base prompts".
 
-- [ ] A.4. Craft the built-in prompt text for each profile. Key design decisions:
+- [x] A.4. Craft the built-in prompt text for each profile. Key design decisions:
 
   **Terminal `whisper_hint`** (≤ 200 chars, examples Whisper uses as prior tokens):
   > `ls -la, grep -r, chmod 755, git commit, sudo apt install, cd /etc, rm -rf, | grep, > /dev/null, ./script.sh, ssh user@host`
@@ -102,7 +104,7 @@ cloud STT `prompt` field threading.
 The X11 path covers XWayland apps even on Wayland desktops (most Electron and Qt apps run
 under XWayland). Native Wayland compositors need explicit paths:
 
-- [ ] B.1. **sway / wlroots** path in `detect_focus()`: read `$SWAYSOCK` (or `$I3SOCK`).
+- [x] B.1. **sway / wlroots** path in `detect_focus()`: read `$SWAYSOCK` (or `$I3SOCK`).
   If set, open a Unix socket, send the sway IPC `get_tree` message (type 4), parse the
   minimal JSON to find the focused node's `app_id` and `name` fields. Map `app_id` →
   `window_class`, `name` → `window_title`. Add `swayipc` crate (MIT) or implement the raw
@@ -112,7 +114,7 @@ under XWayland). Native Wayland compositors need explicit paths:
   Priority: **highest** — sway/Hyprland are the dominant tiling compositors for Fono's
   target user base.
 
-- [ ] B.2. **Hyprland** path: read `$HYPRLAND_INSTANCE_SIGNATURE`. If set, call
+- [x] B.2. **Hyprland** path: read `$HYPRLAND_INSTANCE_SIGNATURE`. If set, call
   `hyprctl activewindow -j` as a subprocess (already acceptable latency at hotkey press
   time; ≤ 5 ms). Parse the JSON `class` and `title` fields. Map directly to `window_class`
   / `window_title`.
@@ -120,7 +122,7 @@ under XWayland). Native Wayland compositors need explicit paths:
   Alternative: use the `hyprland` crate's `ActiveWindow::get_active()`. Evaluate crate size
   vs. subprocess cost; subprocess is safer for a feature this peripheral.
 
-- [ ] B.3. **GNOME Shell** path: call D-Bus `org.gnome.Shell.Introspect.GetWindows()`,
+- [x] B.3. **GNOME Shell** path: call D-Bus `org.gnome.Shell.Introspect.GetWindows()`,
   find the entry with `"is-focused": true`, extract `"wm-class"` and `"title"`. Use
   `zbus` (already a workspace dep, or add if not) for the D-Bus call. Gate behind an
   `if std::env::var("GNOME_SETUP_DISPLAY").is_ok() || desktop_is_gnome()` check.
@@ -128,12 +130,12 @@ under XWayland). Native Wayland compositors need explicit paths:
   Note: GNOME does not expose XWayland window classes through this interface in all
   versions. Acceptable fallback: return `None` for those windows.
 
-- [ ] B.4. **KDE Plasma / Wayland** path: KDE runs many apps under XWayland, so the
+- [x] B.4. **KDE Plasma / Wayland** path: KDE runs many apps under XWayland, so the
   existing X11 path may already fire. For native Wayland clients, `org.kde.KWin.Script`
   or the `PlasmaWindow` protocol are options but require more work. Defer to a follow-up;
   document the gap in `docs/wayland.md`.
 
-- [ ] B.5. Update `detect_focus()` to try paths in order:
+- [x] B.5. Update `detect_focus()` to try paths in order:
   1. If `XDG_SESSION_TYPE == wayland`:
      - Try sway IPC (B.1) if `$SWAYSOCK` or `$I3SOCK` set
      - Try Hyprland (B.2) if `$HYPRLAND_INSTANCE_SIGNATURE` set
@@ -153,20 +155,19 @@ Triggered only when the classifier identifies a `Terminal` profile. All reads ar
 synchronous filesystem reads on `/proc` — owned by the same user, no elevated permissions
 required.
 
-- [ ] C.1. Extend `FocusInfo` with `Option<u32> window_pid`. Populate it on X11 by reading
+- [x] C.1. Extend `FocusInfo` with `Option<u32> window_pid`. Populate it on X11 by reading
   the `_NET_WM_PID` atom from the focused window (same `x11rb` connection already open in
   `x11_focus()`). For Wayland compositors, populate where the compositor provides PID
   (sway's tree JSON includes `pid`; Hyprland's `activewindow` JSON includes `pid`).
 
-- [ ] C.2. Implement `terminal_context(terminal_pid: u32) -> TerminalContext`. Steps:
+- [x] C.2. Implement `terminal_context(terminal_pid: u32) -> TerminalContext`. Steps:
   1. Read `/proc/[terminal_pid]/task/[terminal_pid]/children` (or parse `/proc/[pid]/stat`
      with `ppid == terminal_pid` scan) to find child process PIDs.
   2. For each child, read `/proc/[child]/comm` to identify a shell (`bash`, `zsh`, `fish`,
      `sh`, `dash`). Take the first match.
   3. Read `/proc/[shell_pid]/cwd` (symlink) → resolve to absolute path.
   4. Probe CWD for project-type markers (in order of specificity):
-     - `KUBECONFIG` in `/proc/[shell_pid]/environ`, or `k8s/` subdir, or `*.yaml` with
-       `kind: Deployment` → `K8s`
+     - `KUBECONFIG` in `/proc/[shell_pid]/environ`, or `k8s/` subdir → `K8s`
      - `docker-compose.yml` or `Dockerfile` → `Docker`
      - `Cargo.toml` → `Rust`
      - `pyproject.toml` / `setup.py` / `setup.cfg` → `Python`
@@ -175,10 +176,61 @@ required.
      - `.git/` exists → `Git` (add git vocabulary even if language unknown)
      - No markers → generic `Shell`
 
-- [ ] C.3. Map `TerminalContext` variant to a refined `ContextProfile` with a more targeted
-  `whisper_hint`. Examples:
+- [x] C.2b. **Coding agent detection** — also scan the shell's direct children
+  (grandchildren of the terminal emulator) for known coding agent processes. This runs in
+  parallel with the CWD probe in C.2 step 4 and populates a separate
+  `agent: Option<CodingAgentKind>` field on `TerminalContext`, making it a struct rather
+  than a plain enum: `TerminalContext { project: ProjectKind, agent: Option<CodingAgentKind> }`.
 
-  | Variant | Additional `whisper_hint` |
+  Detection strategy for each child PID of the shell:
+  1. Read `/proc/[pid]/comm` (≤ 15 chars, the kernel-truncated executable name). Match
+     against the known agent binary name list — this covers all native binaries with zero
+     extra I/O.
+  2. If `comm` is an interpreter (`node`, `python3`, `python`, `deno`), read
+     `/proc/[pid]/cmdline` (NUL-separated argv) and check for agent-specific path fragments
+     or argv tokens. This covers agents distributed as Node or Python packages.
+  3. Take the **first** match; if multiple agents are somehow running, precedence follows
+     table order. All reads fail silently to `None` — the agent field is best-effort.
+
+  Known agent fingerprints:
+
+  | Agent | `CodingAgentKind` variant | Primary signal (`comm`) | Interpreter fallback (cmdline fragment) |
+  |---|---|---|---|
+  | Forge | `Forge` | `forge` | — |
+  | Claude Code | `ClaudeCode` | `claude` | `node` + cmdline contains `claude` |
+  | OpenAI Codex | `Codex` | `codex` | `node` + cmdline contains `codex` |
+  | Aider | `Aider` | `aider` | `python`/`python3` + cmdline contains `aider` |
+  | Goose (Block) | `Goose` | `goose` | — |
+  | Gemini CLI | `GeminiCli` | `gemini` | `node` + cmdline contains `@google/gemini` |
+  | Amp | `Amp` | `amp` | — |
+  | GitHub Copilot CLI | `GithubCopilot` | `gh` + cmdline contains `copilot` | — |
+  | Amazon Q | `AmazonQ` | `q` or `qchat` | — |
+  | Cursor (CLI) | `Cursor` | `cursor` | — |
+
+  Notes:
+  - `CodingAgentKind` is `#[non_exhaustive]` so future agents can be added without breaking
+    existing match arms elsewhere in the codebase.
+  - Editor-integrated agents (Cline, Continue, Copilot Chat inside VS Code) run inside the
+    editor process, not as terminal children — they are not detectable through this path.
+    They are instead covered by the CodeEditor profile (Phase A / Phase F).
+  - The list above is the initial set. It is expected to grow as new agents emerge; adding
+    a new entry is a one-line table addition with no architectural changes.
+
+- [x] C.3. Restructure `TerminalContext` as a struct carrying both detection results:
+  `TerminalContext { project: ProjectKind, agent: Option<CodingAgentKind> }`.
+  Both fields are always populated after a successful `/proc` walk. The `agent` field is
+  carried through to `ContextProfile` for use in biasing.
+
+  **Biasing strategy for `CodingAgentKind` is TBD** — the detection capability is built now
+  and the prompt tuning follows as a dedicated design step once there is empirical data on
+  what framing actually helps each agent. For now, a detected agent leaves `whisper_hint`
+  and `llm_suffix` at the project-type profile values (no regression vs. today). The field
+  is preserved in the `ContextProfile` so the future biasing step requires only prompt text
+  additions, not structural changes.
+
+  Project-type `whisper_hint` additions (independent of agent):
+
+  | `ProjectKind` | Additional `whisper_hint` |
   |---|---|
   | `Rust` | `cargo build, cargo test, cargo clippy, rustc, --release` |
   | `Python` | `python3, pip install, pytest, virtualenv, uv run` |
@@ -187,9 +239,10 @@ required.
   | `Docker` | `docker build, docker run, docker compose up, --rm` |
   | `Git` | `git commit, git push, git rebase, git stash, --amend` |
 
-- [ ] C.4. Gate the entire `/proc` enrichment behind a capability check on startup
-  (`/proc/[self_pid]/cwd` readable → proceed). Fail silently to `TerminalContext::Shell`
-  if any step fails (missing file, permission error, non-Linux platform).
+- [x] C.4. Gate the entire `/proc` enrichment behind a capability check on startup
+  (`/proc/[self_pid]/cwd` readable → proceed). Fail silently to
+  `TerminalContext { project: Shell, agent: None }` if any step fails (missing file,
+  permission error, non-Linux platform).
 
 ---
 
@@ -198,26 +251,26 @@ required.
 Currently `resolve_prompt()` at `crates/fono-stt/src/whisper_local.rs:127` only considers
 language code. The context hint needs to flow alongside it.
 
-- [ ] D.1. Extend the `SpeechToText` trait's `transcribe()` method (or add a parallel
+- [x] D.1. Extend the `SpeechToText` trait's `transcribe()` method (or add a parallel
   `transcribe_with_context()`) to accept an `Option<&str> context_hint`. For backends that
   ignore it, the default implementation discards it. Evaluate impact on all backend
   implementations before widening the trait signature — a `TranscribeOptions` struct param
   may be cleaner than extending positional args.
 
-- [ ] D.2. Update `WhisperLocal::resolve_prompt()` to also accept an `Option<&str>
+- [x] D.2. Update `WhisperLocal::resolve_prompt()` to also accept an `Option<&str>
   context_hint`. When both a language prompt and a context hint are present, concatenate
   them separated by a space. When only a context hint is present and the language is
   auto-detect (would normally suppress the prompt), still inject the context hint — it does
   not bias language detection since it contains no spoken words, only representative tokens.
 
-- [ ] D.3. For cloud STT backends that support an equivalent:
+- [x] D.3. For cloud STT backends that support an equivalent:
   - **OpenAI Whisper API** (`openai-stt`): the `prompt` field in the multipart form body.
     Thread `context_hint` through `GroqSTT` and `OpenAISTT` request builders.
   - **Deepgram**: uses a `keywords` query param (different mechanism, different semantics).
     Map a curated keyword list from the profile rather than the raw hint string.
   - **Other cloud backends**: no equivalent — skip silently.
 
-- [ ] D.4. At the `session.rs` call site, after classifying the context profile, pass
+- [x] D.4. At the `session.rs` call site, after classifying the context profile, pass
   `profile.whisper_hint` as the `context_hint` argument to `stt_backend.transcribe()`.
 
 ---
@@ -228,7 +281,7 @@ The `FormatContext.rule_suffix` field is already the injection point for the LLM
 here is wiring the built-in profile's `llm_suffix` into it, merged correctly with any
 user-configured `[[context_rules]]` match.
 
-- [ ] E.1. Change `build_format_context()` at `crates/fono/src/session.rs:3052` to accept
+- [x] E.1. Change `build_format_context()` at `crates/fono/src/session.rs:3052` to accept
   an `Option<&ContextProfile>` in addition to the existing `(app_class, app_title)`. Build
   `rule_suffix` as:
   1. Try `matched_rule_suffix()` against user `[[context_rules]]` first (existing behaviour,
@@ -237,7 +290,7 @@ user-configured `[[context_rules]]` match.
   3. If both match, concatenate with `\n` (user rule appended after built-in — user intent
      is additive, not replacing).
 
-- [ ] E.2. No changes needed to `FormatContext`, `system_prompt()`, or any `TextFormatter`
+- [x] E.2. No changes needed to `FormatContext`, `system_prompt()`, or any `TextFormatter`
   backend — the `rule_suffix` field already wires straight into the system prompt at
   `crates/fono-polish/src/traits.rs:36-39`.
 
@@ -249,7 +302,7 @@ Code editors reliably expose the open file name in their window title
 (`filename.ext — Visual Studio Code`, `kate — ~/project/src/main.rs`). This gives
 language-specific injection for free.
 
-- [ ] F.1. In `ContextClassifier::classify()`, when the primary match is `CodeEditor`,
+- [x] F.1. In `ContextClassifier::classify()`, when the primary match is `CodeEditor`,
   scan the window title for known file extensions:
   - `.rs` → Rust sub-profile
   - `.py` → Python sub-profile
@@ -259,7 +312,7 @@ language-specific injection for free.
   - `.sql` → SQL sub-profile
   - `.md` / `.rst` → Prose sub-profile (full punctuation, no identifier casing)
 
-- [ ] F.2. Each sub-profile overrides only `whisper_hint` and adjusts `llm_suffix`
+- [x] F.2. Each sub-profile overrides only `whisper_hint` and adjusts `llm_suffix`
   minimally (casing convention). The base `CodeEditor` profile applies when no extension is
   detected.
 
@@ -267,12 +320,12 @@ language-specific injection for free.
 
 ### Phase G — Privacy guard for sensitive windows
 
-- [ ] G.1. Define a `Private` built-in profile with `whisper_hint: None`,
+- [x] G.1. Define a `Private` built-in profile with `whisper_hint: None`,
   `llm_suffix: None`, and a `suppress_history: true` flag. Apply it to classes:
   `keepassxc`, `bitwarden`, `1password`, `gnome-keyring`, `seahorse`, `pass` (the
   terminal password manager, detected by title pattern `pass`).
 
-- [ ] G.2. When `suppress_history` is set in the profile, skip writing the transcription
+- [x] G.2. When `suppress_history` is set in the profile, skip writing the transcription
   to the SQLite history DB and skip the `redact_secrets` pass entirely (no data persisted).
   This is the *opposite* of context injection — the window context tells us to do *less*,
   not more.
@@ -281,13 +334,13 @@ language-specific injection for free.
 
 ### Phase H — Snapshot semantics and toggle-mode correctness
 
-- [ ] H.1. Context classification must happen at **hotkey-press time** (recording start),
+- [x] H.1. Context classification must happen at **hotkey-press time** (recording start),
   not at paste time. The focused window may change during a long dictation in toggle mode.
   Capture the `ContextProfile` as part of the `Session` struct and carry it through to STT
   and polish — already the case since `focus.probe()` is called at the start of each
   session, but confirm the profile snapshot is stored and not re-evaluated at paste time.
 
-- [ ] H.2. The Wayland detection paths (B.1–B.3) must not block the hotkey response. If
+- [x] H.2. The Wayland detection paths (B.1–B.3) must not block the hotkey response. If
   a Wayland IPC call takes more than ~20 ms, fall through to `None` rather than delaying
   the recording start. Use `tokio::time::timeout` around each async path.
 
@@ -309,6 +362,11 @@ language-specific injection for free.
 - With KeePassXC focused: transcription is not written to history DB.
 - `/proc` enrichment identifies a Rust project (has `Cargo.toml` in CWD) and injects
   `cargo build, cargo clippy` into the Whisper hint.
+- With `forge` running as a child of the shell: `TerminalContext.agent` resolves to
+  `Some(CodingAgentKind::Forge)`. Same for `claude` → `ClaudeCode`, `aider` → `Aider`.
+- With `node` running as a child of the shell and cmdline containing `claude`:
+  `TerminalContext.agent` resolves to `Some(CodingAgentKind::ClaudeCode)`.
+- When no agent is detected: `agent` field is `None` with no error or log noise.
 - `cargo clippy --workspace --all-targets -- -D warnings` passes with all new code.
 - No new config fields required; existing configs continue to work unchanged (all new
   built-in logic is additive).
@@ -352,6 +410,20 @@ language-specific injection for free.
    The `org.gnome.Shell.Introspect` interface was added in GNOME 3.34. Older GNOME
    releases will return a D-Bus error.
    Mitigation: wrap in `timeout(10ms)` and catch all errors; log at `TRACE` level only.
+
+7. **Agent binary name collisions**
+   `comm == "q"` matches Amazon Q but also any other single-character binary named `q`.
+   `comm == "gh"` matches the GitHub CLI generally, not only when used for Copilot.
+   Mitigation: for ambiguous short names, always check cmdline as a secondary filter.
+   For `gh`, only set `GithubCopilot` when cmdline also contains `copilot`. For `q`,
+   accept the false-positive rate as low-stakes — a detected agent with TBD biasing
+   currently has no effect on prompts.
+
+8. **Rapidly cycling processes (shell running a build, not an agent)**
+   The shell may have short-lived child processes that happen to share a name.
+   Mitigation: the scan happens once at hotkey-press time and takes a snapshot. A build
+   that finished before the hotkey was pressed is invisible. A build running during the
+   scan would be a false positive; acceptable since agent biasing is currently a no-op.
 
 ---
 

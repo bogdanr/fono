@@ -1,5 +1,7 @@
 # Universal TTS Voice Autodiscovery (Task 10)
 
+## Status: Completed
+
 > Continues the per-program voices work (`plans/2026-06-16-per-program-tts-voices-v4.md`,
 > Tasks 1–9 + the Deepgram fix shipped). This is the deferred **Task 10**, reframed by the
 > latest requirement: discovery must be **universal** — one mechanism that serves every

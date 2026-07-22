@@ -1,5 +1,7 @@
 # Catalogue-Driven Wizard Provider Lists
 
+## Status: Completed
+
 ## Objective
 
 Eliminate per-provider hand-wiring in the setup wizard. Today, adding a

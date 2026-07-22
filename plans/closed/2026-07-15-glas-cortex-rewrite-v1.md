@@ -1,5 +1,7 @@
 # Glas Cortex Rewrite — "Watch it think" LED panel
 
+## Status: Completed (visual rewrite shipped; Task 15 speech-synced clock deferred as independently-shippable follow-up)
+
 ## Objective
 
 Replace the current Glas Cortex visualization (`crates/fono-overlay/src/cortex.rs`, ~3 000 lines, shipped as a "rough preview" in v0.16.0) with a from-scratch port of the new design specified in `/root/Downloads/IMPLEMENTATION.md` and prototyped in `/root/Downloads/fono-how-it-thinks.bundle.html`. The new design is a **fixed 6×46 LED bar** with an event-driven visual language: cool prefill flood, warm per-token compute sweeps, dense equalizer vs MoE expert lanes, confidence/entropy modulation, speech-paced timing, and never-dead resting behavior. The rewrite keeps the existing capture layer (`brain_tap`) and overlay wiring largely intact, extending the data contract only where the spec requires it.

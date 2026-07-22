@@ -1,5 +1,7 @@
 # Shared ggml Size-Reclaim Spike
 
+## Status: Completed (spike delivered its decision — "Decision (2026-06-24): DEFER"; D2 was conditional on a Go verdict)
+
 ## Objective
 
 Investigate whether Fono can replace the `--allow-multiple-definition`

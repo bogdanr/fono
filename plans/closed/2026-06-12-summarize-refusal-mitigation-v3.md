@@ -1,5 +1,7 @@
 # Mitigate small-Gemma safety refusals + repetition loops in `fono summarize` (v3)
 
+## Status: Completed
+
 ## Objective
 
 `fono summarize` with the local `gemma-4-e2b` backend refuses on profane input and loops the refusal sentence until the 384-token cap (~13 s, 333 deltas). Fix it by porting the already-proven F7 polish fixes into the assistant backend, harden the prompt, add a fallback — **and make the decoding-level fixes structurally shared so the next model switch cannot reintroduce the bug in one backend but not the other.**

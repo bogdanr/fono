@@ -14,8 +14,8 @@ The home page is [fono.page](https://fono.page).
 
 <table width="100%">
 <tr>
-<td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#personal-vocabulary--voice-correction">Personal vocabulary &amp; voice correction</a></strong><br>Teach Fono once that "Phono" means "Fono" — it sticks forever, deterministically, before the text ever hits the cursor.<br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".</td>
-<td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#self-hosted-modelship-backend">Self-hosted Modelship backend</a></strong><br>One box on your LAN runs the LLM, speech-to-text, text-to-speech, and embeddings — every Fono desktop points at it, fully local.<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#local-rest-api">Local REST API</a></strong><br>Every CLI verb over plain HTTP, so scripts and editor plugins can drive the daemon you already run — no MCP, no special tooling.</td>
+<td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#larger-than-ram-local-models">Larger-than-RAM local models</a></strong><br>Run a local model bigger than your RAM — the hot parts stay in memory, the rest streams from your SSD.</td>
+<td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#self-hosted-modelship-backend">Self-hosted Modelship backend</a></strong><br>One box on your LAN runs the LLM, speech-to-text, text-to-speech, and embeddings — every Fono desktop points at it, fully local.<br><br><strong><a href="#local-rest-api">Local REST API</a></strong><br>Every CLI verb over plain HTTP, so scripts and editor plugins can drive the daemon you already run — no MCP, no special tooling.<br><br><strong><a href="#openai-realtime-backend">OpenAI Realtime backend</a></strong><br>The same hands-free conversation, now on OpenAI's voice models.</td>
 </tr>
 </table>
 
@@ -136,31 +136,6 @@ Deepgram + Cartesia STT, headless install, pause UI polish. *(2026-05-23)*
 
 ## Up next
 
-### Personal vocabulary & voice correction
-
-> Say "Fono". Get "Fono". Every time. Without touching the keyboard.
-
-Whisper — cloud and local alike — reliably mishears proper nouns, project names,
-and jargon. Fono will let you teach it your vocabulary once, and have every future
-dictation corrected before the text ever reaches the cursor.
-
-**How it works:** a `vocabulary.toml` in your config directory maps mishearings to
-canonical spellings (`phono → Fono`, `bug done → Bogdan`, `cube ernetes → Kubernetes`).
-After every STT result — regardless of whether LLM cleanup is on or off — a
-word-boundary-aware substitution pass rewrites the final text before injection. It is
-deterministic and idempotent: no probability, no model call, no network round-trip.
-This substitution pass is already implemented and runs on every dictation; when a
-correction fires, the diagnostic log now shows the original speech-to-text output
-alongside the corrected text.
-
-The vocabulary grows via `fono vocabulary add/remove/list`.
-
-A later phase moves correction into the decoder itself: hotword / contextual
-biasing (a Whisper `initial_prompt` injection today, CTC/TDT biasing when a
-transducer STT engine lands — an approach demonstrated by
-[CrispASR](https://github.com/CrispStrobe/CrispASR)'s `--hotwords`), layered
-under the deterministic substitution pass rather than replacing it.
-
 ### Automatic translation
 
 > Speak in Romanian, type in English. Or any other pair. Without leaving your editor.
@@ -178,20 +153,6 @@ Fono will translate as it transcribes — the pipeline becomes
   live-dictation mode.
 - **One-shot CLI.** `fono translate <text> --to <code>` pipes any text through the
   configured translator without touching audio capture.
-
-### OpenAI Realtime backend
-
-> The same hands-free conversation, on OpenAI's voice models.
-
-Live conversation mode is built provider-agnostic at the trait and catalogue
-layer, so adding a second realtime backend is a self-contained client, not a
-rearchitecture. OpenAI's Realtime API is the next provider to land: it speaks a
-different wire protocol (`session.update` + `response.create` instead of Gemini's
-`setupComplete` / `audioStreamEnd`) and runs at 24 kHz in and out, so it needs
-its own client module and an input resampler, both already scoped. Once it lands,
-tap-to-converse, the cost guardrails, the floor-ownership overlay, and the
-mute-while-speaking baseline all apply unchanged — you simply pick OpenAI as your
-assistant provider.
 
 ### Talk over the assistant
 
@@ -220,6 +181,57 @@ later slice. Plan:
 Voice UX polish follow-up: an optional server-side wake chime
 before TTS after long idle gaps, as a deferred refinement to the
 spoken refocus preamble.
+
+### Voice actions
+
+> Stop asking. Start doing.
+
+The voice assistant today answers questions. The next step is letting it **do
+things** — turn on the kitchen lights, start a Pomodoro, open a GitHub issue,
+anything an MCP server can expose. You hold F8, say what you want, and Fono
+either explains (as today) or acts. The assistant decides per turn, no special
+keyword, no separate hotkey.
+
+The connector is the [Model Context Protocol](https://modelcontextprotocol.io)
+— Fono is the **client**, speaking to whichever MCP servers you configure. A
+typical setup points at Home Assistant on your LAN for smart-home control;
+power users add GitHub, calendar, file-search, or any of the growing MCP
+ecosystem. Tools are advertised to the assistant LLM via its native
+function-calling API (works on OpenAI, Anthropic, Groq, Cerebras, and Gemini —
+local LLM tool-calling lands later).
+
+Two in-process built-ins ship by default — `pomodoro_start` and
+`pomodoro_cancel` — so the feature works out of the box without any external
+server, and the tray shows the active timer. A confirmation-policy hook is
+wired in from day one so dangerous actions ("delete every file in Downloads")
+can later require a spoken "yes" or a hotkey tap before they fire. v1 ships
+with confirmation off by default; the UX layers on later without schema churn.
+
+Concrete plan: `plans/2026-05-22-voice-actions-via-mcp-v1.md`. Once it lands,
+voice actions apply in lockstep to both the staged pipeline and the realtime
+assistant.
+
+### Larger-than-RAM local models
+
+> Run a model bigger than your memory. The hot parts stay in RAM; the rest
+> streams from your SSD.
+
+Today a local model has to fit in your RAM. This work lifts that ceiling: Fono
+keeps the always-needed parts of a mixture-of-experts model resident in fast
+memory and streams the rarely-used expert weights from your SSD on demand, so
+you can run a noticeably bigger, smarter local model than your machine could
+normally hold — at speeds that still feel interactive.
+
+This is a measurement-first campaign, not a shipped feature yet. Proven so far:
+with the right build (memory-mapped weights, no weight repacking) a
+mixture-of-experts model keeps decoding usably with only ~40% of it resident in
+RAM, no out-of-memory crash — something the stock build can't do. The biggest
+remaining wins are smarter quantization of the streamed expert weights and
+moving the streaming path onto the integrated GPU. A ranked, machine-independent
+benchmark and a concrete integration proposal — respecting Fono's binary-size
+budget and its separate cleanup/assistant model choices — come out of it before
+any shipping code. Research plan:
+`plans/2026-07-21-fono-larger-than-ram-llm-research-v4.md`.
 
 ---
 
@@ -270,35 +282,6 @@ fallback model covers requests that name nothing, and an allowlist bounds which
 providers and models an exposed instance will relay so a shared box never becomes
 an open, cost-burning gateway.
 
-### Voice actions
-
-> Stop asking. Start doing.
-
-The voice assistant today answers questions. The next step is letting it **do
-things** — turn on the kitchen lights, start a Pomodoro, open a GitHub issue,
-anything an MCP server can expose. You hold F8, say what you want, and Fono
-either explains (as today) or acts. The assistant decides per turn, no special
-keyword, no separate hotkey.
-
-The connector is the [Model Context Protocol](https://modelcontextprotocol.io)
-— Fono is the **client**, speaking to whichever MCP servers you configure. A
-typical setup points at Home Assistant on your LAN for smart-home control;
-power users add GitHub, calendar, file-search, or any of the growing MCP
-ecosystem. Tools are advertised to the assistant LLM via its native
-function-calling API (works on OpenAI, Anthropic, Groq, Cerebras, and Gemini —
-local LLM tool-calling lands later).
-
-Two in-process built-ins ship by default — `pomodoro_start` and
-`pomodoro_cancel` — so the feature works out of the box without any external
-server, and the tray shows the active timer. A confirmation-policy hook is
-wired in from day one so dangerous actions ("delete every file in Downloads")
-can later require a spoken "yes" or a hotkey tap before they fire. v1 ships
-with confirmation off by default; the UX layers on later without schema churn.
-
-Concrete plan: `plans/2026-05-22-voice-actions-via-mcp-v1.md`. Once it lands,
-voice actions apply in lockstep to both the staged pipeline and the realtime
-assistant.
-
 ### Research spikes (low priority)
 
 > Measure first, decide later. These are spike-first investigations that
@@ -319,11 +302,40 @@ assistant.
   default binary. Baseline numbers and go-bar in
   `plans/2026-07-12-gemma-vision-ocr-spike-v1.md`.
 
+### OpenAI Realtime backend
+
+> The same hands-free conversation, on OpenAI's voice models.
+
+Live conversation mode is built provider-agnostic at the trait and catalogue
+layer, so adding a second realtime backend is a self-contained client, not a
+rearchitecture. OpenAI's Realtime API is a natural second provider: it speaks a
+different wire protocol (`session.update` + `response.create` instead of Gemini's
+`setupComplete` / `audioStreamEnd`) and runs at 24 kHz in and out, so it needs
+its own client module and an input resampler, both already scoped. Once it lands,
+tap-to-converse, the cost guardrails, the floor-ownership overlay, and the
+mute-while-speaking baseline all apply unchanged — you simply pick OpenAI as your
+assistant provider.
+
 ---
 
 ## Shipped
 
 Newest first.
+
+- ![shipped](https://img.shields.io/badge/shipped-2026--07--21-6e7681?style=flat-square)
+  **Personal vocabulary (deterministic correction).** Teach Fono once that a
+  mishearing maps to the spelling you want — "Phono" to "Fono", "bug done" to
+  "Bogdan", "cube ernetes" to "Kubernetes" — and it fixes every future
+  dictation before the text reaches the cursor. The rewrite is deterministic
+  and idempotent: whole-word and whole-phrase, case-insensitive, longest match
+  first, no model call and no network round-trip, and it runs on every
+  dictation whether AI cleanup is on or off. Manage the list with `fono
+  vocabulary add/remove/list` or the browser settings page, and the diagnostic
+  log shows the original speech-to-text wording alongside the corrected form
+  when a correction fires. A later decoder-level hotword-biasing refinement is
+  tracked separately; the deterministic pass is complete. Design in
+  [ADR 0037](docs/decisions/0037-personal-vocabulary-deterministic-correction.md).
+  *2026-07-21.*
 
 - ![v0.17.1](https://img.shields.io/badge/v0.17.1-2026--07--21-blue?style=flat-square)
   **Natural multilingual voice by default.** Fono's built-in text-to-speech now

@@ -1,5 +1,7 @@
 # Speaker Verification — Calibration, Enrollment Quality & UX (Consolidated)
 
+## Status: Completed (Step 1 cohort shipped 2026-07-19 / Release 0.17.0; Tasks 1.2–1.4 done — selection manifest committed, cohorts generated/hosted/pinned, AS-Norm live end-to-end)
+
 ## Objective
 
 Sequence the next phase of Fono's on-device speaker verification toward three
@@ -68,15 +70,16 @@ pool is bigger than top-k. Parameters:
 
 - [x] Task 1.1. Cohort source decided — see the decision block above (was
       Open Decision 1).
-- [ ] Task 1.2. Curate + commit the selection manifest (download tarballs,
+- [x] Task 1.2. Curate + commit the selection manifest (download tarballs,
       select speakers per the composition above), then generate
       `redimnet2-b3.cohort.bin` (and `-b6`) locally with the model-agnostic
       tool: embed each speaker's 3–5 clips through the hosted graph, mean per
       speaker, L2-normalise, serialise.
-- [ ] Task 1.3. Host on the `ort-1.24.2` mirror release; pin sha256 + size in
+      (`calibration/speaker-cohort/selection.tsv` + `scripts/gen-speaker-cohort.py`.)
+- [x] Task 1.3. Host on the `ort-1.24.2` mirror release; pin sha256 + size in
       the registry rows (`speaker.rs`) and `manifest.json` (flip cohort rows
-      from UNPINNED → hosted). Needs push + sign-off.
-- [ ] Task 1.4. Load path already exists (`load_cohort` in daemon); verify
+      from UNPINNED → hosted). Cohort rows in `speaker.rs` carry real sha256 pins.
+- [x] Task 1.4. Load path already exists (`load_cohort` in daemon); verify
       AS-Norm now active end-to-end and the empty-cohort fallback still holds.
 
 ### Step 2 — Capture-quality UX (biggest UX + EER-per-effort; zero blockers)

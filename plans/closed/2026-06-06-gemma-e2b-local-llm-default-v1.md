@@ -1,5 +1,7 @@
 # Resumable implementation plan: Gemma E2B local LLM default
 
+## Status: Completed
+
 ## Goal
 
 Simplify Fono’s local LLM strategy:

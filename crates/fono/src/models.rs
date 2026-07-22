@@ -6,7 +6,7 @@
 //! * the daemon startup path (before the IPC loop begins),
 //! * the wizard after a fresh `Setup`,
 //! * the tray's STT/LLM switcher (when the user picks `Local` and the
-//!   weights are missing — see [`ensure_local_stt`] / [`ensure_local_polish`]).
+//!   weights are missing — see [`ensure_local_stt`] / [`ensure_local_llm`]).
 //!
 //! Both whisper STT and llama-cpp LLM are covered; the LLM auto-download
 //! resolves the model name in `config.polish.local.model` against the
@@ -88,14 +88,14 @@ pub async fn ensure_models(paths: &Paths, config: &Config) -> Result<()> {
     if config.polish.backend == PolishBackend::Local {
         // Boxed: the LLM-ensure future may carry registry/download state
         // large enough to trip stack-frame lints when inlined here.
-        if let Err(e) = Box::pin(ensure_local_polish(paths, &config.polish.local.model)).await {
+        if let Err(e) = Box::pin(ensure_local_llm(paths, &config.polish.local.model)).await {
             warn!("auto-download of LLM model failed: {e:#}");
         }
     }
     if config.assistant.enabled && config.assistant.backend == AssistantBackend::Ollama {
         // Boxed for the same reason as the polish LLM ensure above; local
         // assistant and cleanup share the registry/download path.
-        if let Err(e) = Box::pin(ensure_local_polish(paths, &config.assistant.local.model)).await {
+        if let Err(e) = Box::pin(ensure_local_llm(paths, &config.assistant.local.model)).await {
             warn!("auto-download of assistant LLM model failed: {e:#}");
         }
     }
@@ -319,8 +319,8 @@ pub async fn ensure_local_stt(
 /// Ensure the named local LLM (`.gguf`) is on disk. Path resolution
 /// matches `fono-polish::factory::resolve_local_model_path`:
 /// `<polish_models_dir>/<name>.gguf`.
-pub async fn ensure_local_polish(paths: &Paths, model_name: &str) -> Result<EnsureOutcome> {
-    let Some(info) = fono_polish::PolishRegistry::get(model_name) else {
+pub async fn ensure_local_llm(paths: &Paths, model_name: &str) -> Result<EnsureOutcome> {
+    let Some(info) = fono_polish::LocalLlmRegistry::get(model_name) else {
         warn!(
             "config references unknown LLM model {model_name:?} — run \
              `fono models list` to see available names"
@@ -332,7 +332,7 @@ pub async fn ensure_local_polish(paths: &Paths, model_name: &str) -> Result<Ensu
         debug!("LLM model ready: {}", dest.display());
         return Ok(EnsureOutcome::AlreadyPresent);
     }
-    let url = fono_polish::PolishRegistry::url_for(info);
+    let url = fono_polish::LocalLlmRegistry::url_for(info);
     debug!("LLM model {model_name:?} missing; downloading {} MB from {url}", info.approx_mb);
     fono_download::download(&url, &dest, info.sha256)
         .await
@@ -355,5 +355,5 @@ pub fn local_stt_size_mb(model_name: &str, quantization: &str) -> Option<u32> {
 /// or `None` when the registry doesn't know about it.
 #[must_use]
 pub fn local_llm_size_mb(model_name: &str) -> Option<u32> {
-    fono_polish::PolishRegistry::get(model_name).map(|m| m.approx_mb)
+    fono_polish::LocalLlmRegistry::get(model_name).map(|m| m.approx_mb)
 }

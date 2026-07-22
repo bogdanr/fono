@@ -517,6 +517,17 @@ fn manual_local_server_endpoint(cfg: &AssistantCfg) -> Option<String> {
     })
 }
 
+/// True when `[assistant]` resolves to the embedded llama.cpp local model —
+/// the `ollama` backend *without* a manual server endpoint. This is exactly
+/// the case where [`build_ollama`] loads a local GGUF, so it is the condition
+/// under which a caller should ensure the model is downloaded before building
+/// the assistant. A manual Ollama/OpenAI-compatible server URL, any cloud
+/// backend, or `none` all return `false` (nothing to fetch locally).
+#[must_use]
+pub fn uses_embedded_local_model(cfg: &AssistantCfg) -> bool {
+    matches!(cfg.backend, AssistantBackend::Ollama) && manual_local_server_endpoint(cfg).is_none()
+}
+
 fn local_model(cfg: &AssistantCfg) -> String {
     cfg.cloud
         .as_ref()
@@ -527,7 +538,22 @@ fn local_model(cfg: &AssistantCfg) -> String {
 
 #[cfg(feature = "llama-local")]
 fn resolve_local_model_path(cfg: &AssistantCfg, assistant_models_dir: &Path) -> std::path::PathBuf {
-    assistant_models_dir.join(format!("{}.gguf", cfg.local.model))
+    let verbatim = assistant_models_dir.join(format!("{}.gguf", cfg.local.model));
+    if verbatim.exists() {
+        return verbatim;
+    }
+    // Fall back to the canonical filename stem the downloader uses for
+    // registry models: lowercased with a trailing `-gguf` (the HuggingFace
+    // repo suffix) stripped. This lets a config value copied verbatim from the
+    // repo name — e.g. `gemma-4-26B-A4B-it-asym-GGUF` — resolve to the file the
+    // auto-downloader actually wrote (`gemma-4-26b-a4b-it-asym.gguf`). Kept as a
+    // dependency-free string transform so `fono-assistant` need not pull in the
+    // `fono-polish` registry crate; the canonical names live in
+    // `fono_polish::LocalLlmRegistry`. A manually-placed file matches the
+    // verbatim path above, so this only changes behaviour when it is missing.
+    let lower = cfg.local.model.to_ascii_lowercase();
+    let stem = lower.strip_suffix("-gguf").unwrap_or(&lower);
+    assistant_models_dir.join(format!("{stem}.gguf"))
 }
 
 #[cfg(feature = "llama-local")]

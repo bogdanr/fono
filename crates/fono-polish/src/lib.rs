@@ -16,7 +16,7 @@ pub mod llama_local;
 pub mod openai_compat;
 
 pub use factory::build_polish;
-pub use registry::{PolishModelInfo, PolishRegistry};
+pub use registry::{LocalLlmModelInfo, LocalLlmRegistry};
 pub use traits::{
     has_enough_text_for_language_guard, looks_like_clarification, looks_like_degenerate_cleanup,
     looks_like_translated_cleanup, FormatContext, TextFormatter,

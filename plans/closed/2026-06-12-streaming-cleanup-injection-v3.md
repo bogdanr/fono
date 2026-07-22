@@ -1,5 +1,7 @@
 # Streaming Cleanup Injection — Local-Only, First-Sentence Gate, Word Streaming (v3)
 
+## Status: Completed
+
 ## Objective
 
 Final simplified design per user decisions: streaming injection for the

@@ -1,5 +1,7 @@
 # macOS Port — Remote Dev Setup and Build Plan
 
+## Status: Completed
+
 ## Objective
 
 Ship a working macOS build of Fono as a second-class target alongside the

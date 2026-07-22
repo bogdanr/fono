@@ -116,7 +116,12 @@ fn local_openai_endpoint(cfg: &Polish) -> String {
 /// path. Mirrors the whisper resolver in `fono::models::ensure_whisper`.
 #[cfg(any(feature = "llama-local", test))]
 fn resolve_local_model_path(cfg: &Polish, polish_models_dir: &Path) -> std::path::PathBuf {
-    polish_models_dir.join(format!("{}.gguf", cfg.local.model))
+    // Resolve through the registry so a config value copied from the
+    // HuggingFace repo name (mixed case, trailing `-GGUF`) maps to the same
+    // on-disk stem the downloader writes; unknown names pass through verbatim
+    // for manually-placed GGUFs. See `LocalLlmRegistry::resolve_filename_stem`.
+    let stem = crate::registry::LocalLlmRegistry::resolve_filename_stem(&cfg.local.model);
+    polish_models_dir.join(format!("{stem}.gguf"))
 }
 #[cfg(feature = "cerebras")]
 #[allow(clippy::unnecessary_wraps)]

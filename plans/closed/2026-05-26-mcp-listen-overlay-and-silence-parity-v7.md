@@ -1,5 +1,7 @@
 # MCP `fono.listen` — Overlay, Silence Parity, Relevance Filter, and Tray Feedback (v7 — final pre-implementation)
 
+## Status: Completed (Slices 0–8 landed; Task 6.3 IPC overlay forwarding was a stretch goal, not pursued)
+
 ## Objective
 
 Same four goals as v6 with the tray colour decided:

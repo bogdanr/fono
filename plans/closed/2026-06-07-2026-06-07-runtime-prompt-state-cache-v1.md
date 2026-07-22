@@ -1,5 +1,7 @@
 # Runtime Prompt-State Cache Plan
 
+## Status: Completed (cache shipped as the live default for F7 + F8 — wired in `crates/fono-assistant/src/llama_local.rs` and `fono-polish`, subject of the published "Making local LLM fast" post; Task 16 policy promoted; Task 13 STT-contention benchmark consciously deferred to a follow-up and designed around, per the plan's Sequencing note)
+
 ## Objective
 
 Design and implement Fono's embedded local-assistant prompt-state cache so stable prompt work is done early, reused safely, and never competes unnecessarily with STT. The target outcome is lower assistant time-to-first-token for F7/F8 and future wake-word flows while preserving correctness, cancellation, and predictable CPU use.
@@ -38,13 +40,13 @@ Design and implement Fono's embedded local-assistant prompt-state cache so stabl
 
 - [x] Task 12. Add benchmark support for shared-prefix prompts with changing suffixes. Rationale: Exact full-prompt replay proves mechanics, but real Fono usage needs to prove that caching stable prefixes helps when user text and window context change.
 
-- [ ] Task 13. Add benchmark support for STT contention. Rationale: Cache building must not degrade transcription. The benchmark should compare STT-only, STT plus checkpoint restore, and STT plus checkpoint build/extension.
+- [ ] Task 13. Add benchmark support for STT contention. Rationale: Cache building must not degrade transcription. The benchmark should compare STT-only, STT plus checkpoint restore, and STT plus checkpoint build/extension. (DEFERRED — consciously not built: the heavy prefill is a one-time startup/idle base build, and per-turn work is a cheap restore + small-suffix decode after STT completes, so contention was designed away rather than measured; explicitly punted to "another post" in the published write-up.)
 
 - [x] Task 14. Add benchmark support for tool-count scaling. Rationale: One major reason to cache is to make larger tool sets feasible. Benchmarks should measure 0, 5, 10, 20, and 40 tools with and without cached tool prompts.
 
 - [x] Task 15. Add benchmark support for active-window context scaling. Rationale: Window context size will vary significantly. Benchmarks should measure cache behavior for no window context, small context, medium context, and large enriched context.
 
-- [ ] Task 16. Promote the cache policy only after benchmark evidence. Rationale: The default runtime behavior should be based on measured latency, CPU contention, memory use, and correctness rather than assumptions.
+- [x] Task 16. Promote the cache policy only after benchmark evidence. Rationale: The default runtime behavior should be based on measured latency, CPU contention, memory use, and correctness rather than assumptions. (Promoted: the prefix-state cache is the shipped live default on both the F8 assistant and F7 polish paths — latency + memory axes evidence-backed by Tasks 12/14/15; the CPU-contention axis was designed away rather than benchmarked, see Task 13.)
 
 ## Verification Criteria
 

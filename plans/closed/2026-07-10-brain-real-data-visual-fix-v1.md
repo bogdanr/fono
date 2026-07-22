@@ -1,5 +1,7 @@
 # Brain Visualization — Fix the Broken Thinking / Speaking Scenes (Real-Data Regressions)
 
+## Status: Completed (Tasks 0–5, 7 shipped; Task 6 / RC5 live retest overtaken by the from-scratch Glas Cortex rewrite)
+
 Status: executed 2026-07-10 (Tasks 0–5, 7 done; Task 6 awaits a live-desktop retest)
 Date: 2026-07-10
 Follows: `plans/2026-07-07-brain-thinking-speaking-redesign-v1.md`

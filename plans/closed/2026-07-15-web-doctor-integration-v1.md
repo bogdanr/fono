@@ -1,5 +1,7 @@
 # Web Doctor Integration
 
+## Status: Completed
+
 ## Objective
 
 Bring `fono doctor` to the web settings UI. Add a minimal hash router and app

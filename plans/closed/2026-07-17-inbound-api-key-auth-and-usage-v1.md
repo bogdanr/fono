@@ -1,5 +1,7 @@
 # Inbound API Keys: named-key auth, on/off config, and bounded usage tracking
 
+## Status: Completed
+
 ## Objective
 
 Replace Fono's single static bearer token for its **inbound** HTTP APIs (the

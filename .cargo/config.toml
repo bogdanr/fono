@@ -179,3 +179,15 @@ GGML_AVX2 = "ON"
 GGML_FMA = "ON"
 GGML_F16C = "ON"
 GGML_BMI2 = "ON"
+# Disable the Q4_0 runtime repack (larger-than-RAM streaming, Win #1 of
+# `plans/2026-07-22-larger-than-ram-integration-v1.md`). With repack ON (ggml's
+# default) ggml rewrites Q4_0 weights into a runtime-only layout held in
+# anonymous memory, which disables mmap and forces a full resident copy of the
+# weights. That is fine for models that fit in RAM but fatal for the streaming
+# use case: an over-RAM MoE must keep its weights file-backed so they page in on
+# demand under a tight RAM cap, otherwise it OOMs on load instead of streaming.
+# Forwarded to CMake by the pinned llama-cpp-sys-2 fork rev (see Cargo.toml) and
+# already by whisper-rs-sys. This is a build-time, whole-binary flag: it also
+# disables repack for the small in-RAM default model, a minor CPU-matmul perf
+# cost that is the accepted price of enabling streaming.
+GGML_CPU_REPACK = "OFF"
