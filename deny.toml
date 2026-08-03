@@ -100,11 +100,10 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# One forked git source: our `llama-cpp-sys-2` fork, consumed via the
-# `[patch.crates-io]` block in the workspace `Cargo.toml`. It carries one
-# extra commit on top of the published 0.1.150 crate (a model-loading fix
-# so hybrid Gated-Delta-Net models such as gemma-4 don't abort on load);
-# `llama-cpp-2` still tracks the crates.io release and links this patched
-# sys. Keep this in lockstep with the `rev` pinned in `Cargo.toml`; drop it
-# once the fix lands in a published release.
-allow-git = ["https://github.com/bogdanr/llama-cpp-rs"]
+# One forked git source: our `whisper-rs` fork, consumed via the
+# `[patch.crates-io]` block in the workspace `Cargo.toml`. It carries
+# upstream PR 260 (the `system-ggml` feature) plus the `llama-ggml` edge
+# that lets whisper link the ggml llama-cpp-sys-2 already builds, until
+# upstream merges them. Keep this in lockstep with the `rev` pinned in
+# `Cargo.toml`.
+allow-git = ["https://github.com/bogdanr/whisper-rs"]

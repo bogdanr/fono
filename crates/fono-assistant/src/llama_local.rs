@@ -2769,10 +2769,20 @@ impl Assistant for LlamaLocalAssistant {
                     // time, so it is not sent — unless the failure was Fono
                     // refusing on a guess about the request, where writing the
                     // call again is how the model says the guess was wrong.
+                    //
+                    // Judged against both what the model wrote and what the
+                    // executor actually sent, because those differ: fields the
+                    // model wrote are dropped or settled on the way out, so a
+                    // second attempt that writes exactly what went last time is
+                    // a repeat even though the two spellings do not match.
                     let repeat_ok = outcome.repeat_ok;
+                    let as_sent = outcome.sent.clone();
                     let retry = retry.filter(|next| {
+                        let same_as =
+                            |before: &str| local_tools::same_request(&next.arguments, before);
                         let repeat = next.name == call.name
-                            && local_tools::same_request(&next.arguments, &call.arguments);
+                            && (same_as(&call.arguments)
+                                || as_sent.as_deref().is_some_and(same_as));
                         if repeat && !repeat_ok {
                             warn!(
                                 "{} was written again unchanged after it failed; not sending it a \

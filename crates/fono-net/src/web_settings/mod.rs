@@ -511,6 +511,105 @@ fn static_asset(method: &Method, path: &str) -> Option<Response<ResBody>> {
     }
 }
 
+/// Decide whether one request may proceed, or the response that turns it
+/// away. Kept separate from [`route`] so the dispatch below reads as a table
+/// of paths.
+///
+/// When auth is on, a presented token is always verified — even from loopback
+/// — so a wrong `?token=`/bearer is rejected and a valid key's id is recorded
+/// against its usage counters. Loopback with *no* token is trusted so the
+/// first key can be created locally (bootstrap).
+fn admit(req: &Request<Incoming>, peer: SocketAddr, ctx: &ServerCtx) -> Option<Response<ResBody>> {
+    if !ctx.cfg.auth_enabled {
+        return None;
+    }
+    let presented = presented_token(req);
+    match crate::auth::decide(
+        ctx.cfg.auth_enabled,
+        is_loopback(&peer),
+        presented.as_deref(),
+        ctx.verifier.as_ref(),
+    ) {
+        crate::auth::AuthDecision::Allow(key_id) => {
+            if let (Some(id), Some(sink)) = (key_id, ctx.usage.as_ref()) {
+                sink(id);
+            }
+            None
+        }
+        crate::auth::AuthDecision::Deny => {
+            Some(error_response(StatusCode::UNAUTHORIZED, "missing or invalid API key"))
+        }
+    }
+}
+
+/// Dispatch the routes that read and write stored settings — the config
+/// document, the vocabulary list, and one named secret — or `None` if the
+/// request is for something else.
+async fn route_settings(
+    method: &Method,
+    path: &str,
+    req: Request<Incoming>,
+    ctx: &ServerCtx,
+) -> Option<Response<ResBody>> {
+    Some(match (method, path) {
+        (&Method::GET, "/api/config") => match (ctx.hooks.get_config)() {
+            Ok(v) => json_ok(&v),
+            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        },
+        (&Method::PUT, "/api/config") => {
+            let Some(body) = read_json_body(req).await else {
+                return Some(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid or oversized JSON body",
+                ));
+            };
+            match (ctx.hooks.put_config)(body).await {
+                Ok(summary) => json_ok(&serde_json::json!({ "ok": true, "summary": summary })),
+                Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &e),
+            }
+        }
+        (&Method::GET, "/api/vocabulary") => match (ctx.hooks.get_vocabulary)() {
+            Ok(v) => json_ok(&v),
+            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        },
+        (&Method::PUT, "/api/vocabulary") => {
+            let Some(body) = read_json_body(req).await else {
+                return Some(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid or oversized JSON body",
+                ));
+            };
+            match (ctx.hooks.put_vocabulary)(body) {
+                Ok(summary) => json_ok(&serde_json::json!({ "ok": true, "summary": summary })),
+                Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &e),
+            }
+        }
+        (&Method::PUT, p) if p.starts_with("/api/secret/") => {
+            let name = p.trim_start_matches("/api/secret/").to_owned();
+            if !valid_secret_name(&name) {
+                return Some(error_response(StatusCode::BAD_REQUEST, "invalid secret name"));
+            }
+            let Some(body) = read_json_body(req).await else {
+                return Some(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid or oversized JSON body",
+                ));
+            };
+            let Some(value) = body.get("value").and_then(|v| v.as_str()) else {
+                return Some(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "body must be {\"value\": \"…\"}",
+                ));
+            };
+            match (ctx.hooks.set_secret)(&name, value) {
+                Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
+                Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &e),
+            }
+        }
+        _ => return None,
+    })
+}
+
 /// Dispatch one request. The service layer never fails; every path
 /// returns a `Response` (including error responses).
 async fn route(req: Request<Incoming>, peer: SocketAddr, ctx: ServerCtx) -> Response<ResBody> {
@@ -522,43 +621,11 @@ async fn route(req: Request<Incoming>, peer: SocketAddr, ctx: ServerCtx) -> Resp
         return res;
     }
 
-    // Everything else is state-bearing (JSON API + `/v1/audio/*`). When
-    // auth is on, a presented token is always verified — even from loopback
-    // — so a wrong `?token=`/bearer is rejected and a valid key's id is
-    // recorded against its usage counters. Loopback with *no* token is
-    // trusted so the first key can be created locally (bootstrap).
-    if ctx.cfg.auth_enabled {
-        let presented = presented_token(&req);
-        match crate::auth::decide(
-            ctx.cfg.auth_enabled,
-            is_loopback(&peer),
-            presented.as_deref(),
-            ctx.verifier.as_ref(),
-        ) {
-            crate::auth::AuthDecision::Allow(key_id) => {
-                if let (Some(id), Some(sink)) = (key_id, ctx.usage.as_ref()) {
-                    sink(id);
-                }
-            }
-            crate::auth::AuthDecision::Deny => {
-                return error_response(StatusCode::UNAUTHORIZED, "missing or invalid API key");
-            }
-        }
+    // Everything else is state-bearing (JSON API + `/v1/audio/*`).
+    if let Some(res) = admit(&req, peer, &ctx) {
+        return res;
     }
     match (&method, path.as_str()) {
-        (&Method::GET, "/api/config") => match (ctx.hooks.get_config)() {
-            Ok(v) => json_ok(&v),
-            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
-        },
-        (&Method::PUT, "/api/config") => {
-            let Some(body) = read_json_body(req).await else {
-                return error_response(StatusCode::BAD_REQUEST, "invalid or oversized JSON body");
-            };
-            match (ctx.hooks.put_config)(body).await {
-                Ok(summary) => json_ok(&serde_json::json!({ "ok": true, "summary": summary })),
-                Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &e),
-            }
-        }
         (&Method::GET, "/api/meta") => json_ok(&(ctx.hooks.meta)()),
         (m, p) if p == "/api/apikeys" || p.starts_with("/api/apikeys/") => {
             route_api_keys(m, p, req, &ctx).await
@@ -584,36 +651,9 @@ async fn route(req: Request<Incoming>, peer: SocketAddr, ctx: ServerCtx) -> Resp
             Ok(v) => json_ok(&v),
             Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
         },
-        (&Method::GET, "/api/vocabulary") => match (ctx.hooks.get_vocabulary)() {
-            Ok(v) => json_ok(&v),
-            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
-        },
-        (&Method::PUT, "/api/vocabulary") => {
-            let Some(body) = read_json_body(req).await else {
-                return error_response(StatusCode::BAD_REQUEST, "invalid or oversized JSON body");
-            };
-            match (ctx.hooks.put_vocabulary)(body) {
-                Ok(summary) => json_ok(&serde_json::json!({ "ok": true, "summary": summary })),
-                Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &e),
-            }
-        }
-        (&Method::PUT, p) if p.starts_with("/api/secret/") => {
-            let name = p.trim_start_matches("/api/secret/").to_owned();
-            if !valid_secret_name(&name) {
-                return error_response(StatusCode::BAD_REQUEST, "invalid secret name");
-            }
-            let Some(body) = read_json_body(req).await else {
-                return error_response(StatusCode::BAD_REQUEST, "invalid or oversized JSON body");
-            };
-            let Some(value) = body.get("value").and_then(|v| v.as_str()) else {
-                return error_response(StatusCode::BAD_REQUEST, "body must be {\"value\": \"…\"}");
-            };
-            match (ctx.hooks.set_secret)(&name, value) {
-                Ok(()) => json_ok(&serde_json::json!({ "ok": true })),
-                Err(e) => error_response(StatusCode::UNPROCESSABLE_ENTITY, &e),
-            }
-        }
-        _ => error_response(StatusCode::NOT_FOUND, "not found"),
+        (m, p) => route_settings(m, p, req, &ctx)
+            .await
+            .unwrap_or_else(|| error_response(StatusCode::NOT_FOUND, "not found")),
     }
 }
 

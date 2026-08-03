@@ -1,18 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-only
 #
-# Workspace-wide cargo config. Four concerns are encoded here:
+# Workspace-wide cargo config. Two concerns are encoded here:
 #
-# 1. Duplicate-ggml resolution (legacy, retiring under Phase 1 Task 1.2 of
-#    `plans/2026-04-30-fono-single-binary-size-v1.md`). Both
-#    `whisper-rs-sys` and `llama-cpp-sys-2` statically build their own copy
-#    of ggml; without the link flag below GNU ld aborts with "multiple
-#    definition of ggml_*". `--allow-multiple-definition` tells ld to keep
-#    the first copy and discard the second. Both ggml builds are pinned
-#    upstream to the same `ggerganov/ggml` family so the surviving copy is
-#    ABI-compatible. This is the lightest-touch fix, recorded in ADR 0018.
-#    It will be removed once we land source-level shared ggml (Task 1.2).
-#
-# 2. Dead-code elimination flags (Phase 1 Task 1.3 of the same plan).
+# 1. Dead-code elimination flags (Phase 1 Task 1.3 of the same plan).
 #    `-ffunction-sections -fdata-sections` on the C/C++ side combined with
 #    `-Wl,--gc-sections,--as-needed` on the linker line lets ld drop unused
 #    arch kernels (AVX-512 / AMX / etc.) and helper functions that ggml,
@@ -20,7 +10,7 @@
 #    of `.text` after LTO. `--as-needed` further drops unused `NEEDED`
 #    entries that intermediate linkage might otherwise pin.
 #
-# 3. Static C++/OpenMP runtime on ship builds (Phase 2 Task 2.3 of the same
+# 2. Static C++/OpenMP runtime on ship builds (Phase 2 Task 2.3 of the same
 #    plan). The actual `libstdc++` / `libgomp` linkage is controlled by the
 #    `llama-cpp-2/static-stdcxx` and `llama-cpp-2/static-openmp` features in
 #    `Cargo.toml`; those make the sys crate emit `static=stdc++` and
@@ -29,16 +19,22 @@
 #    GCC runtime static flag for toolchains that honour it.
 #
 # We scope the flags conservatively — Linux GNU + Linux musl + Windows
-# GNU + Windows MSVC. macOS uses ld64 (different duplicate-symbol
-# semantics, no --gc-sections). MSVC's link.exe folds duplicate *COMDAT*
-# C++ symbols silently, but ggml exports its quantise/dequantise helpers
-# as plain external C symbols, which collide with LNK2005/LNK1169 across
-# the two vendored ggml copies — so MSVC needs its own explicit
-# allow-multiple-definition flag (see the msvc target section below).
+# GNU. macOS uses ld64, which has no --gc-sections.
+#
+# Nothing here silences duplicate symbols. whisper.cpp used to build its
+# own ggml alongside llama.cpp's, and the two collided on every plain C
+# symbol ggml exports; the link only succeeded because of
+# `--allow-multiple-definition` on GNU ld and `/FORCE:MULTIPLE` on
+# link.exe. Those flags keep one definition and discard the other, so
+# which copy survived depended on link order, and the rest of the binary
+# then called into the copy it was not compiled against. The
+# `whisper-rs/llama-ggml` feature in `Cargo.toml` builds whisper.cpp
+# against llama's ggml instead, so there is one copy and no collision. If
+# a future dependency reintroduces duplicate symbols, fix the duplication
+# rather than restoring the flags. Supersedes ADR 0018.
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))']
 rustflags = [
-    "-C", "link-arg=-Wl,--allow-multiple-definition",
     "-C", "link-arg=-Wl,--gc-sections",
     "-C", "link-arg=-Wl,--as-needed",
     "-C", "force-unwind-tables=no",
@@ -64,24 +60,7 @@ rustflags = [
 
 [target.'cfg(all(target_os = "windows", target_env = "gnu"))']
 rustflags = [
-    "-C", "link-arg=-Wl,--allow-multiple-definition",
     "-C", "link-arg=-Wl,--gc-sections",
-]
-
-# Windows MSVC (the shipped Windows toolchain). `whisper-rs-sys` and
-# `llama-cpp-sys-2` each statically build their own copy of ggml, whose
-# quantise/dequantise helpers (`quantize_row_q*_ref`, `quantize_tq*`, …)
-# are plain external C symbols. link.exe cannot fold those the way it
-# folds duplicate C++ COMDATs, so the final `fono.exe` link aborts with
-# `LNK2005 ... already defined` → `LNK1169: multiply defined symbols`.
-# `/FORCE:MULTIPLE` is the MSVC analogue of GNU ld's
-# `--allow-multiple-definition` used on the Linux/Windows-GNU rows above:
-# it keeps the first definition and discards the rest. Both ggml copies
-# are pinned to the same upstream `ggml` family, so the surviving copy is
-# ABI-compatible (same rationale as ADR 0018). Windows port Task 3.3.
-[target.x86_64-pc-windows-msvc]
-rustflags = [
-    "-C", "link-arg=/FORCE:MULTIPLE",
 ]
 
 # `-Os -ffunction-sections -fdata-sections` for the C/C++ compiles run by

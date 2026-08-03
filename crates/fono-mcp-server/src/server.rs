@@ -33,10 +33,21 @@ impl McpServer {
     /// 2. Wait for `notifications/initialized` notification → no response.
     /// 3. Loop: dispatch `tools/list`, `tools/call`, and other requests.
     pub async fn run(&mut self) -> Result<()> {
-        // ── Step 1: initialize handshake ─────────────────────────────────────
+        if !self.handshake().await? {
+            return Ok(()); // EOF before initialize
+        }
+        if !self.await_initialized().await? {
+            return Ok(());
+        }
+        self.serve().await
+    }
+
+    /// Step 1: answer the `initialize` request. Returns `false` on EOF
+    /// before the client ever got that far.
+    async fn handshake(&mut self) -> Result<bool> {
         loop {
             let Some(line) = self.transport.recv().await? else {
-                return Ok(()); // EOF before initialize
+                return Ok(false); // EOF before initialize
             };
             if line.trim().is_empty() {
                 continue;
@@ -92,7 +103,7 @@ impl McpServer {
                     tools = self.registry.len(),
                     "MCP initialize handshake complete"
                 );
-                break;
+                return Ok(true);
             }
             // Any other method before initialize → error
             let id = msg.id.unwrap_or(serde_json::Value::Null);
@@ -104,11 +115,14 @@ impl McpServer {
             let json = serde_json::to_string(&resp)?;
             self.transport.send(&json).await?;
         }
+    }
 
-        // ── Step 2: notifications/initialized ────────────────────────────────
+    /// Step 2: wait for the `notifications/initialized` notification,
+    /// dispatching anything else that arrives first. Returns `false` on EOF.
+    async fn await_initialized(&mut self) -> Result<bool> {
         loop {
             let Some(line) = self.transport.recv().await? else {
-                return Ok(());
+                return Ok(false);
             };
             if line.trim().is_empty() {
                 continue;
@@ -122,13 +136,15 @@ impl McpServer {
             };
             if msg.method == "notifications/initialized" {
                 debug!(target: "fono_mcp_server", "received notifications/initialized");
-                break; // No response to notifications.
+                return Ok(true); // No response to notifications.
             }
             // Anything else — dispatch normally, then keep waiting.
             self.dispatch(msg).await?;
         }
+    }
 
-        // ── Step 3: main dispatch loop ────────────────────────────────────────
+    /// Step 3: serve requests until the transport reports EOF.
+    async fn serve(&mut self) -> Result<()> {
         loop {
             let Some(line) = self.transport.recv().await? else {
                 info!(target: "fono_mcp_server", "stdin closed — MCP server exiting");

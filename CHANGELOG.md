@@ -7,20 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **Live dictation is no longer garbled, and the pauses in your speech are
-  respected.** Dictating with the live transcript view could come back stuttering
-  — words repeated, sentences that did not agree with themselves, capital letters
-  restarting mid-phrase. Two causes, both on Fono's side. First, Fono was cutting
-  every pause out of the recording before sending it, so what the service heard
-  was words glued together with no breathing room; pauses inside a sentence are
-  now sent as they happened, while the quiet before you start and after you stop
-  is still left out. Second, Fono was telling the service your sentence had
-  finished every time you paused for half a second, and each of those pieces was
-  transcribed on its own with no knowledge of the ones before it. Fono now treats
-  everything you say between pressing and releasing the key as one continuous
-  piece of speech. Text still appears as you talk.
+## [0.18.0] — 2026-08-03
 
 ### Added
 
@@ -88,6 +75,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   thought about. Amounts are never shortcut, because "two degrees warmer" twice
   is four degrees. Settings shows what has been learned under Things you can
   say, where you can add another wording for the same command or forget one.
+- **A page for everything the assistant can do, built for answering "why did
+  that command not work".** Each tool shows what its server says about it, what
+  it expects you to fill in, and what Fono narrows that to — plus its own
+  history: your words, the request built from them, and what came back. Beneath
+  it are every room and device your servers reported, and the exact words the
+  assistant is given about your home. You can switch off a single tool, a whole
+  server, or every server but one, without editing config or restarting.
 - Connecting a tool server now switches tool use on for you. Previously you
   could add a server, watch it list everything it could do, and still have
   nothing happen, because a separate switch had quietly stayed off.
@@ -121,9 +115,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the tray, in Settings and in the config file always agree. Switching a role
   **off** is still respected exactly as before, and a choice you made yourself
   is never overridden.
+- **OpenAI speech-to-text now uses `gpt-transcribe` by default** instead of the
+  older `whisper-1`. It handles switching between languages properly, mishears
+  names less often, and costs less per minute. `whisper-1` still works if you
+  prefer it — set `model` under `[stt.cloud]`. As a side fix, choosing any of
+  the newer OpenAI transcription models used to fail outright; Fono now sends
+  the right request shape for whichever model you pick.
+- **The OpenAI assistant now uses `gpt-5.6-luna` by default.**
 
 ### Fixed
 
+- **The macOS build works again.** Building Fono on a Mac failed outright
+  because the dictation library asked the linker for a helper library that the
+  shared build does not produce. Fono now only asks for the helper libraries
+  that actually exist.
+- **The benchmark tool links again on Linux.** `fono-bench` failed to build
+  with pages of undefined-reference errors because its C++ runtime was
+  discarded before the dictation library was linked. It now links the runtime
+  the same way the main application does.
+- **The Windows build no longer crashes when dictation and the assistant run
+  together.** The binary carried two copies of the same internal library — one
+  for dictation, one for the assistant — and the linker kept whichever it met
+  first, which varied from machine to machine. On some machines the surviving
+  copy disagreed with the rest of the program and corrupted memory. Fono now
+  builds a single shared copy, and the two linker workarounds that held the
+  duplicates together are gone. The same change retires Fono's fork of the
+  assistant's model library, whose one remaining patch was made obsolete
+  upstream.
+- **A command about one device no longer switches the whole room.** Asking to
+  turn on the air conditioning in a room could switch on every light in it, and
+  a command naming a device in one room could act on a similarly named device in
+  another. Fono now uses the room to pick between the devices your home
+  published rather than discarding it, keeps a command about one kind of device
+  from reaching the rest of the room, and never sends the same command twice
+  after it has already failed. When a command cannot run as written — asking for
+  a temperature nobody said — Fono now names the command to use instead, so the
+  request goes through rather than coming back as an apology.
+- **A slow device is no longer reported as disobedient.** Some devices keep
+  reporting their old state for a few seconds after they obey. Fono checked
+  immediately, saw the old state, and told you the command had not worked when
+  it had. It now waits for the device to catch up, and only spends that time on
+  a command that would otherwise be reported wrongly.
+- **Live dictation is no longer garbled, and the pauses in your speech are
+  respected.** Dictating with the live transcript view could come back stuttering
+  — words repeated, sentences that did not agree with themselves, capital letters
+  restarting mid-phrase. Two causes, both on Fono's side. First, Fono was cutting
+  every pause out of the recording before sending it, so what the service heard
+  was words glued together with no breathing room; pauses inside a sentence are
+  now sent as they happened, while the quiet before you start and after you stop
+  is still left out. Second, Fono was telling the service your sentence had
+  finished every time you paused for half a second, and each of those pieces was
+  transcribed on its own with no knowledge of the ones before it. Fono now treats
+  everything you say between pressing and releasing the key as one continuous
+  piece of speech. Text still appears as you talk.
 - **Speak Romanian to the assistant and it answers in Romanian again.** When
   you list more than one language, Fono used to tell OpenAI which languages to
   expect. That turned out to make OpenAI report the wrong one: with English
@@ -183,15 +227,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   like a command, whether or not you have cleanup switched on. Prose dictated
   into a terminal, and messages to a coding agent running in one, are untouched.
 
-### Changed (models)
+### Security
 
-- **OpenAI speech-to-text now uses `gpt-transcribe` by default** instead of the
-  older `whisper-1`. It handles switching between languages properly, mishears
-  names less often, and costs less per minute. `whisper-1` still works if you
-  prefer it — set `model` under `[stt.cloud]`. As a side fix, choosing any of
-  the newer OpenAI transcription models used to fail outright; Fono now sends
-  the right request shape for whichever model you pick.
-- **The OpenAI assistant now uses `gpt-5.6-luna` by default.**
+- Updated `quinn-proto` to 0.11.15, which fixes an upstream remote
+  memory-exhaustion issue in QUIC stream reassembly
+  ([RUSTSEC-2026-0185](https://rustsec.org/advisories/RUSTSEC-2026-0185)). Fono
+  does not build the QUIC lane in any shipped binary, so no release was
+  affected.
 
 ## [0.17.1] — 2026-07-22
 

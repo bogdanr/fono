@@ -31,6 +31,16 @@ const STAGE_TIMEOUT: Duration = Duration::from_secs(20);
 /// soon scores the delay rather than the model.
 const SETTLE: Duration = Duration::from_millis(1200);
 
+/// How long to wait before the reading that decides the score.
+///
+/// Longer than [`SETTLE`] because this is the one reading a case is judged on,
+/// and some devices report the state they were commanded out of for several
+/// seconds after obeying: an air conditioner in the author's home took up to
+/// eight (observed 2026-08-03, from its own recorded history). Reading at 1.2 s
+/// scored three cases as "nothing moved" in every run while the house was
+/// doing exactly as it was told.
+const OBEY_WINDOW: Duration = Duration::from_secs(8);
+
 /// How many devices one case may try before it gives up and skips.
 ///
 /// Every rejection costs one staging call and one reading, so this is also the
@@ -390,7 +400,7 @@ async fn run_one(
 
     let obs = driver.run(said, lang).await?;
 
-    tokio::time::sleep(SETTLE).await;
+    tokio::time::sleep(OBEY_WINDOW).await;
     let after = House::read(ep).await.context("read the home after the command")?;
 
     // Judge, then restore — the restore must not be able to change the score.

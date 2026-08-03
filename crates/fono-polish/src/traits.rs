@@ -739,7 +739,7 @@ mod tests {
              base checkpoint is reusable\n base: {base:?}\n full: {full:?}"
         );
         // The per-context and per-utterance parts live only in the full prompt.
-        assert!(base != full);
+        assert_ne!(base, full);
         assert!(full.contains("terminal"));
         assert!(!base.contains("terminal"));
     }

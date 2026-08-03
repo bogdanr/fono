@@ -1127,8 +1127,8 @@ fn drop_any_kind(args: serde_json::Value) -> serde_json::Value {
 /// Built once per turn from the same store the rails come from. Only the one
 /// fact worth acting on is kept: which kind of thing each named device is.
 ///
-/// The default knows nothing, which leaves every call exactly as written.
-#[derive(Default)]
+/// The default knows nothing, which leaves every call exactly as written —
+/// including the vendor, which is the one we have no specific knowledge of.
 struct HouseFacts {
     /// Which published argument carries a device name and which carries a kind,
     /// asked of the vendor rather than assumed. A server naming neither leaves
@@ -1153,11 +1153,28 @@ struct HouseFacts {
     /// two readings, and "everything in the Office" must not be narrowed to a
     /// single thing called `Office`.
     places: std::collections::HashSet<String>,
+    /// The software that answered discovery, kept so a correction can ask it
+    /// what it knows about a tool: which tools switch a thing without setting a
+    /// value on it, and which kind of device a tool is about.
+    vendor: &'static dyn vendor::Vendor,
+}
+
+impl Default for HouseFacts {
+    fn default() -> Self {
+        Self {
+            slots: vendor::SlotFields::default(),
+            kind_of: std::collections::HashMap::new(),
+            sole: std::collections::HashMap::new(),
+            places: std::collections::HashSet::new(),
+            vendor: &vendor::Unknown,
+        }
+    }
 }
 
 impl HouseFacts {
     fn learn(store: &ToolCatalogStore, tools: &[&str]) -> Self {
-        let slots = vendor::for_catalogue(tools).slot_fields();
+        let vendor = vendor::for_catalogue(tools);
+        let slots = vendor.slot_fields();
         let mut kind_of: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         let mut ambiguous = Vec::new();
@@ -1188,7 +1205,7 @@ impl HouseFacts {
             .into_iter()
             .map(|p| p.trim().to_lowercase())
             .collect();
-        Self { slots, kind_of, sole, places }
+        Self { slots, kind_of, sole, places, vendor }
     }
 
     /// Aim the call at the device the user actually named.
@@ -1260,6 +1277,42 @@ impl HouseFacts {
             |was| format!("{field} was {was}, but the user said {published}"),
         );
         (serde_json::Value::Object(map), Some(note))
+    }
+
+    /// The device an area named beside a device name is pointing at.
+    ///
+    /// The defect: asked in Romanian and again in English to aim the office air
+    /// conditioner at a temperature, the model wrote
+    /// `{"area": "Office", "name": "Air conditioner"}`. This home publishes both
+    /// an `Air conditioner`, in the hall, and an `Office air conditioner`. The
+    /// name matched one device exactly, so the area was taken out as
+    /// redundant — and the hall unit was set to twenty degrees while the reply
+    /// said the office. Wrong room, and a confident account of the room the user
+    /// asked about.
+    ///
+    /// So before an area is discarded it gets its say: when exactly one
+    /// published name contains both the area and the name that was written, that
+    /// is the device, and the area was doing the work of telling two apart.
+    ///
+    /// Silent unless there is exactly one answer. Two candidates mean the area
+    /// still has not settled it, and none means the area really was redundant —
+    /// in both, the rule below is right to drop it.
+    ///
+    /// Nothing here reads a word of any language: both halves are searched for
+    /// in names this server published, at word boundaries, so the same
+    /// substitution happens in a house Fono has never seen.
+    fn narrowed_by(&self, written: &str, place: &str) -> Option<String> {
+        let (written, place) = (written.trim().to_lowercase(), place.trim().to_lowercase());
+        if written.is_empty() || place.is_empty() {
+            return None;
+        }
+        let mut better = self
+            .sole
+            .iter()
+            .filter(|(folded, _)| **folded != written)
+            .filter(|(folded, _)| spoken_in(folded, &written) && spoken_in(folded, &place));
+        let (_, published) = better.next()?;
+        better.next().is_none().then(|| published.clone())
     }
 
     /// Make the call agree with the house that was published.
@@ -1336,6 +1389,22 @@ impl HouseFacts {
                 }
             }
             if self.sole.contains_key(&key) {
+                // An area beside a name usually narrows nothing. Sometimes it
+                // is the only thing saying which device was meant, and then
+                // dropping it acts in the wrong room, so it gets its say first.
+                if let (Some(field), Some(place)) = (self.slots.device, self.slots.place) {
+                    let said_where = map
+                        .get(place)
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_default();
+                    if let Some(better) = self.narrowed_by(named, &said_where) {
+                        notes.push(format!(
+                            "{field} was {named}, but the only {named} in {said_where} is {better}"
+                        ));
+                        map.insert(field.to_string(), Value::String(better));
+                    }
+                }
                 let wider = [self.slots.place, self.slots.wider_place, self.slots.filter];
                 for field in wider.into_iter().flatten() {
                     if map.remove(field).is_some() {
@@ -1658,7 +1727,17 @@ async fn execute(
         // have: they tell the user why, and they are also precisely what the
         // model needs to correct itself. A refused call did nothing, so
         // trying again cannot double an effect.
-        Ok(res) if res.is_error => Err(format!("{} failed: {}", call.name, brief(&res.text))),
+        //
+        // Its own words, but not necessarily its own wording: a server that
+        // objects in its debugging vocabulary buries the useful part, and
+        // [`brief`] then throws the middle away to fit. Where a vendor can read
+        // the objection, the sentence it makes of it goes instead; where it
+        // cannot, the server's text stands.
+        Ok(res) if res.is_error => Err(format!(
+            "{} failed: {}",
+            call.name,
+            vendor::refusal(&res.text).unwrap_or_else(|| brief(&res.text))
+        )),
         Ok(res) => Ok(res),
     }
 }
@@ -1689,13 +1768,7 @@ fn prepare_args(
     // Anything the house has already stated is not the model's to get wrong.
     let (args, corrected) = house.agree(args);
     for note in [aimed, corrected].into_iter().flatten() {
-        debug!(tool = %call.name, "actions: corrected {}: {note}", call.name);
-        current_instant(
-            "tool.corrected",
-            "actions",
-            ACTIONS_LANE,
-            serde_json::json!({ "tool": call.name, "args": args, "note": note }),
-        );
+        write_down(call, &args, &note);
     }
 
     // Only on the first go at this tool. A model that writes the same number
@@ -1704,24 +1777,24 @@ fn prepare_args(
     let args = if words.first_attempt_at(&call.name) {
         let (args, unasked) = numbers_nobody_asked_for(args, &words.said.words());
         if let Some(complaint) = unasked {
-            warn!(tool = %call.name, args = %call.arguments, "actions: not sending {}: {complaint}", call.name);
-            current_instant(
-                "tool.rejected",
-                "actions",
-                ACTIONS_LANE,
-                serde_json::json!({ "tool": call.name, "args": args, "complaint": complaint }),
-            );
-            return Err(Refusal {
-                sent: args.to_string(),
-                complaint: format!("{} was not sent: {complaint}", call.name),
-                // The refusal rests on a guess about the request, and the
-                // complaint tells the model how to say the guess was wrong.
-                repeat_ok: true,
-            });
+            // The refusal rests on a guess about the request, and the complaint
+            // tells the model how to say the guess was wrong.
+            return Err(Refusal::of(call, &args, &complaint, true));
         }
         args
     } else {
         args
+    };
+
+    let args = match the_whole_room(house, words, call, &r.schema, &args) {
+        Room::Fine => args,
+        Room::Device(fixed, note) | Room::Kind(fixed, note) => {
+            write_down(call, &fixed, &note);
+            fixed
+        }
+        // The same call again switches the same room, so there is no reading of
+        // it that is safe to send.
+        Room::Complain(complaint) => return Err(Refusal::of(call, &args, &complaint, false)),
     };
 
     // A tool that sets one thing, written without the thing. The house refuses
@@ -1730,26 +1803,34 @@ fn prepare_args(
     // than the server's own rejection.
     if let Some(field) = the_one_value_a_tool_sets(&r.schema, house.slots) {
         if args.as_object().is_some_and(|o| !o.contains_key(&field)) {
+            // What this tool is about outlives it. The request is going to be
+            // retried with a tool that switches anything at all, and the kind of
+            // device this one names is the only record that the user asked about
+            // one kind of thing.
+            // The device goes with it: a switch written for a whole area can be
+            // aimed back at the one thing this call was already aimed at.
+            words.is_about(
+                house.vendor.kind_of(&call.name),
+                house.slots.device.and_then(|f| args.get(f)).and_then(|v| v.as_str()),
+            );
+            // Naming the way out is the whole point, and naming the tool by name
+            // is a stronger way out than describing it. Told only to reach for
+            // "the tool that switches things without one", a small model wrote
+            // the same wrong call again and then apologised to the user for
+            // having no temperature to set — twice in one turn, for a request
+            // that was only ever "switch it on".
+            let instead = match house.vendor.switches() {
+                [] => "use the tool that switches things without one".to_string(),
+                names => format!("use {} instead", names.join(" or ")),
+            };
             let complaint = format!(
                 "{field} is the only thing {} sets, and there is none in this call, so it \
-                 would ask the house to set nothing. Either say the value or use the tool \
-                 that switches things without one.",
+                 would ask the house to set nothing. Either say the value or {instead}.",
                 call.name
             );
-            warn!(tool = %call.name, args = %call.arguments, "actions: not sending {}: {complaint}", call.name);
-            current_instant(
-                "tool.rejected",
-                "actions",
-                ACTIONS_LANE,
-                serde_json::json!({ "tool": call.name, "args": args, "complaint": complaint }),
-            );
-            return Err(Refusal {
-                sent: args.to_string(),
-                complaint: format!("{} was not sent: {complaint}", call.name),
-                // Writing the same call again would still set nothing, so
-                // there is no reading of the request under which it works.
-                repeat_ok: false,
-            });
+            // Writing the same call again would still set nothing, so there is
+            // no reading of the request under which it works.
+            return Err(Refusal::of(call, &args, &complaint, false));
         }
     }
 
@@ -1757,23 +1838,137 @@ fn prepare_args(
     // phrased against the schema the model was shown, which is a more useful
     // thing to hand back than the server's rejection of the whole payload.
     if let Some(complaint) = schema_complaint(&r.schema, &args) {
-        warn!(tool = %call.name, args = %call.arguments, "actions: not sending {}: {complaint}", call.name);
-        current_instant(
-            "tool.rejected",
-            "actions",
-            ACTIONS_LANE,
-            serde_json::json!({ "tool": call.name, "args": args, "complaint": complaint }),
-        );
-        return Err(Refusal {
-            sent: args.to_string(),
-            complaint: format!("{} was not sent: {complaint}.", call.name),
-            repeat_ok: false,
-        });
+        return Err(Refusal::of(call, &args, &format!("{complaint}."), false));
     }
     Ok(args)
 }
 
+/// Record a call Fono put right on its way out, for the log and the trace.
+fn write_down(call: &ToolCall, args: &serde_json::Value, note: &str) {
+    debug!(tool = %call.name, "actions: corrected {}: {note}", call.name);
+    current_instant(
+        "tool.corrected",
+        "actions",
+        ACTIONS_LANE,
+        serde_json::json!({ "tool": call.name, "args": args, "note": note }),
+    );
+}
+
+/// What a switch aimed at a whole area turns out to be, in a turn that was
+/// about one kind of thing in it.
+enum Room {
+    /// Nothing here reaches a whole room, so the call goes out as written.
+    Fine,
+    /// The call aimed back at the device the turn had already settled on, and
+    /// the note that says so.
+    Device(serde_json::Value, String),
+    /// The call narrowed to the kind of device the turn is about, and the note
+    /// that says so.
+    Kind(serde_json::Value, String),
+    /// Nothing here can narrow it, and what to tell the model.
+    Complain(String),
+}
+
+/// Would this switch reach a whole room, in a turn that was about one kind of
+/// thing in it?
+///
+/// The defect, seen once in Romanian and twice in English: told that a
+/// temperature tool cannot run without a temperature and to switch the thing
+/// instead, the model reached for the switch, kept the area it had written and
+/// dropped the kind — so a request about one air conditioner turned on every
+/// light in the office, and the turn before it turned them all off.
+///
+/// The kind is not guessed: the tool that could not run names it, and a
+/// temperature tool is about the heating whatever words the request used.
+///
+/// When that refused tool had a device to aim at, the switch is aimed at the
+/// same one and goes out — a request that named a device does not become a
+/// request about a room because the first tool for it was the wrong tool. The
+/// area then goes, as it does for any name only one device answers to.
+/// Otherwise the kind is written in, and the switch reaches only that kind of
+/// device in the area. Refusing instead was safe and useless: told which field
+/// to write, the model apologised to the user rather than writing it, so the
+/// command the user asked for never happened at all. Writing it can only ever
+/// *narrow* what the call reaches, and the alternative it replaces — a bare
+/// area — is the widest call there is.
+///
+/// Narrowing to a kind is not narrowing to a device: an area holding two
+/// climate devices still gets both. That is a smaller version of the same
+/// fault, not a cure for it, and only knowing where each device is would cure
+/// it — which this home's catalogue does not record.
+///
+/// Silent unless every part of the trap is present: a tool this server switches
+/// with, an area, no device named, and no kind. A turn that never reached for a
+/// tool naming a kind is left alone entirely — switching off a whole room is a
+/// real request, and this must not become the reason nobody can make it.
+///
+/// The device is only substituted when its published name is spoken inside the
+/// area that was written, which is what says the two agree. Told to set the
+/// office air conditioner and turn the bedroom on, the switch is about the
+/// bedroom, and aiming it at the office would act in the wrong room — so a
+/// device the area does not vouch for falls through to the complaint.
+fn the_whole_room(
+    house: &HouseFacts,
+    words: &Words,
+    call: &ToolCall,
+    schema: &serde_json::Value,
+    args: &serde_json::Value,
+) -> Room {
+    let Some(kind) = words.about_kind() else { return Room::Fine };
+    if !house.vendor.switches().contains(&call.name.as_str()) {
+        return Room::Fine;
+    }
+    let (Some(place), Some(kind_field)) = (house.slots.place, house.slots.kind) else {
+        return Room::Fine;
+    };
+    if house.slots.device.is_some_and(|field| args.get(field).is_some()) {
+        return Room::Fine;
+    }
+    let Some(area) = args.get(place).and_then(|v| v.as_str()) else { return Room::Fine };
+    if area.is_empty() || args.get(kind_field).is_some() {
+        return Room::Fine;
+    }
+
+    if let (Some(field), Some(device)) = (house.slots.device, words.about_device()) {
+        if spoken_in(&device.to_lowercase(), &area.trim().to_lowercase()) {
+            let mut map = args.as_object().cloned().unwrap_or_default();
+            map.insert(field.to_string(), serde_json::Value::String(device.clone()));
+            map.remove(place);
+            let note = format!(
+                "{field} is {device} and the {place} is gone: the call this switch stands in \
+                 for was aimed at that one device"
+            );
+            return Room::Device(serde_json::Value::Object(map), note);
+        }
+    }
+
+    // Written in the shape the tool asked for, list or single value, exactly as
+    // a kind that disagreed with the house is corrected.
+    let Some(spec) = schema.get("properties").and_then(|p| p.get(kind_field)) else {
+        // The tool takes no kind at all, so there is nothing to narrow it with
+        // and the model has to aim it at one device instead.
+        return Room::Complain(format!(
+            "{} with the {place} {area} would switch everything in {area}, and this request is \
+             about {kind}. Name the one device that was meant.",
+            call.name
+        ));
+    };
+    let value = if spec.get("type").and_then(|t| t.as_str()) == Some("array") {
+        serde_json::Value::Array(vec![serde_json::Value::String(kind.clone())])
+    } else {
+        serde_json::Value::String(kind.clone())
+    };
+    let mut map = args.as_object().cloned().unwrap_or_default();
+    map.insert(kind_field.to_string(), value);
+    let note = format!(
+        "{kind_field} is {kind}: without it this would switch everything in {area}, and the call \
+         this switch stands in for was about {kind}"
+    );
+    Room::Kind(serde_json::Value::Object(map), note)
+}
+
 /// A call Fono would not send, and what to tell the model about it.
+#[derive(Debug)]
 struct Refusal {
     /// What would have gone out, so the run is recorded by the arguments it
     /// used whether or not they travelled.
@@ -1785,6 +1980,25 @@ struct Refusal {
     repeat_ok: bool,
 }
 
+impl Refusal {
+    /// Build one, and record it in the log and the trace on the way — every
+    /// refusal is news, and a run is only readable if they all read alike.
+    fn of(call: &ToolCall, args: &serde_json::Value, complaint: &str, repeat_ok: bool) -> Self {
+        warn!(tool = %call.name, args = %call.arguments, "actions: not sending {}: {complaint}", call.name);
+        current_instant(
+            "tool.rejected",
+            "actions",
+            ACTIONS_LANE,
+            serde_json::json!({ "tool": call.name, "args": args, "complaint": complaint }),
+        );
+        Self {
+            sent: args.to_string(),
+            complaint: format!("{} was not sent: {complaint}", call.name),
+            repeat_ok,
+        }
+    }
+}
+
 /// What the user said this turn, and which tools have already been told a
 /// number in their arguments was never asked for.
 ///
@@ -1794,6 +2008,14 @@ struct Refusal {
 struct Words {
     said: fono_assistant::Said,
     told: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// The kind of device this turn turned out to be about, when a tool that
+    /// names one could not run. It outlives that tool: the retry reaches for
+    /// something that switches anything at all, and this is what stops it
+    /// switching the whole room.
+    kind: std::sync::Mutex<Option<String>>,
+    /// The device that tool was aimed at, when it named one. What stops the
+    /// retry needing a second go: the switch is pointed straight back at it.
+    device: std::sync::Mutex<Option<String>>,
 }
 
 impl Words {
@@ -1806,6 +2028,30 @@ impl Words {
     /// user asked for never happening.
     fn first_attempt_at(&self, tool: &str) -> bool {
         self.told.lock().map(|mut told| told.insert(tool.to_string())).unwrap_or(false)
+    }
+
+    /// Remember what this turn is about, and which device. Ignored when the
+    /// tool names no kind, and never overwritten: the first tool the model
+    /// reached for is the one that read the request, and a later guess should
+    /// not talk over it.
+    fn is_about(&self, kind: Option<&str>, device: Option<&str>) {
+        let Some(kind) = kind else { return };
+        if let Ok(mut about) = self.kind.lock() {
+            about.get_or_insert_with(|| kind.to_string());
+        }
+        if let (Some(device), Ok(mut aimed)) = (device, self.device.lock()) {
+            aimed.get_or_insert_with(|| device.to_string());
+        }
+    }
+
+    /// What this turn is about, when something has said.
+    fn about_kind(&self) -> Option<String> {
+        self.kind.lock().ok().and_then(|k| k.clone())
+    }
+
+    /// The device this turn is about, when a tool named one.
+    fn about_device(&self) -> Option<String> {
+        self.device.lock().ok().and_then(|d| d.clone())
     }
 }
 
@@ -2083,11 +2329,32 @@ struct Looked {
     readings: Vec<(String, String)>,
 }
 
+/// How long a device is given to admit it obeyed before the reading is
+/// believed over the command.
+///
+/// A device does not always report its new state when it accepts a command.
+/// An air conditioner in the author's home (observed 2026-08-03, from its own
+/// recorded history) kept saying `off` for up to eight seconds after switching
+/// on, so a reading taken at once shows the state the command was sent to
+/// change. Fono then told the user their command had failed while the room was
+/// cooling — a worse lie than the one the check exists to prevent.
+const OBEY_WINDOW: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// How long to wait between readings inside [`OBEY_WINDOW`].
+const LOOK_AGAIN: std::time::Duration = std::time::Duration::from_millis(1500);
+
 /// Re-read the world and ask the vendor what it shows.
 ///
 /// A readback that fails to arrive yields nothing: not being able to look is
 /// not the same as having looked and found a problem, and reporting a working
 /// command as broken because a second request timed out would be its own bug.
+///
+/// A reading that contradicts the command is taken again, up to
+/// [`OBEY_WINDOW`], because a slow device and a disobedient one look identical
+/// in the first reading and only one of them changes its mind. Nothing else is
+/// retried: a confirmed or unjudged check is already as good as it will get,
+/// so the extra round trips are only ever spent on the turn that would
+/// otherwise have said something untrue.
 async fn confirm(
     r: &Runnable,
     vendor: &'static dyn Vendor,
@@ -2100,16 +2367,27 @@ async fn confirm(
     // costs read off the lane separately: proving a command landed is a whole
     // extra round trip to the same server, and it is charged to the same turn.
     let span = current_span("tool.verify", "actions", ACTIONS_LANE);
-    let back = mcp_client::call_tool(&r.endpoint, readback, ask).await;
-    let looked = match &back {
-        Ok(back) => Looked {
-            verdict: vendor.confirms(call, result, &back.text),
-            readings: vendor.readings(&back.text, &claimed(vendor, result)),
-        },
-        Err(e) => {
-            warn!("actions: could not check whether {} worked: {e}", call.name);
-            Looked { verdict: None, readings: Vec::new() }
+    let started = std::time::Instant::now();
+    let mut reads = 0_usize;
+    let looked = loop {
+        let back = mcp_client::call_tool(&r.endpoint, readback, ask).await;
+        reads += 1;
+        let looked = match &back {
+            Ok(back) => Looked {
+                verdict: vendor.confirms(call, result, &back.text),
+                readings: vendor.readings(&back.text, &claimed(vendor, result)),
+            },
+            Err(e) => {
+                warn!("actions: could not check whether {} worked: {e}", call.name);
+                Looked { verdict: None, readings: Vec::new() }
+            }
+        };
+        if looked.verdict != Some(Verdict::Contradicted)
+            || started.elapsed() + LOOK_AGAIN >= OBEY_WINDOW
+        {
+            break looked;
         }
+        tokio::time::sleep(LOOK_AGAIN).await;
     };
     // The server's claim and the house's reading are both stamped, so a run can
     // be asked afterwards whether the two ever disagreed — the question that
@@ -2124,6 +2402,9 @@ async fn confirm(
         },
         "claimed": claimed(vendor, result),
         "reading": looked.readings.iter().map(|(n, s)| format!("{n}: {s}")).collect::<Vec<_>>(),
+        // More than one means a device was slow to admit it obeyed, and says
+        // how much of the turn went on waiting for it.
+        "reads": reads,
     }));
     looked
 }
@@ -2372,17 +2653,24 @@ mod tests {
         assert_eq!(drop_any_kind(args.clone()), args);
     }
 
-    /// A house with one of each, plus a name two devices answer to.
+    /// A house with one of each, a name two devices answer to, and — as real
+    /// homes have — two air conditioners, one of them named after the room it
+    /// is in and one not.
     fn house() -> HouseFacts {
         let mut kind_of = std::collections::HashMap::new();
         kind_of.insert("air conditioner".to_string(), "climate".to_string());
+        kind_of.insert("office air conditioner".to_string(), "climate".to_string());
         kind_of.insert("balcony lights".to_string(), "light".to_string());
-        let sole = [("air conditioner", "Air conditioner"), ("balcony lights", "Balcony lights")]
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
+        let sole = [
+            ("air conditioner", "Air conditioner"),
+            ("office air conditioner", "Office air conditioner"),
+            ("balcony lights", "Balcony lights"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
         let places = ["kitchen", "yard", "office"].into_iter().map(String::from).collect();
-        HouseFacts { slots: slots(), kind_of, sole, places }
+        HouseFacts { slots: slots(), kind_of, sole, places, vendor: &vendor::HomeAssistant }
     }
 
     /// The fields Home Assistant uses to say *which* device a call is about.
@@ -2477,12 +2765,116 @@ mod tests {
         };
         assert!(refused.complaint.contains("temperature"), "{}", refused.complaint);
         assert!(!refused.repeat_ok, "writing it again would still set nothing");
+        assert!(
+            refused.complaint.contains("HassTurnOn"),
+            "the way out is named, not described: {}",
+            refused.complaint
+        );
+
+        // A server that names no switching tool still gets a way out, described
+        // rather than named — there is no name to give.
+        let quiet = HouseFacts { vendor: &vendor::Unknown, ..house() };
+        let Err(refused) = prepare_args(&r, &quiet, &Words::default(), &call) else {
+            panic!("still sets nothing")
+        };
+        assert!(refused.complaint.contains("switches things without one"), "{}", refused.complaint);
 
         let call =
             wrote("HassClimateSetTemperature", r#"{"name": "Air conditioner", "temperature": 23}"#);
         assert!(
             prepare_args(&r, &house(), &said("set the Air conditioner to 23"), &call).is_ok(),
             "a temperature was asked for"
+        );
+    }
+
+    /// Verbatim from three runs, one in Romanian and two in English: told that a
+    /// temperature tool cannot run without a temperature and to switch the thing
+    /// instead, the model reached for the switch and pointed it at the whole
+    /// room. An area-wide switch reaches everything in the area, so a request
+    /// about one air conditioner turned on every light in the office \u2014 and the
+    /// turn before it turned them all off.
+    #[test]
+    fn a_switch_aimed_at_a_whole_area_is_narrowed_to_the_kind_the_turn_named() {
+        let words = said("turn on the air conditioning in the Office");
+        let value_tool = runnable(serde_json::json!({"properties": {
+            "area": {}, "name": {}, "domain": {}, "temperature": {}
+        }}));
+        let no_value = wrote("HassClimateSetTemperature", r#"{"area": "Office"}"#);
+        assert!(
+            prepare_args(&value_tool, &house(), &words, &no_value).is_err(),
+            "there is no temperature to set"
+        );
+
+        // The tool that was refused is what says this request is about the
+        // heating. The switch that replaces it must not lose that.
+        let switch = runnable(serde_json::json!({"properties": {
+            "area": {}, "name": {}, "domain": {"type": "array"}
+        }}));
+        let whole_room = wrote("HassTurnOn", r#"{"area": "Office"}"#);
+        let sent = prepare_args(&switch, &house(), &words, &whole_room)
+            .expect("the kind is written in rather than the room switched");
+        assert_eq!(sent, serde_json::json!({"area": "Office", "domain": ["climate"]}));
+
+        // A tool with nowhere to put the kind cannot be narrowed, so the model
+        // has to aim it at one device instead.
+        let blunt = runnable(serde_json::json!({"properties": {"area": {}, "name": {}}}));
+        let Err(refused) = prepare_args(&blunt, &house(), &words, &whole_room) else {
+            panic!("a bare area switches everything in it")
+        };
+        assert!(refused.complaint.contains("climate"), "{}", refused.complaint);
+        assert!(refused.complaint.contains("everything in Office"), "{}", refused.complaint);
+        assert!(!refused.repeat_ok, "the same call switches the same room");
+
+        // What the model writes itself is left alone, kind or device.
+        let with_kind = wrote("HassTurnOn", r#"{"area": "Office", "domain": ["climate"]}"#);
+        assert!(prepare_args(&switch, &house(), &words, &with_kind).is_ok());
+        let one_device = wrote("HassTurnOn", r#"{"name": "Office air conditioner"}"#);
+        assert!(prepare_args(&switch, &house(), &words, &one_device).is_ok());
+
+        // And a turn that never established a kind is not second-guessed: a
+        // request to switch off a whole room is a real request, and it goes out
+        // as the room.
+        let room = prepare_args(&switch, &house(), &said("turn on the Office"), &whole_room)
+            .expect("switching a whole room is a real request");
+        assert_eq!(room, serde_json::json!({"area": "Office"}));
+    }
+
+    /// The half of that defect the user pays for: refused and told to switch the
+    /// thing instead, the model wrote the room again, so the safe answer was to
+    /// refuse a second time and nothing happened at all. When the refused call
+    /// had one device to aim at, the switch is aimed at the same one and goes.
+    #[test]
+    fn a_switch_is_aimed_back_at_the_device_the_turn_settled_on() {
+        // Words holding no published name, so the device on the call is the
+        // model's own and nothing else can put it back.
+        let words = said("pornește aerul condiționat din birou");
+        let value_tool = runnable(serde_json::json!({"properties": {
+            "area": {}, "name": {}, "domain": {}, "temperature": {}
+        }}));
+        let no_value = wrote(
+            "HassClimateSetTemperature",
+            r#"{"area": "Office", "name": "Office air conditioner"}"#,
+        );
+        assert!(prepare_args(&value_tool, &house(), &words, &no_value).is_err());
+
+        let switch = runnable(serde_json::json!({"properties": {
+            "area": {}, "name": {}, "domain": {}
+        }}));
+        let whole_room = wrote("HassTurnOn", r#"{"area": "Office"}"#);
+        let sent = prepare_args(&switch, &house(), &words, &whole_room)
+            .expect("the device it was aimed at is not a room");
+        assert_eq!(sent, serde_json::json!({"name": "Office air conditioner"}));
+
+        // An area the remembered device does not answer to is a different
+        // request, and aiming at the device would act in the wrong room. The
+        // kind is all that carries over.
+        let elsewhere = wrote("HassTurnOn", r#"{"area": "Kitchen"}"#);
+        let sent = prepare_args(&switch, &house(), &words, &elsewhere)
+            .expect("a kitchen switch is still a switch");
+        assert_eq!(
+            sent,
+            serde_json::json!({"area": "Kitchen", "domain": "climate"}),
+            "nothing here says the Kitchen means that air conditioner"
         );
     }
 
@@ -2528,14 +2920,13 @@ mod tests {
 
     /// Verbatim from the benchmark, three cells: the kind was corrected, the
     /// call was sent, and the house refused it anyway because the area named
-    /// beside the device was an area that device is not in. An area can only
-    /// narrow, so beside a name only one device answers to it can only narrow
-    /// wrongly.
+    /// beside the device was an area that device is not in. An area that picks
+    /// out nothing more than the name already did can only narrow wrongly.
     #[test]
     fn an_area_named_beside_one_device_is_dropped() {
         let (fixed, note) = house().agree(serde_json::json!({
             "name": "Air conditioner",
-            "area": "Office",
+            "area": "Kitchen",
             "floor": "1",
             "domain": ["light"],
         }));
@@ -2543,6 +2934,31 @@ mod tests {
         let note = note.expect("both repairs are written down");
         assert!(note.contains("climate"), "{note}");
         assert!(note.contains("area") && note.contains("floor"), "{note}");
+    }
+
+    /// Verbatim from a run, in Romanian and again in English: asked to aim the
+    /// office air conditioner at a temperature, the model wrote the area beside
+    /// the shorter name, and the area was taken out as redundant — so the call
+    /// reached the *hall* unit, and the reply said the office. The area was not
+    /// redundant at all: it was the only thing saying which of the two was
+    /// meant.
+    #[test]
+    fn an_area_beside_a_name_two_rooms_share_picks_the_one_in_that_room() {
+        let (fixed, note) =
+            house().agree(serde_json::json!({"name": "Air conditioner", "area": "Office"}));
+        assert_eq!(
+            fixed,
+            serde_json::json!({"name": "Office air conditioner"}),
+            "the room that was said picks the device, and then has nothing left to say"
+        );
+        let note = note.expect("the substitution is written down");
+        assert!(note.contains("Office air conditioner"), "{note}");
+
+        // Only ever with one answer. A room that leaves the name as ambiguous as
+        // it found it changes nothing about which device is meant.
+        let (fixed, _) =
+            house().agree(serde_json::json!({"name": "Air conditioner", "area": "Kitchen"}));
+        assert_eq!(fixed, serde_json::json!({"name": "Air conditioner"}));
     }
 
     /// The area stays when it is the only thing telling two devices apart, and

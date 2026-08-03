@@ -247,11 +247,41 @@ pub fn parse_call(text: &str) -> Option<(String, String)> {
 /// its fields in another order, or with different spacing, still counts as the
 /// same request. Where either side is not JSON, the text is compared as it
 /// stands — being wrong here may only cost one extra attempt, never a command.
+///
+/// Blank fields are ignored, and that is not tidiness. The question here is
+/// whether the *request* is the same, not whether the typing is, and a field
+/// holding nothing asks for nothing: it is dropped before the call leaves, so
+/// two calls differing only there are one request. A real turn slipped through
+/// this gap — the model wrote the refused call a second time with one empty
+/// field added, the comparison called them different, and the user waited out
+/// the identical refusal twice.
 #[must_use]
 pub fn same_request(a: &str, b: &str) -> bool {
     match (serde_json::from_str::<Value>(a), serde_json::from_str::<Value>(b)) {
-        (Ok(x), Ok(y)) => x == y,
+        (Ok(x), Ok(y)) => without_blanks(x) == without_blanks(y),
         _ => a.trim() == b.trim(),
+    }
+}
+
+/// The same request with everything that says nothing taken out.
+fn without_blanks(v: Value) -> Value {
+    fn says_nothing(v: &Value) -> bool {
+        match v {
+            Value::Null => true,
+            Value::String(s) => s.trim().is_empty(),
+            Value::Array(a) => a.is_empty(),
+            Value::Object(o) => o.is_empty(),
+            _ => false,
+        }
+    }
+    match v {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(k, v)| (k, without_blanks(v)))
+                .filter(|(_, v)| !says_nothing(v))
+                .collect(),
+        ),
+        other => other,
     }
 }
 
@@ -457,5 +487,20 @@ mod tests {
         // Neither side is JSON: compared as it stands, whitespace aside.
         assert!(same_request("not json", " not json "));
         assert!(!same_request("not json", "something else"));
+    }
+
+    /// From a real turn: the model wrote the refused call again with one empty
+    /// field added, and the comparison called that a fresh attempt. The user
+    /// waited out the identical refusal twice. A field holding nothing asks for
+    /// nothing, so it cannot be what makes two requests different.
+    #[test]
+    fn a_field_holding_nothing_does_not_make_a_new_request() {
+        let asked = r#"{"area":"Office"}"#;
+        assert!(same_request(asked, r#"{"area":"Office","floor":""}"#));
+        assert!(same_request(asked, r#"{"area":"Office","name":null,"domain":[]}"#));
+        // Emptiness cuts no further than that: a field that says something
+        // still tells two requests apart.
+        assert!(!same_request(asked, r#"{"area":"Office","domain":["climate"]}"#));
+        assert!(!same_request(asked, r#"{"area":"Kitchen"}"#));
     }
 }

@@ -173,10 +173,7 @@ jobs:
     #     Wayland overlay backend (`fono-overlay/backend-wlr`) links
     #     `xkbcommon`/`wayland-client` via dlopen / unreferenced-symbol
     #     paths, so `-Wl,--as-needed` strips both from the final
-    #     `NEEDED` set — the gate stays tight. ADR 0018's
-    #     `--allow-multiple-definition` keeps a single ggml copy at
-    #     link time; that invariant is enforced by the link itself, not
-    #     a post-strip nm grep (release-slim sets `strip = "symbols"`).
+    #     `NEEDED` set — the gate stays tight.
     #
     # Runs in parallel with `test`; one byte or one stray NEEDED entry
     # fails the PR. Static-musl ship is deferred (plan Phase 2.4); see

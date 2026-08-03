@@ -2,7 +2,15 @@
 
 ## Status
 
-Accepted 2026-04-27.
+Accepted 2026-04-27. **Superseded 2026-08-04 by ADR 0041 — one ggml,
+built once.** The premise below ("both copies … are ABI-compatible") is
+false: `whisper-rs-sys` 0.15.0 vendors a ggml with `GGML_TYPE_COUNT` 40,
+the llama fork one with 42, and their `ggml-backend.h` differ by ~100
+lines. The flag hid that, and which copy survived depended on link order
+— green on one machine, `STATUS_HEAP_CORRUPTION` on another from
+identical sources. whisper.cpp now builds against llama's ggml and both
+flags are gone. The text below is kept as the record of what we did and
+why it failed.
 
 > **AMENDED 2026-06-24 — this is the steady state, not an interim kludge.**
 > A spike (`plans/2026-06-23-shared-ggml-size-reclaim-spike-v1.md`)

@@ -236,10 +236,8 @@ jobs:
           # `tts-local` and `wakeword-onnx` — the merged static
           # `onnxruntime.lib` hosted on the fono-voice mirror links cleanly
           # on MSVC (the fetch step below pins ORT_LIB_LOCATION to it, same
-          # as every other row). The `/FORCE:MULTIPLE` ggml-dedup link flag
-          # comes from `.cargo/config.toml`'s MSVC target block, and
-          # `crates/fono/build.rs` adds the second `onnxruntime.lib`
-          # reference MSVC's single-pass linker needs.
+          # as every other row), and `crates/fono/build.rs` adds the second
+          # `onnxruntime.lib` reference MSVC's single-pass linker needs.
           #
           # `windows-defaults` now INCLUDES `accel-vulkan`: Windows ships a
           # single Vulkan-accelerated `.exe` that soft-loads `vulkan-1.dll`

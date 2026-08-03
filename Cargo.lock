@@ -735,6 +735,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmake-file-api"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d9aa58456f0c04e68c47d27120bd7004751be8243c7e50d1895e9db2018fca9"
+dependencies = [
+ "serde",
+ "serde_json",
+ "shlex",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1249,7 +1261,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1382,7 +1394,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "fono"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1429,7 +1441,7 @@ dependencies = [
 
 [[package]]
 name = "fono-assistant"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1454,7 +1466,7 @@ dependencies = [
 
 [[package]]
 name = "fono-audio"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1473,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "fono-bench"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1501,7 +1513,7 @@ dependencies = [
 
 [[package]]
 name = "fono-core"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "ash",
@@ -1525,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "fono-download"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "fono-core",
@@ -1540,7 +1552,7 @@ dependencies = [
 
 [[package]]
 name = "fono-hotkey"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -1560,7 +1572,7 @@ dependencies = [
 
 [[package]]
 name = "fono-http"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1574,7 +1586,7 @@ dependencies = [
 
 [[package]]
 name = "fono-inject"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1592,7 +1604,7 @@ dependencies = [
 
 [[package]]
 name = "fono-ipc"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1605,7 +1617,7 @@ dependencies = [
 
 [[package]]
 name = "fono-mcp-server"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1631,7 +1643,7 @@ dependencies = [
 
 [[package]]
 name = "fono-net"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1657,7 +1669,7 @@ dependencies = [
 
 [[package]]
 name = "fono-net-codec"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1667,7 +1679,7 @@ dependencies = [
 
 [[package]]
 name = "fono-overlay"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "ab_glyph",
  "fono-core",
@@ -1688,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "fono-polish"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1711,7 +1723,7 @@ dependencies = [
 
 [[package]]
 name = "fono-stt"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1734,7 +1746,7 @@ dependencies = [
 
 [[package]]
 name = "fono-tray"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "fono-core",
@@ -1750,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "fono-tts"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1778,7 +1790,7 @@ dependencies = [
 
 [[package]]
 name = "fono-update"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "fono-core",
@@ -2612,7 +2624,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2886,9 +2898,9 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "llama-cpp-2"
-version = "0.1.153"
+version = "0.1.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a86ff114bb5ec602625776ec11d80d6ac8d113c74460e6a17bd44a6fedff15ef"
+checksum = "4397360a0bd81be29929a55ad2f49eba27a744a6578f3271894d6f41d86bd15b"
 dependencies = [
  "encoding_rs",
  "enumflags2",
@@ -2900,8 +2912,9 @@ dependencies = [
 
 [[package]]
 name = "llama-cpp-sys-2"
-version = "0.1.153"
-source = "git+https://github.com/bogdanr/llama-cpp-rs?rev=39cbdb951f7dd156bafb1c87dcada15c4fedbd4b#39cbdb951f7dd156bafb1c87dcada15c4fedbd4b"
+version = "0.1.154"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13a9ea2ce0cdc20bcb1870534022e340b391663f8fe09133951e2fe37fbc29cf"
 dependencies = [
  "bindgen",
  "cc",
@@ -4004,9 +4017,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.14"
+version = "0.11.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "434b42fec591c96ef50e21e886936e66d3cc3f737104fdb9b737c40ffb94c098"
+checksum = "4fcb935c5bec503c2f0e306bdd3e58bb9029dcb14fa8d9ac76e3a5256ac0763e"
 dependencies = [
  "bytes",
  "getrandom 0.3.4",
@@ -4377,7 +4390,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4837,7 +4850,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5733,8 +5746,7 @@ dependencies = [
 [[package]]
 name = "whisper-rs"
 version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2088172d00f936c348d6a72f488dc2660ab3f507263a195df308a3c2383229f6"
+source = "git+https://github.com/bogdanr/whisper-rs?rev=bd049da3687e5d7d138cd5a91463b8cece54f511#bd049da3687e5d7d138cd5a91463b8cece54f511"
 dependencies = [
  "libc",
  "tracing",
@@ -5744,13 +5756,14 @@ dependencies = [
 [[package]]
 name = "whisper-rs-sys"
 version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6986c0fe081241d391f09b9a071fbcbb59720c3563628c3c829057cf69f2a56f"
+source = "git+https://github.com/bogdanr/whisper-rs?rev=bd049da3687e5d7d138cd5a91463b8cece54f511#bd049da3687e5d7d138cd5a91463b8cece54f511"
 dependencies = [
  "bindgen",
  "cfg-if",
  "cmake",
+ "cmake-file-api",
  "fs_extra",
+ "llama-cpp-sys-2",
  "semver",
 ]
 

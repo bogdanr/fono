@@ -13,7 +13,7 @@
 # The cases are not a tour of the happy path. Each one is a failure that has
 # actually been observed, written down so it cannot come back unnoticed.
 
-suite_version = 4
+suite_version = 5
 server = "Home Assistant"
 
 # ---------------------------------------------------------------------------
@@ -73,6 +73,34 @@ en = "turn on the lights in the {area}"
 ro = "aprinde lumina în {area}"
 fr = "allume la lumière dans {area}"
 es = "enciende la luz en {area}"
+
+# ---------------------------------------------------------------------------
+# The same room, asked about the kind of device that is not the lights.
+#
+# Asked to switch on the air conditioning in a room, a model reached for the
+# set-a-temperature tool with no temperature in it; handed that back and told
+# to use a plain switch instead, it aimed the switch at the room, and every
+# light in the room came on. Both calls were well-formed, and the only witness
+# was the house.
+#
+# So the assertion is on the bystander. The case deliberately says nothing
+# about what state the climate device ends in: a home may refuse a plain
+# switch on a thermostat outright, which is a fact about that home and not the
+# failure being measured. Nothing is staged either, so a home that answers
+# strangely cannot leave the rest of the run standing in the wrong state.
+# ---------------------------------------------------------------------------
+[[cases]]
+id = "a_kind_in_an_area_reaches_only_that_kind"
+class = "area_command"
+requires = { kind = "area_with_bystander", domain = "climate" }
+expect_bystander_unchanged = true
+expect_tool = "HassTurnOn"
+
+[cases.utterances]
+en = "turn on the air conditioning in the {area}"
+ro = "pornește aerul condiționat din {area}"
+fr = "allume la climatisation dans {area}"
+es = "enciende el aire acondicionado en {area}"
 
 # ---------------------------------------------------------------------------
 # A value nobody asked for.

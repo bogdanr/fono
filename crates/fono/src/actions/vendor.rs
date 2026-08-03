@@ -138,6 +138,54 @@ pub trait Vendor: Send + Sync {
         Vec::new()
     }
 
+    /// One sentence a model can act on, out of a refusal this server wrote for
+    /// itself.
+    ///
+    /// A server that objects in its own debugging vocabulary is worse than
+    /// useless to a small model. A real house refused a temperature set with
+    /// 1400 characters of Python `repr`, of which the two facts that mattered —
+    /// that the area held two devices of that kind, and what they were called —
+    /// sat in the middle, exactly where shortening a long answer throws text
+    /// away. The model read the wreckage and told the user the opposite of the
+    /// truth: that the home had no such device at all.
+    ///
+    /// Everything in the sentence has to come out of the refusal itself.
+    /// Nothing is inferred about the home, so this cannot invent a device.
+    ///
+    /// `None` means "not one of mine, or nothing better to say than the server
+    /// already said", and the original text is used unchanged.
+    fn refusal(&self, _text: &str) -> Option<String> {
+        None
+    }
+
+    /// The tools that switch a device without setting a value on it.
+    ///
+    /// Needed for one correction and no other purpose. A tool whose only job is
+    /// to set a value, called with no value, is not a request this server can
+    /// carry out — and where the user asked for something to be switched on or
+    /// off, these are the tools that do it. Naming them costs a clause and
+    /// saves a turn.
+    ///
+    /// Empty by default: a server that does not say keeps the general wording,
+    /// which tells the model what kind of tool to reach for without claiming to
+    /// know its name.
+    fn switches(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// The kind of device a tool is about, when the tool's own name says.
+    ///
+    /// A temperature tool is about the heating whatever words the request used,
+    /// so a request that reached for one is a request about a kind of device —
+    /// which is exactly the fact missing when the same request is retried with a
+    /// tool that switches anything at all.
+    ///
+    /// `None` for every tool whose name does not state it, which is most of
+    /// them: guessing here would put a kind in a call the user never limited.
+    fn kind_of(&self, _tool: &str) -> Option<&'static str> {
+        None
+    }
+
     /// Which argument of a tool holds an area, which holds a device, and which
     /// holds a kind of device.
     ///
@@ -240,6 +288,17 @@ pub fn for_catalogue(tools: &[&str]) -> &'static dyn Vendor {
     &Unknown
 }
 
+/// Turn a server's own refusal into one sentence, if any vendor can read it.
+///
+/// Recognition is by the shape of the refusal, for the same reason
+/// [`for_result`] recognises a result that way: nothing has to be remembered,
+/// and a server that renames itself is still understood. An unreadable refusal
+/// yields `None` and is passed on exactly as the server wrote it.
+pub fn refusal(text: &str) -> Option<String> {
+    const KNOWN: &[&dyn Vendor] = &[&HomeAssistant];
+    KNOWN.iter().find_map(|v| v.refusal(text))
+}
+
 /// A server we have no specific knowledge of.
 pub struct Unknown;
 
@@ -304,6 +363,73 @@ impl Vendor for HomeAssistant {
             (true, true) => Admission::Worked,
             (true, false) => Admission::PartlyWorked { failed: missed },
         })
+    }
+
+    /// Home Assistant refuses a command it cannot aim by raising
+    /// `MatchFailedError`, whose `repr` carries the reason it gave up, the whole
+    /// state of every device it considered, and the filters it was matching
+    /// against. Three of those things are worth a sentence: why it gave up,
+    /// what the call aimed at, and — where the trouble is that several devices
+    /// answer to it — what they are called.
+    ///
+    /// The device names come from the `friendly_name` of each state it listed,
+    /// which is the same spelling a command has to use to reach one.
+    fn refusal(&self, text: &str) -> Option<String> {
+        let reason: String = text
+            .split_once("MatchFailedReason.")?
+            .1
+            .chars()
+            .take_while(|c| c.is_ascii_uppercase() || *c == '_')
+            .collect();
+        if reason.is_empty() {
+            return None;
+        }
+        let filters = text.split_once("MatchTargetsConstraints(").map_or("", |(_, t)| t);
+        let aimed_at = [
+            between(text, "MatchTargetsConstraints(name=", ",").map(|n| format!("the name {n}")),
+            between(filters, "domains=[", "]").map(|k| format!("the kind {k}")),
+            between(filters, "area_name=", ",").map(|a| format!("the area {a}")),
+            between(filters, "floor_name=", ",").map(|f| format!("the floor {f}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        let aimed_at =
+            if aimed_at.is_empty() { "this call".to_string() } else { aimed_at.join(" with ") };
+        // Every device it weighed up and could not choose between.
+        let candidates: Vec<&str> = text
+            .split("friendly_name=")
+            .skip(1)
+            .filter_map(|s| s.split(',').next())
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .collect();
+        Some(if reason == "MULTIPLE_TARGETS" && candidates.len() > 1 {
+            format!(
+                "{aimed_at} matches more than one device: {}. It reaches one device at a time, \
+                 so name the one that was meant and leave out the area.",
+                candidates.join(", ")
+            )
+        } else {
+            format!(
+                "{aimed_at} did not pick out a device this home can act on ({}).",
+                reason.to_lowercase().replace('_', " ")
+            )
+        })
+    }
+
+    /// The two intents [`desired_state`] knows, which is not a coincidence: a
+    /// tool that names an end state is exactly a tool that needs no value.
+    fn switches(&self) -> &'static [&'static str] {
+        SWITCHES
+    }
+
+    /// Read off the intent's own name. Home Assistant names its intents after
+    /// the thing they operate — `HassClimateSetTemperature`, `HassLightSet` —
+    /// so the kind is stated rather than inferred, and an intent whose name
+    /// says nothing about a kind says nothing here either.
+    fn kind_of(&self, tool: &str) -> Option<&'static str> {
+        KINDS.iter().find(|(intent, _)| tool.starts_with(intent)).map(|(_, kind)| *kind)
     }
 
     /// The same two intents, and for the same reason: they name a state the
@@ -392,6 +518,36 @@ impl Vendor for HomeAssistant {
         tools.iter().any(|t| t.starts_with("Hass"))
     }
 }
+
+/// The text after `open`, up to the first `close` that follows it.
+///
+/// Home Assistant spells an absent filter `None`, which is not a value to
+/// report, so it reads as nothing at all. Quotes come off: they are Python's
+/// punctuation, not part of a room's name.
+fn between<'a>(text: &'a str, open: &str, close: &str) -> Option<&'a str> {
+    let rest = text.split_once(open)?.1;
+    let found = rest.split_once(close).map_or(rest, |(head, _)| head);
+    let found = found.trim().trim_matches('\'').trim();
+    (!found.is_empty() && found != "None").then_some(found)
+}
+
+/// The intents that switch a device without setting anything on it.
+const SWITCHES: &[&str] = &["HassTurnOn", "HassTurnOff"];
+
+/// The intents whose names state which kind of device they act on, and the
+/// `domain` value that names that kind.
+///
+/// Matched on the leading word so a house running a newer Home Assistant, with
+/// intents these lines have never seen, is still read correctly — every climate
+/// intent begins `HassClimate`. The two volume intents are named outright
+/// because they do not follow that pattern.
+const KINDS: &[(&str, &str)] = &[
+    ("HassClimate", "climate"),
+    ("HassLight", "light"),
+    ("HassMedia", "media_player"),
+    ("HassSetVolume", "media_player"),
+    ("HassVacuum", "vacuum"),
+];
 
 /// The state a tool is asking for, when its name says.
 ///
@@ -530,6 +686,19 @@ mod tests {
         r#"{"response_type": "action_done", "data": {"success": [], "failed": []}}"#;
     /// A real office: the climate came on, the light did not.
     const HALF_DONE_ROOM: &str = r#"{"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Office", "type": "area"}, {"name": "Office air conditioner", "type": "entity"}], "failed": [{"name": "Office TV Light", "type": "entity"}]}}"#;
+    /// A real refusal, shortened in the middle of each device's attributes:
+    /// asked to set a temperature in an area holding both a thermostat and an
+    /// air conditioner, the house could not tell which was meant.
+    const TWO_OF_A_KIND: &str = "Error calling tool: <MatchFailedError \
+         result=MatchTargetsResult(is_match=False, \
+         no_match_reason=<MatchFailedReason.MULTIPLE_TARGETS: 12>, \
+         states=[<state climate.office_thermostat=off; min_temp=0.0, current_temperature=24, \
+         friendly_name=Office thermostat, supported_features=401 @ \
+         2026-08-02T14:37:13.080064+03:00>, <state climate.office_air_conditioner=off; \
+         drlc_status_level=-1, friendly_name=Office air conditioner, supported_features=441 @ \
+         2026-08-03T13:58:02.279993+03:00>], no_match_name=None, areas=[], floors=[]), \
+         constraints=MatchTargetsConstraints(name=None, area_name='Office', floor_name=None, \
+         domains=['climate'], device_classes=None, single_target=True), preferences=None>";
 
     fn call(name: &str) -> ToolCall {
         ToolCall { id: "1".into(), name: name.into(), arguments: "{}".into() }
@@ -766,6 +935,86 @@ mod tests {
             Some(Verdict::Confirmed),
             "one lamp is on and the other cannot say; that is not a contradiction"
         );
+    }
+
+    /// A refusal the house wrote for its own debugging is no use to a model:
+    /// the two facts that matter sit in the middle of 1400 characters, which is
+    /// exactly the part a shortener throws away. One sentence carries them.
+    #[test]
+    fn a_refusal_is_read_back_as_one_sentence() {
+        let ha = HomeAssistant;
+        let said = ha.refusal(TWO_OF_A_KIND).expect("the house said why");
+        assert_eq!(
+            said,
+            "the kind climate with the area Office matches more than one device: Office \
+             thermostat, Office air conditioner. It reaches one device at a time, so name the one \
+             that was meant and leave out the area."
+        );
+        // Both names a command could use to reach one of them, and nothing else
+        // invented alongside them.
+        assert!(said.contains("Office air conditioner"));
+        assert!(!said.contains("supported_features"), "none of the debugging goes to the model");
+        assert!(said.len() < TWO_OF_A_KIND.len() / 3, "shorter than what it replaces");
+    }
+
+    /// Every other way the house can fail to aim a command gets a sentence too,
+    /// naming what was aimed at and why it did not land. Read off the refusal
+    /// alone, so no device is ever invented.
+    #[test]
+    fn a_refusal_that_matched_nothing_says_what_it_looked_for() {
+        let ha = HomeAssistant;
+        let missed = "<MatchFailedError result=MatchTargetsResult(is_match=False, \
+                      no_match_reason=<MatchFailedReason.NAME: 1>, states=[], no_match_name='Lamp'), \
+                      constraints=MatchTargetsConstraints(name='Lamp', area_name=None, \
+                      floor_name=None, domains=['light'])>";
+        assert_eq!(
+            ha.refusal(missed).as_deref(),
+            Some(
+                "the name Lamp with the kind light did not pick out a device this home can \
+                 act on (name)."
+            )
+        );
+    }
+
+    /// One-sided, like every other reading here: anything that is not one of
+    /// ours goes to the model exactly as the server wrote it.
+    #[test]
+    fn an_unreadable_refusal_is_left_alone() {
+        assert_eq!(refusal("Received invalid slot info"), None);
+        assert_eq!(refusal(""), None);
+        assert_eq!(refusal(r#"{"error":"upstream timeout"}"#), None);
+        assert_eq!(Unknown.refusal(TWO_OF_A_KIND), None, "not this server's to explain");
+        // Read by whoever can, without being told which server answered.
+        assert!(refusal(TWO_OF_A_KIND).is_some());
+    }
+
+    /// The tools named as switches must be the ones whose end state is known,
+    /// or a correction would send the model to a tool that needs a value after
+    /// all — the very mistake it is there to undo.
+    #[test]
+    fn the_switches_are_the_tools_that_need_no_value() {
+        let ha = HomeAssistant;
+        assert!(!ha.switches().is_empty());
+        for tool in ha.switches() {
+            assert!(desired_state(tool).is_some(), "{tool} names an end state");
+        }
+        assert!(Unknown.switches().is_empty(), "a server we do not know names no tool");
+    }
+
+    /// A tool that sets one kind of thing says so in its name, and that is the
+    /// fact a plain switch-on loses. Read off the name only — a tool whose name
+    /// says nothing gets no kind put in its mouth.
+    #[test]
+    fn a_tool_that_names_a_kind_of_device_is_read_as_being_about_it() {
+        let ha = HomeAssistant;
+        assert_eq!(ha.kind_of("HassClimateSetTemperature"), Some("climate"));
+        assert_eq!(ha.kind_of("HassLightSet"), Some("light"));
+        assert_eq!(ha.kind_of("HassSetVolume"), Some("media_player"));
+        for switch in ha.switches() {
+            assert_eq!(ha.kind_of(switch), None, "{switch} switches anything at all");
+        }
+        assert_eq!(ha.kind_of("HassGetState"), None);
+        assert_eq!(Unknown.kind_of("HassClimateSetTemperature"), None);
     }
 
     /// The house sends its state as an escaped JSON string, not as loose text.

@@ -26,7 +26,7 @@ members = [
 exclude = ["packaging/crates-io"]
 
 [workspace.package]
-version = "0.17.1"
+version = "0.18.0"
 edition = "2021"
 rust-version = "1.82"
 license = "GPL-3.0-only"
@@ -101,11 +101,15 @@ cpal = "0.15"
 rubato = "0.15"
 
 # STT / LLM local engines
-whisper-rs = { version = "0.16", features = ["tracing_backend"] }
-# Both of our patches landed upstream and ship in the current crates.io
-# release: the `common` opt-out (utilityai/llama-cpp-rs#1015) and the
-# `static-openmp` static-runtime linkage feature. The fork and the
-# `[patch.crates-io]` block are gone; we now track the published crate.
+# `llama-ggml` builds whisper.cpp against the ggml that llama-cpp-sys-2
+# already builds, instead of a second copy. Two copies in one binary
+# collide on every ggml symbol; the linker keeps one at random and the
+# rest of the binary calls into the copy it was not compiled against.
+whisper-rs = { version = "0.16", features = ["tracing_backend", "llama-ggml"] }
+# The llama-cpp-rs fork is gone: both patches landed upstream and ship in
+# the current crates.io release, the `common` opt-out (utilityai/llama-cpp-rs#1015)
+# and the `static-openmp` static-runtime linkage feature. We now track the
+# published crate. The whisper-rs fork remains, via `[patch.crates-io]` below.
 # `default-features = false` drops the `common` feature, which strips the
 # unused llama.cpp `common/` static library (`libcommon.a` ~14 MB +
 # wrapper archive ~10 MB) plus the OpenAI-compat / chat-template /
@@ -323,17 +327,10 @@ strip = "symbols"
 opt-level = "s"
 
 [patch.crates-io]
-# Our fork of llama-cpp-sys-2 0.1.153, rebased on upstream main. It carries a
-# single commit that makes llama.cpp fall back gracefully instead of aborting
-# when the fused Gated Delta Net support check sees an unnamed node. Without it,
-# loading gemma-4 (a hybrid GDN model) hits a GGML_ASSERT at context creation
-# and the process dies, because on the CPU reserve path those nodes still have
-# ggml's default node_N names. The fork disables the fused path and uses the
-# non-fused one instead, which is no slower on CPU (see ggml-org/llama.cpp#24298).
-# llama-cpp-2 stays on the published crate and links this patched sys. Pinned to
-# an exact rev; drop this once the fix lands in a published llama-cpp-2 release.
-#
-# The GGML_ env-var forwarding we used to carry here (so `GGML_CPU_REPACK=OFF`
-# in .cargo/config.toml can disable the Q4_0 repack) landed upstream as
-# utilityai/llama-cpp-rs#1079 and is now inherited, not carried.
-llama-cpp-sys-2 = { git = "https://github.com/bogdanr/llama-cpp-rs", rev = "39cbdb951f7dd156bafb1c87dcada15c4fedbd4b" }
+# Our fork of whisper-rs 0.16.0. It carries the upstream `system-ggml` work
+# (tazz4843/whisper-rs#260, open since 2025-12) plus a `llama-ggml` feature
+# that depends on llama-cpp-sys-2, so cargo builds llama first and hands
+# whisper the path to its ggml. Without it the binary holds two ggml copies
+# and only links because of `--allow-multiple-definition` / `/FORCE:MULTIPLE`.
+# Drop this patch line once the changes land upstream.
+whisper-rs = { git = "https://github.com/bogdanr/whisper-rs", rev = "bd049da3687e5d7d138cd5a91463b8cece54f511" }

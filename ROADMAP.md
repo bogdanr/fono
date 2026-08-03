@@ -14,12 +14,24 @@ The home page is [fono.page](https://fono.page).
 
 <table width="100%">
 <tr>
-<td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".<br><br><strong><a href="#voice-actions">Voice actions</a></strong><br>"Turn on the kitchen lights." Fono speaks to Home Assistant, GitHub, and your own MCP servers — the assistant doesn't just answer, it does.<br><br><strong><a href="#larger-than-ram-local-models">Larger-than-RAM local models</a></strong><br>Run a local model bigger than your RAM — the hot parts stay in memory, the rest streams from your SSD.</td>
+<td valign="top" width="50%"><img src="https://img.shields.io/badge/Up_next-2ea44f?style=for-the-badge" alt="Up next"><br><br><strong><a href="#automatic-translation">Automatic translation</a></strong><br>Speak in any language, type in another — any pair, per-app rules, batch and live parity.<br><br><strong><a href="#talk-over-the-assistant">Talk over the assistant</a></strong><br>Just start speaking — Fono hears you over its own voice and hands the turn back. No hotkey, no escape, no awkward "stop, stop, stop".<br><br><strong><a href="#larger-than-ram-local-models">Larger-than-RAM local models</a></strong><br>Run a local model bigger than your RAM — the hot parts stay in memory, the rest streams from your SSD.</td>
 <td valign="top" width="50%"><img src="https://img.shields.io/badge/On_the_horizon-0075ca?style=for-the-badge" alt="On the horizon"><br><br><strong><a href="#self-hosted-modelship-backend">Self-hosted Modelship backend</a></strong><br>One box on your LAN runs the LLM, speech-to-text, text-to-speech, and embeddings — every Fono desktop points at it, fully local.<br><br><strong><a href="#local-rest-api">Local REST API</a></strong><br>Every CLI verb over plain HTTP, so scripts and editor plugins can drive the daemon you already run — no MCP, no special tooling.<br><br><strong><a href="#openai-realtime-backend">OpenAI Realtime backend</a></strong><br>The same hands-free conversation, now on OpenAI's voice models.</td>
 </tr>
 </table>
 
 ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge)
+
+**[v0.18.0 — The assistant does things, not just answers](#shipped)**  
+Point Fono at a server that speaks the Model Context Protocol — Home Assistant,
+for example — and ask it to turn on the kitchen lights: it does, and tells you
+what happened. A settings page lists everything your servers offer, lets you
+switch off anything you would rather Fono never touched, and keeps a per-tool
+history for when a command does not work. A command you give often stops waiting
+for the model and fires straight away. Your conversations are now saved, so a
+restart no longer loses your train of thought, and a new History page lets you
+read back both your transcripts and your chats — with the recognised speaker
+beside each one. Live dictation also works with OpenAI now, painting your words
+into the overlay as you speak them. *(2026-08-03)*
 
 **[v0.17.1 — Natural multilingual voice by default](#shipped)**  
 Fono's built-in text-to-speech now speaks with the multilingual Supertonic
@@ -182,45 +194,6 @@ Voice UX polish follow-up: an optional server-side wake chime
 before TTS after long idle gaps, as a deferred refinement to the
 spoken refocus preamble.
 
-### Voice actions
-
-> Stop asking. Start doing.
-
-The voice assistant today answers questions. The next step is letting it **do
-things** — turn on the kitchen lights, start a Pomodoro, open a GitHub issue,
-anything an MCP server can expose. You hold F8, say what you want, and Fono
-either explains (as today) or acts. The assistant decides per turn, no special
-keyword, no separate hotkey.
-
-The connector is the [Model Context Protocol](https://modelcontextprotocol.io)
-— Fono is the **client**, speaking to whichever MCP servers you configure. A
-typical setup points at Home Assistant on your LAN for smart-home control;
-power users add GitHub, calendar, file-search, or any of the growing MCP
-ecosystem. Tools are advertised to the assistant model through its own
-function-calling interface, and the work covers cloud and on-device models
-together rather than treating on-device as a later add-on — because how well a
-small local model can pick the right tool is the single biggest open question,
-it gets measured on a real Home Assistant setup before the rest is built.
-
-Two in-process built-ins ship by default — `pomodoro_start` and
-`pomodoro_cancel` — so the feature works out of the box without any external
-server, and the tray shows the active timer. A confirmation-policy hook is
-wired in from day one so dangerous actions ("delete every file in Downloads")
-can later require a spoken "yes" or a hotkey tap before they fire. v1 ships
-with confirmation off by default; the UX layers on later without schema churn.
-
-Commands you use often get **faster the more you use them**. When the assistant
-handles the same request the same way twice, Fono remembers the phrase and runs
-it straight away next time — no model, no waiting. Because it remembers the
-*phrase*, several wordings in several languages can point at the same action, so
-"turn on the kitchen lights" and "pornește luminile în bucătărie" both work.
-Everything it has learned is listed in Settings, grouped by what it does, with
-how often it ran and who asked — and anything wrong can be edited or removed.
-
-Concrete plan: `plans/2026-07-25-voice-actions-v3.md` (decision record:
-`docs/decisions/0029-voice-triggered-actions.md`). Once it lands, voice actions
-apply in lockstep to both the staged pipeline and the realtime assistant.
-
 ### Larger-than-RAM local models
 
 > Run a model bigger than your memory. The hot parts stay in RAM; the rest
@@ -331,6 +304,44 @@ assistant provider.
 ## Shipped
 
 Newest first.
+
+- ![v0.18.0](https://img.shields.io/badge/v0.18.0-2026--08--03-blue?style=flat-square)
+  **Voice actions — the assistant does things, not just answers.** Point Fono at
+  any server that speaks the [Model Context
+  Protocol](https://modelcontextprotocol.io) — Home Assistant on your LAN is the
+  typical setup — and the assistant can act on what you say: "turn on the
+  kitchen lights" switches them on, and you hear what happened in the same
+  breath. It is careful about what it claims: a server error is reported as one,
+  and for an action nothing can check afterwards it says only that the request
+  was sent. One action per request, so a sentence can never set off a chain.
+  Everything your servers offer is listed on its own settings page — what each
+  tool expects, what Fono narrows it to, every room and device reported, the
+  exact words the assistant is given about your home, and a per-tool history of
+  your words, the request built from them, and what came back, for when a
+  command does not work. Switch off a single tool, a whole server, or every
+  server but one, without editing config or restarting. Commands you repeat get
+  **faster the more you use them**: once the same words have worked twice, they
+  fire straight away with no model in the loop — several wordings in several
+  languages can point at the same action, and anything learned can be edited or
+  forgotten in Settings. Amounts are never shortcut. Works with cloud and
+  on-device models alike, with a spoken-command benchmark against a real house
+  driving the accuracy work. Design in
+  [ADR 0029](docs/decisions/0029-voice-triggered-actions.md).
+
+  Also in this release: your assistant conversations are saved as threads, so a
+  restart no longer loses your train of thought; a new **History** page lets you
+  read back both your transcripts and your chats, turn by turn, with the
+  recognised speaker beside each entry and one-click deletion. Live dictation
+  now works with OpenAI, painting your words into the overlay as you speak them,
+  and no longer garbles what you said or swallows the pauses in it. Choosing
+  where the assistant and cleanup models run is one consistent set of four
+  choices — off, this computer, a server on your network, or a cloud provider —
+  everywhere you look, with a **Test connection** button that lists the models a
+  server offers (this retires `backend = "ollama"`; see the changelog). A command
+  dictated into a terminal is typed as a command again, the assistant applies
+  your spelling corrections and trims silence the way dictation does, and your
+  history retention setting is finally enforced. OpenAI speech-to-text defaults
+  to `gpt-transcribe`. *v0.18.0, 2026-08-03.*
 
 - ![shipped](https://img.shields.io/badge/shipped-2026--07--21-6e7681?style=flat-square)
   **Personal vocabulary (deterministic correction).** Teach Fono once that a

@@ -1,5 +1,177 @@
 # Fono — Project Status
-Last updated: 2026-08-03
+Last updated: 2026-08-05
+
+## 2026-08-05 — The bench link, fixed for the right reason this time
+
+CI on `a4e4a41` (the republished 0.18.0) still failed the Ubuntu `fono-bench` equivalence step,
+and for a reason the previous session's fix could not have addressed. The link line CI printed
+settles it:
+
+```
+-Wl,-Bstatic -lstdc++ <rlibs> -Wl,-Bdynamic -lwhisper -lggml -lggml-base -lggml-cpu
+```
+
+rustc sorts native libs by kind — every `static` one goes ahead of the unspecified/dynamic ones —
+so *where the fork's build script emits the C++ runtime does not matter*. `static:-bundle=stdc++`
+landed before the archives that need it, and GNU ld does not go back to an archive it has already
+walked. Moving the directive to the end of the script changes nothing; verified by reading the
+emitted link line, not by watching the build succeed.
+
+Fix (fork `fono-llama-ggml`, now `bd049da`): under `llama-ggml`, tag the provider's whisper and
+ggml archives `static:-bundle=` as well. They then sit in the same `-Bstatic` group as the C++
+runtime, which is emitted last, and ld closes their symbols. `-bundle` keeps the archives out of
+the whisper rlib so llama still links the one copy. A generic `system-ggml` provider may ship
+shared objects, so there the link kind stays unspecified.
+
+Why this took two attempts: this box links the bench fine either way (GNU ld 2.46, gcc 15.3), so
+"it builds locally" proves nothing about the ordering. The check that does is `cargo rustc …
+-- --print link-args`.
+
+Gates: fmt, clippy, `--tests --lib`, and the size budget all pass (23.00 MiB, four-entry NEEDED).
+The equivalence gate matches the baseline on all 13 fixtures.
+
+Windows is unchanged and still red: `0xc0000374` in `local_backends_coexist`, test 2. The job is
+`continue-on-error` and the release workflow builds the `.exe` without tests, so nothing ships
+broken, but the diagnosis is still open.
+
+## 2026-08-05 — CI fallout from the one-ggml change, fixed and republished
+
+The 0.18.0 push failed both workflows on four fronts. Three were regressions from the one-ggml
+change, all fixed in the whisper fork (`fono-llama-ggml`, now `409f66c`) plus a one-line
+`deny.toml` correction:
+
+1. **License audit** — `deny.toml` still allowed the retired `llama-cpp-rs` fork and denied the
+   `whisper-rs` one. Swapped the `allow-git` entry.
+2. **Ubuntu `fono-bench` link** — whisper.cpp's C++ references went undefined. Root cause:
+   nothing references `llama-cpp-sys-2`'s code, so rustc drops its rlib — and its native lib
+   directives with it — from consumers that link whisper but not `llama-cpp-2`; the only stdlib
+   directive that reached the bench link was the fork's own top-of-script `dylib=stdc++`, which
+   sat before `-lwhisper` and our own `--as-needed` dropped it. The main binary never notices
+   because it really uses `llama-cpp-2` (plus `ort-sys`'s bundled static stdc++). Fix: under
+   `llama-ggml` the fork emits the stdlib directive itself, as `static:-bundle=stdc++` on
+   Linux-gnu (the same incantation `ort-sys` uses via `ORT_CXX_STDLIB`), so the archive is
+   packed into the whisper rlib and no dylib entry can be dropped. The first attempt (enabling
+   `static-stdcxx` on the fork's `llama-cpp-sys-2` dep) passed locally but failed CI exactly the
+   same way — that was what exposed the dropped-rlib mechanism. Verified locally: forced relink
+   has no `NEEDED libstdc++`, and the exact CI equivalence gate passes (13 fixtures, overall
+   PASS).
+3. **macOS build + metal audit** — `ld: library 'ggml-blas' not found`. The fork emitted
+   `ggml-blas` unconditionally on macOS, but llama's ggml build has no such target. Fix: under
+   `system-ggml` each backend link directive (`ggml-blas/-hip/-metal/-cuda/-vulkan`) is emitted
+   only if the library file exists in the provider's install dirs. Linux still links (verified);
+   macOS itself is CI-verified. The `lib64` search-path warning comes from `llama-cpp-sys-2`'s
+   own build script and is out of the fork's reach — cosmetic, left as is.
+4. **Windows heap corruption** — `0xc0000374` in `local_backends_coexist` persists with one ggml
+   confirmed and zero duplicate-symbol warnings, so the two-copy diagnosis is dead as its cause.
+   Non-blocking (the CI job is `continue-on-error`; the release workflow builds the `.exe`
+   without tests). Still open; next step is a throwaway CI matrix with and without
+   `accel-vulkan`, or a run on the Windows box when reachable. Do not paper over the test.
+
+Republished 0.18.0: amended release commit, force-pushed main, moved the tag.
+
+## 2026-08-05 — One ggml, and a green Windows build
+
+Folded into the 0.18.0 release commit: the fix for the Windows CI failure that had been red since
+07-21 (`local_backends_coexist` dying with `STATUS_HEAP_CORRUPTION`), and the simplification that
+retires the llama fork.
+
+The root cause took a while to pin down, mostly because every software variable came back green.
+The exact CI command passed on the Windows box on 1.88, 1.96.1 and 1.97.1, with and without Vulkan
+and with and without `windows-defaults`. What differed was the link itself: locally the linker
+reported 4,264 duplicate ggml symbols and kept the whisper copy (`LNK4006`); in CI it reported
+zero and kept the other one. The binary carried **two** vendored copies of ggml — one from
+`whisper-rs-sys`, one from `llama-cpp-sys-2` — held together by `/FORCE:MULTIPLE` (MSVC) and
+`--allow-multiple-definition` (GNU ld) in `.cargo/config.toml`. Which copy survives depends on link
+order, which varies by machine, and the copies are not ABI-equivalent (`GGML_TYPE_COUNT` 40 vs 42,
+`ggml-backend.h` differs by ~100 lines). The surviving copy sometimes disagrees with the rest of the
+program, and that is what `0xc0000374` looks like. ADR 0018's premise — both copies pinned to the
+same ggml family, so the survivor is compatible — was false.
+
+The fix makes the premise true by making there be one copy. Two upstream PRs, both ours:
+
+- `bogdanr/llama-cpp-rs` — emit `cargo:ggml_cmake_dir=<OUT_DIR>/lib64/cmake` from
+  `llama-cpp-sys-2/build.rs`, so a dependent crate can feed the installed ggml package to CMake
+  ([utilityai/llama-cpp-rs#1091](https://github.com/utilityai/llama-cpp-rs/pull/1091), released in
+  0.1.154 the next day).
+- `bogdanr/whisper-rs` — PR 260 (`system-ggml`) plus a new `llama-ggml` feature: an optional
+  dependency edge on `llama-cpp-sys-2` so cargo builds llama first, and the build script reads
+  `DEP_LLAMA_GGML_CMAKE_DIR` into `CMAKE_PREFIX_PATH`. The edge is what makes it robust — without
+  it the ggml path may not exist when whisper builds.
+
+In fono: whisper comes from the fork with `llama-ggml` on; both duplicate-symbol linker flags are
+deleted; ADR 0018 is marked Superseded by ADR 0041. Proven on Linux (one `ggml_init` in the binary,
+no flags, full gate green) and on the Windows box with the exact CI feature set: `WHISPER_USE_SYSTEM_GGML=ON`,
+zero ggml archives built by whisper, zero `LNK4006`, zero `LNK4088`, both coexist tests pass.
+
+The simplification: `llama-cpp-rs` released 0.1.154 with our `ggml_cmake_dir` verbatim, and its
+newer llama.cpp replaced the name-assert our GDN fallback commit patched with `resolve_fused_ops()`,
+which matches fused nodes by `node.op` and never touches names. So the llama fork patch is dead
+weight: the `[patch.crates-io]` entry is gone, `llama-cpp-2`/`llama-cpp-sys-2` resolve from the
+registry at 0.1.154, and the fork's only remaining carry commit is obsolete. The empirical oracle —
+loading the gemma-4 hybrid-GDN model, which motivated the fork in the first place — passes on
+0.1.154: context created, prefill decoded, token sampled. Whisper stays forked only until PR 260
+merges upstream.
+
+Honest notes: the binary grew ~80 KB (22.67 vs 22.59 MiB) — the old flags discarded a duplicate
+copy, so there was no weight to reclaim; llama's ggml has more types and backends than whisper's.
+The size gate still passes with 2.3 MiB of headroom. One known flake remains: a fresh Windows build
+can trip a known MSBuild race in llama's Vulkan shader sub-project; a second run passes unchanged.
+
+
+## 2026-08-03 — Released 0.18.0
+
+Cut 0.18.0: voice actions. The assistant can act on what you say through any MCP server, with a
+settings page for every tool it may use, a per-tool history for when a command fails, and repeated
+commands that fire without the model. Also in the release: saved conversations, the History page,
+OpenAI live dictation, one consistent set of choices for where the assistant and cleanup models
+run (which retires `backend = "ollama"`), and the language, terminal-command and silence fixes from
+the past two weeks.
+
+Folded into the release commit before tagging: eight targeting and verification fixes found by
+reading traces of two failed turns on a real home, plus the benchmark case that reproduces the worst
+of them.
+
+The reported failure was a Romanian command about one air conditioner that switched every light in
+the office. The chain behind it: the guard against re-sending a failed command compared the JSON the
+model wrote instead of the arguments that would be sent, so the cleaning step hid a repeat; the
+home's own objection reached the model as 1,400 characters of Python `repr` with the middle elided,
+taking both candidate device names with it; the refusal for a missing value described the replacement
+tool instead of naming it; a name only one device answered to made the area look redundant, so it was
+dropped and the call landed on a device in another room; the switch that replaced the refused tool
+kept the area and no kind, which is how the lights came on; and the readback ran before a climate
+entity had stopped reporting its old state, so a command that worked was reported as failed. Each is
+fixed where the knowledge belongs — the vendor layer reads its own server's refusals and reports
+which of its tools switch; everything else compares against names the server published, at word
+boundaries, so no language or house is named anywhere.
+
+The last of them writes the kind of device into a switch that stands in for a refused value-setting
+tool rather than refusing again. Refusing was safe and useless: told which field to write, the model
+apologised to the user instead of writing it. Narrowing to a kind is not narrowing to a device — an
+area holding two climate devices still gets both — and curing that needs the catalogue to record
+where each device is, which it does not.
+
+Measured over six full bench runs, en + ro, 26 cases every run ran: worked in the end 20/26 and
+21/26 before, 26/26 in both runs after. p50 9,283 / 9,559 ms before, 6,417 / 7,558 ms after; p90
+14,291 / 14,836 before, 16,256 / 15,452 after; round trips to the home 39 before, 36 after. The
+median gain is Romanian (11.1 s → 6.4/7.6 s); English medians are flat. Each recovery costs one
+generation pass, ~3–5 s on this machine, which is where the tail comes from. Two failures remain in
+the full 34 and neither is a targeting fault: the model writes `brightness: 10` for "thirty percent",
+and reaches for the light tool to move a curtain.
+
+Release mechanics: version bumped to 0.18.0, the `Unreleased` changelog section dated and folded
+into `## [0.18.0]` (its two `Fixed` blocks and the model-defaults block merged into one Added /
+Changed / Fixed set), and `ROADMAP.md` updated — Voice actions moved out of **Up next** into
+**Shipped** with the tag and date, and the recently-shipped summary refreshed. Tag `v0.18.0` and
+the push are the user's call.
+
+Dependabot alert 3 (RUSTSEC-2026-0185, high, remote memory exhaustion in `quinn-proto`'s
+out-of-order stream reassembly) closed by pinning `quinn-proto` 0.11.15 in `Cargo.lock` — the first
+patched version, and the only bump that adds no crates: `cargo update -p quinn-proto` without
+`--precise` also pulls `rand` 0.10 and adds `chacha20`, `cpufeatures` and `rand_pcg`. Nothing was
+exposed: `reqwest` is taken with `default-features = false` and no `http3`, so `quinn` is a lock-file
+entry no shipped binary compiles (`cargo tree -i quinn-proto` resolves to nothing). The `main`
+branch was already pushed when the alert came in, so this is a commit on top and the unpushed
+`v0.18.0` tag moved to it.
 
 ## 2026-08-03 — Three measured retreats, and the fix that stuck
 
