@@ -1,0 +1,131 @@
+name: Windows heap-corruption probe
+
+# Throwaway diagnostic workflow. It exists to answer one question: which
+# ingredient of the Windows feature set makes `local_backends_coexist`
+# die with STATUS_HEAP_CORRUPTION (0xc0000374) on the hosted, GPU-less
+# windows-2022 runner, when the same test passes on a real Windows
+# desktop with the same feature set. Delete the branch and this file once
+# the answer is recorded.
+#
+# Three rows, differing only in features:
+#   vulkan      — `windows-defaults` as CI runs it (expected: crash)
+#   no-vulkan   — same, minus `accel-vulkan` (isolates ggml-vulkan
+#                 initialising on a host with no Vulkan device)
+#   llama-only  — llama + whisper only, no onnxruntime, no Vulkan
+#                 (isolates the ort static lib and the tray/realtime glue)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [win-heap-probe]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: full
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
+
+jobs:
+  probe:
+    name: probe (${{ matrix.row }})
+    runs-on: windows-2022
+    continue-on-error: true
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - row: vulkan
+            features: windows-defaults
+            vulkan: true
+            ort: true
+          - row: no-vulkan
+            features: tray,local-models,llama-local,interactive,realtime,tts-local,wakeword-onnx,speaker-onnx
+            vulkan: false
+            ort: true
+          - row: llama-only
+            features: local-models,llama-local
+            vulkan: false
+            ort: false
+    steps:
+      - name: Enable git long paths
+        run: git config --system core.longpaths true
+
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-win-probe-${{ matrix.row }}"
+
+      - name: Point bindgen at the runner's LLVM (LIBCLANG_PATH)
+        shell: bash
+        run: echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+
+      - name: Neutralise GNU size flags + force Ninja on MSVC
+        shell: bash
+        run: |
+          echo "CFLAGS=" >> "$GITHUB_ENV"
+          echo "CXXFLAGS=" >> "$GITHUB_ENV"
+          echo "CMAKE_GENERATOR=Ninja" >> "$GITHUB_ENV"
+          echo "ORT_CXX_STDLIB=" >> "$GITHUB_ENV"
+
+      - name: Set up MSVC environment (cl on PATH for Ninja)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Vulkan SDK (Windows)
+        if: matrix.vulkan
+        shell: pwsh
+        run: |
+          $ver = '1.4.350.0'
+          $url = "https://sdk.lunarg.com/sdk/download/$ver/windows/vulkansdk-windows-X64-$ver.exe"
+          $exe = "$env:RUNNER_TEMP\VulkanSDK-Installer.exe"
+          $root = "C:\VulkanSDK\$ver"
+          curl.exe -L -o $exe $url
+          $p = Start-Process -FilePath $exe -Wait -PassThru -ArgumentList `
+            "--root", $root, "--accept-licenses", "--default-answer", `
+            "--confirm-command", "install"
+          if ($p.ExitCode -ne 0) { throw "Vulkan SDK installer exited $($p.ExitCode)" }
+          if (-not (Test-Path "$root\Bin\glslc.exe")) { throw "glslc.exe missing after install" }
+          "VULKAN_SDK=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$root\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Fetch minimal onnxruntime static lib (pin ORT_LIB_LOCATION)
+        if: matrix.ort
+        shell: bash
+        run: |
+          ort_dir="$(TARGET=x86_64-pc-windows-msvc sh scripts/fetch-onnxruntime.sh)"
+          ort_dir="$(cygpath -w "${ort_dir}")"
+          echo "ORT_LIB_LOCATION=${ort_dir}" >> "$GITHUB_ENV"
+
+      # What the runner reports about Vulkan, before anything links it.
+      # A hosted runner has no GPU; whether the loader finds an ICD at all
+      # is the variable the `vulkan` row is testing.
+      - name: What Vulkan does this runner have
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Get-ChildItem -Path C:\Windows\System32\vulkan-1.dll -ErrorAction SilentlyContinue |
+            Select-Object FullName, Length, LastWriteTime | Format-List
+          Get-ChildItem -Path 'HKLM:\SOFTWARE\Khronos\Vulkan\Drivers' -ErrorAction SilentlyContinue
+          if (Get-Command vulkaninfo -ErrorAction SilentlyContinue) {
+            vulkaninfo --summary 2>&1 | Select-Object -First 40
+          } else { "vulkaninfo not on PATH" }
+
+      - name: Run the crashing test alone
+        shell: bash
+        run: |
+          cargo test -p fono --no-default-features \
+            --features ${{ matrix.features }} \
+            --test local_backends_coexist -- --nocapture --test-threads=1
