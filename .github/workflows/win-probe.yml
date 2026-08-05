@@ -7,13 +7,18 @@ name: Windows heap-corruption probe
 # desktop with the same feature set. Delete the branch and this file once
 # the answer is recorded.
 #
-# Three rows, differing only in features:
-#   vulkan      — `windows-defaults` as CI runs it (expected: crash)
-#   no-vulkan   — same, minus `accel-vulkan` (isolates ggml-vulkan
-#                 initialising on a host with no Vulkan device)
-#   llama-only  — llama + whisper + the streaming/realtime glue the
-#                 `fono` lib needs to compile at all, no onnxruntime, no
-#                 Vulkan (isolates the ort static lib and the tray)
+# Round 1 answered the feature question: with `accel-vulkan` the test
+# crashes, without it (and without onnxruntime) it passes, single-threaded
+# and parallel alike. So it is ggml-vulkan initialising against the LunarG
+# loader this workflow installs on a runner that has no Vulkan device.
+#
+# Round 2 splits that in two. One build, three runs:
+#   1. loader present, loader tracing on — what the loader reports before
+#      the crash.
+#   2. loader hidden — exercises the in-tree soft-load shim's
+#      absent-loader path instead of the real loader. If the crash
+#      survives this, the shim is at fault; if it goes away, the real
+#      loader with zero drivers is.
 
 on:
   workflow_dispatch:
@@ -47,14 +52,6 @@ jobs:
             features: windows-defaults
             vulkan: true
             ort: true
-          - row: no-vulkan
-            features: tray,local-models,llama-local,interactive,realtime,tts-local,wakeword-onnx,speaker-onnx
-            vulkan: false
-            ort: true
-          - row: llama-only
-            features: local-models,llama-local,interactive,realtime
-            vulkan: false
-            ort: false
     steps:
       - name: Enable git long paths
         run: git config --system core.longpaths true
@@ -128,19 +125,36 @@ jobs:
       # `link.exe` ahead of MSVC's on PATH, and every build script then
       # fails to link ("extra operand ... .rcgu.o"). The CI job builds
       # under pwsh for the same reason.
-      - name: Run the crashing test alone
+      - name: Build the test binary
+        run: >
+          cargo test -p fono --no-default-features
+          --features ${{ matrix.features }}
+          --test local_backends_coexist --no-run
+
+      # Loader tracing goes straight to stderr, so it survives even though
+      # the test process has no tracing subscriber to catch ggml's own logs.
+      - name: Run with the loader present, loader tracing on
+        if: always()
+        env:
+          VK_LOADER_DEBUG: all
         run: >
           cargo test -p fono --no-default-features
           --features ${{ matrix.features }}
           --test local_backends_coexist -- --nocapture --test-threads=1
 
-      # Second pass with the harness left at its default parallelism —
-      # the same shape the failing CI job runs. If this crashes while the
-      # single-threaded pass above passed, the fault is a race between the
-      # two tests, not the feature set.
-      - name: Run the whole test file in parallel
+      # Move the loader out of the DLL search path so the in-tree shim
+      # takes its absent-loader branch. If the crash goes away here, the
+      # real loader with zero drivers is at fault; if it stays, the shim is.
+      - name: Hide the loader, then run again
         if: always()
-        run: >
-          cargo test -p fono --no-default-features
-          --features ${{ matrix.features }}
-          --test local_backends_coexist -- --nocapture
+        run: |
+          $dll = "C:\Windows\System32\vulkan-1.dll"
+          if (Test-Path $dll) {
+            takeown /F $dll | Out-Null
+            icacls $dll /grant "$env:USERNAME:(F)" | Out-Null
+            Move-Item $dll "$env:RUNNER_TEMP\vulkan-1.dll.hidden" -Force
+          }
+          Test-Path $dll
+          cargo test -p fono --no-default-features `
+            --features ${{ matrix.features }} `
+            --test local_backends_coexist -- --nocapture --test-threads=1
