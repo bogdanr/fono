@@ -11,8 +11,9 @@ name: Windows heap-corruption probe
 #   vulkan      — `windows-defaults` as CI runs it (expected: crash)
 #   no-vulkan   — same, minus `accel-vulkan` (isolates ggml-vulkan
 #                 initialising on a host with no Vulkan device)
-#   llama-only  — llama + whisper only, no onnxruntime, no Vulkan
-#                 (isolates the ort static lib and the tray/realtime glue)
+#   llama-only  — llama + whisper + the streaming/realtime glue the
+#                 `fono` lib needs to compile at all, no onnxruntime, no
+#                 Vulkan (isolates the ort static lib and the tray)
 
 on:
   workflow_dispatch:
@@ -51,7 +52,7 @@ jobs:
             vulkan: false
             ort: true
           - row: llama-only
-            features: local-models,llama-local
+            features: local-models,llama-local,interactive,realtime
             vulkan: false
             ort: false
     steps:
