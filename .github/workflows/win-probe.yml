@@ -12,13 +12,13 @@ name: Windows heap-corruption probe
 # and parallel alike. So it is ggml-vulkan initialising against the LunarG
 # loader this workflow installs on a runner that has no Vulkan device.
 #
-# Round 2 splits that in two. One build, three runs:
-#   1. loader present, loader tracing on — what the loader reports before
-#      the crash.
-#   2. loader hidden — exercises the in-tree soft-load shim's
-#      absent-loader path instead of the real loader. If the crash
-#      survives this, the shim is at fault; if it goes away, the real
-#      loader with zero drivers is.
+# Round 2 turned on the loader's own tracing. Its last line before the
+# crash is `vkCreateInstance: Found no drivers!`, and hiding the loader
+# altogether crashes the same way, so both routes end at a failed Vulkan
+# instance. The same no-driver condition is harmless on Linux, so this is
+# Windows-specific.
+#
+# Round 3 wants the faulting stack, under `cdb` if the image has it.
 
 on:
   workflow_dispatch:
@@ -131,30 +131,32 @@ jobs:
           --features ${{ matrix.features }}
           --test local_backends_coexist --no-run
 
-      # Loader tracing goes straight to stderr, so it survives even though
-      # the test process has no tracing subscriber to catch ggml's own logs.
-      - name: Run with the loader present, loader tracing on
+      - name: Confirm the crash still reproduces
         if: always()
-        env:
-          VK_LOADER_DEBUG: all
         run: >
           cargo test -p fono --no-default-features
           --features ${{ matrix.features }}
           --test local_backends_coexist -- --nocapture --test-threads=1
 
-      # Move the loader out of the DLL search path so the in-tree shim
-      # takes its absent-loader branch. If the crash goes away here, the
-      # real loader with zero drivers is at fault; if it stays, the shim is.
-      - name: Hide the loader, then run again
+      # Round 2 result: the loader logs `vkCreateInstance: Found no
+      # drivers!` and the process dies immediately after, and hiding the
+      # loader entirely does not help. Both paths end in a failed Vulkan
+      # instance creation, so what is left is to see the faulting stack.
+      # `cdb` ships with the Windows SDK's Debugging Tools, which the
+      # hosted image may or may not carry — report either way.
+      - name: Faulting stack under the debugger
         if: always()
         run: |
-          $dll = "C:\Windows\System32\vulkan-1.dll"
-          if (Test-Path $dll) {
-            takeown /F $dll | Out-Null
-            icacls $dll /grant "$env:USERNAME:(F)" | Out-Null
-            Move-Item $dll "$env:RUNNER_TEMP\vulkan-1.dll.hidden" -Force
+          $cdb = Get-ChildItem -Path 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe' `
+            -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $cdb) {
+            choco install windbg -y --no-progress 2>&1 | Select-Object -Last 5
+            $cdb = Get-ChildItem -Path 'C:\Program Files*\Windows Kits\10\Debuggers\x64\cdb.exe' `
+              -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
           }
-          Test-Path $dll
-          cargo test -p fono --no-default-features `
-            --features ${{ matrix.features }} `
-            --test local_backends_coexist -- --nocapture --test-threads=1
+          if (-not $cdb) { "no cdb.exe on this image"; exit 0 }
+          "using $($cdb.FullName)"
+          $exe = Get-ChildItem 'target\debug\deps\local_backends_coexist-*.exe' |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          "running $($exe.FullName)"
+          & $cdb.FullName -o -g -G -c "g; .lastevent; kb; ~*kb; q" $exe.FullName --test-threads=1
