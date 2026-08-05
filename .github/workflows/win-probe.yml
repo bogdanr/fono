@@ -18,7 +18,17 @@ name: Windows heap-corruption probe
 # instance. The same no-driver condition is harmless on Linux, so this is
 # Windows-specific.
 #
-# Round 3 wants the faulting stack, under `cdb` if the image has it.
+# Round 3 got the faulting stack under `cdb`: the free that trips the
+# heap check is the CRT destroying the `vk::SystemError` object as ggml's
+# catch block exits (`__std_exception_destroy` → `_free_base` →
+# `RtlFreeHeap`). So *any* ggml-vulkan exception kills the process on
+# Windows, which is why hiding the loader did not help — that path throws
+# too.
+#
+# Round 4 checks the fix: the loader shim no longer lets ggml fail. It
+# pre-flights Vulkan and, when there is no usable device, emulates an
+# instance with zero physical devices, which ggml handles with an early
+# return and no exception. This row must now pass.
 
 on:
   workflow_dispatch:
@@ -131,32 +141,18 @@ jobs:
           --features ${{ matrix.features }}
           --test local_backends_coexist --no-run
 
-      - name: Confirm the crash still reproduces
+      # The shape CI runs: driverless runner, both tests, harness parallel.
+      - name: Run the tests the way CI does
+        if: always()
+        run: >
+          cargo test -p fono --no-default-features
+          --features ${{ matrix.features }}
+          --test local_backends_coexist -- --nocapture
+
+      # And single-threaded, which is how every earlier round crashed.
+      - name: Run the tests single-threaded
         if: always()
         run: >
           cargo test -p fono --no-default-features
           --features ${{ matrix.features }}
           --test local_backends_coexist -- --nocapture --test-threads=1
-
-      # Round 2 result: the loader logs `vkCreateInstance: Found no
-      # drivers!` and the process dies immediately after, and hiding the
-      # loader entirely does not help. Both paths end in a failed Vulkan
-      # instance creation, so what is left is to see the faulting stack.
-      # `cdb` ships with the Windows SDK's Debugging Tools, which the
-      # hosted image may or may not carry — report either way.
-      - name: Faulting stack under the debugger
-        if: always()
-        run: |
-          $cdb = Get-ChildItem -Path 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe' `
-            -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $cdb) {
-            choco install windbg -y --no-progress 2>&1 | Select-Object -Last 5
-            $cdb = Get-ChildItem -Path 'C:\Program Files*\Windows Kits\10\Debuggers\x64\cdb.exe' `
-              -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-          }
-          if (-not $cdb) { "no cdb.exe on this image"; exit 0 }
-          "using $($cdb.FullName)"
-          $exe = Get-ChildItem 'target\debug\deps\local_backends_coexist-*.exe' |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          "running $($exe.FullName)"
-          & $cdb.FullName -o -g -G -c "g; .lastevent; kb; ~*kb; q" $exe.FullName --test-threads=1

@@ -154,6 +154,11 @@ pub struct LlamaLocalAssistant {
     ubatch_size: Option<u32>,
     state: Arc<Mutex<Option<Arc<LlamaModel>>>>,
     prompt_state_cache: Arc<Mutex<PromptStateCache>>,
+    /// Running cache totals for this backend, shared with `clone_thin` workers
+    /// so every turn adds to one tally. Held beside the cache, not inside it,
+    /// so recording never waits on the cache lock. Read by the diagnostics
+    /// panel; the cache itself never looks at them.
+    cache_counters: Arc<CacheCounters>,
     /// Glass Cortex capture (opt-in, default off). Created lazily in
     /// [`Self::ensure_loaded`] once the model's layer count is known;
     /// shared via `Arc` so `clone_thin` workers and the overlay-side
@@ -244,10 +249,25 @@ pub struct ConversationPrefixCacheReport {
 // checkpoint by prefilling tokens into a context, restoring one, and computing
 // the content-fingerprint key.
 use fono_core::prompt_cache::{
-    PromptStateCache, PromptStateCacheEntry, PromptStateCacheKey, PromptStateCacheLayer,
+    CacheCounters, CacheMutationReport, PromptStateCache, PromptStateCacheEntry,
+    PromptStateCacheKey, PromptStateCacheLayer,
 };
+use fono_core::prompt_cache_view::{self as cache_view, CacheSnapshot};
 
 impl LlamaLocalAssistant {
+    /// Note a cache mutation: emit the trace instants and add the churn to this
+    /// backend's running totals.
+    fn note_cache_mutation(&self, report: &CacheMutationReport) {
+        record_cache_mutation(report);
+        self.cache_counters.apply(report);
+    }
+
+    /// Note that a turn read its whole prompt from scratch, and why.
+    fn note_cold_prefill(&self, layer: &str, reason: &str) {
+        cold_prefill(layer, reason);
+        self.cache_counters.record_cold_prefill(reason);
+    }
+
     pub fn new(model_path: impl Into<PathBuf>, context_size: u32) -> Self {
         Self::with_threads(model_path, context_size, num_threads())
     }
@@ -279,6 +299,7 @@ impl LlamaLocalAssistant {
             ubatch_size,
             state: Arc::new(Mutex::new(None)),
             prompt_state_cache: Arc::new(Mutex::new(PromptStateCache::default())),
+            cache_counters: Arc::new(CacheCounters::default()),
             brain_tap_enabled: false,
             brain_tap: Arc::new(OnceLock::new()),
             capture_gate: Arc::new(AtomicBool::new(false)),
@@ -326,6 +347,7 @@ impl LlamaLocalAssistant {
             ubatch_size: self.ubatch_size,
             state: Arc::clone(&self.state),
             prompt_state_cache: Arc::clone(&self.prompt_state_cache),
+            cache_counters: Arc::clone(&self.cache_counters),
             brain_tap_enabled: self.brain_tap_enabled,
             brain_tap: Arc::clone(&self.brain_tap),
             capture_gate: Arc::clone(&self.capture_gate),
@@ -463,7 +485,7 @@ impl LlamaLocalAssistant {
             let state_bytes = state.len();
             if let Ok(mut cache) = self.prompt_state_cache.lock() {
                 let entry = PromptStateCacheEntry::with_tokens(state, token_ids(&head_tokens[..]));
-                record_cache_mutation(&cache.insert_pinned(key.clone(), entry));
+                self.note_cache_mutation(&cache.insert_pinned(key.clone(), entry));
             }
             current_instant(
                 "llm.prompt_cache_head_stored",
@@ -502,13 +524,13 @@ impl LlamaLocalAssistant {
         F: FnMut(String) -> Result<bool>,
     {
         if prefix.is_empty() || suffix.is_empty() {
-            cold_prefill(layer.as_str(), "empty_prefix_or_suffix");
+            self.note_cold_prefill(layer.as_str(), "empty_prefix_or_suffix");
             return Ok(None);
         }
         let prefix_tokens =
             model.str_to_token(prefix, AddBos::Always).context("tokenize cached prefix")?;
         if prefix_tokens.is_empty() {
-            cold_prefill(layer.as_str(), "empty_prefix_tokens");
+            self.note_cold_prefill(layer.as_str(), "empty_prefix_tokens");
             return Ok(None);
         }
         let full_prompt = format!("{prefix}{suffix}");
@@ -519,12 +541,12 @@ impl LlamaLocalAssistant {
                 layer = layer.as_str(),
                 "prompt-state cache token split incompatible; falling back"
             );
-            cold_prefill(layer.as_str(), "token_split_incompatible");
+            self.note_cold_prefill(layer.as_str(), "token_split_incompatible");
             return Ok(None);
         }
         let suffix_tokens = &full_tokens[prefix_tokens.len()..];
         if suffix_tokens.is_empty() {
-            cold_prefill(layer.as_str(), "empty_suffix_tokens");
+            self.note_cold_prefill(layer.as_str(), "empty_suffix_tokens");
             return Ok(None);
         }
         if full_tokens.len() + params.max_new_tokens.max(0) as usize >= self.context_size as usize {
@@ -534,7 +556,7 @@ impl LlamaLocalAssistant {
                 ctx = self.context_size,
                 "prompt-state cache prompt too large; falling back"
             );
-            cold_prefill(layer.as_str(), "prompt_too_large");
+            self.note_cold_prefill(layer.as_str(), "prompt_too_large");
             return Ok(None);
         }
         let key = self.prompt_state_cache_key(layer.clone(), prefix, &prefix_tokens)?;
@@ -593,7 +615,7 @@ impl LlamaLocalAssistant {
                     layer = layer.as_str(),
                     "llama.cpp failed to restore prompt-state cache; falling back"
                 );
-                cold_prefill(layer.as_str(), "restore_failed");
+                self.note_cold_prefill(layer.as_str(), "restore_failed");
                 return Ok(None);
             }
             current_instant(
@@ -620,6 +642,7 @@ impl LlamaLocalAssistant {
                     "suffix_tokens": suffix_tokens.len(),
                 }),
             );
+            self.cache_counters.record_restore();
         } else {
             // Exact-key miss. Before paying a full cold prefill from scratch,
             // restore the deepest cached prefix that is a token-prefix of this
@@ -665,6 +688,7 @@ impl LlamaLocalAssistant {
                 } else {
                     start = entry.token_count.min(prefix_tokens.len());
                     matched = true;
+                    self.cache_counters.record_restore();
                     current_instant(
                         "llm.prompt_cache_prefix_match",
                         "cache",
@@ -693,7 +717,7 @@ impl LlamaLocalAssistant {
                 }
             }
             if !matched {
-                cold_prefill(layer.as_str(), "no_prefix_match");
+                self.note_cold_prefill(layer.as_str(), "no_prefix_match");
             }
             // Stop at the end of the steady head, keep what has been read, then
             // read on. Everything after that boundary — the language note, the
@@ -790,7 +814,7 @@ impl LlamaLocalAssistant {
                         } else {
                             cache.insert(store_key.clone(), entry)
                         };
-                        record_cache_mutation(&report);
+                        self.note_cache_mutation(&report);
                     }
                     current_instant(
                         "llm.prompt_cache_prefix_stored",
@@ -904,7 +928,7 @@ impl LlamaLocalAssistant {
                                         token_ids(reusable),
                                     ),
                                 );
-                                record_cache_mutation(&report);
+                                self.note_cache_mutation(&report);
                             }
                             current_instant(
                                 "llm.prompt_cache_completed_turn",
@@ -982,7 +1006,7 @@ impl LlamaLocalAssistant {
         } else {
             cache.insert(key, entry)
         };
-        record_cache_mutation(&report);
+        self.note_cache_mutation(&report);
         current_instant(
             "llm.prompt_cache_built",
             "assistant.llm",
@@ -1042,7 +1066,7 @@ impl LlamaLocalAssistant {
                 return Ok(text);
             }
         } else {
-            cold_prefill(layer.as_str(), "prompt_split_mismatch");
+            self.note_cold_prefill(layer.as_str(), "prompt_split_mismatch");
         }
         // The rails follow the fallback: a cache miss must not quietly disarm
         // them, or an A/B run would be measuring cache luck instead of rails.
@@ -2926,6 +2950,19 @@ impl Assistant for LlamaLocalAssistant {
 
     fn can_run_actions(&self) -> bool {
         true
+    }
+
+    fn prompt_cache_snapshot(&self) -> Option<CacheSnapshot> {
+        // A poisoned lock means a generation panicked mid-mutation. Report
+        // nothing rather than propagate: this is a diagnostic, and it must never
+        // be the thing that takes the daemon down.
+        let cache = self.prompt_state_cache.lock().ok()?;
+        Some(cache_view::snapshot(
+            "assistant",
+            &self.model().unwrap_or_default(),
+            &cache,
+            self.cache_counters.read(),
+        ))
     }
 
     async fn prewarm(&self) -> Result<()> {

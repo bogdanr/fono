@@ -75,6 +75,64 @@ main { max-width: 740px; margin: 0 auto; padding: 40px 32px 140px; }
 .sev.info { background: var(--ink-dim); }
 .dsec .lbl .sev { margin-right: 6px; }
 .dsec .desc.mono { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; max-width: none; }
+
+/* ---------- prompt cache view ---------- */
+/* The panel is one card, like every other page. `details.sec` carries that
+   styling but only opens on click, and there is nothing here to fold away. */
+section.sec {
+  border: 1px solid var(--line-2); border-radius: 10px;
+  background: var(--card); padding: 16px 18px; margin-bottom: 10px;
+}
+.pc-tabs { display: flex; gap: 6px; }
+.pc-occ { margin: 0 0 14px; }
+.pc-occ-hd { display: flex; align-items: baseline; gap: 10px; margin-bottom: 5px; }
+.pc-occ-lbl { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--ink-dim); }
+.pc-bar {
+  display: flex; height: 10px; border-radius: 5px; overflow: hidden;
+  background: var(--bg); border: 1px solid var(--line);
+}
+.pc-seg { height: 100%; }
+/* Pins are hatched rather than merely a different colour: they are the one
+   thing on the bar the user cannot reclaim, and that is worth reading without
+   consulting a key. They also sit outside the budget, so the bar shows them
+   ahead of it rather than eating into it. */
+.pc-seg.pin {
+  background: repeating-linear-gradient(135deg,
+    var(--ink-dim) 0 3px, transparent 3px 6px), var(--bg-3);
+}
+.pc-seg.use { background: var(--accent); }
+.pc-counters { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 11.5px; color: var(--ink-mute); margin: 12px 0 4px; }
+.pc-counters b { color: var(--ink); }
+.pc-counters .bad { color: var(--warn); }
+.pc-tree { margin: 14px 0 6px; }
+.pc-node {
+  display: flex; align-items: baseline; gap: 10px; font-size: 12px;
+  padding: 5px 8px 5px calc(8px + var(--d) * 20px);
+  border-left: 3px solid var(--ink-mute); border-radius: 0 4px 4px 0;
+}
+/* Recency as one hue fading out, never as a second colour. Hue already means
+   "pinned" on this panel, and a five-colour ramp on top of that made a
+   six-minute-old pin look like the entry just used. The row states its own age
+   in words regardless; the rail is only there to group at a glance. */
+.pc-node.h4 { opacity: 1; }
+.pc-node.h3 { opacity: .88; border-left-color: var(--ink-dim); }
+.pc-node.h2 { opacity: .78; border-left-color: var(--ink-dim); }
+.pc-node.h1 { opacity: .68; border-left-color: var(--line-2); }
+.pc-node.h0 { opacity: .6; border-left-color: var(--line-2); }
+.pc-node:hover { background: var(--bg-2); opacity: 1; }
+/* Pinned is the one state worth the accent: it is why the cache is fast, and it
+   is the only row eviction will not touch. */
+.pc-node.pinned { background: var(--accent-soft); border-left-color: var(--accent); }
+.pc-node.doomed .pc-fate { color: var(--warn); }
+.pc-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-raw { color: var(--ink-dim); font-size: 11px; }
+.pc-tok, .pc-by { color: var(--ink-mute); text-align: right; }
+.pc-tok { width: 78px; }
+.pc-by { width: 68px; }
+.pc-when { width: 76px; text-align: right; color: var(--ink-dim); font-size: 11px; }
+.pc-fate { width: 84px; text-align: right; color: var(--ink-dim); font-size: 11px; }
+.pc-unplaced { margin: 10px 0; }
+.pc-unplaced summary { cursor: pointer; font-size: 12px; color: var(--ink-mute); }
 .search {
   display: flex; align-items: center; gap: 10px;
   background: var(--bg-2); border: 1px solid var(--line-2);

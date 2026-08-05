@@ -13,6 +13,9 @@ use std::sync::{Arc, Mutex};
 
 use fono_net::web_settings::{DoctorFn, WebSettingsConfig, WebSettingsHooks, WebSettingsServer};
 
+// One stub per hook, so the length tracks the hook count rather than any
+// complexity worth splitting up.
+#[allow(clippy::too_many_lines)]
 fn stub_hooks() -> WebSettingsHooks {
     let doctor: DoctorFn = Arc::new(|| {
         Box::pin(async {
@@ -88,6 +91,16 @@ fn stub_hooks() -> WebSettingsHooks {
         put_vocabulary: Arc::new(|_| Ok(String::new())),
         meta: Arc::new(|| serde_json::json!({})),
         doctor,
+        prompt_cache: Arc::new(|| {
+            Ok(serde_json::json!({ "caches": [{
+                "role": "assistant", "model": "stub", "runtime": "abcd1234",
+                "max_entries": 10, "max_bytes": 268_435_456u64,
+                "entries_pinned": 1, "entries_evictable": 1, "entries_free": 9,
+                "bytes_pinned": 2048, "bytes_evictable": 1024,
+                "bytes_free": 268_434_432u64, "bytes_resident": 3072,
+                "nodes": [], "unplaced": [], "verdicts": {}, "counters": {},
+            }] }))
+        }),
         speak: Arc::new(|_| Box::pin(async { Err("speech disabled in test".to_string()) })),
         list_api_keys: list_keys,
         create_api_key: create_key,
@@ -252,6 +265,25 @@ async fn loopback_is_trusted_even_with_auth_on() {
     // Static assets stay open (they hold no state).
     let r = client.get(format!("{base}/")).send().await.expect("send");
     assert_eq!(r.status(), 200);
+
+    handle.shutdown().await;
+}
+
+/// The prompt-cache route is wired and, unlike the doctor report, answers
+/// without spawning a probe — so the page can refresh it as a conversation
+/// runs.
+#[tokio::test]
+async fn prompt_cache_route_reports_occupancy() {
+    let handle = start(true).await;
+    let base = format!("http://{}", handle.local_addr());
+    let client = reqwest::Client::new();
+
+    let r = client.get(format!("{base}/api/promptcache")).send().await.expect("send");
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = r.json().await.expect("json");
+    assert_eq!(body["caches"][0]["role"], "assistant");
+    assert_eq!(body["caches"][0]["entries_pinned"], 1);
+    assert_eq!(body["caches"][0]["bytes_resident"], 3072);
 
     handle.shutdown().await;
 }

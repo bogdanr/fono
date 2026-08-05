@@ -33,7 +33,10 @@
 //! Both budgets measure only what eviction can actually reclaim — see
 //! [`PromptStateCache::evictable_totals`].
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Logical role of a cached prefix. The layer is part of the cache key, so two
 /// prefixes with identical text but different roles never collide, and it
@@ -161,18 +164,48 @@ pub struct PromptStateCacheEntry {
     pub state: Vec<u8>,
     pub token_count: usize,
     pub prefix_tokens: Vec<i32>,
+    /// When this entry was last created or read. The LRU deque records the
+    /// *order* entries were touched in; this records *when*, which is what a
+    /// diagnostic needs to tell a stale branch from one merely second in a
+    /// burst. Private so only the cache can move it.
+    last_used: Instant,
 }
 
 impl PromptStateCacheEntry {
     pub fn new(state: Vec<u8>, token_count: usize) -> Self {
-        Self { state, token_count, prefix_tokens: Vec::new() }
+        Self { state, token_count, prefix_tokens: Vec::new(), last_used: Instant::now() }
     }
 
     /// Build an entry that records its token sequence so it can be found by
     /// longest-prefix matching. `token_count` is derived from `prefix_tokens`.
     pub fn with_tokens(state: Vec<u8>, prefix_tokens: Vec<i32>) -> Self {
-        Self { state, token_count: prefix_tokens.len(), prefix_tokens }
+        Self { state, token_count: prefix_tokens.len(), prefix_tokens, last_used: Instant::now() }
     }
+
+    /// How long since this entry was created or last read.
+    pub fn idle(&self) -> Duration {
+        self.last_used.elapsed()
+    }
+}
+
+/// Read-only view of one cached entry, borrowed from the cache for diagnostics.
+///
+/// Deliberately carries no `state`: [`PromptStateCache::get`] clones the whole
+/// multi-megabyte blob, which makes it unusable for a panel that refreshes.
+/// Everything here is either a copy of a small field or a borrow.
+#[derive(Debug, Clone)]
+pub struct CacheNodeView<'a> {
+    pub id: String,
+    pub layer: &'a PromptStateCacheLayer,
+    pub runtime_sha256: &'a str,
+    pub token_count: usize,
+    pub bytes: usize,
+    pub pinned: bool,
+    /// Position in the eviction queue, 0 = least recently used. Pinned entries
+    /// carry a rank too, but eviction skips them.
+    pub lru_rank: usize,
+    pub idle: Duration,
+    pub prefix_tokens: &'a [i32],
 }
 
 /// One entry dropped by LRU / byte-budget enforcement, surfaced to the caller
@@ -204,6 +237,85 @@ pub struct CacheMutationReport {
     /// Stale pin of the same pinnable layer released because this insert
     /// replaced it (`insert_pinned` only).
     pub pin_released: Option<PromptStateCacheLayer>,
+}
+
+/// Running totals for one cache instance, since the daemon started.
+///
+/// Per-instance rather than process-global so the assistant and polish caches
+/// never blend into one meaningless average, and held beside the cache rather
+/// than inside it so recording a fact never has to wait on the cache lock —
+/// several of these are reported from paths that have just released it, and one
+/// is reported from a path that never takes it at all.
+///
+/// The per-turn trace already records all of this in far more detail, but only
+/// when tracing is switched on and only one turn at a time, so it can never
+/// answer "is the cache working today".
+#[derive(Debug, Default)]
+pub struct CacheCounters {
+    restores: AtomicU64,
+    cold_prefills: AtomicU64,
+    evictions: AtomicU64,
+    prunes: AtomicU64,
+    pin_releases: AtomicU64,
+    /// Cold prefills bucketed by reason. A leaf lock: nothing else is ever
+    /// acquired while it is held, so it cannot take part in a deadlock.
+    reasons: Mutex<BTreeMap<String, u64>>,
+}
+
+impl CacheCounters {
+    /// A turn restored a cached checkpoint instead of reading its prompt again.
+    pub fn record_restore(&self) {
+        self.restores.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A turn read its whole prompt from scratch, and why.
+    pub fn record_cold_prefill(&self, reason: &str) {
+        self.cold_prefills.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut reasons) = self.reasons.lock() {
+            *reasons.entry(reason.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    /// Fold in the churn one insert caused.
+    pub fn apply(&self, report: &CacheMutationReport) {
+        self.evictions.fetch_add(report.evicted.len() as u64, Ordering::Relaxed);
+        self.prunes.fetch_add(report.pruned.len() as u64, Ordering::Relaxed);
+        if report.pin_released.is_some() {
+            self.pin_releases.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn read(&self) -> CacheCountersSnapshot {
+        CacheCountersSnapshot {
+            restores: self.restores.load(Ordering::Relaxed),
+            cold_prefills: self.cold_prefills.load(Ordering::Relaxed),
+            evictions: self.evictions.load(Ordering::Relaxed),
+            prunes: self.prunes.load(Ordering::Relaxed),
+            pin_releases: self.pin_releases.load(Ordering::Relaxed),
+            cold_prefill_reasons: self.reasons.lock().map(|r| r.clone()).unwrap_or_default(),
+        }
+    }
+}
+
+/// Point-in-time copy of [`CacheCounters`], for reporting.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct CacheCountersSnapshot {
+    pub restores: u64,
+    pub cold_prefills: u64,
+    /// Ordered so the serialized form is stable.
+    pub cold_prefill_reasons: BTreeMap<String, u64>,
+    pub evictions: u64,
+    pub prunes: u64,
+    pub pin_releases: u64,
+}
+
+impl CacheCountersSnapshot {
+    /// True until some turn has either restored a checkpoint or paid a cold
+    /// prefill, i.e. while the cache holds only startup prewarm and nothing has
+    /// consulted it yet. Shape verdicts are meaningless before that.
+    pub fn warming(&self) -> bool {
+        self.restores == 0 && self.cold_prefills == 0
+    }
 }
 
 /// Bounded in-memory cache of prompt-state checkpoints with LRU eviction, a
@@ -335,14 +447,66 @@ impl PromptStateCache {
     }
 
     pub fn get(&mut self, key: &PromptStateCacheKey) -> Option<PromptStateCacheEntry> {
-        let entry = self.entries.get(key).cloned()?;
+        let stored = self.entries.get_mut(key)?;
+        stored.last_used = Instant::now();
+        let entry = stored.clone();
         self.lru.retain(|existing| existing != key);
         self.lru.push_back(key.clone());
         Some(entry)
     }
 
+    /// Membership test that **also marks the entry as most-recently-used**, and
+    /// clones its state blob on the way through [`Self::get`]. Use
+    /// [`Self::peek`] from anything that must not disturb eviction order.
     pub fn contains(&mut self, key: &PromptStateCacheKey) -> bool {
         self.get(key).is_some()
+    }
+
+    /// Membership test with no side effects and no blob copy.
+    pub fn peek(&self, key: &PromptStateCacheKey) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    /// Borrowed metadata for every entry, cheapest-possible: no state blob is
+    /// cloned and eviction order is untouched. Ordered by eviction queue
+    /// position so the caller sees which entry dies first.
+    pub fn nodes(&self) -> Vec<CacheNodeView<'_>> {
+        let rank: HashMap<&PromptStateCacheKey, usize> =
+            self.lru.iter().enumerate().map(|(i, k)| (k, i)).collect();
+        let mut views: Vec<CacheNodeView<'_>> = self
+            .entries
+            .iter()
+            .map(|(key, entry)| CacheNodeView {
+                id: key.stable_id(),
+                layer: &key.layer,
+                runtime_sha256: &key.runtime_sha256,
+                token_count: entry.token_count,
+                bytes: entry.state.len(),
+                pinned: self.pinned.contains(key),
+                lru_rank: rank.get(key).copied().unwrap_or(usize::MAX),
+                idle: entry.idle(),
+                prefix_tokens: &entry.prefix_tokens,
+            })
+            .collect();
+        views.sort_by_key(|v| v.lru_rank);
+        views
+    }
+
+    /// Budget the cache enforces: maximum evictable entries.
+    pub fn max_entries(&self) -> usize {
+        self.max_entries
+    }
+
+    /// Budget the cache enforces: maximum evictable bytes.
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+
+    /// Count and byte total eviction is allowed to reclaim, i.e. everything
+    /// except the pins. This is what both budgets are measured against; see
+    /// [`Self::evictable_totals`].
+    pub fn evictable(&self) -> (usize, usize) {
+        self.evictable_totals()
     }
 
     pub fn is_pinned(&self, key: &PromptStateCacheKey) -> bool {

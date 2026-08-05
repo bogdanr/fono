@@ -41,32 +41,50 @@
 //! backend's Vulkan without the first (e.g. a polish-only GPU build),
 //! reintroducing both the hard link and the loader-absent crash.
 //!
-//! ## Loader-absent behaviour (the subtle part)
+//! ## No-usable-device behaviour (the subtle part)
 //!
-//! When the loader is genuinely absent we must *not* simply return null
-//! from `vkGetInstanceProcAddr`. ggml bootstraps its dynamic dispatcher
-//! with our `vkGetInstanceProcAddr` and then, in `ggml_vk_instance_init`
-//! (`ggml-vulkan.cpp:5403`), immediately calls `vk::enumerateInstanceVersion()`
-//! *through that dispatcher*. If the bootstrap handed back a null `PFN`,
-//! that call dereferences a null function pointer and the process
-//! **segfaults** — before ggml's own guard can react.
+//! Returning null from `vkGetInstanceProcAddr` is not an option. ggml
+//! bootstraps its dynamic dispatcher with our `vkGetInstanceProcAddr`
+//! and then immediately calls `vk::enumerateInstanceVersion()` through
+//! that dispatcher; a null `PFN` there is an indirect call through null,
+//! i.e. a segfault before ggml's own guard can react.
 //!
-//! ggml *does* guard init: `ggml_backend_vk_reg` (`ggml-vulkan.cpp:15091`)
-//! wraps `ggml_vk_instance_init` in a `try { … } catch (vk::SystemError)`
-//! that returns a null registration (⇒ zero Vulkan devices ⇒ CPU
-//! backend). The catch only fires for a thrown C++ exception, never for
-//! a hardware segfault. So the trick is to make the absent-loader path
-//! *throw* instead of *fault*: when `dlopen` fails, our
-//! `vkGetInstanceProcAddr` returns a non-null pointer to an **error
-//! stub** that reports `VK_ERROR_INITIALIZATION_FAILED`. Vulkan-Hpp's
-//! `resultCheck` turns that into a `vk::SystemError`, ggml catches it,
-//! registers zero Vulkan devices, and inference falls back to CPU —
-//! exactly the behaviour we want for a single "runs everywhere" build.
+//! Making that path *fail* is not an option either, and this is the part
+//! that is easy to get wrong. ggml guards init with
+//! `try { ggml_vk_instance_init(); } catch (vk::SystemError)`, so a
+//! failing entry point looks safe on paper: Vulkan-Hpp's `resultCheck`
+//! throws, ggml catches, zero Vulkan devices get registered, inference
+//! falls back to the CPU. It works on Linux. On Windows the process dies
+//! with `STATUS_HEAP_CORRUPTION` instead, inside the CRT's own
+//! `__std_exception_destroy` as the catch block tears the exception
+//! object down — the free of the exception's message is rejected by the
+//! heap. Any ggml-vulkan exception is enough to trigger it, so the
+//! machine that most needs the CPU fallback (a Windows box with no
+//! Vulkan driver) is the one that crashes.
+//!
+//! So the shim does not fail — it reports, truthfully, that there are no
+//! Vulkan devices, which ggml handles with a plain early `return` and no
+//! exception at all. Two pieces:
+//!
+//! 1. **Pre-flight.** On first use, once the loader is open, the shim
+//!    asks it — through its own entry points — to create a throwaway
+//!    instance and count physical devices. A live loader with at least
+//!    one device means everything is forwarded to the real Vulkan
+//!    unchanged. Anything else (loader absent, instance creation
+//!    refused, zero devices) selects the emulation.
+//! 2. **Emulation.** A handful of stubs that succeed: API version 1.3,
+//!    no layers, no instance extensions, an opaque instance handle, and
+//!    **zero physical devices**. ggml walks its normal init path, finds
+//!    the device list empty, logs `ggml_vulkan: No devices found.` and
+//!    returns. Zero Vulkan devices ⇒ the CPU backend runs the work.
+//!
+//! Entry points the emulation does not implement return null, which is
+//! safe because ggml stops asking once it sees no devices.
 //!
 //! The other two forwarders are only ever reached *after* a Vulkan
-//! device has been created (i.e. the loader was present), so they will
-//! always have a live target when called; they no-op defensively if
-//! not.
+//! device has been created (i.e. the loader was present and had one), so
+//! they will always have a live target when called; they no-op
+//! defensively if not.
 //!
 //! ## Cross-platform loader
 //!
@@ -145,39 +163,183 @@ mod sys {
     }
 }
 
-/// `VkResult` for "the implementation could not be initialised" (`-3`).
-/// Returned by [`vk_stub_incompatible`] so Vulkan-Hpp throws rather than
-/// the process faulting.
-const VK_ERROR_INITIALIZATION_FAILED: c_int = -3;
+/// `VkResult` for success (`0`).
+const VK_SUCCESS: c_int = 0;
 
-/// Error stub handed back by [`vkGetInstanceProcAddr`] for *every*
-/// instance-level entry point when the Vulkan loader is absent.
-///
-/// All the global-scope commands ggml calls during
-/// `ggml_vk_instance_init` (`vkEnumerateInstanceVersion`,
-/// `vkEnumerateInstanceExtensionProperties`, `vkCreateInstance`, …)
-/// return a `VkResult`. Reporting `VK_ERROR_INITIALIZATION_FAILED` makes
-/// Vulkan-Hpp's `resultCheck` throw `vk::SystemError`, which ggml's
-/// `ggml_backend_vk_reg` catches and turns into a zero-device
-/// registration ⇒ CPU fallback.
-///
-/// It is declared with no parameters on purpose: on the C ABI the
-/// caller passes arguments in registers/stack that a zero-arg callee
-/// simply ignores, and every caller here only consumes the `VkResult`
-/// return value. The first such call (`vkEnumerateInstanceVersion` at
-/// `ggml-vulkan.cpp:5403`) throws immediately, so no later entry point
-/// is ever reached.
-extern "C" fn vk_stub_incompatible() -> c_int {
-    VK_ERROR_INITIALIZATION_FAILED
+/// `VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO`.
+const VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO: u32 = 1;
+
+/// `VK_API_VERSION_1_3`, reported by the emulation. ggml refuses to
+/// continue below 1.2, and it must continue far enough to see the empty
+/// device list.
+const VK_API_VERSION_1_3: u32 = (1 << 22) | (3 << 12);
+
+/// `VkInstanceCreateInfo` — the one Vulkan struct the shim builds itself,
+/// for the pre-flight instance. Field order and padding match the C
+/// definition.
+#[repr(C)]
+struct VkInstanceCreateInfo {
+    s_type: u32,
+    p_next: *const c_void,
+    flags: u32,
+    p_application_info: *const c_void,
+    enabled_layer_count: u32,
+    pp_enabled_layer_names: *const *const c_char,
+    enabled_extension_count: u32,
+    pp_enabled_extension_names: *const *const c_char,
 }
 
-/// Real entry points resolved from the system Vulkan loader, or all
-/// null when the loader could not be opened.
+/// Stand-in for the `VkInstance` the emulation reports creating. Handles
+/// must be non-null, and only the stubs below ever see this one, so its
+/// contents never matter.
+static EMULATED_INSTANCE: u8 = 0;
+
+/// `VkResult vkEnumerateInstanceVersion(uint32_t *pApiVersion)`.
+extern "C" fn stub_instance_version(api_version: *mut u32) -> c_int {
+    if !api_version.is_null() {
+        // SAFETY: Vulkan-Hpp passes a pointer to its own live `uint32_t`.
+        unsafe { *api_version = VK_API_VERSION_1_3 };
+    }
+    VK_SUCCESS
+}
+
+/// `VkResult vkCreateInstance(const VkInstanceCreateInfo*,
+/// const VkAllocationCallbacks*, VkInstance *pInstance)`.
+extern "C" fn stub_create_instance(
+    _create_info: *const c_void,
+    _allocator: *const c_void,
+    instance: *mut *mut c_void,
+) -> c_int {
+    if !instance.is_null() {
+        // SAFETY: Vulkan-Hpp passes a pointer to its own live handle slot.
+        unsafe { *instance = std::ptr::addr_of!(EMULATED_INSTANCE).cast_mut().cast() };
+    }
+    VK_SUCCESS
+}
+
+/// `VkResult vkEnumerateInstanceLayerProperties(uint32_t *pCount,
+/// VkLayerProperties*)` — reports none.
+extern "C" fn stub_no_layers(count: *mut u32, _properties: *mut c_void) -> c_int {
+    if !count.is_null() {
+        // SAFETY: Vulkan-Hpp passes a pointer to its own live counter.
+        unsafe { *count = 0 };
+    }
+    VK_SUCCESS
+}
+
+/// Shared shape of `vkEnumerateInstanceExtensionProperties(const char
+/// *pLayerName, uint32_t *pCount, …)` and
+/// `vkEnumeratePhysicalDevices(VkInstance, uint32_t *pCount, …)`: a
+/// leading name or handle, then the count. Reports none of either — the
+/// empty device list is what sends ggml down its exception-free early
+/// return.
+extern "C" fn stub_none_of(_first: *const c_void, count: *mut u32, _out: *mut c_void) -> c_int {
+    if !count.is_null() {
+        // SAFETY: Vulkan-Hpp passes a pointer to its own live counter.
+        unsafe { *count = 0 };
+    }
+    VK_SUCCESS
+}
+
+/// `void vkDestroyInstance(VkInstance, const VkAllocationCallbacks*)` —
+/// there is nothing to destroy.
+extern "C" fn stub_destroy_instance(_instance: *mut c_void, _allocator: *const c_void) {}
+
+/// Entry points of the no-device emulation, by name. Unknown names get
+/// null: ggml asks for hundreds while priming its dispatcher, and calls
+/// none of them once it has seen that there are no devices.
+fn emulated_proc(p_name: *const c_char) -> *const c_void {
+    if p_name.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: Vulkan's C ABI requires `p_name` to be NUL-terminated.
+    let name = unsafe { CStr::from_ptr(p_name) };
+    match name.to_bytes() {
+        b"vkEnumerateInstanceVersion" => stub_instance_version as *const c_void,
+        b"vkEnumerateInstanceLayerProperties" => stub_no_layers as *const c_void,
+        b"vkEnumerateInstanceExtensionProperties" | b"vkEnumeratePhysicalDevices" => {
+            stub_none_of as *const c_void
+        }
+        b"vkCreateInstance" => stub_create_instance as *const c_void,
+        b"vkDestroyInstance" => stub_destroy_instance as *const c_void,
+        _ => std::ptr::null(),
+    }
+}
+
+/// Ask the system loader, through its own entry points, whether a usable
+/// Vulkan device exists: create a throwaway instance and count physical
+/// devices. Fewer than one device means the accelerated path cannot run
+/// and the emulation takes over.
+///
+/// # Safety
+/// `gipa` is the loader's genuine `vkGetInstanceProcAddr`.
+unsafe fn device_available(gipa: *mut c_void) -> bool {
+    // SAFETY: transmuted to the Vulkan C ABI for the real trampoline.
+    let gipa: unsafe extern "C" fn(*mut c_void, *const c_char) -> *const c_void =
+        unsafe { std::mem::transmute(gipa) };
+    unsafe {
+        let create = gipa(std::ptr::null_mut(), c"vkCreateInstance".as_ptr());
+        if create.is_null() {
+            return false;
+        }
+        let create: unsafe extern "C" fn(
+            *const VkInstanceCreateInfo,
+            *const c_void,
+            *mut *mut c_void,
+        ) -> c_int = std::mem::transmute(create);
+        let info = VkInstanceCreateInfo {
+            s_type: VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+            p_next: std::ptr::null(),
+            flags: 0,
+            p_application_info: std::ptr::null(),
+            enabled_layer_count: 0,
+            pp_enabled_layer_names: std::ptr::null(),
+            enabled_extension_count: 0,
+            pp_enabled_extension_names: std::ptr::null(),
+        };
+        let mut instance: *mut c_void = std::ptr::null_mut();
+        if create(&raw const info, std::ptr::null(), &raw mut instance) != VK_SUCCESS
+            || instance.is_null()
+        {
+            return false;
+        }
+
+        let mut count: u32 = 0;
+        let enumerate = gipa(instance, c"vkEnumeratePhysicalDevices".as_ptr());
+        if !enumerate.is_null() {
+            let f: unsafe extern "C" fn(*mut c_void, *mut u32, *mut c_void) -> c_int =
+                std::mem::transmute(enumerate);
+            if f(instance, &raw mut count, std::ptr::null_mut()) != VK_SUCCESS {
+                count = 0;
+            }
+        }
+        let destroy = gipa(instance, c"vkDestroyInstance".as_ptr());
+        if !destroy.is_null() {
+            let f: unsafe extern "C" fn(*mut c_void, *const c_void) = std::mem::transmute(destroy);
+            f(instance, std::ptr::null());
+        }
+        count > 0
+    }
+}
+
+/// Real entry points resolved from the system Vulkan loader, or all null
+/// when the loader could not be opened or reported no Vulkan device.
 #[derive(Clone, Copy)]
 struct Loader {
     get_instance_proc_addr: *mut c_void,
     cmd_copy_buffer: *mut c_void,
     get_physical_device_features2: *mut c_void,
+}
+
+impl Loader {
+    /// The all-null loader: forwarding is off, the emulation answers.
+    const fn none() -> Self {
+        Self {
+            get_instance_proc_addr: std::ptr::null_mut(),
+            cmd_copy_buffer: std::ptr::null_mut(),
+            get_physical_device_features2: std::ptr::null_mut(),
+        }
+    }
 }
 
 // SAFETY: the fields are opaque function pointers into the (process-
@@ -191,14 +353,14 @@ fn loader() -> &'static Loader {
     LOADER.get_or_init(|| unsafe {
         let handle = sys::open(sys::LOADER_NAME);
         if handle.is_null() {
-            return Loader {
-                get_instance_proc_addr: std::ptr::null_mut(),
-                cmd_copy_buffer: std::ptr::null_mut(),
-                get_physical_device_features2: std::ptr::null_mut(),
-            };
+            return Loader::none();
+        }
+        let gipa = sys::symbol(handle, c"vkGetInstanceProcAddr");
+        if gipa.is_null() || !device_available(gipa) {
+            return Loader::none();
         }
         Loader {
-            get_instance_proc_addr: sys::symbol(handle, c"vkGetInstanceProcAddr"),
+            get_instance_proc_addr: gipa,
             cmd_copy_buffer: sys::symbol(handle, c"vkCmdCopyBuffer"),
             get_physical_device_features2: sys::symbol(handle, c"vkGetPhysicalDeviceFeatures2"),
         }
@@ -207,14 +369,11 @@ fn loader() -> &'static Loader {
 
 /// `PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance, const char*)`.
 ///
-/// When the loader is present this delegates to the real
-/// `vkGetInstanceProcAddr`. When it is absent, it returns a non-null
-/// pointer to [`vk_stub_incompatible`] for *any* requested entry point,
-/// so ggml's dispatcher gets a callable that reports
-/// `VK_ERROR_INITIALIZATION_FAILED` (Vulkan-Hpp then throws, ggml
-/// catches, and inference falls back to CPU). Returning null here would
-/// instead crash ggml when it calls `vk::enumerateInstanceVersion`
-/// through a null pointer.
+/// With a Vulkan device present this delegates to the real
+/// `vkGetInstanceProcAddr`. Without one it answers from the no-device
+/// emulation, which reports zero physical devices so ggml registers no
+/// Vulkan devices and inference runs on the CPU. See the module docs for
+/// why it must neither return null nor report an error here.
 ///
 /// # Safety
 /// Called by ggml with a valid (or null) `VkInstance` and a
@@ -226,9 +385,7 @@ pub unsafe extern "C" fn vkGetInstanceProcAddr(
 ) -> *const c_void {
     let real = loader().get_instance_proc_addr;
     if real.is_null() {
-        // Loader absent: hand back an error stub (never null) so the
-        // caller throws instead of faulting. See the module docs.
-        return vk_stub_incompatible as *const c_void;
+        return emulated_proc(p_name);
     }
     // SAFETY: `real` is the loader's genuine `vkGetInstanceProcAddr`
     // trampoline; the transmuted signature matches the Vulkan C ABI.
@@ -287,5 +444,54 @@ pub unsafe extern "C" fn vkGetPhysicalDeviceFeatures2(
     unsafe {
         let f: unsafe extern "C" fn(*mut c_void, *mut c_void) = std::mem::transmute(real);
         f(physical_device, p_features);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proc(name: &CStr) -> *const c_void {
+        emulated_proc(name.as_ptr())
+    }
+
+    // The whole point of the emulation is that ggml's init walk finds
+    // every entry point it needs, succeeds at each, and ends up with an
+    // empty device list. A null here would fault; an error would throw.
+    #[test]
+    fn emulation_answers_the_init_walk() {
+        for name in [
+            c"vkEnumerateInstanceVersion",
+            c"vkEnumerateInstanceLayerProperties",
+            c"vkEnumerateInstanceExtensionProperties",
+            c"vkCreateInstance",
+            c"vkEnumeratePhysicalDevices",
+            c"vkDestroyInstance",
+        ] {
+            assert!(!proc(name).is_null(), "{name:?} must resolve without the loader");
+        }
+    }
+
+    #[test]
+    fn emulation_declines_anything_else() {
+        assert!(proc(c"vkCreateDevice").is_null());
+        assert!(emulated_proc(std::ptr::null()).is_null());
+    }
+
+    #[test]
+    fn emulation_reports_no_devices_and_a_usable_api_version() {
+        let mut version = 0u32;
+        assert_eq!(stub_instance_version(&raw mut version), VK_SUCCESS);
+        assert!(version >= (1 << 22) | (2 << 12), "ggml requires Vulkan 1.2 or newer");
+
+        let mut count = 7u32;
+        let mut instance: *mut c_void = std::ptr::null_mut();
+        assert_eq!(
+            stub_create_instance(std::ptr::null(), std::ptr::null(), &raw mut instance),
+            VK_SUCCESS
+        );
+        assert!(!instance.is_null(), "Vulkan handles must be non-null");
+        assert_eq!(stub_none_of(instance, &raw mut count, std::ptr::null_mut()), VK_SUCCESS);
+        assert_eq!(count, 0, "zero devices is what keeps ggml on its exception-free path");
     }
 }

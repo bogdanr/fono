@@ -1879,7 +1879,7 @@ async fn handle_client(
                 ),
             }
         }
-        Request::Doctor => match run_doctor(paths.clone()).await {
+        Request::Doctor => match run_doctor(paths.clone(), orchestrator.clone()).await {
             Ok(report) => Response::Text(report.render_plain()),
             Err(e) => Response::Error(format!("doctor failed: {e:#}")),
         },
@@ -4042,7 +4042,10 @@ async fn spawn_web_settings(
 /// running two full reports at once — the second caller simply waits for
 /// its own fresh run right after the first finishes. This is
 /// deduplication, not caching: every call produces a fresh report.
-async fn run_doctor(paths: Paths) -> Result<crate::doctor::DoctorReport> {
+async fn run_doctor(
+    paths: Paths,
+    orchestrator: Option<Arc<SessionOrchestrator>>,
+) -> Result<crate::doctor::DoctorReport> {
     static GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _running = GUARD.lock().await;
     // Kick off the live API-key reachability probes first so they run
@@ -4054,8 +4057,9 @@ async fn run_doctor(paths: Paths) -> Result<crate::doctor::DoctorReport> {
     let probe_task =
         tokio::spawn(async move { crate::doctor::probe_configured_keys(&probe_paths).await });
     let handle = tokio::runtime::Handle::current();
+    let caches = orchestrator.map(|o| o.prompt_cache_snapshots()).unwrap_or_default();
     tokio::task::spawn_blocking(move || {
-        crate::doctor::gather(&paths, || handle.block_on(probe_task).unwrap_or_default())
+        crate::doctor::gather(&paths, &caches, || handle.block_on(probe_task).unwrap_or_default())
     })
     .await
     .context("doctor task panicked")?
@@ -4064,14 +4068,40 @@ async fn run_doctor(paths: Paths) -> Result<crate::doctor::DoctorReport> {
 /// The doctor hook (`GET /api/doctor`): runs the full diagnostic suite and
 /// serializes the report. Split out to keep [`web_settings_hooks`] within the
 /// line budget.
-fn doctor_hook(paths: &Paths) -> fono_net::web_settings::DoctorFn {
+fn doctor_hook(
+    paths: &Paths,
+    orchestrator: Option<&Arc<SessionOrchestrator>>,
+) -> fono_net::web_settings::DoctorFn {
     let doctor_paths = paths.clone();
+    let orch = orchestrator.map(Arc::clone);
     Arc::new(move || {
         let paths = doctor_paths.clone();
+        let orch = orch.clone();
         Box::pin(async move {
-            let report = run_doctor(paths).await.map_err(|e| format!("doctor: {e:#}"))?;
+            let report = run_doctor(paths, orch).await.map_err(|e| format!("doctor: {e:#}"))?;
             serde_json::to_value(&report).map_err(|e| format!("serialize doctor report: {e}"))
         })
+    })
+}
+
+/// The prompt-cache hook (`GET /api/promptcache`): the live shape of every
+/// prompt-state cache the loaded backends keep, assistant first.
+///
+/// Synchronous, unlike the doctor hook — it spawns nothing and contacts
+/// nothing, so the page can refresh it between turns of a conversation
+/// without the daemon doing any work it wouldn't otherwise do. Answers with
+/// an empty list rather than an error when there is no cache to describe
+/// (degraded mode, a cloud backend, or a build without embedded llama.cpp),
+/// so the panel can say "nothing to show" instead of "broken".
+fn prompt_cache_hook(
+    orchestrator: Option<&Arc<SessionOrchestrator>>,
+) -> fono_net::web_settings::PromptCacheFn {
+    let orch = orchestrator.map(Arc::clone);
+    Arc::new(move || {
+        let caches = orch.as_ref().map(|o| o.prompt_cache_snapshots()).unwrap_or_default();
+        let caches =
+            serde_json::to_value(caches).map_err(|e| format!("serialize prompt cache: {e}"))?;
+        Ok(serde_json::json!({ "caches": caches }))
     })
 }
 
@@ -4146,7 +4176,8 @@ fn web_settings_hooks(
     let delete_utterance = delete_utterance_hook(paths);
     let speak = speech_hook(config_path.clone(), secrets_path.clone(), paths.voices_dir());
     let meta = meta_hook(config_path, secrets_path, paths.polish_models_dir());
-    let doctor = doctor_hook(paths);
+    let doctor = doctor_hook(paths, orchestrator);
+    let prompt_cache = prompt_cache_hook(orchestrator);
     let (list_tools, set_tool_enabled, discover_tools, edit_shortcut) =
         tool_catalog_hooks(paths, orchestrator);
     let probe_llm = probe_llm_hook(paths);
@@ -4160,6 +4191,7 @@ fn web_settings_hooks(
         put_vocabulary,
         meta,
         doctor,
+        prompt_cache,
         speak,
         list_api_keys: auth.list_hook(),
         create_api_key: auth.create_hook(),

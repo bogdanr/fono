@@ -15,6 +15,7 @@ pub mod notify;
 pub mod openrouter_attribution;
 pub mod paths;
 pub mod prompt_cache;
+pub mod prompt_cache_view;
 pub mod provider_catalog;
 pub mod providers;
 pub mod screen_capture;

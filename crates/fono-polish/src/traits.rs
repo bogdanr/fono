@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use fono_core::prompt_cache_view::CacheSnapshot;
 use futures::stream::{BoxStream, StreamExt};
 use whatlang::{Detector, Lang};
 
@@ -454,6 +455,13 @@ pub trait TextFormatter: Send + Sync {
     /// sub-second cloud cleanup would just flash.
     fn is_local(&self) -> bool {
         false
+    }
+
+    /// Shape and running totals of this backend's prompt-state cache, for the
+    /// diagnostics panel. `None` from every backend that keeps no local KV
+    /// cache, which is every cloud one.
+    fn prompt_cache_snapshot(&self) -> Option<CacheSnapshot> {
+        None
     }
 }
 

@@ -2309,12 +2309,13 @@ function toast(msg, isErr) {
 }
 
 // ---------- views (hash router) ----------
-// Four views share the page shell (header, toast, theme, token): the settings
-// editor (default), the doctor report, the history browser, and the tools &
-// actions list. Hash routing keeps `?token=…` intact across navigation — a
-// real path would drop it.
+// Five views share the page shell (header, toast, theme, token): the settings
+// editor (default), the doctor report, the prompt-cache panel, the history
+// browser, and the tools & actions list. Hash routing keeps `?token=…` intact
+// across navigation — a real path would drop it.
 function currentView() {
   if (location.hash === '#/doctor') return 'doctor';
+  if (location.hash === '#/cache') return 'cache';
   if (location.hash === '#/history') return 'history';
   if (location.hash === '#/actions') return 'actions';
   return 'settings';
@@ -2323,11 +2324,19 @@ function showView() {
   const v = currentView();
   document.getElementById('view-settings').hidden = v !== 'settings';
   document.getElementById('view-doctor').hidden = v !== 'doctor';
+  document.getElementById('view-cache').hidden = v !== 'cache';
   document.getElementById('view-history').hidden = v !== 'history';
   document.getElementById('view-actions').hidden = v !== 'actions';
   document.getElementById('verchip').textContent =
     v + (meta && meta.version ? ' \u00b7 v' + meta.version : '');
   if (v === 'doctor') renderDoctor();
+  if (v === 'cache') {
+    // Same reasoning as the actions view: paint what we have so the page never
+    // flashes empty, then re-read. Arriving here is exactly when a stale copy
+    // is worst — the shape changes on every turn.
+    renderCache();
+    loadCache();
+  }
   if (v === 'history') openHistory();
   if (v === 'actions') {
     // Render what we already have so the page never flashes empty, then
@@ -2380,6 +2389,7 @@ function renderDoctor() {
   const el = document.getElementById('view-doctor');
   const bar = '<div class="doctor-bar">'
     + '<a class="btn ghost" href="#/settings">\u2190 Settings</a>'
+    + '<a class="btn ghost" href="#/cache">Prompt cache</a>'
     + '<span class="hint" style="margin-left:auto">'
     + (doctorBusy ? 'running checks\u2026'
       : doctor ? 'checked ' + new Date(doctor.generated_at * 1000).toLocaleTimeString() : '')
@@ -2407,6 +2417,226 @@ function renderDoctor() {
   el.innerHTML = bar + body;
   const b = el.querySelector('#rerunbtn');
   if (b) b.addEventListener('click', fetchDoctor);
+}
+
+// ---------- prompt cache ----------
+// GET /api/promptcache: { caches: [{ role, model, runtime, max_entries,
+// max_bytes, entries_pinned/evictable/free, bytes_pinned/evictable/free,
+// bytes_resident, nodes, unplaced, verdicts, counters }] }. `nodes` arrives
+// depth-first with a `depth` on each entry, so the tree draws by indentation
+// with no client-side index.
+//
+// Fetched on entering #/cache and on explicit refresh. Cheap on the daemon
+// side — no probes, no network — so unlike the doctor report this one is safe
+// to re-read as often as the user likes.
+let cacheData = null, cacheErr = null, cacheBusy = false, cacheRole = null;
+
+async function loadCache() {
+  if (cacheBusy) return;
+  cacheBusy = true;
+  if (currentView() === 'cache') renderCache();
+  try {
+    cacheData = (await api('/api/promptcache')).caches || [];
+    cacheErr = null;
+  } catch (err) {
+    cacheErr = err.message;
+  }
+  cacheBusy = false;
+  if (currentView() === 'cache') renderCache();
+}
+
+function fmtMiB(bytes) {
+  const mib = (bytes || 0) / 1048576;
+  if (mib >= 100) return mib.toFixed(0) + ' MiB';
+  if (mib >= 1) return mib.toFixed(1) + ' MiB';
+  return ((bytes || 0) / 1024).toFixed(0) + ' KiB';
+}
+function fmtIdle(secs) {
+  if (secs < 5) return 'just now';
+  if (secs < 60) return secs + 's ago';
+  if (secs < 3600) return Math.round(secs / 60) + 'm ago';
+  return Math.round(secs / 3600) + 'h ago';
+}
+// Recency as five steps rather than a continuous ramp: the useful question is
+// "is this the branch I was just on, or a stale one", and five buckets answer
+// it without asking anyone to compare two similar shades. Rank 0 is the
+// coldest entry, so the ramp runs with the rank, not against it.
+function heatClass(rank, total) {
+  if (total <= 1) return 'h4';
+  return 'h' + Math.min(4, Math.floor((rank / (total - 1)) * 4.999));
+}
+
+// Two segments against a budget: the pins first, hatched, then what eviction
+// could actually reclaim. Both budgets count only reclaimable entries, so the
+// pins are drawn *ahead of* the budget rather than inside it — charging them
+// against it would show a bar over half full while the label read 2 of 10.
+function occBar(pinned, used, budget, label, note) {
+  const total = (budget + pinned) || 1;
+  const pct = (n) => (100 * n / total).toFixed(2) + '%';
+  return '<div class="pc-occ">'
+    + '<div class="pc-occ-hd"><span class="pc-occ-lbl">' + esc(label) + '</span>'
+    + '<span class="hint mono">' + esc(note) + '</span></div>'
+    + '<div class="pc-bar">'
+    + '<span class="pc-seg pin" style="width:' + pct(pinned) + '"></span>'
+    + '<span class="pc-seg use" style="width:' + pct(used) + '"></span>'
+    + '</div></div>';
+}
+
+// The layer names are internal (`f8_system`, `f7_context`). Say what each one
+// actually holds; the raw name stays alongside for anyone reading the source.
+const PC_LAYER = {
+  f8_system: 'assistant instructions',
+  f8_chat_prefix: 'conversation',
+  history_prefix: 'conversation history',
+  assistant_tools: 'tool catalogue',
+  f7_system: 'cleanup instructions',
+  f7_context: 'cleanup context',
+  exact_prompt: 'one exact prompt',
+};
+
+function cacheChips(v, slots) {
+  const chip = (cls, n, t) =>
+    '<span class="chip ' + cls + '"><span class="n">' + esc(n) + '</span> ' + esc(t) + '</span>';
+  const out = [];
+  out.push(chip(v.fragmented ? 'chip-bad' : 'chip-ok', v.roots, v.roots === 1 ? 'root' : 'roots'));
+  out.push(chip(v.heads_over_slots ? 'chip-bad' : 'chip-ok', v.heads,
+    v.heads === 1 ? 'live branch' : 'live branches'));
+  out.push(chip('', v.max_depth, v.max_depth === 1 ? 'level deep' : 'levels deep'));
+  if (v.stranded_pins) out.push(chip('chip-bad', v.stranded_pins, 'stranded pins'));
+  if (v.orphans) out.push(chip('chip-bad', v.orphans, 'unplaced'));
+  if (v.duplication_bytes) out.push(chip('', fmtMiB(v.duplication_bytes), 'duplicated'));
+  let verdict = '';
+  if (v.warming) {
+    verdict = 'Nothing has used the cache yet \u2014 this is startup prewarm, so the shape means little.';
+  } else if (v.heads_over_slots) {
+    verdict = 'More live branches than slots (' + slots + '): they are now evicting each other.';
+  } else if (v.fragmented) {
+    verdict = 'A branch does not descend from any pinned base, so it pays a cold prefill however warm the pins are.';
+  } else if (v.stranded_pins) {
+    verdict = 'A pinned entry has nothing growing off it \u2014 a slot and a blob spent on nothing.';
+  }
+  return '<div class="chips">' + out.join('') + '</div>'
+    + (verdict ? '<p class="hint">' + esc(verdict) + '</p>' : '');
+}
+
+// Reuse rate is the headline, but a percentage off one or two turns says
+// nothing, so below a real sample we show the raw counts instead of a
+// confident-looking 100%. Zero evictions and zero prunes are the normal,
+// healthy case and not worth a column each; a lost pin never is, so that one is
+// always spelled out.
+function cacheCounters(c) {
+  const restores = c.restores || 0, cold = c.cold_prefills || 0;
+  const seen = restores + cold;
+  const reasons = Object.entries(c.cold_prefill_reasons || {})
+    .map(([k, n]) => n + ' ' + k.replace(/_/g, ' ')).join(', ');
+  const out = [];
+  if (seen >= 5) {
+    out.push('<span><b>' + Math.round(100 * restores / seen) + '%</b> of prompts reused a checkpoint</span>');
+  } else if (seen === 0) {
+    out.push('<span>no prompt has consulted the cache yet</span>');
+  } else {
+    out.push('<span><b>' + restores + ' of ' + seen + '</b> prompts reused a checkpoint'
+      + ' — too few to rate</span>');
+  }
+  if (cold) out.push('<span>' + cold + ' started cold' + (reasons ? ' (' + esc(reasons) + ')' : '') + '</span>');
+  if (c.evictions) out.push('<span>' + c.evictions + ' evicted</span>');
+  if (c.prunes) out.push('<span>' + c.prunes + ' superseded</span>');
+  out.push(c.pin_releases
+    ? '<span class="bad">' + c.pin_releases + ' pinned prefixes lost</span>'
+    : '<span>no pinned prefix lost</span>');
+  return '<div class="pc-counters mono">' + out.join('') + '</div>';
+}
+
+function cacheRow(n, total) {
+  const doomed = n.evicts_in === 1;
+  const cls = ['pc-node', heatClass(n.lru_rank, total)];
+  if (n.pinned) cls.push('pinned');
+  if (doomed) cls.push('doomed');
+  const tokens = n.parent ? '+' + n.delta_tokens : String(n.tokens);
+  const fate = n.pinned ? 'pinned' : n.evicts_in === 1 ? 'out next' : 'out #' + n.evicts_in;
+  const title = n.layer + ' \u00b7 ' + n.tokens + ' tokens \u00b7 ' + n.bytes + ' bytes'
+    + (n.parent ? '\nextends ' + n.parent : '\nno cached ancestor');
+  const name = PC_LAYER[n.layer] || n.layer;
+  return '<div class="' + cls.join(' ') + '" style="--d:' + n.depth + '" title="' + esc(title) + '">'
+    + '<span class="pc-name">' + (n.pinned ? '\u25c9 ' : '') + esc(name)
+    + ' <span class="pc-raw mono">' + esc(n.layer) + '</span></span>'
+    + '<span class="pc-tok mono">' + esc(tokens) + ' tok</span>'
+    + '<span class="pc-by mono">' + esc(fmtMiB(n.bytes)) + '</span>'
+    + '<span class="pc-when">' + esc(fmtIdle(n.idle_secs)) + '</span>'
+    + '<span class="pc-fate mono">' + esc(fate) + '</span>'
+    + '</div>';
+}
+
+function cacheBody(c) {
+  const total = c.nodes.length + c.unplaced.length;
+  // The slot line has to reconcile with the tree below it, which shows every
+  // entry. Reporting only the reclaimable count against the budget left a
+  // "2 of 10" sitting above four rows.
+  let out = occBar(c.entries_pinned, c.entries_evictable, c.max_entries, 'slots',
+    total + (total === 1 ? ' entry' : ' entries') + ' \u00b7 ' + c.entries_pinned
+    + ' pinned \u00b7 ' + c.entries_evictable + ' of ' + c.max_entries + ' reclaimable slots');
+  out += occBar(c.bytes_pinned, c.bytes_evictable, c.max_bytes, 'memory',
+    fmtMiB(c.bytes_resident) + ' held \u00b7 ' + fmtMiB(c.bytes_pinned) + ' pinned \u00b7 '
+    + fmtMiB(c.bytes_evictable) + ' of ' + fmtMiB(c.max_bytes) + ' reclaimable budget');
+  out += cacheChips(c.verdicts, c.max_entries);
+  out += cacheCounters(c.counters);
+  if (!c.nodes.length && !c.unplaced.length) {
+    out += '<p class="hint">Nothing cached yet. The base prompts are stored when the model'
+      + ' first loads, and branches appear as you talk to it.</p>';
+    return out;
+  }
+  out += '<div class="pc-tree">' + c.nodes.map((n) => cacheRow(n, total)).join('') + '</div>';
+  if (c.unplaced.length) {
+    out += '<details class="pc-unplaced"><summary>' + c.unplaced.length
+      + ' reachable by exact match only</summary>'
+      + '<div class="pc-tree">' + c.unplaced.map((n) => cacheRow(n, total)).join('') + '</div>'
+      + '<p class="hint">These recorded no tokens, so a prompt that merely extends them'
+      + ' cannot find them \u2014 only an identical one can.</p></details>';
+  }
+  out += '<p class="privacy-note">Only the roots and the tip of each branch are kept: storing'
+    + ' a longer prefix makes the shorter one it extends redundant, so the steps in between'
+    + ' are dropped on purpose.</p>';
+  return out;
+}
+
+function renderCache() {
+  const el = document.getElementById('view-cache');
+  const list = cacheData || [];
+  if (list.length && !list.some((c) => c.role === cacheRole)) cacheRole = list[0].role;
+  const tabs = list.length > 1
+    ? '<div class="pc-tabs">' + list.map((c) =>
+      '<button class="btn' + (c.role === cacheRole ? ' primary' : ' ghost')
+      + '" type="button" data-role="' + esc(c.role) + '">' + esc(c.role) + '</button>').join('')
+    + '</div>'
+    : '';
+  const bar = '<div class="doctor-bar">'
+    + '<a class="btn ghost" href="#/doctor">\u2190 Health</a>'
+    + tabs
+    + '<span class="hint" style="margin-left:auto">'
+    + (cacheBusy ? 'reading\u2026' : '') + '</span>'
+    + '<button class="btn" type="button" id="cachereload"'
+    + (cacheBusy ? ' disabled' : '') + '>Refresh</button></div>';
+
+  let body;
+  if (cacheErr) {
+    body = '<p class="privacy-note">Could not read the cache: ' + esc(cacheErr) + '</p>';
+  } else if (!cacheData) {
+    body = '<p class="hint">Reading\u2026</p>';
+  } else if (!list.length) {
+    body = '<p class="hint">No prompt cache to show. Only the built-in local models keep one'
+      + ' \u2014 a cloud provider holds no state here.</p>';
+  } else {
+    const c = list.find((x) => x.role === cacheRole) || list[0];
+    body = '<section class="sec"><div class="body">'
+      + '<p class="hint mono">' + esc(c.model) + ' \u00b7 runtime ' + esc(c.runtime) + '</p>'
+      + cacheBody(c) + '</div></section>';
+  }
+  el.innerHTML = bar + body;
+  const r = el.querySelector('#cachereload');
+  if (r) r.addEventListener('click', loadCache);
+  el.querySelectorAll('[data-role]').forEach((b) => {
+    b.addEventListener('click', () => { cacheRole = b.dataset.role; renderCache(); });
+  });
 }
 
 // ---------- history browser ----------

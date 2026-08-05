@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use fono_core::prompt_cache_view::CacheSnapshot;
 use fono_core::screen_capture::{CaptureError, CaptureMode, CapturedImage};
 use futures::stream::BoxStream;
 
@@ -541,6 +542,13 @@ pub trait Assistant: Send + Sync {
         _snapshot: AssistantPromptCacheSnapshot,
     ) -> Result<()> {
         Ok(())
+    }
+
+    /// Shape and running totals of this backend's prompt-state cache, for the
+    /// diagnostics panel. `None` from every backend that keeps no local KV
+    /// cache, which is every cloud one.
+    fn prompt_cache_snapshot(&self) -> Option<CacheSnapshot> {
+        None
     }
 }
 

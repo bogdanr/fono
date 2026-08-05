@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 
 use anyhow::Result;
 use fono_core::hwcheck;
+use fono_core::prompt_cache_view::CacheSnapshot;
 use fono_core::{Config, Paths, Secrets};
 
 use crate::key_probe::KeyReachability;
@@ -151,6 +152,10 @@ impl Collector {
 /// `fono doctor` — the full diagnostic report as text (colored when
 /// stdout is a TTY).
 ///
+/// Runs in the CLI process, so it reports nothing about the loaded models'
+/// prompt caches — those live in the daemon. The web UI's copy of the report
+/// includes them.
+///
 /// The live API-key reachability probes are kicked off **first**, then
 /// the synchronous [`gather`] pass runs concurrently on a blocking
 /// thread. `gather` only needs the probe results for the provider
@@ -164,7 +169,8 @@ pub async fn report(paths: &Paths) -> Result<String> {
     let handle = tokio::runtime::Handle::current();
     let gather_paths = paths.clone();
     tokio::task::spawn_blocking(move || {
-        gather(&gather_paths, || handle.block_on(probe_task).unwrap_or_default()).map(|r| r.text)
+        gather(&gather_paths, &[], || handle.block_on(probe_task).unwrap_or_default())
+            .map(|r| r.text)
     })
     .await
     .map_err(|e| anyhow::anyhow!("doctor task panicked: {e}"))?
@@ -225,8 +231,17 @@ fn key_status(
 /// invoked lazily, only once the provider matrix is reached, so callers
 /// can run the network probes concurrently with this pass. Return an
 /// empty map to skip live key reporting (presence-only).
+///
+/// `caches` describes the prompt-state caches of the loaded models. Only a
+/// running daemon can see those, so the CLI passes an empty slice and the
+/// section is simply absent — the same single pass either way, so the text
+/// and the JSON can never disagree about what was checked.
 #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
-pub fn gather(paths: &Paths, probes_source: impl FnOnce() -> KeyProbes) -> Result<DoctorReport> {
+pub fn gather(
+    paths: &Paths,
+    caches: &[CacheSnapshot],
+    probes_source: impl FnOnce() -> KeyProbes,
+) -> Result<DoctorReport> {
     use Severity as S;
     let mut col = Collector::default();
     let mut out = String::new();
@@ -1488,6 +1503,62 @@ pub fn gather(paths: &Paths, probes_source: impl FnOnce() -> KeyProbes) -> Resul
             out,
             "  voice preset         : assets/agent-presets/voice.md (see docs/coding-agents.md)"
         )?;
+        writeln!(out)?;
+    }
+
+    // ----------------------------------------------------------------
+    // Prompt cache — one line per live cache. The whole shape (which
+    // prefixes are held, what falls out next, how branches share them)
+    // is in the web UI's cache panel; here we only say whether reuse is
+    // working, so the health icon reflects a cache that has started
+    // thrashing. Empty unless a running daemon with an embedded model
+    // supplied the snapshots.
+    // ----------------------------------------------------------------
+    if !caches.is_empty() {
+        writeln!(out, "{}", head("Prompt cache:"))?;
+        col.section("Prompt cache");
+        for c in caches {
+            let held = format!("{:.0} MiB", c.bytes_resident as f64 / (1024.0 * 1024.0));
+            let counters = &c.counters;
+            let seen = counters.restores + counters.cold_prefills;
+            let reuse = (counters.restores * 100).checked_div(seen).unwrap_or(0);
+            let v = &c.verdicts;
+            // Losing a pin means two different prompts are taking turns
+            // evicting each other's warm base, which costs a full prefill
+            // every time. Worth flagging above everything else.
+            let (sev, note) = if v.warming {
+                (S::Info, "not used yet".to_string())
+            } else if counters.pin_releases > 0 {
+                (S::Warn, format!("{} pinned prefixes lost", counters.pin_releases))
+            } else if v.heads_over_slots {
+                (S::Warn, format!("{} branches for {} slots", v.heads, c.max_entries))
+            } else if v.fragmented {
+                (S::Warn, "a branch shares no cached base".to_string())
+            } else if seen > 0 && reuse < 50 {
+                (S::Warn, format!("only {reuse}% of prompts reused a checkpoint"))
+            } else {
+                (S::Ok, format!("{reuse}% of prompts reused a checkpoint"))
+            };
+            let painted = match sev {
+                S::Ok => ok(&note),
+                S::Warn => warn(&note),
+                _ => dim(&note),
+            };
+            writeln!(
+                out,
+                "  {:<20} : {painted} ({}/{} slots, {} pinned, {} held)",
+                c.role, c.entries_evictable, c.max_entries, c.entries_pinned, held,
+            )?;
+            col.push(
+                sev,
+                &c.role,
+                &format!(
+                    "{note} — {}/{} slots, {} pinned, {} held. Full shape in the web UI \
+                     under Health → Prompt cache.",
+                    c.entries_evictable, c.max_entries, c.entries_pinned, held,
+                ),
+            );
+        }
         writeln!(out)?;
     }
 
