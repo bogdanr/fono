@@ -123,9 +123,23 @@ jobs:
             vulkaninfo --summary 2>&1 | Select-Object -First 40
           } else { "vulkaninfo not on PATH" }
 
+      # Default shell (pwsh), NOT bash: Git Bash puts its GNU coreutils
+      # `link.exe` ahead of MSVC's on PATH, and every build script then
+      # fails to link ("extra operand ... .rcgu.o"). The CI job builds
+      # under pwsh for the same reason.
       - name: Run the crashing test alone
-        shell: bash
-        run: |
-          cargo test -p fono --no-default-features \
-            --features ${{ matrix.features }} \
-            --test local_backends_coexist -- --nocapture --test-threads=1
+        run: >
+          cargo test -p fono --no-default-features
+          --features ${{ matrix.features }}
+          --test local_backends_coexist -- --nocapture --test-threads=1
+
+      # Second pass with the harness left at its default parallelism —
+      # the same shape the failing CI job runs. If this crashes while the
+      # single-threaded pass above passed, the fault is a race between the
+      # two tests, not the feature set.
+      - name: Run the whole test file in parallel
+        if: always()
+        run: >
+          cargo test -p fono --no-default-features
+          --features ${{ matrix.features }}
+          --test local_backends_coexist -- --nocapture
