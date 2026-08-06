@@ -21,6 +21,15 @@ The home page is [fono.page](https://fono.page).
 
 ![Recently shipped](https://img.shields.io/badge/Recently_shipped-6e7681?style=for-the-badge)
 
+**[v0.18.1 — See what the assistant keeps warm](#shipped)**  
+Fono holds on to the work it has already done on a conversation so your next
+sentence starts warm instead of paying for the whole prompt again. Settings now
+shows you that cache as a live tree: what is kept, how full it is, what goes
+next, and the prompt behind any entry. About a fifth of the memory it reserved
+was being held for nothing and is now free, leaving room for one more
+conversation to stay warm. Also fixes a crash on Windows machines with no usable
+graphics driver. *(2026-08-06)*
+
 **[v0.18.0 — The assistant does things, not just answers](#shipped)**  
 Point Fono at a server that speaks the Model Context Protocol — Home Assistant,
 for example — and ask it to turn on the kitchen lights: it does, and tells you
@@ -304,6 +313,23 @@ assistant provider.
 ## Shipped
 
 Newest first.
+
+- ![v0.18.1](https://img.shields.io/badge/v0.18.1-2026--08--06-blue?style=flat-square)
+  **See what the assistant keeps warm.** The embedded engine keeps the work it
+  has already done on a conversation, so the next thing you say starts warm
+  rather than re-crunching the whole prompt — and nothing showed you what was in
+  there. A new **Prompt cache** page in Settings, linked from the health view,
+  draws it as a live tree: every kept prompt, how full the cache is, how recently
+  each entry was used, which ones go next, and the prompt behind any entry on
+  hover. Separate tabs for the assistant and the cleanup model. It also flags a
+  cache in bad shape and counts warm starts, cold starts and the reason for each;
+  `fono doctor` gains a one-line summary. Requests arriving on the local API port
+  still never start warm — the page will show you that.
+
+  Also: about a fifth of the reserved memory was held for prompts nothing could
+  ever match and is now free, leaving room for roughly one more conversation to
+  stay warm; and Windows machines with no usable graphics driver no longer crash
+  on startup instead of falling back to the processor.
 
 - ![v0.18.0](https://img.shields.io/badge/v0.18.0-2026--08--03-blue?style=flat-square)
   **Voice actions — the assistant does things, not just answers.** Point Fono at

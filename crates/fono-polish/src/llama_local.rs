@@ -33,8 +33,10 @@ use fono_core::llama_gen::{
     turn_markers, warn_on_template_vocab_mismatch, TurnMarkers,
 };
 use fono_core::prompt_cache::{
-    PromptStateCache, PromptStateCacheEntry, PromptStateCacheKey, PromptStateCacheLayer,
+    CacheCounters, CacheMutationReport, PromptStateCache, PromptStateCacheEntry,
+    PromptStateCacheKey, PromptStateCacheLayer,
 };
+use fono_core::prompt_cache_view::{self as cache_view, CacheSnapshot};
 use fono_core::turn_trace::{
     current_instant, current_span, generation_span_args, record_cache_mutation, POLISH_LANE,
 };
@@ -92,6 +94,10 @@ pub struct LlamaLocal {
     /// full-system prefixes (`F7Context`); the live cleanup path restores the
     /// deepest matching prefix and decodes only the transcript suffix.
     prompt_state_cache: Arc<Mutex<PromptStateCache>>,
+    /// Running cache totals for this backend, shared with `clone_thin` workers
+    /// so every cleanup adds to one tally. Held beside the cache, not inside
+    /// it, so recording never waits on the cache lock.
+    cache_counters: Arc<CacheCounters>,
     /// Glass Cortex capture (opt-in, default off) — same tap design as
     /// the assistant backend; see `fono_core::brain_tap`.
     brain_tap_enabled: bool,
@@ -99,6 +105,30 @@ pub struct LlamaLocal {
 }
 
 impl LlamaLocal {
+    /// Note a cache mutation: emit the trace instants and add the churn to this
+    /// backend's running totals.
+    fn note_cache_mutation(&self, report: &CacheMutationReport) {
+        record_cache_mutation(report);
+        self.cache_counters.apply(report);
+    }
+
+    /// Note that a cleanup read its whole prompt from scratch, and why.
+    fn note_cold_prefill(&self, layer: &str, reason: &str) {
+        polish_cold_prefill(layer, reason);
+        self.cache_counters.record_cold_prefill(reason);
+    }
+
+    /// Shape and running totals of this backend's prompt-state cache.
+    fn cache_snapshot(&self) -> Option<CacheSnapshot> {
+        // A poisoned lock means a cleanup panicked mid-mutation. Report nothing
+        // rather than propagate: this is a diagnostic, and it must never be the
+        // thing that takes the daemon down.
+        let cache = self.prompt_state_cache.lock().ok()?;
+        let model =
+            self.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
+        Some(cache_view::snapshot("polish", &model, &cache, self.cache_counters.read()))
+    }
+
     pub fn new(model_path: impl Into<PathBuf>, context_size: u32) -> Self {
         Self::with_threads(model_path, context_size, fono_core::llama_backend::decode_threads())
     }
@@ -110,6 +140,7 @@ impl LlamaLocal {
             threads,
             state: Arc::new(Mutex::new(None)),
             prompt_state_cache: Arc::new(Mutex::new(PromptStateCache::default())),
+            cache_counters: Arc::new(CacheCounters::default()),
             brain_tap_enabled: false,
             brain_tap: Arc::new(OnceLock::new()),
         }
@@ -152,6 +183,7 @@ impl LlamaLocal {
             threads: self.threads,
             state: Arc::clone(&self.state),
             prompt_state_cache: Arc::clone(&self.prompt_state_cache),
+            cache_counters: Arc::clone(&self.cache_counters),
             brain_tap_enabled: self.brain_tap_enabled,
             brain_tap: Arc::clone(&self.brain_tap),
         }
@@ -501,10 +533,10 @@ impl LlamaLocal {
                 .map_err(|_| anyhow!("llama-local prompt-state cache mutex poisoned"))?;
             cache.insert_pinned(
                 key,
-                PromptStateCacheEntry::with_tokens(state, token_ids(&base_tokens)),
+                PromptStateCacheEntry::with_tokens(state, token_ids(&base_tokens)).describing(base),
             )
         };
-        record_cache_mutation(&report);
+        self.note_cache_mutation(&report);
         build_span.finish(json!({
             "layer": PromptStateCacheLayer::F7System.as_str(),
             "base_tokens": base_tokens.len(),
@@ -555,7 +587,7 @@ impl LlamaLocal {
         let restored = unsafe { ctx.set_state_data(&entry.state) };
         if restored == 0 {
             warn!("F7 prompt-state restore failed; falling back to full prefill");
-            polish_cold_prefill(layer_str, "restore_failed");
+            self.note_cold_prefill(layer_str, "restore_failed");
             return Ok(None);
         }
         current_instant(
@@ -581,6 +613,7 @@ impl LlamaLocal {
                 "suffix_tokens": suffix_tokens.len(),
             }),
         );
+        self.cache_counters.record_restore();
         self.prefill_tokens(&mut ctx, suffix_tokens, prefix_tokens.len() as i32, true)?;
         let text = Self::generate_from_prefilled(
             model,
@@ -610,7 +643,7 @@ impl LlamaLocal {
     ) -> Result<Option<String>> {
         let layer_str = PromptStateCacheLayer::F7Context.as_str();
         if full_prefix.is_empty() || suffix.is_empty() {
-            polish_cold_prefill(layer_str, "empty_prefix_or_suffix");
+            self.note_cold_prefill(layer_str, "empty_prefix_or_suffix");
             return Ok(None);
         }
         let prefix_tokens =
@@ -619,14 +652,14 @@ impl LlamaLocal {
         let full_tokens =
             model.str_to_token(&full_prompt, AddBos::Always).context("tokenize prompt")?;
         if prefix_tokens.is_empty() || !full_tokens.starts_with(&prefix_tokens) {
-            polish_cold_prefill(layer_str, "token_split_incompatible");
+            self.note_cold_prefill(layer_str, "token_split_incompatible");
             return Ok(None);
         }
         let suffix_tokens = &full_tokens[prefix_tokens.len()..];
         if suffix_tokens.is_empty()
             || full_tokens.len() + MAX_NEW_TOKENS as usize >= self.context_size as usize
         {
-            polish_cold_prefill(layer_str, "empty_suffix_or_too_large");
+            self.note_cold_prefill(layer_str, "empty_suffix_or_too_large");
             return Ok(None);
         }
 
@@ -656,8 +689,14 @@ impl LlamaLocal {
         // Miss: build the full-context prefix, accelerating with the deepest
         // cached prefix (the pinned base) when present, then cache it pinned-by-
         // layer for next time. Finally decode the suffix.
-        let mut ctx =
-            self.build_miss_context(model, ctx_key, &runtime, layer_str, &prefix_tokens)?;
+        let mut ctx = self.build_miss_context(
+            model,
+            ctx_key,
+            &runtime,
+            layer_str,
+            &prefix_tokens,
+            full_prefix,
+        )?;
         self.prefill_tokens(&mut ctx, suffix_tokens, prefix_tokens.len() as i32, true)?;
         let text = Self::generate_from_prefilled(
             model,
@@ -683,6 +722,7 @@ impl LlamaLocal {
         runtime: &str,
         layer_str: &'static str,
         prefix_tokens: &[LlamaToken],
+        prefix_text: &str,
     ) -> Result<LlamaContext<'model>> {
         let mut ctx = self.new_context(model)?;
         let longest = {
@@ -739,8 +779,9 @@ impl LlamaLocal {
                     "restored_bytes": restored_bytes,
                 }),
             );
+            self.cache_counters.record_restore();
         } else {
-            polish_cold_prefill(layer_str, "no_prefix_match");
+            self.note_cold_prefill(layer_str, "no_prefix_match");
         }
         if start < prefix_tokens.len() {
             self.prefill_tokens(&mut ctx, &prefix_tokens[start..], start as i32, false)?;
@@ -753,9 +794,10 @@ impl LlamaLocal {
                 .map_err(|_| anyhow!("llama-local prompt-state cache mutex poisoned"))?;
             let report = cache.insert(
                 ctx_key,
-                PromptStateCacheEntry::with_tokens(state, token_ids(prefix_tokens)),
+                PromptStateCacheEntry::with_tokens(state, token_ids(prefix_tokens))
+                    .describing(prefix_text),
             );
-            record_cache_mutation(&report);
+            self.note_cache_mutation(&report);
         }
         current_instant(
             "polish.prompt_cache_built",
@@ -790,7 +832,10 @@ impl LlamaLocal {
                 return Ok(text);
             }
         } else {
-            polish_cold_prefill(PromptStateCacheLayer::F7Context.as_str(), "prompt_split_mismatch");
+            self.note_cold_prefill(
+                PromptStateCacheLayer::F7Context.as_str(),
+                "prompt_split_mismatch",
+            );
         }
         self.run_inference_with_model(model, prompt, on_piece)
     }
@@ -851,6 +896,7 @@ impl LlamaLocal {
             &runtime,
             PromptStateCacheLayer::F7Context.as_str(),
             &prefix_tokens,
+            full_prefix,
         )?;
         debug!(tokens = prefix_tokens.len(), "F7 context prefix checkpoint prewarmed");
         Ok(())
@@ -1151,6 +1197,10 @@ impl TextFormatter for LlamaLocal {
 
     fn is_local(&self) -> bool {
         true
+    }
+
+    fn prompt_cache_snapshot(&self) -> Option<CacheSnapshot> {
+        self.cache_snapshot()
     }
 
     async fn prewarm(&self) -> Result<()> {

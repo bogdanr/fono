@@ -33,7 +33,10 @@
 //! Both budgets measure only what eviction can actually reclaim — see
 //! [`PromptStateCache::evictable_totals`].
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Logical role of a cached prefix. The layer is part of the cache key, so two
 /// prefixes with identical text but different roles never collide, and it
@@ -44,9 +47,13 @@ pub enum PromptStateCacheLayer {
     /// dictionary). Context-independent, pinned.
     F7System,
     /// F8 assistant system prompt. Context-independent, pinned.
+    ///
+    /// The tool descriptions are part of this prompt rather than a layer of
+    /// their own: the embedded backend renders its own chat markers, so it
+    /// describes tools inside the system prompt and warms the head it will
+    /// really send. A separately warmed tool prompt could never match, because
+    /// prefix matching starts at token 0 and the descriptions sit mid-prompt.
     F8System,
-    /// F8 assistant tool/function prompt. Context-independent, pinned.
-    AssistantTools,
     /// F7 cleanup base + the focused app's `rule_suffix` (CLI / editor /
     /// browser / terminal-agent). Per-context layer, LRU among contexts.
     F7Context,
@@ -78,7 +85,6 @@ impl PromptStateCacheLayer {
         match self {
             Self::F7System => "f7_system",
             Self::F8System => "f8_system",
-            Self::AssistantTools => "assistant_tools",
             Self::F7Context => "f7_context",
             Self::WindowContext => "window_context",
             Self::F8ChatPrefix => "f8_chat_prefix",
@@ -92,7 +98,7 @@ impl PromptStateCacheLayer {
     /// conversation. These are prewarmed at startup and must never be evicted
     /// by LRU churn. All other layers age out normally.
     pub fn is_pinnable(&self) -> bool {
-        matches!(self, Self::F7System | Self::F8System | Self::AssistantTools)
+        matches!(self, Self::F7System | Self::F8System)
     }
 }
 
@@ -161,18 +167,132 @@ pub struct PromptStateCacheEntry {
     pub state: Vec<u8>,
     pub token_count: usize,
     pub prefix_tokens: Vec<i32>,
+    /// When this entry was last created or read. The LRU deque records the
+    /// *order* entries were touched in; this records *when*, which is what a
+    /// diagnostic needs to tell a stale branch from one merely second in a
+    /// burst. Private so only the cache can move it.
+    last_used: Instant,
+    /// Set when the caller knows this snapshot cannot recur once the turn that
+    /// made it is over — an intra-turn checkpoint whose prefix contains this
+    /// turn's tool call and result, which the stored history does not keep.
+    ///
+    /// Such an entry is scratch: useful to the wording pass moments later,
+    /// useless to every turn after. Marking it lets a longer checkpoint
+    /// supersede it across layer boundaries (see [`Self::dies_with_turn`] and
+    /// `prune_dominated_by`), instead of leaving ~28 MiB of dead weight to age
+    /// out through LRU while live branches compete for the same budget.
+    ///
+    /// Off by default, which is the safe answer: an OpenAI-protocol client
+    /// resends tool calls and results verbatim, so for a network caller the
+    /// same prefix may well recur and is worth keeping.
+    dies_with_turn: bool,
+    /// An abridged copy of the prompt this snapshot was taken over, kept so a
+    /// diagnostic can say what an entry holds. Without it the only handle on an
+    /// entry is the hash of that prompt, which tells a reader nothing.
+    ///
+    /// The end is kept in full and the beginning trimmed, because every entry
+    /// on a branch shares the same opening: what distinguishes a child from its
+    /// parent is only ever at the tail. A few hundred bytes beside a
+    /// multi-megabyte blob.
+    preview: Option<String>,
 }
 
 impl PromptStateCacheEntry {
     pub fn new(state: Vec<u8>, token_count: usize) -> Self {
-        Self { state, token_count, prefix_tokens: Vec::new() }
+        Self {
+            state,
+            token_count,
+            prefix_tokens: Vec::new(),
+            last_used: Instant::now(),
+            dies_with_turn: false,
+            preview: None,
+        }
     }
 
     /// Build an entry that records its token sequence so it can be found by
     /// longest-prefix matching. `token_count` is derived from `prefix_tokens`.
     pub fn with_tokens(state: Vec<u8>, prefix_tokens: Vec<i32>) -> Self {
-        Self { state, token_count: prefix_tokens.len(), prefix_tokens }
+        Self {
+            state,
+            token_count: prefix_tokens.len(),
+            prefix_tokens,
+            last_used: Instant::now(),
+            dies_with_turn: false,
+            preview: None,
+        }
     }
+
+    /// Record what prompt this snapshot covers, abridged for display.
+    #[must_use]
+    pub fn describing(mut self, prompt: &str) -> Self {
+        self.preview = Some(abridge_prompt(prompt));
+        self
+    }
+
+    /// The abridged prompt, when the caller supplied one.
+    pub fn preview(&self) -> Option<&str> {
+        self.preview.as_deref()
+    }
+
+    /// Declare this snapshot intra-turn scratch, so a longer checkpoint may
+    /// supersede it whatever layer that checkpoint is filed under. Only the
+    /// caller can know this; see the field docs.
+    #[must_use]
+    pub fn dying_with_turn(mut self) -> Self {
+        self.dies_with_turn = true;
+        self
+    }
+
+    /// Whether this snapshot is intra-turn scratch.
+    pub fn dies_with_turn(&self) -> bool {
+        self.dies_with_turn
+    }
+
+    /// How long since this entry was created or last read.
+    pub fn idle(&self) -> Duration {
+        self.last_used.elapsed()
+    }
+}
+
+/// Read-only view of one cached entry, borrowed from the cache for diagnostics.
+///
+/// Deliberately carries no `state`: [`PromptStateCache::get`] clones the whole
+/// multi-megabyte blob, which makes it unusable for a panel that refreshes.
+/// Everything here is either a copy of a small field or a borrow.
+#[derive(Debug, Clone)]
+pub struct CacheNodeView<'a> {
+    pub id: String,
+    pub layer: &'a PromptStateCacheLayer,
+    pub runtime_sha256: &'a str,
+    pub token_count: usize,
+    pub bytes: usize,
+    pub pinned: bool,
+    /// Position in the eviction queue, 0 = least recently used. Pinned entries
+    /// carry a rank too, but eviction skips them.
+    pub lru_rank: usize,
+    pub idle: Duration,
+    pub prefix_tokens: &'a [i32],
+    /// The abridged prompt this snapshot covers, when the caller recorded one.
+    pub preview: Option<&'a str>,
+}
+
+/// Trim a prompt to something a tooltip can hold.
+///
+/// The tail is kept and the head trimmed: entries on one branch all begin with
+/// the same system prompt, so the only part that identifies an entry is what it
+/// added at the end. Enough of the opening survives for a root — which has no
+/// parent and is all opening — to stay recognisable.
+fn abridge_prompt(prompt: &str) -> String {
+    const HEAD: usize = 180;
+    const TAIL: usize = 620;
+    let trimmed = prompt.trim();
+    if trimmed.chars().count() <= HEAD + TAIL {
+        return trimmed.to_string();
+    }
+    let chars: Vec<char> = trimmed.chars().collect();
+    let head: String = chars[..HEAD].iter().collect();
+    let tail: String = chars[chars.len() - TAIL..].iter().collect();
+    format!("{head}\n\n […]\n\n{tail}")
 }
 
 /// One entry dropped by LRU / byte-budget enforcement, surfaced to the caller
@@ -204,6 +324,85 @@ pub struct CacheMutationReport {
     /// Stale pin of the same pinnable layer released because this insert
     /// replaced it (`insert_pinned` only).
     pub pin_released: Option<PromptStateCacheLayer>,
+}
+
+/// Running totals for one cache instance, since the daemon started.
+///
+/// Per-instance rather than process-global so the assistant and polish caches
+/// never blend into one meaningless average, and held beside the cache rather
+/// than inside it so recording a fact never has to wait on the cache lock —
+/// several of these are reported from paths that have just released it, and one
+/// is reported from a path that never takes it at all.
+///
+/// The per-turn trace already records all of this in far more detail, but only
+/// when tracing is switched on and only one turn at a time, so it can never
+/// answer "is the cache working today".
+#[derive(Debug, Default)]
+pub struct CacheCounters {
+    restores: AtomicU64,
+    cold_prefills: AtomicU64,
+    evictions: AtomicU64,
+    prunes: AtomicU64,
+    pin_releases: AtomicU64,
+    /// Cold prefills bucketed by reason. A leaf lock: nothing else is ever
+    /// acquired while it is held, so it cannot take part in a deadlock.
+    reasons: Mutex<BTreeMap<String, u64>>,
+}
+
+impl CacheCounters {
+    /// A turn restored a cached checkpoint instead of reading its prompt again.
+    pub fn record_restore(&self) {
+        self.restores.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A turn read its whole prompt from scratch, and why.
+    pub fn record_cold_prefill(&self, reason: &str) {
+        self.cold_prefills.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut reasons) = self.reasons.lock() {
+            *reasons.entry(reason.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    /// Fold in the churn one insert caused.
+    pub fn apply(&self, report: &CacheMutationReport) {
+        self.evictions.fetch_add(report.evicted.len() as u64, Ordering::Relaxed);
+        self.prunes.fetch_add(report.pruned.len() as u64, Ordering::Relaxed);
+        if report.pin_released.is_some() {
+            self.pin_releases.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn read(&self) -> CacheCountersSnapshot {
+        CacheCountersSnapshot {
+            restores: self.restores.load(Ordering::Relaxed),
+            cold_prefills: self.cold_prefills.load(Ordering::Relaxed),
+            evictions: self.evictions.load(Ordering::Relaxed),
+            prunes: self.prunes.load(Ordering::Relaxed),
+            pin_releases: self.pin_releases.load(Ordering::Relaxed),
+            cold_prefill_reasons: self.reasons.lock().map(|r| r.clone()).unwrap_or_default(),
+        }
+    }
+}
+
+/// Point-in-time copy of [`CacheCounters`], for reporting.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct CacheCountersSnapshot {
+    pub restores: u64,
+    pub cold_prefills: u64,
+    /// Ordered so the serialized form is stable.
+    pub cold_prefill_reasons: BTreeMap<String, u64>,
+    pub evictions: u64,
+    pub prunes: u64,
+    pub pin_releases: u64,
+}
+
+impl CacheCountersSnapshot {
+    /// True until some turn has either restored a checkpoint or paid a cold
+    /// prefill, i.e. while the cache holds only startup prewarm and nothing has
+    /// consulted it yet. Shape verdicts are meaningless before that.
+    pub fn warming(&self) -> bool {
+        self.restores == 0 && self.cold_prefills == 0
+    }
 }
 
 /// Bounded in-memory cache of prompt-state checkpoints with LRU eviction, a
@@ -274,11 +473,19 @@ impl PromptStateCache {
     }
 
     /// Drop every non-pinned entry that the entry at `key` dominates: same
-    /// `layer` and `runtime_sha256`, with recorded `prefix_tokens` that are a
-    /// *strict* prefix of `key`'s tokens. Such entries can never beat `key` in
-    /// a [`Self::find_longest_prefix`] match, so retaining them only wastes a
-    /// slot and a (multi-MB) state blob. No-op when the new entry records no
-    /// tokens (exact-key-only entries don't participate in prefix matching).
+    /// `runtime_sha256`, with recorded `prefix_tokens` that are a *strict*
+    /// prefix of `key`'s tokens. Such entries can never beat `key` in a
+    /// [`Self::find_longest_prefix`] match, so retaining them only wastes a slot
+    /// and a (multi-MB) state blob. No-op when the new entry records no tokens
+    /// (exact-key-only entries don't participate in prefix matching).
+    ///
+    /// Normally confined to one `layer`, because layers exist precisely to keep
+    /// checkpoints out of each other's way: a turn stores one at the start and
+    /// one at the end, and letting the second delete the first left the next
+    /// turn nothing to stand on. The exception is an entry the caller marked
+    /// [`PromptStateCacheEntry::dies_with_turn`] — intra-turn scratch that
+    /// nothing later can match anyway, so the checkpoint that supersedes it is
+    /// free to reclaim it whatever layer it belongs to.
     fn prune_dominated_by(&mut self, key: &PromptStateCacheKey) -> Vec<EvictedEntry> {
         let Some(new_entry) = self.entries.get(key) else { return Vec::new() };
         if new_entry.prefix_tokens.is_empty() {
@@ -291,7 +498,7 @@ impl PromptStateCache {
             .filter(|(k, e)| {
                 *k != key
                     && !self.pinned.contains(k)
-                    && k.layer == key.layer
+                    && (k.layer == key.layer || e.dies_with_turn)
                     && k.runtime_sha256 == key.runtime_sha256
                     && !e.prefix_tokens.is_empty()
                     && e.prefix_tokens.len() < new_tokens.len()
@@ -335,14 +542,67 @@ impl PromptStateCache {
     }
 
     pub fn get(&mut self, key: &PromptStateCacheKey) -> Option<PromptStateCacheEntry> {
-        let entry = self.entries.get(key).cloned()?;
+        let stored = self.entries.get_mut(key)?;
+        stored.last_used = Instant::now();
+        let entry = stored.clone();
         self.lru.retain(|existing| existing != key);
         self.lru.push_back(key.clone());
         Some(entry)
     }
 
+    /// Membership test that **also marks the entry as most-recently-used**, and
+    /// clones its state blob on the way through [`Self::get`]. Use
+    /// [`Self::peek`] from anything that must not disturb eviction order.
     pub fn contains(&mut self, key: &PromptStateCacheKey) -> bool {
         self.get(key).is_some()
+    }
+
+    /// Membership test with no side effects and no blob copy.
+    pub fn peek(&self, key: &PromptStateCacheKey) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    /// Borrowed metadata for every entry, cheapest-possible: no state blob is
+    /// cloned and eviction order is untouched. Ordered by eviction queue
+    /// position so the caller sees which entry dies first.
+    pub fn nodes(&self) -> Vec<CacheNodeView<'_>> {
+        let rank: HashMap<&PromptStateCacheKey, usize> =
+            self.lru.iter().enumerate().map(|(i, k)| (k, i)).collect();
+        let mut views: Vec<CacheNodeView<'_>> = self
+            .entries
+            .iter()
+            .map(|(key, entry)| CacheNodeView {
+                id: key.stable_id(),
+                layer: &key.layer,
+                runtime_sha256: &key.runtime_sha256,
+                token_count: entry.token_count,
+                bytes: entry.state.len(),
+                pinned: self.pinned.contains(key),
+                lru_rank: rank.get(key).copied().unwrap_or(usize::MAX),
+                idle: entry.idle(),
+                prefix_tokens: &entry.prefix_tokens,
+                preview: entry.preview(),
+            })
+            .collect();
+        views.sort_by_key(|v| v.lru_rank);
+        views
+    }
+
+    /// Budget the cache enforces: maximum evictable entries.
+    pub fn max_entries(&self) -> usize {
+        self.max_entries
+    }
+
+    /// Budget the cache enforces: maximum evictable bytes.
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+
+    /// Count and byte total eviction is allowed to reclaim, i.e. everything
+    /// except the pins. This is what both budgets are measured against; see
+    /// [`Self::evictable_totals`].
+    pub fn evictable(&self) -> (usize, usize) {
+        self.evictable_totals()
     }
 
     pub fn is_pinned(&self, key: &PromptStateCacheKey) -> bool {
@@ -500,28 +760,28 @@ mod tests {
 
     #[test]
     fn pins_do_not_consume_the_entry_cap() {
-        // Three pinnable layers exist. If pins counted against the cap they
-        // would take three of its slots before a single conversation is cached.
+        // Both pinnable layers can be occupied at once. If pins counted against
+        // the cap they would take two of its slots before a single conversation
+        // is cached.
         let mut cache = PromptStateCache::new(2, usize::MAX);
         cache.insert_pinned(key(PromptStateCacheLayer::F7System, "f7"), entry(8));
         cache.insert_pinned(key(PromptStateCacheLayer::F8System, "f8"), entry(8));
-        cache.insert_pinned(key(PromptStateCacheLayer::AssistantTools, "tools"), entry(8));
         cache.insert(key(PromptStateCacheLayer::F8ChatPrefix, "a"), entry(8));
         cache.insert(key(PromptStateCacheLayer::F8ChatPrefix, "b"), entry(8));
         // The cap is two *evictable* entries, so both conversations survive
-        // alongside all three pins.
+        // alongside both pins.
         assert!(cache.contains(&key(PromptStateCacheLayer::F8ChatPrefix, "a")));
         assert!(cache.contains(&key(PromptStateCacheLayer::F8ChatPrefix, "b")));
-        assert_eq!(cache.len(), 5);
+        assert_eq!(cache.len(), 4);
     }
 
     #[test]
     fn a_pin_larger_than_the_byte_budget_does_not_empty_the_cache() {
-        // On a model with a large KV footprint one pinned tool catalogue can
+        // On a model with a large KV footprint one pinned system prompt can
         // exceed the whole budget. Counting it would evict every unpinned entry
         // on every insert, leaving the cache permanently empty.
         let mut cache = PromptStateCache::new(usize::MAX, 64);
-        cache.insert_pinned(key(PromptStateCacheLayer::AssistantTools, "huge"), entry(4096));
+        cache.insert_pinned(key(PromptStateCacheLayer::F8System, "huge"), entry(4096));
         cache.insert(key(PromptStateCacheLayer::F8ChatPrefix, "a"), entry(32));
         cache.insert(key(PromptStateCacheLayer::F8ChatPrefix, "b"), entry(32));
         assert!(cache.contains(&key(PromptStateCacheLayer::F8ChatPrefix, "a")));
@@ -643,6 +903,49 @@ mod tests {
         assert!(report.pruned.is_empty());
         assert!(cache.contains(&key(PromptStateCacheLayer::F8System, "base")));
         assert!(cache.is_pinned(&key(PromptStateCacheLayer::F8System, "base")));
+    }
+
+    #[test]
+    fn a_completed_turn_reclaims_its_own_scratch_but_spares_the_turn_start_prefix() {
+        // A tool-calling turn writes three checkpoints. Only two are worth
+        // keeping, and the middle one is the largest kind of waste there is: a
+        // whole KV snapshot that nothing can ever match again.
+        let mut cache = PromptStateCache::new(8, usize::MAX);
+        // Turn start — the prefix the NEXT turn shares. Must survive.
+        cache.insert(key(PromptStateCacheLayer::HistoryPrefix, "start"), token_entry(&[1, 2]));
+        // Mid-turn — carries this turn's tool call and result. Scratch.
+        cache.insert(
+            key(PromptStateCacheLayer::ExactPrompt, "scratch"),
+            token_entry(&[1, 2, 3]).dying_with_turn(),
+        );
+        // Turn end — extends both.
+        let report = cache
+            .insert(key(PromptStateCacheLayer::F8ChatPrefix, "done"), token_entry(&[1, 2, 3, 4]));
+
+        assert_eq!(report.pruned.len(), 1, "only the scratch should be reclaimed");
+        assert!(
+            !cache.contains(&key(PromptStateCacheLayer::ExactPrompt, "scratch")),
+            "intra-turn scratch outlived the turn"
+        );
+        assert!(
+            cache.contains(&key(PromptStateCacheLayer::HistoryPrefix, "start")),
+            "turn-start prefix was reclaimed — the next turn has nothing to stand on"
+        );
+        assert!(cache.contains(&key(PromptStateCacheLayer::F8ChatPrefix, "done")));
+    }
+
+    #[test]
+    fn an_unmarked_entry_of_another_layer_is_never_reclaimed() {
+        // The cross-layer reach is granted by the entry, not taken by the
+        // inserter: an ordinary checkpoint of a different layer stays put even
+        // when it is a strict prefix. This is what keeps a network caller's
+        // reusable prefix safe.
+        let mut cache = PromptStateCache::new(8, usize::MAX);
+        cache.insert(key(PromptStateCacheLayer::ExactPrompt, "keep"), token_entry(&[1, 2, 3]));
+        let report = cache
+            .insert(key(PromptStateCacheLayer::F8ChatPrefix, "done"), token_entry(&[1, 2, 3, 4]));
+        assert!(report.pruned.is_empty());
+        assert!(cache.contains(&key(PromptStateCacheLayer::ExactPrompt, "keep")));
     }
 
     #[test]

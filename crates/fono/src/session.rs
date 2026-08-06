@@ -28,6 +28,7 @@ use fono_audio::{
 };
 use fono_core::config::{Config, ContextRule};
 use fono_core::history::{HistoryDb, Transcription as HistoryRow};
+use fono_core::prompt_cache_view::CacheSnapshot;
 use fono_core::turn_trace::{
     current_instant, current_span, TurnTrace, INJECT_LANE, KEYS_LANE, PUMP_LANE, STT_LANE,
     WARMUP_LANE,
@@ -214,10 +215,6 @@ pub(crate) fn assistant_cache_warmup(
     AssistantPromptCacheWarmup {
         f7_system_prompt: Some(f7_polish_prompt_for_cache(config)),
         f8_system_prompt: Some(context),
-        assistant_tool_prompt: config
-            .assistant
-            .prefer_vision
-            .then(|| ASSISTANT_SCREEN_TOOL_PROMPT.to_string()),
         f8_action_descriptors: descriptors,
         f8_instructions: Some(instructions),
     }
@@ -299,8 +296,6 @@ fn f7_polish_prompt_for_cache(config: &Config) -> String {
     }
     prompt
 }
-
-const ASSISTANT_SCREEN_TOOL_PROMPT: &str = "Assistant tool schema: fono_screen captures the focused window or a user-selected screen region when the user asks about visible on-screen content. Call it only when the answer needs current pixels.";
 
 fn classify_focus_profile(focus_info: &FocusInfo) -> Option<ContextProfile> {
     let mut profile = ContextClassifier::classify(
@@ -1432,6 +1427,25 @@ impl SessionOrchestrator {
     #[must_use]
     pub fn server_upstream_snapshot(&self) -> Option<Arc<fono_assistant::CloudUpstream>> {
         self.server_upstream.read().ok().and_then(|g| g.as_ref().map(Arc::clone))
+    }
+
+    /// Shape and running totals of every live prompt-state cache, assistant
+    /// first. Empty when neither backend keeps one — every cloud backend, and a
+    /// build without the embedded llama.cpp path.
+    ///
+    /// Reads the backend `Arc`s the same way the other snapshot accessors do, so
+    /// asking for this can never block a turn; the caches themselves are read
+    /// under their own short-lived locks and no KV state is copied.
+    #[must_use]
+    pub fn prompt_cache_snapshots(&self) -> Vec<CacheSnapshot> {
+        let mut out = Vec::new();
+        if let Some(snapshot) = self.current_assistant().and_then(|a| a.prompt_cache_snapshot()) {
+            out.push(snapshot);
+        }
+        if let Some(snapshot) = self.current_llm().and_then(|p| p.prompt_cache_snapshot()) {
+            out.push(snapshot);
+        }
+        out
     }
 
     fn current_llm(&self) -> Option<Arc<dyn TextFormatter>> {

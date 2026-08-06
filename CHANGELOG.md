@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] — 2026-08-06
+
+### Added
+
+- **You can now see what the assistant keeps warm between turns.** Fono holds on
+  to the work it has already done on a conversation so the next thing you say
+  starts where the last one left off instead of paying for the whole prompt
+  again — and until now nothing showed you what was in there. Settings has a new
+  **Prompt cache** panel, linked from the health view, with a live tree of the
+  kept prompts, how full the cache is, how recently each entry was used, and
+  which ones go next when room runs out. Hover an entry to read the prompt
+  behind it. The assistant and the cleanup model keep separate caches, so they
+  get separate tabs. The panel also tells you when the cache is in a bad shape —
+  a wasted reserved entry, or so many conversations open that they push each
+  other out — and counts how often a turn started warm, how often it started
+  cold, and why. `fono doctor` gains a one-line summary, and says plainly when
+  the app is not running to ask.
+
+  One thing the panel will show you: requests arriving on the local API port
+  never start warm. That is a real limitation, not a display fault.
+
+### Changed
+
+- **About a fifth of the memory the assistant reserved for warm conversations is
+  back.** Two things were being kept that nothing could ever use: a copy of the
+  tool descriptions warmed at startup, which no real prompt could ever match,
+  and the half-finished state of a turn that used a tool, which lingered long
+  after the turn ended. Both are gone, leaving room for roughly one more
+  conversation to stay warm — so replies keep coming back quickly for longer.
+
+### Fixed
+
+- **Fono no longer crashes on Windows machines with no usable graphics driver.**
+  Asking the graphics stack for a device on such a machine raised an error that
+  killed the process outright, which meant the computers that most needed to
+  fall back to the processor were the ones that could not start. Fono now sees
+  "no graphics devices", falls back as intended, and runs.
+
 ## [0.18.0] — 2026-08-03
 
 ### Added
@@ -3166,6 +3204,8 @@ feature and ships fully wired in v0.2.
 - Local LLM cleanup (Qwen / SmolLM) is opt-in / preview.
 - Real `winit + softbuffer` overlay window is a stub (event channel only).
 
+[0.18.1]: https://github.com/bogdanr/fono/compare/v0.18.0...v0.18.1
+[0.18.0]: https://github.com/bogdanr/fono/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/bogdanr/fono/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/bogdanr/fono/compare/v0.16.0...v0.17.0
 [0.10.0]: https://github.com/bogdanr/fono/compare/v0.9.1...v0.10.0

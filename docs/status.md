@@ -1,5 +1,80 @@
 # Fono — Project Status
-Last updated: 2026-08-05
+Last updated: 2026-08-06
+
+## 2026-08-06 — Windows without a graphics driver no longer crashes
+
+The Windows CI test job had been red since the GPU work landed:
+`local_backends_coexist` died with `STATUS_HEAP_CORRUPTION` (`0xc0000374`) on the
+hosted, GPU-less runner while passing on a real Windows desktop. Four throwaway
+probe rounds on a `win-heap-probe` branch narrowed it:
+
+1. The crash needs `accel-vulkan`; without it the test passes, parallel or serial.
+2. The loader's own trace ends at `vkCreateInstance: Found no drivers!` — and
+   hiding `vulkan-1.dll` entirely crashes the same way, so both routes matter.
+3. `cdb` gave the stack, which is the whole answer: `ggml_backend_vk_reg`'s
+   `catch (vk::SystemError)` block exits, the CRT destroys the exception object
+   (`__std_exception_destroy` → `_free_base` → `RtlFreeHeap`), and the heap
+   rejects the free. **Any** ggml-vulkan exception kills the process on Windows.
+
+So this was never a CI-only defect: a Windows user running the Vulkan build on a
+machine with no usable Vulkan device crashed instead of falling back to the CPU.
+
+Fix in `crates/fono-core/src/vk_loader_shim.rs`: stop making ggml fail. The shim
+pre-flights Vulkan through the loader's own entry points (create a throwaway
+instance, count physical devices) and, when there is no usable device — loader
+absent, instance refused, or zero devices — answers ggml's init walk from a small
+emulation that *succeeds*: API 1.3, no layers, no instance extensions, an opaque
+instance handle, and zero physical devices. ggml then takes its own early
+`return` (`ggml_vulkan: No devices found.`), registers no Vulkan devices, and the
+CPU backend runs the work. No exception, no unwind, no crash.
+
+Verified both ways: locally with `VK_DRIVER_FILES=/dev/null` (and unchanged with
+the real ICDs present), and on the driverless Windows runner, where both tests
+now pass parallel and single-threaded. `plans/` has no entry for this; it was a
+CI bug hunt, and the probe branch can be deleted.
+
+Gates: fmt, clippy, `--tests --lib`, size budget (23.08 MiB, four-entry NEEDED)
+all pass.
+
+## 2026-08-06 — You can now see inside the prompt cache
+
+`plans/2026-08-06-prompt-cache-tree-panel-v1.md`, all 15 tasks landed. The prompt-state cache
+was completely opaque: its only numbers lived in per-turn trace JSON that is off unless
+`FONO_ASSISTANT_TRACE` is set, and nothing aggregated them. There was no way to answer "is the
+cache warming", "what dies next", or "is the shape right" — which is exactly what has to be
+answerable before the coexistence work (API branches, pin sets, budgets) can be judged.
+
+What exists now:
+
+- **A read-only view of the cache** (`crates/fono-core/src/prompt_cache_view.rs`). Entries gained
+  a `last_used` instant — the cache previously knew eviction *order* but not *time*, so "last
+  used 30s ago" was unanswerable. `nodes()` is `&self`, borrows the token slices, and never
+  clones a KV blob or bumps the LRU; `peek()` is the non-bumping `contains`. The existing
+  `contains` bumps the LRU and now says so.
+- **Parent edges derived from the tokens.** Every entry already stores its full prefix, so the
+  tree is recovered by longest-`starts_with` over length-sorted nodes — the same comparison
+  `find_longest_prefix` and `prune_dominated_by` already do. Tokenless entries can't join and
+  land in an explicit unplaced bucket rather than vanishing.
+- **Shape verdicts as data**: rooted vs fragmented, stranded pins, heads against the evictable
+  cap, orphans, depth, duplication ratio. Suppressed while the cache is still warming, so
+  startup prewarm doesn't fire warnings at a half-built cache.
+- **Lifetime counters** — restores, cold prefills bucketed by reason, evictions, prunes, and pin
+  releases — incremented at the trace call sites in both llama backends. Pin-release rate is the
+  signal that tells you two system prompts are fighting over one pin slot.
+- **`GET /api/promptcache`** and a tree panel in web settings, reachable from the doctor view.
+  Occupancy bars split pinned / evictable / free for entries and bytes, a recency rail paired
+  with an age string, inline per-node byte bars, eviction ordinals on the LRU tail, tabs for the
+  assistant and polish caches (they are separate instances; merging them would be a lie).
+  Deliberately not on `/api/doctor` — that endpoint spawns subprocesses and probes the network,
+  and the cache changes every turn.
+- **One summary row in `fono doctor`** so the header health icon reflects cache thrash, degrading
+  to an informational row when the daemon isn't there to ask.
+
+Known and expected, not a rendering bug: LLM-server turns never warm, because pinning requires
+empty history and API clients resend theirs. The panel will show it plainly. Fixing it is the
+next round, and now it can be measured before and after.
+
+Gates: fmt, clippy, `--tests --lib`, size budget (23.07 MiB, four-entry NEEDED) all pass.
 
 ## 2026-08-05 — The bench link, fixed for the right reason this time
 
@@ -10913,6 +10988,7 @@ new `Request::Reload` IPC; the orchestrator hot-swaps STT/LLM behind a
 | `plans/2026-04-27-fono-self-update-v1.md` | ~85% landed in `3e2c742`; finishing pass tracked as Wave 2 Task 8 |
 | `plans/2026-04-28-equivalence-harness-language-gating-and-accuracy-v1.md` | ~50% landed in `b6596c0`/`7db29b5`; typed-API refactor tracked as Wave 2 Task 7 |
 | `plans/2026-04-28-fono-auto-translation-v1.md` | Not started (Wave 4 of revised strategic plan) |
+| `plans/2026-08-06-prompt-cache-tree-panel-v1.md` (Tasks 1–15) | ✅ 15/15 |
 | `plans/closed/` (candle / dynamic-link / shared-ggml) | Superseded by `--allow-multiple-definition` link trick (ADR 0018) |
 
 ## Phase progress

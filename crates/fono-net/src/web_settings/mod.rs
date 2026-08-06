@@ -16,6 +16,10 @@
 //!   structured report as JSON (sections → checks with severities plus an
 //!   aggregate). Token-gated like every other `/api/*` route — the report
 //!   describes system topology.
+//! * `GET /api/promptcache` — the live shape of each prompt-state cache:
+//!   what is resident, what is pinned, what falls out next, and how the
+//!   entries share prefixes. Metadata only; the cached KV state never
+//!   leaves the daemon.
 //!
 //! ## Why raw hyper (no axum)
 //!
@@ -108,6 +112,17 @@ pub type MetaFn = Arc<dyn Fn() -> serde_json::Value + Send + Sync>;
 pub type DoctorFn = Arc<
     dyn Fn() -> BoxFuture<'static, std::result::Result<serde_json::Value, String>> + Send + Sync,
 >;
+/// Shape and running totals of every live prompt-state cache
+/// (`GET /api/promptcache`): `{"caches": [{…}, …]}`, assistant first, one
+/// entry per cache-keeping backend and an empty list when none keeps one.
+/// Carries only metadata and derived topology — never the serialized KV
+/// state, which is megabytes per entry and useless to a browser.
+///
+/// Synchronous and cheap: reads the cache under its own short-lived lock,
+/// spawns nothing and contacts nothing, so a page can refresh it as often as
+/// it likes without waking the rest of the daemon.
+pub type PromptCacheFn =
+    Arc<dyn Fn() -> std::result::Result<serde_json::Value, String> + Send + Sync>;
 /// OpenAI-compatible `POST /v1/audio/speech` handler. Takes the parsed
 /// request body (`{model, input, voice, response_format?}`) and returns the
 /// synthesized audio as `(content_type, bytes)` — WAV or raw PCM. Async: the
@@ -285,6 +300,8 @@ pub struct WebSettingsHooks {
     pub put_vocabulary: PutVocabularyFn,
     pub meta: MetaFn,
     pub doctor: DoctorFn,
+    /// Live prompt-state cache shape and totals (`GET /api/promptcache`).
+    pub prompt_cache: PromptCacheFn,
     /// OpenAI-compatible speech synthesis handler for `POST /v1/audio/speech`.
     pub speak: SpeechFn,
     /// Inbound API-key management (the Groq-style "API Keys" table).
@@ -648,6 +665,10 @@ async fn route(req: Request<Incoming>, peer: SocketAddr, ctx: ServerCtx) -> Resp
             }
         }
         (&Method::GET, "/api/doctor") => match (ctx.hooks.doctor)().await {
+            Ok(v) => json_ok(&v),
+            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        },
+        (&Method::GET, "/api/promptcache") => match (ctx.hooks.prompt_cache)() {
             Ok(v) => json_ok(&v),
             Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
         },
@@ -1141,6 +1162,21 @@ mod tests {
         for block in ["Your home", "What it can do", "How to answer"] {
             assert!(APP_JS.contains(block), "the prompt panel must show {block}");
         }
+    }
+
+    /// The prompt-cache panel is a route of its own, reached from the health
+    /// report. Shell, link and route all have to exist together, and the panel
+    /// is worthless unless it says which entry falls out next and which base
+    /// prefixes are being held.
+    #[test]
+    fn the_prompt_cache_page_is_reachable() {
+        assert!(INDEX_HTML.contains("view-cache"), "the panel needs somewhere to render");
+        assert!(APP_JS.contains("'#/cache'"), "and a route that recognises it");
+        assert!(APP_JS.contains("href=\"#/cache\""), "and a way in from the health report");
+        assert!(APP_JS.contains("/api/promptcache"), "and the endpoint it reads");
+        assert!(APP_JS.contains("out next"), "which entry falls out next");
+        assert!(APP_JS.contains("pinned"), "and which prefixes are held");
+        assert!(APP_CSS.contains(".pc-node"), "the tree needs its own styling");
     }
 
     /// A saved conversation has to answer the same question the tools page
