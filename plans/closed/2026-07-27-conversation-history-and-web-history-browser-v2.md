@@ -1,5 +1,7 @@
 # Conversation History Persistence + Web History Browser
 
+## Status: Completed (all 20 tasks landed; not recorded in docs/status.md at the time)
+
 ## Objective
 
 Two user-facing deliverables:

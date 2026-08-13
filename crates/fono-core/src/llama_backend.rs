@@ -18,9 +18,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Once, OnceLock, Weak};
 
 use anyhow::{Context, Result};
+use llama_cpp_2::context::params::KvCacheType;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::LlamaModel;
+use tracing::{debug, info, warn};
 
 static LLAMA_LOG_INIT: Once = Once::new();
 
@@ -69,9 +71,9 @@ pub fn backend() -> &'static LlamaBackend {
 /// once nothing references them. Keyed by canonicalized path **plus** the
 /// load-time knobs that change the resident layout (`n_gpu_layers`, `use_mmap`,
 /// `use_mlock`): a caller loading the same file with the same knobs shares one
-/// resident copy, while the same file loaded with different per-role params
-/// (e.g. polish on `default()` vs assistant on [`streaming_model_params`])
-/// loads as separate entries rather than silently reusing the first variant.
+/// resident copy, while the same file loaded with different params (e.g. one
+/// role on the device and another on the host) loads as separate entries rather
+/// than silently reusing the first variant.
 ///
 /// # Errors
 /// Propagates `llama.cpp`'s load failure (missing/corrupt GGUF, OOM, …).
@@ -124,13 +126,61 @@ impl ModelKey {
 /// Model-load params for the larger-than-RAM streaming regime: **mmap on**
 /// (weights stay file-backed and page in on demand instead of being copied into
 /// anonymous RAM) and **mlock off** (never pin — pinning a model bigger than
-/// RAM is an OOM). CPU-only (`n_gpu_layers = 0`); GPU offload is a separate,
-/// still-unproven effort. This is what the assistant role uses so a selected
-/// asym MoE streams from SSD rather than being resident in full; the small
-/// dense polish models keep `LlamaModelParams::default()`.
+/// RAM is an OOM), with the model kept entirely on the host.
+///
+/// This is what a load falls back to when the device refuses it, and what
+/// [`shared_model_sized`] uses whenever the model does not fit an accelerator.
 #[must_use]
-pub fn streaming_model_params() -> LlamaModelParams {
+pub fn host_only_model_params() -> LlamaModelParams {
     LlamaModelParams::default().with_use_mmap(true).with_use_mlock(false).with_n_gpu_layers(0)
+}
+
+/// Load `path` with the layers on an accelerator when the whole model fits one,
+/// and on the host when it does not — falling back to the host if the device
+/// refuses the load anyway.
+///
+/// One entry point for both roles, because the question that decides the answer
+/// is the same for both: do these weights, this cache and its working memory fit
+/// the device? Only the inputs differ, which is why they are arguments. A shared
+/// *constant* was the previous arrangement and it was wrong in both directions —
+/// the assistant was pinned to the host even on a machine that could hold it,
+/// while cleanup asked for everything and so failed the load outright on a small
+/// card instead of quietly running on the CPU.
+///
+/// `n_ctx` and the two cache types are needed because the cache is not a
+/// rounding error: at full context it can rival the weights, and the same model
+/// costs a different amount at `f16` than at `q8_0`.
+///
+/// # Errors
+/// Propagates the load failure when the host attempt fails too.
+pub fn shared_model_sized(
+    path: &Path,
+    n_ctx: u32,
+    type_k: KvCacheType,
+    type_v: KvCacheType,
+) -> Result<Arc<LlamaModel>> {
+    let decision = crate::gpu_offload::decide(path, n_ctx, type_k, type_v);
+    if decision.n_gpu_layers == 0 {
+        debug!("offload: {}", decision.explanation);
+        return shared_model(path, &host_only_model_params());
+    }
+    let params = host_only_model_params().with_n_gpu_layers(decision.n_gpu_layers);
+    match shared_model(path, &params) {
+        Ok(model) => {
+            info!("offload: {}", decision.explanation);
+            Ok(model)
+        }
+        // The estimate said it fits and the device disagreed. One retry on the
+        // host, and no search for a layer count in between: a partial offload
+        // generates slower than none at all, so there is nothing to find.
+        Err(e) => {
+            warn!(
+                "offload: the device refused the model ({e:#}); loading it on the CPU instead. \
+                 The reply will be slower but correct"
+            );
+            shared_model(path, &host_only_model_params())
+        }
+    }
 }
 
 /// Default llama.cpp decode thread count: all available logical cores
@@ -190,22 +240,19 @@ mod tests {
 
     #[test]
     fn same_file_different_params_load_separately() {
-        // Scenario B: same file, but polish `default()` vs assistant streaming
-        // params → distinct keys, so the two roles load independent copies
-        // rather than the assistant inheriting polish's (or vice versa).
-        let polish = key("/models/gemma.gguf", &LlamaModelParams::default());
-        let assistant = key("/models/gemma.gguf", &streaming_model_params());
-        assert_ne!(
-            polish, assistant,
-            "streaming params must not collide with default() for the same file"
-        );
+        // Scenario B: the same file, one role on the host and one on the
+        // device → distinct keys, so each gets the residency it asked for
+        // instead of inheriting whichever role loaded first.
+        let host = key("/models/gemma.gguf", &host_only_model_params());
+        let device = key("/models/gemma.gguf", &host_only_model_params().with_n_gpu_layers(31));
+        assert_ne!(host, device, "an offloaded load must not reuse the host copy");
     }
 
     #[test]
-    fn streaming_params_are_mmap_on_mlock_off_cpu() {
-        let p = streaming_model_params();
-        assert!(p.use_mmap(), "streaming must mmap (file-backed, page on demand)");
-        assert!(!p.use_mlock(), "streaming must not pin — mlock on an over-RAM model OOMs");
-        assert_eq!(p.n_gpu_layers(), 0, "streaming path is CPU-only for now");
+    fn host_params_are_mmap_on_mlock_off_cpu() {
+        let p = host_only_model_params();
+        assert!(p.use_mmap(), "weights must stay file-backed and page in on demand");
+        assert!(!p.use_mlock(), "pinning a model larger than RAM is an OOM");
+        assert_eq!(p.n_gpu_layers(), 0, "the host fallback keeps every layer on the CPU");
     }
 }

@@ -313,6 +313,44 @@ pub fn gather(
         "local tier",
         &format!("{} (recommends whisper-{})", tier.as_str(), recommended_model),
     );
+    // The compute devices ggml registered. This is the list llama.cpp
+    // chooses between when it loads a model, so it is the one worth
+    // showing: anything else risks reporting a device that will not be
+    // used. Reported only — no offload decision is made from it yet.
+    #[cfg(feature = "llama-local")]
+    {
+        let devices = fono_core::ggml_devices::devices();
+        if devices.is_empty() {
+            writeln!(out, "  compute : CPU only (no accelerator registered)")?;
+            col.push(S::Info, "compute devices", "CPU only (no accelerator registered)");
+        } else {
+            for dev in &devices {
+                let memory = if dev.free_bytes == 0 && dev.total_bytes == 0 {
+                    "memory not reported".to_string()
+                } else if dev.free_is_trustworthy() {
+                    format!(
+                        "{} GB free of {} GB",
+                        dev.free_bytes / (1024 * 1024 * 1024),
+                        dev.total_bytes / (1024 * 1024 * 1024)
+                    )
+                } else if dev.kind.shares_system_memory() {
+                    // Shared with the rest of the machine, so the figure is
+                    // an upper bound rather than a reservation.
+                    format!(
+                        "{} GB, shared with system memory",
+                        dev.total_bytes / (1024 * 1024 * 1024)
+                    )
+                } else {
+                    // Driver did not answer the free-memory query, so the
+                    // reported figure is just the size of the device.
+                    format!("{} GB, free amount unknown", dev.total_bytes / (1024 * 1024 * 1024))
+                };
+                let line = format!("{} — {} ({memory})", dev.description, dev.name);
+                writeln!(out, "  compute : {line}")?;
+                col.push(S::Info, "compute device", &line);
+            }
+        }
+    }
     if let Err(reason) = snap.suitability() {
         writeln!(out, "  {} {reason}", bad("unsuitable because:"))?;
         col.push(S::Fail, "suitability", &format!("unsuitable: {reason}"));

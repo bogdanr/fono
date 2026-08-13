@@ -1089,6 +1089,8 @@ struct PrefixCacheRun {
     outputs_match: bool,
     uncached_output: String,
     cached_output: String,
+    state_roundtrip_first_diff: Option<usize>,
+    state_roundtrip_diff_bytes: usize,
 }
 
 async fn run_assistant_prefix_cache_cmd(args: AssistantPrefixCacheArgs) -> Result<()> {
@@ -1175,6 +1177,8 @@ async fn run_assistant_prefix_cache_cmd(args: AssistantPrefixCacheArgs) -> Resul
                     cached_delta_count: run.cached_delta_count,
                     uncached_output_chars: run.uncached_output_chars,
                     cached_output_chars: run.cached_output_chars,
+                    state_roundtrip_first_diff: run.state_roundtrip_first_diff,
+                    state_roundtrip_diff_bytes: run.state_roundtrip_diff_bytes,
                     outputs_match: run.outputs_match,
                     uncached_output: run.uncached_output,
                     cached_output: run.cached_output,

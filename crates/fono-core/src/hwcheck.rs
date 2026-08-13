@@ -406,6 +406,18 @@ pub fn probe(disk_check_dir: &Path) -> HardwareSnapshot {
     }
 }
 
+/// Memory the host can spare right now, without the rest of [`probe`].
+///
+/// Split out because the offload sizing asks this question on every model
+/// load and wants nothing else from the snapshot — no core count, and in
+/// particular no disk check, which costs a `statvfs` and needs a path.
+/// `0` when the platform cannot report it, which callers must read as
+/// "unknown", never as "no memory".
+#[must_use]
+pub fn available_ram_bytes() -> u64 {
+    read_meminfo().map_or(0, |(_, available)| available)
+}
+
 /// Static platform default for [`HostGpu`] without consulting a runtime
 /// Vulkan probe. Apple Silicon is always [`HostGpu::IntegratedTensor`]
 /// (Metal + CoreML on M-series silicon expose the matmul-tensor fast

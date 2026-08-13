@@ -1,5 +1,7 @@
 # Local TTS (ggml: Piper + Kokoro) and Fono-as-a-Wyoming-TTS-Server — v2
 
+## Status: Superseded (retained for its spike evidence trail — see note below)
+
 > **SUPERSEDED 2026-05-31 by
 > `plans/2026-05-31-local-tts-onnx-voice-stack-and-wyoming-server-v3.md`.**
 > This plan's **ggml-reuse** substrate was reversed once the project

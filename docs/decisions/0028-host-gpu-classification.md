@@ -118,6 +118,19 @@ right.
   detected — Vulkan backend recommended" /
   "Modern integrated GPU detected — Vulkan backend recommended" /
   "Legacy / no GPU — CPU backend (AVX2 + FMA)").
+- **`HostGpu` is not the authority on device memory.** It answers a
+  speed question — how much faster than AVX2 CPU is this host's GPU
+  likely to be, so the wizard can recommend a binary variant and a
+  model size. It deliberately carries no memory figure, and the Vulkan
+  probe it is built on runs in a subprocess and works in builds that do
+  not link llama.cpp at all, so it can be answered before any model
+  exists. Deciding how much of a model fits on a device is a different
+  question with a different source: `fono_core::ggml_devices` reads
+  ggml's own registry, which is the list llama.cpp will actually choose
+  between when it loads that model. Two probes of the same hardware
+  will eventually disagree, so the split of authority is stated rather
+  than left to be discovered: **`HostGpu` decides speed, ggml's device
+  registry decides capacity.** Neither is derived from the other.
 
 ## Risks and mitigations
 

@@ -1,5 +1,376 @@
 # Fono — Project Status
-Last updated: 2026-08-06
+Last updated: 2026-08-13
+
+## 2026-08-13 — Fono now uses your graphics chip by itself, when it can
+
+Until now you got the graphics chip by luck. Cleanup asked for it unconditionally
+and simply failed to start on a card too small to hold the model; the assistant
+never asked at all, so on this laptop it left a doubling of its own speed on the
+table. Neither role checked the one thing that decides the matter — whether the
+model actually fits.
+
+Now both ask the same question at every load: do the weights, the conversation it
+has to remember, and the working memory fit in what the chip has free right now?
+If they do, the whole model goes there. If they don't, it all stays on the
+processor, which is slower but always works. Nothing is remembered between runs,
+because the answer changes the moment you open a browser and it takes half the
+machine. And if the chip refuses a model we thought would fit, Fono says so and
+loads it on the processor instead of failing.
+
+It is all-or-nothing on purpose. Moving *half* the model across is not half the
+benefit — measured, it writes replies slower than moving none of it, because each
+word pays the trip between the two chips in full. There is no polite middle
+setting to offer, so the memory decides and that is the end of it.
+
+Reading the model's own description turned out to be the hard part, and getting
+it wrong is not harmless: too high a guess leaves your graphics chip idle, too
+low pins memory the desktop needed. Two things had to be right. A model's layers
+are not alike — one of ours keeps four times more per word on some layers than on
+others, and the newest kind replaces three layers in four with something that
+remembers a conversation at a fixed cost no matter how long it runs. And the
+obvious cheap way to ask a model about itself crashes the program outright, so we
+read the file's own table of contents instead. Every figure now matches what the
+same models were measured to use, to within a percent.
+
+On this laptop a 9 GB model and an 11 GB one both moved onto the graphics chip
+and ran; the 97 GB one was turned away and streamed from the SSD, exactly as
+before.
+
+The last thing to check was whether the answers change. The two chips add numbers
+in a different order, so the words can differ slightly even when nothing is wrong
+— which means comparing replies letter by letter proves nothing. So we scored the
+model instead: ten programming problems it either solves or doesn't, three runs on
+each chip, alternating. Seven out of ten every single time, the same three
+problems failing in the same way in all six runs. The graphics chip does not make
+the model worse. It made it a little over twice as quick to start speaking.
+
+## 2026-08-13 — NVIDIA's fast new speech model: three times quicker, and we are not taking it
+
+NVIDIA's Parakeet speech model now covers twenty-five European languages,
+Romanian among them, under a licence we can ship. So we measured it against the
+models Fono uses today, on Fono's own recordings. **It is not going in.**
+
+The speed is real and startling: it transcribes at roughly three times the pace
+of our normal model and twenty times the pace of our most accurate one, and it
+does that on a *single* processor core, which means the slowest machine we
+support would still keep up easily. Punctuation and capital letters come out of
+it correctly with no help.
+
+Three things sank it.
+
+It falls apart with noise — but that part is fixable. On the thirty-second
+Romanian recording with a radio playing, our current model gets almost every
+word and this one gets under six in ten. Cleaning the recording first, with a
+half-megabyte noise remover that costs almost nothing to run, takes it to nine
+in ten. The interesting part: doing the same for our current model helps it not
+at all, because it was already trained on noisy speech. So this is not a trick
+that lifts both — it closes most of the gap.
+
+The two that stayed shut are worse. You cannot tell it what language you are
+speaking. It guesses, and on the French recording it guessed wrong and produced
+English-shaped nonsense from start to finish. Our current model lets us say
+"this user speaks Romanian and English", which is exactly how the guard against
+this class of failure works today. There is no equivalent to set here, so the
+failure has no floor.
+
+And it is quiet on short bursts. Under about two seconds it returns nothing at
+all, and padding the recording out with silence does not help — it wants real
+speech. Dictation is full of two-second utterances.
+
+The last hope for it was slow machines, and that turned out backwards. It needs
+about a gigabyte of memory while it works, against six hundred megabytes for the
+model we ship, and its appetite grows with the length of the recording where
+whisper's does not. It is fast because it is a big model with a clever shape, not
+because it is small — it pays in memory for what it saves in processor time. On a
+machine short of cores that is a good trade; on a machine short of memory, which
+is what a cheap laptop usually is, it is worse than what we already have. Our
+actual small option is forty-three megabytes, fifteen times lighter than this.
+And a gigabyte is too much to keep loaded between dictations on such a machine,
+so it would reload every time and hand back most of the speed it won.
+
+With the recording cleaned up it lands about a sixth better than the model we
+use today across English and Romanian, short of the fifth we said we would need,
+and still behind our most accurate tier. Add a six-hundred-and-seventy-megabyte
+download and the answer holds. The full measurements, every trick tried and what
+it was worth, the plumbing notes needed to build this if we ever change our
+minds, and the specific things that would make us reconsider are written into
+the plan file. One pleasant surprise for later: it needs only three operations
+our runtime does not already have, so the size budget was never going to be what
+stopped this.
+
+One idea we then talked ourselves back out of: cleaning up noisy recordings
+before transcribing them, for the model we already ship. Measured properly, with
+the language pinned per recording, it is worth exactly nothing to whisper —
+under a fifth of a per cent across ten recordings, better on two and worse on
+two. Whisper was trained on noisy speech and does not need the help. The cleaner
+is only interesting bundled with the model that does, which we are not taking.
+
+And one claim withdrawn: making recordings louder before transcribing them is
+not a trick at all. Both models throw amplitude away before they look at
+anything — one divides by the loudest moment in the clip, the other levels each
+frequency band over the whole clip — so scaling the sound cannot change what
+either sees, and scaling two recordings by four different amounts produced
+identical text down to the byte. The one recording that appeared to improve is
+simply an unstable one that returns something different every time you nudge it.
+If a microphone is too quiet, that has to be fixed while recording, not
+afterwards.
+
+## 2026-08-13 — The graphics card is worth about half again, not five times
+
+The earlier "four to six times faster" reading is **withdrawn**. It came from one
+run of each arm on a machine that was also downloading a hundred gigabytes and
+compiling at the time, and the processor arm took the beating. Repeated three
+times each on an idle machine, on two models a factor of three apart in size:
+reading a prompt is about 1.5 times faster on the graphics chip and writing the
+reply about 1.9 times faster. The two models agree to within three per cent.
+
+A second retraction from the same cause: a ninety-five-fold speed-up noted during
+the offload checks was mostly the processor run reading the model off disk from
+cold, straight after a twenty-five gigabyte load had emptied the file cache.
+
+**Moving part of the model onto the card is not a way to go part-way faster.**
+Measured again with three repeats per setting and the file cache warmed the same
+way before each, reading a prompt does get steadily faster the more is moved. But
+writing the reply does not: it is twice as fast with everything on the card, and
+at half the layers it is *slower than not using the card at all*. The reason is
+that reading a prompt hands over hundreds of words at a time, so the cost of
+crossing between the two halves is shared out and disappears, while writing hands
+over one word at a time and pays that cost on every single word.
+
+Since writing the reply is what dictation is made of, a half-and-half setting
+chosen to be polite about memory would make the thing users feel slower. **So it
+is all of the model or none of it.**
+
+That makes the memory question sharper rather than softer. Filling the graphics
+chip on this laptop pinned about ten gigabytes — and on a machine that shares
+memory between graphics and everything else, that is ten gigabytes taken from the
+browser, and taken permanently until the model is unloaded. The part left on the
+processor is merely cached and can be given back at any time. There is no middle
+setting to retreat to, so on a shared-memory machine the choice is simply whether
+ten gigabytes is worth the speed today.
+
+Everything above was measured on shared-memory graphics only. No machine with a
+separate card has been measured, and these numbers must not be used to size one.
+
+## 2026-08-12 — `fono doctor` now lists the machine's compute devices
+
+`fono doctor` reports every device the model loader can choose between, with
+its name and how much memory it has. On this laptop the plain build shows the
+processor and the graphics build additionally shows the integrated graphics.
+
+Nothing acts on it yet — this is deliberately a report first, so the numbers can
+be checked on machines we cannot test before any behaviour depends on them. If
+you have a machine with a graphics card, running `fono doctor` and sending the
+`compute` lines is directly useful.
+
+Two things the first readings settled. The graphics chip says for itself that it
+shares memory with the rest of the machine, so Fono does not have to guess. And
+it offers 23 GB on a machine with 30 GB in total — taking that at face value
+would hand the graphics card memory the rest of the machine is already using,
+which is the mistake the next step has to avoid.
+
+## 2026-08-12 — Two questions answered before designing graphics-card offload
+
+Both were things that could have invalidated the design, so they were measured
+rather than assumed. Neither needed code that ships.
+
+**Asking for more graphics memory than exists is a clean failure.** A 25.6 GB
+model against roughly 20 GB free, and separately a conversation far longer than
+the machine could hold, both came back as ordinary errors — no crash, no wedged
+driver, the machine untouched. So Fono can simply ask for what it thinks will
+fit and step down when it does not. It also emerged that llama.cpp does not
+quietly reduce the request to what fits; it tries and fails. Stepping down is
+therefore necessary, not merely careful.
+
+**A remembered conversation survives moving between the processor and the
+graphics card.** Saved on one, reloaded on the other: identical bytes, identical
+answer. So turning offload on does not throw away what was remembered before,
+and cannot silently reload it wrong.
+
+One thing found while looking: the polish step already asks for the graphics
+card to take the whole model, and given the above, on a machine with a small
+card that fails the load rather than falling back. Not introduced here; it goes
+away when both roles share one rule.
+
+## 2026-08-12 — Remembering a conversation now costs half as much
+
+Both halves of the model's working memory are stored at eight bits per number
+instead of sixteen. Measured on a 26B model, that is 46.9% off every remembered
+conversation and off the live one, with both unambiguous test questions
+answered exactly as before.
+
+Restoring got *faster* too, 609 to 303 milliseconds, because the state is
+copied out and back verbatim — fewer bytes is simply quicker. An earlier note
+here said the opposite, from two single runs on a machine that was busy
+compiling.
+
+The correction that made the second half possible: this project had recorded
+that llama.cpp would not shrink the value half without flash attention, which
+was supposedly off. Flash attention defaults to `auto` and resolves to on. It
+was never checked. That mistake was costing half the saving.
+
+Going below eight bits keeps shrinking — four bits is 71.9% off — and the smoke
+questions still answer correctly all the way down. That is not evidence it is
+safe; the test model is a 2-bit quant whose output varies wildly even without a
+cache, so it cannot resolve a small quality loss. Eight bits is the reported
+near-lossless point. Anything lower needs the graded coding suite.
+
+## 2026-08-12 — Tool-using clients work, and the GPU turns out to be four times cheaper
+
+Third session on the prompt cache. Two things landed that the cache work was
+waiting on, plus a correction to a claim this project made yesterday.
+
+**A coding agent can now drive Fono over the chat API.** Yesterday's fix made
+an agent's history survive the request; this one lets an agent actually run.
+The list of tools a client offers is described in the prompt using the same
+words and the same order the assistant uses for its own tools locally, and a
+reply that asks for a tool comes back as a proper tool call — as a JSON string
+on the OpenAI surface, as an object on the Ollama one, which is how each spells
+it. Offering tools means the reply is generated whole before it is sent, since
+a call can only be read out of a finished reply; a client that asked to stream
+still gets a stream, it just arrives at the end.
+
+**The GPU helps, and by much less than first reported.** Two separate reasons
+the earlier answer was "the GPU changes nothing": the benchmark binary had no
+way to pass graphics support through to the assistant, so building with it
+accelerated speech recognition only; and the assistant pinned itself to the
+processor with no override. Fixing both gave a first reading of "four to six
+times cheaper", **which is retracted** — see the 2026-08-13 entry, where
+repeating it on an idle machine gives about 1.5×. Nothing about what ships
+changed; the measurement is now possible.
+
+One thing that argues against the planned disk cache: restoring a saved
+conversation is *slower* on the graphics card for a large model, because it has
+to be uploaded rather than copied within memory. Any sizing arithmetic that
+assumed restoring is nearly free is wrong on both paths.
+
+**The cache directory on this machine is memory, not disk.** `$HOME` is
+`tmpfs` here, so a 4 GB disk cache would have eaten a seventh of the machine's
+memory while appearing to spend disk. Symlinked onto the SSD as a local
+workaround. The real fix — refusing to grow a disk tier on a memory-backed
+filesystem — belongs with the tier itself.
+
+## 2026-08-12 — A saved prompt over a gigabyte quietly ruins the model
+
+Second measurement session on the prompt cache. Two defects fixed, both
+reachable today, and the numbers extended to a 104 GB model and to a
+turn-by-turn conversation. Everything is in
+`docs/bench/prompt-cache-2026-08-11.md`.
+
+**A conversation past ~2,000 tokens could not be answered at all.** The whole
+prompt went to llama.cpp in one decode, which refuses a batch larger than
+`n_batch`. History only grows, so once a conversation crossed the line it
+stayed broken. Prefill is now chunked at `n_batch`; length is bounded only by
+the configured context. This is what unblocked every measurement below, and it
+clears finding F-J001.
+
+**A suspected large-state corruption bug does not exist.** It looked solid:
+holding everything constant except prefix length on gemma-4-26B, a 1.56 GB
+checkpoint restored byte-identically while 2.12 GB came back continuing the
+document instead of answering, reproducibly. A 1 GiB admission ceiling was
+added. Three later checks killed it. Saving from the restored context and
+comparing gives a zero-byte diff at 1.978 GiB. The warm reply is stable across
+two cache layouts differing fourfold in size, while the *cold* reply is not.
+And with an unambiguous instruction at the same 1.978 GiB, warm and cold both
+return `BANANA`, byte-identical. The fixture — 9,428 tokens of notes plus a
+one-line question, on a two-bit quant — was a coin flip between answering and
+continuing, and three of four arms continued. The ceiling has been removed and
+the bench doc records the retraction. The strict `restored == stored` check
+added while chasing it stays.
+
+What the measurements changed about the plan:
+
+- **Per-token KV cost varies eightfold across models of similar size** —
+  220 KB on gemma-4, 162 KB on DeepSeek-V4-Flash, 27 KB on qwen3.6. A 32k coding
+  session is 7.0 GB of checkpoint on one and 0.9 GB on the other. Model choice,
+  not disk budget, decides whether such a session can be cached.
+- **There is no such thing as a small entry.** qwen3.6 pays a fixed ~64 MiB
+  floor per checkpoint, so a 30-token one costs the same as a 184-token one. A
+  hundred one-sentence checkpoints would be 6 GB.
+- **The cache is worth more on a model larger than RAM, not less.**
+  DeepSeek-V4-Flash streaming 104 GB of weights against 30 GB of RAM prefills at
+  269 ms/token; a 369-token prompt already shows 2.7×. Mapping the 58 MB state
+  did not measurably disturb the streamed weights, which was the main worry
+  about letting the kernel page cache be the hot tier.
+- **The API surface adds no prefix instability of its own** — an identical
+  `messages[]` array produces an identical prompt, with nothing time-varying in
+  it. It was, however, throwing away half of an agent's conversation: `tool`
+  messages were dropped, assistant `tool_calls` never parsed, and a request
+  ending in a tool result was answered as if the result had not arrived. Fixed,
+  with tests. Tool *definitions* and tool-call replies are still missing, so an
+  agent can be replayed faithfully but cannot yet drive a tool loop here.
+
+One process note worth keeping. The first fixtures were built by repeating one
+paragraph, and the cached arm looped — which looked exactly like a corrupt
+restore and nearly got written up as one. The cold arm looped too. Repetitive
+text drives a heavily quantized model into a loop on its own, so that benchmark
+measured the fixture. All numbers here use real prose.
+
+Next: tool definitions and tool-call replies on the API, then a hit rate over
+HTTP against a cold page cache.
+
+## 2026-08-11 — Measured what the prompt cache actually costs, before building the disk tier
+
+Baseline for the prompt-state cache persistence work, in
+`docs/bench/prompt-cache-2026-08-11.md`. Run on gemma-4-26B (q4_0 and asym
+2-bit) and qwen3.6-35B via `fono-bench assistant-prefix-cache`, which was
+already the right instrument — it prefills a prefix, saves, restores into a
+fresh context, prefills only the suffix, and generates from both arms in one
+process, so nothing new had to be written. `capability.py` in `../llm-testing`
+gained an `--endpoint` mode so the ten coding tasks can grade Fono over HTTP.
+
+**Three numbers the plan was built on were wrong.** KV is 220 KB/token, not
+18.4 — 12x. Prefill is 21–38 ms/token, not 8.7–14, and gets worse as the prefix
+grows. Restore is not a flat memcpy. The consequences are large: a 32k
+checkpoint is 7 GB, so a 4 GiB ceiling holds two 8k checkpoints and no 32k one,
+and the 256 MiB RAM budget cannot hold even one 1,232-token entry.
+
+**The cache is worth far more than assumed.** A cold 6,685-token turn costs
+4.5 minutes; warm it costs 12 s. That is the case for the work.
+
+**Persistence is effectively free.** Reading a 431 MiB checkpoint back from a
+cold page cache costs ~60 ms, verified against the block device's own counters
+after two flattering false starts (`/tmp` is tmpfs; `cp` sparsifies zeros).
+
+**Write volume is the problem, not capacity.** Only a conversation's frontier is
+kept, so a long session writes a whole checkpoint per turn — 28 GiB/hour at
+6.7k, 138 GiB/hour at 32k. A disk tier must therefore hold new checkpoints
+briefly and persist only those that outlive their turn, which is the opposite of
+the write-through design the plan had settled on.
+
+**Sliding-window attention is the biggest lever available.** gemma-4 windows
+most layers, but llama.cpp allocates them at full context size by default and
+Fono never said otherwise. Windowed costs 66 KB/token instead of 220 and
+restores in 107 ms instead of 313, with prefill unchanged, and it clears the
+score gate: 8/10 cold, 8/10 warm, same verdict on every task at a 6,685-token
+prefix well past the window. Measured from a temporary build; Fono still leaves
+llama.cpp's `true` in place, and switching the default is a decision for the
+plan.
+
+Two defects found and fixed. Sharded models were fingerprinted by their first
+shard alone, so replacing the other 99 GB of a four-shard model left saved
+states looking current; all shards are now fingerprinted together in one shared
+helper in `fono-core`, used by both the assistant and polish backends.
+Serializing a truncated windowed KV cache would have written a hole that
+llama.cpp does not detect and that does not error on resume — guarded.
+
+Also learned: byte equality is the wrong correctness gate. Cold and warm arms
+prefill in different batch shapes, logits move by ~1e-6, near-ties flip, wording
+changes without correctness changing. The graded score is the gate. And a
+synthetic prefix built by repeating a paragraph drives a 2-bit quant into a
+repetition loop in the *cold* arm too, which looks exactly like a corrupt
+restore; prefixes must be real prose.
+
+Still unmeasured: the API surface end to end (no hit rate, no prefix-match
+fraction, no TTFT — and it is where most of the value is expected), 32k contexts
+(blocked by the 2,048-token `n_batch` cap, F-J001), and peak RSS during a save.
+The DeepSeek-V4-Flash 104 GB download was started for a larger-than-RAM
+interference test and then dropped from the critical path: the measured
+bandwidth bounds that effect at ~60 ms, and `../llm-testing` can force the
+over-RAM regime with cgroup caps on a 9.6 GB model in minutes.
+
+Gates: fmt, clippy, `--tests --lib`, size budget (23.08 MiB, four-entry NEEDED)
+all pass.
 
 ## 2026-08-06 — Windows without a graphics driver no longer crashes
 

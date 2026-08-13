@@ -25,7 +25,12 @@ pub mod anthropic_chat;
 pub mod gemini_live;
 #[cfg(feature = "llama-local")]
 pub mod llama_local;
-#[cfg(feature = "llama-local")]
+// Pure text rendering over `serde_json`, with no llama.cpp dependency.
+// Ungated because the LLM server labels an inbound tool result for the
+// model with the same helper the embedded backend replays it with, and
+// those two spellings must not drift: a prompt continued mid-exchange has
+// to stay a prefix of the one rebuilt next turn or the cached prefix stops
+// matching.
 pub mod local_tools;
 #[cfg(feature = "mcp-client")]
 pub mod mcp_client;

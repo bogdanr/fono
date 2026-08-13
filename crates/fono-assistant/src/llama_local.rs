@@ -16,7 +16,7 @@ use std::time::Instant;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use fono_core::brain_tap::{decode_token_with_tap, BrainTap};
-use fono_core::llama_backend::{backend, shared_model, streaming_model_params};
+use fono_core::llama_backend::{backend, shared_model_sized};
 use fono_core::llama_gen::{
     adopt_sampled_token, first_stop_marker, generation_sampler, generation_sampler_with_grammar,
     is_control_token, ruled_out, safe_stream_end, sample_next, turn_markers,
@@ -27,7 +27,7 @@ use fono_core::turn_trace::{
     current_instant, current_span, generation_span_args, record_cache_mutation, CACHE_LANE,
 };
 use futures::stream::{BoxStream, StreamExt};
-use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::context::params::{KvCacheType, LlamaContextParams};
 use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::{AddBos, LlamaModel};
@@ -212,6 +212,15 @@ pub struct RawPromptPrefixCacheRun {
     pub outputs_match: bool,
     pub uncached_output: String,
     pub cached_output: String,
+    /// Offset of the first byte that changed across a save → restore → save
+    /// round trip, or `None` when the round trip was faithful. A restore that
+    /// llama.cpp reports as complete can still land a state the next save does
+    /// not reproduce; this says whether the loss is in the bytes or somewhere
+    /// past them, which is the difference between a serialization bug and a
+    /// numerical one.
+    pub state_roundtrip_first_diff: Option<usize>,
+    /// How many bytes of the round trip differ.
+    pub state_roundtrip_diff_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -249,8 +258,8 @@ pub struct ConversationPrefixCacheReport {
 // checkpoint by prefilling tokens into a context, restoring one, and computing
 // the content-fingerprint key.
 use fono_core::prompt_cache::{
-    CacheCounters, CacheMutationReport, PromptStateCache, PromptStateCacheEntry,
-    PromptStateCacheKey, PromptStateCacheLayer,
+    model_files_fingerprint, CacheCounters, CacheMutationReport, PromptStateCache,
+    PromptStateCacheEntry, PromptStateCacheKey, PromptStateCacheLayer,
 };
 use fono_core::prompt_cache_view::{self as cache_view, CacheSnapshot};
 
@@ -375,14 +384,13 @@ impl LlamaLocalAssistant {
         // `LlamaModel` rather than each loading a ~3.2 GB copy. See
         // `fono_core::llama_backend::shared_model`.
         //
-        // The assistant role uses the explicit streaming params (mmap on, mlock
-        // off, CPU) so a selected larger-than-RAM asym MoE pages in from SSD
-        // instead of being copied resident — the mechanism behind Win #1. For
-        // the small dense default this is behaviourally identical to
-        // `default()`; the differing params also key a *separate* shared-model
-        // entry from polish's `default()` load of the same file, which
-        // is correct — the two roles want different residency for big MoEs.
-        let model = shared_model(&self.model_path, &streaming_model_params())?;
+        // Weights stay file-backed and unpinned, so a selected larger-than-RAM
+        // asym MoE pages in from SSD instead of being copied resident. On top of
+        // that, the layers go on an accelerator when the whole model plus its
+        // cache fits one — which a model several times larger than RAM never
+        // does, so those keep streaming from disk on the CPU exactly as before.
+        let model =
+            shared_model_sized(&self.model_path, self.context_size, KV_CACHE_TYPE, KV_CACHE_TYPE)?;
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let model_name = self.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
         // Load-time tripwire: warn when the selected hand-rolled template's
@@ -611,10 +619,12 @@ impl LlamaLocalAssistant {
         if let Some(entry) = cached {
             let restore_started = Instant::now();
             let restored_bytes = unsafe { ctx.set_state_data(&entry.state) };
-            if restored_bytes == 0 {
+            if restored_bytes != entry.state.len() {
                 warn!(
                     layer = layer.as_str(),
-                    "llama.cpp failed to restore prompt-state cache; falling back"
+                    restored_bytes,
+                    state_bytes = entry.state.len(),
+                    "llama.cpp restored a short prompt-state; falling back"
                 );
                 self.note_cold_prefill(layer.as_str(), "restore_failed");
                 return Ok(None);
@@ -678,13 +688,7 @@ impl LlamaLocalAssistant {
             if let Some((hit_key, entry)) = longest {
                 let restore_started = Instant::now();
                 let restored_bytes = unsafe { ctx.set_state_data(&entry.state) };
-                if restored_bytes == 0 {
-                    warn!(
-                        layer = layer.as_str(),
-                        "llama.cpp failed to restore longest-prefix state; cold-prefilling"
-                    );
-                    ctx = self.new_context(model, "llm.prompt_cache_context_created")?;
-                } else {
+                if restored_bytes == entry.state.len() {
                     start = entry.token_count.min(prefix_tokens.len());
                     matched = true;
                     self.cache_counters.record_restore();
@@ -713,6 +717,14 @@ impl LlamaLocalAssistant {
                             "suffix_tokens": suffix_tokens.len(),
                         }),
                     );
+                } else {
+                    warn!(
+                        layer = layer.as_str(),
+                        restored_bytes,
+                        state_bytes = entry.state.len(),
+                        "llama.cpp restored a short longest-prefix state; cold-prefilling"
+                    );
+                    ctx = self.new_context(model, "llm.prompt_cache_context_created")?;
                 }
             }
             if !matched {
@@ -840,7 +852,7 @@ impl LlamaLocalAssistant {
                 }
             }
         }
-        self.prefill_tokens(
+        let suffix_sample_idx = self.prefill_tokens(
             &mut ctx,
             suffix_tokens,
             prefix_tokens.len() as i32,
@@ -851,7 +863,7 @@ impl LlamaLocalAssistant {
             model,
             &mut ctx,
             full_tokens.len() as i32,
-            (suffix_tokens.len() - 1) as i32,
+            suffix_sample_idx,
             None,
             params.max_new_tokens,
             self.tap().map(Arc::as_ref),
@@ -919,7 +931,10 @@ impl LlamaLocalAssistant {
                 // Drop KV cells at positions >= reusable_len so the serialized
                 // state covers exactly `reusable_len` positions.
                 let truncated = reusable_len == combined.len()
-                    || ctx.clear_kv_cache_seq(Some(0), Some(reusable_len as u32), None).is_ok();
+                    || (truncation_safe_for_state_save(reusable_len, combined.len())
+                        && ctx
+                            .clear_kv_cache_seq(Some(0), Some(reusable_len as u32), None)
+                            .is_ok());
                 if truncated {
                     if let Ok(post_state) = copy_context_state(&ctx) {
                         let reusable = &combined[..reusable_len];
@@ -1109,7 +1124,10 @@ impl LlamaLocalAssistant {
             .with_n_ctx(Some(n_ctx))
             .with_n_batch(batch_size)
             .with_n_threads(self.threads)
-            .with_n_threads_batch(self.threads);
+            .with_n_threads_batch(self.threads)
+            .with_swa_full(SWA_FULL)
+            .with_type_k(KV_CACHE_TYPE)
+            .with_type_v(KV_CACHE_TYPE);
         if let Some(ubatch_size) = self.ubatch_size {
             ctx_params = ctx_params.with_n_ubatch(ubatch_size.max(1));
         }
@@ -1149,22 +1167,8 @@ impl LlamaLocalAssistant {
             ));
         }
 
-        let batch_span = current_span("llm.prefill_batch_build", "assistant.llm", "llm");
-        let prefill_batch_capacity = self.context_size as usize;
-        let mut batch = LlamaBatch::new(prefill_batch_capacity, 1);
-        let last_prefill_idx = tokens.len() as i32 - 1;
-        for (i, token) in tokens.iter().enumerate() {
-            batch
-                .add(*token, i as i32, &[0], i as i32 == last_prefill_idx)
-                .context("prefill batch.add")?;
-        }
-        batch_span.finish(json!({
-            "prompt_tokens": tokens.len(),
-            "batch_capacity": prefill_batch_capacity,
-        }));
-        let prefill_span = current_span("llm.prefill_decode", "assistant.llm", "llm");
-        ctx.decode(&mut batch).context("prefill decode")?;
-        prefill_span.finish(json!({ "prompt_tokens": tokens.len() }));
+        let last_prefill_idx =
+            self.prefill_tokens(&mut ctx, &tokens, 0, true, "llm.prefill_decode")?;
 
         let generation = generate_from_prefilled_context(
             model,
@@ -1408,8 +1412,11 @@ impl LlamaLocalAssistant {
                 let mut cached_ctx = self.new_context(model, "llm.prefix_cache_context_created")?;
                 let restored_bytes = unsafe { cached_ctx.set_state_data(&state) };
                 let state_restore_ms = restore_started.elapsed().as_millis() as u64;
-                if restored_bytes == 0 {
-                    return Err(anyhow!("llama.cpp failed to restore cached prefix state"));
+                if restored_bytes != state.len() {
+                    return Err(anyhow!(
+                        "llama.cpp restored {restored_bytes} of {} cached prefix state bytes",
+                        state.len()
+                    ));
                 }
                 current_instant(
                     "llm.prefix_cache_restored",
@@ -1425,9 +1432,26 @@ impl LlamaLocalAssistant {
                     }),
                 );
 
+                // Save the restored state straight back out. `set_state_data`
+                // reporting a complete restore only says the bytes were
+                // consumed, not that they landed; a second save that does not
+                // reproduce the first tells us the loss is in the state itself.
+                let roundtrip = copy_context_state(&cached_ctx)?;
+                let (state_roundtrip_first_diff, state_roundtrip_diff_bytes) = if roundtrip == state
+                {
+                    (None, 0)
+                } else {
+                    let first = state.iter().zip(roundtrip.iter()).position(|(a, b)| a != b);
+                    let differing =
+                        state.iter().zip(roundtrip.iter()).filter(|(a, b)| a != b).count()
+                            + state.len().abs_diff(roundtrip.len());
+                    (first, differing)
+                };
+                drop(roundtrip);
+
                 let cached_started = Instant::now();
                 let suffix_prefill_started = Instant::now();
-                self.prefill_tokens(
+                let suffix_sample_idx = self.prefill_tokens(
                     &mut cached_ctx,
                     &suffix_tokens,
                     prefix_tokens.len() as i32,
@@ -1441,7 +1465,7 @@ impl LlamaLocalAssistant {
                     model,
                     &mut cached_ctx,
                     (prefix_tokens.len() + suffix_tokens.len()) as i32,
-                    (suffix_tokens.len() - 1) as i32,
+                    suffix_sample_idx,
                     None,
                     MAX_NEW_TOKENS,
                     self.tap().map(Arc::as_ref),
@@ -1496,6 +1520,8 @@ impl LlamaLocalAssistant {
                     outputs_match: uncached_output == cached_output,
                     uncached_output,
                     cached_output,
+                    state_roundtrip_first_diff,
+                    state_roundtrip_diff_bytes,
                 });
             }
         }
@@ -1592,7 +1618,10 @@ impl LlamaLocalAssistant {
             .with_n_ctx(Some(n_ctx))
             .with_n_batch(batch_size)
             .with_n_threads(self.threads)
-            .with_n_threads_batch(self.threads);
+            .with_n_threads_batch(self.threads)
+            .with_swa_full(SWA_FULL)
+            .with_type_k(KV_CACHE_TYPE)
+            .with_type_v(KV_CACHE_TYPE);
         if let Some(ubatch_size) = self.ubatch_size {
             ctx_params = ctx_params.with_n_ubatch(ubatch_size.max(1));
         }
@@ -1619,6 +1648,20 @@ impl LlamaLocalAssistant {
         Ok(ctx)
     }
 
+    /// Read `tokens` into the context, in `n_batch`-sized chunks.
+    ///
+    /// llama.cpp rejects a decode carrying more tokens than the context's
+    /// `n_batch`, and the assistant runs a batch well below its context size,
+    /// so a single-shot prefill puts a hard ceiling on prompt length: a
+    /// conversation that grew past it stopped answering, permanently, because
+    /// history only grows. Chunking removes the ceiling — positions carry
+    /// across decodes, so only the last token of the last chunk asks for
+    /// logits — and shrinks the batch allocation from context-sized to
+    /// chunk-sized.
+    ///
+    /// Returns the index to sample logits from, which is relative to the final
+    /// decode and so is *not* the token's position in `tokens`. Meaningless
+    /// when `logits_last` is false, since nothing asked for logits.
     fn prefill_tokens(
         &self,
         ctx: &mut LlamaContext<'_>,
@@ -1626,20 +1669,36 @@ impl LlamaLocalAssistant {
         start_pos: i32,
         logits_last: bool,
         event_name: &'static str,
-    ) -> Result<()> {
+    ) -> Result<i32> {
         if tokens.is_empty() {
             return Err(anyhow!("cannot prefill an empty token list"));
         }
         let batch_span = current_span(event_name, "assistant.llm", "llm");
-        let prefill_batch_capacity = self.context_size as usize;
-        let mut batch = LlamaBatch::new(prefill_batch_capacity, 1);
+        let chunk_size = self
+            .batch_size
+            .unwrap_or(self.context_size)
+            .max(1)
+            .min(u32::try_from(tokens.len()).unwrap_or(u32::MAX)) as usize;
+        let mut batch = LlamaBatch::new(chunk_size, 1);
         let last_idx = tokens.len() - 1;
-        for (i, token) in tokens.iter().enumerate() {
-            batch
-                .add(*token, start_pos + i as i32, &[0], logits_last && i == last_idx)
-                .context("prefill batch.add")?;
+        let mut sample_idx = 0;
+        for (chunk_index, chunk) in tokens.chunks(chunk_size).enumerate() {
+            batch.clear();
+            let base = chunk_index * chunk_size;
+            for (i, token) in chunk.iter().enumerate() {
+                let index = base + i;
+                batch
+                    .add(
+                        *token,
+                        start_pos + i32::try_from(index).unwrap_or(i32::MAX),
+                        &[0],
+                        logits_last && index == last_idx,
+                    )
+                    .context("prefill batch.add")?;
+            }
+            ctx.decode(&mut batch).context("prefill decode")?;
+            sample_idx = i32::try_from(chunk.len() - 1).unwrap_or(i32::MAX);
         }
-        ctx.decode(&mut batch).context("prefill decode")?;
         // One spine-sweep pulse on the Glass Cortex per prefill batch.
         #[allow(clippy::cast_possible_truncation)]
         fono_core::brain_tap::publish_prefill(
@@ -1649,10 +1708,10 @@ impl LlamaLocalAssistant {
         batch_span.finish(json!({
             "prompt_tokens": tokens.len(),
             "start_pos": start_pos,
-            "batch_capacity": prefill_batch_capacity,
+            "batch_capacity": chunk_size,
             "logits_last": logits_last,
         }));
-        Ok(())
+        Ok(sample_idx)
     }
 
     fn prompt_state_cache_key(
@@ -1661,26 +1720,19 @@ impl LlamaLocalAssistant {
         prompt: &str,
         tokens: &[llama_cpp_2::token::LlamaToken],
     ) -> Result<PromptStateCacheKey> {
-        let metadata = std::fs::metadata(&self.model_path)
-            .with_context(|| format!("read model metadata {}", self.model_path.display()))?;
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or_else(
-                || "unknown".to_string(),
-                |d| format!("{}.{:09}", d.as_secs(), d.subsec_nanos()),
-            );
         let runtime_identity = format!(
-            "llama-cpp-2:{}|model={}|size={}|modified={}|ctx={}|threads={}|batch={}|ubatch={}",
+            "llama-cpp-2:{}|model={}|files={}|ctx={}|threads={}|batch={}|ubatch={}|swa_full={}|kv={:?}",
             env!("CARGO_PKG_VERSION"),
             self.model_path.display(),
-            metadata.len(),
-            modified,
+            model_files_fingerprint(&self.model_path).with_context(|| {
+                format!("read model metadata {}", self.model_path.display())
+            })?,
             self.context_size,
             self.threads,
             self.batch_size.unwrap_or(self.context_size),
-            self.ubatch_size.map_or_else(|| "auto".to_string(), |v| v.to_string())
+            self.ubatch_size.map_or_else(|| "auto".to_string(), |v| v.to_string()),
+            SWA_FULL,
+            KV_CACHE_TYPE,
         );
         Ok(PromptStateCacheKey::new(
             layer,
@@ -1707,7 +1759,10 @@ impl LlamaLocalAssistant {
             .with_n_ctx(Some(n_ctx))
             .with_n_batch(batch_size)
             .with_n_threads(self.threads)
-            .with_n_threads_batch(self.threads);
+            .with_n_threads_batch(self.threads)
+            .with_swa_full(SWA_FULL)
+            .with_type_k(KV_CACHE_TYPE)
+            .with_type_v(KV_CACHE_TYPE);
         if let Some(ubatch_size) = self.ubatch_size {
             ctx_params = ctx_params.with_n_ubatch(ubatch_size.max(1));
         }
@@ -1747,26 +1802,10 @@ impl LlamaLocalAssistant {
             ));
         }
 
-        let batch_span =
-            current_span("llm.state_cache_prefill_batch_build", "assistant.llm", "llm");
-        let prefill_batch_capacity = self.context_size as usize;
-        let mut batch = LlamaBatch::new(prefill_batch_capacity, 1);
-        let last_prefill_idx = tokens.len() as i32 - 1;
-        for (i, token) in tokens.iter().enumerate() {
-            batch
-                .add(*token, i as i32, &[0], i as i32 == last_prefill_idx)
-                .context("prefill batch.add")?;
-        }
-        batch_span.finish(json!({
-            "prompt_tokens": tokens.len(),
-            "batch_capacity": prefill_batch_capacity,
-        }));
         let setup_prefill_started = Instant::now();
-        let prefill_span = current_span("llm.state_cache_prefill_decode", "assistant.llm", "llm");
-        ctx.decode(&mut batch).context("prefill decode")?;
+        let last_prefill_idx =
+            self.prefill_tokens(&mut ctx, &tokens, 0, true, "llm.state_cache_prefill_decode")?;
         let setup_prefill_ms = setup_prefill_started.elapsed().as_millis() as u64;
-        prefill_span
-            .finish(json!({ "prompt_tokens": tokens.len(), "elapsed_ms": setup_prefill_ms }));
 
         let first_token = LlamaSampler::greedy().sample(&ctx, last_prefill_idx);
         current_instant(
@@ -1801,8 +1840,11 @@ impl LlamaLocalAssistant {
                 "restored_bytes": restored_bytes,
                 "elapsed_ms": state_restore_ms,
             }));
-            if restored_bytes == 0 {
-                return Err(anyhow!("llama.cpp failed to restore cached prompt state"));
+            if restored_bytes != state.len() {
+                return Err(anyhow!(
+                    "llama.cpp restored {restored_bytes} of {} cached prompt state bytes",
+                    state.len()
+                ));
             }
 
             let started = Instant::now();
@@ -3025,6 +3067,76 @@ fn token_trace_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         std::env::var("FONO_TRACE_TOKENS").ok().and_then(|v| env_bool(&v)).unwrap_or(false)
     })
+}
+
+/// Whether the sliding-window KV cache is allocated at full context size.
+///
+/// Models with sliding-window attention (gemma-4 among them) only ever attend
+/// to the last `n_swa` positions on most of their layers, so those layers need
+/// a KV cache of `n_swa` cells rather than `n_ctx`. llama.cpp nevertheless
+/// allocates the full size by default, because a windowed cache cannot serve a
+/// request that rewinds or re-seeks inside the prompt — the older cells are
+/// gone. Measured on gemma-4-26B at `n_ctx=8192` with a 6,685-token prefix,
+/// full-size costs 220 KB per token of saved state against 66 KB windowed, and
+/// restores in 313 ms against 107 ms, with prefill unchanged. Below the window
+/// the two are byte-identical, so the saving only appears on long prompts.
+///
+/// Left at llama.cpp's default. Windowed mode restores faithfully for
+/// forward-only prefix reuse — the ten coding tasks score identically from a
+/// restored state and from a cold prefill — but it forbids serializing a state
+/// whose tail has been dropped; see `truncation_safe_for_state_save`.
+///
+/// Folded into the prompt state cache runtime identity because it changes the
+/// saved-state layout.
+const SWA_FULL: bool = true;
+
+/// Numeric type of both halves of the KV cache.
+///
+/// `q8_0` — 8 bits plus a shared scale per 32 values, so ~8.5 bits where f16
+/// uses 16. Measured on gemma-4-26B over a 1,232-token prefix, against f16:
+///
+/// | k, v | per token | restore |
+/// |---|---|---|
+/// | f16, f16 | 220.0 KB | 609 ms |
+/// | q8_0, f16 | 168.5 KB | 465 ms |
+/// | **q8_0, q8_0** | **116.9 KB** | **303 ms** |
+/// | q5_1, q5_1 | 82.5 KB | 198 ms |
+/// | q4_0, q4_0 | 61.9 KB | 127 ms |
+///
+/// 47% off every checkpoint and off the live context, and restore is twice as
+/// fast because it is a copy of the stored rows — nothing is converted on the
+/// way in or out. Prefill pays for it, 34.4 against 39.5 ms per token.
+///
+/// The table keeps going down, and the reason to stop here is that we cannot
+/// yet tell whether the lower rows are worse. Eight bits per value is the
+/// widely reported near-lossless point; below it the loss shows up on long
+/// contexts and recall, which needs a graded suite to see, not the smoke
+/// prompts above — those answer correctly even at four bits.
+///
+/// Quantizing the value half at all requires flash attention, which llama.cpp
+/// resolves to on here.
+const KV_CACHE_TYPE: KvCacheType = KvCacheType::Q8_0;
+
+/// Whether dropping KV cells past `keep_len` leaves a state that can be safely
+/// serialized and later resumed.
+///
+/// With a full-size sliding-window cache every position ever prefilled is still
+/// resident, so dropping a tail is always safe. With a windowed cache only the
+/// most recent cells survive: the layers hold roughly the last `n_swa` window
+/// worth of positions ending at `have_len`. Dropping back to `keep_len` moves
+/// the end of the sequence earlier without recovering the positions that were
+/// already evicted, so the window ending at `keep_len` can be missing its
+/// oldest cells. llama.cpp does not detect this — `state_write` serializes
+/// whichever cells exist — and a resumed hole does not error, it silently
+/// changes what the model attends to.
+///
+/// Rather than reach into llama.cpp for the window geometry, refuse any
+/// truncation at all in windowed mode. The caller only truncates when the
+/// canonical rendering of a finished turn is a few tokens shorter than what was
+/// generated, so the cost is losing that one checkpoint in that one case, and
+/// the next turn re-prefills a short suffix instead.
+fn truncation_safe_for_state_save(keep_len: usize, have_len: usize) -> bool {
+    keep_len == have_len || SWA_FULL
 }
 
 fn sha256_text(text: &str) -> String {

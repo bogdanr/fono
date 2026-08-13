@@ -34,9 +34,71 @@
 //! [`PromptStateCache::evictable_totals`].
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// Size and modification time of every file that makes up a model, for the
+/// runtime half of a cache key.
+///
+/// A GGUF over a few tens of gigabytes is published as numbered shards
+/// (`…-00001-of-00004.gguf`) and llama.cpp is handed only the first one; it
+/// resolves its siblings itself. Fingerprinting just the named file therefore
+/// misses every byte of weight data in the remaining shards — for a 104 GB
+/// four-shard model that is 99 GB of weights invisible to the key. Swapping
+/// those shards for a different quantization would leave saved states looking
+/// current and restore them into a model that never produced them. Shards are
+/// fingerprinted together so any of them changing invalidates the saved states.
+pub fn model_files_fingerprint(path: &Path) -> std::io::Result<String> {
+    let mut parts = Vec::new();
+    for file in model_shard_paths(path) {
+        let metadata = std::fs::metadata(&file)?;
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or_else(
+                || "unknown".to_string(),
+                |d| format!("{}.{:09}", d.as_secs(), d.subsec_nanos()),
+            );
+        parts.push(format!(
+            "{}:{}:{}",
+            file.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+            metadata.len(),
+            modified
+        ));
+    }
+    Ok(parts.join(","))
+}
+
+/// Every shard of a sharded GGUF, or just `path` when it is a single file.
+///
+/// Derives the sibling names from the `-<index>-of-<total>` suffix rather than
+/// reading the directory, so unrelated GGUFs sitting alongside cannot creep in.
+/// Missing siblings stay in the list: their absence must fail loudly in
+/// [`model_files_fingerprint`] rather than silently shrink the fingerprint.
+pub fn model_shard_paths(path: &Path) -> Vec<PathBuf> {
+    let single = || vec![path.to_path_buf()];
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return single() };
+    let Some(stem) = name.strip_suffix(".gguf") else { return single() };
+    // Trailing `-<index>-of-<total>`, zero-padded to the width of `<total>`.
+    let Some((rest, total_field)) = stem.rsplit_once('-') else { return single() };
+    let Some((rest, of)) = rest.rsplit_once('-') else { return single() };
+    let Some((prefix, index_field)) = rest.rsplit_once('-') else { return single() };
+    let Ok(total) = total_field.parse::<u32>() else { return single() };
+    if of != "of" || total == 0 || index_field.len() != total_field.len() {
+        return single();
+    }
+    if index_field.parse::<u32>().is_err() {
+        return single();
+    }
+    let width = total_field.len();
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    (1..=total)
+        .map(|i| parent.join(format!("{prefix}-{i:0width$}-of-{total:0width$}.gguf")))
+        .collect()
+}
 
 /// Logical role of a cached prefix. The layer is part of the cache key, so two
 /// prefixes with identical text but different roles never collide, and it
@@ -702,6 +764,63 @@ mod tests {
 
     fn entry(bytes: usize) -> PromptStateCacheEntry {
         PromptStateCacheEntry::new(vec![0_u8; bytes], 1)
+    }
+
+    #[test]
+    fn a_large_checkpoint_is_stored_like_any_other() {
+        // Checkpoints of a couple of gigabytes were once refused, on the
+        // belief that llama.cpp reloaded them wrongly. Measurement showed the
+        // reload is exact and the suspect replies came from an ambiguous test
+        // prompt, so size alone must not keep a checkpoint out; only the
+        // cache's own byte budget decides what fits.
+        let mut cache = PromptStateCache::new(10, 1024 * 1024);
+        let big = key(PromptStateCacheLayer::F8ChatPrefix, "turn-1");
+        let report = cache.insert(big.clone(), entry(512 * 1024));
+        assert!(report.evicted.is_empty());
+        assert!(cache.contains(&big));
+    }
+
+    #[test]
+    fn shard_paths_enumerate_every_gguf_shard() {
+        // llama.cpp is handed shard 1 and finds the rest; the fingerprint has
+        // to see all of them or the bulk of the weights stays invisible to the
+        // key, and a swapped quantization restores stale states silently.
+        let first = PathBuf::from("/models/DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf");
+        let shards = model_shard_paths(&first);
+        assert_eq!(shards.len(), 4);
+        assert_eq!(shards[0], first);
+        assert_eq!(
+            shards[3],
+            PathBuf::from("/models/DeepSeek-V4-Flash-UD-IQ3_XXS-00004-of-00004.gguf")
+        );
+        // Naming a later shard yields the same set, so the key does not depend
+        // on which shard the config happens to point at.
+        assert_eq!(model_shard_paths(&shards[2]), shards);
+    }
+
+    #[test]
+    fn shard_paths_leave_unsharded_models_alone() {
+        for name in ["gemma-4-26B-it-Q8_0.gguf", "weird-of-4.gguf", "no-extension", "a-1-of-0.gguf"]
+        {
+            let p = PathBuf::from("/models").join(name);
+            assert_eq!(model_shard_paths(&p), vec![p.clone()], "{name}");
+        }
+    }
+
+    #[test]
+    fn missing_shard_fails_the_fingerprint() {
+        // A half-downloaded model must not produce a fingerprint at all: a
+        // shorter one would silently collide with the complete download.
+        let dir = std::env::temp_dir().join(format!("fono-shard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let first = dir.join("m-00001-of-00002.gguf");
+        std::fs::write(&first, b"x").expect("write shard");
+        assert!(model_files_fingerprint(&first).is_err(), "missing shard 2");
+        std::fs::write(dir.join("m-00002-of-00002.gguf"), b"yy").expect("write shard");
+        let fingerprint = model_files_fingerprint(&first).expect("complete model");
+        assert!(fingerprint.contains("m-00001-of-00002.gguf:1:"), "{fingerprint}");
+        assert!(fingerprint.contains("m-00002-of-00002.gguf:2:"), "{fingerprint}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

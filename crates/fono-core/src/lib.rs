@@ -36,6 +36,12 @@ pub mod budget;
 pub mod brain_tap;
 
 #[cfg(feature = "llama-local")]
+pub mod ggml_devices;
+
+#[cfg(feature = "llama-local")]
+pub mod gpu_offload;
+
+#[cfg(feature = "llama-local")]
 pub mod llama_backend;
 
 #[cfg(feature = "llama-local")]

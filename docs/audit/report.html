@@ -1,0 +1,212 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fono code audit — what is worth fixing</title>
+<style>
+:root{--bg:#0d1117;--panel:#161b22;--panel2:#1c2128;--bd:#30363d;--fg:#e6edf3;
+--dim:#8b949e;--dim2:#6e7681;--acc:#58a6ff;--s1:#f85149;--s2:#ff9d47;--s3:#d29922;
+--s4:#8b949e;--ok:#3fb950;--mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+.wrap{max-width:1180px;margin:0 auto;padding:40px 24px 80px}
+h1{font-size:30px;margin:0 0 6px;letter-spacing:-.02em}
+h2{font-size:20px;margin:44px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--bd)}
+h3{font-size:15px;margin:26px 0 8px;color:var(--fg)}
+.sub{color:var(--dim);margin:0 0 26px;font-size:14px}
+code,.mono{font-family:var(--mono);font-size:12.5px}
+.note{background:var(--panel);border:1px solid var(--bd);border-left:3px solid var(--acc);
+padding:14px 18px;border-radius:6px;margin:18px 0;font-size:14px}
+.note.warn{border-left-color:var(--s2)}
+.stats{display:flex;flex-wrap:wrap;gap:10px;margin:24px 0}
+.stat{background:var(--panel);border:1px solid var(--bd);border-radius:6px;
+padding:12px 18px;min-width:112px}
+.stat b{display:block;font-size:26px;line-height:1.2}
+.stat span{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+.cards{display:grid;gap:12px}
+.card{background:var(--panel);border:1px solid var(--bd);border-radius:8px;padding:16px 18px;
+display:grid;grid-template-columns:44px 1fr auto;gap:16px;align-items:start}
+.card .rank{font:700 20px/1 var(--mono);color:var(--dim2);padding-top:2px}
+.card h4{margin:0 0 4px;font-size:15.5px;font-weight:600}
+.card .meta{color:var(--dim);font-size:12.5px;margin:0 0 8px}
+.card .fix{font-size:13.5px;color:var(--fg);opacity:.9}
+.card .val{text-align:right}
+.card .val b{display:block;font:700 22px/1 var(--mono);color:var(--ok)}
+.card .val span{font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em}
+.pill{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;
+font-weight:600;border:1px solid;margin-right:5px;vertical-align:1px}
+.S1{color:var(--s1);border-color:#5c2321;background:#2a1210}
+.S2{color:var(--s2);border-color:#5c3a1a;background:#2a1c0d}
+.S3{color:var(--s3);border-color:#4a3a12;background:#241d09}
+.S4{color:var(--s4);border-color:#3d444d;background:#1c2128}
+.tag{display:inline-block;padding:0 6px;border-radius:4px;font-size:10.5px;
+background:var(--panel2);border:1px solid var(--bd);color:var(--dim);margin-right:4px;
+font-family:var(--mono)}
+table{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:12px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--bd);vertical-align:top}
+th{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.06em;
+font-weight:600;cursor:pointer;user-select:none;white-space:nowrap;position:sticky;top:0;
+background:var(--bg)}
+th:hover{color:var(--fg)}
+th.num,td.num{text-align:right;font-family:var(--mono)}
+tbody tr:hover{background:var(--panel)}
+td .t{font-weight:500}
+td .w{color:var(--dim2);font-family:var(--mono);font-size:11.5px;display:block;margin-top:3px}
+.bar{display:inline-block;height:5px;border-radius:3px;background:var(--ok);
+vertical-align:2px;margin-right:6px;min-width:2px}
+.ctl{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0 0;align-items:center}
+.ctl button{background:var(--panel);color:var(--dim);border:1px solid var(--bd);
+border-radius:6px;padding:5px 12px;font-size:12.5px;cursor:pointer;font-weight:500}
+.ctl button:hover{color:var(--fg);border-color:var(--dim2)}
+.ctl button.on{background:#1f2f45;color:var(--acc);border-color:#2d4a70}
+.bundle{background:var(--panel);border:1px solid var(--bd);border-radius:8px;
+padding:14px 18px;margin:10px 0}
+.bundle h4{margin:0 0 3px;font-size:14.5px}
+.bundle .ids{font-family:var(--mono);font-size:12px;color:var(--acc);margin-bottom:6px}
+.bundle p{margin:0;font-size:13.5px;color:var(--dim)}
+ul.clean{padding-left:20px;margin:10px 0}
+ul.clean li{margin:5px 0;color:var(--dim);font-size:14px}
+ul.clean li b{color:var(--fg);font-weight:600}
+footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--bd);
+color:var(--dim2);font-size:12.5px}
+@media(max-width:720px){.card{grid-template-columns:1fr}.card .val{text-align:left}}
+</style></head><body><div class="wrap">
+<h1>Fono code audit — what is worth fixing</h1>
+<p class="sub">Stage 3 output, ranked. Anchor <code>86a7a41</code> &middot; full ledger in <code>docs/audit/findings.md</code> (4,930 lines, 58 findings)</p>
+<div class="note warn"><b>These are suggestions, not changes.</b> No source file was modified in any phase of this audit. Nothing here is approved; fixes happen only per finding ID, after you approve them.</div>
+<div class="stats">
+<div class="stat"><b>2</b><span>S1 findings</span></div>
+<div class="stat"><b>12</b><span>S2 findings</span></div>
+<div class="stat"><b>40</b><span>scored defects</span></div>
+<div class="stat"><b>6</b><span>reproduced by running code</span></div>
+<div class="stat"><b>0</b><span>new dependencies needed</span></div>
+</div>
+<h2>How the scores are built</h2>
+<p class="sub" style="margin-bottom:14px">Every number below is computed from the same four inputs, so two findings with the same score really are comparable. Nothing is scored by feel.</p>
+<ul class="clean">
+<li><b>Importance (0–10)</b> = severity base (S1&nbsp;6, S2&nbsp;4, S3&nbsp;2, S4&nbsp;1) + harm tags (work&#8209;loss&nbsp;2, crash&nbsp;2, security&nbsp;2, wrong&#8209;output&nbsp;2, silent&nbsp;1) + reachability (default config&nbsp;2, needs a setting&nbsp;1, rare&nbsp;0), capped at 10.</li>
+<li><b>Confidence (0–1)</b> comes from the Stage&nbsp;3 verification state, not from how convincing the argument reads: <b>1.00</b> reproduced by running code, <b>0.95</b> proven by a single command, <b>0.70</b> high confidence read-only, <b>0.50</b> medium, <b>0.30</b> low.</li>
+<li><b>Cost</b> is XS (under 5 lines), S (one function), M (one module), L (a design decision), weighted 1 / 1.5 / 2.5 / 4.</li>
+<li><b>Value = importance &times; confidence &divide; cost weight.</b> This deliberately ranks a three-line certain fix above a large speculative one, which is what makes the list actionable rather than merely alarming.</li>
+</ul>
+<div class="note">Four findings were <b>downgraded</b> from S2 to S3 during verification because their mechanism is real but their user-visible consequence was never demonstrated (<code>F-A001</code>, <code>F-A003</code>, <code>F-D001</code>, <code>F-L001</code>). They score lower here by design. Both S1s survived verification and neither weakened.</div>
+<h2>The ten worth doing first</h2>
+<div class="cards">
+<div class="card"><div class="rank">01</div><div>
+<h4><span class="pill S1">S1</span>Three injection backends report success when they failed <code style="color:var(--dim2)">F-M001</code></h4>
+<p class="meta">crates/fono-inject/src/inject.rs:575-585 &middot; cost <b>XS</b> (under 5 lines) &middot; Reproduced by running code</p>
+<p class="fix">Return Err on a non-zero exit; the clipboard fallback that already exists then fires.</p>
+</div><div class="val"><b>10.0</b><span>value</span></div></div>
+<div class="card"><div class="rank">02</div><div>
+<h4><span class="pill S1">S1</span>The Wyoming bearer token is never checked <code style="color:var(--dim2)">F-H001</code></h4>
+<p class="meta">crates/fono-net/src/wyoming/server.rs:63-67 &middot; cost <b>M</b> (one module / several call sites) &middot; Proven by a single command</p>
+<p class="fix">Call auth::decide from the listener. Must ship with F-H002.</p>
+</div><div class="val"><b>3.8</b><span>value</span></div></div>
+<div class="card"><div class="rank">03</div><div>
+<h4><span class="pill S2">S2</span>A server ignoring Range yields a corrupt file that is kept <code style="color:var(--dim2)">F-O002</code></h4>
+<p class="meta">crates/fono-download/src/lib.rs:113 &middot; cost <b>XS</b> (under 5 lines) &middot; Proven by a single command</p>
+<p class="fix">If bytes are already on disk and the status is 200, truncate instead of appending.</p>
+</div><div class="val"><b>7.6</b><span>value</span></div></div>
+<div class="card"><div class="rank">04</div><div>
+<h4><span class="pill S2">S2</span>Two of three server tokens ignore secrets.toml <code style="color:var(--dim2)">F-H002</code></h4>
+<p class="meta">crates/fono/src/daemon.rs:3640 &middot; cost <b>XS</b> (under 5 lines) &middot; Proven by a single command</p>
+<p class="fix">Use secrets.resolve at both sites.</p>
+</div><div class="val"><b>7.6</b><span>value</span></div></div>
+<div class="card"><div class="rank">05</div><div>
+<h4><span class="pill S3">S3</span>The default wake model downloads unverified <code style="color:var(--dim2)">F-0008</code></h4>
+<p class="meta">crates/fono-audio/src/wake_registry.rs:190 &middot; cost <b>XS</b> (under 5 lines) &middot; Proven by a single command</p>
+<p class="fix">Pin the SHA. Implicated in two independent paths to a bad file on disk.</p>
+</div><div class="val"><b>6.7</b><span>value</span></div></div>
+<div class="card"><div class="rank">06</div><div>
+<h4><span class="pill S2">S2</span>“Pause hotkeys” ships, does nothing, and a test pins it there <code style="color:var(--dim2)">F-B004</code></h4>
+<p class="meta">crates/fono-tray/src/menu.rs:138 &middot; cost <b>XS</b> (under 5 lines) &middot; Proven by a single command</p>
+<p class="fix">Stop rendering it, or implement it — the state, tooltip and icon already exist.</p>
+</div><div class="val"><b>6.7</b><span>value</span></div></div>
+<div class="card"><div class="rank">07</div><div>
+<h4><span class="pill S2">S2</span>One hyphen defeats the non-English shell gate <code style="color:var(--dim2)">F-A004</code></h4>
+<p class="meta">crates/fono/src/session.rs:5773-5774 &middot; cost <b>S</b> (one function) &middot; Reproduced by running code</p>
+<p class="fix">Anchor the flag markers as tokens; add a hyphen-bearing fixture.</p>
+</div><div class="val"><b>5.3</b><span>value</span></div></div>
+<div class="card"><div class="rank">08</div><div>
+<h4><span class="pill S2">S2</span>Batch dictation cannot be cancelled once processing starts <code style="color:var(--dim2)">F-A006</code></h4>
+<p class="meta">crates/fono-hotkey/src/fsm.rs:348 &middot; cost <b>S</b> (one function) &middot; Reproduced by running code</p>
+<p class="fix">Add the (Processing, CancelPressed) arm; retain the pipeline AbortHandle.</p>
+</div><div class="val"><b>5.3</b><span>value</span></div></div>
+<div class="card"><div class="rank">09</div><div>
+<h4><span class="pill S3">S3</span>64 MiB is reserved from a 110-byte header <code style="color:var(--dim2)">F-G002</code></h4>
+<p class="meta">crates/fono-net-codec/src/frame.rs:136-140 &middot; cost <b>XS</b> (under 5 lines) &middot; Proven by a single command</p>
+<p class="fix">Grow the buffer as bytes arrive rather than sizing it from the claim.</p>
+</div><div class="val"><b>4.8</b><span>value</span></div></div>
+<div class="card"><div class="rank">10</div><div>
+<h4><span class="pill S2">S2</span>The header limit is checked after the whole line is in memory <code style="color:var(--dim2)">F-G001</code></h4>
+<p class="meta">crates/fono-net-codec/src/frame.rs:92-99 &middot; cost <b>S</b> (one function) &middot; Reproduced by running code</p>
+<p class="fix">take(MAX + 1) so the bound precedes the allocation.</p>
+</div><div class="val"><b>4.7</b><span>value</span></div></div>
+</div>
+<div class="note"><b>If you approve exactly one thing, approve <code>F-M001</code>.</b> Three lines, the highest severity in the audit, reproduced by running code, and it stops the product destroying a dictation while telling the user it succeeded. The clipboard fallback that should catch it already exists and is correct — it is simply never reached, because the error was converted to <code>Ok(())</code> one layer down.</div>
+<div class="note warn"><b>Why <code>F-H001</code> is listed above its score.</b> Its value is 3.8 — lower than eight cheaper items — purely because the fix is module-sized rather than a few lines. It is an <b>absent authentication control on a listener the docs invite you to bind to 0.0.0.0</b>, so ranking it tenth would be an artefact of the cost divisor rather than a judgement. Both S1s are pinned to this list.</div>
+<h2>Four bundles that are cheaper together than apart</h2>
+<p class="sub" style="margin-bottom:8px">Approving these as groups costs less than approving their members, because one change serves all of them.</p>
+<div class="bundle"><h4>One shutdown channel</h4><div class="ids">F-B001 + F-B002 + F-C001</div><p>Fed by SIGTERM, SIGINT, tray Quit and Request::Shutdown, with run() returning normally. Three S2s close together for the cost of roughly one, two false comments become true, and the installers need no change at all.</p></div>
+<div class="bundle"><h4>Wyoming authentication</h4><div class="ids">F-H001 + F-H002</div><p>Must ship together. Fixing the check alone produces a listener that rejects users who configured the token the documented way; fixing the lookup alone changes nothing.</p></div>
+<div class="bundle"><h4>Bound the network surface</h4><div class="ids">F-G001 + F-G002 + F-G003 + F-C003 + F-C005</div><p>A Semaphore on both accept loops caps four of these at once. All five are the same question: does the code allocate what the peer claims, or what the peer delivers?</p></div>
+<div class="bundle"><h4>One mutex poisoning policy</h4><div class="ids">F-B005 + F-C002 + F-A003</div><p>Four sites, four spellings, no shared policy. The data is Copy scalars that cannot tear, so the last written value beats a default. One decision, not four fixes.</p></div>
+<h2>Every scored defect</h2>
+<div class="ctl"><button class="on" data-f="all">All</button><button data-f="S1">S1</button><button data-f="S2">S2</button><button data-f="S3">S3</button><button data-f="cheap">Cheap only (XS + S)</button><span style="color:var(--dim2);font-size:12px" id="cnt"></span></div>
+<table><thead><tr><th data-k="id">ID</th><th data-k="sev">Sev</th><th data-k="title">Finding</th><th class="num" data-k="imp">Imp</th><th class="num" data-k="conf">Conf</th><th data-k="cost">Cost</th><th class="num" data-k="val">Value</th></tr></thead><tbody id="tb"></tbody></table>
+<h2>Free wins: controls that exist but never fire</h2>
+<p class="sub" style="margin-bottom:8px">Not user-facing defects, so they are not scored on the harm axes above — but each is cheap and each stops a class of problem recurring.</p>
+<table><thead><tr><th>ID</th><th>Finding</th><th>Cost</th><th>Note</th></tr></thead><tbody>
+<tr><td class="mono">F-0001</td><td><span class="t">The comment-hygiene gate greps for digits; the slices use letters</span><span class="w">tests/check.sh:107</span></td><td class="mono">XS</td><td style="color:var(--dim)">~30 violations pass today.</td></tr>
+<tr><td class="mono">F-0002</td><td><span class="t">cargo deny check bans can never pass, so CI never runs it</span><span class="w">deny.toml</span></td><td class="mono">XS</td><td style="color:var(--dim)">One line: allow-wildcard-paths = true.</td></tr>
+<tr><td class="mono">F-0009</td><td><span class="t">paths-ignore skips docs/**, where the bench baselines live</span><span class="w">.github/workflows/ci.yml</span></td><td class="mono">XS</td><td style="color:var(--dim)">Editing a baseline runs no CI.</td></tr>
+<tr><td class="mono">F-H003</td><td><span class="t">mirror_to_stdout has no read site</span><span class="w">crates/fono-core/src/config.rs:1991</span></td><td class="mono">XS</td><td style="color:var(--dim)">Delete, or implement against stderr — never stdout.</td></tr>
+<tr><td class="mono">F-0004</td><td><span class="t">53 of 140 unsafe sites carry no safety contract</span><span class="w">workspace</span></td><td class="mono">S</td><td style="color:var(--dim)">forbid(unsafe_code) on the 12 crates with none: 19 files to 7.</td></tr>
+<tr><td class="mono">F-0010</td><td><span class="t">The criterion bench compiles every run and never executes</span><span class="w">.github/workflows/ci.yml</span></td><td class="mono">XS</td><td style="color:var(--dim)">No perf-regression signal.</td></tr>
+<tr><td class="mono">F-0012</td><td><span class="t">Six feature flags are never compiled by any gate</span><span class="w">.github/workflows/ci.yml</span></td><td class="mono">S</td><td style="color:var(--dim)">enigo, bench-actions, cpal-backend, three accel-*.</td></tr>
+<tr><td class="mono">NEW-1</td><td><span class="t">Add two mechanical gates that each already found a real defect</span><span class="w">tests/check.sh</span></td><td class="mono">M</td><td style="color:var(--dim)">“Every config field has a read site” and “every dispatch variant has a producer”.</td></tr>
+</tbody></table>
+<h2>What the audit did not find</h2>
+<p class="sub" style="margin-bottom:8px">Load-bearing for how much weight to put on the rest of the list.</p>
+<ul class="clean">
+<li><b>No memory-safety defect</b> across 140 <code>unsafe</code> sites. Null checks precede every use, handles close on every path, layout assumptions are asserted rather than assumed.</li>
+<li><b>No secret logged anywhere.</b> Every logging macro across all 272 source files containing <code>api_key</code>, <code>secret</code>, <code>password</code> or <code>bearer</code> emits only key names and file paths.</li>
+<li><b>No on-disk permission defect.</b> All four SQLite stores chmod the database <i>and</i> its <code>-wal</code>/<code>-shm</code> sidecars to 0600, each with a test that creates the file 0644 and asserts it comes back 0600.</li>
+<li><b>No inconsistent error mapping</b> across the sixteen cloud providers — the expected defect in that surface. Classification is centralised; the divergence is one layer below, in transport config.</li>
+<li><b>No bounds defect</b> in 2,729 lines of software rasteriser. Every framebuffer write goes through <code>get_mut</code>; negative coordinates are filtered before the cast that would wrap them.</li>
+</ul>
+<div class="note"><b>One caution on reading coverage as confidence.</b> <code>F-A006</code> — batch dictation cannot be cancelled — lives in one of the best-covered files in the workspace. Its tests are thorough and still miss it, because they assert the transitions that exist rather than probing for the one that is absent. Coverage measures what runs, not what is missing.</div>
+<footer>Generated from <code>docs/audit/findings.md</code>. Scores computed, not asserted — the model is stated above and applied uniformly. Every fix in this report is net-zero on binary size; no recommendation requires a crate new to <code>Cargo.lock</code>.</footer>
+</div><script>const DATA=[{"id": "F-M001", "title": "Three injection backends report success when they failed", "sev": "S1", "tags": ["work-loss", "silent"], "reach": "default", "verif": "exec", "verifLabel": "Reproduced by running code", "cost": "XS", "costLabel": "under 5 lines", "where": "crates/fono-inject/src/inject.rs:575-585", "fix": "Return Err on a non-zero exit; the clipboard fallback that already exists then fires.", "bundle": "", "imp": 10.0, "conf": 1.0, "val": 10.0}, {"id": "F-O002", "title": "A server ignoring Range yields a corrupt file that is kept", "sev": "S2", "tags": ["work-loss", "silent"], "reach": "config", "verif": "static", "verifLabel": "Proven by a single command", "cost": "XS", "costLabel": "under 5 lines", "where": "crates/fono-download/src/lib.rs:113", "fix": "If bytes are already on disk and the status is 200, truncate instead of appending.", "bundle": "", "imp": 8, "conf": 0.95, "val": 7.6}, {"id": "F-H002", "title": "Two of three server tokens ignore secrets.toml", "sev": "S2", "tags": ["security", "silent"], "reach": "config", "verif": "static", "verifLabel": "Proven by a single command", "cost": "XS", "costLabel": "under 5 lines", "where": "crates/fono/src/daemon.rs:3640", "fix": "Use secrets.resolve at both sites.", "bundle": "auth", "imp": 8, "conf": 0.95, "val": 7.6}, {"id": "F-0008", "title": "The default wake model downloads unverified", "sev": "S3", "tags": ["work-loss", "silent"], "reach": "default", "verif": "static", "verifLabel": "Proven by a single command", "cost": "XS", "costLabel": "under 5 lines", "where": "crates/fono-audio/src/wake_registry.rs:190", "fix": "Pin the SHA. Implicated in two independent paths to a bad file on disk.", "bundle": "", "imp": 7, "conf": 0.95, "val": 6.65}, {"id": "F-B004", "title": "\u201cPause hotkeys\u201d ships, does nothing, and a test pins it there", "sev": "S2", "tags": ["silent"], "reach": "default", "verif": "static", "verifLabel": "Proven by a single command", "cost": "XS", "costLabel": "under 5 lines", "where": "crates/fono-tray/src/menu.rs:138", "fix": "Stop rendering it, or implement it \u2014 the state, tooltip and icon already exist.", "bundle": "", "imp": 7, "conf": 0.95, "val": 6.65}, {"id": "F-A004", "title": "One hyphen defeats the non-English shell gate", "sev": "S2", "tags": ["wrong-output"], "reach": "default", "verif": "exec", "verifLabel": "Reproduced by running code", "cost": "S", "costLabel": "one function", "where": "crates/fono/src/session.rs:5773-5774", "fix": "Anchor the flag markers as tokens; add a hyphen-bearing fixture.", "bundle": "", "imp": 8, "conf": 1.0, "val": 5.33}, {"id": "F-A006", "title": "Batch dictation cannot be cancelled once processing starts", "sev": "S2", "tags": ["wrong-output"], "reach": "default", "verif": "exec", "verifLabel": "Reproduced by running code", "cost": "S", "costLabel": "one function", "where": "crates/fono-hotkey/src/fsm.rs:348", "fix": "Add the (Processing, CancelPressed) arm; retain the pipeline AbortHandle.", "bundle": "", "imp": 8, "conf": 1.0, "val": 5.33}, {"id": "F-G002", "title": "64 MiB is reserved from a 110-byte header", "sev": "S3", "tags": ["crash"], "reach": "config", "verif": "static", "verifLabel": "Proven by a single command", "cost": "XS", "costLabel": "under 5 lines", "where": "crates/fono-net-codec/src/frame.rs:136-140", "fix": "Grow the buffer as bytes arrive rather than sizing it from the claim.", "bundle": "netcap", "imp": 5, "conf": 0.95, "val": 4.75}, {"id": "F-G001", "title": "The header limit is checked after the whole line is in memory", "sev": "S2", "tags": ["crash"], "reach": "config", "verif": "exec", "verifLabel": "Reproduced by running code", "cost": "S", "costLabel": "one function", "where": "crates/fono-net-codec/src/frame.rs:92-99", "fix": "take(MAX + 1) so the bound precedes the allocation.", "bundle": "netcap", "imp": 7, "conf": 1.0, "val": 4.67}, {"id": "F-K001", "title": "34 of 40 config sections ignore unknown keys, then delete them", "sev": "S3", "tags": ["work-loss", "silent"], "reach": "default", "verif": "static", "verifLabel": "Proven by a single command", "cost": "S", "costLabel": "one function", "where": "crates/fono-core/src/config.rs:23", "fix": "Warn per unknown key at load, or deny_unknown_fields after a removed-field survey.", "bundle": "", "imp": 7, "conf": 0.95, "val": 4.43}, {"id": "F-B001", "title": "SIGTERM is unhandled, so the shipped units never shut down cleanly", "sev": "S2", "tags": ["silent"], "reach": "default", "verif": "static", "verifLabel": "Proven by a single command", "cost": "S", "costLabel": "one function", "where": "crates/fono/src/daemon.rs:1493-1528", "fix": "One SIGTERM arm breaking to the existing clean path.", "bundle": "shutdown", "imp": 7, "conf": 0.95, "val": 4.43}, {"id": "F-B002", "title": "Tray Quit skips the cleanup two comments promise", "sev": "S2", "tags": ["silent"], "reach": "default", "verif": "static", "verifLabel": "Proven by a single command", "cost": "S", "costLabel": "one function", "where": "crates/fono/src/daemon.rs:1184-1187", "fix": "Signal the shutdown channel instead of process::exit.", "bundle": "shutdown", "imp": 7, "conf": 0.95, "val": 4.43}, {"id": "F-C001", "title": "Shutdown never replies, so the installer settle-wait is dead", "sev": "S2", "tags": ["silent"], "reach": "default", "verif": "static", "verifLabel": "Proven by a single command", "cost": "S", "costLabel": "one function", "where": "crates/fono/src/daemon.rs:2030-2032", "fix": "Reply Ok before exiting; all three installers become correct unchanged.", "bundle": "shutdown", "imp": 7, "conf": 0.95, "val": 4.43}, {"id": "F-F001", "title": "The resampler never flushes; every capture loses up to 21 ms", "sev": "S2", "tags": ["work-loss", "wrong-output", "silent"], "reach": "default", "verif": "exec", "verifLabel": "Reproduced by running code", "cost": "M", "costLabel": "one module / several call sites", "where": "crates/fono-audio/src/resample.rs:33-46", "fix": "Add flush(); give the capture-side resampler an owner outliving the stream.", "bundle": "", "imp": 10.0, "conf": 1.0, "val": 4.0}, {"id": "F-H001", "title": "The Wyoming bearer token is never checked", "sev": "S1", "tags": ["security", "silent"], "reach": "config", "verif": "static", "verifLabel": "Proven by a single command", "cost": "M", "costLabel": "one module / several call sites", "where": "crates/fono-net/src/wyoming/server.rs:63-67", "fix": "Call auth::decide from the listener. Must ship with F-H002.", "bundle": "auth", "imp": 10.0, "conf": 0.95, "val": 3.8}, {"id": "F-O001", "title": "A failed persist after the backup rename leaves no binary", "sev": "S2", "tags": ["work-loss"], "reach": "rare", "verif": "static", "verifLabel": "Proven by a single command", "cost": "S", "costLabel": "one function", "where": "crates/fono-update/src/lib.rs:640-654", "fix": "Rename the backup back on the error path, or use a disarmable Drop guard.", "bundle": "", "imp": 6, "conf": 0.95, "val": 3.8}, {"id": "F-M002", "title": "An unrecognised [inject].backend silently disables typing", "sev": "S3", "tags": ["silent"], "reach": "config", "verif": "static", "verifLabel": "Proven by a single command", "cost": "XS", "costLabel": "under 5 lines", "where": "crates/fono-inject/src/inject.rs:53", "fix": "Warn naming the value and the valid set; better, validate at config load.", "bundle": "", "imp": 4, "conf": 0.95, "val": 3.8}, {"id": "F-L001", "title": "Cloud STT has a 45 s total deadline; recording length is unbounded", "sev": "S3", "tags": ["work-loss"], "reach": "config", "verif": "high", "verifLabel": "High confidence, read-only", "cost": "XS", "costLabel": "under 5 lines", "where": "crates/fono-stt/src/groq.rs:164", "fix": "Scale the deadline to the audio, or raise it to the project's own 300 s.", "bundle": "", "imp": 5, "conf": 0.7, "val": 3.5}, {"id": "F-J001", "title": "The assistant prefills 8192 tokens into a 2048 batch", "sev": "S2", "tags": ["work-loss", "silent"], "reach": "default", "verif": "static", "verifLabel": "Proven by a single command", "cost": "M", "costLabel": "one module / several call sites", "where": "crates/fono-assistant/src/llama_local.rs:1153-1166", "fix": "Chunk the prefill into n_batch-sized decodes.", "bundle": "", "imp": 9, "conf": 0.95, "val": 3.42}, {"id": "F-G003", "title": "The local IPC decoder has no length limit at all", "sev": "S3", "tags": ["crash"], "reach": "config", "verif": "exec", "verifLabel": "Reproduced by running code", "cost": "S", "costLabel": "one function", "where": "crates/fono-ipc/src/lib.rs:181-193", "fix": "Add MAX_FRAME_BYTES and check before allocating.", "bundle": "netcap", "imp": 5, "conf": 1.0, "val": 3.33}, {"id": "F-D001", "title": "notify_waiters is lossy, so a cancel can leave the assistant talking", "sev": "S3", "tags": ["wrong-output", "silent"], "reach": "config", "verif": "med", "verifLabel": "Medium confidence", "cost": "XS", "costLabel": "under 5 lines", "where": "crates/fono/src/assistant.rs:236", "fix": "notify_one, so the wake is stored. One word.", "bundle": "", "imp": 6, "conf": 0.5, "val": 3.0}, {"id": "F-A002", "title": "Device open blocks the executor beside a comment forbidding it", "sev": "S3", "tags": [], "reach": "default", "verif": "static", "verifLabel": "Proven by a single command", "cost": "S", "costLabel": "one function", "where": "crates/fono/src/session.rs:2638", "fix": "Replace the std mpsc handshake with a tokio oneshot.", "bundle": "", "imp": 4, "conf": 0.95, "val": 2.53}, {"id": "F-A005", "title": "window_title_regex is a substring match", "sev": "S3", "tags": ["silent"], "reach": "config", "verif": "static", "verifLabel": "Proven by a single command", "cost": "S", "costLabel": "one function", "where": "crates/fono/src/session.rs:5961-5967", "fix": "Use regex (already a direct dependency) or rename the field with an alias.", "bundle": "", "imp": 4, "conf": 0.95, "val": 2.53}, {"id": "F-C005", "title": "No timeout on the first frame; a silent connection pins a task", "sev": "S3", "tags": ["crash"], "reach": "config", "verif": "high", "verifLabel": "High confidence, read-only", "cost": "S", "costLabel": "one function", "where": "crates/fono/src/daemon.rs:1824", "fix": "Wrap the first read in a timeout; warn instead of ? on accept errors.", "bundle": "netcap", "imp": 5, "conf": 0.7, "val": 2.33}, {"id": "F-A003", "title": "A poisoned buffer reports lost audio as \u201crecording too short\u201d", "sev": "S3", "tags": ["work-loss", "wrong-output", "silent"], "reach": "rare", "verif": "med", "verifLabel": "Medium confidence", "cost": "S", "costLabel": "one function", "where": "crates/fono/src/session.rs:387", "fix": "Recover through PoisonError::into_inner; distinguish the two causes.", "bundle": "poison", "imp": 7, "conf": 0.5, "val": 2.33}, {"id": "F-J002", "title": "The state cache key labels the wrong crate's version", "sev": "S3", "tags": ["wrong-output"], "reach": "rare", "verif": "med", "verifLabel": "Medium confidence", "cost": "XS", "costLabel": "under 5 lines", "where": "crates/fono-assistant/src/llama_local.rs:1674-1685", "fix": "Use a STATE_FORMAT_VERSION const tied to the pin; at minimum relabel.", "bundle": "", "imp": 4, "conf": 0.5, "val": 2.0}, {"id": "F-D002", "title": "notify_triggered is hardcoded false at two sites that read as guards", "sev": "S4", "tags": ["silent"], "reach": "rare", "verif": "static", "verifLabel": "Proven by a single command", "cost": "XS", "costLabel": "under 5 lines", "where": "crates/fono/src/assistant.rs:3242-3250", "fix": "Delete it and both call sites.", "bundle": "", "imp": 2, "conf": 0.95, "val": 1.9}, {"id": "F-C003", "title": "The cross-process speak lock has no timeout", "sev": "S3", "tags": ["silent"], "reach": "config", "verif": "high", "verifLabel": "High confidence, read-only", "cost": "S", "costLabel": "one function", "where": "crates/fono/src/daemon.rs:2008-2028", "fix": "Bound the hold, not just the acquire.", "bundle": "netcap", "imp": 4, "conf": 0.7, "val": 1.87}, {"id": "F-A007", "title": "ASCII-only terminators disable streaming for non-Latin scripts", "sev": "S3", "tags": ["silent"], "reach": "config", "verif": "high", "verifLabel": "High confidence, read-only", "cost": "S", "costLabel": "one function", "where": "crates/fono/src/session.rs:5469", "fix": "Extend the terminator set; iterate chars rather than bytes.", "bundle": "", "imp": 4, "conf": 0.7, "val": 1.87}, {"id": "F-N001", "title": "A dead overlay backend thread is undetectable", "sev": "S3", "tags": ["silent"], "reach": "config", "verif": "high", "verifLabel": "High confidence, read-only", "cost": "S", "costLabel": "one function", "where": "crates/fono-overlay/src/backend.rs:242-245", "fix": "Latch a dead flag, log once on the transition, surface it in doctor.", "bundle": "", "imp": 4, "conf": 0.7, "val": 1.87}, {"id": "F-B006", "title": "The single-instance guard is a TOCTOU 1290 lines from the bind", "sev": "S3", "tags": ["silent"], "reach": "rare", "verif": "high", "verifLabel": "High confidence, read-only", "cost": "S", "costLabel": "one function", "where": "crates/fono/src/daemon.rs:191-210", "fix": "Move the guard next to the bind; or acquire a flock atomically.", "bundle": "", "imp": 3, "conf": 0.7, "val": 1.4}, {"id": "F-E002", "title": "Two producer-less actions, one guarding the only wildcard transition", "sev": "S3", "tags": [], "reach": "rare", "verif": "static", "verifLabel": "Proven by a single command", "cost": "S", "costLabel": "one function", "where": "crates/fono-hotkey/src/fsm.rs:323", "fix": "Delete both variants and the wildcard arm.", "bundle": "", "imp": 2, "conf": 0.95, "val": 1.27}, {"id": "F-I001", "title": "The Vulkan shim's safety rests on an unstated non-export property", "sev": "S3", "tags": ["crash"], "reach": "rare", "verif": "low", "verifLabel": "Low confidence", "cost": "XS", "costLabel": "under 5 lines", "where": "crates/fono-core/src/vk_loader_shim.rs:351-368", "fix": "Run nm -D on the release binary and record the answer as a comment.", "bundle": "", "imp": 4, "conf": 0.3, "val": 1.2}, {"id": "F-F002", "title": "Live mode reimplements the silence watch without its hysteresis", "sev": "S3", "tags": ["silent"], "reach": "config", "verif": "high", "verifLabel": "High confidence, read-only", "cost": "M", "costLabel": "one module / several call sites", "where": "crates/fono/src/assistant.rs:2759-2781", "fix": "Use SilenceWatch; the two duplicated constants go with it.", "bundle": "", "imp": 4, "conf": 0.7, "val": 1.12}, {"id": "F-A001", "title": "Stop frees the capture slot 54 lines before the device", "sev": "S3", "tags": ["silent"], "reach": "config", "verif": "high", "verifLabel": "High confidence, read-only", "cost": "M", "costLabel": "one module / several call sites", "where": "crates/fono/src/session.rs:2758", "fix": "Hold the slot across teardown, or make Stopping a named state.", "bundle": "", "imp": 4, "conf": 0.7, "val": 1.12}, {"id": "F-C006", "title": "20+ unsynchronised config read-modify-write cycles", "sev": "S3", "tags": ["work-loss", "silent"], "reach": "config", "verif": "high", "verifLabel": "High confidence, read-only", "cost": "L", "costLabel": "a design decision", "where": "crates/fono/src/daemon.rs:2881-2925", "fix": "An advisory file lock across load-mutate-save; cross-process, so a mutex is not enough.", "bundle": "", "imp": 6, "conf": 0.7, "val": 1.05}, {"id": "F-B005", "title": "A poisoned mutex silently disarms Escape-to-cancel", "sev": "S3", "tags": ["silent"], "reach": "rare", "verif": "med", "verifLabel": "Medium confidence", "cost": "S", "costLabel": "one function", "where": "crates/fono/src/daemon.rs:1129", "fix": "One poisoning policy across all three sites; an atomic for the counter.", "bundle": "poison", "imp": 3, "conf": 0.5, "val": 1.0}, {"id": "F-C002", "title": "One mutex, three poisoning policies, two panic while holding it", "sev": "S3", "tags": ["silent"], "reach": "rare", "verif": "med", "verifLabel": "Medium confidence", "cost": "S", "costLabel": "one function", "where": "crates/fono/src/daemon.rs:2051", "fix": "Same single policy.", "bundle": "poison", "imp": 3, "conf": 0.5, "val": 1.0}, {"id": "F-E001", "title": "State::McpDriven is unreachable; MCP cancel exists twice, wired once", "sev": "S3", "tags": [], "reach": "rare", "verif": "static", "verifLabel": "Proven by a single command", "cost": "M", "costLabel": "one module / several call sites", "where": "crates/fono-hotkey/src/fsm.rs:328-347", "fix": "Pick one design and delete the other; ~55 lines net removed.", "bundle": "", "imp": 2, "conf": 0.95, "val": 0.76}, {"id": "F-L002", "title": "Four warm_client functions, four timeout policies, one public", "sev": "S3", "tags": [], "reach": "rare", "verif": "static", "verifLabel": "Proven by a single command", "cost": "M", "costLabel": "one module / several call sites", "where": "crates/fono-tts/src/openai_compat.rs:205", "fix": "One builder in fono-http taking an explicit workload descriptor.", "bundle": "", "imp": 2, "conf": 0.95, "val": 0.76}];
+const D=DATA;let sortKey='val',sortDir=-1,filt='all';
+const sevRank={S1:0,S2:1,S3:2,S4:3,S5:4},costRank={XS:0,S:1,M:2,L:3};
+function bar(v,max,w){return '<span class="bar" style="width:'+Math.max(2,Math.round(v/max*w))+'px"></span>'}
+function render(){
+ const tb=document.getElementById('tb');
+ let rows=D.filter(d=>filt==='all'||(filt==='cheap'?(d.cost==='XS'||d.cost==='S'):d.sev===filt));
+ const cmp=(a,b)=>{let x,y;
+  if(sortKey==='sev'){x=sevRank[a.sev];y=sevRank[b.sev]}
+  else if(sortKey==='cost'){x=costRank[a.cost];y=costRank[b.cost]}
+  else if(sortKey==='id'){x=a.id;y=b.id}
+  else{x=a[sortKey];y=b[sortKey]}
+  return x<y?-1*sortDir:x>y?1*sortDir:0};
+ rows.sort(cmp);
+ tb.innerHTML=rows.map(d=>'<tr>'
+  +'<td class="mono">'+d.id+'</td>'
+  +'<td><span class="pill '+d.sev+'">'+d.sev+'</span></td>'
+  +'<td><span class="t">'+d.title+'</span><span class="w">'+d.where+'</span>'
+    +(d.tags.length?'<div style="margin-top:5px">'+d.tags.map(t=>'<span class="tag">'+t+'</span>').join('')+'</div>':'')+'</td>'
+  +'<td class="num">'+d.imp.toFixed(1)+'</td>'
+  +'<td class="num" title="'+d.verifLabel+'">'+d.conf.toFixed(2)+'</td>'
+  +'<td class="mono" title="'+d.costLabel+'">'+d.cost+'</td>'
+  +'<td class="num">'+bar(d.val,10,46)+d.val.toFixed(2)+'</td>'
+  +'</tr>').join('');
+ document.getElementById('cnt').textContent=rows.length+' of '+D.length+' shown';
+}
+document.querySelectorAll('th[data-k]').forEach(th=>th.onclick=()=>{
+ const k=th.dataset.k;if(sortKey===k){sortDir*=-1}else{sortKey=k;sortDir=(k==='id'||k==='sev'||k==='cost')?1:-1}
+ render()});
+document.querySelectorAll('.ctl button').forEach(b=>b.onclick=()=>{
+ document.querySelectorAll('.ctl button').forEach(x=>x.classList.remove('on'));
+ b.classList.add('on');filt=b.dataset.f;render()});
+render();
+</script></body></html>

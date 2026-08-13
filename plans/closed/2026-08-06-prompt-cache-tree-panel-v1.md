@@ -1,5 +1,7 @@
 # Prompt-Cache Tree Panel in Web Settings
 
+## Status: Completed (all 15 tasks landed 2026-08-06)
+
 ## Objective
 
 Make the live prompt-state (KV) cache visible in the web settings UI as a

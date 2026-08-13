@@ -82,6 +82,14 @@ accel-polish-cuda = ["llama-local", "fono-polish/accel-cuda"]
 accel-polish-vulkan = ["llama-local", "fono-polish/accel-vulkan"]
 accel-polish-metal = ["llama-local", "fono-polish/accel-metal"]
 accel-polish-rocm = ["llama-local", "fono-polish/accel-rocm"]
+# The assistant backend has its own passthroughs. Without these,
+# `--features accel-vulkan` accelerates whisper only and the assistant
+# subcommands keep running on the CPU — which reads as "the GPU made no
+# difference" rather than "the GPU was never asked".
+accel-assistant-cuda = ["llama-local", "fono-assistant/accel-cuda"]
+accel-assistant-vulkan = ["llama-local", "fono-assistant/accel-vulkan"]
+accel-assistant-metal = ["llama-local", "fono-assistant/accel-metal"]
+accel-assistant-rocm = ["llama-local", "fono-assistant/accel-rocm"]
 
 [[bin]]
 name = "fono-bench"

@@ -27,24 +27,23 @@ use std::time::Instant;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use fono_core::brain_tap::{decode_token_with_tap, BrainTap};
-use fono_core::llama_backend::{backend, shared_model};
+use fono_core::llama_backend::{backend, shared_model_sized};
 use fono_core::llama_gen::{
     first_stop_marker, generation_sampler, is_control_token, safe_stream_end, sample_next,
     turn_markers, warn_on_template_vocab_mismatch, TurnMarkers,
 };
 use fono_core::prompt_cache::{
-    CacheCounters, CacheMutationReport, PromptStateCache, PromptStateCacheEntry,
-    PromptStateCacheKey, PromptStateCacheLayer,
+    model_files_fingerprint, CacheCounters, CacheMutationReport, PromptStateCache,
+    PromptStateCacheEntry, PromptStateCacheKey, PromptStateCacheLayer,
 };
 use fono_core::prompt_cache_view::{self as cache_view, CacheSnapshot};
 use fono_core::turn_trace::{
     current_instant, current_span, generation_span_args, record_cache_mutation, POLISH_LANE,
 };
 use futures::stream::{BoxStream, StreamExt};
-use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::context::params::{KvCacheType, LlamaContextParams};
 use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_batch::LlamaBatch;
-use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::token::LlamaToken;
 use serde_json::json;
@@ -209,7 +208,16 @@ impl LlamaLocal {
         // the same local model (the default `gemma-4-e2b`) they resolve to the
         // same path and share ONE `LlamaModel` instead of loading two ~3.2 GB
         // copies. See `fono_core::llama_backend::shared_model`.
-        let model = shared_model(&self.model_path, &LlamaModelParams::default())?;
+        //
+        // The layers go on an accelerator when the whole model plus its cache
+        // fits one, and on the CPU when they do not — decided fresh here, since
+        // how much of the machine is free changes between launches.
+        let model = shared_model_sized(
+            &self.model_path,
+            self.context_size,
+            KvCacheType::F16,
+            KvCacheType::F16,
+        )?;
         // Single, concise INFO line summarising what got loaded — name +
         // on-disk size (≈ resident memory once mapped) + load wall time.
         // Verbose architecture/KV/tensor dumps from llama.cpp itself are
@@ -460,31 +468,21 @@ impl LlamaLocal {
     }
 
     /// Build a runtime+content cache key for `prefix`. Mirrors the assistant
-    /// backend: the runtime identity (model path, size, mtime, ctx, threads)
-    /// keys out cross-model / cross-config reuse, and the prompt + token hashes
-    /// key out cross-prompt reuse.
+    /// backend: the runtime identity (model files, ctx, threads) keys out
+    /// cross-model / cross-config reuse, and the prompt + token hashes key out
+    /// cross-prompt reuse.
     fn prompt_state_cache_key(
         &self,
         layer: PromptStateCacheLayer,
         prefix: &str,
         tokens: &[LlamaToken],
     ) -> Result<PromptStateCacheKey> {
-        let metadata = std::fs::metadata(&self.model_path)
-            .with_context(|| format!("read model metadata {}", self.model_path.display()))?;
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or_else(
-                || "unknown".to_string(),
-                |d| format!("{}.{:09}", d.as_secs(), d.subsec_nanos()),
-            );
         let runtime_identity = format!(
-            "llama-cpp-2:{}|model={}|size={}|modified={}|ctx={}|threads={}",
+            "llama-cpp-2:{}|model={}|files={}|ctx={}|threads={}",
             env!("CARGO_PKG_VERSION"),
             self.model_path.display(),
-            metadata.len(),
-            modified,
+            model_files_fingerprint(&self.model_path)
+                .with_context(|| format!("read model metadata {}", self.model_path.display()))?,
             self.context_size,
             self.threads,
         );

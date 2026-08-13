@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use super::access_log::{provider_label, Mode, ReqLog, StreamLog};
 use super::messages::{
-    collect_reply, gen_id, make_context, read_body_bytes, split_messages, stream_body, unix_secs,
-    WireMessage,
+    collect_reply, gen_id, make_context, read_body_bytes, read_reply, split_messages, stream_body,
+    unix_secs, Reply, WireMessage,
 };
 use super::{error_response, json_ok, sse_response, ResBody, ServerCtx};
 use hyper::Response;
@@ -70,6 +70,11 @@ struct ChatRequest {
     stream: bool,
     #[serde(default)]
     max_tokens: Option<u32>,
+    /// Tool descriptors the client offers. Kept as raw JSON: the shape is
+    /// the OpenAI one the prompt renderer already reads, and a client may
+    /// send schema fields Fono neither needs nor should reject.
+    #[serde(default)]
+    tools: Vec<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -91,7 +96,38 @@ struct Choice {
 #[derive(Serialize)]
 struct Message {
     role: &'static str,
-    content: String,
+    /// `null` when the model called a tool instead of speaking — clients
+    /// distinguish the two cases by this field being absent, not empty.
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<OutToolCall>,
+}
+
+/// A tool call on the way out. `arguments` is a JSON-encoded *string* per
+/// the spec, which is also what the parser hands back.
+#[derive(Serialize, Clone)]
+struct OutToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: OutToolFunction,
+}
+
+#[derive(Serialize, Clone)]
+struct OutToolFunction {
+    name: String,
+    arguments: String,
+}
+
+fn out_calls(calls: &[fono_assistant::history::ToolCall]) -> Vec<OutToolCall> {
+    calls
+        .iter()
+        .map(|c| OutToolCall {
+            id: c.id.clone(),
+            kind: "function",
+            function: OutToolFunction { name: c.name.clone(), arguments: c.arguments.clone() },
+        })
+        .collect()
 }
 
 pub async fn chat(req: Request<Incoming>, ctx: &ServerCtx, log: &mut ReqLog) -> Response<ResBody> {
@@ -119,28 +155,71 @@ pub async fn chat(req: Request<Incoming>, ctx: &ServerCtx, log: &mut ReqLog) -> 
     let Some(assistant) = (ctx.assistant)() else {
         return error_response(StatusCode::SERVICE_UNAVAILABLE, "no assistant backend configured");
     };
-    let ctx_obj = make_context(&split, body.max_tokens);
+    let ctx_obj = make_context(&split, body.max_tokens, &body.tools);
     let model = ctx.cfg.model_name.clone();
     log.set_target(Mode::Adapt, model.clone());
 
-    if body.stream {
-        stream_chat(assistant, split.user_text, ctx_obj, model, log.defer(true))
-    } else {
-        match collect_reply(assistant, split.user_text, ctx_obj).await {
-            Ok(text) => json_ok(&ChatCompletion {
-                id: gen_id("chatcmpl-"),
-                object: "chat.completion",
-                created: unix_secs(),
-                model,
-                choices: vec![Choice {
-                    index: 0,
-                    message: Message { role: "assistant", content: text },
-                    finish_reason: "stop",
-                }],
-            }),
-            Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
-        }
+    // A tool call has to be read out of the finished reply, so a request
+    // that offers tools is generated whole even when the client asked to
+    // stream. Nothing is lost: a call is a single small object, and
+    // trickling it out word by word would only let a client act on half
+    // an argument list.
+    if body.stream && body.tools.is_empty() {
+        return stream_chat(assistant, split.user_text, ctx_obj, model, log.defer(true));
     }
+    let text = match collect_reply(assistant, split.user_text, ctx_obj).await {
+        Ok(t) => t,
+        Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    };
+    let reply = read_reply(text, !body.tools.is_empty());
+    if body.stream {
+        return stream_one_shot(&reply, model);
+    }
+    json_ok(&ChatCompletion {
+        id: gen_id("chatcmpl-"),
+        object: "chat.completion",
+        created: unix_secs(),
+        model,
+        choices: vec![Choice {
+            index: 0,
+            finish_reason: reply.finish_reason(),
+            message: Message {
+                role: "assistant",
+                content: reply.tool_calls.is_empty().then(|| reply.text.clone()),
+                tool_calls: out_calls(&reply.tool_calls),
+            },
+        }],
+    })
+}
+
+/// Frame an already-finished reply as a short SSE stream, for the client
+/// that asked to stream and also offered tools.
+fn stream_one_shot(reply: &Reply, model: String) -> Response<ResBody> {
+    let id = gen_id("chatcmpl-");
+    let created = unix_secs();
+    let chunk = |delta: Delta, finish: Option<&'static str>| {
+        sse_line(&ChatChunk {
+            id: id.clone(),
+            object: "chat.completion.chunk",
+            created,
+            model: model.clone(),
+            choices: vec![ChunkChoice { index: 0, delta, finish_reason: finish }],
+        })
+    };
+    let frames = vec![
+        chunk(Delta { role: Some("assistant"), ..Delta::default() }, None),
+        chunk(
+            Delta {
+                content: reply.tool_calls.is_empty().then(|| reply.text.clone()),
+                tool_calls: out_calls(&reply.tool_calls),
+                ..Delta::default()
+            },
+            None,
+        ),
+        chunk(Delta::default(), Some(reply.finish_reason())),
+        Bytes::from_static(b"data: [DONE]\n\n"),
+    ];
+    sse_response(super::messages::fixed_body(frames))
 }
 
 /// SSE chunk shapes (`object: "chat.completion.chunk"`).
@@ -166,6 +245,8 @@ struct Delta {
     role: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<OutToolCall>,
 }
 
 fn sse_line<T: Serialize>(value: &T) -> Bytes {
@@ -191,7 +272,7 @@ fn stream_chat(
         model: model.clone(),
         choices: vec![ChunkChoice {
             index: 0,
-            delta: Delta { role: Some("assistant"), content: None },
+            delta: Delta { role: Some("assistant"), ..Delta::default() },
             finish_reason: None,
         }],
     });
@@ -206,7 +287,7 @@ fn stream_chat(
             model: enc_model.clone(),
             choices: vec![ChunkChoice {
                 index: 0,
-                delta: Delta { role: None, content: Some(text.to_owned()) },
+                delta: Delta { content: Some(text.to_owned()), ..Delta::default() },
                 finish_reason: None,
             }],
         })
@@ -243,7 +324,7 @@ mod tests {
             model: "fono".into(),
             choices: vec![ChunkChoice {
                 index: 0,
-                delta: Delta { role: None, content: Some("hi".into()) },
+                delta: Delta { content: Some("hi".into()), ..Delta::default() },
                 finish_reason: None,
             }],
         };
@@ -261,5 +342,29 @@ mod tests {
         let d = Delta::default();
         let s = serde_json::to_string(&d).unwrap();
         assert_eq!(s, "{}");
+    }
+
+    #[test]
+    fn a_tool_call_is_spelled_the_way_the_spec_says() {
+        // `content` must be null rather than empty, `arguments` a
+        // JSON-encoded string rather than an object, and `type` present —
+        // clients branch on all three.
+        let calls = out_calls(&[fono_assistant::history::ToolCall {
+            id: "call_1".into(),
+            name: "read_file".into(),
+            arguments: "{\"path\":\"a.txt\"}".into(),
+        }]);
+        let msg = Message { role: "assistant", content: None, tool_calls: calls };
+        let s = serde_json::to_string(&msg).unwrap();
+        assert!(s.contains("\"content\":null"));
+        assert!(s.contains("\"type\":\"function\""));
+        assert!(s.contains(r#""arguments":"{\"path\":\"a.txt\"}""#));
+    }
+
+    #[test]
+    fn a_plain_reply_carries_no_tool_calls_field() {
+        let msg = Message { role: "assistant", content: Some("hi".into()), tool_calls: Vec::new() };
+        let s = serde_json::to_string(&msg).unwrap();
+        assert!(!s.contains("tool_calls"));
     }
 }
