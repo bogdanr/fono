@@ -90,6 +90,8 @@ enum Cmd {
     AssistantCacheScaling(AssistantCacheScalingArgs),
     /// Replay a growing multi-turn conversation to measure cached prefix reuse.
     AssistantConversationCache(AssistantConversationCacheArgs),
+    /// Drive the HTTP surface the way a coding agent does, to a target context.
+    CodingClientCache(CodingClientCacheArgs),
     /// Simulated Home Assistant light-control tool-use benchmark.
     AssistantToolUse(AssistantToolUseArgs),
     /// Extract the first captured assistant prompt from a trace JSON.
@@ -540,6 +542,71 @@ struct AssistantConversationCacheArgs {
     #[arg(long)]
     out: Option<PathBuf>,
 }
+
+/// A coding agent's conversation, driven at Fono's own OpenAI-compatible
+/// endpoint.
+///
+/// The existing conversation-cache mode grows a chat of short spoken turns
+/// against the embedded backend. A coding client is a different shape and it is
+/// the shape that decides whether checkpoints are worth storing: the volume is
+/// tool output and file contents rather than sentences, it arrives over HTTP
+/// with the whole conversation resent every turn, and it reaches sixteen
+/// thousand tokens in a handful of exchanges rather than dozens.
+///
+/// This mode measures what the client can see — wall time and time to first
+/// token per turn. What each turn *cost the cache* is recorded daemon-side by
+/// the prompt-cache lookup trace, which names how many prefix tokens were read
+/// again and why.
+#[derive(Debug, Parser)]
+struct CodingClientCacheArgs {
+    /// Fono's OpenAI-compatible endpoint, e.g.
+    /// `http://127.0.0.1:18131/v1/chat/completions`.
+    #[arg(long, default_value = "http://127.0.0.1:18131/v1/chat/completions")]
+    endpoint: String,
+
+    /// Model name to send. Fono ignores it; pass whatever the daemon serves.
+    #[arg(long, default_value = "fono")]
+    model: String,
+
+    /// System prompt at the head of the conversation, as a coding client sends.
+    #[arg(
+        long,
+        default_value = "You are a coding assistant working in a Rust repository. Answer with the smallest change that works."
+    )]
+    system_prompt: String,
+
+    /// Files whose contents are pasted in as tool results, in order, one per
+    /// turn. Repeat the flag. When the list runs out it wraps, so a short list
+    /// still reaches the target size.
+    #[arg(long = "file", required = true)]
+    files: Vec<PathBuf>,
+
+    /// Stop once the conversation reaches roughly this many tokens. Estimated
+    /// at four characters a token, which is close enough to size a run.
+    #[arg(long, default_value_t = 16384)]
+    target_tokens: usize,
+
+    /// Hard cap on turns, so a run against small files still terminates.
+    #[arg(long, default_value_t = 24)]
+    max_turns: usize,
+
+    /// Bearer token, when the daemon requires one.
+    #[arg(long)]
+    api_key: Option<String>,
+
+    /// Human-readable machine label stored in the report.
+    #[arg(long)]
+    machine_label: Option<String>,
+
+    /// Pretty-print the JSON report to stdout.
+    #[arg(long, default_value_t = true)]
+    pretty: bool,
+
+    /// Optional path to write the report.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
 #[derive(Debug, Parser)]
 struct ExtractTracePromptArgs {
     /// Assistant Chrome Trace / Perfetto JSON file.
@@ -776,6 +843,7 @@ async fn main() -> Result<()> {
         Cmd::AssistantPrefixCache(a) => run_assistant_prefix_cache_cmd(a).await,
         Cmd::AssistantCacheScaling(a) => run_assistant_cache_scaling_cmd(a).await,
         Cmd::AssistantConversationCache(a) => run_assistant_conversation_cache_cmd(a).await,
+        Cmd::CodingClientCache(a) => run_coding_client_cache_cmd(a).await,
         Cmd::AssistantToolUse(a) => run_assistant_tool_use_cmd(a).await,
         Cmd::ExtractTracePrompt(a) => run_extract_trace_prompt_cmd(a).await,
         Cmd::Equivalence(a) => run_equivalence(a).await,
@@ -1750,6 +1818,218 @@ async fn run_embedded_state_cache_replay(
             decode_elapsed_ms: Some(run.decode_elapsed_ms),
         })
         .collect())
+}
+
+/// One turn of the coding-client conversation, as the client sees it.
+#[derive(Serialize)]
+struct CodingClientTurn {
+    turn_index: usize,
+    /// Messages sent this turn, whole conversation included.
+    message_count: usize,
+    /// Characters in the conversation sent this turn. The token count is the
+    /// daemon's business; this is what left the client.
+    prompt_chars: usize,
+    /// Rough token count, four characters to a token.
+    estimated_prompt_tokens: usize,
+    /// File pasted in as this turn's tool result.
+    tool_result_file: String,
+    latency_ms: u64,
+    time_to_first_token_ms: Option<u64>,
+    reply_chars: usize,
+}
+
+#[derive(Serialize)]
+struct CodingClientCacheReport {
+    schema_version: &'static str,
+    endpoint: String,
+    model: String,
+    machine_label: Option<String>,
+    target_tokens: usize,
+    turn_count: usize,
+    /// What the conversation reached, so a run that stopped on `--max-turns`
+    /// rather than on size is obvious in the report.
+    final_estimated_tokens: usize,
+    turns: Vec<CodingClientTurn>,
+}
+
+/// Grow a coding conversation against the HTTP surface until it reaches the
+/// target size, resending the whole thing every turn as a real client does.
+///
+/// The conversation is append-only by construction, which is the *favourable*
+/// case for a prefix cache: each turn's prompt contains the last one whole. A
+/// real client may not be so kind, and that difference is exactly what the
+/// daemon's lookup trace measures. Running the friendly shape first establishes
+/// the ceiling — if checkpoints are not reused even here, nothing a client does
+/// will make them so.
+async fn run_coding_client_cache_cmd(args: CodingClientCacheArgs) -> Result<()> {
+    use std::time::Instant;
+
+    if args.files.is_empty() {
+        return Err(anyhow!("--file requires at least one value"));
+    }
+    for path in &args.files {
+        if !path.is_file() {
+            return Err(anyhow!("not a readable file: {}", path.display()));
+        }
+    }
+    let client = reqwest::Client::builder()
+        .pool_idle_timeout(std::time::Duration::from_secs(60))
+        .pool_max_idle_per_host(4)
+        .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
+
+    let mut messages = vec![serde_json::json!({
+        "role": "system",
+        "content": args.system_prompt,
+    })];
+    let mut turns = Vec::new();
+    let mut estimated_tokens = args.system_prompt.len() / 4;
+
+    for turn_index in 1..=args.max_turns {
+        let path = &args.files[(turn_index - 1) % args.files.len()];
+        let contents = std::fs::read_to_string(path)
+            .with_context(|| format!("read tool-result file {}", path.display()))?;
+        // A coding client's user turn is mostly machinery: the question is one
+        // line and the file it read is the rest. Shaping it this way matters,
+        // because the question is what changes turn to turn and the file is
+        // what a checkpoint would hold.
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": format!(
+                "Here is `{}`. Summarise in one sentence what it is responsible for.\n\n```\n{contents}\n```",
+                path.display()
+            ),
+        }));
+
+        let prompt_chars: usize =
+            messages.iter().map(|m| m["content"].as_str().unwrap_or_default().len()).sum();
+        estimated_tokens = prompt_chars / 4;
+
+        let started = Instant::now();
+        let (reply, first_token_ms, _deltas) = coding_client_turn(
+            &client,
+            &args.endpoint,
+            &args.model,
+            &messages,
+            args.api_key.as_deref(),
+            started,
+        )
+        .await?;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        info!(
+            "coding-client turn={turn_index}: ~{estimated_tokens} tok, {latency_ms}ms, \
+             first token {first_token_ms:?}ms"
+        );
+        turns.push(CodingClientTurn {
+            turn_index,
+            message_count: messages.len(),
+            prompt_chars,
+            estimated_prompt_tokens: estimated_tokens,
+            tool_result_file: path.display().to_string(),
+            latency_ms,
+            time_to_first_token_ms: first_token_ms,
+            reply_chars: reply.chars().count(),
+        });
+        // The reply joins the history, so the next turn's prompt contains this
+        // one whole — the append-only growth the cache is meant to exploit.
+        messages.push(serde_json::json!({ "role": "assistant", "content": reply }));
+        if estimated_tokens >= args.target_tokens {
+            break;
+        }
+    }
+
+    let out = CodingClientCacheReport {
+        schema_version: "coding-client-cache-report-v1",
+        endpoint: args.endpoint.clone(),
+        model: args.model.clone(),
+        machine_label: args.machine_label.clone(),
+        target_tokens: args.target_tokens,
+        turn_count: turns.len(),
+        final_estimated_tokens: estimated_tokens,
+        turns,
+    };
+    let payload = if args.pretty {
+        serde_json::to_string_pretty(&out)?
+    } else {
+        serde_json::to_string(&out)?
+    };
+    if let Some(path) = &args.out {
+        std::fs::write(path, &payload)
+            .with_context(|| format!("write coding-client report {}", path.display()))?;
+        info!("wrote coding-client-cache report to {}", path.display());
+    }
+    println!("{payload}");
+    Ok(())
+}
+
+/// POST one turn and drain the stream. Same SSE handling as the replay path,
+/// differing only in sending a whole conversation rather than one prompt.
+async fn coding_client_turn(
+    client: &reqwest::Client,
+    endpoint: &str,
+    model: &str,
+    messages: &[serde_json::Value],
+    api_key: Option<&str>,
+    started: std::time::Instant,
+) -> Result<(String, Option<u64>, usize)> {
+    let req = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        "temperature": 0.0,
+        // `max_tokens` is the field Fono's endpoint reads. Sending only the
+        // newer `max_completion_tokens` leaves generation uncapped, which on a
+        // CPU backend turns a cache probe into a minutes-long generation
+        // benchmark.
+        "max_tokens": 128,
+        "max_completion_tokens": 128,
+        "stream": true,
+    });
+    let mut builder = client.post(endpoint).header("accept", "text/event-stream").json(&req);
+    if let Some(key) = api_key.filter(|s| !s.is_empty()) {
+        builder = builder.bearer_auth(key);
+    }
+    let response = builder.send().await.context("coding-client chat POST failed")?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!("coding-client chat returned {status}: {}", truncate(&body, 400)));
+    }
+
+    let mut bytes_stream = response.bytes_stream();
+    let mut parser = BenchSseBuffer::new();
+    let mut output = String::new();
+    let mut first_token_ms = None;
+    let mut delta_count = 0_usize;
+    while let Some(chunk) = bytes_stream.next().await {
+        let chunk = chunk.context("coding-client stream chunk")?;
+        parser.push(&chunk);
+        while let Some(data) = parser.next_data() {
+            let data = data.trim();
+            if data == "[DONE]" {
+                return Ok((output.trim().to_string(), first_token_ms, delta_count));
+            }
+            if data.is_empty() {
+                continue;
+            }
+            let parsed: ReplayStreamChunk = serde_json::from_str(data)
+                .with_context(|| format!("parse coding-client stream chunk: {data}"))?;
+            for choice in parsed.choices {
+                if let Some(content) = choice.delta.content.filter(|s| !s.is_empty()) {
+                    if first_token_ms.is_none() {
+                        first_token_ms = Some(started.elapsed().as_millis() as u64);
+                    }
+                    delta_count = delta_count.saturating_add(1);
+                    output.push_str(&content);
+                }
+                if choice.finish_reason.is_some() {
+                    return Ok((output.trim().to_string(), first_token_ms, delta_count));
+                }
+            }
+        }
+    }
+    Ok((output.trim().to_string(), first_token_ms, delta_count))
 }
 
 async fn run_http_replay(

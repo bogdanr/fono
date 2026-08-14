@@ -103,6 +103,10 @@ pub struct CacheSnapshot {
     /// what eviction can reclaim, so this can exceed `max_bytes` without the
     /// cache being over budget.
     pub bytes_resident: u64,
+    /// What one checkpoint costs for the loaded model, once a model has loaded.
+    /// The budget is a multiple of this, so it is what makes `max_bytes`
+    /// readable as "room for N conversations".
+    pub checkpoint_bytes: Option<u64>,
     pub nodes: Vec<CacheNode>,
     pub unplaced: Vec<CacheNode>,
     pub verdicts: CacheVerdicts,
@@ -202,6 +206,7 @@ pub fn snapshot(
         bytes_evictable: bytes_evictable as u64,
         bytes_free: max_bytes.saturating_sub(bytes_evictable as u64),
         bytes_resident,
+        checkpoint_bytes: cache.checkpoint_bytes(),
         verdicts: CacheVerdicts {
             roots,
             heads,

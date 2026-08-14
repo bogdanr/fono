@@ -2421,8 +2421,9 @@ function renderDoctor() {
 
 // ---------- prompt cache ----------
 // GET /api/promptcache: { caches: [{ role, model, runtime, max_entries,
-// max_bytes, entries_pinned/evictable/free, bytes_pinned/evictable/free,
-// bytes_resident, nodes, unplaced, verdicts, counters }] }. `nodes` arrives
+// max_bytes, checkpoint_bytes, entries_pinned/evictable/free,
+// bytes_pinned/evictable/free, bytes_resident, nodes, unplaced, verdicts,
+// counters }] }. `nodes` arrives
 // depth-first with a `depth` on each entry, so the tree draws by indentation
 // with no client-side index.
 //
@@ -2558,7 +2559,46 @@ function cacheCounters(c) {
   out.push(c.pin_releases
     ? '<span class="bad">' + c.pin_releases + ' pinned prefixes lost</span>'
     : '<span>no pinned prefix lost</span>');
-  return '<div class="pc-counters mono">' + out.join('') + '</div>';
+  return '<div class="pc-counters mono">' + out.join('') + '</div>' + rereadLine(c);
+}
+
+// Why a prompt was read again, in tokens rather than in lookups: one miss on a
+// long conversation costs more than a hundred on short ones. Only one of these
+// causes is a storage problem — a checkpoint that existed and was dropped —
+// and it is the one that decides whether keeping checkpoints on disk would pay
+// for itself, so it is named rather than lumped in with the rest.
+const PC_REREAD = {
+  deepest: 'nothing cached went any deeper',
+  eviction: 'a checkpoint had been dropped to stay in budget',
+  divergence: 'the prompt changed earlier than the cached one',
+  runtime_key_change: 'the model or its settings changed',
+};
+
+function rereadLine(c) {
+  const by = c.reread_prefix_tokens || {};
+  const rows = Object.entries(by).filter(([, n]) => n > 0);
+  if (!rows.length) return '';
+  const total = rows.reduce((a, [, n]) => a + n, 0);
+  rows.sort((a, b) => b[1] - a[1]);
+  const items = rows.map(([k, n]) =>
+    '<li><b>' + n.toLocaleString() + '</b> because ' + esc(PC_REREAD[k] || k.replace(/_/g, ' '))
+    + '</li>').join('');
+  // The summary has to carry the answer, not just the total. A bare count
+  // behind a closed triangle reads as a footnote and gets scanned past — and
+  // the cause is the whole point of counting. Named inline, and opened on
+  // arrival when a dropped checkpoint is implicated, because that is the one
+  // worth acting on.
+  const dropped = by.eviction || 0;
+  const head = dropped
+    ? '<b>' + dropped.toLocaleString() + '</b> of ' + total.toLocaleString()
+      + ' tokens were read a second time because a saved conversation had been dropped'
+    : total.toLocaleString() + ' tokens have been read a second time \u2014 '
+      + esc(PC_REREAD[rows[0][0]] || rows[0][0].replace(/_/g, ' '));
+  return '<details class="pc-reread' + (dropped ? ' bad' : '') + '"' + (dropped ? ' open' : '')
+    + '><summary>' + head + '</summary><ul>' + items + '</ul>'
+    + '<p class="hint">Only the dropped-conversation line is work that keeping'
+    + ' saved conversations on disk could have saved. The rest would have been read'
+    + ' again whatever was stored.</p></details>';
 }
 
 function cacheRow(n, total) {
@@ -2587,6 +2627,20 @@ function cacheRow(n, total) {
     + '</div>';
 }
 
+// A budget in megabytes means nothing on its own: the same 1.3 GiB is room for
+// three conversations on a small model and not one on a large one. The budget
+// is set as a multiple of what one conversation costs, so say it that way.
+function checkpointLine(c) {
+  const one = c.checkpoint_bytes || 0;
+  if (!one) return '';
+  const room = Math.floor(c.max_bytes / one);
+  const note = room >= 1
+    ? 'room for ' + room + (room === 1 ? ' conversation' : ' conversations')
+    : 'not enough for even one — the cache is off until the context is shorter';
+  return '<p class="hint">One saved conversation costs ' + esc(fmtMiB(one)) + ' at this'
+    + ' context: ' + esc(note) + '.</p>';
+}
+
 function cacheBody(c) {
   const total = c.nodes.length + c.unplaced.length;
   // The slot line has to reconcile with the tree below it, which shows every
@@ -2598,6 +2652,7 @@ function cacheBody(c) {
   out += occBar(c.bytes_pinned, c.bytes_evictable, c.max_bytes, 'memory',
     fmtMiB(c.bytes_resident) + ' held \u00b7 ' + fmtMiB(c.bytes_pinned) + ' pinned \u00b7 '
     + fmtMiB(c.bytes_evictable) + ' of ' + fmtMiB(c.max_bytes) + ' reclaimable budget');
+  out += checkpointLine(c);
   out += cacheChips(c);
   out += cacheCounters(c.counters);
   if (!c.nodes.length && !c.unplaced.length) {

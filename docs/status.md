@@ -1,5 +1,40 @@
 # Fono — Project Status
-Last updated: 2026-08-13
+Last updated: 2026-08-14
+
+## 2026-08-14 — The cache can be told why it missed, and a wrong number is fixed
+
+Fono now records, on every lookup, how much of a prompt it recognised and what
+stopped it recognising more — the prompt was rewritten, or the checkpoint was
+thrown away to stay inside a budget. Those two look identical from the outside
+and lead to opposite conclusions, so eviction now leaves behind the token list
+of what it dropped (not the data, which is what costs) purely so the difference
+can be measured. It is capped at a megabyte, so the diagnostic cannot quietly
+become a second cache.
+
+Driving a conversation to nearly twenty thousand tokens through the network
+interface showed the machinery works: after the first turn, only five tokens
+were ever read twice.
+
+That measurement then found something worth more than itself. The cache was
+allowed 256 MB, fixed, with no way to change it — while a single saved
+conversation for the larger model at a long context is 1.8 GB. Nothing that big
+could be kept: it was admitted and dropped in the same breath, so every turn
+re-read everything, which on the processor costs three minutes.
+
+The limit is no longer a constant. It is three times what one saved
+conversation actually costs for the model in use, capped by what the machine
+has free, and if even one will not fit the cache says so and switches itself
+off rather than thrash. On this laptop with the small model at a twenty
+thousand token context that is 446 MB a conversation and a 1.3 GB budget.
+
+Also added: Fono refuses at startup to pair a compressed attention cache with
+attention explicitly switched off, a combination that produces wrong replies
+rather than an error, and `fono doctor` now names the setting in force.
+
+The cache page in settings says all of this in plain words: how many tokens
+have been read a second time and why — the prompt changed, or a saved
+conversation had been thrown away — and what one conversation costs against the
+limit, so the limit reads as "room for three" rather than a number of megabytes.
 
 ## 2026-08-13 — What a driver claims, and what your machine actually has
 

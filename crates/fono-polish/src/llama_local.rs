@@ -139,7 +139,7 @@ impl LlamaLocal {
             context_size: context_size.max(MIN_CTX),
             threads,
             state: Arc::new(Mutex::new(None)),
-            prompt_state_cache: Arc::new(Mutex::new(PromptStateCache::default())),
+            prompt_state_cache: Arc::new(Mutex::new(PromptStateCache::sized_for_host())),
             cache_counters: Arc::new(CacheCounters::default()),
             brain_tap_enabled: false,
             brain_tap: Arc::new(OnceLock::new()),
@@ -219,6 +219,16 @@ impl LlamaLocal {
             KvCacheType::F16,
             KvCacheType::F16,
         )?;
+        // Now that the model is known, budget the checkpoint cache in the unit
+        // that decides whether it can hold anything: one copy of this model's
+        // KV cache at this context.
+        fono_core::llama_backend::budget_prompt_cache(
+            &self.prompt_state_cache,
+            &self.model_path,
+            self.context_size,
+            KvCacheType::F16,
+            KvCacheType::F16,
+        );
         // Single, concise INFO line summarising what got loaded — name +
         // on-disk size (≈ resident memory once mapped) + load wall time.
         // Verbose architecture/KV/tensor dumps from llama.cpp itself are

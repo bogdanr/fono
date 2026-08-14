@@ -17,14 +17,60 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Once, OnceLock, Weak};
 
-use anyhow::{Context, Result};
-use llama_cpp_2::context::params::KvCacheType;
+use anyhow::{anyhow, Context, Result};
+use llama_cpp_2::context::params::{KvCacheType, LlamaContextParams};
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::LlamaModel;
 use tracing::{debug, info, warn};
 
 static LLAMA_LOG_INIT: Once = Once::new();
+
+/// Budget a prompt-state cache for the model and context that just loaded.
+///
+/// The cache is built before the model is known, so its opening budget is a
+/// share of free RAM — a number that says what may be spent, not what is worth
+/// spending. Once the model is loaded the useful unit is available: one saved
+/// checkpoint is one copy of the KV cache, and a cache smaller than that
+/// retains nothing at all.
+///
+/// Best-effort. A model whose metadata will not parse keeps the opening budget,
+/// which is the behaviour that predates this and costs only efficiency.
+pub fn budget_prompt_cache(
+    cache: &Mutex<crate::prompt_cache::PromptStateCache>,
+    model_path: &Path,
+    n_ctx: u32,
+    type_k: KvCacheType,
+    type_v: KvCacheType,
+) {
+    let Some(checkpoint) = crate::gpu_offload::kv_cache_bytes(model_path, n_ctx, type_k, type_v)
+    else {
+        debug!("prompt cache: model metadata unreadable, keeping the opening budget");
+        return;
+    };
+    let Ok(mut cache) = cache.lock() else { return };
+    let budget = cache.resize_for_checkpoint(checkpoint, crate::hwcheck::available_ram_bytes());
+    let mb = |b: u64| b / (1024 * 1024);
+    if cache.holds_a_checkpoint(checkpoint) {
+        debug!(
+            "prompt cache: {} MB budget, {} MB a checkpoint at ctx={n_ctx}",
+            mb(budget as u64),
+            mb(checkpoint)
+        );
+    } else {
+        // Not a tuning note. Below one checkpoint every entry is admitted and
+        // dropped by the same pass, so the cache is inert and every turn pays a
+        // full cold prefill. The remedy is a shorter context or more free
+        // memory; a larger cache is not on offer, because the ceiling is what
+        // the machine has.
+        warn!(
+            "prompt cache: {} MB budget cannot hold one {} MB checkpoint at ctx={n_ctx}; \
+             prompt reuse is off until the context is shorter or memory frees up",
+            mb(budget as u64),
+            mb(checkpoint)
+        );
+    }
+}
 
 /// Redirect llama.cpp + ggml's chatty stderr logging through `tracing`
 /// so the daemon's normal log filter governs it (the `info` filter pins
@@ -217,6 +263,48 @@ pub fn streaming_decode_threads() -> i32 {
     }
 }
 
+/// Check that the context params are not asking for a quantized value cache
+/// with flash attention switched off, and name the policy in force so callers
+/// can record it.
+///
+/// Quantizing the V half of the KV cache *requires* flash attention. Without
+/// it llama.cpp hands back a null context, which surfaces as an opaque
+/// "create llama context" failure rather than as the configuration mistake it
+/// is. The policy defaults to `AUTO` and llama.cpp resolves it on for the
+/// shapes we run, so the pairing is correct today — this turns a future
+/// upstream default flip, or a local edit, into a message that says what went
+/// wrong instead of a null pointer.
+///
+/// `AUTO` is reported rather than resolved: llama.cpp decides at context
+/// creation and does not publish the answer, so the honest thing to record is
+/// what was asked for. A successful load with a quantized V cache is itself the
+/// evidence that `AUTO` resolved to enabled.
+///
+/// # Errors
+/// When `type_v` is a quantized type and flash attention is explicitly
+/// disabled.
+pub fn flash_attention_policy(params: &LlamaContextParams) -> Result<&'static str> {
+    let policy = match params.flash_attention_policy() {
+        llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_DISABLED => "disabled",
+        llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_ENABLED => "enabled",
+        _ => "auto",
+    };
+    if policy == "disabled" && is_quantized(params.type_v()) {
+        return Err(anyhow!(
+            "a quantized value cache ({:?}) needs flash attention, and it is switched off; \
+             llama.cpp would refuse to create the context",
+            params.type_v()
+        ));
+    }
+    Ok(policy)
+}
+
+/// Whether a cache type stores fewer than a whole float per value, which is the
+/// property flash attention is required for.
+fn is_quantized(ty: KvCacheType) -> bool {
+    !matches!(ty, KvCacheType::F32 | KvCacheType::F16 | KvCacheType::BF16 | KvCacheType::F64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +342,36 @@ mod tests {
         assert!(p.use_mmap(), "weights must stay file-backed and page in on demand");
         assert!(!p.use_mlock(), "pinning a model larger than RAM is an OOM");
         assert_eq!(p.n_gpu_layers(), 0, "the host fallback keeps every layer on the CPU");
+    }
+
+    #[test]
+    fn the_shipped_cache_types_pass_the_flash_attention_check() {
+        // What every inference path actually asks for: a q8_0 cache on the
+        // default AUTO policy. It must not trip the guard.
+        let params = LlamaContextParams::default()
+            .with_type_k(KvCacheType::Q8_0)
+            .with_type_v(KvCacheType::Q8_0);
+        assert_eq!(flash_attention_policy(&params).unwrap(), "auto");
+    }
+
+    #[test]
+    fn a_quantized_value_cache_with_flash_attention_off_is_refused() {
+        // Forcing the policy off is the failure this guard exists to name.
+        // Without it llama.cpp returns a null context and the caller reports
+        // an opaque "create llama context" error.
+        let params = LlamaContextParams::default()
+            .with_type_v(KvCacheType::Q8_0)
+            .with_flash_attention_policy(llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_DISABLED);
+        assert!(flash_attention_policy(&params).is_err());
+    }
+
+    #[test]
+    fn an_unquantized_value_cache_may_switch_flash_attention_off() {
+        // f16 has no such requirement, so turning the policy off is a legal
+        // configuration and the guard must not invent a failure.
+        let params = LlamaContextParams::default()
+            .with_type_v(KvCacheType::F16)
+            .with_flash_attention_policy(llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_DISABLED);
+        assert_eq!(flash_attention_policy(&params).unwrap(), "disabled");
     }
 }

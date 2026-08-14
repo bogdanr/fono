@@ -16,7 +16,7 @@ use std::time::Instant;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use fono_core::brain_tap::{decode_token_with_tap, BrainTap};
-use fono_core::llama_backend::{backend, shared_model_sized};
+use fono_core::llama_backend::{backend, flash_attention_policy, shared_model_sized};
 use fono_core::llama_gen::{
     adopt_sampled_token, first_stop_marker, generation_sampler, generation_sampler_with_grammar,
     is_control_token, log_stop_token, ruled_out, safe_stream_end, sample_next, template_family,
@@ -258,7 +258,7 @@ pub struct ConversationPrefixCacheReport {
 // checkpoint by prefilling tokens into a context, restoring one, and computing
 // the content-fingerprint key.
 use fono_core::prompt_cache::{
-    model_files_fingerprint, CacheCounters, CacheMutationReport, PromptStateCache,
+    model_files_fingerprint, CacheCounters, CacheMutationReport, PrefixMissCause, PromptStateCache,
     PromptStateCacheEntry, PromptStateCacheKey, PromptStateCacheLayer,
 };
 use fono_core::prompt_cache_view::{self as cache_view, CacheSnapshot};
@@ -307,7 +307,7 @@ impl LlamaLocalAssistant {
             batch_size,
             ubatch_size,
             state: Arc::new(Mutex::new(None)),
-            prompt_state_cache: Arc::new(Mutex::new(PromptStateCache::default())),
+            prompt_state_cache: Arc::new(Mutex::new(PromptStateCache::sized_for_host())),
             cache_counters: Arc::new(CacheCounters::default()),
             brain_tap_enabled: false,
             brain_tap: Arc::new(OnceLock::new()),
@@ -391,6 +391,16 @@ impl LlamaLocalAssistant {
         // does, so those keep streaming from disk on the CPU exactly as before.
         let model =
             shared_model_sized(&self.model_path, self.context_size, KV_CACHE_TYPE, KV_CACHE_TYPE)?;
+        // Now that the model is known, budget the checkpoint cache in the unit
+        // that decides whether it can hold anything: one copy of this model's
+        // KV cache at this context.
+        fono_core::llama_backend::budget_prompt_cache(
+            &self.prompt_state_cache,
+            &self.model_path,
+            self.context_size,
+            KV_CACHE_TYPE,
+            KV_CACHE_TYPE,
+        );
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let model_name = self.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
         // How this model frames a turn, taken from the model itself and
@@ -670,7 +680,7 @@ impl LlamaLocalAssistant {
                     .prompt_state_cache
                     .lock()
                     .map_err(|_| anyhow!("llama-local prompt-state cache mutex poisoned"))?;
-                let hit_key = cache.find_longest_prefix(
+                let lookup = cache.explain_longest_prefix(
                     &runtime,
                     &[
                         PromptStateCacheLayer::F8ChatPrefix,
@@ -684,7 +694,47 @@ impl LlamaLocalAssistant {
                     ],
                     &token_ids(&prefix_tokens),
                 );
-                hit_key.and_then(|hk| cache.get(&hk).map(|entry| (hk, entry)))
+                // Every token this turn is about to read that a deeper
+                // checkpoint would have covered, and what stopped it. Recorded
+                // whatever the outcome, because a shallow match and a total
+                // miss cost the same thing — tokens read again — and only the
+                // cause says whether storage could have prevented it.
+                let mut fields = json!({
+                    "cause": lookup.cause.as_str(),
+                    "matched_tokens": lookup.matched_tokens,
+                    "decoded_prefix_tokens": lookup.decoded_prefix_tokens,
+                    "total_tokens": full_tokens.len(),
+                });
+                match &lookup.cause {
+                    PrefixMissCause::Eviction { recoverable_tokens, bytes, layer } => {
+                        fields["recoverable_tokens"] = json!(recoverable_tokens);
+                        fields["recoverable_bytes"] = json!(bytes);
+                        fields["recoverable_layer"] = json!(layer.as_str());
+                    }
+                    PrefixMissCause::Divergence { at, candidate_tokens } => {
+                        fields["diverged_at"] = json!(at);
+                        fields["candidate_tokens"] = json!(candidate_tokens);
+                    }
+                    PrefixMissCause::Deepest | PrefixMissCause::RuntimeKeyChange => {}
+                }
+                // Also on the log, not only the trace. A trace is installed
+                // per dictation/assistant turn; a request arriving over the
+                // OpenAI-compatible endpoint has none, and that is exactly the
+                // caller whose reuse we most need to see.
+                debug!(
+                    cause = lookup.cause.as_str(),
+                    matched_tokens = lookup.matched_tokens,
+                    decoded_prefix_tokens = lookup.decoded_prefix_tokens,
+                    total_tokens = full_tokens.len(),
+                    detail = %fields,
+                    "prompt cache lookup"
+                );
+                current_instant("llm.prompt_cache_lookup", "cache", CACHE_LANE, fields);
+                self.cache_counters.record_prefix_reread(
+                    lookup.cause.as_str(),
+                    lookup.decoded_prefix_tokens as u64,
+                );
+                lookup.hit.and_then(|hk| cache.get(&hk).map(|entry| (hk, entry)))
             };
             let mut start = 0_usize;
             let mut matched = false;
@@ -1141,6 +1191,7 @@ impl LlamaLocalAssistant {
             unsafe { tap.install(&mut ctx_params) };
         }
         let ctx_started = Instant::now();
+        let flash_attn = flash_attention_policy(&ctx_params)?;
         let mut ctx = model.new_context(backend(), ctx_params).context("create llama context")?;
         current_instant(
             "llm.context_created",
@@ -1151,6 +1202,7 @@ impl LlamaLocalAssistant {
                 "batch": batch_size,
                 "ubatch": self.ubatch_size,
                 "threads": self.threads,
+                "flash_attn": flash_attn,
                 "elapsed_ms": ctx_started.elapsed().as_millis() as u64,
             }),
         );
@@ -1635,6 +1687,7 @@ impl LlamaLocalAssistant {
             unsafe { tap.install(&mut ctx_params) };
         }
         let ctx_started = Instant::now();
+        let flash_attn = flash_attention_policy(&ctx_params)?;
         let ctx = model.new_context(backend(), ctx_params).context("create llama context")?;
         current_instant(
             event_name,
@@ -1645,6 +1698,7 @@ impl LlamaLocalAssistant {
                 "batch": batch_size,
                 "ubatch": self.ubatch_size,
                 "threads": self.threads,
+                "flash_attn": flash_attn,
                 "elapsed_ms": ctx_started.elapsed().as_millis() as u64,
             }),
         );
@@ -3120,6 +3174,24 @@ const SWA_FULL: bool = true;
 /// Quantizing the value half at all requires flash attention, which llama.cpp
 /// resolves to on here.
 pub(crate) const KV_CACHE_TYPE: KvCacheType = KvCacheType::Q8_0;
+
+/// One line naming the KV cache types the assistant runs and the flash
+/// attention policy that goes with them, for `fono doctor`.
+///
+/// Worth reporting because the two are coupled: an 8-bit value cache only
+/// works with flash attention on, and llama.cpp resolves the default `auto`
+/// policy itself without publishing the answer. Printing what was asked for
+/// makes a future upstream change visible here rather than as a context that
+/// suddenly refuses to open.
+#[must_use]
+pub fn attention_summary() -> String {
+    let params =
+        LlamaContextParams::default().with_type_k(KV_CACHE_TYPE).with_type_v(KV_CACHE_TYPE);
+    match flash_attention_policy(&params) {
+        Ok(policy) => format!("kv cache {KV_CACHE_TYPE:?}, flash attention {policy}"),
+        Err(e) => format!("misconfigured — {e}"),
+    }
+}
 
 /// Whether dropping KV cells past `keep_len` leaves a state that can be safely
 /// serialized and later resumed.

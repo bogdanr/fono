@@ -372,6 +372,16 @@ pub fn gather(
         col.section("Compute backends");
         col.push(S::Info, "variant", &format!("{} ({})", VARIANT.label(), VARIANT.description()));
         col.push(S::Info, "vulkan", &outcome.summary_line());
+        // The attention path the local models run on. An 8-bit value cache
+        // halves what a conversation costs to hold, and it only works with
+        // flash attention, so the two belong on one line: if a future
+        // llama.cpp stops resolving `auto` to on, this is where it shows.
+        #[cfg(feature = "llama-local")]
+        {
+            let line = fono_assistant::llama_local::attention_summary();
+            writeln!(out, "  attention: {line}")?;
+            col.push(S::Info, "attention", &line);
+        }
         if matches!(VARIANT, Variant::Cpu) && outcome.is_usable() {
             col.push(
                 S::Info,
@@ -1609,6 +1619,17 @@ pub fn gather(
                     c.entries_evictable, c.max_entries, c.entries_pinned, held,
                 ),
             );
+            // The one re-read cause a bigger cache would have prevented. Named
+            // here because it is the only one the user can act on: the others
+            // are the prompt changing, which no amount of memory helps.
+            let dropped = c.counters.reread_prefix_tokens.get("eviction").copied().unwrap_or(0);
+            if dropped > 0 {
+                let line = format!(
+                    "{dropped} tokens re-read because a checkpoint was dropped to stay in budget"
+                );
+                writeln!(out, "  {:<20} : {}", "", warn(&line))?;
+                col.push(S::Warn, &format!("{} re-reads", c.role), &line);
+            }
         }
         writeln!(out)?;
     }

@@ -434,6 +434,11 @@ pub struct CacheCounters {
     /// Cold prefills bucketed by reason. A leaf lock: nothing else is ever
     /// acquired while it is held, so it cannot take part in a deadlock.
     reasons: Mutex<BTreeMap<String, u64>>,
+    /// Prefix tokens read again, bucketed by what stopped a deeper checkpoint
+    /// from covering them. Tokens rather than lookups because one miss on a
+    /// 16k prompt costs more than a hundred on short ones, and it is the cost
+    /// that decides whether checkpoints are worth storing.
+    rereads: Mutex<BTreeMap<String, u64>>,
 }
 
 impl CacheCounters {
@@ -447,6 +452,18 @@ impl CacheCounters {
         self.cold_prefills.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut reasons) = self.reasons.lock() {
             *reasons.entry(reason.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    /// A lookup re-read `tokens` prefix tokens, and what stopped a deeper
+    /// checkpoint from covering them. Recorded on hits too: a shallow hit and
+    /// a total miss cost the same thing.
+    pub fn record_prefix_reread(&self, cause: &str, tokens: u64) {
+        if tokens == 0 {
+            return;
+        }
+        if let Ok(mut rereads) = self.rereads.lock() {
+            *rereads.entry(cause.to_string()).or_insert(0) += tokens;
         }
     }
 
@@ -467,6 +484,7 @@ impl CacheCounters {
             prunes: self.prunes.load(Ordering::Relaxed),
             pin_releases: self.pin_releases.load(Ordering::Relaxed),
             cold_prefill_reasons: self.reasons.lock().map(|r| r.clone()).unwrap_or_default(),
+            reread_prefix_tokens: self.rereads.lock().map(|r| r.clone()).unwrap_or_default(),
         }
     }
 }
@@ -481,6 +499,9 @@ pub struct CacheCountersSnapshot {
     pub evictions: u64,
     pub prunes: u64,
     pub pin_releases: u64,
+    /// Prefix tokens read again, by cause — the taxonomy's headline. Ordered so
+    /// the serialized form is stable.
+    pub reread_prefix_tokens: BTreeMap<String, u64>,
 }
 
 impl CacheCountersSnapshot {
@@ -502,15 +523,203 @@ pub struct PromptStateCache {
     entries: HashMap<PromptStateCacheKey, PromptStateCacheEntry>,
     lru: VecDeque<PromptStateCacheKey>,
     pinned: HashSet<PromptStateCacheKey>,
+    /// Token sequences of entries eviction dropped, kept so a later lookup can
+    /// tell "this prompt was rewritten" from "we had this and threw it away".
+    ///
+    /// Only the second of those is worth storing checkpoints on disk for, and
+    /// the two are indistinguishable from a live cache alone: both look like a
+    /// shallow match. Holding the tokens of what was dropped — not the blob,
+    /// which is what costs — makes the difference measurable.
+    ///
+    /// Pruned entries are deliberately not recorded. A prune drops an entry a
+    /// longer live one already covers, so it can never be the deeper thing a
+    /// lookup lost.
+    tombstones: VecDeque<Tombstone>,
+    /// What one checkpoint costs for the loaded model, once known. The budget
+    /// is a multiple of it, so reporting the budget without it says nothing
+    /// about how many conversations stay warm.
+    checkpoint_bytes: Option<u64>,
+}
+
+/// What eviction dropped, minus the blob: enough to re-run prefix matching
+/// against, and nothing else.
+#[derive(Debug, Clone)]
+struct Tombstone {
+    runtime_sha256: String,
+    layer: PromptStateCacheLayer,
+    prefix_tokens: Vec<i32>,
+    bytes: usize,
+}
+
+/// Total tokens the tombstone ring may hold before the oldest are dropped.
+///
+/// Four bytes a token, so this is a 1 MiB ceiling on a diagnostic that sits
+/// beside a cache budgeted in hundreds of megabytes. Sized in tokens rather
+/// than entries because entries differ by three orders of magnitude — a
+/// 72-token system prompt and a 16k conversation are both one entry.
+const TOMBSTONE_TOKEN_BUDGET: usize = 256 * 1024;
+
+/// Why a lookup did not restore a deeper checkpoint than it did.
+///
+/// The whole point of the disk tier is to convert one of these into a hit, and
+/// only one of them: a checkpoint the cache had and dropped is recoverable from
+/// disk, while a prompt whose front was rewritten has nothing to recover. So
+/// this is the measurement that decides whether the tier is worth building.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrefixMissCause {
+    /// The deepest checkpoint that could match did match. Nothing was lost.
+    Deepest,
+    /// Nothing is cached under this runtime key at all — the model, its
+    /// settings or the process changed since anything was stored.
+    RuntimeKeyChange,
+    /// A checkpoint that would have matched was evicted to stay inside the
+    /// budget. This is the case a disk tier turns into a hit.
+    Eviction {
+        /// Tokens that evicted checkpoint covered, i.e. what a disk tier would
+        /// have saved this lookup from reading again.
+        recoverable_tokens: usize,
+        /// Bytes the tier would have had to read back.
+        bytes: usize,
+        layer: PromptStateCacheLayer,
+    },
+    /// Checkpoints exist for this runtime and none is a token prefix of this
+    /// prompt: the prompt was rewritten in front of where they end. No amount
+    /// of storage recovers this.
+    Divergence {
+        /// Token position where the closest candidate stopped agreeing with
+        /// this prompt.
+        at: usize,
+        /// Tokens that candidate held, so the gap between it and `at` says how
+        /// much was thrown away by the rewrite.
+        candidate_tokens: usize,
+    },
+}
+
+impl PrefixMissCause {
+    /// Short stable name, for a trace field or a counter bucket.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Deepest => "deepest",
+            Self::RuntimeKeyChange => "runtime_key_change",
+            Self::Eviction { .. } => "eviction",
+            Self::Divergence { .. } => "divergence",
+        }
+    }
+}
+
+/// The outcome of a longest-prefix lookup, with the reason it was not deeper.
+#[derive(Debug, Clone)]
+pub struct PrefixLookup {
+    /// The live entry to restore, when one matched.
+    pub hit: Option<PromptStateCacheKey>,
+    /// Tokens that entry covers — the prefix this lookup does not have to read
+    /// again.
+    pub matched_tokens: usize,
+    /// Tokens this lookup must read, having matched what it did.
+    pub decoded_prefix_tokens: usize,
+    pub cause: PrefixMissCause,
 }
 
 impl Default for PromptStateCache {
     fn default() -> Self {
-        Self::new(10, 256 * 1024 * 1024)
+        Self::new(10, DEFAULT_MAX_BYTES)
     }
 }
 
+/// Floor for the byte budget, and the whole budget on a machine with no memory
+/// to spare. Small models keep several conversations inside it.
+const DEFAULT_MAX_BYTES: usize = 256 * 1024 * 1024;
+
+/// Ceiling for the byte budget. A checkpoint is pure cache: past this the
+/// return is not worth the resident set, however much RAM the machine has.
+const MAX_MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Share of free RAM the cache may claim, after the desktop's reserve.
+const HOST_RAM_SHARE: u64 = 4;
+
+/// Reserve left to the desktop before any of free RAM is counted as the
+/// cache's to claim. Matches the offload planner's figure.
+const DESKTOP_RESERVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Checkpoints the budget aims to hold: the conversation in progress, the
+/// predecessor a longest-prefix match needs, and one spare.
+const CHECKPOINTS_HELD: u64 = 3;
+
+/// The most this cache may claim on a machine with `host_available` bytes
+/// free — a share of what is left after the desktop's reserve, capped.
+fn host_ceiling(host_available: u64) -> u64 {
+    (host_available.saturating_sub(DESKTOP_RESERVE_BYTES) / HOST_RAM_SHARE).min(MAX_MAX_BYTES)
+}
+
 impl PromptStateCache {
+    /// A cache budgeted from the memory this machine actually has free.
+    ///
+    /// The fixed 256 MiB this replaced was set when the largest thing anyone
+    /// cached was a system prompt. One checkpoint of a 26B model at a 16k
+    /// context is 1.8 GB — seven times that budget — so on a large model the
+    /// cache retained nothing at all: every entry was admitted and dropped by
+    /// the same enforcement pass, and every turn paid a full cold prefill.
+    /// Deriving the number from free RAM keeps small models where they were
+    /// (the floor is the old constant) and lets a large one hold the
+    /// conversation it is having.
+    #[must_use]
+    pub fn sized_for_host() -> Self {
+        Self::sized_from(crate::hwcheck::available_ram_bytes())
+    }
+
+    /// [`Self::sized_for_host`] with the memory figure passed in, so the
+    /// arithmetic is testable away from the machine running the test.
+    #[must_use]
+    pub fn sized_from(host_available: u64) -> Self {
+        let capped = host_ceiling(host_available);
+        let bytes = usize::try_from(capped).unwrap_or(DEFAULT_MAX_BYTES).max(DEFAULT_MAX_BYTES);
+        Self::new(10, bytes)
+    }
+
+    /// Re-budget for the model that actually loaded, in units of the thing
+    /// being stored.
+    ///
+    /// One checkpoint is one copy of the KV cache, so `checkpoint_bytes` is the
+    /// only figure that says whether this cache can hold anything at all —
+    /// share-of-RAM does not, and a fixed byte count cannot, because per-token
+    /// cost varies more than tenfold across the models Fono ships. Below one
+    /// checkpoint the cache retains **nothing**: the entry is admitted and
+    /// dropped by the same enforcement pass. That is a cliff, not a gradient,
+    /// which is why the target is a small multiple rather than a fraction.
+    ///
+    /// Three is the multiple: the conversation in progress, the predecessor a
+    /// longest-prefix match needs, and one spare so a second conversation does
+    /// not evict the first on sight. Bounded above by free RAM, which says what
+    /// may be spent and never what should be.
+    ///
+    /// Returns the budget set. When free RAM cannot cover even one checkpoint
+    /// the caller is told, because the cache then cannot do its job and the
+    /// remedy is a shorter context, not a larger cache.
+    pub fn resize_for_checkpoint(&mut self, checkpoint_bytes: u64, host_available: u64) -> usize {
+        let ceiling = host_ceiling(host_available);
+        let want = checkpoint_bytes.saturating_mul(CHECKPOINTS_HELD);
+        let bytes = usize::try_from(
+            want.min(ceiling).max(u64::try_from(DEFAULT_MAX_BYTES).unwrap_or(u64::MAX)),
+        )
+        .unwrap_or(DEFAULT_MAX_BYTES);
+        self.max_bytes = bytes;
+        self.checkpoint_bytes = Some(checkpoint_bytes);
+        self.evict_over_budget();
+        bytes
+    }
+
+    /// What one checkpoint costs for the loaded model, if a model has loaded.
+    #[must_use]
+    pub fn checkpoint_bytes(&self) -> Option<u64> {
+        self.checkpoint_bytes
+    }
+
+    /// Whether the budget can hold a checkpoint of the given size at all.
+    #[must_use]
+    pub fn holds_a_checkpoint(&self, checkpoint_bytes: u64) -> bool {
+        u64::try_from(self.max_bytes).unwrap_or(u64::MAX) >= checkpoint_bytes
+    }
+
     pub fn new(max_entries: usize, max_bytes: usize) -> Self {
         Self {
             max_entries,
@@ -519,6 +728,8 @@ impl PromptStateCache {
             entries: HashMap::new(),
             lru: VecDeque::new(),
             pinned: HashSet::new(),
+            tombstones: VecDeque::new(),
+            checkpoint_bytes: None,
         }
     }
 
@@ -723,6 +934,89 @@ impl PromptStateCache {
             .map(|(k, _)| k.clone())
     }
 
+    /// [`Self::find_longest_prefix`], plus the reason the match is not deeper.
+    ///
+    /// Same search, so a caller can use this everywhere the plain lookup was
+    /// used and pay only a second scan of the same entries. The extra work is
+    /// entirely in the miss case: when nothing matched, it asks *why*, which is
+    /// the question a live cache cannot otherwise answer. A shallow match looks
+    /// identical whether the prompt was rewritten or the checkpoint was
+    /// evicted, and only the second of those is a case more storage would fix.
+    pub fn explain_longest_prefix(
+        &self,
+        runtime: &str,
+        layers: &[PromptStateCacheLayer],
+        tokens: &[i32],
+    ) -> PrefixLookup {
+        let hit = self.find_longest_prefix(runtime, layers, tokens);
+        let matched_tokens =
+            hit.as_ref().and_then(|k| self.entries.get(k)).map_or(0, |e| e.prefix_tokens.len());
+        let decoded_prefix_tokens = tokens.len().saturating_sub(matched_tokens);
+
+        // A tombstone that reaches past the live match is the disk tier's whole
+        // case, so it is asked first: it is the only cause that names bytes a
+        // tier could have read back.
+        let recoverable = self
+            .tombstones
+            .iter()
+            .filter(|t| {
+                t.runtime_sha256 == runtime
+                    && layers.contains(&t.layer)
+                    && t.prefix_tokens.len() > matched_tokens
+                    && t.prefix_tokens.len() < tokens.len()
+                    && tokens.starts_with(&t.prefix_tokens)
+            })
+            .max_by_key(|t| t.prefix_tokens.len());
+        if let Some(t) = recoverable {
+            return PrefixLookup {
+                hit,
+                matched_tokens,
+                decoded_prefix_tokens,
+                cause: PrefixMissCause::Eviction {
+                    recoverable_tokens: t.prefix_tokens.len(),
+                    bytes: t.bytes,
+                    layer: t.layer.clone(),
+                },
+            };
+        }
+        if matched_tokens > 0 {
+            return PrefixLookup {
+                hit,
+                matched_tokens,
+                decoded_prefix_tokens,
+                cause: PrefixMissCause::Deepest,
+            };
+        }
+
+        // Nothing matched and nothing recoverable was dropped. Either this
+        // runtime has never stored anything, or it has and the prompt moved
+        // away from all of it — a difference the tier cannot close, but which
+        // decides whether it is worth trying.
+        let candidate = self
+            .entries
+            .iter()
+            .filter(|(k, e)| {
+                k.runtime_sha256 == runtime
+                    && layers.contains(&k.layer)
+                    && !e.prefix_tokens.is_empty()
+            })
+            .map(|(_, e)| {
+                let at = e
+                    .prefix_tokens
+                    .iter()
+                    .zip(tokens)
+                    .position(|(a, b)| a != b)
+                    .unwrap_or_else(|| e.prefix_tokens.len().min(tokens.len()));
+                (at, e.prefix_tokens.len())
+            })
+            .max_by_key(|(at, _)| *at);
+        let cause = match candidate {
+            Some((at, candidate_tokens)) => PrefixMissCause::Divergence { at, candidate_tokens },
+            None => PrefixMissCause::RuntimeKeyChange,
+        };
+        PrefixLookup { hit, matched_tokens, decoded_prefix_tokens, cause }
+    }
+
     pub fn remove_layer(&mut self, layer: &PromptStateCacheLayer) {
         let removed: Vec<_> = self.entries.keys().filter(|k| &k.layer == layer).cloned().collect();
         for key in removed {
@@ -768,6 +1062,7 @@ impl PromptStateCache {
             let Some(key) = self.lru.remove(pos) else { break };
             if let Some(entry) = self.entries.remove(&key) {
                 self.bytes = self.bytes.saturating_sub(entry.state.len());
+                self.remember_evicted(&key, &entry);
                 evicted.push(EvictedEntry {
                     layer: key.layer.clone(),
                     token_count: entry.token_count,
@@ -776,6 +1071,28 @@ impl PromptStateCache {
             }
         }
         evicted
+    }
+
+    /// Keep the token sequence of an evicted entry so a later lookup can say
+    /// what the budget cost it. Drops the oldest tombstones once the ring is
+    /// over its token budget.
+    fn remember_evicted(&mut self, key: &PromptStateCacheKey, entry: &PromptStateCacheEntry) {
+        // An entry with no recorded tokens could never win a longest-prefix
+        // match while it was alive, so losing it costs a lookup nothing.
+        if entry.prefix_tokens.is_empty() {
+            return;
+        }
+        self.tombstones.push_back(Tombstone {
+            runtime_sha256: key.runtime_sha256.clone(),
+            layer: key.layer.clone(),
+            prefix_tokens: entry.prefix_tokens.clone(),
+            bytes: entry.state.len(),
+        });
+        let mut held: usize = self.tombstones.iter().map(|t| t.prefix_tokens.len()).sum();
+        while held > TOMBSTONE_TOKEN_BUDGET {
+            let Some(dropped) = self.tombstones.pop_front() else { break };
+            held -= dropped.prefix_tokens.len();
+        }
     }
 }
 
@@ -789,6 +1106,192 @@ mod tests {
 
     fn entry(bytes: usize) -> PromptStateCacheEntry {
         PromptStateCacheEntry::new(vec![0_u8; bytes], 1)
+    }
+
+    // The miss taxonomy exists to answer one question: of the prefix tokens a
+    // turn reads again, how many would a checkpoint on disk have saved? Only
+    // one of the four causes is recoverable that way, so each is pinned here.
+
+    fn tokened(
+        id: &str,
+        tokens: &[i32],
+        bytes: usize,
+    ) -> (PromptStateCacheKey, PromptStateCacheEntry) {
+        (
+            PromptStateCacheKey::new(
+                PromptStateCacheLayer::F8ChatPrefix,
+                "runtime",
+                id,
+                id,
+                tokens.len(),
+            ),
+            PromptStateCacheEntry::with_tokens(vec![0_u8; bytes], tokens.to_vec()),
+        )
+    }
+
+    const CHAT: [PromptStateCacheLayer; 1] = [PromptStateCacheLayer::F8ChatPrefix];
+
+    #[test]
+    fn an_empty_cache_blames_the_runtime_key() {
+        let cache = PromptStateCache::new(10, 1024 * 1024);
+        let miss = cache.explain_longest_prefix("runtime", &CHAT, &[1, 2, 3]);
+        assert_eq!(miss.cause, PrefixMissCause::RuntimeKeyChange);
+        assert_eq!(miss.decoded_prefix_tokens, 3);
+    }
+
+    #[test]
+    fn a_deepest_possible_match_reports_nothing_lost() {
+        let mut cache = PromptStateCache::new(10, 1024 * 1024);
+        let (k, e) = tokened("turn-1", &[1, 2, 3], 64);
+        cache.insert(k, e);
+        let hit = cache.explain_longest_prefix("runtime", &CHAT, &[1, 2, 3, 4, 5]);
+        assert_eq!(hit.cause, PrefixMissCause::Deepest);
+        assert_eq!(hit.matched_tokens, 3);
+        assert_eq!(hit.decoded_prefix_tokens, 2);
+    }
+
+    #[test]
+    fn a_rewritten_prompt_is_divergence_and_names_where() {
+        // The failure a disk tier cannot fix: the client changed the front of
+        // the prompt, so the stored checkpoint describes a different sentence.
+        let mut cache = PromptStateCache::new(10, 1024 * 1024);
+        let (k, e) = tokened("turn-1", &[1, 2, 3, 4], 64);
+        cache.insert(k, e);
+        let miss = cache.explain_longest_prefix("runtime", &CHAT, &[1, 2, 99, 4, 5]);
+        assert_eq!(miss.matched_tokens, 0);
+        assert_eq!(
+            miss.cause,
+            PrefixMissCause::Divergence { at: 2, candidate_tokens: 4 },
+            "the prompt agrees for two tokens, and the candidate held four"
+        );
+    }
+
+    #[test]
+    fn a_checkpoint_larger_than_the_whole_budget_never_survives_its_own_insert() {
+        // Not a corner case: a checkpoint costs context × model, so a large
+        // model at a long context can exceed any fixed budget on its own. Such
+        // an entry is admitted and then dropped by the very same enforcement
+        // pass, so the cache holds nothing and every later turn re-reads the
+        // whole prompt. Sizing the budget from free RAM makes this rarer, not
+        // impossible.
+        //
+        // The taxonomy has to call that eviction rather than a cold cache,
+        // because it is the case a disk tier is for.
+        let mut cache = PromptStateCache::new(10, 1024);
+        let (k, e) = tokened("oversize", &[1, 2, 3, 4], 4096);
+        let report = cache.insert(k.clone(), e);
+        assert!(!cache.contains(&k), "an entry over the whole budget cannot be kept");
+        assert_eq!(report.evicted.len(), 1, "and it is dropped as an eviction, not refused");
+        assert_eq!(report.evicted[0].bytes, 4096);
+
+        let miss = cache.explain_longest_prefix("runtime", &CHAT, &[1, 2, 3, 4, 5]);
+        assert_eq!(
+            miss.cause,
+            PrefixMissCause::Eviction {
+                recoverable_tokens: 4,
+                bytes: 4096,
+                layer: PromptStateCacheLayer::F8ChatPrefix
+            },
+            "the budget, not the prompt, is what cost this lookup its match"
+        );
+    }
+
+    #[test]
+    fn the_budget_follows_free_ram_between_a_floor_and_a_ceiling() {
+        // A machine with nothing spare keeps the old fixed budget.
+        assert_eq!(PromptStateCache::sized_from(2 << 30).max_bytes(), DEFAULT_MAX_BYTES);
+        // 36 GiB free: 32 GiB past the desktop's reserve, a quarter of it ours.
+        assert_eq!(PromptStateCache::sized_from(36 << 30).max_bytes(), 8 << 30);
+        // And no machine, however large, gives the cache more than the cap.
+        assert_eq!(
+            PromptStateCache::sized_from(512 << 30).max_bytes(),
+            usize::try_from(MAX_MAX_BYTES).expect("64-bit target")
+        );
+    }
+
+    #[test]
+    fn the_budget_is_counted_in_checkpoints_once_the_model_is_known() {
+        const GIB: u64 = 1 << 30;
+        // gemma-4-26B at 16k: 1.79 GiB a checkpoint, on a 36 GiB machine.
+        // Three of them fit under the 8 GiB ceiling, so three is what it takes.
+        let mut cache = PromptStateCache::sized_from(36 * GIB);
+        let checkpoint = 1_833_700_000_u64;
+        let budget = cache.resize_for_checkpoint(checkpoint, 36 * GIB);
+        assert_eq!(budget, usize::try_from(checkpoint * CHECKPOINTS_HELD).expect("64-bit"));
+        assert!(cache.holds_a_checkpoint(checkpoint));
+
+        // A cheap model does not shrink below the floor just because its
+        // checkpoints are small — a short conversation should keep several.
+        let budget = cache.resize_for_checkpoint(4 * 1024 * 1024, 36 * GIB);
+        assert_eq!(budget, DEFAULT_MAX_BYTES, "the floor still applies from below");
+
+        // And free RAM remains the ceiling: a machine with 6 GiB free has
+        // 512 MiB to give, which will not hold this checkpoint. The caller has
+        // to be able to see that, because the cache is then inert.
+        let mut tight = PromptStateCache::sized_from(6 * GIB);
+        let budget = tight.resize_for_checkpoint(checkpoint, 6 * GIB);
+        assert_eq!(budget, 512 * 1024 * 1024, "clamped to what the machine has");
+        assert!(!tight.holds_a_checkpoint(checkpoint), "and it cannot hold one");
+    }
+
+    #[test]
+    fn re_budgeting_downward_evicts_what_no_longer_fits() {
+        let mut cache = PromptStateCache::new(10, 8192);
+        // Two unrelated conversations, so neither dominates the other and both
+        // survive on their own merits.
+        let (k1, e1) = tokened("turn-1", &[1, 2], 2048);
+        let (k2, e2) = tokened("turn-2", &[7, 8, 9], 2048);
+        cache.insert(k1.clone(), e1);
+        cache.insert(k2.clone(), e2);
+        assert!(cache.contains(&k1) && cache.contains(&k2));
+
+        // Free RAM collapsed; the new budget holds one checkpoint, not two.
+        // The oldest goes, and it goes through the normal eviction path so the
+        // taxonomy can still say what it cost.
+        cache.max_bytes = 2048;
+        cache.evict_over_budget();
+        assert!(!cache.contains(&k1), "the oldest entry is dropped");
+        assert!(cache.contains(&k2), "the newest survives");
+    }
+
+    #[test]
+    fn a_checkpoint_the_budget_dropped_is_reported_as_recoverable() {
+        // The failure a disk tier exists for. A byte budget too small for two
+        // checkpoints evicts the first; the next prompt extends it and would
+        // have matched. Without the tombstone this is indistinguishable from a
+        // prompt that was rewritten, and the two lead to opposite decisions.
+        let mut cache = PromptStateCache::new(10, 1024);
+        let (k1, e1) = tokened("turn-1", &[1, 2, 3, 4], 900);
+        cache.insert(k1.clone(), e1);
+        let (k2, e2) = tokened("other", &[7, 7, 7], 900);
+        let report = cache.insert(k2, e2);
+        assert_eq!(report.evicted.len(), 1, "the budget must have dropped turn-1");
+        assert!(!cache.contains(&k1));
+
+        let miss = cache.explain_longest_prefix("runtime", &CHAT, &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(miss.matched_tokens, 0, "nothing live matches");
+        assert_eq!(
+            miss.cause,
+            PrefixMissCause::Eviction {
+                recoverable_tokens: 4,
+                bytes: 900,
+                layer: PromptStateCacheLayer::F8ChatPrefix,
+            }
+        );
+    }
+
+    #[test]
+    fn the_tombstone_ring_stays_inside_its_token_budget() {
+        // The taxonomy must not become a second cache. Evict far more than the
+        // ring can hold and it still bounds what it keeps.
+        let mut cache = PromptStateCache::new(1, 1024);
+        let chunk: Vec<i32> = (0..8192).collect();
+        for i in 0..64 {
+            let (k, e) = tokened(&format!("turn-{i}"), &chunk, 900);
+            cache.insert(k, e);
+        }
+        let held: usize = cache.tombstones.iter().map(|t| t.prefix_tokens.len()).sum();
+        assert!(held <= TOMBSTONE_TOKEN_BUDGET, "tombstone ring held {held} tokens");
     }
 
     #[test]

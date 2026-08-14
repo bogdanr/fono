@@ -133,6 +133,12 @@ section.sec {
 .pc-fate { width: 84px; text-align: right; color: var(--ink-dim); font-size: 11px; }
 .pc-unplaced { margin: 10px 0; }
 .pc-unplaced summary { cursor: pointer; font-size: 12px; color: var(--ink-mute); }
+.pc-reread { margin: 4px 0 10px; }
+.pc-reread summary { cursor: pointer; font-size: 12px; color: var(--ink-mute); }
+.pc-reread ul { margin: 6px 0 4px; padding-left: 20px; font-size: 12px; color: var(--ink-mute); }
+.pc-reread b { color: var(--ink); }
+.pc-reread.bad summary { color: var(--warn); }
+.pc-reread.bad summary b { color: var(--warn); }
 .search {
   display: flex; align-items: center; gap: 10px;
   background: var(--bg-2); border: 1px solid var(--line-2);

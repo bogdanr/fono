@@ -1177,6 +1177,10 @@ mod tests {
         assert!(APP_JS.contains("out next"), "which entry falls out next");
         assert!(APP_JS.contains("pinned"), "and which prefixes are held");
         assert!(APP_CSS.contains(".pc-node"), "the tree needs its own styling");
+        // Both read straight off the serialized snapshot, so a rename on the
+        // Rust side would blank them silently rather than fail to compile.
+        assert!(APP_JS.contains("checkpoint_bytes"), "what one conversation costs");
+        assert!(APP_JS.contains("reread_prefix_tokens"), "and why tokens were read twice");
     }
 
     /// A saved conversation has to answer the same question the tools page
