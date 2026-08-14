@@ -6,7 +6,7 @@
 //! and drives it with a real `reqwest` client over both wire formats:
 //!
 //! * OpenAI `GET /v1/models`, `POST /v1/chat/completions` (stream + non-stream),
-//! * Ollama `GET /api/tags`, `POST /api/chat` (stream + non-stream),
+//! * Ollama `GET /api/tags`, `POST /api/show`, `POST /api/chat` (stream + non-stream),
 //! * auth (401) + not-found (404) fallbacks.
 //!
 //! This is the "real client ↔ real server ↔ mock assistant" gate.
@@ -147,6 +147,37 @@ async fn ollama_tags_lists_the_model() {
     let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
     assert_eq!(body["models"][0]["name"], "fono");
     assert_eq!(body["models"][0]["details"]["format"], "gguf");
+    // Several Ollama clients read an empty digest as "not installed" and refuse
+    // the endpoint without sending it a request, so it is never empty even for
+    // a backend with no weights on disk to measure.
+    let digest = body["models"][0]["digest"].as_str().expect("a digest");
+    assert!(digest.starts_with("sha256:"), "{digest}");
+    assert_eq!(digest.len(), "sha256:".len() + 64, "{digest}");
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn ollama_show_advertises_tool_calling() {
+    // The capability a coding client looks for before it will offer tools at
+    // all. Fono reads a tool call out of any backend's finished reply, so this
+    // holds even for the mock.
+    let (handle, base) = start_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/api/show"))
+        .header("content-type", "application/json")
+        .body(serde_json::json!({ "model": "fono" }).to_string())
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), 200);
+    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    let caps = body["capabilities"].as_array().expect("capabilities");
+    assert!(caps.iter().any(|c| c == "tools"), "{caps:?}");
+    assert!(caps.iter().any(|c| c == "completion"), "{caps:?}");
+    assert_eq!(body["details"]["format"], "gguf");
 
     handle.shutdown().await;
 }

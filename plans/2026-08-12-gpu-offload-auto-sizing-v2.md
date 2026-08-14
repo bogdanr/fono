@@ -363,20 +363,33 @@ none, and let the memory budget decide which.
 
 ### Stage 3 — UX
 
-- [ ] Task 13. Report in plain language in `fono doctor` and the diagnostics
+- [x] Task 13. Report in plain language in `fono doctor` and the diagnostics
   panel — which device, how much of the model is on it, what stopped more going
   on — and fail invisibly: a refused or failed offload is a debug log and a
   normal, slower turn. No toast, no startup warning. Rationale: a wrong
   automatic answer must be diagnosable by the person hitting it without them
   learning what a layer is; acceleration should only be noticed by things being
   fast.
-- [ ] Task 14. Assert zero new configuration keys via a serialized
+
+  **Done.** `fono doctor` prints one line per role that loads a local model,
+  naming the device and the arithmetic behind the answer — the same words the
+  daemon logs, e.g. `assistant offload: Intel(R) Graphics (LNL): model needs
+  10.4 GB (8.9 GB weights + 0.5 GB cache + 1.0 GB working), 20.8 GB available —
+  running on the device`. It is a fresh decision, not a record of one: free
+  memory moves, so a diagnostic can only say what would happen now. Nothing was
+  added to the failure path — a refused offload stays a debug log and a slower
+  turn.
+- [x] Task 14. Assert zero new configuration keys via a serialized
   default-config diff before and after. Rationale: makes the no-knobs constraint
   a gate rather than an intention.
 
+  **Done.** `the_decision_is_not_configurable` serialises the default config and
+  fails on any key naming a device, a layer count or an offload switch, so the
+  no-knobs rule now breaks the build rather than a promise.
+
 ### Stage 4 — Measure, then re-sequence the cache work
 
-- [ ] Task 15. Measure on the unified laptop, on 10.10.0.136, and on a discrete
+- [~] Task 15. Measure on the unified laptop, on 10.10.0.136, and on a discrete
   card: prefill and decode per token, restore time, peak RSS, and whether the
   model was offloaded and why — plus a deliberate over-commit on the discrete
   card to prove the CPU fallback fires. Record in `docs/bench/` with model,
@@ -385,6 +398,29 @@ none, and let the memory budget decide which.
   them; a discrete card is the only place the all-or-nothing rule can be judged
   where the memory it pins costs the desktop nothing. Repeats are mandatory —
   single runs produced two retracted findings in this work.
+
+  **Both unified hosts measured; the discrete card is still missing.**
+  10.10.0.136 is a second *unified* machine (Ryzen AI MAX+ 395 / Radeon 8060S),
+  so it cannot settle the all-or-nothing rule either — that question stays open
+  until a discrete card is available. What it did settle is worth more than a
+  timing, and it overturned an earlier reading of the same machine. **The box
+  has 128 GB installed; its firmware hands 96 GiB to the GPU before Linux
+  boots**, so Linux reports 31 GB and RADV's 111 GB is the honest sum of a
+  96 GiB private heap and a 15.6 GiB shared aperture. Bounding the device by
+  system RAM offered a 19 GB budget and sent every model between 19 GB and
+  96 GiB to the CPU. Counting the carve-out — anything the device reports
+  beyond all the RAM the kernel knows about — raised the budget to 99.7 GB and a
+  97 GiB four-shard DeepSeek then loaded with 95.7 GiB resident on the device.
+  That model separately answers *wrongly* on the device. Two attributions were
+  written and both were wrong — first Vulkan's missing Lightning Indexer and
+  fused HC ops (that warning disables the fused path and falls back, costing
+  speed, not correctness), then llama.cpp#25436. Upstream `llama-cli` b10405 on
+  the same machine and shards, all layers on the device, answers correctly under
+  every one of Fono's settings, so the fault is ours and nothing goes upstream.
+  It is not a sizing fault; both findings
+  are in `docs/bench/prompt-cache-2026-08-11.md` along with the fits case
+  (qwen3.5-2b → device, ~2.9× the wall speed of the CPU arm over 128 tokens,
+  three repeats per arm, arms alternated twice).
 - [ ] Task 16. Re-derive the disk cache tier's value against post-offload costs.
   Rationale: measured on the integrated laptop, offload cuts prefill only
   12.81 → 9.93 ms/token (1.29×) while *doubling* restore on the 26B model

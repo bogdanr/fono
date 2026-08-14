@@ -1,6 +1,33 @@
 # Fono — Project Status
 Last updated: 2026-08-13
 
+## 2026-08-13 — What a driver claims, and what your machine actually has
+
+Tried the automatic graphics-chip decision on a second machine, a Ryzen AI MAX+
+395, and it turned out to be the best argument yet for not trusting the chip's own
+answer. Its driver reports **111 gigabytes** of graphics memory on a machine with
+31 gigabytes of memory in total. Had Fono believed that, it would have loaded a
+model three times larger than the machine can hold. Because that chip shares the
+machine's memory, Fono ignores the claim and measures what is actually free, so a
+104 GB model was turned away and streamed from the SSD — slower, but it loaded and
+it answered — while a small one moved onto the chip and ran roughly three times
+quicker than on the processor.
+
+The one machine still not covered is a computer with a *separate* graphics card,
+where the memory a model takes costs the desktop nothing. Everything measured so
+far shares memory with the rest of the machine, so the all-or-nothing rule is
+still unproven there.
+
+`fono doctor` now says, in a sentence, where each model would run and the
+arithmetic behind it, so someone whose model stayed on the processor can see why
+instead of guessing. Fixed on the way past: a model split across several files
+reported the size of the first file, so a 97 GB model announced itself as 5 MB.
+
+Coding assistants that talk to Fono can now also ask it *about* the model before
+using it — its real size, a fingerprint, and the fact that it can call tools.
+Several of them refuse a model that answers "zero bytes", which is what Fono used
+to say, so the tool support fixed earlier this week was invisible to them.
+
 ## 2026-08-13 — Fono now uses your graphics chip by itself, when it can
 
 Until now you got the graphics chip by luck. Cleanup asked for it unconditionally

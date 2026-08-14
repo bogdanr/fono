@@ -3761,6 +3761,31 @@ fn llm_model_name(config: &Config) -> String {
     }
 }
 
+/// What the served model is, in the terms an Ollama client asks for: how big it
+/// is, which model it is, and how much it will read at once.
+///
+/// Only a local model can answer the first two, since only it has files to
+/// measure; a cloud or self-hosted backend leaves them blank and the server
+/// falls back to identifying it by name.
+fn llm_model_facts(config: &Config, paths: &Paths) -> fono_net::ModelFacts {
+    let m = config.server.llm.model.trim();
+    let file = fono_assistant::served_local_model_file(
+        &config.assistant,
+        (!m.is_empty()).then_some(m),
+        &paths.polish_models_dir(),
+    );
+    fono_net::ModelFacts {
+        size_bytes: file
+            .as_deref()
+            .and_then(fono_core::prompt_cache::model_files_size)
+            .unwrap_or_default(),
+        digest: file.as_deref().and_then(fono_core::prompt_cache::model_digest).unwrap_or_default(),
+        // Only a local model's context is Fono's to state. A served cloud model
+        // has one, but it is the provider's number and we would be guessing.
+        context_length: if file.is_some() { config.assistant.local.context } else { 0 },
+    }
+}
+
 /// Spawn the local LLM inference server if `[server.llm].enabled = true`
 /// and an assistant backend is configured. Returns `None` when the
 /// server is disabled, no assistant is available, or the listener fails
@@ -3838,6 +3863,7 @@ async fn spawn_llm_server_if_enabled(
         port: cfg.port,
         auth_enabled: cfg.auth,
         model_name: llm_model_name(config),
+        model_facts: llm_model_facts(config, paths),
         server_version: env!("CARGO_PKG_VERSION").to_string(),
         loopback_only,
     };

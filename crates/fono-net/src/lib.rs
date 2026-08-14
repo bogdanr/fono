@@ -25,7 +25,7 @@ pub mod llm_server;
 
 #[cfg(feature = "llm-server")]
 pub use llm_server::{
-    AssistantProvider, LlmServer, LlmServerConfig, LlmServerHandle, TranscribeProvider,
+    AssistantProvider, LlmServer, LlmServerConfig, LlmServerHandle, ModelFacts, TranscribeProvider,
     TranscribeRequest, UpstreamProvider,
 };
 

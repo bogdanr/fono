@@ -57,11 +57,14 @@
 //! as control tokens (the `gemma-4-e2b` anomaly stayed invisible until
 //! someone debugged a 13-second loop).
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 use llama_cpp_2::token_type::LlamaTokenAttr;
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// Window of recent generated tokens the repetition penalty considers.
 pub const PENALTY_LAST_N: i32 = 128;
@@ -292,6 +295,30 @@ pub fn is_control_token(model: &LlamaModel, token: LlamaToken) -> bool {
     model.token_attr(token).contains(LlamaTokenAttr::Control)
 }
 
+/// Name, at debug level, the control token that just ended a turn.
+///
+/// "Stopped on a control token" is not enough to tell a real end of turn
+/// from a structural marker the model emitted mid-answer, because a
+/// vocabulary can tag a great many tokens `Control`: gemma-4-26B tags 16,
+/// DeepSeek-V4-Flash tags 1,277, of which exactly two are begin/end of
+/// sentence and the rest are padding, tool-call framing, and table and
+/// bounding-box markup. Sampling any one of those cuts the reply short, and
+/// without the spelling there is nothing in the record to say which fired.
+///
+/// Rendering asks for `special = true` on purpose: the reply path renders
+/// control tokens as empty text so a marker can never reach the user, which
+/// also makes them invisible in a log.
+pub fn log_stop_token(model: &LlamaModel, token: LlamaToken, generated: u32) {
+    let bytes = model.token_to_piece_bytes(token, 32, true, None).unwrap_or_default();
+    debug!(
+        token = token.0,
+        spelling = %String::from_utf8_lossy(&bytes),
+        eog = model.is_eog_token(token),
+        generated,
+        "generation stopped on a control token"
+    );
+}
+
 /// Byte offset and spelling of the earliest [`STOP_MARKERS`] occurrence
 /// in `text`, or `None`. Catches template markers that round-trip as
 /// plain text instead of registered control tokens.
@@ -328,24 +355,30 @@ fn longest_marker_prefix_suffix(text: &str, marker: &str) -> Option<usize> {
         .find(|&len| text.is_char_boundary(text.len() - len) && text.ends_with(&marker[..len]))
 }
 
-/// Hand-rolled chat-template family a backend selects for a local GGUF,
-/// keyed off the model file name. The fully general alternative —
-/// rendering via the GGUF's embedded `tokenizer.chat_template` metadata —
-/// is deferred: the prompt-state cache's textual prefix/suffix split and
-/// pinned-base invariants are built on these hand-rolled templates, so
-/// adopting embedded templates needs its own design pass to preserve
-/// cacheability.
+/// Hand-rolled chat-template family a backend renders a turn with. The
+/// fully general alternative — rendering the GGUF's embedded
+/// `tokenizer.chat_template` through a Jinja engine — stays out: it needs
+/// a template engine the binary does not carry, and most of the 54
+/// families llama.cpp knows are not an open/close marker pair these two
+/// renderers can express.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TemplateFamily {
     Gemma,
     ChatMl,
 }
 
-/// Template family for `model_name` (a GGUF file stem). Mirrors the
-/// dispatch both backends use: Gemma-named models get the Gemma turn
-/// markers, everything else falls through to ChatML.
+/// Template family to render `model_name` with, taken from whichever
+/// markers [`turn_markers`] resolved — so a model that named its own
+/// markers picks the renderer to match, and only an unresolved model
+/// falls back to the family its file name suggests.
 #[must_use]
 pub fn template_family(model_name: &str) -> TemplateFamily {
+    turn_markers(model_name).family()
+}
+
+/// Family a model's file name suggests, used only when the model itself
+/// named no markers we can emit.
+fn family_from_name(model_name: &str) -> TemplateFamily {
     if model_name.to_ascii_lowercase().contains("gemma") {
         TemplateFamily::Gemma
     } else {
@@ -391,64 +424,147 @@ impl TurnMarkers {
     pub const GEMMA_4: Self = Self { open: "<|turn>", close: "<turn|>" };
     /// ChatML / Qwen / SmolLM markers.
     pub const CHATML: Self = Self { open: "<|im_start|>", close: "<|im_end|>" };
+
+    /// Every spelling the hand-rolled renderer can emit, most specific
+    /// first. `GEMMA_4` precedes `GEMMA` for readability only — the two
+    /// spellings share no substring, so the order cannot change a match.
+    const ALL: [Self; 3] = [Self::GEMMA_4, Self::GEMMA, Self::CHATML];
+
+    /// Which renderer frames a turn with these markers.
+    #[must_use]
+    pub fn family(self) -> TemplateFamily {
+        if self == Self::CHATML {
+            TemplateFamily::ChatMl
+        } else {
+            TemplateFamily::Gemma
+        }
+    }
 }
 
-/// The turn markers `model_name` actually registers as control tokens. Keyed
-/// off the same name dispatch as [`template_family`]; the only special case is
-/// the `gemma-4` line, whose real markers differ from the rest of the Gemma
-/// family. Any unrecognized model falls through to its family default and is
-/// surfaced by [`warn_on_template_vocab_mismatch`] if the spelling is wrong.
+/// The turn markers `model`'s own embedded chat template names, or `None`
+/// when that template names none the hand-rolled renderer can emit.
+///
+/// A candidate is accepted when the template mentions both of its markers
+/// *and* the vocabulary registers each as a single control token. Both
+/// halves are needed: the template alone can name a marker the vocabulary
+/// spells differently, and the vocabulary alone cannot say which of
+/// several registered markers frames a turn.
+///
+/// `None` for a model that embeds no template, and for the many families
+/// the hand-rolled renderer cannot express — a DeepSeek template frames
+/// roles as `<｜User｜>`, while Llama-3, Mistral and Command-R are not an
+/// open/close pair at all.
+///
+/// This is the model's own answer, and [`resolve_turn_markers`] records it
+/// so every later [`turn_markers`] call renders with it.
+#[must_use]
+pub fn turn_markers_from_template(model: &LlamaModel) -> Option<TurnMarkers> {
+    let text = model.chat_template(None).ok()?;
+    let text = text.to_str().ok()?;
+    TurnMarkers::ALL.into_iter().find(|candidate| {
+        [candidate.open, candidate.close]
+            .into_iter()
+            .all(|marker| text.contains(marker) && is_single_control_token(model, marker))
+    })
+}
+
+/// Whether `marker` tokenizes to exactly one control token in `model`'s
+/// vocabulary, i.e. whether emitting it prefills as the marker the model
+/// was trained on rather than as prose.
+#[must_use]
+pub fn is_single_control_token(model: &LlamaModel, marker: &str) -> bool {
+    let tokens = model.str_to_token(marker, AddBos::Never).unwrap_or_default();
+    tokens.len() == 1 && is_control_token(model, tokens[0])
+}
+
+/// Markers recorded by [`resolve_turn_markers`], keyed by model file stem.
+///
+/// A file stem is what the prompt builders have to work with: they are pure
+/// functions of the rendered text, called far below the loaded model, and
+/// several run in tests with no model at all. Recording the answer once at
+/// load keeps rendering a pure function of the name while still following
+/// the model. Stems collide only if one process serves two different models
+/// whose files are named the same, which the shared-weights cache already
+/// treats as the same model.
+fn recorded_markers() -> &'static Mutex<HashMap<String, TurnMarkers>> {
+    static RECORDED: OnceLock<Mutex<HashMap<String, TurnMarkers>>> = OnceLock::new();
+    RECORDED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Ask `model` how it frames a turn and record the answer for `model_name`,
+/// so every later [`turn_markers`] call renders the model's own markers
+/// rather than the ones its file name suggests. Returns what will be
+/// rendered. Call once per load, before any prompt is built.
+///
+/// A model that names no pair the hand-rolled renderers can emit (most
+/// families are not an open/close pair) records nothing and keeps the name
+/// guess, which [`warn_on_template_vocab_mismatch`] reports.
+pub fn resolve_turn_markers(model: &LlamaModel, model_name: &str) -> TurnMarkers {
+    let Some(markers) = turn_markers_from_template(model) else {
+        return turn_markers(model_name);
+    };
+    if let Ok(mut recorded) = recorded_markers().lock() {
+        recorded.insert(model_name.to_string(), markers);
+    }
+    markers
+}
+
+/// How a turn is framed for `model_name`: what the model itself named at
+/// load if [`resolve_turn_markers`] got an answer, otherwise the spelling
+/// its file name suggests — Gemma 4 for a `gemma-4` name, classic Gemma for
+/// any other Gemma, ChatML for everything else.
 #[must_use]
 pub fn turn_markers(model_name: &str) -> TurnMarkers {
+    if let Ok(recorded) = recorded_markers().lock() {
+        if let Some(markers) = recorded.get(model_name) {
+            return *markers;
+        }
+    }
     let name = model_name.to_ascii_lowercase();
-    match template_family(model_name) {
+    match family_from_name(model_name) {
         TemplateFamily::Gemma if name.contains("gemma-4") => TurnMarkers::GEMMA_4,
         TemplateFamily::Gemma => TurnMarkers::GEMMA,
         TemplateFamily::ChatMl => TurnMarkers::CHATML,
     }
 }
 
-/// Load-time template/vocab tripwire. Call once per model load (e.g.
-/// from `ensure_loaded`) with the loaded model and its file stem.
+/// Load-time template/vocab tripwire. Call once per model load, after
+/// [`resolve_turn_markers`], with the loaded model and its file stem.
 ///
 /// Warns when:
-/// - the markers the selected template family will emit do not tokenize
-///   to a single control token in this vocabulary (the template text
-///   will prefill as plain prose and the model's real turn markers are
-///   spelled differently — the `gemma-4-e2b` anomaly), or
-/// - the model name matches no recognized family and the backend is
-///   falling through to the ChatML default.
+/// - the model named no markers we can emit *and* its file name matches no
+///   family either, so the ChatML renderer is a pure guess, or
+/// - the markers that will actually be rendered do not tokenize to a single
+///   control token in this vocabulary, so they prefill as prose.
 ///
 /// Diagnostic only: never changes behaviour. The Control-attribute stop
 /// in the decode loops keeps generation terminating correctly even when
 /// this warning fires.
 pub fn warn_on_template_vocab_mismatch(model: &LlamaModel, model_name: &str) {
-    if !is_recognized_model_name(model_name) {
+    if turn_markers_from_template(model).is_none() && !is_recognized_model_name(model_name) {
         warn!(
             model = model_name,
-            "model name matches no known template family; defaulting to the ChatML template — \
-             verify the model's chat format and extend the template dispatch if output quality \
-             or turn termination looks wrong"
+            "the model's chat template names no turn markers Fono can emit and its name matches \
+             no known family, so the ChatML template is a guess — verify the model's chat format \
+             if output quality or turn termination looks wrong"
         );
     }
     // Validate the markers the prompt builders will ACTUALLY emit for this
-    // model (via `turn_markers`), not the family's nominal spelling — so the
-    // `gemma-4` line goes silent once its real `<|turn>`/`<turn|>` markers are
-    // emitted, and any future mis-spelling still trips the wire.
-    let TurnMarkers { open, close } = turn_markers(model_name);
-    for marker in [open, close] {
-        let tokens = model.str_to_token(marker, AddBos::Never).unwrap_or_default();
-        let single_control = tokens.len() == 1 && is_control_token(model, tokens[0]);
-        if !single_control {
+    // model, which is whatever `resolve_turn_markers` settled on — so a model
+    // that named its own markers goes silent here, and a guess that this
+    // vocabulary spells differently still trips the wire.
+    let rendered = turn_markers(model_name);
+    for marker in [rendered.open, rendered.close] {
+        if !is_single_control_token(model, marker) {
+            let token_count = model.str_to_token(marker, AddBos::Never).unwrap_or_default().len();
             warn!(
                 model = model_name,
                 marker,
-                token_count = tokens.len(),
+                token_count,
                 "chat-template marker does not tokenize to a single control token in this \
                  model's vocabulary; the template will prefill it as plain text and the \
-                 model's real turn markers are spelled differently (gemma-4-e2b ships \
-                 `<|turn>`/`<turn|>`). Generation still terminates via the control-token \
-                 stop, but prompt fidelity may be degraded"
+                 model's real turn markers are spelled differently. Generation still \
+                 terminates via the control-token stop, but prompt fidelity is degraded"
             );
         }
     }
@@ -470,6 +586,59 @@ mod tests {
         let params = llama_cpp_2::model::params::LlamaModelParams::default().with_vocab_only(true);
         LlamaModel::load_from_file(crate::llama_backend::backend(), &path, &params)
             .expect("loading the vocabulary")
+    }
+
+    /// The candidate list is searched in order, so a marker that is a
+    /// substring of another candidate's would make the order decide the
+    /// answer. Nothing in the code enforces that, so assert it here: adding
+    /// a family whose markers nest inside an earlier one has to fail loudly
+    /// rather than silently mis-frame every turn.
+    #[test]
+    fn no_candidate_marker_hides_inside_another() {
+        for (i, a) in TurnMarkers::ALL.iter().enumerate() {
+            for (j, b) in TurnMarkers::ALL.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                for mine in [a.open, a.close] {
+                    for theirs in [b.open, b.close] {
+                        assert!(
+                            !theirs.contains(mine),
+                            "{mine:?} occurs inside {theirs:?}, so which family a template \
+                             matches would depend on the search order"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A model's embedded template is the only authority on how it frames a
+    /// turn, and the whole point of reading it is that the answer does not
+    /// come from the file name. Prove the round trip against a real
+    /// vocabulary: whatever comes back must be a pair this vocabulary
+    /// registers as control tokens.
+    ///
+    /// `None` is a legitimate answer — most families are not an open/close
+    /// pair the hand-rolled renderer can emit — so this asserts the property
+    /// only when a pair is found.
+    ///
+    /// ```text
+    /// FONO_TEST_VOCAB_GGUF=/path/to/any.gguf \
+    ///   nice -n 10 cargo test -p fono-core --features llama-local \
+    ///   --lib llama_gen -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "needs a vocabulary via FONO_TEST_VOCAB_GGUF"]
+    fn markers_read_from_a_template_are_registered_by_the_vocabulary() {
+        let model = vocab_model();
+        let Some(markers) = turn_markers_from_template(&model) else { return };
+        for marker in [markers.open, markers.close] {
+            assert!(
+                is_single_control_token(&model, marker),
+                "{marker:?} came back from the template but is not a single control token"
+            );
+        }
     }
 
     /// The one thing no other test can prove: llama.cpp accepts a grammar Fono
@@ -744,5 +913,22 @@ mod tests {
         // Everything else is ChatML.
         assert_eq!(turn_markers("qwen3.5-0.8b"), TurnMarkers::CHATML);
         assert_eq!(turn_markers("mystery-model"), TurnMarkers::CHATML);
+    }
+
+    /// What the model itself named at load beats what its file name
+    /// suggests, and it picks the renderer too — a Gemma model saved under
+    /// a name carrying no `gemma` used to be framed as ChatML, which a
+    /// Gemma vocabulary accepts as ordinary words, so nothing complained
+    /// while every prompt was framed off-distribution.
+    #[test]
+    fn a_recorded_answer_beats_the_file_name() {
+        let name = "renamed-by-the-user-Q4_K_M";
+        assert_eq!(turn_markers(name), TurnMarkers::CHATML);
+        assert_eq!(template_family(name), TemplateFamily::ChatMl);
+
+        recorded_markers().lock().unwrap().insert(name.to_string(), TurnMarkers::GEMMA_4);
+
+        assert_eq!(turn_markers(name), TurnMarkers::GEMMA_4);
+        assert_eq!(template_family(name), TemplateFamily::Gemma);
     }
 }

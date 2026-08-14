@@ -29,8 +29,9 @@ use async_trait::async_trait;
 use fono_core::brain_tap::{decode_token_with_tap, BrainTap};
 use fono_core::llama_backend::{backend, shared_model_sized};
 use fono_core::llama_gen::{
-    first_stop_marker, generation_sampler, is_control_token, safe_stream_end, sample_next,
-    turn_markers, warn_on_template_vocab_mismatch, TurnMarkers,
+    first_stop_marker, generation_sampler, is_control_token, log_stop_token, safe_stream_end,
+    sample_next, template_family, turn_markers, warn_on_template_vocab_mismatch, TemplateFamily,
+    TurnMarkers,
 };
 use fono_core::prompt_cache::{
     model_files_fingerprint, CacheCounters, CacheMutationReport, PromptStateCache,
@@ -64,7 +65,7 @@ use crate::traits::{
 const MAX_NEW_TOKENS: i32 = 256;
 
 /// Default n_ctx fallback if the caller passes 0 / a sub-512 value.
-const MIN_CTX: u32 = 512;
+pub(crate) const MIN_CTX: u32 = 512;
 
 // The sampler (repetition penalty over generated tokens only, feeding
 // greedy), the Control-attribute stop predicate, and the textual
@@ -225,9 +226,10 @@ impl LlamaLocal {
         // the default tracing filter so they don't crowd this line.
         let elapsed_ms = t.elapsed().as_millis() as u64;
         let model_name = self.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
-        // Load-time tripwire: warn when the selected hand-rolled template's
-        // markers do not resolve to control tokens in this vocabulary (the
-        // gemma-4-e2b anomaly) or the name matches no known family.
+        // How this model frames a turn, taken from the model itself and
+        // recorded for the prompt builders, then checked: the markers that
+        // will be rendered have to be ones this vocabulary registers.
+        fono_core::llama_gen::resolve_turn_markers(&model, model_name);
         warn_on_template_vocab_mismatch(&model, model_name);
         let size_mb =
             std::fs::metadata(&self.model_path).map(|m| m.len() / (1024 * 1024)).unwrap_or(0);
@@ -363,6 +365,7 @@ impl LlamaLocal {
             let token = sample_next(&mut sampler, ctx, sample_idx);
             if is_control_token(model, token) {
                 stop_reason = "control_token";
+                log_stop_token(model, token, tokens_generated);
                 break;
             }
             if tokens_generated == 0 {
@@ -980,7 +983,7 @@ enum PromptTemplate {
 }
 
 fn template_for_model(model_name: &str) -> PromptTemplate {
-    if model_name.to_ascii_lowercase().contains("gemma") {
+    if template_family(model_name) == TemplateFamily::Gemma {
         PromptTemplate::Gemma
     } else {
         PromptTemplate::ChatMl { disable_thinking: model_uses_qwen_thinking_template(model_name) }

@@ -316,7 +316,8 @@ pub fn gather(
     // The compute devices ggml registered. This is the list llama.cpp
     // chooses between when it loads a model, so it is the one worth
     // showing: anything else risks reporting a device that will not be
-    // used. Reported only — no offload decision is made from it yet.
+    // used. Whether a model actually goes on one is per-role and depends on
+    // its size, which the Backends section below reports.
     #[cfg(feature = "llama-local")]
     {
         let devices = fono_core::ggml_devices::devices();
@@ -532,6 +533,14 @@ pub fn gather(
                 col.push(S::Fail, "polish", &format!("{e:#}"));
             }
         }
+        // Where a local model would run, and the arithmetic behind it. Worth a
+        // line because the decision is invisible otherwise: a model that does
+        // not fit the accelerator simply answers more slowly, with nothing on
+        // screen to say why. Absent for every backend that loads no local model.
+        if let Some(plan) = fono_polish::offload_plan(&c.polish, &paths.polish_models_dir()) {
+            writeln!(out, "  polish offload: {}", dim(&plan))?;
+            col.push(S::Info, "polish offload", &plan);
+        }
         // `mut` is only touched by the `realtime`-gated arm below; allow
         // the unused-mut when that feature is compiled out.
         #[allow(unused_mut)]
@@ -568,6 +577,10 @@ pub fn gather(
                 writeln!(out, "  assistant: {} {e:#}", bad("FAIL —"))?;
                 col.push(S::Fail, "assistant", &format!("{e:#}"));
             }
+        }
+        if let Some(plan) = fono_assistant::offload_plan(&c.assistant, &paths.polish_models_dir()) {
+            writeln!(out, "  assistant offload: {}", dim(&plan))?;
+            col.push(S::Info, "assistant offload", &plan);
         }
         // How much the assistant has to read before it can answer anything.
         // On a model running locally this is the single largest cost of the

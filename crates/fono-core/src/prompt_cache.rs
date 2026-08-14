@@ -72,6 +72,31 @@ pub fn model_files_fingerprint(path: &Path) -> std::io::Result<String> {
     Ok(parts.join(","))
 }
 
+/// Total bytes of every shard that makes up the model at `path`, which is what
+/// the weights occupy once resident. `None` when a shard cannot be read.
+pub fn model_files_size(path: &Path) -> Option<u64> {
+    model_shard_paths(path)
+        .iter()
+        .try_fold(0u64, |sum, p| Some(sum.saturating_add(std::fs::metadata(p).ok()?.len())))
+}
+
+/// A stable identity for the model at `path`, in the `sha256:<hex>` shape
+/// Ollama clients expect of a served model.
+///
+/// Hashed over the same names, sizes and modification times as
+/// [`model_files_fingerprint`], not over the weights: it has to answer a
+/// metadata request, and digesting the bytes of a hundred-gigabyte model to do
+/// so would take minutes. It therefore identifies *which* model is served and
+/// notices it being replaced, which is what a client wants it for — it is not a
+/// checksum of the file's contents and must not be used as one.
+pub fn model_digest(path: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let fingerprint = model_files_fingerprint(path).ok()?;
+    let mut hasher = Sha256::new();
+    hasher.update(fingerprint.as_bytes());
+    Some(format!("sha256:{:x}", hasher.finalize()))
+}
+
 /// Every shard of a sharded GGUF, or just `path` when it is a single file.
 ///
 /// Derives the sibling names from the `-<index>-of-<total>` suffix rather than

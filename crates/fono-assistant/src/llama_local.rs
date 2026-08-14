@@ -19,8 +19,8 @@ use fono_core::brain_tap::{decode_token_with_tap, BrainTap};
 use fono_core::llama_backend::{backend, shared_model_sized};
 use fono_core::llama_gen::{
     adopt_sampled_token, first_stop_marker, generation_sampler, generation_sampler_with_grammar,
-    is_control_token, ruled_out, safe_stream_end, sample_next, turn_markers,
-    warn_on_template_vocab_mismatch, TurnMarkers,
+    is_control_token, log_stop_token, ruled_out, safe_stream_end, sample_next, template_family,
+    turn_markers, warn_on_template_vocab_mismatch, TemplateFamily, TurnMarkers,
 };
 use fono_core::tool_grammar::trigger_patterns;
 use fono_core::turn_trace::{
@@ -46,7 +46,7 @@ use crate::traits::{
 };
 
 const MAX_NEW_TOKENS: i32 = 384;
-const MIN_CTX: u32 = 512;
+pub(crate) const MIN_CTX: u32 = 512;
 
 /// Per-request generation knobs threaded into the prefix-cache decode path.
 /// Bundled so the cache fns stay under clippy's argument limit and the two
@@ -393,12 +393,15 @@ impl LlamaLocalAssistant {
             shared_model_sized(&self.model_path, self.context_size, KV_CACHE_TYPE, KV_CACHE_TYPE)?;
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let model_name = self.model_path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
-        // Load-time tripwire: warn when the selected hand-rolled template's
-        // markers do not resolve to control tokens in this vocabulary (the
-        // gemma-4-e2b anomaly) or the name matches no known family.
+        // How this model frames a turn, taken from the model itself and
+        // recorded for the prompt builders, then checked: the markers that
+        // will be rendered have to be ones this vocabulary registers.
+        fono_core::llama_gen::resolve_turn_markers(&model, model_name);
         warn_on_template_vocab_mismatch(&model, model_name);
-        let size_mb =
-            std::fs::metadata(&self.model_path).map(|m| m.len() / (1024 * 1024)).unwrap_or(0);
+        // Every shard, not just the one named: a sharded model otherwise
+        // reported the few megabytes of its first file.
+        let size_mb = fono_core::prompt_cache::model_files_size(&self.model_path).unwrap_or(0)
+            / (1024 * 1024);
         info!(
             "Assistant LLM ready: {model_name} ({size_mb} MB, {threads} threads, ctx={ctx}, batch={batch}, ubatch={ubatch}) in {elapsed_ms} ms",
             threads = self.threads,
@@ -2107,6 +2110,7 @@ where
         // `fono_core::llama_gen`).
         if token == eos || is_control_token(model, token) {
             stop_reason = if token == eos { "eos" } else { "control_token" };
+            log_stop_token(model, token, generated_tokens);
             break;
         }
         let piece = model.token_to_piece(token, &mut decoder, false, None).unwrap_or_default();
@@ -2256,7 +2260,7 @@ fn build_prompt_split(
     user_text: &str,
     model_name: &str,
 ) -> (String, String) {
-    if model_name.to_ascii_lowercase().contains("gemma") {
+    if template_family(model_name) == TemplateFamily::Gemma {
         build_gemma_prompt_split(ctx, user_text, turn_markers(model_name))
     } else {
         build_chatml_prompt_split(ctx, user_text)
@@ -2436,7 +2440,7 @@ fn assistant_base_prefix(system: &str, model_name: &str) -> String {
     if system.is_empty() {
         return String::new();
     }
-    if model_name.to_ascii_lowercase().contains("gemma") {
+    if template_family(model_name) == TemplateFamily::Gemma {
         format!("{}user\n{system}", turn_markers(model_name).open)
     } else {
         format!("<|im_start|>system\n{system}")
@@ -2454,7 +2458,7 @@ fn assistant_base_prefix(system: &str, model_name: &str) -> String {
 fn tool_result_continuation(prompt: &str, call: &str, result: &str, model_name: &str) -> String {
     let m = turn_markers(model_name);
     let reply_role =
-        if model_name.to_ascii_lowercase().contains("gemma") { "model" } else { "assistant" };
+        if template_family(model_name) == TemplateFamily::Gemma { "model" } else { "assistant" };
     format!(
         "{prompt}{call}{close}\n{open}user\n{result}{close}\n{open}{reply_role}\n",
         close = m.close,
@@ -3115,7 +3119,7 @@ const SWA_FULL: bool = true;
 ///
 /// Quantizing the value half at all requires flash attention, which llama.cpp
 /// resolves to on here.
-const KV_CACHE_TYPE: KvCacheType = KvCacheType::Q8_0;
+pub(crate) const KV_CACHE_TYPE: KvCacheType = KvCacheType::Q8_0;
 
 /// Whether dropping KV cells past `keep_len` leaves a state that can be safely
 /// serialized and later resumed.

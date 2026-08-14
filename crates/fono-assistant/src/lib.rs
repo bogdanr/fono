@@ -39,8 +39,8 @@ pub mod openai_compat_chat;
 
 pub use factory::{
     build_assistant, build_assistant_handle, build_server_assistant_override, chat_endpoint,
-    cloud_chat_upstream, server_assistant_model_name, uses_embedded_local_model, AssistantHandle,
-    CloudUpstream,
+    cloud_chat_upstream, offload_plan, served_local_model_file, server_assistant_model_name,
+    uses_embedded_local_model, AssistantHandle, CloudUpstream,
 };
 #[cfg(feature = "realtime")]
 pub use gemini_live::GeminiLive;

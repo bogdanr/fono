@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Ollama-native surface: `GET /api/tags`, `POST /api/chat`
+//! Ollama-native surface: `GET /api/tags`, `POST /api/show`, `POST /api/chat`
 //! (NDJSON stream or single JSON), `GET /api/version`.
 //!
 //! This is the path Home Assistant's Ollama conversation integration
@@ -12,6 +12,7 @@ use bytes::Bytes;
 use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::access_log::{Mode, ReqLog, StreamLog};
 use super::messages::{
@@ -60,23 +61,88 @@ struct TagDetails {
 pub fn tags(ctx: &ServerCtx, log: &mut ReqLog) -> Response<ResBody> {
     log.set_target(Mode::Adapt, String::new());
     let name = ctx.cfg.model_name.clone();
+    let facts = &ctx.cfg.model_facts;
     let list = TagList {
         models: vec![TagEntry {
             name: name.clone(),
             model: name,
             modified_at: rfc3339_now(),
-            size: 0,
-            digest: String::new(),
-            details: TagDetails {
-                format: "gguf",
-                family: "fono",
-                families: vec!["fono"],
-                parameter_size: "",
-                quantization_level: "",
-            },
+            size: facts.size_bytes,
+            digest: digest(ctx),
+            details: details(),
         }],
     };
     json_ok(&list)
+}
+
+/// A digest that is never empty, because several clients read an empty one as
+/// "this model is not installed" and refuse the endpoint without asking it
+/// anything. Falls back to hashing the served model's name, which identifies it
+/// as well as a name can when there are no weights on disk to measure.
+fn digest(ctx: &ServerCtx) -> String {
+    if !ctx.cfg.model_facts.digest.is_empty() {
+        return ctx.cfg.model_facts.digest.clone();
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(ctx.cfg.model_name.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn details() -> TagDetails {
+    TagDetails {
+        format: "gguf",
+        family: "fono",
+        families: vec!["fono"],
+        parameter_size: "",
+        quantization_level: "",
+    }
+}
+
+// --- POST /api/show ------------------------------------------------------
+
+/// What a client learns about the served model without sending it a prompt.
+///
+/// `capabilities` is the field worth the endpoint: a client that wants to call
+/// tools looks for `"tools"` here, and a client that cannot find the endpoint at
+/// all concludes tools are unavailable and silently drops them from its
+/// requests. Fono reads a tool call out of any model's finished reply, so the
+/// capability holds whichever backend is serving.
+#[derive(Serialize)]
+struct ShowResponse {
+    /// Ollama returns the recipe that built the model. Fono has no such recipe,
+    /// and an empty string is the honest answer — clients display it.
+    modelfile: String,
+    parameters: String,
+    template: String,
+    details: TagDetails,
+    model_info: serde_json::Value,
+    capabilities: Vec<&'static str>,
+    modified_at: String,
+}
+
+pub fn show(ctx: &ServerCtx, log: &mut ReqLog) -> Response<ResBody> {
+    log.set_target(Mode::Adapt, ctx.cfg.model_name.clone());
+    let facts = &ctx.cfg.model_facts;
+    let mut model_info = serde_json::json!({
+        "general.basename": ctx.cfg.model_name,
+        "general.digest": digest(ctx),
+        "general.size": facts.size_bytes,
+    });
+    // Omitted rather than zeroed when unknown: a client that reads a context
+    // length of zero has been told something false, while one that finds no
+    // key falls back to its own default.
+    if facts.context_length > 0 {
+        model_info["fono.context_length"] = facts.context_length.into();
+    }
+    json_ok(&ShowResponse {
+        modelfile: String::new(),
+        parameters: String::new(),
+        template: String::new(),
+        details: details(),
+        model_info,
+        capabilities: vec!["completion", "tools"],
+        modified_at: rfc3339_now(),
+    })
 }
 
 // --- POST /api/chat ------------------------------------------------------

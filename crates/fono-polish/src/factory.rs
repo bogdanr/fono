@@ -101,6 +101,46 @@ fn resolve_local_model_path(cfg: &Polish, polish_models_dir: &Path) -> std::path
     let stem = crate::registry::LocalLlmRegistry::resolve_filename_stem(&cfg.local.model);
     polish_models_dir.join(format!("{stem}.gguf"))
 }
+/// Where the configured local cleanup model would run if it were loaded right
+/// now, as one line naming the device and the numbers behind the answer.
+///
+/// `None` when cleanup does not load a local model at all, or when the model
+/// file is missing — there is nothing to size in either case.
+///
+/// This is a fresh decision rather than a record of one: the answer depends on
+/// how much of the machine is free, so a diagnostic can only say what would
+/// happen now. It agrees with a running daemon only to the extent that the
+/// machine has not changed since that daemon loaded.
+#[cfg(feature = "llama-local")]
+#[must_use]
+pub fn offload_plan(cfg: &Polish, polish_models_dir: &Path) -> Option<String> {
+    use llama_cpp_2::context::params::KvCacheType;
+    if !cfg.enabled || !matches!(cfg.backend, LlmBackend::Local) {
+        return None;
+    }
+    let path = resolve_local_model_path(cfg, polish_models_dir);
+    if !path.exists() {
+        return None;
+    }
+    // The cache types must match what `LlamaLocal::ensure_loaded` asks for, or
+    // the size reported here is not the size that will be allocated.
+    Some(
+        fono_core::gpu_offload::decide(
+            &path,
+            cfg.local.context.max(crate::llama_local::MIN_CTX),
+            KvCacheType::F16,
+            KvCacheType::F16,
+        )
+        .explanation,
+    )
+}
+
+#[cfg(not(feature = "llama-local"))]
+#[must_use]
+pub fn offload_plan(_: &Polish, _: &Path) -> Option<String> {
+    None
+}
+
 #[cfg(feature = "cerebras")]
 #[allow(clippy::unnecessary_wraps)]
 fn build_cerebras(key: String, model: String) -> Result<Arc<dyn TextFormatter>> {

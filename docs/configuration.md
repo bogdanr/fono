@@ -138,9 +138,13 @@ never touch it. See [interactive.md](interactive.md).
 
 Fono can expose whatever assistant you already have configured as a local
 HTTP endpoint that speaks **both** the OpenAI (`/v1/chat/completions`,
-`/v1/models`) and Ollama-native (`/api/chat`, `/api/tags`) wire formats.
-Editors, Open WebUI, `llm`, LangChain, and Home Assistant's Ollama
-conversation agent can then use Fono as a local model backend (ADR 0036).
+`/v1/models`) and Ollama-native (`/api/chat`, `/api/tags`, `/api/show`)
+wire formats. Editors, Open WebUI, `llm`, LangChain, and Home Assistant's
+Ollama conversation agent can then use Fono as a local model backend
+(ADR 0036). For a local model, `/api/tags` and `/api/show` report the real
+file size and a `sha256:` digest over every shard, and advertise the
+`tools` capability, so clients that inspect a model before using it accept
+it instead of treating it as unusable.
 
 ```toml
 [server.llm]

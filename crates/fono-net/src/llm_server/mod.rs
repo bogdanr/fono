@@ -6,8 +6,8 @@
 //!
 //! * **OpenAI-compatible** — `GET /v1/models`, `POST /v1/chat/completions`
 //!   (SSE stream or single JSON).
-//! * **Ollama-native** — `GET /api/tags`, `POST /api/chat` (NDJSON stream
-//!   or single JSON), `GET /api/version`.
+//! * **Ollama-native** — `GET /api/tags`, `POST /api/show`, `POST /api/chat`
+//!   (NDJSON stream or single JSON), `GET /api/version`.
 //!
 //! Both surfaces map their `messages[]` onto the same
 //! [`fono_assistant::traits::AssistantContext`] and drive the one
@@ -108,11 +108,36 @@ pub struct LlmServerConfig {
     /// server always drives the one configured assistant regardless of
     /// the `model` field a client sends.
     pub model_name: String,
+    /// What can honestly be said about the served model beyond its name, for
+    /// `/api/tags` and `/api/show`.
+    pub model_facts: ModelFacts,
     /// Version string surfaced by `/api/version`.
     pub server_version: String,
     /// When `true`, refuses non-loopback peers even if the bind address
     /// would have allowed them. Set when `bind = "127.0.0.1"`.
     pub loopback_only: bool,
+}
+
+/// Measurable facts about the served model, filled in by the daemon.
+///
+/// Ollama clients read these before they will use a model at all: several treat
+/// a zero size or an empty digest as "not installed" and refuse the endpoint
+/// without ever sending a request. Everything here is therefore either measured
+/// or omitted — never guessed.
+#[derive(Debug, Clone, Default)]
+pub struct ModelFacts {
+    /// Bytes the weights occupy on disk, summed over every shard. `0` when the
+    /// served model is not a local file (a cloud or self-hosted backend), which
+    /// is the one case no honest number exists for.
+    pub size_bytes: u64,
+    /// `sha256:<hex>` identity of the weights on disk, or empty when there are
+    /// none. See `fono_core::prompt_cache::model_digest` — it identifies the
+    /// model rather than checksumming it.
+    pub digest: String,
+    /// Tokens the served model is configured to read at once, from the
+    /// backend's own context setting. `0` when unknown. Reported so a client
+    /// can size its prompt instead of discovering the limit by being refused.
+    pub context_length: u32,
 }
 
 impl Default for LlmServerConfig {
@@ -122,6 +147,7 @@ impl Default for LlmServerConfig {
             port: DEFAULT_PORT,
             auth_enabled: true,
             model_name: "fono".to_string(),
+            model_facts: ModelFacts::default(),
             server_version: env!("CARGO_PKG_VERSION").to_string(),
             loopback_only: true,
         }
@@ -325,6 +351,7 @@ fn classify(path: &str) -> (&'static str, String) {
         "/v1/audio/speech" => ("openai", "speech".to_string()),
         "/v1/audio/transcriptions" => ("openai", "transcribe".to_string()),
         "/api/tags" => ("ollama", "tags".to_string()),
+        "/api/show" => ("ollama", "show".to_string()),
         "/api/chat" => ("ollama", "chat".to_string()),
         "/api/version" => ("ollama", "version".to_string()),
         "/" => ("http", "root".to_string()),
@@ -377,6 +404,10 @@ async fn route(req: Request<Incoming>, peer: SocketAddr, ctx: ServerCtx) -> Resp
         ("POST", "/v1/audio/speech") => audio::speech(req, &ctx, &mut log).await,
         ("POST", "/v1/audio/transcriptions") => audio::transcriptions(req, &ctx, &mut log).await,
         ("GET", "/api/tags") => ollama::tags(&ctx, &mut log),
+        // Ollama takes this as a POST with the model named in the body; some
+        // clients probe it with a GET first, which answers about the one model
+        // we serve either way.
+        ("POST" | "GET", "/api/show") => ollama::show(&ctx, &mut log),
         ("POST", "/api/chat") => ollama::chat(req, &ctx, &mut log).await,
         ("GET", "/api/version") => ollama::version(&ctx),
         ("GET" | "HEAD", "/") => text_response(StatusCode::OK, "Fono LLM server\n"),

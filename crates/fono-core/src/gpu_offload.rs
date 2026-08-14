@@ -118,17 +118,39 @@ fn target_device() -> Option<GgmlDevice> {
 ///
 /// A dedicated card reporting a real budget is believed as-is: the memory is a
 /// separate pool, so taking it costs the desktop nothing. Otherwise — an
-/// integrated GPU, or a driver that answered with its whole heap because it
-/// does not implement the budget query — the figure is additionally bound by
-/// free system RAM less the desktop's reserve. A platform that cannot report
-/// its free memory therefore offers no budget at all and the model stays on the
-/// host: the alternative is pinning memory we never established was there.
+/// integrated GPU, or a driver that answered with its whole heap because it does
+/// not implement the budget query — the budget is what the desktop can spare
+/// plus whatever the device owns outright, capped by the device's own free
+/// figure so a device that really is busy is believed when it says so.
+///
+/// "Owns outright" is the memory firmware handed the GPU before the kernel
+/// booted, which the kernel never counts. Measured on a Ryzen AI MAX+ 395 with
+/// 128 GB installed (2026-08-13): firmware carved out 96 GiB, Linux reported
+/// 31 GB of RAM, and the driver offered 111 GB — the 96 GiB plus a 15.6 GiB
+/// share of what the kernel can see. Bounding that device by free *system* RAM
+/// alone refused everything above about 19 GB, which is most of what such a
+/// machine exists to run.
+///
+/// Finding the carve-out needs no vendor interface: whatever the device reports
+/// beyond all the RAM the kernel knows about is by definition memory the kernel
+/// cannot allocate. The subtraction understates it whenever the driver's total
+/// also counts a shared aperture — on that machine it yields 78 GB against a
+/// true 96 GiB — and understating is the direction that cannot over-commit. It
+/// yields zero where GPU memory is allocated on demand, leaving the host bound
+/// alone in charge, as it should be: those bytes are the desktop's too.
 fn budget_bytes(device: &GgmlDevice) -> u64 {
+    budget_from(device, crate::hwcheck::available_ram_bytes(), crate::hwcheck::total_ram_bytes())
+}
+
+/// [`budget_bytes`] with the host's memory figures passed in, so the arithmetic
+/// can be tested against machines other than the one running the test.
+fn budget_from(device: &GgmlDevice, host_available: u64, host_total: u64) -> u64 {
     if device.free_is_trustworthy() {
         return device.free_bytes;
     }
-    let host = crate::hwcheck::available_ram_bytes().saturating_sub(DESKTOP_RESERVE_BYTES);
-    device.free_bytes.min(host)
+    let host = host_available.saturating_sub(DESKTOP_RESERVE_BYTES);
+    let device_only = device.total_bytes.saturating_sub(host_total);
+    device.free_bytes.min(host.saturating_add(device_only))
 }
 
 /// The parts of a model that decide whether it fits.
@@ -423,28 +445,63 @@ mod tests {
         }
     }
 
+    /// Intel Arc 140V on a 30 GiB laptop: the driver's total is well inside
+    /// system RAM, so there is no carve-out and the desktop bound governs.
+    const LAPTOP_RAM_TOTAL: u64 = 32_330_224 * 1024;
+    const LAPTOP_RAM_AVAIL: u64 = 23 << 30;
+
+    /// Ryzen AI MAX+ 395, 128 GB installed, firmware carve-out of 96 GiB. Linux
+    /// sees only what is left; the driver offers the carve-out plus a share of
+    /// what Linux sees (measured 2026-08-13).
+    const AI_RAM_TOTAL: u64 = 32_634_712 * 1024;
+    const AI_RAM_AVAIL: u64 = 23 << 30;
+    const AI_DEVICE_TOTAL: u64 = (98_304 + 15_934) * 1024 * 1024;
+
     #[test]
     fn a_dedicated_card_is_believed_in_full() {
         let d = device(GgmlDeviceKind::Gpu, 6 << 30, 8 << 30);
-        assert_eq!(budget_bytes(&d), 6 << 30);
+        assert_eq!(budget_from(&d, LAPTOP_RAM_AVAIL, LAPTOP_RAM_TOTAL), 6 << 30);
     }
 
     #[test]
     fn shared_memory_is_bounded_by_the_host() {
         // The failure this stops: an integrated device offering more memory
-        // than the machine has to spare. The host bound is whatever this test
-        // machine can spare, so the assertion is that the device figure did
-        // not win outright.
-        let d = device(GgmlDeviceKind::IGpu, u64::MAX / 2, 8 << 30);
-        assert!(budget_bytes(&d) < u64::MAX / 2, "an iGPU must not be trusted on its own");
+        // than the machine has to spare. Nothing here is hidden from the
+        // kernel, so the whole budget comes out of what the desktop can spare.
+        let d = device(GgmlDeviceKind::IGpu, 23 << 30, 23 << 30);
+        let budget = budget_from(&d, LAPTOP_RAM_AVAIL, LAPTOP_RAM_TOTAL);
+        assert_eq!(budget, LAPTOP_RAM_AVAIL - DESKTOP_RESERVE_BYTES);
     }
 
     #[test]
     fn a_driver_that_reports_its_whole_heap_is_bounded_too() {
-        // free == total means the budget query was unavailable, so the figure
-        // is the size of the device rather than what is unused.
-        let d = device(GgmlDeviceKind::Gpu, u64::MAX / 2, u64::MAX / 2);
-        assert!(budget_bytes(&d) < u64::MAX / 2);
+        // free == total and the total fits inside system RAM, so the figure is
+        // the size of the device rather than what is unused.
+        let d = device(GgmlDeviceKind::Gpu, 23 << 30, 23 << 30);
+        assert_eq!(
+            budget_from(&d, LAPTOP_RAM_AVAIL, LAPTOP_RAM_TOTAL),
+            LAPTOP_RAM_AVAIL - DESKTOP_RESERVE_BYTES
+        );
+    }
+
+    #[test]
+    fn memory_the_kernel_cannot_see_is_not_the_desktops_to_reserve() {
+        // The failure this stops, and it shipped: on a machine whose firmware
+        // gave the GPU 96 GiB, we offered a budget of 19 GB and sent every
+        // larger model to the CPU — on hardware bought to run exactly those.
+        let d = device(GgmlDeviceKind::IGpu, AI_DEVICE_TOTAL, AI_DEVICE_TOTAL);
+        let budget = budget_from(&d, AI_RAM_AVAIL, AI_RAM_TOTAL);
+        assert!(budget > 90 << 30, "expected the carve-out to count, got {}", gb(budget));
+        assert!(budget < AI_DEVICE_TOTAL, "must not offer the shared aperture twice");
+    }
+
+    #[test]
+    fn a_device_that_says_it_is_busy_is_believed_over_its_carve_out() {
+        // Same machine, but the driver answers the budget query and most of the
+        // carve-out is already spoken for. The small figure has to win, or we
+        // would pin memory that is not there.
+        let d = device(GgmlDeviceKind::IGpu, 6 << 30, AI_DEVICE_TOTAL);
+        assert_eq!(budget_from(&d, AI_RAM_AVAIL, AI_RAM_TOTAL), 6 << 30);
     }
 
     fn shape(blocks: Vec<KvBlock>) -> ModelShape {
@@ -501,6 +558,32 @@ mod tests {
         }
         let per_token = shape(blocks).kv_bytes(1, KvCacheType::F16, KvCacheType::F16);
         assert_eq!(per_token, 20_480, "20 KB a token");
+    }
+
+    #[test]
+    fn the_decision_is_not_configurable() {
+        // The whole point of measuring the model against the device at load
+        // time is that the user never has to answer the question, and a knob
+        // added "just in case" undoes that: it invites a stale hand-set layer
+        // count to override a fresh measurement, which is the failure this
+        // module exists to prevent. So the default config must mention nothing
+        // about offloading, devices, or layer counts — and this is a gate
+        // rather than a promise because such a key is easy to add by habit.
+        let toml = toml::to_string(&crate::config::Config::default())
+            .expect("the default config serializes");
+        for word in ["gpu", "offload", "layers", "vulkan", "device", "accel"] {
+            let hit = toml
+                .lines()
+                .find(|l| {
+                    l.split('=').next().is_some_and(|k| k.to_ascii_lowercase().contains(word))
+                })
+                .map(str::trim);
+            assert!(
+                hit.is_none(),
+                "the config gained a {word:?} key ({hit:?}); where a model runs is measured, \
+                 not configured"
+            );
+        }
     }
 
     /// What this machine decides for a real model, printed rather than asserted.

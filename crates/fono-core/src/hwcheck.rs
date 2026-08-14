@@ -418,6 +418,19 @@ pub fn available_ram_bytes() -> u64 {
     read_meminfo().map_or(0, |(_, available)| available)
 }
 
+/// Every byte of RAM the kernel knows about, without the rest of [`probe`].
+///
+/// Not the RAM installed in the machine: firmware can hand a slice of the
+/// DIMMs to an integrated GPU before the kernel boots, and the kernel then
+/// never counts that slice. The offload sizing wants exactly this figure —
+/// the boundary of what the kernel can allocate — to work out how much of a
+/// device's memory is the device's alone. `0` when the platform cannot report
+/// it, which callers must read as "unknown".
+#[must_use]
+pub fn total_ram_bytes() -> u64 {
+    read_meminfo().map_or(0, |(total, _)| total)
+}
+
 /// Static platform default for [`HostGpu`] without consulting a runtime
 /// Vulkan probe. Apple Silicon is always [`HostGpu::IntegratedTensor`]
 /// (Metal + CoreML on M-series silicon expose the matmul-tensor fast

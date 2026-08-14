@@ -681,6 +681,174 @@ device is not *how much* to take but *whether* 10 GB of pinned memory is worth
   of that 5,740 ms was reading the model file from disk. Measured warm, the same
   comparison is 1.51×.
 
+## A second host: memory the kernel cannot see is still memory
+
+Host: `ai-framework`, AMD Ryzen AI MAX+ 395 with Radeon 8060S (RADV GFX1151),
+16 physical / 32 logical cores, **128 GB installed**, Ubuntu 24.04 (glibc 2.39),
+Vulkan loader 1.3.275. Also integrated — the same caveat as above applies, and
+this still leaves the all-or-nothing rule untested on a discrete card.
+
+**Retraction.** This section previously read "a driver claims is not a budget"
+and recorded, as its headline finding, that RADV reports a 111 GB heap on a
+machine with 31 GB of RAM — concluding that a device's own figure can only be
+believed on a discrete card. That was wrong, and it was wrong because 31 GB was
+taken for the size of the machine. The machine has 128 GB in eight 16 GB DIMMs.
+Its firmware hands 96 GiB straight to the GPU before Linux boots:
+
+```
+amdgpu 0000:c2:00.0: VRAM: 98304M … (98304M used)
+amdgpu 0000:c2:00.0:  98304M of VRAM memory ready
+amdgpu 0000:c2:00.0:  15934M of GTT memory ready.
+```
+
+Linux therefore reports `MemTotal: 31.1 GiB` — everything the firmware left it —
+and the kernel's own e820 map shows the hole, 96.8 GiB of "device reserved" from
+34.0 GiB to 130.8 GiB. RADV's 111 GB is the exact sum of the two heaps it can
+allocate from, 96.0 GiB of private VRAM plus a 15.6 GiB share of what Linux
+sees. **The driver was telling the truth to the byte.** `amdgpu` confirms it
+independently: `mem_info_vram_total` is `103079215104`.
+
+The consequence was a shipped defect, not a cosmetic one. Bounding this device
+by *system* RAM offered a 19 GB budget on a machine with 96 GiB of GPU memory,
+so every model between 19 GB and 96 GiB went to the CPU — which is the entire
+class of model such a machine exists to run.
+
+The fix needs no vendor interface. Whatever a device reports beyond all the RAM
+the kernel knows about is, by definition, memory the kernel cannot allocate, so
+it is the device's alone and no reserve protects it. The budget is that plus
+what the desktop can spare, capped by the device's own free figure. It
+understates the carve-out whenever the driver's total also counts a shared
+aperture — here 78 GB against a true 96 GiB — and understating is the direction
+that cannot over-commit. It comes out at zero wherever GPU memory is allocated
+on demand, which leaves the desktop bound alone in charge, as before.
+
+Same machine, same binary, sizing policy the only difference:
+
+| Model | Sized | Old budget | New budget | Decision |
+|---|---|---|---|---|
+| DeepSeek-V4-Flash-0731 IQ3_XXS, 4 shards, 104.2 GB | 98.2 GB (97.1 weights + 0.2 cache + 1.0 working) | 11.4–19.4 GB → CPU | 99.7 GB → device | loads, 95.7 GiB resident in the carve-out |
+| qwen3.5-2b Q4_K_M, 1.2 GB | 2.2 GB (1.2 + 0.0 + 1.0) | 19.3–19.5 GB → device | device | ~2.9× the CPU arm |
+
+The 97 GiB model loading at all is the proof: 95.7 GiB of it went resident in
+VRAM the kernel never counted, with the remainder in the shared aperture, and it
+loaded in 62.8 s against 28.6 s for the host path.
+
+### But that model then answers wrongly, for an unrelated and known reason
+
+The offloaded DeepSeek generates degenerate output — `1. 2\n2. 3\n5.\n7,\n11,13`
+then a stop, 21 tokens, against a coherent 130-token answer from the host arm on
+the same prompt at temperature 0. **This is not the sizing, and not the
+carve-out.**
+
+The first attribution written here was wrong and is retracted. It blamed these
+load-time warnings:
+
+```
+WARN layer 2 is assigned to device Vulkan0 but Lightning Indexer is
+     assigned to device CPU (usually due to missing support)
+WARN layer 0 … fused DeepSeek V4 HC pre / comb / post … assigned to device CPU
+```
+
+Vulkan does lack both ops — `ggml-vulkan.cpp` mentions neither, where CUDA,
+Metal (llama.cpp#25893) and SYCL (llama.cpp#26568) implement them. But that
+warning *is* llama.cpp disabling the fused path and falling back to unfused
+primitives, which is a speed penalty by design, not a correctness one
+(`llama-context.cpp`, `resolve_fused_ops`). Missing ops were the wrong culprit.
+
+The real cause is **a llama.cpp older than the fix.** Two attributions were
+written here before this one and both were wrong; what follows is what a clean
+harness and a version comparison show.
+
+Upstream `llama-cli` build b10405 (`e79e4bf66`), the prebuilt
+`ubuntu-vulkan-x64` release, was run on the same machine against the same four
+shards with all 62 layers on the device, and it does **not** reproduce. Four
+runs, each answering correctly and at length:
+
+| Arm | Result |
+|---|---|
+| native template, `f16` KV, no penalty | coherent |
+| `--chat-template chatml` | coherent |
+| `-ctk q8_0 -ctv q8_0`, our prompt | coherent |
+| ChatML **and** `q8_0` KV **and** `--repeat-penalty 1.3 --repeat-last-n 128` | coherent |
+
+The last row is every one of Fono's settings at once, and it produced the full
+twelve primes followed by the explanation. So neither the quantised cache, nor
+the ChatML fallback, nor the repetition penalty causes this on current llama.cpp.
+
+Three further runs then isolate it, and none of them implicate Fono.
+
+*Our decode loop stops for a legitimate reason.* The generator now names the
+token that ended a turn, its spelling, and whether the vocabulary treats it as
+end-of-generation (`crates/fono-core/src/llama_gen.rs`). On the degenerate
+DeepSeek turn it named an end-of-generation token, so the model itself decided
+it had finished after nineteen. Nothing was cut short by our stop rule or by the
+streamed-marker hold-back. That clears the two suspects an earlier draft named,
+and the diagnostic earns its keep: that vocabulary tags **1,277** tokens
+`Control` against gemma-4-26B's 16, so "stopped on a control token" alone could
+not have told a real end of turn from tool-call or table markup firing mid-answer.
+
+*The same Fono binary is correct on another model.* Swapping the assistant to
+`qwen3.5-2b` on the same device arm, same prompt, same settings, returns the
+full twelve primes and the explanation. So the decode loop, the ChatML default
+and the `q8_0` cache are all fine on that hardware.
+
+*The vendored llama.cpp predates a large DeepSeek-V4 rework.* Hashing the
+DeepSeek sources in `llama-cpp-sys-2` 0.1.154 against upstream pins them exactly
+to `dee2a846b` (2026-07-27) — both `src/models/deepseek4.cpp` and
+`src/llama-kv-cache-dsv4.cpp` match that commit and no later one. Two upstream
+commits then touched them:
+
+| Commit | Date | Change |
+|---|---|---|
+| `596a5795b` (#25784) | 2026-08-02 | DeepSeek-V4 MTP + DSpark — `deepseek4.cpp` +415/−74, `llama-kv-cache-dsv4.cpp` +281/−64 |
+| `1269cb1ff` (#26531) | 2026-08-04 | allow reshape of tensors during load |
+
+b10405 contains both and answers correctly; we contain neither and answer
+degenerately. That is the whole difference.
+
+There is no fix to apply. `llama-cpp-2` 0.1.154 is the newest published version,
+so the vendored llama.cpp cannot be advanced by a version bump, and nothing goes
+upstream because upstream already fixed it. The practical statement is narrower
+than it looks: **DeepSeek-V4-Flash needs a newer llama.cpp than our binding
+vendors, and should not be used with Fono until the binding catches up.** No
+policy change, no code change.
+
+For Fono the consequence is narrow. It is not a sizing fault and needs no policy
+change. It does mean this architecture cannot serve as the correctness proof for
+offload, which is why the graded comparison uses a supported one.
+
+For completeness, since an earlier draft here cited them: llama.cpp#25436
+(garbled DeepSeek-V4-Flash on Strix Halo, open since 2026-07-08) is a real open
+report, but the clean run above does not reproduce it, so nothing measured here
+belongs on that issue. #26685 is a different failure — a CUDA host enabling
+fused ops that an RPC-Vulkan worker then skips — and cannot arise single-node.
+And `llama-cli --list-devices` independently confirms the carve-out reading
+above, reporting 114,238 MiB on a machine where Linux sees 31 GB.
+
+Where the model does fit *and* the architecture is supported, 128 tokens of a
+fixed prompt at temperature 0, three repeats per arm, arms alternated twice,
+un-niced:
+
+| Arm | Repeats | Median |
+|---|---|---|
+| CPU (`no accelerator registered`) | 2.24 / 3.73 / 3.82 s and 2.21 / 3.70 / 3.74 s | 3.72 s |
+| All layers on the device | 1.41 / 1.26 / 1.29 s and 1.38 / 1.28 / 1.30 s | 1.29 s |
+
+2.9× on wall time, against 1.5× on the Intel laptop — a wider gap, on a wider
+memory bus, for a model small enough to be decode-bound. Note the CPU arm's first
+repeat is consistently the fastest of its three (2.2 s against 3.7 s); it repeated
+across both blocks, and nothing here explains it, so it is recorded rather than
+interpreted.
+
+Time to first token is not reported: this server emits its first SSE frame
+immediately, so `time_starttransfer` measures the HTTP round trip (~0.3 ms), not
+the model.
+
+Two things the four-shard model incidentally proved: `/api/tags` reports
+`104,207,848,032` bytes and a digest over all four files, and the load line was
+reporting the size of the *first shard only* — 5 MB for a 97 GB model — which is
+fixed.
+
 ## Where a cached state would land
 
 No state in this session was written to disk: the cache is in memory today and

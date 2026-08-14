@@ -521,6 +521,81 @@ fn resolve_local_model_path(cfg: &AssistantCfg, assistant_models_dir: &Path) -> 
     assistant_models_dir.join(format!("{stem}.gguf"))
 }
 
+/// Where the configured local assistant model would run if it were loaded right
+/// now, as one line naming the device and the numbers behind the answer.
+///
+/// `None` when the assistant does not load a local model at all, or when the
+/// model file is missing — there is nothing to size in either case.
+///
+/// This is a fresh decision rather than a record of one: the answer depends on
+/// how much of the machine is free, so a diagnostic can only say what would
+/// happen now. It agrees with a running daemon only to the extent that the
+/// machine has not changed since that daemon loaded.
+#[cfg(feature = "llama-local")]
+#[must_use]
+pub fn offload_plan(cfg: &AssistantCfg, assistant_models_dir: &Path) -> Option<String> {
+    if !uses_embedded_local_model(cfg) {
+        return None;
+    }
+    let path = resolve_local_model_path(cfg, assistant_models_dir);
+    if !path.exists() {
+        return None;
+    }
+    // The cache types must match what `LlamaLocalAssistant::ensure_loaded` asks
+    // for, or the size reported here is not the size that will be allocated.
+    Some(
+        fono_core::gpu_offload::decide(
+            &path,
+            cfg.local.context.max(crate::llama_local::MIN_CTX),
+            crate::llama_local::KV_CACHE_TYPE,
+            crate::llama_local::KV_CACHE_TYPE,
+        )
+        .explanation,
+    )
+}
+
+#[cfg(not(feature = "llama-local"))]
+#[must_use]
+pub fn offload_plan(_: &AssistantCfg, _: &Path) -> Option<String> {
+    None
+}
+
+/// The GGUF file the LLM server's model loads from, when it loads one at all.
+///
+/// `None` for every backend that reaches a server instead of a file, and for a
+/// local model whose weights are not on disk. `server_model_override` is
+/// `[server.llm].model`, which pins the served model independently of the
+/// assistant's own — the same rule [`build_server_assistant_override`] applies,
+/// kept here so a caller describing the served model cannot disagree with the
+/// one building it.
+#[cfg(feature = "llama-local")]
+#[must_use]
+pub fn served_local_model_file(
+    cfg: &AssistantCfg,
+    server_model_override: Option<&str>,
+    assistant_models_dir: &Path,
+) -> Option<std::path::PathBuf> {
+    if !uses_embedded_local_model(cfg) {
+        return None;
+    }
+    let mut cfg = cfg.clone();
+    if let Some(model) = server_model_override.map(str::trim).filter(|m| !m.is_empty()) {
+        cfg.local.model = model.to_string();
+    }
+    let path = resolve_local_model_path(&cfg, assistant_models_dir);
+    path.exists().then_some(path)
+}
+
+#[cfg(not(feature = "llama-local"))]
+#[must_use]
+pub fn served_local_model_file(
+    _: &AssistantCfg,
+    _: Option<&str>,
+    _: &Path,
+) -> Option<std::path::PathBuf> {
+    None
+}
+
 #[cfg(feature = "llama-local")]
 fn build_embedded_local(
     cfg: &AssistantCfg,

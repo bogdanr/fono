@@ -51,8 +51,12 @@ initially argued for a full framework (axum). But:
 2. **Serve both wire formats from one listener:**
    - OpenAI-compatible: `GET /v1/models`, `POST /v1/chat/completions`
      (SSE stream + single JSON).
-   - Ollama-native: `GET /api/tags`, `POST /api/chat` (NDJSON stream +
-     single JSON), `GET /api/version`.
+   - Ollama-native: `GET /api/tags`, `POST /api/show`, `POST /api/chat`
+     (NDJSON stream + single JSON), `GET /api/version`. `/api/tags` and
+     `/api/show` report the served model's real byte size and a `sha256:`
+     digest over every shard, and advertise the `tools` capability —
+     clients that gate on those fields reject a model reporting
+     `size: 0` or an empty digest.
    Both map their `messages[]` onto the same `AssistantContext` and drive
    the one `Assistant::reply_stream`. The near-zero marginal cost of the
    second format buys universal reach (OpenAI) plus the Home Assistant
